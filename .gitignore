@@ -1,0 +1,14 @@
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# Local development caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# User configurations
+config.json

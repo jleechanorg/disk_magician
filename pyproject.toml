@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "disk-magician"
+version = "0.1.0"
+description = "Portable Disk Diagnostics, Snapshot Backups, & Cleanup"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+disk-magician = "disk_magician.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+disk_magician = ["disk_magician.sh", "scripts/*.sh"]
