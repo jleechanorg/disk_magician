@@ -26,9 +26,12 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-CONFIG_FILE="$REPO_ROOT/config.json"
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  CONFIG_FILE="$REPO_ROOT/config.json.template"
+CONFIG_FILE="${DISK_MAGICIAN_CONFIG:-}"
+if [[ -z "$CONFIG_FILE" ]]; then
+  CONFIG_FILE="$REPO_ROOT/config.json"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    CONFIG_FILE="$REPO_ROOT/config.json.template"
+  fi
 fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then

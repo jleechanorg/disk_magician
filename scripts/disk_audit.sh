@@ -230,6 +230,11 @@ if [[ "$MODE" == "clean" ]]; then
     if [[ -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
         "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
     fi
+
+    # Run Antigravity Brain Cleanup
+    if [[ -f "$SCRIPT_DIR/cleanup_antigravity_brain.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_antigravity_brain.sh" $clean_arg || true
+    fi
 fi
 
 # Aggressive Cleanups
@@ -256,14 +261,9 @@ if [[ "$MODE" == "clean-all" ]]; then
         "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" $clean_arg || true
     fi
 
-    # Docker System Prune
-    if command -v docker &>/dev/null; then
-        if [[ "$DRY_RUN" == true ]]; then
-            echo "  Docker: [dry-run] would run: docker system prune -a -f"
-        else
-            echo "  Docker: running system prune -a -f ..."
-            docker system prune -a -f || true
-        fi
+    # Run Docker Prune and TRIM Space Reclamation
+    if [[ -f "$SCRIPT_DIR/cleanup_docker.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_docker.sh" $clean_arg || true
     fi
 fi
 
