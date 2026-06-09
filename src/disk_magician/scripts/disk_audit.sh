@@ -220,6 +220,16 @@ if [[ "$MODE" == "clean" ]]; then
     if [[ -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
         "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
     fi
+
+    # Run LLM Inspector Cleanup
+    if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg || true
+    fi
+
+    # Run Agent Artifacts Cleanup
+    if [[ -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
+    fi
 fi
 
 # Aggressive Cleanups
@@ -239,6 +249,11 @@ if [[ "$MODE" == "clean-all" ]]; then
     # Clean worktrees
     if [[ -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
         "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
+    fi
+
+    # Clean APFS Snapshots
+    if [[ -f "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" $clean_arg || true
     fi
 
     # Docker System Prune

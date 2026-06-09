@@ -5,6 +5,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+echo "=== Syncing package files ==="
+cp disk_magician.sh src/disk_magician/
+cp -r scripts/* src/disk_magician/scripts/
+
 echo "=== Setting script permissions ==="
 chmod +x disk_magician.sh scripts/*.sh src/disk_magician/disk_magician.sh src/disk_magician/scripts/*.sh
 
