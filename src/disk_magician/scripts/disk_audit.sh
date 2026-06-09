@@ -199,7 +199,7 @@ fi
 
 # Safe Cleanups
 if [[ "$MODE" == "clean" ]]; then
-    clean_arg="--dry-run"
+    clean_arg=""
     if [[ "$DRY_RUN" == false ]]; then
         clean_arg="--clean"
     fi
@@ -239,7 +239,7 @@ fi
 
 # Aggressive Cleanups
 if [[ "$MODE" == "clean-all" ]]; then
-    clean_arg="--dry-run"
+    clean_arg=""
     if [[ "$DRY_RUN" == false ]]; then
         clean_arg="--clean"
     fi
