@@ -26,9 +26,22 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-CONFIG_FILE="$REPO_ROOT/config.json"
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  CONFIG_FILE="$REPO_ROOT/config.json.template"
+# Config resolution order:
+#   1. DISK_MAGICIAN_CONFIG env var (caller-supplied path, e.g. user_scope's
+#      site-specific config) — lets an external repo reuse this script with its
+#      own monitored-dir set without forking it.
+#   2. $REPO_ROOT/config.json
+#   3. $REPO_ROOT/config.json.template
+CONFIG_FILE="${DISK_MAGICIAN_CONFIG:-}"
+if [[ -n "$CONFIG_FILE" && ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: DISK_MAGICIAN_CONFIG points to a missing file: $CONFIG_FILE" >&2
+  exit 1
+fi
+if [[ -z "$CONFIG_FILE" ]]; then
+  CONFIG_FILE="$REPO_ROOT/config.json"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    CONFIG_FILE="$REPO_ROOT/config.json.template"
+  fi
 fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
