@@ -133,20 +133,46 @@ XML
 }
 
 run_snapshot() {
+  # Parse --output <path> from args; remaining args are ignored.
+  local caller_output=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output)
+        caller_output="$2"
+        shift 2
+        ;;
+      --output=*)
+        caller_output="${1#--output=}"
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
   local host_name
   host_name="$(hostname -s 2>/dev/null || hostname)"
+
+  if [[ -n "$caller_output" ]]; then
+    # Caller-controlled output path: write there and skip auto git-commit/push.
+    # DISK_MAGICIAN_CONFIG is inherited from the caller environment automatically.
+    echo "Capturing disk snapshot -> $caller_output"
+    "$SCRIPT_DIR/scripts/disk_snapshot.sh" --output "$caller_output"
+    return
+  fi
+
+  # Default behavior: write to BACKUP_DIR and auto-commit/push.
   local snap_dest="$BACKUP_DIR/backup/$host_name/disk_snapshot.json"
   echo "Capturing disk snapshot -> $snap_dest"
-  
-  # Run the snapshot script
   "$SCRIPT_DIR/scripts/disk_snapshot.sh" --output "$snap_dest"
-  
+
   # Auto-commit and push if in git repo
   if [[ -d "$BACKUP_DIR/.git" ]]; then
     echo "Committing snapshot to git repository..."
     git -C "$BACKUP_DIR" add "backup/$host_name/disk_snapshot.json"
     git -C "$BACKUP_DIR" commit -m "chore: update disk snapshot for $host_name" 2>/dev/null || echo "No changes to commit."
-    
+
     # Push to origin if remote is configured
     if git -C "$BACKUP_DIR" remote | grep -q "origin"; then
       echo "Pushing snapshot to remote..."
@@ -160,7 +186,7 @@ case "$CMD" in
     run_setup "$@"
     ;;
   snapshot)
-    run_snapshot
+    run_snapshot "$@"
     ;;
   audit)
     # Forward all args to disk_audit
