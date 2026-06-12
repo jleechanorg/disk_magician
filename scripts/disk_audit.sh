@@ -116,8 +116,8 @@ PY
     # Lane B Section C — stale-snapshot alert. 4 hours is the threshold:
     # the launchd job runs every 30 min, so anything >4 h means the
     # snapshot job is broken or backed up.
-    if [[ -n "$SNAP_AGE_SEC" && "$SNAP_AGE_SEC" =~ ^[0-9]+$ ]] && (( SNAP_AGE_SEC > 14400 )); then
-        SNAP_STALE_WARN="snapshot age ${SNAP_AGE_SEC}s (>4h) — disk_magician snapshot job may be broken"
+    if [[ -n "$SNAP_AGE_MIN" && "$SNAP_AGE_MIN" =~ ^[0-9]+$ ]] && (( SNAP_AGE_MIN * 60 > 14400 )); then
+        SNAP_STALE_WARN="snapshot age $((SNAP_AGE_MIN * 60))s (>4h) — disk_magician snapshot job may be broken"
     fi
     if [[ -n "$SNAP_STATUS" && "$SNAP_STATUS" == "timeout" ]]; then
         SNAP_STALE_WARN="${SNAP_STALE_WARN:+$SNAP_STALE_WARN; }measurement_status=timeout — all du calls failed"
