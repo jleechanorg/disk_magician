@@ -119,16 +119,16 @@ get_builder_cache_mb() {
     return
   fi
 
-  # Lines look like: "Build Cache     2.1G     2.1G     0B     0B"
-  # or:               "Build cache     5.43GB   ...  "
-  # Match the second column regardless of spacing.
+  # Lines look like: "Build Cache     15     0     2.1GB     1.5GB"
+  # Columns: TYPE, TOTAL, ACTIVE, SIZE, RECLAIMABLE
+  # Extract the SIZE column (4th field).
   local line val
   line=$(echo "$out" | awk 'BEGIN{IGNORECASE=1} /build[ -]?cache/ {print; exit}')
   if [[ -z "$line" ]]; then
     echo 0
     return
   fi
-  val=$(echo "$line" | awk '{for (i=1; i<=NF; i++) if ($i ~ /[0-9]/) { print $i; exit }}')
+  val=$(echo "$line" | awk '{print $4}')
   if [[ -z "$val" ]]; then
     echo 0
     return
