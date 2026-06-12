@@ -9,6 +9,11 @@ OUTPUT=""
 DRY_RUN=false
 DISCOVER=false
 DU_TIMEOUT=30
+# Track how many measured paths returned a real value (vs null/timeout)
+# so we can surface a measurement_status sentinel (complete | partial |
+# timeout | empty) — never a silent zero.
+MEASURED_OK=0
+MEASURED_TOTAL=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,14 +74,14 @@ dir_size_kb() {
     echo 0
     return
   fi
-  
+
   local result rc
   if [[ -n "$TIMEOUT_CMD" ]]; then
     result=$("$TIMEOUT_CMD" "$to" du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
   else
     result=$(du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
   fi
-  
+
   if [[ -z "$result" ]]; then
     # Timeout or error -> surface as null (empty string in output)
     echo ""
@@ -125,7 +130,7 @@ get_disk_stats() {
 if [[ "$DISCOVER" == true ]]; then
   echo "Discover mode: scanning for >5 GB dirs not in monitored config..."
   echo ""
-  
+
   # Extract configured paths
   declare -A MONITORED_PATHS=()
   while IFS=$'\t' read -r raw_path; do
@@ -180,9 +185,11 @@ first=true
 add_entry() {
   local key="$1" raw_val="$2"
   local val="null"
+  MEASURED_TOTAL=$(( MEASURED_TOTAL + 1 ))
   if [[ -n "$raw_val" ]]; then
     val="$raw_val"
     tracked_total_kb=$(( tracked_total_kb + raw_val ))
+    MEASURED_OK=$(( MEASURED_OK + 1 ))
   else
     timeout_keys+=("$key")
   fi
@@ -230,6 +237,30 @@ for item in data.get("monitored_globs", []):
 PY
 )
 
+# ────────── TOP-20 LIBRARY/CONTAINERS SUBDIRS (additive) ──────────
+# Per Lane B Section C: the 50 GB Library/Containers blind spot. Track
+# the top-20 per-container subdirs so future regrowth has attribution.
+# Each entry is a separate top-level directory key (lc_<safe_name>) to
+# keep JSON flat — consumers do not need to recurse.
+containers_parent="$HOME/Library/Containers"
+containers_listing=""
+if [[ -d "$containers_parent" ]]; then
+  # Build a sorted list of (size_kb, name). 60s budget so this never
+  # stalls the snapshot.
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    containers_listing=$("$TIMEOUT_CMD" 60 du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
+  else
+    containers_listing=$(du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
+  fi
+  while IFS=$'\t' read -r kb name; do
+    [[ -z "$kb" || -z "$name" ]] && continue
+    base=$(basename "$name")
+    safe=$(printf '%s' "$base" | tr -c 'A-Za-z0-9' '_' | head -c 40)
+    key="lc_${safe}"
+    add_entry "$key" "$kb"
+  done <<< "$containers_listing"
+fi
+
 coverage_pct=$(awk "BEGIN{
   used = $disk_used_kb
   if (used <= 0) { print 0; exit }
@@ -240,14 +271,109 @@ if (( $(awk "BEGIN{print ($coverage_pct < 70)}") )); then
   warning="low_coverage"
 fi
 
+# ────────── SNAPSHOT METADATA + STALENESS ──────────
+# Per Lane B Section C: capture captured_at, age_seconds, coverage_pct,
+# and a measurement_status sentinel so consumers can distinguish
+# "measurement failed" (timeout) from "value is zero".
+captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+age_seconds=0
+prev_snapshot_ts=""
+prev_snapshot_path=""
+
+# Stale-detection: if --output points to a file that already exists,
+# read its embedded timestamp and compute the gap. This way the SAME
+# script that writes the next snapshot also reports whether the prior
+# one was overdue (>24 h).
+if [[ -n "$OUTPUT" && -f "$OUTPUT" ]]; then
+  prev_snapshot_path="$OUTPUT"
+else
+  # Even when output is new, look for a sibling committed snapshot in
+  # backup/<host>/disk_snapshot.json — that is the canonical "previous"
+  # for staleness purposes.
+  host_short="$(hostname -s 2>/dev/null || hostname)"
+  candidate="$REPO_ROOT/backup/${host_short}/disk_snapshot.json"
+  if [[ -f "$candidate" ]]; then
+    prev_snapshot_path="$candidate"
+  fi
+fi
+
+if [[ -n "$prev_snapshot_path" ]]; then
+  prev_ts=$(python3 - "$prev_snapshot_path" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+    print(s.get("timestamp", ""))
+except Exception:
+    pass
+PY
+)
+  if [[ -n "$prev_ts" ]]; then
+    now_epoch=$(date -u +%s)
+    prev_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$prev_ts" +%s 2>/dev/null \
+      || date -u -d "$prev_ts" +%s 2>/dev/null \
+      || echo "")
+    if [[ -n "$prev_epoch" && "$prev_epoch" =~ ^[0-9]+$ ]]; then
+      age_seconds=$(( now_epoch - prev_epoch ))
+    fi
+    prev_snapshot_ts="$prev_ts"
+  fi
+fi
+
+# measurement_status sentinel: per feedback_silent_zero_anti_pattern.md,
+# distinguish "all measured" from "some timed out" from "all failed".
+if [[ "$MEASURED_TOTAL" -eq 0 ]]; then
+  measurement_status="empty"
+elif [[ "$MEASURED_OK" -eq "$MEASURED_TOTAL" ]]; then
+  measurement_status="complete"
+elif [[ "$MEASURED_OK" -eq 0 ]]; then
+  measurement_status="timeout"
+else
+  measurement_status="partial"
+fi
+
+# Stale warning: previous snapshot >24 h old. Additive to coverage
+# warning — disk_audit.sh decides which to surface.
+if [[ "$age_seconds" -gt 86400 && "$age_seconds" -gt 0 ]]; then
+  if [[ -z "$warning" ]]; then
+    warning="stale_previous_snapshot"
+  else
+    warning="${warning}+stale_previous_snapshot"
+  fi
+fi
+
+# Track whether the per-build subdirs were captured.
+containers_captured=0
+containers_total_dirs=0
+if [[ -d "$containers_parent" ]]; then
+  containers_total_dirs=$(find "$containers_parent" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  containers_captured=$(printf '%s' "$containers_listing" | grep -c '^[0-9]' || echo 0)
+fi
+
 json="{"
-json+="\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+json+="\"timestamp\":\"$captured_at\","
 json+="\"hostname\":\"$(hostname -s 2>/dev/null || hostname)\","
 json+="\"disk_total_gb\":$disk_total_gb,"
 json+="\"disk_used_gb\":$disk_used_gb,"
 json+="\"disk_free_gb\":$disk_free_gb,"
 json+="\"disk_pct\":$disk_pct,"
 json+="\"snapshot_coverage_pct\":$coverage_pct,"
+# snapshot_metadata (new top-level block, additive — older consumers
+# ignore unknown fields). Includes the staleness signal consumers need.
+json+="\"snapshot_metadata\":{"
+json+="\"captured_at\":\"$captured_at\","
+json+="\"age_seconds\":$age_seconds,"
+json+="\"coverage_pct\":$coverage_pct,"
+json+="\"measurement_status\":\"$measurement_status\","
+json+="\"measured_paths_ok\":$MEASURED_OK,"
+json+="\"measured_paths_total\":$MEASURED_TOTAL"
+if [[ -n "$prev_snapshot_ts" ]]; then
+  json+=",\"previous_snapshot_timestamp\":\"$prev_snapshot_ts\""
+fi
+if [[ "$containers_total_dirs" -gt 0 ]]; then
+  json+=",\"library_containers_top_subdirs_captured\":$containers_captured"
+  json+=",\"library_containers_total_subdirs\":$containers_total_dirs"
+fi
+json+="},"
 if [[ -n "$warning" ]]; then
   json+="\"snapshot_warning\":\"$warning\","
 fi
