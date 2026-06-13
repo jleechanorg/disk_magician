@@ -145,20 +145,43 @@ for item in data.get("monitored_dirs", []):
 PY
 )
 
+  # Also expand monitored_globs / monitored_file_globs so a directory matched
+  # by a glob pattern (e.g. `~/actions-runner*`) is reported as tracked too,
+  # not as UNTRACKED. This keeps `discover` consistent with the snapshot
+  # measurement (which honors globs).
+  while IFS=$'\t' read -r raw_pattern; do
+    pattern="${raw_pattern/#\~/$HOME}"
+    # shellcheck disable=SC2206
+    expanded=( $(eval echo "$pattern") )
+    for p in "${expanded[@]}"; do
+      [[ -e "$p" ]] && MONITORED_PATHS["$p"]=1
+    done
+  done < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("monitored_globs", []):
+    print(item["pattern"])
+for item in data.get("monitored_file_globs", []):
+    print(item["pattern"])
+PY
+)
+
   candidates=()
   for d in "$HOME"/.[!.]* "$HOME"/*; do
     [[ -d "$d" ]] || continue
     candidates+=("$d")
   done
 
+  # NOTE: this loop body runs in a subshell (the `| while read` pipeline), so
+  # `local` is illegal here and would crash the discover subcommand with
+  # "local: can only be used in a function". We use plain vars instead.
   printf '%s\n' "${candidates[@]}" | while read -r dir; do
-    local kb=""
+    kb=""
     if [[ -n "$TIMEOUT_CMD" ]]; then
       kb=$("$TIMEOUT_CMD" 60 du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
     else
       kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
     fi
-    local gb
     gb=$(awk "BEGIN{printf \"%.1f\", ${kb:-0} / 1048576}")
     if (( $(awk "BEGIN{print (${kb:-0} >= 5242880)}") )); then
       if [[ -z "${MONITORED_PATHS[$dir]:-}" ]]; then

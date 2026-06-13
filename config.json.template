@@ -8,8 +8,10 @@
     { "key": "ao_sessions", "path": "~/.ao-sessions", "timeout": 300 },
     { "key": "llm_inspector", "path": "~/.llm-inspector", "timeout": 120 },
     { "key": "hermes_prod", "path": "~/.hermes_prod", "timeout": 120 },
+    { "key": "hermes", "path": "~/.hermes", "timeout": 120 },
     { "key": "openclaw", "path": "~/.openclaw", "timeout": 120 },
     { "key": "cursor_worktrees", "path": "~/.cursor/worktrees", "timeout": 60 },
+    { "key": "colima", "path": "~/.colima", "timeout": 180 },
     { "key": "docker_raw", "path": "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw", "timeout": 60 },
     { "key": "library_caches", "path": "~/Library/Caches", "timeout": 120 },
     { "key": "library_app_support", "path": "~/Library/Application Support", "timeout": 180 },
@@ -37,7 +39,9 @@
   "monitored_globs": [
     { "key": "worktrees_home", "pattern": "~/worktree_*" },
     { "key": "worktrees_wa", "pattern": "~/wa-*" },
-    { "key": "actions_runners", "pattern": "~/actions-runner*" }
+    { "key": "actions_runners", "pattern": "~/actions-runner*" },
+    { "key": "project_siblings", "pattern": "~/project_*" },
+    { "key": "hf_hub_cache", "pattern": "~/.cache/huggingface/hub/models--*" }
   ],
   "cleanup_thresholds": {
     "git_clone_minutes": 240,
