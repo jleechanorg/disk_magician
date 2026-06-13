@@ -46,8 +46,11 @@ fi
 SNAP_USABLE=false
 SNAP_COVERAGE=""
 SNAP_AGE_MIN=""
+SNAP_AGE_SEC=""
+SNAP_STATUS=""
 SNAP_CACHE=""
 SNAP_REASON=""
+SNAP_STALE_WARN=""
 
 _cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; }
 trap _cleanup_snap EXIT
@@ -64,10 +67,16 @@ src, cache = sys.argv[1], sys.argv[2]
 try:
     s = json.load(open(src))
 except Exception:
-    print("ERR\t\t\tparse_error"); sys.exit(0)
+    print("ERR\t\t\t\tparse_error"); sys.exit(0)
 cov  = s.get("snapshot_coverage_pct", "")
 warn = s.get("snapshot_warning", "") or ""
 ts   = s.get("timestamp", "") or ""
+# snapshot_metadata is the new top-level block (Lane B Section C).
+# Fall back to old fields for backward compat with pre-metadata
+# snapshots — that's the whole point of additive JSON changes.
+meta_block = s.get("snapshot_metadata") or {}
+status = meta_block.get("measurement_status", "")
+age_sec = meta_block.get("age_seconds", "")
 dirs = s.get("directories", {}) or {}
 with open(cache, "w") as fh:
     for k, v in dirs.items():
@@ -83,11 +92,17 @@ try:
     age_min = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
 except Exception:
     pass
-print(f"OK\t{cov}\t{age_min}\t{warn}")
+print(f"OK\t{cov}\t{age_min}\t{warn}\t{age_sec}\t{status}")
 PY
 )
     local _status _warn
-    IFS=$'\t' read -r _status SNAP_COVERAGE SNAP_AGE_MIN _warn <<<"$meta"
+    # Use awk to split the tab-separated meta line into named shell
+    # variables. bash `read` with `<<<` collapses trailing empty fields,
+    # so we cannot rely on positional reads when the 4th field
+    # (snapshot_warning) is empty. awk preserves every column.
+    eval "$(printf '%s' "$meta" | awk -F'\t' '{
+        printf("_status=%s\nSNAP_COVERAGE=%s\nSNAP_AGE_MIN=%s\n_warn=%s\nSNAP_AGE_SEC=%s\nSNAP_STATUS=%s\n", $1, $2, $3, $4, $5, $6)
+    }')"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
     fi
@@ -97,6 +112,15 @@ PY
     fi
     if [[ "$_warn" == "low_coverage" ]]; then
         SNAP_REASON="snapshot_warning=low_coverage — re-measuring live"; return 1
+    fi
+    # Lane B Section C — stale-snapshot alert. 4 hours is the threshold:
+    # the launchd job runs every 30 min, so anything >4 h means the
+    # snapshot job is broken or backed up.
+    if [[ -n "$SNAP_AGE_MIN" && "$SNAP_AGE_MIN" =~ ^[0-9]+$ ]] && (( SNAP_AGE_MIN * 60 > 14400 )); then
+        SNAP_STALE_WARN="snapshot age $((SNAP_AGE_MIN * 60))s (>4h) — disk_magician snapshot job may be broken"
+    fi
+    if [[ -n "$SNAP_STATUS" && "$SNAP_STATUS" == "timeout" ]]; then
+        SNAP_STALE_WARN="${SNAP_STALE_WARN:+$SNAP_STALE_WARN; }measurement_status=timeout — all du calls failed"
     fi
     SNAP_USABLE=true
     return 0
@@ -142,6 +166,13 @@ if [[ "$SNAP_USABLE" == true ]]; then
     section "Largest directories (snapshot-ranked, top 20)"
     printf "  Source:   %s\n" "${SNAPSHOT_JSON/#$HOME/~}"
     printf "  Coverage: %s%%   Age: %s min\n" "${SNAP_COVERAGE:-?}" "${SNAP_AGE_MIN:-?}"
+    if [[ -n "$SNAP_STATUS" ]]; then
+        printf "  Snapshot measurement_status: %s\n" "$SNAP_STATUS"
+    fi
+    if [[ -n "$SNAP_STALE_WARN" ]]; then
+        echo
+        echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
+    fi
     echo
     sort -t"$(printf '\t')" -k2 -rn "$SNAP_CACHE" | head -20 | while IFS="$(printf '\t')" read -r key kb; do
         [[ -n "$key" ]] || continue
@@ -150,6 +181,9 @@ if [[ "$SNAP_USABLE" == true ]]; then
 else
     section "Directory Breakdown (Live du)"
     echo "  Snapshot not usable ($SNAP_REASON). Run snapshot task first."
+    if [[ -n "$SNAP_STALE_WARN" ]]; then
+        echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
+    fi
 fi
 
 # ── 3. Recent History Growth (regressions) ───────────────────────────────────

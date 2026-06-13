@@ -35,6 +35,11 @@ def main():
     parser.add_argument("--days", type=int, help="Limit history to N days ago")
     parser.add_argument("--limit", type=int, default=30, help="Max snapshots to show")
     parser.add_argument("--regressions", action="store_true", help="Show regressions only")
+    parser.add_argument("--growth-rate", action="store_true",
+                        help="Compute and print growth_rate_kb_per_day per top-level dir "
+                             "(linear regression over snapshots in range)")
+    parser.add_argument("--growth-window", type=int, default=7,
+                        help="Days of history to use for --growth-rate (default 7)")
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -107,19 +112,92 @@ def main():
                 data = json.loads(content)
             except Exception:
                 continue
-        
+
         dirs = data.get("directories", {})
         all_keys.update(dirs.keys())
+        try:
+            ts_obj = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            ts_obj = None
+        # has_data: snapshot has at least one numeric (non-null) value
+        has_data = any(v is not None for v in dirs.values())
         snapshots.append({
             "date": ts[:16],
+            "date_obj": ts_obj,
             "free": data.get("disk_free_gb", 0),
             "pct": data.get("disk_pct", 0),
-            "dirs": dirs
+            "dirs": dirs,
+            "has_data": has_data,
         })
 
     if not snapshots:
         print("No readable snapshot data found in history.", file=sys.stderr)
         sys.exit(1)
+
+    # ────────── growth_rate_kb_per_day (Lane B Section C) ──────────
+    # Linear regression (slope) of (epoch_day, kb) for each top-level
+    # dir, over the most-recent N days (default 7). Returns KB/day.
+    # Only dirs with >= 3 numeric samples are scored — fewer points
+    # would yield meaningless slopes.
+    if args.growth_rate:
+        growth_window = args.growth_window or 7
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=growth_window)
+        in_window = [s for s in snapshots
+                     if s["date_obj"] >= cutoff and s.get("has_data", True)]
+        if len(in_window) < 2:
+            print(f"growth_rate_kb_per_day: need >=2 snapshots in last {growth_window} days; got {len(in_window)}",
+                  file=sys.stderr)
+        else:
+            # Per-key linear regression: slope of (day_offset, kb)
+            # day_offset = (snap_date - first_snap_date).total_seconds() / 86400
+            t0 = in_window[0]["date_obj"]
+            growth = {}
+            for k in sorted(all_keys):
+                xs, ys = [], []
+                for s in in_window:
+                    v = s["dirs"].get(k)
+                    if v is None:
+                        continue
+                    try:
+                        ys.append(float(v))
+                        xs.append((s["date_obj"] - t0).total_seconds() / 86400.0)
+                    except (TypeError, ValueError):
+                        continue
+                if len(xs) < 3:
+                    growth[k] = None
+                    continue
+                # Linear regression slope (least squares)
+                n = len(xs)
+                mx = sum(xs) / n
+                my = sum(ys) / n
+                num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+                den = sum((x - mx) ** 2 for x in xs)
+                slope = num / den if den > 0 else 0.0
+                growth[k] = slope
+            # Sort by absolute growth (fastest growers first)
+            sorted_growth = sorted(
+                [(k, v) for k, v in growth.items() if v is not None],
+                key=lambda kv: abs(kv[1]), reverse=True
+            )
+            print(f"growth_rate_kb_per_day (last {growth_window} days, top growers by |slope|):")
+            print(f"  {'directory':<34} {'rate_KB/day':>12} {'rate_GB/day':>12}")
+            print("  " + "-" * 60)
+            for k, slope in sorted_growth[:25]:
+                gb_day = slope / 1024 / 1024
+                if abs(gb_day) >= 0.01:
+                    rate_str = f"{gb_day:+.2f} GB/d"
+                else:
+                    rate_str = f"{slope:+.0f} KB/d"
+                print(f"  {k:<34} {slope:>+12.1f} {rate_str:>12}")
+            # Flag dirs with no data
+            no_data = [k for k, v in growth.items() if v is None]
+            if no_data:
+                print(f"  (skipped {len(no_data)} dirs with <3 numeric samples: {', '.join(no_data[:5])}{'...' if len(no_data) > 5 else ''})",
+                      file=sys.stderr)
+        # growth_rate mode prints its own table; do not also print the row table.
+        print(f"\nSource: git log -- {rel_path} ({len(commits)} snapshots shown)")
+        return
 
     # Select top keys based on current size
     last_dirs = snapshots[-1]["dirs"]
