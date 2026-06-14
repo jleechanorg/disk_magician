@@ -206,3 +206,62 @@ older than **7 days** and explicitly preserves the active log
 that has been running 19+ days without this script. New regrowth
 blocked: the 7-day window keeps total log floor to ~7 × 50 MB =
 350 MB indefinitely.
+
+### Section F — node_modules / venv Duplication Across Worktrees (Documentation Only)
+
+**Problem.** Agent Orchestrator (AO) spawns each worker in its own
+git worktree. Every Node.js worktree resolves its own
+`node_modules/` (typically **~775 MB** per worktree for the
+worldarchitect.ai + hermes-agent Node deps), and every Python
+worktree builds its own `.venv/` (typically **~800 MB** per
+worktree). With **6 active AO Node worktrees**, that is
+**6 × 775 MB = ~4.6 GB of duplicate Node deps**; with **5
+worldarchitect Python worktrees**, that is
+**5 × 800 MB = ~3.7 GB of duplicate venvs**. Combined floor:
+**~8.3 GB** consumed by copies of essentially-identical
+dependency graphs.
+
+**Why it regrows.** `npm install` and `python -m venv` both
+materialize the full dependency set into the worktree because
+the worktree is a fully independent working copy from the file-
+system's perspective. There is no built-in mechanism for
+`node_modules/` or `.venv/` to be shared across worktrees, and
+`package.json` / `requirements.txt` rarely change between
+adjacent worktrees on the same repo, so the install output is
+near-identical.
+
+**Recommended fix (NOT implemented in disk_magician — requires a
+code change in agent-orchestrator).** Two viable shapes, in
+preference order:
+
+1. **pnpm content-addressable store** for Node projects
+   (preferred). pnpm stores every package version once in
+   `~/.local/share/pnpm/store/` and symlinks `node_modules/`
+   entries into that store. Across N worktrees, the store stays
+   at **~775 MB total** (one copy) instead of N × 775 MB. Per-
+   worktree symlink overhead is < 10 MB. Migration: convert
+   `npm install` to `pnpm install` in the worker bootstrap and
+   pre-warm the pnpm store in the org-runner image so worktrees
+   resolve from cache on first use.
+2. **Symlink sharing** for both `node_modules/` and `.venv/`
+   (simpler but fragile). Have the AO bootstrap detect when a
+   sibling worktree on the same repo already has a populated
+   `node_modules/` (matching `package-lock.json` hash) and
+   symlink instead of reinstalling. For `.venv/`, use
+   `python -m venv --symlinks` (3.10+) or symlink
+   `lib/pythonX.Y/site-packages` from a parent store.
+
+**Why disk_magician does NOT implement this.** The fix lives in
+agent-orchestrator's worker bootstrap and in the
+`myoung34/github-runner` image build, not on the disk
+monitoring / cleanup axis. This section exists to make the
+duplication pattern visible to anyone reading the regrowth-
+prevention series and to document the recommended remediation
+path so the next pass at the org-runner image has a target.
+
+**Measured exposure (snapshot 2026-06-13).** Floor cost of the
+AO + worldarchitect worktree set with current duplication:
+**~8.3 GB**. After pnpm + symlinked-venv fix: **~1.6 GB**
+(pnpm store + one venv per Python branch). **Potential
+savings: ~6.7 GB sustained**, with the regrowth floor dropping
+in proportion to active worktree count.

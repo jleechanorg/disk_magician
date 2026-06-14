@@ -51,6 +51,8 @@
     "git_clone_minutes": 240,
     "agent_prompt_minutes": 240,
     "cli_validation_minutes": 60,
-    "dead_sessions_days": 1
+    "dead_sessions_days": 1,
+    "worktree_pointer_minutes": 30,
+    "worktree_pointer_min_kb": 51200
   }
 }
