@@ -31,6 +31,10 @@
     { "key": "projects_reference", "path": "~/projects_reference", "timeout": 120 },
     { "key": "repos", "path": "~/repos", "timeout": 120 },
     { "key": "worktrees_dot", "path": "~/.worktrees", "timeout": 180 },
+    { "key": "agent_f", "path": "~/agent-f", "timeout": 120 },
+    { "key": "lima", "path": "~/.lima", "timeout": 60 },
+    { "key": "go", "path": "~/go", "timeout": 60 },
+    { "key": "lvl_lanes", "path": "~/.lvl-lanes", "timeout": 60 },
     { "key": "tmp_private", "path": "/private/tmp", "timeout": 60 }
   ],
   "monitored_file_globs": [

@@ -186,3 +186,23 @@ launchctl load  ~/Library/LaunchAgents/com.jleechan.disk-magician-sweeper-health
 3. **B** — worktree-venvs weekly sweeper (prevents venv regrowth)
 4. **C** — snapshot freshness (gives the watchdog + a/b something
    meaningful to alert on)
+
+### Section E — Supervisor Launchd-Log Rotator
+
+**Problem.** The `cmux-codex-launchd` plist rotates its stdout log
+to `cmux-codex-launchd.YYYYMMDDTHHMMSS.log` at 50 MB; without
+intervention those rotated files accumulate forever. We measured
+**91 × 50 MB = 4.55 GB** across 19 days on 2026-06-13. The
+auto-cleanup paths (cleanup_llm_inspector, cleanup_agent_artifacts,
+cleanup_dev_caches) did not touch `~/.claude/supervisor/`.
+
+**Fix.** `scripts/cleanup_supervisor_logs.sh` deletes rotated logs
+older than **7 days** and explicitly preserves the active log
+(`cmux-codex-launchd.log`), the active stderr, and the
+`cmux-codex-launchd-state.json` state file. Wired into
+`disk_audit.sh` so `./disk_magician.sh clean` runs it on every pass.
+
+**Expected savings:** ~1.95 GB per machine (39 × 50 MB) on a host
+that has been running 19+ days without this script. New regrowth
+blocked: the 7-day window keeps total log floor to ~7 × 50 MB =
+350 MB indefinitely.

@@ -260,6 +260,11 @@ if [[ "$MODE" == "clean" ]]; then
         "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg || true
     fi
 
+    # Run Supervisor Launchd Logs Cleanup (rotated logs > 7d)
+    if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg || true
+    fi
+
     # Run Agent Artifacts Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
         "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
