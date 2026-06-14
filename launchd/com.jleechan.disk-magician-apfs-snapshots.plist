@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly sweeper: reap stale APFS snapshots that pin the container
+  minimum size (the regrowth-prevention failure mode documented in
+  README Section A1).
+
+  Schedule:  Sundays at 04:30 local time (Weekday=0, Hour=4, Minute=30)
+             — 30 minutes after the worktree-venvs sweep at 04:00.
+  Action:    runs scripts/cleanup_apfs_snapshots.sh --clean which
+             (a) parses diskutil apfs listSnapshots -plist /, (b) keeps
+             the active mounted root snapshot + com.apple.TimeMachine.*
+             snapshots, (c) reaps the LimitingContainerShrink anchor
+             past the hard-recent floor, (d) reaps any other past-
+             retention non-active snapshot.
+
+  Privilege note:
+  `diskutil apfs deleteSnapshot <vol> -uuid <UUID>` for the new
+  com.apple.os.update-* UUID form requires elevated privileges (returns
+  -69863 otherwise). Run as a user-mode LaunchAgent — when the script
+  hits a permission failure, it logs a WARNING and the user can elevate
+  the call manually. macOS 15.5 does not surface this to launchd's
+  `UserName=root` model without further sudoers wiring, so the plist
+  runs as the installing user; the script's dry-run is always safe.
+
+  Template uses @HOME@ placeholders so install scripts can substitute
+  $HOME before copying into ~/Library/LaunchAgents/. Do not commit a
+  fully-resolved path; keep @HOME@ literal in the repo.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechan.disk-magician-apfs-snapshots</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!--
+      Use bash 5.x explicitly. /bin/bash on macOS is 3.2.57, which
+      lacks the regex / array features the script depends on.
+      launchd's default environment PATH is /usr/bin:/bin:/usr/sbin:/sbin,
+      so "env bash" would also resolve to the wrong binary.
+    -->
+    <string>/opt/homebrew/bin/bash</string>
+    <string>@HOME@/projects_other/disk_magician/scripts/cleanup_apfs_snapshots.sh</string>
+    <string>--clean</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-apfs-snapshots.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-apfs-snapshots.log</string>
+</dict>
+</plist>
