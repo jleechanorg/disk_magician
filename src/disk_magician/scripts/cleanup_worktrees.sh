@@ -32,6 +32,10 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "=== WORKTREE CLEANUP (DRY-RUN) ==="
 else
     echo "=== WORKTREE CLEANUP ==="
+    if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+        echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval."
+        exit 0
+    fi
 fi
 
 TOTAL_RECLAIMED_KB=0

@@ -26,15 +26,18 @@ PY
 fi
 
 DRY_RUN=true
+INCLUDE_LARGE=false
+LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--help]
 
 Delete stale agent git clones and temp files from system temp paths.
 
 Options:
   --clean      Actually perform the cleanup (default: dry-run)
   --dry-run    Run in dry-run/preview mode
+  --large      Include top-level /private/tmp dirs larger than LARGE_TMP_MIN_KB
   -h, --help   Show this help
 EOF
 }
@@ -43,11 +46,17 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean)   DRY_RUN=false ;;
     --dry-run) DRY_RUN=true ;;
+    --large)   INCLUDE_LARGE=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+
+if [[ "$INCLUDE_LARGE" == true && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0}" != "1" ]]; then
+  echo "Refusing large /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." >&2
+  exit 0
+fi
 
 TMP_DIRS=("/private/tmp" "/tmp")
 # Add macOS user-specific temp dir if available
@@ -126,5 +135,34 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
               -name "cli_validation_gemini_*" \
               -mmin "+${CLI_VALIDATION_MIN}" -print0 2>/dev/null || true)
 done
+
+if [[ "$INCLUDE_LARGE" == true ]]; then
+  log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB ..."
+  while IFS= read -r -d '' d; do
+    case "$(basename "$d")" in
+      com.apple.*|system-*|PowerlogHelperd*) continue ;;
+    esac
+    case "$(basename "$d")" in
+      wt_*|worktree_*)
+        log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
+        [[ "${TMP_WORKTREES_APPROVED:-0}" == "1" ]] || continue
+        ;;
+    esac
+
+    kb=$(path_size_kb "$d")
+    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+      continue
+    fi
+
+    if [[ "$DRY_RUN" != true ]] && command -v lsof >/dev/null 2>&1 && lsof +D "$d" >/dev/null 2>&1; then
+      log "Skipping in-use large tmp dir: $d  (${kb} KB)"
+      continue
+    fi
+
+    kb=$(remove_path "$d")
+    TOTAL_KB=$(( TOTAL_KB + kb ))
+    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+  done < <(find /private/tmp -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+fi
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"

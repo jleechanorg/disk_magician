@@ -43,35 +43,42 @@ def main():
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
+    script_repo_root = os.path.dirname(script_dir)
 
-    # Source snapshot_lib via bash to resolve path, or do it locally
-    snapshot_path = ""
-    # Look for candidates
-    candidates = []
-    backup_dir = os.path.join(repo_root, "backup")
-    if os.path.exists(backup_dir):
-        for host in os.listdir(backup_dir):
-            p = os.path.join(backup_dir, host, "disk_snapshot.json")
-            if os.path.exists(p):
-                candidates.append(p)
-                
-    if not candidates:
-        print("No disk_snapshot.json found in backup/*/. Run a backup first to generate one.", file=sys.stderr)
-        sys.exit(1)
+    # Look for candidates. Honor the wrapper-provided backup repo path first,
+    # then preserve the historical repo-local backup/* behavior.
+    explicit_snapshot = os.environ.get("DISK_SNAPSHOT_JSON", "")
+    if explicit_snapshot and os.path.exists(explicit_snapshot):
+        best_path = os.path.realpath(explicit_snapshot)
+        repo_root = os.path.realpath(
+            run_cmd("git rev-parse --show-toplevel", cwd=os.path.dirname(best_path)) or script_repo_root
+        )
+    else:
+        repo_root = script_repo_root
+        candidates = []
+        backup_dir = os.path.join(repo_root, "backup")
+        if os.path.exists(backup_dir):
+            for host in os.listdir(backup_dir):
+                p = os.path.join(backup_dir, host, "disk_snapshot.json")
+                if os.path.exists(p):
+                    candidates.append(p)
 
-    # Resolve newest snapshot
-    best_path = candidates[0]
-    best_ts = ""
-    for path in candidates:
-        try:
-            data = json.load(open(path))
-            ts = data.get("timestamp", "")
-            if ts > best_ts:
-                best_ts = ts
-                best_path = path
-        except Exception:
-            pass
+        if not candidates:
+            print("No disk_snapshot.json found in backup/*/. Run a backup first to generate one.", file=sys.stderr)
+            sys.exit(1)
+
+        # Resolve newest snapshot
+        best_path = candidates[0]
+        best_ts = ""
+        for path in candidates:
+            try:
+                data = json.load(open(path))
+                ts = data.get("timestamp", "")
+                if ts > best_ts:
+                    best_ts = ts
+                    best_path = path
+            except Exception:
+                pass
 
     rel_path = os.path.relpath(best_path, repo_root)
 

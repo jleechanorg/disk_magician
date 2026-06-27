@@ -27,9 +27,10 @@ DRY_RUN=true
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [-h|--help]
 
   --clean     Actually delete (default: dry-run preview).
+  --dry-run   Preview cleanup without deleting.
   -h|--help   Show this help.
 
 Environment:
@@ -41,6 +42,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --clean)   DRY_RUN=false ;;
+    --dry-run) DRY_RUN=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac

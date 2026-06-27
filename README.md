@@ -10,8 +10,9 @@ Designed to work across macOS and Linux, it can be exposed as a skill/plugin for
 
 - 🔍 **Diagnostics & Audit**: Quick summary of APFS/Ext4 volumes, top directories, and actionable cleanup recommendations.
 - 🕒 **Historical Trends**: Reads git history of your snapshots to show growth patterns and regressions over time.
-- 🧹 **Orphaned Worktree Cleanup**: Dynamically discovers and deletes orphaned Git worktrees (saving gigabytes of dead venvs/node_modules) without hardcoding repository paths.
+- 🧹 **Guarded Worktree Cleanup**: Dynamically discovers orphaned Git worktrees without deleting them unless `WORKTREE_APPROVED=1` is set.
 - 🗑️ **Temporary & Cache Purge**: Safely removes stale git clones, debug logs, and build/package manager caches older than a configurable threshold.
+- 🧰 **Large Cleanup Sweep**: `clean-all` can preview or apply large tmp, Docker, Ollama, and Xcode cleanup with explicit gates for destructive paths.
 - 📦 **Automated Snapshot Backups**: Self-configures a local and remote backup repository (`disk_backup`) and registers launchd/cron schedules to push snapshot JSON updates every 30 minutes.
 
 ---
@@ -37,13 +38,16 @@ This command will:
 # Audits current disk usage and recommends cleanups
 ./disk_magician.sh audit
 
-# Preview safe targets to be cleaned
+# Preview safe targets to be cleaned; worktrees are skipped unless approved
 ./disk_magician.sh clean --dry-run
 
 # Execute cleanup of safe targets (temp files, cache)
 ./disk_magician.sh clean
 
-# Interactively clean larger/destructive targets (Docker VMs, old sessions)
+# Preview larger/destructive targets (large tmp, Docker, Ollama, Xcode)
+./disk_magician.sh clean-all --dry-run
+
+# Apply larger/destructive cleanup after reviewing the dry-run
 ./disk_magician.sh clean-all
 
 # Shows historical growth trends from the git log of your snapshots
@@ -62,6 +66,17 @@ Detailed skills/plugin specifications are available under `skills/`:
 * `skills/codex/SKILL.md` (for Codex)
 * `skills/hermes/SKILL.md` (for Hermes)
 * `skills/openclaw/SKILL.md` (for Openclaw)
+
+---
+
+## Cleanup Guardrails
+
+- `clean` runs safe cache/temp/log cleanup, but skips worktree deletion unless `WORKTREE_APPROVED=1` is set.
+- `clean-all` supports both `--dry-run` and apply mode for stale sessions, large tmp directories, worktrees, APFS snapshots, Docker, Ollama, and Xcode cleanup.
+- Large tmp apply mode requires `LARGE_TMP_APPROVED=1`; temp directories named `wt_*` or `worktree_*` are skipped unless `TMP_WORKTREES_APPROVED=1` is also set.
+- Docker cleanup runs `docker system prune -a -f` and preserves Docker volumes.
+- Ollama cleanup deletes the local model store (`~/.ollama/models` by default, or `OLLAMA_MODELS_DIR`).
+- Xcode cleanup clears DerivedData, CoreSimulator temp/cache directories, and unavailable simulators.
 
 ---
 

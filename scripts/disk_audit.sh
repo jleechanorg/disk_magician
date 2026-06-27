@@ -9,13 +9,13 @@ SHOW_HISTORY=true
 
 for arg in "$@"; do
     case "$arg" in
-        --clean)         MODE="clean" ;;
-        --clean-all)     MODE="clean-all" ;;
+        clean|--clean)       MODE="clean" ;;
+        clean-all|--clean-all) MODE="clean-all" ;;
         --dry-run)       DRY_RUN=true ;;
         --live)          LIVE=true ;;
         --no-history)    SHOW_HISTORY=false ;;
         --help|-h)
-            echo "Usage: $0 [--clean|--clean-all] [--dry-run] [--live] [--no-history]"
+            echo "Usage: $0 [clean|--clean|clean-all|--clean-all] [--dry-run] [--live] [--no-history]"
             exit 0
             ;;
         *)
@@ -52,7 +52,7 @@ SNAP_CACHE=""
 SNAP_REASON=""
 SNAP_STALE_WARN=""
 
-_cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; }
+_cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; return 0; }
 trap _cleanup_snap EXIT
 
 _load_snapshot() {
@@ -250,9 +250,11 @@ if [[ "$MODE" == "clean" ]]; then
         "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg || true
     fi
 
-    # Run Worktree Cleanup
-    if [[ -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
+    # Run Worktree Cleanup only after explicit approval.
+    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
         "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
+    else
+        echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
     fi
 
     # Run LLM Inspector Cleanup
@@ -265,9 +267,11 @@ if [[ "$MODE" == "clean" ]]; then
         "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg || true
     fi
 
-    # Run Agent Artifacts Cleanup
-    if [[ -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
+    # Broad agent artifacts include app chats/worktrees; keep opt-in.
+    if [[ "${AGENT_ARTIFACTS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
         "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
+    else
+        echo "  Agent artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
     fi
 fi
 
@@ -285,9 +289,16 @@ if [[ "$MODE" == "clean-all" ]]; then
         "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg || true
     fi
 
-    # Clean worktrees
-    if [[ -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
+    # Clean large temp directories after explicit large-temp approval.
+    if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg --large || true
+    fi
+
+    # Clean worktrees only after explicit approval.
+    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
         "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
+    else
+        echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
     fi
 
     # Clean APFS Snapshots
@@ -296,13 +307,18 @@ if [[ "$MODE" == "clean-all" ]]; then
     fi
 
     # Docker System Prune
-    if command -v docker &>/dev/null; then
-        if [[ "$DRY_RUN" == true ]]; then
-            echo "  Docker: [dry-run] would run: docker system prune -a -f"
-        else
-            echo "  Docker: running system prune -a -f ..."
-            docker system prune -a -f || true
-        fi
+    if [[ -f "$SCRIPT_DIR/cleanup_docker.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_docker.sh" $clean_arg || true
+    fi
+
+    # Ollama local model store
+    if [[ -f "$SCRIPT_DIR/cleanup_ollama.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_ollama.sh" $clean_arg || true
+    fi
+
+    # Rebuildable Xcode/simulator caches
+    if [[ -f "$SCRIPT_DIR/cleanup_xcode.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_xcode.sh" $clean_arg || true
     fi
 fi
 

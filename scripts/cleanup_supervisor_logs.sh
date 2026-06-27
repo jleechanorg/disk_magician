@@ -27,6 +27,7 @@ Usage: $(basename "$0") [--clean] [-h|--help]
 
 Options:
   --clean      Actually delete rotated launchd logs older than ${AGE_THRESHOLD_DAYS}d.
+  --dry-run    Preview cleanup without deleting.
   -h, --help   Show this help.
 EOF
 }
@@ -34,6 +35,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --clean)   DRY_RUN=false ;;
+    --dry-run) DRY_RUN=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
