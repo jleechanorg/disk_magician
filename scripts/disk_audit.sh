@@ -284,9 +284,11 @@ if [[ "$MODE" == "clean-all" ]]; then
 
     section "Executing Aggressive/Interactive Cleanups"
 
-    # Clean sessions
-    if [[ -f "$SCRIPT_DIR/cleanup_sessions.sh" ]]; then
+    # Clean sessions only after explicit approval.
+    if [[ "${SESSIONS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_sessions.sh" ]]; then
         "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg || true
+    else
+        echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
     # Clean large temp directories after explicit large-temp approval.
