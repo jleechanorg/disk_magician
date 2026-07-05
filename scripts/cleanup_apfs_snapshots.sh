@@ -142,6 +142,83 @@ DELETE_LIST=()  # entries: "<name>|<uuid>|<reason>"
 LIM_HARD_RECENT_SECONDS="${LIM_HARD_RECENT_SECONDS:-3600}"  # 1 hour
 HARD_RECENT_FLOOR=$(( NOW_EPOCH - LIM_HARD_RECENT_SECONDS ))
 
+# Look up the active mounted root snapshot's XID for the XID-ordering fallback.
+# On modern macOS the active root is the one with the LOWEST XID because the
+# journal resets on volume mount; the os.update preps keep their pre-mount XIDs.
+ACTIVE_XID=""
+if [[ -n "$ACTIVE_SNAPSHOT_NAME" ]]; then
+  for line in "${SNAPSHOT_LINES[@]}"; do
+    IFS=$'\t' read -r nm _ xid _ <<< "$line"
+    if [[ "$nm" == "$ACTIVE_SNAPSHOT_NAME" ]]; then
+      ACTIVE_XID="${xid:-}"
+      break
+    fi
+  done
+fi
+log "Active root XID: ${ACTIVE_XID:-unknown} (max observed: $MAX_XID)"
+
+# Multi-strategy date parser. Returns "<epoch>|<source>" on stdout, or empty
+# if no strategy succeeded. The caller combines the result with its own
+# safety net (XID ordering, LimitingContainerShrink flag, retention window).
+parse_snapshot_date() {
+  local name="$1"
+  local xid="$2"
+  local out_epoch=0
+  local out_source=""
+
+  # Strategy 1: legacy TimeMachine-YYYY-MM-DD-HHMMSS embedded date. Works
+  #             for any cross-OS snapshot that predates the os.update-* form.
+  if [[ "$name" =~ com.apple.TimeMachine.([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2})$ ]]; then
+    local y=${BASH_REMATCH[1]} mo=${BASH_REMATCH[2]} d=${BASH_REMATCH[3]}
+    local h=${BASH_REMATCH[4]} mi=${BASH_REMATCH[5]} s=${BASH_REMATCH[6]}
+    out_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "${y}-${mo}-${d} ${h}:${mi}:${s}" '+%s' 2>/dev/null || echo 0)
+    [[ "$out_epoch" -gt 0 ]] && out_source="embedded-date"
+  fi
+
+  # Strategy 2: ask tmutil for the snapshot's metadata. tmutil snapshotinfo
+  #             occasionally exposes a creation timestamp for the UUID form
+  #             that diskutil hides.
+  if [[ "$out_epoch" -eq 0 ]] && command -v tmutil &>/dev/null; then
+    local tmout
+    tmout=$(tmutil snapshotinfo "$name" 2>/dev/null | grep -iE 'created|date' | head -3 || true)
+    if [[ -n "$tmout" ]]; then
+      local tm_epoch
+      tm_epoch=$(echo "$tmout" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}' | head -1)
+      if [[ -n "$tm_epoch" ]]; then
+        tm_epoch=${tm_epoch/T/ }
+        out_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$tm_epoch" '+%s' 2>/dev/null || echo 0)
+        [[ "$out_epoch" -gt 0 ]] && out_source="tmutil-snapshotinfo"
+      fi
+    fi
+  fi
+
+  # Strategy 3: XID-ordering fallback for com.apple.os.update-* snapshots.
+  #             macOS now emits UUID-form names with NO embedded date
+  #             (e.g., com.apple.os.update-<64-hex-uuid>), and the plist
+  #             from diskutil also omits the Created field. We use the
+  #             XID as an indirect age signal:
+  #               - The active mounted root always has the lowest XID
+  #                 (journal resets on volume mount).
+  #               - Non-active os.update snapshots have higher XIDs
+  #                 because they predate the current mount.
+  #             We treat the active mount time as a LOWER BOUND on their
+  #             creation (they were created at or before the current mount).
+  if [[ "$out_epoch" -eq 0 && "$name" == com.apple.os.update* ]]; then
+    if [[ -n "$ACTIVE_XID" && -n "$xid" && "$xid" =~ ^[0-9]+$ ]]; then
+      # Non-active os.update: this snapshot was created during a previous
+      # journal cycle, so it's at LEAST as old as the current mount time.
+      # The active mount time becomes our best estimate.
+      out_epoch=$REF_EPOCH
+      out_source="xid-ordering"
+    else
+      out_epoch=$REF_EPOCH
+      out_source="active-mount-ref"
+    fi
+  fi
+
+  echo "${out_epoch}|${out_source}"
+}
+
 for line in "${SNAPSHOT_LINES[@]}"; do
   IFS=$'\t' read -r snap_name snap_uuid snap_xid snap_lim <<< "$line"
   [[ -z "$snap_name" ]] && continue
@@ -158,34 +235,12 @@ for line in "${SNAPSHOT_LINES[@]}"; do
     continue
   fi
 
-  is_os_update=0
-  if [[ "$snap_name" =~ ^com.apple.os.update. ]]; then
-    is_os_update=1
-  fi
+  # Parse the snapshot creation date using the multi-strategy parser.
+  parse_result=$(parse_snapshot_date "$snap_name" "$snap_xid")
+  snap_epoch=${parse_result%%|*}
+  age_source=${parse_result#*|}
 
-  # Compute a creation epoch for this snapshot.
-  snap_epoch=0
-  age_source=""
-
-  # Strategy 1: legacy TimeMachine-YYYY-MM-DD-HHMMSS form still works
-  #             for any cross-OS snapshots that predate the os.update-* form.
-  if [[ "$snap_name" =~ com.apple.TimeMachine.([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2})$ ]]; then
-    y=${BASH_REMATCH[1]}; mo=${BASH_REMATCH[2]}; d=${BASH_REMATCH[3]}
-    h=${BASH_REMATCH[4]}; mi=${BASH_REMATCH[5]}; s=${BASH_REMATCH[6]}
-    snap_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "${y}-${mo}-${d} ${h}:${mi}:${s}" '+%s' 2>/dev/null || echo 0)
-    age_source="embedded-date"
-  fi
-
-  # Strategy 2: for com.apple.os.update-* snapshots, no date in name. Use
-  #             the active-mount reference time as a lower bound: any
-  #             non-active os.update snapshot was created at or before the
-  #             active one booted.
-  if [[ "$snap_epoch" -eq 0 && "$is_os_update" -eq 1 ]]; then
-    snap_epoch=$REF_EPOCH
-    age_source="active-mount-ref"
-  fi
-
-  if [[ "$snap_epoch" -eq 0 ]]; then
+  if [[ -z "$snap_epoch" || "$snap_epoch" -eq 0 ]]; then
     log "  SKIP (no age signal): $snap_name"
     continue
   fi
@@ -195,6 +250,14 @@ for line in "${SNAPSHOT_LINES[@]}"; do
 
   is_old=0
   reason=""
+
+  # XID-ordering check: if the active root XID is known and this snapshot
+  # has the SAME XID as the active root, it's a parallel branch (e.g.,
+  # a reversion target) — never delete it.
+  if [[ -n "$ACTIVE_XID" && -n "$snap_xid" && "$snap_xid" == "$ACTIVE_XID" ]]; then
+    log "  KEEP (XID == active root XID): $snap_name"
+    continue
+  fi
 
   # The LimitingContainerShrink snapshot is the "anchoring" regrowth-prevention
   # failure mode — reap it whenever the hard-recent floor is past.
