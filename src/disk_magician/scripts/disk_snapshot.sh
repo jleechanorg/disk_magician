@@ -277,6 +277,7 @@ if [[ -d "$containers_parent" ]]; then
   fi
   while IFS=$'\t' read -r kb name; do
     [[ -z "$kb" || -z "$name" ]] && continue
+    [[ "$kb" =~ ^[0-9]+$ ]] || continue
     base=$(basename "$name")
     safe=$(printf '%s' "$base" | tr -c 'A-Za-z0-9' '_' | head -c 40)
     key="lc_${safe}"
