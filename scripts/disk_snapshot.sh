@@ -369,7 +369,7 @@ containers_captured=0
 containers_total_dirs=0
 if [[ -d "$containers_parent" ]]; then
   containers_total_dirs=$(find "$containers_parent" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-  containers_captured=$(printf '%s' "$containers_listing" | grep -c '^[0-9]' || echo 0)
+  containers_captured=$(printf '%s' "$containers_listing" | grep -c '^[0-9]' || true)
 fi
 
 json="{"
