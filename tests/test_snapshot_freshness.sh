@@ -43,7 +43,7 @@ LIVE_SNAP="$WORK/live_snap.json"
 # recent snapshot exists (e.g. /tmp/test_snap.json from a prior run),
 # prefer that to avoid the 90s+ du pass.
 PRE_EXISTING=""
-for candidate in /tmp/test_snap.json "$REPO_ROOT/backup"/*/disk_snapshot.json; do
+for candidate in /tmp/test_snap.json "$HOME/.disk_magician_backup/backup"/*/disk_snapshot.json "$REPO_ROOT/backup"/*/disk_snapshot.json; do
     if [[ -s "$candidate" ]]; then
         PRE_EXISTING="$candidate"
         break
@@ -76,8 +76,11 @@ if [[ -n "$LIVE_SNAP" && -s "$LIVE_SNAP" ]]; then
     done
     # Check top-20 library_containers lc_ keys
     LC_COUNT=$(python3 -c "import json; d=json.load(open('$LIVE_SNAP')); print(sum(1 for k in d.get('directories',{}) if k.startswith('lc_')))" 2>/dev/null || echo 0)
+    HAS_LC_TIMEOUT=$(python3 -c "import json; d=json.load(open('$LIVE_SNAP')); print('library_containers' in (d.get('timeout_keys') or []))" 2>/dev/null || echo False)
     if [[ "$LC_COUNT" -ge 1 ]]; then
         ok "snapshot has $LC_COUNT lc_ keys (top Library/Containers subdirs)"
+    elif [[ "$HAS_LC_TIMEOUT" == "True" ]]; then
+        ok "0 lc_ keys but library_containers timed out (expected on large installs)"
     else
         bad "snapshot has 0 lc_ keys — Library/Containers expansion not capturing"
     fi

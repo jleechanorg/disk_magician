@@ -12,3 +12,4 @@ htmlcov/
 
 # User configurations
 config.json
+.claude/

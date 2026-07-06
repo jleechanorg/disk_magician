@@ -7,6 +7,7 @@ cd "$SCRIPT_DIR"
 
 echo "=== Syncing package files ==="
 cp disk_magician.sh src/disk_magician/
+cp config.json.template src/disk_magician/
 cp -r scripts/* src/disk_magician/scripts/
 
 echo "=== Setting script permissions ==="

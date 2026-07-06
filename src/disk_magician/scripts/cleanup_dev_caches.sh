@@ -169,6 +169,67 @@ fi
 log "=== Section 6: ~/.npm/_cacache ==="
 clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false
 
+# 7. claude-cli-nodejs and go-build Library/Caches (Fix #8)
+#
+# Both dirs are build/transform caches that auto-rebuild on next use:
+#   - claude-cli-nodejs/ holds per-CLI-process worktree-shared caches
+#     keyed by absolute path (e.g. "-Users-jleechan--hermes"). Rebuild
+#     is fast on next invocation. Currently 365 MB.
+#   - go-build/ holds Go compile-output caches (00/, 01/, ...). Rebuild
+#     is fast on next go build. Currently 196 MB.
+#
+# Apply a 30-day mtime gate per-entry (top-level only). Older entries are
+# stale build artifacts from completed work; recent entries (<30d) are
+# likely part of an in-flight session and should be preserved for fast
+# incremental rebuilds. This is more conservative than the 14-day gate
+# used for opencode, because go/claude caches are larger and slower to
+# rebuild than opencode snapshots.
+#
+# Both dirs are flat lists of subdirectories — same find pattern as the
+# opencode section above. Pattern is: walk top-level entries, delete
+# those whose mtime is older than 30 days. Files mixed with dirs are
+# handled (rm -rf handles both).
+DEV_CACHE_DAYS=30
+for dev_cache_path in \
+  "$HOME/Library/Caches/claude-cli-nodejs" \
+  "$HOME/Library/Caches/go-build"; do
+  dev_cache_label=$(basename "$dev_cache_path")
+  log "=== Section: $dev_cache_path (${DEV_CACHE_DAYS}d mtime) ==="
+  if [[ ! -d "$dev_cache_path" ]]; then
+    log "$dev_cache_label: directory not found, skipping"
+    continue
+  fi
+
+  before_kb=$(size_kb "$dev_cache_path")
+  log "$dev_cache_label: before $(fmt_kb "$before_kb") ($dev_cache_path)"
+
+  mapfile -d '' OLD_ENTRIES < <(
+    find "$dev_cache_path" -mindepth 1 -maxdepth 1 -mtime +"$DEV_CACHE_DAYS" -print0 2>/dev/null
+  )
+
+  if [[ ${#OLD_ENTRIES[@]} -eq 0 ]]; then
+    log "$dev_cache_label: no entries older than ${DEV_CACHE_DAYS}d, nothing to delete"
+    continue
+  fi
+
+  for entry in "${OLD_ENTRIES[@]}"; do
+    if [[ "$DRY_RUN" == true ]]; then
+      log "$dev_cache_label: [dry-run] would delete $entry"
+    else
+      log "$dev_cache_label: deleting $entry"
+      rm -rf "$entry"
+    fi
+  done
+
+  if [[ "$DRY_RUN" != true ]]; then
+    after_kb=$(size_kb "$dev_cache_path")
+    freed_kb=$(( before_kb - after_kb ))
+    [[ $freed_kb -lt 0 ]] && freed_kb=0
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
+    log "$dev_cache_label: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
+  fi
+done
+
 echo
 if [[ "$DRY_RUN" == true ]]; then
   log "=== DRY-RUN complete — no files deleted ==="

@@ -51,6 +51,7 @@ SNAP_STATUS=""
 SNAP_CACHE=""
 SNAP_REASON=""
 SNAP_STALE_WARN=""
+SNAP_PARTIAL_WARN=""
 
 _cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; return 0; }
 trap _cleanup_snap EXIT
@@ -106,12 +107,26 @@ PY
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
     fi
-    local cov_int="${SNAP_COVERAGE%.*}"
-    if [[ -z "$cov_int" || "$cov_int" -lt 70 ]]; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < 70 — re-measuring live"; return 1
+    # Coverage gates (float-safe; avoid bash ${var%.*} truncating 69.8 → 69):
+    #   < 50%  — hard reject (unusable snapshot)
+    #   50–65% — reject (too many blind spots)
+    #   ≥ 65%  — accept with partial-coverage warning when < 70% or low_coverage flag
+    local min_cov="${DISK_MAGICIAN_MIN_COVERAGE:-65}"
+    local hard_floor=50
+    if ! awk -v c="${SNAP_COVERAGE:-0}" "BEGIN{exit !(c+0 >= 0)}"; then
+        SNAP_REASON="coverage invalid (${SNAP_COVERAGE:-?})"; return 1
     fi
-    if [[ "$_warn" == "low_coverage" ]]; then
-        SNAP_REASON="snapshot_warning=low_coverage — re-measuring live"; return 1
+    if awk -v c="${SNAP_COVERAGE:-0}" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${hard_floor} — re-measuring live"; return 1
+    fi
+    if awk -v c="${SNAP_COVERAGE:-0}" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${min_cov} — re-measuring live"; return 1
+    fi
+    if awk -v c="${SNAP_COVERAGE:-0}" 'BEGIN{exit !(c+0 < 70)}'; then
+        SNAP_PARTIAL_WARN="partial coverage ${SNAP_COVERAGE}% (<70% — some paths timed out)"
+    fi
+    if [[ "$_warn" == *"low_coverage"* ]]; then
+        SNAP_PARTIAL_WARN="${SNAP_PARTIAL_WARN:+$SNAP_PARTIAL_WARN; }snapshot_warning=low_coverage"
     fi
     # Lane B Section C — stale-snapshot alert. 4 hours is the threshold:
     # the launchd job runs every 30 min, so anything >4 h means the
@@ -169,6 +184,10 @@ if [[ "$SNAP_USABLE" == true ]]; then
     if [[ -n "$SNAP_STATUS" ]]; then
         printf "  Snapshot measurement_status: %s\n" "$SNAP_STATUS"
     fi
+    if [[ -n "$SNAP_PARTIAL_WARN" ]]; then
+        echo
+        echo "  ⚠️  PARTIAL COVERAGE: $SNAP_PARTIAL_WARN"
+    fi
     if [[ -n "$SNAP_STALE_WARN" ]]; then
         echo
         echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
@@ -195,14 +214,38 @@ fi
 # ── 4. Actionable Cleanup Candidates ─────────────────────────────────────────
 section "Actionable Findings"
 
-# Docker VM check
+# Docker / Colima VM check
 if command -v docker &>/dev/null; then
+    colima_lima="$HOME/.colima/_lima"
+    if [[ -d "$colima_lima" ]]; then
+        size_kb=$(du -sk "$colima_lima" 2>/dev/null | awk '{print $1+0}' || echo 0)
+        if [[ $size_kb -gt $((5 * 1024 * 1024)) ]]; then
+            printf "  %-50s %8s  %s\n" "Colima VM disk (~/.colima/_lima)" "$(fmt_size "$size_kb")" "RUN: cleanup_colima.sh --clean (builder/image/volume prune)"
+        fi
+    fi
     docker_data="$HOME/Library/Containers/com.docker.docker/Data"
     if [[ -d "$docker_data" ]]; then
         size_kb=$(du -sk "$docker_data" 2>/dev/null | awk '{print $1+0}' || echo 0)
         if [[ $size_kb -gt $((5 * 1024 * 1024)) ]]; then
-            printf "  %-50s %8s  %s\n" "Docker VM disk image" "$(fmt_size "$size_kb")" "DESTRUCTIVE: reset Docker disk image / prune -a"
+            printf "  %-50s %8s  %s\n" "Docker Desktop VM disk image" "$(fmt_size "$size_kb")" "DESTRUCTIVE: cleanup_docker.sh --clean"
         fi
+    fi
+fi
+
+# AO session Playwright cache duplication
+ao_sessions="$HOME/.ao-sessions"
+if [[ -d "$ao_sessions" ]]; then
+    pw_dup_count=0
+    pw_dup_kb=0
+    while IFS= read -r -d '' d; do
+        [[ -L "$d" ]] && continue
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
+        [[ "$kb" -lt 1024 ]] && continue
+        pw_dup_count=$((pw_dup_count + 1))
+        pw_dup_kb=$((pw_dup_kb + kb))
+    done < <(find "$ao_sessions" -type d -path '*/ms-playwright-go/1.57.0' -print0 2>/dev/null || true)
+    if [[ $pw_dup_count -gt 0 ]]; then
+        printf "  %-50s %8s  %s\n" "AO session Playwright caches (real dirs)" "$(fmt_size "$pw_dup_kb")" "RUN: symlink-shared-playwright-cache.sh --clean (requires AO_PLAYWRIGHT_DEDUP_APPROVED=1)"
     fi
 fi
 
@@ -262,6 +305,20 @@ if [[ "$MODE" == "clean" ]]; then
         "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg || true
     fi
 
+    # Run Supervisor Launchd Logs Cleanup (rotated logs > 7d)
+    if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
+        "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg || true
+    fi
+
+    # Post-job style docker prune (dangling only; safe for Colima)
+    if [[ -f "$SCRIPT_DIR/post_job_docker_prune.sh" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+            "$SCRIPT_DIR/post_job_docker_prune.sh" --dry-run || true
+        else
+            "$SCRIPT_DIR/post_job_docker_prune.sh" || true
+        fi
+    fi
+
     # Broad agent artifacts include app chats/worktrees; keep opt-in.
     if [[ "${AGENT_ARTIFACTS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
         "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
@@ -279,9 +336,11 @@ if [[ "$MODE" == "clean-all" ]]; then
 
     section "Executing Aggressive/Interactive Cleanups"
 
-    # Clean sessions
-    if [[ -f "$SCRIPT_DIR/cleanup_sessions.sh" ]]; then
+    # Clean sessions only after explicit approval.
+    if [[ "${SESSIONS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_sessions.sh" ]]; then
         "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg || true
+    else
+        echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
     # Clean large temp directories after explicit large-temp approval.
@@ -301,9 +360,39 @@ if [[ "$MODE" == "clean-all" ]]; then
         "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" $clean_arg || true
     fi
 
-    # Docker System Prune
-    if [[ -f "$SCRIPT_DIR/cleanup_docker.sh" ]]; then
+    # Colima / Docker prune (builder cache, unused images/volumes)
+    if [[ -f "$SCRIPT_DIR/cleanup_colima.sh" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+            "$SCRIPT_DIR/cleanup_colima.sh" --dry-run --prune-volumes || true
+        elif [[ "${DOCKER_VOLUMES_APPROVED:-0}" == "1" ]]; then
+            "$SCRIPT_DIR/cleanup_colima.sh" --clean --prune-volumes || true
+        else
+            "$SCRIPT_DIR/cleanup_colima.sh" --clean || true
+            echo "  Colima volume prune: skipped (set DOCKER_VOLUMES_APPROVED=1 for unused volumes)"
+        fi
+    elif [[ -f "$SCRIPT_DIR/cleanup_docker.sh" ]]; then
         "$SCRIPT_DIR/cleanup_docker.sh" $clean_arg || true
+    fi
+
+    # Playwright cache dedup across AO sessions (backup-then-symlink)
+    if [[ "${AO_PLAYWRIGHT_DEDUP_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" ]]; then
+        "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" $clean_arg || true
+        if [[ "$DRY_RUN" == false ]]; then
+            "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" --clean --delete-backups || true
+        fi
+    else
+        echo "  Playwright AO dedup: skipped (requires AO_PLAYWRIGHT_DEDUP_APPROVED=1)"
+    fi
+
+    # Worktree venv reclaim (symlink to main checkout venv)
+    if [[ "${VENV_RECLAIM_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/reclaim_worktree_venvs.sh" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+            DRY_RUN=1 "$SCRIPT_DIR/reclaim_worktree_venvs.sh" || true
+        else
+            DRY_RUN=0 "$SCRIPT_DIR/reclaim_worktree_venvs.sh" || true
+        fi
+    else
+        echo "  Worktree venv reclaim: skipped (requires VENV_RECLAIM_APPROVED=1)"
     fi
 
     # Ollama local model store

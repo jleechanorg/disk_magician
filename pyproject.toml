@@ -17,4 +17,4 @@ disk-magician = "disk_magician.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-disk_magician = ["disk_magician.sh", "scripts/*.sh"]
+disk_magician = ["disk_magician.sh", "config.json.template", "scripts/*.sh"]

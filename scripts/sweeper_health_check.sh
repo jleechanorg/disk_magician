@@ -121,13 +121,17 @@ log_has_error() {
 PLIST_TMP=$(mktemp -t sweeper_health.XXXXXX)
 trap 'rm -f "$PLIST_TMP"' EXIT
 
-find "$PLIST_DIR" -maxdepth 1 -name "com.jleechan.cleanup-*.plist" -print 2>/dev/null \
+find "$PLIST_DIR" -maxdepth 1 \( \
+  -name "com.jleechan.cleanup-*.plist" -o \
+  -name "com.jleechan.disk-magician-*.plist" -o \
+  -name "com.jleechanorg.disk-magician.plist" \
+\) -print 2>/dev/null \
   | sort > "$PLIST_TMP" || true
 
 PLIST_COUNT=$(wc -l < "$PLIST_TMP" | tr -d ' ')
 
 log "Sweeper health check — threshold ${THRESHOLD_DAYS}d, plist dir $PLIST_DIR"
-log "Found $PLIST_COUNT cleanup-* plist(s)"
+log "Found $PLIST_COUNT plist(s)"
 echo
 
 MISS_COUNT=0

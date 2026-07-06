@@ -14,13 +14,15 @@ CONFIG_FILE="$REPO_ROOT/config.json"
 GIT_CLONE_MIN=240
 AGENT_PROMPT_MIN=240
 CLI_VALIDATION_MIN=60
+WORKTREE_POINTER_MIN=30
+WORKTREE_POINTER_MIN_KB=51200
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN <<<$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB <<<$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200"
 import json, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)}")
+print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)}")
 PY
 )
 fi
@@ -134,6 +136,73 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
               -name "cli_validation_gemini_*" \
               -mmin "+${CLI_VALIDATION_MIN}" -print0 2>/dev/null || true)
+
+  # 4. Worktree-linked dirs: .git is a file (worktree pointer) pointing at
+  #    <parent_repo>/.git/worktrees/<name>/. Safety:
+  #      - parse the "gitdir:" line
+  #      - confirm the resolved gitdir exists
+  #      - confirm it lives under a parent repo's .git/worktrees/
+  #      - confirm the parent repo is NOT currently checked out to this worktree
+  #      - honor the worktree-pointer mtime + min-size filters
+  while IFS= read -r -d '' subdir; do
+    # .git must be a regular file (worktree pointer), not a directory
+    [[ -f "$subdir/.git" ]] || continue
+    # Skip essential system or user active directories
+    case "$(basename "$subdir")" in
+      claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
+    esac
+
+    # Parse the gitdir: line from the pointer file
+    gitdir_line=$(head -n 1 "$subdir/.git" 2>/dev/null || true)
+    [[ "$gitdir_line" == gitdir:* ]] || continue
+    gitdir_path="${gitdir_line#gitdir: }"
+    # Resolve relative paths against the worktree dir
+    if [[ "$gitdir_path" != /* ]]; then
+      gitdir_path="$subdir/$gitdir_path"
+    fi
+    # Normalize via cd + pwd
+    gitdir_path=$(cd "$subdir" && cd "$gitdir_path" 2>/dev/null && pwd) || continue
+    [[ -d "$gitdir_path" ]] || continue
+
+    # Confirm the gitdir lives under some <repo>/.git/worktrees/<name>
+    case "$gitdir_path" in
+      */.git/worktrees/*) : ;;
+      *) continue ;;
+    esac
+
+    # Derive the parent repo's .git path
+    parent_git_dir=$(echo "$gitdir_path" | sed -E 's#/\.git/worktrees/[^/]+/?\$##')
+    [[ -d "$parent_git_dir" ]] || continue
+
+    # Derive the parent repo's work-tree (working dir)
+    parent_work_tree=$(git -C "$parent_git_dir" rev-parse --show-toplevel 2>/dev/null || true)
+    [[ -n "$parent_work_tree" && -d "$parent_work_tree" ]] || continue
+
+    # Safety: the worktree must NOT be the currently checked-out branch of the parent repo
+    current_link=$(readlink "$parent_git_dir" 2>/dev/null || true)
+    if [[ -n "$current_link" ]]; then
+      # If HEAD points into the same worktrees/<name>/ we're considering, skip
+      case "$current_link" in
+        *"/worktrees/$(basename "$subdir")"|*"/worktrees/$(basename "$subdir")/") continue ;;
+      esac
+    fi
+    # Also skip if the worktree dir IS the parent repo's toplevel
+    if [[ "$(cd "$subdir" && pwd)" == "$(cd "$parent_work_tree" && pwd)" ]]; then
+      continue
+    fi
+
+    # Size filter
+    kb=$(path_size_kb "$subdir")
+    if [[ "$kb" -lt "$WORKTREE_POINTER_MIN_KB" ]]; then
+      log "Skipping (under min size ${WORKTREE_POINTER_MIN_KB} KB): $subdir  (${kb} KB)"
+      continue
+    fi
+
+    kb=$(remove_path "$subdir")
+    TOTAL_KB=$(( TOTAL_KB + kb ))
+    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+  done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
+              -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
 done
 
 if [[ "$INCLUDE_LARGE" == true ]]; then

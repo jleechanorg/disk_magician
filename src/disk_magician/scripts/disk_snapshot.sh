@@ -271,7 +271,7 @@ if [[ -d "$containers_parent" ]]; then
   # Build a sorted list of (size_kb, name). 60s budget so this never
   # stalls the snapshot.
   if [[ -n "$TIMEOUT_CMD" ]]; then
-    containers_listing=$("$TIMEOUT_CMD" 60 du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
+    containers_listing=$("$TIMEOUT_CMD" 180 du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
   else
     containers_listing=$(du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
   fi
@@ -369,7 +369,8 @@ containers_captured=0
 containers_total_dirs=0
 if [[ -d "$containers_parent" ]]; then
   containers_total_dirs=$(find "$containers_parent" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-  containers_captured=$(printf '%s' "$containers_listing" | grep -c '^[0-9]' || echo 0)
+  containers_captured=$(printf '%s' "$containers_listing" | grep -c '^[0-9]' 2>/dev/null | head -1 | tr -d '[:space:]' || echo 0)
+  [[ "$containers_captured" =~ ^[0-9]+$ ]] || containers_captured=0
 fi
 
 json="{"
@@ -411,6 +412,10 @@ fi
 json+="\"directories\":{$dirs_json}}"
 
 pretty_json=$(echo "$json" | python3 -m json.tool 2>/dev/null || echo "$json")
+if ! echo "$pretty_json" | python3 -m json.tool >/dev/null 2>&1; then
+  echo "ERROR: snapshot JSON failed validation — refusing to write" >&2
+  exit 1
+fi
 
 if [[ -n "$OUTPUT" && "$DRY_RUN" == false ]]; then
   mkdir -p "$(dirname "$OUTPUT")"

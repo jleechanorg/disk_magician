@@ -2,6 +2,14 @@
 
 ## Recent activity (rolling)
 
+- 2026-07-06 — Four root-cause disk growth cleanup (short-term + long-term):
+  - **Live reclaim**: Data volume free 37Gi → 106Gi (~69Gi). Playwright dedup 11.1GB (93 ao-* caches symlinked); /private/tmp −6GB; Colima orphaned org-runner-* volumes removed + `fstrim` (_lima 61G → 11G).
+  - **New**: `scripts/cleanup_colima.sh` (builder/image prune, orphaned volume sweep, `colima ssh -- sudo fstrim -av`).
+  - **Wired**: `disk_audit.sh` clean-all gates for `AO_PLAYWRIGHT_DEDUP_APPROVED`, `VENV_RECLAIM_APPROVED`, `DOCKER_VOLUMES_APPROVED`; Colima + Playwright findings in audit.
+  - **Launchd**: `com.jleechan.disk-magician-colima-prune` (Sun 03:45), `com.jleechan.disk-magician-playwright-dedup` (Sun 04:15).
+  - **Bead closed**: `jleechan-qoss` (Playwright dedup). Still open: `jleechan-emnx`, `jleechan-dp2x`, `jleechan-8twx`, `jleechan-p2gy`.
+  - Nextsteps: `~/roadmap/nextsteps-2026-07-06-disk-magician-four-causes.md`.
+
 - 2026-07-05 — Multi-day regrowth fixed structurally:
   - Antigravity plugin patch: PR jleechanorg/agent-orchestrator#746 (AO_ORIGINAL_HOME env + Playwright cache symlink).
   - reapStaleSessions loop: PR jleechanorg/agent-orchestrator#747.
