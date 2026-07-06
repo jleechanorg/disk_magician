@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jleechan.disk-magician-playwright-dedup</string>
+  <string>com.disk-magician.gemini-dedup</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/bash</string>
-    <string>@HOME@/projects_other/disk_magician/scripts/symlink-shared-playwright-cache.sh</string>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/symlink-shared-gemini.sh</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>AO_PLAYWRIGHT_DEDUP_APPROVED</key>
+    <key>AO_GEMINI_DEDUP_APPROVED</key>
     <string>1</string>
   </dict>
   <key>StartCalendarInterval</key>
@@ -22,11 +22,11 @@
     <key>Hour</key>
     <integer>4</integer>
     <key>Minute</key>
-    <integer>15</integer>
+    <integer>30</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/tmp/disk-magician-playwright-dedup.log</string>
+  <string>/tmp/disk-magician-gemini-dedup.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/disk-magician-playwright-dedup.log</string>
+  <string>/tmp/disk-magician-gemini-dedup.log</string>
 </dict>
 </plist>

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily watchdog: detect cleanup-* sweepers that are loaded but not actually running.
+
+  Schedule:  Daily at 09:00 local time (Hour=9, Minute=0).
+  Action:    runs scripts/sweeper_health_check.sh in read-only mode. The script
+             scans ~/Library/LaunchAgents/com.jleechan.cleanup-*.plist,
+             resolves the log path from each plist's StandardOutPath, and
+             checks whether the log was modified within --threshold-days
+             (default 7).
+
+  A sweeper is reported as MISS if its log file is missing, empty, or older
+  than the threshold. A non-zero exit code signals silent degradation; wire
+  the exit code into an alerting channel (Slack/email/disk_usage_alert.sh) to
+  turn this into an actual page.
+
+  Template uses @HOME@ placeholders. Do not commit a fully-resolved path.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.disk-magician.sweeper-health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/sweeper_health_check.sh</string>
+    <string>--threshold-days</string>
+    <string>7</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-sweeper-health.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-sweeper-health.log</string>
+</dict>
+</plist>

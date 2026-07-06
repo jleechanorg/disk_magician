@@ -10,6 +10,8 @@
 # unconditionally — the original behavior for the worktree / cache dirs).
 set -euo pipefail
 
+# Optional extra dirs (colon-separated absolute or ~ paths):
+#   DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS="$HOME/my-agent-app"
 TARGETS=(
   "$HOME/.cursor/worktrees"
   "$HOME/.cursor/chats"
@@ -21,7 +23,6 @@ TARGETS=(
   "$HOME/Library/Caches/ms-playwright-go"
   "$HOME/Library/Caches/pip"
   # Idle/stale agent-app targets (regrowth-prevention Fix #6):
-  "$HOME/Library/Application Support/jleechanclaw"
   "$HOME/.gemini/antigravity-ide"
   "$HOME/.gemini/antigravity-browser-profile"
 )
@@ -38,10 +39,20 @@ TARGETS_MTIME_GATE_DAYS=(
   -1   # ms-playwright
   -1   # ms-playwright-go
   -1   # pip cache
-   90  # jleechanclaw (Library/Application Support) — abandoned 2026-03-12 trial, 7.6 GB
    30  # antigravity-ide — idle since 2026-05-29, 2.5 GB
    30  # antigravity-browser-profile — idle since 2026-03-28, 1.5 GB
 )
+
+
+if [[ -n "${DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS:-}" ]]; then
+  IFS=':' read -r -a _extra_dirs <<< "${DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS}"
+  for _d in "${_extra_dirs[@]}"; do
+    [[ -n "$_d" ]] || continue
+    _d="${_d/#\~/$HOME}"
+    TARGETS+=("$_d")
+    TARGETS_MTIME_GATE_DAYS+=(-1)
+  done
+fi
 
 if [[ "${#TARGETS[@]}" -ne "${#TARGETS_MTIME_GATE_DAYS[@]}" ]]; then
   echo "ERROR: TARGETS and TARGETS_MTIME_GATE_DAYS length mismatch" >&2

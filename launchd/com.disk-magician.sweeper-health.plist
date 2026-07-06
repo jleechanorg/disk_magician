@@ -20,11 +20,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jleechan.disk-magician-sweeper-health</string>
+  <string>com.disk-magician.sweeper-health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>@HOME@/projects_other/disk_magician/scripts/sweeper_health_check.sh</string>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/sweeper_health_check.sh</string>
     <string>--threshold-days</string>
     <string>7</string>
   </array>

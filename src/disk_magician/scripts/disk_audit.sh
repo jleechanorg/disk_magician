@@ -247,6 +247,19 @@ if [[ -d "$ao_sessions" ]]; then
     if [[ $pw_dup_count -gt 0 ]]; then
         printf "  %-50s %8s  %s\n" "AO session Playwright caches (real dirs)" "$(fmt_size "$pw_dup_kb")" "RUN: symlink-shared-playwright-cache.sh --clean (requires AO_PLAYWRIGHT_DEDUP_APPROVED=1)"
     fi
+
+    gem_dup_count=0
+    gem_dup_kb=0
+    while IFS= read -r -d '' d; do
+        [[ -L "$d" ]] && continue
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
+        [[ "$kb" -lt 1024 ]] && continue
+        gem_dup_count=$((gem_dup_count + 1))
+        gem_dup_kb=$((gem_dup_kb + kb))
+    done < <(find "$ao_sessions" -mindepth 2 -maxdepth 2 -type d -name '.gemini' -print0 2>/dev/null || true)
+    if [[ $gem_dup_count -gt 0 ]]; then
+        printf "  %-50s %8s  %s\n" "AO session .gemini trees (real dirs)" "$(fmt_size "$gem_dup_kb")" "RUN: symlink-shared-gemini.sh --clean (requires AO_GEMINI_DEDUP_APPROVED=1)"
+    fi
 fi
 
 # Codex sessions check
@@ -382,6 +395,16 @@ if [[ "$MODE" == "clean-all" ]]; then
         fi
     else
         echo "  Playwright AO dedup: skipped (requires AO_PLAYWRIGHT_DEDUP_APPROVED=1)"
+    fi
+
+    # .gemini config dedup across AO sessions (backup-then-symlink)
+    if [[ "${AO_GEMINI_DEDUP_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/symlink-shared-gemini.sh" ]]; then
+        "$SCRIPT_DIR/symlink-shared-gemini.sh" $clean_arg || true
+        if [[ "$DRY_RUN" == false ]]; then
+            "$SCRIPT_DIR/symlink-shared-gemini.sh" --clean --delete-backups || true
+        fi
+    else
+        echo "  Gemini AO dedup: skipped (requires AO_GEMINI_DEDUP_APPROVED=1)"
     fi
 
     # Worktree venv reclaim (symlink to main checkout venv)

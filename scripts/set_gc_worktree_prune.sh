@@ -13,6 +13,9 @@
 # created and abandoned. The kernel does not auto-remove them.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 DAYS="${DAYS:-7}"
 APPLY=false
 # arg parsing for --apply
@@ -23,15 +26,32 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-REPOS=(
-  "$HOME/projects/worldarchitect.ai"
-  "$HOME/jleechanorg/agent-orchestrator"
-  "$HOME/llm_wiki"
-  "$HOME/projects_other/user_scope"
-  "$HOME/projects_other/worldarchitect.ai"
-  "$HOME/projects_reference/agent-orchestrator-mirror"
-  "$HOME/hermes-agent"
-)
+REPOS=()
+if [[ -n "${DISK_MAGICIAN_GC_REPOS:-}" ]]; then
+  IFS=':' read -r -a REPOS <<< "${DISK_MAGICIAN_GC_REPOS}"
+elif command -v python3 >/dev/null 2>&1; then
+  CONFIG="${DISK_MAGICIAN_CONFIG:-$REPO_ROOT/config.json}"
+  [[ -f "$CONFIG" ]] || CONFIG="$REPO_ROOT/config.json.template"
+  export CONFIG
+  mapfile -t REPOS < <(python3 - <<'PYCFG'
+import json, os, sys
+from pathlib import Path
+cfg = Path(os.environ.get("CONFIG", ""))
+try:
+    data = json.loads(cfg.read_text())
+except Exception:
+    sys.exit(0)
+for p in data.get("gc_worktree_repos") or []:
+    print(os.path.expanduser(p))
+PYCFG
+  )
+fi
+
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+  echo "No repos configured. Set DISK_MAGICIAN_GC_REPOS (colon-separated paths)"
+  echo "or add gc_worktree_repos to config.json (see config.json.template)."
+  exit 0
+fi
 
 action="would set"
 $APPLY && action="setting"

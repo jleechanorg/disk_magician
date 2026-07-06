@@ -46,7 +46,7 @@ Usage: $(basename "$0") [--threshold-days N] [--plist-dir DIR] [--verbose] [--dr
 Options:
   --threshold-days N   Maximum log age in days before a sweeper is flagged MISS
                        (default: 7)
-  --plist-dir DIR      Directory to scan for com.jleechan.cleanup-*.plist
+  --plist-dir DIR      Directory to scan for cleanup / disk-magician plists
                        (default: ~/Library/LaunchAgents)
   --verbose            Print per-sweeper details for OK sweepers too
   --dry-run            No-op retained for parity with other disk_magician scripts
@@ -124,6 +124,7 @@ trap 'rm -f "$PLIST_TMP"' EXIT
 find "$PLIST_DIR" -maxdepth 1 \( \
   -name "com.jleechan.cleanup-*.plist" -o \
   -name "com.jleechan.disk-magician-*.plist" -o \
+  -name "com.disk-magician.*.plist" -o \
   -name "com.jleechanorg.disk-magician.plist" \
 \) -print 2>/dev/null \
   | sort > "$PLIST_TMP" || true
