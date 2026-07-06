@@ -280,3 +280,26 @@ AO + worldarchitect worktree set with current duplication:
 (pnpm store + one venv per Python branch). **Potential
 savings: ~6.7 GB sustained**, with the regrowth floor dropping
 in proportion to active worktree count.
+
+### Section G — APFS Snapshot Deletion Sudo Blocker (launchd plist)
+
+**Problem.** macOS requires root privileges to delete local APFS snapshots (errors with exit code 1 or permissions failure like -69863). The user-mode `LaunchAgents` plist runs as the installing user and fails to delete snapshots when scheduled.
+
+**Fix.** Install the snapshot cleanup scheduler as a system-wide `LaunchDaemon` under `/Library/LaunchDaemons` instead of a user-mode `LaunchAgent`. Since LaunchDaemons run as `root` by default, the script has the required permissions to execute `diskutil apfs deleteSnapshot` and `tmutil deletelocalsnapshots` without password prompts or sudoers modifications.
+
+**Install:**
+```bash
+# Substitute @HOME@ with the current user's absolute home directory
+sudo sed "s|@HOME@|$HOME|g" \
+  launchd/com.jleechan.disk-magician-apfs-snapshots.plist \
+  > /tmp/com.jleechan.disk-magician-apfs-snapshots.plist
+
+# Move to LaunchDaemons and set correct root ownership
+sudo mv /tmp/com.jleechan.disk-magician-apfs-snapshots.plist /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
+sudo chmod 644 /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
+
+# Load the daemon
+sudo launchctl unload /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist 2>/dev/null || true
+sudo launchctl load -w /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
+```
