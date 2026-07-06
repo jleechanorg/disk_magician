@@ -202,8 +202,9 @@ disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
 
 tracked_total_kb=0
 timeout_keys=()
-dirs_json=""
-first=true
+DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE"; }
+trap _cleanup_dirs_temp EXIT
 
 add_entry() {
   local key="$1" raw_val="$2"
@@ -216,12 +217,7 @@ add_entry() {
   else
     timeout_keys+=("$key")
   fi
-  if [[ "$first" == true ]]; then
-    first=false
-  else
-    dirs_json+=","
-  fi
-  dirs_json+="\"$key\":$val"
+  printf "%s\t%s\n" "$key" "$val" >> "$DIRS_TEMP_FILE"
 }
 
 # Run dir checks
@@ -374,46 +370,89 @@ if [[ -d "$containers_parent" ]]; then
   [[ "$containers_captured" =~ ^[0-9]+$ ]] || containers_captured=0
 fi
 
-json="{"
-json+="\"timestamp\":\"$captured_at\","
-json+="\"hostname\":\"$(hostname -s 2>/dev/null || hostname)\","
-json+="\"disk_total_gb\":$disk_total_gb,"
-json+="\"disk_used_gb\":$disk_used_gb,"
-json+="\"disk_free_gb\":$disk_free_gb,"
-json+="\"disk_pct\":$disk_pct,"
-json+="\"snapshot_coverage_pct\":$coverage_pct,"
-# snapshot_metadata (new top-level block, additive — older consumers
-# ignore unknown fields). Includes the staleness signal consumers need.
-json+="\"snapshot_metadata\":{"
-json+="\"captured_at\":\"$captured_at\","
-json+="\"age_seconds\":$age_seconds,"
-json+="\"coverage_pct\":$coverage_pct,"
-json+="\"measurement_status\":\"$measurement_status\","
-json+="\"measured_paths_ok\":$MEASURED_OK,"
-json+="\"measured_paths_total\":$MEASURED_TOTAL"
-if [[ -n "$prev_snapshot_ts" ]]; then
-  json+=",\"previous_snapshot_timestamp\":\"$prev_snapshot_ts\""
-fi
-if [[ "$containers_total_dirs" -gt 0 ]]; then
-  json+=",\"library_containers_top_subdirs_captured\":$containers_captured"
-  json+=",\"library_containers_total_subdirs\":$containers_total_dirs"
-fi
-json+="},"
-if [[ -n "$warning" ]]; then
-  json+="\"snapshot_warning\":\"$warning\","
-fi
+timeout_keys_str=""
 if (( ${#timeout_keys[@]} > 0 )); then
-  json+="\"timeout_keys\":["
-  for i in "${!timeout_keys[@]}"; do
-    [[ $i -gt 0 ]] && json+=","
-    json+="\"${timeout_keys[$i]}\""
-  done
-  json+="],"
+  timeout_keys_str=$(IFS=,; echo "${timeout_keys[*]}")
 fi
-json+="\"directories\":{$dirs_json}}"
 
-pretty_json=$(echo "$json" | python3 -m json.tool 2>/dev/null || echo "$json")
-if ! echo "$pretty_json" | python3 -m json.tool >/dev/null 2>&1; then
+# Use Python to safely and durably construct and validate JSON.
+# This prevents empty/malformed variables from creating invalid syntax.
+pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
+  SNAP_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
+  SNAP_DISK_TOTAL="$disk_total_gb" \
+  SNAP_DISK_USED="$disk_used_gb" \
+  SNAP_DISK_FREE="$disk_free_gb" \
+  SNAP_DISK_PCT="$disk_pct" \
+  SNAP_COVERAGE_PCT="$coverage_pct" \
+  SNAP_AGE_SECONDS="$age_seconds" \
+  SNAP_STATUS="$measurement_status" \
+  SNAP_MEASURED_OK="$MEASURED_OK" \
+  SNAP_MEASURED_TOTAL="$MEASURED_TOTAL" \
+  SNAP_PREV_TS="$prev_snapshot_ts" \
+  SNAP_CONTAINERS_CAPTURED="$containers_captured" \
+  SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
+  SNAP_WARNING="$warning" \
+  SNAP_TIMEOUTS="$timeout_keys_str" \
+  python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
+import json, os, sys
+try:
+    data = {
+        "timestamp": os.environ.get("SNAP_TIMESTAMP"),
+        "hostname": os.environ.get("SNAP_HOSTNAME"),
+        "disk_total_gb": int(os.environ.get("SNAP_DISK_TOTAL") or 0),
+        "disk_used_gb": int(os.environ.get("SNAP_DISK_USED") or 0),
+        "disk_free_gb": int(os.environ.get("SNAP_DISK_FREE") or 0),
+        "disk_pct": int(os.environ.get("SNAP_DISK_PCT") or 0),
+        "snapshot_coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
+        "snapshot_metadata": {
+            "captured_at": os.environ.get("SNAP_TIMESTAMP"),
+            "age_seconds": int(os.environ.get("SNAP_AGE_SECONDS") or 0),
+            "coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
+            "measurement_status": os.environ.get("SNAP_STATUS"),
+            "measured_paths_ok": int(os.environ.get("SNAP_MEASURED_OK") or 0),
+            "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
+        }
+    }
+    prev_ts = os.environ.get("SNAP_PREV_TS")
+    if prev_ts:
+        data["snapshot_metadata"]["previous_snapshot_timestamp"] = prev_ts
+    containers_total = int(os.environ.get("SNAP_CONTAINERS_TOTAL") or 0)
+    if containers_total > 0:
+        data["snapshot_metadata"]["library_containers_top_subdirs_captured"] = int(os.environ.get("SNAP_CONTAINERS_CAPTURED") or 0)
+        data["snapshot_metadata"]["library_containers_total_subdirs"] = containers_total
+    warning = os.environ.get("SNAP_WARNING")
+    if warning:
+        data["snapshot_warning"] = warning
+    timeouts = os.environ.get("SNAP_TIMEOUTS")
+    if timeouts:
+        data["timeout_keys"] = timeouts.split(",")
+    dirs = {}
+    dirs_file = sys.argv[1]
+    if os.path.exists(dirs_file):
+        with open(dirs_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                k, v = parts
+                if v == "null" or v == "":
+                    dirs[k] = None
+                else:
+                    try:
+                        dirs[k] = int(v)
+                    except ValueError:
+                        dirs[k] = None
+    data["directories"] = dirs
+    print(json.dumps(data, indent=4))
+except Exception:
+    sys.exit(1)
+PY
+)
+
+if [[ -z "$pretty_json" ]]; then
   echo "ERROR: snapshot JSON failed validation — refusing to write" >&2
   exit 1
 fi
