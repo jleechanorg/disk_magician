@@ -26,17 +26,17 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jleechan.disk-magician-hermes-vacuum</string>
+  <string>com.disk-magician.hermes-vacuum</string>
   <key>ProgramArguments</key>
   <array>
     <!--
-      Use bash 5.x explicitly. /bin/bash on macOS is 3.2.57, which
+      Use bash 5.x explicitly. @BASH@ on macOS is 3.2.57, which
       lacks the regex / array features the script depends on.
       launchd's default environment PATH is /usr/bin:/bin:/usr/sbin:/sbin,
       so "env bash" would also resolve to the wrong binary.
     -->
-    <string>/opt/homebrew/bin/bash</string>
-    <string>@HOME@/projects_other/disk_magician/scripts/vacuum_hermes_state.sh</string>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/vacuum_hermes_state.sh</string>
     <string>--apply</string>
   </array>
   <key>StartCalendarInterval</key>

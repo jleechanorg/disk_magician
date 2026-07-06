@@ -1,51 +1,213 @@
 {
   "monitored_dirs": [
-    { "key": "claude_root", "path": "~/.claude", "timeout": 120 },
-    { "key": "claude_projects", "path": "~/.claude/projects", "timeout": 60 },
-    { "key": "codex_root", "path": "~/.codex", "timeout": 120 },
-    { "key": "codex_sessions", "path": "~/.codex/sessions", "timeout": 60 },
-    { "key": "gemini_root", "path": "~/.gemini", "timeout": 300 },
-    { "key": "ao_sessions", "path": "~/.ao-sessions", "timeout": 300 },
-    { "key": "llm_inspector", "path": "~/.llm-inspector", "timeout": 120 },
-    { "key": "hermes_prod", "path": "~/.hermes_prod", "timeout": 120 },
-    { "key": "hermes", "path": "~/.hermes", "timeout": 120 },
-    { "key": "openclaw", "path": "~/.openclaw", "timeout": 120 },
-    { "key": "cursor_worktrees", "path": "~/.cursor/worktrees", "timeout": 60 },
-    { "key": "colima", "path": "~/.colima", "timeout": 180 },
-    { "key": "docker_raw", "path": "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw", "timeout": 60 },
-    { "key": "library_caches", "path": "~/Library/Caches", "timeout": 120 },
-    { "key": "library_app_support", "path": "~/Library/Application Support", "timeout": 180 },
-    { "key": "library_messages", "path": "~/Library/Messages", "timeout": 600 },
-    { "key": "library_containers", "path": "~/Library/Containers", "timeout": 600 },
-    { "key": "library_developer", "path": "~/Library/Developer", "timeout": 60 },
-    { "key": "npm_cache", "path": "~/.npm", "timeout": 60 },
-    { "key": "nvm", "path": "~/.nvm", "timeout": 60 },
-    { "key": "cache_dir", "path": "~/.cache", "timeout": 60 },
-    { "key": "ollama", "path": "~/.ollama", "timeout": 120 },
-    { "key": "rustup", "path": "~/.rustup", "timeout": 60 },
-    { "key": "pyenv", "path": "~/.pyenv", "timeout": 60 },
-    { "key": "local_dir", "path": "~/.local", "timeout": 60 },
-    { "key": "downloads", "path": "~/Downloads", "timeout": 180 },
-    { "key": "projects", "path": "~/projects", "timeout": 300 },
-    { "key": "projects_other", "path": "~/projects_other", "timeout": 180 },
-    { "key": "projects_reference", "path": "~/projects_reference", "timeout": 120 },
-    { "key": "repos", "path": "~/repos", "timeout": 120 },
-    { "key": "worktrees_dot", "path": "~/.worktrees", "timeout": 180 },
-    { "key": "agent_f", "path": "~/agent-f", "timeout": 120 },
-    { "key": "lima", "path": "~/.lima", "timeout": 60 },
-    { "key": "go", "path": "~/go", "timeout": 60 },
-    { "key": "lvl_lanes", "path": "~/.lvl-lanes", "timeout": 60 },
-    { "key": "tmp_private", "path": "/private/tmp", "timeout": 60 }
+    {
+      "key": "claude_root",
+      "path": "~/.claude",
+      "timeout": 120
+    },
+    {
+      "key": "claude_projects",
+      "path": "~/.claude/projects",
+      "timeout": 60
+    },
+    {
+      "key": "codex_root",
+      "path": "~/.codex",
+      "timeout": 120
+    },
+    {
+      "key": "codex_sessions",
+      "path": "~/.codex/sessions",
+      "timeout": 60
+    },
+    {
+      "key": "gemini_root",
+      "path": "~/.gemini",
+      "timeout": 300
+    },
+    {
+      "key": "ao_sessions",
+      "path": "~/.ao-sessions",
+      "timeout": 300
+    },
+    {
+      "key": "llm_inspector",
+      "path": "~/.llm-inspector",
+      "timeout": 120
+    },
+    {
+      "key": "hermes_prod",
+      "path": "~/.hermes_prod",
+      "timeout": 120
+    },
+    {
+      "key": "hermes",
+      "path": "~/.hermes",
+      "timeout": 120
+    },
+    {
+      "key": "openclaw",
+      "path": "~/.openclaw",
+      "timeout": 120
+    },
+    {
+      "key": "cursor_worktrees",
+      "path": "~/.cursor/worktrees",
+      "timeout": 60
+    },
+    {
+      "key": "colima",
+      "path": "~/.colima",
+      "timeout": 180
+    },
+    {
+      "key": "docker_raw",
+      "path": "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
+      "timeout": 60
+    },
+    {
+      "key": "library_caches",
+      "path": "~/Library/Caches",
+      "timeout": 120
+    },
+    {
+      "key": "library_app_support",
+      "path": "~/Library/Application Support",
+      "timeout": 180
+    },
+    {
+      "key": "library_messages",
+      "path": "~/Library/Messages",
+      "timeout": 600
+    },
+    {
+      "key": "library_containers",
+      "path": "~/Library/Containers",
+      "timeout": 600
+    },
+    {
+      "key": "library_developer",
+      "path": "~/Library/Developer",
+      "timeout": 60
+    },
+    {
+      "key": "npm_cache",
+      "path": "~/.npm",
+      "timeout": 60
+    },
+    {
+      "key": "nvm",
+      "path": "~/.nvm",
+      "timeout": 60
+    },
+    {
+      "key": "cache_dir",
+      "path": "~/.cache",
+      "timeout": 60
+    },
+    {
+      "key": "ollama",
+      "path": "~/.ollama",
+      "timeout": 120
+    },
+    {
+      "key": "rustup",
+      "path": "~/.rustup",
+      "timeout": 60
+    },
+    {
+      "key": "pyenv",
+      "path": "~/.pyenv",
+      "timeout": 60
+    },
+    {
+      "key": "local_dir",
+      "path": "~/.local",
+      "timeout": 60
+    },
+    {
+      "key": "downloads",
+      "path": "~/Downloads",
+      "timeout": 180
+    },
+    {
+      "key": "projects",
+      "path": "~/projects",
+      "timeout": 300
+    },
+    {
+      "key": "projects_other",
+      "path": "~/projects_other",
+      "timeout": 180
+    },
+    {
+      "key": "projects_reference",
+      "path": "~/projects_reference",
+      "timeout": 120
+    },
+    {
+      "key": "repos",
+      "path": "~/repos",
+      "timeout": 120
+    },
+    {
+      "key": "worktrees_dot",
+      "path": "~/.worktrees",
+      "timeout": 180
+    },
+    {
+      "key": "agent_f",
+      "path": "~/agent-f",
+      "timeout": 120
+    },
+    {
+      "key": "lima",
+      "path": "~/.lima",
+      "timeout": 60
+    },
+    {
+      "key": "go",
+      "path": "~/go",
+      "timeout": 60
+    },
+    {
+      "key": "lvl_lanes",
+      "path": "~/.lvl-lanes",
+      "timeout": 60
+    },
+    {
+      "key": "tmp_private",
+      "path": "/private/tmp",
+      "timeout": 60
+    }
   ],
   "monitored_file_globs": [
-    { "key": "codex_repair_bak", "pattern": "~/.codex/*.codex-repair-*.bak" }
+    {
+      "key": "codex_repair_bak",
+      "pattern": "~/.codex/*.codex-repair-*.bak"
+    }
   ],
   "monitored_globs": [
-    { "key": "worktrees_home", "pattern": "~/worktree_*" },
-    { "key": "worktrees_wa", "pattern": "~/wa-*" },
-    { "key": "actions_runners", "pattern": "~/actions-runner*" },
-    { "key": "project_siblings", "pattern": "~/project_*" },
-    { "key": "hf_hub_cache", "pattern": "~/.cache/huggingface/hub/models--*" }
+    {
+      "key": "worktrees_home",
+      "pattern": "~/worktree_*"
+    },
+    {
+      "key": "worktrees_wa",
+      "pattern": "~/wa-*"
+    },
+    {
+      "key": "actions_runners",
+      "pattern": "~/actions-runner*"
+    },
+    {
+      "key": "project_siblings",
+      "pattern": "~/project_*"
+    },
+    {
+      "key": "hf_hub_cache",
+      "pattern": "~/.cache/huggingface/hub/models--*"
+    }
   ],
   "cleanup_thresholds": {
     "git_clone_minutes": 240,
@@ -54,5 +216,6 @@
     "dead_sessions_days": 1,
     "worktree_pointer_minutes": 30,
     "worktree_pointer_min_kb": 51200
-  }
+  },
+  "gc_worktree_repos": []
 }

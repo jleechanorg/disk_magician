@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly sweeper: run SQLite VACUUM against ~/.hermes/state.db.
+
+  Schedule:  Sundays at 04:30 local time (Weekday=0, Hour=4, Minute=30)
+             — same window as the APFS snapshots sweep, since both are
+             state.db / filesystem hygiene jobs and avoid stepping on the
+             worktree-venvs sweep at 04:00. If the two jobs ever collide
+             in real runtime, move this to Weekday=0 Hour=5 Minute=0.
+
+  Action:    runs scripts/vacuum_hermes_state.sh --apply which executes
+             `sqlite3 ~/.hermes/state.db 'VACUUM;'`. The rewrite is
+             atomic (SQLite renames state.db → state.db-old → state.db
+             after rewrite); Hermes daemon tolerates brief writer
+             blocking and reconnects on next op.
+
+  state.db is currently 5.7 GB. Without periodic VACUUM, deleted-row
+  free pages accumulate and the file grows monotonically even when
+  logical data shrinks. Monthly VACUUM reclaims ~10–30% of the file.
+
+  Template uses @HOME@ placeholders so install scripts can substitute
+  $HOME before copying into ~/Library/LaunchAgents/. Do not commit a
+  fully-resolved path; keep @HOME@ literal in the repo.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.disk-magician.hermes-vacuum</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!--
+      Use bash 5.x explicitly. @BASH@ on macOS is 3.2.57, which
+      lacks the regex / array features the script depends on.
+      launchd's default environment PATH is /usr/bin:/bin:/usr/sbin:/sbin,
+      so "env bash" would also resolve to the wrong binary.
+    -->
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/vacuum_hermes_state.sh</string>
+    <string>--apply</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-hermes-vacuum.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-hermes-vacuum.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!--
+      sqlite3 lives at /opt/homebrew/bin on Apple Silicon; macOS does
+      not include it by default. Without this PATH, launchd would
+      fail with "sqlite3: command not found" and exit 127.
+    -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jleechan.disk-magician-gemini-dedup</string>
+  <string>com.disk-magician.gemini-dedup</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/bash</string>
-    <string>@HOME@/projects_other/disk_magician/scripts/symlink-shared-gemini.sh</string>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/symlink-shared-gemini.sh</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>

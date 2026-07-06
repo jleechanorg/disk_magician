@@ -2,6 +2,14 @@
 
 ## Recent activity (rolling)
 
+- 2026-07-06 (Phase 2) — Gemini centralization + host remediation (~116 Gi reclaimed):
+  - **Gemini dedup**: `symlink-shared-gemini.sh --clean` — 819 sessions symlinked; `~/.ao-sessions` 70G → 2.0G (~68 Gi). PR [disk_magician#8](https://github.com/jleechanorg/disk_magician/pull/8) OPEN; spawn fix [agent-orchestrator#751](https://github.com/jleechanorg/agent-orchestrator/pull/751) OPEN.
+  - **Colima second pass**: orphaned volumes + `fstrim`; `~/.colima/_lima` 59G → 23G (~36 Gi additional).
+  - **AO runtime**: `ao-update` on `main` (#746 Playwright symlink deployed). #751 gemini symlink pending merge + second update.
+  - **Launchd loaded**: `com.jleechan.disk-magician-{colima-prune,playwright-dedup,gemini-dedup}` (Sun 03:45 / 04:15 / 04:30).
+  - **Disk**: Data volume ~123 Gi free (86%). Beads: `jleechan-cwgj` open (deploy); `jleechan-emnx` closed.
+  - Nextsteps: `~/roadmap/nextsteps-2026-07-06-disk-magician-four-causes.md`.
+
 - 2026-07-06 — Four root-cause disk growth cleanup (short-term + long-term):
   - **Live reclaim**: Data volume free 37Gi → 106Gi (~69Gi). Playwright dedup 11.1GB (93 ao-* caches symlinked); /private/tmp −6GB; Colima orphaned org-runner-* volumes removed + `fstrim` (_lima 61G → 11G).
   - **New**: `scripts/cleanup_colima.sh` (builder/image prune, orphaned volume sweep, `colima ssh -- sudo fstrim -av`).

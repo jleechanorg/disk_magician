@@ -4,6 +4,35 @@
 
 Designed to work across macOS and Linux, it can be exposed as a skill/plugin for various agent environments (Claude, Codex, Hermes, Openclaw).
 
+
+## Portable configuration
+
+`config.json.template` is the starting point for every install. Copy it to
+`config.json` and edit `monitored_dirs`, optional `gc_worktree_repos`, and
+thresholds for **your** machine — nothing in the repo assumes a particular
+username or checkout path.
+
+**Weekly sweepers (macOS launchd):** templates live under `launchd/com.disk-magician.*.plist`
+with `@REPO_ROOT@`, `@HOME@`, and `@BASH@` placeholders. Install from anywhere:
+
+```bash
+./scripts/install_launchd_sweepers.sh --unload-legacy
+```
+
+Override bash for scripts that need 4+ features:
+
+```bash
+DISK_MAGICIAN_BASH=/opt/homebrew/bin/bash ./scripts/install_launchd_sweepers.sh
+```
+
+Optional environment hooks:
+
+| Variable | Purpose |
+|----------|---------|
+| `DISK_MAGICIAN_GC_REPOS` | Colon-separated git repo paths for `set_gc_worktree_prune.sh` |
+| `DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS` | Extra cleanup targets for `cleanup_agent_artifacts.sh` |
+| `DISK_MAGICIAN_CONFIG` | Path to your `config.json` |
+
 ---
 
 ## Features
