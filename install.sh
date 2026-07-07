@@ -44,3 +44,6 @@ if [[ -d "$CLAUDE_DIR" ]]; then
 else
   echo "Warning: ~/.claude directory not found. Skipping Claude commands/skills installation."
 fi
+
+echo "=== Optional: install weekly launchd sweepers ==="
+echo "Run: ./scripts/install_launchd_sweepers.sh --unload-legacy"

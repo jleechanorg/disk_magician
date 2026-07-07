@@ -19,6 +19,11 @@ with `@REPO_ROOT@`, `@HOME@`, and `@BASH@` placeholders. Install from anywhere:
 ./scripts/install_launchd_sweepers.sh --unload-legacy
 ```
 
+**Find dormant large dirs** (excluding conversations/sessions):
+```bash
+./scripts/find_stale_large_dirs.sh --days 14 --min-mb 500
+```
+
 Override bash for scripts that need 4+ features:
 
 ```bash
@@ -138,7 +143,7 @@ on each runner:
 **Install on a self-hosted Actions runner:**
 ```bash
 RUNNER_ROOT="$HOME/actions-runner"   # or any of the other runner roots
-ln -sf "$HOME/projects_other/disk_magician/scripts/post_job_docker_prune.sh" \
+ln -sf "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/post_job_docker_prune.sh" \
        "$RUNNER_ROOT/hooks/post-job.sh"
 ```
 
@@ -152,17 +157,12 @@ ln -sf "$HOME/projects_other/disk_magician/scripts/post_job_docker_prune.sh" \
 worktree venvs regrow because new worktrees are created with fresh
 venvs.
 
-**Fix.** `launchd/com.jleechan.disk-magician-worktree-venvs.plist`
+**Fix.** `launchd/com.disk-magician.worktree-venvs.plist`
 runs every **Sunday at 04:00** with `WORKTREE_APPROVED=1` baked in:
 
 ```bash
-sed "s|@HOME@|$HOME|g" \
-  launchd/com.jleechan.disk-magician-worktree-venvs.plist \
-  > ~/Library/LaunchAgents/com.jleechan.disk-magician-worktree-venvs.plist
-
-launchctl unload ~/Library/LaunchAgents/com.jleechan.disk-magician-worktree-venvs.plist 2>/dev/null
-launchctl load  ~/Library/LaunchAgents/com.jleechan.disk-magician-worktree-venvs.plist
-launchctl start com.jleechan.disk-magician-worktree-venvs   # one-shot seed
+./scripts/install_launchd_sweepers.sh com.disk-magician.worktree-venvs.plist
+launchctl start com.disk-magician.worktree-venvs   # one-shot seed
 ```
 
 Note: the plist pins `/opt/homebrew/bin/bash` (5.x) explicitly. The
@@ -215,12 +215,7 @@ Exit code 0 if all healthy, 1 if any unhealthy. Currently detects the
 
 **Install:**
 ```bash
-sed "s|@HOME@|$HOME|g" \
-  launchd/com.jleechan.disk-magician-sweeper-health.plist \
-  > ~/Library/LaunchAgents/com.jleechan.disk-magician-sweeper-health.plist
-
-launchctl unload ~/Library/LaunchAgents/com.jleechan.disk-magician-sweeper-health.plist 2>/dev/null
-launchctl load  ~/Library/LaunchAgents/com.jleechan.disk-magician-sweeper-health.plist
+./scripts/install_launchd_sweepers.sh com.disk-magician.sweeper-health.plist
 ```
 
 **Recommended rollout order:**
@@ -318,17 +313,10 @@ in proportion to active worktree count.
 
 **Install:**
 ```bash
-# Substitute @HOME@ with the current user's absolute home directory
-sudo sed "s|@HOME@|$HOME|g" \
-  launchd/com.jleechan.disk-magician-apfs-snapshots.plist \
-  > /tmp/com.jleechan.disk-magician-apfs-snapshots.plist
-
-# Move to LaunchDaemons and set correct root ownership
-sudo mv /tmp/com.jleechan.disk-magician-apfs-snapshots.plist /Library/LaunchDaemons/
-sudo chown root:wheel /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
-sudo chmod 644 /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
-
-# Load the daemon
-sudo launchctl unload /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist 2>/dev/null || true
-sudo launchctl load -w /Library/LaunchDaemons/com.jleechan.disk-magician-apfs-snapshots.plist
+# APFS cleanup needs root — install LaunchDaemon manually from template:
+REPO="$(cd "$(dirname "$0")" && pwd)"  # or your clone path
+sed -e "s|@REPO_ROOT@|$REPO|g" -e "s|@HOME@|$HOME|g" -e "s|@BASH@|$(command -v bash)|g" \
+  launchd/com.disk-magician.apfs-snapshots.plist | sudo tee /Library/LaunchDaemons/com.disk-magician.apfs-snapshots.plist
+sudo chown root:wheel /Library/LaunchDaemons/com.disk-magician.apfs-snapshots.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.disk-magician.apfs-snapshots.plist
 ```

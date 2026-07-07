@@ -55,6 +55,7 @@ def main():
         )
     else:
         repo_root = script_repo_root
+
         candidates = []
         backup_dir = os.path.join(repo_root, "backup")
         if os.path.exists(backup_dir):
@@ -62,6 +63,17 @@ def main():
                 p = os.path.join(backup_dir, host, "disk_snapshot.json")
                 if os.path.exists(p):
                     candidates.append(p)
+
+        # Fallback: default backup repo at ~/.disk_magician_backup (setup target)
+        if not candidates:
+            home_backup = os.path.join(os.path.expanduser("~"), ".disk_magician_backup", "backup")
+            if os.path.exists(home_backup):
+                for host in os.listdir(home_backup):
+                    p = os.path.join(home_backup, host, "disk_snapshot.json")
+                    if os.path.exists(p):
+                        candidates.append(p)
+                if candidates:
+                    repo_root = os.path.join(os.path.expanduser("~"), ".disk_magician_backup")
 
         if not candidates:
             print("No disk_snapshot.json found in backup/*/. Run a backup first to generate one.", file=sys.stderr)
