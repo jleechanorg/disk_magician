@@ -753,6 +753,79 @@ assert_contains "cleanup_colima approved initial Docker recovery starts Colima o
   "colima start" "$(cat "$COLIMA_INVOCATIONS")"
 assert_contains "cleanup_colima approved initial Docker recovery trims after backend proof" \
   "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+echo "Test 11: disk_audit.sh clean --dry-run attempts and reports all non-gated categories"
+AUDIT_FIXTURE_A7="$TMP_ROOT/audit-fixture-all-categories"
+mkdir -p "$AUDIT_FIXTURE_A7/scripts"
+cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_A7/scripts/disk_audit.sh"
+chmod +x "$AUDIT_FIXTURE_A7/scripts/disk_audit.sh"
+for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_llm_inspector.sh cleanup_supervisor_logs.sh post_job_docker_prune.sh; do
+  cat > "$AUDIT_FIXTURE_A7/scripts/$child" <<EOF
+#!/usr/bin/env bash
+echo "stub $child ran with: \$*"
+exit 0
+EOF
+  chmod +x "$AUDIT_FIXTURE_A7/scripts/$child"
+done
+FAKE_BIN_A7="$TMP_ROOT/bin-audit-all-categories"
+make_fake_bin "$FAKE_BIN_A7"
+OUT_A7="$TMP_ROOT/disk-audit-all-categories.out"
+if run_capture "$OUT_A7" env -i HOME="$TMP_ROOT/home-audit-all-categories" PATH="$FAKE_BIN_A7:/usr/bin:/bin" bash "$AUDIT_FIXTURE_A7/scripts/disk_audit.sh" clean --dry-run --live --no-history; then
+  RC7=0
+else
+  RC7=$?
+fi
+OUT_A7_CONTENT=$(cat "$OUT_A7")
+assert_rc "disk_audit clean --dry-run exits 0 when all categories succeed" 0 "$RC7"
+assert_contains "disk_audit ran dev caches category" "stub cleanup_dev_caches.sh ran with: --dry-run" "$OUT_A7_CONTENT"
+assert_contains "disk_audit ran temp files category" "stub cleanup_tmp.sh ran with: --dry-run" "$OUT_A7_CONTENT"
+assert_contains "disk_audit ran LLM inspector category" "stub cleanup_llm_inspector.sh ran with: --dry-run" "$OUT_A7_CONTENT"
+assert_contains "disk_audit ran supervisor logs category" "stub cleanup_supervisor_logs.sh ran with: --dry-run" "$OUT_A7_CONTENT"
+assert_contains "disk_audit ran post-job docker prune category" "stub post_job_docker_prune.sh ran with: --dry-run" "$OUT_A7_CONTENT"
+assert_contains "disk_audit reports category summary header" "── Cleanup Category Summary ──" "$OUT_A7_CONTENT"
+assert_contains "disk_audit reports all-clear when nothing failed" "All attempted categories completed without error." "$OUT_A7_CONTENT"
+
+echo "Test 12: disk_audit.sh surfaces a failing category instead of silently swallowing it (bd-y74 regression)"
+# Root cause of bd-y74: sub-scripts invoked via `\$clean_arg || true` where a
+# sub-script only supports --clean (not --dry-run). The failure exited
+# non-zero but `|| true` swallowed it with no visible signal, so the
+# category silently never ran. This test recreates that exact failure mode
+# and asserts the failure is now surfaced loudly instead of disappearing.
+AUDIT_FIXTURE_A8="$TMP_ROOT/audit-fixture-failing-category"
+mkdir -p "$AUDIT_FIXTURE_A8/scripts"
+cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_A8/scripts/disk_audit.sh"
+chmod +x "$AUDIT_FIXTURE_A8/scripts/disk_audit.sh"
+for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_supervisor_logs.sh; do
+  cat > "$AUDIT_FIXTURE_A8/scripts/$child" <<EOF
+#!/usr/bin/env bash
+echo "stub $child ran with: \$*"
+exit 0
+EOF
+  chmod +x "$AUDIT_FIXTURE_A8/scripts/$child"
+done
+# Simulate a sub-script that only accepts --clean (the historical bd-y74 bug shape).
+cat > "$AUDIT_FIXTURE_A8/scripts/cleanup_llm_inspector.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --clean) exit 0 ;;
+  *) echo "Unknown option: $1" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$AUDIT_FIXTURE_A8/scripts/cleanup_llm_inspector.sh"
+FAKE_BIN_A8="$TMP_ROOT/bin-audit-failing-category"
+make_fake_bin "$FAKE_BIN_A8"
+OUT_A8="$TMP_ROOT/disk-audit-failing-category.out"
+if run_capture "$OUT_A8" env -i HOME="$TMP_ROOT/home-audit-failing-category" PATH="$FAKE_BIN_A8:/usr/bin:/bin" bash "$AUDIT_FIXTURE_A8/scripts/disk_audit.sh" clean --dry-run --live --no-history; then
+  RC8=0
+else
+  RC8=$?
+fi
+OUT_A8_CONTENT=$(cat "$OUT_A8")
+# The audit as a whole must keep running (rc=0) so other categories still execute...
+assert_rc "disk_audit clean --dry-run still completes when one category fails" 0 "$RC8"
+# ...but the failure must no longer be silently swallowed by `|| true`.
+assert_contains "disk_audit surfaces the failing category by name" "CATEGORY FAILED: LLM inspector (exit 2)" "$OUT_A8_CONTENT"
+assert_contains "disk_audit summary counts the failure" "1 of" "$OUT_A8_CONTENT"
+assert_contains "disk_audit still ran the category after the failing one" "stub cleanup_supervisor_logs.sh ran with: --dry-run" "$OUT_A8_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
