@@ -2,6 +2,8 @@
 
 ## Recent activity (rolling)
 
+- 2026-07-06 (evening) — Post-#8 portability: README launchd docs, disk_history backup fallback, find_stale_large_dirs.sh; closed jleechan-p1cw.
+
 - 2026-07-06 (Phase 2) — Gemini centralization + host remediation (~116 Gi reclaimed):
   - **Gemini dedup**: `symlink-shared-gemini.sh --clean` — 819 sessions symlinked; `~/.ao-sessions` 70G → 2.0G (~68 Gi). PR [disk_magician#8](https://github.com/jleechanorg/disk_magician/pull/8) OPEN; spawn fix [agent-orchestrator#751](https://github.com/jleechanorg/agent-orchestrator/pull/751) OPEN.
   - **Colima second pass**: orphaned volumes + `fstrim`; `~/.colima/_lima` 59G → 23G (~36 Gi additional).
