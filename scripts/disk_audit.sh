@@ -156,6 +156,47 @@ section() {
     echo "── $1 ──"
 }
 
+# ── Category run tracking ────────────────────────────────────────────────────
+# Root cause of the historical "3 of 9 categories silently skipped" bug
+# (bd-y74): sub-script invocations used `|| true`, which — combined with
+# `set -e` — swallowed any non-zero exit (e.g. an unsupported --dry-run
+# flag) without any visible signal that the category never ran. `|| true`
+# is still required to keep the audit itself running when one category
+# errors, but every invocation now goes through run_category() so failures
+# are counted, labeled, and reported in an explicit end-of-run summary
+# instead of disappearing silently.
+CATEGORY_TOTAL=0
+CATEGORY_FAILED=0
+FAILED_CATEGORIES=()
+
+run_category() {
+    local label="$1"
+    shift
+    CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
+    local rc=0
+    "$@" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        CATEGORY_FAILED=$(( CATEGORY_FAILED + 1 ))
+        FAILED_CATEGORIES+=("$label (exit $rc)")
+        echo "  ⚠️  CATEGORY FAILED: $label (exit $rc) — see output above"
+    fi
+    return 0
+}
+
+print_category_summary() {
+    section "Cleanup Category Summary"
+    echo "  Categories attempted: $CATEGORY_TOTAL"
+    if [[ $CATEGORY_FAILED -gt 0 ]]; then
+        echo "  ⚠️  $CATEGORY_FAILED of $CATEGORY_TOTAL categories FAILED:"
+        local f
+        for f in "${FAILED_CATEGORIES[@]}"; do
+            echo "    - $f"
+        done
+    else
+        echo "  All attempted categories completed without error."
+    fi
+}
+
 if [[ "$LIVE" != true ]]; then
     _load_snapshot || true
 fi
@@ -282,49 +323,51 @@ if [[ "$MODE" == "clean" ]]; then
     fi
     
     section "Executing Safe Cleanups"
-    
+
     # Run Cache Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_dev_caches.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_dev_caches.sh" $clean_arg || true
+        run_category "Dev caches" "$SCRIPT_DIR/cleanup_dev_caches.sh" $clean_arg
     fi
 
     # Run Temp Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg || true
+        run_category "Temp files" "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg
     fi
 
     # Run Worktree Cleanup only after explicit approval.
     if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
+        run_category "Worktrees" "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg
     else
         echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
     fi
 
     # Run LLM Inspector Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg || true
+        run_category "LLM inspector" "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg
     fi
 
     # Run Supervisor Launchd Logs Cleanup (rotated logs > 7d)
     if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg || true
+        run_category "Supervisor logs" "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg
     fi
 
     # Post-job style docker prune (dangling only; safe for Colima)
     if [[ -f "$SCRIPT_DIR/post_job_docker_prune.sh" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            "$SCRIPT_DIR/post_job_docker_prune.sh" --dry-run || true
+            run_category "Post-job docker prune" "$SCRIPT_DIR/post_job_docker_prune.sh" --dry-run
         else
-            "$SCRIPT_DIR/post_job_docker_prune.sh" || true
+            run_category "Post-job docker prune" "$SCRIPT_DIR/post_job_docker_prune.sh"
         fi
     fi
 
     # Broad agent artifacts include app chats/worktrees; keep opt-in.
     if [[ "${AGENT_ARTIFACTS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_agent_artifacts.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg || true
+        run_category "Agent artifacts" "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg
     else
         echo "  Agent artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
     fi
+
+    print_category_summary
 fi
 
 # Aggressive Cleanups
@@ -338,47 +381,47 @@ if [[ "$MODE" == "clean-all" ]]; then
 
     # Clean sessions only after explicit approval.
     if [[ "${SESSIONS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_sessions.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg || true
+        run_category "Sessions" "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg
     else
         echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
     # Clean large temp directories after explicit large-temp approval.
     if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg --large || true
+        run_category "Large temp files" "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg --large
     fi
 
     # Clean worktrees only after explicit approval.
     if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg || true
+        run_category "Worktrees" "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg
     else
         echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
     fi
 
     # Clean APFS Snapshots
     if [[ -f "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" $clean_arg || true
+        run_category "APFS snapshots" "$SCRIPT_DIR/cleanup_apfs_snapshots.sh" $clean_arg
     fi
 
     # Colima / Docker prune (builder cache, unused images/volumes)
     if [[ -f "$SCRIPT_DIR/cleanup_colima.sh" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            "$SCRIPT_DIR/cleanup_colima.sh" --dry-run --prune-volumes || true
+            run_category "Colima/Docker prune" "$SCRIPT_DIR/cleanup_colima.sh" --dry-run --prune-volumes
         elif [[ "${DOCKER_VOLUMES_APPROVED:-0}" == "1" ]]; then
-            "$SCRIPT_DIR/cleanup_colima.sh" --clean --prune-volumes || true
+            run_category "Colima/Docker prune" "$SCRIPT_DIR/cleanup_colima.sh" --clean --prune-volumes
         else
-            "$SCRIPT_DIR/cleanup_colima.sh" --clean || true
+            run_category "Colima/Docker prune" "$SCRIPT_DIR/cleanup_colima.sh" --clean
             echo "  Colima volume prune: skipped (set DOCKER_VOLUMES_APPROVED=1 for unused volumes)"
         fi
     elif [[ -f "$SCRIPT_DIR/cleanup_docker.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_docker.sh" $clean_arg || true
+        run_category "Docker prune" "$SCRIPT_DIR/cleanup_docker.sh" $clean_arg
     fi
 
     # Playwright cache dedup across AO sessions (backup-then-symlink)
     if [[ "${AO_PLAYWRIGHT_DEDUP_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" ]]; then
-        "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" $clean_arg || true
+        run_category "Playwright AO dedup" "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" $clean_arg
         if [[ "$DRY_RUN" == false ]]; then
-            "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" --clean --delete-backups || true
+            run_category "Playwright AO dedup (delete backups)" "$SCRIPT_DIR/symlink-shared-playwright-cache.sh" --clean --delete-backups
         fi
     else
         echo "  Playwright AO dedup: skipped (requires AO_PLAYWRIGHT_DEDUP_APPROVED=1)"
@@ -387,9 +430,9 @@ if [[ "$MODE" == "clean-all" ]]; then
     # Worktree venv reclaim (symlink to main checkout venv)
     if [[ "${VENV_RECLAIM_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/reclaim_worktree_venvs.sh" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            DRY_RUN=1 "$SCRIPT_DIR/reclaim_worktree_venvs.sh" || true
+            DRY_RUN=1 run_category "Worktree venv reclaim" "$SCRIPT_DIR/reclaim_worktree_venvs.sh"
         else
-            DRY_RUN=0 "$SCRIPT_DIR/reclaim_worktree_venvs.sh" || true
+            DRY_RUN=0 run_category "Worktree venv reclaim" "$SCRIPT_DIR/reclaim_worktree_venvs.sh"
         fi
     else
         echo "  Worktree venv reclaim: skipped (requires VENV_RECLAIM_APPROVED=1)"
@@ -397,13 +440,15 @@ if [[ "$MODE" == "clean-all" ]]; then
 
     # Ollama local model store
     if [[ -f "$SCRIPT_DIR/cleanup_ollama.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_ollama.sh" $clean_arg || true
+        run_category "Ollama model store" "$SCRIPT_DIR/cleanup_ollama.sh" $clean_arg
     fi
 
     # Rebuildable Xcode/simulator caches
     if [[ -f "$SCRIPT_DIR/cleanup_xcode.sh" ]]; then
-        "$SCRIPT_DIR/cleanup_xcode.sh" $clean_arg || true
+        run_category "Xcode/simulator caches" "$SCRIPT_DIR/cleanup_xcode.sh" $clean_arg
     fi
+
+    print_category_summary
 fi
 
 section "After Cleanup"
