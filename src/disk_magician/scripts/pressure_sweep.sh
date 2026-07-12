@@ -9,10 +9,11 @@
 # work when free space has actually dropped below threshold, so idle fires
 # are a single log line.
 #
-# Never runs anything beyond cleanup_tmp.sh --clean and cleanup_colima.sh
-# --clean — both scripts own their own safety semantics (mtime thresholds,
-# docker-prune semantics preserving in-use containers/volumes). This script
-# adds no destructive logic of its own.
+# Never runs anything beyond cleanup_tmp.sh (--clean [--large]) and
+# cleanup_colima.sh --clean — both scripts own their own safety semantics
+# (mtime thresholds, lsof gates, docker-prune semantics preserving in-use
+# containers/volumes). When triggered, passes --large to cleanup_tmp and sets
+# LARGE_TMP_APPROVED=1 for the pressure path only (bead jleechan-nkzj).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +38,7 @@ Usage: $(basename "$0") [--threshold-gb N] [--dry-run]
 Free-space-gated sweep: if free space (df /System/Volumes/Data) is >=
 --threshold-gb (default: ${THRESHOLD_GB}; env DISK_MAGICIAN_PRESSURE_THRESHOLD_GB),
 exit immediately (one log line, no work). Otherwise run, in order:
-  1. scripts/cleanup_tmp.sh --clean    (mtime-thresholded; its own safety layer)
+  1. scripts/cleanup_tmp.sh --clean --large  (mtime + large /private/tmp; LARGE_TMP_APPROVED=1)
   2. scripts/cleanup_colima.sh --clean (docker-prune semantics + fstrim)
 each under a ${STEP_TIMEOUT}s timeout, logging free-GB before/after to
 ${LOG_FILE}.
@@ -134,10 +135,15 @@ trap 'rm -rf "$LOCK_DIR"' EXIT
 clean_flag="--clean"
 [[ "$DRY_RUN" == true ]] && clean_flag="--dry-run"
 
-# ────────── STEP 1: cleanup_tmp.sh ──────────
+# ────────── STEP 1: cleanup_tmp.sh (--large when sweeping) ──────────
 before_gb="$(free_gb)"
-log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} — free before: ${before_gb} GB"
-if run_step_timeout "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" >> "$LOG_FILE" 2>&1; then
+log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
+if [[ "$DRY_RUN" != true ]]; then
+  tmp_step=(env LARGE_TMP_APPROVED=1 "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+else
+  tmp_step=("$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+fi
+if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
   log "pressure_sweep: step 1/2 cleanup_tmp.sh done — free after: ${after_gb} GB"
 else

@@ -11,8 +11,10 @@
              the script self-gates on free-space threshold (default 40GB), so
              idle fires cost one log line and exit immediately.
   Action:    runs scripts/pressure_sweep.sh with no args (uses its built-in
-             defaults). Never runs anything beyond cleanup_tmp.sh --clean and
-             cleanup_colima.sh --clean; both own their own safety semantics.
+             defaults). Never runs anything beyond cleanup_tmp.sh --clean
+             --large (LARGE_TMP_APPROVED=1 on the pressure path; bead
+             jleechan-nkzj) and cleanup_colima.sh --clean; both own their own
+             safety semantics.
              mkdir-based lock (TTL 60min) skips overlapping fires.
 
   Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
