@@ -179,6 +179,81 @@
       "key": "tmp_private",
       "path": "/private/tmp",
       "timeout": 60
+    },
+    {
+      "key": "private_var",
+      "path": "/private/var",
+      "timeout": 300
+    },
+    {
+      "key": "pictures",
+      "path": "~/Pictures",
+      "timeout": 120
+    },
+    {
+      "key": "root_library",
+      "path": "/Library",
+      "timeout": 180
+    },
+    {
+      "key": "ao_home",
+      "path": "~/.ao",
+      "timeout": 60
+    },
+    {
+      "key": "applications",
+      "path": "/Applications",
+      "timeout": 180
+    },
+    {
+      "key": "opt",
+      "path": "/opt",
+      "timeout": 120
+    },
+    {
+      "key": "usr_local",
+      "path": "/usr/local",
+      "timeout": 60
+    },
+    {
+      "key": "documents",
+      "path": "~/Documents",
+      "timeout": 120
+    },
+    {
+      "key": "desktop",
+      "path": "~/Desktop",
+      "timeout": 60
+    },
+    {
+      "key": "movies",
+      "path": "~/Movies",
+      "timeout": 120
+    },
+    {
+      "key": "music",
+      "path": "~/Music",
+      "timeout": 120
+    },
+    {
+      "key": "users_shared",
+      "path": "/Users/Shared",
+      "timeout": 60
+    },
+    {
+      "key": "library_group_containers",
+      "path": "~/Library/Group Containers",
+      "timeout": 180
+    },
+    {
+      "key": "library_mobile_documents",
+      "path": "~/Library/Mobile Documents",
+      "timeout": 300
+    },
+    {
+      "key": "library_mail",
+      "path": "~/Library/Mail",
+      "timeout": 120
     }
   ],
   "monitored_file_globs": [

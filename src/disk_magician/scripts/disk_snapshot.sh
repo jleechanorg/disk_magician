@@ -8,6 +8,7 @@ set -euo pipefail
 OUTPUT=""
 DRY_RUN=false
 DISCOVER=false
+DISCOVER_JSON=false
 DU_TIMEOUT=30
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
@@ -20,8 +21,9 @@ while [[ $# -gt 0 ]]; do
     --output)   OUTPUT="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=true; shift ;;
     --discover) DISCOVER=true; shift ;;
+    --json)     DISCOVER_JSON=true; shift ;;
     --help|-h)
-      echo "Usage: $0 [--output file.json] [--dry-run] [--discover]"
+      echo "Usage: $0 [--output file.json] [--dry-run] [--discover [--json]]"
       exit 0
       ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -128,8 +130,10 @@ get_disk_stats() {
 
 # ────────── DISCOVER MODE ──────────
 if [[ "$DISCOVER" == true ]]; then
-  echo "Discover mode: scanning for >5 GB dirs not in monitored config..."
-  echo ""
+  if [[ "$DISCOVER_JSON" != true ]]; then
+    echo "Discover mode: scanning for >5 GB dirs not in monitored config..."
+    echo ""
+  fi
 
   # Extract configured paths
   declare -A MONITORED_PATHS=()
@@ -166,31 +170,156 @@ for item in data.get("monitored_file_globs", []):
 PY
 )
 
+  # STATE_DIR must exist and be known BEFORE the candidate scan below so we
+  # can exclude disk_magician's own state directory from the candidate list —
+  # otherwise `discover` would measure and cache itself every run.
+  STATE_DIR="$HOME/.disk_magician_state"
+  mkdir -p "$STATE_DIR"
+  CACHE_FILE="$STATE_DIR/discover_cache.json"
+  DISCOVER_LAST_FILE="$STATE_DIR/discover_last.json"
+
   candidates=()
   for d in "$HOME"/.[!.]* "$HOME"/*; do
     [[ -d "$d" ]] || continue
+    [[ "$d" == "$STATE_DIR" ]] && continue
     candidates+=("$d")
   done
 
-  # NOTE: this loop body runs in a subshell (the `| while read` pipeline), so
-  # `local` is illegal here and would crash the discover subcommand with
-  # "local: can only be used in a function". We use plain vars instead.
-  printf '%s\n' "${candidates[@]}" | while read -r dir; do
-    kb=""
-    if [[ -n "$TIMEOUT_CMD" ]]; then
-      kb=$("$TIMEOUT_CMD" 60 du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
+  # ────────── mtime size-cache (fixes bead jleechan-jz5t timeout) ──────────
+  # A top-level dir's own mtime only changes when a DIRECT child is added or
+  # removed — not on writes deep inside it — but that's exactly the signal
+  # `du` itself needs re-running for: an unchanged top-level mtime means the
+  # child listing (and thus what `du` would walk) is unchanged since we last
+  # measured it, so we can safely reuse the cached size and skip the `du`
+  # entirely. This is what turns repeat `discover` runs from "re-walk
+  # everything every time" (the thing that was timing out) into "only
+  # re-walk what actually changed."
+  declare -A CACHE_MTIME=()
+  declare -A CACHE_SIZE=()
+  if [[ -f "$CACHE_FILE" ]]; then
+    while IFS=$'\t' read -r c_path c_mtime c_size; do
+      [[ -z "$c_path" ]] && continue
+      CACHE_MTIME["$c_path"]="$c_mtime"
+      CACHE_SIZE["$c_path"]="$c_size"
+    done < <(python3 - "$CACHE_FILE" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    data = {}
+for path, v in (data or {}).items():
+    print(f"{path}\t{v.get('mtime', 0)}\t{v.get('size_kb', 0)}")
+PY
+)
+  fi
+
+  DISCOVER_TEMP_FILE=$(mktemp -t disk_magician_discover.XXXXXX)
+  _cleanup_discover_temp() { rm -f "$DISCOVER_TEMP_FILE"; }
+  trap _cleanup_discover_temp EXIT
+
+  cache_hits=0
+  cache_misses=0
+
+  # Process substitution (not a pipe) so this loop runs in the CURRENT shell —
+  # cache_hits/cache_misses and the CACHE_* associative arrays must survive
+  # past the loop to be written back below.
+  while read -r dir; do
+    mtime=$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || echo 0)
+    cached_mtime="${CACHE_MTIME[$dir]:-}"
+    if [[ -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
+      kb="${CACHE_SIZE[$dir]:-0}"
+      cache_hits=$(( cache_hits + 1 ))
     else
-      kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
-    fi
-    gb=$(awk "BEGIN{printf \"%.1f\", ${kb:-0} / 1048576}")
-    if (( $(awk "BEGIN{print (${kb:-0} >= 5242880)}") )); then
-      if [[ -z "${MONITORED_PATHS[$dir]:-}" ]]; then
-        echo "  UNTRACKED  ${gb} GB  $dir"
+      kb=""
+      if [[ -n "$TIMEOUT_CMD" ]]; then
+        kb=$("$TIMEOUT_CMD" 60 du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
       else
-        echo "  tracked    ${gb} GB  $dir"
+        kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1+0}' || true)
       fi
+      kb="${kb:-0}"
+      cache_misses=$(( cache_misses + 1 ))
     fi
-  done
+    CACHE_MTIME["$dir"]="$mtime"
+    CACHE_SIZE["$dir"]="$kb"
+    tracked=0
+    [[ -n "${MONITORED_PATHS[$dir]:-}" ]] && tracked=1
+    printf "%s\t%s\t%s\n" "$dir" "$kb" "$tracked" >> "$DISCOVER_TEMP_FILE"
+  done < <(printf '%s\n' "${candidates[@]}")
+
+  # Persist the refreshed cache (full replace — self-cleans entries for dirs
+  # that no longer exist since we only ever wrote candidates we just scanned).
+  # NOTE: dump to a temp FILE rather than piping into python3's stdin — `python3 -`
+  # already reads its PROGRAM from stdin via the heredoc below, so a pipe into
+  # the same invocation would silently be discarded (heredoc wins the fd, the
+  # piped data is never seen). A temp file + argv path sidesteps that entirely.
+  CACHE_DUMP_FILE=$(mktemp -t disk_magician_cachedump.XXXXXX)
+  for p in "${!CACHE_MTIME[@]}"; do
+    printf "%s\t%s\t%s\n" "$p" "${CACHE_MTIME[$p]}" "${CACHE_SIZE[$p]}"
+  done > "$CACHE_DUMP_FILE"
+  python3 - "$CACHE_DUMP_FILE" "$CACHE_FILE" <<'PY'
+import json, sys
+data = {}
+with open(sys.argv[1]) as f:
+    for line in f:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) != 3:
+            continue
+        path, mtime, size_kb = parts
+        try:
+            data[path] = {"mtime": int(mtime), "size_kb": int(size_kb)}
+        except ValueError:
+            continue
+json.dump(data, open(sys.argv[2], "w"), indent=2)
+PY
+  rm -f "$CACHE_DUMP_FILE"
+
+  # Build the persisted findings file + stdout output from the same data, so
+  # `discover`'s findings stop "going nowhere" — every run leaves a structured
+  # record behind regardless of --json, and --json additionally prints it.
+  DISCOVER_JSON="$DISCOVER_JSON" CACHE_HITS="$cache_hits" CACHE_MISSES="$cache_misses" \
+    python3 - "$DISCOVER_TEMP_FILE" "$DISCOVER_LAST_FILE" <<'PY'
+import json, os, sys, datetime
+
+temp_file, last_file = sys.argv[1], sys.argv[2]
+THRESHOLD_KB = 5 * 1024 * 1024  # 5 GB, matches the original discover threshold
+
+entries = []
+with open(temp_file) as f:
+    for line in f:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) != 3:
+            continue
+        path, kb_s, tracked_s = parts
+        try:
+            kb = int(kb_s)
+        except ValueError:
+            kb = 0
+        if kb < THRESHOLD_KB:
+            continue
+        entries.append({
+            "path": path,
+            "size_kb": kb,
+            "size_gb": round(kb / 1048576, 1),
+            "tracked": tracked_s == "1",
+        })
+entries.sort(key=lambda e: e["size_kb"], reverse=True)
+
+result = {
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "cache_hits": int(os.environ.get("CACHE_HITS") or 0),
+    "cache_misses": int(os.environ.get("CACHE_MISSES") or 0),
+    "entries": entries,
+}
+with open(last_file, "w") as f:
+    json.dump(result, f, indent=2)
+
+if os.environ.get("DISCOVER_JSON") == "true":
+    print(json.dumps(result, indent=2))
+else:
+    for e in entries:
+        label = "tracked   " if e["tracked"] else "UNTRACKED"
+        print(f"  {label}  {e['size_gb']} GB  {e['path']}")
+PY
   exit 0
 fi
 
@@ -206,8 +335,15 @@ DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
 _cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE"; }
 trap _cleanup_dirs_temp EXIT
 
+# add_entry records a measured (or timed-out) path under `key`. `src_path` is
+# the literal config path/pattern that produced this measurement — carried
+# through (not just discarded) so the dedup-trie pass below can resolve it
+# to a realpath and detect parent/child or symlink-alias overlaps. Glob-based
+# entries pass their raw pattern string as src_path too; the dedup pass only
+# attempts realpath containment on paths that look like concrete (non-glob)
+# paths and silently leaves globs out of dedup (see dedup pass comment).
 add_entry() {
-  local key="$1" raw_val="$2"
+  local key="$1" raw_val="$2" src_path="${3:-}"
   local val="null"
   MEASURED_TOTAL=$(( MEASURED_TOTAL + 1 ))
   if [[ -n "$raw_val" ]]; then
@@ -217,13 +353,13 @@ add_entry() {
   else
     timeout_keys+=("$key")
   fi
-  printf "%s\t%s\n" "$key" "$val" >> "$DIRS_TEMP_FILE"
+  printf "%s\t%s\t%s\n" "$key" "$val" "$src_path" >> "$DIRS_TEMP_FILE"
 }
 
 # Run dir checks
 while IFS=$'\t' read -r key path timeout; do
   size=$(dir_size_kb "$path" "$timeout")
-  add_entry "$key" "$size"
+  add_entry "$key" "$size" "$path"
 done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -235,7 +371,7 @@ PY
 # Run file glob checks
 while IFS=$'\t' read -r key pattern; do
   size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size"
+  add_entry "$key" "$size" "$pattern"
 done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -247,7 +383,7 @@ PY
 # Run glob checks
 while IFS=$'\t' read -r key pattern; do
   size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size"
+  add_entry "$key" "$size" "$pattern"
 done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -277,11 +413,125 @@ if [[ -d "$containers_parent" ]]; then
     base=$(basename "$name")
     safe=$(printf '%s' "$base" | tr -c 'A-Za-z0-9' '_' | head -c 40)
     key="lc_${safe}"
-    add_entry "$key" "$kb"
+    add_entry "$key" "$kb" "$name"
   done <<< "$containers_listing"
 fi
 
+# ────────── DEDUP TRIE (schema_version 2 — fixes inflated coverage_pct) ──────────
+# `tracked_total_kb` above is a naive sum with no overlap awareness, and the
+# config has real overlaps today: claude_root+claude_projects (parent+child),
+# codex_root+codex_sessions (parent+child), hermes+hermes_prod (symlink
+# alias), and library_containers + its own lc_* top-20 subdirs (parent+child,
+# generated by the block just above). Naively summing double/triple-counts
+# those bytes and makes coverage_pct read HIGHER than reality — exactly wrong
+# for an SLO that's supposed to warn when coverage is too LOW.
+#
+# This pass resolves each entry's source path to a realpath, sorts shallowest
+# first, and keeps an entry only if its realpath is not equal to (symlink
+# alias) or nested under (parent/child) an already-kept realpath. Entries
+# whose src_path is a glob pattern (contains *, ?, or [) are left out of the
+# trie entirely and always counted — resolving containment for an expanded
+# glob is out of scope for this pass; none of the confirmed overlaps today
+# are glob-based.
+DEDUP_JSON=$(python3 - "$DIRS_TEMP_FILE" "$HOME" <<'PY' 2>/dev/null
+import json, os, sys
+
+temp_file, home = sys.argv[1], sys.argv[2]
+
+def expand(p):
+    if p.startswith("~"):
+        p = home + p[1:]
+    return os.path.expandvars(p)
+
+def is_glob(p):
+    return any(c in p for c in "*?[")
+
+try:
+    rows = []  # (key, val_kb_or_None, src_path)
+    with open(temp_file) as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 3:
+                continue
+            key, val_s, src_path = parts
+            val = None if val_s in ("null", "") else int(val_s)
+            rows.append((key, val, src_path))
+
+    resolvable = []  # (depth, is_symlink_alias, realpath, key, val)
+    unresolvable_keys = set()
+    for key, val, src_path in rows:
+        if not src_path or is_glob(src_path):
+            unresolvable_keys.add(key)
+            continue
+        literal = os.path.normpath(expand(src_path))
+        real = os.path.realpath(literal)
+        depth = len([p for p in real.split(os.sep) if p])
+        # When two entries share a realpath (symlink alias, e.g. hermes_prod ->
+        # hermes) the literal (non-symlink) path must win the tie so it becomes
+        # the "covered_by" owner — otherwise sorting ties alphabetically by key
+        # would let the ALIAS become the owner and wrongly exclude the real dir.
+        # Deliberately checks only whether THIS path's own final component is a
+        # symlink (os.path.islink), not whether literal != realpath overall —
+        # ancestor directories are routinely symlinks on macOS (/tmp -> /private/tmp,
+        # /var -> /private/var) and that ambient fact must not affect tie-breaking
+        # between two config-declared entries.
+        is_symlink_alias = 1 if os.path.islink(literal) else 0
+        resolvable.append((depth, is_symlink_alias, real, key, val))
+
+    resolvable.sort(key=lambda r: (r[0], r[1], r[3]))
+
+    kept_real_paths = []  # list of (realpath, key) already accepted, shallowest first
+    excluded = []  # {"key":, "covered_by":, "reason":}
+    tracked_total_kb_deduped = 0
+
+    def covered_by(real):
+        for kept_real, kept_key in kept_real_paths:
+            if real == kept_real:
+                return kept_key, "symlink_alias"
+            if real.startswith(kept_real.rstrip(os.sep) + os.sep):
+                return kept_key, "nested_under_parent"
+        return None, None
+
+    for depth, is_symlink_alias, real, key, val in resolvable:
+        owner, reason = covered_by(real)
+        if owner is not None:
+            excluded.append({"key": key, "covered_by": owner, "reason": reason})
+            continue
+        kept_real_paths.append((real, key))
+        if val is not None:
+            tracked_total_kb_deduped += val
+
+    for key, val, src_path in rows:
+        if key in unresolvable_keys and val is not None:
+            tracked_total_kb_deduped += val
+
+    print(json.dumps({
+        "tracked_total_kb_deduped": tracked_total_kb_deduped,
+        "dedup_excluded": excluded,
+    }))
+except Exception:
+    # Fail open to "no dedup applied" rather than crashing the snapshot —
+    # the bash fallback below also covers a total python-invocation failure.
+    print(json.dumps({"tracked_total_kb_deduped": None, "dedup_excluded": []}))
+PY
+)
+if [[ -z "$DEDUP_JSON" ]]; then
+  DEDUP_JSON=$(printf '{"tracked_total_kb_deduped": null, "dedup_excluded": []}')
+fi
+tracked_total_kb_deduped=$(python3 -c "import json,sys; v=json.loads(sys.argv[1])['tracked_total_kb_deduped']; print(v if v is not None else '')" "$DEDUP_JSON")
+dedup_excluded_json=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['dedup_excluded']))" "$DEDUP_JSON")
+if [[ -z "$tracked_total_kb_deduped" ]]; then
+  # Dedup pass failed open — fall back to the raw (undeduped) total so
+  # coverage_pct is still computed rather than crashing the snapshot.
+  tracked_total_kb_deduped="$tracked_total_kb"
+fi
+
 coverage_pct=$(awk "BEGIN{
+  used = $disk_used_kb
+  if (used <= 0) { print 0; exit }
+  printf \"%.1f\", 100 * $tracked_total_kb_deduped / used
+}")
+coverage_pct_raw_v1=$(awk "BEGIN{
   used = $disk_used_kb
   if (used <= 0) { print 0; exit }
   printf \"%.1f\", 100 * $tracked_total_kb / used
@@ -299,6 +549,7 @@ captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 age_seconds=0
 prev_snapshot_ts=""
 prev_snapshot_path=""
+prev_residual_gb=""
 
 # Stale-detection: if --output points to a file that already exists,
 # read its embedded timestamp and compute the gap. This way the SAME
@@ -318,15 +569,18 @@ else
 fi
 
 if [[ -n "$prev_snapshot_path" ]]; then
-  prev_ts=$(python3 - "$prev_snapshot_path" <<'PY' 2>/dev/null || true
+  prev_info=$(python3 - "$prev_snapshot_path" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     s = json.load(open(sys.argv[1]))
-    print(s.get("timestamp", ""))
+    ts = s.get("timestamp", "")
+    residual_gb = s.get("residual_gb", "")
+    print(f"{ts}\t{residual_gb}")
 except Exception:
     pass
 PY
 )
+  IFS=$'\t' read -r prev_ts prev_residual_gb <<< "$prev_info"
   if [[ -n "$prev_ts" ]]; then
     now_epoch=$(date -u +%s)
     prev_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$prev_ts" +%s 2>/dev/null \
@@ -337,6 +591,14 @@ PY
     fi
     prev_snapshot_ts="$prev_ts"
   fi
+fi
+
+# ────────── RESIDUAL (disk_used − deduped-measured, always attributable) ──────────
+residual_kb=$(( disk_used_kb - tracked_total_kb_deduped ))
+residual_gb=$(awk "BEGIN{printf \"%.1f\", $residual_kb / 1024 / 1024}")
+residual_delta_gb=""
+if [[ -n "$prev_residual_gb" && "$prev_residual_gb" != "None" ]]; then
+  residual_delta_gb=$(awk "BEGIN{printf \"%.1f\", $residual_gb - $prev_residual_gb}")
 fi
 
 # measurement_status sentinel: per feedback_silent_zero_anti_pattern.md,
@@ -375,6 +637,63 @@ if (( ${#timeout_keys[@]} > 0 )); then
   timeout_keys_str=$(IFS=,; echo "${timeout_keys[*]}")
 fi
 
+# ────────── TOPDOWN COVERAGE (frontier scanner summary, additive) ──────────
+# Enablement: data flows when frontier_last.json exists AND config's
+# `topdown_enabled` is not explicitly false (absent key = auto). File
+# presence controls data availability; the config key is the off switch.
+# If lane-topdown's ~/.disk_magician_state/frontier_last.json exists, is valid
+# JSON, and is fresh (<36h), embed a SUMMARY only — never the full `measured`
+# map — so this git-committed-every-35min snapshot JSON stays small. Stale
+# data becomes a {stale: true} marker instead of being silently dropped;
+# absent/corrupt/disabled fails open to omitting the field entirely (same
+# fail-open posture as the dedup pass above — this must never crash a
+# snapshot over a sibling tool's file).
+FRONTIER_LAST_FILE="$HOME/.disk_magician_state/frontier_last.json"
+TOPDOWN_ENABLED=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print('false' if d.get('topdown_enabled') is False else 'true')
+except Exception:
+    print('true')
+" "$CONFIG_FILE" 2>/dev/null || echo "true")
+
+TOPDOWN_JSON=$(python3 - "$FRONTIER_LAST_FILE" "$TOPDOWN_ENABLED" <<'PY' 2>/dev/null
+import datetime, json, sys
+
+path, enabled = sys.argv[1], sys.argv[2]
+if enabled != "true":
+    print("null")
+    sys.exit(0)
+
+try:
+    with open(path) as f:
+        d = json.load(f)
+    captured_at = d["captured_at"]
+    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+    if age_hours > 36:
+        result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
+    else:
+        result = {
+            "mode": d.get("mode"),
+            "captured_at": captured_at,
+            "age_hours": round(age_hours, 1),
+            "measured_total_kb": d.get("measured_total_kb"),
+            "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+            "residual_kb": d.get("residual_kb"),
+            "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
+            "local_snapshots_count": d.get("local_snapshots_count"),
+        }
+    print(json.dumps(result))
+except Exception:
+    print("null")
+PY
+)
+if [[ -z "$TOPDOWN_JSON" ]]; then
+  TOPDOWN_JSON="null"
+fi
+
 # Use Python to safely and durably construct and validate JSON.
 # This prevents empty/malformed variables from creating invalid syntax.
 pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
@@ -384,6 +703,13 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_DISK_FREE="$disk_free_gb" \
   SNAP_DISK_PCT="$disk_pct" \
   SNAP_COVERAGE_PCT="$coverage_pct" \
+  SNAP_COVERAGE_PCT_RAW_V1="$coverage_pct_raw_v1" \
+  SNAP_TRACKED_TOTAL_KB_RAW="$tracked_total_kb" \
+  SNAP_TRACKED_TOTAL_KB_DEDUPED="$tracked_total_kb_deduped" \
+  SNAP_DEDUP_EXCLUDED="$dedup_excluded_json" \
+  SNAP_RESIDUAL_KB="$residual_kb" \
+  SNAP_RESIDUAL_GB="$residual_gb" \
+  SNAP_RESIDUAL_DELTA_GB="$residual_delta_gb" \
   SNAP_AGE_SECONDS="$age_seconds" \
   SNAP_STATUS="$measurement_status" \
   SNAP_MEASURED_OK="$MEASURED_OK" \
@@ -393,10 +719,12 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
+  SNAP_TOPDOWN="$TOPDOWN_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
 try:
     data = {
+        "schema_version": 2,
         "timestamp": os.environ.get("SNAP_TIMESTAMP"),
         "hostname": os.environ.get("SNAP_HOSTNAME"),
         "disk_total_gb": int(os.environ.get("SNAP_DISK_TOTAL") or 0),
@@ -404,15 +732,33 @@ try:
         "disk_free_gb": int(os.environ.get("SNAP_DISK_FREE") or 0),
         "disk_pct": int(os.environ.get("SNAP_DISK_PCT") or 0),
         "snapshot_coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
+        "residual_kb": int(os.environ.get("SNAP_RESIDUAL_KB") or 0),
+        "residual_gb": float(os.environ.get("SNAP_RESIDUAL_GB") or 0.0),
         "snapshot_metadata": {
             "captured_at": os.environ.get("SNAP_TIMESTAMP"),
             "age_seconds": int(os.environ.get("SNAP_AGE_SECONDS") or 0),
             "coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
+            # schema_version 2: coverage_pct is now dedup-corrected and will
+            # read LOWER than pre-2026-07-11 history for the same disk state.
+            # coverage_pct_raw_v1 preserves the old (inflated, undeduped)
+            # formula so trend tooling built against v1 history isn't
+            # misread as a regression — see roadmap/2026-07-11-total-coverage-snapshot-v2.md critic #13.
+            "coverage_pct_raw_v1": float(os.environ.get("SNAP_COVERAGE_PCT_RAW_V1") or 0.0),
+            "tracked_total_kb_raw": int(os.environ.get("SNAP_TRACKED_TOTAL_KB_RAW") or 0),
+            "tracked_total_kb_deduped": int(os.environ.get("SNAP_TRACKED_TOTAL_KB_DEDUPED") or 0),
             "measurement_status": os.environ.get("SNAP_STATUS"),
             "measured_paths_ok": int(os.environ.get("SNAP_MEASURED_OK") or 0),
             "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
         }
     }
+    residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
+    if residual_delta:
+        data["residual_delta_gb"] = float(residual_delta)
+    try:
+        dedup_excluded = json.loads(os.environ.get("SNAP_DEDUP_EXCLUDED") or "[]")
+    except (TypeError, ValueError):
+        dedup_excluded = []
+    data["dedup_excluded"] = dedup_excluded
     prev_ts = os.environ.get("SNAP_PREV_TS")
     if prev_ts:
         data["snapshot_metadata"]["previous_snapshot_timestamp"] = prev_ts
@@ -426,18 +772,24 @@ try:
     timeouts = os.environ.get("SNAP_TIMEOUTS")
     if timeouts:
         data["timeout_keys"] = timeouts.split(",")
+    try:
+        topdown = json.loads(os.environ.get("SNAP_TOPDOWN") or "null")
+    except (TypeError, ValueError):
+        topdown = None
+    if topdown is not None:
+        data["topdown_coverage"] = topdown
     dirs = {}
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):
         with open(dirs_file) as f:
             for line in f:
-                line = line.strip()
+                line = line.rstrip("\n")
                 if not line:
                     continue
-                parts = line.split("\t", 1)
-                if len(parts) != 2:
+                parts = line.split("\t")
+                if len(parts) < 2:
                     continue
-                k, v = parts
+                k, v = parts[0], parts[1]
                 if v == "null" or v == "":
                     dirs[k] = None
                 else:

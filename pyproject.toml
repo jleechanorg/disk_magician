@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "disk-magician"
-version = "0.1.0"
+version = "0.2.0"
 description = "Portable Disk Diagnostics, Snapshot Backups, & Cleanup"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -17,4 +17,4 @@ disk-magician = "disk_magician.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-disk_magician = ["disk_magician.sh", "config.json.template", "scripts/*.sh"]
+disk_magician = ["disk_magician.sh", "config.json.template", "scripts/*.sh", "scripts/*.py", "launchd/*.plist.template"]
