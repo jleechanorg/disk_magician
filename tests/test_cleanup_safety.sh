@@ -43,6 +43,24 @@ assert_contains() {
   fi
 }
 
+assert_exists() {
+  local name="$1" path="$2"
+  if [[ -e "$path" ]]; then
+    record_pass "$name"
+  else
+    record_fail "$name" "expected path to exist: $path"
+  fi
+}
+
+assert_missing() {
+  local name="$1" path="$2"
+  if [[ ! -e "$path" ]]; then
+    record_pass "$name"
+  else
+    record_fail "$name" "expected path to be absent: $path"
+  fi
+}
+
 run_capture() {
   local out_file="$1"
   shift
@@ -209,6 +227,94 @@ do
   fi
   assert_rc "$script accepts --dry-run" 0 "$rc"
 done
+
+echo "Test 7: cleanup_tmp.sh guards OpenCode dylib cleanup and preserves open/unrelated files"
+DYLIB_REAL="$TMP_ROOT/darwin-user-temp-real"
+DYLIB_TMP="$TMP_ROOT/darwin-user-temp-alias"
+FAKE_BIN7="$TMP_ROOT/bin-dylib"
+mkdir -p "$DYLIB_REAL" "$FAKE_BIN7"
+ln -s "$DYLIB_REAL" "$DYLIB_TMP"
+DYLIB_REAL=$(cd "$DYLIB_REAL" && pwd -P)
+CLOSED_DYLIB="$DYLIB_REAL/.bbc1111111111111-00000000.dylib"
+OPEN_DYLIB="$DYLIB_REAL/.bbc2222222222222-00000000.dylib"
+UNRELATED_DYLIB="$DYLIB_REAL/.bbc3333333333333-00000000.dylib"
+RACE_DYLIB="$DYLIB_REAL/.bbc4444444444444-00000000.dylib"
+FAIL_DYLIB="$DYLIB_REAL/.bbc5555555555555-00000000.dylib"
+printf 'closed' > "$CLOSED_DYLIB"
+printf 'open' > "$OPEN_DYLIB"
+printf 'unrelated' > "$UNRELATED_DYLIB"
+
+cat > "$FAKE_BIN7/getconf" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" ]]; then
+  printf '%s\n' "$FAKE_DYLIB_TMP"
+  exit 0
+fi
+exec /usr/bin/getconf "$@"
+EOF
+cat > "$FAKE_BIN7/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
+  exit 2
+fi
+if [[ -n "${FAKE_RACE_DYLIB:-}" ]]; then
+  printf 'race' > "$FAKE_RACE_DYLIB"
+fi
+printf 'p123\n'
+printf 'n%s\n' "$FAKE_OPEN_DYLIB"
+EOF
+cat > "$FAKE_BIN7/otool" <<'EOF'
+#!/usr/bin/env bash
+if /usr/bin/grep -q unrelated "${2:-}"; then
+  printf '\t/usr/lib/libSystem.B.dylib\n'
+else
+  printf '@rpath/libopentui.dylib\n'
+fi
+EOF
+chmod +x "$FAKE_BIN7/getconf" "$FAKE_BIN7/lsof" "$FAKE_BIN7/otool"
+
+OUT7_REFUSE="$TMP_ROOT/dylib-refuse.out"
+if run_capture "$OUT7_REFUSE" env -i HOME="$TMP_ROOT/home-dylib" \
+  FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
+  PATH="$FAKE_BIN7:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
+  RC7_REFUSE=0
+else
+  RC7_REFUSE=$?
+fi
+assert_rc "OpenCode dylib cleanup refusal exits 0" 0 "$RC7_REFUSE"
+assert_contains "OpenCode dylib cleanup requires approval" \
+  "Refusing OpenCode dylib cleanup: set OPENCODE_DYLIBS_APPROVED=1" "$(cat "$OUT7_REFUSE")"
+
+OUT7_CLEAN="$TMP_ROOT/dylib-clean.out"
+if run_capture "$OUT7_CLEAN" env -i HOME="$TMP_ROOT/home-dylib" \
+  OPENCODE_DYLIBS_APPROVED=1 FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
+  FAKE_RACE_DYLIB="$RACE_DYLIB" \
+  PATH="$FAKE_BIN7:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
+  RC7_CLEAN=0
+else
+  RC7_CLEAN=$?
+fi
+assert_rc "approved OpenCode dylib cleanup exits 0" 0 "$RC7_CLEAN"
+assert_missing "closed libopentui dylib is deleted" "$CLOSED_DYLIB"
+assert_exists "open libopentui dylib is preserved" "$OPEN_DYLIB"
+assert_exists "unrelated dylib is preserved" "$UNRELATED_DYLIB"
+assert_exists "dylib created after candidate freeze is preserved" "$RACE_DYLIB"
+assert_contains "open libopentui dylib is reported skipped" \
+  "Skipping in-use OpenCode dylib: $OPEN_DYLIB" "$(cat "$OUT7_CLEAN")"
+
+printf 'closed' > "$FAIL_DYLIB"
+OUT7_LSOF_FAIL="$TMP_ROOT/dylib-lsof-fail.out"
+if run_capture "$OUT7_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-dylib" \
+  OPENCODE_DYLIBS_APPROVED=1 FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
+  FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN7:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
+  RC7_LSOF_FAIL=0
+else
+  RC7_LSOF_FAIL=$?
+fi
+assert_rc "OpenCode dylib cleanup fails closed when lsof errors" 0 "$RC7_LSOF_FAIL"
+assert_exists "closed dylib is preserved when lsof errors" "$FAIL_DYLIB"
+assert_contains "lsof failure is reported" "Skipping OpenCode dylibs: lsof failed" "$(cat "$OUT7_LSOF_FAIL")"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

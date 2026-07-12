@@ -19,21 +19,22 @@ WORKTREE_POINTER_MIN=30
 WORKTREE_POINTER_MIN_KB=51200
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB <<<$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200"
 import json, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
 print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)}")
 PY
-)
+)"
 fi
 
 DRY_RUN=true
 INCLUDE_LARGE=false
+INCLUDE_OPENCODE_DYLIBS=false
 LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--help]
 
 Delete stale agent git clones and temp files from system temp paths.
 
@@ -41,6 +42,8 @@ Options:
   --clean      Actually perform the cleanup (default: dry-run)
   --dry-run    Run in dry-run/preview mode
   --large      Include top-level /private/tmp dirs larger than LARGE_TMP_MIN_KB
+  --opencode-dylibs
+               Include closed OpenCode libopentui dylibs in DARWIN_USER_TEMP_DIR
   -h, --help   Show this help
 EOF
 }
@@ -50,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --clean)   DRY_RUN=false ;;
     --dry-run) DRY_RUN=true ;;
     --large)   INCLUDE_LARGE=true ;;
+    --opencode-dylibs) INCLUDE_OPENCODE_DYLIBS=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -61,10 +65,16 @@ if [[ "$INCLUDE_LARGE" == true && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0
   exit 0
 fi
 
+if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DYLIBS_APPROVED:-0}" != "1" ]]; then
+  echo "Refusing OpenCode dylib cleanup: set OPENCODE_DYLIBS_APPROVED=1 after reviewing dry-run output." >&2
+  exit 0
+fi
+
 TMP_DIRS=("/private/tmp" "/tmp")
 # Add macOS user-specific temp dir if available
 USER_TMP=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
 if [[ -n "$USER_TMP" && -d "$USER_TMP" ]]; then
+  USER_TMP=$(cd "$USER_TMP" && pwd -P)
   TMP_DIRS+=("$USER_TMP")
 fi
 
@@ -205,6 +215,58 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
               -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
 done
+
+if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
+  log "Scanning DARWIN_USER_TEMP_DIR for OpenCode libopentui dylibs ..."
+  if [[ -z "$USER_TMP" || ! -d "$USER_TMP" ]]; then
+    log "Skipping OpenCode dylibs: DARWIN_USER_TEMP_DIR is unavailable"
+  elif ! command -v otool >/dev/null 2>&1; then
+    log "Skipping OpenCode dylibs: otool is unavailable"
+  elif [[ "$DRY_RUN" != true ]] && ! command -v lsof >/dev/null 2>&1; then
+    log "Skipping OpenCode dylibs: lsof is unavailable, cannot prove files are closed"
+  else
+    dylib_candidate_file=$(mktemp -t disk-magician-opencode-dylibs.XXXXXX)
+    trap 'rm -f "${dylib_candidate_file:-}"' EXIT
+    find "$USER_TMP" -mindepth 1 -maxdepth 1 -type f \
+      -name '.*.dylib' -print0 2>/dev/null > "$dylib_candidate_file" || true
+
+    open_dylibs=""
+    lsof_rc=0
+    if command -v lsof >/dev/null 2>&1; then
+      set +e
+      lsof_output=$(lsof +D "$USER_TMP" -Fn 2>/dev/null)
+      lsof_rc=$?
+      set -e
+      open_dylibs=$(sed -n 's/^n//p' <<<"$lsof_output")
+    fi
+    if [[ "$DRY_RUN" != true && "$lsof_rc" -gt 1 ]]; then
+      log "Skipping OpenCode dylibs: lsof failed (rc=${lsof_rc}), cannot prove files are closed"
+    else
+      dylib_candidates=0
+      dylib_deleted=0
+      while IFS= read -r -d '' f; do
+        [[ -f "$f" ]] || continue
+        otool_output=$(otool -D "$f" 2>/dev/null || true)
+        grep -Fxq '@rpath/libopentui.dylib' <<<"$otool_output" || continue
+        dylib_candidates=$(( dylib_candidates + 1 ))
+        if grep -Fxq "$f" <<<"$open_dylibs"; then
+          log "Skipping in-use OpenCode dylib: $f"
+          continue
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+          log "DRY RUN: would remove closed OpenCode dylib: $f"
+        else
+          rm -f "$f"
+          dylib_deleted=$(( dylib_deleted + 1 ))
+        fi
+      done < "$dylib_candidate_file"
+      log "$(dry_prefix)OpenCode dylibs: candidates ${dylib_candidates}, deleted ${dylib_deleted}"
+      FILES_DELETED=$(( FILES_DELETED + dylib_deleted ))
+    fi
+    rm -f "$dylib_candidate_file"
+    dylib_candidate_file=""
+  fi
+fi
 
 if [[ "$INCLUDE_LARGE" == true ]]; then
   log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB ..."
