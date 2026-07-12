@@ -118,6 +118,115 @@ else
   bad "containers metadata broke JSON"
 fi
 
+section "4. Dedup trie: parent+child + symlink alias no longer double-counted (schema_version 2)"
+# Reproduces the real bugs found in config.json.template: claude_root+claude_projects
+# and codex_root+codex_sessions (parent+child both monitored), and
+# hermes+hermes_prod (symlink alias) — all inflate coverage_pct today.
+DEDUP_WORK="$WORK/dedup"
+mkdir -p "$DEDUP_WORK/parent/child"
+dd if=/dev/zero of="$DEDUP_WORK/parent/file.bin" bs=1024 count=2048 >/dev/null 2>&1
+dd if=/dev/zero of="$DEDUP_WORK/parent/child/file.bin" bs=1024 count=1024 >/dev/null 2>&1
+ln -s "$DEDUP_WORK/parent" "$DEDUP_WORK/alias"
+
+DEDUP_CONFIG="$WORK/dedup_config.json"
+cat > "$DEDUP_CONFIG" <<JSON
+{
+  "monitored_dirs": [
+    {"key": "parent", "path": "$DEDUP_WORK/parent", "timeout": 10},
+    {"key": "child", "path": "$DEDUP_WORK/parent/child", "timeout": 10},
+    {"key": "alias", "path": "$DEDUP_WORK/alias", "timeout": 10}
+  ]
+}
+JSON
+
+DEDUP_OUT="$WORK/dedup_snap.json"
+DISK_MAGICIAN_CONFIG="$DEDUP_CONFIG" timeout 120 "$SNAP_SCRIPT" --output "$DEDUP_OUT" >/dev/null 2>&1
+
+if [[ -f "$DEDUP_OUT" ]] && python3 -m json.tool < "$DEDUP_OUT" >/dev/null 2>&1; then
+  ok "dedup snapshot produced valid JSON"
+else
+  bad "dedup snapshot missing or invalid JSON"
+fi
+
+SCHEMA_VER=$(python3 -c "import json; print(json.load(open('$DEDUP_OUT')).get('schema_version'))" 2>/dev/null || echo "")
+if [[ "$SCHEMA_VER" == "2" ]]; then
+  ok "schema_version is 2"
+else
+  bad "schema_version expected 2, got '$SCHEMA_VER'"
+fi
+
+DEDUP_CHECK=$(python3 - "$DEDUP_OUT" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+excluded = {e["key"]: e for e in d.get("dedup_excluded", [])}
+meta = d.get("snapshot_metadata", {})
+raw = meta.get("tracked_total_kb_raw")
+deduped = meta.get("tracked_total_kb_deduped")
+ok = True
+ok &= excluded.get("child", {}).get("covered_by") == "parent" and excluded.get("child", {}).get("reason") == "nested_under_parent"
+ok &= excluded.get("alias", {}).get("covered_by") == "parent" and excluded.get("alias", {}).get("reason") == "symlink_alias"
+ok &= "parent" not in excluded
+ok &= raw is not None and deduped is not None and deduped < raw
+print("PASS" if ok else "FAIL")
+print(json.dumps({"excluded": excluded, "raw": raw, "deduped": deduped}))
+PY
+)
+if echo "$DEDUP_CHECK" | head -1 | grep -q PASS; then
+  ok "child (nested_under_parent) + alias (symlink_alias) both excluded, parent kept, deduped < raw"
+else
+  bad "dedup trie did not exclude overlaps as expected"
+  echo "$DEDUP_CHECK" | tail -1 | sed 's/^/      /'
+fi
+
+if python3 -c "
+import json
+d = json.load(open('$DEDUP_OUT'))
+assert isinstance(d.get('residual_kb'), int)
+assert isinstance(d.get('residual_gb'), float)
+assert 'coverage_pct_raw_v1' in d['snapshot_metadata']
+" 2>/dev/null; then
+  ok "residual_kb/residual_gb + coverage_pct_raw_v1 fields present in schema-v2 snapshot"
+else
+  bad "residual/coverage_pct_raw_v1 fields missing or wrong type"
+fi
+
+section "5. discover --json emits structured findings + mtime cache (sandboxed HOME, fixes jleechan-jz5t)"
+FAKE_HOME="$WORK/fake_home"
+mkdir -p "$FAKE_HOME/small_dir"
+dd if=/dev/zero of="$FAKE_HOME/small_dir/f.bin" bs=1024 count=100 >/dev/null 2>&1
+
+DISCOVER_OUT=$(HOME="$FAKE_HOME" timeout 30 "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
+if echo "$DISCOVER_OUT" | python3 -m json.tool >/dev/null 2>&1; then
+  ok "discover --json produces valid JSON in a sandboxed HOME"
+else
+  bad "discover --json did not produce valid JSON"
+  echo "$DISCOVER_OUT" | head -5 | sed 's/^/      /'
+fi
+
+if echo "$DISCOVER_OUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert {'entries', 'cache_hits', 'cache_misses', 'generated_at'} <= set(d.keys())
+" 2>/dev/null; then
+  ok "discover --json has entries/cache_hits/cache_misses/generated_at keys"
+else
+  bad "discover --json missing expected keys"
+fi
+
+if [[ -f "$FAKE_HOME/.disk_magician_state/discover_last.json" ]]; then
+  ok "discover_last.json persisted under sandboxed HOME's state dir"
+else
+  bad "discover_last.json not found after --discover run"
+fi
+
+DISCOVER_OUT2=$(HOME="$FAKE_HOME" timeout 30 "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
+HITS2=$(echo "$DISCOVER_OUT2" | python3 -c "import json,sys; print(json.load(sys.stdin).get('cache_hits',0))" 2>/dev/null || echo 0)
+if [[ "${HITS2:-0}" -ge 1 ]]; then
+  ok "second discover run reuses mtime cache (cache_hits=$HITS2) — fixes jleechan-jz5t repeat-timeout"
+else
+  bad "second discover run did not hit cache (cache_hits=$HITS2)"
+fi
+
 section "Summary"
 echo "  PASS: $PASS  FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

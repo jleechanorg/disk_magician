@@ -182,13 +182,18 @@ if isinstance(data, list):
         elif "size_kb" in item:
             emit(p, item["size_kb"] / 1048576.0)
 elif isinstance(data, dict):
-    items = data.get("candidates") or data.get("untracked") or []
+    # canonical producer shape (disk_snapshot.sh --discover, schema pinned
+    # 2026-07-11): {generated_at, cache_hits, cache_misses,
+    #               entries: [{path, size_kb, size_gb, tracked}]}
+    items = data.get("entries") or data.get("candidates") or data.get("untracked") or []
     if isinstance(items, list):
         for item in items:
             if not isinstance(item, dict):
                 continue
             p = item.get("path")
             if not p:
+                continue
+            if item.get("tracked") is True:
                 continue
             if "size_gb" in item:
                 emit(p, item["size_gb"])
