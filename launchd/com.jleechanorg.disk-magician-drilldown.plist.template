@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Residual drilldown: every 4h, check the latest snapshot's residual (disk
+  used but not explained by measured directories) and — only when it
+  crosses threshold — propose untracked candidates into
+  config.d/auto-candidates.json for human promotion into config.json.
+
+  Schedule:  Every 4 hours (StartInterval=14400s), no RunAtLoad (avoid
+             firing immediately on every login/install).
+  Action:    runs scripts/residual_drilldown.sh with no args (uses its
+             built-in defaults: 10 GB threshold, cap 5 candidates/run,
+             cap 40 total, >100GB-in-one-run alerts instead of proposing).
+             Never writes to config.json / config.json.template directly.
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-drilldown</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/residual_drilldown.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>14400</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-drilldown.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-drilldown.log</string>
+</dict>
+</plist>

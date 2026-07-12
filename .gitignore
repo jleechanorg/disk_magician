@@ -13,3 +13,7 @@ htmlcov/
 # User configurations
 config.json
 .claude/
+
+# Machine-local residual-drilldown candidate proposals (never committed;
+# human-promoted into config.json — see scripts/residual_drilldown.sh)
+config.d/

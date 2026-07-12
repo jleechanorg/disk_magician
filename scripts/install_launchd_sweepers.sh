@@ -2,6 +2,9 @@
 # install_launchd_sweepers.sh — Install disk_magician weekly/daily launchd sweepers.
 #
 # Templates: launchd/com.disk-magician.*.plist (@REPO_ROOT@, @HOME@, @BASH@)
+#            launchd/com.jleechanorg.disk-magician-*.plist.template (same placeholders;
+#            distinct prefix for control-loop jobs, e.g. residual-drilldown, that are
+#            not part of the weekly/daily sweeper family)
 # Usage: ./scripts/install_launchd_sweepers.sh [--unload-legacy] [plist-name ...]
 set -euo pipefail
 
@@ -75,6 +78,13 @@ if [[ ${#SELECTED[@]} -gt 0 ]]; then
 else
   shopt -s nullglob
   for src in "$LAUNCHD_SRC"/com.disk-magician.*.plist; do
+    install_plist "$src"
+  done
+  # Control-loop jobs (distinct com.jleechanorg.disk-magician-* prefix, .plist.template
+  # suffix). Same install_plist() path — label/dst are read from file content, not
+  # filename. e.g. com.jleechanorg.disk-magician-drilldown.plist.template (4h residual
+  # drilldown cadence, see roadmap/2026-07-11-total-coverage-snapshot-v2.md).
+  for src in "$LAUNCHD_SRC"/com.jleechanorg.disk-magician-*.plist.template; do
     install_plist "$src"
   done
 fi
