@@ -25,8 +25,9 @@ Replace the allowlist as the *source of truth* (keep it as a naming/labeling lay
 - **Symlink dedup at every level:** `/etc`, `/tmp`, `/var` are symlinks to `/private/*` at the volume root — the same class of bug as the `~/.hermes_prod` triple-count. Resolve `realpath` per child, skip already-visited real paths (dedup trie keyed by real path). `du -P`, never follow.
 - **Sibling APFS volumes:** 11 non-Data volumes exist in the container (VM, Preboot, Update, ...). Report per-volume `df` usage as explicit line items; a Data-rooted walk cannot see them.
 - **Purgeable/TM-snapshot bucket:** active local Time Machine snapshots exist NOW; APFS purgeable space is structurally invisible to any tree walk. Add a `tmutil listlocalsnapshots` + purgeable-space line item so du-vs-df reconciliation closes.
-- **Backpressure:** the scanner must never worsen the incident it measures. Single global worker pool; halve concurrency when 1-min loadavg > cores or free < 15 GB; hard wall-clock cap with graceful frontier report.
-- **Coverage dedup trie first:** fix the parent/child double-count (prereq for any SLO on coverage_pct).
+- **Clone/hardlink sign handling (BLOCKER #2):** APFS clonefiles and hardlinks make each `du` count full logical size, so Σmeasured can legitimately EXCEED df-used — residual can go negative. The residual alarm must handle sign explicitly (clamp for display, annotate `clones_suspected`), never assume non-negative.
+- **Backpressure:** the scanner must never worsen the incident it measures. Single global semaphore-bounded worker pool across ALL BFS levels (subdivision must not multiply workers), halve concurrency when 1-min loadavg > cores or free < 15 GB, run workers under `nice`/`taskpolicy -b`, max subdivision depth ~6 + total-node budget with a "give up and report as unfinished" floor, hard wall-clock cap with graceful frontier report.
+- **Coverage dedup trie first:** fix the parent/child double-count (prereq for any SLO on coverage_pct). NOTE (critic #13): this is a semantic step-change to a metric with 673 commits of history — coverage_pct will visibly DROP on ship day; bump a `schema_version` field and changelog it so trend tooling doesn't read it as a regression.
 
 ### Incrementality (simplified per critic — no always-on daemon)
 
@@ -36,7 +37,7 @@ Replace the allowlist as the *source of truth* (keep it as a naming/labeling lay
 ### Control loop (gated per critic — no silent self-mutation)
 
 - **Residual-growth alarm:** residual delta > X GB between snapshots → bounded drilldown burst on the named frontier paths → results written to `config.d/auto-candidates.json` as **proposals**, surfaced via the existing disk_usage_alert.sh escalation. A human (or explicitly authorized agent run) promotes candidates into config — no silent auto-add.
-- **Timeout self-tuning:** budget = 2× last observed duration; two consecutive timeouts → auto-subdivide (this is just frontier-BFS behavior, free).
+- **Timeout budgets:** fixed tiers (10s/30s/90s/180s), NOT open-ended 2× growth (critic #11 — a huge dir would balloon its budget unboundedly); two consecutive timeouts at top tier → auto-subdivide (frontier-BFS behavior, free).
 - **Coverage SLO:** warn (existing `low_coverage`) plus escalation after N consecutive sub-threshold snapshots.
 
 ## Migration
@@ -47,11 +48,14 @@ Replace the allowlist as the *source of truth* (keep it as a naming/labeling lay
 
 ## Implementation order
 
-1. Dedup trie + symlink realpath dedup in coverage math (prereq; extends bead jleechan-wsbk).
-2. Frontier-BFS scanner as `scripts/disk_frontier_scan.sh` (or python), wired as the new `discover` + optional snapshot backend behind a flag.
-3. Purgeable + sibling-volume line items in snapshot JSON.
-4. Residual alarm + candidate proposals + SLO escalation.
-5. Sparse-file stat watchlist.
+**80/20 first (selfheal's key insight): don't build a new scanner for phase 1.** `--discover` (disk_snapshot.sh:130-195) ALREADY computes the exact (path, size, tracked/untracked) list — its findings go nowhere only because nobody captures stdout as structured data. Phase 1 = make discover emit JSON + a ~40-line merge into candidate proposals + the size-cache that fixes its timeout. The frontier-BFS scanner is the phase-2 deep fix.
+
+1. Dedup trie + symlink realpath dedup in coverage math, with `schema_version` bump (prereq; extends bead jleechan-wsbk).
+2. discover → JSON output + mtime size-cache (fixes jleechan-jz5t directly) + residual/`residual_delta_gb` fields + candidate-proposal file (`config.d/auto-candidates.json`, human-promoted, machine-local NOT git-committed per critic #15).
+3. Frontier-BFS scanner as `scripts/disk_frontier_scan.sh`, hourly gap-detector cadence (allowlist stays the 35-min fast path per critic #10), behind `topdown_enabled` config flag; validate its numbers against the allowlist for one deploy cycle before it drives alerts.
+4. Purgeable + sibling-volume + clone-sign line items in snapshot JSON (additive schema only).
+5. Residual alarm + SLO escalation via existing disk_usage_alert.sh conventions (coverage_streak state file, 3-snapshot debounce).
+6. Sparse-file stat watchlist (Colima diffdisk/Docker.raw — the proven ~30 GB/hr vector).
 
 Beads: see jleechan-wsbk (dedup prereq), jleechan-jz5t (superseded-by-frontier), + new implementation bead(s) filed 2026-07-11.
 
