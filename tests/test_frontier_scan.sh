@@ -250,6 +250,67 @@ clones=$(json_get "$OUT7" "d['clones_suspected']")
   || bad "clones_suspected flag not set: $clones"
 
 # ─────────────────────────────────────────────────────────────
+section "8. --output state-file mode (atomic write, stdout stays intact, --output-default resolution)"
+T8="$WORK/t8"
+mkdir -p "$T8/x"
+dd if=/dev/zero of="$T8/x/f" bs=1024 count=30 >/dev/null 2>&1
+
+OUT8="$WORK/state_out.json"
+STDOUT8="$WORK/stdout8.txt"
+python3 "$SCANNER" --root "$T8" --no-sibling-volumes --no-purgeable \
+  --workers 2 --wall-clock-cap 60 --output "$OUT8" >"$STDOUT8" 2>&1
+
+if [[ -s "$OUT8" ]] && python3 -m json.tool "$OUT8" >/dev/null 2>&1; then
+  ok "--output writes a complete, valid JSON file (atomic write landed cleanly)"
+else
+  bad "--output file missing or not valid JSON"
+fi
+
+if [[ -s "$STDOUT8" ]] && python3 -m json.tool "$STDOUT8" >/dev/null 2>&1; then
+  ok "stdout still carries the same valid JSON when --output is also used (additive, not replaced)"
+else
+  bad "stdout was empty or invalid when --output was used — should be additive per contract"
+fi
+
+stdout_measured=$(json_get "$STDOUT8" "d['measured_total_kb']")
+file_measured=$(json_get "$OUT8" "d['measured_total_kb']")
+if [[ -n "$stdout_measured" && "$stdout_measured" == "$file_measured" ]]; then
+  ok "stdout and --output file contain the same report (measured_total_kb: $stdout_measured)"
+else
+  bad "stdout ($stdout_measured) and --output file ($file_measured) disagree"
+fi
+
+perm=$(stat -f "%Mp%Lp" "$OUT8" 2>/dev/null || stat -c "%a" "$OUT8" 2>/dev/null)
+[[ "$perm" == *"644" ]] && ok "--output file has 0644 permissions ($perm)" \
+  || bad "--output file has unexpected permissions: $perm"
+
+# --output-default: point HOME at a scratch dir so we never touch the
+# real ~/.disk_magician_state, and confirm the resolved path + dir creation.
+HOME_SCRATCH="$WORK/home_scratch"
+mkdir -p "$HOME_SCRATCH"
+EXPECTED_DEFAULT="$HOME_SCRATCH/.disk_magician_state/frontier_last.json"
+
+if [[ -e "$EXPECTED_DEFAULT" ]]; then
+  bad "--output-default target already exists before the run (test setup bug)"
+else
+  ok "--output-default target does not pre-exist (clean scratch HOME)"
+fi
+
+HOME="$HOME_SCRATCH" python3 "$SCANNER" --root "$T8" --no-sibling-volumes --no-purgeable \
+  --workers 2 --wall-clock-cap 60 --output-default >/dev/null 2>&1
+
+if [[ -s "$EXPECTED_DEFAULT" ]] && python3 -m json.tool "$EXPECTED_DEFAULT" >/dev/null 2>&1; then
+  ok "--output-default resolved to ~/.disk_magician_state/frontier_last.json and wrote valid JSON (parent dir auto-created)"
+else
+  bad "--output-default did not produce a valid file at $EXPECTED_DEFAULT"
+fi
+
+# Atomicity check: no leftover .tmp files after a normal run.
+leftover_tmp=$(find "$WORK" -name ".disk_frontier_scan.*.tmp" 2>/dev/null | wc -l | tr -d ' ')
+[[ "$leftover_tmp" == "0" ]] && ok "no leftover atomic-write temp files after successful runs" \
+  || bad "found $leftover_tmp leftover .tmp file(s) — atomic write did not clean up"
+
+# ─────────────────────────────────────────────────────────────
 section "Summary"
 echo "PASS=$PASS FAIL=$FAIL"
 if [[ "$FAIL" -eq 0 ]]; then

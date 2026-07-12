@@ -7,9 +7,12 @@
 # wrapper just resolves the repo path and execs it so callers get a stable
 # .sh entrypoint matching every other script in scripts/.
 #
-# Standalone tool: NOT wired into disk_snapshot.sh or launchd yet. See
-# roadmap/2026-07-11-total-coverage-snapshot-v2.md, implementation-order
-# step 3, and config.json's future `topdown_enabled` gate.
+# Wired in two places: the nightly launchd job
+# (com.jleechanorg.disk-magician-frontier-nightly) runs this with
+# --wall-clock-cap 2700 --output-default, and disk_snapshot.sh embeds the
+# resulting frontier_last.json summary as `topdown_coverage` when fresh.
+# Disable via config `topdown_enabled: false`. See
+# roadmap/2026-07-11-total-coverage-snapshot-v2.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

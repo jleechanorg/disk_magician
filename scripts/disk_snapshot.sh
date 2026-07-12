@@ -637,6 +637,63 @@ if (( ${#timeout_keys[@]} > 0 )); then
   timeout_keys_str=$(IFS=,; echo "${timeout_keys[*]}")
 fi
 
+# ────────── TOPDOWN COVERAGE (frontier scanner summary, additive) ──────────
+# Enablement: data flows when frontier_last.json exists AND config's
+# `topdown_enabled` is not explicitly false (absent key = auto). File
+# presence controls data availability; the config key is the off switch.
+# If lane-topdown's ~/.disk_magician_state/frontier_last.json exists, is valid
+# JSON, and is fresh (<36h), embed a SUMMARY only — never the full `measured`
+# map — so this git-committed-every-35min snapshot JSON stays small. Stale
+# data becomes a {stale: true} marker instead of being silently dropped;
+# absent/corrupt/disabled fails open to omitting the field entirely (same
+# fail-open posture as the dedup pass above — this must never crash a
+# snapshot over a sibling tool's file).
+FRONTIER_LAST_FILE="$HOME/.disk_magician_state/frontier_last.json"
+TOPDOWN_ENABLED=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print('false' if d.get('topdown_enabled') is False else 'true')
+except Exception:
+    print('true')
+" "$CONFIG_FILE" 2>/dev/null || echo "true")
+
+TOPDOWN_JSON=$(python3 - "$FRONTIER_LAST_FILE" "$TOPDOWN_ENABLED" <<'PY' 2>/dev/null
+import datetime, json, sys
+
+path, enabled = sys.argv[1], sys.argv[2]
+if enabled != "true":
+    print("null")
+    sys.exit(0)
+
+try:
+    with open(path) as f:
+        d = json.load(f)
+    captured_at = d["captured_at"]
+    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+    if age_hours > 36:
+        result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
+    else:
+        result = {
+            "mode": d.get("mode"),
+            "captured_at": captured_at,
+            "age_hours": round(age_hours, 1),
+            "measured_total_kb": d.get("measured_total_kb"),
+            "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+            "residual_kb": d.get("residual_kb"),
+            "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
+            "local_snapshots_count": d.get("local_snapshots_count"),
+        }
+    print(json.dumps(result))
+except Exception:
+    print("null")
+PY
+)
+if [[ -z "$TOPDOWN_JSON" ]]; then
+  TOPDOWN_JSON="null"
+fi
+
 # Use Python to safely and durably construct and validate JSON.
 # This prevents empty/malformed variables from creating invalid syntax.
 pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
@@ -662,6 +719,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
+  SNAP_TOPDOWN="$TOPDOWN_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
 try:
@@ -714,6 +772,12 @@ try:
     timeouts = os.environ.get("SNAP_TIMEOUTS")
     if timeouts:
         data["timeout_keys"] = timeouts.split(",")
+    try:
+        topdown = json.loads(os.environ.get("SNAP_TOPDOWN") or "null")
+    except (TypeError, ValueError):
+        topdown = None
+    if topdown is not None:
+        data["topdown_coverage"] = topdown
     dirs = {}
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):

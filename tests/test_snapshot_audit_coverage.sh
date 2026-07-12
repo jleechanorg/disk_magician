@@ -227,6 +227,117 @@ else
   bad "second discover run did not hit cache (cache_hits=$HITS2)"
 fi
 
+section "6. topdown_coverage: fresh/stale/corrupt/absent frontier_last.json + topdown_enabled:false override"
+TD_HOME="$WORK/fake_home_topdown"
+mkdir -p "$TD_HOME/small_dir" "$TD_HOME/.disk_magician_state"
+dd if=/dev/zero of="$TD_HOME/small_dir/f.bin" bs=1024 count=100 >/dev/null 2>&1
+
+TD_CONFIG="$TD_HOME/config.json"
+cat > "$TD_CONFIG" <<JSON
+{"monitored_dirs": [{"key": "small", "path": "$TD_HOME/small_dir", "timeout": 10}]}
+JSON
+
+FRONTIER_FILE="$TD_HOME/.disk_magician_state/frontier_last.json"
+write_frontier_last() {
+  local captured_at="$1"
+  python3 - "$FRONTIER_FILE" "$captured_at" <<'PY'
+import json, sys
+path, captured_at = sys.argv[1], sys.argv[2]
+json.dump({
+    "schema_version": 1, "tool": "disk_frontier_scan", "mode": "partial",
+    "captured_at": captured_at, "measured_total_kb": 15476968,
+    "frontier_unfinished": [{"path": "/x"}] * 82,
+    "residual_kb": 873829052,
+    "sibling_volumes": {f"v{i}": {} for i in range(10)},
+    "local_snapshots_count": 3,
+}, open(path, "w"))
+PY
+}
+
+# 6a. fresh (<36h) -> full summary embedded
+NOW_TS=$(python3 -c "import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+write_frontier_last "$NOW_TS"
+TD_OUT="$TD_HOME/snap_fresh.json"
+HOME="$TD_HOME" DISK_MAGICIAN_CONFIG="$TD_CONFIG" timeout 30 "$SNAP_SCRIPT" --output "$TD_OUT" >/dev/null 2>&1
+if python3 -c "
+import json
+d = json.load(open('$TD_OUT'))
+td = d.get('topdown_coverage')
+assert td is not None and td.get('mode') == 'partial'
+assert td.get('frontier_unfinished_count') == 82
+assert td.get('sibling_volumes_count') == 10
+assert td.get('local_snapshots_count') == 3
+assert 'measured' not in td and 'deduped' not in td and 'sibling_volumes' not in td  # summary only, never the full maps/lists
+assert 'stale' not in td
+" 2>/dev/null; then
+  ok "fresh frontier_last.json embeds full topdown_coverage summary (no full measured map)"
+else
+  bad "fresh frontier_last.json did not embed the expected summary"
+fi
+
+# 6b. stale (>36h) -> {stale: true, ...} marker
+OLD_TS=$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+write_frontier_last "$OLD_TS"
+TD_OUT_STALE="$TD_HOME/snap_stale.json"
+HOME="$TD_HOME" DISK_MAGICIAN_CONFIG="$TD_CONFIG" timeout 30 "$SNAP_SCRIPT" --output "$TD_OUT_STALE" >/dev/null 2>&1
+if python3 -c "
+import json
+d = json.load(open('$TD_OUT_STALE'))
+td = d.get('topdown_coverage')
+assert td == {'stale': True, 'captured_at': td.get('captured_at'), 'age_hours': td.get('age_hours')}
+assert td['age_hours'] > 36
+" 2>/dev/null; then
+  ok "stale (>36h) frontier_last.json embeds {stale: true} marker only"
+else
+  bad "stale frontier_last.json did not produce the expected stale marker"
+fi
+
+# 6c. corrupt JSON -> field omitted entirely, snapshot still valid
+echo "{not valid json" > "$FRONTIER_FILE"
+TD_OUT_CORRUPT="$TD_HOME/snap_corrupt.json"
+HOME="$TD_HOME" DISK_MAGICIAN_CONFIG="$TD_CONFIG" timeout 30 "$SNAP_SCRIPT" --output "$TD_OUT_CORRUPT" >/dev/null 2>&1
+if python3 -c "
+import json
+d = json.load(open('$TD_OUT_CORRUPT'))
+assert 'topdown_coverage' not in d
+" 2>/dev/null; then
+  ok "corrupt frontier_last.json fails open — snapshot valid, field omitted"
+else
+  bad "corrupt frontier_last.json broke the snapshot or field wasn't omitted"
+fi
+
+# 6d. absent file -> field omitted, snapshot still valid
+rm -f "$FRONTIER_FILE"
+TD_OUT_ABSENT="$TD_HOME/snap_absent.json"
+HOME="$TD_HOME" DISK_MAGICIAN_CONFIG="$TD_CONFIG" timeout 30 "$SNAP_SCRIPT" --output "$TD_OUT_ABSENT" >/dev/null 2>&1
+if python3 -c "
+import json
+d = json.load(open('$TD_OUT_ABSENT'))
+assert 'topdown_coverage' not in d
+" 2>/dev/null; then
+  ok "absent frontier_last.json — field omitted, snapshot still valid"
+else
+  bad "absent frontier_last.json broke the snapshot or field unexpectedly present"
+fi
+
+# 6e. topdown_enabled:false override skips embedding even with a fresh file present
+write_frontier_last "$NOW_TS"
+TD_CONFIG_DISABLED="$TD_HOME/config_disabled.json"
+cat > "$TD_CONFIG_DISABLED" <<JSON
+{"monitored_dirs": [{"key": "small", "path": "$TD_HOME/small_dir", "timeout": 10}], "topdown_enabled": false}
+JSON
+TD_OUT_DISABLED="$TD_HOME/snap_disabled.json"
+HOME="$TD_HOME" DISK_MAGICIAN_CONFIG="$TD_CONFIG_DISABLED" timeout 30 "$SNAP_SCRIPT" --output "$TD_OUT_DISABLED" >/dev/null 2>&1
+if python3 -c "
+import json
+d = json.load(open('$TD_OUT_DISABLED'))
+assert 'topdown_coverage' not in d
+" 2>/dev/null; then
+  ok "topdown_enabled:false skips embedding even with a fresh frontier_last.json present"
+else
+  bad "topdown_enabled:false did not suppress topdown_coverage"
+fi
+
 section "Summary"
 echo "  PASS: $PASS  FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

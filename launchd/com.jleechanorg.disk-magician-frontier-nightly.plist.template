@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly frontier-BFS scan: exhaustive coverage sweep (frontier-BFS scanner,
+  scripts/disk_frontier_scan.sh) that validates/supersedes the allowlist-based
+  35-min snapshot, per roadmap/2026-07-11-total-coverage-snapshot-v2.md
+  implementation-order step 3 ("hourly gap-detector cadence" — run nightly
+  here since it is the deep/expensive pass, not the fast allowlist path).
+
+  Schedule:  Nightly at 03:41 local time (Hour=3, Minute=41) — off-minute,
+             low-usage hour, avoids colliding with other on-the-hour/half-hour
+             sweepers in this directory.
+  Action:    runs scripts/disk_frontier_scan.sh --wall-clock-cap 2700
+             --output-default. --wall-clock-cap 2700 (45 min) bounds the scan
+             per the roadmap's backpressure requirement (graceful frontier
+             report on cap, never an unbounded walk). --output-default writes
+             to ~/.disk_magician_state/frontier_last.json (topdown lane
+             addition — see scripts/disk_frontier_scan.py); NOT auto-installed
+             or scheduled until that flag lands (main session gates install).
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-frontier-nightly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/disk_frontier_scan.sh</string>
+    <string>--wall-clock-cap</string>
+    <string>2700</string>
+    <string>--output-default</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>41</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-frontier.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-frontier.log</string>
+</dict>
+</plist>
