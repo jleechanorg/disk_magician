@@ -316,6 +316,88 @@ assert_rc "OpenCode dylib cleanup fails closed when lsof errors" 0 "$RC7_LSOF_FA
 assert_exists "closed dylib is preserved when lsof errors" "$FAIL_DYLIB"
 assert_contains "lsof failure is reported" "Skipping OpenCode dylibs: lsof failed" "$(cat "$OUT7_LSOF_FAIL")"
 
+echo "Test 8: cleanup_code_sign_clones.sh requires approval and respects dry-run"
+CSC_PARENT="$TMP_ROOT/csc-parent"
+CSC_X="$CSC_PARENT/X"
+mkdir -p "$CSC_PARENT/T" "$CSC_X/at.studio.AsideBrowser.code_sign_clone" "$CSC_X/com.tiny.code_sign_clone"
+head -c 200000 /dev/zero > "$CSC_X/at.studio.AsideBrowser.code_sign_clone/blob"
+printf 'x' > "$CSC_X/com.tiny.code_sign_clone/x"
+FAKE_CSC_TMP="$CSC_PARENT/T"
+FAKE_BIN8="$TMP_ROOT/bin-csc"
+mkdir -p "$FAKE_BIN8"
+cat > "$FAKE_BIN8/getconf" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" ]]; then
+  printf '%s\n' "$FAKE_CSC_TMP"
+  exit 0
+fi
+exec /usr/bin/getconf "$@"
+EOF
+chmod +x "$FAKE_BIN8/getconf"
+cat > "$FAKE_BIN8/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
+  echo "simulated lsof failure" >&2
+  exit 2
+fi
+exit 1
+EOF
+chmod +x "$FAKE_BIN8/lsof"
+
+OUT8_REFUSE="$TMP_ROOT/csc-refuse.out"
+if run_capture "$OUT8_REFUSE" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_REFUSE=0
+else RC8_REFUSE=$?; fi
+assert_rc "code_sign_clone clean requires approval" 0 "$RC8_REFUSE"
+assert_contains "code_sign_clone refusal message" "Refusing code_sign_clone deletion" "$(cat "$OUT8_REFUSE")"
+assert_exists "large clone preserved without approval" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+
+OUT8_DRY="$TMP_ROOT/csc-dry.out"
+if run_capture "$OUT8_DRY" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+  RC8_DRY=0
+else RC8_DRY=$?; fi
+assert_rc "code_sign_clone dry-run exits 0" 0 "$RC8_DRY"
+assert_contains "code_sign_clone dry-run reports large clone" "AsideBrowser.code_sign_clone" "$(cat "$OUT8_DRY")"
+assert_exists "code_sign_clone dry-run does not delete" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+
+OUT8_LSOF_FAIL="$TMP_ROOT/csc-lsof-fail.out"
+if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-csc" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_LSOF_FAIL=0
+else RC8_LSOF_FAIL=$?; fi
+assert_rc "code_sign_clone clean skips when lsof fails" 0 "$RC8_LSOF_FAIL"
+assert_contains "code_sign_clone lsof failure is reported" "Skipping code_sign_clones: lsof failed" "$(cat "$OUT8_LSOF_FAIL")"
+assert_exists "code_sign_clone preserved when lsof fails" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+
+OUT8_CLEAN="$TMP_ROOT/csc-clean.out"
+if run_capture "$OUT8_CLEAN" env -i HOME="$TMP_ROOT/home-csc" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_CLEAN=0
+else RC8_CLEAN=$?; fi
+assert_rc "code_sign_clone clean requires approval env" 0 "$RC8_CLEAN"
+assert_missing "large clone removed during approved clean" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+assert_exists "small clone preserved above threshold" "$CSC_X/com.tiny.code_sign_clone"
+
+
+echo "Test 9: pressure_sweep passes --large and LARGE_TMP_APPROVED when cleaning"
+PS_LOG="$TMP_ROOT/pressure-sweep.log"
+PS_STATE="$TMP_ROOT/pressure-state"
+mkdir -p "$PS_STATE"
+OUT9="$TMP_ROOT/pressure.out"
+if run_capture "$OUT9" env -i HOME="$TMP_ROOT/home-ps" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=10 \
+  DISK_MAGICIAN_STATE_DIR="$PS_STATE" \
+  DISK_MAGICIAN_PRESSURE_LOG="$PS_LOG" \
+  PATH="/usr/bin:/bin" bash "$REPO_ROOT/scripts/pressure_sweep.sh"; then
+  RC9=0
+else RC9=$?; fi
+assert_rc "pressure_sweep triggered path exits 0" 0 "$RC9"
+OUT9_CONTENT=$(cat "$OUT9")
+assert_contains "pressure_sweep logs --large" "cleanup_tmp.sh --clean --large" "$OUT9_CONTENT"
+assert_contains "pressure_sweep invokes cleanup_tmp step" "cleanup_tmp.sh" "$OUT9_CONTENT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

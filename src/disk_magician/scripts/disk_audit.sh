@@ -232,6 +232,25 @@ if command -v docker &>/dev/null; then
     fi
 fi
 
+# macOS code_sign_clone caches (Aside, Chrome, Codex, etc.)
+if command -v getconf &>/dev/null; then
+    _user_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
+    if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
+        _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
+        _csc_kb=0
+        _csc_count=0
+        while IFS= read -r -d '' d; do
+            kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
+            [[ "$kb" -lt 102400 ]] && continue
+            _csc_count=$(( _csc_count + 1 ))
+            _csc_kb=$(( _csc_kb + kb ))
+        done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
+        if [[ $_csc_count -gt 0 ]]; then
+            printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
+        fi
+    fi
+fi
+
 # AO session Playwright cache duplication
 ao_sessions="$HOME/.ao-sessions"
 if [[ -d "$ao_sessions" ]]; then
