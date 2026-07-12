@@ -132,7 +132,37 @@ XML
   echo "Setup complete! Run './disk_magician.sh snapshot' to capture your first snapshot."
 }
 
+# Concurrency guard for snapshot mode (bead jleechan-q9mu): mkdir-based lock,
+# stale-lock TTL 90 min (dead pid + old enough -> steal), contention = log +
+# exit 0 (skip this run, never queue).
+SNAPSHOT_LOCK_DIR="${HOME}/.disk_magician_state/snapshot.lock"
+SNAPSHOT_LOCK_TTL_SEC=5400
+
+acquire_snapshot_lock() {
+  mkdir -p "$(dirname "$SNAPSHOT_LOCK_DIR")"
+  if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
+    trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+    return 0
+  fi
+  local held_pid age
+  held_pid=$(cat "$SNAPSHOT_LOCK_DIR/pid" 2>/dev/null || echo "")
+  age=$(( $(date +%s) - $(stat -f%m "$SNAPSHOT_LOCK_DIR" 2>/dev/null || stat -c%Y "$SNAPSHOT_LOCK_DIR" 2>/dev/null || date +%s) ))
+  if [[ "$age" -gt "$SNAPSHOT_LOCK_TTL_SEC" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
+    rm -rf "$SNAPSHOT_LOCK_DIR"
+    if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
+      trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+      return 0
+    fi
+  fi
+  echo "snapshot: lock held by pid ${held_pid:-?} (age ${age}s) — skipping this run"
+  return 1
+}
+
 run_snapshot() {
+  acquire_snapshot_lock || exit 0
+
   # Parse --output <path> from args; remaining args are ignored.
   local caller_output=""
   while [[ $# -gt 0 ]]; do

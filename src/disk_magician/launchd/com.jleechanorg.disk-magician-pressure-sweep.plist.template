@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Pressure sweep: free-space-gated cleanup_tmp.sh + cleanup_colima.sh run,
+  addressing beads jleechan-6xzf (/tmp scratch sawtooths to 97G/day against a
+  daily 04:05 sweep) and jleechan-etjw (Colima re-inflates ~30G/hr against
+  sparse prunes) — the daily/weekly sweeper cadence is too slow for these two
+  trees' observed growth rate.
+
+  Schedule:  Every 2 hours (StartInterval=7200s). No off-hour restriction —
+             the script self-gates on free-space threshold (default 40GB), so
+             idle fires cost one log line and exit immediately.
+  Action:    runs scripts/pressure_sweep.sh with no args (uses its built-in
+             defaults). Never runs anything beyond cleanup_tmp.sh --clean and
+             cleanup_colima.sh --clean; both own their own safety semantics.
+             mkdir-based lock (TTL 60min) skips overlapping fires.
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-pressure-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/pressure_sweep.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>7200</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-pressure-sweep.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-pressure-sweep.log</string>
+</dict>
+</plist>

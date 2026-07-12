@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # cleanup_tmp.sh — Delete stale git clones and temp logs from system temp directories.
 #
-# Defaults to actually deleting (use --dry-run to preview).
+# Defaults to DRY-RUN; pass --clean to actually delete. Callers that must
+# delete (disk_audit.sh safe-clean path, pressure sweeps) pass --clean.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
