@@ -62,6 +62,43 @@ run_cmd() {
 }
 
 COLIMA_LIMA="$HOME/.colima/_lima"
+COLIMA_WEDGE_RECOVERY=true
+
+fstrim_colima_disk() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "[dry-run] colima ssh -- sudo fstrim -av"
+    return 0
+  fi
+
+  log "+ colima ssh -- sudo fstrim -av (compact VM sparse disk)"
+  if colima ssh -- sudo fstrim -av 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
+}
+
+recover_colima_wedge_once() {
+  if [[ "$COLIMA_WEDGE_RECOVERY" != true ]]; then
+    return 1
+  fi
+
+  log "WARNING: fstrim failed; attempting Colima restart recovery"
+  if ! colima stop >/dev/null 2>&1; then
+    log "WARNING: colima stop failed"
+  fi
+  if ! colima start >/dev/null 2>&1; then
+    log "WARNING: colima start failed"
+    return 1
+  fi
+  sleep 2
+  if colima status >/dev/null 2>&1; then
+    fstrim_colima_disk
+    return $?
+  fi
+  log "WARNING: colima status unhealthy after restart"
+  return 1
+}
 
 if ! command -v docker >/dev/null 2>&1; then
   log "docker CLI not found — skipping Colima cleanup."
@@ -125,7 +162,8 @@ else
   log "=== docker system df (after) ==="
   docker system df 2>/dev/null || true
   if command -v colima >/dev/null 2>&1 && colima status >/dev/null 2>&1; then
-    log "+ colima ssh -- sudo fstrim -av (compact VM sparse disk)"
-    colima ssh -- sudo fstrim -av 2>/dev/null || log "WARNING: fstrim failed"
+    if ! fstrim_colima_disk; then
+      recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
+    fi
   fi
 fi

@@ -68,16 +68,49 @@ install_plist() {
   echo "installed $label -> $dst"
 }
 
+install_launchdaemon() {
+  local src="$1" label dst
+  label="$(grep -A1 '<key>Label</key>' "$src" | tail -1 | sed -n 's/.*<string>\([^<]*\)<\/string>.*/\1/p')"
+  [[ -n "$label" ]] || { echo "skip (no label): $src" >&2; return 1; }
+  
+  # Clean up legacy user-mode LaunchAgent if present
+  local user_dst="$DEST/${label}.plist"
+  if [[ -f "$user_dst" ]]; then
+    echo "Removing legacy user LaunchAgent: $user_dst"
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    rm -f "$user_dst"
+  fi
+
+  dst="/Library/LaunchDaemons/${label}.plist"
+  echo "Installing root LaunchDaemon: $label -> $dst (requires sudo)"
+  sed -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
+      -e "s|@HOME@|$HOME|g" \
+      -e "s|@BASH@|$BASH_BIN|g" \
+      "$src" | sudo tee "$dst" >/dev/null
+  sudo chown root:wheel "$dst"
+  sudo launchctl bootout system "$dst" 2>/dev/null || true
+  sudo launchctl bootstrap system "$dst"
+  echo "Successfully installed and bootstrapped root LaunchDaemon $label"
+}
+
 if [[ ${#SELECTED[@]} -gt 0 ]]; then
   for name in "${SELECTED[@]}"; do
     src="$LAUNCHD_SRC/${name}"
     [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist"
     [[ -f "$src" ]] || { echo "not found: $name" >&2; exit 2; }
-    install_plist "$src"
+    if [[ "$name" == *apfs-snapshots* ]]; then
+      install_launchdaemon "$src"
+    else
+      install_plist "$src"
+    fi
   done
 else
   shopt -s nullglob
   for src in "$LAUNCHD_SRC"/com.disk-magician.*.plist; do
+    if [[ "$(basename "$src")" == "com.disk-magician.apfs-snapshots.plist" ]]; then
+      echo "Skipping com.disk-magician.apfs-snapshots.plist (requires root privileges; run: sudo ./scripts/install_launchd_sweepers.sh apfs-snapshots to install as a system LaunchDaemon)"
+      continue
+    fi
     install_plist "$src"
   done
   # Control-loop jobs (distinct com.jleechanorg.disk-magician-* prefix, .plist.template

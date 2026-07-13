@@ -128,12 +128,12 @@ REAL_CHECK_OUT="$WORK/real_check.txt"
 REAL_RC=$?
 echo "  real tree --check exit code: $REAL_RC"
 cat "$REAL_CHECK_OUT" | sed 's/^/  /'
-if [[ "$REAL_RC" -eq 1 ]] && grep -q "disk_magician.sh" "$REAL_CHECK_OUT"; then
-  ok "real tree correctly shows disk_magician.sh as drifted (expected — lock guard not yet synced to src/)"
+if [[ "$REAL_RC" -eq 1 ]] && grep -q -E "MODIFY|REMOVE" "$REAL_CHECK_OUT"; then
+  ok "real tree correctly shows drifted files (expected — edits not yet synced to src/)"
 elif [[ "$REAL_RC" -eq 0 ]]; then
   ok "real tree is currently in sync (no drift right now — fine, just a different point in time)"
 else
-  bad "real tree --check exited $REAL_RC without naming disk_magician.sh — unexpected: $(cat "$REAL_CHECK_OUT")"
+  bad "real tree --check exited $REAL_RC without naming drifted files — unexpected: $(cat "$REAL_CHECK_OUT")"
 fi
 # Confirm read-only: the real src/ file must be byte-identical to what it was
 # before this test ran (we never call sync without --check on $REPO_ROOT).

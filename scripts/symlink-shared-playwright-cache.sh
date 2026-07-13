@@ -16,7 +16,10 @@ set -euo pipefail
 
 DRY_RUN=true
 DELETE_BACKUPS=false
-CANONICAL_CACHE="$HOME/Library/Caches/ms-playwright-go/1.57.0"
+CANONICAL_CACHE_VERSION="${PLAYWRIGHT_CANONICAL_VERSION:-1.57.0}"
+CANONICAL_CACHE_BASE="$HOME/Library/Caches/ms-playwright-go"
+CANONICAL_CACHE="$CANONICAL_CACHE_BASE/$CANONICAL_CACHE_VERSION"
+CANONICAL_VERSION="$CANONICAL_CACHE_VERSION"
 AO_SESSIONS_DIR="$HOME/.ao-sessions"
 
 usage() {
@@ -61,7 +64,68 @@ done
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+bootstrap_canonical_cache_from_host() {
+  local candidate=""
+  if [[ -d "$CANONICAL_CACHE_BASE" ]]; then
+    candidate="$(find "$CANONICAL_CACHE_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | \
+      sort -V | tail -1 || true)"
+    if [[ -n "$candidate" ]]; then
+      CANONICAL_CACHE="$candidate"
+      CANONICAL_VERSION="$(basename "$CANONICAL_CACHE")"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+select_largest_session_cache() {
+  local chosen=""
+  local max_kb=0
+  local current_kb=0
+  while IFS= read -r -d '' candidate; do
+    [[ -d "$candidate" ]] || continue
+    current_kb=$(du -sk "$candidate" 2>/dev/null | awk '{print $1+0}' || echo 0)
+    if (( current_kb > max_kb )); then
+      max_kb=$current_kb
+      chosen="$candidate"
+    fi
+  done < <(find "$AO_SESSIONS_DIR" -type d -path '*/Library/Caches/ms-playwright-go/*' -print0 2>/dev/null || true)
+  printf '%s\n' "$chosen"
+}
+
+ensure_canonical_cache() {
+  if [[ -d "$CANONICAL_CACHE" ]]; then
+    CANONICAL_VERSION="$(basename "$CANONICAL_CACHE")"
+    return 0
+  fi
+
+  if bootstrap_canonical_cache_from_host; then
+    log "Canonical version missing; using existing host cache: $CANONICAL_CACHE"
+    return 0
+  fi
+
+  local session_cache
+  session_cache="$(select_largest_session_cache)"
+  if [[ -z "$session_cache" ]]; then
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Canonical cache missing and none exists under $CANONICAL_CACHE_BASE"
+    log "  [dry-run] would use existing AO session cache as canonical: $session_cache"
+  else
+    CANONICAL_CACHE="$session_cache"
+  fi
+  CANONICAL_VERSION="$(basename "$CANONICAL_CACHE")"
+
+  return 0
+}
+
 if [[ "$DELETE_BACKUPS" == true ]]; then
+  if ! ensure_canonical_cache; then
+    log "ERROR: Canonical playwright cache unavailable under $CANONICAL_CACHE_BASE and no AO session cache fallback was found." >&2
+    exit 1
+  fi
   log "=== DELETE PLAYWRIGHT CACHE BACKUPS ==="
   if [[ "$DRY_RUN" == true ]]; then
     log "Mode: dry-run (use --clean to actually delete)"
@@ -90,7 +154,7 @@ if [[ "$DELETE_BACKUPS" == true ]]; then
     fi
     deleted_count=$((deleted_count + 1))
     deleted_bytes=$((deleted_bytes + size_kb))
-  done < <(find "$AO_SESSIONS_DIR" -type d -name "1.57.0.bak.*" 2>/dev/null)
+  done < <(find "$AO_SESSIONS_DIR" -type d -path '*/Library/Caches/ms-playwright-go/*.bak.*' 2>/dev/null)
 
   log ""
   log "=== Summary ==="
@@ -112,10 +176,11 @@ log "Canonical cache path: $CANONICAL_CACHE"
 log "Sessions dir: $AO_SESSIONS_DIR"
 log ""
 
-if [[ ! -d "$CANONICAL_CACHE" ]]; then
-  log "ERROR: Canonical playwright cache not found at $CANONICAL_CACHE" >&2
+if ! ensure_canonical_cache; then
+  log "ERROR: Canonical playwright cache not found at $CANONICAL_CACHE_BASE and no AO session fallback was found." >&2
   exit 1
 fi
+log "Canonical cache version in use: $CANONICAL_VERSION"
 
 if [[ ! -d "$AO_SESSIONS_DIR" ]]; then
   log "Sessions dir $AO_SESSIONS_DIR does not exist. Nothing to do."
@@ -139,7 +204,7 @@ skipped_no_cache=0
 for session_dir in "$AO_SESSIONS_DIR"/*; do
   [[ -d "$session_dir" ]] || continue
   
-  target_cache_dir="$session_dir/Library/Caches/ms-playwright-go/1.57.0"
+  target_cache_dir="$session_dir/Library/Caches/ms-playwright-go/$CANONICAL_VERSION"
   
   # Check if the session has a playwright cache directory
   if [[ ! -d "$target_cache_dir" && ! -L "$target_cache_dir" ]]; then

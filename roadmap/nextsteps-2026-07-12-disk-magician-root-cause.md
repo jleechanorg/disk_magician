@@ -19,8 +19,6 @@ This document captures all currently open disk_magician/related beads and the co
 | jleechan-dqiz | Close fresh AO private-tmp scratch cleanup gap | P1 | bug | jleechan | Removes repeated ~40GB/day temporary growth class | Implement atomic register-on-start + dead-pid stale-sweep in AO producer flow, then `pressure_sweep --large` hardens fallback. |
 | jleechan-etjw | Colima sparse VM disk inflates ~31.6GB/hr under ez-mac-runner CI churn; needs prune+trim cadence | P1 | task | jleechan | Reduces unplanned `~/.colima/_lima` inflation and reclaim cadence misses | Add wedge detection + restart+fstrim fallback in `cleanup_colima.sh`; keep 2h gate behavior in pressure sweep. |
 | jleechan-dp2x | cleanup_apfs_snapshots.sh --clean fails with sudo required, weekly plist can't actually reclaim | P2 | bug | jleechan | Enables reclaim of stale OS update snapshots if present | Add privileged execution model (`sudoers` scoped command OR root LaunchDaemon`) and document operational runbook. |
-| jleechan-8twx | Triage 6.0G Antigravity worktrees for orphaned PR/branch checkouts | P2 | task | jleechan | Reclaims verified-orphan worktrees that are no longer tied to active PRs | Human triage by PR state, then delete safe orphans with backup of uncertain dirs. |
-| jleechan-g3d1 | Prune stale ~/.worktrees per-PR worktrees (22.6G) + stale backup/Mac snapshot profile | P2 | chore | jleechan | Reclaim stale worktrees/backup host-path detritus in user scope | Update scriptable `cleanup_worktrees.sh` policy + periodic runbook for 14d+ stale safe-orphan directories. |
 | jleechan-p2gy | Migrate ~/projects node_modules to pnpm shared store (6.2G duplication) | P2 | task | jleechan | Recovers duplicate JavaScript dependency stores across worktrees | Evaluate low-risk symlinkdedupe script path first, then decide pnpm migration for low-touch repos. |
 | jleechan-z2ya | Review iMessage attachments storage (~28.7G library_messages) | P2 | task | jleechan | Optional large reclaim if user allows | User-approved message cleanup in macOS Storage → Messages settings. |
 | jleechan-u6zx | Review stale Codex session folders (~17.1G, manual only) | P2 | task | jleechan | Manual review-only under never-delete policy | Keep isolated from automation; user-approved cleanup only. |
@@ -35,7 +33,7 @@ This document captures all currently open disk_magician/related beads and the co
 1. Finish `jleechan-dqiz` (agent scratch lifecycle) because it directly gates recurring daily growth spikes.
 2. Finish `jleechan-etjw` once PR evidence cleanup is stable, because Colima can re-pressurize storage quickly.
 3. Close `jleechan-dp2x` and lock APFS cleanup governance.
-4. Batch safe workspace pruning: `jleechan-g3d1`, `jleechan-8twx`, then `jleechan-p2gy`.
+4. Workspace pruning remains contingent on reappearance of stale state: reassess `jleechan-p2gy`; `jleechan-g3d1` and `jleechan-8twx` are closed by runbook review.
 5. Keep `jleechan-z2ya` and `jleechan-yv7b` as explicit user/housekeeping approvals.
 
 ## Verification notes
@@ -49,6 +47,8 @@ This document captures all currently open disk_magician/related beads and the co
 ### Closed this cycle
 
 - `jleechan-emnx` — fixed; JSON parser-safe emission is now enforced and snapshot audit accepts partial coverage paths without malformed JSON rejection.
+- `jleechan-g3d1` — scripted review found 0 eligible stale-orphan deletions with 126 preserved worktrees (safe gate prevented script-only cleanup).
+- `jleechan-8twx` — antigravity worktree root currently missing (`~/.gemini/antigravity/worktrees`), so no safe deletion path exists until it is recreated.
 - `jleechan-9s68` — cleanup safety regression suite expanded and passing: `bash tests/test_cleanup_safety.sh` reports 41 pass / 0 fail.
 - `jleechan-xk95` — behavior docs updated with safe/review/manual cleanup mode matrix.
 - `jleechan-y1xm` — approved cleanup gates formalized in this doc and linked from `roadmap/README.md`.

@@ -23,7 +23,7 @@
   - **New**: `scripts/cleanup_colima.sh` (builder/image prune, orphaned volume sweep, `colima ssh -- sudo fstrim -av`).
   - **Wired**: `disk_audit.sh` clean-all gates for `AO_PLAYWRIGHT_DEDUP_APPROVED`, `VENV_RECLAIM_APPROVED`, `DOCKER_VOLUMES_APPROVED`; Colima + Playwright findings in audit.
   - **Launchd**: `com.jleechan.disk-magician-colima-prune` (Sun 03:45), `com.jleechan.disk-magician-playwright-dedup` (Sun 04:15).
-  - **Bead closed**: `jleechan-qoss` (Playwright dedup). Still open: `jleechan-emnx`, `jleechan-dp2x`, `jleechan-8twx`, `jleechan-p2gy`.
+  - **Bead closed**: `jleechan-qoss` (Playwright dedup). Still open: `jleechan-dp2x`, `jleechan-p2gy`.
   - Nextsteps: `~/roadmap/nextsteps-2026-07-06-disk-magician-four-causes.md`.
 
 - 2026-07-05 — Multi-day regrowth fixed structurally:
@@ -47,7 +47,7 @@
   - Cleaned AO orchestrator session `jc-1933` (jleechanclaw project, confirmed dead process): removed 48 nested sub-worker config/cache homes (2.5G, zero git risk) + 15 of 21 nested git worktrees (confirmed clean + fully pushed), preserving 6 with real unpushed work.
   - Filed a fixed parser bug in `cleanup_apfs_snapshots.sh` (now uses `diskutil apfs listSnapshots` for the `com.apple.os.update-*` UUID form) and a weekly launchd plist, but the actual delete needs `sudo` (launchd runs unprivileged) — unresolved, `jleechan-dp2x`.
   - Found a new bug: `disk_snapshot.sh` can emit malformed JSON (`containers_captured` multi-line value) that silently breaks `disk_magician.sh audit` — `jleechan-emnx`.
-  - Follow-up beads/issues: `jleechan-qoss` (Playwright cache dedup across AO sessions, ~3GB, NOT yet actioned — user has a standing leave-sessions-alone policy), `jleechan-80wj` (generalize the jc-1933-style nested-orchestrator sweep), `jleechan-p2gy` (Node `node_modules` pnpm migration, 6.2G), `jleechan-8twx` (Antigravity worktrees triage, 6.0G), `jleechan-emnx`, `jleechan-dp2x`.
+  - Follow-up beads/issues: `jleechan-qoss` (Playwright cache dedup across AO sessions, ~3GB, NOT yet actioned — user has a standing leave-sessions-alone policy), `jleechan-80wj` (generalize the jc-1933-style nested-orchestrator sweep), `jleechan-p2gy` (Node `node_modules` pnpm migration, 6.2G), `jleechan-emnx`, `jleechan-dp2x`.
   - Nextsteps doc: `~/roadmap/nextsteps-2026-07-03-ao-session-dedup.md`.
 
 - 2026-06-27 — Disk cleanup recovery and harness hardening:
