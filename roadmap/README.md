@@ -1,5 +1,11 @@
 # disk_magician roadmap
 
+## Recent activity (by day)
+
+- [2026-07-12](activity/2026-07-12.md) — Disk crisis recovery, four leak-class root causes, prevention plan (/secondo)
+  - [nextsteps-2026-07-12-disk-magician-root-cause.md](nextsteps-2026-07-12-disk-magician-root-cause.md) — open action queue + owner matrix for all disk beacons
+  - Cleanup modes and approvals are documented in that nextsteps doc: SAFE/REVIEW/MANUAL classes + env-gate map.
+
 ## Recent activity (rolling)
 
 - 2026-07-06 (evening) — Post-#8 portability: README launchd docs, disk_history backup fallback, find_stale_large_dirs.sh; closed jleechan-p1cw.
