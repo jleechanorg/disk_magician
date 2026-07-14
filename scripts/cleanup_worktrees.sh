@@ -65,7 +65,55 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
         IFS=',' read -ra REPO_LOCAL_REPOS <<<"${CLAUDE_WORKTREE_REPOS// /,}"
     else
-        REPO_LOCAL_REPOS=("$HOME/projects/worldarchitect.ai")
+        # Auto-discover main repositories that have registered worktrees
+        discovered_repos_str="$HOME/projects/worldarchitect.ai"
+        
+        find_repos_from_worktrees() {
+            local search_dir="$1"
+            [[ -d "$search_dir" ]] || return 0
+            while IFS= read -r git_file; do
+                local gitdir_line
+                gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
+                if [[ -n "$gitdir_line" ]]; then
+                    local git_dir main_repo
+                    git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
+                    main_repo="${git_dir%/.git/worktrees/*}"
+                    if [[ -d "$main_repo" ]]; then
+                        discovered_repos_str="${discovered_repos_str} ${main_repo}"
+                    fi
+                fi
+            done < <(find "$search_dir" -type f -name ".git" 2>/dev/null)
+        }
+        
+        find_repos_from_worktrees "$HOME/.ao/data/worktrees"
+        find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees"
+        
+        # Also check all .claude/worktrees and projects
+        if [[ -d "$HOME/projects" ]]; then
+            for repo_dir in "$HOME/projects"/*; do
+                [[ -d "$repo_dir" ]] || continue
+                claude_wt_dir="$repo_dir/.claude/worktrees"
+                if [[ -d "$claude_wt_dir" ]]; then
+                    while IFS= read -r git_file; do
+                        gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
+                        if [[ -n "$gitdir_line" ]]; then
+                            git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
+                            main_repo="${git_dir%/.git/worktrees/*}"
+                            if [[ -d "$main_repo" ]]; then
+                                discovered_repos_str="${discovered_repos_str} ${main_repo}"
+                            fi
+                        fi
+                    done < <(find "$claude_wt_dir" -type f -name ".git" 2>/dev/null)
+                fi
+            done
+        fi
+        
+        # Dedup the repository list using tr/sort/uniq
+        if [[ -n "$discovered_repos_str" ]]; then
+            while IFS= read -r repo; do
+                [[ -n "$repo" ]] && REPO_LOCAL_REPOS+=("$repo")
+            done < <(echo "$discovered_repos_str" | tr ' ' '\n' | sort -u)
+        fi
     fi
 fi
 
@@ -147,21 +195,42 @@ resolve_main_ref() {
 classify_repo_local_worktree() {
     local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5"
 
-    if [[ "$locked" == "1" ]]; then
-        echo "locked"
-        return 0
-    fi
-    if [[ "$prunable" == "1" ]]; then
-        echo "prunable-unknown"
-        return 0
-    fi
-
     local age_days
     if ! age_days="$(worktree_age_days "$wt_path")"; then
         echo "age-unknown"
         return 0
     fi
-    if (( age_days < MIN_AGE_DAYS )); then
+
+    local min_age=$MIN_AGE_DAYS
+    if [[ "$wt_path" == *"/.ao/data/worktrees/"* || "$wt_path" == *"/ao/data/worktrees/"* ]]; then
+        min_age=1
+    fi
+
+    if [[ "$locked" == "1" ]]; then
+        # Stale lock detection: only auto-unlock automated/orchestrator worktrees
+        local is_automated=false
+        if [[ "$wt_path" == *"/.ao/data/worktrees/"* || \
+              "$wt_path" == *"/ao/data/worktrees/"* || \
+              "$wt_path" == *"/antigravity/worktrees/"* ]]; then
+            is_automated=true
+        fi
+
+        if [[ "$is_automated" == "true" ]] && (( age_days >= min_age )); then
+            if [[ "$DRY_RUN" == false ]]; then
+                git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
+            fi
+        else
+            echo "locked"
+            return 0
+        fi
+    fi
+
+    if [[ "$prunable" == "1" ]]; then
+        echo "prunable-unknown"
+        return 0
+    fi
+
+    if (( age_days < min_age )); then
         echo "young"
         return 0
     fi
@@ -282,7 +351,16 @@ process_repo_local_worktrees() {
         local abs_path
         abs_path=$(expand_path "$wt_path")
 
-        if [[ "$abs_path" != *"$CLAUDE_WORKTREE_MARKER"* ]]; then
+        local match=false
+        if [[ "$abs_path" == *"/.claude/worktrees/"* || \
+              "$abs_path" == *"/.ao/data/worktrees/"* || \
+              "$abs_path" == *"/ao/data/worktrees/"* || \
+              "$abs_path" == *"/antigravity/worktrees/"* || \
+              "$(basename "$abs_path")" == wt-* ]]; then
+            match=true
+        fi
+
+        if [[ "$match" == false ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
             return 0
         fi
@@ -307,7 +385,7 @@ process_repo_local_worktrees() {
                 ledger_line "repo-local" "ELIGIBLE" "$abs_path" "" "$extra"
             else
                 ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
-                git -C "$repo_abs" worktree remove --force "$abs_path"
+                git -C "$repo_abs" worktree remove --force --force "$abs_path"
             fi
             TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
             REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
