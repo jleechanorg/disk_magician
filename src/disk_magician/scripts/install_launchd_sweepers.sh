@@ -90,6 +90,15 @@ install_launchdaemon() {
   sudo chown root:wheel "$dst"
   sudo launchctl bootout system "$dst" 2>/dev/null || true
   sudo launchctl bootstrap system "$dst"
+
+  # Automatically configure passwordless sudoers rule for diskutil apfs deleteSnapshot
+  local sudoers_file="/etc/sudoers.d/disk_magician"
+  if [[ ! -f "$sudoers_file" ]]; then
+    local target_user="${SUDO_USER:-$(id -un)}"
+    echo "Creating passwordless sudoers entry for $target_user: $sudoers_file"
+    echo "${target_user} ALL=(ALL) NOPASSWD: /usr/sbin/diskutil apfs deleteSnapshot *" | sudo tee "$sudoers_file" >/dev/null
+    sudo chmod 440 "$sudoers_file"
+  fi
   echo "Successfully installed and bootstrapped root LaunchDaemon $label"
 }
 
