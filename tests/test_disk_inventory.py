@@ -62,15 +62,24 @@ class DiskInventoryTest(unittest.TestCase):
             node = root / "lane-b" / "node_modules"
             venv.mkdir(parents=True)
             node.mkdir(parents=True)
+            ao_root = Path(tmp) / ".ao"
+            ao_root.mkdir()
             (venv / "pyvenv.cfg").write_text("home=/usr/bin\n", encoding="utf-8")
             (node / "package.json").write_text("{}", encoding="utf-8")
-            result = inventory.inventory_paths([root], now_epoch=int(time.time()), open_files=[])
+            (ao_root / "session.json").write_text(
+                json.dumps({"worktree": str(root / "lane-a")}), encoding="utf-8"
+            )
+            result = inventory.inventory_paths(
+                [root], now_epoch=int(time.time()), open_files=[], ao_metadata_roots=[ao_root]
+            )
 
         self.assertGreaterEqual(result["roots"][0]["coverage_pct"], 95)
         entries = result["roots"][0]["entries"]
         self.assertEqual({entry["name"] for entry in entries}, {"lane-a", "lane-b"})
         self.assertTrue(any(a["artifact_type"] == "venv" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
         self.assertTrue(any(a["artifact_type"] == "node_modules" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
+        self.assertTrue(entries[0]["ao_metadata_references"])
+        self.assertTrue(result["ao_attribution_complete"])
         self.assertEqual(result["reclaim_ceiling_bytes"], 0)
 
     def test_simulator_inventory_is_ledger_only_with_supported_commands(self):
