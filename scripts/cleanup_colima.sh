@@ -71,8 +71,12 @@ path_owner_uid() {
 
 prove_colima_docker_backend() {
   local context endpoint
-  context=$(docker context show 2>/dev/null) || return 1
-  endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    endpoint="$DOCKER_HOST"
+  else
+    context=$(docker context show 2>/dev/null) || return 1
+    endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+  fi
   if [[ "$endpoint" != "unix://$COLIMA_DOCKER_SOCKET" ]]; then
     log "Docker endpoint $endpoint does not match the expected Colima socket unix://$COLIMA_DOCKER_SOCKET — skipping."
     return 1
@@ -83,6 +87,32 @@ prove_colima_docker_backend() {
     return 1
   fi
   return 0
+}
+
+select_colima_docker_backend() {
+  local context endpoint
+
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    prove_colima_docker_backend
+    return
+  fi
+
+  context=$(docker context show 2>/dev/null) || context=""
+  endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || endpoint=""
+  if [[ "$endpoint" == "unix://$COLIMA_DOCKER_SOCKET" ]]; then
+    prove_colima_docker_backend
+    return
+  fi
+
+  if [[ ! -e "$COLIMA_DOCKER_SOCKET" || -L "$COLIMA_DOCKER_SOCKET" \
+        || "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" != "$(id -u)" ]]; then
+    log "Docker endpoint ${endpoint:-unknown} is not Colima, and the expected Colima socket is missing, symlinked, or not user-owned — skipping."
+    return 1
+  fi
+
+  export DOCKER_HOST="unix://$COLIMA_DOCKER_SOCKET"
+  log "Selected proven Colima Docker socket because Docker context ${context:-unknown} points to ${endpoint:-unknown}."
+  prove_colima_docker_backend
 }
 
 fstrim_via_active_lima_mux() {
@@ -155,19 +185,19 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 
+if ! select_colima_docker_backend; then
+  exit 0
+fi
+
 if ! docker info >/dev/null 2>&1; then
   log "Docker daemon not reachable — checking guarded Colima recovery."
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry-run: guarded Colima restart recovery was not attempted."
     exit 0
   fi
-  if prove_colima_docker_backend && command -v colima >/dev/null 2>&1; then
+  if command -v colima >/dev/null 2>&1; then
     recover_colima_wedge_once || log "WARNING: initial Docker recovery failed"
   fi
-  exit 0
-fi
-
-if ! prove_colima_docker_backend; then
   exit 0
 fi
 

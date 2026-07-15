@@ -529,6 +529,10 @@ cat > "$COLIMA_FAKE_BIN/docker" <<'EOF'
 printf 'docker %s\n' "$*" >> "$COLIMA_INVOCATIONS"
 case "${1:-} ${2:-}" in
   "info ")
+    if [[ "${FAKE_REQUIRE_EFFECTIVE_HOST:-0}" == "1" \
+          && "${DOCKER_HOST:-}" != "unix://$HOME/.colima/default/docker.sock" ]]; then
+      exit 1
+    fi
     if [[ -n "${FAKE_DOCKER_INFO_FAIL_ONCE_STATE:-}" \
           && ! -e "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE" ]]; then
       touch "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE"
@@ -569,6 +573,22 @@ exit 0
 EOF
 chmod +x "$COLIMA_FAKE_BIN/docker" "$COLIMA_FAKE_BIN/colima" "$COLIMA_FAKE_BIN/ssh"
 
+OUT10_AUTOROUTE="$TMP_ROOT/colima-autoroute.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_AUTOROUTE" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  FAKE_DOCKER_HOST="unix:///var/run/docker.sock" \
+  FAKE_REQUIRE_EFFECTIVE_HOST=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --dry-run; then
+  RC10_AUTOROUTE=0
+else RC10_AUTOROUTE=$?; fi
+assert_rc "cleanup_colima auto-routes to the proven Colima socket" 0 "$RC10_AUTOROUTE"
+assert_contains "cleanup_colima reports safe Colima socket selection" \
+  "Selected proven Colima Docker socket" "$(cat "$OUT10_AUTOROUTE")"
+assert_contains "cleanup_colima reaches Docker inventory through selected socket" \
+  "docker system df" "$(cat "$COLIMA_INVOCATIONS")"
+
 OUT10_MUX="$TMP_ROOT/colima-mux.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_MUX" env -i HOME="$COLIMA_HOME" \
@@ -589,7 +609,7 @@ OUT10_CONTEXT="$TMP_ROOT/colima-context-mismatch.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_CONTEXT" env -i HOME="$COLIMA_HOME" \
   COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
-  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" \
+  DOCKER_HOST="unix:///tmp/not-colima.sock" \
   PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_CONTEXT=0
@@ -647,7 +667,7 @@ OUT10_INITIAL_UNPROVEN="$TMP_ROOT/colima-initial-docker-unproven.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_INITIAL_UNPROVEN" env -i HOME="$COLIMA_HOME" \
   COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
-  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" VACATE_CI_RUNNERS_APPROVED=1 \
+  DOCKER_HOST="unix:///tmp/not-colima.sock" VACATE_CI_RUNNERS_APPROVED=1 \
   PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_INITIAL_UNPROVEN=0
