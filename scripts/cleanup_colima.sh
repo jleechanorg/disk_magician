@@ -69,9 +69,17 @@ path_owner_uid() {
   stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
 }
 
+colima_socket_is_trusted() {
+  [[ -S "$COLIMA_DOCKER_SOCKET" && ! -L "$COLIMA_DOCKER_SOCKET" \
+     && "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" == "$(id -u)" ]]
+}
+
 prove_colima_docker_backend() {
   local context endpoint
-  if [[ -n "${DOCKER_HOST:-}" ]]; then
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    context="$DOCKER_CONTEXT"
+    endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+  elif [[ -n "${DOCKER_HOST:-}" ]]; then
     endpoint="$DOCKER_HOST"
   else
     context=$(docker context show 2>/dev/null) || return 1
@@ -81,9 +89,8 @@ prove_colima_docker_backend() {
     log "Docker endpoint $endpoint does not match the expected Colima socket unix://$COLIMA_DOCKER_SOCKET — skipping."
     return 1
   fi
-  if [[ ! -e "$COLIMA_DOCKER_SOCKET" || -L "$COLIMA_DOCKER_SOCKET" \
-        || "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" != "$(id -u)" ]]; then
-    log "Expected Colima Docker socket is missing, symlinked, or not user-owned — skipping: $COLIMA_DOCKER_SOCKET"
+  if ! colima_socket_is_trusted; then
+    log "Expected Colima Docker socket is missing, not a socket, symlinked, or not user-owned — skipping: $COLIMA_DOCKER_SOCKET"
     return 1
   fi
   return 0
@@ -92,7 +99,7 @@ prove_colima_docker_backend() {
 select_colima_docker_backend() {
   local context endpoint
 
-  if [[ -n "${DOCKER_HOST:-}" ]]; then
+  if [[ -n "${DOCKER_CONTEXT:-}" || -n "${DOCKER_HOST:-}" ]]; then
     prove_colima_docker_backend
     return
   fi
@@ -104,9 +111,8 @@ select_colima_docker_backend() {
     return
   fi
 
-  if [[ ! -e "$COLIMA_DOCKER_SOCKET" || -L "$COLIMA_DOCKER_SOCKET" \
-        || "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" != "$(id -u)" ]]; then
-    log "Docker endpoint ${endpoint:-unknown} is not Colima, and the expected Colima socket is missing, symlinked, or not user-owned — skipping."
+  if ! colima_socket_is_trusted; then
+    log "Docker endpoint ${endpoint:-unknown} is not Colima, and the expected Colima socket is missing, not a socket, symlinked, or not user-owned — skipping."
     return 1
   fi
 
