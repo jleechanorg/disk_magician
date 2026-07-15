@@ -43,6 +43,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local name="$1" needle="$2" haystack="$3"
+  if grep -qF "$needle" <<<"$haystack"; then
+    record_fail "$name" "expected output not to contain: $needle"
+    sed 's/^/        | /' <<<"$haystack"
+  else
+    record_pass "$name"
+  fi
+}
+
 assert_exists() {
   local name="$1" path="$2"
   if [[ -e "$path" ]]; then
@@ -501,6 +511,115 @@ assert_rc "pressure_sweep triggered path exits 0" 0 "$RC9"
 OUT9_CONTENT=$(cat "$OUT9")
 assert_contains "pressure_sweep logs --large" "cleanup_tmp.sh --clean --large" "$OUT9_CONTENT"
 assert_contains "pressure_sweep invokes cleanup_tmp step" "cleanup_tmp.sh" "$OUT9_CONTENT"
+
+echo "Test 10: cleanup_colima trims through the proven active backend without an implicit restart"
+COLIMA_HOME="$TMP_ROOT/home-colima"
+COLIMA_FAKE_BIN="$TMP_ROOT/bin-colima"
+COLIMA_INVOCATIONS="$TMP_ROOT/colima-invocations.log"
+COLIMA_SSH_DIR="$COLIMA_HOME/.colima/_lima/colima"
+mkdir -p "$COLIMA_FAKE_BIN" "$COLIMA_HOME/.colima/default" "$COLIMA_SSH_DIR"
+touch "$COLIMA_HOME/.colima/default/docker.sock" "$COLIMA_SSH_DIR/ssh.sock"
+cat > "$COLIMA_SSH_DIR/ssh.config" <<EOF
+Host lima-colima
+  ControlPath "$COLIMA_SSH_DIR/ssh.sock"
+EOF
+
+cat > "$COLIMA_FAKE_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$COLIMA_INVOCATIONS"
+case "${1:-} ${2:-}" in
+  "info ") exit "${FAKE_DOCKER_INFO_RC:-0}" ;;
+  "context show") printf 'colima\n' ;;
+  "context inspect") printf '%s\n' "${FAKE_DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}" ;;
+  "system df") printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n' ;;
+  "ps -q")
+    [[ "${FAKE_DOCKER_RUNNING:-1}" == "1" ]] && printf 'running-container\n'
+    ;;
+esac
+exit 0
+EOF
+cat > "$COLIMA_FAKE_BIN/colima" <<'EOF'
+#!/usr/bin/env bash
+printf 'colima %s\n' "$*" >> "$COLIMA_INVOCATIONS"
+case "${1:-}" in
+  status) exit 1 ;;
+  ssh) exit 1 ;;
+  stop|start) exit 0 ;;
+esac
+exit 0
+EOF
+cat > "$COLIMA_FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >> "$COLIMA_INVOCATIONS"
+if [[ "$*" == *" -O check "* ]]; then
+  exit "${FAKE_SSH_CHECK_RC:-0}"
+fi
+if [[ "$*" == *"sudo fstrim -av"* ]]; then
+  exit "${FAKE_SSH_TRIM_RC:-0}"
+fi
+exit 0
+EOF
+chmod +x "$COLIMA_FAKE_BIN/docker" "$COLIMA_FAKE_BIN/colima" "$COLIMA_FAKE_BIN/ssh"
+
+OUT10_MUX="$TMP_ROOT/colima-mux.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_MUX" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_MUX=0
+else RC10_MUX=$?; fi
+assert_rc "cleanup_colima active-backend fallback exits 0" 0 "$RC10_MUX"
+assert_contains "cleanup_colima uses the proven Lima control master" \
+  "fstrim via active Lima SSH control master" "$(cat "$OUT10_MUX")"
+assert_contains "cleanup_colima invokes fstrim through direct SSH" \
+  "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+assert_not_contains "cleanup_colima does not stop an active backend" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_CONTEXT="$TMP_ROOT/colima-context-mismatch.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_CONTEXT" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_CONTEXT=0
+else RC10_CONTEXT=$?; fi
+assert_rc "cleanup_colima context mismatch fails closed" 0 "$RC10_CONTEXT"
+assert_contains "cleanup_colima reports unproven Docker backend" \
+  "does not match the expected Colima socket" "$(cat "$OUT10_CONTEXT")"
+assert_not_contains "cleanup_colima does not trim through an unproven backend" \
+  "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_BLOCKED="$TMP_ROOT/colima-restart-blocked.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_BLOCKED" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_SSH_CHECK_RC=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_BLOCKED=0
+else RC10_BLOCKED=$?; fi
+assert_rc "cleanup_colima blocked recovery exits 0" 0 "$RC10_BLOCKED"
+assert_contains "cleanup_colima requires the exact restart approval" \
+  "VACATE_CI_RUNNERS_APPROVED=1" "$(cat "$OUT10_BLOCKED")"
+assert_not_contains "cleanup_colima never restarts without approval" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_RUNNING="$TMP_ROOT/colima-restart-running.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_RUNNING" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_SSH_CHECK_RC=1 \
+  VACATE_CI_RUNNERS_APPROVED=1 FAKE_DOCKER_RUNNING=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_RUNNING=0
+else RC10_RUNNING=$?; fi
+assert_rc "cleanup_colima approved recovery still preserves running containers" 0 "$RC10_RUNNING"
+assert_contains "cleanup_colima reports running-container restart refusal" \
+  "running containers remain" "$(cat "$OUT10_RUNNING")"
+assert_not_contains "cleanup_colima does not stop with running containers" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
