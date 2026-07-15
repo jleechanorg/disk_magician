@@ -48,3 +48,69 @@ Unit-only, mock-only, artifact-existence-only, or implementer-self-report eviden
 ## Safety boundary
 
 `/e` authorizes routine implementation and reversible verification. It does not imply exact destructive gates such as `WORKTREE_APPROVED=1` or `CODE_SIGN_CLONES_APPROVED=1`, does not authorize direct deletion of protected session/state paths, and does not authorize stopping active CI without first proving it is drained.
+
+## Final root-cause result (2026-07-15)
+
+The rapid-growth mechanism is the `ezgha` one-job runner lifecycle inside
+Colima. Runner checkouts, dependencies, and build products are written into
+container-local overlay layers. Individual live writable layers reached 3.15
+GB and concurrent writable layers reached 5.98 GB. Docker removes the logical
+layers when each job exits, but Colima's sparse VM allocation is not returned
+to macOS until guest `fstrim` or a VM restart.
+
+The observer captured the mechanism directly:
+
+- `01:09:45Z`: Colima 6.00 GiB, host free 52.95 GiB, zero runners.
+- `01:17:45Z`: Colima 19.81 GiB, host free 42.78 GiB, five runners.
+- Eight-minute change: Colima +13.81 GiB; host free -10.18 GiB.
+
+The fast-recovery mechanism was also captured. Between `01:08:45Z` and
+`01:09:45Z`, Colima allocation fell 20.83 GiB while host free rose 20.30 GiB.
+The VM PID changed, `ezgha` disappeared and reloaded, and Qdrant restarted.
+The `ezgha` backend-recovery path invokes `colima start` after Docker/backend
+loss; the VM restart compacted the sparse allocation. This recovery is not
+service-neutral: Qdrant stop/start events were observed.
+
+Swap is a secondary current pressure source. The deployed v0.2.12 observer
+recorded 7.24 GiB used swap after the recovery event.
+
+## Top-level allocation ledger
+
+The `2026-07-15T00:44:21Z` deduplicated snapshot measured 605.4 GiB of 846
+GiB used (71.6%) and retained 240.6 GiB as explicit unmeasured residual.
+
+| Path | Allocated GiB |
+|---|---:|
+| `~/projects` | 143.7 |
+| `~/projects_other` | 36.1 |
+| `/Library` | 35.8 |
+| `~/Library/Messages` | 28.7 |
+| `~/projects_reference` | 28.3 |
+| `~/.codex` | 27.9 |
+| `~/.colima` | 27.8 at snapshot; 13.9 after recovery |
+| `~/.gemini` | 25.3 |
+| `~/Library/Application Support` | 24.5 |
+| `~/project_*` siblings | 23.1 |
+| `/Applications` | 22.6 |
+| `~/.worktrees` | 21.0 |
+| `/opt` | 16.1 |
+| `~/.hermes` | 16.0 |
+| `/private/var` | 13.5 |
+| `~/Pictures` | 13.3 |
+| `~/Library/Caches` | 10.5 |
+
+Inside `~/projects`, 179 Git worktrees occupied 62.20 GiB. Detected duplicated
+artifacts included 47 virtual environments (25.34 GiB), 186 `node_modules`
+trees (8.92 GiB), and logs (1.85 GiB). The largest child was
+`~/projects/worldarchitect.ai` at 50.52 GiB.
+
+## Exit ledger
+
+- Closed with operational proof: `jleechan-igr8`; duplicate/superseded
+  `jleechan-3umv` and `jleechan-vrp3`.
+- Implemented and deployed, but approval/evidence blocked: `jleechan-tbe3`,
+  `jleechan-cga6`, `jleechan-k8gc`, `jleechan-mf2b`, and `jleechan-ia86`.
+- Design/event/tooling blocked with explicit evidence: `jleechan-etjw`,
+  `jleechan-w5is`, `jleechan-cxg7`, and `jleechan-1m1d`.
+- Cross-repo token refresh `ez-gh-actions-hcu` closed after two successful
+  scheduled runs and exact-token HTTP 200.
