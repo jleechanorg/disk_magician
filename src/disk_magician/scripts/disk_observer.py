@@ -9,7 +9,6 @@ deliberately so the JSONL log cannot capture command-line credentials.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import re
@@ -90,17 +89,36 @@ def _du_kb(path: Path, run: Runner) -> Optional[int]:
     return _int(fields[0]) if fields else None
 
 
+def _colima_datadisk_paths(root: Path, max_depth: int = 6, max_entries: int = 4096) -> tuple[list, bool]:
+    paths = []
+    visited = 0
+    if not root.is_dir():
+        return paths, True
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(directory)
+        try:
+            depth = len(base.relative_to(root).parts)
+        except ValueError:
+            continue
+        dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
+        if depth >= max_depth:
+            dirnames[:] = []
+        for name in filenames:
+            visited += 1
+            if visited > max_entries:
+                return sorted(paths), False
+            path = base / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            if name in {"disk", "diffdisk"} or base.name == "disks":
+                paths.append(path)
+    return sorted(set(paths)), True
+
+
 def collect_colima(home: Path, run: Runner) -> dict:
     root = home / ".colima"
     root_kb = _du_kb(root, run) if root.exists() else 0
-    disk_paths = sorted(
-        {
-            Path(path)
-            for pattern in ("*/disk", "*/diffdisk", "*/disks/*", "*/ha.sock")
-            for path in glob.glob(str(root / pattern))
-            if Path(path).is_file()
-        }
-    )
+    disk_paths, scan_complete = _colima_datadisk_paths(root)
     disks = []
     for path in disk_paths:
         try:
@@ -114,7 +132,12 @@ def collect_colima(home: Path, run: Runner) -> dict:
                 "apparent_bytes": apparent,
             }
         )
-    return {"root": str(root), "root_allocated_kb": root_kb, "datadisks": disks}
+    return {
+        "root": str(root),
+        "root_allocated_kb": root_kb,
+        "datadisks": disks,
+        "datadisk_scan_complete": scan_complete,
+    }
 
 
 def collect_docker(events_since_epoch: int, now_epoch: int, run: Runner) -> dict:
@@ -303,7 +326,19 @@ def collect_sample(
     }
 
 
-def rotate_if_needed(path: Path, max_bytes: int, keep: int) -> None:
+def rotate_if_needed(
+    path: Path, max_bytes: int, keep: int,
+    max_age_seconds: int = 7 * 86400, now_epoch: Optional[float] = None,
+) -> None:
+    now_epoch = time.time() if now_epoch is None else now_epoch
+    for index in range(1, keep + 1):
+        archive = Path(f"{path}.{index}")
+        try:
+            expired = now_epoch - archive.stat().st_mtime > max_age_seconds
+        except OSError:
+            continue
+        if expired:
+            archive.unlink()
     if not path.exists() or path.stat().st_size <= max_bytes:
         return
     for index in range(keep, 0, -1):
@@ -316,9 +351,12 @@ def rotate_if_needed(path: Path, max_bytes: int, keep: int) -> None:
         source.replace(destination)
 
 
-def append_sample(path: Path, sample: dict, max_bytes: int, keep: int) -> None:
+def append_sample(
+    path: Path, sample: dict, max_bytes: int, keep: int,
+    max_age_seconds: int = 7 * 86400,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_if_needed(path, max_bytes, keep)
+    rotate_if_needed(path, max_bytes, keep, max_age_seconds=max_age_seconds)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(sample, sort_keys=True, separators=(",", ":")) + "\n")
 
@@ -381,6 +419,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         child.add_argument("--interval", type=int, default=60)
         child.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
         child.add_argument("--keep", type=int, default=4)
+        child.add_argument("--max-age-days", type=int, default=7)
     report = subparsers.add_parser("report")
     report.add_argument("--input", type=Path, default=Path.home() / ".disk_magician_state" / "disk_observer.jsonl")
     report.add_argument("--limit", type=int, default=10)
@@ -397,14 +436,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.interval < 30 or args.interval > 60:
         print("--interval must be between 30 and 60 seconds", file=sys.stderr)
         return 2
-    if args.max_bytes < 1024 or args.keep < 1:
-        print("--max-bytes must be >=1024 and --keep must be >=1", file=sys.stderr)
+    if args.max_bytes < 1024 or args.keep < 1 or args.max_age_days < 1:
+        print("--max-bytes must be >=1024; --keep and --max-age-days must be >=1", file=sys.stderr)
         return 2
     previous_epoch = int(time.time()) - args.interval
     while True:
         now_epoch = int(time.time())
         sample = collect_sample(Path.home(), now_epoch, previous_epoch)
-        append_sample(args.output, sample, args.max_bytes, args.keep)
+        append_sample(
+            args.output, sample, args.max_bytes, args.keep,
+            max_age_seconds=args.max_age_days * 86400,
+        )
         print(json.dumps({"timestamp": sample["timestamp"], "output": str(args.output)}), flush=True)
         if args.command == "once":
             return 0

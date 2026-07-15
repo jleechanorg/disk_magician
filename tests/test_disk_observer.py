@@ -3,7 +3,9 @@
 
 import importlib.util
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +70,9 @@ class DiskObserverTest(unittest.TestCase):
             home = Path(tmp)
             (home / ".colima" / "default").mkdir(parents=True)
             (home / ".colima" / "default" / "disk").write_bytes(b"x")
+            deep_disk = home / ".colima" / "_lima" / "colima" / "diffdisk"
+            deep_disk.parent.mkdir(parents=True)
+            deep_disk.write_bytes(b"y")
             sample = observer.collect_sample(
                 home=home,
                 now_epoch=1060,
@@ -78,6 +83,7 @@ class DiskObserverTest(unittest.TestCase):
 
         self.assertEqual(sample["host_disk"]["available_kb"], 400)
         self.assertEqual(sample["colima"]["root_allocated_kb"], 25)
+        self.assertIn(str(deep_disk), {item["path"] for item in sample["colima"]["datadisks"]})
         self.assertEqual(sample["docker"]["containers"][0]["writable_bytes"], 4096)
         self.assertEqual(sample["docker"]["events"][0]["action"], "start")
         self.assertEqual(sample["launchd"][0]["state"], "running")
@@ -96,6 +102,13 @@ class DiskObserverTest(unittest.TestCase):
             observer.rotate_if_needed(log, max_bytes=100, keep=2)
             self.assertFalse(log.exists())
             self.assertTrue(Path(str(log) + ".1").exists())
+
+            old_rotation = Path(str(log) + ".2")
+            old_rotation.write_text("old", encoding="utf-8")
+            old = time.time() - 8 * 86400
+            os.utime(old_rotation, (old, old))
+            observer.rotate_if_needed(log, max_bytes=100, keep=2)
+            self.assertFalse(old_rotation.exists())
 
         records = [
             {
