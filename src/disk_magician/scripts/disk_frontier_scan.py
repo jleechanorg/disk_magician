@@ -184,9 +184,15 @@ def list_children(path):
                 except OSError:
                     continue
                 children.append((entry.path, is_symlink))
-    except (PermissionError, FileNotFoundError, NotADirectoryError, OSError):
-        return None
-    return children
+    except PermissionError:
+        return None, "permission_denied_or_tcc"
+    except FileNotFoundError:
+        return None, "path_disappeared"
+    except NotADirectoryError:
+        return None, "not_a_directory"
+    except OSError as exc:
+        return None, f"enumeration_errno_{exc.errno}"
+    return children, None
 
 
 def get_disk_stats(root):
@@ -438,10 +444,14 @@ class FrontierScanner:
             )
             return
 
-        children = list_children(path)
+        children, enumeration_error = list_children(path)
         if children is None:
             self.frontier_unfinished.append(
-                {"path": path, "depth": depth, "reason": "unreadable_after_timeout"}
+                {
+                    "path": path,
+                    "depth": depth,
+                    "reason": enumeration_error or "unreadable_after_timeout",
+                }
             )
             return
         if not children:
@@ -459,9 +469,12 @@ class FrontierScanner:
         except OSError as exc:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
-        level1 = list_children(self.root)
+        level1, root_enumeration_error = list_children(self.root)
         if level1 is None:
-            return {"error": f"could not enumerate root: {self.root}"}
+            return {
+                "error": f"could not enumerate root: {self.root}",
+                "reason": root_enumeration_error,
+            }
         self.level1_paths = [path for path, _ in level1]
 
         frontier = [(p, 1, is_sym) for p, is_sym in level1]

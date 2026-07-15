@@ -471,7 +471,7 @@ if [[ -d "$containers_parent" ]]; then
     safe=$(printf '%s' "$base" | tr -c 'A-Za-z0-9' '_' | head -c 40)
     key="lc_${safe}"
     add_entry "$key" "$kb" "$name"
-done <<< "$containers_listing"
+  done <<< "$containers_listing"
 fi
 
 # ────────── LIBRARY FRONTIER (advisory, bounded, no double-count) ──────────

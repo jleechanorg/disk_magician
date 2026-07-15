@@ -128,6 +128,19 @@ echo "$TRIE_TEST_OUT" | grep -q "^child=True$" && ok "trie catches a path nested
 echo "$TRIE_TEST_OUT" | grep -q "^unrelated=True$" && ok "trie does NOT false-positive on an unrelated path" \
   || bad "trie false-positived on an unrelated path: $TRIE_TEST_OUT"
 
+PERMISSION_TEST_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+from unittest import mock
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+with mock.patch.object(m.os, "scandir", side_effect=PermissionError(1, "Operation not permitted")):
+    print(m.list_children("/protected") == (None, "permission_denied_or_tcc"))
+PY
+)
+[[ "$PERMISSION_TEST_OUT" == "True" ]] && ok "child enumeration identifies permission/TCC denial explicitly" \
+  || bad "child enumeration hid permission/TCC denial: $PERMISSION_TEST_OUT"
+
 # ─────────────────────────────────────────────────────────────
 section "4. Timeout-tier escalation then subdivide-on-exhaustion (not open-ended growth)"
 FAKEBIN="$WORK/fakebin"
