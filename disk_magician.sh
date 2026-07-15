@@ -161,18 +161,28 @@ acquire_snapshot_lock() {
 }
 
 find_gitleaks() {
-  if [[ -n "${DISK_MAGICIAN_GITLEAKS_BIN:-}" && -x "${DISK_MAGICIAN_GITLEAKS_BIN}" ]]; then
-    printf '%s\n' "${DISK_MAGICIAN_GITLEAKS_BIN}"
-    return 0
+  local candidate
+  if [[ -n "${DISK_MAGICIAN_GITLEAKS_BIN:-}" ]]; then
+    if [[ -x "${DISK_MAGICIAN_GITLEAKS_BIN}" ]]; then
+      printf '%s\n' "${DISK_MAGICIAN_GITLEAKS_BIN}"
+      return 0
+    fi
+    return 1
   fi
   if command -v gitleaks >/dev/null 2>&1; then
     command -v gitleaks
     return 0
   fi
-  if [[ -x "$HOME/.local/bin/gitleaks" ]]; then
-    printf '%s\n' "$HOME/.local/bin/gitleaks"
-    return 0
-  fi
+  for candidate in \
+    "${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/gitleaks}" \
+    /opt/homebrew/bin/gitleaks \
+    /usr/local/bin/gitleaks \
+    "$HOME/.local/bin/gitleaks"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   return 1
 }
 
