@@ -331,7 +331,12 @@ def _github_open_pulls(remote: str, timeout: int) -> dict:
         return {"complete": False, "error": "invalid_shape", "pull_requests": []}
     if len(pulls) >= 100:
         return {"complete": False, "error": "pagination_limit", "pull_requests": []}
-    return {"complete": True, "error": None, "pull_requests": pulls}
+    return {
+        "complete": True,
+        "error": None,
+        "repository": f"{owner}/{repo}",
+        "pull_requests": pulls,
+    }
 
 
 def _github_pr_ownership(remote: str, branch: str, timeout: int = 4) -> dict:
@@ -340,10 +345,16 @@ def _github_pr_ownership(remote: str, branch: str, timeout: int = 4) -> dict:
     result = _github_open_pulls(remote, timeout)
     if not result["complete"]:
         return result
+    expected_head_repo = result["repository"]
     matching = []
     for raw in result["pull_requests"]:
         head = raw.get("head") or {}
         if head.get("ref") != branch:
+            continue
+        head_repo = (head.get("repo") or {}).get("full_name")
+        if not head_repo:
+            return {"complete": False, "error": "missing_head_repo", "pull_requests": []}
+        if head_repo.casefold() != expected_head_repo.casefold():
             continue
         base = raw.get("base") or {}
         matching.append(
@@ -353,6 +364,7 @@ def _github_pr_ownership(remote: str, branch: str, timeout: int = 4) -> dict:
                 "state": raw.get("state"),
                 "draft": bool(raw.get("draft", False)),
                 "head_ref": head.get("ref"),
+                "head_repo": head_repo,
                 "base_ref": base.get("ref"),
             }
         )
