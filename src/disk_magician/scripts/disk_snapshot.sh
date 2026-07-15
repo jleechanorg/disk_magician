@@ -10,6 +10,8 @@ DRY_RUN=false
 DISCOVER=false
 DISCOVER_JSON=false
 DU_TIMEOUT=30
+SNAPSHOT_BUDGET_SECONDS="${DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS:-1500}"
+MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-20}"
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
 # timeout | empty) — never a silent zero.
@@ -69,24 +71,26 @@ if command -v dua &>/dev/null; then
   DUA_CMD="dua"
 fi
 
-# dua-cli is parallel-by-default and dramatically faster than single-threaded
-# du on large/many-file trees, so it's used as a fallback (not primary) when
-# du times out -- primary stays du for behavioral parity with existing
-# snapshots. Falling back rather than switching outright avoids silently
-# changing every historical size number in disk_snapshot.json.
+remaining_measurement_seconds() {
+  local remaining=$(( MEASUREMENT_DEADLINE_EPOCH - $(date +%s) ))
+  (( remaining > 0 )) && echo "$remaining" || echo 0
+}
+
+# dua reports allocated bytes by default (the same quantity as du -sk) and is
+# parallel-by-default. Its ANSI reset can leave a trailing blank line, so take
+# the last numeric row rather than the last physical line.
 dua_size_kb() {
   local path="$1"
   local to="$2"
-  [[ -n "$DUA_CMD" ]] || { echo ""; return; }
-  local bytes
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    bytes=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
-      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
-  else
-    bytes=$("$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
-      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
+  [[ -n "$DUA_CMD" && -n "$TIMEOUT_CMD" && "$to" -gt 0 ]] || { echo ""; return; }
+  local output bytes
+  if ! output=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null); then
+    echo ""
+    return
   fi
-  [[ -n "$bytes" && "$bytes" -gt 0 ]] && echo $(( bytes / 1024 )) || echo ""
+  bytes=$(printf '%s\n' "$output" | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | awk '$1 ~ /^[0-9]+$/ { value=$1 } END { if (value != "") print value }')
+  [[ "$bytes" =~ ^[0-9]+$ ]] && echo $(( (bytes + 1023) / 1024 )) || echo ""
 }
 
 dir_size_kb() {
@@ -102,23 +106,29 @@ dir_size_kb() {
     return
   fi
 
-  local result rc
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    result=$("$TIMEOUT_CMD" "$to" du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
-  else
-    result=$(du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
+  local remaining path_budget path_deadline result fallback_budget
+  remaining=$(remaining_measurement_seconds)
+  (( remaining > 0 )) || { echo ""; return; }
+  [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
+  path_budget="$to"
+  (( path_budget > MEASURE_PATH_MAX_SECONDS )) && path_budget="$MEASURE_PATH_MAX_SECONDS"
+  (( path_budget > remaining )) && path_budget="$remaining"
+  path_deadline=$(( $(date +%s) + path_budget ))
+
+  result=$(dua_size_kb "$path" "$path_budget")
+
+  if [[ -z "$result" ]]; then
+    fallback_budget=$(( path_deadline - $(date +%s) ))
+    remaining=$(remaining_measurement_seconds)
+    (( fallback_budget > remaining )) && fallback_budget="$remaining"
+    if [[ -n "$TIMEOUT_CMD" && "$fallback_budget" -gt 0 ]]; then
+      result=$("$TIMEOUT_CMD" "$fallback_budget" du -sk "$path" 2>/dev/null \
+        | awk '{print $1+0}' || true)
+    fi
   fi
 
   if [[ -z "$result" ]]; then
-    # du timed out or errored -- retry once with dua (parallel scanner) using
-    # the same time budget before surfacing as null. This is what fixes the
-    # keys that were intermittently going null under disk pressure
-    # (codex_sessions, gemini_root, hermes, library_caches, projects).
-    result=$(dua_size_kb "$path" "$to")
-  fi
-
-  if [[ -z "$result" ]]; then
-    # Both du and dua failed/timed out -> surface as null (empty string)
+    # Both bounded attempts failed/timed out -> surface as null (empty string).
     echo ""
     return
   fi
@@ -135,12 +145,9 @@ glob_size_kb() {
   for d in $pattern; do
     [[ -e "$d" ]] || continue
     local s
-    if [[ -n "$TIMEOUT_CMD" ]]; then
-      s=$("$TIMEOUT_CMD" "$DU_TIMEOUT" du -sk "$d" 2>/dev/null | awk '{print $1+0}' || true)
-    else
-      s=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || true)
-    fi
-    total=$(( total + ${s:-0} ))
+    s=$(dir_size_kb "$d" "$DU_TIMEOUT")
+    [[ -n "$s" ]] || { echo ""; return; }
+    total=$(( total + s ))
   done
   echo "$total"
 }
@@ -358,6 +365,16 @@ fi
 
 # ────────── SNAPSHOT MODE ──────────
 read -r disk_total_kb disk_used_kb disk_free_kb disk_pct <<< "$(get_disk_stats)"
+if [[ ! "$SNAPSHOT_BUDGET_SECONDS" =~ ^[0-9]+$ || "$SNAPSHOT_BUDGET_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+MEASUREMENT_STARTED_EPOCH=$(date +%s)
+MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECONDS ))
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
 disk_used_gb=$(awk "BEGIN{printf \"%.0f\", $disk_used_kb / 1024 / 1024}")
 disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
@@ -433,12 +450,13 @@ PY
 containers_parent="$HOME/Library/Containers"
 containers_listing=""
 if [[ -d "$containers_parent" ]]; then
-  # Build a sorted list of (size_kb, name). 60s budget so this never
-  # stalls the snapshot.
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    containers_listing=$("$TIMEOUT_CMD" 180 du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
-  else
-    containers_listing=$(du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
+  # Build a sorted list of (size_kb, name) inside the same remaining global
+  # budget and per-path cap as the allowlist measurements.
+  containers_budget=$(remaining_measurement_seconds)
+  (( containers_budget > MEASURE_PATH_MAX_SECONDS )) && containers_budget="$MEASURE_PATH_MAX_SECONDS"
+  if [[ -n "$TIMEOUT_CMD" && "$containers_budget" -gt 0 ]]; then
+    containers_listing=$("$TIMEOUT_CMD" "$containers_budget" du -sk "$containers_parent"/* 2>/dev/null \
+      | sort -rn | head -20 || true)
   fi
   while IFS=$'\t' read -r kb name; do
     [[ -z "$kb" || -z "$name" ]] && continue
@@ -448,6 +466,11 @@ if [[ -d "$containers_parent" ]]; then
     key="lc_${safe}"
     add_entry "$key" "$kb" "$name"
   done <<< "$containers_listing"
+fi
+MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
+MEASUREMENT_BUDGET_EXHAUSTED=false
+if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
+  MEASUREMENT_BUDGET_EXHAUSTED=true
 fi
 
 # ────────── DEDUP TRIE (schema_version 2 — fixes inflated coverage_pct) ──────────
@@ -747,6 +770,10 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_STATUS="$measurement_status" \
   SNAP_MEASURED_OK="$MEASURED_OK" \
   SNAP_MEASURED_TOTAL="$MEASURED_TOTAL" \
+  SNAP_MEASUREMENT_BUDGET_SECONDS="$SNAPSHOT_BUDGET_SECONDS" \
+  SNAP_MEASUREMENT_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS" \
+  SNAP_MEASUREMENT_ELAPSED_SECONDS="$MEASUREMENT_ELAPSED_SECONDS" \
+  SNAP_MEASUREMENT_BUDGET_EXHAUSTED="$MEASUREMENT_BUDGET_EXHAUSTED" \
   SNAP_PREV_TS="$prev_snapshot_ts" \
   SNAP_CONTAINERS_CAPTURED="$containers_captured" \
   SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
@@ -782,6 +809,10 @@ try:
             "measurement_status": os.environ.get("SNAP_STATUS"),
             "measured_paths_ok": int(os.environ.get("SNAP_MEASURED_OK") or 0),
             "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
+            "measurement_budget_seconds": int(os.environ.get("SNAP_MEASUREMENT_BUDGET_SECONDS") or 0),
+            "measurement_path_max_seconds": int(os.environ.get("SNAP_MEASUREMENT_PATH_MAX_SECONDS") or 0),
+            "measurement_elapsed_seconds": int(os.environ.get("SNAP_MEASUREMENT_ELAPSED_SECONDS") or 0),
+            "measurement_budget_exhausted": os.environ.get("SNAP_MEASUREMENT_BUDGET_EXHAUSTED") == "true",
         }
     }
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
