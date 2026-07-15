@@ -319,8 +319,26 @@ assert_contains "lsof failure is reported" "Skipping OpenCode dylibs: lsof faile
 echo "Test 8: cleanup_code_sign_clones.sh requires approval and respects dry-run"
 CSC_PARENT="$TMP_ROOT/csc-parent"
 CSC_X="$CSC_PARENT/X"
-mkdir -p "$CSC_PARENT/T" "$CSC_X/at.studio.AsideBrowser.code_sign_clone" "$CSC_X/com.tiny.code_sign_clone"
+CSC_ACTIVE="$CSC_X/at.studio.Active App.code_sign_clone"
+CSC_FOREIGN="$CSC_X/com.example.ForeignOwner.code_sign_clone"
+CSC_RACE="$CSC_X/com.example.Race.code_sign_clone"
+CSC_SYMLINK_TARGET="$TMP_ROOT/protected-clone-target"
+CSC_SYMLINK="$CSC_X/com.example.Symlink.code_sign_clone"
+mkdir -p "$CSC_PARENT/T" \
+  "$CSC_X/at.studio.AsideBrowser.code_sign_clone" \
+  "$CSC_ACTIVE" "$CSC_FOREIGN" "$CSC_RACE" \
+  "$CSC_X/com.tiny.code_sign_clone" "$CSC_SYMLINK_TARGET"
+ln -s "$CSC_SYMLINK_TARGET" "$CSC_SYMLINK"
+CSC_X=$(cd "$CSC_X" && pwd -P)
+CSC_ACTIVE="$CSC_X/at.studio.Active App.code_sign_clone"
+CSC_FOREIGN="$CSC_X/com.example.ForeignOwner.code_sign_clone"
+CSC_RACE="$CSC_X/com.example.Race.code_sign_clone"
+CSC_SYMLINK="$CSC_X/com.example.Symlink.code_sign_clone"
 head -c 200000 /dev/zero > "$CSC_X/at.studio.AsideBrowser.code_sign_clone/blob"
+head -c 200000 /dev/zero > "$CSC_ACTIVE/blob"
+head -c 200000 /dev/zero > "$CSC_FOREIGN/blob"
+head -c 200000 /dev/zero > "$CSC_RACE/blob"
+printf 'protected' > "$CSC_SYMLINK_TARGET/blob"
 printf 'x' > "$CSC_X/com.tiny.code_sign_clone/x"
 FAKE_CSC_TMP="$CSC_PARENT/T"
 FAKE_BIN8="$TMP_ROOT/bin-csc"
@@ -340,9 +358,37 @@ if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
   echo "simulated lsof failure" >&2
   exit 2
 fi
+target="${!#}"
+if [[ -n "${FAKE_LSOF_ACTIVE:-}" && "$target" == "$FAKE_LSOF_ACTIVE" ]]; then
+  printf 'p4242\ncAsideBrowser\nn%s/blob\n' "$target"
+  exit 0
+fi
+if [[ -n "${FAKE_LSOF_RACE_TARGET:-}" && "$target" == "$FAKE_LSOF_RACE_TARGET" ]]; then
+  count=0
+  [[ -f "$FAKE_LSOF_STATE" ]] && count=$(cat "$FAKE_LSOF_STATE")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FAKE_LSOF_STATE"
+  if [[ "$count" -eq 2 ]]; then
+    rm -rf "$target"
+    mkdir -p "$target"
+    printf 'replacement' > "$target/replacement"
+  fi
+fi
 exit 1
 EOF
-chmod +x "$FAKE_BIN8/lsof"
+cat > "$FAKE_BIN8/stat" <<'EOF'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ -n "${FAKE_FOREIGN_OWNER:-}" && "$target" == "$FAKE_FOREIGN_OWNER" ]]; then
+  printf '1:2:0\n'
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+EOF
+chmod +x "$FAKE_BIN8/lsof" "$FAKE_BIN8/stat"
+FAKE_BIN8_NO_LSOF="$TMP_ROOT/bin-csc-no-lsof"
+mkdir -p "$FAKE_BIN8_NO_LSOF"
+cp "$FAKE_BIN8/getconf" "$FAKE_BIN8/stat" "$FAKE_BIN8_NO_LSOF/"
 
 OUT8_REFUSE="$TMP_ROOT/csc-refuse.out"
 if run_capture "$OUT8_REFUSE" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
@@ -360,6 +406,45 @@ assert_rc "code_sign_clone dry-run exits 0" 0 "$RC8_DRY"
 assert_contains "code_sign_clone dry-run reports large clone" "AsideBrowser.code_sign_clone" "$(cat "$OUT8_DRY")"
 assert_exists "code_sign_clone dry-run does not delete" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
+OUT8_ACTIVE="$TMP_ROOT/csc-active.out"
+if run_capture "$OUT8_ACTIVE" env -i HOME="$TMP_ROOT/home-csc" \
+  FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_LSOF_ACTIVE="$CSC_ACTIVE" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+  RC8_ACTIVE=0
+else RC8_ACTIVE=$?; fi
+assert_rc "code_sign_clone dry-run classifies active clone" 0 "$RC8_ACTIVE"
+assert_contains "active code_sign_clone is reported as preserved" \
+  "ACTIVE — preserving: $CSC_ACTIVE" "$(cat "$OUT8_ACTIVE")"
+assert_contains "active code_sign_clone reports owner process" \
+  "pid=4242 command=AsideBrowser" "$(cat "$OUT8_ACTIVE")"
+assert_exists "active code_sign_clone with spaces is preserved" "$CSC_ACTIVE"
+
+OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
+if run_capture "$OUT8_NO_LSOF" env -i HOME="$TMP_ROOT/home-csc" \
+  FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 \
+  PATH="$FAKE_BIN8_NO_LSOF:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+  RC8_NO_LSOF=0
+else RC8_NO_LSOF=$?; fi
+assert_rc "code_sign_clone dry-run fails closed without lsof" 0 "$RC8_NO_LSOF"
+assert_contains "missing lsof is reported as unknown, not removable" \
+  "lsof unavailable — preserving all candidates" "$(cat "$OUT8_NO_LSOF")"
+assert_exists "clone is preserved without lsof" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+
+OUT8_FOREIGN="$TMP_ROOT/csc-foreign-owner.out"
+if run_capture "$OUT8_FOREIGN" env -i HOME="$TMP_ROOT/home-csc" \
+  FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+  RC8_FOREIGN=0
+else RC8_FOREIGN=$?; fi
+assert_rc "code_sign_clone dry-run rejects foreign-owned candidate" 0 "$RC8_FOREIGN"
+assert_contains "foreign-owned candidate is reported unsafe" \
+  "Unsafe candidate ownership or identity changed — preserving: $CSC_FOREIGN" "$(cat "$OUT8_FOREIGN")"
+assert_exists "foreign-owned candidate is preserved" "$CSC_FOREIGN"
+assert_exists "symlinked clone target is preserved" "$CSC_SYMLINK_TARGET/blob"
+
 OUT8_LSOF_FAIL="$TMP_ROOT/csc-lsof-fail.out"
 if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-csc" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:/usr/bin:/bin" \
@@ -370,14 +455,33 @@ assert_rc "code_sign_clone clean skips when lsof fails" 0 "$RC8_LSOF_FAIL"
 assert_contains "code_sign_clone lsof failure is reported" "Skipping code_sign_clones: lsof failed" "$(cat "$OUT8_LSOF_FAIL")"
 assert_exists "code_sign_clone preserved when lsof fails" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
+OUT8_RACE="$TMP_ROOT/csc-race.out"
+if run_capture "$OUT8_RACE" env -i HOME="$TMP_ROOT/home-csc" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
+  FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
+  FAKE_LSOF_RACE_TARGET="$CSC_RACE" FAKE_LSOF_STATE="$TMP_ROOT/csc-lsof-count" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_RACE=0
+else RC8_RACE=$?; fi
+assert_rc "code_sign_clone clean detects replacement race" 0 "$RC8_RACE"
+assert_contains "replacement candidate is reported and preserved" \
+  "Candidate changed after lsof recheck — preserving: $CSC_RACE" "$(cat "$OUT8_RACE")"
+assert_exists "replacement clone is preserved" "$CSC_RACE/replacement"
+
 OUT8_CLEAN="$TMP_ROOT/csc-clean.out"
 if run_capture "$OUT8_CLEAN" env -i HOME="$TMP_ROOT/home-csc" \
-  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
+  FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_CLEAN=0
 else RC8_CLEAN=$?; fi
 assert_rc "code_sign_clone clean requires approval env" 0 "$RC8_CLEAN"
 assert_missing "large clone removed during approved clean" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
+assert_exists "active clone remains during approved clean" "$CSC_ACTIVE"
+assert_exists "foreign-owned clone remains during approved clean" "$CSC_FOREIGN"
+assert_exists "replacement clone remains during approved clean" "$CSC_RACE"
 assert_exists "small clone preserved above threshold" "$CSC_X/com.tiny.code_sign_clone"
 
 
