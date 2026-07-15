@@ -66,7 +66,9 @@ The observer captured the mechanism directly:
 
 The fast-recovery mechanism was also captured. Between `01:08:45Z` and
 `01:09:45Z`, Colima allocation fell 20.83 GiB while host free rose 20.30 GiB.
-The VM PID changed, `ezgha` disappeared and reloaded, and Qdrant restarted.
+The VM PID changed during the preceding `01:07:45Z` to `01:08:45Z` sample
+interval. `ezgha` was unavailable at `01:08:45Z` and reloaded by `01:09:45Z`,
+when Qdrant restarted.
 The `ezgha` backend-recovery path invokes `colima start` after Docker/backend
 loss; the VM restart compacted the sparse allocation. This recovery is not
 service-neutral: Qdrant stop/start events were observed.

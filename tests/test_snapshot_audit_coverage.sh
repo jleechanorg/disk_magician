@@ -338,6 +338,143 @@ else
   bad "topdown_enabled:false did not suppress topdown_coverage"
 fi
 
+section "7. allowlist measurement is dua-first and bounded per path + in total"
+BUDGET_HOME="$WORK/budget_home"
+BUDGET_BIN="$WORK/budget_bin"
+BUDGET_LOG="$WORK/budget_invocations.log"
+mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
+: > "$BUDGET_LOG"
+
+cat > "$BUDGET_BIN/dua" <<'SH'
+#!/usr/bin/env bash
+echo "dua $*" >> "${BUDGET_LOG:?}"
+case "${BUDGET_MODE:?}" in
+  parity)
+    printf '\033[32m%12s b payload\033[39m\n' "${DUA_BYTES:?}"
+    printf '\033[32m%12s b total\033[39m\n' "${DUA_BYTES:?}"
+    printf '\033[32m\n'
+    ;;
+  fail-fast) exit 1 ;;
+  slow) sleep 5 ;;
+esac
+SH
+cat > "$BUDGET_BIN/du" <<'SH'
+#!/usr/bin/env bash
+echo "du $*" >> "${BUDGET_LOG:?}"
+sleep 5
+SH
+chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du"
+
+PARITY_CONFIG="$WORK/budget_parity_config.json"
+cat > "$PARITY_CONFIG" <<JSON
+{"monitored_dirs": [{"key": "parity", "path": "$BUDGET_HOME/slow-a", "timeout": 180}]}
+JSON
+PARITY_OUT="$WORK/budget_parity.json"
+expected_kb=1234
+if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DUA_BYTES=$(( expected_kb * 1024 )) \
+  DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=2 timeout 10 "$SNAP_SCRIPT" --output "$PARITY_OUT" \
+  >/dev/null 2>&1 && \
+  python3 -c "import json; d=json.load(open('$PARITY_OUT')); assert d['directories']['parity'] == $expected_kb" && \
+  [[ "$(head -1 "$BUDGET_LOG")" == dua* ]] && ! grep -q '^du ' "$BUDGET_LOG"; then
+  ok "dua is primary and parses the last numeric row despite trailing ANSI output"
+else
+  bad "dua primary/parity parsing contract failed"
+fi
+
+PER_PATH_CONFIG="$WORK/budget_per_path_config.json"
+cat > "$PER_PATH_CONFIG" <<JSON
+{"monitored_dirs": [{"key": "slow", "path": "$BUDGET_HOME/slow-a", "timeout": 180}]}
+JSON
+PER_PATH_OUT="$WORK/budget_per_path.json"
+: > "$BUDGET_LOG"
+start=$(date +%s)
+HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$PER_PATH_OUT" \
+  >/dev/null 2>&1 || true
+per_path_elapsed=$(( $(date +%s) - start ))
+if [[ "$per_path_elapsed" -le 3 ]] && \
+  [[ "$(sed -n '1p' "$BUDGET_LOG")" == dua* ]] && \
+  [[ "$(sed -n '2p' "$BUDGET_LOG")" == du* ]] && \
+  python3 -c "import json; d=json.load(open('$PER_PATH_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
+  ok "dua failure falls back to du inside one shared 1s per-path deadline"
+else
+  bad "per-path deadline failed (elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
+fi
+
+TOTAL_CONFIG="$WORK/budget_total_config.json"
+cat > "$TOTAL_CONFIG" <<JSON
+{"monitored_dirs": [
+  {"key": "slow_a", "path": "$BUDGET_HOME/slow-a", "timeout": 180},
+  {"key": "slow_b", "path": "$BUDGET_HOME/slow-b", "timeout": 180},
+  {"key": "slow_c", "path": "$BUDGET_HOME/slow-c", "timeout": 180}
+]}
+JSON
+TOTAL_OUT="$WORK/budget_total.json"
+: > "$BUDGET_LOG"
+start=$(date +%s)
+HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=slow \
+  DISK_MAGICIAN_CONFIG="$TOTAL_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=2 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$TOTAL_OUT" \
+  >/dev/null 2>&1 || true
+total_elapsed=$(( $(date +%s) - start ))
+if [[ "$total_elapsed" -le 4 ]] && python3 - "$TOTAL_OUT" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["snapshot_metadata"]
+assert all(d["directories"][key] is None for key in ("slow_a", "slow_b", "slow_c"))
+assert set(d["timeout_keys"]) == {"slow_a", "slow_b", "slow_c"}
+assert m["measurement_budget_seconds"] == 2
+assert m["measurement_path_max_seconds"] == 1
+assert m["measurement_elapsed_seconds"] <= 4
+assert m["measurement_budget_exhausted"] is True
+PY
+then
+  ok "global 2s measurement budget fail-closes all remaining paths as null"
+else
+  bad "global measurement budget failed (elapsed=${total_elapsed}s)"
+fi
+
+section "8. Library frontier names every direct child inside a bounded sub-budget"
+LIBRARY_HOME="$WORK/library_home"
+mkdir -p "$LIBRARY_HOME/Library/Alpha" "$LIBRARY_HOME/Library/Beta"
+dd if=/dev/zero of="$LIBRARY_HOME/Library/Alpha/a.bin" bs=1024 count=16 >/dev/null 2>&1
+dd if=/dev/zero of="$LIBRARY_HOME/Library/Beta/b.bin" bs=1024 count=24 >/dev/null 2>&1
+LIBRARY_CONFIG="$WORK/library_config.json"
+cat > "$LIBRARY_CONFIG" <<JSON
+{"library_frontier_enabled": true, "monitored_dirs": [{"key": "alpha", "path": "$LIBRARY_HOME/Library/Alpha", "timeout": 2}]}
+JSON
+LIBRARY_OUT="$WORK/library_snapshot.json"
+start=$(date +%s)
+HOME="$LIBRARY_HOME" DISK_MAGICIAN_CONFIG="$LIBRARY_CONFIG" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=12 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=2 \
+  DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS=5 \
+  timeout 15 "$SNAP_SCRIPT" --output "$LIBRARY_OUT" >/dev/null 2>&1 || true
+library_elapsed=$(( $(date +%s) - start ))
+if [[ "$library_elapsed" -le 12 ]] && python3 - "$LIBRARY_OUT" "$LIBRARY_HOME/Library" <<'PY' 2>/dev/null
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+root = sys.argv[2]
+coverage = d["library_coverage"]
+ledger = {os.path.basename(item["path"]): item for item in coverage["top_level_ledger"]}
+assert coverage["root"] == os.path.realpath(root)
+assert set(ledger) == {"Alpha", "Beta"}
+assert all(item["status"] == "measured" for item in ledger.values())
+assert coverage["top_level_children_total"] == 2
+assert coverage["top_level_children_accounted"] == 2
+assert coverage["wall_clock_cap_seconds"] == 5
+PY
+then
+  ok "Library frontier accounts for every direct child and respects its 5s sub-budget"
+else
+  bad "Library frontier ledger missing, incomplete, or exceeded its bounded sub-budget"
+fi
+
 section "Summary"
 echo "  PASS: $PASS  FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

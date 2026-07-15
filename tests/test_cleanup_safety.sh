@@ -513,12 +513,21 @@ assert_contains "pressure_sweep logs --large" "cleanup_tmp.sh --clean --large" "
 assert_contains "pressure_sweep invokes cleanup_tmp step" "cleanup_tmp.sh" "$OUT9_CONTENT"
 
 echo "Test 10: cleanup_colima trims through the proven active backend without an implicit restart"
-COLIMA_HOME="$TMP_ROOT/home-colima"
+COLIMA_HOME=$(mktemp -d /tmp/dm-colima.XXXXXX)
+trap 'rm -rf "$TMP_ROOT" "$COLIMA_HOME"' EXIT
 COLIMA_FAKE_BIN="$TMP_ROOT/bin-colima"
 COLIMA_INVOCATIONS="$TMP_ROOT/colima-invocations.log"
 COLIMA_SSH_DIR="$COLIMA_HOME/.colima/_lima/colima"
 mkdir -p "$COLIMA_FAKE_BIN" "$COLIMA_HOME/.colima/default" "$COLIMA_SSH_DIR"
-touch "$COLIMA_HOME/.colima/default/docker.sock" "$COLIMA_SSH_DIR/ssh.sock"
+python3 - "$COLIMA_HOME/.colima/default/docker.sock" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(sys.argv[1])
+sock.close()
+PY
+touch "$COLIMA_SSH_DIR/ssh.sock"
 cat > "$COLIMA_SSH_DIR/ssh.config" <<EOF
 Host lima-colima
   ControlPath "$COLIMA_SSH_DIR/ssh.sock"
@@ -529,6 +538,10 @@ cat > "$COLIMA_FAKE_BIN/docker" <<'EOF'
 printf 'docker %s\n' "$*" >> "$COLIMA_INVOCATIONS"
 case "${1:-} ${2:-}" in
   "info ")
+    if [[ "${FAKE_REQUIRE_EFFECTIVE_HOST:-0}" == "1" \
+          && "${DOCKER_HOST:-}" != "unix://$HOME/.colima/default/docker.sock" ]]; then
+      exit 1
+    fi
     if [[ -n "${FAKE_DOCKER_INFO_FAIL_ONCE_STATE:-}" \
           && ! -e "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE" ]]; then
       touch "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE"
@@ -569,6 +582,22 @@ exit 0
 EOF
 chmod +x "$COLIMA_FAKE_BIN/docker" "$COLIMA_FAKE_BIN/colima" "$COLIMA_FAKE_BIN/ssh"
 
+OUT10_AUTOROUTE="$TMP_ROOT/colima-autoroute.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_AUTOROUTE" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  FAKE_DOCKER_HOST="unix:///var/run/docker.sock" \
+  FAKE_REQUIRE_EFFECTIVE_HOST=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --dry-run; then
+  RC10_AUTOROUTE=0
+else RC10_AUTOROUTE=$?; fi
+assert_rc "cleanup_colima auto-routes to the proven Colima socket" 0 "$RC10_AUTOROUTE"
+assert_contains "cleanup_colima reports safe Colima socket selection" \
+  "Selected proven Colima Docker socket" "$(cat "$OUT10_AUTOROUTE")"
+assert_contains "cleanup_colima reaches Docker inventory through selected socket" \
+  "docker system df" "$(cat "$COLIMA_INVOCATIONS")"
+
 OUT10_MUX="$TMP_ROOT/colima-mux.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_MUX" env -i HOME="$COLIMA_HOME" \
@@ -589,7 +618,7 @@ OUT10_CONTEXT="$TMP_ROOT/colima-context-mismatch.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_CONTEXT" env -i HOME="$COLIMA_HOME" \
   COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
-  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" \
+  DOCKER_HOST="unix:///tmp/not-colima.sock" \
   PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_CONTEXT=0
@@ -599,6 +628,23 @@ assert_contains "cleanup_colima reports unproven Docker backend" \
   "does not match the expected Colima socket" "$(cat "$OUT10_CONTEXT")"
 assert_not_contains "cleanup_colima does not trim through an unproven backend" \
   "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_CONTEXT_PRECEDENCE="$TMP_ROOT/colima-context-precedence.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_CONTEXT_PRECEDENCE" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  DOCKER_CONTEXT="explicit-remote" \
+  DOCKER_HOST="unix://$COLIMA_HOME/.colima/default/docker.sock" \
+  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_CONTEXT_PRECEDENCE=0
+else RC10_CONTEXT_PRECEDENCE=$?; fi
+assert_rc "cleanup_colima honors explicit Docker context precedence" 0 "$RC10_CONTEXT_PRECEDENCE"
+assert_contains "cleanup_colima rejects an explicit non-Colima Docker context" \
+  "does not match the expected Colima socket" "$(cat "$OUT10_CONTEXT_PRECEDENCE")"
+assert_not_contains "cleanup_colima never inventories an explicit non-Colima context" \
+  "docker system df" "$(cat "$COLIMA_INVOCATIONS")"
 
 OUT10_BLOCKED="$TMP_ROOT/colima-restart-blocked.out"
 : > "$COLIMA_INVOCATIONS"
@@ -647,7 +693,7 @@ OUT10_INITIAL_UNPROVEN="$TMP_ROOT/colima-initial-docker-unproven.out"
 : > "$COLIMA_INVOCATIONS"
 if run_capture "$OUT10_INITIAL_UNPROVEN" env -i HOME="$COLIMA_HOME" \
   COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
-  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" VACATE_CI_RUNNERS_APPROVED=1 \
+  DOCKER_HOST="unix:///tmp/not-colima.sock" VACATE_CI_RUNNERS_APPROVED=1 \
   PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_INITIAL_UNPROVEN=0

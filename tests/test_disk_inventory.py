@@ -117,6 +117,114 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertEqual(by_name["mystery"]["active_processes"][0]["pid"], 77)
         self.assertEqual(by_name["other"]["classification"], "unknown")
         self.assertEqual(by_name["other"]["reclaim_ceiling_bytes"], 0)
+        self.assertTrue(by_name["other"].get("upgrade_path"))
+
+    def test_github_pr_ownership_is_bounded_and_surfaces_timeout(self):
+        inventory = load_module()
+        self.assertTrue(
+            hasattr(inventory, "_github_pr_ownership"),
+            "branch-to-PR ownership lookup is missing",
+        )
+        payload = [{
+            "number": 42,
+            "html_url": "https://github.com/jleechanorg/example/pull/42",
+            "state": "open",
+            "draft": False,
+            "head": {
+                "ref": "feature",
+                "repo": {"full_name": "jleechanorg/example"},
+            },
+            "base": {"ref": "main"},
+        }, {
+            "number": 43,
+            "html_url": "https://github.com/someone/example/pull/43",
+            "state": "open",
+            "draft": False,
+            "head": {
+                "ref": "feature",
+                "repo": {"full_name": "someone/example"},
+            },
+            "base": {"ref": "main"},
+        }]
+        completed = subprocess.CompletedProcess(["gh", "api"], 0, json.dumps(payload), "")
+        with mock.patch.object(inventory.subprocess, "run", return_value=completed) as run:
+            result = inventory._github_pr_ownership(
+                "https://jleechan2015@github.com/jleechanorg/example.git",
+                "feature",
+                timeout=4,
+            )
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["pull_requests"][0]["number"], 42)
+        self.assertEqual(result["pull_requests"][0]["url"], payload[0]["html_url"])
+        self.assertEqual(result["pull_requests"][0]["head_repo"], "jleechanorg/example")
+        self.assertEqual(len(result["pull_requests"]), 1)
+        self.assertEqual(run.call_args.kwargs["timeout"], 4)
+
+        missing_repo_payload = [{
+            "number": 44,
+            "html_url": "https://github.com/jleechanorg/example/pull/44",
+            "state": "open",
+            "draft": False,
+            "head": {"ref": "feature", "repo": None},
+            "base": {"ref": "main"},
+        }]
+        missing_repo = subprocess.CompletedProcess(
+            ["gh", "api"], 0, json.dumps(missing_repo_payload), ""
+        )
+        with mock.patch.object(inventory.subprocess, "run", return_value=missing_repo):
+            incomplete = inventory._github_pr_ownership(
+                "https://github.com/jleechanorg/example.git", "feature", timeout=4
+            )
+        self.assertFalse(incomplete["complete"])
+        self.assertEqual(incomplete["error"], "missing_head_repo")
+        self.assertEqual(incomplete["pull_requests"], [])
+        inventory._github_open_pulls.cache_clear()
+
+        with mock.patch.object(
+            inventory.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["gh", "api"], 4),
+        ):
+            timed_out = inventory._github_pr_ownership(
+                "https://github.com/jleechanorg/example.git", "feature", timeout=4
+            )
+        self.assertFalse(timed_out["complete"])
+        self.assertEqual(timed_out["error"], "timeout")
+        self.assertEqual(timed_out["pull_requests"], [])
+
+        full_page = subprocess.CompletedProcess(
+            ["gh", "api"], 0, json.dumps(payload * 100), ""
+        )
+        with mock.patch.object(inventory.subprocess, "run", return_value=full_page):
+            truncated = inventory._github_pr_ownership(
+                "git@github.com:jleechanorg/full-page.git", "feature", timeout=4
+            )
+        self.assertFalse(truncated["complete"])
+        self.assertEqual(truncated["error"], "pagination_limit")
+
+    def test_ao_native_scan_timeout_is_incomplete(self):
+        inventory = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            candidate = base / "lanes" / "lane"
+            candidate.mkdir(parents=True)
+            ao_root = base / ".ao"
+            ao_root.mkdir()
+            (ao_root / "session.json").write_text(
+                json.dumps({"worktree": str(candidate)}), encoding="utf-8"
+            )
+            with mock.patch.object(
+                inventory.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["rg"], 30),
+            ):
+                references, complete = inventory._ao_reference_map(
+                    [candidate], [ao_root]
+                )
+
+        self.assertFalse(complete)
+        self.assertEqual(references[str(candidate.resolve())], [])
 
     def test_path_inventory_attributes_artifacts_and_excludes_uncertain_reclaim(self):
         inventory = load_module()
@@ -183,10 +291,18 @@ class DiskInventoryTest(unittest.TestCase):
             os.utime(worktree, (old, old))
             (ao_root / "session.json").write_text("{}", encoding="utf-8")
 
-            ticks = iter([0.0, 11.0])
-            with mock.patch.object(inventory.time, "monotonic", side_effect=lambda: next(ticks, 11.0)):
+            with mock.patch.object(inventory, "_ao_reference_map", return_value=({}, False)):
                 result = inventory.inventory_paths(
                     [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[ao_root]
+                )
+            with mock.patch.object(inventory, "_ao_reference_map", return_value=({}, True)), mock.patch.object(
+                inventory,
+                "_github_pr_ownership",
+                return_value={"complete": False, "error": "timeout", "pull_requests": []},
+                create=True,
+            ):
+                pr_failure_result = inventory.inventory_paths(
+                    [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[]
                 )
             open_failure_result = inventory.inventory_paths(
                 [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[],
@@ -199,6 +315,10 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertEqual(lane["classification"], "unknown")
         self.assertEqual(lane["reclaim_ceiling_bytes"], 0)
         self.assertEqual(result["reclaim_ceiling_bytes"], 0)
+        pr_failure_lane = pr_failure_result["roots"][0]["entries"][0]
+        self.assertFalse(pr_failure_lane["git"].get("pr_attribution_complete", True))
+        self.assertEqual(pr_failure_lane["classification"], "unknown")
+        self.assertEqual(pr_failure_lane["reclaim_ceiling_bytes"], 0)
         open_failure_lane = open_failure_result["roots"][0]["entries"][0]
         self.assertFalse(open_failure_result["open_file_attribution_complete"])
         self.assertEqual(open_failure_lane["classification"], "unknown")

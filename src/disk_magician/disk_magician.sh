@@ -160,6 +160,103 @@ acquire_snapshot_lock() {
   return 1
 }
 
+find_gitleaks() {
+  local candidate
+  if [[ -n "${DISK_MAGICIAN_GITLEAKS_BIN:-}" ]]; then
+    if [[ -x "${DISK_MAGICIAN_GITLEAKS_BIN}" ]]; then
+      printf '%s\n' "${DISK_MAGICIAN_GITLEAKS_BIN}"
+      return 0
+    fi
+    return 1
+  fi
+  if command -v gitleaks >/dev/null 2>&1; then
+    command -v gitleaks
+    return 0
+  fi
+  for candidate in \
+    "${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/gitleaks}" \
+    /opt/homebrew/bin/gitleaks \
+    /usr/local/bin/gitleaks \
+    "$HOME/.local/bin/gitleaks"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+remote_has_embedded_credentials() {
+  local remote_url="$1"
+  python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+url = urlsplit(sys.stdin.read().strip())
+sys.exit(0 if url.scheme in {"http", "https"} and (url.username or url.password) else 1)
+' <<<"$remote_url"
+}
+
+guard_snapshot_history_push() {
+  local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin
+  branch="$(git -C "$BACKUP_DIR" symbolic-ref --quiet --short HEAD)" || {
+    echo "Snapshot history guard: detached HEAD is not safe to push." >&2
+    return 1
+  }
+  remote_url="$(git -C "$BACKUP_DIR" remote get-url origin)" || {
+    echo "Snapshot history guard: origin has no usable URL." >&2
+    return 1
+  }
+  if remote_has_embedded_credentials "$remote_url"; then
+    echo "Snapshot history guard: origin URL contains embedded credentials; refusing to push." >&2
+    return 1
+  fi
+
+  if git -C "$BACKUP_DIR" ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+    remote_exists=true
+  else
+    local ls_remote_rc=$?
+    if [[ "$ls_remote_rc" -ne 2 ]]; then
+      echo "Snapshot history guard: could not verify origin/$branch." >&2
+      return 1
+    fi
+  fi
+
+  if [[ "$remote_exists" == true ]]; then
+    remote_ref="refs/remotes/origin/$branch"
+    git -C "$BACKUP_DIR" fetch --quiet origin \
+      "refs/heads/$branch:$remote_ref" || {
+      echo "Snapshot history guard: could not refresh origin/$branch." >&2
+      return 1
+    }
+    if ! git -C "$BACKUP_DIR" merge-base --is-ancestor "$remote_ref" HEAD; then
+      echo "Snapshot history guard: local $branch does not descend from origin/$branch; refusing history rewrite." >&2
+      return 1
+    fi
+    scan_range="$remote_ref..HEAD"
+  else
+    scan_range="HEAD"
+  fi
+
+  if git -C "$BACKUP_DIR" show-ref --verify --quiet refs/heads/archive/pre-reset-20260711 && \
+     ! git -C "$BACKUP_DIR" merge-base --is-ancestor refs/heads/archive/pre-reset-20260711 HEAD; then
+    echo "Snapshot history guard: main no longer contains archive/pre-reset-20260711; refusing history loss." >&2
+    return 1
+  fi
+
+  gitleaks_bin="$(find_gitleaks)" || {
+    echo "Snapshot history guard: gitleaks is unavailable; refusing unscanned push." >&2
+    return 1
+  }
+  if ! "$gitleaks_bin" git --no-banner --no-color --redact=100 \
+      --log-opts="$scan_range" "$BACKUP_DIR" >/dev/null 2>&1; then
+    echo "Snapshot history guard: secret scan rejected outgoing snapshot history." >&2
+    return 1
+  fi
+
+  echo "Snapshot history guard passed for origin/$branch."
+}
+
 run_snapshot() {
   acquire_snapshot_lock || exit 0
 
@@ -201,12 +298,17 @@ run_snapshot() {
   if [[ -d "$BACKUP_DIR/.git" ]]; then
     echo "Committing snapshot to git repository..."
     git -C "$BACKUP_DIR" add "backup/$host_name/disk_snapshot.json"
-    git -C "$BACKUP_DIR" commit -m "chore: update disk snapshot for $host_name" 2>/dev/null || echo "No changes to commit."
+    if git -C "$BACKUP_DIR" diff --cached --quiet; then
+      echo "No changes to commit."
+    else
+      git -C "$BACKUP_DIR" commit -m "chore: update disk snapshot for $host_name"
+    fi
 
     # Push to origin if remote is configured
     if git -C "$BACKUP_DIR" remote | grep -q "origin"; then
       echo "Pushing snapshot to remote..."
-      git -C "$BACKUP_DIR" push origin HEAD || echo "Push failed (remote unreachable)."
+      guard_snapshot_history_push
+      git -C "$BACKUP_DIR" push origin "HEAD:refs/heads/$(git -C "$BACKUP_DIR" symbolic-ref --short HEAD)"
     fi
   fi
 }
@@ -220,11 +322,13 @@ case "$CMD" in
     ;;
   audit)
     # Forward all args to disk_audit
-    export DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    export DISK_SNAPSHOT_JSON
     "$SCRIPT_DIR/scripts/disk_audit.sh" "$@"
     ;;
   clean)
-    export DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    export DISK_SNAPSHOT_JSON
     
     AUTO_CLEAN="${DISK_MAGICIAN_AUTO_CLEAN:-${DISK_MAGICIAN_SAFE_AUTO:-0}}"
     DRY_RUN_ARG=false
@@ -247,11 +351,13 @@ case "$CMD" in
     "$SCRIPT_DIR/scripts/disk_audit.sh" --clean "$@"
     ;;
   clean-all)
-    export DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    export DISK_SNAPSHOT_JSON
     "$SCRIPT_DIR/scripts/disk_audit.sh" --clean-all "$@"
     ;;
   history)
-    export DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
+    export DISK_SNAPSHOT_JSON
     # Execute history from the BACKUP_DIR context so git history is tracked there
     DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json" python3 "$SCRIPT_DIR/scripts/disk_history.sh" "$@"
     ;;

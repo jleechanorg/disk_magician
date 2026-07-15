@@ -10,6 +10,9 @@ DRY_RUN=false
 DISCOVER=false
 DISCOVER_JSON=false
 DU_TIMEOUT=30
+SNAPSHOT_BUDGET_SECONDS="${DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS:-1500}"
+MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-20}"
+LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS:-120}"
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
 # timeout | empty) — never a silent zero.
@@ -69,24 +72,26 @@ if command -v dua &>/dev/null; then
   DUA_CMD="dua"
 fi
 
-# dua-cli is parallel-by-default and dramatically faster than single-threaded
-# du on large/many-file trees, so it's used as a fallback (not primary) when
-# du times out -- primary stays du for behavioral parity with existing
-# snapshots. Falling back rather than switching outright avoids silently
-# changing every historical size number in disk_snapshot.json.
+remaining_measurement_seconds() {
+  local remaining=$(( MEASUREMENT_DEADLINE_EPOCH - $(date +%s) ))
+  (( remaining > 0 )) && echo "$remaining" || echo 0
+}
+
+# dua reports allocated bytes by default (the same quantity as du -sk) and is
+# parallel-by-default. Its ANSI reset can leave a trailing blank line, so take
+# the last numeric row rather than the last physical line.
 dua_size_kb() {
   local path="$1"
   local to="$2"
-  [[ -n "$DUA_CMD" ]] || { echo ""; return; }
-  local bytes
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    bytes=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
-      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
-  else
-    bytes=$("$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
-      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
+  [[ -n "$DUA_CMD" && -n "$TIMEOUT_CMD" && "$to" -gt 0 ]] || { echo ""; return; }
+  local output bytes
+  if ! output=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null); then
+    echo ""
+    return
   fi
-  [[ -n "$bytes" && "$bytes" -gt 0 ]] && echo $(( bytes / 1024 )) || echo ""
+  bytes=$(printf '%s\n' "$output" | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | awk '$1 ~ /^[0-9]+$/ { value=$1 } END { if (value != "") print value }')
+  [[ "$bytes" =~ ^[0-9]+$ ]] && echo $(( (bytes + 1023) / 1024 )) || echo ""
 }
 
 dir_size_kb() {
@@ -102,23 +107,29 @@ dir_size_kb() {
     return
   fi
 
-  local result rc
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    result=$("$TIMEOUT_CMD" "$to" du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
-  else
-    result=$(du -sk "$path" 2>/dev/null | awk '{print $1+0}' || true)
+  local remaining path_budget path_deadline result fallback_budget
+  remaining=$(remaining_measurement_seconds)
+  (( remaining > 0 )) || { echo ""; return; }
+  [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
+  path_budget="$to"
+  (( path_budget > MEASURE_PATH_MAX_SECONDS )) && path_budget="$MEASURE_PATH_MAX_SECONDS"
+  (( path_budget > remaining )) && path_budget="$remaining"
+  path_deadline=$(( $(date +%s) + path_budget ))
+
+  result=$(dua_size_kb "$path" "$path_budget")
+
+  if [[ -z "$result" ]]; then
+    fallback_budget=$(( path_deadline - $(date +%s) ))
+    remaining=$(remaining_measurement_seconds)
+    (( fallback_budget > remaining )) && fallback_budget="$remaining"
+    if [[ -n "$TIMEOUT_CMD" && "$fallback_budget" -gt 0 ]]; then
+      result=$("$TIMEOUT_CMD" "$fallback_budget" du -sk "$path" 2>/dev/null \
+        | awk '{print $1+0}' || true)
+    fi
   fi
 
   if [[ -z "$result" ]]; then
-    # du timed out or errored -- retry once with dua (parallel scanner) using
-    # the same time budget before surfacing as null. This is what fixes the
-    # keys that were intermittently going null under disk pressure
-    # (codex_sessions, gemini_root, hermes, library_caches, projects).
-    result=$(dua_size_kb "$path" "$to")
-  fi
-
-  if [[ -z "$result" ]]; then
-    # Both du and dua failed/timed out -> surface as null (empty string)
+    # Both bounded attempts failed/timed out -> surface as null (empty string).
     echo ""
     return
   fi
@@ -135,12 +146,9 @@ glob_size_kb() {
   for d in $pattern; do
     [[ -e "$d" ]] || continue
     local s
-    if [[ -n "$TIMEOUT_CMD" ]]; then
-      s=$("$TIMEOUT_CMD" "$DU_TIMEOUT" du -sk "$d" 2>/dev/null | awk '{print $1+0}' || true)
-    else
-      s=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || true)
-    fi
-    total=$(( total + ${s:-0} ))
+    s=$(dir_size_kb "$d" "$DU_TIMEOUT")
+    [[ -n "$s" ]] || { echo ""; return; }
+    total=$(( total + s ))
   done
   echo "$total"
 }
@@ -358,6 +366,20 @@ fi
 
 # ────────── SNAPSHOT MODE ──────────
 read -r disk_total_kb disk_used_kb disk_free_kb disk_pct <<< "$(get_disk_stats)"
+if [[ ! "$SNAPSHOT_BUDGET_SECONDS" =~ ^[0-9]+$ || "$SNAPSHOT_BUDGET_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUDGET_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+MEASUREMENT_STARTED_EPOCH=$(date +%s)
+MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECONDS ))
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
 disk_used_gb=$(awk "BEGIN{printf \"%.0f\", $disk_used_kb / 1024 / 1024}")
 disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
@@ -365,7 +387,8 @@ disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
 tracked_total_kb=0
 timeout_keys=()
 DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE"; }
+LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
 trap _cleanup_dirs_temp EXIT
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
@@ -433,12 +456,13 @@ PY
 containers_parent="$HOME/Library/Containers"
 containers_listing=""
 if [[ -d "$containers_parent" ]]; then
-  # Build a sorted list of (size_kb, name). 60s budget so this never
-  # stalls the snapshot.
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    containers_listing=$("$TIMEOUT_CMD" 180 du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
-  else
-    containers_listing=$(du -sk "$containers_parent"/* 2>/dev/null | sort -rn | head -20 || true)
+  # Build a sorted list of (size_kb, name) inside the same remaining global
+  # budget and per-path cap as the allowlist measurements.
+  containers_budget=$(remaining_measurement_seconds)
+  (( containers_budget > MEASURE_PATH_MAX_SECONDS )) && containers_budget="$MEASURE_PATH_MAX_SECONDS"
+  if [[ -n "$TIMEOUT_CMD" && "$containers_budget" -gt 0 ]]; then
+    containers_listing=$("$TIMEOUT_CMD" "$containers_budget" du -sk "$containers_parent"/* 2>/dev/null \
+      | sort -rn | head -20 || true)
   fi
   while IFS=$'\t' read -r kb name; do
     [[ -z "$kb" || -z "$name" ]] && continue
@@ -448,6 +472,83 @@ if [[ -d "$containers_parent" ]]; then
     key="lc_${safe}"
     add_entry "$key" "$kb" "$name"
   done <<< "$containers_listing"
+fi
+
+# ────────── LIBRARY FRONTIER (advisory, bounded, no double-count) ──────────
+# The allowlist intentionally retains stable historical keys, but it cannot
+# systematically name every direct ~/Library child. Reuse the exhaustive
+# scanner under a strict slice of the existing global deadline. This ledger is
+# advisory: its measurements are not added to tracked_total_kb, because several
+# allowlist entries overlap it and the snapshot dedup trie remains the sole
+# owner of coverage arithmetic.
+LIBRARY_COVERAGE_JSON="null"
+library_root="$HOME/Library"
+LIBRARY_FRONTIER_ENABLED=$(python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    print("true" if data.get("library_frontier_enabled") is True else "false")
+except Exception:
+    print("false")
+' "$CONFIG_FILE" 2>/dev/null || echo "false")
+if [[ "$LIBRARY_FRONTIER_ENABLED" == "true" && -d "$library_root" ]]; then
+  library_budget=$(remaining_measurement_seconds)
+  (( library_budget > LIBRARY_FRONTIER_BUDGET_SECONDS )) && library_budget="$LIBRARY_FRONTIER_BUDGET_SECONDS"
+  if [[ "$library_budget" -gt 0 && -n "$TIMEOUT_CMD" ]]; then
+    scanner_budget=$(( library_budget > 2 ? library_budget - 2 : 1 ))
+    "$TIMEOUT_CMD" "$library_budget" python3 "$SCRIPT_DIR/disk_frontier_scan.py" \
+      --root "$library_root" --resolve-root --no-sibling-volumes --no-purgeable \
+      --workers 6 --max-depth 2 --max-nodes 400 \
+      --timeout-tiers 2,5 --wall-clock-cap "$scanner_budget" \
+      --output "$LIBRARY_FRONTIER_FILE" >/dev/null 2>&1 || true
+  fi
+
+  # The scanner owns the per-child ledger. If the outer deadline kills it
+  # before an atomic report lands, emit an explicit unfinished row per direct
+  # child instead of silently omitting Library coverage.
+  LIBRARY_COVERAGE_JSON=$(python3 - "$LIBRARY_FRONTIER_FILE" "$library_root" "${library_budget:-0}" <<'PY' 2>/dev/null || echo "null"
+import collections, json, os, sys
+
+report_path, root, wall_cap = sys.argv[1], os.path.realpath(sys.argv[2]), int(sys.argv[3])
+try:
+    with open(report_path) as f:
+        report = json.load(f)
+except Exception:
+    report = {}
+ledger = report.get("top_level_ledger")
+if not isinstance(ledger, list):
+    try:
+        with os.scandir(root) as entries:
+            paths = sorted(os.path.realpath(entry.path) for entry in entries)
+    except OSError:
+        paths = [root]
+    ledger = [{
+        "path": path,
+        "status": "unfinished",
+        "measured_kb": None,
+        "unfinished_reasons": ["scanner_timeout_or_error"],
+    } for path in paths]
+status_counts = collections.Counter(item.get("status") for item in ledger)
+result = {
+    "mode": report.get("mode") if report else "partial",
+    "root": root,
+    "captured_at": report.get("captured_at"),
+    "elapsed_seconds": report.get("elapsed_s"),
+    "wall_clock_cap_seconds": wall_cap,
+    "top_level_children_total": len(ledger),
+    "top_level_children_accounted": len(ledger),
+    "status_counts": dict(sorted(status_counts.items())),
+    "top_level_ledger": ledger,
+}
+print(json.dumps(result))
+PY
+)
+  [[ -n "$LIBRARY_COVERAGE_JSON" ]] || LIBRARY_COVERAGE_JSON="null"
+fi
+MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
+MEASUREMENT_BUDGET_EXHAUSTED=false
+if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
+  MEASUREMENT_BUDGET_EXHAUSTED=true
 fi
 
 # ────────── DEDUP TRIE (schema_version 2 — fixes inflated coverage_pct) ──────────
@@ -747,12 +848,17 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_STATUS="$measurement_status" \
   SNAP_MEASURED_OK="$MEASURED_OK" \
   SNAP_MEASURED_TOTAL="$MEASURED_TOTAL" \
+  SNAP_MEASUREMENT_BUDGET_SECONDS="$SNAPSHOT_BUDGET_SECONDS" \
+  SNAP_MEASUREMENT_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS" \
+  SNAP_MEASUREMENT_ELAPSED_SECONDS="$MEASUREMENT_ELAPSED_SECONDS" \
+  SNAP_MEASUREMENT_BUDGET_EXHAUSTED="$MEASUREMENT_BUDGET_EXHAUSTED" \
   SNAP_PREV_TS="$prev_snapshot_ts" \
   SNAP_CONTAINERS_CAPTURED="$containers_captured" \
   SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
   SNAP_TOPDOWN="$TOPDOWN_JSON" \
+  SNAP_LIBRARY_COVERAGE="$LIBRARY_COVERAGE_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
 try:
@@ -782,6 +888,10 @@ try:
             "measurement_status": os.environ.get("SNAP_STATUS"),
             "measured_paths_ok": int(os.environ.get("SNAP_MEASURED_OK") or 0),
             "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
+            "measurement_budget_seconds": int(os.environ.get("SNAP_MEASUREMENT_BUDGET_SECONDS") or 0),
+            "measurement_path_max_seconds": int(os.environ.get("SNAP_MEASUREMENT_PATH_MAX_SECONDS") or 0),
+            "measurement_elapsed_seconds": int(os.environ.get("SNAP_MEASUREMENT_ELAPSED_SECONDS") or 0),
+            "measurement_budget_exhausted": os.environ.get("SNAP_MEASUREMENT_BUDGET_EXHAUSTED") == "true",
         }
     }
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
@@ -811,6 +921,12 @@ try:
         topdown = None
     if topdown is not None:
         data["topdown_coverage"] = topdown
+    try:
+        library_coverage = json.loads(os.environ.get("SNAP_LIBRARY_COVERAGE") or "null")
+    except (TypeError, ValueError):
+        library_coverage = None
+    if library_coverage is not None:
+        data["library_coverage"] = library_coverage
     dirs = {}
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):

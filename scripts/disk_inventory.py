@@ -8,9 +8,11 @@ prune, stop, or mutate any measured target.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import pwd
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -28,6 +30,10 @@ MANAGED_LIBRARY_CACHES = {
     "claude-cli-nodejs": {"owner": "cleanup_dev_caches.sh", "age_gate_days": 30},
     "go-build": {"owner": "cleanup_dev_caches.sh", "age_gate_days": 30},
 }
+UNKNOWN_CACHE_UPGRADE_PATH = (
+    "Document the owning tool's supported prune semantics, then add an exact-path "
+    "adapter with active-process, symlink, and age-gate refusal tests."
+)
 
 
 def _utc(epoch: Optional[float]) -> Optional[str]:
@@ -262,6 +268,7 @@ def inventory_caches(
                     "active_processes": active,
                     "classification": classification,
                     "classification_rationale": rationale,
+                    "upgrade_path": UNKNOWN_CACHE_UPGRADE_PATH if classification == "unknown" else None,
                     "cleanup_owner": policy["owner"] if policy else None,
                     "cleanup_age_gate_days": policy["age_gate_days"] if policy else None,
                     "eligibility_measurement_errors": eligibility_errors,
@@ -291,6 +298,79 @@ def _run(argv: Sequence[str], timeout: int = 8) -> tuple[int, str]:
         return 127, ""
 
 
+@functools.lru_cache(maxsize=256)
+def _github_open_pulls(remote: str, timeout: int) -> dict:
+    match = re.fullmatch(
+        r"(?:git@|ssh://git@|https://(?:[^/@]+@)?)github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?",
+        remote,
+    )
+    if not match:
+        return {"complete": False, "error": "unsupported_remote", "pull_requests": []}
+    owner, repo = match.groups()
+    endpoint = f"repos/{owner}/{repo}/pulls?state=open&per_page=100"
+    try:
+        result = subprocess.run(
+            ["gh", "api", endpoint], capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"complete": False, "error": "timeout", "pull_requests": []}
+    except OSError as exc:
+        return {"complete": False, "error": f"gh_oserror_{exc.errno}", "pull_requests": []}
+    if result.returncode:
+        return {
+            "complete": False,
+            "error": f"gh_exit_{result.returncode}",
+            "pull_requests": [],
+        }
+    try:
+        pulls = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"complete": False, "error": "invalid_json", "pull_requests": []}
+    if not isinstance(pulls, list):
+        return {"complete": False, "error": "invalid_shape", "pull_requests": []}
+    if len(pulls) >= 100:
+        return {"complete": False, "error": "pagination_limit", "pull_requests": []}
+    return {
+        "complete": True,
+        "error": None,
+        "repository": f"{owner}/{repo}",
+        "pull_requests": pulls,
+    }
+
+
+def _github_pr_ownership(remote: str, branch: str, timeout: int = 4) -> dict:
+    if not branch:
+        return {"complete": False, "error": "missing_branch", "pull_requests": []}
+    result = _github_open_pulls(remote, timeout)
+    if not result["complete"]:
+        return result
+    expected_head_repo = result["repository"]
+    matching = []
+    for raw in result["pull_requests"]:
+        head = raw.get("head") or {}
+        if head.get("ref") != branch:
+            continue
+        head_repo = (head.get("repo") or {}).get("full_name")
+        if not head_repo:
+            return {"complete": False, "error": "missing_head_repo", "pull_requests": []}
+        if head_repo.casefold() != expected_head_repo.casefold():
+            continue
+        base = raw.get("base") or {}
+        matching.append(
+            {
+                "number": raw.get("number"),
+                "url": raw.get("html_url"),
+                "state": raw.get("state"),
+                "draft": bool(raw.get("draft", False)),
+                "head_ref": head.get("ref"),
+                "head_repo": head_repo,
+                "base_ref": base.get("ref"),
+            }
+        )
+    return {"complete": True, "error": None, "pull_requests": matching}
+
+
 def _git_facts(path: Path) -> dict:
     rc, top = _run(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
     if rc:
@@ -309,6 +389,7 @@ def _git_facts(path: Path) -> dict:
             ahead = None
     _, worktrees = _run(["git", "-C", str(top_path), "worktree", "list", "--porcelain"])
     registered = f"worktree {top_path.resolve()}\n" in worktrees + "\n"
+    pr_ownership = _github_pr_ownership(remote.strip(), branch.strip())
     return {
         "is_git": True,
         "top_level": str(top_path),
@@ -319,6 +400,9 @@ def _git_facts(path: Path) -> dict:
         "upstream_configured": upstream_rc == 0,
         "registered_worktree": registered,
         "git_kind": "worktree" if (top_path / ".git").is_file() else "repository",
+        "pr_attribution_complete": pr_ownership["complete"],
+        "pr_attribution_error": pr_ownership["error"],
+        "pull_requests": pr_ownership["pull_requests"],
     }
 
 
@@ -347,7 +431,7 @@ def _artifacts(path: Path, now_epoch: int) -> list:
 
 
 def _ao_reference_map(
-    paths: Sequence[Path], ao_metadata_roots: Sequence[Path], max_seconds: int = 10
+    paths: Sequence[Path], ao_metadata_roots: Sequence[Path], timeout_seconds: int = 30
 ) -> tuple[dict, bool]:
     canonical_paths = {str(path.resolve()) for path in paths}
     aliases = {}
@@ -356,26 +440,40 @@ def _ao_reference_map(
         aliases[str(path)] = canonical
         aliases[canonical] = canonical
     references = {canonical: [] for canonical in canonical_paths}
-    deadline = time.monotonic() + max_seconds
-    for root in ao_metadata_roots:
-        if not root.is_dir():
+    roots = [str(root) for root in ao_metadata_roots if root.is_dir()]
+    if not aliases or not roots:
+        return references, True
+    try:
+        result = subprocess.run(
+            [
+                "rg", "--json", "--hidden", "--no-ignore", "--text",
+                "--fixed-strings", "--file", "-", "--", *roots,
+            ],
+            input="\n".join(aliases), capture_output=True, text=True,
+            timeout=timeout_seconds, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return references, False
+    if result.returncode not in (0, 1):
+        return references, False
+    try:
+        events = [json.loads(line) for line in result.stdout.splitlines() if line]
+    except json.JSONDecodeError:
+        return references, False
+    for event in events:
+        if event.get("type") != "match":
             continue
-        for directory, _, filenames in os.walk(root, followlinks=False):
-            for filename in filenames:
-                if time.monotonic() >= deadline:
-                    return references, False
-                candidate = Path(directory) / filename
-                try:
-                    if candidate.stat().st_size > 2 * 1024 * 1024:
-                        continue
-                    content = candidate.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
-                for needle, canonical in aliases.items():
-                    if needle in content and len(references[canonical]) < 50:
-                        reference = str(candidate)
-                        if reference not in references[canonical]:
-                            references[canonical].append(reference)
+        data = event.get("data") or {}
+        path_data = data.get("path") or {}
+        reference = path_data.get("text")
+        if not reference:
+            return references, False
+        for submatch in data.get("submatches") or []:
+            needle = (submatch.get("match") or {}).get("text")
+            canonical = aliases.get(needle)
+            if canonical and len(references[canonical]) < 50:
+                if reference not in references[canonical]:
+                    references[canonical].append(reference)
     return references, True
 
 
@@ -423,6 +521,9 @@ def inventory_paths(
                 eligible_worktree = (
                     ao_attribution_complete
                     and open_file_attribution_complete
+                    and git.get("pr_attribution_complete") is True
+                    and not git.get("pull_requests")
+                    and bool(git.get("branch"))
                     and git.get("git_kind") == "worktree"
                     and git.get("registered_worktree") is True
                     and git.get("dirty") is False
@@ -434,8 +535,14 @@ def inventory_paths(
                     classification, rationale = "protected", "hard never-delete prefix"
                 elif active or ao_refs:
                     classification, rationale = "active", "open process or AO metadata reference"
-                elif not ao_attribution_complete or not open_file_attribution_complete:
-                    classification, rationale = "unknown", "process or AO attribution incomplete; eligibility is fail-closed"
+                elif git.get("pull_requests"):
+                    classification, rationale = "active", "branch has an open pull request"
+                elif (
+                    not ao_attribution_complete
+                    or not open_file_attribution_complete
+                    or (git.get("is_git") and not git.get("pr_attribution_complete"))
+                ):
+                    classification, rationale = "unknown", "process, AO, or PR attribution incomplete; eligibility is fail-closed"
                 elif eligible_worktree:
                     classification, rationale = "approval_required", "registered clean dormant worktree; WORKTREE_APPROVED remains required"
                 else:
@@ -487,6 +594,10 @@ def inventory_paths(
         "ao_attribution_complete": ao_attribution_complete,
         "open_file_attribution_complete": open_file_attribution_complete,
         "open_file_attribution_error": open_file_attribution_error,
+        "pr_attribution_complete": all(
+            not entry["git"].get("is_git") or entry["git"].get("pr_attribution_complete") is True
+            for root in root_ledgers for entry in root["entries"]
+        ),
         "child_size_ranking": sorted(
             all_ranked_children, key=lambda item: item["allocated_bytes"], reverse=True
         ),
