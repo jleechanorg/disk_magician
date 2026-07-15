@@ -4,10 +4,13 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +26,67 @@ def load_module():
 
 
 class DiskInventoryTest(unittest.TestCase):
+    def test_lsof_failure_fail_closes_managed_cache_reclaim(self):
+        now = int(time.time())
+        old = now - 40 * 86400
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "Library" / "Caches"
+            old_entry = root / "go-build" / "old-entry"
+            old_entry.mkdir(parents=True)
+            (old_entry / "payload").write_bytes(b"x" * 4096)
+            os.utime(old_entry / "payload", (old, old))
+            os.utime(old_entry, (old, old))
+            fake_bin = home / "bin"
+            fake_bin.mkdir()
+            fake_lsof = fake_bin / "lsof"
+            fake_lsof.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            fake_lsof.chmod(0o755)
+            output = home / "cache.json"
+            env = {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "--output", str(output), "caches", "--root", str(root)],
+                env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(output.read_text(encoding="utf-8"))
+
+        cache = result["entries"][0]
+        self.assertFalse(result.get("open_file_attribution_complete", True))
+        self.assertEqual(result.get("open_file_attribution_error"), "lsof_exit_1")
+        self.assertEqual(cache["classification"], "unknown")
+        self.assertEqual(cache["reclaim_ceiling_bytes"], 0)
+
+    def test_cache_reclaim_matches_existing_top_level_age_gate_and_refuses_symlink(self):
+        inventory = load_module()
+        now = int(time.time())
+        old = now - 40 * 86400
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Library" / "Caches"
+            recent_entry = root / "go-build" / "recent-entry"
+            old_entry = root / "go-build" / "old-entry"
+            outside = Path(tmp) / "outside-cache"
+            recent_entry.mkdir(parents=True)
+            old_entry.mkdir(parents=True)
+            outside.mkdir()
+            recent_payload = recent_entry / "old-payload"
+            old_payload = old_entry / "payload"
+            recent_payload.write_bytes(b"r" * 4096)
+            old_payload.write_bytes(b"o" * 8192)
+            os.utime(recent_payload, (old, old))
+            os.utime(old_payload, (old, old))
+            os.utime(old_entry, (old, old))
+            (root / "claude-cli-nodejs").symlink_to(outside, target_is_directory=True)
+
+            expected = inventory._walk_measure(old_entry, now)["allocated_bytes"]
+            result = inventory.inventory_caches(root, now_epoch=now, open_files=[])
+
+        by_name = {item["name"]: item for item in result["entries"]}
+        self.assertEqual(by_name["go-build"]["reclaim_ceiling_bytes"], expected)
+        self.assertGreater(by_name["go-build"]["age_buckets"]["older_than_30d_bytes"], expected)
+        self.assertEqual(by_name["claude-cli-nodejs"]["classification"], "protected")
+        self.assertEqual(by_name["claude-cli-nodejs"]["reclaim_ceiling_bytes"], 0)
+
     def test_cache_inventory_has_coverage_age_owner_and_fail_closed_classification(self):
         inventory = load_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,7 +144,65 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertTrue(any(a["artifact_type"] == "node_modules" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
         self.assertTrue(entries[0]["ao_metadata_references"])
         self.assertTrue(result["ao_attribution_complete"])
+        self.assertIn("captured_at", result)
+        self.assertEqual(result["history"]["status"], "baseline_only")
+        self.assertIsNone(result["history"]["child_growth_7d_bytes"])
+        self.assertIsNone(result["history"]["child_growth_30d_bytes"])
+        self.assertIn("aggregate", result["history"]["blocker"])
+        ranked_types = {item["artifact_type"] for item in result["artifact_class_ranking"]}
+        self.assertTrue({"venv", "node_modules"} <= ranked_types)
+        self.assertEqual(result["roots"][0]["coverage_status"], "complete")
+        self.assertTrue(result["roots"][0]["coverage_target_met"])
         self.assertEqual(result["reclaim_ceiling_bytes"], 0)
+
+    def test_ao_timeout_fail_closes_an_otherwise_eligible_worktree(self):
+        inventory = load_module()
+        now = int(time.time())
+        old = now - 40 * 86400
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            remote = base / "remote.git"
+            main = base / "main"
+            lanes = base / "lanes"
+            worktree = lanes / "lane"
+            ao_root = base / ".ao"
+            ao_root.mkdir()
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main", str(main)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "config", "user.email", "fixture@users.noreply.github.com"], check=True)
+            subprocess.run(["git", "-C", str(main), "config", "user.name", "Fixture User"], check=True)
+            (main / "README.md").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(main), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(main), "commit", "-m", "base"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(main), "push", "-u", "origin", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-b", "lane", str(worktree)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(worktree), "branch", "--set-upstream-to", "origin/main"], check=True, capture_output=True)
+            for path in sorted(worktree.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                os.utime(path, (old, old), follow_symlinks=False)
+            os.utime(worktree, (old, old))
+            (ao_root / "session.json").write_text("{}", encoding="utf-8")
+
+            ticks = iter([0.0, 11.0])
+            with mock.patch.object(inventory.time, "monotonic", side_effect=lambda: next(ticks, 11.0)):
+                result = inventory.inventory_paths(
+                    [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[ao_root]
+                )
+            open_failure_result = inventory.inventory_paths(
+                [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[],
+                open_file_attribution_complete=False,
+                open_file_attribution_error="lsof_timeout",
+            )
+
+        lane = result["roots"][0]["entries"][0]
+        self.assertFalse(result["ao_attribution_complete"])
+        self.assertEqual(lane["classification"], "unknown")
+        self.assertEqual(lane["reclaim_ceiling_bytes"], 0)
+        self.assertEqual(result["reclaim_ceiling_bytes"], 0)
+        open_failure_lane = open_failure_result["roots"][0]["entries"][0]
+        self.assertFalse(open_failure_result["open_file_attribution_complete"])
+        self.assertEqual(open_failure_lane["classification"], "unknown")
+        self.assertEqual(open_failure_lane["reclaim_ceiling_bytes"], 0)
 
     def test_simulator_inventory_is_ledger_only_with_supported_commands(self):
         inventory = load_module()
@@ -104,6 +226,43 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertGreater(device["allocated_bytes"], 0)
         self.assertEqual(device["supported_delete_command"], ["xcrun", "simctl", "delete", udid])
         self.assertEqual(result["executed_commands"], [])
+
+    def test_simctl_failure_is_surfaced_instead_of_empty_success(self):
+        inventory = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = inventory.inventory_simulators(
+                Path(tmp), {"devices": {}, "error": "simctl_exit_127"}
+            )
+
+        self.assertEqual(result.get("error"), "simctl_exit_127")
+        self.assertEqual(result["inventory_status"], "unavailable")
+        self.assertEqual(result["unavailable_reclaim_ceiling_bytes"], 0)
+
+    def test_existing_dev_cache_cleanup_contract_is_dry_run_and_top_level_age_gated(self):
+        now = int(time.time())
+        old = now - 40 * 86400
+        cleanup = ROOT / "scripts" / "cleanup_dev_caches.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cache = home / "Library" / "Caches" / "go-build"
+            old_entry = cache / "old-entry"
+            recent_entry = cache / "recent-entry"
+            old_entry.mkdir(parents=True)
+            recent_entry.mkdir()
+            (old_entry / "payload").write_text("old", encoding="utf-8")
+            (recent_entry / "payload").write_text("recent", encoding="utf-8")
+            os.utime(old_entry / "payload", (old, old))
+            os.utime(old_entry, (old, old))
+            completed = subprocess.run(
+                ["bash", str(cleanup), "--dry-run"],
+                env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                capture_output=True, text=True, check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(str(old_entry), completed.stdout)
+        self.assertNotIn(str(recent_entry), completed.stdout)
+        self.assertIn("no files deleted", completed.stdout)
 
     def test_cli_source_contains_no_delete_execution(self):
         text = SCRIPT.read_text(encoding="utf-8")
