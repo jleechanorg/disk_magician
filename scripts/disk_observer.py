@@ -301,6 +301,30 @@ def collect_boot(now_epoch: int, run: Runner) -> dict:
     }
 
 
+def collect_swap(run: Runner) -> dict:
+    result = run(["sysctl", "-n", "vm.swapusage"], 3)
+    empty = {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+    if result.returncode:
+        return {**empty, "error": _error(result)}
+    multipliers = {
+        "K": 1024,
+        "M": 1024 ** 2,
+        "G": 1024 ** 3,
+        "T": 1024 ** 4,
+    }
+    values = {}
+    for name in ("total", "used", "free"):
+        match = re.search(
+            rf"\b{name}\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT])(?:B)?\b",
+            result.stdout,
+            re.IGNORECASE,
+        )
+        if not match:
+            return {**empty, "error": "unparseable"}
+        values[f"{name}_bytes"] = int(float(match.group(1)) * multipliers[match.group(2).upper()])
+    return {**values, "error": None}
+
+
 def collect_sample(
     home: Path,
     now_epoch: Optional[int] = None,
@@ -323,6 +347,7 @@ def collect_sample(
         "open_unlinked_files": collect_unlinked_files(run),
         "time_machine": collect_time_machine(run),
         "boot": collect_boot(now_epoch, run),
+        "swap": collect_swap(run),
     }
 
 

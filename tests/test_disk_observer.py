@@ -23,6 +23,30 @@ def load_module():
 
 
 class DiskObserverTest(unittest.TestCase):
+    def test_swap_sample_parses_bytes_and_surfaces_failure(self):
+        observer = load_module()
+        self.assertTrue(hasattr(observer, "collect_swap"), "swap collector is missing")
+
+        def success_run(argv, timeout=3):
+            return observer.CommandResult(
+                0, "total = 4096.00M  used = 1536.50M  free = 2559.50M  (encrypted)\n", "", False
+            )
+
+        swap = observer.collect_swap(success_run)
+        self.assertEqual(swap["total_bytes"], 4096 * 1024 * 1024)
+        self.assertEqual(swap["used_bytes"], int(1536.5 * 1024 * 1024))
+        self.assertEqual(swap["free_bytes"], int(2559.5 * 1024 * 1024))
+        self.assertIsNone(swap["error"])
+
+        def failure_run(argv, timeout=3):
+            return observer.CommandResult(1, "", "unsupported", False)
+
+        failed = observer.collect_swap(failure_run)
+        self.assertEqual(failed["error"], "exit_1")
+        self.assertIsNone(failed["total_bytes"])
+        self.assertIsNone(failed["used_bytes"])
+        self.assertIsNone(failed["free_bytes"])
+
     def test_live_runner_label_and_never_exited_status_are_truthful(self):
         observer = load_module()
 
@@ -62,6 +86,8 @@ class DiskObserverTest(unittest.TestCase):
                 return observer.CommandResult(0, "p99\ncDocker\nf7\ns2097152\nl0\nn/private/tmp/growing.bin\n", "", False)
             if argv[0] == "tmutil":
                 return observer.CommandResult(0, "Snapshots for volume /:\ncom.apple.TimeMachine.2026-07-14-010000.local\n", "", False)
+            if argv[:3] == ["sysctl", "-n", "vm.swapusage"]:
+                return observer.CommandResult(0, "total = 2.00G used = 512.00M free = 1.50G", "", False)
             if argv[:2] == ["sysctl", "-n"]:
                 return observer.CommandResult(0, "1000", "", False)
             return observer.CommandResult(127, "", "missing", False)
@@ -92,6 +118,8 @@ class DiskObserverTest(unittest.TestCase):
         self.assertEqual(sample["open_unlinked_files"][0]["size_bytes"], 2097152)
         self.assertEqual(sample["time_machine"]["local_snapshot_count"], 1)
         self.assertEqual(sample["boot"]["boot_epoch"], 1000)
+        self.assertIn("swap", sample)
+        self.assertEqual(sample["swap"]["used_bytes"], 512 * 1024 * 1024)
         self.assertTrue(any(call[:2] == ("docker", "events") for call in calls))
 
     def test_rotation_is_size_bounded_and_report_correlates_deltas(self):
