@@ -121,7 +121,7 @@ def _active_for(path: Path, open_files: Sequence[dict]) -> list:
     return active
 
 
-def collect_open_files(timeout: int = 15) -> list:
+def collect_open_files(timeout: int = 8) -> list:
     try:
         result = subprocess.run(
             ["lsof", "-nP", "-Fpcn"], capture_output=True, text=True,
@@ -269,23 +269,37 @@ def _artifacts(path: Path, now_epoch: int) -> list:
     return artifacts
 
 
-def _ao_references(path: Path, ao_metadata_roots: Sequence[Path]) -> list:
-    needle = str(path.resolve())
-    references = []
+def _ao_reference_map(
+    paths: Sequence[Path], ao_metadata_roots: Sequence[Path], max_seconds: int = 10
+) -> tuple[dict, bool]:
+    canonical_paths = {str(path.resolve()) for path in paths}
+    aliases = {}
+    for path in paths:
+        canonical = str(path.resolve())
+        aliases[str(path)] = canonical
+        aliases[canonical] = canonical
+    references = {canonical: [] for canonical in canonical_paths}
+    deadline = time.monotonic() + max_seconds
     for root in ao_metadata_roots:
         if not root.is_dir():
             continue
         for directory, _, filenames in os.walk(root, followlinks=False):
             for filename in filenames:
+                if time.monotonic() >= deadline:
+                    return references, False
                 candidate = Path(directory) / filename
                 try:
                     if candidate.stat().st_size > 2 * 1024 * 1024:
                         continue
-                    if needle in candidate.read_text(encoding="utf-8", errors="ignore"):
-                        references.append(str(candidate))
+                    content = candidate.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
-    return references[:50]
+                for needle, canonical in aliases.items():
+                    if needle in content and len(references[canonical]) < 50:
+                        reference = str(candidate)
+                        if reference not in references[canonical]:
+                            references[canonical].append(reference)
+    return references, True
 
 
 def inventory_paths(
@@ -295,6 +309,12 @@ def inventory_paths(
 ) -> dict:
     now_epoch = int(time.time()) if now_epoch is None else now_epoch
     open_files = collect_open_files() if open_files is None else list(open_files)
+    children_by_root = {
+        root: sorted(root.iterdir(), key=lambda item: item.name) if root.is_dir() else []
+        for root in roots
+    }
+    all_children = [child for children in children_by_root.values() for child in children]
+    ao_reference_map, ao_attribution_complete = _ao_reference_map(all_children, ao_metadata_roots)
     root_ledgers = []
     total_reclaim = 0
     for root in roots:
@@ -303,11 +323,11 @@ def inventory_paths(
         }
         entries = []
         if root.is_dir():
-            for child in sorted(root.iterdir(), key=lambda item: item.name):
+            for child in children_by_root[root]:
                 measured = _walk_measure(child, now_epoch)
                 active = _active_for(child, open_files)
                 git = _git_facts(child)
-                ao_refs = _ao_references(child, ao_metadata_roots)
+                ao_refs = ao_reference_map.get(str(child.resolve()), [])
                 latest = measured.get("latest_mtime_epoch")
                 age_days = int((now_epoch - latest) / 86400) if latest else None
                 eligible_worktree = (
@@ -352,6 +372,7 @@ def inventory_paths(
     return {
         "schema_version": 1, "tool": "disk_inventory", "inventory": "workspace_paths",
         "roots": root_ledgers, "reclaim_ceiling_bytes": total_reclaim,
+        "ao_attribution_complete": ao_attribution_complete,
         "approval_environment": "WORKTREE_APPROVED=1", "executed_commands": [],
     }
 
