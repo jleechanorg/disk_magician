@@ -19,6 +19,8 @@
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>DOCKER_HOST</key>
+    <string>unix://@HOME@/.colima/default/docker.sock</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

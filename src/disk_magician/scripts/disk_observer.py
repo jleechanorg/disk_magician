@@ -35,9 +35,14 @@ DEFAULT_LABELS = [
 
 
 def run_command(argv: Sequence[str], timeout: int = 5) -> CommandResult:
+    env = None
+    if argv and argv[0] == "docker" and "DOCKER_HOST" not in os.environ:
+        colima_socket = Path.home() / ".colima" / "default" / "docker.sock"
+        if colima_socket.is_socket():
+            env = {**os.environ, "DOCKER_HOST": f"unix://{colima_socket}"}
     try:
         result = subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=timeout, check=False
+            list(argv), capture_output=True, text=True, timeout=timeout, check=False, env=env
         )
         return CommandResult(result.returncode, result.stdout, result.stderr, False)
     except subprocess.TimeoutExpired as exc:

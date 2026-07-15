@@ -4,10 +4,13 @@
 import importlib.util
 import json
 import os
+import socket
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +26,32 @@ def load_module():
 
 
 class DiskObserverTest(unittest.TestCase):
+    def test_docker_commands_use_live_colima_socket(self):
+        observer = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            socket_path = home / ".colima" / "default" / "docker.sock"
+            socket_path.parent.mkdir(parents=True)
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(socket_path))
+            try:
+                completed = subprocess.CompletedProcess(["docker", "ps"], 0, "", "")
+                with mock.patch.object(observer.Path, "home", return_value=home), mock.patch.object(
+                    observer.subprocess, "run", return_value=completed
+                ) as run:
+                    observer.run_command(["docker", "ps"])
+            finally:
+                server.close()
+
+        env = run.call_args.kwargs.get("env", {})
+        self.assertEqual(env.get("DOCKER_HOST"), f"unix://{socket_path}")
+
+    def test_observer_launchd_declares_colima_docker_host(self):
+        template = ROOT / "launchd" / "com.jleechanorg.disk-magician-observer.plist.template"
+        text = template.read_text(encoding="utf-8")
+        self.assertIn("<key>DOCKER_HOST</key>", text)
+        self.assertIn("unix://@HOME@/.colima/default/docker.sock", text)
+
     def test_swap_sample_parses_bytes_and_surfaces_failure(self):
         observer = load_module()
         self.assertTrue(hasattr(observer, "collect_swap"), "swap collector is missing")
