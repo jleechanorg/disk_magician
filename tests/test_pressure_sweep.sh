@@ -4,17 +4,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SCRIPT="$REPO_ROOT/scripts/pressure_sweep.sh"
+SOURCE_SCRIPT="$REPO_ROOT/scripts/pressure_sweep.sh"
 
-if [[ ! -x "$SCRIPT" ]]; then
-  echo "FAIL: $SCRIPT not executable" >&2
+if [[ ! -x "$SOURCE_SCRIPT" ]]; then
+  echo "FAIL: $SOURCE_SCRIPT not executable" >&2
   exit 2
 fi
 
 TMP_ROOT=$(mktemp -d -t pressure_sweep_test.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-MOCK_BIN="$TMP_ROOT/bin"
+MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
 LOG_FILE="$TMP_ROOT/pressure-sweep.log"
 INVOCATION_LOG="$TMP_ROOT/invocations.log"
@@ -34,23 +34,13 @@ exit 0
 MOCK
 
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh"
+cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
+chmod +x "$MOCK_BIN/pressure_sweep.sh"
+SCRIPT="$MOCK_BIN/pressure_sweep.sh"
 
 run_pressure() {
   local free_gb="$1"
   shift
-  local real_tmp="$REPO_ROOT/scripts/cleanup_tmp.sh"
-  local real_colima="$REPO_ROOT/scripts/cleanup_colima.sh"
-  local back_tmp="$TMP_ROOT/cleanup_tmp.sh.real"
-  local back_colima="$TMP_ROOT/cleanup_colima.sh.real"
-  cp -p "$real_tmp" "$back_tmp"
-  cp -p "$real_colima" "$back_colima"
-  cp "$MOCK_BIN/cleanup_tmp.sh" "$real_tmp"
-  cp "$MOCK_BIN/cleanup_colima.sh" "$real_colima"
-  restore_mocks() {
-    cp -p "$back_tmp" "$real_tmp"
-    cp -p "$back_colima" "$real_colima"
-  }
-  trap restore_mocks RETURN
   env -i \
     HOME="$TMP_ROOT/home" \
     PATH="/usr/bin:/bin" \
