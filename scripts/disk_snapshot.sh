@@ -64,6 +64,31 @@ elif command -v gtimeout &>/dev/null; then
   TIMEOUT_CMD="gtimeout"
 fi
 
+DUA_CMD=""
+if command -v dua &>/dev/null; then
+  DUA_CMD="dua"
+fi
+
+# dua-cli is parallel-by-default and dramatically faster than single-threaded
+# du on large/many-file trees, so it's used as a fallback (not primary) when
+# du times out -- primary stays du for behavioral parity with existing
+# snapshots. Falling back rather than switching outright avoids silently
+# changing every historical size number in disk_snapshot.json.
+dua_size_kb() {
+  local path="$1"
+  local to="$2"
+  [[ -n "$DUA_CMD" ]] || { echo ""; return; }
+  local bytes
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    bytes=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
+      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
+  else
+    bytes=$("$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null \
+      | tail -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1+0}')
+  fi
+  [[ -n "$bytes" && "$bytes" -gt 0 ]] && echo $(( bytes / 1024 )) || echo ""
+}
+
 dir_size_kb() {
   local raw_path="$1"
   local to="${2:-$DU_TIMEOUT}"
@@ -85,7 +110,15 @@ dir_size_kb() {
   fi
 
   if [[ -z "$result" ]]; then
-    # Timeout or error -> surface as null (empty string in output)
+    # du timed out or errored -- retry once with dua (parallel scanner) using
+    # the same time budget before surfacing as null. This is what fixes the
+    # keys that were intermittently going null under disk pressure
+    # (codex_sessions, gemini_root, hermes, library_caches, projects).
+    result=$(dua_size_kb "$path" "$to")
+  fi
+
+  if [[ -z "$result" ]]; then
+    # Both du and dua failed/timed out -> surface as null (empty string)
     echo ""
     return
   fi
