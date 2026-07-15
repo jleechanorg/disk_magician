@@ -40,6 +40,10 @@ Optional environment hooks:
 | `DISK_MAGICIAN_GITLEAKS_BIN` | Explicit path to `gitleaks` for the snapshot pre-push secret scan |
 
 Automated snapshot pushes require [`gitleaks`](https://github.com/gitleaks/gitleaks).
+The resolver honors `DISK_MAGICIAN_GITLEAKS_BIN`, the current `PATH`,
+`$HOMEBREW_PREFIX/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and finally
+`~/.local/bin`, so the launchd environment can find standard Homebrew installs.
+An explicit `DISK_MAGICIAN_GITLEAKS_BIN` that is not executable fails closed.
 Before pushing, Disk Magician refreshes the matching remote branch, requires a
 fast-forward history (and preserves `archive/pre-reset-20260711` when present),
 rejects HTTP(S) remotes with embedded credentials, and scans every outgoing

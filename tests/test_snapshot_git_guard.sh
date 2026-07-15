@@ -53,12 +53,48 @@ run_snapshot() {
     HOME="$HOME_DIR" PATH="$BIN_DIR:$PATH" bash "$APP/disk_magician.sh" snapshot
 }
 
+run_snapshot_launchd() {
+    HOME="$HOME_DIR" \
+        PATH="$BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+        HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-}" \
+        DISK_MAGICIAN_GITLEAKS_BIN="${DISK_MAGICIAN_GITLEAKS_BIN:-}" \
+        bash "$APP/disk_magician.sh" snapshot
+}
+
 init_backup_repo
 write_snapshot_stub '{"snapshot":"clean"}'
 clean_output="$WORK/clean.out"
 run_snapshot >"$clean_output" 2>&1
 [[ "$(git -C "$BACKUP_REPO" rev-parse HEAD)" == "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" ]]
 grep -q "Snapshot history guard passed" "$clean_output"
+
+init_backup_repo
+write_snapshot_stub '{"snapshot":"homebrew-only"}'
+real_gitleaks="$(command -v gitleaks)"
+fake_homebrew="$WORK/homebrew"
+gitleaks_marker="$WORK/homebrew-gitleaks-called"
+mkdir -p "$fake_homebrew/bin"
+cat > "$fake_homebrew/bin/gitleaks" <<SH
+#!/usr/bin/env bash
+printf '%s\n' called > "$gitleaks_marker"
+exec "$real_gitleaks" "\$@"
+SH
+chmod +x "$fake_homebrew/bin/gitleaks"
+homebrew_output="$WORK/homebrew.out"
+HOMEBREW_PREFIX="$fake_homebrew" run_snapshot_launchd >"$homebrew_output" 2>&1
+[[ -s "$gitleaks_marker" ]]
+grep -q "Snapshot history guard passed" "$homebrew_output"
+
+init_backup_repo
+write_snapshot_stub '{"snapshot":"missing-gitleaks"}'
+missing_output="$WORK/missing.out"
+remote_before="$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)"
+if DISK_MAGICIAN_GITLEAKS_BIN="$WORK/absent-gitleaks" run_snapshot_launchd >"$missing_output" 2>&1; then
+    echo "expected missing configured gitleaks to fail closed" >&2
+    exit 1
+fi
+[[ "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" == "$remote_before" ]]
+grep -q "gitleaks is unavailable" "$missing_output"
 
 secret_value="outgoing-secret-marker"
 private_key_begin="$(printf '%s%s' '-----BEGIN PRIVATE' ' KEY-----')"
