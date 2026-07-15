@@ -62,11 +62,50 @@ run_cmd() {
 }
 
 COLIMA_LIMA="$HOME/.colima/_lima"
-COLIMA_WEDGE_RECOVERY=true
+COLIMA_DOCKER_SOCKET="$HOME/.colima/default/docker.sock"
+COLIMA_SSH_DIR="$COLIMA_LIMA/colima"
+
+path_owner_uid() {
+  stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
+}
+
+prove_colima_docker_backend() {
+  local context endpoint
+  context=$(docker context show 2>/dev/null) || return 1
+  endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+  if [[ "$endpoint" != "unix://$COLIMA_DOCKER_SOCKET" ]]; then
+    log "Docker endpoint $endpoint does not match the expected Colima socket unix://$COLIMA_DOCKER_SOCKET — skipping."
+    return 1
+  fi
+  if [[ ! -e "$COLIMA_DOCKER_SOCKET" || -L "$COLIMA_DOCKER_SOCKET" \
+        || "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" != "$(id -u)" ]]; then
+    log "Expected Colima Docker socket is missing, symlinked, or not user-owned — skipping: $COLIMA_DOCKER_SOCKET"
+    return 1
+  fi
+  return 0
+}
+
+fstrim_via_active_lima_mux() {
+  local ssh_config="$COLIMA_SSH_DIR/ssh.config"
+  local mux_socket="$COLIMA_SSH_DIR/ssh.sock"
+  local current_uid
+  current_uid=$(id -u)
+
+  command -v ssh >/dev/null 2>&1 || return 1
+  for trusted_path in "$ssh_config" "$mux_socket"; do
+    [[ -e "$trusted_path" && ! -L "$trusted_path" ]] || return 1
+    [[ "$(path_owner_uid "$trusted_path" 2>/dev/null || echo unknown)" == "$current_uid" ]] || return 1
+  done
+  grep -qF "ControlPath \"$mux_socket\"" "$ssh_config" || return 1
+  ssh -S "$mux_socket" -F "$ssh_config" -O check lima-colima >/dev/null 2>&1 || return 1
+
+  log "+ fstrim via active Lima SSH control master (Colima CLI control plane unavailable)"
+  ssh -S "$mux_socket" -F "$ssh_config" lima-colima sudo fstrim -av
+}
 
 fstrim_colima_disk() {
   if [[ "$DRY_RUN" == true ]]; then
-    log "[dry-run] colima ssh -- sudo fstrim -av"
+    log "[dry-run] colima ssh -- sudo fstrim -av; if unavailable, use the verified active Lima SSH control master"
     return 0
   fi
 
@@ -74,16 +113,27 @@ fstrim_colima_disk() {
   if colima ssh -- sudo fstrim -av 2>/dev/null; then
     return 0
   fi
-
-  return 1
+  fstrim_via_active_lima_mux
 }
 
 recover_colima_wedge_once() {
-  if [[ "$COLIMA_WEDGE_RECOVERY" != true ]]; then
+  local running_containers
+
+  if [[ "${VACATE_CI_RUNNERS_APPROVED:-0}" != "1" ]]; then
+    log "WARNING: trim backends unavailable; restart recovery requires VACATE_CI_RUNNERS_APPROVED=1."
     return 1
   fi
 
-  log "WARNING: fstrim failed; attempting Colima restart recovery"
+  if ! running_containers=$(docker ps -q 2>/dev/null); then
+    log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
+    return 1
+  fi
+  if [[ -n "$running_containers" ]]; then
+    log "WARNING: refusing Colima restart because running containers remain."
+    return 1
+  fi
+
+  log "WARNING: trim failed; attempting approved Colima restart recovery"
   if ! colima stop >/dev/null 2>&1; then
     log "WARNING: colima stop failed"
   fi
@@ -92,11 +142,11 @@ recover_colima_wedge_once() {
     return 1
   fi
   sleep 2
-  if colima status >/dev/null 2>&1; then
+  if docker info >/dev/null 2>&1 && prove_colima_docker_backend; then
     fstrim_colima_disk
     return $?
   fi
-  log "WARNING: colima status unhealthy after restart"
+  log "WARNING: Docker backend unhealthy after restart"
   return 1
 }
 
@@ -106,7 +156,18 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if ! docker info >/dev/null 2>&1; then
-  log "Docker daemon not reachable (start colima?) — skipping."
+  log "Docker daemon not reachable — checking guarded Colima recovery."
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry-run: guarded Colima restart recovery was not attempted."
+    exit 0
+  fi
+  if prove_colima_docker_backend && command -v colima >/dev/null 2>&1; then
+    recover_colima_wedge_once || log "WARNING: initial Docker recovery failed"
+  fi
+  exit 0
+fi
+
+if ! prove_colima_docker_backend; then
   exit 0
 fi
 
@@ -161,7 +222,7 @@ else
   log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
   log "=== docker system df (after) ==="
   docker system df 2>/dev/null || true
-  if command -v colima >/dev/null 2>&1 && colima status >/dev/null 2>&1; then
+  if command -v colima >/dev/null 2>&1; then
     if ! fstrim_colima_disk; then
       recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
     fi

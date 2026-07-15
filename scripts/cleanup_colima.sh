@@ -117,12 +117,18 @@ fstrim_colima_disk() {
 }
 
 recover_colima_wedge_once() {
+  local running_containers
+
   if [[ "${VACATE_CI_RUNNERS_APPROVED:-0}" != "1" ]]; then
     log "WARNING: trim backends unavailable; restart recovery requires VACATE_CI_RUNNERS_APPROVED=1."
     return 1
   fi
 
-  if [[ -n "$(docker ps -q 2>/dev/null)" ]]; then
+  if ! running_containers=$(docker ps -q 2>/dev/null); then
+    log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
+    return 1
+  fi
+  if [[ -n "$running_containers" ]]; then
     log "WARNING: refusing Colima restart because running containers remain."
     return 1
   fi
@@ -150,7 +156,14 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if ! docker info >/dev/null 2>&1; then
-  log "Docker daemon not reachable (start colima?) — skipping."
+  log "Docker daemon not reachable — checking guarded Colima recovery."
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry-run: guarded Colima restart recovery was not attempted."
+    exit 0
+  fi
+  if prove_colima_docker_backend && command -v colima >/dev/null 2>&1; then
+    recover_colima_wedge_once || log "WARNING: initial Docker recovery failed"
+  fi
   exit 0
 fi
 
