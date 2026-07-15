@@ -61,3 +61,25 @@ production ran v1).
 `roadmap/2026-07-11-total-coverage-snapshot-v2.md` — frontier-BFS coverage
 architecture, critic findings, implementation order. Beads track remaining
 work (`br search disk`).
+
+## Machine-local safety guidelines (safety.local.json)
+
+Machine-specific safety rules live in a gitignored `safety.local.json`
+(repo root or `~/.config/disk-magician/` — schema in
+`safety.local.json.template`): never_delete globs, protected_live_paths
+(dirs owned by running processes), needs_decision (paths awaiting a human
+push-or-discard call), and min_stale_days. The wired cleanup scripts
+(agent_artifacts, worktrees) consult it via `scripts/safety_lib.sh` and
+fail closed on unreadable rules. Before ANY manual deletion, run
+`scripts/safety_check.sh <path>...`.
+
+## Machine-local findings (findings_wiki/ — fork-tracked knowledge)
+
+`findings_wiki/` holds one doc per durable machine finding (hotspots, traps,
+root causes) — git-tracked in each machine's FORK, never upstream (upstream
+carries only README + TEMPLATE; `scripts/findings_lint.sh --upstream` asserts
+purity). At the START of any cleanup or measurement session, read the active
+findings (`scripts/safety_check.sh --findings`). When you discover a new
+hotspot/trap, add BOTH a findings_wiki doc (knowledge, fork commit) and a
+safety.local.json rule when enforcement applies — cross-linked. Keep findings
+commits separate from code commits so code can be cherry-picked upstream.

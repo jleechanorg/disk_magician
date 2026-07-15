@@ -1,0 +1,34 @@
+{
+  "_doc": [
+    "Machine-local safety guidelines for disk cleanup. Copy to safety.local.json",
+    "(repo root, gitignored) or ~/.config/disk-magician/safety.local.json — the",
+    "~/.config location is the only one the uv-tool-packaged copy can see.",
+    "Consulted by scripts/safety_lib.sh + safety_check.sh and by the cleanup",
+    "scripts before every deletion. Globs supported; ~ expands; the",
+    "/System/Volumes/Data firmlink alias of $HOME is normalized automatically.",
+    "Sections: never_delete = hard invariants (strings or {path, reason});",
+    "protected_live_paths = dirs owned by running processes; needs_decision =",
+    "paths a human must push-or-discard before reclaim; min_stale_days =",
+    "staleness floor for any age-gated cleanup (default 14)."
+  ],
+  "never_delete": [
+    "~/.codex/sessions*",
+    "~/.codex/state*.sqlite",
+    "~/.codex/log",
+    "~/.claude/projects",
+    "~/.disk_magician_backup"
+  ],
+  "protected_live_paths": [
+    {
+      "path": "~/example/live-daemon-workdir",
+      "reason": "example: cwd of a running daemon — check pgrep before removing this entry"
+    }
+  ],
+  "needs_decision": [
+    {
+      "path": "~/example/clone-with-unpushed-commits",
+      "reason": "example: full clone holding unpushed commits — push or discard first"
+    }
+  ],
+  "min_stale_days": 14
+}

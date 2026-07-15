@@ -8,6 +8,9 @@
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 MIN_AGE_DAYS=14
 REPO_LOCAL_REPOS=()
@@ -306,6 +309,11 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
             fi
             local_kb=$(size_kb "$abs_subdir")
             local_mb=$(( local_kb / 1024 ))
+            if ! _safety_reason="$(safety_gate "$abs_subdir")"; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "safety.local: $_safety_reason"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
             if [[ "$DRY_RUN" == true ]]; then
                 ledger_line "antigravity" "ELIGIBLE" "$abs_subdir" "" " (~${local_mb}M, rm -rf orphan)"
                 TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
@@ -377,6 +385,9 @@ process_repo_local_worktrees() {
         age_label=$(worktree_age_days "$abs_path" 2>/dev/null || echo '?')
         extra=" | age=${age_label}d size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
 
+        if [[ -z "$reason" ]] && ! _safety_reason="$(safety_gate "$abs_path")"; then
+            reason="safety.local: $_safety_reason"
+        fi
         if [[ -n "$reason" ]]; then
             ledger_line "repo-local" "PRESERVE" "$abs_path" "$reason" "$extra"
             REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
