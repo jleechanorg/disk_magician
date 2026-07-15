@@ -296,3 +296,92 @@ The 4-class taxonomy from 07-12 is **still correct** and unchanged. What shifted
 ## Roadmap pointer
 
 - Appended `roadmap/activity/2026-07-14.md` with a corrected second bullet separating physical recovery, residual accounting, and frontier operational state.
+
+# Roll-forward — 2026-07-15 (sustained /sidekick + /swarm + ultracode root-cause session)
+
+## Table of contents (this section only — earlier sections predate the TOC convention)
+
+- [Executive summary](#executive-summary-2026-07-15)
+- [Context](#context-2026-07-15)
+- [Bead index](#bead-index-2026-07-15)
+- [Confirmed mechanisms](#confirmed-mechanisms-2026-07-15)
+- [Fixes shipped](#fixes-shipped-2026-07-15)
+- [Cleanups executed](#cleanups-executed-2026-07-15)
+- [Work queue / open items](#work-queue--open-items-2026-07-15)
+- [PR / merge state](#pr--merge-state-2026-07-15)
+- [Learnings pointer](#learnings-pointer-2026-07-15)
+- [Roadmap pointer](#roadmap-pointer-2026-07-15)
+
+## Executive summary {#executive-summary-2026-07-15}
+
+- Ran a multi-hour sustained investigation (two in-session sidekicks + one ultracode Workflow fan-out) to truly root-cause disk free-space swings, not just correlate them.
+- **Two mechanisms confirmed with live/direct evidence** (not correlation): (1) OS reboot at 2026-07-14T21:13:33Z force-closing fds on a deleted-but-open file, explaining the 5.8GiB→76GiB recovery; (2) Colima guest-VM wedge → forced restart → in-VM `fstrim`, caught live 00:19-00:20Z with the datadisk file shrinking 50.5GB→23.8GB→7.6GB in real time — this is the recurring, actionable mechanism (matches an already-documented CLAUDE.md failure mode).
+- **Rigorous disk accounting completed** (`jleechan-w5is` comments): ground truth 834.65 GiB used, 620.77 GiB directly measured via `du -xsk`, gap of 213.9 GiB fully named as TCC/SIP-protected paths (`~/.Trash`, ~20 `~/Library` subtrees — MobileSync backups called out as the likely largest single piece — 4 SIP dotdirs), not hand-waved.
+- **Fixes shipped and deployed** (not just committed): `dua-cli` wired as a `du`-timeout fallback in `disk_snapshot.sh` (commits `74ded74`, `6bb839c`, v0.2.12→0.2.13; later PR #16 merged further Library-coverage work on top, now at v0.2.18 — re-verify fallback still intact post-merge before next claim).
+- **Cleanups executed, real bytes freed:** Colima wedge-recovery run (32GiB→54GiB free, datadisk 27GB→4.2GB); `~/projects_reference` build-artifact purge (28.3GB→11GB — `.zig-cache`, Rust `target/`, Xcode `build/`, zero data loss); 2 genuinely-48h+-old `dk2d_evidence` items (~469MB, most candidates were disqualified on a per-file mtime check, not just directory mtime).
+- **Blocked, needs user action:** MobileSync backup deletion — macOS TCC Full Disk Access is not granted to the hosting app (traced process tree to **cmux**, specifically "cmux DEV dev-fork"); `sudo -n` does not bypass this. User must grant via System Settings → Privacy & Security → Full Disk Access before this can proceed.
+- **Still genuinely open:** `dk2d_evidence` has no retention policy and grew 24GB→37GB during this session alone (~13GB in a few hours) — the single fastest-growing untracked consumer found; the 2026-07-13 historical swing pair remains unexplained by any confirmed mechanism.
+
+## Context {#context-2026-07-15}
+
+Continuation of the 2026-07-12/07-14 disk-recovery investigation in this same rolling doc. Repo: `jleechanorg/disk_magician`, branch `main`, no PR (direct commits, matches this repo's evident direct-to-main convention). Session used `/cmux-goal` twice to self-enforce a Stop hook until root-cause criteria were met, `/sidekick` twice (`sidekick-root-cause-swing-mechanism`, `sidekick-real-accounting`, both in-session Agent-tool teammates per the DEFAULT visible-team mode), and one ultracode Workflow (`wf_c6e77463-977` then `wf_f93abdb9-502`) for adversarial 3-lens verification of candidate causes.
+
+## Bead index {#bead-index-2026-07-15}
+
+| Bead | Title | Status |
+|---|---|---|
+| [jleechan-w5is](https://github.com/jleechanorg/disk_magician/issues) | Root-cause the unexplained fast disk free-space swing mechanism (parent) | Open — see comments for full evidence trail |
+| [jleechan-3umv](https://github.com/jleechanorg/disk_magician/issues) | Unexplained fast free-space recovery 5.8GiB→76GiB | Open — mechanism confirmed (reboot fd-release), culprit process forensically unreachable |
+| [jleechan-tbe3](https://github.com/jleechanorg/disk_magician/issues) | Tight-cadence disk-free live logger | Done, ran ~3h, self-terminated at time-box |
+| [jleechan-hjup](https://github.com/jleechanorg/disk_magician/issues) | APFS local-snapshot candidate | Refuted with direct storagekitd telemetry |
+| [jleechan-pfxw](https://github.com/jleechanorg/disk_magician/issues) | Swapfile/other-launchd candidate | Corrected then refuted-for-the-flagship-event (swap is real but wrong path initially checked, and too small/wrong-window for the main event) |
+| [jleechan-fslj](https://github.com/jleechanorg/disk_magician/issues) | Colima VM crash-looping, CI capacity degraded | Open — recovery run (see Cleanups), re-verify current state |
+| [jleechan-rx6v](https://github.com/jleechanorg/disk_magician/issues) | host-disk-guardian log leaks plaintext GitHub PATs | **Open — still needs user credential rotation, not yet done** |
+| [jleechan-772q](https://github.com/jleechanorg/disk_magician/issues) | disk_snapshot.sh never covers ~/Library as a whole tree | Open — PR #16 (merged) did some Library-coverage work; re-verify scope against this bead before closing |
+
+Not repeated here in full — see `br show <id>` on each for the complete comment-level evidence trail (multiple long comments per bead from both sidekicks and the main session).
+
+## Confirmed mechanisms {#confirmed-mechanisms-2026-07-15}
+
+1. **OS reboot fd-release** (flagship event, 2026-07-14T21:13:33Z): `sysctl kern.boottime` + `last reboot` + storagekitd unified-log telemetry (free 0.5GB pre-reboot → 37-39GB by T+60-64s) triple-confirmed independently. Explains RECOVERY direction only; growth-side culprit process is forensically unreachable (reboot destroyed the process table).
+2. **Colima wedge → forced-restart → in-VM trim** (live-caught 2026-07-15T00:19-00:21Z): growth side evidenced by `colima_datadisk_kb` climbing monotonically over ~2.5h tracking live ephemeral CI-container count (confirmed non-crash via `docker inspect RestartCount=0`); recovery side evidenced by the datadisk shrinking 50.5GB→23.8GB→7.6GB in the same 45s window `ezgha-watchdog.log` shows a forced restart attempt. This is the recurring, general-case mechanism — matches this repo's own CLAUDE.md-documented wedge scenario.
+3. **Ruled out**: APFS snapshot purge (purgeable space telemetry stayed flat <0.5GB during a 73GB swing), swapfile-as-sole-cause for the flagship event (real mechanism, wrong magnitude/window), Time Machine local snapshot thinning.
+
+## Fixes shipped {#fixes-shipped-2026-07-15}
+
+- `scripts/disk_snapshot.sh` / `src/disk_magician/scripts/disk_snapshot.sh`: added `dua_size_kb()` fallback inside `dir_size_kb()` — when `du -sk` times out, retry once with `dua aggregate` (parallel scanner) before surfacing null. Targets the exact keys that were intermittently going null under pressure (`codex_sessions`, `gemini_root`, `hermes`, `library_caches`, `projects`), which is what produced the earlier false "+81.7GB/day leak" alarm. Commits `74ded74` (fix), `6bb839c` (sync to packaged `src/` tree + version bump 0.2.12→0.2.13 + `uv tool install --force --reinstall` + deployed-tree diff verification). **Note:** PR #16 merged additional Library-coverage commits on top (now v0.2.18) after this session's changes — re-diff before next claiming this fallback is live in the deployed tool.
+
+## Cleanups executed {#cleanups-executed-2026-07-15}
+
+| Action | Before | After | Method |
+|---|---|---|---|
+| Colima wedge recovery | 32GiB free, datadisk 27GB | 54GiB free, datadisk 4.2GB | `scripts/cleanup_colima.sh --clean` (has built-in wedge-recovery fallback) |
+| `~/projects_reference` build-artifact purge | 28.3GB | 11GB | Deleted `cmux/ghostty/.zig-cache` (13GB, Zig build cache), `cmux_ubuntu/target` (4.0GB, Rust build output), `cmux/ghostty/macos/build` (370MB, Xcode build output) — all regeneratable, zero source/history loss |
+| `dk2d_evidence` 48h+ purge | 24GB | ~23.5GB (small) | Per-file mtime check (not directory mtime, which was misleading — 7/10 candidates were disqualified because the mission writes into "old-looking" top-level dirs continuously); only 2 items were genuinely all-clear (~469MB) |
+| Hermes old sessions | — | ~0.1GB | `cleanup_sessions.sh --clean`, 338 JSONLs >30d, not on never-delete list |
+| tmp scratch | — | ~1.5GB | `cleanup_tmp.sh --clean --large` with `LARGE_TMP_APPROVED=1` |
+
+Net free space across the session: ~2-5GiB free (start) → 62GiB (peak, post-projects_reference cleanup) → 45GiB (current, `dk2d_evidence` regrew ~13GB and Colima churn continues). **The disk is still net-growing faster than these one-time cleanups reclaim** — the real fix is the retention-policy item below, not repeated manual sweeps.
+
+## Work queue / open items {#work-queue--open-items-2026-07-15}
+
+1. **`dk2d_evidence` retention policy** — no bead created yet, should be. Grew 24GB→37GB in a few hours this session alone; needs a keep-last-N-runs or auto-compress-after-N-days policy, not manual review each time. Owner: whoever runs the DK2D mission.
+2. **MobileSync backup deletion — blocked on user action.** Grant Full Disk Access to **cmux** (System Settings → Privacy & Security → Full Disk Access → add cmux/"cmux DEV dev-fork") before this can be measured or touched. Likely the single largest piece of the 213.9GB TCC-blocked residual (`jleechan-w5is` accounting comment).
+3. **`jleechan-rx6v` — still open.** Two live GitHub PATs remain unrotated in a plaintext log file. Highest-priority non-disk item from this whole session.
+4. **`jleechan-772q`** — re-verify scope against merged PR #16 before closing; confirm whether `~/Library` coverage is now complete or still partial.
+5. **`jleechan-fslj`** — re-verify current Colima/CI-runner health; last known state was recovered via the wedge-recovery run, but confirm `ezgha-watchdog` isn't still flagging degraded capacity.
+6. **2026-07-13 historical swing pair** — still unexplained by either confirmed mechanism; lowest priority, no active lead.
+
+## PR / merge state {#pr--merge-state-2026-07-15}
+
+- No PR opened this session — direct commits to `main` (`74ded74`, `6bb839c`), matching this repo's evident convention (recent history is direct-to-main commits, not PR-gated).
+- `PR #16: MERGED` (`jleechanorg/disk_magician`, "assemble disk audit fixes for deployment" + Library frontier coverage work) — merged by another concurrent session during this investigation, landed on top of this session's commits. Not re-verified line-by-line against this session's `dua-cli` fallback; flagged above as a re-verify item.
+- `PR #1` ("[antig] feat: port docker/antigravity cleanups and fill tests") — still OPEN as of this session, touches `scripts/disk_snapshot.sh` with a small (+6/-3) diff; flagged by the repo's merge_train hook as a potential future conflict with this session's changes, not resolved (informational only, warn-only hook).
+
+## Learnings pointer {#learnings-pointer-2026-07-15}
+
+- `~/roadmap/learnings-2026-07.md` — entry `2026-07-15 — disk_magician sustained root-cause session` logs: (a) directory-mtime is an unreliable proxy for "no recent writes" on actively-written trees, always verify per-file; (b) `du` without `-x` silently crosses APFS volume boundaries and inflates figures; (c) an installed `gdu` binary may be GNU coreutils' `du` (Homebrew `g`-prefix collision), not the Go disk-analyzer tool of the same name; (d) `dua-cli` can itself hang on very-many-entry directories despite being "parallel by default" — plain `du` + `xargs -P` was more reliable for a 589-entry top-level scan.
+
+## Roadmap pointer {#roadmap-pointer-2026-07-15}
+
+- Appended `roadmap/activity/2026-07-15.md` with this session's summary bullet (new date — also prepended a date link to `roadmap/README.md`'s Recent activity list).
