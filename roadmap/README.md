@@ -2,6 +2,7 @@
 
 ## Recent activity (by day)
 
+- [2026-07-14](activity/2026-07-14.md) — Disk pressure recheck and correction: the early ~186 GiB Colima figure summed sparse apparent capacities, not allocated bytes; snapshot residual deltas are coverage/accounting changes, not physical reclaim. Live evidence instead ties rapid growth to one-shot ezgha runner replacement, while the largest recovery remains open pending a direct catch. Roll-forward in [nextsteps-2026-07-12-disk-magician-root-cause.md](nextsteps-2026-07-12-disk-magician-root-cause.md) (2026-07-14 section).
 - [2026-07-12](activity/2026-07-12.md) — Disk crisis recovery, four leak-class root causes, prevention plan (/secondo)
   - [nextsteps-2026-07-12-disk-magician-root-cause.md](nextsteps-2026-07-12-disk-magician-root-cause.md) — open action queue + owner matrix for all disk beacons
   - Cleanup modes and approvals are documented in that nextsteps doc: SAFE/REVIEW/MANUAL classes + env-gate map.
