@@ -31,7 +31,7 @@ DEFAULT_LABELS = [
     "com.jleechanorg.disk-magician-drilldown",
     "com.jleechanorg.disk-magician-frontier-nightly",
     "org.jleechanorg.host-disk-guardian",
-    "com.jleechan.ezgha-runner",
+    "org.jleechanorg.ezgha",
 ]
 
 
@@ -193,6 +193,10 @@ def collect_launchd(labels: Iterable[str], run: Runner) -> list:
             match = re.match(r"\s*(state|pid|runs|last exit code)\s*=\s*(.+?)\s*$", line)
             if match:
                 values[match.group(1)] = match.group(2)
+        raw_exit_code = values.get("last exit code")
+        numeric_exit_code = (
+            int(raw_exit_code) if raw_exit_code and re.fullmatch(r"-?\d+", raw_exit_code) else None
+        )
         jobs.append(
             {
                 "label": label,
@@ -200,7 +204,8 @@ def collect_launchd(labels: Iterable[str], run: Runner) -> list:
                 "state": values.get("state"),
                 "pid": _int(values.get("pid")) or None,
                 "runs": _int(values.get("runs")),
-                "last_exit_code": _int(values.get("last exit code")),
+                "last_exit_code": numeric_exit_code,
+                "last_exit_code_raw": raw_exit_code,
             }
         )
     return jobs

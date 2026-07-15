@@ -21,6 +21,20 @@ def load_module():
 
 
 class DiskObserverTest(unittest.TestCase):
+    def test_live_runner_label_and_never_exited_status_are_truthful(self):
+        observer = load_module()
+
+        def fake_run(argv, timeout=5):
+            return observer.CommandResult(
+                0, "state = waiting\nruns = 0\nlast exit code = (never exited)\n", "", False
+            )
+
+        self.assertIn("org.jleechanorg.ezgha", observer.DEFAULT_LABELS)
+        self.assertNotIn("com.jleechan.ezgha-runner", observer.DEFAULT_LABELS)
+        job = observer.collect_launchd(["org.jleechanorg.ezgha"], fake_run)[0]
+        self.assertIsNone(job["last_exit_code"])
+        self.assertEqual(job["last_exit_code_raw"], "(never exited)")
+
     def test_collect_sample_aligns_required_signals_without_arguments_or_env(self):
         observer = load_module()
         calls = []

@@ -32,8 +32,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/disk-magician-observer.log</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/disk-magician-observer.log</string>
+  <string>/dev/null</string>
 </dict>
 </plist>
