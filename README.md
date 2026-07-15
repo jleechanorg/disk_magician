@@ -37,6 +37,15 @@ Optional environment hooks:
 | `DISK_MAGICIAN_GC_REPOS` | Colon-separated git repo paths for `set_gc_worktree_prune.sh` |
 | `DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS` | Extra cleanup targets for `cleanup_agent_artifacts.sh` |
 | `DISK_MAGICIAN_CONFIG` | Path to your `config.json` |
+| `DISK_MAGICIAN_GITLEAKS_BIN` | Explicit path to `gitleaks` for the snapshot pre-push secret scan |
+
+Automated snapshot pushes require [`gitleaks`](https://github.com/gitleaks/gitleaks).
+Before pushing, Disk Magician refreshes the matching remote branch, requires a
+fast-forward history (and preserves `archive/pre-reset-20260711` when present),
+rejects HTTP(S) remotes with embedded credentials, and scans every outgoing
+commit with fully redacted output. A missing scanner or failed guard stops the
+push with a non-zero exit; the local snapshot commit remains available for
+inspection and recovery.
 
 ---
 
