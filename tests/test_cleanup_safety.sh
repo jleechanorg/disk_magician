@@ -39,7 +39,7 @@ assert_contains() {
     record_pass "$name"
   else
     record_fail "$name" "expected output to contain: $needle"
-    sed 's/^/        | /' <<<"$haystack"
+    printf '        | %s\n' "${haystack//$'\n'/$'\n        | '}"
   fi
 }
 
@@ -47,7 +47,7 @@ assert_not_contains() {
   local name="$1" needle="$2" haystack="$3"
   if grep -qF "$needle" <<<"$haystack"; then
     record_fail "$name" "expected output not to contain: $needle"
-    sed 's/^/        | /' <<<"$haystack"
+    printf '        | %s\n' "${haystack//$'\n'/$'\n        | '}"
   else
     record_pass "$name"
   fi
@@ -350,7 +350,6 @@ head -c 200000 /dev/zero > "$CSC_FOREIGN/blob"
 head -c 200000 /dev/zero > "$CSC_RACE/blob"
 printf 'protected' > "$CSC_SYMLINK_TARGET/blob"
 printf 'x' > "$CSC_X/com.tiny.code_sign_clone/x"
-FAKE_CSC_TMP="$CSC_PARENT/T"
 FAKE_BIN8="$TMP_ROOT/bin-csc"
 mkdir -p "$FAKE_BIN8"
 cat > "$FAKE_BIN8/getconf" <<'EOF'
