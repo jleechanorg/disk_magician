@@ -250,7 +250,40 @@ clones=$(json_get "$OUT7" "d['clones_suspected']")
   || bad "clones_suspected flag not set: $clones"
 
 # ─────────────────────────────────────────────────────────────
-section "8. --output state-file mode (atomic write, stdout stays intact, --output-default resolution)"
+section "8. Partial du output with a failing exit code is never reported as complete"
+T8_PARTIAL="$WORK/t8_partial"
+PARTIAL_BIN="$WORK/partial_bin"
+mkdir -p "$T8_PARTIAL/protected" "$PARTIAL_BIN"
+cat > "$PARTIAL_BIN/du" <<'PARTIAL_DU'
+#!/usr/bin/env bash
+path="${@: -1}"
+printf '123\t%s\n' "$path"
+echo "du: protected child: Operation not permitted" >&2
+exit 1
+PARTIAL_DU
+chmod +x "$PARTIAL_BIN/du"
+
+OUT8_PARTIAL="$WORK/out8_partial.json"
+PATH="$PARTIAL_BIN:$PATH" python3 "$SCANNER" --root "$T8_PARTIAL" \
+  --no-sibling-volumes --no-purgeable --workers 1 --max-depth 1 \
+  --timeout-tiers 1 --wall-clock-cap 10 --output "$OUT8_PARTIAL" \
+  >/dev/null 2>&1
+
+if python3 - "$OUT8_PARTIAL" "$T8_PARTIAL/protected" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+path = sys.argv[2]
+assert path not in d["measured"]
+assert d["mode"] == "partial"
+assert any(item["path"] == path for item in d["frontier_unfinished"])
+PY
+then
+  ok "nonzero du exit with partial stdout stays on the named unfinished frontier"
+else
+  bad "nonzero du exit was silently accepted as a complete measurement"
+fi
+
+section "9. --output state-file mode (atomic write, stdout stays intact, --output-default resolution)"
 T8="$WORK/t8"
 mkdir -p "$T8/x"
 dd if=/dev/zero of="$T8/x/f" bs=1024 count=30 >/dev/null 2>&1

@@ -439,6 +439,42 @@ else
   bad "global measurement budget failed (elapsed=${total_elapsed}s)"
 fi
 
+section "8. Library frontier names every direct child inside a bounded sub-budget"
+LIBRARY_HOME="$WORK/library_home"
+mkdir -p "$LIBRARY_HOME/Library/Alpha" "$LIBRARY_HOME/Library/Beta"
+dd if=/dev/zero of="$LIBRARY_HOME/Library/Alpha/a.bin" bs=1024 count=16 >/dev/null 2>&1
+dd if=/dev/zero of="$LIBRARY_HOME/Library/Beta/b.bin" bs=1024 count=24 >/dev/null 2>&1
+LIBRARY_CONFIG="$WORK/library_config.json"
+cat > "$LIBRARY_CONFIG" <<JSON
+{"library_frontier_enabled": true, "monitored_dirs": [{"key": "alpha", "path": "$LIBRARY_HOME/Library/Alpha", "timeout": 2}]}
+JSON
+LIBRARY_OUT="$WORK/library_snapshot.json"
+start=$(date +%s)
+HOME="$LIBRARY_HOME" DISK_MAGICIAN_CONFIG="$LIBRARY_CONFIG" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=12 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=2 \
+  DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS=5 \
+  timeout 15 "$SNAP_SCRIPT" --output "$LIBRARY_OUT" >/dev/null 2>&1 || true
+library_elapsed=$(( $(date +%s) - start ))
+if [[ "$library_elapsed" -le 12 ]] && python3 - "$LIBRARY_OUT" "$LIBRARY_HOME/Library" <<'PY' 2>/dev/null
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+root = sys.argv[2]
+coverage = d["library_coverage"]
+ledger = {os.path.basename(item["path"]): item for item in coverage["top_level_ledger"]}
+assert coverage["root"] == os.path.realpath(root)
+assert set(ledger) == {"Alpha", "Beta"}
+assert all(item["status"] == "measured" for item in ledger.values())
+assert coverage["top_level_children_total"] == 2
+assert coverage["top_level_children_accounted"] == 2
+assert coverage["wall_clock_cap_seconds"] == 5
+PY
+then
+  ok "Library frontier accounts for every direct child and respects its 5s sub-budget"
+else
+  bad "Library frontier ledger missing, incomplete, or exceeded its bounded sub-budget"
+fi
+
 section "Summary"
 echo "  PASS: $PASS  FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

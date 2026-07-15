@@ -12,6 +12,7 @@ DISCOVER_JSON=false
 DU_TIMEOUT=30
 SNAPSHOT_BUDGET_SECONDS="${DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS:-1500}"
 MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-20}"
+LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS:-120}"
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
 # timeout | empty) — never a silent zero.
@@ -373,6 +374,10 @@ if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -
   echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a positive integer." >&2
   exit 2
 fi
+if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUDGET_SECONDS" -le 0 ]]; then
+  echo "Error: DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS must be a positive integer." >&2
+  exit 2
+fi
 MEASUREMENT_STARTED_EPOCH=$(date +%s)
 MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECONDS ))
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
@@ -382,7 +387,8 @@ disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
 tracked_total_kb=0
 timeout_keys=()
 DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE"; }
+LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
 trap _cleanup_dirs_temp EXIT
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
@@ -466,6 +472,78 @@ if [[ -d "$containers_parent" ]]; then
     key="lc_${safe}"
     add_entry "$key" "$kb" "$name"
   done <<< "$containers_listing"
+fi
+
+# ────────── LIBRARY FRONTIER (advisory, bounded, no double-count) ──────────
+# The allowlist intentionally retains stable historical keys, but it cannot
+# systematically name every direct ~/Library child. Reuse the exhaustive
+# scanner under a strict slice of the existing global deadline. This ledger is
+# advisory: its measurements are not added to tracked_total_kb, because several
+# allowlist entries overlap it and the snapshot dedup trie remains the sole
+# owner of coverage arithmetic.
+LIBRARY_COVERAGE_JSON="null"
+library_root="$HOME/Library"
+LIBRARY_FRONTIER_ENABLED=$(python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    print("true" if data.get("library_frontier_enabled") is True else "false")
+except Exception:
+    print("false")
+' "$CONFIG_FILE" 2>/dev/null || echo "false")
+if [[ "$LIBRARY_FRONTIER_ENABLED" == "true" && -d "$library_root" ]]; then
+  library_budget=$(remaining_measurement_seconds)
+  (( library_budget > LIBRARY_FRONTIER_BUDGET_SECONDS )) && library_budget="$LIBRARY_FRONTIER_BUDGET_SECONDS"
+  if [[ "$library_budget" -gt 0 && -n "$TIMEOUT_CMD" ]]; then
+    scanner_budget=$(( library_budget > 2 ? library_budget - 2 : 1 ))
+    "$TIMEOUT_CMD" "$library_budget" python3 "$SCRIPT_DIR/disk_frontier_scan.py" \
+      --root "$library_root" --resolve-root --no-sibling-volumes --no-purgeable \
+      --workers 6 --max-depth 2 --max-nodes 400 \
+      --timeout-tiers 2,5 --wall-clock-cap "$scanner_budget" \
+      --output "$LIBRARY_FRONTIER_FILE" >/dev/null 2>&1 || true
+  fi
+
+  # The scanner owns the per-child ledger. If the outer deadline kills it
+  # before an atomic report lands, emit an explicit unfinished row per direct
+  # child instead of silently omitting Library coverage.
+  LIBRARY_COVERAGE_JSON=$(python3 - "$LIBRARY_FRONTIER_FILE" "$library_root" "${library_budget:-0}" <<'PY' 2>/dev/null || echo "null"
+import collections, json, os, sys
+
+report_path, root, wall_cap = sys.argv[1], os.path.realpath(sys.argv[2]), int(sys.argv[3])
+try:
+    with open(report_path) as f:
+        report = json.load(f)
+except Exception:
+    report = {}
+ledger = report.get("top_level_ledger")
+if not isinstance(ledger, list):
+    try:
+        with os.scandir(root) as entries:
+            paths = sorted(os.path.realpath(entry.path) for entry in entries)
+    except OSError:
+        paths = [root]
+    ledger = [{
+        "path": path,
+        "status": "unfinished",
+        "measured_kb": None,
+        "unfinished_reasons": ["scanner_timeout_or_error"],
+    } for path in paths]
+status_counts = collections.Counter(item.get("status") for item in ledger)
+result = {
+    "mode": report.get("mode") if report else "partial",
+    "root": root,
+    "captured_at": report.get("captured_at"),
+    "elapsed_seconds": report.get("elapsed_s"),
+    "wall_clock_cap_seconds": wall_cap,
+    "top_level_children_total": len(ledger),
+    "top_level_children_accounted": len(ledger),
+    "status_counts": dict(sorted(status_counts.items())),
+    "top_level_ledger": ledger,
+}
+print(json.dumps(result))
+PY
+)
+  [[ -n "$LIBRARY_COVERAGE_JSON" ]] || LIBRARY_COVERAGE_JSON="null"
 fi
 MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
 MEASUREMENT_BUDGET_EXHAUSTED=false
@@ -780,6 +858,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
   SNAP_TOPDOWN="$TOPDOWN_JSON" \
+  SNAP_LIBRARY_COVERAGE="$LIBRARY_COVERAGE_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
 try:
@@ -842,6 +921,12 @@ try:
         topdown = None
     if topdown is not None:
         data["topdown_coverage"] = topdown
+    try:
+        library_coverage = json.loads(os.environ.get("SNAP_LIBRARY_COVERAGE") or "null")
+    except (TypeError, ValueError):
+        library_coverage = None
+    if library_coverage is not None:
+        data["library_coverage"] = library_coverage
     dirs = {}
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):

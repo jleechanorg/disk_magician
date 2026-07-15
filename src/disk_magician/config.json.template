@@ -1,4 +1,5 @@
 {
+  "library_frontier_enabled": true,
   "monitored_dirs": [
     {
       "key": "claude_root",

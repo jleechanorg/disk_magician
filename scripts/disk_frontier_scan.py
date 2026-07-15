@@ -23,6 +23,7 @@ Design contract (roadmap doc, "post-critic" section):
 """
 
 import argparse
+import collections
 import concurrent.futures
 import json
 import os
@@ -151,6 +152,11 @@ def run_du(path, timeout_s, tracker):
         return None
     finally:
         tracker.exit()
+    # `du` can print a partial subtotal and still exit nonzero when TCC or
+    # filesystem permissions block a descendant. Treating that stdout as a
+    # complete measurement would silently hide the inaccessible subtree.
+    if proc.returncode != 0:
+        return None
     out = proc.stdout.strip()
     if not out:
         return None
@@ -298,6 +304,7 @@ class FrontierScanner:
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
         self.root_dev = None
+        self.level1_paths = []
         self.skip_sibling_volumes = args.no_sibling_volumes
         self.skip_purgeable = args.no_purgeable
 
@@ -375,8 +382,15 @@ class FrontierScanner:
 
         try:
             st = os.lstat(path)
-        except OSError:
-            self.warnings.append(f"lstat failed, skipping: {path}")
+        except OSError as exc:
+            self.frontier_unfinished.append(
+                {
+                    "path": path,
+                    "depth": depth,
+                    "reason": "lstat_failed",
+                    "errno": exc.errno,
+                }
+            )
             return
 
         if self.root_dev is not None and st.st_dev != self.root_dev and not is_symlink:
@@ -448,6 +462,7 @@ class FrontierScanner:
         level1 = list_children(self.root)
         if level1 is None:
             return {"error": f"could not enumerate root: {self.root}"}
+        self.level1_paths = [path for path, _ in level1]
 
         frontier = [(p, 1, is_sym) for p, is_sym in level1]
 
@@ -474,6 +489,12 @@ class FrontierScanner:
                         result = fut.result()
                     except Exception as exc:  # noqa: BLE001 - never crash the scan
                         self.warnings.append(f"worker exception for {futures[fut]}: {exc}")
+                        self.frontier_unfinished.append(
+                            {
+                                "path": futures[fut],
+                                "reason": "worker_exception",
+                            }
+                        )
                         continue
                     if result:
                         next_frontier.extend(result)
@@ -515,6 +536,63 @@ def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s
 
     mode = "complete" if not scanner.frontier_unfinished else "partial"
 
+    measured_by_top = collections.defaultdict(int)
+    exact_measured = {}
+    unfinished_by_top = collections.defaultdict(list)
+    deduped_top = set()
+
+    def top_child(path):
+        try:
+            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(scanner.root))
+        except (OSError, ValueError):
+            return None, None
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            return None, None
+        first = rel.split(os.sep, 1)[0]
+        return os.path.join(os.path.realpath(scanner.root), first), rel
+
+    for path, kb in scanner.measured.items():
+        top, rel = top_child(path)
+        if top is None:
+            continue
+        measured_by_top[top] += kb
+        if os.sep not in rel:
+            exact_measured[top] = kb
+    for item in scanner.frontier_unfinished:
+        top, _ = top_child(item.get("path", ""))
+        if top is not None:
+            unfinished_by_top[top].append(item.get("reason") or "unfinished")
+    for item in scanner.deduped:
+        top, _ = top_child(item.get("path", ""))
+        if top is not None:
+            deduped_top.add(top)
+
+    top_level_ledger = []
+    for original_path in sorted(scanner.level1_paths):
+        path = os.path.realpath(original_path)
+        reasons = sorted(set(unfinished_by_top[path]))
+        if path in exact_measured and not reasons:
+            status, size_kb = "measured", exact_measured[path]
+        elif measured_by_top[path]:
+            status = "partial" if reasons else "measured_by_descendants"
+            size_kb = measured_by_top[path]
+        elif path in deduped_top and not reasons:
+            status, size_kb = "deduped", None
+        else:
+            status, size_kb = "unfinished", None
+            if not reasons:
+                reasons = ["scanner_did_not_report"]
+        top_level_ledger.append(
+            {
+                "path": path,
+                "status": status,
+                "measured_kb": size_kb,
+                "unfinished_reasons": reasons,
+            }
+        )
+
+    status_counts = collections.Counter(item["status"] for item in top_level_ledger)
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "tool": "disk_frontier_scan",
@@ -550,6 +628,10 @@ def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s
         "nodes_processed": scanner.nodes_processed,
         "max_concurrent_du_observed": scanner.tracker.peak(),
         "warnings": scanner.warnings,
+        "top_level_children_total": len(top_level_ledger),
+        "top_level_children_accounted": len(top_level_ledger),
+        "top_level_status_counts": dict(sorted(status_counts.items())),
+        "top_level_ledger": top_level_ledger,
     }
     return report
 
