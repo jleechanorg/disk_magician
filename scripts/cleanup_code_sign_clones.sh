@@ -59,13 +59,16 @@ path_mtime() {
 lsof_state() {
   local candidate="$1" output rc=0 pid command
   output=$(lsof -Fpcn +D "$candidate" 2>/dev/null) || rc=$?
-  if [[ "$rc" -eq 0 ]]; then
+  # macOS lsof may return 1 even when +D emitted valid matches. Structured
+  # process + file records are authoritative; rc=1 means inactive only when
+  # the record stream is empty.
+  if grep -q '^p' <<<"$output" && grep -q '^n' <<<"$output"; then
     pid=$(awk '/^p/{sub(/^p/, ""); print; exit}' <<<"$output")
     command=$(awk '/^c/{sub(/^c/, ""); print; exit}' <<<"$output")
     LSOF_DETAIL="pid=${pid:-unknown} command=${command:-unknown}"
     return 0
   fi
-  [[ "$rc" -eq 1 ]] && return 1
+  [[ "$rc" -eq 1 && -z "$output" ]] && return 1
   LSOF_DETAIL="rc=$rc"
   return 2
 }

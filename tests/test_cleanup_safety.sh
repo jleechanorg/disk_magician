@@ -370,7 +370,8 @@ fi
 target="${!#}"
 if [[ -n "${FAKE_LSOF_ACTIVE:-}" && "$target" == "$FAKE_LSOF_ACTIVE" ]]; then
   printf 'p4242\ncAsideBrowser\nn%s/blob\n' "$target"
-  exit 0
+  # macOS lsof can return 1 despite emitting valid +D matches.
+  exit 1
 fi
 if [[ -n "${FAKE_LSOF_RACE_TARGET:-}" && "$target" == "$FAKE_LSOF_RACE_TARGET" ]]; then
   count=0
