@@ -528,11 +528,19 @@ cat > "$COLIMA_FAKE_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$COLIMA_INVOCATIONS"
 case "${1:-} ${2:-}" in
-  "info ") exit "${FAKE_DOCKER_INFO_RC:-0}" ;;
+  "info ")
+    if [[ -n "${FAKE_DOCKER_INFO_FAIL_ONCE_STATE:-}" \
+          && ! -e "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE" ]]; then
+      touch "$FAKE_DOCKER_INFO_FAIL_ONCE_STATE"
+      exit 1
+    fi
+    exit "${FAKE_DOCKER_INFO_RC:-0}"
+    ;;
   "context show") printf 'colima\n' ;;
   "context inspect") printf '%s\n' "${FAKE_DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}" ;;
   "system df") printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n' ;;
   "ps -q")
+    [[ "${FAKE_DOCKER_PS_RC:-0}" == "0" ]] || exit "$FAKE_DOCKER_PS_RC"
     [[ "${FAKE_DOCKER_RUNNING:-1}" == "1" ]] && printf 'running-container\n'
     ;;
 esac
@@ -620,6 +628,85 @@ assert_contains "cleanup_colima reports running-container restart refusal" \
   "running containers remain" "$(cat "$OUT10_RUNNING")"
 assert_not_contains "cleanup_colima does not stop with running containers" \
   "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_INITIAL_BLOCKED="$TMP_ROOT/colima-initial-docker-blocked.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_INITIAL_BLOCKED" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_INITIAL_BLOCKED=0
+else RC10_INITIAL_BLOCKED=$?; fi
+assert_rc "cleanup_colima initial Docker failure exits safely" 0 "$RC10_INITIAL_BLOCKED"
+assert_contains "cleanup_colima initial Docker failure reaches guarded recovery" \
+  "VACATE_CI_RUNNERS_APPROVED=1" "$(cat "$OUT10_INITIAL_BLOCKED")"
+assert_not_contains "cleanup_colima initial Docker failure never restarts without approval" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_INITIAL_UNPROVEN="$TMP_ROOT/colima-initial-docker-unproven.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_INITIAL_UNPROVEN" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
+  FAKE_DOCKER_HOST="unix:///tmp/not-colima.sock" VACATE_CI_RUNNERS_APPROVED=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_INITIAL_UNPROVEN=0
+else RC10_INITIAL_UNPROVEN=$?; fi
+assert_rc "cleanup_colima initial Docker failure with unproven backend exits safely" 0 "$RC10_INITIAL_UNPROVEN"
+assert_contains "cleanup_colima initial Docker failure reports unproven backend" \
+  "does not match the expected Colima socket" "$(cat "$OUT10_INITIAL_UNPROVEN")"
+assert_not_contains "cleanup_colima initial Docker failure never restarts an unproven backend" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_INITIAL_UNKNOWN="$TMP_ROOT/colima-initial-docker-container-state-unknown.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_INITIAL_UNKNOWN" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
+  FAKE_DOCKER_PS_RC=1 VACATE_CI_RUNNERS_APPROVED=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_INITIAL_UNKNOWN=0
+else RC10_INITIAL_UNKNOWN=$?; fi
+assert_rc "cleanup_colima initial Docker failure with unknown container state exits safely" 0 "$RC10_INITIAL_UNKNOWN"
+assert_contains "cleanup_colima refuses restart when container state is unknown" \
+  "could not prove that no containers are running" "$(cat "$OUT10_INITIAL_UNKNOWN")"
+assert_not_contains "cleanup_colima never restarts with unknown container state" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_INITIAL_RUNNING="$TMP_ROOT/colima-initial-docker-running.out"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_INITIAL_RUNNING" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" FAKE_DOCKER_INFO_RC=1 \
+  FAKE_DOCKER_RUNNING=1 VACATE_CI_RUNNERS_APPROVED=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_INITIAL_RUNNING=0
+else RC10_INITIAL_RUNNING=$?; fi
+assert_rc "cleanup_colima initial Docker failure with running containers exits safely" 0 "$RC10_INITIAL_RUNNING"
+assert_contains "cleanup_colima initial Docker failure preserves running containers" \
+  "running containers remain" "$(cat "$OUT10_INITIAL_RUNNING")"
+assert_not_contains "cleanup_colima initial Docker failure never restarts with running containers" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+
+OUT10_INITIAL_RECOVERED="$TMP_ROOT/colima-initial-docker-recovered.out"
+INFO_FAIL_ONCE_STATE="$TMP_ROOT/colima-info-failed-once"
+rm -f "$INFO_FAIL_ONCE_STATE"
+: > "$COLIMA_INVOCATIONS"
+if run_capture "$OUT10_INITIAL_RECOVERED" env -i HOME="$COLIMA_HOME" \
+  COLIMA_INVOCATIONS="$COLIMA_INVOCATIONS" \
+  FAKE_DOCKER_INFO_FAIL_ONCE_STATE="$INFO_FAIL_ONCE_STATE" \
+  FAKE_DOCKER_RUNNING=0 VACATE_CI_RUNNERS_APPROVED=1 \
+  PATH="$COLIMA_FAKE_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
+  RC10_INITIAL_RECOVERED=0
+else RC10_INITIAL_RECOVERED=$?; fi
+assert_rc "cleanup_colima approved initial Docker recovery exits 0" 0 "$RC10_INITIAL_RECOVERED"
+assert_contains "cleanup_colima approved initial Docker recovery stops Colima once" \
+  "colima stop" "$(cat "$COLIMA_INVOCATIONS")"
+assert_contains "cleanup_colima approved initial Docker recovery starts Colima once" \
+  "colima start" "$(cat "$COLIMA_INVOCATIONS")"
+assert_contains "cleanup_colima approved initial Docker recovery trims after backend proof" \
+  "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
