@@ -130,7 +130,20 @@ class DiskInventoryTest(unittest.TestCase):
             "html_url": "https://github.com/jleechanorg/example/pull/42",
             "state": "open",
             "draft": False,
-            "head": {"ref": "feature"},
+            "head": {
+                "ref": "feature",
+                "repo": {"full_name": "jleechanorg/example"},
+            },
+            "base": {"ref": "main"},
+        }, {
+            "number": 43,
+            "html_url": "https://github.com/someone/example/pull/43",
+            "state": "open",
+            "draft": False,
+            "head": {
+                "ref": "feature",
+                "repo": {"full_name": "someone/example"},
+            },
             "base": {"ref": "main"},
         }]
         completed = subprocess.CompletedProcess(["gh", "api"], 0, json.dumps(payload), "")
@@ -144,7 +157,29 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertEqual(result["pull_requests"][0]["number"], 42)
         self.assertEqual(result["pull_requests"][0]["url"], payload[0]["html_url"])
+        self.assertEqual(result["pull_requests"][0]["head_repo"], "jleechanorg/example")
+        self.assertEqual(len(result["pull_requests"]), 1)
         self.assertEqual(run.call_args.kwargs["timeout"], 4)
+
+        missing_repo_payload = [{
+            "number": 44,
+            "html_url": "https://github.com/jleechanorg/example/pull/44",
+            "state": "open",
+            "draft": False,
+            "head": {"ref": "feature", "repo": None},
+            "base": {"ref": "main"},
+        }]
+        missing_repo = subprocess.CompletedProcess(
+            ["gh", "api"], 0, json.dumps(missing_repo_payload), ""
+        )
+        with mock.patch.object(inventory.subprocess, "run", return_value=missing_repo):
+            incomplete = inventory._github_pr_ownership(
+                "https://github.com/jleechanorg/example.git", "feature", timeout=4
+            )
+        self.assertFalse(incomplete["complete"])
+        self.assertEqual(incomplete["error"], "missing_head_repo")
+        self.assertEqual(incomplete["pull_requests"], [])
+        inventory._github_open_pulls.cache_clear()
 
         with mock.patch.object(
             inventory.subprocess,
