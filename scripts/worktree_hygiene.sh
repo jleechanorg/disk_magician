@@ -32,10 +32,11 @@ MIN_AGE_DAYS=14
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
+MAX_CANDIDATES=0
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--execute] [--min-age N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [-h|--help]
+Usage: $(basename "$0") [--execute] [--min-age N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--max-candidates N] [-h|--help]
 
 Repeatable worktree-hygiene sweep: IDENTIFY -> TRIAGE -> CLASSIFY -> (optionally) DELETE.
 
@@ -51,6 +52,13 @@ Options:
                 during triage (offline/test runs). push_status="skipped".
   --skip-gh     Skip the 'gh pr list' lookup during triage (offline/test
                 runs). pr_state="unknown".
+  --max-candidates N
+                Cap the number of age-qualifying candidates triaged per
+                repo per run (0 = unlimited, default). On a registry with
+                many more candidates than N, the oldest N (by mtime) are
+                processed and the rest are reported as skipped -- this run
+                degrades gracefully instead of hanging on an unexpectedly
+                large registry. Re-run to work through the remainder.
   -h, --help    Show this help.
 
 Environment:
@@ -89,12 +97,34 @@ identify_candidates() {
                 path="${line#worktree }"
                 if [[ "$path" != "$main_wt_abs" && -d "$path" ]]; then
                     local latest_mtime
-                    latest_mtime=$(find "$path" -type f \
-                        -not -path '*/.git/*' \
-                        -not -path '*/node_modules/*' \
-                        -not -path '*/venv/*' \
-                        -not -path '*/__pycache__/*' \
-                        -exec stat -f '%m' {} \; 2>/dev/null | sort -rn | head -1)
+                    # Three stacked perf/correctness fixes for the same
+                    # underlying hang (jleechan-q912), each independently
+                    # confirmed against the real 340+ worktree
+                    # worldarchitect.ai registry:
+                    #  1. `-prune` on excluded dirs instead of `-not -path`
+                    #     -- `-not -path` still descends into every
+                    #     excluded dir (e.g. a venv/ with tens of thousands
+                    #     of site-packages files) and filters results
+                    #     afterward; `-prune` stops descent entirely. This
+                    #     was the dominant cost (47s of syscall/kernel time
+                    #     alone, even after fix #2 below).
+                    #  2. `-exec stat ... +` batches many files per stat
+                    #     invocation instead of spawning one process per
+                    #     file (`\;`).
+                    #  3. `|| true` guards against a real pre-existing bug:
+                    #     under this script's `set -o pipefail`, `head -1`
+                    #     closing the pipe early can make `sort` receive
+                    #     SIGPIPE and the whole pipeline exit 141, which --
+                    #     unguarded -- trips `set -e` and aborts
+                    #     identify_candidates silently (zero output, no
+                    #     error surfaced) partway through a large registry.
+                    #     Confirmed present in the previously-committed
+                    #     script too, independent of fixes #1/#2.
+                    latest_mtime=$(find "$path" \
+                        \( -name '.git' -o -name 'node_modules' \
+                           -o -name 'venv' -o -name '__pycache__' \) -prune \
+                        -o -type f -exec stat -f '%m' {} + 2>/dev/null \
+                        | sort -rn | head -1) || true
                     if [[ -z "$latest_mtime" ]]; then
                         latest_mtime=$(stat -f '%m' "$path" 2>/dev/null || echo "$now")
                     fi
@@ -189,67 +219,15 @@ triage_candidate() {
         untracked_present=1
     fi
 
-    local push_status="no-remote"
-    if [[ "${SKIP_PUSH:-false}" == true ]]; then
-        push_status="skipped"
-    else
-        if git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
-            local push_rc
-            git -C "$wt_path" push origin "HEAD:${branch}" >/dev/null 2>&1
-            push_rc=$?
-            if [[ $push_rc -eq 0 ]]; then
-                push_status="pushed"
-            else
-                # Non-fast-forward (or any) rejection: retry to a dated
-                # backup ref instead of forcing the original branch.
-                local backup_ref
-                backup_ref="backup/${branch}-$(date +%Y%m%d)"
-                if git -C "$wt_path" push origin "HEAD:${backup_ref}" >/dev/null 2>&1; then
-                    push_status="pushed"
-                else
-                    push_status="rejected-nonff"
-                fi
-            fi
-        else
-            push_status="no-remote"
-        fi
-    fi
-
-    local pr_state="unknown"
-    if [[ "${SKIP_GH:-false}" == true ]]; then
-        pr_state="unknown"
-    else
-        local origin_url owner_repo
-        origin_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
-        if [[ -n "$origin_url" ]]; then
-            local safe_url
-            safe_url="$(redact_url "$origin_url")"
-            owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-            if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
-                local pr_json
-                pr_json="$(gh pr list --repo "$owner_repo" --head "$branch" --state all \
-                    --json number,state,title 2>/dev/null || true)"
-                if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
-                    if echo "$pr_json" | grep -qi '"state":"OPEN"'; then
-                        pr_state="open"
-                    elif echo "$pr_json" | grep -qi '"state":"MERGED"'; then
-                        pr_state="merged"
-                    elif echo "$pr_json" | grep -qi '"state":"CLOSED"'; then
-                        pr_state="closed"
-                    else
-                        pr_state="none"
-                    fi
-                else
-                    pr_state="none"
-                fi
-            else
-                pr_state="unknown"
-            fi
-        else
-            pr_state="unknown"
-        fi
-    fi
-
+    # Compute ahead-count / merge-base BEFORE any network call -- both are
+    # cheap local git operations. Per classify_candidate's contract, the
+    # SAFE branches require uncommitted==0 AND untracked==0, and
+    # SAFE|zero-ahead fires whenever ahead==0 regardless of push/PR state.
+    # So push+gh can only ever change the verdict for the single remaining
+    # case: locally clean AND ahead>0 (a merged/closed PR could flip that
+    # to SAFE). Every other case is a guaranteed NEEDS-REVIEW no matter
+    # what push/gh would report, so skip the real network calls entirely
+    # (jleechan-q912 -- sequential push+gh across 300+ candidates hangs).
     local ahead_count=0 has_merge_base=1
     local main_ref
     if main_ref="$(resolve_main_ref "$repo_path")"; then
@@ -263,6 +241,80 @@ triage_candidate() {
     else
         has_merge_base=0
         ahead_count="$(git -C "$wt_path" rev-list --count HEAD 2>/dev/null || echo 0)"
+    fi
+
+    local needs_network=1
+    if (( uncommitted_count > 0 || untracked_present == 1 )); then
+        needs_network=0
+    elif (( ahead_count == 0 )); then
+        needs_network=0
+    fi
+
+    local push_status pr_state
+    if (( needs_network == 0 )); then
+        push_status="skipped-not-needed"
+        pr_state="unknown"
+    else
+        push_status="no-remote"
+        if [[ "${SKIP_PUSH:-false}" == true ]]; then
+            push_status="skipped"
+        else
+            if git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
+                local push_rc
+                git -C "$wt_path" push origin "HEAD:${branch}" >/dev/null 2>&1
+                push_rc=$?
+                if [[ $push_rc -eq 0 ]]; then
+                    push_status="pushed"
+                else
+                    # Non-fast-forward (or any) rejection: retry to a dated
+                    # backup ref instead of forcing the original branch.
+                    local backup_ref
+                    backup_ref="backup/${branch}-$(date +%Y%m%d)"
+                    if git -C "$wt_path" push origin "HEAD:${backup_ref}" >/dev/null 2>&1; then
+                        push_status="pushed"
+                    else
+                        push_status="rejected-nonff"
+                    fi
+                fi
+            else
+                push_status="no-remote"
+            fi
+        fi
+
+        pr_state="unknown"
+        if [[ "${SKIP_GH:-false}" == true ]]; then
+            pr_state="unknown"
+        else
+            local origin_url owner_repo
+            origin_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+            if [[ -n "$origin_url" ]]; then
+                local safe_url
+                safe_url="$(redact_url "$origin_url")"
+                owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
+                    local pr_json
+                    pr_json="$(gh pr list --repo "$owner_repo" --head "$branch" --state all \
+                        --json number,state,title 2>/dev/null || true)"
+                    if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
+                        if echo "$pr_json" | grep -qi '"state":"OPEN"'; then
+                            pr_state="open"
+                        elif echo "$pr_json" | grep -qi '"state":"MERGED"'; then
+                            pr_state="merged"
+                        elif echo "$pr_json" | grep -qi '"state":"CLOSED"'; then
+                            pr_state="closed"
+                        else
+                            pr_state="none"
+                        fi
+                    else
+                        pr_state="none"
+                    fi
+                else
+                    pr_state="unknown"
+                fi
+            else
+                pr_state="unknown"
+            fi
+        fi
     fi
 
     echo "${uncommitted_count}|${untracked_present}|${push_status}|${pr_state}|${ahead_count}|${has_merge_base}"
@@ -310,6 +362,11 @@ main() {
                 ;;
             --skip-push) SKIP_PUSH=true ;;
             --skip-gh) SKIP_GH=true ;;
+            --max-candidates)
+                [[ $# -ge 2 ]] || { echo "--max-candidates requires a value" >&2; exit 2; }
+                MAX_CANDIDATES="$2"
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -349,8 +406,22 @@ main() {
         echo ""
         echo "--- ${repo_abs} ---"
 
-        local candidates
-        candidates="$(identify_candidates "$repo_abs" "$MIN_AGE_DAYS" || true)"
+        local all_candidates candidates capped=false
+        all_candidates="$(identify_candidates "$repo_abs" "$MIN_AGE_DAYS" || true)"
+        candidates="$all_candidates"
+
+        if [[ "$MAX_CANDIDATES" -gt 0 ]]; then
+            local candidate_count
+            candidate_count=$(printf '%s\n' "$all_candidates" | grep -c . || true)
+            if (( candidate_count > MAX_CANDIDATES )); then
+                local skipped=$(( candidate_count - MAX_CANDIDATES ))
+                echo "  NOTE: ${candidate_count} candidates found, capping to" \
+                     "${MAX_CANDIDATES} (--max-candidates); ${skipped} will be" \
+                     "left for a subsequent run instead of hanging this one."
+                candidates="$(printf '%s\n' "$all_candidates" | head -n "$MAX_CANDIDATES")"
+                capped=true
+            fi
+        fi
 
         local porcelain all_paths=()
         porcelain="$(git -C "$repo_abs" worktree list --porcelain 2>/dev/null || true)"
@@ -365,7 +436,11 @@ main() {
             [[ -d "$wt_path" ]] || continue
 
             if ! grep -qxF "$wt_path" <<<"$candidates"; then
-                ledger_line "PRESERVE" "$wt_path" "young"
+                if [[ "$capped" == true ]] && grep -qxF "$wt_path" <<<"$all_candidates"; then
+                    ledger_line "PRESERVE" "$wt_path" "capped, re-run to process"
+                else
+                    ledger_line "PRESERVE" "$wt_path" "young"
+                fi
                 preserved_count=$(( preserved_count + 1 ))
                 continue
             fi
