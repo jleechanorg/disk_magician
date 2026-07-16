@@ -1,36 +1,48 @@
 #!/usr/bin/env python3
-"""RED/GREEN contract for scripts/worktree_hygiene.sh (bead jleechan-ue9w).
+"""Contract tests for scripts/worktree_hygiene.sh (lane-tests deliverable).
 
-Algorithm under test (roadmap/2026-07-16 sidekick STATE.md + bead
-jleechan-ue9w -- written against the spec before the script existed, see
-lane-tests report for RED/GREEN verification status against the real file):
+Written independently against the exact interface contract handed to
+lane-tests (identify_candidates / redact_url / classify_candidate,
+sourceable bash functions guarded by the standard
+`[[ "${BASH_SOURCE[0]}" == "${0}" ]]` idiom), NOT against whatever
+lane-script's actual implementation happens to do. Any divergence between
+this file's expectations and the real script is a contract bug to report,
+not something these tests should silently adapt to.
 
-  IDENTIFY -- discover registered worktrees under --repos, filter by TRUE
-    last-modified-FILE mtime (find + stat, excluding .git/node_modules/
-    venv/__pycache__), not directory creation time and not bare `.git`
-    mtime alone (which lags real edits). Default cutoff --min-age 14 days.
-  TRIAGE   -- per candidate: `git status --porcelain` (uncommitted count),
-    `git push origin HEAD:<branch>` (no --force), `gh pr list --head
-    <branch> --state all --json number,state,title`. Any remote URL is
-    redacted before ever being printed.
-  CLASSIFY -- SAFE only if (0 commits ahead of main) OR (merged/closed PR
-    with no unique content vs main), AND uncommitted diff is trivial/zero.
-    NEEDS-REVIEW if: open PR exists; detached HEAD with unpushed commits;
-    untracked files present; uncommitted diff >~50 files; no merge-base
-    with main.
-  DELETE   -- `git worktree remove --force` (metadata-safe, never raw
-    `rm -rf`), gated behind an explicit --execute flag; default is
-    dry-run / no deletion, matching this repo's cleanup_*.sh convention.
+  identify_candidates <repo_path> <min_age_days>
+    Echoes newline-separated worktree paths (excluding the main worktree)
+    whose most-recent file mtime -- excluding .git/, node_modules/, venv/,
+    __pycache__ -- is older than min_age_days days.
 
-Every fixture here is a fully local, offline git repo (bare "origin" on
-disk, no github.com network calls) plus a PATH-stubbed `gh` CLI. No real
-network or real git remotes are touched.
+  redact_url <url>
+    Strips embedded credentials from a git remote URL.
+
+  classify_candidate <uncommitted_count> <untracked_present:0|1>
+      <push_status> <pr_state> <ahead_count> <has_merge_base:0|1>
+    Echoes exactly one line `SAFE|<reason>` or `NEEDS-REVIEW|<reason>`,
+    evaluated in priority order (first match wins):
+      SAFE|zero-ahead        -- ahead==0 AND uncommitted==0 AND untracked==0
+      SAFE|merged-pr-clean   -- pr_state==merged AND uncommitted==0 AND untracked==0
+      NEEDS-REVIEW|open-pr             -- pr_state==open
+      NEEDS-REVIEW|detached-unpushed   -- push_status==rejected-nonff
+      NEEDS-REVIEW|untracked           -- untracked==1
+      NEEDS-REVIEW|large-diff          -- uncommitted>50
+      NEEDS-REVIEW|no-merge-base       -- has_merge_base==0
+      NEEDS-REVIEW|unpushed-ahead      -- ahead>0 AND push_status in {no-remote, skipped}
+      NEEDS-REVIEW|dirty               -- fallback when uncommitted>0
+
+Safety note: as of this writing scripts/worktree_hygiene.sh has NOT yet
+added the BASH_SOURCE guard, and its unguarded main body defaults to
+scanning $HOME/projects (real git push / gh pr list calls). Every
+subprocess call in this file that sources the script therefore runs with
+an isolated, throwaway $HOME so sourcing it can never touch real repos or
+the network, regardless of whether the guard has landed yet.
 """
 
-import json
 import os
-import stat
+import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -38,58 +50,49 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "worktree_hygiene.sh"
-
-# Fake `gh` CLI: reads canned `gh pr list` JSON from $GH_STUB_RESPONSE_FILE
-# so each test can control the "open PR" / "merged PR" / "no PR" response
-# without touching the network.
-GH_STUB = """#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
-  if [[ -n "${GH_STUB_RESPONSE_FILE:-}" && -f "${GH_STUB_RESPONSE_FILE}" ]]; then
-    cat "${GH_STUB_RESPONSE_FILE}"
-  else
-    echo "[]"
-  fi
-  exit 0
-fi
-echo "gh-stub: unsupported invocation: $*" >&2
-exit 1
-"""
+GIT = shutil.which("git") or "/usr/bin/git"
+EXCLUDED_DIRNAMES = ("node_modules", "venv", "__pycache__")
 
 
 def _git(repo, *args, check=True):
     result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
+        [GIT, "-C", str(repo), *args], capture_output=True, text=True
     )
     if check and result.returncode != 0:
-        raise RuntimeError(f"git -C {repo} {args} failed: {result.stderr}")
+        raise RuntimeError(
+            f"git -C {repo} {args} failed: {result.stdout}{result.stderr}"
+        )
     return result
 
 
-def _make_gh_stub(bin_dir: Path) -> Path:
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    gh_path = bin_dir / "gh"
-    gh_path.write_text(GH_STUB, encoding="utf-8")
-    gh_path.chmod(gh_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return gh_path
+def _call(func_name, *args, timeout=15):
+    """Source SCRIPT with an isolated $HOME, then invoke func_name with args
+    passed as positional shell parameters (avoids shell-quoting injection
+    for paths/URLs containing spaces or special characters)."""
+    positional = " ".join(f'"${i + 1}"' for i in range(len(args)))
+    body = f'source "{SCRIPT}"; {func_name} {positional}'
+    cmd = ["bash", "-c", body, "call"] + [str(a) for a in args]
+    with tempfile.TemporaryDirectory() as home:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
+        return subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=timeout
+        )
 
 
-def _write_gh_response(tmp_path: Path, payload) -> Path:
-    response_file = tmp_path / "gh_response.json"
-    response_file.write_text(json.dumps(payload), encoding="utf-8")
-    return response_file
+def _classify(uncommitted, untracked, push_status, pr_state, ahead, has_merge_base):
+    return _call(
+        "classify_candidate",
+        uncommitted,
+        untracked,
+        push_status,
+        pr_state,
+        ahead,
+        has_merge_base,
+    )
 
 
-def _init_bare_origin(tmp_path: Path, name: str = "origin.git") -> Path:
-    bare = tmp_path / name
-    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
-    return bare
-
-
-def _init_main_repo(tmp_path: Path, origin: Path, dirname: str = "main-repo") -> Path:
-    repo = tmp_path / dirname
+def _init_repo(parent, dirname="main-repo"):
+    repo = parent / dirname
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "config", "user.email", "fixture@users.noreply.github.com")
@@ -97,338 +100,216 @@ def _init_main_repo(tmp_path: Path, origin: Path, dirname: str = "main-repo") ->
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "base")
-    _git(repo, "remote", "add", "origin", str(origin))
-    _git(repo, "push", "-q", "origin", "main")
     return repo
 
 
-def _set_mtime(path: Path, days_ago: float) -> None:
+def _set_mtime(path, days_ago):
     ts = time.time() - days_ago * 86400
     os.utime(path, (ts, ts))
 
 
-def _age_all_files(root: Path, days_ago: float) -> None:
+def _age_tree(root, days_ago, skip_dirnames=(".git",)):
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        dirnames[:] = [d for d in dirnames if d not in skip_dirnames]
         for name in filenames:
             _set_mtime(Path(dirpath) / name, days_ago)
         _set_mtime(Path(dirpath), days_ago)
 
 
-def _run_script(args, extra_path=None, extra_env=None, timeout=30):
-    env = dict(os.environ)
-    if extra_path:
-        env["PATH"] = f"{extra_path}:{env.get('PATH', '')}"
-    if extra_env:
-        env.update(extra_env)
-    return subprocess.run(
-        ["bash", str(SCRIPT), *args],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+class IdentifyCandidatesTest(unittest.TestCase):
+    """(a) IDENTIFY age-filter correctness."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        # Resolve once: on macOS $TMPDIR lives under /var/folders, which is a
+        # symlink to /private/var/folders. `git worktree list --porcelain`
+        # canonicalizes paths, so comparing against the raw tempfile path
+        # would spuriously fail even when the script is correct.
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_age_filter_includes_old_excludes_young_and_excludes_main_worktree(self):
+        repo = _init_repo(self.tmp)
+
+        old_wt = self.tmp / "wt-old"
+        _git(repo, "worktree", "add", "-B", "wt-old", str(old_wt), "main")
+        _age_tree(old_wt, 30)
+
+        young_wt = self.tmp / "wt-young"
+        _git(repo, "worktree", "add", "-B", "wt-young", str(young_wt), "main")
+        _age_tree(young_wt, 3)
+
+        result = _call("identify_candidates", str(repo), "14")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidates = [line for line in result.stdout.splitlines() if line.strip()]
+
+        self.assertIn(str(old_wt), candidates)
+        self.assertNotIn(str(young_wt), candidates)
+        self.assertNotIn(str(repo), candidates)
+
+    def test_excluded_dirs_do_not_count_as_recent_activity(self):
+        # Only a node_modules/venv/__pycache__ file is recently touched;
+        # every real (non-excluded) file is 30 days stale. True content-mtime
+        # scanning must still flag this worktree as a stale candidate.
+        repo = _init_repo(self.tmp)
+        wt = self.tmp / "wt-excluded-dirs-only-recent"
+        _git(repo, "worktree", "add", "-B", "wt-excluded-only-recent", str(wt), "main")
+        _age_tree(wt, 30)
+
+        for excluded in EXCLUDED_DIRNAMES:
+            nested = wt / excluded / "nested"
+            nested.mkdir(parents=True)
+            fresh_file = nested / "recent.txt"
+            fresh_file.write_text("fresh\n", encoding="utf-8")
+            _set_mtime(fresh_file, 0.1)
+            _set_mtime(nested, 0.1)
+            _set_mtime(wt / excluded, 0.1)
+
+        result = _call("identify_candidates", str(repo), "14")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidates = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn(str(wt), candidates)
 
 
-class WorktreeHygieneIdentifyTest(unittest.TestCase):
-    """IDENTIFY: true last-modified-FILE scan, not .git mtime / creation time."""
+class RedactUrlTest(unittest.TestCase):
+    """(c) redact_url credential stripping."""
 
-    def test_stale_git_dir_but_recently_edited_file_is_not_flagged_as_stale(self):
-        # .git mtime is old (>14d) but a real file was edited yesterday --
-        # the spec requires TRUE last-modified-file scanning, so this
-        # worktree must NOT be treated as stale/eligible.
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-fresh-content"
-            _git(main_repo, "worktree", "add", "-B", "wt-fresh-content", str(wt), "main")
-            _age_all_files(wt, days_ago=30)
-            recent_file = wt / "recent.txt"
-            recent_file.write_text("edited recently\n", encoding="utf-8")
-            _set_mtime(recent_file, days_ago=1)
-            _set_mtime(wt / ".git", days_ago=30)
+    def _redact(self, url):
+        result = _call("redact_url", url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
 
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
-            result = _run_script(
-                ["--repos", str(main_repo), "--min-age", "14"],
-                extra_path=str(bin_dir),
-            )
-
-            self.assertNotIn(str(wt), result.stdout + result.stderr)
-
-    def test_old_git_dir_mtime_with_stale_content_is_flagged_as_stale(self):
-        # Inverse of the above: .git dir was touched recently (e.g. by an
-        # unrelated `git fetch`) but every real file is untouched for 30
-        # days -- true content-mtime scan must still flag this as stale.
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-stale-content"
-            _git(main_repo, "worktree", "add", "-B", "wt-stale-content", str(wt), "main")
-            _age_all_files(wt, days_ago=30)
-            _set_mtime(wt / ".git", days_ago=0.1)
-
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
-            result = _run_script(
-                ["--repos", str(main_repo), "--min-age", "14"],
-                extra_path=str(bin_dir),
-            )
-
-            self.assertIn(str(wt), result.stdout + result.stderr)
-
-    def test_worktree_younger_than_cutoff_is_excluded(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-young"
-            _git(main_repo, "worktree", "add", "-B", "wt-young", str(wt), "main")
-            _age_all_files(wt, days_ago=3)
-
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
-            result = _run_script(
-                ["--repos", str(main_repo), "--min-age", "14"],
-                extra_path=str(bin_dir),
-            )
-
-            self.assertNotIn(str(wt), result.stdout + result.stderr)
-
-
-class WorktreeHygieneClassifyTest(unittest.TestCase):
-    """CLASSIFY: SAFE vs NEEDS-REVIEW decision matrix, per bead jleechan-ue9w."""
-
-    def _run_classify(self, tmp, main_repo, gh_payload=None, min_age="1"):
-        bin_dir = tmp / "bin"
-        _make_gh_stub(bin_dir)
-        extra_env = {}
-        if gh_payload is not None:
-            extra_env["GH_STUB_RESPONSE_FILE"] = str(_write_gh_response(tmp, gh_payload))
-        return _run_script(
-            ["--repos", str(main_repo), "--min-age", min_age],
-            extra_path=str(bin_dir),
-            extra_env=extra_env,
+    def test_strips_user_colon_token_credentials(self):
+        self.assertEqual(
+            self._redact("https://oauth2:ghp_abc123@github.com/org/repo.git"),
+            "https://github.com/org/repo.git",
         )
 
-    def _assert_label(self, output, wt_path, label):
-        lines = [ln for ln in output.splitlines() if str(wt_path) in ln]
-        self.assertTrue(lines, f"no output line mentions {wt_path}:\n{output}")
-        self.assertTrue(
-            any(label.lower() in ln.lower() for ln in lines),
-            f"expected a line with {wt_path!r} to contain {label!r}, got:\n"
-            + "\n".join(lines),
+    def test_strips_token_only_no_colon_credentials(self):
+        self.assertEqual(
+            self._redact("https://ghp_TOKEN123@github.com/org/repo.git"),
+            "https://github.com/org/repo.git",
         )
 
-    def test_zero_commits_ahead_is_safe(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-zero-ahead"
-            _git(main_repo, "worktree", "add", "-B", "wt-zero-ahead", str(wt), "main")
-            _age_all_files(wt, days_ago=30)
-
-            result = self._run_classify(tmp, main_repo, gh_payload=[])
-            self._assert_label(result.stdout + result.stderr, wt, "SAFE")
-
-    def test_squash_merged_pr_with_no_unique_content_is_safe(self):
-        # Branch is 1 commit "ahead" by raw rev-list (squash-merge left it
-        # unreachable from main) but its net content is already on main and
-        # gh reports the PR as MERGED -- must classify SAFE per spec
-        # clause (b), not just clause (a)'s zero-ahead shortcut.
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-
-            _git(main_repo, "checkout", "-q", "-b", "feature-squashed")
-            (main_repo / "feature.txt").write_text("squashed content\n", encoding="utf-8")
-            _git(main_repo, "add", "feature.txt")
-            _git(main_repo, "commit", "-q", "-m", "feature work")
-            _git(main_repo, "checkout", "-q", "main")
-            # Simulate the squash-merge landing on main as a *different*
-            # commit with identical net content.
-            (main_repo / "feature.txt").write_text("squashed content\n", encoding="utf-8")
-            _git(main_repo, "add", "feature.txt")
-            _git(main_repo, "commit", "-q", "-m", "feature work (squashed)")
-            _git(main_repo, "push", "-q", "origin", "main")
-
-            wt = main_repo / "worktrees" / "wt-squash-merged"
-            _git(main_repo, "worktree", "add", str(wt), "feature-squashed")
-            _age_all_files(wt, days_ago=30)
-
-            gh_payload = [{"number": 101, "state": "MERGED", "title": "feature work"}]
-            result = self._run_classify(tmp, main_repo, gh_payload=gh_payload)
-            self._assert_label(result.stdout + result.stderr, wt, "SAFE")
-
-    def test_open_pr_is_needs_review(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-
-            _git(main_repo, "checkout", "-q", "-b", "feature-open-pr")
-            (main_repo / "feature.txt").write_text("in review\n", encoding="utf-8")
-            _git(main_repo, "add", "feature.txt")
-            _git(main_repo, "commit", "-q", "-m", "in-review work")
-            _git(main_repo, "checkout", "-q", "main")
-
-            wt = main_repo / "worktrees" / "wt-open-pr"
-            _git(main_repo, "worktree", "add", str(wt), "feature-open-pr")
-            _age_all_files(wt, days_ago=30)
-
-            gh_payload = [{"number": 202, "state": "OPEN", "title": "in-review work"}]
-            result = self._run_classify(tmp, main_repo, gh_payload=gh_payload)
-            self._assert_label(result.stdout + result.stderr, wt, "NEEDS-REVIEW")
-
-    def test_detached_head_with_unpushed_commit_is_needs_review(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            base_sha = _git(main_repo, "rev-parse", "HEAD").stdout.strip()
-
-            wt = main_repo / "worktrees" / "wt-detached"
-            _git(main_repo, "worktree", "add", "--detach", str(wt), base_sha)
-            (wt / "local_only.txt").write_text("never pushed\n", encoding="utf-8")
-            _git(wt, "add", "local_only.txt")
-            _git(wt, "commit", "-q", "-m", "detached local work")
-            _age_all_files(wt, days_ago=30)
-            _set_mtime(wt / "local_only.txt", days_ago=30)
-
-            result = self._run_classify(tmp, main_repo, gh_payload=[])
-            self._assert_label(result.stdout + result.stderr, wt, "NEEDS-REVIEW")
-
-    def test_untracked_files_present_is_needs_review(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-untracked"
-            _git(main_repo, "worktree", "add", "-B", "wt-untracked", str(wt), "main")
-            (wt / "stray.txt").write_text("untracked, git push cannot capture this\n", encoding="utf-8")
-            _age_all_files(wt, days_ago=30)
-
-            result = self._run_classify(tmp, main_repo, gh_payload=[])
-            self._assert_label(result.stdout + result.stderr, wt, "NEEDS-REVIEW")
-
-    def test_large_uncommitted_diff_is_needs_review(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-big-diff"
-            _git(main_repo, "worktree", "add", "-B", "wt-big-diff", str(wt), "main")
-            for i in range(55):
-                (wt / f"file_{i}.txt").write_text(f"change {i}\n", encoding="utf-8")
-            _age_all_files(wt, days_ago=30)
-
-            result = self._run_classify(tmp, main_repo, gh_payload=[])
-            self._assert_label(result.stdout + result.stderr, wt, "NEEDS-REVIEW")
-
-    def test_no_merge_base_with_main_is_needs_review(self):
-        with _tmp() as tmp:
-            origin = _init_bare_origin(tmp)
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-orphan"
-            _git(main_repo, "worktree", "add", "--detach", str(wt), "main")
-            _git(wt, "checkout", "-q", "--orphan", "orphan-branch")
-            _git(wt, "rm", "-rf", "--quiet", ".")
-            (wt / "unrelated.txt").write_text("no shared history\n", encoding="utf-8")
-            _git(wt, "add", "unrelated.txt")
-            _git(wt, "commit", "-q", "-m", "orphan root commit")
-            _age_all_files(wt, days_ago=30)
-
-            result = self._run_classify(tmp, main_repo, gh_payload=[])
-            self._assert_label(result.stdout + result.stderr, wt, "NEEDS-REVIEW")
+    def test_url_without_credentials_passes_through_unchanged(self):
+        self.assertEqual(
+            self._redact("https://github.com/org/repo.git"),
+            "https://github.com/org/repo.git",
+        )
 
 
-class WorktreeHygieneCredentialRedactionTest(unittest.TestCase):
-    def test_embedded_token_in_remote_url_never_appears_in_output(self):
-        token = "ghp_FAKEfixtureTOKEN1234567890abcdef"
-        with _tmp() as tmp:
-            # A fully offline local "remote" whose path embeds a
-            # token-shaped string, mirroring the live PAT-in-.git/config
-            # incident this bead's spec calls out. No network is used --
-            # git treats this as a normal local path remote.
-            origin = _init_bare_origin(tmp, name=f"{token}-origin.git")
-            main_repo = _init_main_repo(tmp, origin)
-            wt = main_repo / "worktrees" / "wt-zero-ahead"
-            _git(main_repo, "worktree", "add", "-B", "wt-zero-ahead", str(wt), "main")
-            _age_all_files(wt, days_ago=30)
+class ClassifyCandidateTest(unittest.TestCase):
+    """(b) CLASSIFY priority-ordered decision matrix -- one case per rule,
+    plus explicit ordering proofs."""
 
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
-            result = _run_script(
-                ["--repos", str(main_repo), "--min-age", "1"],
-                extra_path=str(bin_dir),
-            )
+    def _assert(self, args, expected):
+        result = _classify(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
 
-            combined = result.stdout + result.stderr
-            self.assertNotIn(token, combined, "raw token leaked into script output")
+    def test_zero_ahead_clean_is_safe_zero_ahead(self):
+        # push_status=rejected-nonff and pr_state=open would both trigger
+        # NEEDS-REVIEW reasons on their own -- zero-ahead must still win
+        # because it is the first rule evaluated.
+        self._assert((0, 0, "rejected-nonff", "open", 0, 1), "SAFE|zero-ahead")
 
+    def test_merged_pr_clean_is_safe_merged_pr_clean(self):
+        self._assert((0, 0, "ok", "merged", 3, 1), "SAFE|merged-pr-clean")
 
-class WorktreeHygieneDryRunTest(unittest.TestCase):
-    def _safe_fixture(self, tmp):
-        origin = _init_bare_origin(tmp)
-        main_repo = _init_main_repo(tmp, origin)
-        wt = main_repo / "worktrees" / "wt-zero-ahead"
-        _git(main_repo, "worktree", "add", "-B", "wt-zero-ahead", str(wt), "main")
-        _age_all_files(wt, days_ago=30)
-        return main_repo, wt
+    def test_open_pr_is_needs_review_open_pr(self):
+        self._assert((0, 0, "ok", "open", 2, 1), "NEEDS-REVIEW|open-pr")
 
-    def test_default_invocation_never_removes_a_worktree(self):
-        with _tmp() as tmp:
-            main_repo, wt = self._safe_fixture(tmp)
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
+    def test_rejected_push_is_needs_review_detached_unpushed(self):
+        self._assert((0, 0, "rejected-nonff", "none", 1, 1), "NEEDS-REVIEW|detached-unpushed")
 
-            result = _run_script(
-                ["--repos", str(main_repo), "--min-age", "1"],
-                extra_path=str(bin_dir),
-            )
+    def test_untracked_present_is_needs_review_untracked(self):
+        self._assert((0, 1, "ok", "none", 0, 1), "NEEDS-REVIEW|untracked")
 
-            self.assertTrue(wt.exists(), "dry-run must not delete the worktree directory")
-            listing = _git(main_repo, "worktree", "list", "--porcelain").stdout
-            self.assertIn(str(wt), listing, "dry-run must not deregister the worktree")
-            self.assertNotEqual(result.returncode, None)
+    def test_large_diff_is_needs_review_large_diff(self):
+        self._assert((60, 0, "ok", "none", 0, 1), "NEEDS-REVIEW|large-diff")
 
-    def test_explicit_dry_run_flag_never_removes_a_worktree(self):
-        with _tmp() as tmp:
-            main_repo, wt = self._safe_fixture(tmp)
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
+    def test_no_merge_base_is_needs_review_no_merge_base(self):
+        self._assert((5, 0, "ok", "none", 0, 0), "NEEDS-REVIEW|no-merge-base")
 
-            _run_script(
-                ["--repos", str(main_repo), "--min-age", "1", "--dry-run"],
-                extra_path=str(bin_dir),
-            )
+    def test_unpushed_ahead_no_remote_is_needs_review_unpushed_ahead(self):
+        self._assert((0, 0, "no-remote", "none", 2, 1), "NEEDS-REVIEW|unpushed-ahead")
 
-            self.assertTrue(wt.exists())
+    def test_unpushed_ahead_skipped_is_needs_review_unpushed_ahead(self):
+        self._assert((0, 0, "skipped", "none", 2, 1), "NEEDS-REVIEW|unpushed-ahead")
 
-    def test_execute_flag_removes_a_confirmed_safe_worktree(self):
-        with _tmp() as tmp:
-            main_repo, wt = self._safe_fixture(tmp)
-            bin_dir = tmp / "bin"
-            _make_gh_stub(bin_dir)
+    def test_dirty_fallback_is_needs_review_dirty(self):
+        self._assert((3, 0, "ok", "none", 0, 1), "NEEDS-REVIEW|dirty")
 
-            _run_script(
-                ["--repos", str(main_repo), "--min-age", "1", "--execute"],
-                extra_path=str(bin_dir),
-                extra_env={"WORKTREE_APPROVED": "1"},
-            )
-
-            self.assertFalse(wt.exists(), "--execute on a SAFE candidate should delete it")
-            listing = _git(main_repo, "worktree", "list", "--porcelain").stdout
-            self.assertNotIn(str(wt), listing)
+    def test_ordering_untracked_wins_over_large_diff(self):
+        # untracked=1 AND uncommitted=60: untracked is evaluated before
+        # large-diff in priority order, so it must win.
+        self._assert((60, 1, "ok", "none", 0, 1), "NEEDS-REVIEW|untracked")
 
 
-class _tmp:
-    """Thin wrapper so fixture helpers can `with _tmp() as tmp:` like tempfile."""
+class IntegrationRealGitRepoTest(unittest.TestCase):
+    """(d) End-to-end against a real local git repo (no network)."""
 
-    def __enter__(self):
-        import tempfile
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        # See IdentifyCandidatesTest.setUp: resolve to match git's
+        # canonicalized /private/var/folders paths on macOS.
+        self.tmp = Path(self._tmp.name).resolve()
 
-        self._td = tempfile.TemporaryDirectory()
-        return Path(self._td.name)
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    def __exit__(self, exc_type, exc, tb):
-        self._td.cleanup()
+    @staticmethod
+    def _gather(worktree, main_branch="main"):
+        status_lines = _git(worktree, "status", "--porcelain").stdout.splitlines()
+        uncommitted = len(status_lines)
+        untracked = 1 if any(line.startswith("??") for line in status_lines) else 0
+        ahead = int(
+            _git(worktree, "rev-list", "--count", f"{main_branch}..HEAD").stdout.strip()
+        )
+        merge_base = _git(worktree, "merge-base", main_branch, "HEAD", check=False)
+        has_merge_base = 1 if merge_base.returncode == 0 else 0
+        return uncommitted, untracked, ahead, has_merge_base
+
+    def test_clean_zero_ahead_worktree_end_to_end_is_safe(self):
+        repo = _init_repo(self.tmp)
+        wt = self.tmp / "wt-clean"
+        _git(repo, "worktree", "add", "-B", "wt-clean", str(wt), "main")
+        _age_tree(wt, 30)
+
+        identify = _call("identify_candidates", str(repo), "14")
+        self.assertEqual(identify.returncode, 0, identify.stderr)
+        candidates = [line for line in identify.stdout.splitlines() if line.strip()]
+        self.assertIn(str(wt), candidates)
+
+        uncommitted, untracked, ahead, has_merge_base = self._gather(wt)
+        self.assertEqual((uncommitted, untracked, ahead), (0, 0, 0))
+
+        result = _classify(uncommitted, untracked, "skipped", "none", ahead, has_merge_base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "SAFE|zero-ahead")
+
+    def test_detached_ahead_with_untracked_file_is_needs_review_untracked(self):
+        repo = _init_repo(self.tmp)
+        wt = self.tmp / "wt-untracked-ahead"
+        _git(repo, "worktree", "add", "-B", "wt-untracked-ahead", str(wt), "main")
+
+        (wt / "extra.txt").write_text("committed change\n", encoding="utf-8")
+        _git(wt, "add", "extra.txt")
+        _git(wt, "commit", "-q", "-m", "ahead commit")
+        _git(wt, "checkout", "--detach", "-q")
+
+        (wt / "stray.txt").write_text("untracked stray file\n", encoding="utf-8")
+
+        uncommitted, untracked, ahead, has_merge_base = self._gather(wt)
+        self.assertEqual(untracked, 1)
+        self.assertGreaterEqual(ahead, 1)
+        self.assertEqual(has_merge_base, 1)
+
+        result = _classify(uncommitted, untracked, "no-remote", "none", ahead, has_merge_base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "NEEDS-REVIEW|untracked")
 
 
 if __name__ == "__main__":
