@@ -443,3 +443,52 @@ This roll-forward follows the earlier root-cause investigation in `jleechanorg/d
 ## Roadmap pointer {#roadmap-pointer-full-ssd-accounting}
 
 - Appended `/Users/jleechan/projects_other/disk_magician/roadmap/activity/2026-07-15.md`. The date already existed in `roadmap/README.md`, so no duplicate README link was added.
+
+# Roll-forward — 2026-07-16 (100GB-reclaim swarm, crash-resume, regrowth root-cause cross-reference)
+
+## Table of contents {#toc-2026-07-16-reclaim}
+
+- [Executive summary](#executive-summary-2026-07-16-reclaim)
+- [Context](#context-2026-07-16-reclaim)
+- [Bead index](#bead-index-2026-07-16-reclaim)
+- [Work queue](#work-queue-2026-07-16-reclaim)
+- [Learnings pointer](#learnings-pointer-2026-07-16-reclaim)
+- [Roadmap pointer](#roadmap-pointer-2026-07-16-reclaim)
+
+## Executive summary {#executive-summary-2026-07-16-reclaim}
+
+- Reclaimed ~38.8 GiB total against the user's "save another 100GB" request via fully verified, reversible deletions (git-ignored/untracked cache dirs, worktrees with merged PRs and zero local changes, worktrees whose commits were already captured on other remote branches). Zero data loss. Free space moved 83.0GiB -> 111.4GiB in the first pass.
+- Ran a 4-lane `/swarm` sweep (dark-factory, `~/.hermes`, ez-gh-actions+merge_train+disk_magician, worldarchitect.ai 87-candidate review) using in-session Agent Team teammates. The full unscoped `scripts/worktree_hygiene.sh --min-age 14` run against all 375 worldarchitect.ai worktrees hung twice (once in the swarm lane, once again in the prior session) — sequential real `git push`+`gh pr list` per candidate does not finish in reasonable time at this scale. Root-caused and worked around by scoping the network check to only the "ahead-of-main but locally clean" subset (32 candidates), where a merge/close verdict actually changes the outcome; the dirty/diverged subset needs human review regardless of network calls, so skipping the full run there costs nothing.
+- Session crashed (real reboot — `/tmp` wiped, cmux surface_ref changed `surface:2`->`surface:1`). Resumed cleanly: confirmed continuity via the session's own JSONL transcript, restarted the `/cmux-goal` Stop-hook on the new surface, continued via the goal condition directly.
+- **Regrowth observed**: free space dropped 111.4GiB -> 88.0GiB in the session-crash gap (a few hours). This is NOT a new mechanism — it is the same already-tracked `~/projects`/`.worktrees` churn pattern. Cross-referenced against existing beads (see below) rather than creating a duplicate; posted this session's numbers as a comment onto the existing ledger bead `jleechan-mf2b` instead of re-diagnosing from scratch.
+- Resolved one long-standing ambiguity: `~/.pyenv/versions/3.11.10` (3.9GiB) is NOT orphaned — it backs a live `devpi-server` launchd daemon invoked by direct binary path (bypassing the `pyenv` shim, which is why `pyenv versions` falsely reported "not installed"). Do not delete.
+- Filed 9 new beads for genuinely orphaned non-trivial work discovered during worktree triage (not root-cause/regrowth beads — individual pieces of uncaptured work): `jleechan-g54u`, `trt2`, `pnxs`, `mxax`, `by8p`, `mu42`, `dlpr`, `6s8p`, `8t49`.
+
+## Context {#context-2026-07-16-reclaim}
+
+Continuation of the 2026-07-12 through 2026-07-15 root-cause work in this same doc. This section covers only the 2026-07-16 "another 100GB" reclaim push, the crash/resume, and the explicit user question "did we make beads/roadmap already for regrowth?" — answered by cross-referencing existing coverage rather than creating parallel tracking.
+
+## Bead index {#bead-index-2026-07-16-reclaim}
+
+| Bead | Priority/status | Scope |
+|---|---|---|
+| [jleechan-mf2b](https://github.com/jleechanorg/disk_magician) | P1 BLOCKED | Attribution/reclaim ledger for `~/projects`+`.worktrees` growth — pre-existing, closest match to today's regrowth observation; updated with today's numbers as a comment, not duplicated. |
+| [jleechan-bd-vgyk-7f08](https://github.com/jleechanorg/disk_magician) | P1 OPEN | The actual structural fix: port upstream AO lifecycle ownership so managed worktrees/temp resources tear down on session exit. This is what would stop the regrowth at the source; manual sweeps (today's work) cannot outrun it. |
+| `jleechan-dqiz` | P1 OPEN | Adjacent but distinct: `/private/tmp` scratch clone teardown gap, not `~/projects` worktree churn. |
+| `jleechan-g54u`, `trt2`, `pnxs`, `mxax`, `by8p`, `mu42`, `dlpr`, `6s8p`, `8t49` | P2-P3 OPEN | Individual orphaned-work findings from today's worktree triage (not regrowth-root-cause beads). |
+
+## Work queue {#work-queue-2026-07-16-reclaim}
+
+1. The next real gain is **jleechan-bd-vgyk-7f08**, not another manual sweep — AO lifecycle teardown on session exit is what stops `~/projects`/`.worktrees` from regrowing ~10-20GiB/hour. Manual `worktree_hygiene.sh` sweeps are a valid stopgap but structurally cannot win against live churn.
+2. `jleechan-mf2b` remains BLOCKED on missing 7/30-day child-level snapshot keys for delta reconstruction — unrelated to today's manual findings, still needs the snapshot schema fix to unblock properly.
+3. Fix `scripts/worktree_hygiene.sh`'s full-run performance: an unscoped run over 300+ worktrees with real `git push`+`gh pr list` per candidate hangs/times out in practice (hit twice now — 2026-07-15 and 2026-07-16). Either parallelize the network-check phase, or default `--min-age` runs to the "ahead-but-clean" scoping used manually today (skip push/PR-check entirely for candidates already known-dirty, since the network call can't change their verdict).
+4. Review the remaining 50 dirty / 7 diverged worldarchitect.ai worktree candidates — these need human judgment (uncommitted/untracked changes), not automation. Not actioned this session.
+5. Messages attachment dedup (~1.74GiB, dry-run script from 2026-07-15 lost in the 2026-07-16 crash) — low priority relative to the structural AO-lifecycle fix; regenerate only if reclaim is urgent again.
+
+## Learnings pointer {#learnings-pointer-2026-07-16-reclaim}
+
+- `~/roadmap/learnings-2026-07.md` — entry to be added: "2026-07-16 — worktree_hygiene.sh full-run performance ceiling; pyenv 3.11.10 false-orphan (live devpi-server); regrowth is already-tracked, cross-reference before re-diagnosing."
+
+## Roadmap pointer {#roadmap-pointer-2026-07-16-reclaim}
+
+- Appended this section to `roadmap/nextsteps-2026-07-12-disk-magician-root-cause.md` (existing rolling doc, per this repo's append-don't-fragment convention). `roadmap/activity/2026-07-16.md` not yet created — pending.
