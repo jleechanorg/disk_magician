@@ -138,11 +138,13 @@ non-fast-forward push — never `--force`), and looks up existing PR
 coverage, then deletes only worktrees with zero unique local content via
 `git worktree remove --force` (metadata only, never raw `rm -rf`).
 Read-only/dry-run by default; nothing is pushed or deleted without
-`--execute`:
+`--execute`, which is itself gated behind `WORKTREE_HYGIENE_APPROVED=1`
+(same refuse-otherwise pattern as `clean`'s `WORKTREE_APPROVED=1`, but a
+distinct env var — the two scripts are not interchangeable):
 
 ```bash
-./scripts/worktree_hygiene.sh                        # dry-run preview
-./scripts/worktree_hygiene.sh --execute --min-age 14  # apply
+./scripts/worktree_hygiene.sh                                              # dry-run preview
+WORKTREE_HYGIENE_APPROVED=1 ./scripts/worktree_hygiene.sh --execute --min-age 14  # apply
 ```
 
 This is the "safe quick-win" lane's worktree-cleanup component in the

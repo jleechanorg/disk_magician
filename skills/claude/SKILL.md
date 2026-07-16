@@ -33,6 +33,10 @@ This skill teaches Claude how to use `disk_magician` to audit disk space, identi
   ```bash
   ./disk_magician.sh clean-all
   ```
+* **Worktree Hygiene Sweep (deep pass)**: For a dedicated triage-and-delete pass across all monitored project roots (not just the current repo), run `scripts/worktree_hygiene.sh` instead of `clean`. Dry-run by default; apply mode requires both `--execute` and `WORKTREE_HYGIENE_APPROVED=1`:
+  ```bash
+  ./scripts/worktree_hygiene.sh
+  ```
 
 ## Safety Constraints & Guardrails
 - **Mtime Caution:** Worktrees and agent sessions with modification time < 14 days require explicit `WORKTREE APPROVED` confirmation from the user before deletion.
