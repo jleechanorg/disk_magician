@@ -427,14 +427,19 @@ class FrontierScanner:
     def measure_one(self, path, is_symlink=False):
         self.sem.acquire()
         try:
-            attempted_tiers = []
+            if DUA_CMD and not is_symlink and self.timeout_tiers:
+                remaining = self.remaining_budget()
+                if remaining <= 0:
+                    return None
+                effective = min(self.timeout_tiers[-1], max(1, int(remaining)))
+                return run_du(path, effective, self.tracker)
+
             kb = None
             for tier in self.timeout_tiers:
                 remaining = self.remaining_budget()
                 if remaining <= 0:
                     break
                 effective = min(tier, max(1, int(remaining)))
-                attempted_tiers.append(effective)
                 kb = run_du(path, effective, self.tracker, is_symlink=is_symlink)
                 if kb is not None:
                     break

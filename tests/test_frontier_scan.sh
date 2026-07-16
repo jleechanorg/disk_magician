@@ -249,6 +249,31 @@ PY
 [[ "$APFS_CONTAINER_OUT" == "True" ]] && ok "Data mount selects its APFSContainerReference, not a simulator container" \
   || bad "APFS accounting selected the wrong container: $APFS_CONTAINER_OUT"
 
+DUA_ATTEMPT_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+args = SimpleNamespace(
+    root="/fixture", resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=30, timeout_tiers=[1, 2, 3], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=0,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+with mock.patch.object(m, "DUA_CMD", "/fake/dua"), \
+     mock.patch.object(m, "run_du", return_value=None) as run:
+    scanner.measure_one("/fixture/slow")
+print(run.call_count, run.call_args.args[1])
+PY
+)
+[[ "$DUA_ATTEMPT_OUT" == "1 3" ]] && ok "dua gets one top-tier attempt per node before subdivision" \
+  || bad "dua repeated timeout tiers instead of subdividing: $DUA_ATTEMPT_OUT"
+
 # ─────────────────────────────────────────────────────────────
 section "4. Timeout-tier escalation then subdivide-on-exhaustion (not open-ended growth)"
 FAKEBIN="$WORK/fakebin"
