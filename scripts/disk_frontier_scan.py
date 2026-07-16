@@ -40,6 +40,7 @@ import time
 DEFAULT_ROOT = "/System/Volumes/Data"
 DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_last.json")
 DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
+DUA_TIMEOUT_CAP_SECONDS = 90
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_DEPTH = 6
 DEFAULT_MAX_NODES = 500
@@ -431,7 +432,10 @@ class FrontierScanner:
                 remaining = self.remaining_budget()
                 if remaining <= 0:
                     return None
-                effective = min(self.timeout_tiers[-1], max(1, int(remaining)))
+                effective = min(
+                    self.timeout_tiers[-1], DUA_TIMEOUT_CAP_SECONDS,
+                    max(1, int(remaining)),
+                )
                 return run_du(path, effective, self.tracker)
 
             kb = None

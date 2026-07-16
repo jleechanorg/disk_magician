@@ -260,7 +260,7 @@ import disk_frontier_scan as m
 
 args = SimpleNamespace(
     root="/fixture", resolve_root=False, workers=1, max_depth=6, max_nodes=10,
-    wall_clock_cap=30, timeout_tiers=[1, 2, 3], no_sibling_volumes=True,
+    wall_clock_cap=300, timeout_tiers=[10, 30, 90, 180], no_sibling_volumes=True,
     no_purgeable=True, granularity_gib=0,
 )
 scanner = m.FrontierScanner(args)
@@ -271,7 +271,7 @@ with mock.patch.object(m, "DUA_CMD", "/fake/dua"), \
 print(run.call_count, run.call_args.args[1])
 PY
 )
-[[ "$DUA_ATTEMPT_OUT" == "1 3" ]] && ok "dua gets one top-tier attempt per node before subdivision" \
+[[ "$DUA_ATTEMPT_OUT" == "1 90" ]] && ok "dua gets one capped attempt per node before subdivision" \
   || bad "dua repeated timeout tiers instead of subdividing: $DUA_ATTEMPT_OUT"
 
 # ─────────────────────────────────────────────────────────────
