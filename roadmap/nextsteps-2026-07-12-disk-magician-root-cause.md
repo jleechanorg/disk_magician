@@ -385,3 +385,61 @@ Net free space across the session: ~2-5GiB free (start) → 62GiB (peak, post-pr
 ## Roadmap pointer {#roadmap-pointer-2026-07-15}
 
 - Appended `roadmap/activity/2026-07-15.md` with this session's summary bullet (new date — also prepended a date link to `roadmap/README.md`'s Recent activity list).
+
+# Roll-forward — 2026-07-15 (full-SSD top-down accounting and default-diagnostic decision)
+
+## Table of contents — full-SSD accounting
+
+- [Executive summary](#executive-summary-full-ssd-accounting)
+- [Context](#context-full-ssd-accounting)
+- [Bead index](#bead-index-full-ssd-accounting)
+- [Work queue](#work-queue-full-ssd-accounting)
+- [PR / merge state](#pr--merge-state-full-ssd-accounting)
+- [Learnings pointer](#learnings-pointer-full-ssd-accounting)
+- [Roadmap pointer](#roadmap-pointer-full-ssd-accounting)
+
+## Executive summary {#executive-summary-full-ssd-accounting}
+
+- Reconciled the complete marketed 1 TB internal SSD at one coherent sample: 931.840 GiB physical, including 821.124 GiB Data, 17.130 GiB sealed System, 14.178 GiB Preboot, 12.003 GiB VM, 3.132 GiB main-container support/overhead, 58.786 GiB main-container free, and 5.488 GiB separate Recovery/ISC capacity.
+- Recursively measured every real home root at 5 GiB granularity: 570.645 GiB total, led by 266.5 GiB of repositories/worktrees/evidence and 78.4 GiB of Codex/Gemini/Hermes/Claude state. Symlink aliases and simulator disk-image mounts were excluded from double counting.
+- Named the remaining 168.552 GiB honestly as an attribution residual: `Data physical allocation - readable directory allocation`. It is not a backup, purgeable-space estimate, or cleanup target. Data has zero snapshots and Time Machine has no destination configured.
+- Established the new default diagnostic shape tracked by `jleechan-rvqz`: run full top-down accounting, snapshot deltas, and safe quick-win/outlier inspection concurrently. The repo's safe dispatcher reclaimed only 116 KiB and Colima prune reclaimed 0 host bytes in this pass, demonstrating why bottom-up cleanup cannot stand in for whole-disk accounting.
+- Attribution is blocked by two independent ceilings: cmux lacks effective Full Disk Access for protected Data paths, and the latest frontier stopped 995 of 1,017 unfinished nodes at its node budget. FDA/root access alone will not make the current bounded frontier exhaustive.
+
+## Context {#context-full-ssd-accounting}
+
+This roll-forward follows the earlier root-cause investigation in `jleechanorg/disk_magician` on `main`. The user explicitly rejected gigabyte-at-a-time cleanup reports that did not explain the full disk and required a top-down report of the complete 1 TB at 5 GiB granularity. Parallel lanes reconciled physical APFS allocation, the writable Data volume, all home roots, snapshot state, readable non-home trees, and safe cleanup candidates. Measurements were read-only except for the separately authorized safe-cleanup lane; protected Codex/Claude session stores were not touched.
+
+## Bead index {#bead-index-full-ssd-accounting}
+
+| Bead | Priority/status | Scope |
+|---|---|---|
+| [jleechan-rvqz](https://github.com/jleechanorg/disk_magician/issues/18) | P1 blocked | Make the three-lane top-down diagnostic the default first-use workflow and repo skill; blocked on auto-factory multi-repo intake. |
+| `jleechan-wsbk` | P2 open | Prevent snapshot coverage collapse under disk pressure and timeouts. |
+| `jleechan-772q` | P1 in progress | Close the whole-`~/Library` coverage blind spot. |
+| `jleechan-7jq3` | P1 open | Add retention for rapidly growing `dk2d_evidence`. |
+| `jleechan-z2ya` | P2 open | Review 28.7 GiB Messages storage, including 26.7 GiB attachments. |
+| `jleechan-p2gy` | P2 open | Reduce repeated dependency-store allocation across project trees. |
+| [jleechan-5c5y](https://github.com/jleechanorg/llm-wiki/issues/21) | P2 open | Repair wiki-ingest adapters so `/learn` can complete its mandatory wiki sink. |
+
+## Work queue {#work-queue-full-ssd-accounting}
+
+1. Unblock and implement [jleechan-rvqz](https://github.com/jleechanorg/disk_magician/issues/18). The live auto-factory only polls `jleechanorg/worldarchitect.ai`, so it did not adopt the labeled `disk_magician` issue; this is tracked by [dark-factory issue 280](https://github.com/jleechanorg/dark-factory/issues/280) and [PR 283](https://github.com/jleechanorg/dark-factory/pull/283). Once routed, the default first-use command must start three independent lanes concurrently: (a) physical APFS → Data → home top-down reconciliation with every individual bucket at least 5 GiB and a named residual, (b) coverage-validated snapshot deltas, and (c) safety-gated quick wins and obvious outliers. Reuse `scripts/disk_audit.sh`, `scripts/disk_frontier_scan.py`, and existing cleanup scripts; do not add a second scanner.
+2. Make permissions and scan limits explicit acceptance criteria. A complete report must record the hosting app's Full Disk Access state, sudo availability, denied paths, node/time-budget exhaustion, and remaining residual. Granting FDA improves attribution but does not reclaim storage.
+3. Add RED/GREEN tests for the repo-level skill and script behavior. Baseline pressure case: a new user asks why a nearly full 1 TB disk is growing; the old workflow must be shown to stop at quick cleanup candidates or partial snapshots. Green behavior must reconcile the whole disk before making cleanup claims.
+4. Repair snapshot coverage through `jleechan-wsbk` and `jleechan-772q`. Snapshot deltas are evidence only when coverage is valid; null/timeouts and changing coverage must not be described as physical growth or reclaim.
+5. Address known real growth separately: `jleechan-7jq3` for evidence retention, `jleechan-z2ya` for Messages attachments review, and `jleechan-p2gy` for repeated dependencies. Keep session stores on the never-delete list.
+6. After implementation, run package-tree sync, version bump, forced uv-tool reinstall, deployed-tree verification, and a first-use smoke run. The 35-minute launchd snapshot consumer uses the packaged copy, not repo-root code.
+7. Fix [jleechan-5c5y](https://github.com/jleechanorg/llm-wiki/issues/21). The Codex adapter currently passes an unsupported flag, while the Claude adapters returned without producing required artifacts or a final actionable error. `/learn` must not silently bypass this sink.
+
+## PR / merge state {#pr--merge-state-full-ssd-accounting}
+
+- No PR exists yet for [jleechan-rvqz](https://github.com/jleechanorg/disk_magician/issues/18). Auto-factory adoption is **BLOCKED** because the live intake polls one configured repository and does not see `disk_magician`; no worker or PR was spawned. Evidence and blocker comment: [issue comment](https://github.com/jleechanorg/disk_magician/issues/18#issuecomment-4987222786). No merge action is recommended.
+
+## Learnings pointer {#learnings-pointer-full-ssd-accounting}
+
+- `/Users/jleechan/roadmap/learnings-2026-07.md` — entry `2026-07-15 — Full-disk diagnosis must run top-down and bottom-up concurrently`.
+
+## Roadmap pointer {#roadmap-pointer-full-ssd-accounting}
+
+- Appended `/Users/jleechan/projects_other/disk_magician/roadmap/activity/2026-07-15.md`. The date already existed in `roadmap/README.md`, so no duplicate README link was added.
