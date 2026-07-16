@@ -141,6 +141,96 @@ PY
 [[ "$PERMISSION_TEST_OUT" == "True" ]] && ok "child enumeration identifies permission/TCC denial explicitly" \
   || bad "child enumeration hid permission/TCC denial: $PERMISSION_TEST_OUT"
 
+SYMLINK_ORDER_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+work = os.path.join(sys.argv[1], "symlink-order")
+os.makedirs(os.path.join(work, "real"), exist_ok=True)
+alias = os.path.join(work, "alias")
+os.symlink(os.path.join(work, "real"), alias)
+args = SimpleNamespace(
+    root=work, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=0,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+scanner.root_dev = os.lstat(alias).st_dev
+with mock.patch.object(scanner, "measure_one", return_value=0):
+    scanner.process_node(alias, 1, True)
+print(scanner.trie.covered_by(os.path.join(work, "real")) is None)
+PY
+)
+[[ "$SYMLINK_ORDER_OUT" == "True" ]] && ok "measuring a symlink first does not mark its real payload covered" \
+  || bad "symlink-first ordering hid the real payload: $SYMLINK_ORDER_OUT"
+
+GRANULARITY_LIMIT_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+path = os.path.join(sys.argv[1], "granularity-limit")
+os.makedirs(path, exist_ok=True)
+args = SimpleNamespace(
+    root=path, resolve_root=False, workers=1, max_depth=1, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+scanner.root_dev = os.lstat(path).st_dev
+with mock.patch.object(scanner, "measure_one", return_value=6 * 1024 * 1024):
+    scanner.process_node(path, 1, False)
+print(any(item.get("reason") == "granularity_max_depth_reached"
+          for item in scanner.frontier_unfinished))
+PY
+)
+[[ "$GRANULARITY_LIMIT_OUT" == "True" ]] && ok "large parent names the limit when 5 GiB subdivision cannot continue" \
+  || bad "large parent falsely looked complete at requested granularity: $GRANULARITY_LIMIT_OUT"
+
+APFS_CONTAINER_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import plistlib
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+apfs = {"Containers": [
+    {"ContainerReference": "disk7", "CapacityCeiling": 20_000,
+     "CapacityFree": 1_000, "PhysicalStores": [{"DeviceIdentifier": "disk6s1", "Size": 20_000}],
+     "Volumes": [{"Name": "Simulator", "Roles": [], "CapacityInUse": 19_000}]},
+    {"ContainerReference": "disk3", "CapacityCeiling": 1_000_000,
+     "CapacityFree": 100_000, "PhysicalStores": [{"DeviceIdentifier": "disk0s2", "Size": 1_000_000}],
+     "Volumes": [{"Name": "Data", "Roles": ["Data"], "CapacityInUse": 800_000},
+                 {"Name": "VM", "Roles": ["VM"], "CapacityInUse": 50_000}]},
+]}
+root = {"APFSContainerReference": "disk3"}
+accounting = {}
+with mock.patch.object(
+    m.subprocess, "check_output",
+    side_effect=[plistlib.dumps(apfs), plistlib.dumps(root)],
+):
+    m.get_sibling_volumes("/System/Volumes/Data", [], accounting)
+print(accounting.get("container_reference") == "disk3" and
+      accounting.get("physical_stores", [{}])[0].get("device") == "disk0s2")
+PY
+)
+[[ "$APFS_CONTAINER_OUT" == "True" ]] && ok "Data mount selects its APFSContainerReference, not a simulator container" \
+  || bad "APFS accounting selected the wrong container: $APFS_CONTAINER_OUT"
+
 # ─────────────────────────────────────────────────────────────
 section "4. Timeout-tier escalation then subdivide-on-exhaustion (not open-ended growth)"
 FAKEBIN="$WORK/fakebin"

@@ -321,10 +321,11 @@ case "$CMD" in
     run_snapshot "$@"
     ;;
   audit)
-    # Forward all args to disk_audit
+    # Default diagnosis: top-down accounting, snapshot deltas, and safe
+    # quick-win analysis run concurrently and render as one ordered report.
     DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
     export DISK_SNAPSHOT_JSON
-    "$SCRIPT_DIR/scripts/disk_audit.sh" "$@"
+    "$SCRIPT_DIR/scripts/disk_diagnostic.sh" "$@"
     ;;
   clean)
     DISK_SNAPSHOT_JSON="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"

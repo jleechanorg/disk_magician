@@ -214,7 +214,7 @@ def get_disk_stats(root):
         return {"total_kb": 0, "used_kb": 0, "free_kb": 0}
 
 
-def get_sibling_volumes(root, warnings):
+def get_sibling_volumes(root, warnings, apfs_accounting=None):
     """Enumerate every APFS volume in the same container as `root`'s
     container, excluding the Data-role volume itself. These are
     structurally invisible to a Data-rooted walk (VM/Preboot/Update/...)."""
@@ -235,16 +235,34 @@ def get_sibling_volumes(root, warnings):
         root_container_uuid = root_plist.get("APFSContainerUUID") or root_plist.get(
             "ContainerUUID"
         )
+        root_container_reference = root_plist.get("APFSContainerReference")
     except (subprocess.CalledProcessError, OSError, ValueError):
         root_container_uuid = None
-        warnings.append("sibling_volumes: could not resolve root's container UUID")
+        root_container_reference = None
+        warnings.append("sibling_volumes: could not resolve root's container identity")
 
     siblings = {}
     for container in data.get("Containers", []):
         if root_container_uuid and container.get("APFSContainerUUID") != root_container_uuid:
             continue
+        if (
+            not root_container_uuid
+            and root_container_reference
+            and container.get("ContainerReference") != root_container_reference
+        ):
+            continue
+        if not root_container_uuid and not root_container_reference:
+            continue
+        all_volumes = []
         for vol in container.get("Volumes", []):
             roles = vol.get("Roles", []) or []
+            all_volumes.append(
+                {
+                    "name": vol.get("Name") or vol.get("APFSVolumeUUID") or "unknown",
+                    "roles": roles,
+                    "capacity_in_use_kb": int((vol.get("CapacityInUse") or 0) / 1024),
+                }
+            )
             if "Data" in roles:
                 continue
             name = vol.get("Name") or vol.get("APFSVolumeUUID") or "unknown"
@@ -252,7 +270,31 @@ def get_sibling_volumes(root, warnings):
                 "roles": roles,
                 "capacity_in_use_kb": int((vol.get("CapacityInUse") or 0) / 1024),
             }
-        if root_container_uuid:
+        if apfs_accounting is not None:
+            capacity_kb = int((container.get("CapacityCeiling") or 0) / 1024)
+            free_kb = int((container.get("CapacityFree") or 0) / 1024)
+            allocated_kb = sum(item["capacity_in_use_kb"] for item in all_volumes)
+            shared_kb = max(0, capacity_kb - free_kb - allocated_kb)
+            apfs_accounting.update(
+                {
+                    "container_uuid": container.get("APFSContainerUUID"),
+                    "container_reference": container.get("ContainerReference"),
+                    "physical_stores": [
+                        {
+                            "device": item.get("DeviceIdentifier"),
+                            "size_kb": int((item.get("Size") or 0) / 1024),
+                        }
+                        for item in container.get("PhysicalStores", [])
+                    ],
+                    "container_capacity_kb": capacity_kb,
+                    "container_free_kb": free_kb,
+                    "volumes": all_volumes,
+                    "volume_allocations_kb": allocated_kb,
+                    "shared_allocation_kb": shared_kb,
+                    "equation_balanced": allocated_kb + shared_kb + free_kb == capacity_kb,
+                }
+            )
+        if root_container_uuid or root_container_reference:
             break
     return siblings
 
@@ -303,6 +345,11 @@ class FrontierScanner:
         self.tracker = ConcurrencyTracker()
         self.sem = AdjustableSemaphore(args.workers)
         self.measured = {}
+        # Every successful du result, including parents later subdivided for
+        # the granularity report. `measured` remains the non-overlapping byte
+        # ledger; `observed` is only for selecting useful display buckets.
+        self.observed = {}
+        self.granularity_kb = int(args.granularity_gib * 1024 * 1024)
         self.deduped = []
         self.frontier_unfinished = []
         self.warnings = []
@@ -415,8 +462,8 @@ class FrontierScanner:
         if is_symlink:
             kb = self.measure_one(path)
             if kb is not None:
+                self.observed[path] = kb
                 self.measured[path] = kb
-                self.trie.add(path)
             else:
                 self.frontier_unfinished.append(
                     {"path": path, "depth": depth, "reason": "symlink_measure_failed"}
@@ -425,6 +472,28 @@ class FrontierScanner:
 
         kb = self.measure_one(path)
         if kb is not None:
+            self.observed[path] = kb
+            if self.granularity_kb > 0 and kb >= self.granularity_kb:
+                granularity_reason = None
+                if depth >= self.max_depth:
+                    granularity_reason = "granularity_max_depth_reached"
+                elif self.remaining_budget() <= 0:
+                    granularity_reason = "granularity_time_budget_exhausted"
+                else:
+                    children, enumeration_error = list_children(path)
+                    if children:
+                        return [
+                            (child_path, depth + 1, child_symlink)
+                            for child_path, child_symlink in children
+                        ]
+                    if children is None:
+                        granularity_reason = (
+                            "granularity_" + (enumeration_error or "enumeration_failed")
+                        )
+                if granularity_reason:
+                    self.frontier_unfinished.append(
+                        {"path": path, "depth": depth, "reason": granularity_reason}
+                    )
             self.measured[path] = kb
             self.trie.add(path)
             return
@@ -541,7 +610,10 @@ def atomic_write_json(path, text):
             os.unlink(tmp_path)
 
 
-def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args):
+def build_report(
+    scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args,
+    apfs_accounting=None,
+):
     measured_total_kb = sum(scanner.measured.values())
     residual_raw_kb = disk_stats["used_kb"] - measured_total_kb - purgeable_info["purgeable_kb"]
     residual_negative_clamped = residual_raw_kb < 0
@@ -606,6 +678,50 @@ def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s
 
     status_counts = collections.Counter(item["status"] for item in top_level_ledger)
 
+    granularity_kb = int(args.granularity_gib * 1024 * 1024)
+    observed = getattr(scanner, "observed", scanner.measured)
+    large_observed = {
+        path: kb for path, kb in observed.items()
+        if granularity_kb > 0 and kb >= granularity_kb
+    }
+    granularity_buckets = []
+    for path, kb in large_observed.items():
+        prefix = path.rstrip(os.sep) + os.sep
+        if any(other.startswith(prefix) for other in large_observed if other != path):
+            continue
+        granularity_buckets.append({"path": path, "measured_kb": kb})
+    granularity_buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
+
+    accounting_equation = {
+        "data_used_kb": disk_stats["used_kb"],
+        "measured_kb": measured_total_kb,
+        "purgeable_kb": purgeable_info["purgeable_kb"],
+        "residual_kb": residual_kb,
+        "balanced": (
+            measured_total_kb + purgeable_info["purgeable_kb"] + residual_kb
+            == disk_stats["used_kb"]
+        ),
+        "residual_label": "protected_or_apfs_allocation_not_attributable_by_this_session",
+        "residual_reclaimable": False,
+    }
+    reasons = collections.defaultdict(list)
+    for item in scanner.frontier_unfinished:
+        reasons[item.get("reason") or "unknown"].append(item.get("path"))
+    limits = {
+        "sudo_used": False,
+        "full_disk_access": "not_inferred",
+        "permission_denied_or_tcc": reasons.get("permission_denied_or_tcc", []),
+        "time_budget_exhausted": reasons.get("time_budget_exhausted", []),
+        "node_budget_exhausted": reasons.get("node_budget_exhausted", []),
+        "cross_device_boundary": reasons.get("cross_device_boundary", []),
+        "max_depth_reached": reasons.get("max_depth_reached", []),
+        "granularity": [
+            {"reason": reason, "paths": paths}
+            for reason, paths in sorted(reasons.items())
+            if reason.startswith("granularity_")
+        ],
+    }
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "tool": "disk_frontier_scan",
@@ -621,12 +737,14 @@ def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s
             "max_nodes": args.max_nodes,
             "wall_clock_cap_s": args.wall_clock_cap,
             "timeout_tiers_s": args.timeout_tiers,
+            "granularity_gib": args.granularity_gib,
         },
         "disk_total_kb": disk_stats["total_kb"],
         "disk_used_kb": disk_stats["used_kb"],
         "disk_free_kb": disk_stats["free_kb"],
         "measured": scanner.measured,
         "measured_total_kb": measured_total_kb,
+        "granularity_buckets": granularity_buckets,
         "deduped": scanner.deduped,
         "frontier_unfinished": scanner.frontier_unfinished,
         "sibling_volumes": sibling_volumes,
@@ -638,6 +756,9 @@ def build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s
         "residual_raw_kb": residual_raw_kb,
         "residual_negative_clamped": residual_negative_clamped,
         "clones_suspected": residual_negative_clamped,
+        "accounting_equation": accounting_equation,
+        "apfs_accounting": apfs_accounting or {},
+        "limits": limits,
         "nodes_processed": scanner.nodes_processed,
         "max_concurrent_du_observed": scanner.tracker.peak(),
         "warnings": scanner.warnings,
@@ -663,6 +784,11 @@ def parse_args(argv):
     p.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
     p.add_argument("--max-nodes", type=int, default=DEFAULT_MAX_NODES)
+    p.add_argument(
+        "--granularity-gib", type=float, default=0.0,
+        help="subdivide successful large directories and report the finest "
+             "non-overlapping buckets at or above this size (0 disables)",
+    )
     p.add_argument("--wall-clock-cap", type=float, default=DEFAULT_WALL_CLOCK_CAP)
     p.add_argument(
         "--timeout-tiers",
@@ -698,8 +824,11 @@ def main(argv=None):
         disk_stats["used_kb"] = args.disk_used_kb_override
 
     sibling_volumes = {}
+    apfs_accounting = {}
     if not args.no_sibling_volumes:
-        sibling_volumes = get_sibling_volumes(args.root, scanner.warnings)
+        sibling_volumes = get_sibling_volumes(
+            args.root, scanner.warnings, apfs_accounting
+        )
 
     purgeable_info = {
         "purgeable_kb": 0,
@@ -710,7 +839,10 @@ def main(argv=None):
     if not args.no_purgeable:
         purgeable_info = get_purgeable_info(args.root, scanner.warnings)
 
-    report = build_report(scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args)
+    report = build_report(
+        scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args,
+        apfs_accounting=apfs_accounting,
+    )
 
     out_text = json.dumps(report, indent=2)
 

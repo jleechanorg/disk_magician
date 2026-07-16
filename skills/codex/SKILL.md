@@ -1,9 +1,6 @@
 ---
 name: disk-magician-codex
-description: Disk space monitoring and cleanup tool for Codex agent nodes.
-metadata:
-  type: skill
-  runtime: codex
+description: Use when a Codex agent needs disk usage diagnosis, growth history, or repository-gated cleanup guidance.
 ---
 
 # Disk Magician — Codex Agent Skill
@@ -12,18 +9,19 @@ This skill teaches Codex how to integrate with `disk_magician` to perform automa
 
 ## Usage Guide for Codex
 
-1. **Verify Node Disk Health**:
-   Run the audit check to verify the current capacity:
+1. **Run the default diagnosis first**:
+   Launch top-down 5 GiB accounting, coverage-validated deltas, and safe quick wins concurrently:
    ```bash
-   ./disk_magician.sh alert
+   disk-magician audit
    ```
+   Follow the full forensic procedure in `../disk-root-cause/SKILL.md` when deeper attribution is needed. Residual is not backup size or reclaimable without evidence.
 2. **Retrieve Growth Regression Log**:
    Query the Git snapshot database to review recent space regressions:
    ```bash
    ./disk_magician.sh history
    ```
-3. **Execute Automated Maintenance**:
-   Prune stale temp folders, caches, and orphaned worktrees to restore disk space:
+3. **Preview maintenance**:
+   Keep cleanup behind the repository safety gates:
    ```bash
    ./disk_magician.sh clean
    ```

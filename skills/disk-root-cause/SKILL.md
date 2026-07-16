@@ -1,14 +1,27 @@
 ---
 name: disk-root-cause
-description: Always-on disk growth forensics. Mines snapshot history for floor/week/month-vs-now deltas, attributes growth to attributable buckets, runs cleanup via the repo's safety gates, and refrains from destructive actions without explicit user OK. Use when a user asks "why is the disk filling up", "what grew over the last X period", "find the min disk used last week/month", or "root cause disk growth". Complements disk_magician.sh (which measures) — this skill explains why.
-metadata:
-  type: skill
-  runtime: claude
+description: Use when a user asks why a disk is filling, what uses its capacity, what grew over time, or what can be safely reclaimed.
 ---
 
 # disk-root-cause — forensic attribution skill
 
 When a user asks **why the disk filled up**, **what grew over a window**, or **where a specific bucket came from**, this skill is the entry point. It never assumes an answer; it pulls facts from this machine's snapshot history (`~/.disk_magician_backup`), never deletes anything without an explicit human OK, and prefers parallel-subagent fan-out to keep wall-clock bounded.
+
+## Default first-use workflow
+
+Run this before chasing individual directories:
+
+```bash
+disk-magician audit
+```
+
+This is the mandatory three-lane diagnostic. It launches in parallel:
+
+1. top-down whole-disk accounting from physical/APFS capacity through the Data volume and the finest non-overlapping 5 GiB buckets;
+2. coverage-validated snapshot deltas, so a coverage change cannot masquerade as physical growth; and
+3. safe quick wins and obvious outliers, with cleanup commands still behind repository safety gates.
+
+Read the whole report before drilling down. Keep permission/TCC denial, time budget, node budget, cross-device boundaries, APFS sibling allocations, purgeable estimates, and residual bytes as separate fields. The residual is an attribution gap: it is **not backup size and not reclaimable without evidence**.
 
 **Pair with** `disk_magician` skill (measurement + safe cleanup) and the `CLAUDE.md` / `AGENTS.md` in this repo (cross-repo authorization + never-delete list).
 
@@ -37,6 +50,9 @@ Do **not** use this skill for one-off size queries — `du -sh <path>` answers t
 ## Phase 0 — environment ground truth (always run)
 
 ```bash
+# Produce the default concurrent top-down + delta + quick-win report first.
+disk-magician audit
+
 # Authenticate the data source
 df -h /System/Volumes/Data
 hostname -s                                                    # = directory key in ~/.disk_magician_backup
@@ -144,6 +160,10 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 ## Exit criteria for the skill
 
 A complete root-cause answer for this machine has:
+- [ ] Default `disk-magician audit` three-lane report completed or its named limits were reported
+- [ ] Every individually measured bucket at or above 5 GiB is shown without parent/child or symlink double counting
+- [ ] Data equation reconciles measured + purgeable estimate + residual = Data used
+- [ ] Residual is explicitly not called backup or reclaimable without evidence
 - [ ] Phase 0 ground-truth probe done
 - [ ] Phase 1 floor deltas computed (last week + last month + all-time min)
 - [ ] Phase 2 attribution buckets with credible per-bucket numbers

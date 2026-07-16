@@ -140,6 +140,16 @@ def main():
             ts_obj = None
         # has_data: snapshot has at least one numeric (non-null) value
         has_data = any(v is not None for v in dirs.values())
+        used_gb = data.get("disk_used_gb")
+        coverage = data.get("snapshot_coverage_pct")
+        try:
+            used_gb = float(used_gb)
+        except (TypeError, ValueError):
+            used_gb = None
+        try:
+            coverage = float(coverage)
+        except (TypeError, ValueError):
+            coverage = None
         snapshots.append({
             "date": ts[:16],
             "date_obj": ts_obj,
@@ -147,11 +157,37 @@ def main():
             "pct": data.get("disk_pct", 0),
             "dirs": dirs,
             "has_data": has_data,
+            "used_gb": used_gb,
+            "coverage": coverage,
         })
 
     if not snapshots:
         print("No readable snapshot data found in history.", file=sys.stderr)
         sys.exit(1)
+
+    first = snapshots[0]
+    last = snapshots[-1]
+    if first["used_gb"] is not None and last["used_gb"] is not None:
+        used_delta = last["used_gb"] - first["used_gb"]
+        print(
+            f"Physical used delta: {used_delta:+.1f} GiB "
+            f"({first['used_gb']:.1f} -> {last['used_gb']:.1f} GiB)"
+        )
+    else:
+        print("Physical used delta: unavailable (disk_used_gb missing)")
+    if first["coverage"] is not None and last["coverage"] is not None:
+        coverage_delta = last["coverage"] - first["coverage"]
+        print(
+            f"Coverage changed: {coverage_delta:+.1f} percentage points "
+            f"({first['coverage']:.1f}% -> {last['coverage']:.1f}%); "
+            "directory-bucket deltas are coverage-sensitive and do not prove physical growth."
+        )
+    else:
+        print(
+            "Coverage changed: unavailable; directory-bucket deltas are "
+            "coverage-sensitive and do not prove physical growth."
+        )
+    print()
 
     # ────────── growth_rate_kb_per_day (Lane B Section C) ──────────
     # Linear regression (slope) of (epoch_day, kb) for each top-level
@@ -239,16 +275,24 @@ def main():
 
     # Print Rows
     prev_dirs = {}
+    prev_coverage = None
     for snap in snapshots:
         date_str = snap["date"]
         free_gb = f"{snap['free']}G"
         pct_str = f"{snap['pct']}%"
         
         row_regressions = []
+        coverage_comparable = (
+            prev_coverage is not None
+            and snap["coverage"] is not None
+            and prev_coverage >= 70
+            and snap["coverage"] >= 70
+            and abs(snap["coverage"] - prev_coverage) <= 5
+        )
         for k in display_keys:
             val = snap["dirs"].get(k)
             prev = prev_dirs.get(k)
-            if val is not None and prev is not None and prev > 0:
+            if coverage_comparable and val is not None and prev is not None and prev > 0:
                 delta = val - prev
                 # Regression threshold: grew >1GB or >50%
                 if delta > 1024 * 1024 or (delta > 1024 * 100 and delta / prev > 0.5):
@@ -260,6 +304,7 @@ def main():
         
         if args.regressions and not (is_low or has_reg):
             prev_dirs = snap["dirs"]
+            prev_coverage = snap["coverage"]
             continue
 
         print(f"{date_str:<16} {free_gb:>6} {pct_str:>4}", end="")
@@ -274,9 +319,12 @@ def main():
             print("  LOW!", end="")
         if has_reg:
             print(f"  <- {', '.join(row_regressions)}", end="")
+        if prev_dirs and not coverage_comparable:
+            print("  COVERAGE_CHANGE: directory deltas incomparable", end="")
         print()
         
         prev_dirs = snap["dirs"]
+        prev_coverage = snap["coverage"]
 
     print(f"\nLegend: sizes in KB. Regression = grew >1GB or >50% vs previous snapshot.")
     print(f"Source: git log -- {rel_path} ({len(commits)} snapshots shown)")
