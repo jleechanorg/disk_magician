@@ -23,6 +23,7 @@ SKILL="$REPO_ROOT/skills/disk-root-cause/SKILL.md"
 if grep -q 'disk-magician audit' "$SKILL" &&
    grep -qi 'three.lane' "$SKILL" &&
    grep -q '5 GiB' "$SKILL" &&
+   grep -qi 'dua.*du' "$SKILL" &&
    grep -qi 'residual.*not.*reclaimable' "$SKILL"; then
   ok "skill requires the three-lane >=5 GiB workflow and protects residual attribution"
 else
@@ -31,7 +32,12 @@ fi
 if [[ -f "$REPO_ROOT/.agents/skills/disk-root-cause/SKILL.md" ]] &&
    grep -q 'disk-magician audit' "$REPO_ROOT/skills/codex/SKILL.md" &&
    grep -q 'disk-magician audit' "$REPO_ROOT/skills/claude/SKILL.md" &&
-   grep -q 'skills/disk-root-cause/SKILL.md' "$REPO_ROOT/install.sh"; then
+   grep -q 'skills/disk-root-cause/SKILL.md' "$REPO_ROOT/install.sh" &&
+   [[ -f "$REPO_ROOT/skills/disk-audit/SKILL.md" ]] &&
+   grep -q '^name: disk-audit$' "$REPO_ROOT/skills/disk-audit/SKILL.md" &&
+   grep -q '../disk-root-cause/SKILL.md' "$REPO_ROOT/skills/disk-audit/SKILL.md" &&
+   grep -q 'skills/disk-audit/SKILL.md.*CLAUDE_DIR.*skills/disk-audit' "$REPO_ROOT/install.sh" &&
+   grep -q 'skills/disk-audit/SKILL.md.*HOME.*agents/skills/disk-audit' "$REPO_ROOT/install.sh"; then
   ok "repo-native and installed skill surfaces route to the canonical workflow"
 else
   bad "skill discovery/install surfaces still route to a stale workflow"

@@ -28,6 +28,7 @@ import concurrent.futures
 import json
 import os
 import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -48,6 +49,8 @@ SCHEMA_VERSION = 1
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
+DUA_CMD = shutil.which("dua")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class AdjustableSemaphore:
@@ -134,22 +137,48 @@ class ConcurrencyTracker:
             return self._peak
 
 
-def run_du(path, timeout_s, tracker):
-    cmd = []
+def run_du(path, timeout_s, tracker, is_symlink=False):
+    prefix = []
     if HAVE_TASKPOLICY:
-        cmd += ["taskpolicy", "-b"]
+        prefix += ["taskpolicy", "-b"]
     if HAVE_NICE:
-        cmd += ["nice", "-n", "10"]
-    cmd += ["du", "-x", "-P", "-sk", path]
+        prefix += ["nice", "-n", "10"]
+    deadline = time.monotonic() + timeout_s
     tracker.enter()
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    except OSError:
-        return None
+        if DUA_CMD and not is_symlink:
+            try:
+                proc = subprocess.run(
+                    prefix + [DUA_CMD, "aggregate", "-x", "--format", "bytes", path],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+            except subprocess.TimeoutExpired:
+                return None
+            except OSError:
+                proc = None
+            if proc is not None and proc.returncode == 0:
+                bytes_used = None
+                for line in ANSI_ESCAPE_RE.sub("", proc.stdout).splitlines():
+                    parts = line.split()
+                    if parts and parts[0].isdigit():
+                        bytes_used = int(parts[0])
+                if bytes_used is not None:
+                    return (bytes_used + 1023) // 1024
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            proc = subprocess.run(
+                prefix + ["du", "-x", "-P", "-sk", path],
+                capture_output=True,
+                text=True,
+                timeout=remaining,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
     finally:
         tracker.exit()
     # `du` can print a partial subtotal and still exit nonzero when TCC or
@@ -395,7 +424,7 @@ class FrontierScanner:
                     f"(load1={load1:.1f} ncpu={ncpu} free_gb={free_gb:.1f})"
                 )
 
-    def measure_one(self, path):
+    def measure_one(self, path, is_symlink=False):
         self.sem.acquire()
         try:
             attempted_tiers = []
@@ -406,7 +435,7 @@ class FrontierScanner:
                     break
                 effective = min(tier, max(1, int(remaining)))
                 attempted_tiers.append(effective)
-                kb = run_du(path, effective, self.tracker)
+                kb = run_du(path, effective, self.tracker, is_symlink=is_symlink)
                 if kb is not None:
                     break
             if kb is None and self.timeout_tiers:
@@ -415,7 +444,7 @@ class FrontierScanner:
                 if remaining > 0:
                     top = self.timeout_tiers[-1]
                     effective = min(top, max(1, int(remaining)))
-                    kb = run_du(path, effective, self.tracker)
+                    kb = run_du(path, effective, self.tracker, is_symlink=is_symlink)
         finally:
             self.sem.release()
         return kb
@@ -460,7 +489,7 @@ class FrontierScanner:
         # Symlinks are always measured as leaves (du -P never follows them,
         # so this is O(1) and cannot double-count or recurse).
         if is_symlink:
-            kb = self.measure_one(path)
+            kb = self.measure_one(path, is_symlink=True)
             if kb is not None:
                 self.observed[path] = kb
                 self.measured[path] = kb

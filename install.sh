@@ -36,9 +36,11 @@ fi
 echo "=== Installing Claude Commands and Skills ==="
 CLAUDE_DIR="${HOME}/.claude"
 if [[ -d "$CLAUDE_DIR" ]]; then
-  mkdir -p "$CLAUDE_DIR/commands" "$CLAUDE_DIR/skills/disk_magician" "$CLAUDE_DIR/skills/disk-root-cause"
+  mkdir -p "$CLAUDE_DIR/commands" "$CLAUDE_DIR/skills/disk_magician" \
+    "$CLAUDE_DIR/skills/disk-root-cause" "$CLAUDE_DIR/skills/disk-audit"
   cp "$SCRIPT_DIR/skills/claude/SKILL.md" "$CLAUDE_DIR/skills/disk_magician/SKILL.md"
   cp "$SCRIPT_DIR/skills/disk-root-cause/SKILL.md" "$CLAUDE_DIR/skills/disk-root-cause/SKILL.md"
+  cp "$SCRIPT_DIR/skills/disk-audit/SKILL.md" "$CLAUDE_DIR/skills/disk-audit/SKILL.md"
   cp "$SCRIPT_DIR/skills/claude/commands/disk_magician.md" "$CLAUDE_DIR/commands/disk_magician.md"
   cp "$SCRIPT_DIR/skills/claude/commands/diskm.md" "$CLAUDE_DIR/commands/diskm.md"
   cp "$SCRIPT_DIR/commands/disk-root-cause.md" "$CLAUDE_DIR/commands/disk-root-cause.md"
@@ -48,9 +50,10 @@ else
 fi
 
 echo "=== Installing Codex Skill ==="
-mkdir -p "${HOME}/.agents/skills/disk-root-cause"
+mkdir -p "${HOME}/.agents/skills/disk-root-cause" "${HOME}/.agents/skills/disk-audit"
 cp "$SCRIPT_DIR/skills/disk-root-cause/SKILL.md" "${HOME}/.agents/skills/disk-root-cause/SKILL.md"
-echo "Codex disk-root-cause skill successfully installed!"
+cp "$SCRIPT_DIR/skills/disk-audit/SKILL.md" "${HOME}/.agents/skills/disk-audit/SKILL.md"
+echo "Codex disk-root-cause and disk-audit skills successfully installed!"
 
 echo "=== Optional: install weekly launchd sweepers ==="
 echo "Run: ./scripts/install_launchd_sweepers.sh --unload-legacy"

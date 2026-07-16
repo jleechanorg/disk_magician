@@ -23,6 +23,8 @@ This is the mandatory three-lane diagnostic. It launches in parallel:
 
 Read the whole report before drilling down. Keep permission/TCC denial, time budget, node budget, cross-device boundaries, APFS sibling allocations, purgeable estimates, and residual bytes as separate fields. The residual is an attribution gap: it is **not backup size and not reclaimable without evidence**.
 
+The top-down scanner prefers the installed parallel `dua` backend, rejects partial output from failed commands, and falls back to bounded `du`. Symlinks remain `du -P` leaves so aliases cannot pull their targets into the ledger.
+
 **Pair with** `disk_magician` skill (measurement + safe cleanup) and the `CLAUDE.md` / `AGENTS.md` in this repo (cross-repo authorization + never-delete list).
 
 ## When to use

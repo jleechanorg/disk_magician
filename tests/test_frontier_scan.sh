@@ -21,6 +21,24 @@ SCANNER="$REPO_ROOT/scripts/disk_frontier_scan.py"
 WORK="$(mktemp -d -t frontier_scan_test.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Production deliberately runs scanners through taskpolicy/nice. Under live
+# runner I/O pressure that can starve even tiny fixtures, so tests preserve
+# the argv contract while executing the wrapped command without throttling.
+LOW_PRIORITY_BIN="$WORK/low-priority-bin"
+mkdir -p "$LOW_PRIORITY_BIN"
+cat > "$LOW_PRIORITY_BIN/taskpolicy" <<'TEST_TASKPOLICY'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-b" ]] && shift
+exec "$@"
+TEST_TASKPOLICY
+cat > "$LOW_PRIORITY_BIN/nice" <<'TEST_NICE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-n" ]]; then shift 2; fi
+exec "$@"
+TEST_NICE
+chmod +x "$LOW_PRIORITY_BIN/taskpolicy" "$LOW_PRIORITY_BIN/nice"
+export PATH="$LOW_PRIORITY_BIN:$PATH"
+
 PASS=0
 FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
@@ -235,6 +253,10 @@ PY
 section "4. Timeout-tier escalation then subdivide-on-exhaustion (not open-ended growth)"
 FAKEBIN="$WORK/fakebin"
 mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/dua" <<'FAKE_DUA_DISABLED'
+#!/usr/bin/env bash
+exit 1
+FAKE_DUA_DISABLED
 cat > "$FAKEBIN/du" <<'FAKE_DU'
 #!/usr/bin/env bash
 # Fake du: hang forever for a dir literally named "slow_dir" (exact basename
@@ -247,7 +269,7 @@ if [[ "$(basename "$path")" == "slow_dir" ]]; then
 fi
 exec /usr/bin/du "$@"
 FAKE_DU
-chmod +x "$FAKEBIN/du"
+chmod +x "$FAKEBIN/dua" "$FAKEBIN/du"
 
 T4="$WORK/t4"
 mkdir -p "$T4/slow_dir/childA" "$T4/slow_dir/childB" "$T4/fast_dir"
@@ -357,6 +379,10 @@ section "8. Partial du output with a failing exit code is never reported as comp
 T8_PARTIAL="$WORK/t8_partial"
 PARTIAL_BIN="$WORK/partial_bin"
 mkdir -p "$T8_PARTIAL/protected" "$PARTIAL_BIN"
+cat > "$PARTIAL_BIN/dua" <<'PARTIAL_DUA_DISABLED'
+#!/usr/bin/env bash
+exit 1
+PARTIAL_DUA_DISABLED
 cat > "$PARTIAL_BIN/du" <<'PARTIAL_DU'
 #!/usr/bin/env bash
 path="${@: -1}"
@@ -364,7 +390,7 @@ printf '123\t%s\n' "$path"
 echo "du: protected child: Operation not permitted" >&2
 exit 1
 PARTIAL_DU
-chmod +x "$PARTIAL_BIN/du"
+chmod +x "$PARTIAL_BIN/dua" "$PARTIAL_BIN/du"
 
 OUT8_PARTIAL="$WORK/out8_partial.json"
 PATH="$PARTIAL_BIN:$PATH" python3 "$SCANNER" --root "$T8_PARTIAL" \
@@ -386,7 +412,61 @@ else
   bad "nonzero du exit was silently accepted as a complete measurement"
 fi
 
-section "9. --output state-file mode (atomic write, stdout stays intact, --output-default resolution)"
+section "9. dua is preferred, rejects partial output, and falls back to du"
+DUA_BIN="$WORK/dua_bin"
+mkdir -p "$DUA_BIN"
+cat > "$DUA_BIN/dua" <<'FAKE_DUA_OK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DUA_MARKER"
+printf '\033[32m6291456 b\033[39m total\n'
+FAKE_DUA_OK
+cat > "$DUA_BIN/du" <<'FAKE_DU_MUST_NOT_RUN'
+#!/usr/bin/env bash
+exit 99
+FAKE_DU_MUST_NOT_RUN
+chmod +x "$DUA_BIN/dua" "$DUA_BIN/du"
+
+T9_DUA="$WORK/t9_dua"
+mkdir -p "$T9_DUA/large"
+DUA_MARKER="$WORK/dua-ok.marker" PATH="$DUA_BIN:$PATH" \
+  python3 "$SCANNER" --root "$T9_DUA" --no-sibling-volumes --no-purgeable \
+  --workers 1 --wall-clock-cap 10 --timeout-tiers 1 --output "$WORK/out9_dua.json" \
+  >/dev/null 2>&1
+
+dua_kb=$(json_get "$WORK/out9_dua.json" "d['measured'].get('$T9_DUA/large', -1)")
+if [[ -s "$WORK/dua-ok.marker" ]] && grep -q -- '-x' "$WORK/dua-ok.marker" &&
+   [[ "$dua_kb" == "6144" ]]; then
+  ok "dua is preferred and its byte total is converted to allocated KiB"
+else
+  bad "dua was not preferred or parsed correctly (marker=$(test -s "$WORK/dua-ok.marker" && echo yes || echo no), kb=$dua_kb)"
+fi
+
+cat > "$DUA_BIN/dua" <<'FAKE_DUA_PARTIAL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DUA_MARKER"
+printf '\033[32m999999999 b\033[39m total\n'
+exit 1
+FAKE_DUA_PARTIAL
+cat > "$DUA_BIN/du" <<'FAKE_DU_FALLBACK'
+#!/usr/bin/env bash
+path="${@: -1}"
+printf '321\t%s\n' "$path"
+FAKE_DU_FALLBACK
+chmod +x "$DUA_BIN/dua" "$DUA_BIN/du"
+
+DUA_MARKER="$WORK/dua-partial.marker" PATH="$DUA_BIN:$PATH" \
+  python3 "$SCANNER" --root "$T9_DUA" --no-sibling-volumes --no-purgeable \
+  --workers 1 --wall-clock-cap 10 --timeout-tiers 1 --output "$WORK/out9_fallback.json" \
+  >/dev/null 2>&1
+fallback_kb=$(json_get "$WORK/out9_fallback.json" "d['measured'].get('$T9_DUA/large', -1)")
+if [[ -s "$WORK/dua-partial.marker" && "$fallback_kb" == "321" ]]; then
+  ok "nonzero dua partial output is rejected and bounded du fallback is used"
+else
+  bad "dua partial output was accepted or du fallback failed (kb=$fallback_kb)"
+fi
+
+# ─────────────────────────────────────────────────────────────
+section "10. --output state-file mode (atomic write, stdout stays intact, --output-default resolution)"
 T8="$WORK/t8"
 mkdir -p "$T8/x"
 dd if=/dev/zero of="$T8/x/f" bs=1024 count=30 >/dev/null 2>&1
