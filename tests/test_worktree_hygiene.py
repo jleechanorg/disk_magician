@@ -173,6 +173,30 @@ class IdentifyCandidatesTest(unittest.TestCase):
         self.assertIn(str(wt), candidates)
 
 
+    def test_fresh_git_pointer_file_does_not_mask_stale_real_content(self):
+        # Regression test for jleechan-20gm: in a git worktree, .git is a
+        # regular FILE (not a directory) at the top level, so the old
+        # exclusion pattern '*/.git/*' never matched it -- its mtime
+        # (usually ~worktree-creation-time, but here deliberately touched
+        # fresh to simulate e.g. a `git worktree repair` with no real
+        # content edit) was silently included in the scan, masking
+        # genuinely stale content. The `-prune`-based exclusion added for
+        # jleechan-q912 matches by basename regardless of file-vs-directory
+        # type, which closes this gap as a side effect.
+        repo = _init_repo(self.tmp)
+        wt = self.tmp / "wt-fresh-git-pointer"
+        _git(repo, "worktree", "add", "-B", "wt-fresh-git-pointer", str(wt), "main")
+        _age_tree(wt, 30)
+        # Real content is 30 days stale; only the .git pointer file is
+        # fresh (simulating worktree-metadata-only activity).
+        os.utime(wt / ".git", None)
+
+        result = _call("identify_candidates", str(repo), "14")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidates = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn(str(wt), candidates)
+
+
 class RedactUrlTest(unittest.TestCase):
     """(c) redact_url credential stripping."""
 
@@ -310,6 +334,119 @@ class IntegrationRealGitRepoTest(unittest.TestCase):
         result = _classify(uncommitted, untracked, "no-remote", "none", ahead, has_merge_base)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "NEEDS-REVIEW|untracked")
+
+
+class TriageCandidateNetworkSkipTest(unittest.TestCase):
+    """Proves the jleechan-q912 perf fix: triage_candidate must skip real
+    'git push' / 'gh pr list' network calls whenever local signals alone
+    already determine the SAFE/NEEDS-REVIEW verdict (classify_candidate's
+    SAFE branches both require uncommitted==0 AND untracked==0, and
+    SAFE|zero-ahead fires regardless of push/PR state) -- network only
+    matters for the single remaining case: locally clean AND ahead>0.
+
+    Proof strategy: configure a real local bare repo as `origin` so a push
+    would genuinely succeed (push_status="pushed") if attempted. Skip-
+    eligible cases must report push_status="skipped-not-needed" instead --
+    proving the network branch was never entered, not merely proving the
+    push failed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.bare = self.tmp / "origin.git"
+        _git(self.tmp, "init", "-q", "--bare", str(self.bare))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _repo_with_remote(self):
+        repo = _init_repo(self.tmp)
+        _git(repo, "remote", "add", "origin", str(self.bare))
+        _git(repo, "push", "-q", "origin", "main")
+        return repo
+
+    def _triage(self, repo, wt, branch):
+        return _call("triage_candidate", str(repo), str(wt), branch, timeout=20)
+
+    def test_dirty_worktree_skips_network_regardless_of_ahead_count(self):
+        repo = self._repo_with_remote()
+        wt = self.tmp / "wt-dirty"
+        _git(repo, "worktree", "add", "-B", "wt-dirty", str(wt), "main")
+        (wt / "extra.txt").write_text("uncommitted\n", encoding="utf-8")
+
+        result = self._triage(repo, wt, "wt-dirty")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        push_status, pr_state = fields[2], fields[3]
+        self.assertEqual(push_status, "skipped-not-needed")
+        self.assertEqual(pr_state, "unknown")
+
+    def test_clean_zero_ahead_worktree_skips_network(self):
+        repo = self._repo_with_remote()
+        wt = self.tmp / "wt-zero-ahead"
+        _git(repo, "worktree", "add", "-B", "wt-zero-ahead", str(wt), "main")
+
+        result = self._triage(repo, wt, "wt-zero-ahead")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        push_status, pr_state = fields[2], fields[3]
+        self.assertEqual(push_status, "skipped-not-needed")
+        self.assertEqual(pr_state, "unknown")
+
+    def test_clean_ahead_worktree_still_does_real_network_push(self):
+        repo = self._repo_with_remote()
+        wt = self.tmp / "wt-ahead-clean"
+        _git(repo, "worktree", "add", "-B", "wt-ahead-clean", str(wt), "main")
+        (wt / "extra.txt").write_text("committed change\n", encoding="utf-8")
+        _git(wt, "add", "extra.txt")
+        _git(wt, "commit", "-q", "-m", "ahead commit")
+
+        result = self._triage(repo, wt, "wt-ahead-clean")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        push_status = fields[2]
+        # Must NOT be the skip sentinel -- the real (successful, since a
+        # real bare-repo remote is configured) push path must have run.
+        self.assertEqual(push_status, "pushed")
+
+
+class MaxCandidatesCliTest(unittest.TestCase):
+    """Proves --max-candidates degrades gracefully instead of hanging on an
+    unexpectedly large registry (jleechan-q912 fix approach #4)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_caps_candidates_and_reports_skipped_count(self):
+        repo = _init_repo(self.tmp)
+        for i in range(5):
+            wt = self.tmp / f"wt-{i}"
+            _git(repo, "worktree", "add", "-B", f"wt-{i}", str(wt), "main")
+            _age_tree(wt, 30)
+
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp / "home")}
+        result = subprocess.run(
+            [
+                "bash", str(SCRIPT), "--repos", str(repo), "--min-age", "1",
+                "--skip-push", "--skip-gh", "--max-candidates", "2",
+            ],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("capping to 2", result.stdout)
+        # Exactly 2 candidates triaged (SAFE + NEEDS-REVIEW combined); the
+        # other 3 must be reported PRESERVE|capped, not silently dropped
+        # from the summary and not mislabeled "young" (they DO qualify by
+        # age -- they were just capped out of this run).
+        safe_and_review = result.stdout.count("LEDGER worktree-hygiene  SAFE") + \
+            result.stdout.count("LEDGER worktree-hygiene  NEEDS-REVIEW")
+        self.assertEqual(safe_and_review, 2)
+        self.assertEqual(result.stdout.count("capped, re-run to process"), 3)
+        self.assertNotIn("| young", result.stdout)
 
 
 class ExecuteFlagCliTest(unittest.TestCase):
