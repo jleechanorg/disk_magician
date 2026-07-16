@@ -125,6 +125,29 @@ Detailed skills/plugin specifications are available under `skills/`:
 - Ollama cleanup deletes the local model store (`~/.ollama/models` by default, or `OLLAMA_MODELS_DIR`).
 - Xcode cleanup clears DerivedData, CoreSimulator temp/cache directories, and unavailable simulators.
 
+### Worktree Hygiene Sweep (`scripts/worktree_hygiene.sh`)
+
+Automates the manual "find dormant worktrees, triage each one, delete only
+the provably safe ones" pass proven live on 2026-07-16 (51 candidates
+triaged, 42 safe deletions, ~13 GB freed, zero data loss, zero
+force-pushes). For every worktree under the monitored project roots whose
+newest file mtime is older than `--min-age` days (default 14), it checks
+uncommitted diff size, pushes any unpushed commits to the real branch
+(falling back to a timestamped `backup/<branch>-<date>` ref on a
+non-fast-forward push — never `--force`), and looks up existing PR
+coverage, then deletes only worktrees with zero unique local content via
+`git worktree remove --force` (metadata only, never raw `rm -rf`).
+Read-only/dry-run by default; nothing is pushed or deleted without
+`--execute`:
+
+```bash
+./scripts/worktree_hygiene.sh                        # dry-run preview
+./scripts/worktree_hygiene.sh --execute --min-age 14  # apply
+```
+
+This is the "safe quick-win" lane's worktree-cleanup component in the
+three-lane default diagnostic (`jleechan-rvqz`).
+
 ---
 
 ## Regrowth Prevention Series (PRs 1–4)
