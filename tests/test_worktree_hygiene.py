@@ -312,5 +312,59 @@ class IntegrationRealGitRepoTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "NEEDS-REVIEW|untracked")
 
 
+class ExecuteFlagCliTest(unittest.TestCase):
+    """End-to-end CLI proof (bead jleechan-ue9w "Standing rules": read-only/
+    dry-run by default, actual delete step requires an explicit flag).
+    Complements ClassifyCandidateTest/IntegrationRealGitRepoTest, which
+    prove *what* gets classified SAFE but not that only --execute +
+    WORKTREE_APPROVED=1 can turn a SAFE verdict into a real deletion."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _safe_fixture(self):
+        repo = _init_repo(self.tmp)
+        wt = self.tmp / "wt-safe"
+        _git(repo, "worktree", "add", "-B", "wt-safe", str(wt), "main")
+        _age_tree(wt, 30)
+        return repo, wt
+
+    def _run(self, repo, extra_args=(), extra_env=None):
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp / "home")}
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [
+                "bash", str(SCRIPT), "--repos", str(repo), "--min-age", "1",
+                "--skip-push", "--skip-gh", *extra_args,
+            ],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def test_default_dry_run_never_deletes_the_worktree(self):
+        repo, wt = self._safe_fixture()
+        self._run(repo)
+        self.assertTrue(wt.exists())
+        listing = _git(repo, "worktree", "list", "--porcelain").stdout
+        self.assertIn(str(wt), listing)
+
+    def test_execute_without_approval_env_var_refuses_to_delete(self):
+        repo, wt = self._safe_fixture()
+        result = self._run(repo, extra_args=["--execute"])
+        self.assertTrue(wt.exists(), "--execute without WORKTREE_APPROVED=1 must not delete")
+        self.assertIn("WORKTREE_APPROVED", result.stdout + result.stderr)
+
+    def test_execute_with_approval_deletes_the_safe_worktree(self):
+        repo, wt = self._safe_fixture()
+        self._run(repo, extra_args=["--execute"], extra_env={"WORKTREE_APPROVED": "1"})
+        self.assertFalse(wt.exists(), "--execute + WORKTREE_APPROVED=1 on SAFE should delete")
+        listing = _git(repo, "worktree", "list", "--porcelain").stdout
+        self.assertNotIn(str(wt), listing)
+
+
 if __name__ == "__main__":
     unittest.main()
