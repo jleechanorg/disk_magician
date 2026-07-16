@@ -26,6 +26,7 @@ PATTERNS=(
   "config.json.template"
   "scripts/*.sh"
   "scripts/*.py"
+  "scripts/lib/*.sh"
   "launchd/*.plist.template"
 )
 
