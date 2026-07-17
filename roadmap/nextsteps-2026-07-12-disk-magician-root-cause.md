@@ -708,8 +708,8 @@ Raw home-ledger evidence was captured in `/tmp/home_top_level_ledger_20260716.ts
 
 ## Concrete work queue {#concrete-work-queue-2026-07-17}
 
-1. **Fix accounting correctness first — `jleechan-df3k`.** Build displayed buckets only from accepted, non-overlapping ledger leaves; add a sub-5GiB tail; fail closed unless `displayed + tail + residual = Data` in raw KiB.
-2. **Fix default traversal — `jleechan-sdlv`.** Prioritize `/Users`, `/private`, Spotlight, `/opt`, and `/Library` within the bounded default. Raising the node cap alone is not sufficient.
+1. **DONE — accounting correctness (`jleechan-df3k`).** Shipped and deployed in [248a39f](https://github.com/jleechanorg/disk_magician/commit/248a39f92ba0298cbc1ecc27c9b35079e7ddb730): displayed buckets now come only from accepted, non-overlapping ledger leaves, with an explicit sub-5GiB tail and measurement bracket.
+2. **DONE — default traversal (`jleechan-sdlv`).** Shipped and deployed in [248a39f](https://github.com/jleechanorg/disk_magician/commit/248a39f92ba0298cbc1ecc27c9b35079e7ddb730): the bounded default prioritizes `/Users`, `/private`, Spotlight, `/opt`, and `/Library` and uses an 8000-node ceiling.
 3. **Revalidate `jleechan-rvqz` end to end.** Re-run the normal three-lane entrypoint and persist one timestamped physical-container/Data report. Acceptance: no table/base mismatch, explicit permission and budget frontier, and at most 50 GiB truly unknown.
 4. **Narrow snapshot completeness — `jleechan-wsbk`.** The latest authoritative snapshot (`2026-07-17T00:13:41Z`) recovered to 49.2% coverage, measured 76/77 configured paths in 139 seconds, did not exhaust the total budget, and timed out only on `projects`. Implement an adaptive or cached strategy for that path.
 5. **Keep Library permission truth separate — `jleechan-772q`.** Improve sizing completeness without treating TCC-protected Mail/Messages paths as numeric zero.
@@ -718,8 +718,8 @@ Raw home-ledger evidence was captured in `/tmp/home_top_level_ledger_20260716.ts
 ## PR and issue state {#pr-and-issue-state-2026-07-17}
 
 - [Issue 18](https://github.com/jleechanorg/disk_magician/issues/18) — reopened because the shipped default diagnostic failed its additive-report acceptance criterion.
-- [Issue 22](https://github.com/jleechanorg/disk_magician/issues/22) — open, default frontier budget/traversal defect.
-- [Issue 23](https://github.com/jleechanorg/disk_magician/issues/23) — open, displayed-bucket accounting defect.
+- [Issue 22](https://github.com/jleechanorg/disk_magician/issues/22) — closed by deployed commit [248a39f](https://github.com/jleechanorg/disk_magician/commit/248a39f92ba0298cbc1ecc27c9b35079e7ddb730), default frontier budget/traversal defect.
+- [Issue 23](https://github.com/jleechanorg/disk_magician/issues/23) — closed by deployed commit [248a39f](https://github.com/jleechanorg/disk_magician/commit/248a39f92ba0298cbc1ecc27c9b35079e7ddb730), displayed-bucket accounting defect.
 - [PR 20](https://github.com/jleechanorg/disk_magician/pull/20) — merged at `46c75cd1f580a6ec1ba674bd7a5cae2522762f3d`; worktree-hygiene beads remain correctly closed.
 
 ## Learnings pointer {#learnings-pointer-2026-07-17}
