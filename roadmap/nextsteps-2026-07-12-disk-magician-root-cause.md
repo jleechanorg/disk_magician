@@ -729,3 +729,29 @@ Raw home-ledger evidence was captured in `/tmp/home_top_level_ledger_20260716.ts
 ## Roadmap pointer {#roadmap-pointer-2026-07-17}
 
 - `/Users/jleechan/projects_other/disk_magician/roadmap/activity/2026-07-16.md` — corrected the same-session activity entry; the date was already indexed, so no duplicate README prepend was required.
+
+## Roll-forward — 2026-07-17 disk regrowth and shipped fixes {#roll-forward-2026-07-17-disk-regrowth}
+
+### What happened
+
+- Snapshot history is intact: 686 parseable snapshots span 2026-06-19 through 2026-07-17.
+- At `2026-07-17T18:58:58Z`, the incident snapshot recorded 830 GiB Data used and 46 GiB free. Coverage was 42.2%, so namespace deltas are directional rather than exhaustive.
+- Between 13:28 and 18:58, physical Data use grew by 11 GiB. Reliably measured keys grew 10.118 GiB, almost entirely Colima (`~/.colima/_lima` 33.196 -> 43.443 GiB, +10.247 GiB).
+- The one-minute observer shows Colima flat near 33.20 GiB through 16:58, then growing to 43.44 GiB under 7-13 ephemeral self-hosted CI containers. The scheduled trim guard repeatedly skipped on a stale singleton lock, so it did not bound that growth.
+- The recovery cycle reduced Colima's host allocation to 9.60 GiB and increased host free space by about 38.4 GiB. This report does not classify that recovery as a deletion recommendation.
+
+### Fixes now on `origin/main` and deployed
+
+| Repo | Commit | Result |
+|---|---|---|
+| `disk_magician` | [248a39f](https://github.com/jleechanorg/disk_magician/commit/248a39f92ba0298cbc1ecc27c9b35079e7ddb730) | Default frontier budget is 8000; high-value Data roots are traversed first; displayed >=5 GiB buckets come only from the accepted non-overlap leaf ledger; the sub-granularity tail is explicit; Data use is bracketed before/after long scans. Deployed as `disk-magician v0.2.23`. |
+| `ez-gh-actions` | [043536d](https://github.com/jleechanorg/ez-gh-actions/commit/043536db61e355fab5ecd9b917e9c79f9d5db236) | Trim guard safely handles stale/dead/PID-reuse locks, bounds each Colima stage and the outer run, and backs off after failures. Installed launchd copy matches the repo and produced a healthy live skip. |
+
+Verification at the shipped heads: disk-frontier tests 45/45, top-down diagnostic tests 8/8, package-sync tests 16/16, trim-guard tests 21/21, and Cargo tests 312 passed with 1 ignored. Independent review found no remaining P0/P1 code blocker.
+
+### Current acceptance state and next steps
+
+- A 30-second installed smoke test proved the new traversal reaches `/Users` early and the report's APFS equation balances. It intentionally did not complete enough namespace work to satisfy the <=50 GiB residual acceptance criterion, so `jleechan-rvqz` remains open.
+- The next full scheduled frontier run will exercise the new 8000-node default and atomic measurement bracket. Persist that run and close `jleechan-rvqz` only if its true unknown residual is <=50 GiB.
+- Dry-run-only low-risk candidates remain about 3.33 GiB (`/private/tmp` standard-aged files about 2.79 GiB and development caches about 0.54 GiB). Nothing was deleted in this follow-up. Large temp files with open holders, active code-sign clones, active Colima containers, Codex/Claude session state, and worktrees without completed safety classification are not approved cleanup.
+- `jleechan-i67e` remains open to fix double-counting in the large-temp dry-run report before its total is used for cleanup decisions.
