@@ -492,3 +492,97 @@ Continuation of the 2026-07-12 through 2026-07-15 root-cause work in this same d
 ## Roadmap pointer {#roadmap-pointer-2026-07-16-reclaim}
 
 - Appended this section to `roadmap/nextsteps-2026-07-12-disk-magician-root-cause.md` (existing rolling doc, per this repo's append-don't-fragment convention). `roadmap/activity/2026-07-16.md` not yet created — pending.
+
+# Roll-forward — 2026-07-16 part 2 (5GiB top-down breakdown swarm + worktree_hygiene.sh perf fix)
+
+## Table of contents {#toc-2026-07-16-part2}
+
+- [Executive summary](#executive-summary-2026-07-16-part2)
+- [Context](#context-2026-07-16-part2)
+- [Bead index](#bead-index-2026-07-16-part2)
+- [5GiB top-down breakdown](#5gib-top-down-breakdown-2026-07-16)
+- [Work queue](#work-queue-2026-07-16-part2)
+- [PR / merge state](#pr--merge-state-2026-07-16-part2)
+- [Learnings pointer](#learnings-pointer-2026-07-16-part2)
+- [Roadmap pointer](#roadmap-pointer-2026-07-16-part2)
+
+## Executive summary {#executive-summary-2026-07-16-part2}
+
+- Fixed `scripts/worktree_hygiene.sh`'s full-run hang on 300+ candidates. PR [jleechanorg/disk_magician#20](https://github.com/jleechanorg/disk_magician/pull/20) **MERGED** (SHA `46c75cd`), deployed to production, beads [jleechan-q912](https://github.com/jleechanorg/disk_magician) and [jleechan-20gm](https://github.com/jleechanorg/disk_magician) closed.
+- Ran the repo's own three-lane default diagnostic (`scripts/disk_diagnostic.sh`'s constituent scripts, run individually via a swarm of Agent Team lanes) to get a real 5GiB-granularity top-down breakdown. Found the exhaustive frontier scanner's **default node budget (500) is too small for this disk** — it exhausted before ever subdividing `/Users` (the home directory, where the bulk of usage lives). A supplementary `--max-nodes 8000` run reached usable coverage (25.38%) and satisfies the SKILL.md accounting-equation contract. Filed two real tool bugs: [jleechan-sdlv](https://github.com/jleechanorg/disk_magician) (node budget) and [jleechan-df3k](https://github.com/jleechanorg/disk_magician) (a 55.7 GiB internal accounting gap between `granularity_buckets` and `measured_total_kb` in the same run).
+- lane-history's 7-day regression check found no size regressions (net -7 GiB improvement) but flagged the nightly snapshot mechanism's coverage collapsing 50.7%→5.6% — logged onto the existing bead [jleechan-wsbk](https://github.com/jleechanorg/disk_magician), not a new issue.
+- lane-quickaudit flagged ~39.1 GiB of "safe" quick-win candidates; independently verified the Colima 35.6 GiB figure is real allocated disk (not a sparse-file artifact) but reclaiming it on the host needs `colima stop/start` + in-VM `fstrim` per this repo's own CLAUDE.md, not just `cleanup_colima.sh --clean` alone — flagging this nuance so a future session doesn't over-claim reclaim from a docker-prune-only pass.
+- Operational finding, hit by two independent agents (me and a swarm lane) in this session and once in the prior session: `disk_frontier_scan.py` does not stream progress — it batches all output at the end of its wall-clock budget. Retrying because "there's been no output for N seconds" produces duplicate concurrent scans racing on the same output file, which is itself the actual cause of apparent hangs. Worth a `README`/`--help` note in the script itself (not filed as a bead — low severity, operational-only).
+
+## Context {#context-2026-07-16-part2}
+
+Continuation of the same 2026-07-16 session as the "100GB-reclaim swarm" roll-forward earlier in this doc. This section covers the `/swarm`-orchestrated worktree_hygiene.sh perf fix (via an isolated `/newb` worktree, merged with `/advice` approval) and the subsequent 5GiB top-down breakdown swarm requested directly by the user ("its suppose to be in 5G increments... use swarm to make report in parallel").
+
+## Bead index {#bead-index-2026-07-16-part2}
+
+| Bead | Priority/status | Scope |
+|---|---|---|
+| `jleechan-q912` | P1 CLOSED | worktree_hygiene.sh full-run hang — fixed, merged in PR #20 |
+| `jleechan-20gm` | P2 CLOSED | `.git` pointer file exclusion gap — fixed as a side effect of #20 |
+| `jleechan-sdlv` | P1 OPEN | disk_frontier_scan.py default 500-node budget exhausted before reaching `/Users` |
+| `jleechan-df3k` | P2 OPEN | disk_frontier_scan.py `granularity_buckets` vs `measured_total_kb` 55.7 GiB internal accounting gap |
+| `jleechan-wsbk` | P2 OPEN | Snapshot coverage collapse (updated with 2026-07-16 data point: 50.7%→5.6%) |
+
+## 5GiB top-down breakdown {#5gib-top-down-breakdown-2026-07-16}
+
+**Ground truth (2026-07-16, ~20:00 UTC):** 815.1 GiB used / 70.1 GiB free / 926.4 GiB total on the physical container. Data volume "Capacity Consumed" tracked separately at ~809 GiB across the session (drifted with ongoing AO-factory worktree churn).
+
+**Best available measurement:** `python3 scripts/disk_frontier_scan.py --granularity-gib 5 --max-nodes 8000 --output-default` (raw JSON: `/tmp/frontier_5g_scan_v2.json`, not committed — regenerate via the command above if needed). Coverage 25.38% (206.85 GiB measured / 815.1 GiB used) — below the 70% "treat as exhaustive" threshold per `skills/disk-root-cause/SKILL.md`, so treat as directional for anything not in the named-bucket table below. Accounting equation reconciles: 206.85 (measured) + 0 (purgeable, unavailable on this macOS version) + 608.24 (residual) = 815.1 (disk_used), `balanced: true`.
+
+**≥5 GiB buckets, verified non-overlapping (no path is a prefix of another in this list):**
+
+| GiB | Path |
+|---|---|
+| 38.26 | `~/.colima/_lima` |
+| 28.89 | `~/.codex` |
+| 22.57 | `/Applications` |
+| 19.18 | `~/dk2d_evidence` |
+| 17.83 | `~/.worktrees` |
+| 17.09 | `~/projects_other` |
+| 15.12 | `~/.hermes` |
+| 13.77 | `~/Pictures/Photos Library.photoslibrary` |
+| 12.94 | `~/project_worldaiclaw` |
+| 11.19 | `~/projects_reference` |
+| 8.50 | `/System/Library/AssetsV2/...iOSSimulatorRuntime` |
+| 8.21 | `/opt/homebrew/Cellar` |
+| 7.79 | `~/.ao` |
+| 7.16 | `~/.claude/projects` (never-delete list) |
+| 6.32 | `~/repos` |
+| 6.23 | `/opt/homebrew/lib` |
+| 5.79 | `/Library/Developer` |
+| 5.43 | `~/.local/share` |
+| 5.29 | `/private/tmp/worldarchitect.ai` |
+| 5.03 | `~/.lima/colima` |
+
+**Sibling APFS volumes** (separate from the Data volume, not double-counted into the table above): Macintosh HD (System) 17.13 GiB, Preboot 14.18 GiB, Recovery 2.19 GiB, Update 0.75 GiB, VM 7.00 GiB — 41.25 GiB total.
+
+**Known-real but not yet resolved to named sub-buckets:** `~/projects` (~119 GiB per an earlier manual `du -xsk` cross-check this session) and `~/Library` (~85.5 GiB) are inside the 608.24 GiB residual — the frontier scanner descended into both but ran out of wall-clock time mid-subdivision (`~/projects` alone fanned into 100+ still-unfinished worktree subdirectories). They are real and not lost, just not yet broken into named ≥5GiB pieces by this specific run.
+
+**Quick-win candidates** (from `disk_audit.sh --no-history`, unexecuted, needs verification before trusting the full amount): Colima VM disk ~35.6 GiB (real allocated size, confirmed via sparse-aware `du -k` cross-check — but reclaiming on the host needs `colima stop/start` + in-VM `fstrim`, not just `cleanup_colima.sh --clean`'s docker/image prune), code_sign_clone caches ~3.5 GiB (`cleanup_code_sign_clones.sh --clean`, requires `CODE_SIGN_CLONES_APPROVED=1` + quitting apps first), Codex Sessions ~18.3 GiB (flagged for manual review only — protected by the never-delete list, not auto-purgeable).
+
+**Worktree hygiene preview** (`worktree_hygiene.sh --skip-push --skip-gh`, 120s timeout, partial — 75 of an unknown larger total evaluated): 1 SAFE (`~/.worktrees/agent-orchestrator/ao-lifecycle`), 41 PRESERVE (young), 33 NEEDS-REVIEW (unpushed-ahead/dirty/untracked).
+
+## Work queue {#work-queue-2026-07-16-part2}
+
+1. Fix [jleechan-sdlv](https://github.com/jleechanorg/disk_magician) — raise `disk_frontier_scan.py`'s default `--max-nodes`, or reorder BFS traversal to visit `/Users` before `/Applications`/system paths, so a *default* invocation reaches the highest-value subtree first instead of needing a manual `--max-nodes 8000` override.
+2. Fix [jleechan-df3k](https://github.com/jleechanorg/disk_magician) — reconcile `granularity_buckets` (built from `scanner.observed`) against `scanner.measured` so the accounting equation's `balanced: true` actually guarantees the bucket table is non-overlapping with residual, not just internally-consistent by luck.
+3. Investigate [jleechan-wsbk](https://github.com/jleechanorg/disk_magician)'s latest data point — snapshot coverage crash to 5.6% on 2026-07-16 needs root-causing (likely `projects*` du timeout under concurrent AO churn, matching the bead's existing framing).
+4. Re-run `disk_frontier_scan.py --max-nodes 8000` (or higher) scoped specifically to `~/projects` and `~/Library` once #1 is fixed, to resolve the two known-but-unnamed big buckets into real sub-attribution.
+5. Structural fix still outstanding from earlier today: `jleechan-bd-vgyk-7f08` (AO lifecycle teardown) — the actual fix for the underlying disk-churn pattern that keeps re-filling every bucket this report names.
+
+## PR / merge state {#pr--merge-state-2026-07-16-part2}
+
+- [jleechanorg/disk_magician#20](https://github.com/jleechanorg/disk_magician/pull/20) — **MERGED** (SHA `46c75cd`, 2026-07-16T19:08:20Z).
+
+## Learnings pointer {#learnings-pointer-2026-07-16-part2}
+
+- `~/roadmap/learnings-2026-07.md` — entry `2026-07-16 — disk_frontier_scan.py doesn't stream progress; retrying on "no output" causes duplicate concurrent scans`.
+
+## Roadmap pointer {#roadmap-pointer-2026-07-16-part2}
+
+- Appended to `roadmap/activity/2026-07-16.md` (same-date file, no README re-prepend needed).
