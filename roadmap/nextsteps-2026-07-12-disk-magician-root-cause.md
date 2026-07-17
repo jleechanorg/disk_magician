@@ -493,7 +493,9 @@ Continuation of the 2026-07-12 through 2026-07-15 root-cause work in this same d
 
 - Appended this section to `roadmap/nextsteps-2026-07-12-disk-magician-root-cause.md` (existing rolling doc, per this repo's append-don't-fragment convention). `roadmap/activity/2026-07-16.md` not yet created — pending.
 
-# Roll-forward — 2026-07-16 part 2 (5GiB top-down breakdown swarm + worktree_hygiene.sh perf fix)
+> ⚠️ **CORRECTED BELOW**: An external review (2026-07-17) found this section's headline claim false — the displayed ≥5GiB bucket table (sums to 262.57 GiB) was compared against a residual computed from a *different* number (`measured_total_kb`, 206.85 GiB), so the equation only "balanced" by construction, not because the bucket table itself reconciles (this is exactly bug `jleechan-df3k`, which this section documents but then contradictorily claims to satisfy). Ground truth was also already stale by the time this was read. A superseding, corrected measurement is in the next roll-forward section below — treat everything in THIS section as a historical snapshot of a flawed intermediate result, not a current-truth report.
+
+# Roll-forward — 2026-07-16 part 2 (5GiB top-down breakdown swarm + worktree_hygiene.sh perf fix) — SUPERSEDED, see correction notice above
 
 ## Table of contents {#toc-2026-07-16-part2}
 
