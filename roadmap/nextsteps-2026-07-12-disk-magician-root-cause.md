@@ -511,7 +511,7 @@ Continuation of the 2026-07-12 through 2026-07-15 root-cause work in this same d
 ## Executive summary {#executive-summary-2026-07-16-part2}
 
 - Fixed `scripts/worktree_hygiene.sh`'s full-run hang on 300+ candidates. PR [jleechanorg/disk_magician#20](https://github.com/jleechanorg/disk_magician/pull/20) **MERGED** (SHA `46c75cd`), deployed to production, beads `jleechan-q912` (no GitHub issue — see `br show jleechan-q912`) and `jleechan-20gm` (no GitHub issue — see `br show jleechan-20gm`) closed.
-- Ran the repo's own three-lane default diagnostic (`scripts/disk_diagnostic.sh`'s constituent scripts, run individually via a swarm of Agent Team lanes) to get a real 5GiB-granularity top-down breakdown. Found the exhaustive frontier scanner's **default node budget (500) is too small for this disk** — it exhausted before ever subdividing `/Users` (the home directory, where the bulk of usage lives). A supplementary `--max-nodes 8000` run reached usable coverage (25.38%) and satisfies the SKILL.md accounting-equation contract. Filed two real tool bugs: [jleechan-sdlv](https://github.com/jleechanorg/disk_magician/issues/22) (node budget) and [jleechan-df3k](https://github.com/jleechanorg/disk_magician/issues/23) (a 55.7 GiB internal accounting gap between `granularity_buckets` and `measured_total_kb` in the same run).
+- Ran the repo's own three-lane default diagnostic (`scripts/disk_diagnostic.sh`'s constituent scripts, run individually via a swarm of Agent Team lanes) to attempt a 5GiB-granularity top-down breakdown. The default node budget (500) exhausted before subdividing `/Users`; the supplementary `--max-nodes 8000` run remained partial at 25.38% coverage and **did not satisfy** the accounting contract because its displayed buckets and residual used different bases. Filed [jleechan-sdlv / issue 22](https://github.com/jleechanorg/disk_magician/issues/22) and [jleechan-df3k / issue 23](https://github.com/jleechanorg/disk_magician/issues/23).
 - lane-history's 7-day regression check found no size regressions (net -7 GiB improvement) but flagged the nightly snapshot mechanism's coverage collapsing 50.7%→5.6% — logged onto the existing bead `jleechan-wsbk` (no GitHub issue — see `br show jleechan-wsbk`), not a new issue.
 - lane-quickaudit flagged ~39.1 GiB of "safe" quick-win candidates; independently verified the Colima 35.6 GiB figure is real allocated disk (not a sparse-file artifact) but reclaiming it on the host needs `colima stop/start` + in-VM `fstrim` per this repo's own CLAUDE.md, not just `cleanup_colima.sh --clean` alone — flagging this nuance so a future session doesn't over-claim reclaim from a docker-prune-only pass.
 - Operational finding, hit by two independent agents (me and a swarm lane) in this session and once in the prior session: `disk_frontier_scan.py` does not stream progress — it batches all output at the end of its wall-clock budget. Retrying because "there's been no output for N seconds" produces duplicate concurrent scans racing on the same output file, which is itself the actual cause of apparent hangs. Worth a `README`/`--help` note in the script itself (not filed as a bead — low severity, operational-only).
@@ -532,9 +532,9 @@ Continuation of the same 2026-07-16 session as the "100GB-reclaim swarm" roll-fo
 
 ## 5GiB top-down breakdown {#5gib-top-down-breakdown-2026-07-16}
 
-**Ground truth (2026-07-16, ~20:00 UTC):** 815.1 GiB used / 70.1 GiB free / 926.4 GiB total on the physical container. Data volume "Capacity Consumed" tracked separately at ~809 GiB across the session (drifted with ongoing AO-factory worktree churn).
+**Captured Data-volume sample (2026-07-16T20:13:20Z; not the complete physical-container equation):** 815.095539 GiB allocated to Data. The corrected whole-container equation is in the superseding section below.
 
-**Best available measurement:** `python3 scripts/disk_frontier_scan.py --granularity-gib 5 --max-nodes 8000 --output-default` (raw JSON: `/tmp/frontier_5g_scan_v2.json`, not committed — regenerate via the command above if needed). Coverage 25.38% (206.85 GiB measured / 815.1 GiB used) — below the 70% "treat as exhaustive" threshold per `skills/disk-root-cause/SKILL.md`, so treat as directional for anything not in the named-bucket table below. Accounting equation reconciles: 206.85 (measured) + 0 (purgeable, unavailable on this macOS version) + 608.24 (residual) = 815.1 (disk_used), `balanced: true`.
+**Invalid intermediate measurement:** `python3 scripts/disk_frontier_scan.py --granularity-gib 5 --max-nodes 8000 --output-default` produced a partial run: 25.38% coverage, 4,293 unfinished paths, and a 480-second wall-clock exhaustion. Its hidden equation `206.850929 measured + 608.244610 residual = 815.095539 Data` balances by construction, but the displayed bucket rows total 262.570343 GiB. Therefore `262.570343 displayed + 608.244610 residual = 870.814953 GiB`, which exceeds Data by 55.719414 GiB. The numeric purgeable value of zero means unavailable, not proven zero. Raw evidence SHA-256: `d3086ffb5a02c67f074c0ba2061f15dd3696cc68d68f40d491d7a31ec15f0b2e` (`/tmp/frontier_5g_scan_v2.json`).
 
 **≥5 GiB buckets, verified non-overlapping (no path is a prefix of another in this list):**
 
@@ -571,8 +571,8 @@ Continuation of the same 2026-07-16 session as the "100GB-reclaim swarm" roll-fo
 
 ## Work queue {#work-queue-2026-07-16-part2}
 
-1. Fix [jleechan-sdlv](https://github.com/jleechanorg/disk_magician/issues/22) — raise `disk_frontier_scan.py`'s default `--max-nodes`, or reorder BFS traversal to visit `/Users` before `/Applications`/system paths, so a *default* invocation reaches the highest-value subtree first instead of needing a manual `--max-nodes 8000` override.
-2. Fix [jleechan-df3k](https://github.com/jleechanorg/disk_magician/issues/23) — reconcile `granularity_buckets` (built from `scanner.observed`) against `scanner.measured` so the accounting equation's `balanced: true` actually guarantees the bucket table is non-overlapping with residual, not just internally-consistent by luck.
+1. Fix [jleechan-df3k / issue 23](https://github.com/jleechanorg/disk_magician/issues/23) first — reconcile `granularity_buckets` against the accepted leaf ledger so displayed buckets, sub-5GiB tail, residual, and Data allocation share one base.
+2. Fix [jleechan-sdlv / issue 22](https://github.com/jleechanorg/disk_magician/issues/22) — prioritize `/Users` and other high-value roots within a bounded default, rather than relying only on a larger node limit.
 3. Investigate `jleechan-wsbk` (no GitHub issue — see `br show jleechan-wsbk`)'s latest data point — snapshot coverage crash to 5.6% on 2026-07-16 needs root-causing (likely `projects*` du timeout under concurrent AO churn, matching the bead's existing framing).
 4. Re-run `disk_frontier_scan.py --max-nodes 8000` (or higher) scoped specifically to `~/projects` and `~/Library` once #1 is fixed, to resolve the two known-but-unnamed big buckets into real sub-attribution.
 5. Structural fix still outstanding from earlier today: `jleechan-bd-vgyk-7f08` (AO lifecycle teardown) — the actual fix for the underlying disk-churn pattern that keeps re-filling every bucket this report names.
@@ -588,3 +588,144 @@ Continuation of the same 2026-07-16 session as the "100GB-reclaim swarm" roll-fo
 ## Roadmap pointer {#roadmap-pointer-2026-07-16-part2}
 
 - Appended to `roadmap/activity/2026-07-16.md` (same-date file, no README re-prepend needed).
+
+---
+
+# Roll-forward — 2026-07-17 correction and concrete next steps
+
+## Table of contents {#toc-2026-07-17-correction}
+
+- [Executive summary](#executive-summary-2026-07-17-correction)
+- [Context and evidence contract](#context-and-evidence-contract-2026-07-17)
+- [Bead index](#bead-index-2026-07-17)
+- [Corrected top-down report](#corrected-top-down-report-2026-07-17)
+- [Concrete work queue](#concrete-work-queue-2026-07-17)
+- [PR and issue state](#pr-and-issue-state-2026-07-17)
+- [Learnings pointer](#learnings-pointer-2026-07-17)
+- [Roadmap pointer](#roadmap-pointer-2026-07-17)
+
+## Executive summary {#executive-summary-2026-07-17-correction}
+
+- The prior frontier table is retained only as invalid bug evidence. Its visible rows plus residual exceed Data by **55.719414 GiB**.
+- The captured whole-container equation balances: **815.095539 GiB Data + 41.247948 GiB sibling volumes + 0.192493 GiB APFS overhead + 69.815739 GiB free = 926.351719 GiB**.
+- A supplementary APFS-native root allocation pass names the previously unexplained space, especially `/private/var/dirs_cleaner` (**165.011 GiB**) and `/.Spotlight-V100` (**17.780 GiB**). Its root rollup needs only a **1.319 GiB** cross-scan/shared-allocation adjustment, below the user's 50 GiB unknown ceiling.
+- The default-diagnostic feature bead `jleechan-rvqz` must be open again: the proof used to close it did not meet its own additive-ledger acceptance criterion. Scanner correctness precedes another coverage run or cleanup ranking.
+
+## Context and evidence contract {#context-and-evidence-contract-2026-07-17}
+
+The container equation and the supplementary root allocation are distinct captured samples; they are shown separately so live AO/Colima churn is not hidden by mixing timestamps. A future PASS requires one atomic run whose displayed `>=5 GiB` rows, explicit sub-5GiB tail, residual, Data allocation, sibling volumes, overhead, and free space all reconcile. `balanced: true` is insufficient unless it validates the displayed report, and unavailable purgeable data must remain `unknown`, not numeric zero.
+
+Durable evidence anchors for the rejected frontier run:
+
+- command: `python3 scripts/disk_frontier_scan.py --granularity-gib 5 --max-nodes 8000 --output-default`
+- captured: `2026-07-16T20:13:20Z`; elapsed 481 seconds; 4,649 nodes processed; 4,293 unfinished
+- raw file: `/tmp/frontier_5g_scan_v2.json`; SHA-256 `d3086ffb5a02c67f074c0ba2061f15dd3696cc68d68f40d491d7a31ec15f0b2e`
+- arithmetic: `262.570343 displayed + 608.244610 residual - 815.095539 Data = 55.719414 GiB overage`
+
+## Bead index {#bead-index-2026-07-17}
+
+| Bead | Status | Concrete scope |
+|---|---|---|
+| `jleechan-rvqz` / [issue 18](https://github.com/jleechanorg/disk_magician/issues/18) | P1 OPEN | Restore the default diagnostic's real whole-disk additive contract; prior close proof was invalid. |
+| `jleechan-df3k` / [issue 23](https://github.com/jleechanorg/disk_magician/issues/23) | P1 OPEN | Make displayed buckets derive from the same accepted leaf ledger as measured total and residual. |
+| `jleechan-sdlv` / [issue 22](https://github.com/jleechanorg/disk_magician/issues/22) | P1 OPEN | Make the bounded default reach `/Users` and other high-value roots. |
+| `jleechan-wsbk` | P2 OPEN | Snapshot runtime is recovered; remaining concrete gap is the 20-second `~/projects` timeout. |
+| `jleechan-772q` | P1 IN PROGRESS | Improve byte coverage of the enumerated Library frontier and keep TCC denials explicit. |
+| `jleechan-ue9w` | CLOSED | Worktree hygiene workflow shipped; performance/correctness follow-up landed in PR 20. |
+| `jleechan-q912`, `jleechan-20gm` | CLOSED | Merged and deployed through [PR 20](https://github.com/jleechanorg/disk_magician/pull/20). |
+
+## Corrected top-down report {#corrected-top-down-report-2026-07-17}
+
+### Captured physical-container equation
+
+| Allocation | GiB |
+|---|---:|
+| Data volume | 815.095539 |
+| System, Preboot, Recovery, Update, and VM sibling volumes | 41.247948 |
+| APFS container overhead/shared allocation | 0.192493 |
+| Free | 69.815739 |
+| **Physical container total** | **926.351719** |
+
+### Supplementary Data root allocation
+
+| Data root or adjustment | GiB |
+|---|---:|
+| `/Users` | 545.535 |
+| `/private` | 187.011 |
+| `/System` | 23.750 |
+| `/Applications` | 18.377 |
+| `/.Spotlight-V100` | 17.780 |
+| `/opt` | 16.102 |
+| `/Library` | 8.241 |
+| Smaller Data roots | 0.193 |
+| Child-root rollup | 816.989 |
+| Cross-scan/shared-allocation adjustment | -1.319 |
+| **APFS-native Data baseline** | **815.670** |
+
+The **1.319 GiB adjustment** is the remaining attribution uncertainty in this rollup. It is not labeled reclaimable. This table durably preserves the supplementary lane's exact summary, including the two dominant allocations omitted by the frontier table; its raw APFS-native output was not persisted, so the atomic acceptance rerun in the work queue remains mandatory.
+
+### `/private` drilldown
+
+| Path | GiB |
+|---|---:|
+| `/private/var/dirs_cleaner` | 165.011 |
+| `/private/tmp` | 9.201 |
+| `/private/var/folders` | 5.524 |
+| `/private/var/db` | 5.347 |
+| Remaining `/private` entries | 1.929 |
+| **Rounded subtotal** | **187.012** |
+
+### Home ledger at 5 GiB granularity
+
+The exhaustive home pass measured 601 of 601 direct children with zero command errors: **539.969 GiB** total. Rows are rounded, so their displayed sum can differ by 0.001 GiB.
+
+| Home child | GiB |
+|---|---:|
+| `~/projects` | 119.451 |
+| `~/Library` | 85.547 |
+| `~/.colima` | 35.644 |
+| `~/.codex` | 28.888 |
+| `~/.gemini` | 23.181 |
+| `~/dk2d_evidence` | 19.181 |
+| `~/.worktrees` | 17.828 |
+| `~/projects_other` | 17.086 |
+| `~/.hermes` | 15.107 |
+| `~/Pictures` | 13.762 |
+| `~/project_worldaiclaw` | 12.942 |
+| `~/projects_reference` | 11.185 |
+| `~/.local` | 9.914 |
+| `~/.claude` | 9.176 |
+| `~/.ao` | 7.787 |
+| `~/repos` | 6.323 |
+| `~/.nvm` | 5.625 |
+| `~/.lima` | 5.027 |
+| 583 children below 5 GiB each | 96.316 |
+| **Home total from raw ledger** | **539.969** |
+
+Raw home-ledger evidence was captured in `/tmp/home_top_level_ledger_20260716.tsv` (SHA-256 `61d6b1ee4345dfb0a4c83244e868344915055fa957cf234e54ab36dfb240cca0`) with drilldowns in `/tmp/home_ge5_drilldown_20260716.tsv` (`4da7ffd476c5d670974150af4a15648b51bbd2a424b33b63ecd20b4e8c944217`) and `/tmp/home_ge5_second_drilldown_20260716.tsv` (`7be2da2ec3be35550b377dfdc2c50a7002ca95baf35670718bb0d80a457d66b1`).
+
+**Durable copies** (the `/tmp` originals are volatile and will not survive reboot/cleanup): `roadmap/evidence/home_top_level_ledger_20260716.tsv`, `roadmap/evidence/home_ge5_drilldown_20260716.tsv`, `roadmap/evidence/home_ge5_second_drilldown_20260716.tsv` — hashes independently re-verified by a second session before commit; the top-level ledger's 601 OK rows sum to 539.969 GiB with zero errors, matching this section's claim exactly, and the physical-container equation (815.095539 + 41.247948 + 0.192493 + 69.815739 = 926.351719 GiB) was independently recomputed and confirmed.
+
+## Concrete work queue {#concrete-work-queue-2026-07-17}
+
+1. **Fix accounting correctness first — `jleechan-df3k`.** Build displayed buckets only from accepted, non-overlapping ledger leaves; add a sub-5GiB tail; fail closed unless `displayed + tail + residual = Data` in raw KiB.
+2. **Fix default traversal — `jleechan-sdlv`.** Prioritize `/Users`, `/private`, Spotlight, `/opt`, and `/Library` within the bounded default. Raising the node cap alone is not sufficient.
+3. **Revalidate `jleechan-rvqz` end to end.** Re-run the normal three-lane entrypoint and persist one timestamped physical-container/Data report. Acceptance: no table/base mismatch, explicit permission and budget frontier, and at most 50 GiB truly unknown.
+4. **Narrow snapshot completeness — `jleechan-wsbk`.** The latest authoritative snapshot (`2026-07-17T00:13:41Z`) recovered to 49.2% coverage, measured 76/77 configured paths in 139 seconds, did not exhaust the total budget, and timed out only on `projects`. Implement an adaptive or cached strategy for that path.
+5. **Keep Library permission truth separate — `jleechan-772q`.** Improve sizing completeness without treating TCC-protected Mail/Messages paths as numeric zero.
+6. **Only after steps 1–5, rank cleanup.** Run dry-run safety-gated quick wins beside the trusted report; do not present them as the explanation of capacity.
+
+## PR and issue state {#pr-and-issue-state-2026-07-17}
+
+- [Issue 18](https://github.com/jleechanorg/disk_magician/issues/18) — reopened because the shipped default diagnostic failed its additive-report acceptance criterion.
+- [Issue 22](https://github.com/jleechanorg/disk_magician/issues/22) — open, default frontier budget/traversal defect.
+- [Issue 23](https://github.com/jleechanorg/disk_magician/issues/23) — open, displayed-bucket accounting defect.
+- [PR 20](https://github.com/jleechanorg/disk_magician/pull/20) — merged at `46c75cd1f580a6ec1ba674bd7a5cae2522762f3d`; worktree-hygiene beads remain correctly closed.
+
+## Learnings pointer {#learnings-pointer-2026-07-17}
+
+- `/Users/jleechan/roadmap/learnings-2026-07.md` — appended the additive-report acceptance rule and correction provenance.
+
+## Roadmap pointer {#roadmap-pointer-2026-07-17}
+
+- `/Users/jleechan/projects_other/disk_magician/roadmap/activity/2026-07-16.md` — corrected the same-session activity entry; the date was already indexed, so no duplicate README prepend was required.
