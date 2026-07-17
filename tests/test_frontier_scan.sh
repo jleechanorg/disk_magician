@@ -159,6 +159,25 @@ PY
 [[ "$PERMISSION_TEST_OUT" == "True" ]] && ok "child enumeration identifies permission/TCC denial explicitly" \
   || bad "child enumeration hid permission/TCC denial: $PERMISSION_TEST_OUT"
 
+ROOT_PRIORITY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = "/System/Volumes/Data"
+frontier = [
+    (os.path.join(root, name), 1, False)
+    for name in ("Applications", "zzz", "Library", "opt", ".Spotlight-V100", "private", "Users", "System")
+]
+ordered = sorted(frontier, key=lambda item: m.frontier_sort_key(root, item))
+print(",".join(os.path.basename(item[0]) for item in ordered))
+PY
+)
+expected_priority="Users,private,.Spotlight-V100,opt,Library,Applications,System,zzz"
+[[ "$ROOT_PRIORITY_OUT" == "$expected_priority" ]] && ok "whole-disk frontier schedules high-value Data roots before app fan-out" \
+  || bad "whole-disk frontier priority was '$ROOT_PRIORITY_OUT' (expected '$expected_priority')"
+
 SYMLINK_ORDER_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
 import sys

@@ -23,6 +23,8 @@ This is the mandatory three-lane diagnostic. It launches in parallel:
 
 Read the whole report before drilling down. Keep permission/TCC denial, time budget, node budget, cross-device boundaries, APFS sibling allocations, purgeable estimates, and residual bytes as separate fields. The residual is an attribution gap: it is **not backup size and not reclaimable without evidence**.
 
+The displayed Data equation must use one accepted leaf ledger: `>=5 GiB buckets + sub-5 GiB measured tail + purgeable estimate + residual = Data used`. Roll small accepted leaves up to their deepest non-overlapping ancestor at or above 5 GiB; never reuse an earlier parent observation. A hidden measured-total equation does not validate the displayed buckets. Capture Data used before and after the namespace walk; when it changes, report the residual interval and mark the measurement non-atomic.
+
 The top-down scanner prefers the installed parallel `dua` backend, rejects partial output from failed commands, and falls back to bounded `du`. Symlinks remain `du -P` leaves so aliases cannot pull their targets into the ledger.
 
 **Pair with** `disk_magician` skill (measurement + safe cleanup) and the `CLAUDE.md` / `AGENTS.md` in this repo (cross-repo authorization + never-delete list).
@@ -164,7 +166,8 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 A complete root-cause answer for this machine has:
 - [ ] Default `disk-magician audit` three-lane report completed or its named limits were reported
 - [ ] Every individually measured bucket at or above 5 GiB is shown without parent/child or symlink double counting
-- [ ] Data equation reconciles measured + purgeable estimate + residual = Data used
+- [ ] Displayed Data equation reconciles >=5 GiB buckets + sub-5 GiB measured tail + purgeable estimate + residual = Data used from one accepted leaf ledger
+- [ ] Data-used before/after bracket is shown; any drift is marked non-atomic with a residual interval
 - [ ] Residual is explicitly not called backup or reclaimable without evidence
 - [ ] Phase 0 ground-truth probe done
 - [ ] Phase 1 floor deltas computed (last week + last month + all-time min)

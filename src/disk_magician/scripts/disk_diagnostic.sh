@@ -15,16 +15,22 @@ WORKTREE_LOG="$WORK/worktree-hygiene.log"
 
 budget="${DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS:-480}"
 workers="${DISK_MAGICIAN_TOPDOWN_WORKERS:-8}"
-max_nodes="${DISK_MAGICIAN_TOPDOWN_MAX_NODES:-500}"
+max_nodes="${DISK_MAGICIAN_TOPDOWN_MAX_NODES:-}"
 granularity="${DISK_MAGICIAN_GRANULARITY_GIB:-5}"
 quick_budget="${DISK_MAGICIAN_QUICK_BUDGET_SECONDS:-120}"
 
+frontier_args=(
+  --granularity-gib "$granularity"
+  --wall-clock-cap "$budget"
+  --workers "$workers"
+  --output "$TOPDOWN_JSON"
+)
+if [[ -n "$max_nodes" ]]; then
+  frontier_args+=(--max-nodes "$max_nodes")
+fi
+
 python3 "$SCRIPT_DIR/disk_frontier_scan.py" \
-  --granularity-gib "$granularity" \
-  --wall-clock-cap "$budget" \
-  --workers "$workers" \
-  --max-nodes "$max_nodes" \
-  --output "$TOPDOWN_JSON" >"$TOPDOWN_LOG" 2>&1 &
+  "${frontier_args[@]}" >"$TOPDOWN_LOG" 2>&1 &
 topdown_pid=$!
 
 "$SCRIPT_DIR/disk_history.sh" --days 7 --regressions >"$HISTORY_LOG" 2>&1 &
@@ -87,6 +93,17 @@ print(
     f"Data used: {gib(report.get('disk_used_kb')):.1f} GiB; "
     f"Data free: {gib(report.get('disk_free_kb')):.1f} GiB"
 )
+window = report.get("measurement_window") or {}
+if window:
+    interval = window.get("residual_interval_kb") or {}
+    print(
+        "Data measurement window: "
+        f"{gib(window.get('disk_used_before_kb')):.1f} -> "
+        f"{gib(window.get('disk_used_after_kb')):.1f} GiB used "
+        f"(delta={gib(window.get('disk_used_delta_kb')):+.1f} GiB; "
+        f"non_atomic={str(bool(window.get('non_atomic'))).lower()}); "
+        f"residual interval={gib(interval.get('min')):.1f}..{gib(interval.get('max')):.1f} GiB"
+    )
 
 apfs = report.get("apfs_accounting") or {}
 for store in apfs.get("physical_stores") or []:
@@ -121,17 +138,19 @@ if buckets:
 else:
     print("  none measured")
 
-measured = report.get("measured_total_kb") or 0
 purgeable = report.get("purgeable_kb") or 0
 residual = report.get("residual_kb") or 0
 used = report.get("disk_used_kb") or 0
+bucket_total = report.get("granularity_bucket_total_kb") or 0
+tail = report.get("granularity_tail_kb") or 0
 equation = report.get("accounting_equation") or {}
 print(
-    "Data equation: "
-    f"{gib(measured):.1f} GiB measured + "
+    "Displayed Data equation: "
+    f"{gib(bucket_total):.1f} GiB buckets + "
+    f"{gib(tail):.1f} GiB sub-{threshold:g} GiB tail + "
     f"{gib(purgeable):.1f} GiB purgeable estimate + "
     f"{gib(residual):.1f} GiB residual = {gib(used):.1f} GiB used "
-    f"(balanced={str(bool(equation.get('balanced'))).lower()})"
+    f"(balanced={str(bool(equation.get('displayed_balanced'))).lower()})"
 )
 print(
     "Residual means protected/APFS allocation not attributable by this session; "

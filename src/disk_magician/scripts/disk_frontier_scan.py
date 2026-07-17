@@ -43,10 +43,10 @@ DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
 DUA_TIMEOUT_CAP_SECONDS = 90
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_DEPTH = 6
-DEFAULT_MAX_NODES = 500
+DEFAULT_MAX_NODES = 8000
 DEFAULT_WALL_CLOCK_CAP = 480
 LOW_FREE_GB_THRESHOLD = 15
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
@@ -223,6 +223,77 @@ def list_children(path):
     except OSError as exc:
         return None, f"enumeration_errno_{exc.errno}"
     return children, None
+
+
+DATA_ROOT_PRIORITY = {
+    "Users": 0,
+    "private": 1,
+    ".Spotlight-V100": 2,
+    "opt": 3,
+    "Library": 4,
+    "Applications": 5,
+    "System": 6,
+}
+
+
+def frontier_sort_key(root, item):
+    """Keep breadth-first traversal deterministic while scheduling the
+    explicitly required high-value Data roots before application fan-out."""
+    path = item[0]
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        rel = path
+    first = rel.split(os.sep, 1)[0]
+    return (DATA_ROOT_PRIORITY.get(first, len(DATA_ROOT_PRIORITY)), rel.casefold(), rel)
+
+
+def build_granularity_buckets(measured, root, granularity_kb):
+    """Project one non-overlapping display partition from accepted leaves.
+
+    Small accepted leaves are rolled up only through their own ancestry. A
+    parent observation is never reused, so every displayed byte remains a sum
+    of the same accepted leaf ledger used by residual accounting.
+    """
+    if granularity_kb <= 0:
+        return []
+
+    tree = {"path": root, "measured_kb": 0, "children": {}}
+    for path, kb in measured.items():
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:
+            continue
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            continue
+        parts = [] if rel == os.curdir else rel.split(os.sep)
+        node = tree
+        node["measured_kb"] += kb
+        current = root
+        for part in parts:
+            current = os.path.join(current, part)
+            node = node["children"].setdefault(
+                part, {"path": current, "measured_kb": 0, "children": {}}
+            )
+            node["measured_kb"] += kb
+
+    def select(node):
+        selected = []
+        for child in node["children"].values():
+            if child["measured_kb"] >= granularity_kb:
+                selected.extend(select(child))
+        if selected:
+            return selected
+        if node["measured_kb"] >= granularity_kb:
+            return [{"path": node["path"], "measured_kb": node["measured_kb"]}]
+        return []
+
+    buckets = []
+    for child in tree["children"].values():
+        if child["measured_kb"] >= granularity_kb:
+            buckets.extend(select(child))
+    buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
+    return buckets
 
 
 def get_disk_stats(root):
@@ -584,7 +655,10 @@ class FrontierScanner:
             }
         self.level1_paths = [path for path, _ in level1]
 
-        frontier = [(p, 1, is_sym) for p, is_sym in level1]
+        frontier = sorted(
+            [(p, 1, is_sym) for p, is_sym in level1],
+            key=lambda item: frontier_sort_key(self.root, item),
+        )
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(self.workers_cap, 1)
@@ -618,7 +692,10 @@ class FrontierScanner:
                         continue
                     if result:
                         next_frontier.extend(result)
-                frontier = next_frontier
+                frontier = sorted(
+                    next_frontier,
+                    key=lambda item: frontier_sort_key(self.root, item),
+                )
 
         return None
 
@@ -650,12 +727,29 @@ def atomic_write_json(path, text):
 
 def build_report(
     scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args,
-    apfs_accounting=None,
+    apfs_accounting=None, disk_stats_before=None,
 ):
+    disk_stats_before = disk_stats_before or disk_stats
     measured_total_kb = sum(scanner.measured.values())
     residual_raw_kb = disk_stats["used_kb"] - measured_total_kb - purgeable_info["purgeable_kb"]
     residual_negative_clamped = residual_raw_kb < 0
     residual_kb = max(0, residual_raw_kb)
+    used_before_kb = disk_stats_before["used_kb"]
+    used_after_kb = disk_stats["used_kb"]
+    residual_interval_kb = {
+        "min": max(
+            0,
+            min(used_before_kb, used_after_kb)
+            - measured_total_kb
+            - purgeable_info["purgeable_kb"],
+        ),
+        "max": max(
+            0,
+            max(used_before_kb, used_after_kb)
+            - measured_total_kb
+            - purgeable_info["purgeable_kb"],
+        ),
+    }
 
     mode = "complete" if not scanner.frontier_unfinished else "partial"
 
@@ -717,18 +811,13 @@ def build_report(
     status_counts = collections.Counter(item["status"] for item in top_level_ledger)
 
     granularity_kb = int(args.granularity_gib * 1024 * 1024)
-    observed = getattr(scanner, "observed", scanner.measured)
-    large_observed = {
-        path: kb for path, kb in observed.items()
-        if granularity_kb > 0 and kb >= granularity_kb
-    }
-    granularity_buckets = []
-    for path, kb in large_observed.items():
-        prefix = path.rstrip(os.sep) + os.sep
-        if any(other.startswith(prefix) for other in large_observed if other != path):
-            continue
-        granularity_buckets.append({"path": path, "measured_kb": kb})
-    granularity_buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
+    granularity_buckets = build_granularity_buckets(
+        scanner.measured, scanner.root, granularity_kb
+    )
+    granularity_bucket_total_kb = sum(
+        item["measured_kb"] for item in granularity_buckets
+    )
+    granularity_tail_kb = measured_total_kb - granularity_bucket_total_kb
 
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
@@ -739,6 +828,16 @@ def build_report(
             measured_total_kb + purgeable_info["purgeable_kb"] + residual_kb
             == disk_stats["used_kb"]
         ),
+        "displayed_buckets_kb": granularity_bucket_total_kb,
+        "sub_granularity_tail_kb": granularity_tail_kb,
+        "displayed_balanced": (
+            granularity_bucket_total_kb
+            + granularity_tail_kb
+            + purgeable_info["purgeable_kb"]
+            + residual_kb
+            == disk_stats["used_kb"]
+        ),
+        "measurement_non_atomic": used_before_kb != used_after_kb,
         "residual_label": "protected_or_apfs_allocation_not_attributable_by_this_session",
         "residual_reclaimable": False,
     }
@@ -780,9 +879,18 @@ def build_report(
         "disk_total_kb": disk_stats["total_kb"],
         "disk_used_kb": disk_stats["used_kb"],
         "disk_free_kb": disk_stats["free_kb"],
+        "measurement_window": {
+            "disk_used_before_kb": used_before_kb,
+            "disk_used_after_kb": used_after_kb,
+            "disk_used_delta_kb": used_after_kb - used_before_kb,
+            "non_atomic": used_before_kb != used_after_kb,
+            "residual_interval_kb": residual_interval_kb,
+        },
         "measured": scanner.measured,
         "measured_total_kb": measured_total_kb,
         "granularity_buckets": granularity_buckets,
+        "granularity_bucket_total_kb": granularity_bucket_total_kb,
+        "granularity_tail_kb": granularity_tail_kb,
         "deduped": scanner.deduped,
         "frontier_unfinished": scanner.frontier_unfinished,
         "sibling_volumes": sibling_volumes,
@@ -849,6 +957,7 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    disk_stats_before = get_disk_stats(args.root)
     scanner = FrontierScanner(args)
     err = scanner.run()
     elapsed_s = scanner.elapsed()
@@ -859,6 +968,7 @@ def main(argv=None):
 
     disk_stats = get_disk_stats(args.root)
     if args.disk_used_kb_override is not None:
+        disk_stats_before["used_kb"] = args.disk_used_kb_override
         disk_stats["used_kb"] = args.disk_used_kb_override
 
     sibling_volumes = {}
@@ -880,6 +990,7 @@ def main(argv=None):
     report = build_report(
         scanner, disk_stats, sibling_volumes, purgeable_info, elapsed_s, args,
         apfs_accounting=apfs_accounting,
+        disk_stats_before=disk_stats_before,
     )
 
     out_text = json.dumps(report, indent=2)

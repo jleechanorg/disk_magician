@@ -55,11 +55,17 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 gib = 1024 * 1024
 root = "/fixture"
+measured = {f"{root}/large/child": 6 * gib, f"{root}/large/small": 2 * gib,
+            f"{root}/other/a": 1 * gib, f"{root}/other/b": 1 * gib}
+measured.update({f"{root}/grouped/leaf-{i}": 1 * gib for i in range(10)})
+observed = {f"{root}/large": 8 * gib, f"{root}/large/child": 6 * gib,
+            f"{root}/large/small": 2 * gib, f"{root}/other": 10 * gib,
+            f"{root}/other/a": 1 * gib, f"{root}/other/b": 1 * gib,
+            f"{root}/grouped": 10 * gib}
 scanner = SimpleNamespace(
     root=root,
-    measured={f"{root}/large/child": 6 * gib, f"{root}/large/small": 2 * gib},
-    observed={f"{root}/large": 8 * gib, f"{root}/large/child": 6 * gib,
-              f"{root}/large/small": 2 * gib},
+    measured=measured,
+    observed=observed,
     frontier_unfinished=[], deduped=[], warnings=[], nodes_processed=3,
     tracker=SimpleNamespace(peak=lambda: 2),
     level1_paths=[f"{root}/large"],
@@ -68,7 +74,7 @@ args = SimpleNamespace(workers=2, max_depth=6, max_nodes=50,
                        wall_clock_cap=10, timeout_tiers=[1], granularity_gib=5.0)
 report = mod.build_report(
     scanner,
-    {"total_kb": 20 * gib, "used_kb": 10 * gib, "free_kb": 10 * gib},
+    {"total_kb": 30 * gib, "used_kb": 20 * gib, "free_kb": 10 * gib},
     {},
     {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
      "local_snapshots": [], "local_snapshots_count": 0},
@@ -76,25 +82,38 @@ report = mod.build_report(
     args,
     apfs_accounting={
         "physical_stores": [{"device": "disk0s2", "size_kb": 20 * gib}],
-        "container_capacity_kb": 20 * gib,
+        "container_capacity_kb": 30 * gib,
         "container_free_kb": 5 * gib,
         "volumes": [
-            {"name": "Data", "roles": ["Data"], "capacity_in_use_kb": 10 * gib},
+            {"name": "Data", "roles": ["Data"], "capacity_in_use_kb": 20 * gib},
             {"name": "VM", "roles": ["VM"], "capacity_in_use_kb": 4 * gib},
         ],
-        "volume_allocations_kb": 14 * gib,
+        "volume_allocations_kb": 24 * gib,
         "shared_allocation_kb": 1 * gib,
         "equation_balanced": True,
     },
+    disk_stats_before={"total_kb": 30 * gib, "used_kb": 21 * gib, "free_kb": 9 * gib},
 )
 buckets = report["granularity_buckets"]
-assert buckets == [{"path": f"{root}/large/child", "measured_kb": 6 * gib}]
+assert buckets == [
+    {"path": f"{root}/grouped", "measured_kb": 10 * gib},
+    {"path": f"{root}/large/child", "measured_kb": 6 * gib},
+]
+assert report["granularity_bucket_total_kb"] == 16 * gib
+assert report["granularity_tail_kb"] == 4 * gib
 assert report["accounting_equation"]["balanced"] is True
+assert report["accounting_equation"]["displayed_balanced"] is True
+assert report["accounting_equation"]["displayed_buckets_kb"] == 16 * gib
+assert report["accounting_equation"]["sub_granularity_tail_kb"] == 4 * gib
+assert report["accounting_equation"]["measurement_non_atomic"] is True
+assert report["measurement_window"]["disk_used_delta_kb"] == -1 * gib
+assert report["measurement_window"]["residual_interval_kb"] == {"min": 0, "max": 1 * gib}
 assert report["config"]["granularity_gib"] == 5.0
 assert report["apfs_accounting"]["equation_balanced"] is True
 assert report["apfs_accounting"]["volumes"][0]["roles"] == ["Data"]
 assert report["limits"]["sudo_used"] is False
 assert report["limits"]["full_disk_access"] == "not_inferred"
+assert mod.DEFAULT_MAX_NODES >= 8000
 PY
 then
   ok "frontier report keeps the finest >=5 GiB bucket and an exact Data equation"
@@ -154,22 +173,28 @@ fi
 
 cat > "$TREE/scripts/disk_frontier_scan.py" <<'PY'
 #!/usr/bin/env python3
-import json, sys, time
+import json, os, sys, time
 time.sleep(2)
 out = sys.argv[sys.argv.index("--output") + 1]
+with open(os.environ["FRONTIER_ARGS_CAPTURE"], "w") as fh:
+    fh.write("\n".join(sys.argv[1:]))
 gib = 1024 * 1024
 data = {
   "mode": "partial", "disk_total_kb": 20*gib, "disk_used_kb": 10*gib,
-  "disk_free_kb": 10*gib, "measured_total_kb": 4*gib,
-  "purgeable_kb": 0, "residual_kb": 6*gib,
+  "disk_free_kb": 10*gib, "measured_total_kb": 6*gib,
+  "purgeable_kb": 0, "residual_kb": 4*gib,
   "granularity_buckets": [{"path": "/fixture/big", "measured_kb": 6*gib}],
+  "granularity_bucket_total_kb": 6*gib, "granularity_tail_kb": 0,
   "sibling_volumes": {"VM": {"capacity_in_use_kb": 6*gib, "roles": ["VM"]}},
   "frontier_unfinished": [
     {"path": "/fixture/protected", "reason": "permission_denied_or_tcc"},
     {"path": "/fixture/slow", "reason": "time_budget_exhausted"},
     {"path": "/fixture/wide", "reason": "node_budget_exhausted"},
   ],
-  "accounting_equation": {"balanced": True},
+  "accounting_equation": {
+    "balanced": True, "displayed_balanced": True,
+    "displayed_buckets_kb": 6*gib, "sub_granularity_tail_kb": 0,
+  },
   "apfs_accounting": {
     "physical_stores": [{"device": "disk0s2", "size_kb": 20*gib}],
     "container_capacity_kb": 20*gib, "container_free_kb": 5*gib,
@@ -207,8 +232,10 @@ chmod +x "$TREE/scripts/disk_history.sh" "$TREE/scripts/disk_audit.sh" \
   "$TREE/scripts/worktree_hygiene.sh"
 
 OUT="$WORK/out.txt"
+FRONTIER_ARGS_CAPTURE="$WORK/frontier-args.txt"
 start=$(python3 -c 'import time; print(time.time())')
-HOME="$WORK/home" DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS=10 \
+HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$FRONTIER_ARGS_CAPTURE" \
+  DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS=10 \
   "$TREE/scripts/disk_diagnostic.sh" >"$OUT" 2>&1
 rc=$?
 elapsed=$(python3 - "$start" <<'PY'
@@ -228,6 +255,8 @@ if grep -q 'Lane 1/3.*top-down' "$OUT" &&
    grep -q 'Lane 3/3.*quick' "$OUT" &&
    grep -q '/fixture/big' "$OUT" &&
    grep -q '6.0 GiB' "$OUT" &&
+   grep -q 'Displayed Data equation:' "$OUT" &&
+   grep -q '0.0 GiB sub-5 GiB tail' "$OUT" &&
    grep -q 'Physical store disk0s2' "$OUT" &&
    grep -q 'APFS container equation: 14.0 GiB volumes + 1.0 GiB shared' "$OUT" &&
    grep -q 'sudo_used=false' "$OUT" &&
@@ -242,6 +271,17 @@ if grep -q 'Lane 1/3.*top-down' "$OUT" &&
   ok "ordered report includes top-down accounting, limits, deltas, and quick wins"
 else
   bad "three-lane report is incomplete: $(tr '\n' ';' < "$OUT")"
+fi
+
+if ! grep -q '^--max-nodes$' "$FRONTIER_ARGS_CAPTURE"; then
+  ok "diagnostic delegates the default node budget to the scanner's single source of truth"
+else
+  configured=$(awk '/^--max-nodes$/{getline; print; exit}' "$FRONTIER_ARGS_CAPTURE")
+  if [[ "$configured" =~ ^[0-9]+$ ]] && [[ "$configured" -ge 8000 ]]; then
+    ok "diagnostic passes an empirically sufficient node budget ($configured)"
+  else
+    bad "diagnostic still overrides the scanner with an insufficient node budget ($configured)"
+  fi
 fi
 
 echo
