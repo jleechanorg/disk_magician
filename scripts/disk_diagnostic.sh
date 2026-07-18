@@ -172,6 +172,7 @@ print(
 print(
     f"Scan mode: {report.get('mode', 'unknown')}; "
     f"nodes={report.get('nodes_processed', 0)}; "
+    f"emergency node ceiling={(report.get('config') or {}).get('max_nodes', 'unknown')}; "
     f"elapsed={report.get('elapsed_s', 0)}s"
 )
 limits = report.get("limits") or {}

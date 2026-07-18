@@ -118,7 +118,7 @@ assert report["apfs_accounting"]["equation_balanced"] is True
 assert report["apfs_accounting"]["volumes"][0]["roles"] == ["Data"]
 assert report["limits"]["sudo_used"] is False
 assert report["limits"]["full_disk_access"] == "not_inferred"
-assert mod.DEFAULT_MAX_NODES >= 8000
+assert mod.DEFAULT_MAX_NODES == 10_000_000
 PY
 then
   ok "frontier report caps every directory leaf at 5 GiB and keeps an exact Data equation"
@@ -203,6 +203,7 @@ data = {
     "balanced": True, "displayed_balanced": True,
     "displayed_buckets_kb": 6*gib, "sub_granularity_tail_kb": 0,
   },
+  "config": {"max_nodes": 10_000_000},
   "apfs_accounting": {
     "physical_stores": [{"device": "disk0s2", "size_kb": 20*gib}],
     "container_capacity_kb": 20*gib, "container_free_kb": 5*gib,
@@ -280,6 +281,7 @@ if grep -q 'Lane 1/3.*top-down' "$OUT" &&
    grep -q 'permission_denied_or_tcc' "$OUT" &&
    grep -q 'time_budget_exhausted' "$OUT" &&
    grep -q 'node_budget_exhausted' "$OUT" &&
+   grep -q 'emergency node ceiling=10000000' "$OUT" &&
    grep -q 'SNAPSHOT_DELTA_MARKER' "$OUT" &&
    grep -q 'QUICK_WIN_MARKER' "$OUT" &&
    grep -q 'WORKTREE_PREVIEW_MARKER' "$OUT" &&
