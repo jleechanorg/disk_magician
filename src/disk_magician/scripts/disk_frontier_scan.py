@@ -25,6 +25,7 @@ Design contract (roadmap doc, "post-critic" section):
 import argparse
 import collections
 import concurrent.futures
+import heapq
 import json
 import os
 import plistlib
@@ -41,17 +42,20 @@ import time
 DEFAULT_ROOT = "/System/Volumes/Data"
 DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_last.json")
 DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
-DUA_TIMEOUT_CAP_SECONDS = 90
+DUA_TIMEOUT_CAP_SECONDS = 1
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_DEPTH = 6
 DEFAULT_MAX_NODES = 8000
 DEFAULT_WALL_CLOCK_CAP = 480
+SHALLOW_ENUMERATION_MAX_DEPTH = 2
 LOW_FREE_GB_THRESHOLD = 15
 SCHEMA_VERSION = 2
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
 DUA_CMD = shutil.which("dua")
+_GDU_OVERRIDE = os.environ.get("DISK_MAGICIAN_GDU_CMD")
+GDU_CMD = shutil.which("gdu") if _GDU_OVERRIDE is None else (_GDU_OVERRIDE or None)
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -148,10 +152,29 @@ def run_du(path, timeout_s, tracker, is_symlink=False):
     deadline = time.monotonic() + timeout_s
     tracker.enter()
     try:
-        if DUA_CMD and not is_symlink:
+        if GDU_CMD and not is_symlink:
             try:
                 proc = subprocess.run(
-                    prefix + [DUA_CMD, "aggregate", "-x", "--format", "bytes", path],
+                    [GDU_CMD, "-x", "-k", "-s", path],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+            except subprocess.TimeoutExpired:
+                return None
+            except OSError:
+                proc = None
+            if proc is not None and proc.returncode == 0:
+                parts = proc.stdout.strip().split()
+                if parts:
+                    try:
+                        return int(parts[0])
+                    except ValueError:
+                        pass
+        elif DUA_CMD and not is_symlink:
+            try:
+                proc = subprocess.run(
+                    [DUA_CMD, "aggregate", "-x", "--format", "bytes", path],
                     capture_output=True,
                     text=True,
                     timeout=max(0.001, deadline - time.monotonic()),
@@ -236,17 +259,49 @@ DATA_ROOT_PRIORITY = {
     "System": 6,
 }
 
+USER_ROOT_PRIORITY = {
+    "projects": 0,
+    "projects_other": 1,
+    "Library": 2,
+    ".colima": 3,
+    ".codex": 4,
+    ".worktrees": 5,
+    ".hermes": 6,
+    "Pictures": 7,
+    "dk2d_evidence": 8,
+    "project_worldaiclaw": 9,
+    "projects_reference": 10,
+    "repos": 11,
+    ".ao": 12,
+    ".local": 13,
+    ".lima": 14,
+}
+
 
 def frontier_sort_key(root, item):
     """Keep breadth-first traversal deterministic while scheduling the
     explicitly required high-value Data roots before application fan-out."""
-    path = item[0]
+    path, depth, _ = item
     try:
         rel = os.path.relpath(path, root)
     except ValueError:
         rel = path
-    first = rel.split(os.sep, 1)[0]
-    return (DATA_ROOT_PRIORITY.get(first, len(DATA_ROOT_PRIORITY)), rel.casefold(), rel)
+    parts = rel.split(os.sep)
+    first = parts[0]
+    user_priority = len(USER_ROOT_PRIORITY)
+    hidden_descendant = 0
+    if first == "Users" and len(parts) >= 3:
+        if len(parts) == 3:
+            user_priority = USER_ROOT_PRIORITY.get(parts[2], user_priority)
+        hidden_descendant = int(any(part.startswith(".") for part in parts[3:]))
+    return (
+        depth,
+        DATA_ROOT_PRIORITY.get(first, len(DATA_ROOT_PRIORITY)),
+        user_priority,
+        hidden_descendant,
+        rel.casefold(),
+        rel,
+    )
 
 
 def build_granularity_buckets(measured, root, granularity_kb):
@@ -449,6 +504,11 @@ class FrontierScanner:
         # ledger; `observed` is only for selecting useful display buckets.
         self.observed = {}
         self.granularity_kb = int(args.granularity_gib * 1024 * 1024)
+        self.shallow_enumeration_depth = getattr(
+            args,
+            "shallow_enumeration_depth",
+            SHALLOW_ENUMERATION_MAX_DEPTH if args.root == DEFAULT_ROOT else 0,
+        )
         self.oversize_files = []
         self.deduped = []
         self.frontier_unfinished = []
@@ -498,7 +558,7 @@ class FrontierScanner:
     def measure_one(self, path, is_symlink=False):
         self.sem.acquire()
         try:
-            if DUA_CMD and not is_symlink and self.timeout_tiers:
+            if (GDU_CMD or DUA_CMD) and not is_symlink and self.timeout_tiers:
                 remaining = self.remaining_budget()
                 if remaining <= 0:
                     return None
@@ -578,7 +638,38 @@ class FrontierScanner:
                 )
             return
 
-        kb = self.measure_one(path)
+        # ponytail: a fixed shallow depth avoids spending the per-node timeout
+        # on known namespace containers; deeper paths still use measured
+        # subdivision, and this ceiling can become configurable if another
+        # filesystem layout needs it.
+        if (
+            stat.S_ISDIR(st.st_mode)
+            and depth <= self.shallow_enumeration_depth
+            and depth < self.max_depth
+        ):
+            children, enumeration_error = list_children(path)
+            if children is None:
+                self.frontier_unfinished.append(
+                    {
+                        "path": path,
+                        "depth": depth,
+                        "reason": enumeration_error or "shallow_enumeration_failed",
+                    }
+                )
+                return
+            if children:
+                return [
+                    (child_path, depth + 1, child_symlink)
+                    for child_path, child_symlink in children
+                ]
+
+        # Regular files are O(1) leaves: st_blocks reports allocated 512-byte
+        # blocks, matching this tool's allocated-space accounting without a
+        # subprocess that can starve under background I/O policy.
+        if stat.S_ISDIR(st.st_mode):
+            kb = self.measure_one(path)
+        else:
+            kb = (st.st_blocks * 512 + 1023) // 1024
         if kb is not None:
             self.observed[path] = kb
             if self.granularity_kb > 0 and kb > self.granularity_kb:
@@ -669,47 +760,77 @@ class FrontierScanner:
             }
         self.level1_paths = [path for path, _ in level1]
 
-        frontier = sorted(
-            [(p, 1, is_sym) for p, is_sym in level1],
-            key=lambda item: frontier_sort_key(self.root, item),
-        )
+        frontier = []
+        sequence = 0
+
+        def enqueue(item):
+            nonlocal sequence
+            sequence += 1
+            heapq.heappush(
+                frontier,
+                (frontier_sort_key(self.root, item), sequence, item),
+            )
+
+        for path, is_sym in level1:
+            enqueue((path, 1, is_sym))
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(self.workers_cap, 1)
         ) as pool:
-            while frontier:
-                if self.elapsed() > self.wall_clock_cap:
-                    for path, depth, _ in frontier:
+            in_flight = {}
+            stop_scheduling = False
+            while frontier or in_flight:
+                if self.elapsed() > self.wall_clock_cap and not stop_scheduling:
+                    stop_scheduling = True
+                    while frontier:
+                        _, _, (path, depth, _) = heapq.heappop(frontier)
                         self.frontier_unfinished.append(
                             {"path": path, "depth": depth, "reason": "time_budget_exhausted"}
                         )
+
+                if not stop_scheduling:
+                    self.maybe_throttle()
+                    while frontier and len(in_flight) < max(self.workers_cap, 1):
+                        _, _, item = heapq.heappop(frontier)
+                        path, depth, is_sym = item
+                        in_flight[pool.submit(
+                            self.process_node, path, depth, is_sym
+                        )] = item
+
+                if not in_flight:
                     break
 
-                self.maybe_throttle()
-
-                futures = {
-                    pool.submit(self.process_node, path, depth, is_sym): path
-                    for path, depth, is_sym in frontier
-                }
-                next_frontier = []
-                for fut in concurrent.futures.as_completed(futures):
+                done, _ = concurrent.futures.wait(
+                    in_flight,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for fut in done:
+                    path, _, _ = in_flight.pop(fut)
                     try:
                         result = fut.result()
                     except Exception as exc:  # noqa: BLE001 - never crash the scan
-                        self.warnings.append(f"worker exception for {futures[fut]}: {exc}")
+                        self.warnings.append(f"worker exception for {path}: {exc}")
                         self.frontier_unfinished.append(
                             {
-                                "path": futures[fut],
+                                "path": path,
                                 "reason": "worker_exception",
                             }
                         )
                         continue
                     if result:
-                        next_frontier.extend(result)
-                frontier = sorted(
-                    next_frontier,
-                    key=lambda item: frontier_sort_key(self.root, item),
-                )
+                        if stop_scheduling or self.elapsed() > self.wall_clock_cap:
+                            stop_scheduling = True
+                            for child_path, child_depth, _ in result:
+                                self.frontier_unfinished.append(
+                                    {
+                                        "path": child_path,
+                                        "depth": child_depth,
+                                        "reason": "time_budget_exhausted",
+                                    }
+                                )
+                        else:
+                            for item in result:
+                                enqueue(item)
 
         return None
 
@@ -899,6 +1020,7 @@ def build_report(
             "timeout_tiers_s": args.timeout_tiers,
             "granularity_gib": args.granularity_gib,
             "max_bucket_gib": args.granularity_gib,
+            "shallow_enumeration_depth": getattr(scanner, "shallow_enumeration_depth", 0),
         },
         "disk_total_kb": disk_stats["total_kb"],
         "disk_used_kb": disk_stats["used_kb"],
@@ -957,6 +1079,11 @@ def parse_args(argv):
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
     p.add_argument("--max-nodes", type=int, default=DEFAULT_MAX_NODES)
     p.add_argument(
+        "--shallow-enumeration-depth", type=int, default=None,
+        help="enumerate directories through this depth before measuring them; "
+             "defaults to 3 for the Data-volume root and 0 for custom roots",
+    )
+    p.add_argument(
         "--granularity-gib", type=float, default=0.0,
         help="maximum size of each non-overlapping displayed path bucket; "
              "larger directories are subdivided and larger indivisible files "
@@ -975,6 +1102,10 @@ def parse_args(argv):
     p.add_argument("--disk-used-kb-override", type=int, default=None,
                     help="test-only: force disk_used_kb to exercise residual clamping")
     args = p.parse_args(argv)
+    if args.shallow_enumeration_depth is None:
+        args.shallow_enumeration_depth = (
+            SHALLOW_ENUMERATION_MAX_DEPTH if args.root == DEFAULT_ROOT else 0
+        )
     args.timeout_tiers = [int(x) for x in args.timeout_tiers.split(",") if x.strip()]
     if not args.timeout_tiers:
         args.timeout_tiers = list(DEFAULT_TIMEOUT_TIERS)

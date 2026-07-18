@@ -17,6 +17,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCANNER="$REPO_ROOT/scripts/disk_frontier_scan.py"
+export DISK_MAGICIAN_GDU_CMD=""
 
 WORK="$(mktemp -d -t frontier_scan_test.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -178,6 +179,119 @@ expected_priority="Users,private,.Spotlight-V100,opt,Library,Applications,System
 [[ "$ROOT_PRIORITY_OUT" == "$expected_priority" ]] && ok "whole-disk frontier schedules high-value Data roots before app fan-out" \
   || bad "whole-disk frontier priority was '$ROOT_PRIORITY_OUT' (expected '$expected_priority')"
 
+HOME_PRIORITY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = "/System/Volumes/Data"
+base = os.path.join(root, "Users", "fixture")
+frontier = [
+    (os.path.join(base, name), 3, False)
+    for name in ("zzz", ".agents", ".codex", ".colima", "Library", "projects")
+]
+ordered = sorted(frontier, key=lambda item: m.frontier_sort_key(root, item))
+print(",".join(os.path.basename(item[0]) for item in ordered))
+PY
+)
+expected_home_priority="projects,Library,.colima,.codex,.agents,zzz"
+[[ "$HOME_PRIORITY_OUT" == "$expected_home_priority" ]] && ok "home frontier schedules known high-volume roots before alphabetic dot-directory fan-out" \
+  || bad "home frontier priority was '$HOME_PRIORITY_OUT' (expected '$expected_home_priority')"
+
+PROJECT_CHILD_PRIORITY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = "/System/Volumes/Data"
+base = os.path.join(root, "Users", "fixture", "projects")
+frontier = [
+    (os.path.join(base, name), 4, False)
+    for name in (".beads", ".claude", "worldarchitect.ai", "agent-orchestrator")
+]
+ordered = sorted(frontier, key=lambda item: m.frontier_sort_key(root, item))
+print(",".join(os.path.basename(item[0]) for item in ordered))
+PY
+)
+expected_project_child_priority="agent-orchestrator,worldarchitect.ai,.beads,.claude"
+[[ "$PROJECT_CHILD_PRIORITY_OUT" == "$expected_project_child_priority" ]] && ok "project content outranks hidden metadata within a high-volume root" \
+  || bad "project child priority was '$PROJECT_CHILD_PRIORITY_OUT' (expected '$expected_project_child_priority')"
+
+SHALLOW_ENUMERATION_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = os.path.join(sys.argv[1], "shallow-enumeration")
+path = os.path.join(root, "Users", "fixture")
+child = os.path.join(path, "projects")
+os.makedirs(child, exist_ok=True)
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=2,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+scanner.root_dev = os.lstat(root).st_dev
+with mock.patch.object(scanner, "measure_one", return_value=1) as measure:
+    next_frontier = scanner.process_node(path, 2, False)
+print(measure.call_count == 0,
+      next_frontier == [(child, 3, False)],
+      path not in scanner.measured)
+PY
+)
+[[ "$SHALLOW_ENUMERATION_OUT" == "True True True" ]] && ok "shallow namespace directories enumerate before expensive parent aggregation" \
+  || bad "shallow directory wasted budget on a parent total: $SHALLOW_ENUMERATION_OUT"
+
+STREAMING_FRONTIER_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = os.path.join(sys.argv[1], "streaming-frontier")
+first = os.path.join(root, "a")
+child = os.path.join(first, "child")
+last = os.path.join(root, "z")
+os.makedirs(child, exist_ok=True)
+os.makedirs(last, exist_ok=True)
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5,
+)
+scanner = m.FrontierScanner(args)
+order = []
+
+def process(path, depth, is_symlink):
+    rel = os.path.relpath(path, root)
+    order.append(rel)
+    if path == first:
+        return [(child, depth + 1, False)]
+    return None
+
+with mock.patch.object(scanner, "process_node", side_effect=process), \
+     mock.patch.object(scanner, "maybe_throttle"):
+    scanner.run()
+print(order == ["a", "z", os.path.join("a", "child")], order)
+PY
+)
+[[ "$STREAMING_FRONTIER_OUT" == "True ['a', 'z', 'a/child']" ]] && ok "streaming frontier preserves breadth fairness before deeper children" \
+  || bad "deeper children starved shallower siblings: $STREAMING_FRONTIER_OUT"
+
 SYMLINK_ORDER_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
 import sys
@@ -280,7 +394,8 @@ gib = 1024 * 1024
 root = os.path.join(sys.argv[1], "oversize-file")
 os.makedirs(root, exist_ok=True)
 path = os.path.join(root, "large.bin")
-open(path, "wb").close()
+with open(path, "wb") as f:
+    f.write(b"x" * 4096)
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
@@ -289,7 +404,13 @@ args = SimpleNamespace(
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
 scanner.root_dev = os.lstat(root).st_dev
-with mock.patch.object(scanner, "measure_one", return_value=6 * gib):
+real = os.lstat(path)
+fake = SimpleNamespace(
+    st_dev=real.st_dev,
+    st_mode=real.st_mode,
+    st_blocks=12 * gib,
+)
+with mock.patch.object(m.os, "lstat", return_value=fake):
     scanner.process_node(path, 1, False)
 print(scanner.measured.get(path) == 6 * gib,
       scanner.oversize_files == [
@@ -300,6 +421,39 @@ PY
 )
 [[ "$OVERSIZE_FILE_OUT" == "True True True" ]] && ok "indivisible file above 5 GiB is separate from bounded directory buckets" \
   || bad "oversize file was hidden or emitted as a normal bucket: $OVERSIZE_FILE_OUT"
+
+REGULAR_FILE_BACKEND_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = os.path.join(sys.argv[1], "regular-file-backend")
+os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "payload.bin")
+with open(path, "wb") as f:
+    f.write(b"x" * 4096)
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+scanner.root_dev = os.lstat(root).st_dev
+with mock.patch.object(scanner, "measure_one", return_value=1) as measure:
+    scanner.process_node(path, 1, False)
+expected_kb = (os.lstat(path).st_blocks * 512 + 1023) // 1024
+print(measure.call_count == 0,
+      scanner.measured.get(path) == expected_kb)
+PY
+)
+[[ "$REGULAR_FILE_BACKEND_OUT" == "True True" ]] && ok "regular files use native allocated blocks without a subprocess" \
+  || bad "regular file was sent through a subprocess backend: $REGULAR_FILE_BACKEND_OUT"
 
 APFS_CONTAINER_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import plistlib
@@ -332,6 +486,28 @@ PY
 [[ "$APFS_CONTAINER_OUT" == "True" ]] && ok "Data mount selects its APFSContainerReference, not a simulator container" \
   || bad "APFS accounting selected the wrong container: $APFS_CONTAINER_OUT"
 
+GDU_BACKEND_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+completed = subprocess.CompletedProcess(
+    ["/fake/gdu"], 0, stdout="6144\t/fixture\n", stderr=""
+)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m, "DUA_CMD", "/fake/dua"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed) as run:
+    kb = m.run_du("/fixture", 1, m.ConcurrencyTracker())
+cmd = run.call_args.args[0]
+print(kb, cmd)
+PY
+)
+[[ "$GDU_BACKEND_OUT" == "6144 ['/fake/gdu', '-x', '-k', '-s', '/fixture']" ]] && ok "installed GNU du backend is preferred and parsed as allocated KiB" \
+  || bad "GNU du backend was not preferred or parsed correctly: $GDU_BACKEND_OUT"
+
 DUA_ATTEMPT_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import sys
 import time
@@ -354,7 +530,7 @@ with mock.patch.object(m, "DUA_CMD", "/fake/dua"), \
 print(run.call_count, run.call_args.args[1])
 PY
 )
-[[ "$DUA_ATTEMPT_OUT" == "1 90" ]] && ok "dua gets one capped attempt per node before subdivision" \
+[[ "$DUA_ATTEMPT_OUT" == "1 1" ]] && ok "dua gets one short capped attempt per node before subdivision" \
   || bad "dua repeated timeout tiers instead of subdividing: $DUA_ATTEMPT_OUT"
 
 # ─────────────────────────────────────────────────────────────
