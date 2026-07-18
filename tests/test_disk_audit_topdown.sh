@@ -22,10 +22,11 @@ fi
 SKILL="$REPO_ROOT/skills/disk-root-cause/SKILL.md"
 if grep -q 'disk-magician audit' "$SKILL" &&
    grep -qi 'three.lane' "$SKILL" &&
-   grep -q '5 GiB' "$SKILL" &&
+   grep -q 'at or below 5 GiB' "$SKILL" &&
+   grep -qi 'indivisible.*file' "$SKILL" &&
    grep -qi 'dua.*du' "$SKILL" &&
    grep -qi 'residual.*not.*reclaimable' "$SKILL"; then
-  ok "skill requires the three-lane >=5 GiB workflow and protects residual attribution"
+  ok "skill requires the three-lane <=5 GiB path workflow and protects residual attribution"
 else
   bad "skill is missing the default three-lane/5 GiB/residual contract"
 fi
@@ -44,7 +45,7 @@ else
 fi
 
 echo
-echo "── 2. Frontier report exposes finest non-overlapping >=5 GiB buckets ──"
+echo "── 2. Frontier report exposes non-overlapping directory leaves <=5 GiB ──"
 if python3 - "$REPO_ROOT/scripts/disk_frontier_scan.py" <<'PY'
 import importlib.util
 import sys
@@ -55,20 +56,21 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 gib = 1024 * 1024
 root = "/fixture"
-measured = {f"{root}/large/child": 6 * gib, f"{root}/large/small": 2 * gib,
-            f"{root}/other/a": 1 * gib, f"{root}/other/b": 1 * gib}
-measured.update({f"{root}/grouped/leaf-{i}": 1 * gib for i in range(10)})
-observed = {f"{root}/large": 8 * gib, f"{root}/large/child": 6 * gib,
-            f"{root}/large/small": 2 * gib, f"{root}/other": 10 * gib,
-            f"{root}/other/a": 1 * gib, f"{root}/other/b": 1 * gib,
-            f"{root}/grouped": 10 * gib}
+measured = {
+    f"{root}/large/a": 4 * gib,
+    f"{root}/large/b": 4 * gib,
+    f"{root}/large/c": 4 * gib,
+    f"{root}/small-group/a": 2 * gib,
+    f"{root}/small-group/b": 2 * gib,
+}
+observed = {f"{root}/large": 12 * gib, f"{root}/small-group": 4 * gib}
 scanner = SimpleNamespace(
     root=root,
     measured=measured,
     observed=observed,
     frontier_unfinished=[], deduped=[], warnings=[], nodes_processed=3,
     tracker=SimpleNamespace(peak=lambda: 2),
-    level1_paths=[f"{root}/large"],
+    level1_paths=[f"{root}/large", f"{root}/small-group"],
 )
 args = SimpleNamespace(workers=2, max_depth=6, max_nodes=50,
                        wall_clock_cap=10, timeout_tiers=[1], granularity_gib=5.0)
@@ -96,18 +98,21 @@ report = mod.build_report(
 )
 buckets = report["granularity_buckets"]
 assert buckets == [
-    {"path": f"{root}/grouped", "measured_kb": 10 * gib},
-    {"path": f"{root}/large/child", "measured_kb": 6 * gib},
+    {"path": f"{root}/large/a", "measured_kb": 4 * gib},
+    {"path": f"{root}/large/b", "measured_kb": 4 * gib},
+    {"path": f"{root}/large/c", "measured_kb": 4 * gib},
+    {"path": f"{root}/small-group", "measured_kb": 4 * gib},
 ]
+assert all(item["measured_kb"] <= 5 * gib for item in buckets)
 assert report["granularity_bucket_total_kb"] == 16 * gib
-assert report["granularity_tail_kb"] == 4 * gib
+assert report["granularity_tail_kb"] == 0
 assert report["accounting_equation"]["balanced"] is True
 assert report["accounting_equation"]["displayed_balanced"] is True
 assert report["accounting_equation"]["displayed_buckets_kb"] == 16 * gib
-assert report["accounting_equation"]["sub_granularity_tail_kb"] == 4 * gib
+assert report["accounting_equation"]["sub_granularity_tail_kb"] == 0
 assert report["accounting_equation"]["measurement_non_atomic"] is True
 assert report["measurement_window"]["disk_used_delta_kb"] == -1 * gib
-assert report["measurement_window"]["residual_interval_kb"] == {"min": 0, "max": 1 * gib}
+assert report["measurement_window"]["residual_interval_kb"] == {"min": 4 * gib, "max": 5 * gib}
 assert report["config"]["granularity_gib"] == 5.0
 assert report["apfs_accounting"]["equation_balanced"] is True
 assert report["apfs_accounting"]["volumes"][0]["roles"] == ["Data"]
@@ -116,9 +121,9 @@ assert report["limits"]["full_disk_access"] == "not_inferred"
 assert mod.DEFAULT_MAX_NODES >= 8000
 PY
 then
-  ok "frontier report keeps the finest >=5 GiB bucket and an exact Data equation"
+  ok "frontier report caps every directory leaf at 5 GiB and keeps an exact Data equation"
 else
-  bad "frontier report lacks granularity buckets or exact accounting equation"
+  bad "frontier report emitted an oversized directory bucket or broke its equation"
 fi
 
 echo
@@ -183,7 +188,10 @@ data = {
   "mode": "partial", "disk_total_kb": 20*gib, "disk_used_kb": 10*gib,
   "disk_free_kb": 10*gib, "measured_total_kb": 6*gib,
   "purgeable_kb": 0, "residual_kb": 4*gib,
-  "granularity_buckets": [{"path": "/fixture/big", "measured_kb": 6*gib}],
+  "granularity_buckets": [
+    {"path": "/fixture/big/a", "measured_kb": 3*gib},
+    {"path": "/fixture/big/b", "measured_kb": 3*gib},
+  ],
   "granularity_bucket_total_kb": 6*gib, "granularity_tail_kb": 0,
   "sibling_volumes": {"VM": {"capacity_in_use_kb": 6*gib, "roles": ["VM"]}},
   "frontier_unfinished": [
@@ -207,6 +215,11 @@ data = {
   },
   "limits": {"sudo_used": False, "full_disk_access": "not_inferred"},
 }
+if os.environ.get("INJECT_OVERSIZE_BUCKET") == "1":
+    data["granularity_buckets"] = [
+        {"path": "/fixture/invalid-parent", "measured_kb": 6*gib}
+    ]
+    data["granularity_bucket_total_kb"] = 6*gib
 with open(out, "w") as fh:
     json.dump(data, fh)
 PY
@@ -219,6 +232,7 @@ echo "SNAPSHOT_DELTA_MARKER"
 SH
 cat > "$TREE/scripts/disk_audit.sh" <<'SH'
 #!/usr/bin/env bash
+[[ "$*" == *"--skip-directory-breakdown"* ]] || exit 9
 sleep 2
 echo "QUICK_WIN_MARKER"
 SH
@@ -253,10 +267,12 @@ fi
 if grep -q 'Lane 1/3.*top-down' "$OUT" &&
    grep -q 'Lane 2/3.*snapshot' "$OUT" &&
    grep -q 'Lane 3/3.*quick' "$OUT" &&
-   grep -q '/fixture/big' "$OUT" &&
-   grep -q '6.0 GiB' "$OUT" &&
+   grep -q '/fixture/big/a' "$OUT" &&
+   grep -q '/fixture/big/b' "$OUT" &&
+   grep -q '3.0 GiB' "$OUT" &&
+   grep -q 'Data directory/path buckets <= 5 GiB' "$OUT" &&
    grep -q 'Displayed Data equation:' "$OUT" &&
-   grep -q '0.0 GiB sub-5 GiB tail' "$OUT" &&
+   grep -q '0.0 GiB measured tail' "$OUT" &&
    grep -q 'Physical store disk0s2' "$OUT" &&
    grep -q 'APFS container equation: 14.0 GiB volumes + 1.0 GiB shared' "$OUT" &&
    grep -q 'sudo_used=false' "$OUT" &&
@@ -271,6 +287,17 @@ if grep -q 'Lane 1/3.*top-down' "$OUT" &&
   ok "ordered report includes top-down accounting, limits, deltas, and quick wins"
 else
   bad "three-lane report is incomplete: $(tr '\n' ';' < "$OUT")"
+fi
+
+INVALID_OUT="$WORK/invalid-out.txt"
+HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$FRONTIER_ARGS_CAPTURE" \
+  INJECT_OVERSIZE_BUCKET=1 DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS=10 \
+  "$TREE/scripts/disk_diagnostic.sh" >"$INVALID_OUT" 2>&1
+invalid_rc=$?
+if [[ "$invalid_rc" -ne 0 ]] && grep -q 'CONTRACT FAILURE: scanner emitted oversized normal buckets' "$INVALID_OUT"; then
+  ok "renderer fails closed when a scanner violates the <=5 GiB bucket ceiling"
+else
+  bad "renderer accepted an oversized normal bucket (rc=$invalid_rc): $(tr '\n' ';' < "$INVALID_OUT")"
 fi
 
 if ! grep -q '^--max-nodes$' "$FRONTIER_ARGS_CAPTURE"; then

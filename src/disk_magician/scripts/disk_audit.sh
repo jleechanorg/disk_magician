@@ -6,6 +6,7 @@ MODE="audit"
 DRY_RUN=false
 LIVE=false
 SHOW_HISTORY=true
+SHOW_DIRECTORY_BREAKDOWN=true
 
 for arg in "$@"; do
     case "$arg" in
@@ -14,8 +15,9 @@ for arg in "$@"; do
         --dry-run)       DRY_RUN=true ;;
         --live)          LIVE=true ;;
         --no-history)    SHOW_HISTORY=false ;;
+        --skip-directory-breakdown) SHOW_DIRECTORY_BREAKDOWN=false ;;
         --help|-h)
-            echo "Usage: $0 [clean|--clean|clean-all|--clean-all] [--dry-run] [--live] [--no-history]"
+            echo "Usage: $0 [clean|--clean|clean-all|--clean-all] [--dry-run] [--live] [--no-history] [--skip-directory-breakdown]"
             exit 0
             ;;
         *)
@@ -177,7 +179,12 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 fi
 
 # ── 2. Largest directories ───────────────────────────────────────────────────
-if [[ "$SNAP_USABLE" == true ]]; then
+# The default three-lane orchestrator already provides the bounded top-down
+# partition, so it suppresses this older aggregate view to avoid reintroducing
+# 100+ GiB parent rows after the <=5 GiB ledger.
+if [[ "$SHOW_DIRECTORY_BREAKDOWN" != true ]]; then
+    :
+elif [[ "$SNAP_USABLE" == true ]]; then
     section "Largest directories (snapshot-ranked, top 20)"
     printf "  Source:   %s\n" "${SNAPSHOT_JSON/#$HOME/~}"
     printf "  Coverage: %s%%   Age: %s min\n" "${SNAP_COVERAGE:-?}" "${SNAP_AGE_MIN:-?}"

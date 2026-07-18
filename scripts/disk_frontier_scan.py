@@ -31,6 +31,7 @@ import plistlib
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -251,9 +252,10 @@ def frontier_sort_key(root, item):
 def build_granularity_buckets(measured, root, granularity_kb):
     """Project one non-overlapping display partition from accepted leaves.
 
-    Small accepted leaves are rolled up only through their own ancestry. A
-    parent observation is never reused, so every displayed byte remains a sum
-    of the same accepted leaf ledger used by residual accounting.
+    A path is rolled up only when its accepted descendants total no more than
+    the configured ceiling. Larger directories are recursively subdivided;
+    an indivisible accepted leaf above the ceiling is reported separately by
+    ``build_report`` and never masquerades as a bounded bucket.
     """
     if granularity_kb <= 0:
         return []
@@ -278,20 +280,16 @@ def build_granularity_buckets(measured, root, granularity_kb):
             node["measured_kb"] += kb
 
     def select(node):
+        if 0 < node["measured_kb"] <= granularity_kb:
+            return [{"path": node["path"], "measured_kb": node["measured_kb"]}]
         selected = []
         for child in node["children"].values():
-            if child["measured_kb"] >= granularity_kb:
-                selected.extend(select(child))
-        if selected:
-            return selected
-        if node["measured_kb"] >= granularity_kb:
-            return [{"path": node["path"], "measured_kb": node["measured_kb"]}]
-        return []
+            selected.extend(select(child))
+        return selected
 
     buckets = []
     for child in tree["children"].values():
-        if child["measured_kb"] >= granularity_kb:
-            buckets.extend(select(child))
+        buckets.extend(select(child))
     buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
     return buckets
 
@@ -451,6 +449,7 @@ class FrontierScanner:
         # ledger; `observed` is only for selecting useful display buckets.
         self.observed = {}
         self.granularity_kb = int(args.granularity_gib * 1024 * 1024)
+        self.oversize_files = []
         self.deduped = []
         self.frontier_unfinished = []
         self.warnings = []
@@ -582,7 +581,14 @@ class FrontierScanner:
         kb = self.measure_one(path)
         if kb is not None:
             self.observed[path] = kb
-            if self.granularity_kb > 0 and kb >= self.granularity_kb:
+            if self.granularity_kb > 0 and kb > self.granularity_kb:
+                if not stat.S_ISDIR(st.st_mode):
+                    self.oversize_files.append(
+                        {"path": path, "measured_kb": kb, "reason": "indivisible_file"}
+                    )
+                    self.measured[path] = kb
+                    self.trie.add(path)
+                    return
                 granularity_reason = None
                 if depth >= self.max_depth:
                     granularity_reason = "granularity_max_depth_reached"
@@ -599,10 +605,18 @@ class FrontierScanner:
                         granularity_reason = (
                             "granularity_" + (enumeration_error or "enumeration_failed")
                         )
+                    else:
+                        granularity_reason = "granularity_no_children"
                 if granularity_reason:
                     self.frontier_unfinished.append(
-                        {"path": path, "depth": depth, "reason": granularity_reason}
+                        {
+                            "path": path,
+                            "depth": depth,
+                            "reason": granularity_reason,
+                            "observed_kb": kb,
+                        }
                     )
+                    return
             self.measured[path] = kb
             self.trie.add(path)
             return
@@ -817,7 +831,14 @@ def build_report(
     granularity_bucket_total_kb = sum(
         item["measured_kb"] for item in granularity_buckets
     )
-    granularity_tail_kb = measured_total_kb - granularity_bucket_total_kb
+    oversize_files = sorted(
+        getattr(scanner, "oversize_files", []),
+        key=lambda item: (-item["measured_kb"], item["path"]),
+    )
+    oversize_files_total_kb = sum(item["measured_kb"] for item in oversize_files)
+    granularity_tail_kb = (
+        measured_total_kb - granularity_bucket_total_kb - oversize_files_total_kb
+    )
 
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
@@ -829,9 +850,11 @@ def build_report(
             == disk_stats["used_kb"]
         ),
         "displayed_buckets_kb": granularity_bucket_total_kb,
+        "oversize_indivisible_files_kb": oversize_files_total_kb,
         "sub_granularity_tail_kb": granularity_tail_kb,
         "displayed_balanced": (
             granularity_bucket_total_kb
+            + oversize_files_total_kb
             + granularity_tail_kb
             + purgeable_info["purgeable_kb"]
             + residual_kb
@@ -875,6 +898,7 @@ def build_report(
             "wall_clock_cap_s": args.wall_clock_cap,
             "timeout_tiers_s": args.timeout_tiers,
             "granularity_gib": args.granularity_gib,
+            "max_bucket_gib": args.granularity_gib,
         },
         "disk_total_kb": disk_stats["total_kb"],
         "disk_used_kb": disk_stats["used_kb"],
@@ -891,6 +915,8 @@ def build_report(
         "granularity_buckets": granularity_buckets,
         "granularity_bucket_total_kb": granularity_bucket_total_kb,
         "granularity_tail_kb": granularity_tail_kb,
+        "oversize_indivisible_files": oversize_files,
+        "oversize_indivisible_files_total_kb": oversize_files_total_kb,
         "deduped": scanner.deduped,
         "frontier_unfinished": scanner.frontier_unfinished,
         "sibling_volumes": sibling_volumes,
@@ -932,8 +958,9 @@ def parse_args(argv):
     p.add_argument("--max-nodes", type=int, default=DEFAULT_MAX_NODES)
     p.add_argument(
         "--granularity-gib", type=float, default=0.0,
-        help="subdivide successful large directories and report the finest "
-             "non-overlapping buckets at or above this size (0 disables)",
+        help="maximum size of each non-overlapping displayed path bucket; "
+             "larger directories are subdivided and larger indivisible files "
+             "are reported separately (0 disables)",
     )
     p.add_argument("--wall-clock-cap", type=float, default=DEFAULT_WALL_CLOCK_CAP)
     p.add_argument(

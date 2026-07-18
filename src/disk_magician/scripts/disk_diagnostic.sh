@@ -37,7 +37,7 @@ topdown_pid=$!
 history_pid=$!
 
 (
-  "$SCRIPT_DIR/disk_audit.sh" --no-history "$@" >"$QUICK_AUDIT_LOG" 2>&1 &
+  "$SCRIPT_DIR/disk_audit.sh" --no-history --skip-directory-breakdown "$@" >"$QUICK_AUDIT_LOG" 2>&1 &
   audit_pid=$!
   hygiene_pid=""
   if [[ -x "$SCRIPT_DIR/worktree_hygiene.sh" ]]; then
@@ -75,8 +75,9 @@ quick_pid=$!
 wait "$topdown_pid"; topdown_rc=$?
 wait "$history_pid"; history_rc=$?
 wait "$quick_pid"; quick_rc=$?
+render_rc=0
 
-echo "=== Lane 1/3: top-down whole-disk accounting (>=${granularity} GiB) ==="
+echo "=== Lane 1/3: top-down whole-disk accounting (directory/path buckets <=${granularity} GiB) ==="
 if [[ "$topdown_rc" -eq 0 && -s "$TOPDOWN_JSON" ]]; then
   python3 - "$TOPDOWN_JSON" "$granularity" <<'PY'
 import json
@@ -131,23 +132,35 @@ else:
     print(f"APFS volume allocations >= {threshold:g} GiB: unavailable or none measured")
 
 buckets = report.get("granularity_buckets") or []
-print(f"Finest non-overlapping Data buckets >= {threshold:g} GiB:")
+oversize_files = report.get("oversize_indivisible_files") or []
+print(f"Data directory/path buckets <= {threshold:g} GiB:")
 if buckets:
     for item in buckets:
         print(f"  {gib(item.get('measured_kb')):8.1f} GiB  {item.get('path')}")
 else:
     print("  none measured")
+violations = [item for item in buckets if gib(item.get("measured_kb")) > threshold]
+if violations:
+    print("CONTRACT FAILURE: scanner emitted oversized normal buckets:")
+    for item in violations:
+        print(f"  {gib(item.get('measured_kb')):8.1f} GiB  {item.get('path')}")
+if oversize_files:
+    print(f"Indivisible files above {threshold:g} GiB (final path-level explanation):")
+    for item in oversize_files:
+        print(f"  {gib(item.get('measured_kb')):8.1f} GiB  {item.get('path')}")
 
 purgeable = report.get("purgeable_kb") or 0
 residual = report.get("residual_kb") or 0
 used = report.get("disk_used_kb") or 0
 bucket_total = report.get("granularity_bucket_total_kb") or 0
 tail = report.get("granularity_tail_kb") or 0
+oversize_total = report.get("oversize_indivisible_files_total_kb") or 0
 equation = report.get("accounting_equation") or {}
 print(
     "Displayed Data equation: "
-    f"{gib(bucket_total):.1f} GiB buckets + "
-    f"{gib(tail):.1f} GiB sub-{threshold:g} GiB tail + "
+    f"{gib(bucket_total):.1f} GiB bounded buckets + "
+    f"{gib(oversize_total):.1f} GiB indivisible files + "
+    f"{gib(tail):.1f} GiB measured tail + "
     f"{gib(purgeable):.1f} GiB purgeable estimate + "
     f"{gib(residual):.1f} GiB residual = {gib(used):.1f} GiB used "
     f"(balanced={str(bool(equation.get('displayed_balanced'))).lower()})"
@@ -171,10 +184,15 @@ unfinished = report.get("frontier_unfinished") or []
 if unfinished:
     print("Named unfinished frontier (permission/time/node/mount limits remain separate):")
     for item in unfinished:
-        print(f"  {item.get('reason', 'unknown')}: {item.get('path', '?')}")
+        observed = item.get("observed_kb")
+        size = f" ({gib(observed):.1f} GiB observed)" if observed is not None else ""
+        print(f"  {item.get('reason', 'unknown')}: {item.get('path', '?')}{size}")
 else:
     print("Named unfinished frontier: none")
+if violations:
+    raise SystemExit(2)
 PY
+  render_rc=$?
 else
   echo "Top-down lane failed (rc=$topdown_rc); raw diagnostic follows:"
   sed -n '1,160p' "$TOPDOWN_LOG"
@@ -190,6 +208,6 @@ echo "=== Lane 3/3: safe quick wins and obvious outliers ==="
 cat "$QUICK_LOG"
 [[ "$quick_rc" -eq 0 ]] || echo "Quick-win lane failed (rc=$quick_rc)."
 
-if [[ "$topdown_rc" -ne 0 || "$history_rc" -ne 0 || "$quick_rc" -ne 0 ]]; then
+if [[ "$topdown_rc" -ne 0 || "$render_rc" -ne 0 || "$history_rc" -ne 0 || "$quick_rc" -ne 0 ]]; then
   exit 1
 fi

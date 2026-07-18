@@ -17,13 +17,13 @@ disk-magician audit
 
 This is the mandatory three-lane diagnostic. It launches in parallel:
 
-1. top-down whole-disk accounting from physical/APFS capacity through the Data volume and the finest non-overlapping 5 GiB buckets;
+1. top-down whole-disk accounting from physical/APFS capacity through the Data volume and non-overlapping path buckets at or below 5 GiB;
 2. coverage-validated snapshot deltas, so a coverage change cannot masquerade as physical growth; and
 3. safe quick wins and obvious outliers, with cleanup commands still behind repository safety gates.
 
 Read the whole report before drilling down. Keep permission/TCC denial, time budget, node budget, cross-device boundaries, APFS sibling allocations, purgeable estimates, and residual bytes as separate fields. The residual is an attribution gap: it is **not backup size and not reclaimable without evidence**.
 
-The displayed Data equation must use one accepted leaf ledger: `>=5 GiB buckets + sub-5 GiB measured tail + purgeable estimate + residual = Data used`. Roll small accepted leaves up to their deepest non-overlapping ancestor at or above 5 GiB; never reuse an earlier parent observation. A hidden measured-total equation does not validate the displayed buckets. Capture Data used before and after the namespace walk; when it changes, report the residual interval and mark the measurement non-atomic.
+The displayed Data equation must use one accepted leaf ledger: `<=5 GiB bounded path buckets + indivisible files above 5 GiB + measured tail + purgeable estimate + residual = Data used`. Recursively subdivide every directory above 5 GiB; roll accepted descendants up only when their combined size stays at or below 5 GiB. Never display a larger directory as a normal bucket. Permission, time, node, depth, and cross-device limits stay on the named unfinished frontier and inside residual rather than masquerading as a large bucket. An indivisible file above 5 GiB is a separately labeled final path-level explanation, not a directory bucket. Never reuse an earlier parent observation. A hidden measured-total equation does not validate the displayed buckets. Capture Data used before and after the namespace walk; when it changes, report the residual interval and mark the measurement non-atomic.
 
 The top-down scanner prefers the installed parallel `dua` backend, rejects partial output from failed commands, and falls back to bounded `du`. Symlinks remain `du -P` leaves so aliases cannot pull their targets into the ledger.
 
@@ -165,8 +165,9 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 
 A complete root-cause answer for this machine has:
 - [ ] Default `disk-magician audit` three-lane report completed or its named limits were reported
-- [ ] Every individually measured bucket at or above 5 GiB is shown without parent/child or symlink double counting
-- [ ] Displayed Data equation reconciles >=5 GiB buckets + sub-5 GiB measured tail + purgeable estimate + residual = Data used from one accepted leaf ledger
+- [ ] Every normal Data path bucket is at or below 5 GiB, without parent/child or symlink double counting
+- [ ] Every larger directory is recursively subdivided or named on the unfinished frontier; indivisible files above 5 GiB are labeled separately
+- [ ] Displayed Data equation reconciles bounded buckets + indivisible files + measured tail + purgeable estimate + residual = Data used from one accepted leaf ledger
 - [ ] Data-used before/after bracket is shown; any drift is marked non-atomic with a residual interval
 - [ ] Residual is explicitly not called backup or reclaimable without evidence
 - [ ] Phase 0 ground-truth probe done

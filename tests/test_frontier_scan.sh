@@ -230,12 +230,76 @@ scanner.start_time = time.time()
 scanner.root_dev = os.lstat(path).st_dev
 with mock.patch.object(scanner, "measure_one", return_value=6 * 1024 * 1024):
     scanner.process_node(path, 1, False)
-print(any(item.get("reason") == "granularity_max_depth_reached"
-          for item in scanner.frontier_unfinished))
+limit_named = any(item.get("reason") == "granularity_max_depth_reached"
+                  for item in scanner.frontier_unfinished)
+buckets = m.build_granularity_buckets(scanner.measured, path, 5 * 1024 * 1024)
+print(limit_named, path not in scanner.measured, buckets == [])
 PY
 )
-[[ "$GRANULARITY_LIMIT_OUT" == "True" ]] && ok "large parent names the limit when 5 GiB subdivision cannot continue" \
+[[ "$GRANULARITY_LIMIT_OUT" == "True True True" ]] && ok "large unfinished parent stays out of the <=5 GiB leaf ledger" \
   || bad "large parent falsely looked complete at requested granularity: $GRANULARITY_LIMIT_OUT"
+
+MAX_BUCKET_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+root = "/fixture"
+measured = {
+    f"{root}/large/a": 4 * gib,
+    f"{root}/large/b": 4 * gib,
+    f"{root}/large/c": 4 * gib,
+}
+buckets = m.build_granularity_buckets(measured, root, 5 * gib)
+expected = [
+    {"path": f"{root}/large/a", "measured_kb": 4 * gib},
+    {"path": f"{root}/large/b", "measured_kb": 4 * gib},
+    {"path": f"{root}/large/c", "measured_kb": 4 * gib},
+]
+print(buckets == expected,
+      all(item["measured_kb"] <= 5 * gib for item in buckets),
+      sum(item["measured_kb"] for item in buckets) == 12 * gib)
+PY
+)
+[[ "$MAX_BUCKET_OUT" == "True True True" ]] && ok "display partition recursively subdivides every directory above 5 GiB" \
+  || bad "display partition emitted an oversized parent or lost bytes: $MAX_BUCKET_OUT"
+
+OVERSIZE_FILE_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+root = os.path.join(sys.argv[1], "oversize-file")
+os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "large.bin")
+open(path, "wb").close()
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
+    wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5,
+)
+scanner = m.FrontierScanner(args)
+scanner.start_time = time.time()
+scanner.root_dev = os.lstat(root).st_dev
+with mock.patch.object(scanner, "measure_one", return_value=6 * gib):
+    scanner.process_node(path, 1, False)
+print(scanner.measured.get(path) == 6 * gib,
+      scanner.oversize_files == [
+          {"path": path, "measured_kb": 6 * gib, "reason": "indivisible_file"}
+      ],
+      m.build_granularity_buckets(scanner.measured, root, 5 * gib) == [])
+PY
+)
+[[ "$OVERSIZE_FILE_OUT" == "True True True" ]] && ok "indivisible file above 5 GiB is separate from bounded directory buckets" \
+  || bad "oversize file was hidden or emitted as a normal bucket: $OVERSIZE_FILE_OUT"
 
 APFS_CONTAINER_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import plistlib
