@@ -452,9 +452,9 @@ No destructive commands were run — only `du`, `colima ssh -- df -h`, `docker p
 
 ### CRITICAL side-finding (not part of the ask, but too severe to omit): plaintext GitHub PAT tokens in `.git/config`
 Four clones have a **live-looking personal access token embedded directly in `remote.origin.url`** (visible via `git remote get-url origin`, i.e. it sits in plaintext in `.git/config`):
-- `/Users/jleechan/projects/worldarchitect.ai` → `ghp_PU2m...REDACTED...a2DziPx (rotate immediately, see issue #25)`
-- `/Users/jleechan/projects_reference/jleechanclaw` → `ghp_T9mz...REDACTED...c4ocDX03MDnq (rotate immediately, see issue #25)`
-- `/Users/jleechan/repos/jleechanclaw` → a GitHub PAT (value redacted, rotate immediately — see issue #25)
+- `/Users/jleechan/projects/worldarchitect.ai` → `ghp_PU2m...REDACTED...a2DziPx (rotate immediately, see issue #27)`
+- `/Users/jleechan/projects_reference/jleechanclaw` → `ghp_T9mz...REDACTED...c4ocDX03MDnq (rotate immediately, see issue #27)`
+- `/Users/jleechan/repos/jleechanclaw` → a GitHub PAT (value redacted, rotate immediately — see issue #27)
 - `/Users/jleechan/repos/wt-6969-tmp` → `ghp_@...` (looks empty/broken)
 
 Recommend rotating/revoking these tokens and switching those remotes to `gh`-credential-helper or SSH. This is read-only discovery — no config was touched.
