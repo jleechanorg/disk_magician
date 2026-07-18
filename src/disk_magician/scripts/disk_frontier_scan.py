@@ -161,7 +161,7 @@ def run_du(path, timeout_s, tracker, is_symlink=False):
                     timeout=max(0.001, deadline - time.monotonic()),
                 )
             except subprocess.TimeoutExpired:
-                return None
+                proc = None
             except OSError:
                 proc = None
             if proc is not None and proc.returncode == 0:
@@ -171,7 +171,7 @@ def run_du(path, timeout_s, tracker, is_symlink=False):
                         return int(parts[0])
                     except ValueError:
                         pass
-        elif DUA_CMD and not is_symlink:
+        if DUA_CMD and not is_symlink:
             try:
                 proc = subprocess.run(
                     [DUA_CMD, "aggregate", "-x", "--format", "bytes", path],
@@ -1081,7 +1081,7 @@ def parse_args(argv):
     p.add_argument(
         "--shallow-enumeration-depth", type=int, default=None,
         help="enumerate directories through this depth before measuring them; "
-             "defaults to 3 for the Data-volume root and 0 for custom roots",
+             "defaults to 2 for the Data-volume root and 0 for custom roots",
     )
     p.add_argument(
         "--granularity-gib", type=float, default=0.0,

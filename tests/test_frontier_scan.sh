@@ -508,6 +508,33 @@ PY
 [[ "$GDU_BACKEND_OUT" == "6144 ['/fake/gdu', '-x', '-k', '-s', '/fixture']" ]] && ok "installed GNU du backend is preferred and parsed as allocated KiB" \
   || bad "GNU du backend was not preferred or parsed correctly: $GDU_BACKEND_OUT"
 
+GDU_DUA_FALLBACK_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+calls = []
+def run(cmd, **kwargs):
+    calls.append(cmd[0])
+    if cmd[0] == "/fake/gdu":
+        return subprocess.CompletedProcess(cmd, 1, stdout="bad partial\n", stderr="failed")
+    if cmd[0] == "/fake/dua":
+        return subprocess.CompletedProcess(cmd, 0, stdout="6291456 b total\n", stderr="")
+    raise AssertionError(f"unexpected backend: {cmd}")
+
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m, "DUA_CMD", "/fake/dua"), \
+     mock.patch.object(m.subprocess, "run", side_effect=run):
+    kb = m.run_du("/fixture", 1, m.ConcurrencyTracker())
+print(kb, calls)
+PY
+)
+[[ "$GDU_DUA_FALLBACK_OUT" == "6144 ['/fake/gdu', '/fake/dua']" ]] && ok "failed GNU du falls through to dua before macOS du" \
+  || bad "GNU du failure skipped or broke the dua fallback: $GDU_DUA_FALLBACK_OUT"
+
 DUA_ATTEMPT_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import sys
 import time
