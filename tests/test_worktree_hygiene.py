@@ -503,5 +503,45 @@ class ExecuteFlagCliTest(unittest.TestCase):
         self.assertNotIn(str(wt), listing)
 
 
+class BranchForWorktreeSigpipeTest(unittest.TestCase):
+    """Proves the jleechan-* fix: branch_for_worktree() must not crash the
+    whole script with a SIGPIPE-driven exit 141 on a large worktree registry.
+
+    `git worktree list --porcelain | awk '...; exit'` is unguarded: awk exits
+    as soon as it finds the requested worktree's branch line, closing its end
+    of the pipe while `git` may still be writing porcelain output for later
+    worktrees in a large registry. Under this script's `set -o pipefail`,
+    that races git into SIGPIPE and the pipeline's exit 141 (unguarded here,
+    unlike identify_candidates' analogous sort|head guard) trips `set -e`
+    and aborts the entire run non-deterministically -- confirmed live against
+    a real 340+ worktree registry, crashing at a different candidate on each
+    of three consecutive attempts depending on exactly where the race landed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_branch_lookup_survives_a_large_registry_without_sigpipe_crash(self):
+        repo = _init_repo(self.tmp)
+        # Enough worktrees that git's porcelain output exceeds a pipe buffer
+        # by the time awk exits on an early match -- reproduces the race.
+        first_wt = None
+        for i in range(300):
+            wt = self.tmp / f"wt-{i}"
+            _git(repo, "worktree", "add", "--no-checkout", "-B", f"branch-{i}", str(wt), "main")
+            if first_wt is None:
+                first_wt = wt
+
+        result = _call("branch_for_worktree", str(repo), str(first_wt), timeout=30)
+        self.assertEqual(
+            result.returncode, 0, f"SIGPIPE regression: rc={result.returncode} stderr={result.stderr}"
+        )
+        self.assertEqual(result.stdout.strip(), "branch-0")
+
+
 if __name__ == "__main__":
     unittest.main()

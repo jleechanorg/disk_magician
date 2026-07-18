@@ -335,11 +335,20 @@ ledger_line() {
 
 branch_for_worktree() {
     local repo_path="$1" wt_path="$2"
+    # `|| true`: awk's own `exit` after a match closes its end of the pipe
+    # while `git worktree list --porcelain` may still be writing output for
+    # later worktrees (this function is called once per candidate against a
+    # registry that can have 300+ entries) -- git then receives SIGPIPE, and
+    # under this script's `set -o pipefail` the pipeline exits 141, tripping
+    # `set -e` and aborting the whole run partway through, non-deterministically
+    # (crash point depends on which worktree's awk match races git's buffering).
+    # awk has already printed the matched branch name before git is signaled,
+    # so the guard only suppresses the spurious failure status, not real output.
     git -C "$repo_path" worktree list --porcelain 2>/dev/null | awk -v p="$wt_path" '
         $1 == "worktree" { cur = $2 }
         cur == p && $1 == "branch" { sub(/^refs\/heads\//, "", $2); print $2; exit }
         cur == p && $1 == "detached" { print "detached"; exit }
-    '
+    ' || true
 }
 
 # ---------------------------------------------------------------------------
