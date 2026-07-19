@@ -530,6 +530,219 @@ PY
 [[ "$GDU_BACKEND_OUT" == "6144 ['/fake/gdu', '-x', '-k', '-s', '/fixture']" ]] && ok "installed GNU du backend is preferred and parsed as allocated KiB" \
   || bad "GNU du backend was not preferred or parsed correctly: $GDU_BACKEND_OUT"
 
+GDU_INVENTORY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+raw = "".join(
+    f"{kb}\t{path}\0"
+    for kb, path in [
+        (4 * gib, "/fixture/shard-a/one"),
+        (4 * gib, "/fixture/shard-a/two"),
+        (8 * gib, "/fixture/shard-a"),
+    ]
+)
+completed = subprocess.CompletedProcess(["/fake/gdu"], 0, stdout=raw, stderr="")
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed) as run:
+    result = m.run_gdu_inventory(
+        ["/fixture/shard-a"], 10, m.ConcurrencyTracker(), 10_000_000
+    )
+cmd = run.call_args.args[0]
+print(
+    run.call_count == 1,
+    cmd == ["/fake/gdu", "-x", "-k", "--null", "--", "/fixture/shard-a"],
+    "-s" not in cmd,
+    result["records"]["/fixture/shard-a"] == 8 * gib,
+    len(result["records"]) == 3,
+)
+PY
+)
+[[ "$GDU_INVENTORY_OUT" == "True True True True True" ]] && ok "GNU du inventory walks a shard once and retains postorder records" \
+  || bad "GNU du one-pass inventory contract failed: $GDU_INVENTORY_OUT"
+
+GDU_UNKNOWN_ERROR_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+completed = subprocess.CompletedProcess(
+    ["/fake/gdu"], 1, stdout="4\t/fixture/clean\0", stderr="gdu: unexpected diagnostic"
+)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed):
+    result = m.run_gdu_inventory(
+        ["/fixture/clean"], 10, m.ConcurrencyTracker(), 10_000_000
+    )
+print(result["usable"], bool(result["unknown_errors"]))
+PY
+)
+[[ "$GDU_UNKNOWN_ERROR_OUT" == "False True" ]] && ok "unknown GNU du diagnostics fail closed instead of accepting partial totals" \
+  || bad "unknown GNU du diagnostic entered the accepted inventory: $GDU_UNKNOWN_ERROR_OUT"
+
+GDU_INVENTORY_PARTITION_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+root = os.path.join(sys.argv[1], "gdu-inventory-partition")
+shard_a = os.path.join(root, "shard-a")
+one = os.path.join(shard_a, "one")
+two = os.path.join(shard_a, "two")
+shard_b = os.path.join(root, "shard-b")
+huge = os.path.join(root, "huge.bin")
+protected = os.path.join(root, "protected")
+for path in (one, two, shard_b, protected):
+    os.makedirs(path, exist_ok=True)
+for path in (os.path.join(one, "payload.bin"), os.path.join(two, "payload.bin"),
+             os.path.join(shard_b, "payload.bin"), huge):
+    with open(path, "wb") as f:
+        f.write(b"x")
+
+rows = [
+    (4 * gib, one),
+    (4 * gib, two),
+    (8 * gib, shard_a),
+    (3 * gib, shard_b),
+    (7 * gib, huge),
+    (1, protected),
+]
+raw = "".join(f"{kb}\t{path}\0" for kb, path in rows)
+stderr = f"gdu: cannot read directory '{protected}': Permission denied\n"
+completed = subprocess.CompletedProcess(["/fake/gdu"], 1, stdout=raw, stderr=stderr)
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=2, max_depth=6, max_nodes=10_000_000,
+    wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+)
+scanner = m.FrontierScanner(args)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed) as run:
+    error = scanner.run()
+
+commands = [call.args[0] for call in run.call_args_list]
+buckets = getattr(scanner, "inventory_buckets", [])
+bucket_paths = [item["path"] for item in buckets]
+oversize = scanner.oversize_files
+unfinished = scanner.frontier_unfinished
+measured_total = sum(scanner.measured.values())
+nonoverlap = not any(
+    left != right and (
+        left.startswith(right.rstrip(os.sep) + os.sep)
+        or right.startswith(left.rstrip(os.sep) + os.sep)
+    )
+    for left in bucket_paths for right in bucket_paths
+)
+print(
+    error is None,
+    len(commands) == 1,
+    set(commands[0][5:]) == {shard_a, shard_b, huge, protected},
+    all(item["measured_kb"] <= 5 * gib for item in buckets),
+    set(bucket_paths) == {one, two, shard_b},
+    oversize == [{"path": huge, "measured_kb": 7 * gib, "reason": "indivisible_file"}],
+    any(item.get("path") == protected and item.get("reason") == "inventory_permission_denied"
+        for item in unfinished),
+    all(not path.startswith(protected + os.sep) and path != protected for path in bucket_paths),
+    measured_total == 18 * gib,
+    sum(item["measured_kb"] for item in buckets) + sum(item["measured_kb"] for item in oversize)
+        == measured_total,
+    nonoverlap,
+)
+PY
+)
+[[ "$GDU_INVENTORY_PARTITION_OUT" == "True True True True True True True True True True True" ]] && ok "one-pass inventory yields a bounded, failure-isolated, exactly reconciled partition" \
+  || bad "one-pass inventory partition contract failed: $GDU_INVENTORY_PARTITION_OUT"
+
+GDU_DIRECT_SEGMENTS_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+root = os.path.join(sys.argv[1], "gdu-direct-segments")
+heavy = os.path.join(root, "direct-heavy")
+os.makedirs(heavy, exist_ok=True)
+raw = f"{12 * gib}\t{heavy}\0"
+completed = subprocess.CompletedProcess(["/fake/gdu"], 0, stdout=raw, stderr="")
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=100_000_000,
+    wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+)
+scanner = m.FrontierScanner(args)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed):
+    scanner.run()
+sizes = sorted(item["measured_kb"] for item in scanner.inventory_buckets)
+print(
+    sizes == [2 * gib, 5 * gib, 5 * gib],
+    all(item.get("kind") == "direct_allocation_segment" for item in scanner.inventory_buckets),
+    sum(sizes) == 12 * gib,
+    not scanner.oversize_files,
+)
+PY
+)
+[[ "$GDU_DIRECT_SEGMENTS_OUT" == "True True True True" ]] && ok "large direct-file allocation is split into honest <=5 GiB path segments" \
+  || bad "direct allocation stayed as an oversized hidden tail: $GDU_DIRECT_SEGMENTS_OUT"
+
+GDU_MISSING_ANCESTOR_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+root = os.path.join(sys.argv[1], "gdu-missing-ancestor")
+shard = os.path.join(root, "System")
+safe = os.path.join(shard, "Library", "AssetsV2")
+failed = os.path.join(shard, "Library", "Speech")
+os.makedirs(safe, exist_ok=True)
+raw = f"{4 * gib}\t{safe}\0"
+stderr = f"gdu: fts_read failed: {failed}: No such file or directory\n"
+completed = subprocess.CompletedProcess(["/fake/gdu"], 1, stdout=raw, stderr=stderr)
+args = SimpleNamespace(
+    root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=100_000_000,
+    wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
+    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+)
+scanner = m.FrontierScanner(args)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed):
+    scanner.run()
+print(
+    scanner.measured == {safe: 4 * gib},
+    scanner.inventory_buckets == [{"path": safe, "measured_kb": 4 * gib}],
+    any(item.get("path") == failed and item.get("reason") == "inventory_path_disappeared"
+        for item in scanner.frontier_unfinished),
+)
+PY
+)
+[[ "$GDU_MISSING_ANCESTOR_OUT" == "True True True" ]] && ok "missing tainted ancestor preserves clean descendant attribution" \
+  || bad "missing GNU du ancestor orphaned clean descendant rows: $GDU_MISSING_ANCESTOR_OUT"
+
 GDU_DUA_FALLBACK_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import subprocess
 import sys

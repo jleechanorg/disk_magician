@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""disk_frontier_scan.py — exhaustive top-down disk coverage via frontier-BFS.
+"""disk_frontier_scan.py — exhaustive top-down disk coverage.
 
 Standalone scanner (not yet wired into disk_snapshot.sh — see
 roadmap/2026-07-11-total-coverage-snapshot-v2.md, implementation-order step 3).
 
 Design contract (roadmap doc, "post-critic" section):
+  - With GNU du installed and a nonzero granularity, all level-1 logical
+    shards are scanned by ONE NUL-delimited postorder inventory process.
+    This avoids repeated subtree walks and preserves process-global hardlink
+    deduplication across shards.
+  - Localized permission/TCC failures taint their ancestors; partial ancestor
+    totals are rejected while clean siblings remain attributable. Unknown
+    diagnostics fail closed to the legacy frontier scanner.
   - Level-1 enumeration under --root is exhaustive and O(1) (single readdir),
     so nothing can be silently absent the way an allowlist can miss a tree.
   - Any subtree that doesn't finish `du` within its timeout tier is
@@ -17,7 +24,7 @@ Design contract (roadmap doc, "post-critic" section):
     and a realpath dedup trie prevents double-counting when two different
     top-level paths resolve to the same real directory (e.g. /etc and
     /private/etc both existing as children of the volume root).
-  - A single global, dynamically-throttled worker pool bounds concurrent
+  - In the compatibility fallback, a single global, dynamically-throttled worker pool bounds concurrent
     `du` subprocesses across ALL BFS levels — subdivision enqueues more
     tasks, it never spins up more concurrent workers.
 """
@@ -45,7 +52,7 @@ DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
 DUA_TIMEOUT_CAP_SECONDS = 1
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_DEPTH = 6
-DEFAULT_MAX_NODES = 10_000_000
+DEFAULT_MAX_NODES = 100_000_000
 DEFAULT_WALL_CLOCK_CAP = 480
 SHALLOW_ENUMERATION_MAX_DEPTH = 2
 LOW_FREE_GB_THRESHOLD = 15
@@ -57,6 +64,14 @@ DUA_CMD = shutil.which("dua")
 _GDU_OVERRIDE = os.environ.get("DISK_MAGICIAN_GDU_CMD")
 GDU_CMD = shutil.which("gdu") if _GDU_OVERRIDE is None else (_GDU_OVERRIDE or None)
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+GDU_LOCALIZED_ERROR_RE = re.compile(
+    r"^gdu: .*? '(.+)': (Permission denied|Operation not permitted|"
+    r"No such file or directory|Input/output error|Interrupted system call)$"
+)
+GDU_FTS_ERROR_RE = re.compile(
+    r"^gdu: fts_read failed: (.+): (No such file or directory|"
+    r"Permission denied|Operation not permitted|Input/output error|Interrupted system call)$"
+)
 
 
 class AdjustableSemaphore:
@@ -222,6 +237,111 @@ def run_du(path, timeout_s, tracker, is_symlink=False):
         return int(parts[0])
     except ValueError:
         return None
+
+
+def run_gdu_inventory(paths, timeout_s, tracker, max_records):
+    """Walk a non-overlapping path manifest once with GNU du.
+
+    One process is important: GNU du's hardlink deduplication is process-local,
+    so totals from independently scanned shards cannot safely be summed.
+    NUL records preserve whitespace and newlines in filesystem paths.
+    """
+    cmd = [GDU_CMD, "-x", "-k", "--null", "--", *paths]
+    tracker.enter()
+    try:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(0.001, timeout_s),
+                env={**os.environ, "LC_ALL": "C"},
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "usable": False,
+                "records": {},
+                "error_paths": [],
+                "unknown_errors": ["inventory_timeout"],
+                "returncode": None,
+                "timed_out": True,
+                "stderr": exc.stderr or "",
+            }
+        except OSError as exc:
+            return {
+                "usable": False,
+                "records": {},
+                "error_paths": [],
+                "unknown_errors": [f"inventory_exec_errno_{exc.errno}"],
+                "returncode": None,
+                "timed_out": False,
+                "stderr": str(exc),
+            }
+    finally:
+        tracker.exit()
+
+    records = {}
+    malformed = False
+    record_ceiling_exceeded = False
+    chunks = proc.stdout.split("\0")
+    if chunks and chunks[-1]:
+        malformed = True
+    for raw in chunks[:-1] if chunks else []:
+        if not raw:
+            continue
+        try:
+            size_text, path = raw.split("\t", 1)
+            kb = int(size_text)
+        except (ValueError, TypeError):
+            malformed = True
+            break
+        if kb < 0 or not path:
+            malformed = True
+            break
+        records[os.path.normpath(path)] = kb
+        if len(records) > max_records:
+            record_ceiling_exceeded = True
+            break
+
+    error_paths = []
+    unknown_errors = []
+    reason_by_message = {
+        "Permission denied": "inventory_permission_denied",
+        "Operation not permitted": "inventory_permission_denied",
+        "No such file or directory": "inventory_path_disappeared",
+        "Input/output error": "inventory_io_error",
+        "Interrupted system call": "inventory_interrupted_system_call",
+    }
+    for line in proc.stderr.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = GDU_LOCALIZED_ERROR_RE.match(line) or GDU_FTS_ERROR_RE.match(line)
+        if match:
+            error_paths.append(
+                {
+                    "path": os.path.normpath(match.group(1)),
+                    "reason": reason_by_message[match.group(2)],
+                }
+            )
+        else:
+            unknown_errors.append(line)
+
+    if malformed:
+        unknown_errors.append("inventory_malformed_output")
+    if record_ceiling_exceeded:
+        unknown_errors.append("inventory_record_ceiling_exceeded")
+    if proc.returncode != 0 and not error_paths and not unknown_errors:
+        unknown_errors.append(f"inventory_exit_{proc.returncode}_without_diagnostic")
+    return {
+        "usable": not malformed and not unknown_errors,
+        "records": records,
+        "error_paths": error_paths,
+        "unknown_errors": unknown_errors,
+        "returncode": proc.returncode,
+        "timed_out": False,
+        "stderr": proc.stderr,
+    }
 
 
 def list_children(path):
@@ -516,6 +636,8 @@ class FrontierScanner:
             SHALLOW_ENUMERATION_MAX_DEPTH if args.root == DEFAULT_ROOT else 0,
         )
         self.oversize_files = []
+        self.inventory_buckets = None
+        self.inventory_backend = None
         self.deduped = []
         self.frontier_unfinished = []
         self.warnings = []
@@ -526,6 +648,202 @@ class FrontierScanner:
         self.level1_paths = []
         self.skip_sibling_volumes = args.no_sibling_volumes
         self.skip_purgeable = args.no_purgeable
+
+    def _apply_inventory_partition(self, records, error_items, manifest):
+        """Build one safe byte ledger and one <=granularity display frontier."""
+        children = collections.defaultdict(set)
+        for path in records:
+            current = path
+            while current != self.root:
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                children[parent].add(current)
+                if parent in records:
+                    break
+                current = parent
+        children = {
+            parent: sorted(paths, key=str.casefold) for parent, paths in children.items()
+        }
+
+        error_roots = [item["path"] for item in error_items]
+        tainted_ancestors = set()
+        root_prefix = self.root.rstrip(os.sep) + os.sep
+        for error_path in error_roots:
+            current = error_path
+            while current == self.root or current.startswith(root_prefix):
+                tainted_ancestors.add(current)
+                if current == self.root:
+                    break
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
+
+        def is_tainted(path):
+            if path in tainted_ancestors:
+                return True
+            prefix = path.rstrip(os.sep) + os.sep
+            return any(path == failed or path.startswith(failed.rstrip(os.sep) + os.sep)
+                       or failed.startswith(prefix) for failed in error_roots)
+
+        def accept_safe_ledger(path):
+            if path not in records or is_tainted(path):
+                for child in children.get(path, []):
+                    accept_safe_ledger(child)
+                return
+            self.measured[path] = records[path]
+
+        for path in manifest:
+            accept_safe_ledger(path)
+
+        buckets = []
+
+        def emit_direct_allocation(path, direct_kb):
+            """Explain directory-local allocation without emitting a >5 GiB row.
+
+            Directory-only gdu output keeps the inventory small. Unique-link
+            direct files above the ceiling can still be named exactly; the
+            remaining direct files plus directory metadata are split into
+            bounded, explicitly synthetic path-local segments.
+            """
+            remaining_kb = max(0, direct_kb)
+            try:
+                direct_files = []
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        file_kb = (st.st_blocks * 512 + 1023) // 1024
+                        if st.st_nlink == 1 and file_kb > self.granularity_kb:
+                            direct_files.append((entry.path, file_kb))
+                for file_path, file_kb in sorted(direct_files):
+                    if file_kb > remaining_kb:
+                        continue
+                    self.oversize_files.append(
+                        {
+                            "path": file_path,
+                            "measured_kb": file_kb,
+                            "reason": "indivisible_file",
+                        }
+                    )
+                    remaining_kb -= file_kb
+            except OSError:
+                pass
+
+            if remaining_kb <= 0:
+                return
+            parts = (remaining_kb + self.granularity_kb - 1) // self.granularity_kb
+            for index in range(parts):
+                segment_kb = min(self.granularity_kb, remaining_kb)
+                suffix = "" if parts == 1 else f" {index + 1}/{parts}"
+                buckets.append(
+                    {
+                        "path": f"{path} [direct files + directory metadata{suffix}]",
+                        "source_path": path,
+                        "kind": "direct_allocation_segment",
+                        "measured_kb": segment_kb,
+                    }
+                )
+                remaining_kb -= segment_kb
+
+        def select_display(path):
+            kb = records[path]
+            if kb <= self.granularity_kb:
+                if kb > 0:
+                    buckets.append({"path": path, "measured_kb": kb})
+                return
+            try:
+                is_directory = stat.S_ISDIR(os.lstat(path).st_mode)
+            except OSError:
+                is_directory = bool(children.get(path))
+            if is_directory:
+                child_paths = [
+                    child for child in children.get(path, []) if not is_tainted(child)
+                ]
+                for child in child_paths:
+                    select_display(child)
+                child_total_kb = sum(records[child] for child in child_paths)
+                emit_direct_allocation(path, max(0, kb - child_total_kb))
+                return
+            self.oversize_files.append(
+                {"path": path, "measured_kb": kb, "reason": "indivisible_file"}
+            )
+
+        for path in self.measured:
+            select_display(path)
+        buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
+        self.inventory_buckets = buckets
+
+    def run_one_pass_inventory(self, level1):
+        """Use one GNU du process for all level-1 logical shards.
+
+        Returns True when the authoritative inventory was usable. Unknown
+        diagnostics fail closed and leave the existing frontier scanner as
+        the compatibility fallback.
+        """
+        manifest_items = []
+        pending_unfinished = []
+        for path, is_symlink in sorted(
+            level1, key=lambda item: frontier_sort_key(self.root, (item[0], 1, item[1]))
+        ):
+            try:
+                st = os.lstat(path)
+            except OSError as exc:
+                pending_unfinished.append(
+                    {"path": path, "depth": 1, "reason": "lstat_failed", "errno": exc.errno}
+                )
+                continue
+            if not is_symlink and self.root_dev is not None and st.st_dev != self.root_dev:
+                pending_unfinished.append(
+                    {"path": path, "depth": 1, "reason": "cross_device_boundary"}
+                )
+                continue
+            manifest_items.append(path)
+
+        if not manifest_items:
+            self.frontier_unfinished.extend(pending_unfinished)
+            self.inventory_buckets = []
+            self.inventory_backend = "gdu_one_pass"
+            return True
+
+        result = run_gdu_inventory(
+            manifest_items,
+            max(0.001, self.remaining_budget()),
+            self.tracker,
+            self.max_nodes,
+        )
+        if not result["usable"]:
+            self.warnings.append(
+                "one-pass gdu inventory rejected; falling back to frontier: "
+                + "; ".join(result["unknown_errors"][:5])
+            )
+            return False
+
+        self.nodes_processed = len(result["records"])
+        self.frontier_unfinished.extend(pending_unfinished)
+        for item in result["error_paths"]:
+            try:
+                rel = os.path.relpath(item["path"], self.root)
+                depth = 0 if rel == os.curdir else len(rel.split(os.sep))
+            except ValueError:
+                depth = None
+            self.frontier_unfinished.append({**item, "depth": depth})
+        if result["returncode"] != 0:
+            self.warnings.append(
+                f"one-pass gdu returned {result['returncode']}; localized inaccessible paths "
+                "were excluded from accepted ancestor totals"
+            )
+        self._apply_inventory_partition(
+            result["records"], result["error_paths"], manifest_items
+        )
+        self.observed = result["records"]
+        self.inventory_backend = "gdu_one_pass"
+        return True
 
     def elapsed(self):
         return time.time() - self.start_time
@@ -766,6 +1084,9 @@ class FrontierScanner:
             }
         self.level1_paths = [path for path, _ in level1]
 
+        if GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
+            return None
+
         frontier = []
         sequence = 0
 
@@ -952,8 +1273,11 @@ def build_report(
     status_counts = collections.Counter(item["status"] for item in top_level_ledger)
 
     granularity_kb = int(args.granularity_gib * 1024 * 1024)
-    granularity_buckets = build_granularity_buckets(
-        scanner.measured, scanner.root, granularity_kb
+    inventory_buckets = getattr(scanner, "inventory_buckets", None)
+    granularity_buckets = (
+        inventory_buckets
+        if inventory_buckets is not None
+        else build_granularity_buckets(scanner.measured, scanner.root, granularity_kb)
     )
     granularity_bucket_total_kb = sum(
         item["measured_kb"] for item in granularity_buckets
@@ -1027,6 +1351,7 @@ def build_report(
             "granularity_gib": args.granularity_gib,
             "max_bucket_gib": args.granularity_gib,
             "shallow_enumeration_depth": getattr(scanner, "shallow_enumeration_depth", 0),
+            "scan_backend": getattr(scanner, "inventory_backend", None) or "frontier_per_node",
         },
         "disk_total_kb": disk_stats["total_kb"],
         "disk_used_kb": disk_stats["used_kb"],
