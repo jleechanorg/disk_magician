@@ -33,7 +33,9 @@ elif command -v python3 >/dev/null 2>&1; then
   CONFIG="${DISK_MAGICIAN_CONFIG:-$REPO_ROOT/config.json}"
   [[ -f "$CONFIG" ]] || CONFIG="$REPO_ROOT/config.json.template"
   export CONFIG
-  mapfile -t REPOS < <(python3 - <<'PYCFG'
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] && REPOS+=("$repo")
+  done < <(python3 - <<'PYCFG'
 import json, os, sys
 from pathlib import Path
 cfg = Path(os.environ.get("CONFIG", ""))

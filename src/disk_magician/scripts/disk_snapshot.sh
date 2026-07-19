@@ -178,12 +178,13 @@ if [[ "$DISCOVER" == true ]]; then
     echo ""
   fi
 
-  # Extract configured paths
-  declare -A MONITORED_PATHS=()
+  # Extract configured paths. Temp-file sets keep discover mode compatible
+  # with the stock Bash 3.2 shipped by macOS.
+  MONITORED_PATHS_FILE=$(mktemp -t disk_magician_monitored.XXXXXX)
   while IFS=$'\t' read -r raw_path; do
     path="${raw_path/#\~/$HOME}"
     path=$(eval echo "$path")
-    MONITORED_PATHS["$path"]=1
+    printf '%s\n' "$path" >> "$MONITORED_PATHS_FILE"
   done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -201,7 +202,7 @@ PY
     # shellcheck disable=SC2206
     expanded=( $(eval echo "$pattern") )
     for p in "${expanded[@]}"; do
-      [[ -e "$p" ]] && MONITORED_PATHS["$p"]=1
+      [[ -e "$p" ]] && printf '%s\n' "$p" >> "$MONITORED_PATHS_FILE"
     done
   done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
@@ -237,14 +238,9 @@ PY
   # entirely. This is what turns repeat `discover` runs from "re-walk
   # everything every time" (the thing that was timing out) into "only
   # re-walk what actually changed."
-  declare -A CACHE_MTIME=()
-  declare -A CACHE_SIZE=()
+  CACHE_READ_FILE=$(mktemp -t disk_magician_cache_read.XXXXXX)
   if [[ -f "$CACHE_FILE" ]]; then
-    while IFS=$'\t' read -r c_path c_mtime c_size; do
-      [[ -z "$c_path" ]] && continue
-      CACHE_MTIME["$c_path"]="$c_mtime"
-      CACHE_SIZE["$c_path"]="$c_size"
-    done < <(python3 - "$CACHE_FILE" <<'PY'
+    python3 - "$CACHE_FILE" > "$CACHE_READ_FILE" <<'PY'
 import json, sys
 try:
     data = json.load(open(sys.argv[1]))
@@ -253,24 +249,33 @@ except Exception:
 for path, v in (data or {}).items():
     print(f"{path}\t{v.get('mtime', 0)}\t{v.get('size_kb', 0)}")
 PY
-)
   fi
 
   DISCOVER_TEMP_FILE=$(mktemp -t disk_magician_discover.XXXXXX)
-  _cleanup_discover_temp() { rm -f "$DISCOVER_TEMP_FILE"; }
+  CACHE_DUMP_FILE=$(mktemp -t disk_magician_cachedump.XXXXXX)
+  _cleanup_discover_temp() {
+    rm -f "$DISCOVER_TEMP_FILE" "$MONITORED_PATHS_FILE" \
+      "$CACHE_READ_FILE" "$CACHE_DUMP_FILE"
+  }
   trap _cleanup_discover_temp EXIT
 
   cache_hits=0
   cache_misses=0
 
-  # Process substitution (not a pipe) so this loop runs in the CURRENT shell —
-  # cache_hits/cache_misses and the CACHE_* associative arrays must survive
-  # past the loop to be written back below.
+  # Process substitution (not a pipe) keeps cache hit/miss counters in this
+  # shell. Each refreshed row is also the complete replacement cache.
   while read -r dir; do
     mtime=$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || echo 0)
-    cached_mtime="${CACHE_MTIME[$dir]:-}"
+    cached_mtime=""
+    cached_size=""
+    while IFS=$'\t' read -r cached_path candidate_mtime candidate_size; do
+      [[ "$cached_path" == "$dir" ]] || continue
+      cached_mtime="$candidate_mtime"
+      cached_size="$candidate_size"
+      break
+    done < "$CACHE_READ_FILE"
     if [[ -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
-      kb="${CACHE_SIZE[$dir]:-0}"
+      kb="${cached_size:-0}"
       cache_hits=$(( cache_hits + 1 ))
     else
       kb=""
@@ -282,10 +287,9 @@ PY
       kb="${kb:-0}"
       cache_misses=$(( cache_misses + 1 ))
     fi
-    CACHE_MTIME["$dir"]="$mtime"
-    CACHE_SIZE["$dir"]="$kb"
+    printf "%s\t%s\t%s\n" "$dir" "$mtime" "$kb" >> "$CACHE_DUMP_FILE"
     tracked=0
-    [[ -n "${MONITORED_PATHS[$dir]:-}" ]] && tracked=1
+    grep -Fqx -- "$dir" "$MONITORED_PATHS_FILE" && tracked=1
     printf "%s\t%s\t%s\n" "$dir" "$kb" "$tracked" >> "$DISCOVER_TEMP_FILE"
   done < <(printf '%s\n' "${candidates[@]}")
 
@@ -295,10 +299,6 @@ PY
   # already reads its PROGRAM from stdin via the heredoc below, so a pipe into
   # the same invocation would silently be discarded (heredoc wins the fd, the
   # piped data is never seen). A temp file + argv path sidesteps that entirely.
-  CACHE_DUMP_FILE=$(mktemp -t disk_magician_cachedump.XXXXXX)
-  for p in "${!CACHE_MTIME[@]}"; do
-    printf "%s\t%s\t%s\n" "$p" "${CACHE_MTIME[$p]}" "${CACHE_SIZE[$p]}"
-  done > "$CACHE_DUMP_FILE"
   python3 - "$CACHE_DUMP_FILE" "$CACHE_FILE" <<'PY'
 import json, sys
 data = {}
@@ -314,7 +314,6 @@ with open(sys.argv[1]) as f:
             continue
 json.dump(data, open(sys.argv[2], "w"), indent=2)
 PY
-  rm -f "$CACHE_DUMP_FILE"
 
   # Build the persisted findings file + stdout output from the same data, so
   # `discover`'s findings stop "going nowhere" — every run leaves a structured

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 
 
@@ -15,6 +16,11 @@ REQUIRED_FIELDS = (
 )
 CLAIM_CLASSES = {"tooling", "documentation-only", "production"}
 VERDICTS = {"PASS", "PARTIAL", "INSUFFICIENT", "FAIL"}
+PLACEHOLDER_VALUES = {"n/a", "na", "none", "tbd", "todo", "trust me"}
+GIST_ARTIFACT_URL = re.compile(
+    r"https://gist\.github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[0-9a-fA-F]{16,}"
+    r"(?:[/?#].*)?"
+)
 
 
 def evidence_lines(markdown: str) -> list[str]:
@@ -60,6 +66,10 @@ def validate(markdown: str) -> None:
     if missing:
         raise ValueError(f"missing evidence field(s): {', '.join(missing)}")
 
+    for label in ("Commands and results", "What this proves", "What this does not prove"):
+        if fields[label].strip().casefold().rstrip(".") in PLACEHOLDER_VALUES:
+            raise ValueError(f"placeholder evidence field: {label}")
+
     claim_class = fields["Claim class"].casefold()
     if claim_class not in CLAIM_CLASSES:
         raise ValueError(f"unsupported Claim class: {fields['Claim class']}")
@@ -74,8 +84,10 @@ def validate(markdown: str) -> None:
         if verdict != "PASS":
             raise ValueError("production evidence requires Verdict PASS")
         evidence_url = fields.get("Evidence URL", "")
-        if not evidence_url.startswith("https://gist.github.com/"):
-            raise ValueError("production evidence requires a gist.github.com Evidence URL")
+        if not GIST_ARTIFACT_URL.fullmatch(evidence_url):
+            raise ValueError(
+                "production evidence requires a gist.github.com owner and artifact ID"
+            )
 
 
 def main() -> int:

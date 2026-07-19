@@ -132,16 +132,10 @@ is_likely_worktree() {
 # status, worktree repair) — i.e. actual user activity — so its mtime is
 # a much cleaner signal of "when was this worktree last used?"
 #
-# Result is cached in WT_AGE_CACHE so a worktree that contains BOTH a
-# `venv` and a `.venv` reports the SAME age for both. Falls back to the
-# parent dir mtime if the .git file is missing (shouldn't happen for
-# anything that passed is_likely_worktree, but defense-in-depth).
+# Falls back to the parent dir mtime if the .git file is missing (shouldn't
+# happen for anything that passed is_likely_worktree, but defense-in-depth).
 worktree_age_days() {
   local p="$1"
-  if [[ -n "${WT_AGE_CACHE[$p]+set}" ]]; then
-    echo "${WT_AGE_CACHE[$p]}"
-    return
-  fi
   local mtime_epoch
   # Prefer the .git file mtime; fall back to parent dir mtime.
   mtime_epoch=$(stat -f '%m' "$p/.git" 2>/dev/null || true)
@@ -151,8 +145,7 @@ worktree_age_days() {
   [[ -n "$mtime_epoch" ]] || { echo ""; return; }
   local now
   now=$(date +%s)
-  WT_AGE_CACHE[$p]=$(( (now - mtime_epoch) / 86400 ))
-  echo "${WT_AGE_CACHE[$p]}"
+  echo $(( (now - mtime_epoch) / 86400 ))
 }
 
 # Detects venv dirs that are already centralized (symlinks) or are broken
@@ -199,10 +192,6 @@ log ""
 # Candidate venv dirnames. Covers both `venv` and `.venv` (the dominant
 # conventions across the 156 worktrees in ~/projects).
 VENV_NAMES=(venv .venv)
-
-# Cache of worktree mtime -> age in days, keyed by parent path. Ensures a
-# worktree with both `venv` and `.venv` reports the same age for both.
-declare -A WT_AGE_CACHE
 
 # Per-venv safety: we only strip a venv whose *parent* is a worktree (not
 # a base repo) AND whose parent is older than MIN_AGE_DAYS. The find is

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import unittest
@@ -95,8 +96,51 @@ class EvidenceGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_rejects_placeholder_evidence_fields(self) -> None:
+        result = validate(
+            """## Evidence
+**Claim class:** production
+**Verdict:** PASS
+**Commands and results:** N/A
+**Evidence URL:** https://gist.github.com/jleechan2015/0123456789abcdef
+**What this proves:** trust me
+**What this does not prove:** N/A
+"""
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("placeholder", result.stderr.lower())
+
+    def test_rejects_gist_url_without_owner_and_artifact_id(self) -> None:
+        result = validate(
+            """## Evidence
+**Claim class:** production
+**Verdict:** PASS
+**Commands and results:** `bash tests/test_cleanup_safety.sh` — passed.
+**Evidence URL:** https://gist.github.com/
+**What this proves:** The real operator call path completed at this commit.
+**What this does not prove:** External reviewers will approve future changes.
+"""
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner", result.stderr.lower())
+
 
 class WorkflowContractTest(unittest.TestCase):
+    def test_runtime_shell_scripts_avoid_known_bash4_only_primitives(self) -> None:
+        violations = []
+        for script in (ROOT / "scripts").glob("*.sh"):
+            for line_number, line in enumerate(
+                script.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                code = line.split("#", 1)[0]
+                if re.search(r"\b(?:mapfile|readarray)\b|\bdeclare\s+-A\b", code):
+                    violations.append(f"{script.name}:{line_number}")
+        self.assertEqual(
+            violations,
+            [],
+            "runtime scripts must run under macOS stock Bash 3.2",
+        )
+
     def test_ci_fetches_history_for_pinned_regression_proofs(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
