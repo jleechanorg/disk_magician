@@ -186,6 +186,57 @@ components are the `sessions` table (2.019 GiB), trigram FTS data (1.946 GiB),
 `sessions.system_prompt` values alone total 1.947 GiB across 14,299 sessions.
 Bead `jleechan-m8um` tracks bounded retention and search-storage design.
 
+## Launchd-context supplement: Downloads is now attributed
+
+The existing `com.jleechanorg.disk-magician-frontier-nightly` launchd job was
+run read-only to obtain the storage access that this interactive shell lacks.
+It finished normally (`last exit code = 0`) at `2026-07-19T09:36:36Z` after
+2,405.7 seconds and 229,425 processed nodes. The raw state file is
+`/Users/jleechan/.disk_magician_state/frontier_last.json`; its SHA-256 is
+`c8084d01166fce0d09fbb999adbaee333626e02ae2ddb47c28d5029540dfaa53`.
+A compact durable extraction is
+`roadmap/evidence/frontier_launchd_supplement_20260719.json`.
+
+This independently timed equation balances:
+
+```text
+435.205414 GiB measured
++  0.000000 GiB purgeable estimate (unavailable)
++369.785366 GiB protected/APFS residual
+=804.990780 GiB Data used
+```
+
+Coverage is 54.063404%. This is lower than the exact one-pass scan's 66.977354%
+because the launchd job stopped subdivision at depth six, but it successfully
+read `~/Downloads`. The two runs are not atomic and their measured totals must
+not be added together.
+
+`~/Downloads` accounts for **50.025951 GiB** in this scan. Its six >=5 GiB
+evidence bundles are:
+
+| GiB | Path |
+|---:|---|
+| 9.083351 | `~/Downloads/dk2d_evidence_sidekick10_v2` |
+| 7.809769 | `~/Downloads/dk2d_evidence_sidekick11` |
+| 6.626842 | `~/Downloads/dk2d_evidence_sidekick13` |
+| 6.519108 | `~/Downloads/dk2d_evidence_sidekick_wc4ic6_validation_r2` |
+| 6.267315 | `~/Downloads/dk2d_evidence_sidekick_wc4ic6_validation` |
+| 5.125332 | `~/Downloads/dk2d_evidence_sidekick12` |
+
+Together these six directories are 41.431717 GiB. The remaining Downloads
+contents total 8.594234 GiB, including a 4.579475 GiB `sidekick14` bundle and a
+1.583611 GiB `final_gate_v4` bundle. These paths explain the previously
+unattributed Downloads growth; they are review candidates, not automatically
+safe deletions.
+
+The launchd output also exposed a reporting defect: its invocation omitted
+`--granularity-gib 5`, so the scanner configuration used `0.0`, emitted zero
+`granularity_buckets`, and placed all 435.205414 measured GiB into the tail even
+though nine measured entries exceeded 5 GiB. Bead `jleechan-e8an` tracks the
+launchd/default fix. Therefore this supplement is valid for the exact measured
+paths and equation above, but it does not supersede the one-pass report's
+<=5 GiB bucket ledger.
+
 ## APFS allocation-semantics probes
 
 ### Native allocated versus apparent namespace size

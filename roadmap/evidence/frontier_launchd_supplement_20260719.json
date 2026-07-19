@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "source": "/Users/jleechan/.disk_magician_state/frontier_last.json",
+  "source_sha256": "c8084d01166fce0d09fbb999adbaee333626e02ae2ddb47c28d5029540dfaa53",
+  "captured_at": "2026-07-19T09:36:36Z",
+  "elapsed_s": 2405.7,
+  "nodes_processed": 229425,
+  "disk_used_kb": 844094012,
+  "measured_total_kb": 456345952,
+  "purgeable_kb": 0,
+  "residual_kb": 387748060,
+  "coverage_pct": 54.063404,
+  "downloads_total_kb": 52456012,
+  "downloads_gt_5gib": [
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick10_v2", "size_kb": 9524584},
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick11", "size_kb": 8189136},
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick13", "size_kb": 6948748},
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick_wc4ic6_validation_r2", "size_kb": 6835780},
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick_wc4ic6_validation", "size_kb": 6571756},
+    {"path": "/System/Volumes/Data/Users/jleechan/Downloads/dk2d_evidence_sidekick12", "size_kb": 5374300}
+  ],
+  "limits": {
+    "permission_denied_or_tcc_count": 62,
+    "max_depth_reached_count": 131,
+    "frontier_unfinished_count": 216,
+    "time_budget_exhausted_count": 0,
+    "node_budget_exhausted_count": 0
+  },
+  "reporting_defect": {
+    "bead": "jleechan-e8an",
+    "granularity_gib": 0.0,
+    "granularity_bucket_count": 0,
+    "measured_entries_at_least_5gib": 9
+  }
+}
