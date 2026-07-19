@@ -334,6 +334,16 @@ else
   fi
 fi
 
+DEFAULT_BUDGET_CAPTURE="$WORK/frontier-args-default-budget.txt"
+HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$DEFAULT_BUDGET_CAPTURE" \
+  "$TREE/scripts/disk_diagnostic.sh" >/dev/null 2>&1
+default_budget=$(awk '/^--wall-clock-cap$/{getline; print; exit}' "$DEFAULT_BUDGET_CAPTURE" 2>/dev/null)
+if [[ "$default_budget" == "900" ]]; then
+  ok "default whole-volume deadline covers empirically observed >480s scans"
+else
+  bad "default whole-volume deadline is '$default_budget' (expected 900)"
+fi
+
 if ! grep -q '^--root$' "$FRONTIER_ARGS_CAPTURE"; then
   ok "diagnostic leaves scanner root at its own default when no override is set"
 else
