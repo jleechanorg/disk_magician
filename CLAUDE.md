@@ -61,3 +61,21 @@ production ran v1).
 `roadmap/2026-07-11-total-coverage-snapshot-v2.md` — frontier-BFS coverage
 architecture, critic findings, implementation order. Beads track remaining
 work (`br search disk`).
+
+## Pull-request gates
+
+- `.github/workflows/ci.yml` runs the maintained package-sync, shell, and
+  Python suites on macOS. `.github/workflows/evidence-gate.yml` enforces the
+  deterministic evidence fields supplied by the pull-request template.
+- CodeRabbit and Cursor Bugbot are external GitHub Apps. Repository workflows
+  may report their results but cannot create or impersonate their reviews.
+- Canonical 7-green Gate 7 is currently unavailable: the user-scope
+  `skeptic-agent` skill marks the verdict system deleted as of 2026-07-09 and
+  explicitly forbids dispatching or waiting for verdicts. Do not add a caller
+  for the stale reusable skeptic workflows that remain in agent-orchestrator.
+- Therefore CI and Evidence Gate success do not imply 7-green. Until the
+  governing policy is updated or a replacement reviewer is explicitly
+  commissioned, report Gate 7 as a structural blocker and do not merge under a
+  7-green claim. Branch protection/rulesets are GitHub repository settings,
+  not files; configure required checks only after their workflows exist on
+  `main`.
