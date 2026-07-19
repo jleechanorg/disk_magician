@@ -293,6 +293,7 @@ G3_BIN="$TMP_ROOT/g3-bin"
 mkdir -p "$G3_PRIVATE_TMP" "$G3_TMP"
 make_find_shim "$G3_BIN" "$G3_PRIVATE_TMP" "$G3_TMP"
 make_large_dir "$G3_PRIVATE_TMP/worldarchitect.ai"
+mkdir -p "$G3_PRIVATE_TMP/worldarchitect.ai/.git"
 set_old_mtime "$G3_PRIVATE_TMP/worldarchitect.ai"
 
 G3_OUT="$TMP_ROOT/g3.out"

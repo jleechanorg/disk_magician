@@ -145,6 +145,18 @@ is_protected_root() {
   return 1
 }
 
+# is_protected_tmp_path <path> — true for a configured protected root and
+# everything below it, regardless of which cleanup class discovered it first.
+is_protected_tmp_path() {
+  local path="$1" root
+  for root in "${PROTECTED_TMP_ROOTS[@]}"; do
+    case "/$path/" in
+      *"/$root/"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # has_recent_activity <dir> <hours> — true if any file/dir under <dir> has an
 # mtime within the last <hours>. Fails CLOSED: any error reading the tree
 # (permission denied, vanished path, etc.) is treated as "active" so the
@@ -289,6 +301,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   # 1. Any directory containing a .git folder and older than GIT_CLONE_MIN
   while IFS= read -r -d '' subdir; do
     [[ -d "$subdir/.git" ]] || continue
+    if is_protected_tmp_path "$subdir"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $subdir"
+      continue
+    fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
@@ -317,6 +333,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
   # 3. cli_validation_gemini_* dirs older than CLI_VALIDATION_MIN
   while IFS= read -r -d '' d; do
+    if is_protected_tmp_path "$d"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+      continue
+    fi
     kb=$(remove_path "$d")
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -334,6 +354,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   while IFS= read -r -d '' subdir; do
     # .git must be a regular file (worktree pointer), not a directory
     [[ -f "$subdir/.git" ]] || continue
+    if is_protected_tmp_path "$subdir"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $subdir"
+      continue
+    fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
