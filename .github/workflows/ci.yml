@@ -41,7 +41,7 @@ jobs:
           while IFS= read -r -d '' candidate; do
             case "$(head -n 1 "$candidate")" in
               *bash|*sh)
-                bash -n "$candidate"
+                /bin/bash -n "$candidate"
                 shellcheck --severity=error --external-sources "$candidate"
                 ;;
             esac
@@ -55,6 +55,6 @@ jobs:
           set -euo pipefail
           for test_file in tests/test_*.sh; do
             echo "::group::$test_file"
-            timeout 300 bash "$test_file"
+            timeout 300 /bin/bash "$test_file"
             echo "::endgroup::"
           done

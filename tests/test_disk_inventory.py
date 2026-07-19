@@ -250,7 +250,8 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertEqual({entry["name"] for entry in entries}, {"lane-a", "lane-b"})
         self.assertTrue(any(a["artifact_type"] == "venv" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
         self.assertTrue(any(a["artifact_type"] == "node_modules" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
-        self.assertTrue(entries[0]["ao_metadata_references"])
+        by_name = {entry["name"]: entry for entry in entries}
+        self.assertTrue(by_name["lane-a"]["ao_metadata_references"])
         self.assertTrue(result["ao_attribution_complete"])
         self.assertIn("captured_at", result)
         self.assertEqual(result["history"]["status"], "baseline_only")
@@ -364,22 +365,32 @@ class DiskInventoryTest(unittest.TestCase):
         cleanup = ROOT / "scripts" / "cleanup_dev_caches.sh"
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            opencode_entry = home / ".local" / "share" / "opencode" / "repos" / "old-entry"
+            cursor_versions = home / ".local" / "share" / "cursor-agent" / "versions"
             cache = home / "Library" / "Caches" / "go-build"
             old_entry = cache / "old-entry"
             recent_entry = cache / "recent-entry"
+            opencode_entry.mkdir(parents=True)
+            for version in ("v1", "v2", "v3"):
+                (cursor_versions / version).mkdir(parents=True)
             old_entry.mkdir(parents=True)
             recent_entry.mkdir()
+            (opencode_entry / "payload").write_text("old", encoding="utf-8")
             (old_entry / "payload").write_text("old", encoding="utf-8")
             (recent_entry / "payload").write_text("recent", encoding="utf-8")
+            os.utime(opencode_entry / "payload", (old, old))
+            os.utime(opencode_entry, (old, old))
             os.utime(old_entry / "payload", (old, old))
             os.utime(old_entry, (old, old))
             completed = subprocess.run(
-                ["bash", str(cleanup), "--dry-run"],
+                ["/bin/bash", str(cleanup), "--dry-run"],
                 env={"HOME": str(home), "PATH": os.environ["PATH"]},
                 capture_output=True, text=True, check=False,
             )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(str(opencode_entry), completed.stdout)
+        self.assertIn(str(cursor_versions / "v1"), completed.stdout)
         self.assertIn(str(old_entry), completed.stdout)
         self.assertNotIn(str(recent_entry), completed.stdout)
         self.assertIn("no files deleted", completed.stdout)
