@@ -12,11 +12,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_evidence.py"
+CURRENT_SHA = "a" * 40
+STALE_SHA = "b" * 40
 
 
-def validate(body: str) -> subprocess.CompletedProcess[str]:
+def validate(body: str, expected_head: str | None = None) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(VALIDATOR)]
+    if expected_head is not None:
+        command.extend(("--expected-head", expected_head))
     return subprocess.run(
-        [sys.executable, str(VALIDATOR)],
+        command,
         input=body,
         text=True,
         capture_output=True,
@@ -85,44 +90,66 @@ class EvidenceGateTest(unittest.TestCase):
 
     def test_accepts_production_pass_with_gist(self) -> None:
         result = validate(
-            """## Evidence
+            f"""## Evidence
 **Claim class:** production
 **Verdict:** PASS
 **Commands and results:** `bash tests/test_cleanup_safety.sh` — passed.
 **Evidence URL:** https://gist.github.com/jleechan2015/0123456789abcdef
+**Evidence SHA:** {CURRENT_SHA}
 **What this proves:** The real operator call path completed at this commit.
 **What this does not prove:** External reviewers will approve future changes.
-"""
+""",
+            CURRENT_SHA,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_placeholder_evidence_fields(self) -> None:
         result = validate(
-            """## Evidence
+            f"""## Evidence
 **Claim class:** production
 **Verdict:** PASS
 **Commands and results:** N/A
 **Evidence URL:** https://gist.github.com/jleechan2015/0123456789abcdef
+**Evidence SHA:** {CURRENT_SHA}
 **What this proves:** trust me
 **What this does not prove:** N/A
-"""
+""",
+            CURRENT_SHA,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("placeholder", result.stderr.lower())
 
     def test_rejects_gist_url_without_owner_and_artifact_id(self) -> None:
         result = validate(
-            """## Evidence
+            f"""## Evidence
 **Claim class:** production
 **Verdict:** PASS
 **Commands and results:** `bash tests/test_cleanup_safety.sh` — passed.
 **Evidence URL:** https://gist.github.com/
+**Evidence SHA:** {CURRENT_SHA}
 **What this proves:** The real operator call path completed at this commit.
 **What this does not prove:** External reviewers will approve future changes.
-"""
+""",
+            CURRENT_SHA,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("owner", result.stderr.lower())
+
+    def test_rejects_stale_production_evidence_sha(self) -> None:
+        result = validate(
+            f"""## Evidence
+**Claim class:** production
+**Verdict:** PASS
+**Commands and results:** `bash tests/test_cleanup_safety.sh` — passed.
+**Evidence URL:** https://gist.github.com/jleechan2015/0123456789abcdef
+**Evidence SHA:** {STALE_SHA}
+**What this proves:** The real operator call path completed at this commit.
+**What this does not prove:** External reviewers will approve future changes.
+""",
+            CURRENT_SHA,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match", result.stderr.lower())
 
 
 class WorkflowContractTest(unittest.TestCase):
@@ -192,6 +219,8 @@ class WorkflowContractTest(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("python3 .github/scripts/validate_evidence.py", workflow)
+        self.assertIn("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}", workflow)
+        self.assertIn('--expected-head "$PR_HEAD_SHA"', workflow)
 
 
 if __name__ == "__main__":

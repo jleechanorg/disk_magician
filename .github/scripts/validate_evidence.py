@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 
@@ -44,7 +45,7 @@ def parse_fields(lines: list[str]) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in lines:
         stripped = line.strip()
-        for label in (*REQUIRED_FIELDS, "Evidence URL"):
+        for label in (*REQUIRED_FIELDS, "Evidence URL", "Evidence SHA"):
             prefix = f"**{label}:**"
             if not stripped.startswith(prefix):
                 continue
@@ -60,7 +61,7 @@ def parse_fields(lines: list[str]) -> dict[str, str]:
     return fields
 
 
-def validate(markdown: str) -> None:
+def validate(markdown: str, expected_head: str | None = None) -> None:
     fields = parse_fields(evidence_lines(markdown))
     missing = [label for label in REQUIRED_FIELDS if label not in fields]
     if missing:
@@ -88,11 +89,23 @@ def validate(markdown: str) -> None:
             raise ValueError(
                 "production evidence requires a gist.github.com owner and artifact ID"
             )
+        evidence_sha = fields.get("Evidence SHA", "")
+        if not re.fullmatch(r"[0-9a-f]{40}", evidence_sha):
+            raise ValueError("production evidence requires a full lowercase Evidence SHA")
+        if not expected_head:
+            raise ValueError("production evidence requires a trusted expected head SHA")
+        if evidence_sha != expected_head:
+            raise ValueError(
+                f"Evidence SHA {evidence_sha} does not match PR head {expected_head}"
+            )
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expected-head")
+    args = parser.parse_args()
     try:
-        validate(sys.stdin.read())
+        validate(sys.stdin.read(), args.expected_head)
     except ValueError as error:
         print(f"Evidence Gate: FAIL: {error}", file=sys.stderr)
         return 1
