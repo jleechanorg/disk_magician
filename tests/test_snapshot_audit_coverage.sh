@@ -383,6 +383,23 @@ else
   bad "dua primary/parity parsing contract failed"
 fi
 
+DEFAULT_CAP_OUT="$WORK/budget_default_cap.json"
+if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DUA_BYTES=$(( expected_kb * 1024 )) \
+  DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=150 \
+  timeout 10 "$SNAP_SCRIPT" --output "$DEFAULT_CAP_OUT" >/dev/null 2>&1 && \
+  python3 - "$DEFAULT_CAP_OUT" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["directories"]["parity"] == 1234
+assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 90
+PY
+then
+  ok "default per-path cap covers the proven 40s projects scan while remaining bounded"
+else
+  bad "default per-path cap is shorter than the proven projects scan"
+fi
+
 PER_PATH_CONFIG="$WORK/budget_per_path_config.json"
 cat > "$PER_PATH_CONFIG" <<JSON
 {"monitored_dirs": [{"key": "slow", "path": "$BUDGET_HOME/slow-a", "timeout": 180}]}
