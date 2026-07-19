@@ -34,6 +34,7 @@ git -C "$TREE" config user.name "Disk Magician Test"
 git -C "$TREE" config user.email "jleechan2015@users.noreply.github.com"
 mkdir -p "$TREE/scripts" "$TREE/src/disk_magician"
 cp "$SOURCE_DEPLOY" "$TREE/scripts/deploy_uv_tool.sh"
+printf 'fixture\n' > "$TREE/src/disk_magician/fixture.txt"
 cat > "$TREE/scripts/sync_package_tree.sh" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == "--check" ]] || exit 2
@@ -78,6 +79,33 @@ elif grep -q "origin/main" "$AHEAD_OUT"; then
   ok "branch-ahead source is refused"
 else
   bad "branch-ahead source is refused" "missing diagnostic: $(cat "$AHEAD_OUT")"
+fi
+
+git -C "$TREE" reset --hard -q origin/main
+TOOL_ROOT="$WORK/tool-root"
+UV_STUB="$WORK/uv"
+mkdir -p "$TOOL_ROOT/bin" "$TOOL_ROOT/lib/python3.13/site-packages/disk_magician"
+cat > "$TOOL_ROOT/bin/python" <<'EOF'
+#!/usr/bin/env bash
+echo 9.9.9
+EOF
+cat > "$UV_STUB" <<'EOF'
+#!/usr/bin/env bash
+repo="${!#}"
+deployed="$DISK_MAGICIAN_TOOL_ROOT/lib/python3.13/site-packages/disk_magician"
+mkdir -p "$deployed"
+cp -R "$repo/src/disk_magician/." "$deployed/"
+printf 'obsolete\n' > "$deployed/removed_module.py"
+EOF
+chmod +x "$TOOL_ROOT/bin/python" "$UV_STUB"
+STALE_OUT="$WORK/stale.out"
+if DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" \
+  "$TREE/scripts/deploy_uv_tool.sh" >"$STALE_OUT" 2>&1; then
+  bad "installed-only stale package file is refused" "command unexpectedly succeeded"
+elif grep -Eq "installed-only|unexpected deployed file" "$STALE_OUT"; then
+  ok "installed-only stale package file is refused"
+else
+  bad "installed-only stale package file is refused" "missing diagnostic: $(cat "$STALE_OUT")"
 fi
 
 echo

@@ -66,4 +66,16 @@ while IFS= read -r -d '' source_file; do
   fi
 done < <(find "$REPO_ROOT/src/disk_magician" -type f -print0)
 
+while IFS= read -r -d '' deployed_file; do
+  rel="${deployed_file#"$deployed_root/"}"
+  case "$rel" in
+    __pycache__/*|*/__pycache__/*|*.pyc|launchd/*.plist) continue ;;
+  esac
+  source_file="$REPO_ROOT/src/disk_magician/$rel"
+  if [[ ! -f "$source_file" ]]; then
+    echo "deploy_uv_tool: unexpected deployed file: $rel" >&2
+    exit 1
+  fi
+done < <(find "$deployed_root" -type f -print0)
+
 echo "deploy_uv_tool: deployed head=$head_sha version=$version verified_root=$deployed_root"
