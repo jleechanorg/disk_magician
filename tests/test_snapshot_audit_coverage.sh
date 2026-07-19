@@ -342,6 +342,8 @@ section "7. allowlist measurement is dua-first and bounded per path + in total"
 BUDGET_HOME="$WORK/budget_home"
 BUDGET_BIN="$WORK/budget_bin"
 BUDGET_LOG="$WORK/budget_invocations.log"
+BUDGET_CLOCK_STATE="$WORK/budget_clock_state"
+SYSTEM_DATE=$(command -v date)
 mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
 : > "$BUDGET_LOG"
 
@@ -363,7 +365,24 @@ cat > "$BUDGET_BIN/du" <<'SH'
 echo "du $*" >> "${BUDGET_LOG:?}"
 sleep 5
 SH
-chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du"
+cat > "$BUDGET_BIN/date" <<SH
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "+%s" ]]; then
+  if [[ "\${BUDGET_CLOCK_MODE:-}" == "fixed" ]]; then
+    echo 1000000
+    exit 0
+  elif [[ "\${BUDGET_CLOCK_MODE:-}" == "boundary" ]]; then
+    count=0
+    [[ -f "\${BUDGET_CLOCK_STATE:?}" ]] && read -r count < "\$BUDGET_CLOCK_STATE"
+    count=\$(( count + 1 ))
+    printf '%s\n' "\$count" > "\$BUDGET_CLOCK_STATE"
+    (( count <= 3 )) && echo 1000000 || echo 1000001
+    exit 0
+  fi
+fi
+exec "$SYSTEM_DATE" "\$@"
+SH
+chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du" "$BUDGET_BIN/date"
 
 PARITY_CONFIG="$WORK/budget_parity_config.json"
 cat > "$PARITY_CONFIG" <<JSON
@@ -494,6 +513,7 @@ PER_PATH_OUT="$WORK/budget_per_path.json"
 start=$(date +%s)
 HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_CLOCK_MODE=fixed BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
   DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$PER_PATH_OUT" \
   >/dev/null 2>&1 || true
@@ -505,6 +525,26 @@ if [[ "$per_path_elapsed" -le 3 ]] && \
   ok "dua failure falls back to du inside one shared 1s per-path deadline"
 else
   bad "per-path deadline failed (elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
+fi
+
+EXPIRED_OUT="$WORK/budget_expired.json"
+: > "$BUDGET_LOG"
+rm -f "$BUDGET_CLOCK_STATE"
+start=$(date +%s)
+HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_CLOCK_MODE=boundary BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
+  DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$EXPIRED_OUT" \
+  >/dev/null 2>&1 || true
+expired_elapsed=$(( $(date +%s) - start ))
+if [[ "$expired_elapsed" -le 3 ]] && \
+  [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
+  [[ "$(head -1 "$BUDGET_LOG")" == dua* ]] && \
+  python3 -c "import json; d=json.load(open('$EXPIRED_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
+  ok "expired shared deadline deterministically skips the du fallback"
+else
+  bad "expired deadline launched extra work (elapsed=${expired_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi
 
 TOTAL_CONFIG="$WORK/budget_total_config.json"
