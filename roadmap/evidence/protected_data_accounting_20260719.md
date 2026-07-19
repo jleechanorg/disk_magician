@@ -146,6 +146,46 @@ The schema-v2 snapshot at `/Users/jleechan/.disk_magician_backup/backup/jeffreys
 
 That **400.6 snapshot residual is configured-path coverage**, not the fresh physical top-down residual of **259.629402–262.587505 GiB**. Neither value may be substituted for the other.
 
+## Root cause of the latest 52 GiB growth
+
+The coverage-validated snapshot history provides a separate, directional delta
+for the latest growth interval. Between `2026-07-18T19:08:31Z` (backup commit
+`e53ebe11`) and `2026-07-19T08:19:02Z` (backup commit `da4113e8`), reported disk
+use rose from **730 GiB to 782 GiB**. Coverage improved from 42.7% (72/77 paths)
+to 48.8% (74/77 paths), so these path deltas identify the dominant measured
+writers but are not an exhaustive physical equation.
+
+| Measured path | Old GiB | New GiB | Delta GiB |
+|---|---:|---:|---:|
+| `~/Downloads` | 4.005 | 43.507 | **+39.501** |
+| `~/.colima` | 8.302 | 18.836 | **+10.534** |
+| `/private/tmp` | 12.718 | 15.645 | **+2.927** |
+| `~/.worktrees` | 16.370 | 18.699 | **+2.329** |
+| `~/.ao` | 6.568 | 7.325 | +0.757 |
+| `~/Library/Caches` | 6.151 | 6.663 | +0.512 |
+| `~/Library/Messages` | 28.683 | 27.197 | -1.486 |
+| `~/.hermes` | 15.614 | 13.949 | -1.665 |
+| `~/Library/Application Support` | 24.302 | 20.966 | -3.336 |
+
+The dominant current writer is not APFS snapshots. A live read-only `lsof`
+probe found PID 67830 running `testing_ui/run_dk2d_evidence.py` and writing
+canvas frames below
+`~/Downloads/dk2d_evidence_sidekick_wc4ic6_validation_r2/`. Its log showed
+healthy completed playthrough stages, so the process was not killed mid-proof.
+Current-session TCC blocks `find`, `du`, and `dua` on `~/Downloads` with
+`Operation not permitted`; Spotlight nevertheless identified the two
+`dk2d_evidence_sidekick_wc4ic6_validation*` roots as the indexed evidence
+spools. Bead `jleechan-uwtk` tracks an active-use-safe post-run size and
+retention policy.
+
+The inventory also exposed `/Users/jleechan/.hermes/state.db` as one 6.878784
+GiB indivisible file. Read-only SQLite accounting shows this is real payload,
+not vacuumable slack: only 699 of 1,799,950 pages are free. The largest
+components are the `sessions` table (2.019 GiB), trigram FTS data (1.946 GiB),
+`messages` (0.924 GiB), and two 0.825 GiB FTS content stores. Repeated
+`sessions.system_prompt` values alone total 1.947 GiB across 14,299 sessions.
+Bead `jleechan-m8um` tracks bounded retention and search-storage design.
+
 ## APFS allocation-semantics probes
 
 ### Native allocated versus apparent namespace size
