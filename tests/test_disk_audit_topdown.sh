@@ -313,6 +313,24 @@ else
   fi
 fi
 
+if ! grep -q '^--root$' "$FRONTIER_ARGS_CAPTURE"; then
+  ok "diagnostic leaves scanner root at its own default when no override is set"
+else
+  bad "diagnostic passed --root without DISK_MAGICIAN_TOPDOWN_ROOT set"
+fi
+
+ROOT_OVERRIDE_CAPTURE="$WORK/frontier-args-root.txt"
+HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$ROOT_OVERRIDE_CAPTURE" \
+  DISK_MAGICIAN_TOPDOWN_ROOT="$WORK/home" \
+  DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS=10 \
+  "$TREE/scripts/disk_diagnostic.sh" >/dev/null 2>&1
+override_root=$(awk '/^--root$/{getline; print; exit}' "$ROOT_OVERRIDE_CAPTURE" 2>/dev/null)
+if [[ "$override_root" == "$WORK/home" ]]; then
+  ok "DISK_MAGICIAN_TOPDOWN_ROOT scopes the top-down lane to the requested root (jleechan-ez97)"
+else
+  bad "root override not forwarded to scanner (got '--root ${override_root:-<absent>}')"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

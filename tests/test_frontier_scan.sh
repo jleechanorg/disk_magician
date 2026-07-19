@@ -221,6 +221,28 @@ expected_project_child_priority="agent-orchestrator,worldarchitect.ai,.beads,.cl
 [[ "$PROJECT_CHILD_PRIORITY_OUT" == "$expected_project_child_priority" ]] && ok "project content outranks hidden metadata within a high-volume root" \
   || bad "project child priority was '$PROJECT_CHILD_PRIORITY_OUT' (expected '$expected_project_child_priority')"
 
+CROSS_DEPTH_PRIORITY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = "/System/Volumes/Data"
+frontier = [
+    (os.path.join(root, "Library", "Fonts"), 2, False),
+    (os.path.join(root, "Users", "fixture", "projects", "repo"), 4, False),
+    (os.path.join(root, "Users", "fixture"), 2, False),
+    (os.path.join(root, "System", "Library"), 2, False),
+]
+ordered = sorted(frontier, key=lambda item: m.frontier_sort_key(root, item))
+print(",".join(os.path.relpath(item[0], root) for item in ordered))
+PY
+)
+expected_cross_depth="Users/fixture,Users/fixture/projects/repo,Library/Fonts,System/Library"
+[[ "$CROSS_DEPTH_PRIORITY_OUT" == "$expected_cross_depth" ]] && ok "deep Users descendants outrank shallow system-dir fan-out (jleechan-ez97)" \
+  || bad "cross-depth priority was '$CROSS_DEPTH_PRIORITY_OUT' (expected '$expected_cross_depth')"
+
 SHALLOW_ENUMERATION_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
 import sys

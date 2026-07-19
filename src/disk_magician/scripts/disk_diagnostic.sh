@@ -18,6 +18,7 @@ workers="${DISK_MAGICIAN_TOPDOWN_WORKERS:-8}"
 max_nodes="${DISK_MAGICIAN_TOPDOWN_MAX_NODES:-}"
 granularity="${DISK_MAGICIAN_GRANULARITY_GIB:-5}"
 quick_budget="${DISK_MAGICIAN_QUICK_BUDGET_SECONDS:-120}"
+topdown_root="${DISK_MAGICIAN_TOPDOWN_ROOT:-}"
 
 frontier_args=(
   --granularity-gib "$granularity"
@@ -27,6 +28,9 @@ frontier_args=(
 )
 if [[ -n "$max_nodes" ]]; then
   frontier_args+=(--max-nodes "$max_nodes")
+fi
+if [[ -n "$topdown_root" ]]; then
+  frontier_args+=(--root "$topdown_root")
 fi
 
 python3 "$SCRIPT_DIR/disk_frontier_scan.py" \

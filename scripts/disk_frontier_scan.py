@@ -279,8 +279,14 @@ USER_ROOT_PRIORITY = {
 
 
 def frontier_sort_key(root, item):
-    """Keep breadth-first traversal deterministic while scheduling the
-    explicitly required high-value Data roots before application fan-out."""
+    """Deterministic traversal order: the Data-root priority class dominates
+    depth, so the entire /Users subtree drains (breadth-first within the
+    class) before any system-dir fan-out is measured. Under a tight
+    wall-clock budget a whole-volume scan previously died running slow `du`s
+    over depth-2 /Library and /System nodes before ever reaching depth-3
+    /Users content (bead jleechan-ez97); class-first ordering spends the
+    budget on the usage-relevant tree first while residual accounting keeps
+    the unmeasured remainder honest."""
     path, depth, _ = item
     try:
         rel = os.path.relpath(path, root)
@@ -295,8 +301,8 @@ def frontier_sort_key(root, item):
             user_priority = USER_ROOT_PRIORITY.get(parts[2], user_priority)
         hidden_descendant = int(any(part.startswith(".") for part in parts[3:]))
     return (
-        depth,
         DATA_ROOT_PRIORITY.get(first, len(DATA_ROOT_PRIORITY)),
+        depth,
         user_priority,
         hidden_descendant,
         rel.casefold(),
