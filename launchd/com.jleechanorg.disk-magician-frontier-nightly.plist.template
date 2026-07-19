@@ -10,8 +10,9 @@
   Schedule:  Nightly at 03:41 local time (Hour=3, Minute=41) — off-minute,
              low-usage hour, avoids colliding with other on-the-hour/half-hour
              sweepers in this directory.
-  Action:    runs scripts/disk_frontier_scan.sh --wall-clock-cap 2700
-             --output-default. --wall-clock-cap 2700 (45 min) bounds the scan
+  Action:    runs scripts/disk_frontier_scan.sh with 5 GiB granularity, a
+             2700-second wall-clock cap, and the default state output. The cap
+             (45 min) bounds the scan
              per the roadmap's backpressure requirement (graceful frontier
              report on cap, never an unbounded walk). --output-default writes
              to ~/.disk_magician_state/frontier_last.json (topdown lane
@@ -30,6 +31,8 @@
   <array>
     <string>@BASH@</string>
     <string>@REPO_ROOT@/scripts/disk_frontier_scan.sh</string>
+    <string>--granularity-gib</string>
+    <string>5</string>
     <string>--wall-clock-cap</string>
     <string>2700</string>
     <string>--output-default</string>

@@ -101,17 +101,14 @@ else
   for subdir in "${OPENCODE_SAFE_SUBDIRS[@]}"; do
     target="$OPENCODE_DIR/$subdir"
     [[ ! -d "$target" ]] && continue
-    mapfile -d '' OLD_ENTRIES < <(
-      find "$target" -mindepth 1 -maxdepth 1 -mtime +14 -print0 2>/dev/null
-    )
-    for entry in "${OLD_ENTRIES[@]}"; do
+    while IFS= read -r -d '' entry; do
       if [[ "$DRY_RUN" == true ]]; then
         log "opencode $subdir/: [dry-run] would delete $entry"
       else
         log "opencode $subdir/: deleting $entry"
         rm -rf "$entry"
       fi
-    done
+    done < <(find "$target" -mindepth 1 -maxdepth 1 -mtime +14 -print0 2>/dev/null)
   done
 
   if [[ "$DRY_RUN" != true ]]; then
@@ -132,9 +129,10 @@ else
   before_kb=$(size_kb "$CURSOR_VERSIONS_DIR")
   log "cursor-agent versions: before $(fmt_kb "$before_kb") ($CURSOR_VERSIONS_DIR)"
 
-  mapfile -t ALL_VERSIONS < <(
-    find "$CURSOR_VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort || true
-  )
+  ALL_VERSIONS=()
+  while IFS= read -r version; do
+    [[ -n "$version" ]] && ALL_VERSIONS[${#ALL_VERSIONS[@]}]="$version"
+  done < <(find "$CURSOR_VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort || true)
 
   KEEP=2
   TOTAL_VERSIONS=${#ALL_VERSIONS[@]}
@@ -203,23 +201,21 @@ for dev_cache_path in \
   before_kb=$(size_kb "$dev_cache_path")
   log "$dev_cache_label: before $(fmt_kb "$before_kb") ($dev_cache_path)"
 
-  mapfile -d '' OLD_ENTRIES < <(
-    find "$dev_cache_path" -mindepth 1 -maxdepth 1 -mtime +"$DEV_CACHE_DAYS" -print0 2>/dev/null
-  )
-
-  if [[ ${#OLD_ENTRIES[@]} -eq 0 ]]; then
-    log "$dev_cache_label: no entries older than ${DEV_CACHE_DAYS}d, nothing to delete"
-    continue
-  fi
-
-  for entry in "${OLD_ENTRIES[@]}"; do
+  found_old_entry=false
+  while IFS= read -r -d '' entry; do
+    found_old_entry=true
     if [[ "$DRY_RUN" == true ]]; then
       log "$dev_cache_label: [dry-run] would delete $entry"
     else
       log "$dev_cache_label: deleting $entry"
       rm -rf "$entry"
     fi
-  done
+  done < <(find "$dev_cache_path" -mindepth 1 -maxdepth 1 -mtime +"$DEV_CACHE_DAYS" -print0 2>/dev/null)
+
+  if [[ "$found_old_entry" == false ]]; then
+    log "$dev_cache_label: no entries older than ${DEV_CACHE_DAYS}d, nothing to delete"
+    continue
+  fi
 
   if [[ "$DRY_RUN" != true ]]; then
     after_kb=$(size_kb "$dev_cache_path")

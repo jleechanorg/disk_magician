@@ -195,7 +195,7 @@ FAKE_HOME="$WORK/fake_home"
 mkdir -p "$FAKE_HOME/small_dir"
 dd if=/dev/zero of="$FAKE_HOME/small_dir/f.bin" bs=1024 count=100 >/dev/null 2>&1
 
-DISCOVER_OUT=$(HOME="$FAKE_HOME" timeout 30 "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
+DISCOVER_OUT=$(HOME="$FAKE_HOME" timeout 30 /bin/bash "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
 if echo "$DISCOVER_OUT" | python3 -m json.tool >/dev/null 2>&1; then
   ok "discover --json produces valid JSON in a sandboxed HOME"
 else
@@ -219,7 +219,7 @@ else
   bad "discover_last.json not found after --discover run"
 fi
 
-DISCOVER_OUT2=$(HOME="$FAKE_HOME" timeout 30 "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
+DISCOVER_OUT2=$(HOME="$FAKE_HOME" timeout 30 /bin/bash "$SNAP_SCRIPT" --discover --json 2>/dev/null || true)
 HITS2=$(echo "$DISCOVER_OUT2" | python3 -c "import json,sys; print(json.load(sys.stdin).get('cache_hits',0))" 2>/dev/null || echo 0)
 if [[ "${HITS2:-0}" -ge 1 ]]; then
   ok "second discover run reuses mtime cache (cache_hits=$HITS2) — fixes jleechan-jz5t repeat-timeout"

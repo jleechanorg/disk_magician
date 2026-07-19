@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and lint
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install test tools
+        run: |
+          command -v timeout >/dev/null 2>&1 || brew install coreutils
+          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
+          command -v rg >/dev/null 2>&1 || brew install ripgrep
+          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
+
+      - name: Verify package-tree synchronization
+        run: bash scripts/sync_package_tree.sh --check
+
+      - name: Check shell syntax and ShellCheck errors
+        run: |
+          while IFS= read -r -d '' candidate; do
+            case "$(head -n 1 "$candidate")" in
+              *bash|*sh)
+                /bin/bash -n "$candidate"
+                shellcheck --severity=error --external-sources "$candidate"
+                ;;
+            esac
+          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+
+      - name: Run Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run shell tests
+        run: |
+          set -euo pipefail
+          for test_file in tests/test_*.sh; do
+            echo "::group::$test_file"
+            timeout 300 /bin/bash "$test_file"
+            echo "::endgroup::"
+          done

@@ -96,7 +96,10 @@ fi
 
 # 4. Parse the snapshot list with python (cleanest way to handle plist XML).
 #    Output columns: name \t uuid \t xid \t limiting
-mapfile -t SNAPSHOT_LINES < <(python3 -c "
+SNAPSHOT_LINES=()
+while IFS= read -r snapshot_line; do
+  [[ -n "$snapshot_line" ]] && SNAPSHOT_LINES+=("$snapshot_line")
+done < <(python3 -c "
 import sys, plistlib
 data = plistlib.loads(sys.stdin.buffer.read())
 for s in data.get('Snapshots', []):

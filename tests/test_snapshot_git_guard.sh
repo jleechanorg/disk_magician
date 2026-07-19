@@ -102,12 +102,21 @@ private_key_end="$(printf '%s%s' '-----END PRIVATE' ' KEY-----')"
 secret_payload="$(printf '%s\n' '{"snapshot":"outgoing-secret-marker"}' "$private_key_begin" 'not-a-real-key' "$private_key_end")"
 write_snapshot_stub "$secret_payload"
 secret_output="$WORK/secret.out"
+rejecting_gitleaks="$WORK/rejecting-gitleaks"
+rejecting_gitleaks_marker="$WORK/rejecting-gitleaks-called"
+cat > "$rejecting_gitleaks" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$rejecting_gitleaks_marker"
+exit 1
+SH
+chmod +x "$rejecting_gitleaks"
 remote_before="$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)"
-if run_snapshot >"$secret_output" 2>&1; then
+if DISK_MAGICIAN_GITLEAKS_BIN="$rejecting_gitleaks" run_snapshot >"$secret_output" 2>&1; then
     echo "expected secret-bearing snapshot push to fail closed" >&2
     exit 1
 fi
 [[ "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" == "$remote_before" ]]
+grep -q -- '--redact=100' "$rejecting_gitleaks_marker"
 if grep -Fq "$secret_value" "$secret_output"; then
     echo "secret scanner output exposed the rejected value" >&2
     exit 1
