@@ -144,6 +144,7 @@ if buckets:
 else:
     print("  none measured")
 violations = [item for item in buckets if gib(item.get("measured_kb")) > threshold]
+contract_failed = bool(violations)
 if violations:
     print("CONTRACT FAILURE: scanner emitted oversized normal buckets:")
     for item in violations:
@@ -160,6 +161,12 @@ bucket_total = report.get("granularity_bucket_total_kb") or 0
 tail = report.get("granularity_tail_kb") or 0
 oversize_total = report.get("oversize_indivisible_files_total_kb") or 0
 equation = report.get("accounting_equation") or {}
+if equation.get("display_ledger_valid") is False:
+    contract_failed = True
+    print(
+        "CONTRACT FAILURE: displayed buckets/files exceed the accepted measured ledger "
+        f"(delta_kb={equation.get('display_ledger_delta_kb')})"
+    )
 print(
     "Displayed Data equation: "
     f"{gib(bucket_total):.1f} GiB bounded buckets + "
@@ -195,7 +202,7 @@ if unfinished:
         print(f"  {item.get('reason', 'unknown')}: {item.get('path', '?')}{size}")
 else:
     print("Named unfinished frontier: none")
-if violations:
+if contract_failed:
     raise SystemExit(2)
 PY
   render_rc=$?

@@ -247,61 +247,91 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     NUL records preserve whitespace and newlines in filesystem paths.
     """
     cmd = [GDU_CMD, "-x", "-k", "--null", "--", *paths]
-    tracker.enter()
-    try:
+    with tempfile.TemporaryFile(mode="w+b") as stdout_spool:
+        tracker.enter()
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=max(0.001, timeout_s),
-                env={**os.environ, "LC_ALL": "C"},
-            )
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "usable": False,
-                "records": {},
-                "error_paths": [],
-                "unknown_errors": ["inventory_timeout"],
-                "returncode": None,
-                "timed_out": True,
-                "stderr": exc.stderr or "",
-            }
-        except OSError as exc:
-            return {
-                "usable": False,
-                "records": {},
-                "error_paths": [],
-                "unknown_errors": [f"inventory_exec_errno_{exc.errno}"],
-                "returncode": None,
-                "timed_out": False,
-                "stderr": str(exc),
-            }
-    finally:
-        tracker.exit()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=stdout_spool,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=max(0.001, timeout_s),
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+            except subprocess.TimeoutExpired as exc:
+                return {
+                    "usable": False,
+                    "records": {},
+                    "error_paths": [],
+                    "unknown_errors": ["inventory_timeout"],
+                    "returncode": None,
+                    "timed_out": True,
+                    "stderr": exc.stderr or "",
+                }
+            except OSError as exc:
+                return {
+                    "usable": False,
+                    "records": {},
+                    "error_paths": [],
+                    "unknown_errors": [f"inventory_exec_errno_{exc.errno}"],
+                    "returncode": None,
+                    "timed_out": False,
+                    "stderr": str(exc),
+                }
+        finally:
+            tracker.exit()
 
-    records = {}
-    malformed = False
-    record_ceiling_exceeded = False
-    chunks = proc.stdout.split("\0")
-    if chunks and chunks[-1]:
-        malformed = True
-    for raw in chunks[:-1] if chunks else []:
-        if not raw:
-            continue
-        try:
-            size_text, path = raw.split("\t", 1)
-            kb = int(size_text)
-        except (ValueError, TypeError):
+        records = {}
+        malformed = False
+        record_ceiling_exceeded = False
+        mocked_stdout = getattr(proc, "stdout", None)
+        if mocked_stdout is None:
+            stdout_spool.seek(0)
+            source = stdout_spool
+            pending = b""
+            delimiter = b"\0"
+        else:
+            source = None
+            pending = "" if isinstance(mocked_stdout, str) else b""
+            delimiter = "\0" if isinstance(mocked_stdout, str) else b"\0"
+
+        first_chunk = mocked_stdout
+        while True:
+            if first_chunk is not None:
+                chunk = first_chunk
+                first_chunk = None
+            elif source is not None:
+                chunk = source.read(1024 * 1024)
+            else:
+                chunk = pending[:0]
+            if not chunk:
+                break
+            pending += chunk
+            complete = pending.split(delimiter)
+            pending = complete.pop()
+            for raw in complete:
+                if not raw:
+                    continue
+                try:
+                    tab = "\t" if isinstance(raw, str) else b"\t"
+                    size_text, path_raw = raw.split(tab, 1)
+                    kb = int(size_text)
+                    path = path_raw if isinstance(path_raw, str) else os.fsdecode(path_raw)
+                except (ValueError, TypeError):
+                    malformed = True
+                    break
+                if kb < 0 or not path:
+                    malformed = True
+                    break
+                records[os.path.normpath(path)] = kb
+                if len(records) > max_records:
+                    record_ceiling_exceeded = True
+                    break
+            if malformed or record_ceiling_exceeded:
+                break
+        if pending:
             malformed = True
-            break
-        if kb < 0 or not path:
-            malformed = True
-            break
-        records[os.path.normpath(path)] = kb
-        if len(records) > max_records:
-            record_ceiling_exceeded = True
-            break
 
     error_paths = []
     unknown_errors = []
@@ -331,6 +361,14 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
         unknown_errors.append("inventory_malformed_output")
     if record_ceiling_exceeded:
         unknown_errors.append("inventory_record_ceiling_exceeded")
+    localized_paths = [item["path"] for item in error_paths]
+    for manifest_path in paths:
+        if manifest_path in records:
+            continue
+        prefix = manifest_path.rstrip(os.sep) + os.sep
+        if any(path == manifest_path or path.startswith(prefix) for path in localized_paths):
+            continue
+        unknown_errors.append(f"inventory_manifest_missing:{manifest_path}")
     if proc.returncode != 0 and not error_paths and not unknown_errors:
         unknown_errors.append(f"inventory_exit_{proc.returncode}_without_diagnostic")
     return {
@@ -1287,9 +1325,16 @@ def build_report(
         key=lambda item: (-item["measured_kb"], item["path"]),
     )
     oversize_files_total_kb = sum(item["measured_kb"] for item in oversize_files)
-    granularity_tail_kb = (
+    granularity_tail_raw_kb = (
         measured_total_kb - granularity_bucket_total_kb - oversize_files_total_kb
     )
+    display_ledger_valid = granularity_tail_raw_kb >= 0
+    granularity_tail_kb = max(0, granularity_tail_raw_kb)
+    if not display_ledger_valid:
+        scanner.warnings.append(
+            "display ledger overcounts accepted measurement by "
+            f"{-granularity_tail_raw_kb} KiB; displayed equation rejected"
+        )
 
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
@@ -1303,8 +1348,11 @@ def build_report(
         "displayed_buckets_kb": granularity_bucket_total_kb,
         "oversize_indivisible_files_kb": oversize_files_total_kb,
         "sub_granularity_tail_kb": granularity_tail_kb,
+        "display_ledger_delta_kb": granularity_tail_raw_kb,
+        "display_ledger_valid": display_ledger_valid,
         "displayed_balanced": (
-            granularity_bucket_total_kb
+            display_ledger_valid
+            and granularity_bucket_total_kb
             + oversize_files_total_kb
             + granularity_tail_kb
             + purgeable_info["purgeable_kb"]

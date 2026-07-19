@@ -588,6 +588,34 @@ PY
 [[ "$GDU_UNKNOWN_ERROR_OUT" == "False True" ]] && ok "unknown GNU du diagnostics fail closed instead of accepting partial totals" \
   || bad "unknown GNU du diagnostic entered the accepted inventory: $GDU_UNKNOWN_ERROR_OUT"
 
+GDU_MISSING_MANIFEST_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+completed = subprocess.CompletedProcess(
+    ["/fake/gdu"], 0, stdout="4\t/fixture/a\0", stderr=""
+)
+with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=completed):
+    result = m.run_gdu_inventory(
+        ["/fixture/a", "/fixture/silently-omitted"],
+        10,
+        m.ConcurrencyTracker(),
+        100_000_000,
+    )
+print(
+    result["usable"],
+    any("inventory_manifest_missing" in item for item in result["unknown_errors"]),
+)
+PY
+)
+[[ "$GDU_MISSING_MANIFEST_OUT" == "False True" ]] && ok "silently omitted manifest roots fail closed" \
+  || bad "missing manifest root could masquerade as a complete inventory: $GDU_MISSING_MANIFEST_OUT"
+
 GDU_INVENTORY_PARTITION_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
 import subprocess
@@ -742,6 +770,51 @@ PY
 )
 [[ "$GDU_MISSING_ANCESTOR_OUT" == "True True True" ]] && ok "missing tainted ancestor preserves clean descendant attribution" \
   || bad "missing GNU du ancestor orphaned clean descendant rows: $GDU_MISSING_ANCESTOR_OUT"
+
+NEGATIVE_DISPLAY_TAIL_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+gib = 1024 * 1024
+scanner = SimpleNamespace(
+    root="/fixture",
+    measured={"/fixture/ledger": 10 * gib},
+    inventory_buckets=[
+        {"path": "/fixture/a", "measured_kb": 6 * gib},
+        {"path": "/fixture/b", "measured_kb": 6 * gib},
+    ],
+    oversize_files=[], frontier_unfinished=[], deduped=[], warnings=[],
+    nodes_processed=2, tracker=SimpleNamespace(peak=lambda: 1),
+    level1_paths=["/fixture/ledger"], inventory_backend="gdu_one_pass",
+    shallow_enumeration_depth=0,
+)
+args = SimpleNamespace(
+    workers=1, max_depth=6, max_nodes=100_000_000, wall_clock_cap=10,
+    timeout_tiers=[10], granularity_gib=5,
+)
+report = m.build_report(
+    scanner,
+    {"total_kb": 20 * gib, "used_kb": 10 * gib, "free_kb": 10 * gib},
+    {},
+    {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+     "local_snapshots": [], "local_snapshots_count": 0},
+    0.1,
+    args,
+)
+equation = report["accounting_equation"]
+print(
+    report["granularity_tail_kb"] == 0,
+    equation["display_ledger_valid"] is False,
+    equation["displayed_balanced"] is False,
+    any("display ledger overcounts" in item for item in report["warnings"]),
+)
+PY
+)
+[[ "$NEGATIVE_DISPLAY_TAIL_OUT" == "True True True True" ]] && ok "negative display tail fails closed instead of algebraically balancing" \
+  || bad "display overcount was hidden by a negative balancing tail: $NEGATIVE_DISPLAY_TAIL_OUT"
 
 GDU_DUA_FALLBACK_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import subprocess

@@ -221,6 +221,15 @@ if os.environ.get("INJECT_OVERSIZE_BUCKET") == "1":
         {"path": "/fixture/invalid-parent", "measured_kb": 6*gib}
     ]
     data["granularity_bucket_total_kb"] = 6*gib
+if os.environ.get("INJECT_DISPLAY_OVERCOUNT") == "1":
+    data["granularity_buckets"] = [
+        {"path": "/fixture/a", "measured_kb": 4*gib},
+        {"path": "/fixture/b", "measured_kb": 4*gib},
+    ]
+    data["granularity_bucket_total_kb"] = 8*gib
+    data["accounting_equation"]["display_ledger_valid"] = False
+    data["accounting_equation"]["display_ledger_delta_kb"] = -2*gib
+    data["accounting_equation"]["displayed_balanced"] = False
 with open(out, "w") as fh:
     json.dump(data, fh)
 PY
@@ -301,6 +310,17 @@ if [[ "$invalid_rc" -ne 0 ]] && grep -q 'CONTRACT FAILURE: scanner emitted overs
   ok "renderer fails closed when a scanner violates the <=5 GiB bucket ceiling"
 else
   bad "renderer accepted an oversized normal bucket (rc=$invalid_rc): $(tr '\n' ';' < "$INVALID_OUT")"
+fi
+
+OVERCOUNT_OUT="$WORK/overcount-out.txt"
+HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$FRONTIER_ARGS_CAPTURE" \
+  INJECT_DISPLAY_OVERCOUNT=1 DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS=10 \
+  "$TREE/scripts/disk_diagnostic.sh" >"$OVERCOUNT_OUT" 2>&1
+overcount_rc=$?
+if [[ "$overcount_rc" -ne 0 ]] && grep -q 'CONTRACT FAILURE: displayed buckets/files exceed' "$OVERCOUNT_OUT"; then
+  ok "renderer fails closed when bounded rows overcount the accepted ledger"
+else
+  bad "renderer algebraically balanced a negative display tail (rc=$overcount_rc): $(tr '\n' ';' < "$OVERCOUNT_OUT")"
 fi
 
 if ! grep -q '^--max-nodes$' "$FRONTIER_ARGS_CAPTURE"; then
