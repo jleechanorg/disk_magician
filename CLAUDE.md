@@ -31,10 +31,12 @@ their mtime/safety filters apply — no hand-`rm` of session/worktree state.
 
 After changing root scripts: run `scripts/sync_package_tree.sh` (use
 `--check` in review), **bump the version in pyproject.toml** (uv caches
-wheels by version), then `uv tool install --force --reinstall <repo path>`.
-Verify the deployed tree, not the repo, before claiming production behavior
-(stale-deploy incident 2026-07-11: v2 code was committed for hours while
-production ran v1).
+wheels by version), merge the change, then run `tools/deploy_uv_tool.sh` from
+the exact clean `origin/main`. The wrapper fetches `origin/main`, refuses a
+dirty or divergent source tree, reinstalls the uv tool, and verifies the
+installed package against source. Verify the deployed tree, not the repo,
+before claiming production behavior (stale-deploy incident 2026-07-11: v2
+code was committed for hours while production ran v1).
 
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
