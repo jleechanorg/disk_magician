@@ -203,10 +203,12 @@ has_active_marker() {
 
 # has_open_files <dir> — true when lsof finds an open file or cannot prove the
 # tree is closed. macOS lsof's +D return status is unreliable, so matching
-# stdout is authoritative and an empty rc=1 result means "no open files."
+# stdout is authoritative while any stderr diagnostic fails closed.
 has_open_files() {
-  local dir="$1" lsof_bin hit_file rc=0
-  if [[ -x /usr/sbin/lsof ]]; then
+  local dir="$1" lsof_bin hit_file err_file diagnostic rc=0
+  if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
+    lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif [[ -x /usr/sbin/lsof ]]; then
     lsof_bin=/usr/sbin/lsof
   elif lsof_bin=$(command -v lsof 2>/dev/null); then
     :
@@ -214,16 +216,28 @@ has_open_files() {
     log "Open-file check unavailable for $dir — fail-closed, treating as active."
     return 0
   fi
+  if [[ ! -x "$lsof_bin" ]]; then
+    log "Open-file check unavailable for $dir ($lsof_bin is not executable) — fail-closed, treating as active."
+    return 0
+  fi
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
-  "$lsof_bin" +D "$dir" >"$hit_file" 2>/dev/null || rc=$?
+  err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
+  "$lsof_bin" +D "$dir" >"$hit_file" 2>"$err_file" || rc=$?
   # macOS lsof 4.91 can print matching open files yet return 1 for +D, so
   # stdout is the authoritative positive signal; rc only diagnoses errors
   # when there were no matches.
   if [[ -s "$hit_file" ]]; then
-    rm -f "$hit_file"
+    rm -f "$hit_file" "$err_file"
     return 0
   fi
   rm -f "$hit_file"
+  if [[ -s "$err_file" ]]; then
+    diagnostic=$(head -n 1 "$err_file")
+    rm -f "$err_file"
+    log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
+    return 0
+  fi
+  rm -f "$err_file"
   if (( rc != 1 )); then
     log "Open-file check failed for $dir (lsof rc=${rc}) — fail-closed, treating as active."
     return 0

@@ -162,6 +162,16 @@ EOF
   chmod +x "$bin_dir/du"
 }
 
+make_lsof_failure_shim() {
+  local shim_path="$1"
+  cat > "$shim_path" <<'EOF'
+#!/usr/bin/env bash
+echo "lsof: cannot traverse requested tree" >&2
+exit 1
+EOF
+  chmod +x "$shim_path"
+}
+
 make_large_dir() {
   # make_large_dir <dir> — a directory whose real du -sk size clears the
   # default 100MB LARGE_TMP_MIN_KB threshold isn't needed in tests: we
@@ -621,6 +631,41 @@ assert_rc "GREEN 5f: exits 0" 0 "$G5F_RC"
 assert_contains "GREEN 5f: logs in-use archive skip after sizing" \
   "Skipping in-use aged archive" "$G5F_OUT_CONTENT"
 assert_exists "GREEN 5f: payload opened during sizing is preserved" "$G5F_PAYLOAD"
+
+echo "GREEN 6: lsof traversal failures fail closed for archive and purge"
+G6_PRIVATE_TMP="$TMP_ROOT/g6-private-tmp"
+G6_TMP="$TMP_ROOT/g6-tmp"
+G6_ARCHIVE="$TMP_ROOT/g6-archive"
+G6_BIN="$TMP_ROOT/g6-bin"
+G6_CANDIDATE="$G6_PRIVATE_TMP/stale_candidate"
+G6_AGED="$G6_ARCHIVE/20200101T000000Z/already_archived_dir"
+mkdir -p "$G6_PRIVATE_TMP" "$G6_TMP" "$G6_AGED"
+make_large_dir "$G6_CANDIDATE"
+touch "$G6_AGED/payload.bin"
+set_old_mtime "$G6_CANDIDATE"
+set_old_mtime "$G6_ARCHIVE/20200101T000000Z"
+make_find_shim "$G6_BIN" "$G6_PRIVATE_TMP" "$G6_TMP"
+make_lsof_failure_shim "$G6_BIN/lsof-fail"
+
+G6_OUT="$TMP_ROOT/g6.out"
+if run_capture "$G6_OUT" env -i HOME="$TMP_ROOT/g6-home" \
+  PATH="$G6_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  DISK_MAGICIAN_LSOF_BIN="$G6_BIN/lsof-fail" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G6_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G6_RC=0
+else
+  G6_RC=$?
+fi
+G6_OUT_CONTENT=$(cat "$G6_OUT")
+assert_rc "GREEN 6: exits 0" 0 "$G6_RC"
+assert_contains "GREEN 6: logs fail-closed lsof diagnostic" \
+  "Open-file check failed" "$G6_OUT_CONTENT"
+assert_exists "GREEN 6: initial archive candidate survives lsof failure" \
+  "$G6_CANDIDATE/payload.bin"
+assert_exists "GREEN 6: aged archive survives lsof failure" \
+  "$G6_AGED/payload.bin"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
