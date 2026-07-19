@@ -756,3 +756,65 @@ Verification at the shipped heads: disk-frontier tests 45/45, top-down diagnosti
 - Dry-run-only low-risk candidates remain about 3.33 GiB (`/private/tmp` standard-aged files about 2.79 GiB and development caches about 0.54 GiB). Nothing was deleted in this follow-up. Large temp files with open holders, active code-sign clones, active Colima containers, Codex/Claude session state, and worktrees without completed safety classification are not approved cleanup.
 - `jleechan-i67e` remains open to fix double-counting in the large-temp dry-run report before its total is used for cleanup decisions.
 - **Correction 2026-07-17 (later pass):** the previous version of this bullet claimed `jleechan-6547` did not exist ("`br show` returning `ISSUE_NOT_FOUND`") — **that claim was itself wrong.** `br`'s beads are scoped per-repo by `source_repo_path`/cwd, not globally visible; `jleechan-6547` genuinely exists ("Raise Colima trim trigger above the 40 GiB emergency floor", open) but only resolves when `br` is run from inside `~/projects_other/ez-gh-actions`, which this session's check did not do. A duplicate bead (`jleechan-uio3`) was inadvertently created for the same topic and has since been closed/cross-linked back to the real `jleechan-6547`. Fresh evidence at the time of the original (now-corrected) pass: Colima had grown to 39.26 GiB (up from 26.3 GiB cited minutes earlier) while host free space held at 57 GiB — comfortably above the guard's 40 GiB trigger, so the guard correctly skipped every check even as Colima nearly quadrupled from its post-recovery low of 9.60 GiB. The actual fix landed as `ez-gh-actions@688a798` (guest-native fstrim every 5min + `--all` scope, independent of host free space entirely) — see the 2026-07-17 root-cause activity entry. **Lesson: before declaring any `jleechan-*` bead ID "fabricated" or "nonexistent", re-check `br show <id>` from inside the specific repo directory the ID's context suggests, not just the current cwd.**
+
+## Roll-forward — 2026-07-18 one-pass top-down report v0.2.31 {#roll-forward-2026-07-18-one-pass-v0231}
+
+The deployed default `disk-magician audit` completed at origin/main
+[`5e9169e22c21bff3ac5857f4df0840e06f164ece`](https://github.com/jleechanorg/disk_magician/commit/5e9169e22c21bff3ac5857f4df0840e06f164ece)
+with `disk-magician==0.2.31`. The complete human report is persisted at
+`roadmap/evidence/disk_audit_v0.2.31_20260718.txt` (SHA-256
+`deed2991077c6c0fef1bb2559cc5463da374ee89e76d6a4bf9b8db02595d7a08`).
+
+### Current physical and Data equations
+
+- Physical/APFS: **777.8 GiB volume allocations + 0.2 GiB shared/metadata +
+  148.3 GiB free = 926.4 GiB capacity** (`balanced=true`).
+- Data measurement window: **717.0 -> 719.6 GiB used** while the namespace
+  walk ran (`+2.6 GiB`, non-atomic), producing a residual interval of
+  **209.3..211.8 GiB**.
+- Displayed Data: **500.9 GiB bounded rows + 6.8 GiB indivisible files +
+  0.0 GiB measured tail + 0.0 GiB purgeable estimate + 211.8 GiB residual =
+  719.6 GiB used** (`balanced=true`).
+- The bounded display contains **8,708 rows**; every normal row is at most
+  **5 GiB**. The separately labeled indivisible file is
+  `~/.hermes/state.db` at **6.8 GiB**.
+- Scanner evidence: `backend=gdu_one_pass`, **1,531,417** inventory records,
+  **554.1 seconds**, 100,000,000-record remote sanity ceiling, and no
+  negative-tail/display-ledger acceptance loophole.
+
+### Residual status — still above acceptance threshold
+
+The report has **213 named exclusions**: 203 permission/TCC denials, eight
+interrupted reads, one cross-device boundary, and one vanished path. Data has
+zero APFS snapshots and container-wide shared/metadata allocation is only
+0.2 GiB, so snapshots/shared metadata do not explain the 211.8 GiB Data gap.
+Non-interactive sudo is unavailable (`sudo -n` failed).
+
+`/private/var/dirs_cleaner` is again a current, exact permission-denied path
+and remains the leading candidate for the dominant protected allocation. A
+prior supplementary rollup in this document assigned it 165.011 GiB, but
+`roadmap/2026-07-17-plan-700g-target.md` correctly records that the path-level
+number lacks independently reproducible CLI proof because SIP/Launch
+Constraints block inspection. Therefore this run does **not** subtract that
+stale/unverified number from residual. The <=50 GiB truly-unknown acceptance
+criterion remains unmet, and `jleechan-rvqz` stays open. The next measurement
+step requires an Apple-entitled Storage Management view or another privileged,
+independently verifiable source; ordinary user-shell retries cannot resolve it.
+
+### Implementation and regression proof
+
+- [`6fdaae38043df24f6756aec4f15d12f2ce732287`](https://github.com/jleechanorg/disk_magician/commit/6fdaae38043df24f6756aec4f15d12f2ce732287): one shared GNU `du` process,
+  directory-only NUL inventory, hardlink-safe logical shards, localized TCC
+  taint, missing-ancestor recovery, <=5 GiB direct-allocation segments,
+  manifest coverage validation, disk-spooled stdout, and negative display-tail
+  rejection.
+- [`5e9169e22c21bff3ac5857f4df0840e06f164ece`](https://github.com/jleechanorg/disk_magician/commit/5e9169e22c21bff3ac5857f4df0840e06f164ece): default whole-volume deadline
+  raised from the empirically insufficient 480 seconds to 900 seconds.
+- Verification: frontier **62/62**, top-down **13/13**, cleanup safety
+  **93/93**, package sync **16/16**, snapshot coverage **22/22**, inventory
+  pytest **11/11**, Ruff pass, installed v0.2.31, installed scripts byte-match
+  source, installed Claude/Codex skills match the repository, and origin/main
+  matches the deployed head.
+- No files were deleted during this report run. The quick-win lane remains
+  advisory: Colima 8.3 GiB, code-sign clone caches 4.9 GiB (approval-gated),
+  and Codex sessions 18.7 GiB (never-delete/review-only).
