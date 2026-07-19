@@ -251,8 +251,8 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertTrue(any(a["artifact_type"] == "venv" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
         self.assertTrue(any(a["artifact_type"] == "node_modules" for a in entries[0]["artifacts"] + entries[1]["artifacts"]))
         by_name = {entry["name"]: entry for entry in entries}
-        self.assertTrue(by_name["lane-a"]["ao_metadata_references"])
         self.assertTrue(result["ao_attribution_complete"])
+        self.assertTrue(by_name["lane-a"]["ao_metadata_references"])
         self.assertIn("captured_at", result)
         self.assertEqual(result["history"]["status"], "baseline_only")
         self.assertIsNone(result["history"]["child_growth_7d_bytes"])
