@@ -11,21 +11,57 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$REPO_ROOT/config.json"
 [[ -f "$CONFIG_FILE" ]] || CONFIG_FILE="$REPO_ROOT/config.json.template"
 
-# Default thresholds (minutes)
+# Default thresholds (minutes unless noted)
 GIT_CLONE_MIN=240
 AGENT_PROMPT_MIN=240
 CLI_VALIDATION_MIN=60
 WORKTREE_POINTER_MIN=30
 WORKTREE_POINTER_MIN_KB=51200
+# --large branch safety (hours): a top-level /private/tmp dir with any file
+# mtime within this window is considered "active use" and is skipped
+# regardless of size or protected-root status.
+LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
+# --large branch: how long an archived dir sits under
+# /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
+# permanently rm -rf it and actually reclaim the space.
+LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200"
-import json, sys
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24"
+import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)}")
+print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))}")
 PY
 )"
+fi
+
+# --large branch: top-level /private/tmp basenames that are NEVER deleted or
+# archived, regardless of mtime/size — a documented canonical evidence/repo
+# root landing directly in /private/tmp (e.g. worldarchitect.ai's evidence
+# path) must never be treated as scratch. Override via
+# DISK_MAGICIAN_PROTECTED_TMP_ROOTS (space-separated) or config.json's
+# top-level "protected_tmp_roots" array; env wins over config.
+DEFAULT_PROTECTED_TMP_ROOTS=(worldarchitect.ai worldai_claw wa-missions)
+PROTECTED_TMP_ROOTS=()
+if [[ -n "${DISK_MAGICIAN_PROTECTED_TMP_ROOTS:-}" ]]; then
+  read -r -a PROTECTED_TMP_ROOTS <<<"$DISK_MAGICIAN_PROTECTED_TMP_ROOTS"
+elif [[ -f "$CONFIG_FILE" ]]; then
+  # Portable read loop (not `mapfile`/`readarray`) — macOS ships /bin/bash
+  # 3.2 by default and launchd jobs without an interactive PATH fall back to
+  # it even though the shebang is `env bash`.
+  while IFS= read -r root; do
+    [[ -n "$root" ]] && PROTECTED_TMP_ROOTS+=("$root")
+  done < <(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("protected_tmp_roots") or []:
+    print(r)
+PY
+)
+fi
+if [[ ${#PROTECTED_TMP_ROOTS[@]} -eq 0 ]]; then
+  PROTECTED_TMP_ROOTS=("${DEFAULT_PROTECTED_TMP_ROOTS[@]}")
 fi
 
 DRY_RUN=true
@@ -99,11 +135,180 @@ remove_path() {
   echo "$kb"
 }
 
+# is_protected_root <basename> — true if the top-level /private/tmp dir
+# basename is on the never-touch list (see PROTECTED_TMP_ROOTS above).
+is_protected_root() {
+  local base="$1" root
+  for root in "${PROTECTED_TMP_ROOTS[@]}"; do
+    [[ "$base" == "$root" ]] && return 0
+  done
+  return 1
+}
+
+# is_protected_tmp_path <path> — true for a configured protected root and
+# everything below it, regardless of which cleanup class discovered it first.
+is_protected_tmp_path() {
+  local path="$1" root
+  for root in "${PROTECTED_TMP_ROOTS[@]}"; do
+    case "/$path/" in
+      *"/$root/"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# has_recent_activity <dir> <hours> — true if any file/dir under <dir> has an
+# mtime within the last <hours>. Fails CLOSED: any error reading the tree
+# (permission denied, vanished path, etc.) is treated as "active" so the
+# caller skips deletion rather than risking a false-negative on a directory
+# it can't actually inspect. Uses /usr/bin/find explicitly — some shells in
+# this fleet alias `find` to an incompatible wrapper that rejects -mmin.
+has_recent_activity() {
+  local dir="$1" hours="$2" mins hit_file rc=0
+  mins=$(( hours * 60 ))
+  hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
+  /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    rm -f "$hit_file"
+    log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
+    return 0
+  fi
+  if [[ -s "$hit_file" ]]; then
+    rm -f "$hit_file"
+    return 0
+  fi
+  rm -f "$hit_file"
+  return 1
+}
+
+# has_active_marker <dir> — true when any quarantined subtree carries the
+# explicit active-use marker. The marker moves with an archived directory, so
+# purge checks recursively rather than only at the timestamp directory root.
+has_active_marker() {
+  local dir="$1" hit_file rc=0
+  hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
+  /usr/bin/find "$dir" -name .in-use -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    rm -f "$hit_file"
+    log "Active-use marker check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
+    return 0
+  fi
+  if [[ -s "$hit_file" ]]; then
+    rm -f "$hit_file"
+    return 0
+  fi
+  rm -f "$hit_file"
+  return 1
+}
+
+# has_open_files <dir> — true when lsof finds an open file or cannot prove the
+# tree is closed. macOS lsof's +D return status is unreliable, so matching
+# stdout is authoritative while any stderr diagnostic fails closed.
+has_open_files() {
+  local dir="$1" lsof_bin hit_file err_file diagnostic rc=0
+  if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
+    lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif [[ -x /usr/sbin/lsof ]]; then
+    lsof_bin=/usr/sbin/lsof
+  elif lsof_bin=$(command -v lsof 2>/dev/null); then
+    :
+  else
+    log "Open-file check unavailable for $dir — fail-closed, treating as active."
+    return 0
+  fi
+  if [[ ! -x "$lsof_bin" ]]; then
+    log "Open-file check unavailable for $dir ($lsof_bin is not executable) — fail-closed, treating as active."
+    return 0
+  fi
+  hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
+  err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
+  # Force warnings on: lsof documents +D authority/traversal failures as
+  # warnings, while -w suppresses the only signal that distinguishes them
+  # from the ordinary empty-search rc=1 result.
+  "$lsof_bin" +w +D "$dir" >"$hit_file" 2>"$err_file" || rc=$?
+  # macOS lsof 4.91 can print matching open files yet return 1 for +D, so
+  # stdout is the authoritative positive signal; rc only diagnoses errors
+  # when there were no matches.
+  if [[ -s "$hit_file" ]]; then
+    rm -f "$hit_file" "$err_file"
+    return 0
+  fi
+  rm -f "$hit_file"
+  if [[ -s "$err_file" ]]; then
+    diagnostic=$(head -n 1 "$err_file")
+    rm -f "$err_file"
+    log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
+    return 0
+  fi
+  rm -f "$err_file"
+  if (( rc != 1 )); then
+    log "Open-file check failed for $dir (lsof rc=${rc}) — fail-closed, treating as active."
+    return 0
+  fi
+  return 1
+}
+
+# archive_path <dir> <size_kb> — move (not delete) a large top-level /private/tmp dir
+# into a dated quarantine root instead of an instant rm -rf. Same-filesystem
+# mv is a rename (near-zero cost, frees no space immediately) so a later
+# --large run can still purge_aged_archives() once the retention window
+# passes, giving a real recovery window before space is reclaimed.
+archive_path() {
+  local path="$1" kb="$2" ts dest
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  dest="$ARCHIVE_ROOT/$ts"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
+  else
+    mkdir -p "$dest"
+    log "Archiving: $path -> $dest/  (${kb} KB)"
+    mv "$path" "$dest/"
+  fi
+  echo "$kb"
+}
+
+# purge_aged_archives — permanently rm -rf inactive archive entries older than
+# LARGE_TMP_ARCHIVE_RETENTION_HOURS. Safety checks run again at purge time
+# because quarantined content can become active during its recovery window.
+purge_aged_archives() {
+  [[ -d "$ARCHIVE_ROOT" ]] || return 0
+  local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
+  local d kb
+  while IFS= read -r -d '' d; do
+    # Size first because du can be slow. All safety probes follow it, with the
+    # open-file check last immediately before the destructive operation.
+    kb=$(path_size_kb "$d")
+    if has_active_marker "$d"; then
+      log "Skipping marked-active aged archive: $d"
+      continue
+    fi
+    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+      log "Skipping recently-active aged archive: $d"
+      continue
+    fi
+    if has_open_files "$d"; then
+      log "Skipping in-use aged archive: $d"
+      continue
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+      log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
+    else
+      log "Purging aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
+      rm -rf "$d"
+    fi
+    TOTAL_KB=$(( TOTAL_KB + kb ))
+    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
+}
+
 log "$(dry_prefix)cleanup_tmp.sh starting"
 
 DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
+DIRS_ARCHIVED=0
+ARCHIVED_KB=0
 
 # Scan all temp directories for git clones & validation scratch dirs
 for tmp_dir in "${TMP_DIRS[@]}"; do
@@ -113,6 +318,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   # 1. Any directory containing a .git folder and older than GIT_CLONE_MIN
   while IFS= read -r -d '' subdir; do
     [[ -d "$subdir/.git" ]] || continue
+    if is_protected_tmp_path "$subdir"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $subdir"
+      continue
+    fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
@@ -141,6 +350,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
   # 3. cli_validation_gemini_* dirs older than CLI_VALIDATION_MIN
   while IFS= read -r -d '' d; do
+    if is_protected_tmp_path "$d"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+      continue
+    fi
     kb=$(remove_path "$d")
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -158,6 +371,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   while IFS= read -r -d '' subdir; do
     # .git must be a regular file (worktree pointer), not a directory
     [[ -f "$subdir/.git" ]] || continue
+    if is_protected_tmp_path "$subdir"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $subdir"
+      continue
+    fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
@@ -269,32 +486,57 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
 fi
 
 if [[ "$INCLUDE_LARGE" == true ]]; then
-  log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB ..."
+  # Overridable so sandboxed tests can point archiving at a fixture tree
+  # instead of the real /private/tmp; production always uses the default.
+  ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
+  log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
   while IFS= read -r -d '' d; do
-    case "$(basename "$d")" in
+    base="$(basename "$d")"
+
+    case "$base" in
       com.apple.*|system-*|PowerlogHelperd*) continue ;;
+      # Our own quarantine root — never re-archive/delete it here;
+      # purge_aged_archives() below is the only thing that touches it.
+      _disk_magician_archive) continue ;;
     esac
-    case "$(basename "$d")" in
+    case "$base" in
       wt_*|worktree_*)
         log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
         [[ "${TMP_WORKTREES_APPROVED:-0}" == "1" ]] || continue
         ;;
     esac
 
+    if is_protected_root "$base"; then
+      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+      continue
+    fi
+
     kb=$(path_size_kb "$d")
     if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
       continue
     fi
 
-    if [[ "$DRY_RUN" != true ]] && command -v lsof >/dev/null 2>&1 && lsof +D "$d" >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
       log "Skipping in-use large tmp dir: $d  (${kb} KB)"
       continue
     fi
 
-    kb=$(remove_path "$d")
-    TOTAL_KB=$(( TOTAL_KB + kb ))
-    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    if [[ -e "$d/.in-use" ]]; then
+      log "Skipping active-use marker (.in-use present): $d  (${kb} KB)"
+      continue
+    fi
+
+    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d  (${kb} KB)"
+      continue
+    fi
+
+    archive_path "$d" "$kb" >/dev/null
+    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
   done < <(find /private/tmp -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+
+  purge_aged_archives
 fi
 
-log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Dirs archived: ${DIRS_ARCHIVED}  Total archived: ${ARCHIVED_KB} KB"

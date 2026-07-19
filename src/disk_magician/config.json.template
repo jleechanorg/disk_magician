@@ -291,7 +291,10 @@
     "cli_validation_minutes": 60,
     "dead_sessions_days": 1,
     "worktree_pointer_minutes": 30,
-    "worktree_pointer_min_kb": 51200
+    "worktree_pointer_min_kb": 51200,
+    "large_tmp_active_hours": 24,
+    "large_tmp_archive_retention_hours": 24
   },
+  "protected_tmp_roots": ["worldarchitect.ai", "worldai_claw", "wa-missions"],
   "gc_worktree_repos": []
 }
