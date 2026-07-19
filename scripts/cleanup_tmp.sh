@@ -222,7 +222,10 @@ has_open_files() {
   fi
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
-  "$lsof_bin" +D "$dir" >"$hit_file" 2>"$err_file" || rc=$?
+  # Force warnings on: lsof documents +D authority/traversal failures as
+  # warnings, while -w suppresses the only signal that distinguishes them
+  # from the ordinary empty-search rc=1 result.
+  "$lsof_bin" +w +D "$dir" >"$hit_file" 2>"$err_file" || rc=$?
   # macOS lsof 4.91 can print matching open files yet return 1 for +D, so
   # stdout is the authoritative positive signal; rc only diagnoses errors
   # when there were no matches.
