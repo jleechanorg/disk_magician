@@ -818,3 +818,113 @@ independently verifiable source; ordinary user-shell retries cannot resolve it.
 - No files were deleted during this report run. The quick-win lane remains
   advisory: Colima 8.3 GiB, code-sign clone caches 4.9 GiB (approval-gated),
   and Codex sessions 18.7 GiB (never-delete/review-only).
+
+## Roll-forward — 2026-07-18 ez97 traversal fix, two-lane coordination, and /nextsteps sync {#roll-forward-2026-07-18-ez97-and-nextsteps}
+
+### Executive summary
+
+- **`jleechan-ez97` CLOSED** (commits
+  [`f80dc83`](https://github.com/jleechanorg/disk_magician/commit/f80dc83) +
+  [`b99562c`](https://github.com/jleechanorg/disk_magician/commit/b99562c),
+  v0.2.29): `frontier_sort_key` put depth first (strict global BFS), so every
+  depth-2 `/Library`/`/System` `du` had to finish before any depth-3 `/Users`
+  node — the 480s budget died there. Fix: the Data-root priority class now
+  dominates depth (`/Users` drains first, breadth-first within class), plus a
+  `DISK_MAGICIAN_TOPDOWN_ROOT` env override forwarded as `--root` by
+  `disk_diagnostic.sh`. Proof at
+  `roadmap/evidence/2026-07-18-ez97-frontier-users-priority-proof.json`:
+  a 120s cap (¼ the previously-exhausted budget) measured 511 `/Users`
+  buckets / 39.5 GiB vs the prior 0 buckets / 100% residual.
+- **Two agents, one working tree** — while this session's full-audit proof
+  run executed, a concurrent Codex lane (gpt-5.6-sol, cmux surface:2) began
+  the `jleechan-rvqz` one-pass gdu-inventory architecture in the SAME
+  checkout, uncommitted, and killed this session's v0.2.29 audit process
+  (mislabeled as stale v0.2.28; host load was 200+ so the kill itself was
+  reasonable). This session detected the collision via unexplained mtime
+  changes, identified the writer through the cmux socket, sent a
+  coordination note (correct process provenance + request to preserve the
+  two new tests), and stood down from the shared files per the
+  single-writer rule. The Codex lane then landed `12a7e9b`…`b1a30f9`
+  (v0.2.31 one-pass report: residual 708.2 → 211.8 GiB) on top of this
+  session's pushed commits, with all tests (including the two new ones)
+  green at HEAD — and separately opened PR #28 (`be1858a`, the
+  `cleanup_tmp --large` active-use safety fix) on its own branch, leaving
+  the shared working tree checked out on that PR branch.
+- **Second same-tree hazard, self-inflicted and corrected:** this
+  session's /nextsteps docs commit was made without re-checking the
+  current branch and landed on the PR-28 branch the shared tree had been
+  left on — pushed to `origin/fix/large-tmp-active-use-protection` before
+  the mistake was caught. Corrected without force-push: reverted on the PR
+  branch (`cd5994a`), cherry-picked onto `main`. The earlier
+  “PR #28 diverges from main's `be1858a`” reading in this session was an
+  artifact of running `git log` on the switched checkout: `be1858a` was
+  never on main; PR #28 is simply the sole, unmerged carrier of the
+  safety fix. Lesson: in a shared tree a sibling can also SWITCH BRANCHES
+  under you — verify `git branch --show-current` immediately before every
+  commit, not once per session.
+- **/nextsteps sync findings (fixed inline):** deployed tool was v0.2.31
+  while pyproject said 0.2.32 — redeployed via
+  `uv tool install --force --reinstall` and verified `Version: 0.2.32` in
+  the installed dist-info.
+- **New beads:** [jleechan-oqb5](https://github.com/jleechanorg/disk_magician/issues/29)
+  (P1 — merge PR #28: sole carrier of the `cleanup_tmp --large` active-use
+  safety fix, `be1858a` + a 336-line test suite, none of it on main) and
+  [jleechan-pqhb](https://github.com/jleechanorg/disk_magician/issues/30)
+  (P2 — triage stale open PRs #21/#9/#1).
+
+### Bead index (this block)
+
+| Bead | Title | Status | Link |
+|------|-------|--------|------|
+| jleechan-ez97 | Top-down lane exhausts wall-clock before /Users | CLOSED | `br show jleechan-ez97` |
+| jleechan-oqb5 | Merge PR #28 — sole carrier of cleanup_tmp --large safety fix | OPEN P1 | [#29](https://github.com/jleechanorg/disk_magician/issues/29) |
+| jleechan-pqhb | Triage stale open PRs #21/#9/#1 | OPEN P2 | [#30](https://github.com/jleechanorg/disk_magician/issues/30) |
+| jleechan-rvqz | Full top-down accounting default (≤50 GiB residual) | OPEN P1 | [#18](https://github.com/jleechanorg/disk_magician/issues/18) |
+| jleechan-1utw | Privileged protected-allocation evidence lane | OPEN P1 | `br show jleechan-1utw` |
+| jleechan-s99f | Rotate 2 embedded PATs (user-side) | OPEN P0 | `br show jleechan-s99f` |
+| jleechan-6mu5 | Swarm SAFE-tier report per-item verification defect | OPEN P2 | `br show jleechan-6mu5` |
+| jleechan-6ads | Execute 700G reclaim plan (REVIEW tier needs sign-off) | OPEN P1 | [#26](https://github.com/jleechanorg/disk_magician/issues/26) |
+
+### Work queue (updated)
+
+1. **Merge PR #28** — tracks
+   [jleechan-oqb5](https://github.com/jleechanorg/disk_magician/issues/29).
+   It is the sole carrier of the `cleanup_tmp --large` active-use safety
+   fix (`be1858a` + `tests/test_cleanup_tmp_large_protections.sh`); none
+   of it is on main. Drive green, merge, then sync/bump/reinstall.
+   Ignore the transient `f3a6885`/`cd5994a` docs-commit + revert pair on
+   the branch (wrong-branch accident, net-zero). Safety-relevant: guards
+   `--large` against deleting active worldarchitect.ai trees.
+2. **PAT rotation** — [jleechan-s99f] P0, user-side GitHub action; local
+   clones already deleted. Verify actual revocation state, not just local
+   removal (also jleechan-521f).
+3. **rvqz residual ≤50 GiB** — next step is a privileged evidence lane
+   ([jleechan-1utw]); ordinary user-shell retries cannot resolve the
+   211.8 GiB protected residual (`/private/var/dirs_cleaner` leading
+   candidate, SIP/Launch-Constraints blocked).
+4. **REVIEW-tier cleanup (~36.6 GiB per v0.2.31 quick-win lane)** — blocked
+   on explicit user sign-off; re-measure before executing
+   ([jleechan-6ads]).
+5. **Stale PR triage #21/#9/#1** — tracks
+   [jleechan-pqhb](https://github.com/jleechanorg/disk_magician/issues/30).
+6. **Swarm report generation per-item verification** — [jleechan-6mu5];
+   process fix in the /swarm extraction lanes (per-directory size+status,
+   never aggregate globs).
+
+### PR / merge state (verified this run via gh)
+
+- [PR #28](https://github.com/jleechanorg/disk_magician/pull/28): OPEN — sole carrier of the cleanup_tmp --large safety fix
+- [PR #21](https://github.com/jleechanorg/disk_magician/pull/21): OPEN — stale, needs triage
+- [PR #9](https://github.com/jleechanorg/disk_magician/pull/9): OPEN — stale, needs triage
+- [PR #1](https://github.com/jleechanorg/disk_magician/pull/1): OPEN — stale, needs triage
+
+### Learnings pointer
+
+- `~/roadmap/learnings-2026-07.md` — section `2026-07-18 — ez97 traversal
+  fix + same-tree two-agent coordination` (single-writer detection via
+  mtime + cmux socket identification + stand-down protocol).
+
+### Roadmap pointer
+
+- Appended `roadmap/activity/2026-07-18.md` (existing date file; README
+  already links 2026-07-18).
