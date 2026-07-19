@@ -97,6 +97,7 @@ dua_size_kb() {
 dir_size_kb() {
   local raw_path="$1"
   local to="${2:-$DU_TIMEOUT}"
+  local max_seconds="${3:-$MEASURE_PATH_MAX_SECONDS}"
   # Expand ~ or $HOME manually
   local path
   path="${raw_path/#\~/$HOME}"
@@ -111,8 +112,9 @@ dir_size_kb() {
   remaining=$(remaining_measurement_seconds)
   (( remaining > 0 )) || { echo ""; return; }
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
+  [[ "$max_seconds" =~ ^[0-9]+$ && "$max_seconds" -gt 0 ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
   path_budget="$to"
-  (( path_budget > MEASURE_PATH_MAX_SECONDS )) && path_budget="$MEASURE_PATH_MAX_SECONDS"
+  (( path_budget > max_seconds )) && path_budget="$max_seconds"
   (( path_budget > remaining )) && path_budget="$remaining"
   path_deadline=$(( $(date +%s) + path_budget ))
 
@@ -387,8 +389,9 @@ disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
 tracked_total_kb=0
 timeout_keys=()
 DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
+RETRY_TEMP_FILE=$(mktemp -t disk_magician_retries.XXXXXX)
 LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
 trap _cleanup_dirs_temp EXIT
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
@@ -413,14 +416,19 @@ add_entry() {
 }
 
 # Run dir checks
-while IFS=$'\t' read -r key path timeout; do
+while IFS=$'\t' read -r key path timeout retry_timeout; do
   size=$(dir_size_kb "$path" "$timeout")
-  add_entry "$key" "$size" "$path"
+  if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && \
+        "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ]]; then
+    printf "%s\t%s\t%s\n" "$key" "$path" "$retry_timeout" >> "$RETRY_TEMP_FILE"
+  else
+    add_entry "$key" "$size" "$path"
+  fi
 done < <(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 for item in data.get("monitored_dirs", []):
-    print(f"{item['key']}\t{item['path']}\t{item.get('timeout', 30)}")
+    print(f"{item['key']}\t{item['path']}\t{item.get('timeout', 30)}\t{item.get('retry_timeout', 0)}")
 PY
 )
 
@@ -447,6 +455,14 @@ for item in data.get("monitored_globs", []):
     print(f"{item['key']}\t{item['pattern']}")
 PY
 )
+
+# Retry only explicitly selected slow directories after every configured entry
+# has received the short first pass. The existing global deadline remains the
+# final authority, so retries cannot extend the snapshot budget.
+while IFS=$'\t' read -r key path retry_timeout; do
+  size=$(dir_size_kb "$path" "$retry_timeout" "$retry_timeout")
+  add_entry "$key" "$size" "$path"
+done < "$RETRY_TEMP_FILE"
 
 # ────────── TOP-20 LIBRARY/CONTAINERS SUBDIRS (additive) ──────────
 # Per Lane B Section C: the 50 GB Library/Containers blind spot. Track

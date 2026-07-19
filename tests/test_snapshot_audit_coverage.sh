@@ -342,6 +342,8 @@ section "7. allowlist measurement is dua-first and bounded per path + in total"
 BUDGET_HOME="$WORK/budget_home"
 BUDGET_BIN="$WORK/budget_bin"
 BUDGET_LOG="$WORK/budget_invocations.log"
+BUDGET_CLOCK_STATE="$WORK/budget_clock_state"
+SYSTEM_DATE=$(command -v date)
 mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
 : > "$BUDGET_LOG"
 
@@ -363,7 +365,24 @@ cat > "$BUDGET_BIN/du" <<'SH'
 echo "du $*" >> "${BUDGET_LOG:?}"
 sleep 5
 SH
-chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du"
+cat > "$BUDGET_BIN/date" <<SH
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "+%s" ]]; then
+  if [[ "\${BUDGET_CLOCK_MODE:-}" == "fixed" ]]; then
+    echo 1000000
+    exit 0
+  elif [[ "\${BUDGET_CLOCK_MODE:-}" == "boundary" ]]; then
+    count=0
+    [[ -f "\${BUDGET_CLOCK_STATE:?}" ]] && read -r count < "\$BUDGET_CLOCK_STATE"
+    count=\$(( count + 1 ))
+    printf '%s\n' "\$count" > "\$BUDGET_CLOCK_STATE"
+    (( count <= 3 )) && echo 1000000 || echo 1000001
+    exit 0
+  fi
+fi
+exec "$SYSTEM_DATE" "\$@"
+SH
+chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du" "$BUDGET_BIN/date"
 
 PARITY_CONFIG="$WORK/budget_parity_config.json"
 cat > "$PARITY_CONFIG" <<JSON
@@ -383,6 +402,108 @@ else
   bad "dua primary/parity parsing contract failed"
 fi
 
+DEFAULT_CAP_OUT="$WORK/budget_default_cap.json"
+if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DUA_BYTES=$(( expected_kb * 1024 )) \
+  DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=150 \
+  timeout 10 "$SNAP_SCRIPT" --output "$DEFAULT_CAP_OUT" >/dev/null 2>&1 && \
+  python3 - "$DEFAULT_CAP_OUT" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["directories"]["parity"] == 1234
+assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 20
+PY
+then
+  ok "default first-pass cap stays short for every serial path"
+else
+  bad "default first-pass cap does not stay at 20s"
+fi
+
+RETRY_HOME="$WORK/budget_retry_home"
+RETRY_BIN="$WORK/budget_retry_bin"
+RETRY_LOG="$WORK/budget_retry.log"
+RETRY_STATE="$WORK/budget_retry_state"
+mkdir -p "$RETRY_HOME/slow-a" "$RETRY_HOME/slow-b" \
+  "$RETRY_HOME/retry-selected" "$RETRY_HOME/fast-sentinel" "$RETRY_BIN" "$RETRY_STATE"
+: > "$RETRY_LOG"
+
+cat > "$RETRY_BIN/timeout" <<'SH'
+#!/usr/bin/env bash
+limit="$1"
+shift
+FAKE_TIMEOUT_SECONDS="$limit" "$@"
+SH
+cat > "$RETRY_BIN/dua" <<'SH'
+#!/usr/bin/env bash
+path=""
+for arg in "$@"; do path="$arg"; done
+printf '%s\t%s\n' "${FAKE_TIMEOUT_SECONDS:?}" "$path" >> "${RETRY_LOG:?}"
+case "$path" in
+  */slow-a|*/slow-b) exit 124 ;;
+  */retry-selected)
+    count_file="${RETRY_STATE:?}/selected_count"
+    count=0
+    [[ -f "$count_file" ]] && read -r count < "$count_file"
+    count=$(( count + 1 ))
+    printf '%s\n' "$count" > "$count_file"
+    (( count > 1 && FAKE_TIMEOUT_SECONDS > 20 )) || exit 124
+    printf '%s b total\n' 2097152
+    ;;
+  */fast-sentinel) printf '%s b total\n' 1048576 ;;
+  *) exit 1 ;;
+esac
+SH
+cat > "$RETRY_BIN/du" <<'SH'
+#!/usr/bin/env bash
+exit 124
+SH
+chmod +x "$RETRY_BIN/timeout" "$RETRY_BIN/dua" "$RETRY_BIN/du"
+
+RETRY_CONFIG="$WORK/budget_retry_config.json"
+cat > "$RETRY_CONFIG" <<JSON
+{"monitored_dirs": [
+  {"key": "slow_a", "path": "$RETRY_HOME/slow-a", "timeout": 180},
+  {"key": "slow_b", "path": "$RETRY_HOME/slow-b", "timeout": 180},
+  {"key": "retry_selected", "path": "$RETRY_HOME/retry-selected", "timeout": 180, "retry_timeout": 90},
+  {"key": "fast_sentinel", "path": "$RETRY_HOME/fast-sentinel", "timeout": 180}
+]}
+JSON
+RETRY_OUT="$WORK/budget_retry.json"
+if HOME="$RETRY_HOME" PATH="$RETRY_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  RETRY_LOG="$RETRY_LOG" RETRY_STATE="$RETRY_STATE" \
+  DISK_MAGICIAN_CONFIG="$RETRY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=1500 \
+  timeout 10 "$SNAP_SCRIPT" --output "$RETRY_OUT" >/dev/null 2>&1 && \
+  python3 - "$RETRY_OUT" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["snapshot_metadata"]
+assert d["directories"]["slow_a"] is None
+assert d["directories"]["slow_b"] is None
+assert d["directories"]["retry_selected"] == 2048
+assert d["directories"]["fast_sentinel"] == 1024
+assert set(d["timeout_keys"]) == {"slow_a", "slow_b"}
+assert m["measurement_budget_seconds"] == 1500
+assert m["measurement_path_max_seconds"] == 20
+assert m["measurement_budget_exhausted"] is False
+PY
+then
+  expected_retry_log=$(cat <<EOF
+20	$RETRY_HOME/slow-a
+20	$RETRY_HOME/slow-b
+20	$RETRY_HOME/retry-selected
+20	$RETRY_HOME/fast-sentinel
+90	$RETRY_HOME/retry-selected
+EOF
+)
+  if [[ "$(cat "$RETRY_LOG")" == "$expected_retry_log" ]]; then
+    ok "selected >20s retry runs after later fast paths while the 1500s total stays authoritative"
+  else
+    bad "selected retry order or cap was wrong: $(tr '\n' ';' < "$RETRY_LOG")"
+  fi
+else
+  bad "selected retry did not recover without starving the later fast sentinel"
+fi
+
 PER_PATH_CONFIG="$WORK/budget_per_path_config.json"
 cat > "$PER_PATH_CONFIG" <<JSON
 {"monitored_dirs": [{"key": "slow", "path": "$BUDGET_HOME/slow-a", "timeout": 180}]}
@@ -392,6 +513,7 @@ PER_PATH_OUT="$WORK/budget_per_path.json"
 start=$(date +%s)
 HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_CLOCK_MODE=fixed BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
   DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$PER_PATH_OUT" \
   >/dev/null 2>&1 || true
@@ -403,6 +525,26 @@ if [[ "$per_path_elapsed" -le 3 ]] && \
   ok "dua failure falls back to du inside one shared 1s per-path deadline"
 else
   bad "per-path deadline failed (elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
+fi
+
+EXPIRED_OUT="$WORK/budget_expired.json"
+: > "$BUDGET_LOG"
+rm -f "$BUDGET_CLOCK_STATE"
+start=$(date +%s)
+HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_CLOCK_MODE=boundary BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
+  DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$EXPIRED_OUT" \
+  >/dev/null 2>&1 || true
+expired_elapsed=$(( $(date +%s) - start ))
+if [[ "$expired_elapsed" -le 3 ]] && \
+  [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
+  [[ "$(head -1 "$BUDGET_LOG")" == dua* ]] && \
+  python3 -c "import json; d=json.load(open('$EXPIRED_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
+  ok "expired shared deadline deterministically skips the du fallback"
+else
+  bad "expired deadline launched extra work (elapsed=${expired_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi
 
 TOTAL_CONFIG="$WORK/budget_total_config.json"
