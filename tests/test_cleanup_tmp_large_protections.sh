@@ -37,7 +37,7 @@ SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
 # Literal pre-fix SHA: the commit immediately before
 # be1858a "fix(cleanup_tmp): add active-use protection to --large branch".
 # Do not change to HEAD or HEAD^ — see comment block above.
-PRE_FIX_SHA="b1a30f9"
+PRE_FIX_SHA="b1a30f95d4a75dd52ed313b100629c9af783717c"
 
 TMP_ROOT=$(mktemp -d -t cleanup_tmp_large_protections.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -114,6 +114,9 @@ case "\${1:-}" in
     exec /usr/bin/find "$fake_tmp" "\$@"
     ;;
   *)
+    if [[ -n "\${FAIL_FIND_ROOT:-}" && "\${1:-}" == "\$FAIL_FIND_ROOT" ]]; then
+      exit 91
+    fi
     exec /usr/bin/find "\$@"
     ;;
 esac
@@ -128,6 +131,26 @@ fi
 exec /usr/bin/getconf "$@"
 EOF
   chmod +x "$bin_dir/getconf"
+}
+
+make_du_probe() {
+  local bin_dir="$1"
+  cat > "$bin_dir/du" <<'EOF'
+#!/usr/bin/env bash
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+if [[ -n "${DU_LOG:-}" ]]; then
+  printf '%s\n' "$last" >> "$DU_LOG"
+fi
+if [[ -n "${DU_FIXED_PATH:-}" && "$last" == "$DU_FIXED_PATH" ]]; then
+  printf '4\t%s\n' "$last"
+  exit 0
+fi
+exec /usr/bin/du "$@"
+EOF
+  chmod +x "$bin_dir/du"
 }
 
 make_large_dir() {
@@ -147,6 +170,13 @@ set_old_mtime() {
 }
 
 echo "=== cleanup_tmp.sh --large protection tests ==="
+
+if [[ "$PRE_FIX_SHA" =~ ^[[:xdigit:]]{40}$ ]]; then
+  record_pass "pre-fix SHA pin is a full 40-character object ID"
+else
+  record_fail "pre-fix SHA pin is a full 40-character object ID" \
+    "got '$PRE_FIX_SHA' (${#PRE_FIX_SHA} characters)"
+fi
 
 # ─────────────────────── RED: prove the pre-fix bug ───────────────────────
 echo "RED: pre-fix cleanup_tmp.sh deletes a protected-root-shaped large tmp dir"
@@ -300,6 +330,67 @@ assert_contains "GREEN 3b: logs env-configured protected-root skip" \
   "Skipping protected root (in PROTECTED_TMP_ROOTS): $G3B_PRIVATE_TMP/my_custom_root" "$G3B_OUT_CONTENT"
 assert_exists "GREEN 3b: custom protected root untouched" "$G3B_PRIVATE_TMP/my_custom_root"
 
+echo "GREEN 3c: unreadable activity subtree fails closed instead of being archived"
+G3C_PRIVATE_TMP="$TMP_ROOT/g3c-private-tmp"
+G3C_TMP="$TMP_ROOT/g3c-tmp"
+G3C_ARCHIVE="$TMP_ROOT/g3c-archive"
+G3C_BIN="$TMP_ROOT/g3c-bin"
+mkdir -p "$G3C_PRIVATE_TMP" "$G3C_TMP"
+make_find_shim "$G3C_BIN" "$G3C_PRIVATE_TMP" "$G3C_TMP"
+make_du_probe "$G3C_BIN"
+make_large_dir "$G3C_PRIVATE_TMP/unreadable_tree"
+mkdir -p "$G3C_PRIVATE_TMP/unreadable_tree/blocked"
+touch "$G3C_PRIVATE_TMP/unreadable_tree/blocked/hidden"
+set_old_mtime "$G3C_PRIVATE_TMP/unreadable_tree"
+chmod 000 "$G3C_PRIVATE_TMP/unreadable_tree/blocked"
+
+G3C_OUT="$TMP_ROOT/g3c.out"
+if run_capture "$G3C_OUT" env -i HOME="$TMP_ROOT/g3c-home" \
+  PATH="$G3C_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DU_FIXED_PATH="$G3C_PRIVATE_TMP/unreadable_tree" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G3C_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G3C_RC=0
+else
+  G3C_RC=$?
+fi
+chmod 700 "$G3C_PRIVATE_TMP/unreadable_tree/blocked" 2>/dev/null || true
+/usr/bin/find "$G3C_ARCHIVE" -type d -name blocked -exec chmod 700 {} + 2>/dev/null || true
+G3C_OUT_CONTENT=$(cat "$G3C_OUT")
+assert_rc "GREEN 3c: exits 0" 0 "$G3C_RC"
+assert_contains "GREEN 3c: logs fail-closed activity probe" \
+  "fail-closed, treating as active" "$G3C_OUT_CONTENT"
+assert_exists "GREEN 3c: unreadable tree remains at original path" \
+  "$G3C_PRIVATE_TMP/unreadable_tree"
+
+echo "GREEN 3d: LARGE_TMP_ACTIVE_HOURS env overrides config"
+G3D_PRIVATE_TMP="$TMP_ROOT/g3d-private-tmp"
+G3D_TMP="$TMP_ROOT/g3d-tmp"
+G3D_ARCHIVE="$TMP_ROOT/g3d-archive"
+G3D_BIN="$TMP_ROOT/g3d-bin"
+mkdir -p "$G3D_PRIVATE_TMP" "$G3D_TMP"
+make_find_shim "$G3D_BIN" "$G3D_PRIVATE_TMP" "$G3D_TMP"
+make_large_dir "$G3D_PRIVATE_TMP/env_active_window"
+set_old_mtime "$G3D_PRIVATE_TMP/env_active_window"
+
+G3D_OUT="$TMP_ROOT/g3d.out"
+if run_capture "$G3D_OUT" env -i HOME="$TMP_ROOT/g3d-home" \
+  PATH="$G3D_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ACTIVE_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G3D_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G3D_RC=0
+else
+  G3D_RC=$?
+fi
+G3D_OUT_CONTENT=$(cat "$G3D_OUT")
+assert_rc "GREEN 3d: exits 0" 0 "$G3D_RC"
+assert_contains "GREEN 3d: logs env-selected active window" \
+  "mtime within 876000h" "$G3D_OUT_CONTENT"
+assert_exists "GREEN 3d: env-selected active window preserves candidate" \
+  "$G3D_PRIVATE_TMP/env_active_window"
+
 echo "GREEN 4: old + unmarked large dir is archived (moved, not rm -rf'd)"
 G4_PRIVATE_TMP="$TMP_ROOT/g4-private-tmp"
 G4_TMP="$TMP_ROOT/g4-tmp"
@@ -307,13 +398,17 @@ G4_ARCHIVE="$TMP_ROOT/g4-archive"
 G4_BIN="$TMP_ROOT/g4-bin"
 mkdir -p "$G4_PRIVATE_TMP" "$G4_TMP"
 make_find_shim "$G4_BIN" "$G4_PRIVATE_TMP" "$G4_TMP"
+make_du_probe "$G4_BIN"
 make_large_dir "$G4_PRIVATE_TMP/stale_scratch_dir"
 set_old_mtime "$G4_PRIVATE_TMP/stale_scratch_dir"
+G4_DU_LOG="$TMP_ROOT/g4-du.log"
+: > "$G4_DU_LOG"
 
 G4_OUT="$TMP_ROOT/g4.out"
 if run_capture "$G4_OUT" env -i HOME="$TMP_ROOT/g4-home" \
   PATH="$G4_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DU_LOG="$G4_DU_LOG" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G4_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large; then
   G4_RC=0
@@ -334,6 +429,14 @@ else
 fi
 assert_exists "GREEN 4: archived payload is still readable (data preserved, not lost)" \
   "$G4_ARCHIVE"/*/stale_scratch_dir/payload.bin
+G4_TARGET_DU_COUNT=$(grep -cFx "$G4_PRIVATE_TMP/stale_scratch_dir" "$G4_DU_LOG" || true)
+assert_rc "GREEN 4: candidate size is measured once" 1 "$G4_TARGET_DU_COUNT"
+assert_contains "GREEN 4: archive move is not counted as a removed dir" \
+  "Dirs removed: 0" "$G4_OUT_CONTENT"
+assert_contains "GREEN 4: same-filesystem archive move reports zero reclaimed bytes" \
+  "Total freed: 0 KB" "$G4_OUT_CONTENT"
+assert_contains "GREEN 4: quarantine accounting is reported separately" \
+  "Dirs archived: 1" "$G4_OUT_CONTENT"
 
 echo "GREEN 5: an aged archive entry is purged (space actually reclaimed on a later run)"
 G5_PRIVATE_TMP="$TMP_ROOT/g5-private-tmp"
@@ -349,6 +452,7 @@ G5_OUT="$TMP_ROOT/g5.out"
 if run_capture "$G5_OUT" env -i HOME="$TMP_ROOT/g5-home" \
   PATH="$G5_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  FAIL_FIND_ROOT="$G5_ARCHIVE" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large; then
   G5_RC=0
@@ -360,6 +464,33 @@ assert_rc "GREEN 5: exits 0" 0 "$G5_RC"
 assert_contains "GREEN 5: logs purging the aged archive entry" \
   "Purging aged archive" "$G5_OUT_CONTENT"
 assert_missing "GREEN 5: aged archive entry actually reclaimed" "$G5_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 5: actual purge is counted as a removed dir" \
+  "Dirs removed: 1" "$G5_OUT_CONTENT"
+
+echo "GREEN 5b: LARGE_TMP_ARCHIVE_RETENTION_HOURS env overrides config"
+G5B_PRIVATE_TMP="$TMP_ROOT/g5b-private-tmp"
+G5B_TMP="$TMP_ROOT/g5b-tmp"
+G5B_ARCHIVE="$TMP_ROOT/g5b-archive"
+G5B_BIN="$TMP_ROOT/g5b-bin"
+mkdir -p "$G5B_PRIVATE_TMP" "$G5B_TMP" "$G5B_ARCHIVE/20200101T000000Z/already_archived_dir"
+touch "$G5B_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
+set_old_mtime "$G5B_ARCHIVE/20200101T000000Z"
+make_find_shim "$G5B_BIN" "$G5B_PRIVATE_TMP" "$G5B_TMP"
+
+G5B_OUT="$TMP_ROOT/g5b.out"
+if run_capture "$G5B_OUT" env -i HOME="$TMP_ROOT/g5b-home" \
+  PATH="$G5B_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5B_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G5B_RC=0
+else
+  G5B_RC=$?
+fi
+G5B_OUT_CONTENT=$(cat "$G5B_OUT")
+assert_rc "GREEN 5b: exits 0" 0 "$G5B_RC"
+assert_exists "GREEN 5b: env-selected retention preserves archive" \
+  "$G5B_ARCHIVE/20200101T000000Z"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

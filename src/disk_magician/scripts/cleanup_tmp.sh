@@ -20,18 +20,18 @@ WORKTREE_POINTER_MIN_KB=51200
 # --large branch safety (hours): a top-level /private/tmp dir with any file
 # mtime within this window is considered "active use" and is skipped
 # regardless of size or protected-root status.
-LARGE_TMP_ACTIVE_HOURS=24
+LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
 # --large branch: how long an archived dir sits under
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
-LARGE_TMP_ARCHIVE_RETENTION_HOURS=24
+LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
 
 if [[ -f "$CONFIG_FILE" ]]; then
   read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24"
-import json, sys
+import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {t.get('large_tmp_active_hours', 24)} {t.get('large_tmp_archive_retention_hours', 24)}")
+print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))}")
 PY
 )"
 fi
@@ -155,9 +155,7 @@ has_recent_activity() {
   local dir="$1" hours="$2" mins hit_file rc=0
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  if ! /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null; then
-    rc=$?
-  fi
+  /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
   if (( rc != 0 )); then
     rm -f "$hit_file"
     log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
@@ -171,14 +169,13 @@ has_recent_activity() {
   return 1
 }
 
-# archive_path <dir> — move (not delete) a large top-level /private/tmp dir
+# archive_path <dir> <size_kb> — move (not delete) a large top-level /private/tmp dir
 # into a dated quarantine root instead of an instant rm -rf. Same-filesystem
 # mv is a rename (near-zero cost, frees no space immediately) so a later
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
-  local path="$1" kb ts dest
-  kb=$(path_size_kb "$path")
+  local path="$1" kb="$2" ts dest
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts"
 
@@ -209,7 +206,7 @@ purge_aged_archives() {
     fi
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-  done < <(find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
 }
 
 log "$(dry_prefix)cleanup_tmp.sh starting"
@@ -217,6 +214,8 @@ log "$(dry_prefix)cleanup_tmp.sh starting"
 DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
+DIRS_ARCHIVED=0
+ARCHIVED_KB=0
 
 # Scan all temp directories for git clones & validation scratch dirs
 for tmp_dir in "${TMP_DIRS[@]}"; do
@@ -427,12 +426,12 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    kb=$(archive_path "$d")
-    TOTAL_KB=$(( TOTAL_KB + kb ))
-    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    archive_path "$d" "$kb" >/dev/null
+    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
   done < <(find /private/tmp -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 
   purge_aged_archives
 fi
 
-log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Dirs archived: ${DIRS_ARCHIVED}  Total archived: ${ARCHIVED_KB} KB"
