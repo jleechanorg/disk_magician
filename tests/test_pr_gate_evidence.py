@@ -97,12 +97,25 @@ class EvidenceGateTest(unittest.TestCase):
 
 
 class WorkflowContractTest(unittest.TestCase):
+    def test_ci_fetches_history_for_pinned_regression_proofs(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "fetch-depth: 0",
+            workflow,
+            "CI must fetch pinned pre-fix commits used by regression tests",
+        )
+
     def test_pull_request_gates_run_for_stacked_base_branches(self) -> None:
-        for workflow_name in ("ci.yml", "evidence-gate.yml"):
+        for workflow_name, event_name in (
+            ("ci.yml", "pull_request"),
+            ("evidence-gate.yml", "pull_request_target"),
+        ):
             lines = (ROOT / ".github" / "workflows" / workflow_name).read_text(
                 encoding="utf-8"
             ).splitlines()
-            start = lines.index("  pull_request:")
+            start = lines.index(f"  {event_name}:")
             block = []
             for line in lines[start + 1 :]:
                 if line and not line.startswith("    "):
@@ -112,6 +125,20 @@ class WorkflowContractTest(unittest.TestCase):
                 any(line.strip().startswith("branches:") for line in block),
                 f"{workflow_name} must run when a PR is stacked on a non-main base",
             )
+
+    def test_evidence_gate_runs_only_trusted_validator_code(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "evidence-gate.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("  pull_request_target:", workflow)
+        self.assertNotIn("  pull_request:\n", workflow)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+        self.assertIn("path: trusted-gate", workflow)
+        self.assertIn(
+            "python3 trusted-gate/.github/scripts/validate_evidence.py",
+            workflow,
+        )
+        self.assertNotIn("python3 .github/scripts/validate_evidence.py", workflow)
 
 
 if __name__ == "__main__":

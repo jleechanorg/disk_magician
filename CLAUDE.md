@@ -66,7 +66,10 @@ work (`br search disk`).
 
 - `.github/workflows/ci.yml` runs the maintained package-sync, shell, and
   Python suites on macOS. `.github/workflows/evidence-gate.yml` enforces the
-  deterministic evidence fields supplied by the pull-request template.
+  deterministic evidence fields supplied by the pull-request template. The
+  evidence workflow uses `pull_request_target` with read-only permissions and
+  runs the validator checked out from the default branch; it must never
+  execute validator or repository code from the pull request.
 - CodeRabbit and Cursor Bugbot are external GitHub Apps. Repository workflows
   may report their results but cannot create or impersonate their reviews.
 - Canonical 7-green Gate 7 is currently unavailable: the user-scope
