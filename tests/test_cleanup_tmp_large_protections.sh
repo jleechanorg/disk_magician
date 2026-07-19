@@ -12,9 +12,20 @@
 # LARGE_TMP_APPROVED=1 is auto-set by pressure_sweep.sh below the free-space
 # threshold.
 #
-# RED section runs the pre-fix script content (git show HEAD, before this
-# PR's changes) against a fixture and proves it deletes the protected dir.
-# GREEN section runs the current script and proves it does not.
+# RED section runs the pre-fix script content (git show at a pinned
+# pre-fix SHA, before this PR's changes) against a fixture and proves it
+# deletes the protected dir. GREEN section runs the current script and
+# proves it does not.
+#
+# The pre-fix reference is pinned to a literal commit SHA (NOT "HEAD" and
+# NOT "HEAD^") because once this PR's fix commit lands on the branch, HEAD
+# (and, on any later commit, HEAD^ too) points at already-fixed code — a
+# relative ref self-invalidates the moment the commit lands or the branch
+# grows. A literal SHA of the last commit before the fix stays correct
+# forever. A guard immediately below re-verifies the fetched content is
+# actually the unfixed version (absence of the fixed-code marker
+# `is_protected_root`), so a bad pin fails loudly instead of producing a
+# confusing RED failure.
 #
 # Run: bash tests/test_cleanup_tmp_large_protections.sh
 set -euo pipefail
@@ -22,6 +33,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
+
+# Literal pre-fix SHA: the commit immediately before
+# be1858a "fix(cleanup_tmp): add active-use protection to --large branch".
+# Do not change to HEAD or HEAD^ — see comment block above.
+PRE_FIX_SHA="b1a30f9"
 
 TMP_ROOT=$(mktemp -d -t cleanup_tmp_large_protections.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -135,30 +151,44 @@ echo "=== cleanup_tmp.sh --large protection tests ==="
 # ─────────────────────── RED: prove the pre-fix bug ───────────────────────
 echo "RED: pre-fix cleanup_tmp.sh deletes a protected-root-shaped large tmp dir"
 RED_SCRIPT="$TMP_ROOT/red-cleanup_tmp.sh"
-if git -C "$REPO_ROOT" show HEAD:scripts/cleanup_tmp.sh > "$RED_SCRIPT" 2>/dev/null; then
+if git -C "$REPO_ROOT" show "$PRE_FIX_SHA:scripts/cleanup_tmp.sh" > "$RED_SCRIPT" 2>/dev/null; then
   chmod +x "$RED_SCRIPT"
-  RED_PRIVATE_TMP="$TMP_ROOT/red-private-tmp"
-  RED_TMP="$TMP_ROOT/red-tmp"
-  RED_BIN="$TMP_ROOT/red-bin"
-  mkdir -p "$RED_PRIVATE_TMP" "$RED_TMP"
-  make_find_shim "$RED_BIN" "$RED_PRIVATE_TMP" "$RED_TMP"
-  make_large_dir "$RED_PRIVATE_TMP/worldarchitect.ai"
-  set_old_mtime "$RED_PRIVATE_TMP/worldarchitect.ai"
-
-  RED_OUT="$TMP_ROOT/red.out"
-  if run_capture "$RED_OUT" env -i HOME="$TMP_ROOT/red-home" \
-    PATH="$RED_BIN:/usr/bin:/bin" \
-    LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
-    bash "$RED_SCRIPT" --clean --large; then
-    RED_RC=0
+  # Guard: the pinned pre-fix SHA must NOT contain the fixed-code marker.
+  # If it does, the pin is wrong (points at or past the fix commit) and the
+  # RED replay below would silently run already-fixed code instead of
+  # reproducing the bug — fail loudly here instead of a confusing RED
+  # assertion failure further down.
+  if grep -q "is_protected_root" "$RED_SCRIPT"; then
+    record_fail "RED: pre-fix SHA pin ($PRE_FIX_SHA) is stale" \
+      "fetched script already contains the fixed-code marker 'is_protected_root' — update PRE_FIX_SHA to a commit before the fix"
+    RED_GUARD_FAILED=1
   else
-    RED_RC=$?
+    RED_GUARD_FAILED=0
   fi
-  assert_rc "RED: pre-fix script exits 0" 0 "$RED_RC"
-  assert_missing "RED: pre-fix script deletes /private/tmp/worldarchitect.ai (confirms historical bug)" \
-    "$RED_PRIVATE_TMP/worldarchitect.ai"
+  if [[ "$RED_GUARD_FAILED" -eq 0 ]]; then
+    RED_PRIVATE_TMP="$TMP_ROOT/red-private-tmp"
+    RED_TMP="$TMP_ROOT/red-tmp"
+    RED_BIN="$TMP_ROOT/red-bin"
+    mkdir -p "$RED_PRIVATE_TMP" "$RED_TMP"
+    make_find_shim "$RED_BIN" "$RED_PRIVATE_TMP" "$RED_TMP"
+    make_large_dir "$RED_PRIVATE_TMP/worldarchitect.ai"
+    set_old_mtime "$RED_PRIVATE_TMP/worldarchitect.ai"
+
+    RED_OUT="$TMP_ROOT/red.out"
+    if run_capture "$RED_OUT" env -i HOME="$TMP_ROOT/red-home" \
+      PATH="$RED_BIN:/usr/bin:/bin" \
+      LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+      bash "$RED_SCRIPT" --clean --large; then
+      RED_RC=0
+    else
+      RED_RC=$?
+    fi
+    assert_rc "RED: pre-fix script exits 0" 0 "$RED_RC"
+    assert_missing "RED: pre-fix script deletes /private/tmp/worldarchitect.ai (confirms historical bug)" \
+      "$RED_PRIVATE_TMP/worldarchitect.ai"
+  fi
 else
-  record_fail "RED: could not load HEAD:scripts/cleanup_tmp.sh" "git show failed — skipped RED proof"
+  record_fail "RED: could not load $PRE_FIX_SHA:scripts/cleanup_tmp.sh" "git show failed — skipped RED proof"
 fi
 
 # ─────────────────────────── GREEN: fixed script ───────────────────────────
