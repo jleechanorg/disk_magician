@@ -34,6 +34,7 @@ jobs:
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
           command -v rg >/dev/null 2>&1 || brew install ripgrep
+          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
 
       - name: Verify package-tree synchronization
         run: bash scripts/sync_package_tree.sh --check

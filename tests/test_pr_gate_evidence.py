@@ -151,6 +151,15 @@ class WorkflowContractTest(unittest.TestCase):
             "CI must fetch pinned pre-fix commits used by regression tests",
         )
 
+    def test_ci_installs_snapshot_guard_dependencies(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "command -v gitleaks >/dev/null 2>&1 || brew install gitleaks",
+            workflow,
+        )
+
     def test_pull_request_gates_run_for_stacked_base_branches(self) -> None:
         for workflow_name, event_name in (
             ("ci.yml", "pull_request"),
