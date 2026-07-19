@@ -96,5 +96,23 @@ class EvidenceGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class WorkflowContractTest(unittest.TestCase):
+    def test_pull_request_gates_run_for_stacked_base_branches(self) -> None:
+        for workflow_name in ("ci.yml", "evidence-gate.yml"):
+            lines = (ROOT / ".github" / "workflows" / workflow_name).read_text(
+                encoding="utf-8"
+            ).splitlines()
+            start = lines.index("  pull_request:")
+            block = []
+            for line in lines[start + 1 :]:
+                if line and not line.startswith("    "):
+                    break
+                block.append(line)
+            self.assertFalse(
+                any(line.strip().startswith("branches:") for line in block),
+                f"{workflow_name} must run when a PR is stacked on a non-main base",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
