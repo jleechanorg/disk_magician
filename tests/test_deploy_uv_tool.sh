@@ -18,6 +18,14 @@ if [[ ! -x "$SOURCE_DEPLOY" ]]; then
   exit 1
 fi
 
+for policy in AGENTS.md CLAUDE.md; do
+  if grep -q 'tools/deploy_uv_tool.sh' "$REPO_ROOT/$policy"; then
+    ok "$policy routes deployment through the provenance guard"
+  else
+    bad "$policy routes deployment through the provenance guard" "wrapper not referenced"
+  fi
+done
+
 REMOTE="$WORK/remote.git"
 TREE="$WORK/tree"
 git init --bare -q "$REMOTE"
