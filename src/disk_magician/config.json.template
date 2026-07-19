@@ -134,7 +134,8 @@
     {
       "key": "projects",
       "path": "~/projects",
-      "timeout": 300
+      "timeout": 300,
+      "retry_timeout": 90
     },
     {
       "key": "projects_other",

@@ -392,12 +392,97 @@ if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["directories"]["parity"] == 1234
-assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 90
+assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 20
 PY
 then
-  ok "default per-path cap covers the proven 40s projects scan while remaining bounded"
+  ok "default first-pass cap stays short for every serial path"
 else
-  bad "default per-path cap is shorter than the proven projects scan"
+  bad "default first-pass cap does not stay at 20s"
+fi
+
+RETRY_HOME="$WORK/budget_retry_home"
+RETRY_BIN="$WORK/budget_retry_bin"
+RETRY_LOG="$WORK/budget_retry.log"
+RETRY_STATE="$WORK/budget_retry_state"
+mkdir -p "$RETRY_HOME/slow-a" "$RETRY_HOME/slow-b" \
+  "$RETRY_HOME/retry-selected" "$RETRY_HOME/fast-sentinel" "$RETRY_BIN" "$RETRY_STATE"
+: > "$RETRY_LOG"
+
+cat > "$RETRY_BIN/timeout" <<'SH'
+#!/usr/bin/env bash
+limit="$1"
+shift
+FAKE_TIMEOUT_SECONDS="$limit" "$@"
+SH
+cat > "$RETRY_BIN/dua" <<'SH'
+#!/usr/bin/env bash
+path=""
+for arg in "$@"; do path="$arg"; done
+printf '%s\t%s\n' "${FAKE_TIMEOUT_SECONDS:?}" "$path" >> "${RETRY_LOG:?}"
+case "$path" in
+  */slow-a|*/slow-b) exit 124 ;;
+  */retry-selected)
+    count_file="${RETRY_STATE:?}/selected_count"
+    count=0
+    [[ -f "$count_file" ]] && read -r count < "$count_file"
+    count=$(( count + 1 ))
+    printf '%s\n' "$count" > "$count_file"
+    (( count > 1 && FAKE_TIMEOUT_SECONDS > 20 )) || exit 124
+    printf '%s b total\n' 2097152
+    ;;
+  */fast-sentinel) printf '%s b total\n' 1048576 ;;
+  *) exit 1 ;;
+esac
+SH
+cat > "$RETRY_BIN/du" <<'SH'
+#!/usr/bin/env bash
+exit 124
+SH
+chmod +x "$RETRY_BIN/timeout" "$RETRY_BIN/dua" "$RETRY_BIN/du"
+
+RETRY_CONFIG="$WORK/budget_retry_config.json"
+cat > "$RETRY_CONFIG" <<JSON
+{"monitored_dirs": [
+  {"key": "slow_a", "path": "$RETRY_HOME/slow-a", "timeout": 180},
+  {"key": "slow_b", "path": "$RETRY_HOME/slow-b", "timeout": 180},
+  {"key": "retry_selected", "path": "$RETRY_HOME/retry-selected", "timeout": 180, "retry_timeout": 90},
+  {"key": "fast_sentinel", "path": "$RETRY_HOME/fast-sentinel", "timeout": 180}
+]}
+JSON
+RETRY_OUT="$WORK/budget_retry.json"
+if HOME="$RETRY_HOME" PATH="$RETRY_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  RETRY_LOG="$RETRY_LOG" RETRY_STATE="$RETRY_STATE" \
+  DISK_MAGICIAN_CONFIG="$RETRY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=1500 \
+  timeout 10 "$SNAP_SCRIPT" --output "$RETRY_OUT" >/dev/null 2>&1 && \
+  python3 - "$RETRY_OUT" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["snapshot_metadata"]
+assert d["directories"]["slow_a"] is None
+assert d["directories"]["slow_b"] is None
+assert d["directories"]["retry_selected"] == 2048
+assert d["directories"]["fast_sentinel"] == 1024
+assert set(d["timeout_keys"]) == {"slow_a", "slow_b"}
+assert m["measurement_budget_seconds"] == 1500
+assert m["measurement_path_max_seconds"] == 20
+assert m["measurement_budget_exhausted"] is False
+PY
+then
+  expected_retry_log=$(cat <<EOF
+20	$RETRY_HOME/slow-a
+20	$RETRY_HOME/slow-b
+20	$RETRY_HOME/retry-selected
+20	$RETRY_HOME/fast-sentinel
+90	$RETRY_HOME/retry-selected
+EOF
+)
+  if [[ "$(cat "$RETRY_LOG")" == "$expected_retry_log" ]]; then
+    ok "selected >20s retry runs after later fast paths while the 1500s total stays authoritative"
+  else
+    bad "selected retry order or cap was wrong: $(tr '\n' ';' < "$RETRY_LOG")"
+  fi
+else
+  bad "selected retry did not recover without starving the later fast sentinel"
 fi
 
 PER_PATH_CONFIG="$WORK/budget_per_path_config.json"
