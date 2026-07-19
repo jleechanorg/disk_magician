@@ -169,6 +169,56 @@ has_recent_activity() {
   return 1
 }
 
+# has_active_marker <dir> — true when any quarantined subtree carries the
+# explicit active-use marker. The marker moves with an archived directory, so
+# purge checks recursively rather than only at the timestamp directory root.
+has_active_marker() {
+  local dir="$1" hit_file rc=0
+  hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
+  /usr/bin/find "$dir" -name .in-use -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    rm -f "$hit_file"
+    log "Active-use marker check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
+    return 0
+  fi
+  if [[ -s "$hit_file" ]]; then
+    rm -f "$hit_file"
+    return 0
+  fi
+  rm -f "$hit_file"
+  return 1
+}
+
+# has_open_files <dir> — true when lsof finds an open file or cannot prove the
+# tree is closed. macOS lsof's +D return status is unreliable, so matching
+# stdout is authoritative and an empty rc=1 result means "no open files."
+has_open_files() {
+  local dir="$1" lsof_bin hit_file rc=0
+  if [[ -x /usr/sbin/lsof ]]; then
+    lsof_bin=/usr/sbin/lsof
+  elif lsof_bin=$(command -v lsof 2>/dev/null); then
+    :
+  else
+    log "Open-file check unavailable for $dir — fail-closed, treating as active."
+    return 0
+  fi
+  hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
+  "$lsof_bin" +D "$dir" >"$hit_file" 2>/dev/null || rc=$?
+  # macOS lsof 4.91 can print matching open files yet return 1 for +D, so
+  # stdout is the authoritative positive signal; rc only diagnoses errors
+  # when there were no matches.
+  if [[ -s "$hit_file" ]]; then
+    rm -f "$hit_file"
+    return 0
+  fi
+  rm -f "$hit_file"
+  if (( rc != 1 )); then
+    log "Open-file check failed for $dir (lsof rc=${rc}) — fail-closed, treating as active."
+    return 0
+  fi
+  return 1
+}
+
 # archive_path <dir> <size_kb> — move (not delete) a large top-level /private/tmp dir
 # into a dated quarantine root instead of an instant rm -rf. Same-filesystem
 # mv is a rename (near-zero cost, frees no space immediately) so a later
@@ -189,14 +239,26 @@ archive_path() {
   echo "$kb"
 }
 
-# purge_aged_archives — permanently rm -rf archive entries older than
-# LARGE_TMP_ARCHIVE_RETENTION_HOURS. This is the "later sweep ages it out"
-# step that actually reclaims disk space for content nobody rescued.
+# purge_aged_archives — permanently rm -rf inactive archive entries older than
+# LARGE_TMP_ARCHIVE_RETENTION_HOURS. Safety checks run again at purge time
+# because quarantined content can become active during its recovery window.
 purge_aged_archives() {
   [[ -d "$ARCHIVE_ROOT" ]] || return 0
   local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
   local d kb
   while IFS= read -r -d '' d; do
+    if has_open_files "$d"; then
+      log "Skipping in-use aged archive: $d"
+      continue
+    fi
+    if has_active_marker "$d"; then
+      log "Skipping marked-active aged archive: $d"
+      continue
+    fi
+    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+      log "Skipping recently-active aged archive: $d"
+      continue
+    fi
     kb=$(path_size_kb "$d")
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
@@ -411,7 +473,7 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    if [[ "$DRY_RUN" != true ]] && command -v lsof >/dev/null 2>&1 && lsof +D "$d" >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
       log "Skipping in-use large tmp dir: $d  (${kb} KB)"
       continue
     fi

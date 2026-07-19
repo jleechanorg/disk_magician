@@ -487,10 +487,94 @@ if run_capture "$G5B_OUT" env -i HOME="$TMP_ROOT/g5b-home" \
 else
   G5B_RC=$?
 fi
-G5B_OUT_CONTENT=$(cat "$G5B_OUT")
 assert_rc "GREEN 5b: exits 0" 0 "$G5B_RC"
 assert_exists "GREEN 5b: env-selected retention preserves archive" \
   "$G5B_ARCHIVE/20200101T000000Z"
+
+echo "GREEN 5c: an aged archive reopened by a live process is preserved"
+G5C_PRIVATE_TMP="$TMP_ROOT/g5c-private-tmp"
+G5C_TMP="$TMP_ROOT/g5c-tmp"
+G5C_ARCHIVE="$TMP_ROOT/g5c-archive"
+G5C_BIN="$TMP_ROOT/g5c-bin"
+G5C_PAYLOAD="$G5C_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
+mkdir -p "$G5C_PRIVATE_TMP" "$G5C_TMP" "$(dirname "$G5C_PAYLOAD")"
+touch "$G5C_PAYLOAD"
+set_old_mtime "$G5C_ARCHIVE/20200101T000000Z"
+make_find_shim "$G5C_BIN" "$G5C_PRIVATE_TMP" "$G5C_TMP"
+
+/usr/bin/tail -f "$G5C_PAYLOAD" >/dev/null 2>&1 &
+G5C_HOLDER_PID=$!
+for _ in 1 2 3 4 5; do
+  [[ -n "$(/usr/sbin/lsof +D "$G5C_ARCHIVE/20200101T000000Z" 2>/dev/null || true)" ]] && break
+  sleep 1
+done
+
+G5C_OUT="$TMP_ROOT/g5c.out"
+if run_capture "$G5C_OUT" env -i HOME="$TMP_ROOT/g5c-home" \
+  PATH="$G5C_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5C_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G5C_RC=0
+else
+  G5C_RC=$?
+fi
+G5C_OUT_CONTENT=$(cat "$G5C_OUT")
+kill "$G5C_HOLDER_PID" 2>/dev/null || true
+wait "$G5C_HOLDER_PID" 2>/dev/null || true
+assert_rc "GREEN 5c: exits 0" 0 "$G5C_RC"
+assert_contains "GREEN 5c: logs in-use archive skip" \
+  "Skipping in-use aged archive" "$G5C_OUT_CONTENT"
+assert_exists "GREEN 5c: open archived payload is preserved" "$G5C_PAYLOAD"
+
+echo "GREEN 5d: an aged archive with a nested .in-use marker is preserved"
+G5D_PRIVATE_TMP="$TMP_ROOT/g5d-private-tmp"
+G5D_TMP="$TMP_ROOT/g5d-tmp"
+G5D_ARCHIVE="$TMP_ROOT/g5d-archive"
+G5D_BIN="$TMP_ROOT/g5d-bin"
+G5D_ENTRY="$G5D_ARCHIVE/20200101T000000Z/already_archived_dir"
+mkdir -p "$G5D_PRIVATE_TMP" "$G5D_TMP" "$G5D_ENTRY"
+touch "$G5D_ENTRY/payload.bin" "$G5D_ENTRY/.in-use"
+set_old_mtime "$G5D_ARCHIVE/20200101T000000Z"
+make_find_shim "$G5D_BIN" "$G5D_PRIVATE_TMP" "$G5D_TMP"
+
+G5D_OUT="$TMP_ROOT/g5d.out"
+run_capture "$G5D_OUT" env -i HOME="$TMP_ROOT/g5d-home" \
+  PATH="$G5D_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5D_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large
+G5D_RC=$?
+G5D_OUT_CONTENT=$(cat "$G5D_OUT")
+assert_rc "GREEN 5d: exits 0" 0 "$G5D_RC"
+assert_contains "GREEN 5d: logs marked-active archive skip" \
+  "Skipping marked-active aged archive" "$G5D_OUT_CONTENT"
+assert_exists "GREEN 5d: marked archived payload is preserved" "$G5D_ENTRY/payload.bin"
+
+echo "GREEN 5e: an aged archive with recent nested activity is preserved"
+G5E_PRIVATE_TMP="$TMP_ROOT/g5e-private-tmp"
+G5E_TMP="$TMP_ROOT/g5e-tmp"
+G5E_ARCHIVE="$TMP_ROOT/g5e-archive"
+G5E_BIN="$TMP_ROOT/g5e-bin"
+G5E_ENTRY="$G5E_ARCHIVE/20200101T000000Z/already_archived_dir"
+mkdir -p "$G5E_PRIVATE_TMP" "$G5E_TMP" "$G5E_ENTRY"
+touch "$G5E_ENTRY/payload.bin"
+set_old_mtime "$G5E_ARCHIVE/20200101T000000Z"
+touch "$G5E_ENTRY/payload.bin"
+make_find_shim "$G5E_BIN" "$G5E_PRIVATE_TMP" "$G5E_TMP"
+
+G5E_OUT="$TMP_ROOT/g5e.out"
+run_capture "$G5E_OUT" env -i HOME="$TMP_ROOT/g5e-home" \
+  PATH="$G5E_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5E_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large
+G5E_RC=$?
+G5E_OUT_CONTENT=$(cat "$G5E_OUT")
+assert_rc "GREEN 5e: exits 0" 0 "$G5E_RC"
+assert_contains "GREEN 5e: logs recently-active archive skip" \
+  "Skipping recently-active aged archive" "$G5E_OUT_CONTENT"
+assert_exists "GREEN 5e: recently-active archived payload is preserved" "$G5E_ENTRY/payload.bin"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
