@@ -144,6 +144,15 @@ done
 if [[ -n "${DU_LOG:-}" ]]; then
   printf '%s\n' "$last" >> "$DU_LOG"
 fi
+if [[ -n "${DU_OPEN_ON_PATH:-}" && "$last" == "$DU_OPEN_ON_PATH" ]]; then
+  /usr/bin/nohup /usr/bin/tail -f "$DU_OPEN_PATH" >/dev/null 2>&1 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" >"$DU_HOLDER_PID_FILE"
+  for _ in 1 2 3 4 5; do
+    [[ -n "$(/usr/sbin/lsof +D "$DU_OPEN_ON_PATH" 2>/dev/null || true)" ]] && break
+    sleep 1
+  done
+fi
 if [[ -n "${DU_FIXED_PATH:-}" && "$last" == "$DU_FIXED_PATH" ]]; then
   printf '4\t%s\n' "$last"
   exit 0
@@ -575,6 +584,42 @@ assert_rc "GREEN 5e: exits 0" 0 "$G5E_RC"
 assert_contains "GREEN 5e: logs recently-active archive skip" \
   "Skipping recently-active aged archive" "$G5E_OUT_CONTENT"
 assert_exists "GREEN 5e: recently-active archived payload is preserved" "$G5E_ENTRY/payload.bin"
+
+echo "GREEN 5f: activity beginning during archive sizing is preserved"
+G5F_PRIVATE_TMP="$TMP_ROOT/g5f-private-tmp"
+G5F_TMP="$TMP_ROOT/g5f-tmp"
+G5F_ARCHIVE="$TMP_ROOT/g5f-archive"
+G5F_BIN="$TMP_ROOT/g5f-bin"
+G5F_STAMP="$G5F_ARCHIVE/20200101T000000Z"
+G5F_PAYLOAD="$G5F_STAMP/already_archived_dir/payload.bin"
+G5F_PID_FILE="$TMP_ROOT/g5f-holder.pid"
+mkdir -p "$G5F_PRIVATE_TMP" "$G5F_TMP" "$(dirname "$G5F_PAYLOAD")"
+touch "$G5F_PAYLOAD"
+set_old_mtime "$G5F_STAMP"
+make_find_shim "$G5F_BIN" "$G5F_PRIVATE_TMP" "$G5F_TMP"
+make_du_probe "$G5F_BIN"
+
+G5F_OUT="$TMP_ROOT/g5f.out"
+if run_capture "$G5F_OUT" env -i HOME="$TMP_ROOT/g5f-home" \
+  PATH="$G5F_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  DU_OPEN_ON_PATH="$G5F_STAMP" DU_OPEN_PATH="$G5F_PAYLOAD" \
+  DU_HOLDER_PID_FILE="$G5F_PID_FILE" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5F_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G5F_RC=0
+else
+  G5F_RC=$?
+fi
+G5F_OUT_CONTENT=$(cat "$G5F_OUT")
+if [[ -s "$G5F_PID_FILE" ]]; then
+  kill "$(cat "$G5F_PID_FILE")" 2>/dev/null || true
+  wait "$(cat "$G5F_PID_FILE")" 2>/dev/null || true
+fi
+assert_rc "GREEN 5f: exits 0" 0 "$G5F_RC"
+assert_contains "GREEN 5f: logs in-use archive skip after sizing" \
+  "Skipping in-use aged archive" "$G5F_OUT_CONTENT"
+assert_exists "GREEN 5f: payload opened during sizing is preserved" "$G5F_PAYLOAD"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

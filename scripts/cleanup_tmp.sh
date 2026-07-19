@@ -247,10 +247,9 @@ purge_aged_archives() {
   local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
   local d kb
   while IFS= read -r -d '' d; do
-    if has_open_files "$d"; then
-      log "Skipping in-use aged archive: $d"
-      continue
-    fi
+    # Size first because du can be slow. All safety probes follow it, with the
+    # open-file check last immediately before the destructive operation.
+    kb=$(path_size_kb "$d")
     if has_active_marker "$d"; then
       log "Skipping marked-active aged archive: $d"
       continue
@@ -259,7 +258,10 @@ purge_aged_archives() {
       log "Skipping recently-active aged archive: $d"
       continue
     fi
-    kb=$(path_size_kb "$d")
+    if has_open_files "$d"; then
+      log "Skipping in-use aged archive: $d"
+      continue
+    fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
     else
