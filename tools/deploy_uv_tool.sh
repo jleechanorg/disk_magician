@@ -78,4 +78,18 @@ while IFS= read -r -d '' deployed_file; do
   fi
 done < <(find "$deployed_root" -type f -print0)
 
-echo "deploy_uv_tool: deployed head=$head_sha version=$version verified_root=$deployed_root"
+# Post-deploy smoke: the launchd snapshot job runs this entrypoint next tick;
+# prove it still executes before reporting success (a deploy that installs but
+# cannot run is the worst failure mode — it looks green until the job fires).
+smoke_bin="$tool_root/bin/disk-magician"
+if [[ -x "$smoke_bin" ]]; then
+  if ! "$smoke_bin" --help >/dev/null 2>&1; then
+    echo "deploy_uv_tool: SMOKE FAILED — $smoke_bin --help did not execute cleanly" >&2
+    exit 1
+  fi
+else
+  echo "deploy_uv_tool: SMOKE FAILED — deployed entrypoint missing/not executable: $smoke_bin" >&2
+  exit 1
+fi
+
+echo "deploy_uv_tool: deployed head=$head_sha version=$version smoke=ok verified_root=$deployed_root"

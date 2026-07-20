@@ -99,13 +99,41 @@ if [[ -z "$current_free_gb" ]]; then
   exit 0
 fi
 
+# Colima-size ceiling (2026-07-19 gap analysis): Colima's sparse disk can
+# balloon from CI-runner churn while host free space stays comfortably above
+# the pressure threshold, so a free-space-only gate never fires until the
+# host is already in trouble. When Colima's allocated size crosses the
+# ceiling, run ONLY the colima step proactively. 0 disables. Override via
+# DISK_MAGICIAN_COLIMA_CEILING_GB; DISK_MAGICIAN_COLIMA_GB_OVERRIDE is the
+# deterministic test hook (like FREE_GB_OVERRIDE above).
+COLIMA_CEILING_GB="${DISK_MAGICIAN_COLIMA_CEILING_GB:-35}"
+COLIMA_GB_OVERRIDE="${DISK_MAGICIAN_COLIMA_GB_OVERRIDE:-}"
+colima_gb() {
+  if [[ -n "$COLIMA_GB_OVERRIDE" ]]; then
+    echo "$COLIMA_GB_OVERRIDE"
+    return
+  fi
+  [[ -d "$HOME/.colima" ]] || { echo 0; return; }
+  du -skx "$HOME/.colima" 2>/dev/null | awk '{print int($1/1024/1024)}'
+}
+
+SWEEP_MODE="full"
 below_threshold=$(awk -v f="$current_free_gb" -v t="$THRESHOLD_GB" 'BEGIN{print (f < t) ? "1" : "0"}')
 if [[ "$below_threshold" != "1" ]]; then
-  log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
-  exit 0
+  current_colima_gb="$(colima_gb)"
+  over_ceiling=0
+  if [[ "$COLIMA_CEILING_GB" != "0" && -n "$current_colima_gb" ]]; then
+    over_ceiling=$(awk -v c="$current_colima_gb" -v t="$COLIMA_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
+  fi
+  if [[ "$over_ceiling" != "1" ]]; then
+    log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
+    exit 0
+  fi
+  SWEEP_MODE="colima-only"
+  log "pressure_sweep: free healthy (${current_free_gb} GB) but Colima ${current_colima_gb} GB >= ceiling ${COLIMA_CEILING_GB} GB — colima-only sweep triggered (dry_run=${DRY_RUN})."
+else
+  log "pressure_sweep: free ${current_free_gb} GB < threshold ${THRESHOLD_GB} GB — sweep triggered (dry_run=${DRY_RUN})."
 fi
-
-log "pressure_sweep: free ${current_free_gb} GB < threshold ${THRESHOLD_GB} GB — sweep triggered (dry_run=${DRY_RUN})."
 
 # ────────── LOCK (mkdir-based, TTL 60min) — overlapping fires skip ──────────
 acquire_lock() {
@@ -136,6 +164,9 @@ clean_flag="--clean"
 [[ "$DRY_RUN" == true ]] && clean_flag="--dry-run"
 
 # ────────── STEP 1: cleanup_tmp.sh (--large when sweeping) ──────────
+if [[ "$SWEEP_MODE" == "colima-only" ]]; then
+  log "pressure_sweep: step 1/2 skipped (colima-only mode — host free space is healthy)."
+else
 before_gb="$(free_gb)"
 log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
 if [[ "$DRY_RUN" != true ]]; then
@@ -149,6 +180,7 @@ if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
 else
   rc=$?
   log "pressure_sweep: step 1/2 cleanup_tmp.sh FAILED or timed out (rc=${rc}) — continuing to step 2."
+fi
 fi
 
 # ────────── STEP 2: cleanup_colima.sh ──────────
