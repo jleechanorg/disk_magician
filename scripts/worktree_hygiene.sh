@@ -41,6 +41,9 @@ MAX_CANDIDATES=0
 # Candidates above the cap are classified suspect-history-rewrite instead of
 # unpushed-ahead; see classify_candidate.
 WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
+# Non-numeric cap would crash bash arithmetic under set -u (the string gets
+# evaluated as a variable name); fall back to the default instead.
+[[ "$WORKTREE_AHEAD_SANITY_CAP" =~ ^[0-9]+$ ]] || WORKTREE_AHEAD_SANITY_CAP=500
 
 usage() {
     cat <<EOF

@@ -490,6 +490,19 @@ class TriageCandidateSanityCapTest(unittest.TestCase):
         cmd = ["bash", "-c", body, "call", str(repo), str(wt), branch]
         return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
 
+    def test_garbage_cap_env_falls_back_to_default_without_crashing(self):
+        # A non-numeric WORKTREE_AHEAD_SANITY_CAP used to crash bash
+        # arithmetic under set -u (the string is evaluated as a variable
+        # name). It must fall back to the default cap and triage normally.
+        self._write_fake_gh("[]")
+        repo, wt = self._repo_with_ahead_commit("wt-garbage-cap")
+        result = self._triage_with_cap(repo, wt, "wt-garbage-cap", cap="not-a-number")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("unbound variable", result.stderr)
+        fields = result.stdout.strip().split("|")
+        # 1 ahead commit is far below the default 500 cap: not suspect.
+        self.assertNotIn("suspect-history-rewrite", result.stdout)
+
     def test_ahead_above_cap_sets_suspect_flag_and_skips_push_no_pr(self):
         self._write_fake_gh("[]")
         repo, wt = self._repo_with_ahead_commit("wt-suspect-no-pr")
