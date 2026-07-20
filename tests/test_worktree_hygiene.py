@@ -79,7 +79,8 @@ def _call(func_name, *args, timeout=15):
         )
 
 
-def _classify(uncommitted, untracked, push_status, pr_state, ahead, has_merge_base):
+def _classify(uncommitted, untracked, push_status, pr_state, ahead, has_merge_base,
+              suspect_rewrite=0):
     return _call(
         "classify_candidate",
         uncommitted,
@@ -88,6 +89,7 @@ def _classify(uncommitted, untracked, push_status, pr_state, ahead, has_merge_ba
         pr_state,
         ahead,
         has_merge_base,
+        suspect_rewrite,
     )
 
 
@@ -271,6 +273,26 @@ class ClassifyCandidateTest(unittest.TestCase):
         # large-diff in priority order, so it must win.
         self._assert((60, 1, "ok", "none", 0, 1), "NEEDS-REVIEW|untracked")
 
+    def test_suspect_rewrite_forces_needs_review_over_zero_ahead(self):
+        # ahead=0 would normally win as SAFE|zero-ahead (the first rule
+        # evaluated) -- the suspect_rewrite override (jleechan-rq9j) must
+        # run before even that check, since triage_candidate only ever sets
+        # suspect_rewrite=1 when ahead_count is untrustworthy, and a
+        # trustworthy ahead=0 can't coexist with it in real triage output.
+        # Proving the override wins here at the classify_candidate unit
+        # level proves the priority ordering independent of triage's wiring.
+        self._assert((0, 0, "ok", "none", 0, 1, 1), "NEEDS-REVIEW|suspect-history-rewrite")
+
+    def test_suspect_rewrite_with_merged_pr_is_still_needs_review(self):
+        # Fail-safe: a "merged" PR match must NOT flip a suspect ahead-count
+        # to SAFE -- the merge match itself could be against rewritten
+        # history, so the reason distinguishes this case but the verdict
+        # never becomes SAFE.
+        self._assert((0, 0, "ok", "merged", 9000, 1, 1), "NEEDS-REVIEW|merged-pr-suspect-rewrite")
+
+    def test_suspect_rewrite_without_merged_pr_is_suspect_history_rewrite(self):
+        self._assert((0, 0, "no-remote", "none", 9000, 1, 1), "NEEDS-REVIEW|suspect-history-rewrite")
+
 
 class IntegrationRealGitRepoTest(unittest.TestCase):
     """(d) End-to-end against a real local git repo (no network)."""
@@ -407,6 +429,127 @@ class TriageCandidateNetworkSkipTest(unittest.TestCase):
         push_status = fields[2]
         # Must NOT be the skip sentinel -- the real (successful, since a
         # real bare-repo remote is configured) push path must have run.
+        self.assertEqual(push_status, "pushed")
+
+
+class TriageCandidateSanityCapTest(unittest.TestCase):
+    """Proves the jleechan-rq9j fix end-to-end through triage_candidate: an
+    ahead_count above WORKTREE_AHEAD_SANITY_CAP is not trusted as a real
+    commit count (history-rewrite false positive -- memory
+    feedback_2026-07-18_git_ahead_count_false_positive_on_rewritten_history).
+    triage_candidate must set suspect_rewrite=1, skip the real 'git push'
+    step (push_status=skipped-suspect-rewrite -- pushing a branch whose
+    ahead-count is bogus is unnecessary risk), and still attempt the 'gh pr
+    list' fallback so classify_candidate can distinguish
+    merged-pr-suspect-rewrite from a plain suspect-history-rewrite.
+
+    'gh' is stubbed with a fake script on PATH (no real network / GitHub
+    auth needed) so this stays a sandboxed, offline fixture test."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.bare = self.tmp / "origin.git"
+        _git(self.tmp, "init", "-q", "--bare", str(self.bare))
+        self.fake_bin = self.tmp / "fake-bin"
+        self.fake_bin.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _repo_with_ahead_commit(self, branch):
+        repo = _init_repo(self.tmp, dirname=f"main-repo-{branch}")
+        _git(repo, "remote", "add", "origin", str(self.bare))
+        _git(repo, "push", "-q", "origin", "main")
+        wt = self.tmp / f"wt-{branch}"
+        _git(repo, "worktree", "add", "-B", branch, str(wt), "main")
+        (wt / "extra.txt").write_text("ahead\n", encoding="utf-8")
+        _git(wt, "add", "extra.txt")
+        _git(wt, "commit", "-q", "-m", "ahead commit")
+        return repo, wt
+
+    def _write_fake_gh(self, pr_list_json):
+        # A minimal stub: echoes a fixed `gh pr list --json ...` response
+        # regardless of arguments, so the test never touches the network or
+        # requires GitHub auth.
+        script = self.fake_bin / "gh"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo '{pr_list_json}'\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    def _triage_with_cap(self, repo, wt, branch, cap):
+        env = {
+            "PATH": f"{self.fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "HOME": str(self.tmp / "home"),
+            "WORKTREE_AHEAD_SANITY_CAP": str(cap),
+        }
+        body = 'source "%s"; triage_candidate "$1" "$2" "$3"' % SCRIPT
+        cmd = ["bash", "-c", body, "call", str(repo), str(wt), branch]
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
+
+    def test_garbage_cap_env_falls_back_to_default_without_crashing(self):
+        # A non-numeric WORKTREE_AHEAD_SANITY_CAP used to crash bash
+        # arithmetic under set -u (the string is evaluated as a variable
+        # name). It must fall back to the default cap and triage normally.
+        self._write_fake_gh("[]")
+        repo, wt = self._repo_with_ahead_commit("wt-garbage-cap")
+        result = self._triage_with_cap(repo, wt, "wt-garbage-cap", cap="not-a-number")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("unbound variable", result.stderr)
+        fields = result.stdout.strip().split("|")
+        # 1 ahead commit is far below the default 500 cap: not suspect.
+        self.assertNotIn("suspect-history-rewrite", result.stdout)
+
+    def test_ahead_above_cap_sets_suspect_flag_and_skips_push_no_pr(self):
+        self._write_fake_gh("[]")
+        repo, wt = self._repo_with_ahead_commit("wt-suspect-no-pr")
+        # cap=0: any ahead_count >= 1 counts as suspect, without needing to
+        # fabricate thousands of real commits in the fixture.
+        result = self._triage_with_cap(repo, wt, "wt-suspect-no-pr", cap=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        self.assertEqual(len(fields), 7, fields)
+        push_status, pr_state, suspect_rewrite = fields[2], fields[3], fields[6]
+        self.assertEqual(suspect_rewrite, "1")
+        self.assertEqual(push_status, "skipped-suspect-rewrite")
+        self.assertEqual(pr_state, "none")
+
+        verdict = _call("classify_candidate", *fields, timeout=10)
+        self.assertEqual(verdict.returncode, 0, verdict.stderr)
+        self.assertEqual(verdict.stdout.strip(), "NEEDS-REVIEW|suspect-history-rewrite")
+
+    def test_ahead_above_cap_with_merged_pr_is_merged_pr_suspect_rewrite(self):
+        self._write_fake_gh('[{"number":1,"state":"MERGED","title":"x"}]')
+        repo, wt = self._repo_with_ahead_commit("wt-suspect-merged-pr")
+        result = self._triage_with_cap(repo, wt, "wt-suspect-merged-pr", cap=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        self.assertEqual(len(fields), 7, fields)
+        push_status, pr_state, suspect_rewrite = fields[2], fields[3], fields[6]
+        self.assertEqual(suspect_rewrite, "1")
+        self.assertEqual(push_status, "skipped-suspect-rewrite")
+        self.assertEqual(pr_state, "merged")
+
+        verdict = _call("classify_candidate", *fields, timeout=10)
+        self.assertEqual(verdict.returncode, 0, verdict.stderr)
+        # Fail-safe: even a merged-PR match must not become SAFE when the
+        # ahead-count that got us here isn't trustworthy.
+        self.assertEqual(verdict.stdout.strip(), "NEEDS-REVIEW|merged-pr-suspect-rewrite")
+
+    def test_ahead_below_cap_is_unaffected(self):
+        self._write_fake_gh("[]")
+        repo, wt = self._repo_with_ahead_commit("wt-not-suspect")
+        # Default cap (500) is far above this fixture's ahead_count of 1.
+        result = self._triage_with_cap(repo, wt, "wt-not-suspect", cap=500)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        self.assertEqual(len(fields), 7, fields)
+        push_status, suspect_rewrite = fields[2], fields[6]
+        self.assertEqual(suspect_rewrite, "0")
+        # Real (successful, bare-repo remote) push must still run.
         self.assertEqual(push_status, "pushed")
 
 

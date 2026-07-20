@@ -33,6 +33,17 @@ REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
 MAX_CANDIDATES=0
+# A raw `git rev-list --count main..HEAD` ahead-count above this is not
+# trusted as a real commit count -- a history rewrite (rebase --onto,
+# filter-branch, force-pushed main) can make an unrelated worktree report
+# 9000+ false "ahead" commits (memory
+# feedback_2026-07-18_git_ahead_count_false_positive_on_rewritten_history).
+# Candidates above the cap are classified suspect-history-rewrite instead of
+# unpushed-ahead; see classify_candidate.
+WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
+# Non-numeric cap would crash bash arithmetic under set -u (the string gets
+# evaluated as a variable name); fall back to the default instead.
+[[ "$WORKTREE_AHEAD_SANITY_CAP" =~ ^[0-9]+$ ]] || WORKTREE_AHEAD_SANITY_CAP=500
 
 usage() {
     cat <<EOF
@@ -64,6 +75,11 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --execute deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths (same as --repos).
+  WORKTREE_AHEAD_SANITY_CAP
+                           Above this raw ahead-count, don't trust it as a
+                           real commit count (history-rewrite false
+                           positive) -- classify suspect-history-rewrite
+                           instead of unpushed-ahead (default: 500).
 EOF
 }
 
@@ -146,11 +162,26 @@ redact_url() {
     echo "$url" | sed -E 's#^(https?://)[^/@]+@#\1#'
 }
 
-# classify_candidate <uncommitted_count> <untracked_present:0|1> <push_status> <pr_state> <ahead_count> <has_merge_base:0|1>
+# classify_candidate <uncommitted_count> <untracked_present:0|1> <push_status> <pr_state> <ahead_count> <has_merge_base:0|1> <suspect_rewrite:0|1>
 # Echoes exactly one line: SAFE|<reason> or NEEDS-REVIEW|<reason>
 classify_candidate() {
     local uncommitted_count="$1" untracked_present="$2" push_status="$3" \
-          pr_state="$4" ahead_count="$5" has_merge_base="$6"
+          pr_state="$4" ahead_count="$5" has_merge_base="$6" suspect_rewrite="${7:-0}"
+
+    # Fail-safe: an ahead_count above WORKTREE_AHEAD_SANITY_CAP is not a
+    # trustworthy commit count (history-rewrite artifact), so it can never
+    # produce a SAFE verdict on its own -- not even via a merged PR, since
+    # the "merged" match itself could be against rewritten history. This
+    # check must run before every other branch below, including the
+    # zero-ahead fast path (which ahead_count > cap already precludes).
+    if (( suspect_rewrite == 1 )); then
+        if [[ "$pr_state" == "merged" ]]; then
+            echo "NEEDS-REVIEW|merged-pr-suspect-rewrite"
+        else
+            echo "NEEDS-REVIEW|suspect-history-rewrite"
+        fi
+        return 0
+    fi
 
     if (( ahead_count == 0 && uncommitted_count == 0 && untracked_present == 0 )); then
         echo "SAFE|zero-ahead"
@@ -203,7 +234,7 @@ resolve_main_ref() {
 }
 
 # triage_candidate <repo_path> <wt_path> <branch>
-# Echoes: <uncommitted_count>|<untracked_present>|<push_status>|<pr_state>|<ahead_count>|<has_merge_base>
+# Echoes: <uncommitted_count>|<untracked_present>|<push_status>|<pr_state>|<ahead_count>|<has_merge_base>|<suspect_rewrite>
 triage_candidate() {
     local repo_path="$1" wt_path="$2" branch="$3"
 
@@ -250,13 +281,27 @@ triage_candidate() {
         needs_network=0
     fi
 
+    # A suspect (history-rewrite) ahead_count can never yield SAFE (see
+    # classify_candidate), but we still attempt a gh PR-list fallback below
+    # so the reason can distinguish merged-pr-suspect-rewrite from a plain
+    # suspect-history-rewrite. Skip the push step for suspect candidates --
+    # pushing a branch whose local history was rewritten against a huge
+    # bogus ahead-count is unnecessary risk for a verdict that is NEEDS-
+    # REVIEW either way.
+    local suspect_rewrite=0
+    if (( ahead_count > WORKTREE_AHEAD_SANITY_CAP )); then
+        suspect_rewrite=1
+    fi
+
     local push_status pr_state
     if (( needs_network == 0 )); then
         push_status="skipped-not-needed"
         pr_state="unknown"
     else
         push_status="no-remote"
-        if [[ "${SKIP_PUSH:-false}" == true ]]; then
+        if (( suspect_rewrite == 1 )); then
+            push_status="skipped-suspect-rewrite"
+        elif [[ "${SKIP_PUSH:-false}" == true ]]; then
             push_status="skipped"
         else
             if git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
@@ -319,7 +364,7 @@ triage_candidate() {
         fi
     fi
 
-    echo "${uncommitted_count}|${untracked_present}|${push_status}|${pr_state}|${ahead_count}|${has_merge_base}"
+    echo "${uncommitted_count}|${untracked_present}|${push_status}|${pr_state}|${ahead_count}|${has_merge_base}|${suspect_rewrite}"
 }
 
 # ---------------------------------------------------------------------------
@@ -463,11 +508,11 @@ main() {
             local record
             record="$(triage_candidate "$repo_abs" "$wt_path" "$branch")"
 
-            IFS='|' read -r uncommitted_count untracked_present push_status pr_state ahead_count has_merge_base <<<"$record"
+            IFS='|' read -r uncommitted_count untracked_present push_status pr_state ahead_count has_merge_base suspect_rewrite <<<"$record"
 
             local verdict
             verdict="$(classify_candidate "$uncommitted_count" "$untracked_present" \
-                "$push_status" "$pr_state" "$ahead_count" "$has_merge_base")"
+                "$push_status" "$pr_state" "$ahead_count" "$has_merge_base" "$suspect_rewrite")"
 
             local class="${verdict%%|*}" reason="${verdict#*|}"
 
