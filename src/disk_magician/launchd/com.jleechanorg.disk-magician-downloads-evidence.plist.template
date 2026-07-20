@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Downloads evidence-spool retention (bead jleechan-uwtk): expires aged
+  DK2D-EVIDENCE-* / dk2d_evidence_* agent evidence dirs from ~/Downloads,
+  always keeping the newest KEEP_COUNT (default 2) and anything marked
+  .keep/.in-use or with open files.
+
+  Provenance: 2026-07-19 incident (bead jleechan-m4yc) — 9 evidence runs
+  produced 55.9 GiB into ~/Downloads in one day; no sweeper covered that
+  path and free space fell from 81.7 GiB to 11.3 GB.
+
+  Schedule:  Every 6 hours (StartInterval=21600s). The generator produces
+             ~5-8 GiB per run, several runs/day; a 6h cadence bounds the
+             spool backlog to keep-count + a few hours of production.
+  Action:    scripts/cleanup_downloads_evidence.sh --clean (script owns its
+             own safety semantics: keep-newest, retention window, markers,
+             lsof fail-closed).
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-downloads-evidence</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/cleanup_downloads_evidence.sh</string>
+    <string>--clean</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-downloads-evidence.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-downloads-evidence.log</string>
+</dict>
+</plist>
