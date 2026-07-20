@@ -296,7 +296,8 @@
     "large_tmp_active_hours": 24,
     "large_tmp_archive_retention_hours": 24,
     "downloads_evidence_retention_hours": 72,
-    "downloads_evidence_keep_count": 2
+    "downloads_evidence_keep_count": 2,
+    "large_tmp_archive_max_hours": 168
   },
   "protected_tmp_roots": [
     "worldarchitect.ai",

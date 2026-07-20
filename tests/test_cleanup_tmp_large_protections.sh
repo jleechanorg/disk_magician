@@ -472,6 +472,7 @@ G5_OUT="$TMP_ROOT/g5.out"
 if run_capture "$G5_OUT" env -i HOME="$TMP_ROOT/g5-home" \
   PATH="$G5_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   FAIL_FIND_ROOT="$G5_ARCHIVE" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large; then
@@ -532,7 +533,7 @@ done
 G5C_OUT="$TMP_ROOT/g5c.out"
 if run_capture "$G5C_OUT" env -i HOME="$TMP_ROOT/g5c-home" \
   PATH="$G5C_BIN:/usr/sbin:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5C_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large; then
   G5C_RC=0
@@ -561,7 +562,7 @@ make_find_shim "$G5D_BIN" "$G5D_PRIVATE_TMP" "$G5D_TMP"
 G5D_OUT="$TMP_ROOT/g5d.out"
 run_capture "$G5D_OUT" env -i HOME="$TMP_ROOT/g5d-home" \
   PATH="$G5D_BIN:/usr/sbin:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5D_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large
 G5D_RC=$?
@@ -586,7 +587,7 @@ make_find_shim "$G5E_BIN" "$G5E_PRIVATE_TMP" "$G5E_TMP"
 G5E_OUT="$TMP_ROOT/g5e.out"
 run_capture "$G5E_OUT" env -i HOME="$TMP_ROOT/g5e-home" \
   PATH="$G5E_BIN:/usr/sbin:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5E_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large
 G5E_RC=$?
@@ -613,7 +614,7 @@ make_du_probe "$G5F_BIN"
 G5F_OUT="$TMP_ROOT/g5f.out"
 if run_capture "$G5F_OUT" env -i HOME="$TMP_ROOT/g5f-home" \
   PATH="$G5F_BIN:/usr/sbin:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DU_OPEN_ON_PATH="$G5F_STAMP" DU_OPEN_PATH="$G5F_PAYLOAD" \
   DU_HOLDER_PID_FILE="$G5F_PID_FILE" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5F_ARCHIVE" \
@@ -650,7 +651,7 @@ make_lsof_failure_shim "$G6_BIN/lsof-fail"
 G6_OUT="$TMP_ROOT/g6.out"
 if run_capture "$G6_OUT" env -i HOME="$TMP_ROOT/g6-home" \
   PATH="$G6_BIN:/usr/sbin:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_LSOF_BIN="$G6_BIN/lsof-fail" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G6_ARCHIVE" \
   bash "$SOURCE_SCRIPT" --clean --large; then
@@ -666,6 +667,68 @@ assert_exists "GREEN 6: initial archive candidate survives lsof failure" \
   "$G6_CANDIDATE/payload.bin"
 assert_exists "GREEN 6: aged archive survives lsof failure" \
   "$G6_AGED/payload.bin"
+
+echo "GREEN 7: over-cap archive entry is purged despite an active marker (hard cap, bead jleechan-mtow)"
+G7_PRIVATE_TMP="$TMP_ROOT/g7-private-tmp"
+G7_TMP="$TMP_ROOT/g7-tmp"
+G7_ARCHIVE="$TMP_ROOT/g7-archive"
+G7_BIN="$TMP_ROOT/g7-bin"
+G7_ENTRY="$G7_ARCHIVE/20200101T000000Z/already_archived_dir"
+mkdir -p "$G7_PRIVATE_TMP" "$G7_TMP" "$G7_ENTRY"
+touch "$G7_ENTRY/payload.bin" "$G7_ENTRY/.in-use"
+set_old_mtime "$G7_ARCHIVE/20200101T000000Z"
+make_find_shim "$G7_BIN" "$G7_PRIVATE_TMP" "$G7_TMP"
+
+G7_OUT="$TMP_ROOT/g7.out"
+if run_capture "$G7_OUT" env -i HOME="$TMP_ROOT/g7-home" \
+  PATH="$G7_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=48 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G7_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G7_RC=0
+else
+  G7_RC=$?
+fi
+G7_OUT_CONTENT=$(cat "$G7_OUT")
+assert_rc "GREEN 7: exits 0" 0 "$G7_RC"
+assert_contains "GREEN 7: logs over-cap purge with guards bypassed" \
+  "Purging over-cap archive" "$G7_OUT_CONTENT"
+assert_missing "GREEN 7: over-cap marked entry actually reclaimed" \
+  "$G7_ARCHIVE/20200101T000000Z"
+
+echo "GREEN 7b: under-cap long-lived skipped entry logs a loud warning"
+G7B_PRIVATE_TMP="$TMP_ROOT/g7b-private-tmp"
+G7B_TMP="$TMP_ROOT/g7b-tmp"
+G7B_ARCHIVE="$TMP_ROOT/g7b-archive"
+G7B_BIN="$TMP_ROOT/g7b-bin"
+G7B_ENTRY="$G7B_ARCHIVE/20260101T000000Z/already_archived_dir"
+mkdir -p "$G7B_PRIVATE_TMP" "$G7B_TMP" "$G7B_ENTRY"
+touch "$G7B_ENTRY/payload.bin" "$G7B_ENTRY/.in-use"
+# Age the entry ~4h: older than 2x the 1h retention (warning threshold) but
+# far under the pinned hard cap.
+G7B_STAMP="$(date -v-4H '+%Y%m%d%H%M' 2>/dev/null || date '+%Y%m%d%H%M')"
+/usr/bin/find "$G7B_ARCHIVE/20260101T000000Z" -exec touch -t "$G7B_STAMP" {} +
+make_find_shim "$G7B_BIN" "$G7B_PRIVATE_TMP" "$G7B_TMP"
+
+G7B_OUT="$TMP_ROOT/g7b.out"
+if run_capture "$G7B_OUT" env -i HOME="$TMP_ROOT/g7b-home" \
+  PATH="$G7B_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G7B_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G7B_RC=0
+else
+  G7B_RC=$?
+fi
+G7B_OUT_CONTENT=$(cat "$G7B_OUT")
+assert_rc "GREEN 7b: exits 0" 0 "$G7B_RC"
+assert_contains "GREEN 7b: logs marked-active skip" \
+  "Skipping marked-active aged archive" "$G7B_OUT_CONTENT"
+assert_contains "GREEN 7b: logs long-lived warning (>2x retention)" \
+  "WARNING: archive entry still alive after" "$G7B_OUT_CONTENT"
+assert_exists "GREEN 7b: under-cap entry preserved" "$G7B_ENTRY/payload.bin"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
