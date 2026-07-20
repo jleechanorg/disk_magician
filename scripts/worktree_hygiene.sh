@@ -293,7 +293,9 @@ triage_candidate() {
                 owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                 if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
                     local pr_json
-                    pr_json="$(gh pr list --repo "$owner_repo" --head "$branch" --state all \
+                    # env -u: a stale GH_TOKEN/GITHUB_TOKEN override breaks gh
+                    # even when the stored keychain credential is valid.
+                    pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --repo "$owner_repo" --head "$branch" --state all \
                         --json number,state,title 2>/dev/null || true)"
                     if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
                         if echo "$pr_json" | grep -qi '"state":"OPEN"'; then

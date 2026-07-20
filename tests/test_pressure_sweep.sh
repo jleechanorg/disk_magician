@@ -105,6 +105,63 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 assert_contains "cleanup_colima dry-run" "cleanup_colima --dry-run" "$INVOCATIONS"
 
+echo "Test 4: healthy free space + Colima over ceiling triggers colima-only sweep"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=40 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "logs colima-only trigger" "Colima 40 GB >= ceiling 35 GB — colima-only sweep triggered" "$LOG_CONTENT"
+assert_contains "logs step-1 skip" "step 1/2 skipped (colima-only mode" "$LOG_CONTENT"
+assert_not_contains "does not run cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
+assert_contains "runs cleanup_colima" "cleanup_colima --clean" "$INVOCATIONS"
+
+echo "Test 5: healthy free space + Colima under ceiling stays a no-op"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=30 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
+assert_not_contains "no colima invocation under ceiling" "cleanup_colima" "$INVOCATIONS"
+
+echo "Test 6: ceiling=0 disables the colima-size trigger entirely"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=999 \
+  DISK_MAGICIAN_COLIMA_CEILING_GB=0 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "ceiling=0 logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
+assert_not_contains "ceiling=0 runs nothing" "cleanup_colima" "$INVOCATIONS"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then
