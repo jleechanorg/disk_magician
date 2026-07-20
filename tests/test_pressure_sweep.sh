@@ -41,12 +41,16 @@ SCRIPT="$MOCK_BIN/pressure_sweep.sh"
 run_pressure() {
   local free_gb="$1"
   shift
+  # DISK_MAGICIAN_TMP_GB_OVERRIDE pinned to 0 here so these baseline tests
+  # never pick up the real host's /private/tmp size (tmp_gb() reads an
+  # absolute host path, not something scoped under the fake $HOME above).
   env -i \
     HOME="$TMP_ROOT/home" \
     PATH="/usr/bin:/bin" \
     DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
     DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
+    DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
     INVOCATION_LOG="$INVOCATION_LOG" \
     bash "$SCRIPT" "$@"
 }
@@ -116,6 +120,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=40 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
   bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
@@ -136,6 +141,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=30 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
   bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
@@ -155,12 +161,93 @@ env -i \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=999 \
   DISK_MAGICIAN_COLIMA_CEILING_GB=0 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
   bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "ceiling=0 logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
 assert_not_contains "ceiling=0 runs nothing" "cleanup_colima" "$INVOCATIONS"
+
+echo "Test 7: healthy free space + tmp over ceiling triggers tmp-only sweep"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=35 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "logs tmp-only trigger" "/private/tmp 35 GB >= ceiling 30 GB — tmp-only sweep triggered" "$LOG_CONTENT"
+assert_contains "logs step-2 skip" "step 2/2 skipped (tmp-only mode" "$LOG_CONTENT"
+assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_not_contains "does not run cleanup_colima" "cleanup_colima" "$INVOCATIONS"
+
+echo "Test 8: healthy free space + tmp under ceiling stays a no-op"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=10 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
+assert_not_contains "no cleanup_tmp invocation under ceiling" "cleanup_tmp" "$INVOCATIONS"
+
+echo "Test 9: tmp ceiling=0 disables the tmp-size trigger entirely"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=999 \
+  DISK_MAGICIAN_TMP_CEILING_GB=0 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "tmp ceiling=0 logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
+assert_not_contains "tmp ceiling=0 runs nothing" "cleanup_tmp" "$INVOCATIONS"
+
+echo "Test 10: both Colima and tmp over ceiling triggers a full sweep"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=40 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=35 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "logs full-sweep trigger" "full sweep triggered" "$LOG_CONTENT"
+assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_contains "runs cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
