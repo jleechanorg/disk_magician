@@ -45,7 +45,9 @@ run_sweeper() {
     if [[ "$in_args" == true ]]; then args+=("$a"); else envs+=("$a"); fi
   done
   set +e
-  env DISK_MAGICIAN_EVIDENCE_ROOT="$root" "${envs[@]}" \
+  # ${arr[0]+...} guards: bash 3.2 (macOS /bin/bash, used by CI) treats
+  # empty-array expansion as unbound under set -u.
+  env DISK_MAGICIAN_EVIDENCE_ROOT="$root" ${envs[0]+"${envs[@]}"} \
     bash "$SWEEPER" ${args[0]+"${args[@]}"} >"$out_file" 2>&1
   local rc=$?
   set -e
