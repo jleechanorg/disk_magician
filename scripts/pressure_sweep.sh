@@ -117,20 +117,55 @@ colima_gb() {
   du -skx "$HOME/.colima" 2>/dev/null | awk '{print int($1/1024/1024)}'
 }
 
+# /private/tmp size ceiling (2026-07-20 gap analysis, bead jleechan-zx7g): AO
+# /private/tmp PR-scratch churn (~40 GiB/day historical) is only cleaned when
+# free < the pressure threshold or by the daily 04:05 sweep — between those,
+# scratch accumulates while host free space and Colima both stay healthy, so
+# neither existing gate fires. When /private/tmp crosses this ceiling while
+# free space is healthy, run a tmp-only sweep proactively. 0 disables.
+# Override via DISK_MAGICIAN_TMP_CEILING_GB; DISK_MAGICIAN_TMP_GB_OVERRIDE is
+# the deterministic test hook (like COLIMA_GB_OVERRIDE above).
+TMP_CEILING_GB="${DISK_MAGICIAN_TMP_CEILING_GB:-30}"
+TMP_GB_OVERRIDE="${DISK_MAGICIAN_TMP_GB_OVERRIDE:-}"
+tmp_gb() {
+  if [[ -n "$TMP_GB_OVERRIDE" ]]; then
+    echo "$TMP_GB_OVERRIDE"
+    return
+  fi
+  [[ -d "/private/tmp" ]] || { echo 0; return; }
+  du -skx "/private/tmp" 2>/dev/null | awk '{print int($1/1024/1024)}'
+}
+
 SWEEP_MODE="full"
 below_threshold=$(awk -v f="$current_free_gb" -v t="$THRESHOLD_GB" 'BEGIN{print (f < t) ? "1" : "0"}')
 if [[ "$below_threshold" != "1" ]]; then
   current_colima_gb="$(colima_gb)"
-  over_ceiling=0
+  over_colima_ceiling=0
   if [[ "$COLIMA_CEILING_GB" != "0" && -n "$current_colima_gb" ]]; then
-    over_ceiling=$(awk -v c="$current_colima_gb" -v t="$COLIMA_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
+    over_colima_ceiling=$(awk -v c="$current_colima_gb" -v t="$COLIMA_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
   fi
-  if [[ "$over_ceiling" != "1" ]]; then
+
+  current_tmp_gb="$(tmp_gb)"
+  over_tmp_ceiling=0
+  if [[ "$TMP_CEILING_GB" != "0" && -n "$current_tmp_gb" ]]; then
+    over_tmp_ceiling=$(awk -v c="$current_tmp_gb" -v t="$TMP_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
+  fi
+
+  if [[ "$over_colima_ceiling" != "1" && "$over_tmp_ceiling" != "1" ]]; then
     log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
     exit 0
   fi
-  SWEEP_MODE="colima-only"
-  log "pressure_sweep: free healthy (${current_free_gb} GB) but Colima ${current_colima_gb} GB >= ceiling ${COLIMA_CEILING_GB} GB — colima-only sweep triggered (dry_run=${DRY_RUN})."
+
+  if [[ "$over_colima_ceiling" == "1" && "$over_tmp_ceiling" == "1" ]]; then
+    SWEEP_MODE="full"
+    log "pressure_sweep: free healthy (${current_free_gb} GB) but Colima ${current_colima_gb} GB >= ceiling ${COLIMA_CEILING_GB} GB AND /private/tmp ${current_tmp_gb} GB >= ceiling ${TMP_CEILING_GB} GB — full sweep triggered (dry_run=${DRY_RUN})."
+  elif [[ "$over_colima_ceiling" == "1" ]]; then
+    SWEEP_MODE="colima-only"
+    log "pressure_sweep: free healthy (${current_free_gb} GB) but Colima ${current_colima_gb} GB >= ceiling ${COLIMA_CEILING_GB} GB — colima-only sweep triggered (dry_run=${DRY_RUN})."
+  else
+    SWEEP_MODE="tmp-only"
+    log "pressure_sweep: free healthy (${current_free_gb} GB) but /private/tmp ${current_tmp_gb} GB >= ceiling ${TMP_CEILING_GB} GB — tmp-only sweep triggered (dry_run=${DRY_RUN})."
+  fi
 else
   log "pressure_sweep: free ${current_free_gb} GB < threshold ${THRESHOLD_GB} GB — sweep triggered (dry_run=${DRY_RUN})."
 fi
@@ -184,6 +219,9 @@ fi
 fi
 
 # ────────── STEP 2: cleanup_colima.sh ──────────
+if [[ "$SWEEP_MODE" == "tmp-only" ]]; then
+  log "pressure_sweep: step 2/2 skipped (tmp-only mode — Colima under ceiling)."
+else
 before_gb="$(free_gb)"
 log "pressure_sweep: step 2/2 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
 if run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" "$clean_flag" >> "$LOG_FILE" 2>&1; then
@@ -192,6 +230,7 @@ if run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" "$clean_flag" >> "$LO
 else
   rc=$?
   log "pressure_sweep: step 2/2 cleanup_colima.sh FAILED or timed out (rc=${rc})."
+fi
 fi
 
 log "pressure_sweep: sweep complete."
