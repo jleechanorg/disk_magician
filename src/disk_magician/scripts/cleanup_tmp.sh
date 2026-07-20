@@ -25,13 +25,18 @@ LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
 LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
+# Hard cap (bead jleechan-mtow): an archive entry older than this is purged
+# even if it still looks active (marker/mtime/open files). Without a cap, a
+# process holding fds into an archived dir keeps it alive forever and the
+# quarantine grows unboundedly — the leak class this repo exists to prevent.
+LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168"
 import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))}")
+print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))}")
 PY
 )"
 fi
@@ -268,27 +273,62 @@ archive_path() {
   echo "$kb"
 }
 
+# warn_if_long_lived <dir> <age_hours> — loud signal when an archive entry
+# has dodged the purge for more than two retention windows: something is
+# keeping quarantined data alive and the operator should look at it before
+# the LARGE_TMP_ARCHIVE_MAX_HOURS hard cap eventually force-purges it.
+warn_if_long_lived() {
+  local d="$1" age_hours="$2"
+  local warn_after=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 2 ))
+  if (( age_hours > warn_after )); then
+    log "WARNING: archive entry still alive after ${age_hours}h (>2x retention ${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h; hard cap ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d"
+  fi
+}
+
 # purge_aged_archives — permanently rm -rf inactive archive entries older than
 # LARGE_TMP_ARCHIVE_RETENTION_HOURS. Safety checks run again at purge time
 # because quarantined content can become active during its recovery window.
+# Entries older than LARGE_TMP_ARCHIVE_MAX_HOURS are purged unconditionally.
 purge_aged_archives() {
   [[ -d "$ARCHIVE_ROOT" ]] || return 0
   local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
-  local d kb
+  local now_epoch d kb entry_mtime age_hours
+  now_epoch="$(date +%s)"
   while IFS= read -r -d '' d; do
     # Size first because du can be slow. All safety probes follow it, with the
     # open-file check last immediately before the destructive operation.
     kb=$(path_size_kb "$d")
+    # Hard cap (bead jleechan-mtow): past LARGE_TMP_ARCHIVE_MAX_HOURS the
+    # entry is purged even if activity probes would keep it — otherwise a
+    # process holding fds into the archive keeps it alive unboundedly. If
+    # the entry's mtime can't be read, fall through to the guarded path
+    # (fail closed toward keeping data, not toward the cap).
+    entry_mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now_epoch")"
+    age_hours=$(( (now_epoch - entry_mtime) / 3600 ))
+    if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY RUN: would purge over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h, activity guards bypassed): $d  (${kb} KB)"
+      else
+        log "Purging over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h, activity guards bypassed): $d  (${kb} KB)"
+        rm -rf "$d"
+      fi
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+      DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+      continue
+    fi
     if has_active_marker "$d"; then
       log "Skipping marked-active aged archive: $d"
+      warn_if_long_lived "$d" "$age_hours"
       continue
     fi
     if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
       log "Skipping recently-active aged archive: $d"
+      warn_if_long_lived "$d" "$age_hours"
       continue
     fi
     if has_open_files "$d"; then
       log "Skipping in-use aged archive: $d"
+      warn_if_long_lived "$d" "$age_hours"
       continue
     fi
     if [[ "$DRY_RUN" == true ]]; then
