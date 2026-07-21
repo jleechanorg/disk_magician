@@ -4,7 +4,8 @@
 # Subcommands: init | status | remote <url> | push
 set -euo pipefail
 
-STATE_DIR="${DISK_MAGICIAN_STATE_REPO:-${XDG_STATE_HOME:-$HOME/.local/state}/disk-magician}"
+SR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$(python3 "$SR_SCRIPT_DIR/resolve_state_repo_path.py")"
 log() { echo "[state_repo] $*"; }
 
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }

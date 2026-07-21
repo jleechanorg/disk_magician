@@ -136,5 +136,31 @@ git -C "$SD10" log --format=%s | grep -q local-conflict && ok "local commit pres
 [[ ! -d "$SD10/.git/rebase-merge" && ! -d "$SD10/.git/rebase-apply" ]] && ok "no mid-rebase state" || bad "mid-rebase" "rebase dirs left"
 [[ -n "$(git -C "$SD10" branch --show-current)" ]] && ok "still on a branch" || bad "on branch" "detached"
 
+echo "Test 11: state_repo_path config key grandfathers an existing directory"
+H11="$TMP_ROOT/h11"; mkdir -p "$H11"
+LEGACY11="$TMP_ROOT/legacy11"; mkdir -p "$LEGACY11"
+mkdir -p "$H11/.config/disk-magician"
+python3 - "$H11/.config/disk-magician/config.json" "$LEGACY11" <<'PY'
+import json, sys
+json.dump({"state_repo_path": sys.argv[2]}, open(sys.argv[1], "w"))
+PY
+OUT11=$(run_sr "$H11" - init 2>&1); RC11=$?
+[[ $RC11 -eq 0 ]] && ok "grandfathered init exits 0" || bad "grandfathered init rc" "$RC11: $OUT11"
+[[ -f "$LEGACY11/MACHINE" ]] && ok "state repo created at the configured legacy dir" || bad "grandfathered dir" "missing MACHINE at $LEGACY11"
+[[ ! -d "$H11/.local/state/disk-magician" ]] && ok "XDG default dir NOT created when grandfathered" || bad "no stray XDG dir" "found $H11/.local/state/disk-magician"
+
+echo "Test 12: DISK_MAGICIAN_STATE_REPO env still wins over a configured state_repo_path"
+H12="$TMP_ROOT/h12"; mkdir -p "$H12"
+LEGACY12="$TMP_ROOT/legacy12"; ENVOVERRIDE12="$TMP_ROOT/envoverride12"
+mkdir -p "$H12/.config/disk-magician"
+python3 - "$H12/.config/disk-magician/config.json" "$LEGACY12" <<'PY'
+import json, sys
+json.dump({"state_repo_path": sys.argv[2]}, open(sys.argv[1], "w"))
+PY
+OUT12=$(env -i HOME="$H12" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_REPO="$ENVOVERRIDE12" bash "$SR" init 2>&1); RC12=$?
+[[ $RC12 -eq 0 ]] && ok "env-override init exits 0" || bad "env-override rc" "$RC12: $OUT12"
+[[ -f "$ENVOVERRIDE12/MACHINE" ]] && ok "env override beats configured state_repo_path" || bad "env override" "missing MACHINE at $ENVOVERRIDE12"
+[[ ! -d "$LEGACY12" || ! -f "$LEGACY12/MACHINE" ]] && ok "configured legacy dir untouched by env override" || bad "legacy untouched" "unexpectedly initialized $LEGACY12"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
