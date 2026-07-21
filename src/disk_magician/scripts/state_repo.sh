@@ -14,13 +14,18 @@ cmd_init() {
     log "adopted existing state repo: $STATE_DIR"
   elif [[ -f "$STATE_DIR/MACHINE" ]]; then
     # MACHINE marker without .git (partial/corrupt state) — re-init in place.
-    git -C "$STATE_DIR" init -q
+    git -C "$STATE_DIR" init -q -b main 2>/dev/null \
+      || { git -C "$STATE_DIR" init -q && git -C "$STATE_DIR" symbolic-ref HEAD refs/heads/main; }
     git_id add -A
     git_id commit -q -m "re-init: recovered state dir without .git"
     log "re-initialized git in existing state dir: $STATE_DIR"
   else
     mkdir -p "$STATE_DIR"
-    [[ -d "$STATE_DIR/.git" ]] || git -C "$STATE_DIR" init -q
+    # Pin the branch name: default-branch differs by git config/vendor
+    # (env -i sandboxes see the compiled default), which broke CI when the
+    # state repo (master) pushed to a bare whose HEAD was unborn main.
+    [[ -d "$STATE_DIR/.git" ]] || git -C "$STATE_DIR" init -q -b main 2>/dev/null \
+      || { git -C "$STATE_DIR" init -q && git -C "$STATE_DIR" symbolic-ref HEAD refs/heads/main; }
     printf 'hostname: %s\ncreated: %s\ntool: disk-magician\n' \
       "$(hostname -s 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/MACHINE"
     mkdir -p "$STATE_DIR/config" "$STATE_DIR/snapshots" "$STATE_DIR/ledger" "$STATE_DIR/evidence"

@@ -77,7 +77,7 @@ echo "$OUT5" | grep -q "local-only" && ok "no-gh reports local-only" || bad "no-
 
 echo "Test 6: remote <url> wires origin; push publishes commits"
 H6="$TMP_ROOT/h6"; mkdir -p "$H6"
-BARE6="$TMP_ROOT/bare6.git"; git init -q --bare "$BARE6"
+BARE6="$TMP_ROOT/bare6.git"; git init -q --bare --initial-branch=main "$BARE6"
 INIT6=$(run_sr "$H6" - init 2>&1) || { echo "init6 failed: $INIT6"; }
 SD6="$H6/.local/state/disk-magician"
 run_sr "$H6" - remote "$BARE6" >/dev/null 2>&1; RC6=$?
@@ -120,7 +120,7 @@ echo "$OUT9" | grep -q "local-only" && ok "reports local-only on create failure"
 
 echo "Test 10: conflicting divergence — push fails safely, both sides intact, no mid-rebase state"
 H10="$TMP_ROOT/h10"; mkdir -p "$H10"
-BARE10="$TMP_ROOT/bare10.git"; git init -q --bare "$BARE10"
+BARE10="$TMP_ROOT/bare10.git"; git init -q --bare --initial-branch=main "$BARE10"
 INIT10=$(run_sr "$H10" - init 2>&1) || { echo "init10 failed: $INIT10"; }
 SD10="$H10/.local/state/disk-magician"
 run_sr "$H10" - remote "$BARE10" >/dev/null 2>&1
