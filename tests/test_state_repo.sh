@@ -162,5 +162,19 @@ OUT12=$(env -i HOME="$H12" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_REPO="$ENVOV
 [[ -f "$ENVOVERRIDE12/MACHINE" ]] && ok "env override beats configured state_repo_path" || bad "env override" "missing MACHINE at $ENVOVERRIDE12"
 [[ ! -d "$LEGACY12" || ! -f "$LEGACY12/MACHINE" ]] && ok "configured legacy dir untouched by env override" || bad "legacy untouched" "unexpectedly initialized $LEGACY12"
 
+echo "Test 13: 'disk_magician.sh snapshot' routes through snapshot_commit.sh (new layout)"
+H13="$TMP_ROOT/h13"; mkdir -p "$H13"
+STUB13="$TMP_ROOT/stub13"; mkdir -p "$STUB13"
+cat > "$STUB13/snap.sh" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [[ $# -gt 0 ]]; do case "$1" in --output) out="$2"; shift 2;; *) shift;; esac; done
+mkdir -p "$(dirname "$out")"; printf '{"schema_version":2}\n' > "$out"
+EOF
+chmod +x "$STUB13/snap.sh"
+OUT13=$(env -i HOME="$H13" PATH="/usr/bin:/bin" DISK_MAGICIAN_SNAPSHOT_BIN="$STUB13/snap.sh" \
+  bash "$REPO_ROOT/disk_magician.sh" snapshot 2>&1); RC13=$?
+[[ $RC13 -eq 0 ]] && ok "dispatcher snapshot exits 0" || bad "dispatcher snapshot rc" "$RC13: $OUT13"
+[[ -f "$H13/.local/state/disk-magician/snapshots/disk_snapshot.json" ]] && ok "snapshot in new-layout state repo" || bad "new-layout snapshot" "missing"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

@@ -16,6 +16,20 @@ REMOTE_REPO="$WORK/remote.git"
 mkdir -p "$APP/scripts" "$HOME_DIR" "$BIN_DIR"
 cp "$REPO_ROOT/disk_magician.sh" "$APP/disk_magician.sh"
 cp "$REPO_ROOT/config.json.template" "$APP/config.json.template"
+# Snapshot dispatch now delegates to scripts/snapshot_commit.sh (design:
+# roadmap/2026-07-21-generic-split-state-repo-design.md §Snapshot/commit
+# flow), which in turn needs the state-repo helper scripts — copy the whole
+# scripts/ dir rather than hand-picking files that could silently drift.
+cp "$REPO_ROOT"/scripts/*.sh "$APP/scripts/"
+cp "$REPO_ROOT"/scripts/*.py "$APP/scripts/"
+
+# Grandfather $BACKUP_REPO via state_repo_path (same one-time setup
+# README.md's "Grandfathering an existing backup repo" section documents)
+# so the new state-repo write path targets the exact directory this test's
+# init_backup_repo()/REMOTE_REPO fixtures already manage, instead of a fresh
+# unrelated state dir under .local/state.
+mkdir -p "$HOME_DIR/.config/disk-magician"
+printf '{"state_repo_path": "%s"}\n' "$BACKUP_REPO" > "$HOME_DIR/.config/disk-magician/config.json"
 
 cat > "$BIN_DIR/hostname" <<'SH'
 #!/usr/bin/env bash
@@ -89,8 +103,13 @@ init_backup_repo
 write_snapshot_stub '{"snapshot":"missing-gitleaks"}'
 missing_output="$WORK/missing.out"
 remote_before="$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)"
-if DISK_MAGICIAN_GITLEAKS_BIN="$WORK/absent-gitleaks" run_snapshot_launchd >"$missing_output" 2>&1; then
-    echo "expected missing configured gitleaks to fail closed" >&2
+# Fail-safe contract (design: roadmap/2026-07-21-generic-split-state-repo-design.md
+# §Snapshot/commit flow): a rejected push is never fatal to the overall
+# snapshot process (the commit already landed locally and must not be lost),
+# but the rejection itself still has to hold — nothing reaches the remote,
+# and the reason is still logged.
+if ! DISK_MAGICIAN_GITLEAKS_BIN="$WORK/absent-gitleaks" run_snapshot_launchd >"$missing_output" 2>&1; then
+    echo "expected fail-safe snapshot to exit 0 even when the push guard rejects (commit stays local, never fatal)" >&2
     exit 1
 fi
 [[ "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" == "$remote_before" ]]
@@ -111,8 +130,8 @@ exit 1
 SH
 chmod +x "$rejecting_gitleaks"
 remote_before="$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)"
-if DISK_MAGICIAN_GITLEAKS_BIN="$rejecting_gitleaks" run_snapshot >"$secret_output" 2>&1; then
-    echo "expected secret-bearing snapshot push to fail closed" >&2
+if ! DISK_MAGICIAN_GITLEAKS_BIN="$rejecting_gitleaks" run_snapshot >"$secret_output" 2>&1; then
+    echo "expected fail-safe snapshot to exit 0 even when the push guard rejects (commit stays local, never fatal)" >&2
     exit 1
 fi
 [[ "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" == "$remote_before" ]]
@@ -134,12 +153,20 @@ git -C "$BACKUP_REPO" branch -M main
 write_snapshot_stub '{"snapshot":"new-after-rewrite"}'
 rewrite_output="$WORK/rewrite.out"
 remote_before="$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)"
-if run_snapshot >"$rewrite_output" 2>&1; then
-    echo "expected rewritten snapshot history to fail closed" >&2
+if ! run_snapshot >"$rewrite_output" 2>&1; then
+    echo "expected fail-safe snapshot to exit 0 even when the push guard rejects (commit stays local, never fatal)" >&2
     exit 1
 fi
 [[ "$(git --git-dir="$REMOTE_REPO" rev-parse refs/heads/main)" == "$remote_before" ]]
-grep -q "does not descend from origin/main" "$rewrite_output"
+# state_repo.sh's cmd_push resolves ordinary divergence via an automatic
+# rebase BEFORE the push guard runs (pre-existing, separately-tested
+# contract: tests/test_state_repo.sh Test 10 "conflicting divergence").
+# Since this fixture's rewritten local history has no shared content with
+# origin/main, the rebase itself conflicts and cmd_push aborts there — a
+# different message than the old inline guard's direct ancestor check, but
+# the same safety property: local history that doesn't descend from origin
+# is never pushed, and nothing is lost.
+grep -q "diverged from origin/main with conflicts" "$rewrite_output"
 
 init_backup_repo
 git -C "$BACKUP_REPO" branch archive/pre-reset-20260711
@@ -155,8 +182,8 @@ git --git-dir="$REMOTE_REPO" update-ref refs/heads/main "$(git -C "$BACKUP_REPO"
 git -C "$BACKUP_REPO" update-ref -d refs/remotes/origin/main
 write_snapshot_stub '{"snapshot":"new-after-remote-rewrite"}'
 archive_output="$WORK/archive.out"
-if run_snapshot >"$archive_output" 2>&1; then
-    echo "expected archived history loss to fail closed" >&2
+if ! run_snapshot >"$archive_output" 2>&1; then
+    echo "expected fail-safe snapshot to exit 0 even when the push guard rejects (commit stays local, never fatal)" >&2
     exit 1
 fi
 grep -q "no longer contains archive/pre-reset-20260711" "$archive_output"
@@ -166,8 +193,8 @@ credential_marker="credential-marker"
 git -C "$BACKUP_REPO" remote set-url origin "https://user:${credential_marker}@example.invalid/disk_backup.git"
 write_snapshot_stub '{"snapshot":"credential-url"}'
 credential_output="$WORK/credential.out"
-if run_snapshot >"$credential_output" 2>&1; then
-    echo "expected credential-bearing remote URL to fail closed" >&2
+if ! run_snapshot >"$credential_output" 2>&1; then
+    echo "expected fail-safe snapshot to exit 0 even when the push guard rejects (commit stays local, never fatal)" >&2
     exit 1
 fi
 if grep -Fq "$credential_marker" "$credential_output"; then

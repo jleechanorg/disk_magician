@@ -16,6 +16,36 @@ KEEP="${DISK_MAGICIAN_EVIDENCE_KEEP:-4}"
 log() { echo "[snapshot_commit] $*"; }
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
 
+# Concurrency guard (relocated from disk_magician.sh's legacy run_snapshot,
+# bead jleechan-q9mu): mkdir-based lock, stale-lock TTL 90 min (dead pid +
+# old enough -> steal), contention = log + exit 0 (skip this run, never
+# queue). This orchestrator is now the only path a 35-min tick reaches, so
+# the lock has to live here rather than in the now-bypassed caller.
+SNAPSHOT_LOCK_DIR="${HOME}/.disk_magician_state/snapshot.lock"
+SNAPSHOT_LOCK_TTL_SEC=5400
+acquire_snapshot_lock() {
+  mkdir -p "$(dirname "$SNAPSHOT_LOCK_DIR")"
+  if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
+    trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+    return 0
+  fi
+  local held_pid age
+  held_pid=$(cat "$SNAPSHOT_LOCK_DIR/pid" 2>/dev/null || echo "")
+  age=$(( $(date +%s) - $(stat -f%m "$SNAPSHOT_LOCK_DIR" 2>/dev/null || stat -c%Y "$SNAPSHOT_LOCK_DIR" 2>/dev/null || date +%s) ))
+  if [[ "$age" -gt "$SNAPSHOT_LOCK_TTL_SEC" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
+    rm -rf "$SNAPSHOT_LOCK_DIR"
+    if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
+      trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+      return 0
+    fi
+  fi
+  echo "snapshot: lock held by pid ${held_pid:-?} (age ${age}s) — skipping this run"
+  return 1
+}
+acquire_snapshot_lock || exit 0
+
 # 1. Ensure the state repo exists (local-only auto-init).
 if [[ ! -f "$STATE_DIR/MACHINE" || ! -d "$STATE_DIR/.git" ]]; then
   DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" init >/dev/null 2>&1 || {
@@ -48,13 +78,20 @@ git_id add -A
 git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty
 log "committed snapshot"
 
-# 6. Fail-safe push (never fatal).
+# 6. Fail-safe push (never fatal). Capture (don't discard) the push guard's
+# output: a rejected push is often security-relevant (secret scan, credential
+# URL, history rewrite) and swallowing the reason would turn a real rejection
+# into an indistinguishable "will retry next run" — the guard's whole point
+# is to be visible when it fires.
 if git -C "$STATE_DIR" remote get-url origin >/dev/null 2>&1; then
-  if DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" push >/dev/null 2>&1; then
+  PUSH_OUT="$(DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" push 2>&1)"
+  PUSH_RC=$?
+  if [[ $PUSH_RC -eq 0 ]]; then
     log "pushed to origin"
   else
     log "push failed — commit kept local, will retry next run"
   fi
+  [[ -n "$PUSH_OUT" ]] && log "$PUSH_OUT"
 else
   log "local-only (no remote)"
 fi
