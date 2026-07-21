@@ -176,5 +176,39 @@ OUT13=$(env -i HOME="$H13" PATH="/usr/bin:/bin" DISK_MAGICIAN_SNAPSHOT_BIN="$STU
 [[ $RC13 -eq 0 ]] && ok "dispatcher snapshot exits 0" || bad "dispatcher snapshot rc" "$RC13: $OUT13"
 [[ -f "$H13/.local/state/disk-magician/snapshots/disk_snapshot.json" ]] && ok "snapshot in new-layout state repo" || bad "new-layout snapshot" "missing"
 
+echo "Test 12: push to a PUBLIC github origin is refused (confidentiality guard, jleechan-v78q)"
+HVIS="$TMP_ROOT/hvis"; FBVIS="$TMP_ROOT/fbvis"; mkdir -p "$HVIS" "$FBVIS"
+BAREVIS="$TMP_ROOT/barevis.git"; git init -q --bare --initial-branch=main "$BAREVIS"
+# fake gh reporting the repo is PUBLIC
+cat > "$FBVIS/gh" <<'EOF12'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "auth status") exit 0 ;;
+  "repo view") echo "public" ;;
+  *) exit 0 ;;
+esac
+EOF12
+chmod +x "$FBVIS/gh"
+run_sr "$HVIS" - init >/dev/null 2>&1
+SDVIS="$HVIS/.local/state/disk-magician"
+# wire a github.com origin so the visibility guard engages
+git -C "$SDVIS" remote add origin https://github.com/jleechan2015/disk-magician-state-h12.git 2>/dev/null ||   git -C "$SDVIS" remote set-url origin https://github.com/jleechan2015/disk-magician-state-h12.git
+OUTVIS=$(env -i HOME="$HVIS" PATH="$FBVIS:/usr/bin:/bin" bash "$SR" push 2>&1); RCVIS=$?
+[[ $RCVIS -ne 0 ]] && ok "public-origin push refused (nonzero)" || bad "public refused" "rc=0: $OUTVIS"
+echo "$OUTVIS" | grep -qi "public\|private\|visibility" && ok "explains the visibility refusal" || bad "visibility message" "$OUTVIS"
+
+echo "Test 13: DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 overrides the public refusal"
+OUTVISB=$(env -i HOME="$HVIS" PATH="$FBVIS:/usr/bin:/bin" DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 bash "$SR" push 2>&1); RCVISB=$?
+# origin is a bogus URL so the actual push fails, but it must get PAST the visibility guard
+echo "$OUTVISB" | grep -qi "public visibility refused\|refusing.*public" && bad "override bypasses guard" "still blocked: $OUTVISB" || ok "override bypasses the visibility guard"
+
+echo "Test 14: non-github origin skips the visibility check (local bare remote pushes fine)"
+HVIS2="$TMP_ROOT/hvis2"; mkdir -p "$HVIS2"
+BAREVIS2="$TMP_ROOT/barevis2.git"; git init -q --bare --initial-branch=main "$BAREVIS2"
+run_sr "$HVIS2" - init >/dev/null 2>&1
+run_sr "$HVIS2" - remote "$BAREVIS2" >/dev/null 2>&1
+OUTVIS2=$(run_sr "$HVIS2" - push 2>&1); RCVIS2=$?
+[[ $RCVIS2 -eq 0 ]] && ok "non-github push not blocked by visibility guard" || bad "non-github push" "rc=$RCVIS2: $OUTVIS2"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
