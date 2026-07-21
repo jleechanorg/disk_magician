@@ -70,7 +70,7 @@ Itemized (per-item verified at execution time):
 - mcp-daemon logs: **3.2 GiB** — lane estimate right in total, wrong in mechanism: only 1 file was >3d stale; the bulk was 10 ACTIVE oversized logs (context7.log alone 1.3 GiB) — truncated in place, daemons unaffected.
 - reclaim_worktree_venvs (symlink conversion): **1.41 GiB** (2 venvs converted, 0 failed).
 - duplicate-clone venv+.venv (`~/repos/jleechanorg/worldarchitect.ai`): **1.36 GiB**.
-- pnpm store prune: 31,164 files / 951 packages (~3.5 GiB store était 4.2).
+- pnpm store prune: 31,164 files / 951 packages (~3.5 GiB store was 4.2).
 - package-manager caches (pnpm/pip/node-gyp/electron/Homebrew >50MB): **1.01 GiB**.
 - git gc (dark-factory, jleechanclaw, user_scope, hermes-agent): ~1.2 GiB packfile garbage.
 - cleanup_worktree_venvs --clean: most candidates <14d young — correctly gated out (small yield).
