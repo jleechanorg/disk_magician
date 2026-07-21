@@ -116,5 +116,106 @@ class TestFormatDiff(unittest.TestCase):
         self.assertFalse(any("/flat" in l for l in lines))
 
 
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=True,
+    )
+
+
+def _write_ledger_commit(repo, ledger_obj, msg):
+    ledger_dir = repo / "ledger"
+    ledger_dir.mkdir(exist_ok=True)
+    (ledger_dir / "topdown-5g.json").write_text(json.dumps(ledger_obj))
+    _git(repo, "add", "ledger/topdown-5g.json")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg)
+
+
+class TestCLIIntegration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "state"
+        self.repo.mkdir()
+        try:
+            _git(self.repo, "init", "-q", "-b", "main")
+        except subprocess.CalledProcessError:
+            _git(self.repo, "init", "-q")
+            _git(self.repo, "symbolic-ref", "HEAD", "refs/heads/main")
+
+    def _run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--state-dir", str(self.repo), *args],
+            capture_output=True, text=True,
+        )
+
+    def test_default_diffs_head_minus_1_against_head(self):
+        # Both buckets stay under the 5 GiB dir ceiling on purpose — this
+        # test exercises ordering/wiring, not the ceiling edge case (that's
+        # test_fail_closed_on_oversize_bucket_refuses_diff below, and the
+        # >=5 GiB kind="file" exemption is covered in TestValidateLedger).
+        base = ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
+        _write_ledger_commit(self.repo, base, "base")
+        target = ledger(8 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 4 * GIB_KB},
+            {"path": "/fixture_growth", "measured_kb": 4 * GIB_KB},
+        ])
+        _write_ledger_commit(self.repo, target, "target")
+        result = self._run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("/fixture_growth", lines[0])
+        self.assertEqual(lines[-1], "residual delta: +0.00 GiB")
+
+    def test_explicit_ref_diffs_against_head(self):
+        first = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        _write_ledger_commit(self.repo, first, "c1")
+        mid = ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}])
+        _write_ledger_commit(self.repo, mid, "c2")
+        last = ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 3 * GIB_KB}])
+        _write_ledger_commit(self.repo, last, "c3")
+        result = self._run_cli("HEAD~2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+2.00 GiB", result.stdout)
+
+    def test_fail_closed_on_oversize_bucket_refuses_diff(self):
+        base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        _write_ledger_commit(self.repo, base, "base")
+        bad = ledger(6 * GIB_KB, 0, [{"path": "/opaque", "measured_kb": 6 * GIB_KB}])
+        _write_ledger_commit(self.repo, bad, "bad")
+        result = self._run_cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/opaque", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_missing_state_repo_exits_1(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--state-dir", str(self.tmp / "nope")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+
+    def test_validate_mode_valid_file(self):
+        led_path = self.tmp / "led.json"
+        led_path.write_text(json.dumps(
+            ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        ))
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--validate", str(led_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_validate_mode_invalid_file(self):
+        led_path = self.tmp / "bad.json"
+        led_path.write_text(json.dumps(
+            ledger(6 * GIB_KB, 0, [{"path": "/big", "measured_kb": 6 * GIB_KB}])
+        ))
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--validate", str(led_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
