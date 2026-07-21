@@ -50,7 +50,25 @@ fi
 FAKE_BIN="$TMP_ROOT/fakebin"
 mkdir -p "$FAKE_BIN"
 GH_LOG="$TMP_ROOT/gh.log"
-if [[ "$DM_E2E_REAL_GH" != "1" ]]; then
+# REAL_GH_ENV: extra env -i args, empty by default. DM_E2E_REAL_GH=1 needs
+# real `gh` reachable (its dir added to PATH — the stock-tools PATH below
+# won't have it, e.g. Homebrew's /opt/homebrew/bin) and its real credential
+# store located (GH_CONFIG_DIR) — both are stripped by the env -i sandbox
+# that intentionally isolates the rest of this run from the real $HOME.
+# Deviation from the plan's literal script (documented, not silently
+# patched): without this, DM_E2E_REAL_GH=1 always falls into
+# state_repo.sh's "no gh auth" branch and never actually creates a repo
+# (confirmed via manual run + `gh api repos/.../disk-magician-state-...`
+# returning 404 before this fix).
+REAL_GH_PATH_PREFIX=""
+REAL_GH_ENV=()
+if [[ "$DM_E2E_REAL_GH" == "1" ]]; then
+  REAL_GH_BIN="$(command -v gh || true)"
+  [[ -n "$REAL_GH_BIN" ]] || { bad "real gh on PATH" "gh not found — required when DM_E2E_REAL_GH=1"; echo "=== Result: $PASS pass, $FAIL fail ==="; exit 1; }
+  REAL_GH_PATH_PREFIX="$(dirname "$REAL_GH_BIN"):"
+  REAL_GH_CONFIG_DIR="${GH_CONFIG_DIR:-$HOME/.config/gh}"
+  REAL_GH_ENV=(GH_CONFIG_DIR="$REAL_GH_CONFIG_DIR")
+else
   cat > "$FAKE_BIN/gh" <<EOF
 #!/usr/bin/env bash
 echo "gh \$*" >> "$GH_LOG"
@@ -65,7 +83,8 @@ EOF
 fi
 
 STATE_DIR="$SANDBOX_HOME/.local/state/disk-magician"
-INIT_OUT=$(env -i HOME="$SANDBOX_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+INIT_OUT=$(env -i HOME="$SANDBOX_HOME" PATH="${REAL_GH_PATH_PREFIX}${FAKE_BIN}:/usr/bin:/bin" \
+  "${REAL_GH_ENV[@]+"${REAL_GH_ENV[@]}"}" \
   DISK_MAGICIAN_ASSUME_YES=1 "$REPO_ROOT/scripts/state_repo.sh" init 2>&1)
 [[ -d "$STATE_DIR/.git" ]] && ok "state init creates a git state repo" \
   || bad "state init creates a git state repo" "$INIT_OUT"
@@ -73,7 +92,25 @@ if [[ "$DM_E2E_REAL_GH" != "1" ]]; then
   grep -q "repo create" "$GH_LOG" 2>/dev/null && ok "gh repo-create offer invoked (stub)" \
     || bad "gh repo-create offer invoked" "$(cat "$GH_LOG" 2>/dev/null || echo missing)"
 else
-  echo "  REAL gh: verify via 'gh api repos/<user>/disk-magician-state-${FAKE_HOST}' after this run."
+  # state_repo.sh derives the repo name from the REAL machine hostname (via
+  # its own `hostname -s` call, unaffected by our HOME sandboxing) — NOT
+  # from $FAKE_HOST (that var only feeds the ledger fixture's "hostname"
+  # JSON field below). Compute the same name here so verification/teardown
+  # target the repo that was actually created, not a name that was never
+  # used (confirmed bug in an earlier draft of this harness: the printed
+  # verify/delete commands referenced $FAKE_HOST and always 404'd).
+  REAL_HOST="$(hostname -s 2>/dev/null || echo unknown)"
+  REAL_STATE_REPO="disk-magician-state-${REAL_HOST}"
+  REAL_GH_LOGIN=$(env -i HOME="$SANDBOX_HOME" "${REAL_GH_ENV[@]+"${REAL_GH_ENV[@]}"}" \
+    PATH="${REAL_GH_PATH_PREFIX}/usr/bin:/bin" gh api user --jq .login 2>/dev/null || true)
+  if [[ -n "$REAL_GH_LOGIN" ]] && env -i HOME="$SANDBOX_HOME" "${REAL_GH_ENV[@]+"${REAL_GH_ENV[@]}"}" \
+       PATH="${REAL_GH_PATH_PREFIX}/usr/bin:/bin" \
+       gh api "repos/${REAL_GH_LOGIN}/${REAL_STATE_REPO}" --jq .full_name >/dev/null 2>&1; then
+    ok "real throwaway repo exists (verified via gh api, not tool output)"
+  else
+    bad "real throwaway repo exists (verified via gh api)" \
+      "repos/${REAL_GH_LOGIN:-<unknown-login>}/${REAL_STATE_REPO} not found — gh repo create likely failed; see INIT_OUT: $INIT_OUT"
+  fi
 fi
 
 # ---- Criterion 2 + 3: ledger contract + diff naming growth ------------
@@ -134,8 +171,9 @@ LAST_LINE=$(python3 -c "import sys; print(sys.argv[1].splitlines()[-1])" "$DIFF_
 # ---- Teardown -----------------------------------------------------------
 rm -f "$FIXTURE_FILE"
 if [[ "$DM_E2E_REAL_GH" == "1" ]]; then
-  echo "  REAL gh: tear down the throwaway repo yourself:"
-  echo "    gh repo delete disk-magician-state-${FAKE_HOST} --yes"
+  echo "  REAL gh: tear down the throwaway repo yourself (this harness never"
+  echo "  auto-deletes — the real-gh leg is opt-in/manual by design):"
+  echo "    gh repo delete ${REAL_GH_LOGIN:-<your-login>}/${REAL_STATE_REPO:-disk-magician-state-<hostname>} --yes"
 fi
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
