@@ -93,5 +93,48 @@ OUT7=$(env -i HOME="$H7" PATH="/usr/bin:/bin" bash "$REPO_ROOT/disk_magician.sh"
 [[ $RC7 -eq 0 ]] && ok "dispatcher state init exits 0" || bad "dispatcher rc" "$RC7: $OUT7"
 [[ -f "$H7/.local/state/disk-magician/MACHINE" ]] && ok "dispatcher created state repo" || bad "dispatcher create" "missing"
 
+echo "Test 8: MACHINE marker without .git — init re-inits instead of crashing"
+H8="$TMP_ROOT/h8"; SD8="$H8/.local/state/disk-magician"; mkdir -p "$SD8"
+printf 'hostname: x\n' > "$SD8/MACHINE"
+OUT8=$(run_sr "$H8" - init 2>&1); RC8=$?
+[[ $RC8 -eq 0 ]] && ok "corrupt-adopt init exits 0" || bad "corrupt-adopt rc" "$RC8: $OUT8"
+[[ -d "$SD8/.git" ]] && ok "git re-initialized" || bad "git re-init" "missing .git"
+
+echo "Test 9: gh fallback with failing 'gh api user' never wires a guessed origin"
+H9="$TMP_ROOT/h9"; FB9="$TMP_ROOT/fb9"; mkdir -p "$H9" "$FB9"
+cat > "$FB9/gh" <<'EOF9'
+#!/usr/bin/env bash
+case "$1" in
+  auth) exit 0 ;;
+  api)  exit 1 ;;
+  repo) exit 1 ;;
+esac
+exit 1
+EOF9
+chmod +x "$FB9/gh"
+OUT9=$(DISK_MAGICIAN_ASSUME_YES=1 run_sr "$H9" "$FB9" init 2>&1); RC9=$?
+SD9="$H9/.local/state/disk-magician"
+[[ $RC9 -eq 0 ]] && ok "failed-create init exits 0" || bad "failed-create rc" "$RC9"
+git -C "$SD9" remote get-url origin >/dev/null 2>&1 && bad "no guessed origin" "origin was set: $(git -C "$SD9" remote get-url origin)" || ok "no guessed origin wired"
+echo "$OUT9" | grep -q "local-only" && ok "reports local-only on create failure" || bad "failure report" "$OUT9"
+
+echo "Test 10: conflicting divergence — push fails safely, both sides intact, no mid-rebase state"
+H10="$TMP_ROOT/h10"; mkdir -p "$H10"
+BARE10="$TMP_ROOT/bare10.git"; git init -q --bare "$BARE10"
+run_sr "$H10" - init >/dev/null 2>&1
+SD10="$H10/.local/state/disk-magician"
+run_sr "$H10" - remote "$BARE10" >/dev/null 2>&1
+run_sr "$H10" - push >/dev/null 2>&1
+git clone -q "$BARE10" "$TMP_ROOT/other10"
+( cd "$TMP_ROOT/other10" && echo remote-side > MACHINE && git -c user.email=o@o -c user.name=o commit -qam remote-conflict && git push -q )
+REMOTE_HEAD=$(git -C "$BARE10" rev-parse HEAD)
+( cd "$SD10" && echo local-side > MACHINE && git -c user.email=a@a -c user.name=a commit -qam local-conflict )
+run_sr "$H10" - push >/dev/null 2>&1; RC10=$?
+[[ $RC10 -ne 0 ]] && ok "conflicted push exits nonzero" || bad "conflicted push rc" "rc=0"
+[[ "$(git -C "$BARE10" rev-parse HEAD)" == "$REMOTE_HEAD" ]] && ok "remote history untouched" || bad "remote intact" "remote moved"
+git -C "$SD10" log --format=%s | grep -q local-conflict && ok "local commit preserved" || bad "local preserved" "missing"
+[[ ! -d "$SD10/.git/rebase-merge" && ! -d "$SD10/.git/rebase-apply" ]] && ok "no mid-rebase state" || bad "mid-rebase" "rebase dirs left"
+[[ -n "$(git -C "$SD10" branch --show-current)" ]] && ok "still on a branch" || bad "on branch" "detached"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

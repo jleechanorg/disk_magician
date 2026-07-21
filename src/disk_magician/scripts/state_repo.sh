@@ -10,8 +10,14 @@ log() { echo "[state_repo] $*"; }
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
 
 cmd_init() {
-  if [[ -f "$STATE_DIR/MACHINE" ]]; then
+  if [[ -f "$STATE_DIR/MACHINE" && -d "$STATE_DIR/.git" ]]; then
     log "adopted existing state repo: $STATE_DIR"
+  elif [[ -f "$STATE_DIR/MACHINE" ]]; then
+    # MACHINE marker without .git (partial/corrupt state) — re-init in place.
+    git -C "$STATE_DIR" init -q
+    git_id add -A
+    git_id commit -q -m "re-init: recovered state dir without .git"
+    log "re-initialized git in existing state dir: $STATE_DIR"
   else
     mkdir -p "$STATE_DIR"
     [[ -d "$STATE_DIR/.git" ]] || git -C "$STATE_DIR" init -q
@@ -43,9 +49,12 @@ offer_remote() {
   else read -r -p "Create private GitHub repo ${repo} for snapshot history? [y/N] " reply || reply=n
   fi
   if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
-    if gh repo create "$repo" --private --source "$STATE_DIR" --remote origin --push >/dev/null 2>&1 \
-       || { gh repo create "$repo" --private >/dev/null 2>&1 \
-            && git -C "$STATE_DIR" remote add origin "https://github.com/$(gh api user --jq .login 2>/dev/null || echo me)/${repo}.git"; }; then
+    local login=""
+    login=$(gh api user --jq .login 2>/dev/null || true)
+    if gh repo create "$repo" --private --source "$STATE_DIR" --remote origin --push >/dev/null 2>&1; then
+      log "origin wired to ${repo}"
+    elif [[ -n "$login" ]] && gh repo create "$repo" --private >/dev/null 2>&1; then
+      git -C "$STATE_DIR" remote add origin "https://github.com/${login}/${repo}.git"
       log "origin wired to ${repo}"
     else
       log "gh repo create failed — running local-only"
@@ -75,7 +84,18 @@ cmd_remote() {
 cmd_push() {
   git -C "$STATE_DIR" remote get-url origin >/dev/null 2>&1 || { log "no remote configured"; exit 1; }
   local branch; branch=$(git -C "$STATE_DIR" branch --show-current)
-  git -C "$STATE_DIR" pull --rebase -q origin "$branch" 2>/dev/null || true
+  [[ -n "$branch" ]] || { log "ERROR: not on a branch (mid-rebase/detached?) — resolve manually in $STATE_DIR"; exit 1; }
+  git -C "$STATE_DIR" fetch -q origin "$branch" 2>/dev/null || true
+  if git -C "$STATE_DIR" rev-parse --verify -q "origin/$branch" >/dev/null; then
+    if ! git -C "$STATE_DIR" merge-base --is-ancestor "origin/$branch" HEAD; then
+      # Diverged: try a rebase; on ANY failure, abort cleanly and stop.
+      if ! git_id rebase -q "origin/$branch" 2>/dev/null; then
+        git -C "$STATE_DIR" rebase --abort 2>/dev/null || true
+        log "ERROR: diverged from origin/$branch with conflicts — resolve manually in $STATE_DIR (nothing was lost or pushed)"
+        exit 1
+      fi
+    fi
+  fi
   git -C "$STATE_DIR" push -q -u origin "$branch"
   log "pushed $branch"
 }
