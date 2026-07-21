@@ -134,7 +134,13 @@ mkdir -p "$(dirname "$HISTORY_SNAPSHOT")"
 git -C "$WORK" init -q history-repo
 git -C "$HISTORY_REPO" config user.name "Disk Diagnostic Test"
 git -C "$HISTORY_REPO" config user.email "disk-diagnostic-test@invalid.local"
-for spec in "20 5242880 2026-07-14T12:00:00Z" "80 41943040 2026-07-15T12:00:00Z"; do
+# Dates are computed relative to today so the two commits always fall inside
+# the `disk_history.sh --days 7` window (jleechan-aoja class: hardcoded
+# 2026-07-14/15 timestamps silently fell out of the window as the calendar
+# advanced, collapsing the two-snapshot delta to one point).
+_d2="$(date -u -v-2d +%Y-%m-%dT12:00:00Z 2>/dev/null || date -u -d '2 days ago' +%Y-%m-%dT12:00:00Z)"
+_d1="$(date -u -v-1d +%Y-%m-%dT12:00:00Z 2>/dev/null || date -u -d '1 day ago' +%Y-%m-%dT12:00:00Z)"
+for spec in "20 5242880 $_d2" "80 41943040 $_d1"; do
   read -r coverage measured timestamp <<<"$spec"
   python3 - "$HISTORY_SNAPSHOT" "$coverage" "$measured" "$timestamp" <<'PY'
 import json, sys
