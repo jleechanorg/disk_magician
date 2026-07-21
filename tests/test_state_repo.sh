@@ -27,5 +27,15 @@ C1=$(git -C "$SD1" rev-list --count HEAD 2>/dev/null)
 [[ "$C1" == "1" ]] && ok "first commit exists" || bad "first commit" "count=$C1"
 echo "$OUT1" | grep -q "local-only" && ok "reports local-only (no gh)" || bad "local-only report" "$OUT1"
 
+echo "Test 2: second init adopts (no new commit), status reports"
+OUT2=$(run_sr "$H1" - init 2>&1)
+C2=$(git -C "$SD1" rev-list --count HEAD)
+[[ "$C2" == "1" ]] && ok "re-init makes no new commit" || bad "idempotent init" "count=$C2"
+echo "$OUT2" | grep -q "adopted existing" && ok "reports adoption" || bad "adoption report" "$OUT2"
+OUT2b=$(run_sr "$H1" - status 2>&1); RC2b=$?
+[[ $RC2b -eq 0 ]] && ok "status exits 0" || bad "status rc" "$RC2b"
+echo "$OUT2b" | grep -q "$SD1" && ok "status names the state dir" || bad "status dir" "$OUT2b"
+echo "$OUT2b" | grep -qi "remote: none" && ok "status shows no remote" || bad "status remote" "$OUT2b"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

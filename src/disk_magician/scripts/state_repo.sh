@@ -32,7 +32,16 @@ offer_remote() {
   log "running local-only (no remote configured)"
 }
 
+cmd_status() {
+  [[ -f "$STATE_DIR/MACHINE" ]] || { log "no state repo at $STATE_DIR (run: state init)"; exit 1; }
+  log "state repo: $STATE_DIR"
+  log "commits: $(git -C "$STATE_DIR" rev-list --count HEAD 2>/dev/null || echo 0)"
+  local r; r=$(git -C "$STATE_DIR" remote get-url origin 2>/dev/null || true)
+  log "remote: ${r:-none}"
+}
+
 case "${1:-}" in
   init) cmd_init ;;
+  status) cmd_status ;;
   *) echo "usage: state_repo.sh init|status|remote <url>|push" >&2; exit 2 ;;
 esac
