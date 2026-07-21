@@ -4,10 +4,114 @@
 # Subcommands: init | status | remote <url> | push
 set -euo pipefail
 
-STATE_DIR="${DISK_MAGICIAN_STATE_REPO:-${XDG_STATE_HOME:-$HOME/.local/state}/disk-magician}"
+SR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$(python3 "$SR_SCRIPT_DIR/resolve_state_repo_path.py")"
 log() { echo "[state_repo] $*"; }
 
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
+
+# Pre-push safety guard (relocated from disk_magician.sh's legacy inline
+# run_snapshot commit/push path — design bright line: the state repo owns
+# everything about its own push, so all pushers, old and new, funnel through
+# this ONE guard instead of each dispatch site re-implementing it). Message
+# text is unchanged from the original so tests/test_snapshot_git_guard.sh's
+# grep assertions keep matching without edits.
+find_gitleaks() {
+  local candidate
+  if [[ -n "${DISK_MAGICIAN_GITLEAKS_BIN:-}" ]]; then
+    if [[ -x "${DISK_MAGICIAN_GITLEAKS_BIN}" ]]; then
+      printf '%s\n' "${DISK_MAGICIAN_GITLEAKS_BIN}"
+      return 0
+    fi
+    return 1
+  fi
+  if command -v gitleaks >/dev/null 2>&1; then
+    command -v gitleaks
+    return 0
+  fi
+  for candidate in \
+    "${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/gitleaks}" \
+    /opt/homebrew/bin/gitleaks \
+    /usr/local/bin/gitleaks \
+    "$HOME/.local/bin/gitleaks"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+remote_has_embedded_credentials() {
+  local remote_url="$1"
+  python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+url = urlsplit(sys.stdin.read().strip())
+sys.exit(0 if url.scheme in {"http", "https"} and (url.username or url.password) else 1)
+' <<<"$remote_url"
+}
+
+guard_state_repo_push() {
+  local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin
+  branch="$(git -C "$STATE_DIR" symbolic-ref --quiet --short HEAD)" || {
+    echo "Snapshot history guard: detached HEAD is not safe to push." >&2
+    return 1
+  }
+  remote_url="$(git -C "$STATE_DIR" remote get-url origin)" || {
+    echo "Snapshot history guard: origin has no usable URL." >&2
+    return 1
+  }
+  if remote_has_embedded_credentials "$remote_url"; then
+    echo "Snapshot history guard: origin URL contains embedded credentials; refusing to push." >&2
+    return 1
+  fi
+
+  if git -C "$STATE_DIR" ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+    remote_exists=true
+  else
+    local ls_remote_rc=$?
+    if [[ "$ls_remote_rc" -ne 2 ]]; then
+      echo "Snapshot history guard: could not verify origin/$branch." >&2
+      return 1
+    fi
+  fi
+
+  if [[ "$remote_exists" == true ]]; then
+    remote_ref="refs/remotes/origin/$branch"
+    git -C "$STATE_DIR" fetch --quiet origin \
+      "refs/heads/$branch:$remote_ref" || {
+      echo "Snapshot history guard: could not refresh origin/$branch." >&2
+      return 1
+    }
+    if ! git -C "$STATE_DIR" merge-base --is-ancestor "$remote_ref" HEAD; then
+      echo "Snapshot history guard: local $branch does not descend from origin/$branch; refusing history rewrite." >&2
+      return 1
+    fi
+    scan_range="$remote_ref..HEAD"
+  else
+    scan_range="HEAD"
+  fi
+
+  if git -C "$STATE_DIR" show-ref --verify --quiet refs/heads/archive/pre-reset-20260711 && \
+     ! git -C "$STATE_DIR" merge-base --is-ancestor refs/heads/archive/pre-reset-20260711 HEAD; then
+    echo "Snapshot history guard: main no longer contains archive/pre-reset-20260711; refusing history loss." >&2
+    return 1
+  fi
+
+  gitleaks_bin="$(find_gitleaks)" || {
+    echo "Snapshot history guard: gitleaks is unavailable; refusing unscanned push." >&2
+    return 1
+  }
+  if ! "$gitleaks_bin" git --no-banner --no-color --redact=100 \
+      --log-opts="$scan_range" "$STATE_DIR" >/dev/null 2>&1; then
+    echo "Snapshot history guard: secret scan rejected outgoing snapshot history." >&2
+    return 1
+  fi
+
+  echo "Snapshot history guard passed for origin/$branch."
+}
 
 cmd_init() {
   if [[ -f "$STATE_DIR/MACHINE" && -d "$STATE_DIR/.git" ]]; then
@@ -112,6 +216,7 @@ cmd_push() {
       fi
     fi
   fi
+  guard_state_repo_push || exit 1
   git -C "$STATE_DIR" push -q -u origin "$branch"
   log "pushed $branch"
 }
