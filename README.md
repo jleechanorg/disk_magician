@@ -4,6 +4,42 @@
 
 Designed to work across macOS and Linux, it can be exposed as a skill/plugin for various agent environments (Claude, Codex, Hermes, Openclaw).
 
+## Quick start (strangers, no local checkout needed)
+
+```bash
+# 1. Install straight from GitHub (requires https://docs.astral.sh/uv/):
+uv tool install git+https://github.com/jleechanorg/disk_magician.git@main
+
+# 2. First run — audits your disk and auto-initializes a per-machine state
+#    repo at $XDG_STATE_HOME/disk-magician (default: ~/.local/state/disk-magician).
+#    If `gh` is authenticated, you'll be offered a private
+#    disk-magician-state-<hostname> GitHub repo for snapshot history;
+#    decline once and it won't ask again. No gh -> local-only, silently.
+disk-magician audit
+
+# 3. See what's committed to your state repo:
+disk-magician state status
+
+# 4. Take another snapshot later, then see what grew between the two:
+disk-magician snapshot
+disk-magician history diff          # last two committed ledgers
+disk-magician history diff HEAD~5   # explicit base ref
+```
+
+Output is a plain list of bucket-level deltas, growth first, with the
+residual (space `disk-magician` can't attribute to a specific directory)
+printed last:
+
+```
++6.20 GiB  /Users/you/Downloads/big_dataset
++0.40 GiB  /Users/you/Library/Caches/some-app
+-1.00 GiB  /Users/you/tmp/old-build
+residual delta: +0.05 GiB
+```
+
+Everything `disk-magician` observes — snapshots, ledgers, resolved config —
+lives in your state repo, not in this checkout; see `roadmap/2026-07-21-generic-split-state-repo-design.md`
+for the full design.
 
 ## Portable configuration
 

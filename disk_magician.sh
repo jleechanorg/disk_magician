@@ -17,6 +17,7 @@ Commands:
   clean         Clean safe targets (caches, temp files, orphaned worktrees).
   clean-all     Clean all targets interactively (Docker VMs, old sessions).
   history       Show historical growth trends from git snapshots.
+  history diff [ref]  Diff two committed ledger/topdown-5g.json snapshots.
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
@@ -202,6 +203,11 @@ case "$CMD" in
     "$SCRIPT_DIR/scripts/disk_audit.sh" --clean-all "$@"
     ;;
   history)
+    if [[ "${1:-}" == "diff" ]]; then
+      shift
+      python3 "$SCRIPT_DIR/scripts/history_diff.py" "$@"
+      exit $?
+    fi
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
     # Execute history from the BACKUP_DIR context so git history is tracked there
