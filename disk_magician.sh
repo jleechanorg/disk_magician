@@ -19,6 +19,7 @@ Commands:
   history       Show historical growth trends from git snapshots.
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
+  state         Manage the per-machine state repo (init|status|remote|push).
 
 Options:
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
@@ -367,6 +368,9 @@ case "$CMD" in
     ;;
   alert)
     "$SCRIPT_DIR/scripts/disk_usage_alert.sh" "$@"
+    ;;
+  state)
+    "$SCRIPT_DIR/scripts/state_repo.sh" "$@"
     ;;
   -h|--help)
     usage
