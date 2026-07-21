@@ -26,6 +26,17 @@ cmd_init() {
     mkdir -p "$STATE_DIR/config" "$STATE_DIR/snapshots" "$STATE_DIR/ledger" "$STATE_DIR/evidence"
     git_id add -A
     git_id commit -q -m "state repo initialized ($(hostname -s 2>/dev/null || echo unknown))"
+    if ! git -C "$STATE_DIR" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+      # CI diagnostics (2026-07-21): a runner produced an empty initial commit
+      # state; fail loudly with the facts instead of cascading downstream.
+      {
+        echo "[state_repo] FATAL: initial commit produced no HEAD"
+        git --version
+        git -C "$STATE_DIR" status
+        git -C "$STATE_DIR" config -l | head -20
+      } >&2
+      exit 1
+    fi
     log "initialized state repo: $STATE_DIR"
   fi
   offer_remote
