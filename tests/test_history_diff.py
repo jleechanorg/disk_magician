@@ -217,5 +217,21 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
+    def test_malformed_json_fails_closed_not_traceback(self):
+        # cursor-agent adversarial finding 2026-07-21: malformed ledger JSON
+        # must produce a clean "history diff: ..." diagnostic on stderr with a
+        # nonzero rc, never an uncaught JSONDecodeError traceback.
+        import subprocess, os
+        bad = os.path.join(self.tmp, "bad.json")
+        with open(bad, "w") as f:
+            f.write("not{valid json")
+        r = subprocess.run(
+            ["python3", str(SCRIPT), "--validate", bad],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("not readable JSON", r.stderr + r.stdout)
+
 if __name__ == "__main__":
     unittest.main()

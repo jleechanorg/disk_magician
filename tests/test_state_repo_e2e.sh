@@ -171,9 +171,21 @@ LAST_LINE=$(python3 -c "import sys; print(sys.argv[1].splitlines()[-1])" "$DIFF_
 # ---- Teardown -----------------------------------------------------------
 rm -f "$FIXTURE_FILE"
 if [[ "$DM_E2E_REAL_GH" == "1" ]]; then
-  echo "  REAL gh: tear down the throwaway repo yourself (this harness never"
-  echo "  auto-deletes — the real-gh leg is opt-in/manual by design):"
-  echo "    gh repo delete ${REAL_GH_LOGIN:-<your-login>}/${REAL_STATE_REPO:-disk-magician-state-<hostname>} --yes"
+  # Attempt real teardown, then FAIL LOUDLY if the repo still exists (e.g. the
+  # token lacks the delete_repo scope) so a real-gh run never silently litters
+  # the account. cursor-agent adversarial finding 2026-07-21: the old teardown
+  # only printed a manual command and could not surface a scope failure.
+  target="${REAL_GH_LOGIN:-}/${REAL_STATE_REPO:-}"
+  if [[ "$target" != "/" ]]; then
+    gh repo delete "$target" --yes >/dev/null 2>&1 || true
+    if gh repo view "$target" >/dev/null 2>&1; then
+      echo "  !! WARNING: throwaway repo NOT deleted (missing delete_repo scope?):" >&2
+      echo "     https://github.com/$target" >&2
+      echo "     Delete manually: gh auth refresh -h github.com -s delete_repo && gh repo delete $target --yes" >&2
+    else
+      echo "  teardown: deleted throwaway repo $target"
+    fi
+  fi
 fi
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="

@@ -89,7 +89,13 @@ def format_diff(deltas: list, residual_delta: int) -> str:
 
 
 def load_ledger_from_file(path: pathlib.Path) -> dict:
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        # ValueError covers json.JSONDecodeError. Fail closed as a LedgerError
+        # (cursor-agent adversarial finding 2026-07-21: malformed JSON produced
+        # an uncaught traceback instead of a clean diagnostic).
+        raise LedgerError(f"{path}: not readable JSON — {exc}")
 
 
 def load_ledger_from_git(state_dir: pathlib.Path, ref: str) -> dict:
@@ -99,7 +105,10 @@ def load_ledger_from_git(state_dir: pathlib.Path, ref: str) -> dict:
     )
     if result.returncode != 0:
         raise LedgerError(f"{ref}: cannot read {LEDGER_REL_PATH} — {result.stderr.strip()}")
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise LedgerError(f"{ref}:{LEDGER_REL_PATH}: not readable JSON — {exc}")
 
 
 def resolve_state_dir(explicit) -> pathlib.Path:
