@@ -61,5 +61,17 @@ OUT3=$(run_sc "$H3" 2>&1); RC3=$?
 LOG3="$(git -C "$SD3" log --oneline 2>&1)"
 [[ "$LOG3" == *[Ss]napshot* ]] && ok "commit preserved despite push failure" || bad "commit preserved" "$LOG3"
 
+echo "Test 4: state_repo_path config grandfathers an existing repo in place"
+H4="$TMP_ROOT/h4"; mkdir -p "$H4/.config/disk-magician"
+LEGACY="$TMP_ROOT/legacy-backup"; mkdir -p "$LEGACY/backup/somehost"
+printf '{"pre":"existing"}\n' > "$LEGACY/backup/somehost/disk_snapshot.json"
+( cd "$LEGACY" && git init -q -b main && git -c user.email=x@x -c user.name=x add -A && git -c user.email=x@x -c user.name=x commit -qm seed )
+printf '{"state_repo_path": "%s"}\n' "$LEGACY" > "$H4/.config/disk-magician/config.json"
+OUT4=$(run_sc "$H4" 2>&1); RC4=$?
+[[ $RC4 -eq 0 ]] && ok "grandfathered run exits 0" || bad "grandfather rc" "$RC4: $OUT4"
+[[ -f "$LEGACY/snapshots/disk_snapshot.json" ]] && ok "new-layout snapshots/ created in legacy repo" || bad "new layout" "missing"
+[[ -f "$LEGACY/backup/somehost/disk_snapshot.json" ]] && ok "existing backup/<host>/ left untouched" || bad "legacy preserved" "gone"
+[[ "$(cat "$LEGACY/backup/somehost/disk_snapshot.json")" == '{"pre":"existing"}' ]] && ok "legacy content byte-identical" || bad "legacy content" "changed"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

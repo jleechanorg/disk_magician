@@ -51,6 +51,24 @@ commit with fully redacted output. A missing scanner or failed guard stops the
 push with a non-zero exit; the local snapshot commit remains available for
 inspection and recovery.
 
+### Grandfathering an existing backup repo
+
+The 35-min snapshot job writes through a per-machine **state repo** (design:
+`roadmap/2026-07-21-generic-split-state-repo-design.md`), defaulting to
+`${XDG_STATE_HOME:-$HOME/.local/state}/disk-magician`. If you already have a
+disk-magician backup repo somewhere else (e.g. a machine that predates the
+state-repo layout), adopt it in place instead of starting a second one — the
+existing `backup/<host>/` contents are left untouched, and the new
+`snapshots/`, `ledger/`, `config/`, `evidence/` directories are created
+beside them in the same repo:
+
+```bash
+mkdir -p ~/.config/disk-magician
+echo '{"state_repo_path": "'$HOME'/.disk_magician_backup"}' > ~/.config/disk-magician/config.json
+```
+
+`DISK_MAGICIAN_STATE_REPO` (if set) still wins outright over this config key.
+
 ---
 
 ## Features
