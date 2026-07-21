@@ -55,7 +55,11 @@ fi
 RETENTION_HOURS="${RETENTION_HOURS:-${CONFIG_RETENTION_HOURS:-72}}"
 KEEP_COUNT="${KEEP_COUNT:-${CONFIG_KEEP_COUNT:-2}}"
 PATTERNS_RAW="${PATTERNS_RAW:-${CONFIG_PATTERNS:-}}"
-[[ -n "$PATTERNS_RAW" ]] || PATTERNS_RAW="DK2D-EVIDENCE-* dk2d_evidence_*"
+# Broadened 2026-07-21 (pattern drift: the generator began emitting
+# DK2D-RUN9-captioned-burned/, dk2d_style_round*/ etc. that escaped the
+# original DK2D-EVIDENCE-*/dk2d_evidence_* patterns — 20 escapee dirs found).
+# keep-newest + 72h retention + markers still protect anything active.
+[[ -n "$PATTERNS_RAW" ]] || PATTERNS_RAW="DK2D-* dk2d_*"
 
 # Portable split (no mapfile — macOS /bin/bash 3.2).
 PATTERNS=()
