@@ -87,5 +87,11 @@ run_sr "$H6" - push >/dev/null 2>&1; RC6b=$?
 [[ $RC6b -eq 0 ]] && ok "push exits 0" || bad "push rc" "$RC6b"
 [[ "$(git -C "$BARE6" rev-list --count HEAD 2>/dev/null)" == "1" ]] && ok "commit on remote" || bad "remote commits" "none"
 
+echo "Test 7: disk_magician.sh routes 'state' to state_repo.sh"
+H7="$TMP_ROOT/h7"; mkdir -p "$H7"
+OUT7=$(env -i HOME="$H7" PATH="/usr/bin:/bin" bash "$REPO_ROOT/disk_magician.sh" state init 2>&1); RC7=$?
+[[ $RC7 -eq 0 ]] && ok "dispatcher state init exits 0" || bad "dispatcher rc" "$RC7: $OUT7"
+[[ -f "$H7/.local/state/disk-magician/MACHINE" ]] && ok "dispatcher created state repo" || bad "dispatcher create" "missing"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
