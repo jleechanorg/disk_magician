@@ -29,7 +29,32 @@ offer_remote() {
   if git -C "$STATE_DIR" remote get-url origin >/dev/null 2>&1; then
     log "remote: $(git -C "$STATE_DIR" remote get-url origin)"; return 0
   fi
-  log "running local-only (no remote configured)"
+  if [[ -f "$STATE_DIR/.offer-declined" ]]; then
+    log "remote offer declined earlier — running local-only (state_repo.sh remote <url> to wire one)"; return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    log "running local-only (no gh auth; state_repo.sh remote <url> to wire one)"; return 0
+  fi
+  local host reply repo
+  host="$(hostname -s 2>/dev/null || echo unknown)"
+  repo="disk-magician-state-${host}"
+  if [[ "${DISK_MAGICIAN_ASSUME_YES:-0}" == "1" ]]; then reply=y
+  elif [[ "${DISK_MAGICIAN_ASSUME_NO:-0}" == "1" ]]; then reply=n
+  else read -r -p "Create private GitHub repo ${repo} for snapshot history? [y/N] " reply || reply=n
+  fi
+  if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
+    if gh repo create "$repo" --private --source "$STATE_DIR" --remote origin --push >/dev/null 2>&1 \
+       || { gh repo create "$repo" --private >/dev/null 2>&1 \
+            && git -C "$STATE_DIR" remote add origin "https://github.com/$(gh api user --jq .login 2>/dev/null || echo me)/${repo}.git"; }; then
+      log "origin wired to ${repo}"
+    else
+      log "gh repo create failed — running local-only"
+    fi
+  else
+    touch "$STATE_DIR/.offer-declined"
+    git_id add .offer-declined && git_id commit -q -m "record remote-offer decline" || true
+    log "declined — running local-only"
+  fi
 }
 
 cmd_status() {
