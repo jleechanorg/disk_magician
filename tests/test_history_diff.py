@@ -72,5 +72,49 @@ class TestValidateLedger(unittest.TestCase):
         hd.validate_ledger(oversize_file, label="oversize-file")  # must not raise
 
 
+class TestComputeDeltas(unittest.TestCase):
+    def test_growth_sorted_first_shrink_last(self):
+        base = ledger(4 * GIB_KB, 1 * GIB_KB, [
+            {"path": "/grew", "measured_kb": 1 * GIB_KB},
+            {"path": "/shrank", "measured_kb": 2 * GIB_KB},
+        ])
+        target = ledger(4 * GIB_KB, 1 * GIB_KB, [
+            {"path": "/grew", "measured_kb": 3 * GIB_KB},
+            {"path": "/shrank", "measured_kb": 0},
+        ])
+        deltas, residual_delta = hd.compute_deltas(base, target)
+        self.assertEqual(deltas[0][0], "/grew")
+        self.assertGreater(deltas[0][1], 0)
+        self.assertEqual(deltas[-1][0], "/shrank")
+        self.assertLess(deltas[-1][1], 0)
+        self.assertEqual(residual_delta, 0)
+
+    def test_added_and_removed_buckets_diff_against_zero(self):
+        base = ledger(1 * GIB_KB, 0, [{"path": "/old", "measured_kb": 1 * GIB_KB}])
+        target = ledger(1 * GIB_KB, 0, [{"path": "/new", "measured_kb": 1 * GIB_KB}])
+        deltas, _ = hd.compute_deltas(base, target)
+        by_path = dict(deltas)
+        self.assertEqual(by_path["/new"], 1 * GIB_KB)
+        self.assertEqual(by_path["/old"], -1 * GIB_KB)
+
+    def test_residual_delta_sign(self):
+        base = ledger(2 * GIB_KB, 1 * GIB_KB, [])
+        target = ledger(2 * GIB_KB, 2 * GIB_KB, [])
+        _, residual_delta = hd.compute_deltas(base, target)
+        self.assertEqual(residual_delta, 1 * GIB_KB)
+
+
+class TestFormatDiff(unittest.TestCase):
+    def test_top_line_is_largest_growth_last_line_is_residual(self):
+        deltas = [("/grew", 6 * GIB_KB), ("/flat", 0), ("/shrank", -1 * GIB_KB)]
+        out = hd.format_diff(deltas, 0)
+        lines = out.splitlines()
+        self.assertIn("/grew", lines[0])
+        self.assertTrue(lines[0].startswith("+"))
+        self.assertEqual(lines[-1], "residual delta: +0.00 GiB")
+        # zero-delta buckets are noise in a diff view — omitted, not printed as +0.00.
+        self.assertFalse(any("/flat" in l for l in lines))
+
+
 if __name__ == "__main__":
     unittest.main()

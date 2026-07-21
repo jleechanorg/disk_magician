@@ -60,5 +60,33 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         )
 
 
+def compute_deltas(base: dict, target: dict) -> "tuple[list, int]":
+    base_by_path = {b["path"]: b["measured_kb"] for b in base["buckets"]}
+    target_by_path = {b["path"]: b["measured_kb"] for b in target["buckets"]}
+    paths = set(base_by_path) | set(target_by_path)
+    deltas = [
+        (path, target_by_path.get(path, 0) - base_by_path.get(path, 0))
+        for path in paths
+    ]
+    deltas.sort(key=lambda item: (-item[1], item[0]))
+    residual_delta = target["residual_kb"] - base["residual_kb"]
+    return deltas, residual_delta
+
+
+def format_kb(delta_kb: int) -> str:
+    sign = "+" if delta_kb >= 0 else "-"
+    return f"{sign}{abs(delta_kb) / GIB_KB:.2f} GiB"
+
+
+def format_diff(deltas: list, residual_delta: int) -> str:
+    lines = [
+        f"{format_kb(delta_kb)}  {path}"
+        for path, delta_kb in deltas
+        if delta_kb != 0
+    ]
+    lines.append(f"residual delta: {format_kb(residual_delta)}")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     pass
