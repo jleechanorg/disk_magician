@@ -41,5 +41,17 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, os.path.join(self.home, ".disk_magician_backup")))
 
+    def test_relative_state_repo_path_anchors_to_home_not_cwd(self):
+        # cursor-agent adversarial finding 2026-07-21: a relative
+        # state_repo_path used to resolve against the caller's CWD (/ under
+        # launchd). It must anchor to $HOME deterministically.
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": "relative/backup"}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, os.path.join(self.home, "relative", "backup"))
+
 if __name__ == "__main__":
     unittest.main()

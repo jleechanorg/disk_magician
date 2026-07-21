@@ -27,7 +27,14 @@ def resolve() -> str:
                 data = json.load(f)
             configured = data.get("state_repo_path")
             if configured:
-                return str(pathlib.Path(configured.replace("~", str(home), 1)))
+                expanded = pathlib.Path(os.path.expanduser(configured))
+                # A relative state_repo_path would resolve against the caller's
+                # CWD — repo root in dev, but `/` under launchd (cursor-agent
+                # adversarial finding 2026-07-21). Anchor it to $HOME so the
+                # location is deterministic regardless of who invokes the tool.
+                if not expanded.is_absolute():
+                    expanded = home / expanded
+                return str(expanded)
         except (OSError, ValueError):
             pass
     state_home = pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
