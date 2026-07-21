@@ -75,5 +75,17 @@ OUT5=$(run_sr "$H5" - init 2>&1); RC5=$?
 [[ $RC5 -eq 0 ]] && ok "no-gh init exits 0" || bad "no-gh rc" "$RC5"
 echo "$OUT5" | grep -q "local-only" && ok "no-gh reports local-only" || bad "no-gh report" "$OUT5"
 
+echo "Test 6: remote <url> wires origin; push publishes commits"
+H6="$TMP_ROOT/h6"; mkdir -p "$H6"
+BARE6="$TMP_ROOT/bare6.git"; git init -q --bare "$BARE6"
+run_sr "$H6" - init >/dev/null 2>&1
+SD6="$H6/.local/state/disk-magician"
+run_sr "$H6" - remote "$BARE6" >/dev/null 2>&1; RC6=$?
+[[ $RC6 -eq 0 ]] && ok "remote cmd exits 0" || bad "remote rc" "$RC6"
+[[ "$(git -C "$SD6" remote get-url origin)" == "$BARE6" ]] && ok "origin set" || bad "origin" "$(git -C "$SD6" remote get-url origin 2>&1)"
+run_sr "$H6" - push >/dev/null 2>&1; RC6b=$?
+[[ $RC6b -eq 0 ]] && ok "push exits 0" || bad "push rc" "$RC6b"
+[[ "$(git -C "$BARE6" rev-list --count HEAD 2>/dev/null)" == "1" ]] && ok "commit on remote" || bad "remote commits" "none"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

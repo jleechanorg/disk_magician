@@ -65,8 +65,25 @@ cmd_status() {
   log "remote: ${r:-none}"
 }
 
+cmd_remote() {
+  [[ -n "${1:-}" ]] || { echo "usage: state_repo.sh remote <url>" >&2; exit 2; }
+  git -C "$STATE_DIR" remote remove origin 2>/dev/null || true
+  git -C "$STATE_DIR" remote add origin "$1"
+  rm -f "$STATE_DIR/.offer-declined"
+  log "origin set: $1"
+}
+cmd_push() {
+  git -C "$STATE_DIR" remote get-url origin >/dev/null 2>&1 || { log "no remote configured"; exit 1; }
+  local branch; branch=$(git -C "$STATE_DIR" branch --show-current)
+  git -C "$STATE_DIR" pull --rebase -q origin "$branch" 2>/dev/null || true
+  git -C "$STATE_DIR" push -q -u origin "$branch"
+  log "pushed $branch"
+}
+
 case "${1:-}" in
   init) cmd_init ;;
   status) cmd_status ;;
+  remote) shift; cmd_remote "$@" ;;
+  push) cmd_push ;;
   *) echo "usage: state_repo.sh init|status|remote <url>|push" >&2; exit 2 ;;
 esac
