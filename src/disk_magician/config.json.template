@@ -306,7 +306,7 @@
   ],
   "gc_worktree_repos": [],
   "downloads_evidence_patterns": [
-    "DK2D-EVIDENCE-*",
-    "dk2d_evidence_*"
+    "DK2D-*",
+    "dk2d_*"
   ]
 }

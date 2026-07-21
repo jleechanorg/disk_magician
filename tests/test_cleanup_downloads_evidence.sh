@@ -142,6 +142,20 @@ assert_rc "T6: exits 0" 0 "$RC6"
 assert_missing "T6: custom-pattern old spool removed" "$R6/MYEVID-run1"
 assert_exists "T6: default-pattern dir untouched when patterns overridden" "$R6/DK2D-EVIDENCE-OLD"
 
+echo "T6b: broadened default patterns catch drift-named spools (dk2d_style_*, DK2D-RUN*)"
+R6B="$TMP_ROOT/r6b"; mkdir -p "$R6B"
+spool "$R6B" "dk2d_style_round4_20260720" old
+spool "$R6B" "DK2D-RUN9-captioned-burned" old
+spool "$R6B" "DK2D-EVIDENCE-NEWEST" fresh
+spool "$R6B" "my_vacation_photos" old
+O6B="$TMP_ROOT/o6b"
+run_sweeper "$R6B" "$O6B" DISK_MAGICIAN_EVIDENCE_KEEP_COUNT=1 -- --clean; RC6B=$?
+assert_rc "T6b: exits 0" 0 "$RC6B"
+assert_missing "T6b: drift-named style spool expired" "$R6B/dk2d_style_round4_20260720"
+assert_missing "T6b: drift-named RUN spool expired" "$R6B/DK2D-RUN9-captioned-burned"
+assert_exists "T6b: newest kept" "$R6B/DK2D-EVIDENCE-NEWEST"
+assert_exists "T6b: non-matching dir untouched" "$R6B/my_vacation_photos"
+
 echo "T7: missing evidence root is a clean no-op"
 O7="$TMP_ROOT/o7"
 run_sweeper "$TMP_ROOT/does-not-exist" "$O7" -- --clean; RC7=$?
