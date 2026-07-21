@@ -68,6 +68,34 @@ guard_state_repo_push() {
     return 1
   fi
 
+  # Confidentiality guard (bead jleechan-v78q): the state repo holds disk
+  # topology, machine paths, and hostnames. If origin is a GitHub repo whose
+  # visibility has drifted to public, refuse the push so that data is never
+  # published. Only engages for github.com origins with gh available; the
+  # DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 escape hatch opts out entirely.
+  if [[ "${DISK_MAGICIAN_ALLOW_PUBLIC_STATE:-0}" != "1" ]] \
+     && printf '%s' "$remote_url" | grep -qi 'github\.com'; then
+    local owner_repo visibility
+    owner_repo="$(printf '%s' "$remote_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+    if command -v gh >/dev/null 2>&1; then
+      visibility="$(gh repo view "$owner_repo" --json visibility --jq .visibility 2>/dev/null || echo "")"
+      case "$visibility" in
+        PRIVATE|INTERNAL|private|internal) : ;;
+        "")
+          echo "Snapshot history guard: could not confirm $owner_repo is private (gh returned nothing); refusing push. Set DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 to override." >&2
+          return 1
+          ;;
+        *)
+          echo "Snapshot history guard: $owner_repo has public visibility ($visibility); refusing to push disk state to a public repo. Make it private, or set DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 to override." >&2
+          return 1
+          ;;
+      esac
+    else
+      echo "Snapshot history guard: gh unavailable to confirm $owner_repo is private; refusing push. Set DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 to override." >&2
+      return 1
+    fi
+  fi
+
   if git -C "$STATE_DIR" ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
     remote_exists=true
   else
