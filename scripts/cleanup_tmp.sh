@@ -541,8 +541,18 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
     esac
     case "$base" in
       wt_*|worktree_*)
-        log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
-        [[ "${TMP_WORKTREES_APPROVED:-0}" == "1" ]] || continue
+        # Misleading-log defect (found live 2026-07-22 during the tmp-scratch
+        # incident diagnosis): this used to log "Skipping ..." unconditionally
+        # BEFORE the approval check, so even when TMP_WORKTREES_APPROVED=1 was
+        # set and the dir was about to be evaluated normally, the log said
+        # "Skipping" -- misread as the gate being broken. Only log "Skipping"
+        # on the actual skip path now; the approved fall-through gets its own
+        # distinct line.
+        if [[ "${TMP_WORKTREES_APPROVED:-0}" != "1" ]]; then
+          log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
+          continue
+        fi
+        log "Worktree dir approved (TMP_WORKTREES_APPROVED=1), evaluating: $d"
         ;;
     esac
 

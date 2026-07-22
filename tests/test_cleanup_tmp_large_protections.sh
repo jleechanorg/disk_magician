@@ -730,6 +730,71 @@ assert_contains "GREEN 7b: logs long-lived warning (>2x retention)" \
   "WARNING: archive entry still alive after" "$G7B_OUT_CONTENT"
 assert_exists "GREEN 7b: under-cap entry preserved" "$G7B_ENTRY/payload.bin"
 
+echo "GREEN 8a: worktree dir without TMP_WORKTREES_APPROVED logs Skipping and is untouched"
+G8A_PRIVATE_TMP="$TMP_ROOT/g8a-private-tmp"
+G8A_TMP="$TMP_ROOT/g8a-tmp"
+G8A_ARCHIVE="$TMP_ROOT/g8a-archive"
+G8A_BIN="$TMP_ROOT/g8a-bin"
+mkdir -p "$G8A_PRIVATE_TMP" "$G8A_TMP"
+make_find_shim "$G8A_BIN" "$G8A_PRIVATE_TMP" "$G8A_TMP"
+make_large_dir "$G8A_PRIVATE_TMP/worktree_stale_dir"
+set_old_mtime "$G8A_PRIVATE_TMP/worktree_stale_dir"
+
+G8A_OUT="$TMP_ROOT/g8a.out"
+if run_capture "$G8A_OUT" env -i HOME="$TMP_ROOT/g8a-home" \
+  PATH="$G8A_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G8A_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G8A_RC=0
+else
+  G8A_RC=$?
+fi
+G8A_OUT_CONTENT=$(cat "$G8A_OUT")
+assert_rc "GREEN 8a: exits 0" 0 "$G8A_RC"
+assert_contains "GREEN 8a: logs Skipping (no TMP_WORKTREES_APPROVED)" \
+  "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $G8A_PRIVATE_TMP/worktree_stale_dir" \
+  "$G8A_OUT_CONTENT"
+if [[ "$G8A_OUT_CONTENT" == *"Worktree dir approved"* ]]; then
+  record_fail "GREEN 8a: does not log the approved fall-through line" "found 'Worktree dir approved' with no approval set"
+else
+  record_pass "GREEN 8a: does not log the approved fall-through line"
+fi
+assert_exists "GREEN 8a: dir untouched at original path" "$G8A_PRIVATE_TMP/worktree_stale_dir"
+
+echo "GREEN 8b: worktree dir WITH TMP_WORKTREES_APPROVED logs the approved line, not Skipping, and is evaluated"
+G8B_PRIVATE_TMP="$TMP_ROOT/g8b-private-tmp"
+G8B_TMP="$TMP_ROOT/g8b-tmp"
+G8B_ARCHIVE="$TMP_ROOT/g8b-archive"
+G8B_BIN="$TMP_ROOT/g8b-bin"
+mkdir -p "$G8B_PRIVATE_TMP" "$G8B_TMP"
+make_find_shim "$G8B_BIN" "$G8B_PRIVATE_TMP" "$G8B_TMP"
+make_large_dir "$G8B_PRIVATE_TMP/worktree_stale_dir"
+set_old_mtime "$G8B_PRIVATE_TMP/worktree_stale_dir"
+
+G8B_OUT="$TMP_ROOT/g8b.out"
+if run_capture "$G8B_OUT" env -i HOME="$TMP_ROOT/g8b-home" \
+  PATH="$G8B_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G8B_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G8B_RC=0
+else
+  G8B_RC=$?
+fi
+G8B_OUT_CONTENT=$(cat "$G8B_OUT")
+assert_rc "GREEN 8b: exits 0" 0 "$G8B_RC"
+assert_contains "GREEN 8b: logs the distinct approved fall-through line" \
+  "Worktree dir approved (TMP_WORKTREES_APPROVED=1), evaluating: $G8B_PRIVATE_TMP/worktree_stale_dir" \
+  "$G8B_OUT_CONTENT"
+if [[ "$G8B_OUT_CONTENT" == *"Skipping temp worktree dir"* ]]; then
+  record_fail "GREEN 8b: does not log the misleading 'Skipping' line when approved" "found it anyway"
+else
+  record_pass "GREEN 8b: does not log the misleading 'Skipping' line when approved"
+fi
+assert_contains "GREEN 8b: approved dir is actually archived (evaluation proceeded)" \
+  "Archiving: $G8B_PRIVATE_TMP/worktree_stale_dir ->" "$G8B_OUT_CONTENT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
