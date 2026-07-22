@@ -13,7 +13,12 @@
 # cleanup_colima.sh --clean — both scripts own their own safety semantics
 # (mtime thresholds, lsof gates, docker-prune semantics preserving in-use
 # containers/volumes). When triggered, passes --large to cleanup_tmp and sets
-# LARGE_TMP_APPROVED=1 for the pressure path only (bead jleechan-nkzj).
+# LARGE_TMP_APPROVED=1 for the pressure path only (bead jleechan-nkzj), and
+# TMP_WORKTREES_APPROVED=1 for the same pressure-only path (roadmap
+# 2026-07-22-disk-regrowth-rootcause.md §3.2 — without it, every
+# wt_*/worktree_* dir under /private/tmp is structurally un-sweepable even
+# under critical pressure). cleanup_tmp.sh's own mtime/lsof/protected-root
+# gates still apply unchanged; this only lifts the worktree-specific opt-in.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -205,7 +210,7 @@ else
 before_gb="$(free_gb)"
 log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
 if [[ "$DRY_RUN" != true ]]; then
-  tmp_step=(env LARGE_TMP_APPROVED=1 "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+  tmp_step=(env LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
 else
   tmp_step=("$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
 fi

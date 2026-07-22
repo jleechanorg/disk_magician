@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Proactive /private/tmp scratch sweep — closes the interim gap named in
+  bead jleechan-dqiz (AO worktree scratch under /private/tmp/worldarchitect-pr*
+  and pr*-evidence-* only got cleaned reactively, via pressure_sweep.sh's
+  cleanup_tmp.sh --large step, once free space had already dropped below
+  40GB). This job runs the same already-safety-gated cleanup_tmp.sh --large
+  path on a fixed hourly cadence instead, so stale scratch (>24h,
+  LARGE_TMP_ACTIVE_HOURS gate) gets archived well before it can contribute
+  to a pressure event, not just after one starts.
+
+  Safety: cleanup_tmp.sh --large is unchanged — it still only acts on
+  top-level /private/tmp dirs with no file mtime within the last 24h
+  (LARGE_TMP_ACTIVE_HOURS), skips the DEFAULT_PROTECTED_TMP_ROOTS list,
+  archives (never immediately rm -rf's) into
+  /private/tmp/_disk_magician_archive/<ts>/, and only purges an archived
+  copy after its own retention window. LARGE_TMP_APPROVED=1 here mirrors
+  exactly how pressure_sweep.sh already auto-approves the same flag for the
+  same script.
+
+  Schedule:  Every hour (StartInterval=3600s) — matches jleechan-dqiz's
+             literal "hourly stale-clone sweeper" interim ask. Idle fires
+             (nothing stale) cost one log line and exit quickly since the
+             script's own age/protected-root gates make repeated runs a
+             no-op.
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-tmp-scratch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/cleanup_tmp.sh</string>
+    <string>--clean</string>
+    <string>--large</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>LARGE_TMP_APPROVED</key>
+    <string>1</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-tmp-scratch.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-tmp-scratch.log</string>
+</dict>
+</plist>
