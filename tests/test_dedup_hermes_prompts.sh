@@ -190,12 +190,23 @@ cp -- "$DB7" "$old_backup"
 touch -t "$(date -v-72H '+%Y%m%d%H%M' 2>/dev/null || date -d '-72 hours' '+%Y%m%d%H%M' 2>/dev/null)" "$old_backup" 2>/dev/null || true
 recent_backup="$TMP_ROOT/t7.db.dedup-backup-20990101-000000"
 cp -- "$DB7" "$recent_backup"
-HERMES_STATE_DB="$DB7" HERMES_DEDUP_BACKUP_RETENTION_HOURS=24 bash "$SOURCE_SCRIPT" >/dev/null 2>&1
-if [[ ! -f "$old_backup" ]]; then
-  echo "  PASS  72h-old backup swept by the 24h-retention startup sweep"
+# A dry-run (no --apply) must be side-effect-free: it REPORTS what it would
+# purge but deletes nothing (codex review 2026-07-22).
+dry7=$(HERMES_STATE_DB="$DB7" HERMES_DEDUP_BACKUP_RETENTION_HOURS=24 bash "$SOURCE_SCRIPT" 2>&1)
+if [[ -f "$old_backup" ]] && echo "$dry7" | grep -q "would purge stale dedup backup"; then
+  echo "  PASS  dry-run reports but does NOT delete the aged backup"
   PASS=$(( PASS + 1 ))
 else
-  echo "  FAIL  72h-old backup swept by the 24h-retention startup sweep"
+  echo "  FAIL  dry-run reports but does NOT delete the aged backup"
+  FAIL=$(( FAIL + 1 ))
+fi
+# --apply actually performs the retention deletion.
+HERMES_STATE_DB="$DB7" HERMES_DEDUP_BACKUP_RETENTION_HOURS=24 bash "$SOURCE_SCRIPT" --apply >/dev/null 2>&1
+if [[ ! -f "$old_backup" ]]; then
+  echo "  PASS  72h-old backup swept by the 24h-retention sweep under --apply"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  72h-old backup swept by the 24h-retention sweep under --apply"
   FAIL=$(( FAIL + 1 ))
 fi
 if [[ -f "$recent_backup" ]]; then

@@ -60,16 +60,21 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 fi
 
 FREE_GB_OVERRIDE="${DISK_MAGICIAN_VACUUM_FREE_GB_OVERRIDE:-}"
-free_gb() {
+# free_bytes — available bytes on the filesystem that actually holds $DB.
+# NOT a hardcoded /System/Volumes/Data: HERMES_STATE_DB may live on a different
+# mount, and checking the wrong volume could pass the guard while the DB's own
+# volume is nearly full (codex review 2026-07-22). Byte precision (not rounded
+# GB) so the 2x-DB comparison can't pass on a fractional-GB margin.
+free_bytes() {
   if [[ -n "$FREE_GB_OVERRIDE" ]]; then
-    echo "$FREE_GB_OVERRIDE"
+    # test override is expressed in whole GB
+    awk -v g="$FREE_GB_OVERRIDE" 'BEGIN{printf "%.0f", g * 1073741824}'
     return
   fi
-  local check_path="/"
-  if [[ "$OSTYPE" == "darwin"* ]] && df "/System/Volumes/Data" >/dev/null 2>&1; then
-    check_path="/System/Volumes/Data"
-  fi
-  df -kP "$check_path" 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}'
+  local target
+  target="$(dirname -- "$DB")"
+  [[ -e "$target" ]] || target="$DB"
+  df -kP "$target" 2>/dev/null | awk 'NR==2{printf "%.0f", $4 * 1024}'
 }
 
 before=$(stat -f%z "$DB" 2>/dev/null || echo 0)
@@ -94,19 +99,24 @@ log "wal_checkpoint(TRUNCATE) done — state.db now ${after_checkpoint_mb} MB (a
 # ────────── Step 2: full VACUUM (opt-in, free-space-gated) ──────────
 if $FULL_VACUUM; then
   current_size=$(stat -f%z "$DB" 2>/dev/null || echo 0)
-  current_gb=$(awk "BEGIN {printf \"%.1f\", $current_size / 1073741824}")
-  free_now="$(free_gb)"
-  if [[ -z "$free_now" ]]; then
+  free_now_bytes="$(free_bytes)"
+  if [[ -z "$free_now_bytes" || "$free_now_bytes" == 0 ]]; then
     log "REFUSING full VACUUM: could not read free space — fail safe, no VACUUM attempted."
     exit 0
   fi
-  required_gb=$(awk -v db="$current_gb" -v floor="$VACUUM_MIN_FREE_GB" 'BEGIN{req = db * 2; print (req > floor) ? req : floor}')
-  guard_pass=$(awk -v f="$free_now" -v r="$required_gb" 'BEGIN{print (f >= r) ? "1" : "0"}')
-  if [[ "$guard_pass" != "1" ]]; then
-    log "REFUSING full VACUUM: free ${free_now} GB < required ${required_gb} GB (2x current DB size ${current_gb} GB, floor ${VACUUM_MIN_FREE_GB} GB). VACUUM writes a full second copy of the file — this is exactly the condition that nearly wedged the disk on 2026-07-22. Checkpoint above already ran; skipping VACUUM only."
+  # Byte-precise: required = max(2 * current DB size, floor GB). No GB rounding,
+  # so a fractional-GB shortfall can't slip past (codex review 2026-07-22).
+  floor_bytes=$(( VACUUM_MIN_FREE_GB * 1073741824 ))
+  twice_db_bytes=$(( current_size * 2 ))
+  required_bytes=$(( twice_db_bytes > floor_bytes ? twice_db_bytes : floor_bytes ))
+  current_gb=$(awk "BEGIN {printf \"%.2f\", $current_size / 1073741824}")
+  free_gb_disp=$(awk "BEGIN {printf \"%.2f\", $free_now_bytes / 1073741824}")
+  required_gb_disp=$(awk "BEGIN {printf \"%.2f\", $required_bytes / 1073741824}")
+  if (( free_now_bytes < required_bytes )); then
+    log "REFUSING full VACUUM: free ${free_gb_disp} GB < required ${required_gb_disp} GB (2x current DB size ${current_gb} GB, floor ${VACUUM_MIN_FREE_GB} GB). VACUUM writes a full second copy of the file — this is exactly the condition that nearly wedged the disk on 2026-07-22. Checkpoint above already ran; skipping VACUUM only."
     exit 0
   fi
-  log "Guard passed (free ${free_now} GB >= required ${required_gb} GB) — running full VACUUM."
+  log "Guard passed (free ${free_gb_disp} GB >= required ${required_gb_disp} GB) — running full VACUUM."
   sqlite3 "$DB" 'VACUUM;'
   after=$(stat -f%z "$DB" 2>/dev/null || echo 0)
   after_mb=$(awk "BEGIN {printf \"%.1f\", $after / 1048576}")

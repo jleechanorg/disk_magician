@@ -130,7 +130,9 @@ log "state.db before: ${before_mb} MB ($DB)"
 # safety net, but nothing ever removed it — so interrupted runs (see the trap
 # below) AND old successful runs left full-size (multi-GB) dedup-backup-* copies
 # forever (12 GB of orphans observed 2026-07-22). Purge copies older than the
-# retention window on EVERY run (dry-run included) so they self-expire.
+# retention window so they self-expire. Deletions happen only under --apply;
+# dry-run reports what WOULD be purged (a preview must not have side effects —
+# codex review 2026-07-22).
 DEDUP_BACKUP_RETENTION_HOURS="${HERMES_DEDUP_BACKUP_RETENTION_HOURS:-48}"
 purge_old_backups() {
   local dir="$BACKUP_DIR" pat n=0 freed=0 f sz
@@ -138,13 +140,16 @@ purge_old_backups() {
   pat="$(basename -- "$DB").dedup-backup-*"
   while IFS= read -r -d '' f; do
     sz=$(file_size "$f")
-    if rm -f -- "$f" 2>/dev/null; then
-      n=$(( n + 1 )); freed=$(( freed + sz ))
+    if [[ "$APPLY" == true ]]; then
+      rm -f -- "$f" 2>/dev/null || continue
       log "Purged stale dedup backup (>${DEDUP_BACKUP_RETENTION_HOURS}h, $(awk "BEGIN{printf \"%.1f\", $sz/1048576}") MB): $f"
+    else
+      log "[dry-run] would purge stale dedup backup (>${DEDUP_BACKUP_RETENTION_HOURS}h, $(awk "BEGIN{printf \"%.1f\", $sz/1048576}") MB): $f"
     fi
+    n=$(( n + 1 )); freed=$(( freed + sz ))
   done < <(find "$dir" -maxdepth 1 -type f -name "$pat" \
              -mmin "+$(( DEDUP_BACKUP_RETENTION_HOURS * 60 ))" -print0 2>/dev/null)
-  [[ "$n" -gt 0 ]] && log "Retention sweep: removed ${n} stale backup(s), reclaimed $(awk "BEGIN{printf \"%.1f\", $freed/1048576}") MB"
+  [[ "$n" -gt 0 ]] && log "Retention sweep: $([[ "$APPLY" == true ]] && echo removed || echo 'would remove') ${n} stale backup(s), $(awk "BEGIN{printf \"%.1f\", $freed/1048576}") MB"
   return 0
 }
 purge_old_backups
@@ -236,6 +241,12 @@ cleanup_backup_on_exit() {
 trap cleanup_backup_on_exit EXIT INT TERM
 
 # --- Mutate + reclaim ---
+# Keep the backup from the moment mutation BEGINS: once the UPDATE/VACUUM below
+# start, an interrupt must PRESERVE the pre-mutation backup (it's the only
+# recovery copy) rather than delete it — deleting it mid-VACUUM was a real
+# data-loss path (codex review 2026-07-22). Orphaned backups from an interrupt
+# are reclaimed later by purge_old_backups once they age past retention.
+committed=true
 sql_rw "
   UPDATE sessions
   SET system_prompt = NULL
@@ -264,8 +275,6 @@ else
     vacuum_ran=true
   fi
 fi
-
-committed=true
 
 after=$(file_size "$DB")
 after_mb=$(awk "BEGIN {printf \"%.1f\", $after / 1048576}")

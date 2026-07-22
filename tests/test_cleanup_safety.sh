@@ -827,6 +827,51 @@ assert_contains "disk_audit surfaces the failing category by name" "CATEGORY FAI
 assert_contains "disk_audit summary counts the failure" "1 of" "$OUT_A8_CONTENT"
 assert_contains "disk_audit still ran the category after the failing one" "stub cleanup_supervisor_logs.sh ran with: --dry-run" "$OUT_A8_CONTENT"
 
+echo "Test A9: cleanup_tmp never archives an APPROVED worktree that has unsaved work (codex 2026-07-22 data-loss guard)"
+GITBIN9="$(dirname "$(command -v git)")"
+WTREPO9="$TMP_ROOT/wt-repo9"; mkdir -p "$WTREPO9"
+git -C "$WTREPO9" init -q -b main
+git -C "$WTREPO9" config user.email jleechan2015@users.noreply.github.com
+git -C "$WTREPO9" config user.name jleechan2015
+echo base > "$WTREPO9/f"; git -C "$WTREPO9" add f
+git -C "$WTREPO9" commit -qm init
+FAKE_PT9="$TMP_ROOT/private-tmp9"; FAKE_ET9="$TMP_ROOT/empty-tmp9"; FAKE_BIN9="$TMP_ROOT/bin9"
+mkdir -p "$FAKE_PT9" "$FAKE_ET9" "$FAKE_BIN9"
+git -C "$WTREPO9" worktree add -q "$FAKE_PT9/worktree_dirty" -b feat9
+echo uncommitted > "$FAKE_PT9/worktree_dirty/untracked.txt"   # untracked -> unsafe
+cat > "$FAKE_BIN9/find" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  /private/tmp) shift; exec /usr/bin/find "$FAKE_PT9" "$@" ;;
+  /tmp) shift; exec /usr/bin/find "$FAKE_ET9" "$@" ;;
+  *) exec /usr/bin/find "$@" ;;
+esac
+EOF
+chmod +x "$FAKE_BIN9/find"
+cat > "$FAKE_BIN9/getconf" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" ]]; then exit 0; fi
+exec /usr/bin/getconf "$@"
+EOF
+chmod +x "$FAKE_BIN9/getconf"
+OUT9W="$TMP_ROOT/wt-approved-dirty.out"
+if run_capture "$OUT9W" env -i HOME="$TMP_ROOT/home9" TMP_WORKTREES_APPROVED=1 LARGE_TMP_APPROVED=1 \
+    FAKE_PT9="$FAKE_PT9" FAKE_ET9="$FAKE_ET9" PATH="$FAKE_BIN9:$GITBIN9:/usr/bin:/bin" \
+    bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --large; then
+  RC9W=0
+else
+  RC9W=$?
+fi
+OUT9W_CONTENT=$(cat "$OUT9W")
+assert_rc "cleanup_tmp --clean --large exits 0 (approved dirty worktree)" 0 "$RC9W"
+assert_contains "approved worktree with unsaved work is skipped" "Skipping approved worktree with unsaved work" "$OUT9W_CONTENT"
+if [[ -e "$FAKE_PT9/worktree_dirty/untracked.txt" ]]; then
+  echo "  PASS  dirty worktree preserved on disk (not archived/purged)"; PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  dirty worktree preserved on disk (not archived/purged)"; FAIL=$(( FAIL + 1 ))
+fi
+git -C "$WTREPO9" worktree prune 2>/dev/null || true
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
