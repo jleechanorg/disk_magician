@@ -141,6 +141,72 @@ assert_eq "refusal exits non-zero" "1" "$rc3"
 assert_contains "refusal message present" "refusing --apply" "$out3"
 assert_eq "unwritable-backup path makes zero mutations" "$before_flags3" "$after_flags3"
 
+echo "Test 4: VACUUM free-space guard refuses VACUUM but keeps the UPDATE + backup (jleechan-sd1t pattern)"
+DB4="$TMP_ROOT/t4.db"
+make_fixture "$DB4"
+before_size4=$(stat -f%z "$DB4" 2>/dev/null || stat -c%s "$DB4")
+out4=$(HERMES_STATE_DB="$DB4" DISK_MAGICIAN_DEDUP_FREE_GB_OVERRIDE=1 bash "$SOURCE_SCRIPT" --apply 2>&1)
+flags4=$(null_flags "$DB4")
+after_size4=$(stat -f%z "$DB4" 2>/dev/null || stat -c%s "$DB4")
+assert_contains "guard refuses VACUUM" "REFUSING VACUUM" "$out4"
+assert_contains "old1 still nulled despite refused VACUUM" "old1:1" "$flags4"
+assert_contains "old2 still nulled despite refused VACUUM" "old2:1" "$flags4"
+assert_contains "old3 still nulled despite refused VACUUM" "old3:1" "$flags4"
+assert_eq "db file size unchanged (VACUUM did not run)" "$before_size4" "$after_size4"
+backup_count4=$(find "$TMP_ROOT" -maxdepth 1 -name 't4.db.dedup-backup-*' | wc -l | tr -d ' ')
+assert_eq "backup still kept even though VACUUM was refused" "1" "$backup_count4"
+
+echo "Test 5: --delete-backups dry-run reports existing backups without deleting them"
+DB5="$TMP_ROOT/t5.db"
+make_fixture "$DB5"
+HERMES_STATE_DB="$DB5" bash "$SOURCE_SCRIPT" --apply >/dev/null 2>&1
+backup5=$(find "$TMP_ROOT" -maxdepth 1 -name 't5.db.dedup-backup-*')
+out5=$(HERMES_STATE_DB="$DB5" bash "$SOURCE_SCRIPT" --delete-backups 2>&1)
+assert_contains "dry-run reports the backup" "would delete: $backup5" "$out5"
+if [[ -f "$backup5" ]]; then
+  echo "  PASS  --delete-backups dry-run leaves the file in place"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  --delete-backups dry-run leaves the file in place"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+echo "Test 6: --delete-backups --apply actually deletes"
+out6=$(HERMES_STATE_DB="$DB5" bash "$SOURCE_SCRIPT" --delete-backups --apply 2>&1)
+assert_contains "apply mode reports the deletion" "deleted: $backup5" "$out6"
+if [[ -f "$backup5" ]]; then
+  echo "  FAIL  --delete-backups --apply removes the file"
+  FAIL=$(( FAIL + 1 ))
+else
+  echo "  PASS  --delete-backups --apply removes the file"
+  PASS=$(( PASS + 1 ))
+fi
+
+echo "Test 7: an aged-but-below-retention backup survives the startup sweep, an aged-past-retention one does not"
+DB7="$TMP_ROOT/t7.db"
+make_fixture "$DB7"
+old_backup="$TMP_ROOT/t7.db.dedup-backup-19990101-000000"
+cp -- "$DB7" "$old_backup"
+touch -t "$(date -v-72H '+%Y%m%d%H%M' 2>/dev/null || date -d '-72 hours' '+%Y%m%d%H%M' 2>/dev/null)" "$old_backup" 2>/dev/null || true
+recent_backup="$TMP_ROOT/t7.db.dedup-backup-20990101-000000"
+cp -- "$DB7" "$recent_backup"
+HERMES_STATE_DB="$DB7" HERMES_DEDUP_BACKUP_RETENTION_HOURS=24 bash "$SOURCE_SCRIPT" >/dev/null 2>&1
+if [[ ! -f "$old_backup" ]]; then
+  echo "  PASS  72h-old backup swept by the 24h-retention startup sweep"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  72h-old backup swept by the 24h-retention startup sweep"
+  FAIL=$(( FAIL + 1 ))
+fi
+if [[ -f "$recent_backup" ]]; then
+  echo "  PASS  fresh backup survives the sweep"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  fresh backup survives the sweep"
+  FAIL=$(( FAIL + 1 ))
+fi
+rm -f -- "$recent_backup"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
