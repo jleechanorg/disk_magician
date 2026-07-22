@@ -124,6 +124,7 @@ trap 'rm -f "$PLIST_TMP"' EXIT
 find "$PLIST_DIR" -maxdepth 1 \( \
   -name "com.jleechan.cleanup-*.plist" -o \
   -name "com.jleechan.disk-magician-*.plist" -o \
+  -name "com.jleechanorg.disk-magician-*.plist" -o \
   -name "com.disk-magician.*.plist" -o \
   -name "com.jleechanorg.disk-magician.plist" \
 \) -print 2>/dev/null \
