@@ -60,36 +60,119 @@ documented flags. No hand-`rm` used anywhere in this run.
      `~/Library/Caches/ms-playwright` (1.0G), `~/Library/Caches/pip` (197M),
      `~/.cursor/chats` (5.2M), `~/.claude/debug` (64K).
 
-## Anomaly observed mid-run (flagged separately to team-lead)
+## Incident — dedup_hermes_prompts.sh backup spiked usage +5.5 GB, nearly wedged the disk
 
-Free space fluctuated sharply during this run, independent of the
-reclaim actions above: 12 GB (baseline) → 6 GB → **5 GB (low point)** → 7 GB
-→ stabilized at 9-10 GB. `ps aux` during the dip showed no single runaway
-writer; `du -sh ~/.colima/_lima` was flat at ~13G across the dip. Most
-likely explanation is APFS purgeable-space/snapshot accounting noise
-(consistent with local snapshots still present per the apfs-snapshots
-dry-run above) rather than a genuine leak, but flagged to lane1-rootcause
-for confirmation since it happened live during this session.
+**Root cause, corrected from the initial "APFS purgeable noise" guess below,
+per team-lead's diagnosis + this lane's own file evidence:**
 
-## Final (13:03 local)
+`scripts/dedup_hermes_prompts.sh --apply` (run in this session at 12:53 to
+NULL 268 stale `system_prompt` values) has a **mandatory pre-flight backup**
+step (`scripts/dedup_hermes_prompts.sh:113-140`): before mutating, it `cp`'s
+the entire live db to `~/.hermes/state.db.dedup-backup-<timestamp>` and
+verifies the copy, gating on 2x db size free space to even attempt it. This
+is by design (a safety net for an irreversible NULL+VACUUM) but the script
+**never deletes the backup afterward** — there is no retention/cleanup
+mechanism or `--delete-backups` flag for these files, unlike the analogous
+`.bak.<timestamp>` handling in `symlink-shared-gemini.sh` /
+`symlink-shared-playwright-cache.sh`.
+
+Evidence: `ls -la ~/.hermes/state.db.dedup-backup-*` shows two such files
+sitting on disk right now — `state.db.dedup-backup-20260720-210228`
+(7258.3 MB, from an earlier run 2 days ago) and
+`state.db.dedup-backup-20260722-125309` (5644.6 MB, created 12:53:09 by
+this session's `--apply` run) — **12.9 GB combined dead weight**, neither
+reclaimed by the `wal_checkpoint(TRUNCATE)` team-lead ran (that reclaimed
+the separate `state.db-wal` file, not these `cp`-made full backups).
+
+Note for the record: `scripts/vacuum_hermes_state.sh --apply`, which I also
+ran (1 + 3 retries) during this session, **never succeeded** — every
+invocation returned `Error: stepping, database is locked (5)` immediately
+(the live Hermes daemon holds writers). So the actual WAL/space spike was
+caused by `dedup_hermes_prompts.sh --apply`'s own internal VACUUM step
+(documented in its own dry-run message: "would NULL system_prompt on 268
+sessions and VACUUM"), not by `vacuum_hermes_state.sh`. Both scripts VACUUM
+the same db and both are unsafe at low free space — team-lead's directive
+to not re-run either one stands regardless of which one fired first.
+
+**Not yet reclaimed — STOP item, no existing script deletes these:**
+the two `~/.hermes/state.db.dedup-backup-*` files (12.9 GB). This is the
+single largest lever found in this entire session, larger than every other
+item combined. Not hand-`rm`'d per policy (no existing repo script covers
+`.dedup-backup-*` cleanup) — flagging for team-lead decision: either a
+manual `rm` of the two named files (both post-date successful, verified
+mutations — the 07-20 one is 2 runs stale, the 07-22 one is from this
+session's already-completed run) or a new retention step added to
+`dedup_hermes_prompts.sh` (e.g. delete backups older than N days, mirroring
+`symlink-shared-*`'s `--delete-backups` pattern) — handed to
+lane3-automation.
+
+**hermes-vacuum marked NOT-safe-at-low-free-space**, per team-lead
+directive: do not re-run `vacuum_hermes_state.sh --apply` (needs ~2x db
+size headroom to VACUUM safely) below ~15 GB free. Same caution now applies
+to `dedup_hermes_prompts.sh --apply` for the same reason (its own gate
+requires 2x db size free, but that gate checks space at the START, not
+whether the WAL growth during VACUUM will itself consume the remaining
+margin).
+
+## Second anomaly — Colima `_lima` regrowth confirmed live, +5.1 GB in <4 min
+
+While re-checking scripts after the incident above, free space swung again
+independent of any lane2 action: 18 GB (post-team-lead-fix) → 10.5 GB in
+the few minutes it took to run three more dry-run/no-op scripts. Checked
+`du -sh ~/.colima/_lima` before/after: **12.9 GB (13:00:55) → 18 GB
+(13:04:06+), +5.1 GB in under 4 minutes**, while lane2 ran nothing but
+read-only dry-runs. This supersedes the initial "APFS purgeable noise"
+theory below — the Colima sparse-disk regrowth mechanism (documented in
+memory `project_2026-07-17_colima_regrowth_shlock_bug_and_dk2d_retention`)
+is confirmed actively firing live during this session, most likely CI-runner
+container churn. Handed to lane1-rootcause; `cleanup_colima.sh` prune found
+0 reclaimable both times it ran here (the 2 images are 100% actively
+referenced, not prunable garbage) so the existing sweeper cannot address
+this — it needs a different mechanism (fstrim only recovers what's already
+freed inside the VM, not active container growth).
+
+### Original (superseded) anomaly note
+
+Free space fluctuated sharply earlier in this run: 12 GB (baseline) → 6 GB
+→ 5 GB (low point) → 7 GB → stabilized at 9-10 GB. At the time, `du -sh
+~/.colima/_lima` read flat at ~13G across that dip, so this was attributed
+to APFS purgeable-space/snapshot accounting noise. The dedup-backup finding
+above is the confirmed root cause of that specific dip; the Colima regrowth
+above is a second, independently confirmed mechanism seen later in the same
+session.
+
+## Final (13:04 local, after the incident + Colima regrowth)
 
 ```
 $ df -g /System/Volumes/Data
 Filesystem   1G-blocks Used Available Capacity
-/dev/disk3s5       926  858         9    99%
+/dev/disk3s5       926  859         9    99%
 
 $ diskutil info /System/Volumes/Data | grep -i free
-   Container Free Space:      10.0 GB
+   Container Free Space:      10.5 GB
 ```
 
 ## Summary
 
-- Baseline: 12 GB free (df) / 13.2 GB (diskutil)
-- Final: 9 GB free (df) / 10.0 GB (diskutil)
-- Net change: **-3 GB** despite ~0.5 GB + ~18 MB reclaimed by lane2's
-  actions — the mid-run anomaly (or concurrent activity from other
-  swarm lanes / the live system) outpaced this lane's reclaim by a wide
-  margin. Real, larger reclaim levers exist but are blocked on:
-  (a) a human running the 2 sudo APFS snapshot deletions, and
-  (b) an explicit go/no-go decision on the 2 approval-gated scripts
-  above (~3.5 GB combined).
+- Baseline: 12 GB free (df) / 13.2 GB (diskutil) at 12:44
+- Mid-run low point: 5 GB free (13:00-ish), caused by
+  `dedup_hermes_prompts.sh --apply`'s pre-flight full-db backup + internal
+  VACUUM (see Incident above), not by `vacuum_hermes_state.sh` (which never
+  succeeded — locked every attempt)
+- Team-lead intervention: `PRAGMA wal_checkpoint(TRUNCATE)` on
+  `~/.hermes/state.db` → free rose to 18 GB
+- Final at end of this lane's work: 9 GB free (df) / 10.5 GB (diskutil) at
+  13:04, driven back down by the independently-confirmed Colima `_lima`
+  regrowth (+5.1 GB in <4 min, see above) — not by any lane2 action
+- Net lane2 reclaim (script actions only, excluding the two anomalies):
+  ~0.5 GB (colima fstrim) + ~17.9 MB (hermes prompt dedup) = **~0.52 GB**
+- Uncollected levers identified, largest first:
+  1. `~/.hermes/state.db.dedup-backup-*` — **12.9 GB**, STOP item, no
+     covering script, needs a decision (see Incident above)
+  2. 2 APFS snapshots incl. the `LIMITS_CONTAINER_SHRINK` anchor — size
+     TBD but likely large (container min-size pin), blocked on sudo
+  3. `cleanup_sessions.sh --clean` (gated `SESSIONS_APPROVED=1`) — ~2.2 GB
+  4. `cleanup_agent_artifacts.sh --clean` (gated
+     `AGENT_ARTIFACTS_APPROVED=1`) — ~1.26 GB
+  5. Colima regrowth — ongoing, needs a different mechanism than
+     `cleanup_colima.sh`'s prune (0 GB reclaimable there both runs)
