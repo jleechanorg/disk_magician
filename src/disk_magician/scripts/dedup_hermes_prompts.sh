@@ -90,6 +90,30 @@ before=$(file_size "$DB")
 before_mb=$(awk "BEGIN {printf \"%.1f\", $before / 1048576}")
 log "state.db before: ${before_mb} MB ($DB)"
 
+# --- Retention sweep for stale pre-flight backups (jleechan-ss5o) ---
+# The pre-flight backup created below is deliberately kept on success as a
+# safety net, but nothing ever removed it — so interrupted runs (see the trap
+# below) AND old successful runs left full-size (multi-GB) dedup-backup-* copies
+# forever (12 GB of orphans observed 2026-07-22). Purge copies older than the
+# retention window on EVERY run (dry-run included) so they self-expire.
+DEDUP_BACKUP_RETENTION_HOURS="${HERMES_DEDUP_BACKUP_RETENTION_HOURS:-48}"
+purge_old_backups() {
+  local dir="$BACKUP_DIR" pat n=0 freed=0 f sz
+  [[ -d "$dir" ]] || return 0
+  pat="$(basename -- "$DB").dedup-backup-*"
+  while IFS= read -r -d '' f; do
+    sz=$(file_size "$f")
+    if rm -f -- "$f" 2>/dev/null; then
+      n=$(( n + 1 )); freed=$(( freed + sz ))
+      log "Purged stale dedup backup (>${DEDUP_BACKUP_RETENTION_HOURS}h, $(awk "BEGIN{printf \"%.1f\", $sz/1048576}") MB): $f"
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f -name "$pat" \
+             -mmin "+$(( DEDUP_BACKUP_RETENTION_HOURS * 60 ))" -print0 2>/dev/null)
+  [[ "$n" -gt 0 ]] && log "Retention sweep: removed ${n} stale backup(s), reclaimed $(awk "BEGIN{printf \"%.1f\", $freed/1048576}") MB"
+  return 0
+}
+purge_old_backups
+
 # --- Report: exact-duplicate system_prompt groups (informational only —
 # this is NOT what --apply reclaims; see header for why). ---
 dup_stats=$(sql_ro "
@@ -158,6 +182,12 @@ if [[ "$backup_size" -eq 0 ]] || [[ "$backup_size" -ne "$db_size" ]]; then
   exit 1
 fi
 log "Backup verified: $backup_path (${backup_size} bytes)"
+
+# Remove this run's backup if we're interrupted/killed mid-mutation — an aborted
+# run (e.g. the 2026-07-22 VACUUM incident) otherwise orphans a full-size copy
+# with no owner. On NORMAL success the backup is kept as a safety net (swept
+# later by purge_old_backups once it ages past the retention window). (ss5o)
+trap 'rm -f -- "$backup_path" 2>/dev/null || true' INT TERM
 
 # --- Mutate + reclaim ---
 sql_rw "
