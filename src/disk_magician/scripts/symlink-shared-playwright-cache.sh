@@ -64,10 +64,24 @@ done
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# is_canonical_version_name <basename> — true only for a clean semver-looking
+# directory name (e.g. "1.57.0"). Rejects anything else, in particular this
+# script's own "<version>.bak.<timestamp>" backup naming (bug found live
+# 2026-07-22: a prior real --clean run had left
+# ~/Library/Caches/ms-playwright-go/1.57.0.bak.20260719-041505 sitting next
+# to a (now-symlink, not -type d) "1.57.0" — sort -V | tail -1 picked the
+# .bak. dir as "the" canonical candidate, and every session's dry-run then
+# hunted for a live cache literally named "1.57.0.bak.20260719-041505",
+# matching stray backup-of-a-backup dirs instead of any real cache).
+is_canonical_version_name() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]
+}
+
 bootstrap_canonical_cache_from_host() {
   local candidate=""
   if [[ -d "$CANONICAL_CACHE_BASE" ]]; then
     candidate="$(find "$CANONICAL_CACHE_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | \
+      while IFS= read -r d; do is_canonical_version_name "$(basename "$d")" && printf '%s\n' "$d"; done | \
       sort -V | tail -1 || true)"
     if [[ -n "$candidate" ]]; then
       CANONICAL_CACHE="$candidate"
@@ -84,6 +98,7 @@ select_largest_session_cache() {
   local current_kb=0
   while IFS= read -r -d '' candidate; do
     [[ -d "$candidate" ]] || continue
+    is_canonical_version_name "$(basename "$candidate")" || continue
     current_kb=$(du -sk "$candidate" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if (( current_kb > max_kb )); then
       max_kb=$current_kb
@@ -199,11 +214,24 @@ relpath() {
 replaced=0
 skipped_link=0
 skipped_no_cache=0
+skipped_backup_session=0
 
 # Scan all directories in ~/.ao-sessions/ matching the common prefixes
 for session_dir in "$AO_SESSIONS_DIR"/*; do
   [[ -d "$session_dir" ]] || continue
-  
+
+  # Skip already-archived session dirs (e.g. ao-7444.bak.20260722-042305/,
+  # produced by other sweepers like worktree_hygiene.sh) — these are dead
+  # copies, not live per-session caches; operating on them at best wastes a
+  # rename+symlink and at worst compounds a stray .bak. dir inside another
+  # .bak. dir (see is_canonical_version_name comment above).
+  case "$(basename "$session_dir")" in
+    *.bak.*)
+      skipped_backup_session=$((skipped_backup_session + 1))
+      continue
+      ;;
+  esac
+
   target_cache_dir="$session_dir/Library/Caches/ms-playwright-go/$CANONICAL_VERSION"
   
   # Check if the session has a playwright cache directory
@@ -245,6 +273,7 @@ log "=== Summary ==="
 log "Replaced/Linked:  $replaced"
 log "Already symlinked: $skipped_link"
 log "No cache present:  $skipped_no_cache"
+log "Backup session dirs skipped: $skipped_backup_session"
 if [[ "$DRY_RUN" == true ]]; then
   log "This was a DRY-RUN. Re-run with --clean to apply."
 fi
