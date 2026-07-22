@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AO/agent worktree hygiene: periodic REPORT-ONLY pass of
+  scripts/worktree_hygiene.sh across every discovered repo (worldarchitect.ai,
+  ~/.hermes, ~/.worktrees-registered repos, ~/.ao/data/worktrees,
+  ~/.gemini/antigravity/worktrees, repo-local .claude/worktrees), addressing
+  the #1 reclaimable disk slice named in the 2026-07-22 root-cause report
+  (roadmap/2026-07-22-disk-regrowth-rootcause.md): ~134 GiB across
+  /private/tmp AO scratch, ~/.worktrees (26 GiB), and worldarchitect.ai
+  worktrees (~65 GiB) with no prior sweeper touching it (jleechan-dqiz).
+
+  DELIBERATELY DRY-RUN + --skip-push --skip-gh, NOT wired to --execute:
+    - No deletions happen from this job. It only writes a SAFE /
+      NEEDS-REVIEW / PRESERVE ledger to the log below.
+    - --skip-push/--skip-gh keep this fully offline (no real `git push` or
+      `gh pr list` network calls on a schedule) and bias the classifier
+      toward NEEDS-REVIEW for anything ambiguous (ahead>0 with push
+      skipped is never classified SAFE) -- ONLY a worktree that is already
+      zero-ahead and fully clean locally can land in SAFE this way.
+    - Flipping this job to actually delete (--execute + WORKTREE_APPROVED=1)
+      is an intentional follow-up decision after the cross-model adversarial
+      review the team asked for before "executing the cleaner" -- not
+      something this initial wiring does automatically.
+
+  Hard safety gates already enforced by the script itself (see
+  scripts/worktree_hygiene.sh and scripts/lib/worktree_repo_discovery.sh):
+    - skip anything with uncommitted or untracked changes
+    - skip anything younger than --min-age days (default 14 -- far more
+      conservative than the 24h floor asked for)
+    - skip anything a live tmux pane's cwd is currently inside
+      (worktree_has_live_tmux_pane, jleechan-dqiz)
+    - --execute (when eventually enabled) still requires WORKTREE_APPROVED=1
+    - deletions (when eventually enabled) always use
+      `git worktree remove --force`, never raw `rm -rf`
+
+  Schedule:  Every 6 hours (StartInterval=21600s).
+
+  Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
+  scripts/install_launchd_sweepers.sh at install time. Do not commit a
+  fully-resolved path (see ~/.claude/skills/launchd-plist-template).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-worktree-hygiene</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!--
+      Use bash 5.x explicitly, not @HOME@-default PATH resolution. Bash 3.2
+      (macOS system /bin/bash) treats an empty `"${arr[@]}"` as an unbound
+      variable under `set -u` and aborts -- found live 2026-07-22 when a
+      stale worktree-registry entry surfaced a non-repo path. The script
+      itself now guards against this too (defense in depth), but launchd
+      jobs in this repo consistently pin @BASH@ for the same reason as
+      hermes-vacuum/worktree-venvs.
+    -->
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/worktree_hygiene.sh</string>
+    <string>--skip-push</string>
+    <string>--skip-gh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-worktree-hygiene.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-worktree-hygiene.log</string>
+</dict>
+</plist>
