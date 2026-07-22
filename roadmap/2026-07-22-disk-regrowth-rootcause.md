@@ -111,16 +111,26 @@ window (`LARGE_TMP_ACTIVE_HOURS` default 24, `cleanup_tmp.sh` log:
 while running, so they never age out of this window before the mission ends
 and gets cleaned up manually (or not).
 
-### 3.4 The sweeper's own "safe" fallback adds its own footprint back to the same full volume
+### 3.4 The sweeper's own "safe" fallback adds its own footprint back to the same full volume (correction below)
 
 When `cleanup_tmp.sh --large` can't safely delete an oversized dir, it
 archives it to `/private/tmp/_disk_magician_archive/<timestamp>/` instead of
-deleting. That archive is itself **4.3 GiB today**, with 6+ new
-timestamped subdirs created just in the last 12 hours
-(`20260722T080156Z`...`20260722T120826Z`). Retention constants exist
-(`LARGE_TMP_ARCHIVE_RETENTION_HOURS=24`, `LARGE_TMP_ARCHIVE_MAX_HOURS=168`,
-seen in `cleanup_tmp.sh`) but nothing in `pressure_sweep.sh`'s 2-hour trigger
-path calls a prune step for this archive directory — it only grows.
+deleting. That archive was **4.3 GiB** at scan time, with 6+ new
+timestamped subdirs created just in the preceding 12 hours
+(`20260722T080156Z`...`20260722T120826Z`).
+
+**Correction (2026-07-22, follow-up pass):** `purge_aged_archives()`
+(`cleanup_tmp.sh:292-343`) IS called unconditionally at the bottom of the
+script (`cleanup_tmp.sh:579`, not gated behind `--large`), and does exactly
+what the retention constants promise: `find "$ARCHIVE_ROOT" -mmin
++$((LARGE_TMP_ARCHIVE_RETENTION_HOURS*60))` soft-purges entries past 24h
+(subject to active-marker/recent-activity/open-file guards, same as live
+`/private/tmp` dirs), and unconditionally force-purges anything past the
+168h `LARGE_TMP_ARCHIVE_MAX_HOURS` hard cap regardless of guards. All
+observed archive entries were <5h old at scan time — well inside the
+retention window — so the 4.3 GiB figure reflects normal steady-state
+turnover, not an unbounded leak. Original claim ("nothing calls a prune
+step") was wrong; retracted. Not a cleanup target — no action needed here.
 
 ### 3.5 The one sweeper that names `worldarchitect.ai` directly runs once a day
 
@@ -157,10 +167,10 @@ attention from anyone watching the dashboard.
    invocation) so `worktree_*` dirs under `/private/tmp` are eligible when
    free space is critically low. Unlocks a meaningful slice of the ~290
    scratch dirs.
-2. **HIGH** — Add archive retention enforcement as an explicit step in
-   `pressure_sweep.sh` (prune `/private/tmp/_disk_magician_archive/*`
-   older than `LARGE_TMP_ARCHIVE_MAX_HOURS`) so the sweeper's own safety
-   fallback stops growing unbounded on the same full volume it's relieving.
+2. ~~HIGH — Add archive retention enforcement...~~ **RETRACTED** — see §3.4
+   correction: `purge_aged_archives()` already runs unconditionally on every
+   `cleanup_tmp.sh` invocation and enforces the 24h/168h retention/hard-cap
+   window. No action needed.
 3. **MEDIUM** — Raise `cleanup-ao-tmp.sh` cadence from once-daily (04:05) to
    match or complement the 2h pressure-sweep cadence, since it's the only
    job that specifically targets `worldarchitect.ai`/`wa-missions` by name.
@@ -178,6 +188,68 @@ attention from anyone watching the dashboard.
    (31 GiB): `xcrun simctl delete unavailable` is Apple's own low-risk
    cleanup for orphaned simulator runtimes; worth a one-off manual run but
    not something this repo should own automating.
+
+## Reclaimable residual (follow-up pass, 2026-07-22, still read-only)
+
+Team-lead asked lane1 to attribute the safely-reclaimable slice of the
+~545 GiB residual from §1 so lane2/lane3 can act. Result: **none of the
+four requested candidate buckets are meaningful reclaim targets on this
+machine right now** — each was checked directly and is either empty, small,
+or not safely touchable by automation. The residual itself remains
+predominantly the APFS-protected/purgeable pool described in §1 (`purgeable_kb:
+0` in `frontier_last.json` — nothing is even sitting in the purgeable
+category to reclaim via `tmutil` or Space Nudge). The real reclaimable
+opportunity continues to be the worktree/scratch buckets already identified
+in §2-§4 above (~134 GiB across `/private/tmp` protected roots + `~/.worktrees`
++ `~/projects/worldarchitect.ai` worktrees), not new residual.
+
+| Bucket | GiB | Reclaim method | Safety note | Repo script covers it? |
+|---|---:|---|---|---|
+| `~/Library/Developer/Xcode/DerivedData` | 2.3 | `rm -rf` contents (Xcode regenerates on next build) | Safe, standard Xcode cache | No — not in this repo's scope |
+| `/Library/Developer/CoreSimulator` | 31 (see breakdown) | `xcrun simctl delete unavailable` | **0 GiB actually reclaimable** — see below | No, and shouldn't be |
+| `~/Library/Application Support/MobileSync/Backup` | 0 | N/A | Directory exists but is **empty** — no iOS device backups on this machine | N/A |
+| `~/Library/Caches` (user, subdirs ≥2 GiB) | 6 total / 2 in `ms-playwright` | manual clear | Small; not a meaningful residual source | No |
+| `~/Library/Containers` (user, subdirs ≥2 GiB) | 2 total, no single subdir ≥2 GiB | N/A | Below the requested threshold | No |
+| `~/Library/Developer/Xcode/Archives`, `iOS DeviceSupport` | 0 | N/A | Neither directory exists on this machine | N/A |
+| `/private/tmp/_disk_magician_archive` | 4.3 | already self-pruning | See §3.4 correction — retention/hard-cap already enforced by `cleanup_tmp.sh:579` | **Yes**, no fix needed |
+
+### CoreSimulator detail (why 31 GiB ≠ 31 GiB reclaimable)
+
+`/Library/Developer/CoreSimulator` (root-owned, `stat -f %Su` = `root`) breaks
+down as: `Volumes/` 19 GiB, `Cryptex/` 9 GiB, `Caches/` 4 GiB, `Profiles/` +
+`Images/` 2 GiB. `xcrun simctl list devices | grep -i unavailable` returned
+**zero** unavailable devices, and `xcrun simctl runtime list` shows exactly
+**one** installed runtime (iOS 18.6, 8.2 GiB disk image, status `Ready`) which
+is the one actively backing the user's simulator devices
+(`~/Library/Developer/CoreSimulator/Devices`, separately only 4 GiB, 10
+devices, all pointing at the same runtime). `simctl delete unavailable`
+would free **0 GiB** — there is nothing unavailable to delete. The
+`Volumes`/`Cryptex` weight is the live, in-use runtime infrastructure itself;
+deleting it means deleting the only installed iOS runtime and breaking
+simulator functionality until Xcode re-downloads ~8+ GiB. This bucket is
+**not a safe automation target** and is root-owned, outside this repo's
+user-scope charter regardless.
+
+### Other large tracked (not residual) libraries checked for completeness
+
+While chasing the residual, also measured three big non-growing, already-tracked
+libraries the earlier top-down pass hadn't called out by name: `~/Pictures/Photos
+Library.photoslibrary` (14 GiB), `~/Library/Messages` (27 GiB, this is the
+`library_messages` key from §1's tracked-bucket table, confirmed stable at
++0.018 GiB growth over 24h — not a grower), `~/Library/Mail` (5.7 GiB). These
+are already inside the ~307 GiB "measured" total from §1, not part of the
+545 GiB unattributed residual, and are personal-data libraries — not
+candidates for automated cleanup regardless.
+
+### Bottom line for lane2/lane3
+
+The only genuine, immediately-actionable reclaim from this pass is
+**DerivedData (2.3 GiB)** — small, and arguably not worth a dedicated
+sweeper given the effort/reward ratio versus the ~134 GiB already sitting in
+the worktree/scratch buckets from the main report. Recommend lane2/lane3
+prioritize the §4 fixes (worktree-approval gap, worktree prune pass) over
+chasing this residual further; the residual bucket itself does not currently
+contain a hidden multi-GB "quick win."
 
 ## 5. Explicitly not the culprit this cycle
 
