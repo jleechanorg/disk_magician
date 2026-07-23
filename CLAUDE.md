@@ -84,3 +84,7 @@ work (`br search disk`).
   7-green claim. Branch protection/rulesets are GitHub repository settings,
   not files; configure required checks only after their workflows exist on
   `main`.
+
+## Ironclad disk-reclaim preconditions
+
+Before any "reclaim X GB sustained Y min" goal on this repo, verify the *producer* (the thing currently filling the disk) can be paused. On this host the producer is `agy_openai_shim.py` + the `orch-*` tmux servers it auto-spawns — both must be SIGSTOP'd (or otherwise paused) before the goal can pass. The disk_magician sweeper alone will not stop the AGY fill rate (~3 GB/min observed 2026-07-23). Memory: `feedback_2026-07-23_ao_respawner_blocks_disk_reclaim.md`.
