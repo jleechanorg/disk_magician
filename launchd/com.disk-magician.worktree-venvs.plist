@@ -43,15 +43,19 @@
     <key>WORKTREE_APPROVED</key>
     <string>1</string>
   </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>0</integer>
-    <key>Hour</key>
-    <integer>4</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
+  <!--
+    StartInterval, not StartCalendarInterval: this job was never actually
+    installed to ~/Library/LaunchAgents since it was added 2026-07-06 (the
+    installer glob would have picked it up, but was never re-run). Its
+    sibling early-AM calendar sweepers (colima-prune, gemini-dedup,
+    playwright-dedup) also never fired once loaded — launchd drops a
+    missed StartCalendarInterval window entirely if the Mac is asleep at
+    that wall-clock moment, unlike cron. Switching to StartInterval avoids
+    that failure mode; see com.disk-magician.colima-prune.plist for detail.
+    604800s = 7 days.
+  -->
+  <key>StartInterval</key>
+  <integer>604800</integer>
   <key>StandardOutPath</key>
   <string>/tmp/disk-magician-worktree-venvs.log</string>
   <key>StandardErrorPath</key>

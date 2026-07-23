@@ -15,15 +15,14 @@
     <key>AO_PLAYWRIGHT_DEDUP_APPROVED</key>
     <string>1</string>
   </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>0</integer>
-    <key>Hour</key>
-    <integer>4</integer>
-    <key>Minute</key>
-    <integer>15</integer>
-  </dict>
+  <!--
+    StartInterval, not StartCalendarInterval: see com.disk-magician.colima-prune.plist
+    for the full rationale — the Sunday-04:15 calendar schedule never fired
+    in 16+ days loaded because launchd drops a missed calendar window when
+    asleep instead of queuing a catch-up run. 604800s = 7 days.
+  -->
+  <key>StartInterval</key>
+  <integer>604800</integer>
   <key>StandardOutPath</key>
   <string>/tmp/disk-magician-playwright-dedup.log</string>
   <key>StandardErrorPath</key>

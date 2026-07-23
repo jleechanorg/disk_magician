@@ -1,23 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Weekly sweeper: run SQLite VACUUM against ~/.hermes/state.db.
+  Weekly sweeper: reclaim WAL bloat from ~/.hermes/state.db.
 
-  Schedule:  Sundays at 04:30 local time (Weekday=0, Hour=4, Minute=30)
-             — same window as the APFS snapshots sweep, since both are
-             state.db / filesystem hygiene jobs and avoid stepping on the
-             worktree-venvs sweep at 04:00. If the two jobs ever collide
-             in real runtime, move this to Weekday=0 Hour=5 Minute=0.
+  SAFETY (incident 2026-07-22, jleechan-4dtg): this job previously ran an
+  unconditional `sqlite3 state.db 'VACUUM;'`, claiming unqualified safety
+  "while daemon is up." On a 5.9 GB WAL-mode db, VACUUM writes a full
+  second copy of the file -- it drove host free space from 12 GB to 5 GB
+  in ~13 minutes and nearly wedged the disk, exactly when disk pressure
+  is already the reason you'd want a cleanup sweeper to run. This plist
+  now only passes --apply (no --full-vacuum), so the script runs
+  `PRAGMA wal_checkpoint(TRUNCATE);` -- flushes the WAL into the main
+  file and truncates state.db-wal, no second full-size copy, safe with
+  the daemon up. Full VACUUM is opt-in only (scripts/vacuum_hermes_state.sh
+  --apply --full-vacuum), free-space-guarded (refuses unless free space
+  >= max(2x current DB size, 15 GB)), and intentionally NOT wired into
+  this automated schedule -- run it manually when you want the file to
+  actually shrink.
 
-  Action:    runs scripts/vacuum_hermes_state.sh --apply which executes
-             `sqlite3 ~/.hermes/state.db 'VACUUM;'`. The rewrite is
-             atomic (SQLite renames state.db → state.db-old → state.db
-             after rewrite); Hermes daemon tolerates brief writer
-             blocking and reconnects on next op.
+  Schedule:  Weekly (StartInterval, see below) — same family as the
+             other state.db / filesystem hygiene jobs. StartInterval,
+             not StartCalendarInterval: this job was never actually
+             installed since it was added 2026-07-06 (the installer glob
+             would have picked it up, but was never re-run). Its
+             sibling early-AM calendar sweepers (colima-prune,
+             gemini-dedup, playwright-dedup) also never fired once
+             loaded — launchd drops a missed StartCalendarInterval
+             window entirely if the Mac is asleep at that wall-clock
+             moment, unlike cron. Switching to StartInterval avoids
+             that failure mode. 604800s = 7 days.
 
-  state.db is currently 5.7 GB. Without periodic VACUUM, deleted-row
-  free pages accumulate and the file grows monotonically even when
-  logical data shrinks. Monthly VACUUM reclaims ~10–30% of the file.
+  state.db is currently ~5.9 GB. Checkpointing prevents the WAL itself
+  from growing large between writes; it does not shrink the main file
+  (that needs VACUUM, run manually and guarded as above).
 
   Template uses @HOME@ placeholders so install scripts can substitute
   $HOME before copying into ~/Library/LaunchAgents/. Do not commit a
@@ -39,15 +54,12 @@
     <string>@REPO_ROOT@/scripts/vacuum_hermes_state.sh</string>
     <string>--apply</string>
   </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>0</integer>
-    <key>Hour</key>
-    <integer>4</integer>
-    <key>Minute</key>
-    <integer>30</integer>
-  </dict>
+  <!--
+    StartInterval, not StartCalendarInterval: see comment block above
+    for the full rationale. 604800s = 7 days.
+  -->
+  <key>StartInterval</key>
+  <integer>604800</integer>
   <key>StandardOutPath</key>
   <string>/tmp/disk-magician-hermes-vacuum.log</string>
   <key>StandardErrorPath</key>

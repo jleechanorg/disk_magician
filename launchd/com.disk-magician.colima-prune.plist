@@ -16,15 +16,19 @@
     <key>DOCKER_VOLUMES_APPROVED</key>
     <string>1</string>
   </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>0</integer>
-    <key>Hour</key>
-    <integer>3</integer>
-    <key>Minute</key>
-    <integer>45</integer>
-  </dict>
+  <!--
+    StartInterval, not StartCalendarInterval: the prior Sunday-03:45
+    calendar schedule never fired in 16+ days of being loaded (`launchctl
+    print` showed "last exit code = (never exited)") because launchd drops
+    a missed StartCalendarInterval window entirely if the Mac is asleep at
+    that exact wall-clock moment — unlike cron, it does not queue a
+    catch-up run. StartInterval instead fires as soon as possible after
+    the elapsed-seconds window closes, including right after wake, which
+    matches the observed-working pattern of the other repo-root sweepers
+    (pressure-sweep, drilldown, downloads-evidence). 604800s = 7 days.
+  -->
+  <key>StartInterval</key>
+  <integer>604800</integer>
   <key>StandardOutPath</key>
   <string>/tmp/disk-magician-colima-prune.log</string>
   <key>StandardErrorPath</key>

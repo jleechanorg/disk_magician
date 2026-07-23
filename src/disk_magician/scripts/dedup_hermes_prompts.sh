@@ -44,6 +44,25 @@ for arg in "$@"; do [[ "$arg" == "--apply" ]] && APPLY=true; done
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
 
+# --- Interrupt trap (codex cross-model review defect 2026-07-23) ---
+# If the script is interrupted (SIGINT/SIGTERM) mid-VACUUM, an orphaned
+# .dedup-backup-<ts> file in BACKUP_DIR silently accumulates and is
+# never cleaned by the retention sweep because the timestamp embeds
+# the moment of the abort, not the original completion time. Surface
+# the abort in the log and exit non-zero so the sweeper framework can
+# detect it.
+ABORTED_BACKUP=""
+on_abort() {
+  local sig="$1"
+  log "ERROR: received $sig — aborting dedup_hermes_prompts.sh" >&2
+  if [[ -n "$ABORTED_BACKUP" && -f "$ABORTED_BACKUP" ]]; then
+    log "WARNING: orphaned backup left in place: $ABORTED_BACKUP (not auto-deleted — review manually)" >&2
+  fi
+  exit 130
+}
+trap 'on_abort SIGINT' INT
+trap 'on_abort SIGTERM' TERM
+
 if [[ ! -f "$DB" ]]; then
   log "No $DB — skipping"
   exit 0
@@ -132,6 +151,7 @@ if ! cp -- "$DB" "$backup_path" 2>/dev/null; then
   exit 1
 fi
 backup_size=$(file_size "$backup_path")
+ABORTED_BACKUP="$backup_path"
 if [[ "$backup_size" -eq 0 ]] || [[ "$backup_size" -ne "$db_size" ]]; then
   log "ERROR: refusing --apply — backup at $backup_path is incomplete (${backup_size} vs ${db_size} bytes)" >&2
   rm -f -- "$backup_path"
