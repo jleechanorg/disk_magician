@@ -253,6 +253,34 @@ has_open_files() {
   return 1
 }
 
+# worktree_has_unsaved_work <dir> — fail-closed git-safety guard (codex review
+# 2026-07-22). Returns 0 (treat as UNSAFE → skip) when a git worktree has
+# uncommitted/untracked changes, unpushed commits, or no upstream to compare
+# against — so cleanup_tmp never archives (then later purges) a worktree whose
+# only copy of that work is on disk. cleanup_tmp is not git-recovery-aware; the
+# nuanced classification lives in worktree_hygiene.sh. Returns 1 only for a
+# provably clean-and-pushed worktree (or a non-git dir with nothing to lose).
+worktree_has_unsaved_work() {
+  local wt="$1" git_bin upstream
+  git_bin=$(command -v git 2>/dev/null) || {
+    log "git unavailable — cannot prove worktree $wt is clean; treating as unsafe."
+    return 0
+  }
+  # Not a git worktree at all → no git work to lose here.
+  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  # Uncommitted or untracked changes.
+  if [[ -n "$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)" ]]; then
+    return 0
+  fi
+  # Unpushed commits, or no upstream to compare against → fail closed.
+  upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
+  [[ -z "$upstream" ]] && return 0
+  if [[ -n "$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 # archive_path <dir> <size_kb> — move (not delete) a large top-level /private/tmp dir
 # into a dated quarantine root instead of an instant rm -rf. Same-filesystem
 # mv is a rename (near-zero cost, frees no space immediately) so a later
@@ -541,8 +569,25 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
     esac
     case "$base" in
       wt_*|worktree_*)
-        log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
-        [[ "${TMP_WORKTREES_APPROVED:-0}" == "1" ]] || continue
+        # Misleading-log defect (found live 2026-07-22 during the tmp-scratch
+        # incident diagnosis): this used to log "Skipping ..." unconditionally
+        # BEFORE the approval check, so even when TMP_WORKTREES_APPROVED=1 was
+        # set and the dir was about to be evaluated normally, the log said
+        # "Skipping" -- misread as the gate being broken. Only log "Skipping"
+        # on the actual skip path now; the approved fall-through gets its own
+        # distinct line.
+        if [[ "${TMP_WORKTREES_APPROVED:-0}" != "1" ]]; then
+          log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
+          continue
+        fi
+        # Even when approved, NEVER archive a worktree with unsaved work —
+        # archiving then purging it would permanently lose uncommitted or
+        # unpushed commits. cleanup_tmp is not git-recovery-aware. (codex review)
+        if worktree_has_unsaved_work "$d"; then
+          log "Skipping approved worktree with unsaved work (uncommitted/unpushed/no-upstream): $d"
+          continue
+        fi
+        log "Worktree dir approved + clean, evaluating: $d"
         ;;
     esac
 

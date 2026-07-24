@@ -88,6 +88,14 @@ touch -d "@$ONE_HOUR_AGO" "$LOG_DIR/cleanup-empty.log" 2>/dev/null || \
 write_plist "com.jleechan.cleanup-warn" "$LOG_DIR/cleanup-warn.log"
 write_log_at "$LOG_DIR/cleanup-warn.log" "$ONE_HOUR_AGO" "[$(date)] ERROR: permission denied on /foo"
 
+# 6. Fresh com.jleechanorg.disk-magician-* control-loop sweeper: regression
+# guard for the glob-pattern bug where this family (drilldown, frontier-
+# nightly, pressure-sweep, downloads-evidence, observer, tmp-scratch — the
+# "org" naming) was silently invisible to the health check because the find
+# pattern only matched "com.jleechan.disk-magician-*" (missing "org").
+write_plist "com.jleechanorg.disk-magician-fresh" "$LOG_DIR/disk-magician-fresh.log"
+write_log_at "$LOG_DIR/disk-magician-fresh.log" "$ONE_HOUR_AGO" "[$(date)] Sweep complete."
+
 # Run the script. Threshold=7d so the 10-day-old log is stale.
 set +e
 OUT=$("$SCRIPT" --plist-dir "$PLIST_DIR" --threshold-days 7 --verbose 2>&1)
@@ -121,7 +129,8 @@ expect "missing log flagged MISS"      "[MISS] com.jleechan.cleanup-missing"
 expect "empty log flagged MISS"        "[MISS] com.jleechan.cleanup-empty"
 expect "warn sweeper flagged WARN"     "[WARN] com.jleechan.cleanup-warn"
 expect "fresh sweeper reported OK"     "[OK]   com.jleechan.cleanup-fresh"
-expect "summary line present"          "Summary: 1 OK, 1 WARN, 3 MISS"
+expect "jleechanorg family matched"    "[OK]   com.jleechanorg.disk-magician-fresh"
+expect "summary line present"          "Summary: 2 OK, 1 WARN, 3 MISS"
 expect "FAIL message present"          "FAIL: 3 sweeper(s) appear silent"
 
 # Test the happy path: all sweepers healthy → exit 0.

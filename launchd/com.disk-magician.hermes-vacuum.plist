@@ -9,26 +9,17 @@
   second copy of the file -- it drove host free space from 12 GB to 5 GB
   in ~13 minutes and nearly wedged the disk, exactly when disk pressure
   is already the reason you'd want a cleanup sweeper to run. This plist
-  now only passes --apply (no --full-vacuum), so the script runs
-  `PRAGMA wal_checkpoint(TRUNCATE);` -- flushes the WAL into the main
-  file and truncates state.db-wal, no second full-size copy, safe with
-  the daemon up. Full VACUUM is opt-in only (scripts/vacuum_hermes_state.sh
+  now only passes --apply (no --full-vacuum), so it runs
+  `PRAGMA wal_checkpoint(TRUNCATE);` -- flushes the WAL into the main file
+  and truncates state.db-wal, no second full-size copy, safe with the
+  daemon up. Full VACUUM is opt-in only (scripts/vacuum_hermes_state.sh
   --apply --full-vacuum), free-space-guarded (refuses unless free space
   >= max(2x current DB size, 15 GB)), and intentionally NOT wired into
   this automated schedule -- run it manually when you want the file to
   actually shrink.
 
-  Schedule:  Weekly (StartInterval, see below) — same family as the
-             other state.db / filesystem hygiene jobs. StartInterval,
-             not StartCalendarInterval: this job was never actually
-             installed since it was added 2026-07-06 (the installer glob
-             would have picked it up, but was never re-run). Its
-             sibling early-AM calendar sweepers (colima-prune,
-             gemini-dedup, playwright-dedup) also never fired once
-             loaded — launchd drops a missed StartCalendarInterval
-             window entirely if the Mac is asleep at that wall-clock
-             moment, unlike cron. Switching to StartInterval avoids
-             that failure mode. 604800s = 7 days.
+  Schedule:  Weekly (StartInterval, see below) — same family as the other
+             state.db / filesystem hygiene jobs.
 
   state.db is currently ~5.9 GB. Checkpointing prevents the WAL itself
   from growing large between writes; it does not shrink the main file
@@ -55,8 +46,15 @@
     <string>--apply</string>
   </array>
   <!--
-    StartInterval, not StartCalendarInterval: see comment block above
-    for the full rationale. 604800s = 7 days.
+    StartInterval, not StartCalendarInterval: this job was never actually
+    installed to ~/Library/LaunchAgents since it was added 2026-07-06 (the
+    installer glob would have picked it up, but was never re-run). Its
+    sibling early-AM calendar sweepers (colima-prune, gemini-dedup,
+    playwright-dedup) also never fired once loaded — launchd drops a
+    missed StartCalendarInterval window entirely if the Mac is asleep at
+    that wall-clock moment, unlike cron. Switching to StartInterval avoids
+    that failure mode; see com.disk-magician.colima-prune.plist for detail.
+    604800s = 7 days.
   -->
   <key>StartInterval</key>
   <integer>604800</integer>

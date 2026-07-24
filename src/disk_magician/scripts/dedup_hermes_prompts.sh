@@ -39,29 +39,68 @@ set -euo pipefail
 DB="${HERMES_STATE_DB:-$HOME/.hermes/state.db}"
 RETENTION_DAYS="${HERMES_DEDUP_RETENTION_DAYS:-30}"
 BACKUP_DIR="${HERMES_DEDUP_BACKUP_DIR:-$(dirname -- "$DB")}"
+# VACUUM needs to write a full second copy of the file -- same class of
+# incident as vacuum_hermes_state.sh's hermes-vacuum guard (jleechan-sd1t),
+# and per team review this script's own VACUUM call (not hermes-vacuum's)
+# was the actual trigger for the 2026-07-22 WAL-blowup. Reused pattern:
+# refuse VACUUM unless free space >= max(2x current db size, floor).
+VACUUM_MIN_FREE_GB="${HERMES_DEDUP_VACUUM_MIN_FREE_GB:-15}"
+FREE_GB_OVERRIDE="${DISK_MAGICIAN_DEDUP_FREE_GB_OVERRIDE:-}"
 APPLY=false
-for arg in "$@"; do [[ "$arg" == "--apply" ]] && APPLY=true; done
+DELETE_BACKUPS=false
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=true ;;
+    --delete-backups) DELETE_BACKUPS=true ;;
+  esac
+done
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
 
-# --- Interrupt trap (codex cross-model review defect 2026-07-23) ---
-# If the script is interrupted (SIGINT/SIGTERM) mid-VACUUM, an orphaned
-# .dedup-backup-<ts> file in BACKUP_DIR silently accumulates and is
-# never cleaned by the retention sweep because the timestamp embeds
-# the moment of the abort, not the original completion time. Surface
-# the abort in the log and exit non-zero so the sweeper framework can
-# detect it.
-ABORTED_BACKUP=""
-on_abort() {
-  local sig="$1"
-  log "ERROR: received $sig — aborting dedup_hermes_prompts.sh" >&2
-  if [[ -n "$ABORTED_BACKUP" && -f "$ABORTED_BACKUP" ]]; then
-    log "WARNING: orphaned backup left in place: $ABORTED_BACKUP (not auto-deleted — review manually)" >&2
-  fi
-  exit 130
+file_size() {
+  stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
 }
-trap 'on_abort SIGINT' INT
-trap 'on_abort SIGTERM' TERM
+
+free_gb() {
+  if [[ -n "$FREE_GB_OVERRIDE" ]]; then
+    echo "$FREE_GB_OVERRIDE"
+    return
+  fi
+  local check_path="$BACKUP_DIR"
+  [[ -d "$check_path" ]] || check_path="/"
+  df -kP "$check_path" 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}'
+}
+
+# --delete-backups: on-demand full cleanup of state.db.dedup-backup-*
+# regardless of age, mirroring symlink-shared-playwright-cache.sh's pattern.
+# Dry-run unless combined with --apply.
+if [[ "$DELETE_BACKUPS" == true ]]; then
+  log "=== DELETE HERMES DEDUP BACKUPS ==="
+  if [[ "$APPLY" == true ]]; then
+    log "Mode: APPLY (will delete)"
+  else
+    log "Mode: dry-run (pass --apply --delete-backups to actually delete)"
+  fi
+  base="$(basename -- "$DB")"
+  found=0
+  freed_kb=0
+  shopt -s nullglob
+  for f in "$BACKUP_DIR/${base}".dedup-backup-*; do
+    [[ -f "$f" ]] || continue
+    size_kb=$(( $(file_size "$f") / 1024 ))
+    if [[ "$APPLY" == true ]]; then
+      rm -f -- "$f"
+      log "  deleted: $f (~$((size_kb / 1024)) MB)"
+    else
+      log "  [dry-run] would delete: $f (~$((size_kb / 1024)) MB)"
+    fi
+    found=$(( found + 1 ))
+    freed_kb=$(( freed_kb + size_kb ))
+  done
+  shopt -u nullglob
+  log "Backups found: ${found}  $([[ "$APPLY" == true ]] && echo Reclaimed || echo Would-reclaim): $(( freed_kb / 1024 )) MB"
+  exit 0
+fi
 
 if [[ ! -f "$DB" ]]; then
   log "No $DB — skipping"
@@ -82,13 +121,38 @@ esac
 sql_ro() { sqlite3 "file:${db_abs}?mode=ro" "$1"; }
 sql_rw() { sqlite3 "$DB" "$1"; }
 
-file_size() {
-  stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
-}
-
 before=$(file_size "$DB")
 before_mb=$(awk "BEGIN {printf \"%.1f\", $before / 1048576}")
 log "state.db before: ${before_mb} MB ($DB)"
+
+# --- Retention sweep for stale pre-flight backups (jleechan-ss5o) ---
+# The pre-flight backup created below is deliberately kept on success as a
+# safety net, but nothing ever removed it — so interrupted runs (see the trap
+# below) AND old successful runs left full-size (multi-GB) dedup-backup-* copies
+# forever (12 GB of orphans observed 2026-07-22). Purge copies older than the
+# retention window so they self-expire. Deletions happen only under --apply;
+# dry-run reports what WOULD be purged (a preview must not have side effects —
+# codex review 2026-07-22).
+DEDUP_BACKUP_RETENTION_HOURS="${HERMES_DEDUP_BACKUP_RETENTION_HOURS:-48}"
+purge_old_backups() {
+  local dir="$BACKUP_DIR" pat n=0 freed=0 f sz
+  [[ -d "$dir" ]] || return 0
+  pat="$(basename -- "$DB").dedup-backup-*"
+  while IFS= read -r -d '' f; do
+    sz=$(file_size "$f")
+    if [[ "$APPLY" == true ]]; then
+      rm -f -- "$f" 2>/dev/null || continue
+      log "Purged stale dedup backup (>${DEDUP_BACKUP_RETENTION_HOURS}h, $(awk "BEGIN{printf \"%.1f\", $sz/1048576}") MB): $f"
+    else
+      log "[dry-run] would purge stale dedup backup (>${DEDUP_BACKUP_RETENTION_HOURS}h, $(awk "BEGIN{printf \"%.1f\", $sz/1048576}") MB): $f"
+    fi
+    n=$(( n + 1 )); freed=$(( freed + sz ))
+  done < <(find "$dir" -maxdepth 1 -type f -name "$pat" \
+             -mmin "+$(( DEDUP_BACKUP_RETENTION_HOURS * 60 ))" -print0 2>/dev/null)
+  [[ "$n" -gt 0 ]] && log "Retention sweep: $([[ "$APPLY" == true ]] && echo removed || echo 'would remove') ${n} stale backup(s), $(awk "BEGIN{printf \"%.1f\", $freed/1048576}") MB"
+  return 0
+}
+purge_old_backups
 
 # --- Report: exact-duplicate system_prompt groups (informational only —
 # this is NOT what --apply reclaims; see header for why). ---
@@ -151,7 +215,6 @@ if ! cp -- "$DB" "$backup_path" 2>/dev/null; then
   exit 1
 fi
 backup_size=$(file_size "$backup_path")
-ABORTED_BACKUP="$backup_path"
 if [[ "$backup_size" -eq 0 ]] || [[ "$backup_size" -ne "$db_size" ]]; then
   log "ERROR: refusing --apply — backup at $backup_path is incomplete (${backup_size} vs ${db_size} bytes)" >&2
   rm -f -- "$backup_path"
@@ -159,16 +222,65 @@ if [[ "$backup_size" -eq 0 ]] || [[ "$backup_size" -ne "$db_size" ]]; then
 fi
 log "Backup verified: $backup_path (${backup_size} bytes)"
 
+# Remove this run's backup if we're interrupted/killed mid-mutation — an aborted
+# run (e.g. the 2026-07-22 VACUUM incident) otherwise orphans a full-size copy
+# with no owner. On NORMAL success the backup is kept as a safety net (swept
+# later by purge_old_backups once it ages past the retention window). (ss5o)
+# Also traps EXIT (not just INT/TERM): a `set -e`-triggered abort from any
+# command between here and the committed=true line below (e.g. the UPDATE
+# or VACUUM itself failing) is a normal-exit path, not a signal, so an
+# INT/TERM-only trap would miss it and orphan the backup exactly the same
+# way. `committed` gates the EXIT-trap cleanup so a genuinely successful
+# run still keeps its backup unchanged from before.
+committed=false
+cleanup_backup_on_exit() {
+  if [[ "$committed" != true ]]; then
+    rm -f -- "$backup_path" 2>/dev/null || true
+  fi
+}
+trap cleanup_backup_on_exit EXIT INT TERM
+
 # --- Mutate + reclaim ---
+# Keep the backup from the moment mutation BEGINS: once the UPDATE/VACUUM below
+# start, an interrupt must PRESERVE the pre-mutation backup (it's the only
+# recovery copy) rather than delete it — deleting it mid-VACUUM was a real
+# data-loss path (codex review 2026-07-22). Orphaned backups from an interrupt
+# are reclaimed later by purge_old_backups once they age past retention.
+committed=true
 sql_rw "
   UPDATE sessions
   SET system_prompt = NULL
   WHERE system_prompt IS NOT NULL AND system_prompt != ''
     AND started_at < (strftime('%s','now') - ${RETENTION_DAYS} * 86400);
 "
-sql_rw "VACUUM;"
+
+# VACUUM free-space guard (jleechan-sd1t pattern): VACUUM writes a full
+# second copy of the db, so refuse (non-fatal — the UPDATE above already
+# safely reclaimed the logical space) unless free space is comfortably
+# above 2x the current db size. This is the guard that would have caught
+# the 2026-07-22 WAL-blowup incident.
+vacuum_ran=false
+current_size=$(file_size "$DB")
+current_gb=$(awk "BEGIN {printf \"%.1f\", $current_size / 1073741824}")
+free_now="$(free_gb)"
+if [[ -z "$free_now" ]]; then
+  log "REFUSING VACUUM: could not read free space — fail safe, no VACUUM attempted. UPDATE already applied; backup at $backup_path."
+else
+  required_gb=$(awk -v db="$current_gb" -v floor="$VACUUM_MIN_FREE_GB" 'BEGIN{req = db * 2; print (req > floor) ? req : floor}')
+  guard_pass=$(awk -v f="$free_now" -v r="$required_gb" 'BEGIN{print (f >= r) ? "1" : "0"}')
+  if [[ "$guard_pass" != "1" ]]; then
+    log "REFUSING VACUUM: free ${free_now} GB < required ${required_gb} GB (2x current db size ${current_gb} GB, floor ${VACUUM_MIN_FREE_GB} GB). UPDATE already applied; backup at $backup_path. Re-run once free space recovers to reclaim the physical bytes."
+  else
+    sql_rw "VACUUM;"
+    vacuum_ran=true
+  fi
+fi
 
 after=$(file_size "$DB")
 after_mb=$(awk "BEGIN {printf \"%.1f\", $after / 1048576}")
 delta_mb=$(awk "BEGIN {printf \"%.1f\", ($before - $after) / 1048576}")
-log "Dedup+VACUUM: ${before_mb} -> ${after_mb} MB (reclaimed ${delta_mb} MB, NULLed ${old_count} sessions), backup at $backup_path"
+if [[ "$vacuum_ran" == true ]]; then
+  log "Dedup+VACUUM: ${before_mb} -> ${after_mb} MB (reclaimed ${delta_mb} MB, NULLed ${old_count} sessions), backup at $backup_path"
+else
+  log "Dedup (VACUUM deferred, see REFUSING line above): ${old_count} sessions NULLed, file size unchanged at ${after_mb} MB, backup at $backup_path"
+fi

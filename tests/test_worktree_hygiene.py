@@ -686,5 +686,71 @@ class BranchForWorktreeSigpipeTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "branch-0")
 
 
+class WorktreeHasLiveTmuxPaneTest(unittest.TestCase):
+    """jleechan-dqiz hard safety gate: never touch a worktree a live tmux
+    pane is currently sitting in. Stubs `tmux` on PATH so the test is
+    deterministic and doesn't depend on (or disturb) a real tmux server."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.fake_bin = self.tmp / "fakebin"
+        self.fake_bin.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _stub_tmux(self, pane_paths):
+        script = self.fake_bin / "tmux"
+        lines = "\n".join(f'echo "{p}"' for p in pane_paths)
+        script.write_text(f"#!/bin/sh\n{lines}\n", encoding="utf-8")
+        script.chmod(0o755)
+
+    def _check(self, wt_path):
+        body = f'source "{SCRIPT}"; worktree_has_live_tmux_pane "$1"'
+        cmd = ["bash", "-c", body, "call", str(wt_path)]
+        env = {
+            "PATH": f"{self.fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "HOME": str(self.tmp),
+        }
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
+
+    def test_no_tmux_binary_returns_false(self):
+        # fake_bin is empty (no tmux stub) but still need /bin:/usr/bin on
+        # PATH so bash itself and `command -v` resolve; the point is that
+        # NO "tmux" executable exists anywhere on this PATH.
+        body = f'source "{SCRIPT}"; worktree_has_live_tmux_pane "$1"'
+        cmd = ["bash", "-c", body, "call", str(self.tmp / "some-worktree")]
+        env = {"PATH": f"{self.fake_bin}:/usr/bin:/bin", "HOME": str(self.tmp)}
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, "should fail open (no match) when tmux is missing")
+
+    def test_exact_cwd_match_is_detected(self):
+        wt = self.tmp / "live-worktree"
+        self._stub_tmux([str(wt)])
+        result = self._check(wt)
+        self.assertEqual(result.returncode, 0, "exact pane cwd match must return true (live)")
+
+    def test_descendant_cwd_match_is_detected(self):
+        wt = self.tmp / "live-worktree"
+        self._stub_tmux([str(wt / "subdir" / "deep")])
+        result = self._check(wt)
+        self.assertEqual(result.returncode, 0, "a pane cwd nested under the worktree must still count as live")
+
+    def test_unrelated_cwd_is_not_a_match(self):
+        wt = self.tmp / "dead-worktree"
+        self._stub_tmux([str(self.tmp / "some-other-dir"), "/tmp/unrelated"])
+        result = self._check(wt)
+        self.assertNotEqual(result.returncode, 0, "unrelated pane cwds must not protect an unrelated worktree")
+
+    def test_sibling_path_with_shared_prefix_is_not_a_false_positive(self):
+        # "live-worktree-2" starts with "live-worktree" as a string but is
+        # NOT a descendant path -- must not match.
+        wt = self.tmp / "live-worktree"
+        self._stub_tmux([str(self.tmp / "live-worktree-2")])
+        result = self._check(wt)
+        self.assertNotEqual(result.returncode, 0, "a sibling dir sharing a string prefix must not false-positive")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,9 @@
 #
 # 1) IDENTIFY: worktrees under each --repos entry whose most-recent file
 #    mtime (excluding .git/, node_modules/, venv/, __pycache__/) is older
-#    than --min-age days.
+#    than --min-age days, AND with no live tmux pane currently sitting in
+#    them (worktree_has_live_tmux_pane -- any session, not just a specific
+#    naming convention; jleechan-dqiz hard gate).
 # 2) TRIAGE per candidate: uncommitted/untracked status, `git push origin
 #    HEAD:<branch>` preservation (never --force; non-FF retries to a
 #    backup/<branch>-<date> ref), `gh pr list` PR coverage, ahead-count and
@@ -371,6 +373,24 @@ triage_candidate() {
 # Output helpers
 # ---------------------------------------------------------------------------
 
+# worktree_has_live_tmux_pane <wt_path> — true if any live tmux pane's cwd
+# is inside wt_path (equal to it, or a descendant path). Hard safety gate
+# requested for jleechan-dqiz: never touch a worktree a human/agent tmux
+# session (e.g. an "orch-*" AO session, but checked generally -- any live
+# pane, not just that one naming convention) is actively sitting in, even
+# if it otherwise looks old/clean/pushed. Fails open (no match) if tmux
+# isn't installed or no server is running -- nothing to protect against.
+worktree_has_live_tmux_pane() {
+    local wt_path="$1"
+    command -v tmux >/dev/null 2>&1 || return 1
+    local pane_cwd
+    while IFS= read -r pane_cwd; do
+        [[ -n "$pane_cwd" ]] || continue
+        [[ "$pane_cwd" == "$wt_path" || "$pane_cwd" == "$wt_path"/* ]] && return 0
+    done < <(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null || true)
+    return 1
+}
+
 ledger_line() {
     local action="$1" path="$2" reason="${3:-}"
     if [[ -n "$reason" ]]; then
@@ -487,6 +507,17 @@ main() {
             esac
         done <<<"$porcelain"
 
+        # Bash 3.2 (macOS system /bin/bash, still first-in-PATH in some
+        # invocation contexts) treats `"${arr[@]}"` on a zero-element array
+        # as an unbound variable under `set -u` and aborts the whole script
+        # -- unlike bash 4+/5 where it correctly expands to nothing. Found
+        # live 2026-07-22 (jleechan-dqiz): a discovered repo path
+        # (~/.openclaw, itself a stale/dead worktree-registry entry with no
+        # .git of its own) produced empty porcelain/all_paths and crashed
+        # the entire multi-repo pass here. Guarding the loop entry sidesteps
+        # the bash-3.2 trap without changing behavior for the normal case.
+        [[ ${#all_paths[@]} -eq 0 ]] && continue
+
         for wt_path in "${all_paths[@]}"; do
             [[ "$wt_path" == "$repo_abs" ]] && continue
             [[ -d "$wt_path" ]] || continue
@@ -497,6 +528,12 @@ main() {
                 else
                     ledger_line "PRESERVE" "$wt_path" "young"
                 fi
+                preserved_count=$(( preserved_count + 1 ))
+                continue
+            fi
+
+            if worktree_has_live_tmux_pane "$wt_path"; then
+                ledger_line "PRESERVE" "$wt_path" "live-tmux-session"
                 preserved_count=$(( preserved_count + 1 ))
                 continue
             fi
