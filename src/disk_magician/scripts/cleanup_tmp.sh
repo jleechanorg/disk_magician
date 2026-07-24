@@ -5,6 +5,9 @@
 # delete (disk_audit.sh safe-clean path, pressure sweeps) pass --clean.
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -135,7 +138,11 @@ remove_path() {
     log "DRY RUN: would remove: $path  (${kb} KB)"
   else
     log "Removing: $path  (${kb} KB)"
-    rm -rf "$path"
+    if ! _safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
+      echo "SAFETY-SKIP "$path" ($_safety_reason)"
+    else
+      rm -rf "$path"
+    fi
   fi
   echo "$kb"
 }
@@ -408,7 +415,11 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       log "DRY RUN: would remove: $f  (${local_kb} KB)"
     else
       log "Removing: $f  (${local_kb} KB)"
-      rm -f "$f"
+      if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$f" ($_safety_reason)"
+      else
+        rm -f "$f"
+      fi
     fi
     TOTAL_KB=$(( TOTAL_KB + local_kb ))
     FILES_DELETED=$(( FILES_DELETED + 1 ))
@@ -541,14 +552,22 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
         if [[ "$DRY_RUN" == true ]]; then
           log "DRY RUN: would remove closed OpenCode dylib: $f"
         else
-          rm -f "$f"
+          if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
+            echo "SAFETY-SKIP "$f" ($_safety_reason)"
+          else
+            rm -f "$f"
+          fi
           dylib_deleted=$(( dylib_deleted + 1 ))
         fi
       done < "$dylib_candidate_file"
       log "$(dry_prefix)OpenCode dylibs: candidates ${dylib_candidates}, deleted ${dylib_deleted}"
       FILES_DELETED=$(( FILES_DELETED + dylib_deleted ))
     fi
-    rm -f "$dylib_candidate_file"
+    if ! _safety_reason="$(safety_gate "$dylib_candidate_file" 2>/dev/null)"; then
+      echo "SAFETY-SKIP "$dylib_candidate_file" ($_safety_reason)"
+    else
+      rm -f "$dylib_candidate_file"
+    fi
     dylib_candidate_file=""
   fi
 fi

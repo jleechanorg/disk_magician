@@ -2,6 +2,9 @@
 # cleanup_xcode.sh — Clear rebuildable Xcode and simulator caches.
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
 
@@ -66,6 +69,10 @@ clear_contents() {
     log "$label: [dry-run] would delete contents of $path ($(fmt_kb "$before_kb"))"
   else
     log "$label: deleting contents of $path ($(fmt_kb "$before_kb"))"
+    if ! _safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
+      echo "SAFETY-SKIP $path ($_safety_reason)"
+      return 0
+    fi
     find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
   fi
 }

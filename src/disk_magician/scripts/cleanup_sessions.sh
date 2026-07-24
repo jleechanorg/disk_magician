@@ -4,6 +4,9 @@
 # Defaults to dry-run (use --clean to actually delete).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -124,9 +127,17 @@ for session_dir in "${AO_SESSIONS_DIR}"/*/; do
   log "CANDIDATE $sid: ${age}d old, ${session_size_h} (plus ${total_session_gb} GB in tmp)"
 
   if [[ "$DRY_RUN" == false ]]; then
-    rm -rf "$session_dir"
+    if ! _safety_reason="$(safety_gate "$session_dir" 2>/dev/null)"; then
+      echo "SAFETY-SKIP "$session_dir" ($_safety_reason)"
+    else
+      rm -rf "$session_dir"
+    fi
     if [[ -d "$session_tmp" ]]; then
-      rm -rf "$session_tmp"
+      if ! _safety_reason="$(safety_gate "$session_tmp" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$session_tmp" ($_safety_reason)"
+      else
+        rm -rf "$session_tmp"
+      fi
     fi
     log "  DELETED $sid (freed ${total_session_gb} GB)"
     pruned_count=$(( pruned_count + 1 ))
@@ -174,7 +185,11 @@ else
       log "$(dry_tag)would delete $entry (${entry_age}d old, ${entry_size_h})"
     else
       log "deleting $entry (${entry_age}d old, ${entry_size_h})"
-      rm -rf "$entry"
+      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+      else
+        rm -rf "$entry"
+      fi
     fi
     cron_pruned=$(( cron_pruned + 1 ))
     cron_freed_kb=$(( cron_freed_kb + entry_size_kb ))
@@ -223,7 +238,11 @@ else
       log "$(dry_tag)would delete $entry (${entry_age}d old, ${entry_size_h})"
     else
       log "deleting $entry (${entry_age}d old, ${entry_size_h})"
-      rm -f "$entry"
+      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+      else
+        rm -f "$entry"
+      fi
     fi
     sess_pruned=$(( sess_pruned + 1 ))
     sess_freed_kb=$(( sess_freed_kb + entry_size_kb ))

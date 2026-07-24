@@ -10,6 +10,9 @@
 # unconditionally — the original behavior for the worktree / cache dirs).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 # Optional extra dirs (colon-separated absolute or ~ paths):
 #   DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS="$HOME/my-agent-app"
 TARGETS=(
@@ -172,6 +175,10 @@ for target in "${TARGETS[@]}"; do
   expanded=$(expand_path "$target")
   gate_days="${TARGETS_MTIME_GATE_DAYS[$target_index]}"
   result=$(gate_check "$expanded" "$gate_days")
+  if [[ "$result" == "passed" ]] && ! _safety_reason="$(safety_gate "$expanded")"; then
+    result="safety-skip"
+    echo "  SAFETY-SKIP ($_safety_reason): $target"
+  fi
   GATE_RESULT[$target_index]="$result"
   if [[ "$result" == "passed" ]]; then
     clear_dir_contents "$expanded"

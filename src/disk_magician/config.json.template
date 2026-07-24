@@ -256,6 +256,11 @@
       "key": "library_mail",
       "path": "~/Library/Mail",
       "timeout": 120
+    },
+    {
+      "key": "dev_cache_bazel",
+      "path": "~/Snapchat/Dev/.cache",
+      "timeout": 600
     }
   ],
   "monitored_file_globs": [

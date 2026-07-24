@@ -31,12 +31,10 @@ their mtime/safety filters apply — no hand-`rm` of session/worktree state.
 
 After changing root scripts: run `scripts/sync_package_tree.sh` (use
 `--check` in review), **bump the version in pyproject.toml** (uv caches
-wheels by version), merge the change, then run `tools/deploy_uv_tool.sh` from
-the exact clean `origin/main`. The wrapper fetches `origin/main`, refuses a
-dirty or divergent source tree, reinstalls the uv tool, and verifies the
-installed package against source. Verify the deployed tree, not the repo,
-before claiming production behavior (stale-deploy incident 2026-07-11: v2
-code was committed for hours while production ran v1).
+wheels by version), then `uv tool install --force --reinstall <repo path>`.
+Verify the deployed tree, not the repo, before claiming production behavior
+(stale-deploy incident 2026-07-11: v2 code was committed for hours while
+production ran v1).
 
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
@@ -64,27 +62,23 @@ code was committed for hours while production ran v1).
 architecture, critic findings, implementation order. Beads track remaining
 work (`br search disk`).
 
-## Pull-request gates
+## Machine-local safety guidelines (safety.local.json)
 
-- `.github/workflows/ci.yml` runs the maintained package-sync, shell, and
-  Python suites on macOS. `.github/workflows/evidence-gate.yml` enforces the
-  deterministic evidence fields supplied by the pull-request template. The
-  evidence workflow uses `pull_request_target` with read-only permissions and
-  runs the validator checked out from the default branch; it must never
-  execute validator or repository code from the pull request.
-- CodeRabbit and Cursor Bugbot are external GitHub Apps. Repository workflows
-  may report their results but cannot create or impersonate their reviews.
-- Canonical 7-green Gate 7 is currently unavailable: the user-scope
-  `skeptic-agent` skill marks the verdict system deleted as of 2026-07-09 and
-  explicitly forbids dispatching or waiting for verdicts. Do not add a caller
-  for the stale reusable skeptic workflows that remain in agent-orchestrator.
-- Therefore CI and Evidence Gate success do not imply 7-green. Until the
-  governing policy is updated or a replacement reviewer is explicitly
-  commissioned, report Gate 7 as a structural blocker and do not merge under a
-  7-green claim. Branch protection/rulesets are GitHub repository settings,
-  not files; configure required checks only after their workflows exist on
-  `main`.
+Machine-specific safety rules live in a gitignored `safety.local.json`
+(repo root or `~/.config/disk-magician/` — schema in
+`safety.local.json.template`): never_delete globs, protected_live_paths
+(dirs owned by running processes), needs_decision (paths awaiting a human
+push-or-discard call), and min_stale_days. The cleanup scripts consult it
+via `scripts/safety_lib.sh` and fail closed on unreadable rules. Before ANY
+manual deletion, run `scripts/safety_check.sh <path>...`.
 
-## Ironclad disk-reclaim preconditions
+## Machine-local findings (findings_wiki/ — fork-tracked knowledge)
 
-Before any "reclaim X GB sustained Y min" goal on this repo, verify the *producer* (the thing currently filling the disk) can be paused. On this host the producer is `agy_openai_shim.py` + the `orch-*` tmux servers it auto-spawns — both must be SIGSTOP'd (or otherwise paused) before the goal can pass. The disk_magician sweeper alone will not stop the AGY fill rate (~3 GB/min observed 2026-07-23). Memory: `feedback_2026-07-23_ao_respawner_blocks_disk_reclaim.md`.
+`findings_wiki/` holds one doc per durable machine finding (hotspots, traps,
+root causes) — git-tracked in each machine's FORK, never upstream (upstream
+carries only README + TEMPLATE; `scripts/findings_lint.sh --upstream` asserts
+purity). At the START of any cleanup or measurement session, read the active
+findings (`scripts/safety_check.sh --findings`). When you discover a new
+hotspot/trap, add BOTH a findings_wiki doc (knowledge, fork commit) and a
+safety.local.json rule when enforcement applies — cross-linked. Keep findings
+commits separate from code commits so code can be cherry-picked upstream.
