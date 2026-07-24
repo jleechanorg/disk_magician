@@ -9,6 +9,9 @@
 # Defaults to dry-run (use --clean to actually delete).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 SUPERVISOR_DIR="$HOME/.claude/supervisor"
 ACTIVE_LOG="$SUPERVISOR_DIR/cmux-codex-launchd.log"
 ACTIVE_ERR_LOG="$SUPERVISOR_DIR/cmux-codex-launchd.stderr.log"
@@ -66,7 +69,11 @@ while IFS= read -r -d '' f; do
     log "DRY-RUN would remove: $f  (${kb} KB)"
   else
     log "Removing: $f  (${kb} KB)"
-    rm -f "$f"
+    if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
+      echo "SAFETY-SKIP "$f" ($_safety_reason)"
+    else
+      rm -f "$f"
+    fi
   fi
   deleted=$(( deleted + 1 ))
   freed_kb=$(( freed_kb + kb ))

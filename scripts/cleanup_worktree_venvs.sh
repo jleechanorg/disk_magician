@@ -20,6 +20,9 @@
 #   - Refuses to run --clean without WORKTREE APPROVED=1 in the environment
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
@@ -249,7 +252,9 @@ for root in "${ROOTS[@]}"; do
         STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
       else
         log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
-        if rm -rf "$venv_path" 2>/dev/null; then
+        if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
+          echo "SAFETY-SKIP $venv_path ($_safety_reason)"
+        elif rm -rf "$venv_path" 2>/dev/null; then
           TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
           STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
         else

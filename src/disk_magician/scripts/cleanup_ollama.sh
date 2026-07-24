@@ -2,6 +2,9 @@
 # cleanup_ollama.sh — Remove local Ollama model blobs/manifests.
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama/models}"
 
@@ -72,7 +75,11 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-find "$MODELS_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+if ! _safety_reason="$(safety_gate "$MODELS_DIR" 2>/dev/null)"; then
+  echo "SAFETY-SKIP $MODELS_DIR ($_safety_reason)"
+else
+  find "$MODELS_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+fi
 mkdir -p "$MODELS_DIR"
 
 after_kb=$(size_kb "$MODELS_DIR")

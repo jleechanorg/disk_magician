@@ -4,6 +4,9 @@
 # Defaults to actually deleting (use --dry-run to preview).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 usage() {
   cat <<EOF
@@ -46,6 +49,11 @@ fmt_kb() {
 TOTAL_FREED_KB=0
 
 clean_dir_contents() {
+  # machine-local safety guidelines gate (safety.local.json)
+  if ! _safety_reason="$(safety_gate "$2" 2>/dev/null)"; then
+    log "$1: SAFETY-SKIP ($_safety_reason)"
+    return
+  fi
   local label="$1" path="$2" recreate="${3:-false}"
 
   if [[ ! -d "$path" ]]; then
@@ -106,7 +114,11 @@ else
         log "opencode $subdir/: [dry-run] would delete $entry"
       else
         log "opencode $subdir/: deleting $entry"
-        rm -rf "$entry"
+        if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+          echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+        else
+          rm -rf "$entry"
+        fi
       fi
     done < <(find "$target" -mindepth 1 -maxdepth 1 -mtime +14 -print0 2>/dev/null)
   done
@@ -149,7 +161,11 @@ else
         log "cursor-agent versions: [dry-run] would delete $entry"
       else
         log "cursor-agent versions: deleting $entry"
-        rm -rf "$entry"
+        if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+          echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+        else
+          rm -rf "$entry"
+        fi
       fi
     done
 
@@ -208,7 +224,11 @@ for dev_cache_path in \
       log "$dev_cache_label: [dry-run] would delete $entry"
     else
       log "$dev_cache_label: deleting $entry"
-      rm -rf "$entry"
+      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+      else
+        rm -rf "$entry"
+      fi
     fi
   done < <(find "$dev_cache_path" -mindepth 1 -maxdepth 1 -mtime +"$DEV_CACHE_DAYS" -print0 2>/dev/null)
 
@@ -225,6 +245,20 @@ for dev_cache_path in \
     log "$dev_cache_label: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
   fi
 done
+
+# N. ~/Snapchat/Dev/.cache/bazel — bazel output bases (hit 452.6G unnoticed;
+# dot-dir invisible to Dev/* globs; regrows within hours of any bazel build).
+log "=== Section: Dev/.cache/bazel (bazel output bases) ==="
+DEV_BAZEL_CACHE="$HOME/Snapchat/Dev/.cache/bazel"
+if [[ ! -d "$DEV_BAZEL_CACHE" ]]; then
+  log "dev bazel cache: not found, skipping"
+elif pgrep -f "bazel" >/dev/null 2>&1; then
+  log "dev bazel cache: SKIP — live bazel process"
+elif [[ -n "$(lsof +D "$DEV_BAZEL_CACHE" 2>/dev/null | head -2 | tail -1)" ]]; then
+  log "dev bazel cache: SKIP — open files in cache"
+else
+  clean_dir_contents "dev bazel cache" "$DEV_BAZEL_CACHE" false
+fi
 
 echo
 if [[ "$DRY_RUN" == true ]]; then

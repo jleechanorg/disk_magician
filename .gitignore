@@ -17,3 +17,6 @@ config.json
 # Machine-local residual-drilldown candidate proposals (never committed;
 # human-promoted into config.json — see scripts/residual_drilldown.sh)
 config.d/
+
+# Machine-local safety guidelines (schema: safety.local.json.template)
+safety.local.json

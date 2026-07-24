@@ -8,6 +8,9 @@
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 MIN_AGE_DAYS=14
 REPO_LOCAL_REPOS=()
@@ -312,7 +315,11 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
                 ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
             else
                 ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
-                rm -rf "$abs_subdir"
+                if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
+                  echo "SAFETY-SKIP "$abs_subdir" ($_safety_reason)"
+                else
+                  rm -rf "$abs_subdir"
+                fi
                 TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
                 ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
             fi

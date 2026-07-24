@@ -8,6 +8,9 @@
 # Defaults to DRY-RUN; pass --clean to delete (requires CODE_SIGN_CLONES_APPROVED=1).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+
 DRY_RUN=true
 MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
 
@@ -171,7 +174,11 @@ for i in "${!CANDIDATES[@]}"; do
       continue
     fi
     log "Removing: $d  (${kb} KB)"
-    rm -rf "$d"
+    if ! _safety_reason="$(safety_gate "$d" 2>/dev/null)"; then
+      echo "SAFETY-SKIP "$d" ($_safety_reason)"
+    else
+      rm -rf "$d"
+    fi
   fi
   TOTAL_KB=$(( TOTAL_KB + kb ))
   DIRS_REMOVED=$(( DIRS_REMOVED + 1 ))
