@@ -28,4 +28,4 @@ This skill teaches Codex how to integrate with `disk_magician` to perform automa
 
 ## Codex Safety Policies
 - Codex agent session files inside `~/.codex/sessions` are protected under the global AGENTS policy and must never be deleted unless explicitly requested.
-- Respect the mtime safety rule: any worktree folder modified < 14 days ago requires explicit `WORKTREE APPROVED` user authorization.
+- Respect the worktree 14-day rule — single source of truth is the repo `CLAUDE.md` section "Worktree 14-day rule". A worktree touched within 14 days is protected and needs explicit `WORKTREE APPROVED` user authorization. Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.

@@ -10,6 +10,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS=14
@@ -169,18 +171,13 @@ fmt_kb() {
     }"
 }
 
-worktree_age_days() {
-    local wt_path="$1"
-    local mtime_epoch
-    mtime_epoch=$(stat -f '%m' "$wt_path/.git" 2>/dev/null || true)
-    if [[ -z "$mtime_epoch" ]]; then
-        mtime_epoch=$(stat -f '%m' "$wt_path" 2>/dev/null || true)
-    fi
-    [[ -n "$mtime_epoch" ]] || return 1
-    local now
-    now=$(date +%s)
-    echo $(( (now - mtime_epoch) / 86400 ))
-}
+# Age comes from scripts/lib/worktree_recency.sh (sourced at the top of this
+# file), which measures real activity — newest non-pruned file in the tree plus
+# git admin-dir writes — and fails closed to age 0 when it cannot tell.
+# This used to stat `<wt>/.git`, which for a linked worktree is a static
+# `gitdir:` pointer written once at creation, so it reported creation age and
+# marked actively-edited worktrees deletable. See that file's header for the
+# measured false-old rate on this machine.
 
 resolve_main_ref() {
     local repo="$1"

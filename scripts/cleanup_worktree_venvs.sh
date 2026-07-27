@@ -12,7 +12,9 @@
 # cleanup policy in the repo CLAUDE.md.
 #
 # Safety invariants:
-#   - Never strips a venv whose parent worktree mtime is < --min-age
+#   - Never strips a venv whose parent worktree saw ANY activity within
+#     --min-age days (see scripts/lib/worktree_recency.sh — real activity, not
+#     a .git-pointer or directory-mtime proxy, and fails closed to "active")
 #   - Never strips a venv inside a base repo (only inside worktrees, detected
 #     by the .git file pointer that `git worktree add` creates)
 #   - Never strips a venv that is itself a symlink (already centralized)
@@ -22,6 +24,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -123,33 +127,21 @@ is_likely_worktree() {
   return 0
 }
 
-# Returns the worktree's "user activity" age in days (integer), or empty
-# if stat fails. The proxy we use is the mtime of the `.git` *file* in the
-# worktree, NOT the parent directory's mtime.
+# worktree_age_days comes from scripts/lib/worktree_recency.sh, sourced at the
+# top of this file.
 #
-# Rationale: the parent dir's mtime updates on ANY change inside it,
-# including our own `rm -rf venv` calls. After one cleanup pass, every
-# worktree reports age=0 and the next pass classifies everything as
-# "too young," silently skipping the actual dormant pool. The `.git` file
-# pointer is only touched by git operations (checkout, merge, rebase,
-# status, worktree repair) — i.e. actual user activity — so its mtime is
-# a much cleaner signal of "when was this worktree last used?"
+# It replaces a `stat -f %m <wt>/.git` proxy that rested on a false premise:
+# that the `.git` pointer file "is only touched by git operations (checkout,
+# merge, rebase, status)". It is not — for a linked worktree that file is
+# written once by `git worktree add` and then left alone, so it measured
+# creation age. Two of 30 live worldarchitect.ai worktrees sampled 2026-07-27
+# reported 20.4 days from that proxy while their newest file was 12.8 days old,
+# i.e. inside the 14-day protected window they were supposed to be inside.
 #
-# Falls back to the parent dir mtime if the .git file is missing (shouldn't
-# happen for anything that passed is_likely_worktree, but defense-in-depth).
-worktree_age_days() {
-  local p="$1"
-  local mtime_epoch
-  # Prefer the .git file mtime; fall back to parent dir mtime.
-  mtime_epoch=$(stat -f '%m' "$p/.git" 2>/dev/null || true)
-  if [[ -z "$mtime_epoch" ]]; then
-    mtime_epoch=$(stat -f '%m' "$p" 2>/dev/null || true)
-  fi
-  [[ -n "$mtime_epoch" ]] || { echo ""; return; }
-  local now
-  now=$(date +%s)
-  echo $(( (now - mtime_epoch) / 86400 ))
-}
+# The original rationale for NOT using the parent dir mtime still holds and is
+# preserved by the shared helper: `venv` is one of the pruned directory names,
+# so this script's own `rm -rf venv` cannot bump the worktree's computed
+# activity and re-classify the whole dormant pool as "too young" next pass.
 
 # Detects venv dirs that are already centralized (symlinks) or are broken
 # symlinks. Returns 0 if the venv should be skipped from stripping.

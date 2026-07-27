@@ -21,11 +21,11 @@ This skill teaches Claude how to use `disk_magician` to audit disk space, identi
   ```bash
   ./disk_magician.sh clean-all
   ```
-* **Worktree Hygiene Sweep (deep pass)**: For a dedicated triage-and-delete pass across all monitored project roots (not just the current repo), run `scripts/worktree_hygiene.sh` instead of `clean`. Dry-run by default; apply mode requires both `--execute` and `WORKTREE_HYGIENE_APPROVED=1`:
+* **Worktree Hygiene Sweep (deep pass)**: For a dedicated triage-and-delete pass across all monitored project roots (not just the current repo), run `scripts/worktree_hygiene.sh` instead of `clean`. Dry-run by default; apply mode requires both `--execute` and `WORKTREE_APPROVED=1`:
   ```bash
   ./scripts/worktree_hygiene.sh
   ```
 
 ## Safety Constraints & Guardrails
-- **Mtime Caution:** Worktrees and agent sessions with modification time < 14 days require explicit `WORKTREE APPROVED` confirmation from the user before deletion.
+- **Worktree 14-day rule (single source of truth):** the repo `CLAUDE.md` section "Worktree 14-day rule" — a worktree touched within 14 days is protected; recency is measured by `scripts/lib/worktree_recency.sh` and never re-derived from `stat <wt>/.git` or `stat <wt>` (both measure creation, not use); unmeasurable fails closed to protected. Agent sessions follow the same 14-day floor and need explicit `WORKTREE APPROVED` from the user.
 - **Never-delete list:** Do not delete `~/.codex/sessions`, `~/.codex/sessions_archive/`, `~/.codex/state*.sqlite`, `~/.codex/log`, or `~/.claude/projects` directly. Always run cleanups through `disk_magician.sh` to ensure safety filters are respected.

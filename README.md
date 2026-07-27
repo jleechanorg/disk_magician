@@ -185,20 +185,26 @@ Automates the manual "find dormant worktrees, triage each one, delete only
 the provably safe ones" pass proven live on 2026-07-16 (51 candidates
 triaged, 42 safe deletions, ~13 GB freed, zero data loss, zero
 force-pushes). For every worktree under the monitored project roots whose
-newest file mtime is older than `--min-age` days (default 14), it checks
+last activity is older than `--min-age` days (default 14), it checks
 uncommitted diff size, pushes any unpushed commits to the real branch
 (falling back to a timestamped `backup/<branch>-<date>` ref on a
 non-fast-forward push — never `--force`), and looks up existing PR
 coverage, then deletes only worktrees with zero unique local content via
 `git worktree remove --force` (metadata only, never raw `rm -rf`).
+
+"Last activity" is the newest non-pruned **file** mtime, computed by
+`scripts/lib/worktree_recency.sh` — the single sanctioned implementation,
+shared with `cleanup_worktrees.sh` and `cleanup_worktree_venvs.sh`. It fails
+closed (unmeasurable → age 0 → preserved), and it deliberately ignores both
+`stat <wt>/.git` and `stat <wt>`, which measure worktree creation rather than
+use. See the "Worktree 14-day rule" section of `CLAUDE.md`.
+
 Read-only/dry-run by default; nothing is pushed or deleted without
-`--execute`, which is itself gated behind `WORKTREE_HYGIENE_APPROVED=1`
-(same refuse-otherwise pattern as `clean`'s `WORKTREE_APPROVED=1`, but a
-distinct env var — the two scripts are not interchangeable):
+`--execute`, which is itself gated behind `WORKTREE_APPROVED=1`:
 
 ```bash
-./scripts/worktree_hygiene.sh                                              # dry-run preview
-WORKTREE_HYGIENE_APPROVED=1 ./scripts/worktree_hygiene.sh --execute --min-age 14  # apply
+./scripts/worktree_hygiene.sh                                       # dry-run preview
+WORKTREE_APPROVED=1 ./scripts/worktree_hygiene.sh --execute --min-age 14  # apply
 ```
 
 This is the "safe quick-win" lane's worktree-cleanup component in the

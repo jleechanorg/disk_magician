@@ -35,11 +35,28 @@ run_dry_run() {
     >"$out_file" 2>&1
 }
 
+# Backdate every signal scripts/lib/worktree_recency.sh reads: the worktree's
+# own files, the dir itself, the .git pointer, AND the git admin dir (HEAD /
+# index / logs/HEAD). Touching only "$wt_path/.git" — as this helper used to —
+# no longer ages a worktree, because that pointer file is written once at
+# `git worktree add` time and is not evidence of when work last happened.
 age_worktree_days_ago() {
   local wt_path="$1" days="$2"
-  local ts
+  local ts gitdir
   ts=$(date -v-"${days}"d +%Y%m%d%H%M)
-  touch -t "$ts" "$wt_path/.git"
+
+  # Content + the worktree root. -print0/xargs -0 so paths with spaces (the
+  # "wt spaced path" fixture) survive.
+  find "$wt_path" -name .git -prune -o -print0 2>/dev/null \
+    | xargs -0 touch -t "$ts" 2>/dev/null || true
+  touch -t "$ts" "$wt_path/.git" "$wt_path"
+
+  # Git admin dir behind the pointer.
+  gitdir=$(sed -n 's/^gitdir: *//p' "$wt_path/.git" 2>/dev/null | head -1)
+  if [[ -n "$gitdir" ]]; then
+    [[ "$gitdir" == /* ]] || gitdir="$wt_path/$gitdir"
+    find "$gitdir" -print0 2>/dev/null | xargs -0 touch -t "$ts" 2>/dev/null || true
+  fi
 }
 
 setup_fixture_repo() {
