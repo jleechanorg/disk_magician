@@ -20,7 +20,20 @@ approval, merge gates, `WORKTREE APPROVED` for young worktrees.
 `~/.claude/projects`. Route ALL deletions through this repo's scripts so
 their mtime/safety filters apply — no hand-`rm` of session/worktree state.
 
+## Mutable state-root symlinks (hard)
+
+Never replace a tool-owned mutable state root (for example `.gemini`, `.claude`,
+or `.codex`) with a whole-directory symlink to another live state root. Dedup
+only immutable leaves or explicit caches. Any exception must fail closed unless
+it proves source and destination resolve to distinct physical paths and has an
+integration test that runs the downstream writer/materializer, verifies the
+canonical root is unchanged, and rejects self-referential links. A dry-run or
+isolated dedup test alone is insufficient because the destructive behavior can
+occur only when a second tool later writes through the alias.
+
 ## Deployment — commit is NOT deploy (two consumers, two paths)
+
+**Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 
 1. The 35-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
    **uv-tool-packaged copy** at

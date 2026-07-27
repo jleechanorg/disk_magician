@@ -31,6 +31,18 @@ done
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+resolve_existing_path() {
+  local path="$1" resolved=""
+  if command -v realpath >/dev/null 2>&1; then
+    resolved="$(realpath "$path" 2>/dev/null)" || resolved=""
+  fi
+  if [[ -z "$resolved" ]] && command -v python3 >/dev/null 2>&1; then
+    resolved="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null)" || resolved=""
+  fi
+  [[ -n "$resolved" && -e "$resolved" ]] || return 1
+  printf '%s\n' "$resolved"
+}
+
 size_kb() {
   local path="$1"
   if [[ ! -e "$path" ]]; then echo 0; return; fi
@@ -148,8 +160,18 @@ else
 
   KEEP=2
   TOTAL_VERSIONS=${#ALL_VERSIONS[@]}
+  ACTIVE_AGENT_TARGET=""
+  CURSOR_VERSION_CLEANUP_BLOCKED=false
+  if [[ -L "$HOME/.local/bin/agent" ]]; then
+    if ! ACTIVE_AGENT_TARGET="$(resolve_existing_path "$HOME/.local/bin/agent")"; then
+      log "cursor-agent versions: SAFETY-SKIP active agent target could not be resolved"
+      CURSOR_VERSION_CLEANUP_BLOCKED=true
+    fi
+  fi
 
-  if [[ $TOTAL_VERSIONS -le $KEEP ]]; then
+  if [[ "$CURSOR_VERSION_CLEANUP_BLOCKED" == true ]]; then
+    log "cursor-agent versions: preserving all $TOTAL_VERSIONS version(s)"
+  elif [[ $TOTAL_VERSIONS -le $KEEP ]]; then
     log "cursor-agent versions: only $TOTAL_VERSIONS version(s) present, nothing to delete"
   else
     DELETE_COUNT=$(( TOTAL_VERSIONS - KEEP ))
@@ -157,6 +179,14 @@ else
 
     for (( i=0; i<DELETE_COUNT; i++ )); do
       entry="${ALL_VERSIONS[$i]}"
+      if ! entry_real="$(resolve_existing_path "$entry")"; then
+        log "cursor-agent versions: SAFETY-SKIP candidate path could not be resolved: $entry"
+        continue
+      fi
+      if [[ -n "$ACTIVE_AGENT_TARGET" && "$ACTIVE_AGENT_TARGET" == "$entry_real/"* ]]; then
+        log "cursor-agent versions: preserving active version $entry"
+        continue
+      fi
       if [[ "$DRY_RUN" == true ]]; then
         log "cursor-agent versions: [dry-run] would delete $entry"
       else
