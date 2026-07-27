@@ -33,6 +33,8 @@ occur only when a second tool later writes through the alias.
 
 ## Deployment — commit is NOT deploy (two consumers, two paths)
 
+**Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
+
 1. The 35-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
    **uv-tool-packaged copy** at
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from

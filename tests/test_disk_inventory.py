@@ -417,9 +417,18 @@ class DiskInventoryTest(unittest.TestCase):
             agent_link.parent.mkdir(parents=True)
             agent_link.symlink_to(active_binary)
 
+            fake_bin = home / "fake-bin"
+            fake_bin.mkdir()
+            fake_realpath = fake_bin / "realpath"
+            fake_realpath.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_realpath.chmod(0o755)
+
             completed = subprocess.run(
-                ["bash", str(cleanup), "--clean"],
-                env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                ["/bin/bash", str(cleanup), "--clean"],
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
                 capture_output=True, text=True, check=False,
             )
 
@@ -429,6 +438,53 @@ class DiskInventoryTest(unittest.TestCase):
             self.assertFalse(stale_version.exists(), completed.stdout)
             for version in newest_versions:
                 self.assertTrue(version.exists(), completed.stdout)
+
+    def test_dev_cache_cleanup_preserves_versions_when_active_target_cannot_resolve(self):
+        cleanup = ROOT / "scripts" / "cleanup_dev_caches.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            versions = home / ".local" / "share" / "cursor-agent" / "versions"
+            active_binary = versions / "2026.01-active" / "cursor-agent"
+            stale_version = versions / "2026.02-stale"
+            newest_versions = [
+                versions / "2026.03-new",
+                versions / "2026.04-newest",
+            ]
+            active_binary.parent.mkdir(parents=True)
+            active_binary.write_text("active binary", encoding="utf-8")
+            stale_version.mkdir()
+            for version in newest_versions:
+                version.mkdir()
+
+            agent_link = home / ".local" / "bin" / "agent"
+            agent_link.parent.mkdir(parents=True)
+            agent_link.symlink_to(active_binary)
+
+            fake_bin = home / "fake-bin"
+            fake_bin.mkdir()
+            fake_realpath = fake_bin / "realpath"
+            fake_realpath.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_realpath.chmod(0o755)
+            fake_python = fake_bin / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+
+            completed = subprocess.run(
+                ["/bin/bash", str(cleanup), "--clean"],
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
+                capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(active_binary.exists(), completed.stdout)
+            self.assertTrue(agent_link.samefile(active_binary))
+            self.assertTrue(stale_version.exists(), completed.stdout)
+            for version in newest_versions:
+                self.assertTrue(version.exists(), completed.stdout)
+            self.assertIn("SAFETY-SKIP", completed.stdout)
 
     def test_cli_source_contains_no_delete_execution(self):
         text = SCRIPT.read_text(encoding="utf-8")
