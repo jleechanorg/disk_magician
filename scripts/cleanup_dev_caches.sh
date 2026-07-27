@@ -148,6 +148,10 @@ else
 
   KEEP=2
   TOTAL_VERSIONS=${#ALL_VERSIONS[@]}
+  ACTIVE_AGENT_TARGET=""
+  if [[ -L "$HOME/.local/bin/agent" ]]; then
+    ACTIVE_AGENT_TARGET="$(realpath "$HOME/.local/bin/agent" 2>/dev/null || true)"
+  fi
 
   if [[ $TOTAL_VERSIONS -le $KEEP ]]; then
     log "cursor-agent versions: only $TOTAL_VERSIONS version(s) present, nothing to delete"
@@ -157,6 +161,11 @@ else
 
     for (( i=0; i<DELETE_COUNT; i++ )); do
       entry="${ALL_VERSIONS[$i]}"
+      entry_real="$(realpath "$entry" 2>/dev/null || true)"
+      if [[ -n "$ACTIVE_AGENT_TARGET" && "$ACTIVE_AGENT_TARGET" == "$entry_real/"* ]]; then
+        log "cursor-agent versions: preserving active version $entry"
+        continue
+      fi
       if [[ "$DRY_RUN" == true ]]; then
         log "cursor-agent versions: [dry-run] would delete $entry"
       else
