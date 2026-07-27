@@ -20,3 +20,8 @@ config.d/
 
 # Machine-local safety guidelines (schema: safety.local.json.template)
 safety.local.json
+
+# Machine-local runtime data (never commit)
+.beads/
+storage/
+.qdrant-initialized
