@@ -32,3 +32,4 @@ This skill teaches the Hermes agent how to manage disk usage, diagnose growth re
 ## Hermes Guardrails
 - Ensure you perform a dry-run check before executing any deletions.
 - If deleting directories modified within the last 14 days, verify that user approval is in context or prompt the user for confirmation.
+- Worktrees specifically: see the repo `CLAUDE.md` section "Worktree 14-day rule" (single source of truth). Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.

@@ -30,6 +30,43 @@ integration test that runs the downstream writer/materializer, verifies the
 canonical root is unchanged, and rejects self-referential links. A dry-run or
 isolated dedup test alone is insufficient because the destructive behavior can
 occur only when a second tool later writes through the alias.
+## Worktree 14-day rule (hard) — recency is measured, never proxied
+
+**A git worktree touched within the last 14 days is PROTECTED.** No script,
+sweeper, launchd job, or agent in this repo may delete, archive, strip
+(including its `venv/`), or `git worktree remove` it — regardless of merged
+PR, clean status, zero-ahead, or disk pressure. 14 days is a floor, not a
+target; `safety_min_stale_days` may raise it, never lower it.
+
+**Measure recency, never proxy it.** The only sanctioned implementation is
+`worktree_age_days` / `worktree_is_recently_active` from
+`scripts/lib/worktree_recency.sh`. New code calls it; it does not re-derive
+age. Two proxies are specifically banned because both were shipped here and
+both were measured wrong against the live 340-worktree worldarchitect.ai
+registry on 2026-07-26 (2 of 30 sampled read 20.4 days old when their newest
+file was 12.8 days old — inside the protected window):
+
+- `stat <wt>/.git` — for a linked worktree that is a one-line `gitdir:`
+  pointer written once by `git worktree add`. It measures creation age.
+- `stat <wt>` — a directory mtime only moves when a *top-level* entry is
+  added or removed. Editing files deep in the tree never touches it.
+
+Conversely, git metadata does NOT count as activity: `git status` rewrites
+the index, and this repo's own triage runs `git status` on every candidate,
+so counting it would make each run exempt the worktrees the previous run
+identified. Content mtime is the signal; commit/checkout/reset/rebase all
+rewrite working-tree files, so real work always appears there.
+
+**Fail closed.** Cannot measure it → treat as active → preserve. A sweeper
+that cannot prove a worktree is old must not touch it. Any new "is this
+stale?" check must have a test asserting the unmeasurable case is protected
+(`tests/test_worktree_recency.sh` case 5 is the pattern).
+
+**Deleting is not the only way to lose a worktree.** Removing it while its
+branch still holds unpushed commits, or while a shell/agent has it as cwd,
+is the same incident with extra steps — see the triage ladder in
+`scripts/worktree_hygiene.sh` (`classify_candidate`), which is the canonical
+SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
 
 ## Deployment — commit is NOT deploy (two consumers, two paths)
 

@@ -25,7 +25,7 @@ Full integration guide and guidelines:
 - **Snapshot**: `disk-magician snapshot`
 
 ## Safety Constraints & Guardrails
-- **Mtime Caution:** Worktrees and agent sessions with modification time < 14 days require explicit `WORKTREE APPROVED` confirmation from the user before deletion.
+- **Worktree 14-day rule (single source of truth):** the repo `CLAUDE.md` section "Worktree 14-day rule" — a worktree touched within 14 days is protected; recency is measured by `scripts/lib/worktree_recency.sh` and never re-derived from `stat <wt>/.git` or `stat <wt>` (both measure creation, not use); unmeasurable fails closed to protected. Agent sessions follow the same 14-day floor and need explicit `WORKTREE APPROVED` from the user.
 - **Never-delete list:** Do not delete `~/.codex/sessions`, `~/.codex/sessions_archive/`, `~/.codex/state*.sqlite`, `~/.codex/log`, or `~/.claude/projects` directly.
 - **Dry-run First:** Always run with `--dry-run` or preview the action before running destructive cleanups.
 

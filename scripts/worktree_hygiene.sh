@@ -28,6 +28,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/worktree_repo_discovery.sh
 source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
+# shellcheck source=lib/worktree_recency.sh
+source "$SCRIPT_DIR/lib/worktree_recency.sh"
 
 EXECUTE=false
 MIN_AGE_DAYS=14
@@ -101,9 +103,6 @@ identify_candidates() {
     local porcelain
     porcelain="$(git -C "$repo_abs" worktree list --porcelain 2>/dev/null)" || return 0
 
-    local now
-    now=$(date +%s)
-
     local path=""
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ -z "$line" ]]; then
@@ -114,39 +113,29 @@ identify_candidates() {
             worktree\ *)
                 path="${line#worktree }"
                 if [[ "$path" != "$main_wt_abs" && -d "$path" ]]; then
-                    local latest_mtime
-                    # Three stacked perf/correctness fixes for the same
-                    # underlying hang (jleechan-q912), each independently
-                    # confirmed against the real 340+ worktree
-                    # worldarchitect.ai registry:
-                    #  1. `-prune` on excluded dirs instead of `-not -path`
-                    #     -- `-not -path` still descends into every
-                    #     excluded dir (e.g. a venv/ with tens of thousands
-                    #     of site-packages files) and filters results
-                    #     afterward; `-prune` stops descent entirely. This
-                    #     was the dominant cost (47s of syscall/kernel time
-                    #     alone, even after fix #2 below).
-                    #  2. `-exec stat ... +` batches many files per stat
-                    #     invocation instead of spawning one process per
-                    #     file (`\;`).
-                    #  3. `|| true` guards against a real pre-existing bug:
-                    #     under this script's `set -o pipefail`, `head -1`
-                    #     closing the pipe early can make `sort` receive
-                    #     SIGPIPE and the whole pipeline exit 141, which --
-                    #     unguarded -- trips `set -e` and aborts
-                    #     identify_candidates silently (zero output, no
-                    #     error surfaced) partway through a large registry.
-                    #     Confirmed present in the previously-committed
-                    #     script too, independent of fixes #1/#2.
-                    latest_mtime=$(find "$path" \
-                        \( -name '.git' -o -name 'node_modules' \
-                           -o -name 'venv' -o -name '__pycache__' \) -prune \
-                        -o -type f -exec stat -f '%m' {} + 2>/dev/null \
-                        | sort -rn | head -1) || true
-                    if [[ -z "$latest_mtime" ]]; then
-                        latest_mtime=$(stat -f '%m' "$path" 2>/dev/null || echo "$now")
-                    fi
-                    local age_days=$(( (now - latest_mtime) / 86400 ))
+                    # Recency now comes from scripts/lib/worktree_recency.sh
+                    # (sourced at the top of this file), which keeps the
+                    # perf work that was done here -- `-prune` on excluded
+                    # dirs rather than `-not -path` (the dominant cost,
+                    # jleechan-q912), and `-exec stat ... +` batching -- and
+                    # fixes two safety defects the local copy had:
+                    #
+                    #  1. `sort -rn | head -1` under `set -o pipefail`:
+                    #     head closing the pipe early raises SIGPIPE in
+                    #     sort, so a healthy scan can yield an EMPTY result.
+                    #     The helper uses a single-pass awk max instead,
+                    #     which consumes all of stdin and never triggers it.
+                    #  2. the empty-result fallback used `stat -f '%m'
+                    #     "$path"` -- the worktree root's own mtime, which
+                    #     only moves when a top-level entry is added or
+                    #     removed. Editing files deep in the tree all week
+                    #     leaves it untouched, so the fallback for "I could
+                    #     not measure this" was the most stale-biased number
+                    #     available: the safety check failed OPEN, marking
+                    #     active worktrees deletable. The helper fails
+                    #     CLOSED (unknown -> age 0 -> preserved).
+                    local age_days
+                    age_days=$(worktree_age_days "$path")
                     if (( age_days >= min_age_days )); then
                         echo "$path"
                     fi
