@@ -785,7 +785,7 @@ fi
 G8B_OUT_CONTENT=$(cat "$G8B_OUT")
 assert_rc "GREEN 8b: exits 0" 0 "$G8B_RC"
 assert_contains "GREEN 8b: logs the distinct approved fall-through line" \
-  "Worktree dir approved (TMP_WORKTREES_APPROVED=1), evaluating: $G8B_PRIVATE_TMP/worktree_stale_dir" \
+  "Worktree dir approved + clean, evaluating: $G8B_PRIVATE_TMP/worktree_stale_dir" \
   "$G8B_OUT_CONTENT"
 if [[ "$G8B_OUT_CONTENT" == *"Skipping temp worktree dir"* ]]; then
   record_fail "GREEN 8b: does not log the misleading 'Skipping' line when approved" "found it anyway"
