@@ -36,8 +36,23 @@ resolve_bash() {
 BASH_BIN="$(resolve_bash)"
 mkdir -p "$DEST"
 
-legacy_labels=(
+retired_labels=(
+  com.disk-magician.gemini-dedup
   com.jleechan.disk-magician-gemini-dedup
+)
+
+# Whole-root AO session .gemini aliases violate AO's selective materialization
+# ownership. Retire every historical label on all installer paths.
+for label in "${retired_labels[@]}"; do
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  if [[ -f "$DEST/${label}.plist" ]]; then
+    mkdir -p "$DEST/.retired"
+    mv -f "$DEST/${label}.plist" "$DEST/.retired/${label}.plist"
+  fi
+  echo "retired $label"
+done
+
+legacy_labels=(
   com.jleechan.disk-magician-playwright-dedup
   com.jleechan.disk-magician-colima-prune
   com.jleechan.disk-magician-hermes-vacuum
