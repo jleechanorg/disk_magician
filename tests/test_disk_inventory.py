@@ -395,6 +395,41 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertNotIn(str(recent_entry), completed.stdout)
         self.assertIn("no files deleted", completed.stdout)
 
+    def test_dev_cache_cleanup_preserves_active_cursor_agent_version(self):
+        cleanup = ROOT / "scripts" / "cleanup_dev_caches.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            versions = home / ".local" / "share" / "cursor-agent" / "versions"
+            active_version = versions / "2026.01-active"
+            stale_version = versions / "2026.02-stale"
+            newest_versions = [
+                versions / "2026.03-new",
+                versions / "2026.04-newest",
+            ]
+            active_binary = active_version / "cursor-agent"
+            active_binary.parent.mkdir(parents=True)
+            active_binary.write_text("active binary", encoding="utf-8")
+            stale_version.mkdir()
+            for version in newest_versions:
+                version.mkdir()
+
+            agent_link = home / ".local" / "bin" / "agent"
+            agent_link.parent.mkdir(parents=True)
+            agent_link.symlink_to(active_binary)
+
+            completed = subprocess.run(
+                ["bash", str(cleanup), "--clean"],
+                env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(active_binary.exists(), completed.stdout)
+            self.assertTrue(agent_link.samefile(active_binary))
+            self.assertFalse(stale_version.exists(), completed.stdout)
+            for version in newest_versions:
+                self.assertTrue(version.exists(), completed.stdout)
+
     def test_cli_source_contains_no_delete_execution(self):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("shutil.rmtree", text)
