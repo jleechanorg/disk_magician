@@ -72,13 +72,28 @@ any of the launchd-scheduling bugs below. See Lane 2.
 
 Two structural launchd bugs were found and **fixed** in this pass:
 
-1. **Disk-reclaim impact.** Four weekly reclaim sweepers (colima-prune,
+1. **Disk-reclaim impact — causal diagnosis narrowed by independent
+   review, fix unaffected.** Four weekly reclaim sweepers (colima-prune,
    hermes-vacuum, playwright-dedup, worktree-venvs) had **never fired
-   once** since install (2026-07-23) — not a symptom of running-late, a
-   structural starvation: `StartInterval=604800` (7 days) resets on every
-   per-user launchd reload, and this Mac only reboots every ~2 days, so
-   the interval can never accumulate. Fixed with `RunAtLoad=true`;
-   verified all 4 fired for the first time immediately after the fix.
+   once** since install (2026-07-23 ~16:56, commit `abc8f51`) as observed
+   2026-07-29 ~01:00 — but a second independent adversarial pass found
+   this session's original causal claim ("structurally can never fire,
+   StartInterval resets on every reboot") overstated: only **~5.4–5.9
+   days had elapsed**, LESS than the 7-day interval itself, so "never
+   fired yet" was the *expected* outcome even with **zero** reboots — no
+   reset-on-reload mechanism is required to explain the observation as
+   made. That reset-on-reboot mechanism was inferred from this machine's
+   ~2-day reboot cadence, not confirmed against `launchd` documentation
+   (`man launchd.plist` does not document countdown behavior across
+   reloads for a job that has never fired). **Corrected framing:** the
+   interval simply hadn't elapsed yet; separately, given the observed
+   ~2-day reboot cadence, it was *likely but unconfirmed* that the
+   interval would reset before ever reaching 7 continuous days, making
+   eventual firing without intervention doubtful. **The fix itself is
+   unaffected and independently confirmed valid**: `RunAtLoad=true` was
+   added, all 4 sweepers fired for the first time immediately after
+   (`runs=1`, `last exit code=0`), and this is a strict improvement
+   regardless of which causal story explains the pre-fix silence.
 2. **Telemetry impact only — no reclaim was lost to this one.** The daily
    growth-tracking snapshot job had been failing `EX_CONFIG` (exit 78)
    every day since 2026-07-25 because its `ProgramArguments` hardcoded a
@@ -606,7 +621,7 @@ caveat, exec-summary net-vs-gross framing, telemetry-vs-reclaim framing).
 
 | Claim | Evidence lens | Design lens | Severity lens | Verdict (≥2/3) |
 |---|---|---|---|---|
-| A. 4 sweepers never fired, StartInterval reboot-starvation, fixed w/ RunAtLoad | SURVIVES | SURVIVES | SURVIVES | **SURVIVES (3/3)** |
+| A. 4 sweepers never fired, StartInterval reboot-starvation, fixed w/ RunAtLoad | SURVIVES | SURVIVES | SURVIVES | **SURVIVES (3/3) this pass — REFUTED 1/3 by independent cross-check, see below ⚠️** |
 | B. Daily snapshot EX_CONFIG since 07-25, python3.13 path drift, fixed | SURVIVES | SURVIVES | REFUTED (telemetry framed as "reclaim automation") | **SURVIVES (2/3)**, framing corrected |
 | C. AO `/tmp` scratch churn is dominant active producer, guardian structurally blocked | SURVIVES (minor figure fix) | SURVIVES (found even stronger multi-day evidence) | PARTIALLY SURVIVES (gross-vs-net framing) | **SURVIVES (2/3 + partial)**, framing corrected |
 | D. Colima trim/prune currently broken (I/O error, 0 bytes trimmed) | SURVIVES | PARTIALLY SURVIVES (causal mechanism not independently confirmed this session) | SURVIVES | **SURVIVES (2/3)**, already hedged correctly in Lane 3 |
@@ -615,15 +630,88 @@ caveat, exec-summary net-vs-gross framing, telemetry-vs-reclaim framing).
 | G. Whole-disk +7.0 GiB/day net over 7.86 days, "only fully trustworthy number" | SURVIVES (exact reproduction from raw git history) | SURVIVES | SURVIVES | **SURVIVES (3/3)** |
 | H. Drilldown sweeper gates on delta not absolute residual, never fires | PARTIALLY SURVIVES (cadence wrong: 4h not 40min) | SURVIVES (confirmed via source code, not a design choice) | REFUTED (P1 disproportionate for a diagnostic-only gap) | **SURVIVES (2/3)**, cadence and priority corrected |
 
-**Net result:** 6 of 8 claims survive with the underlying finding intact
-(some with corrected numbers/framing); claim E's core "disk-growth root
-cause" framing did not survive and has been walked back to "CI-reliability
-finding, disk-growth link unestablished"; claim F's underlying facts
-(size, count, age-clustering) survive but the derived "~20 GiB/day" rate
-claim did not and has been removed in favor of an explicit
-burst-vs-continuous-rate caveat. No claim was found to be evidence-fabricated
-or based on primary sources that don't exist — all corrections were
-framing, precision, or over-generalization issues, not fabrication.
+**Net result of this pass:** 6 of 8 claims survive with the underlying
+finding intact (some with corrected numbers/framing); claim E's core
+"disk-growth root cause" framing did not survive and has been walked back
+to "CI-reliability finding, disk-growth link unestablished"; claim F's
+underlying facts (size, count, age-clustering) survive but the derived
+"~20 GiB/day" rate claim did not and has been removed in favor of an
+explicit burst-vs-continuous-rate caveat. No claim was found to be
+evidence-fabricated or based on primary sources that don't exist — all
+corrections were framing, precision, or over-generalization issues, not
+fabrication. **A second, fully independent pass (see next section) found
+one further disagreement this pass missed** — claim A's causal mechanism
+— which has also been corrected.
+
+## Independent cross-verification (second adversarial pass, main session)
+
+A second, fully independent adversarial pass — 12 fresh Sonnet refuters
+(4 claim groups × evidence/methodology/alternative-explanation lenses,
+refute-by-default, ≥2/3 non-refuted to survive; zero dead verifiers) —
+was run by the main session against 10 claims spanning this report,
+overlapping but not identical to the 8 above. Full verdicts:
+`~/roadmap/disk_magician/sidekick/root-cause-disk-keeps-filling/verify-verdicts.md`.
+Result: **8/10 survived**, one matched this pass's own kill (the
+worldarchitect.ai rate claim, already corrected above), and **one new
+disagreement was found and is corrected here**:
+
+**C1 (= claim A above) — REFUTED 1/3 by the independent pass, and the
+correction is accepted.** The "never fired since install" observation is
+true but was **uninformative on its own**: the `StartInterval` plists
+landed 2026-07-23 ~16:56 (commit `abc8f51`, verified directly against
+`git log`), and the "never exited" observation was made 2026-07-29 ~01:00
+— only **~5.4–5.9 days had elapsed**, less than the 7-day interval
+itself. "Never fired yet" was therefore the *expected* outcome even with
+**zero** reboots — the reset-on-reload mechanism this report originally
+proposed as the explanation is not actually needed to account for what
+was observed, and was never confirmed against `launchd` documentation in
+the first place (inferred from this machine's reboot cadence, not
+verified). The Executive Summary above has been corrected to narrow the
+causal claim accordingly; **the `RunAtLoad` fix itself is unaffected and
+independently confirmed valid** (post-fix `runs=1`, `last exit code=0`
+on all 4 sweepers) regardless of which causal story explains the pre-fix
+silence — this is a diagnosis correction, not a fix retraction.
+
+**Smaller corrections also accepted from the independent pass:**
+- **Residual candidate list (Lane 1):** replaced the general TCC-path
+  citation with this repo's own 2026-07-22 *direct measurements* of
+  those same candidate buckets (re-verified against
+  `roadmap/2026-07-22-disk-regrowth-rootcause.md` directly, not just the
+  independent pass's summary) — see the updated Lane 1 table below.
+- **ez-mac-runner window/per-container figures:** the "21-hour window"
+  label is inconsistent with the 1.83-day (~44h) `disk_observer.jsonl`
+  span it was drawn from — cite it as "a 21-hour sub-window within the
+  1.83-day observer span," not as if it were the whole window. The
+  already-corrected 68–120 per-container range stands; "ez-mac-runner-b-5
+  at 120 OOMs in under 2 days" is ~every 23 minutes for the worst single
+  container, not "30–40 minutes" as an earlier draft implied for the
+  fleet in general.
+- **`backup-home.sh` purge date:** "purged 2026-07-15" does not
+  reproduce in `git log` — verified directly: the actual trap/cleanup
+  code landed **2026-06-27** (`user_scope` commit `81d876e`). Also
+  verified directly against `~/Library/Logs/user-scope-backup.launchd.log`:
+  the 2026-07-28 21:00:57 run completed gracefully at 21:19:17
+  (`git=SUCCESS dropbox=TIMEOUT`, the normal 900s-timeout pattern seen on
+  every run this week); the *separate* 2026-07-29 01:05:09 run is the one
+  with no completion line logged, consistent with the `-9` (SIGKILLed)
+  exit code noted earlier — these are two different events, not one.
+
+Residual candidate buckets, corrected to cite the 2026-07-22 pass's
+actual measurements rather than an unquantified path list: `~/Library/Application
+Support/MobileSync/Backup` measured **0 GiB** (directory exists but is
+empty — no iOS device backups on this machine, not a residual
+contributor); `/Library/Developer/CoreSimulator` measured **31 GiB but 0
+GiB actually reclaimable** (`simctl list devices unavailable` returned
+zero results; the weight is the one active, in-use iOS runtime plus its
+Cryptex/Caches, not orphaned data); `~/Library/Caches` (user) subdirs ≥2
+GiB summed to only **6 GiB total**; `~/Library/Containers` (user)
+subdirs ≥2 GiB summed to only **2 GiB total**. None of these four
+explain a meaningful fraction of the 291 GiB residual — the residual
+remains predominantly the APFS-protected/purgeable pool (confirmed via
+`purgeable_kb: 0` in the frontier scan and the APFS local-snapshot
+size-floor finding above), plus the TCC-blocked `Mail`/`Messages`/
+`Group Containers`/root-owned `/private/var` subtrees this session could
+not quantify without Full Disk Access or `sudo`.
 
 ## Durable artifacts
 

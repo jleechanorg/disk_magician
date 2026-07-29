@@ -1,5 +1,5 @@
 ---
-title: Weekly launchd sweepers never fired — StartInterval starved by reboot cadence
+title: Weekly launchd sweepers never fired before day 7 — reboot-reset risk unconfirmed, RunAtLoad fix stands
 hostname: jeffreys-macbook-pro.local
 date: 2026-07-29
 status: mitigated
@@ -32,24 +32,44 @@ catch-up run (see the retained comment in
 `launchd/com.disk-magician.playwright-dedup.plist`). Switching to
 `StartInterval` was meant to route around that.
 
-It didn't work, for an unrelated reason: `StartInterval`'s countdown is
-per-bootstrap-session state and resets on every launchd reload — which
-happens at every login/reboot for a per-user `LaunchAgent`. `last reboot`
-showed only 2 reboots since wtmp began 2026-07-20 (Jul 24 21:34, Jul 26
-18:48). Every continuous-uptime window since the Jul-23 install (1.27
-days, 1.9 days, 2.3+ days as of Jul 29) fell short of the 7-day
-threshold. On a machine that reboots roughly every ~2 days, a
-7-day-interval `LaunchAgent` can structurally never accumulate enough
-continuous uptime to fire — independent of whether the interval mechanism
-is calendar- or duration-based.
+**Correction (2026-07-29, post-publication, independent adversarial
+review):** this section originally claimed the fix was needed because
+`StartInterval`'s countdown resets on every launchd reload (which happens
+at every login/reboot for a per-user `LaunchAgent`), and that on this
+machine's ~2-day reboot cadence a 7-day interval could structurally never
+accumulate enough continuous uptime to fire. **That causal mechanism was
+inferred, not verified, and a second adversarial pass showed it wasn't
+even necessary to explain the observation:** the plists landed
+2026-07-23 ~16:56 (commit `abc8f51`), and the "never fired" observation
+was made 2026-07-29 ~01:00 — only **~5.4–5.9 days had elapsed**, less
+than the 7-day interval itself. "Never fired yet" was the *expected*
+outcome even with **zero** reboots; no reset-on-reload mechanism is
+required. `man launchd.plist` does not document countdown-reset behavior
+across reloads for a job that has never fired, so this remains
+unconfirmed either way — it is *plausible but unconfirmed* that the
+observed ~2-day reboot cadence (only 2 reboots logged since wtmp began
+2026-07-20: Jul 24 21:34, Jul 26 18:48; longest continuous-uptime window
+2.3+ days) would have reset the countdown before it ever reached 7 days,
+but the evidence gathered here does not establish that as fact.
+
+**What this does NOT change:** the `RunAtLoad=true` fix below is
+independently correct and confirmed working (all 4 sweepers fired for
+the first time immediately after, `runs=1`/`exit 0`) regardless of which
+causal story explains the pre-fix silence — a job that hadn't reached its
+first scheduled fire yet, on a machine that reboots every ~2 days, still
+benefits from a `RunAtLoad` backstop instead of waiting out a full
+uninterrupted week. This is a correction to the *diagnosis*, not a
+retraction of the fix.
 
 ## Why it matters
 
 These 4 jobs are the disk-reclaim sweepers for Colima Docker prune, Hermes
 SQLite WAL checkpointing, the Playwright browser-cache dedup symlink farm,
-and dormant worktree venv stripping. With all 4 silently dead for 6+ days
-(and, per the same starvation logic, silently dead since whenever they were
-first introduced under either scheduling mechanism), their reclaim volume
+and dormant worktree venv stripping. With all 4 silently dead for the 6
+days between install and discovery — and, under the original
+`StartCalendarInterval` scheduling before the 2026-07-23 fix, dead for 16+
+days before that via the separately-confirmed sleep-drops-window bug —
+their reclaim volume
 was zero — directly consistent with the recurring "sweepers don't keep up
 with growth" pattern this mission was spawned to root-cause. This is a
 different, deeper bug than the one the 2026-07-22 root-cause pass
@@ -94,3 +114,9 @@ reproduces.
 - 2026-07-29 — sidekick mission (`disk_magician-7io`) found the still-zero
   run count via `launchctl print` + sweeper-health.log corroboration; fixed
   with `RunAtLoad=true`; verified all 4 jobs fired for the first time.
+- 2026-07-29 (same day, later) — an independent 12-refuter adversarial
+  cross-check found the original causal claim (reset-on-reboot starvation)
+  overstated: only ~5.4-5.9 days had elapsed since install, less than the
+  7-day interval, so "never fired" required no special mechanism to
+  explain. Corrected above; the `RunAtLoad` fix itself was unaffected and
+  remains confirmed working.
