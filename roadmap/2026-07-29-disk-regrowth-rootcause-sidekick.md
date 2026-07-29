@@ -41,6 +41,14 @@ session (load average swinging 33–959) severe enough that trivial shell
 commands took >60s to return — noted as a contributing/related
 observation, not independently root-caused.
 
+**Read the Addendum before treating this report as complete.** A parallel
+`/history` + `/ms` sweep surfaced two previously-diagnosed producers
+(~97 GiB/day AO `/tmp` scratch churn, ~40 GiB/day `backup-home.sh`
+duplicate writes) that, if still active, would dwarf everything in this
+session's own measurements — their cited bead IDs could not be
+re-confirmed open in this pass, so their current status needs a fresh
+check, not an assumption either way.
+
 ## Lane 1 — Top-down reconciliation (≥5 GiB granularity, explicit residual)
 
 Source: `~/.disk_magician_state/frontier_last.json` (schema v2 frontier
@@ -176,6 +184,62 @@ These are recommendations, not actions taken in this pass, and require
 - `findings_wiki/`: 3 new docs — see file list below.
 - Bead `disk_magician-w7m` opened for the unconfirmed overlapping-sweeper
   follow-up.
+
+## Addendum — cross-referenced with /history + /ms recall (integrated post-write)
+
+The main session ran parallel `/history` and `/ms` sweeps
+(`recall-history.md`, `recall-ms.md`, same STATE.md directory) and forwarded
+them. Key items that change or extend the picture above:
+
+- **Known larger, still-unresolved producers exist and predate this
+  session's findings.** Per `2026-07-22-disk-regrowth-rootcause.md` §2-3
+  and `nextsteps-2026-07-12-disk-magician-root-cause.md`: (a) AO `/tmp`
+  scratch-worktree churn measured up to **~97 GiB/day**, root-caused to
+  `scripts/cleanup_tmp.sh:50`'s permanent protected-root allowlist
+  (`worldarchitect.ai worldai_claw wa-missions` — 24 GiB / 56% of
+  `/private/tmp` excluded by basename forever) plus a `TMP_WORKTREES_APPROVED`
+  gate that no automated path ever sets; (b) `backup-home.sh` (user_scope
+  repo) writing duplicate rsync output to `/tmp` at an estimated
+  **~40 GiB/day**. The recall cited these as open beads `jleechan-dqiz` and
+  `bd-m8w`, but **this session could not re-locate either ID** as open (or
+  at all) in the `worldarchitect.ai` or `user_scope` beads databases
+  checked — either resolved-and-pruned, or a repo/scope mismatch worth
+  reconciling before assuming either is still live. The underlying roadmap
+  citations are durable regardless of bead-ID status and are worth a fresh
+  measurement pass, since ~97 + ~40 GiB/day would dwarf everything found in
+  this session if still active today.
+- **`disk_magician-1f9` (P0, open):** whole-root AO `.gemini` symlink
+  corruption (an unattended alias script materialized onto a real AO PR).
+  Code fix already implemented (branch `fix/agy-dedup-alias-contract`,
+  disk_magician PR #49) — open only pending merge + existing-alias
+  migration/rollback verification, not a fresh finding for this report.
+- **Frontier-scanner accounting caveat applies to this report's own Lane 1
+  numbers.** Beads `jleechan-df3k`/`jleechan-rvqz` (open) track a known
+  defect where the scanner's displayed ≥5 GiB buckets and its
+  `measured_total_kb` are computed from different bases and don't always
+  reconcile. Checked against this session's own `frontier_last.json`:
+  `granularity_bucket_total_kb` (525.6 GiB) undershoots `measured_total_kb`
+  (532.8 GiB, the figure used above) by **~7.2 GiB** — the same defect
+  class, smaller magnitude than the 55.7 GiB overage that reopened `rvqz`,
+  but present. Treat the 291.0 GiB residual figure as accurate to within
+  roughly this margin, not as a fully closed accounting equation.
+- **Growth-rate telemetry gap worth verifying:** the regrowth-prevention
+  series' "part C" (linear regression of KB/day per top-level dir) was
+  described as shipped 2026-07-06, but the recall found no roadmap doc
+  confirming a currently-running dashboard/output path for it. This
+  session's Lane 2 numbers came from ad hoc analysis of
+  `disk_observer.jsonl`, not from that telemetry — if part C is actually
+  live somewhere, it should be the canonical source going forward instead
+  of one-off analysis.
+- **35-min snapshot's own blind spot on its largest trees:** per
+  `2026-07-22-disk-regrowth-rootcause.md` §3.6/§4.4 (not independently
+  re-verified this session), `du` timeouts on the 5 largest monitored
+  trees (`projects`, `root_library`, `worktrees_dot`, `tmp_private`,
+  `library_containers`) get recorded as literal `0` rather than "stale,"
+  which would make those trees appear to shrink to zero in naive
+  day-over-day diffs while `disk_used_gb` keeps climbing. Not confirmed
+  fixed; worth checking before trusting the 35-min snapshot series for
+  delta attribution on exactly the trees that matter most.
 
 ## Durable artifacts
 
