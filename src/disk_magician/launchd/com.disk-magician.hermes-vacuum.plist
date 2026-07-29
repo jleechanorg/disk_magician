@@ -48,6 +48,20 @@
     <key>Minute</key>
     <integer>30</integer>
   </dict>
+  <!-- RunAtLoad added 2026-07-29: StartInterval alone never fires on this
+       machine. The Jul-22 fix switched Sunday-calendar -> 604800s interval
+       because launchd drops a missed *calendar* window when asleep instead
+       of queuing a catch-up run -- but StartInterval has the same practical
+       failure mode here: its countdown resets on every per-user launchd
+       reload (every login/reboot), and this Mac reboots roughly every 2
+       days, so a 7-day interval never accumulates enough continuous uptime
+       to fire. Verified via `launchctl print` showing "last exit code =
+       (never exited)" on all 4 weekly sweepers, 6 days after install.
+       RunAtLoad gives a real backstop cadence (~every reboot, ~2 days on
+       this box) using the same idempotent/safety-gated script args already
+       in ProgramArguments above. -->
+  <key>RunAtLoad</key>
+  <true/>
   <key>StandardOutPath</key>
   <string>/tmp/disk-magician-hermes-vacuum.log</string>
   <key>StandardErrorPath</key>
