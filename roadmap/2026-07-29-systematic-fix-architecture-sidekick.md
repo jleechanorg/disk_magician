@@ -83,6 +83,23 @@ outside the registry, so the "3 chokepoints undercounts the real producer
 surface" gap becomes a visible, tracked signal instead of an invisible
 adoption gap.
 
+**Scope correction (found via `/ms` recall of bead `disk_magician-si1`,
+added post-scope-change):** this liveness primitive must be shared across
+repo boundaries, not disk_magician-only. `host-disk-guardian` and
+`cleanup-ao-sessions` are separate launchd jobs living outside this repo
+that delete worktrees with **no 14-day recency floor at all** — currently
+low blast-radius because `host-disk-guardian`'s glob is scoped to
+`/private/tmp/wa-*`, but `HOST_DISK_GUARDIAN_WORKTREE_GLOB` can widen that
+to `~/projects/worktree_*`, at which point a worktree edited today whose
+PR merged last week becomes deletable with no age check whatsoever. Any
+version of Layer 1/2 that only wires this liveness+recency primitive into
+disk_magician's own scripts, and leaves the cross-repo sweepers on their
+current unaudited or 1-day-floor logic, has not actually closed this gap —
+it has only closed disk_magician's slice of it while leaving the
+higher-blast-radius sweepers untouched. Porting `worktree_recency.sh` (or
+routing those jobs through disk_magician's own gate) is in scope for
+Layer 1's build, not a follow-up.
+
 ### Layer 2 — Guardian eligibility, hardened (fixes proposal 2's fatal flaws)
 
 The "durable elsewhere" test from proposal 2 is real and correct as ONE
@@ -146,16 +163,34 @@ Fold `diskutil apfs listSnapshots` / `list` into the existing daily
 snapshot job as proposed, but every such call gets a short timeout with
 skip-and-flag-stale (not block) if it doesn't return quickly, given this
 exact system's documented I/O-wedge history. Do **not** grant Full Disk
-Access — the security tradeoff (a standing, unattended, launchd-scheduled
-process with unscoped filesystem-wide read access, with no way to narrow
-the TCC grant) is not justified by an accounting improvement alone.
-Instead, surface the TCC-blind fraction explicitly as
-`tcc_blind_spot_gb: unmeasured` in every report, so residual numbers never
-silently imply completeness they don't have. **Snapshot deletion stays a
-standing needs-operator-decision item, never auto-executed** — the
-rollback-safety question this pass's critique raised (does macOS actually
-self-clear these, and under what confirmed condition) is unresolved and
-should not be worked around by a downstream heuristic.
+Access to any *unattended, launchd-scheduled* process — the security
+tradeoff (a standing, unattended process with unscoped filesystem-wide
+read access, with no way to narrow the TCC grant) is not justified by an
+accounting improvement alone for that class of process. Instead, surface
+the TCC-blind fraction explicitly as `tcc_blind_spot_gb: unmeasured` in
+every report, so residual numbers never silently imply completeness they
+don't have. **Snapshot deletion stays a standing needs-operator-decision
+item, never auto-executed** — the rollback-safety question this pass's
+critique raised (does macOS actually self-clear these, and under what
+confirmed condition) is unresolved and should not be worked around by a
+downstream heuristic; it is now also confirmed (via `/history` recall)
+that a 2026-07-22 attempt to delete these snapshots failed outright for
+lack of sudo under the LaunchAgent, which is itself a durable structural
+reason this can never become an automated action, not just a temporary
+caution.
+
+**Reconciling with the reclaim plan doc's FDA recommendation (added
+post-scope-change):** the reclaim plan proposes granting FDA specifically
+to **cmux** — an interactive terminal application the operator actively
+drives — not to an unattended background daemon. That is a materially
+different risk profile than the one this layer rejects: an
+operator-present, interactively-used tool is not "a standing, unattended,
+launchd-scheduled process." The two documents are not in conflict; this
+layer's rejection is scoped to unattended automation specifically, and the
+reclaim plan's FDA-to-cmux option remains the recommended lowest-risk path
+to shrinking the TCC-blind measurement gap. If FDA is ever considered for
+an unattended `disk_magician` sweeper itself, that remains rejected per
+this layer.
 
 ## Explicitly rejected mechanisms (with the rule that kills them)
 
@@ -182,6 +217,20 @@ should not be worked around by a downstream heuristic.
   an actual idle-timeout feature inside AO itself — out of scope for a
   disk_magician-owned fix, tracked as a cross-repo follow-up, not solved
   here.
+- **Unexplained worktree deletion, root cause unknown (bead
+  `disk_magician-y7t`, open, added post-scope-change).** Three worktrees
+  vanished on 2026-07-26 despite being classified PRESERVE+young by
+  `worktree_hygiene.sh` minutes before they disappeared — an exhaustive
+  investigation (every launchd job, crontab, macOS unified log) found no
+  script or job with `--execute` + `WORKTREE_APPROVED` set anywhere,
+  ruling out every automated path this repo knows about. **This
+  architecture's Layer 1/2 externally-verified-liveness design does not
+  claim to prevent a recurrence of this specific incident, because the
+  mechanism that caused it is still unidentified** — a new layer cannot be
+  claimed to close a hole nobody has located yet. Any future sweeper that
+  touches worktrees, including ones proposed in this doc, should be
+  treated as a suspect class until this bead closes, not assumed safe by
+  construction.
 
 ## Phased implementation order
 
