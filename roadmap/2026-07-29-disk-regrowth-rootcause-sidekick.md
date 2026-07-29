@@ -15,15 +15,22 @@ separately from the explanation.
 CLI agent session log file —
 `/private/var/folders/j0/byd1z6px50v88lf679bgt0h00000gn/T/cursor-agent-logs-501/session-2026-07-27T03-00-48-477Z-95634-1.log`
 — grew from 25.60 GiB (2026-07-28T11:23:50Z frontier-scan capture) to
-**42.24 GiB** (2026-07-29T08:56 UTC), a confirmed **+16.6 GiB in 21.5
-hours (~18.5 GiB/day from a single file)**. `lsof` confirms it is still
-open for writing right now by PID 95634 (a `node` process, the Cursor
-agent session started 2026-07-27T03:00:48Z, running continuously for 2+
-days with no log rotation). This is larger, more precisely quantified,
-and more directly actionable than any other single finding in this
-report — filed as bead `disk_magician-ax0` (P1). **Not acted on in this
-pass**: killing PID 95634 or truncating the log is an irreversible,
-outward-facing action (may lose in-progress agent work) requiring
+**42.24 GiB / 45,519,296,373 bytes** (2026-07-29T08:56 UTC, this
+session's direct `lsof`/`ls` check — 45.52 GB in decimal units, same
+measurement, not a second data point), a confirmed **+16.6 GiB in 21.5
+hours (~18.5 GiB/day average from a single file)** and observed still
+actively growing by two independent watchers (this session's `mtime`
+recheck, and a parallel session watching +28 KB per 20s directly).
+`lsof` confirms it is open for writing right now by **PID 95634, full
+command `~/.local/bin/agent --use-system-ca`, started 2026-07-26 20:00:47
+local under parent `bash` PID 20665** — a live Cursor CLI agent session
+running continuously for 2+ days with no log rotation. This is larger,
+more precisely quantified, and more directly actionable than any other
+single finding in this report — filed as bead `disk_magician-ax0` (P1).
+**Not
+acted on in this pass**: killing PID 95634 or truncating the log is an
+irreversible, outward-facing action (may lose in-progress agent work)
+requiring
 explicit human authorization, not something a read-only root-cause
 mission should do unilaterally.
 
@@ -520,19 +527,25 @@ them. Key items that change or extend the picture above:
   firing 3x with 0 reclaims each time because every candidate fails the
   "no merged PR" / "no uncommitted changes" safety check. This is now the
   Executive Summary's headline finding, not an open question.
-- **`backup-home.sh` duplicate `/tmp` writes — checked live, appears
-  ALREADY FIXED in the current script, contrary to the recall's citation
-  of an open ~40 GiB/day bug.** Read `~/projects/user_scope/scripts/backup-home.sh`
-  directly: it uses `SECURE_TEMP="$(mktemp -d)"` with `trap cleanup EXIT`
+- **`backup-home.sh` duplicate `/tmp` writes — RULED OUT as a current
+  major producer, corroborated by two independent checks.** Read
+  `~/projects/user_scope/scripts/backup-home.sh` directly: it uses
+  `SECURE_TEMP="$(mktemp -d)"` with `trap cleanup EXIT`
   (`cleanup() { rm -rf "$SECURE_TEMP"; }`) and a second nested trap for its
   per-target snapshot temp dir — no unbounded `/tmp` accumulation pattern
-  found. `launchctl print gui/<uid>/org.jleechan.user-scope-backup` shows
-  it ran most recently at 2026-07-29 01:05 (in progress at time of check);
-  its log shows normal git-commit/push cycles to `user_scope`, not runaway
-  `/tmp` growth. One live anomaly noted but not chased further: `launchctl
-  list` shows this job's last exit code as `-9` (SIGKILL) from a prior run
-  — worth a follow-up if it recurs, but does not on its own indicate the
-  historical duplicate-writes bug is still present.
+  found. A second, independent direct check (main session) confirmed the
+  same conclusion with additional specifics: the historical leak variant
+  was purged 2026-07-15; the current `org.jleechan.user-scope-backup` job
+  (runs every 2h) commits config-scoped snapshots only (6 files / 9
+  insertions in its most recent run), and the `user_scope` repo itself is
+  9.2 GiB total — nowhere near a ~40 GiB/day signature. `launchctl print`
+  shows it ran most recently at 2026-07-29 01:05; its log shows normal
+  git-commit/push cycles, not runaway `/tmp` growth. Two minor anomalies
+  noted but not chased further: the 01:05 run's `dropbox` leg reported
+  `TIMEOUT` in its own log, and `launchctl list` shows this job's last
+  exit code as `-9` (SIGKILL) from a prior run — worth a follow-up if
+  either recurs, but neither indicates the historical duplicate-writes
+  bug is still present.
 - **Both `jleechan-dqiz` and `bd-m8w` remain unlocatable** as open (or at
   all) across `disk_magician`, `worldarchitect.ai`, and `user_scope` beads
   databases checked (100+ `.beads/` directories exist across
