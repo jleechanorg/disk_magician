@@ -97,6 +97,24 @@ commit-scoring performance, so no fixed-version upgrade path exists as of
    a days-old session is both a log bomb and (per Cursor forum OOM
    reports) an OOM candidate.
 
+## Deployed prevention (2026-07-29, verified)
+
+1. `export CURSOR_AGENT_DISABLE_DEBUG_LOG=1` added to `~/.bashrc`
+   (user-approved). **A/B verified on the live binary**: with the var,
+   `agent --help` creates NO new session log; without it, one appears
+   immediately. (Var only affects shells sourced after the edit.)
+2. By another operator agent, same day: `~/.cursor/cli-config.json` set
+   `attributeCommitsToAgent=false` + `attributePRsToAgent=false` —
+   disables the commitScoring loop itself (their analysis: the loop
+   queries api2.cursor.sh per commit for AI-attribution dashboards; a
+   private repo absent from Cursor's cloud DB returns noHashData for every
+   commit with no circuit breaker → infinite rescan). Also cleared the
+   NULL-scored junk rows from `~/.cursor/ai-tracking/ai-code-tracking.db`.
+3. Remaining optional: L2 truncate-in-place watchdog (bead
+   disk_magician-rvf) as belt-and-braces for sessions launched without the
+   env var (launchd jobs, other users/shells); upstream forum report (bead
+   disk_magician-5yh).
+
 ## Detection signal for future triage
 
 `$TMPDIR/cursor-agent-logs-<uid>/` — filename embeds the writer PID
