@@ -63,9 +63,17 @@ a third-party tool. Full citations: research report in session
    growing until process exit. Use a size-gated truncate-in-place watchdog
    (launchd, per this repo's conventions) over
    `$TMPDIR/cursor-agent-logs-*/session-*.log` above N GB instead.
-3. **No config-level fix exists** (verified absent from official docs;
-   definitive close-out = run `cursor-agent --help` on the installed
-   binary per the negative-claim evidence bar).
+3. **UNDOCUMENTED KILL SWITCH EXISTS (correction 2026-07-29, found by
+   reading the installed binary — absent from all official docs):**
+   `CURSOR_AGENT_DISABLE_DEBUG_LOG=<any value>` disables the debug session
+   log entirely. Verified in `versions/2026.07.23-e383d2b/index.js`:
+   `const m="CURSOR_AGENT_DISABLE_DEBUG_LOG"; ... function _(){return
+   !!process.env[m]}` — logging is default-ON for every session and gated
+   only by this opt-out. Setting it in `~/.bashrc` is the root-cause fix
+   (trade-off: loses cursor-agent debuggability); the truncate watchdog
+   remains as belt-and-braces for sessions launched without the var.
+   Earlier "no config-level fix" wording here was wrong — docs-absence is
+   not code-absence (negative-claim evidence bar).
 4. Long-lived headless cursor-agent sessions should be cycled periodically;
    a days-old session is both a log bomb and (per Cursor forum OOM
    reports) an OOM candidate.
