@@ -96,11 +96,32 @@ STATE.md):
 | 5.57 | `~/.colima/_lima` |
 | 5.22 | `~/.nvm/versions` |
 
-`~/projects/worldarchitect.ai` at 50.88 GiB is the single largest
-attributed item and is flagged as a quick-win candidate for a follow-up
-`du`/worktree-hygiene pass (likely nested worktrees + git pack objects +
-node_modules; not broken down further in this pass — time-boxed out, see
-Lane 3).
+`~/projects/worldarchitect.ai` at 50.88 GiB (54.32 GiB by a second,
+slightly different pass over the same frontier buckets — within the
+scanner's own known accounting slack, see Addendum) is the single largest
+attributed item. Broken down from the frontier scan's own sub-buckets:
+
+- **42.20 GiB (78%) in `.claude/worktrees/*`** — 131 distinct
+  agent/workflow worktrees (`agent-<hash>`, `wf_<id>`). Sampled 8 of 131 at
+  random with the canonical `worktree_age_days` helper
+  (`scripts/lib/worktree_recency.sh`, real content-mtime measurement, not
+  a proxy): **all 8 measured exactly 2 days old** — well inside the
+  mandatory 14-day protected window, and consistent (not a fail-closed
+  default, which reads differently). This is **not stale accumulation**;
+  it reads as active, ongoing concurrent agent development on
+  `worldarchitect.ai` — plausibly the same underlying activity burst
+  responsible for the extreme CPU load and container churn documented
+  above. **Not currently a safe reclaim target.** Re-sample in a future
+  pass once agent activity on this repo quiets down; if a meaningful
+  fraction age past 14 days, the existing worktree-hygiene tooling can
+  reclaim it then.
+- 5.94 GiB in `.git/` (mostly the 4.70 GiB pack file — normal git
+  history, not a leak).
+- 3.27 GiB across other worktree-adjacent dirs (`worldarchitect.ai.worktrees`,
+  `.worktrees`, `.git/worktrees`) — same 14-day protection applies, not
+  independently sampled this pass.
+- Remainder (~2-3 GiB) not broken down further — `venv/`, `.beads/`, and
+  smaller items below the ≥5-item cutoff used here.
 
 ## Lane 2 — Coverage-validated growth-rate deltas
 
@@ -156,10 +177,14 @@ These are recommendations, not actions taken in this pass, and require
    -leverage fix available — it addresses the producer, not the sweeper.
    Out of `disk_magician`'s scope to change directly; file/track in
    `ez-gh-actions`.
-2. **`~/projects/worldarchitect.ai` (50.88 GiB).** Largest single
-   attributed item; not broken down in this pass. Follow-up: run the
-   existing worktree-hygiene / dedup tooling against it specifically,
-   respecting the 14-day worktree-recency rule.
+2. **`~/projects/worldarchitect.ai` (50.88 GiB) — mostly NOT currently
+   reclaimable.** Broken down in Lane 1 above: 42.20 GiB is 131 active
+   `.claude/worktrees/*` agent worktrees, sampled and measured at 2 days
+   old (well inside the 14-day floor) — this is in-flight work, not a
+   quick win today. Re-run the sample (or a full census) with
+   `scripts/lib/worktree_recency.sh` in a future pass once agent activity
+   on this repo quiets down; anything that ages past 14 days becomes a
+   real reclaim target for the existing worktree-hygiene tooling.
 3. **`colima-prune` I/O error.** The first-ever `colima-prune` run hit
    `input/output error` on one containerd blob during `docker image prune
    -af`. Possibly the known "Colima sparse disk wedges under host disk
