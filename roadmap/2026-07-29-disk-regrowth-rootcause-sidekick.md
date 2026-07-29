@@ -10,6 +10,23 @@ separately from the explanation.
 
 ## Executive summary
 
+**Single most actionable finding, added by a parallel measurement lane
+(`measure-topdown.md`) and confirmed live by this session:** one Cursor
+CLI agent session log file —
+`/private/var/folders/j0/byd1z6px50v88lf679bgt0h00000gn/T/cursor-agent-logs-501/session-2026-07-27T03-00-48-477Z-95634-1.log`
+— grew from 25.60 GiB (2026-07-28T11:23:50Z frontier-scan capture) to
+**42.24 GiB** (2026-07-29T08:56 UTC), a confirmed **+16.6 GiB in 21.5
+hours (~18.5 GiB/day from a single file)**. `lsof` confirms it is still
+open for writing right now by PID 95634 (a `node` process, the Cursor
+agent session started 2026-07-27T03:00:48Z, running continuously for 2+
+days with no log rotation). This is larger, more precisely quantified,
+and more directly actionable than any other single finding in this
+report — filed as bead `disk_magician-ax0` (P1). **Not acted on in this
+pass**: killing PID 95634 or truncating the log is an irreversible,
+outward-facing action (may lose in-progress agent work) requiring
+explicit human authorization, not something a read-only root-cause
+mission should do unilaterally.
+
 **Trustworthy headline number:** whole-disk usage grew **+7.0 GiB/day net**
 over the last 7.86 days (778 → 833 GiB used, from `df`-derived values in
 `~/.disk_magician_backup` snapshot history — see Lane 2). This net figure
@@ -130,6 +147,27 @@ actual disk usage dropped much (852 → 823.7 GiB, a modest ~28 GiB
 decrease). This report does not re-litigate that residual composition;
 see `roadmap/2026-07-22-disk-regrowth-rootcause.md` §"Reclaimable residual"
 for what was already ruled out.
+
+**Update: one residual mechanism moved from "hypothesized" to
+"confirmed."** A parallel measurement lane ran `diskutil apfs listSnapshots /`
+directly and found **3 local APFS snapshots present** (all
+`com.apple.os.update-*`, OS-update-prep snapshots, not user Time Machine
+snapshots) — one of them (`com.apple.os.update-4B8ED9A3...`) is explicitly
+flagged by `diskutil` itself: `NOTE: This snapshot limits the minimum size
+of APFS Container disk3`. This means blocks referenced only by that
+snapshot cannot be reclaimed by deleting files until the snapshot itself
+is deleted — a real, `du`-invisible residual mechanism, not just a
+plausible theory. The same lane also enumerated the specific TCC-protected
+paths blocking full measurement without a Full Disk Access grant:
+`~/Library/{Mail,Messages,Containers,Group Containers}`,
+`~/Library/Application Support/MobileSync` (iPhone/iPad backups),
+`.DocumentRevisions-V100`, `.Spotlight-V100`, and most of
+`/private/var/{networkd,install,spool,...}` — none quantifiable without
+`sudo`/Full Disk Access, all folded into the 291 GiB residual. It also
+confirmed the frontier scan's own self-reported honesty: `disk_used_kb`
+drifted by −2.76 GiB *during the scan's own 43-minute run* — a meaningful
+fraction of "residual" is a genuinely moving target on this box, not a
+fixed hidden pile.
 
 Top attributed producers, aggregated to ~4 path levels under
 `/System/Volumes/Data` (top 15 of 40+ collected, full list in mission
@@ -326,11 +364,77 @@ Coverage caveat: the daily growth-tracking snapshot
 this secondary source leans on `disk_observer.jsonl` (fine-grained,
 unaffected by that specific bug) rather than the daily snapshot series.
 
+### Live producer sampling (a third source, minute-scale, `measure-liverate.md`)
+
+A third parallel lane caught the disk red-handed with t0→t3 sampling
+(~20 minutes, 2026-07-29 01:37–01:57) across prime-suspect paths. Key
+findings that add texture beyond the 8-day and 1.8-day analyses above:
+
+- **The disk oscillates on minute scales, not just day scales.** t0→t1
+  (493s): a **-11.42 GiB reclaim**. t1→t3 (723s): **+2.18 GiB regrowth**
+  (+248.9 GiB/day extrapolated-instantaneous — clearly a burst, not a
+  sustained rate). Available free space moved 29.1 → 39.6 → 38.1 → 37.5
+  GiB across the 20-minute session.
+- **The -11.42 GiB reclaim was NOT the pressure-sweep job**, contrary to
+  the obvious hypothesis. `disk-magician-pressure-sweep.log` shows that
+  job fired 10+ minutes *before* this window and reclaimed almost
+  nothing: `cleanup_tmp.sh` **timed out (rc=124)**, `cleanup_colima.sh
+  --clean` freed **0 bytes** (same containerd I/O error documented
+  above). This is a *third* independent confirmation that the disk
+  pressure-sweep's own sub-cleaners are currently failing, not just
+  colima-prune. The actual -11.42 GiB reclaim mechanism is
+  **unidentified** — leading candidates are APFS purgeable/snapshot
+  thinning triggered by crossing the <30 GiB-free threshold, or a
+  concurrent agent/session in this same multi-lane investigation clearing
+  `/private/tmp`/`~/Library/Caches` (no `rm` process was caught alive at
+  check time). Flagged as an open question, not resolved this pass.
+- **`~/Library/Caches` is the single most volatile path measured this
+  session** — it shrank fastest in the reclaim burst (-6.61 GiB in 8.2
+  min) and regrew fastest afterward (+0.52 GiB in 14.2 min, +53 GiB/day
+  instantaneous). No specific app was attributable (most per-app Caches
+  subdirs are SIP/permission-blocked); recommend a Full-Disk-Access
+  follow-up pass to attribute which app's cache is churning this hard.
+- **11 worktree directories under `~/projects/` vanished mid-`du`-walk**
+  (a genuine TOCTOU race — "No such file or directory" mid-read). No
+  `rm`/`git worktree remove` process was caught alive afterward. Most
+  likely explanation: one of ~22 active AO/wa tmux sessions or ~30
+  concurrent `claude --session-id` worker processes self-cleaning its own
+  finished scratch worktree — **this reads as normal AO-worker lifecycle
+  behavior, not a repeat of the still-unresolved 2026-07-26
+  "who-deleted-the-worktrees" mystery** (`disk_magician-y7t`) — flagged
+  for completeness, not escalated, since a live process census would be
+  needed to confirm and none was performed this pass.
+- **Colima's real (non-sparse) block usage was checked directly and
+  ruled OUT of this specific regrowth burst**: `stat -f "%b"` on both the
+  diffdisk (1.11 GiB real) and datadisk (7.14 GiB real) showed **zero
+  byte growth** across a 3-minute sub-window, despite `ls`-apparent sizes
+  staying pinned at the sparse 20/100 GiB ceiling the whole session and
+  mtimes updating (heartbeat/fsync writes, not net growth). Colima
+  remains the most likely *long-term* suspect per prior project history,
+  but was not the driver of this particular short burst.
+- **New, unverified lead:** a CoreSimulator device process
+  (`~/Library/Developer/CoreSimulator/Devices/EFE037C1-.../`, 2.95 GiB
+  single snapshot) started exactly at 01:52:15 PDT, inside the
+  regrowth window, at 26% CPU — the top candidate to explain the ~1.43
+  GiB of the t1→t3 regrowth left unattributed by `/private/tmp` +
+  `~/Library/Caches` alone. No before/after delta was captured, so this
+  is a lead for a future pass, not a confirmed producer.
+
 ## Lane 3 — Safety-gated quick wins (reported separately — NOT the root-cause explanation)
 
 These are recommendations, not actions taken in this pass, and require
 `scripts/safety_check.sh` + the worktree 14-day rule before any deletion:
 
+0. **HIGHEST PRIORITY: the runaway cursor-agent log (42.24 GiB, growing
+   ~18.5 GiB/day, PID 95634 confirmed still writing).** See Executive
+   Summary and bead `disk_magician-ax0`. Recommended action for the human
+   operator: check whether PID 95634's Cursor agent session is still
+   doing useful work; if not, kill it and truncate/delete the log; if it
+   is, at minimum rotate the log now (the file is a `-rw-------` regular
+   file under `/private/var/folders/...`, not a worktree, so the 14-day
+   worktree rule doesn't apply, but killing a live process is still an
+   irreversible action outside this mission's read-only mandate — not
+   done in this pass).
 1. **`ez-gh-actions` runner memory limit.** Raise the per-container memory
    limit (or reduce concurrent runner count) for `ezgha-runner:latest` to
    stop the high-frequency OOM-cycle per runner. Worth fixing for CI
