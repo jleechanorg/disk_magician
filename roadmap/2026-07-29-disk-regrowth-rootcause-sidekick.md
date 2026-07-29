@@ -10,6 +10,32 @@ separately from the explanation.
 
 ## Executive summary
 
+**Trustworthy headline number:** whole-disk usage grew **+7.0 GiB/day net**
+over the last 7.86 days (778 → 833 GiB used, from `df`-derived values in
+`~/.disk_magician_backup` snapshot history — see Lane 2). This net figure
+hides large sawtooth swings (reclaim events of -85, -28, and -27 GiB) on
+top of a steadier upward creep, and a path-level ledger whose measurement
+coverage has degraded in lockstep with disk pressure (down to 1.0%
+coverage — 18 of 58 tracked paths — in the most recent snapshot). Do not
+trust a single recent snapshot for "what's using disk right now"; this
+report uses the 8-day union of snapshots plus independent live sampling
+instead.
+
+**The dominant currently-active producer, confirmed by two independent
+measurement passes, is AO/CI `/private/tmp` scratch-worktree churn** —
+not the launchd bugs below, though those compound the problem. Gross
+production is ~23–25 GiB/day when unswept; the most recent unswept climb
+was **+25.2 GiB/day sustained for 1.76 days** before the tracking key
+itself timed out under load (true current size likely 65–75+ GiB,
+unmeasured). Critically, `host-disk-guardian.log` shows its CRITICAL-tier
+auto-clean firing 3 times in 2 minutes at 2–6 GiB free and processing
+**zero** evidence bundles, scratchpads, or merged-PR worktrees each time —
+every `/private/tmp/wa-pr-*` candidate is skipped for "no merged PR found"
+or "uncommitted changes present". **The safety net is alive but
+structurally cannot reclaim this path's current occupants** — this is the
+answer to "why don't sweepers keep up," more directly than any of the
+launchd-scheduling bugs below. See Lane 2.
+
 Two structural launchd bugs were found and **fixed** in this pass, both of
 which had silently zeroed out disk-reclaim automation for days:
 
@@ -27,27 +53,34 @@ which had silently zeroed out disk-reclaim automation for days:
    interpreter to python3.14. Fixed by pointing at the stable uv-tool
    entrypoint instead of a version-pinned internal path.
 
-Separately, a **currently-active, unfixed** producer was identified and
-quantified: the `ez-mac-runner` self-hosted CI containers (image
-`ezgha-runner:latest`) are OOM-killed and relaunched roughly every 30–40
-minutes each, generating on the order of one full container lifecycle per
-minute across the fleet — a churn rate no periodic sweeper can keep pace
-with. This is reported as a root cause and a quick-win recommendation, not
-fixed in this pass (it's an `ez-gh-actions` workload-config issue, outside
-`disk_magician`'s scope).
+A **third bug in the same "sweeper structurally cannot fire" class** was
+found by measurement but not fixed: the residual-drilldown sweeper gates
+on `residual_delta_gb` (snapshot-to-snapshot delta, ~0.4 GiB) instead of
+the absolute `residual_gb` (400–824 GiB across this window), so it logs
+"no-op" every ~40 minutes regardless of how catastrophic the absolute
+unmeasured residual gets. Filed as bead `disk_magician-nea` (P1), not
+fixed in this pass — see Lane 2.
+
+Separately, two **currently-active, unfixed** producers were identified
+and quantified:
+
+- The `ez-mac-runner` self-hosted CI containers (image
+  `ezgha-runner:latest`) are OOM-killed and relaunched roughly every
+  30–40 minutes each — a churn rate no periodic sweeper can keep pace
+  with. Out of `disk_magician`'s scope (an `ez-gh-actions` workload-config
+  issue).
+- Colima's sparse-disk trim/prune path is **currently broken**: the
+  2026-07-29 `colima-prune` run hit an `input/output error` on a
+  containerd blob during `docker image prune`, and the subsequent
+  `fstrim -av` reclaimed **0 bytes** on the main volumes — independently
+  corroborated by two separate measurement passes in this session (72.8
+  GiB/day gross-up vs. 578.6 GiB gross-down churn over the 8-day window,
+  net only -0.90 GiB/day because the trim isn't landing).
 
 The system was also observed under extreme, unrelated CPU load during this
 session (load average swinging 33–959) severe enough that trivial shell
 commands took >60s to return — noted as a contributing/related
 observation, not independently root-caused.
-
-**Read the Addendum before treating this report as complete.** A parallel
-`/history` + `/ms` sweep surfaced two previously-diagnosed producers
-(~97 GiB/day AO `/tmp` scratch churn, ~40 GiB/day `backup-home.sh`
-duplicate writes) that, if still active, would dwarf everything in this
-session's own measurements — their cited bead IDs could not be
-re-confirmed open in this pass, so their current status needs a fresh
-check, not an assumption either way.
 
 ## Lane 1 — Top-down reconciliation (≥5 GiB granularity, explicit residual)
 
@@ -107,14 +140,21 @@ attributed item. Broken down from the frontier scan's own sub-buckets:
   (`scripts/lib/worktree_recency.sh`, real content-mtime measurement, not
   a proxy): **all 8 measured exactly 2 days old** — well inside the
   mandatory 14-day protected window, and consistent (not a fail-closed
-  default, which reads differently). This is **not stale accumulation**;
-  it reads as active, ongoing concurrent agent development on
-  `worldarchitect.ai` — plausibly the same underlying activity burst
-  responsible for the extreme CPU load and container churn documented
-  above. **Not currently a safe reclaim target.** Re-sample in a future
-  pass once agent activity on this repo quiets down; if a meaningful
-  fraction age past 14 days, the existing worktree-hygiene tooling can
-  reclaim it then.
+  default, which reads differently). **For cleanup purposes this is
+  correctly protected — not a safe reclaim target.** But for root-cause
+  purposes, standing stock ÷ observed age is itself a rate finding: 42.2
+  GiB accumulated in ~2 days is **on the order of ~20 GiB/day of
+  in-repo agent-worktree production** (a rough derivation from
+  stock/age, not a direct measured delta — treat as an estimate). This
+  independently corroborates the historical "AO worktree churn" producer
+  class from the recall sweep, this time landing inside a project
+  checkout (`~/projects/worldarchitect.ai/.claude/worktrees/`) rather than
+  `/private/tmp`, and reads as part of the same underlying burst of
+  concurrent agent activity responsible for the extreme CPU load and
+  container churn documented in the Executive Summary. Re-sample in a
+  future pass once agent activity on this repo quiets down; if a
+  meaningful fraction age past 14 days, the existing worktree-hygiene
+  tooling can reclaim it then.
 - 5.94 GiB in `.git/` (mostly the 4.70 GiB pack file — normal git
   history, not a leak).
 - 3.27 GiB across other worktree-adjacent dirs (`worldarchitect.ai.worktrees`,
@@ -125,46 +165,107 @@ attributed item. Broken down from the frontier scan's own sub-buckets:
 
 ## Lane 2 — Coverage-validated growth-rate deltas
 
-Source: `~/.disk_magician_state/disk_observer.jsonl` (2,631 records,
-sampled every few minutes, span 2026-07-27 05:24 → 2026-07-29 01:15, 1.83
-days).
+### Primary source (authoritative, 7.86-day window): `measure-deltas.md`
 
-- Net change over the full span: 837.1 → 832.8 GiB used (**-4.3 GiB**,
-  ≈ **-2.35 GiB/day** net) — but net is a misleading headline here.
-- Actual behavior is **highly volatile, not monotonic**: used space swung
-  from a min of 802.6 GiB (2026-07-27 14:17) to a max of 864.5 GiB
-  (2026-07-28 23:16) — a **62 GiB peak-to-trough swing inside under 2
-  days**.
-- Steepest single-hour rise measured: **+26.9 GiB in one hour**
-  (2026-07-27 14:32 → 15:32).
-- Colima's sparse-disk allocation (`root_allocated_kb`) swung between 2.7
-  GiB and 41.6 GiB over the same window, consistent with the documented
-  sparse-disk-grows-under-churn / shrinks-only-via-in-VM-fstrim behavior,
-  but colima alone does not explain the sustained +34 GiB climb from
-  2026-07-28 02:24 (825.3 GiB used) to 23:24 (859.3 GiB used) — colima
-  stayed flat/low (5.6–11 GiB) for most of that climb.
-- Docker event counts in that same 21-hour climb window: **919 `create`,
-  903 `die`, 925 `destroy`, 897 `start`, 361 `oom`** — see Executive
-  Summary and `findings_wiki/extreme-cpu-load-and-ezgha-runner-oom-churn.md`.
-  All 551 OOM events across the full observer history are on
-  `ezgha-runner:latest` across 6 named containers, each OOM'd 68–97 times
-  in under 2 days.
-- **Direct before/after proof of the RunAtLoad fix (Lane-1-adjacent, not a
-  quick win — this is the structural fix landing):** the observer's very
-  last sample before this report shows used space dropping from the
-  859.3 GiB peak to 832.6 GiB (**-26.7 GiB**) in the window immediately
-  following the `RunAtLoad` fix landing and all 4 sweepers firing for the
-  first time ever (colima `docker prune`, hermes-vacuum WAL checkpoint,
-  playwright-dedup, worktree-venvs). `df` immediately after this session's
-  work confirms 833 GiB used / 29 GiB avail (97%) — back near the spawn
-  baseline despite the intervening 859 GiB peak.
+A parallel measurement teammate mined `~/.disk_magician_backup` git history
+(266 parsed `disk_snapshot.json` blobs across 273 commits, 2026-07-21 04:52
+→ 2026-07-29 01:23, READ-ONLY, no commits/gc/prune performed) — see
+`~/roadmap/disk_magician/sidekick/root-cause-disk-keeps-filling/measure-deltas.md`
+for full methodology and raw artifact paths.
+
+**Whole-disk `df` trend (the only fully-trustworthy number in this
+report):** 778 → 833 GiB used over 7.855 days = **+7.0 GiB/day net**, free
+107 → 29 GiB, capacity 84% → 89% (peaked 93% mid-window). Not monotonic —
+large sawtooth reclaim events are superimposed on the upward trend: -85
+GiB in 78 minutes (2026-07-23), -28 GiB (2026-07-25→26), -21 GiB
+(2026-07-24), -18 GiB (2026-07-26), -27 GiB (2026-07-28→29, immediately
+preceding a coverage collapse).
+
+**Coverage caveat — do not trust the most recent snapshot alone:**
+`snapshot_coverage_pct` degrades in lockstep with disk pressure, exactly
+as a prior finding predicted. It fell from 62.0% (77/77 paths, window
+start, healthy) to **1.0% (18/58 paths) at window end** — the snapshot
+that matters most for "what's using disk right now" has essentially
+collapsed (`tmp_private`, `colima`, `codex_root`, `claude_root`, `hermes`,
+`ao_sessions`, `worktrees_dot`, and 30+ others read `null`/timed out). The
+824.5 GiB `residual_gb` in that final snapshot is not newly-discovered
+dark matter — it's mostly the same paths that measured fine an hour
+earlier, now timing out under load. The nightly frontier-BFS top-down scan
+is worse still: it returned `measured_total_kb: 0` (0% coverage) for
+**three consecutive nights** (2026-07-25, 26, 27) before one partial
+success on 2026-07-28 (532.8 GiB measured, 290.9 GiB residual — the
+figures used in Lane 1 above), which is now >21 hours stale with no
+refresh since.
+
+**Top identified producers, ranked by gross production (the real
+root-cause ranking — net alone hides active-but-swept churn):**
+
+| Producer | Net GiB/day | Gross-up GiB/day | Status |
+|---|---:|---:|---|
+| `tmp_private` (`/private/tmp`, AO/CI scratch worktrees) | +4.97 (8-day avg) | ~23–25 (most recent unswept climb: **+25.2 sustained 1.76 days**) | **ACTIVE, currently invisible to tracker (timed out last 4 snapshots)** |
+| `colima` (sparse VM disk) | -0.90 | 72.76 (578.6 GiB gross-down over window) | Trim/prune **currently broken** (I/O error, 0 bytes trimmed) |
+| `worktrees_dot` (`~/.worktrees`) | +1.47 | 2.94 | Steady grower, **not swept at all currently** |
+| `gemini_root` (`~/.gemini`) | +1.30 | 1.47 | Growing, **no sweeper** |
+| `library_developer` (Xcode/DerivedData-class) | +1.03 | 2.17 | Partial sweeps, net still climbing |
+| `projects` (whole `~/projects`) | +0.50 | 7.21 (52.3 GiB gross-down) | Git checkout/rebase churn, mostly self-correcting via 14-day sweeper |
+| `ao_home` | +0.88 | 1.25 | Monotonic, **zero observed reclaim** over the window |
+| `ao_sessions` | +0.71 | 0.71 | Monotonic, **zero reclaim**, same AO family as above |
+
+`library_messages` (27.25→0.45 GiB, one real step-change, likely a
+one-time Messages-cache clear of uncertain provenance) and `pictures`
+(13.7→0.0 GiB) are excluded from the table above: `pictures` is confirmed
+**measurement noise**, not a real trend — it flaps repeatedly between
+exactly 13.7 and 0.0 GiB with no intermediate values, a `du`/timeout
+artifact under load. `hermes`/`hermes_prod` are the same physical
+directory (symlink alias) — net -0.79 GiB/day, driven by the
+`hermes-vacuum` fix's WAL checkpoint (which flushes the WAL but does not
+shrink the 6,130.9 MB main `state.db` — a full guarded `VACUUM` has not
+run, by design).
+
+**Why the sweepers can't keep up with the #1 producer:**
+`host-disk-guardian.log` (2026-07-29 00:46–00:48 local) shows the
+CRITICAL-tier auto-clean firing 3 times in 2 minutes at 2/3/6 GiB free,
+processing **0 evidence bundles, 0 scratchpads, 0 merged-PR worktrees**
+every single time — every `/private/tmp/wa-pr-*` candidate is skipped
+because it has "no merged PR found for this branch" or "uncommitted
+changes present." The safety net is running, on schedule, and structurally
+cannot touch the thing that's filling the disk. This is a materially
+different (and more currently-relevant) answer than the launchd-scheduling
+bugs fixed elsewhere in this report — those bugs meant sweepers didn't
+*run*; this one means a sweeper runs perfectly and still can't reclaim
+anything, because its own safety gate (no merged PR / no uncommitted
+changes) is being tripped by every candidate.
+
+**New prevention-gap bug found, not yet fixed:** `/tmp/disk-magician-drilldown.log`
+shows the residual-drilldown sweeper firing every ~40 minutes and logging
+"residual 0.4 GB < threshold 10 GB — no-op," even while `residual_gb` in
+the *same* snapshots is 400–824 GiB. The gate checks `residual_delta_gb`
+(snapshot-to-snapshot delta, ~0.4 GiB) instead of the absolute
+`residual_gb` — so it can never fire regardless of how catastrophic the
+absolute unmeasured residual gets. Filed as bead `disk_magician-nea` (P1).
+
+### Secondary source (shorter window, independent data): `disk_observer.jsonl`
+
+This session's own earlier pass over `~/.disk_magician_state/disk_observer.jsonl`
+(2,631 records, 2026-07-27 05:24 → 2026-07-29 01:15, 1.83 days) is a
+narrower window but an independent data source, and its findings are
+consistent with the above: net -2.35 GiB/day but a **62 GiB peak-to-trough
+swing in under 2 days** (802.6 → 864.5 GiB), steepest single-hour rise
++26.9 GiB. Docker event counts in one 21-hour climb window: **919
+`create`, 903 `die`, 925 `destroy`, 897 `start`, 361 `oom`** — all 551 OOM
+events across the full observer history are on `ezgha-runner:latest`
+across 6 named containers, each OOM'd 68–97 times in under 2 days (see
+`findings_wiki/extreme-cpu-load-and-ezgha-runner-oom-churn.md`). This
+data source also captured **direct before/after proof of the RunAtLoad
+fix**: used space dropped from an 859.3 GiB peak to 832.6 GiB (-26.7 GiB)
+in the window immediately following all 4 sweepers firing for the first
+time ever.
 
 Coverage caveat: the daily growth-tracking snapshot
 (`~/projects/user_scope/backup/Mac/disk_snapshot.json`) was stale
 2026-07-25 → 2026-07-29 due to the `EX_CONFIG` bug (Lane fix #2 above), so
-this report leans on `disk_observer.jsonl` (fine-grained, unaffected) for
-the delta lane rather than the daily snapshot series, which only regained
-validity mid-session.
+this secondary source leans on `disk_observer.jsonl` (fine-grained,
+unaffected by that specific bug) rather than the daily snapshot series.
 
 ## Lane 3 — Safety-gated quick wins (reported separately — NOT the root-cause explanation)
 
@@ -185,15 +286,38 @@ These are recommendations, not actions taken in this pass, and require
    `scripts/lib/worktree_recency.sh` in a future pass once agent activity
    on this repo quiets down; anything that ages past 14 days becomes a
    real reclaim target for the existing worktree-hygiene tooling.
-3. **`colima-prune` I/O error.** The first-ever `colima-prune` run hit
-   `input/output error` on one containerd blob during `docker image prune
-   -af`. Possibly the known "Colima sparse disk wedges under host disk
-   pressure" gotcha (host was at 97%+ at the time) — not confirmed root
-   cause, worth a recheck once host free space is more comfortable.
+3. **`colima-prune` I/O error — now corroborated, still not root-caused.**
+   Two independent measurement passes this session confirm `docker image
+   prune -af` is currently failing with an `input/output error` on the
+   containerd blob store, and `fstrim -av` is reclaiming 0 bytes on the
+   main volumes — this is very likely the documented "Colima sparse disk
+   wedges under host disk pressure" gotcha (host has been at 93-97%+
+   throughout this session), but a definitive root-cause confirmation
+   (e.g. via `colima ssh -- dmesg` or an explicit stop/start/fstrim cycle)
+   was not performed this pass — worth doing once host free space is more
+   comfortable, since attempting the guest-VM restart cycle while the
+   host itself is critically low on space carries its own risk.
 4. **`disk_magician-w7m`** (new bead, P2): confirm or refute the
    overlapping `cleanup_worktree_venvs.sh` PIDs observed right after the
    `RunAtLoad` fix; add a flock-style lock if it reproduces under normal
    (non-extreme-load) conditions.
+5. **`disk_magician-nea`** (new bead, P1): fix the residual-drilldown
+   sweeper's gate to check absolute `residual_gb` instead of
+   `residual_delta_gb` — see Lane 2. Low-risk, mechanical fix (change a
+   threshold comparison), but out of this pass's time budget to implement
+   and verify safely.
+6. **`host-disk-guardian`'s emergency-tier candidate filter is too
+   strict for a real emergency.** At 2-6 GiB free, the guardian correctly
+   refuses to touch `/private/tmp/wa-pr-*` worktrees with uncommitted
+   changes or no merged PR — appropriate caution under normal pressure,
+   but it means the CRITICAL tier has no actual fallback when literally
+   every candidate fails that check (observed live: 3 consecutive
+   CRITICAL-tier runs, 0 reclaims each). Recommend a genuinely
+   last-resort tier (e.g. archive-not-delete uncommitted scratch worktrees
+   to a separate volume/quota once free space crosses a harder floor like
+   1-2 GiB) rather than silently no-op'ing at the point of actual
+   emergency. Design change, not a quick win — flagging for a dedicated
+   follow-up, not implemented this pass.
 
 ## Fixes landed this session (durable, committed)
 
@@ -216,23 +340,39 @@ The main session ran parallel `/history` and `/ms` sweeps
 (`recall-history.md`, `recall-ms.md`, same STATE.md directory) and forwarded
 them. Key items that change or extend the picture above:
 
-- **Known larger, still-unresolved producers exist and predate this
-  session's findings.** Per `2026-07-22-disk-regrowth-rootcause.md` §2-3
-  and `nextsteps-2026-07-12-disk-magician-root-cause.md`: (a) AO `/tmp`
-  scratch-worktree churn measured up to **~97 GiB/day**, root-caused to
-  `scripts/cleanup_tmp.sh:50`'s permanent protected-root allowlist
-  (`worldarchitect.ai worldai_claw wa-missions` — 24 GiB / 56% of
-  `/private/tmp` excluded by basename forever) plus a `TMP_WORKTREES_APPROVED`
-  gate that no automated path ever sets; (b) `backup-home.sh` (user_scope
-  repo) writing duplicate rsync output to `/tmp` at an estimated
-  **~40 GiB/day**. The recall cited these as open beads `jleechan-dqiz` and
-  `bd-m8w`, but **this session could not re-locate either ID** as open (or
-  at all) in the `worldarchitect.ai` or `user_scope` beads databases
-  checked — either resolved-and-pruned, or a repo/scope mismatch worth
-  reconciling before assuming either is still live. The underlying roadmap
-  citations are durable regardless of bead-ID status and are worth a fresh
-  measurement pass, since ~97 + ~40 GiB/day would dwarf everything found in
-  this session if still active today.
+- **UPDATE (superseded by direct measurement, see Lane 2): AO `/tmp`
+  scratch-worktree churn is CONFIRMED still live today.** The recall
+  originally cited historical rates up to ~97 GiB/day for this producer
+  (root-caused to `scripts/cleanup_tmp.sh:50`'s permanent protected-root
+  allowlist plus a `TMP_WORKTREES_APPROVED` gate no automated path ever
+  sets — `2026-07-22-disk-regrowth-rootcause.md` §2-3). Rather than rely
+  on that historical figure or the bead IDs below, this session's Lane 2
+  measurement directly confirms the mechanism is still active *right now*:
+  `tmp_private` shows a +25.2 GiB/day sustained unswept climb as of
+  2026-07-28, and `host-disk-guardian.log` shows its CRITICAL-tier cleaner
+  firing 3x with 0 reclaims each time because every candidate fails the
+  "no merged PR" / "no uncommitted changes" safety check. This is now the
+  Executive Summary's headline finding, not an open question.
+- **`backup-home.sh` duplicate `/tmp` writes — checked live, appears
+  ALREADY FIXED in the current script, contrary to the recall's citation
+  of an open ~40 GiB/day bug.** Read `~/projects/user_scope/scripts/backup-home.sh`
+  directly: it uses `SECURE_TEMP="$(mktemp -d)"` with `trap cleanup EXIT`
+  (`cleanup() { rm -rf "$SECURE_TEMP"; }`) and a second nested trap for its
+  per-target snapshot temp dir — no unbounded `/tmp` accumulation pattern
+  found. `launchctl print gui/<uid>/org.jleechan.user-scope-backup` shows
+  it ran most recently at 2026-07-29 01:05 (in progress at time of check);
+  its log shows normal git-commit/push cycles to `user_scope`, not runaway
+  `/tmp` growth. One live anomaly noted but not chased further: `launchctl
+  list` shows this job's last exit code as `-9` (SIGKILL) from a prior run
+  — worth a follow-up if it recurs, but does not on its own indicate the
+  historical duplicate-writes bug is still present.
+- **Both `jleechan-dqiz` and `bd-m8w` remain unlocatable** as open (or at
+  all) across `disk_magician`, `worldarchitect.ai`, and `user_scope` beads
+  databases checked (100+ `.beads/` directories exist across
+  `~/projects/*` worktrees; not exhaustively searched). Given the live
+  reproduction above supersedes the need for the bead-ID reconciliation
+  for root-cause purposes, this is noted but not pursued further this
+  pass.
 - **`disk_magician-1f9` (P0, open):** whole-root AO `.gemini` symlink
   corruption (an unattended alias script materialized onto a real AO PR).
   Code fix already implemented (branch `fix/agy-dedup-alias-contract`,
