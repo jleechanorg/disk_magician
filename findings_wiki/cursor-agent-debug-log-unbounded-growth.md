@@ -51,6 +51,25 @@ under-documented with no native rotation; a Cursor staffer pointed users at
 a third-party tool. Full citations: research report in session
 2026-07-29 (main session), summarized here.
 
+## What commitScoring is (research, 2026-07-29 second pass)
+
+Almost certainly Cursor's **AI Code Tracking** attribution system: it hashes
+every AI-suggested line into `~/.cursor/ai-tracking/ai-code-tracking.db`
+and diffs commits against those hashes to score AI-vs-human lines
+("scored" = attributed; "noHashData"/"skip" = commit predates tracking —
+which is why rewritten-history repos double-log on nearly every commit).
+Official docs: https://cursor.com/docs/account/teams/ai-code-tracking-api .
+Nothing public documents that it re-walks full git history repeatedly on an
+IDLE session, and no forum/GitHub source reports this disk cost. Verdict of
+the 2026-07-29 research pass: **previously unreported bug — worth filing**
+against cursor-agent 2026.07.23 (bead disk_magician-5yh). Adjacent known
+classes (idle CPU/disk drain, state.vscdb growth) are desktop-app reports
+that never name this mechanism. `CURSOR_AGENT_DISABLE_DEBUG_LOG` has zero
+public occurrences (docs/forum/changelog/GitHub code search) — confirmed
+undocumented. No newer changelog entry mentions log rotation or
+commit-scoring performance, so no fixed-version upgrade path exists as of
+2026-07-29.
+
 ## Prevention / remediation (ranked)
 
 1. **Truncate-in-place, never rename-rotate:** `: > <log>` frees space
