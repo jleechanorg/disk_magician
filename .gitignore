@@ -25,3 +25,7 @@ safety.local.json
 .beads/
 storage/
 .qdrant-initialized
+
+# /disk-report scratch dir — per-lane drill-down JSON, isolation invariant
+# (see skills/disk-report/SKILL.md step 5); never a shared mutable file
+docs/.disk-report-scratch/
