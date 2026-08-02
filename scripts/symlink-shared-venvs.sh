@@ -19,23 +19,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-ROOTS=("$HOME/projects")
+ROOTS=("$HOME/.worktrees" "$HOME/projects" "$HOME/project_agento" "$HOME/projects_other" "$HOME/repos")
+PURGE_BAK_DAYS=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--roots p1,p2,...] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--purge-bak-days N] [--roots p1,p2,...] [-h|--help]
 
 Replace per-worktree venvs with symlinks to the LARGEST existing venv.
 
 Options:
   --clean                Actually replace venvs (default: dry-run).
   --dry-run              Print what would happen (default).
-  --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
+  --purge-bak-days N     Purge *.bak.* venv directories older than N days (default: disabled).
+  --roots p1,p2,...      Comma-separated root dirs to scan.
   -h, --help             Show this help.
 
 Examples:
   $(basename "$0") --dry-run
-  $(basename "$0") --clean
+  $(basename "$0") --clean --purge-bak-days 1
 EOF
 }
 
@@ -48,6 +50,11 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       DRY_RUN=true
       shift
+      ;;
+    --purge-bak-days)
+      [[ $# -ge 2 ]] || { echo "--purge-bak-days requires a value" >&2; exit 2; }
+      PURGE_BAK_DAYS="$2"
+      shift 2
       ;;
     --roots)
       [[ $# -ge 2 ]] || { echo "--roots requires a value" >&2; exit 2; }
@@ -119,7 +126,7 @@ find_base_repos() {
     case "$(basename "$d")" in
       worktree_*|wt_*) continue ;;
     esac
-    n=$(find "$d" -maxdepth 6 \( -name venv -o -name .venv \) -type d 2>/dev/null | wc -l | tr -d ' ')
+    n=$(find "$d" -maxdepth 6 \( -name venv -o -name .venv \) \( -type d -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$n" -ge 2 ]]; then
       echo "$d"
     fi
@@ -183,7 +190,7 @@ process_repo() {
       log "  linked: $venv → $rel_target  (backup: $bak)"
     fi
     replaced=$((replaced+1))
-  done < <(find "$base" -maxdepth 6 \( -name venv -o -name .venv \) -type d 2>/dev/null)
+  done < <(find "$base" -maxdepth 6 \( -name venv -o -name .venv \) \( -type d -o -type l \) 2>/dev/null)
 
   log "  → $replaced replaced, $skipped_link already-symlinked, $skipped_python skipped (python mismatch)"
 }
@@ -207,6 +214,39 @@ for root in "${ROOTS[@]}"; do
     process_repo "$base"
   done < <(find_base_repos "$root")
 done
+
+purge_bak_dirs() {
+  local days="$1"
+  log ""
+  log "=== PURGING VENV BACKUPS (>= ${days} days old) ==="
+  local now mtime age_days bak_dir freed_kb=0 count=0
+  now=$(date +%s)
+
+  for root in "${ROOTS[@]}"; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r -d '' bak_dir; do
+      mtime=$(stat -f %m "$bak_dir" 2>/dev/null || stat -c %Y "$bak_dir" 2>/dev/null || echo "$now")
+      age_days=$(( (now - mtime) / 86400 ))
+      if (( age_days >= days )); then
+        local sz
+        sz=$(du -sk "$bak_dir" 2>/dev/null | awk '{print $1+0}')
+        freed_kb=$((freed_kb + sz))
+        count=$((count + 1))
+        if [[ "$DRY_RUN" == true ]]; then
+          log "  [dry-run] would remove backup (${sz}K, age ${age_days}d): $bak_dir"
+        else
+          rm -rf "$bak_dir"
+          log "  removed backup (${sz}K, age ${age_days}d): $bak_dir"
+        fi
+      fi
+    done < <(find "$root" -maxdepth 6 -type d \( -name "*.bak.*" -o -name "venv.bak*" -o -name ".venv.bak*" \) -print0 2>/dev/null)
+  done
+  log "  → $count backup(s) processed (total ${freed_kb}K)"
+}
+
+if [[ -n "$PURGE_BAK_DAYS" ]]; then
+  purge_bak_dirs "$PURGE_BAK_DAYS"
+fi
 
 log ""
 log "=== Done ==="
