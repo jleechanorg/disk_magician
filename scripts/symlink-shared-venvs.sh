@@ -160,10 +160,14 @@ process_repo() {
   while IFS= read -r venv; do
     [[ "$venv" == "$canonical" ]] && continue
 
-    if [[ -L "$venv" ]]; then
+    if [[ -L "$venv" && -d "$venv" ]]; then
       log "  skip (already symlink): $venv"
       skipped_link=$((skipped_link+1))
       continue
+    fi
+
+    if [[ -L "$venv" ]]; then
+      log "  dangling symlink, will repair: $venv"
     fi
 
     # Python-mix safety: only symlink if pyvenv.cfg home matches.

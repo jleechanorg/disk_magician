@@ -85,7 +85,42 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-section "4. Purge old backup venvs (--purge-bak-days)"
+section "4. Dangling symlink is repaired, not silently skipped"
+TEST_REPO_DANGLE="$WORK/dangle-repo"
+mkdir -p "$TEST_REPO_DANGLE/base_repo/venv"
+mkdir -p "$TEST_REPO_DANGLE/base_repo/worktree_dangling"
+echo "home = /usr/bin" > "$TEST_REPO_DANGLE/base_repo/venv/pyvenv.cfg"
+dd if=/dev/zero of="$TEST_REPO_DANGLE/base_repo/venv/lib.so" bs=1024 count=100 >/dev/null 2>&1
+
+# Simulate a symlink whose target worktree venv was already deleted
+# (e.g. by the unrelated 14-day worktree sweeper). Must be literally
+# named "venv" so find's -name venv picks it up like a real worktree.
+ln -s "../deleted-worktree/venv" "$TEST_REPO_DANGLE/base_repo/worktree_dangling/venv"
+DANGLE_VENV="$TEST_REPO_DANGLE/base_repo/worktree_dangling/venv"
+
+if [[ -L "$DANGLE_VENV" ]] && [[ ! -e "$DANGLE_VENV" ]]; then
+  ok "fixture setup: worktree_dangling/venv is a symlink that does not resolve"
+else
+  bad "fixture setup failed to produce a dangling symlink"
+fi
+
+OUT_DANGLE="$WORK/dangle.log"
+"$SYMLINK_SCRIPT" --clean --roots "$TEST_REPO_DANGLE" > "$OUT_DANGLE" 2>&1
+
+if grep -q "dangling symlink, will repair" "$OUT_DANGLE"; then
+  ok "dangling symlink was detected and flagged for repair (not silently skipped)"
+else
+  bad "dangling symlink was not detected — regression of the -d check"
+fi
+
+if [[ -L "$DANGLE_VENV" ]] && [[ -e "$DANGLE_VENV" ]]; then
+  ok "dangling symlink now resolves after repair"
+else
+  bad "dangling symlink still does not resolve after --clean"
+fi
+
+# ─────────────────────────────────────────────────────────────
+section "4b. Purge old backup venvs (--purge-bak-days)"
 BAK_DIR="$TEST_REPO/base_repo/worktree_1/venv.bak.20260101-000000"
 mkdir -p "$BAK_DIR"
 dd if=/dev/zero of="$BAK_DIR/dummy" bs=1024 count=5 >/dev/null 2>&1
