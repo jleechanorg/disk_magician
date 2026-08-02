@@ -163,6 +163,79 @@ class DiskObserverTest(unittest.TestCase):
         self.assertEqual(sample["swap"]["used_bytes"], 512 * 1024 * 1024)
         self.assertTrue(any(call[:2] == ("docker", "events") for call in calls))
 
+    def test_step_event_not_triggered_below_threshold(self):
+        observer = load_module()
+        threshold_kb = 10 * 1024 * 1024  # 10 GiB
+        history = [(0, 500_000_000)]
+        # +9 GiB over 10 minutes: below the 10 GiB threshold.
+        event = observer.check_step_event(
+            history, now_epoch=600, used_kb=500_000_000 + 9 * 1024 * 1024,
+            window_seconds=1800, threshold_kb=threshold_kb,
+        )
+        self.assertIsNone(event)
+        # The sample is still recorded in history for future window checks.
+        self.assertEqual(history[-1], (600, 500_000_000 + 9 * 1024 * 1024))
+
+    def test_step_event_triggered_above_threshold_with_expected_fields(self):
+        observer = load_module()
+        threshold_kb = 10 * 1024 * 1024  # 10 GiB
+        history = [(0, 500_000_000)]
+        # +28.4 GiB over 28 minutes: mirrors the disk_magician-pkq incident.
+        delta_kb = int(28.4 * 1024 * 1024)
+        event = observer.check_step_event(
+            history, now_epoch=28 * 60, used_kb=500_000_000 + delta_kb,
+            window_seconds=1800, threshold_kb=threshold_kb,
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event["delta_kb"], delta_kb)
+        self.assertEqual(event["direction"], "grew")
+        self.assertEqual(event["window_seconds"], 28 * 60)
+
+        # Shrinking past the threshold reports "shrank" with a negative delta.
+        history2 = [(0, 500_000_000)]
+        shrink_event = observer.check_step_event(
+            history2, now_epoch=900, used_kb=500_000_000 - delta_kb,
+            window_seconds=1800, threshold_kb=threshold_kb,
+        )
+        self.assertEqual(shrink_event["direction"], "shrank")
+        self.assertEqual(shrink_event["delta_kb"], -delta_kb)
+
+    def test_step_event_record_includes_non_recursive_hot_dir_sizes(self):
+        observer = load_module()
+        calls = []
+
+        def fake_run(argv, timeout=8):
+            calls.append(tuple(argv))
+            # Fake du output: single summary line, no per-subdirectory rows —
+            # proves the caller only issues one non-recursive `du -sk` per
+            # hot dir rather than a deep sweep.
+            return observer.CommandResult(0, f"12345\t{argv[-1]}\n", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            hot_dirs = [".codex", ".cache", "missing_dir"]
+            (home / ".codex").mkdir()
+            (home / ".cache").mkdir()
+            # "missing_dir" deliberately not created, to exercise the
+            # does-not-exist -> None path without shelling out.
+
+            event = {"delta_kb": 11 * 1024 * 1024, "direction": "grew", "window_seconds": 1500}
+            record = observer.build_step_event_record(1_700_000_000, event, home, fake_run, hot_dirs)
+
+        self.assertEqual(record["schema_version"], 1)
+        self.assertEqual(record["tool"], "disk_observer_step_event")
+        self.assertEqual(record["delta_kb"], 11 * 1024 * 1024)
+        self.assertEqual(record["direction"], "grew")
+        self.assertEqual(record["window_seconds"], 1500)
+        self.assertEqual(record["hot_dirs_kb"][".codex"], 12345)
+        self.assertEqual(record["hot_dirs_kb"][".cache"], 12345)
+        self.assertIsNone(record["hot_dirs_kb"]["missing_dir"])
+        # Exactly one du call per existing hot dir — no recursive tree walk.
+        du_calls = [call for call in calls if call[0] == "du"]
+        self.assertEqual(len(du_calls), 2)
+        for call in du_calls:
+            self.assertEqual(call[0:2], ("du", "-sk"))
+
     def test_rotation_is_size_bounded_and_report_correlates_deltas(self):
         observer = load_module()
         with tempfile.TemporaryDirectory() as tmp:
