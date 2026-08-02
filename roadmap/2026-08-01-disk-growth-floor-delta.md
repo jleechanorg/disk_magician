@@ -8,54 +8,90 @@ series). Four anonymous sonnet subagent lanes ran in parallel; every
 non-trivial claim below was independently re-verified by this session
 (bead status checks, direct code reads, live `df`/`uptime`/`grep -n`
 probes) before being included — refute-by-default, survives only with a
-citation. **UPDATE 1 (T+~30min, same session):** the main session's
-parallel `/history` and `/ms` recall lanes surfaced a lower verified
-floor and a live worktree-restoration event; both are folded in below
-(Step 1 and the new "Concurrent event" section) rather than left as a
-stale first draft. **UPDATE 2 (T+~35min):** the sawtooth producer named
-below (Colima fstrim cycle) was identified in response to the team-lead's
-explicit ask to name what fills and what reclaims the swing, and an
+citation. **UPDATE 1 (T+~30min):** floor corrected to 720 GiB/07-19 and
+a concurrent worktree-restoration event folded in (Step 1, "Concurrent
+event" section). **UPDATE 2 (T+~35min):** sawtooth producer named
+(Colima fstrim cycle). **UPDATE 3 (T+~50min, this revision, v3):** an
 independent 3-lens adversarial verification (data/code/logic,
-refute-by-default) of the whole report is documented in the new
-"Adversarial verification" section near the end.
+refute-by-default) REFUTED the v1/v2 trend-label claims and the
+"net shrinking, not growing" framing as an incomplete headline — see the
+"Adversarial verification" section for full verdicts. This revision
+replaces the two-part headline with the three-part decomposition the
+verification demanded, corrects the mislabeled trend figures, attributes
+the specific spike this session observed, and discloses the gap-number
+drift within this very session rather than silently superseding it.
 
-## Headline finding: the mission's own premise partially does not hold, and the swing has a named, already-understood mechanism
+## Headline finding: three separate phenomena, not one — amplitude, baseline trend, and a one-time spike
 
-**The disk is not in sustained net growth right now.** `disk_observer.jsonl`
-(11,554 samples, 2026-07-24→08-02) shows the 7-day trend is **-3.93 GiB/day**
-and the last-48h trend is **-13.43 GiB/day** — both net *shrinking*, not
-growing. What actually explains the "always growing" feeling is a
-**sawtooth oscillation with dangerous amplitude**: single-day swings up to
-**115.9 GiB peak-to-trough** (2026-07-31: 748.69→864.62 GiB used), with
-free space independently confirmed by `host-disk-guardian.log` bouncing
-21 GiB → 98 GiB → 56 GiB → 98 GiB → 80 GiB inside single 2-3 hour windows
-on 2026-08-01/02. The mandatory floor-and-gap number below is correct as
-computed, but **do not read it as a daily growth rate** — see Step 1 and
-the "Sawtooth mechanism" section immediately after it.
+Independent adversarial review (3 lenses, refute-by-default) found the
+v1/v2 headline ("net shrinking, not growing") was an incomplete
+summary that survived only for short-window figures while overstating
+their reliability and omitting a real longer-window growth signal. The
+corrected picture has three distinct, separately-evidenced parts:
 
-**The sawtooth has a fully-evidenced, already-partially-understood
-mechanism: Colima's sparse VM disk fill/trim cycle, not a hidden leak.**
-See the dedicated section below for the full evidence chain; in short,
-the already-deployed 2-hour pressure-sweep job's `cleanup_colima.sh` step
-runs `colima ssh -- sudo fstrim -av` inside the Colima Linux VM whenever
-free space is low, reclaiming 30-50 GiB per firing (confirmed across many
-independent log events spanning 07-25 through 08-01). Between firings,
-ordinary Colima/Docker VM disk-block consumption refills a comparable
-amount, because the VM's thin-provisioned sparse disk does not return
-blocks to the host on in-VM file deletion — only an explicit `fstrim`
-does. **This reconciles the two windows the operator might otherwise see
-as contradictory:** the 14-day floor(720 GiB)-to-now gap is largely an
-artifact of *where in this fstrim cycle* each snapshot happened to land
-(post-trim reads low-used/high-free; pre-trim reads high-used/low-free),
-not sustained accumulation — while the 7-day/48h *net* trend is the
-trustworthy growth-rate figure precisely because it averages across many
-full cycles. **Recommended operator read: do not act on the 60-115 GiB
-single-reading gap as if it were a leak requiring cleanup — it is the
-expected, self-correcting byproduct of a prevention layer that is already
-working as designed.** What would actually matter is if the *fill* side
-itself trended upward across many cycles (i.e., the underlying
-Colima/Docker workload growing over time); the current 7-day/48h net
-data says it is not.
+**1. SAWTOOTH (amplitude) — CONFIRMED, self-correcting, not a leak.**
+Single-day swings up to **115.9 GiB peak-to-trough** (2026-07-31:
+748.69→864.62 GiB used) are driven by the Colima VM fstrim/refill cycle
+(see "Sawtooth mechanism" section) — the already-deployed 2-hour
+pressure-sweep job reclaims 30-50 GiB per firing, and ordinary Colima/
+Docker VM disk-block writes refill a comparable amount between firings.
+**Do not act on any single instant reading of free/used space as if it
+were a leak** — this amplitude is expected and self-correcting.
+
+**2. BASELINE TREND — genuinely growing over the 14-day window, but the
+specific "+3.2 GiB/day trough-to-trough" rate does NOT independently
+reproduce; treat the growth as real and the rate as uncertain.**
+The 14-day floor-to-current gap is real: 720 GiB (07-19, verified via
+direct `git show 3eef45f`) → current live `df` in the 806-822 GiB range
+→ a genuine ~86-102 GiB increase over ~13 days that the sawtooth
+amplitude alone (a mean-reverting oscillation) cannot explain away — this
+is the corrected part of the headline lens 1/3 demanded. **However**,
+attempting to confirm this as a clean "+3.2 GiB/day" rate by computing
+OLS over daily-minimum (trough) values *within a single continuous
+instrument* (`disk_observer.jsonl`, 2026-07-25→08-01, 8 in-window days)
+did **not** reproduce a stable positive slope: results ranged from
+**-4.20 GiB/day (OLS, UTC day-boundaries) to +1.71 GiB/day (OLS, PDT
+day-boundaries)**, with endpoint-method variants at -2.82 and -5.34
+GiB/day, depending entirely on timezone day-bucketing and OLS-vs-
+endpoint choice — see "Baseline-trend reproduction attempt" below for
+the full method matrix. The original **+3.2 GiB/day figure bridges
+two different measurement instruments** (`disk_snapshot.json` floor on
+07-19 vs `disk_observer.jsonl` value on 08-01) **across an unmeasured
+~3.5-day gap** (07-21 05:19 → 07-24 23:03, where neither series has
+data) — a real, honest data point, but not independently confirmed as a
+robust single-instrument rate. **Conclusion: report the 14-day
+accumulation as real (do not dismiss it as sawtooth noise, per lens 1/3),
+but do not present +3.2 GiB/day as a confirmed, reproducible rate** —
+state the range and the reason for its width instead of false precision.
+Candidate contributors (unchanged from the 2026-07-29 report, not
+independently re-measured this pass): `~/.worktrees` +1.47, `~/.gemini`
++1.30, Xcode DerivedData +1.03, `ao_home` +0.88, `ao_sessions` +0.71
+GiB/day gross ≈ +5.4 GiB/day gross before sweeper offsets.
+
+**3. ONE-TIME SPIKE (2026-08-02T00:30-00:58Z) — measured precisely,
+attribution uncertain.** A +28.37 GiB climb (796.92→825.29 GiB used,
+00:30:25Z→00:57:25Z) followed by a -21.09 GiB one-minute drop (825.29→
+804.20 GiB, 00:57:25Z→00:58:25Z) — both independently reproduced by this
+session directly from `disk_observer.jsonl`, closely matching lens 3's
+independently-computed +29.75/-22 GiB figures (small differences are
+rounding/series-merge artifacts, not a disagreement). This event
+brackets bead `disk_magician-oja`'s close timestamp (00:43:11Z) and
+overlaps this mission's own live `df` reads — see "Spike attribution"
+below for the full, honestly-uncertain candidate-cause list.
+
+**Corrected trend-line labels (lens 1 REFUTED the originals — see
+"Adversarial verification"):** the v1/v2 figure "-3.93 GiB/day (7-day
+trend)" is actually the **full 8.09-day-span OLS slope**, re-verified
+directly at **-3.90 GiB/day** — relabeled, not a 7-day figure. The
+**true trailing-7-day OLS is -7.02 GiB/day**, independently re-verified
+exactly. The v1/v2 figure "**-13.43 GiB/day (48h)**" does **not**
+reproduce under any single method: this session's own recomputation
+gives -16.66 GiB/day (OLS) or -17.51 GiB/day (endpoint), both far from
+-13.43, and lens 1 independently found a -4.9 to -20.4 GiB/day range
+depending on anchor. **Root cause of the instability: the one-time spike
+above (item 3) falls inside most 48h windows and dominates short-window
+slope estimates** — the 48h figure is dropped from this report rather
+than restated with false precision.
 
 ## Step 1 — Floor and gap (ledger-mandated, computed first; CORRECTED)
 
@@ -97,20 +133,30 @@ disk_total_gb: 926`). Note 07-19 alone swung from 720 to 859 GiB —
 the sawtooth pattern (see headline finding) was already present 2 weeks
 ago, not a new development.
 
-**Corrected floor = 720 GiB on 2026-07-19T01:39:06Z.** Live `df -k
-/System/Volumes/Data` readings taken during this session (all
-2026-08-02 UTC): 811.72 GiB (T+5min, 00:42Z), 822.53 GiB (T+20min,
-00:54Z), 804.28 GiB (T+24min, 00:58Z), **806.28 GiB (T+30min, 01:01Z,
-most recent)**. Gap = 806.28 − 720 = **86.28 GiB**, and this number
-moved by nearly 20 GiB across four readings taken 3-8 minutes apart
-during this very session — direct, first-hand corroboration of the
-sawtooth finding at fine granularity, not just the daily-snapshot
-evidence. **Do not read either the 86.28 GiB gap or the ~60 GiB gap
-from the first draft as a sustained daily rate** — both are single
-trough-to-instant readings of the same oscillating series. The 7-day
-and 48h trend lines from `disk_observer.jsonl` (net -3.93 and -13.43
-GiB/day, unchanged from the first draft) remain the trustworthy
-growth-rate figures.
+**Corrected floor = 720 GiB on 2026-07-19T01:39:06Z.**
+
+**Gap-number drift within this session, disclosed explicitly (lens 3
+flagged that the v1→v2 edit silently superseded numbers rather than
+showing the progression — corrected here):** across three successive
+edits of this same report, the reported gap was **49.64 GiB** (v1,
+floor 762.08 vs live `df` 811.72 GiB @ T+5min/00:42Z), then **60.45 GiB**
+(v2 first pass, same floor 762.08 vs live `df` 822.53 GiB @ T+20min/
+00:54Z — a +10.81 GiB drift from v1 in 15 minutes from the live reading
+alone, floor unchanged), then **86.28 GiB** (v2 final, corrected floor
+720 vs live `df` 806.28 GiB @ T+30min/01:01Z — floor correction of
+-42.08 GiB plus a live-reading change of -16.25 GiB from the previous
+reading). A fourth live reading at T+24min/00:58Z read 804.28 GiB — landing
+*between* the T+20min and T+30min readings despite being chronologically
+between them, i.e. the series is non-monotonic at minute resolution. This
+progression is itself direct, first-hand, disclosed (not silently
+dropped) evidence of point-in-time gap volatility — exactly what item 3
+above (the 00:30-00:58Z spike) explains: T+20min (00:54Z) landed
+mid-climb of that spike, and T+24min (00:58Z) landed just after its
+21.09 GiB one-minute drop. **None of these four instant-gap numbers
+(49.64 / 60.45 / 86.28, or any other single live `df` reading) should be
+read as a daily rate** — see item 2 of the headline for the actual
+(uncertain-magnitude but real) 14-day trend, and item 1 for why
+individual readings swing this much.
 
 ## Sawtooth mechanism (named producer + reclaimer, evidence chain)
 
@@ -162,9 +208,112 @@ single-day amplitude reported in the headline finding, without invoking
 any unaccounted-for leak. It is also consistent with (and likely a
 primary contributor to) the fine-grained noise this session directly
 observed in its own four live `df` reads (811.72→822.53→804.28→806.28
-GiB across ~20 minutes) and the concurrent worktree-restoration event's
-unclear size — some of that apparent noise is very plausibly this same
-Colima cycle rather than worktree churn.
+GiB across ~20 minutes) — though item 3 below (the 00:30-00:58Z spike)
+is a separate, larger, non-Colima event overlapping the same window.
+
+## Baseline-trend reproduction attempt (item 2 of the headline, full method matrix)
+
+Team-lead's instruction: recompute OLS over daily-minimum (trough)
+values across all `disk_observer.jsonl` days (07-24→08-01) to confirm
+whether a ~+3.2 GiB/day baseline-accumulation rate reproduces. Full,
+honest result of attempting exactly that, using the merged
+`disk_observer.jsonl` + `.1` + `.2` series (11,578 records, independently
+parsed this pass):
+
+| method | window | days | result (GiB/day) |
+|---|---|---:|---:|
+| OLS on daily min, UTC day-boundaries, full days only | 07-25→08-01 | 7 | **-4.20** |
+| Endpoint, UTC day-boundaries | 07-25→08-01 | 7 | **-2.82** |
+| OLS on daily min, PDT day-boundaries, full days only | 07-25→07-31 | 6 | **+1.71** |
+| Endpoint, PDT day-boundaries | 07-25→07-31 | 6 | **-5.34** (788.75→748.69) |
+| OLS on daily min, UTC, including partial first/last day | 07-24→08-02 | 9 | **-2.54** |
+| Cross-instrument (team-lead's original): `disk_snapshot.json` 07-19 (720) → `disk_observer.jsonl` 08-01 (762.23) | 07-19→08-01 | 13 | **+3.25** |
+
+**Verdict: the trough-to-trough rate does not reproduce as a stable,
+method-independent number within a single continuous instrument** —
+results range from -4.20 to +1.71 GiB/day depending solely on timezone
+day-bucketing (UTC vs PDT) and OLS-vs-endpoint choice, a sign flip
+driven entirely by measurement-methodology noise over a short (6-9 day)
+window, not a robust trend. The **only** method that produces the
+team-lead's +3.2-3.25 GiB/day figure is the cross-instrument comparison,
+which necessarily bridges the `disk_snapshot.json`→`topdown-5g.json`
+schema migration and an unmeasured ~3.5-day gap (2026-07-21T05:19Z →
+2026-07-24T23:03Z, no data in either series). That is a legitimate,
+real data point — it should not be discarded — but this session cannot
+independently confirm it as a "reproduced, robust" rate the way the
+sawtooth mechanism (item 1) or the spike (item 3) were confirmed with
+tight, method-insensitive agreement. **This report therefore states the
+14-day accumulation as real (per lens 1/3's core correction — the
+mission's original "net shrinking" framing was incomplete) while
+declining to assert +3.2 GiB/day specifically as a confirmed rate.**
+Operators should read "the disk is accumulating ~40-100 GiB over the
+past two weeks, net of the sawtooth" as the actionable signal, and treat
+any single per-day rate derived from it as approximate pending a longer
+observation window (30+ days) or a single continuous instrument spanning
+the current 3.5-day gap.
+
+## Spike attribution (item 3 of the headline: the 2026-08-02T00:30-00:58Z event)
+
+Independently reproduced directly from this session's own merged
+`disk_observer.jsonl` series (not just cited from a lens verdict):
+
+| timestamp (UTC) | used_kb | used GiB |
+|---|---:|---:|
+| 2026-08-02T00:30:25Z | 835,627,144 | 796.92 |
+| 2026-08-02T00:43:25Z | 854,531,644 | 814.94 |
+| 2026-08-02T00:57:25Z | 865,377,316 | **825.29 (peak)** |
+| 2026-08-02T00:58:25Z | 843,268,644 | **804.20** |
+
+Climb: +28.37 GiB over 27 minutes (00:30:25Z→00:57:25Z), essentially
+monotonic (minute-by-minute increases throughout, confirmed by reading
+all 27 intervening records, not just endpoints). Drop: -21.09 GiB in a
+single one-minute sampling interval (00:57:25Z→00:58:25Z) — a real,
+sharp discontinuity, not a gradual decline. Both figures closely match
+lens 3's independently-computed +29.75/-22 GiB (small differences are
+rounding/series-merge artifacts between this session's re-parse and the
+lens's own extraction, not a substantive disagreement).
+
+**Timing overlap:** bead `disk_magician-oja`'s close timestamp
+(2026-08-02T00:43:11Z, "restored all 30 worktrees modified within 14
+days") falls inside the climb window (00:30:25Z-00:57:25Z), and this
+mission's own v1 live-`df` reading (822.53 GiB @ 00:54:xxZ) landed
+mid-climb, roughly 3 GiB below the eventual peak — consistent with, not
+independently proving, that reading having caught the same event.
+
+**Candidate causes, reported honestly as uncertain (not asserted as
+established):**
+1. **Worktree restoration** (bead-oja / GH issue #51) — timing is
+   plausible (the close event falls inside the climb window), but this
+   session's own earlier finding that the bead's create/close timestamps
+   are only 3 seconds apart (a record-keeping close, not live-action
+   telemetry) is a genuine weakener: the close event does not itself
+   prove the restoration's *disk-writing* activity happened at that
+   exact minute, only that the bead was marked done around then. Size
+   plausible: 30 worktrees + venvs could plausibly total ~28 GiB,
+   consistent with the observed climb, but this was not independently
+   confirmed by locating the actual restored directories (this session's
+   earlier bounded `find -newermt` scan found none).
+2. **Bulk conversation-history sync to Google Drive/Dropbox** — raised
+   via the team-lead's relay of another session's `/nextsteps` summary
+   (a "6-suite AI-conversation sync" creating large local staging
+   copies). **Not independently verified by this session** — no direct
+   evidence (process list, sync logs, or staging-directory sizing) was
+   gathered for this candidate in this pass; included for completeness
+   per the team-lead's instruction, flagged as unverified.
+3. **Other/unknown** — the climb is real and precisely measured; its
+   full cause is not established beyond the two candidates above. Given
+   the 2-hour mission time-box, this report does not claim to have
+   resolved attribution and explicitly leaves it open rather than
+   guessing to closure.
+
+**What is NOT a candidate:** the Colima fstrim cycle (item 1) — that
+mechanism's signature is a `free`-space *increase* from an explicit
+`fstrim` event logged in `disk-magician-pressure-sweep.log`; this spike
+is a `used`-space *increase* (i.e., something wrote ~28 GiB of new data)
+followed by a sharp drop, the opposite direction and a different log
+trail. No `cleanup_colima.sh`/`fstrim` log entry was found bracketing
+00:30-00:58Z in this session's check of the pressure-sweep log for that
+exact window.
 
 ## Step 2 — Per-path ≥5 GiB bucket delta table (ledger-only)
 
@@ -184,7 +333,9 @@ and filtering to any path ≥5 GiB in either snapshot:
 That is the **entire** ≥5 GiB delta table the ledger can produce — two
 paths, both shrinking, net -12.95 GiB. **The ledger's per-path buckets do
 not explain the growth side of the gap at all**; the unmeasured residual
-(258-291 GiB across the covered days) dominates by two orders of
+(**251-291 GiB** across the covered days — corrected range: 07-23's
+actual low was 251.32 GiB, not 258 as an earlier draft of this report
+stated) dominates by two orders of
 magnitude over anything the buckets can attribute. This is itself the
 most important structural finding: coverage is too sparse and too
 intermittent to root-cause growth from the ledger alone, which is why
@@ -193,9 +344,13 @@ direct `du`) carried almost the entire explanatory weight in this pass.
 
 ## Step 3 — Ranked live producers (measured rates, cross-verified)
 
-1. **Nothing is currently the dominant net producer.** Net 7-day/48h
-   trend is shrinking (-3.93 / -13.43 GiB/day); the visible "growth" is
-   intra-day amplitude, not accumulation.
+1. **No single producer is currently dominant on its own — see the
+   headline's 3-part decomposition instead.** The 7-day OLS trend is
+   -7.02 GiB/day (short-window, corrected per adversarial review), but
+   the 14-day floor-to-current view shows a genuine ~86-102 GiB
+   accumulation that the short-window figure alone would miss. Most of
+   the visible day-to-day swing is the Colima-fstrim sawtooth amplitude
+   (item 1 of the headline), not any single producer's steady output.
 2. **`/private/tmp` AO/CI scratch churn — reversed from the 2026-07-29
    finding.** Then: +23-25 GiB/day gross, +4.97 GiB/day net, dominant
    producer. Now: **total measured size is 4.0 GiB** (`du -d 1 -h`
@@ -349,17 +504,24 @@ with this mission's early measurement window**, which plausibly
 contributes to the fine-grained oscillation directly observed above
 (four `df` reads spanning 811.72→822.53→804.28→806.28 GiB across roughly
 20 minutes). **However, this session could not independently confirm the
-restoration's size or location**: a bounded `find -newermt` scan across
-`/Users/jleechan/projects`, `/Users/jleechan/projects_other`, and
-`~/.worktrees` (depth ≤4, threshold 2026-08-02T00:20:00Z onward) found
-**zero** matching directories — either the 30 restored worktrees live
-somewhere this scan didn't cover, mtimes were already overwritten by
-subsequent activity, or `git worktree add`/checkout doesn't touch parent
-directory mtimes at the depth this scan checked. **Treat "worktree
-restoration explains part of the regrowth" as a real, timing-correlated,
-but size-unquantified hypothesis** — a genuine candidate contributor to
-the noise in this mission's own live readings, not a confirmed GiB
-figure to add to any table above.
+restoration's size or location via filesystem search**: a bounded
+`find -newermt` scan across `/Users/jleechan/projects`,
+`/Users/jleechan/projects_other`, and `~/.worktrees` (depth ≤4, threshold
+2026-08-02T00:20:00Z onward) found **zero** matching directories —
+either the 30 restored worktrees live somewhere this scan didn't cover,
+mtimes were already overwritten by subsequent activity, or `git worktree
+add`/checkout doesn't touch parent directory mtimes at the depth this
+scan checked. **Update (v3, adversarial verification):** independent
+lens 3 review found the actual *size evidence* this filesystem search
+couldn't produce — a +28-30 GiB climb in `disk_observer.jsonl` bracketing
+this bead's close timestamp exactly (00:30:25Z-00:57:25Z climb, bead
+closed 00:43:11Z inside that window). See the "Spike attribution"
+section (headline item 3) for the full evidence and the honest caveat
+that the bead's 3-second create/close gap weakens (without eliminating)
+the causal link between the bead's close event and the disk-writing
+activity itself. **Treat "worktree restoration explains part of the
+spike" as a real, timing-correlated, plausible-but-unconfirmed
+hypothesis** among 2-3 candidates — not a confirmed attribution.
 
 ## Quick wins (safety-gated inventory, reported separately — NOT executed)
 
@@ -422,17 +584,31 @@ explicitly checked each rather than re-falling into it:
 The 8+ prevention layers deployed across 2026-07-11 through 2026-07-30
 (RunAtLoad fixes, EINTR retry, absolute-residual gating, cursor debug-log
 env var, etc.) are **holding** where they were designed to hold (sweepers
-fire, cursor log hasn't recurred, Colima shrinking). The gap this pass
-surfaces is different in kind from prior passes: it is not "a sweeper
-never fires" but **"the frontier scanner's own timeout budget has ~1.4%
-margin and, once it trips, fails totally (0 buckets) instead of
-partially"** — a fragility in the measurement layer itself, not the
-reclaim layer. That fragility is why 5 of the last 6 daily ledger
-snapshots have no per-path data at all, which in turn is why Step 2's
-delta table above is so thin. Fixing the budget-allocation bug (Step 4's
-recommended direction) is the highest-leverage next step for restoring
-*measurement* reliability; it is separate from, and does not itself
-reclaim, any disk space.
+fire, cursor log hasn't recurred). The gap this pass surfaces is
+different in kind from prior passes, and now has three distinct parts
+after adversarial revision:
+
+1. **Measurement fragility, unchanged from v1/v2:** the frontier
+   scanner's own timeout budget has ~1.4% margin and, once it trips,
+   fails totally (0 buckets) instead of partially — why 5 of the last 6
+   daily ledger snapshots have no per-path data. Fixing the
+   budget-allocation bug (Step 4) is the highest-leverage next step for
+   *measurement* reliability; it does not itself reclaim space.
+2. **Amplitude prevention is working as designed** (new this revision):
+   the 2h pressure-sweep job's Colima fstrim step is already doing its
+   job — 30-50 GiB reclaimed per firing keeps the sawtooth
+   self-correcting. This is a success story, not a gap, once named.
+3. **The genuine prevention gap this revision surfaces: a real ~14-day
+   baseline accumulation (item 2 of the headline) that neither the
+   amplitude-correcting Colima fstrim nor any of the 8+ prior layers
+   addresses**, because none of them target the slow, steady producers
+   (`~/.worktrees`, `~/.gemini`, Xcode DerivedData, `ao_home`,
+   `ao_sessions` — the 2026-07-29 report's gross +5.4 GiB/day candidate
+   list) that a mean-reverting fstrim cycle cannot touch by definition.
+   This session could not pin the exact rate (see "Baseline-trend
+   reproduction attempt"), but the accumulation itself is real and is
+   the correct target for a follow-up sweeper-coverage pass — distinct
+   from, and more actionable than, chasing the sawtooth amplitude.
 
 ## Adversarial verification (independent 3-lens refute-by-default pass)
 
@@ -462,14 +638,66 @@ to refute-by-default rather than confirm. Verdicts:
   touching `src/disk_magician/`; the all-repo commit count between those
   two SHAs is 21, not 3. *(Correction applied: Step 4 now reads "3
   commits touching `src/disk_magician/` (21 all-repo)".)*
-- **Lens 1 (data)** — [pending at time of last edit; team-lead to relay]
-- **Lens 3 (logic)** — [pending at time of last edit; team-lead to relay]
+- **Lens 1 (data) — claim 1 REFUTED (HIGH severity); claims 2-3
+  reproduced exactly.** (a) "-3.93 GiB/day (7-day trend)" REFUTED as
+  mislabeled: it reproduces only as the full 8.08-day-span OLS (this
+  session independently re-verified: -3.90 GiB/day over 8.09 days). True
+  trailing-7-day OLS is -7.02 GiB/day (independently re-verified exactly
+  by this session). **Response: relabeled in the headline and Step 1;
+  both figures now stated with correct window labels.** (b) "-13.43 GiB/
+  day (48h)" REFUTED as not reproducible under any window/method (lens 1
+  found -4.9 to -20.4 depending on anchor; this session's own
+  recomputation got -16.66 OLS / -17.51 endpoint — neither matches
+  -13.43). Root cause: the ~21 GiB one-minute discontinuity at
+  2026-08-02T00:57:25Z→00:58:25Z dominates short windows. **Response:
+  the 48h figure is dropped from this report rather than restated with
+  false precision; the discontinuity is now the subject of its own
+  "Spike attribution" section.** (c) The 14-day view (720 GiB 07-19 →
+  ~806-822 GiB now, a genuine ~86-102 GiB increase) must be part of the
+  headline, not omitted in favor of the shorter-window "net shrinking"
+  framing — this is exactly the cumulative-reservoir miss the repo's
+  CLAUDE.md methodology section exists to prevent. **Response: headline
+  rewritten as a three-part decomposition (amplitude/baseline/spike);
+  the 14-day accumulation is now stated as real** (see "Baseline-trend
+  reproduction attempt" for why this session declines to assert lens 1's
+  specific "+3.2 GiB/day" rate as independently confirmed — a partial,
+  disclosed disagreement, not a rejection of the core correction). (d)
+  Nit on guardian-log clustering (composite of two separate clusters,
+  not one chronological bounce) — the specific sentence this referred to
+  was removed in the headline rewrite; not reintroduced.
+- **Lens 3 (logic) — angles 1-2 REFUTED; angle 3 partial; both nits
+  accepted.** (e) REFUTED the report's earlier silence on spike
+  attribution: `disk_observer.jsonl` shows a +29.75 GiB climb
+  (00:30:25Z→00:57:25Z) then a -22 GiB drop (00:58:25Z), bracketing bead
+  `disk_magician-oja`'s close (00:43:11Z) and overlapping this session's
+  own v1 live-`df` read (822.53 GiB @ 00:54Z, shown to be mid-climb).
+  **Response: independently re-verified these figures directly from the
+  raw series (+28.37/-21.09 GiB, matching closely) and added the full
+  "Spike attribution" section** naming worktree-restoration and a
+  Google-Drive/Dropbox sync as candidate-but-unconfirmed causes, per
+  lens 3's own noted weakener that the bead's 3-second create/close
+  gap is record-keeping, not live-restore telemetry. (f) REFUTED the
+  v1→v2 silent supersession of the gap number (49.64→60.45→86.28 GiB
+  without disclosure). **Response: added an explicit gap-drift-
+  disclosure paragraph in Step 1** showing all three numbers, their
+  floor/live-reading sources, and the timing correlation with the item-3
+  spike. (g) Nit: residual band should be 251-291 GiB, not 258-291 (the
+  07-23 actual low is 251.32). **Response: corrected in Step 2.**
 
-**Survival tally: 3/3 claims survived Lens 2 in full (1 scope-precision
-nit accepted and folded in, not a refutation).** Lenses 1 and 3 verdicts
-to be folded in as they land; this report will not be presented as fully
-adversarially closed until all 3 lenses report and the tally is updated
-here.
+**Survival tally: Lens 2 — 3/3 NOT-REFUTED (1 accepted scope nit). Lens
+1 — 2/3 reproduced exactly, 1 REFUTED and corrected (trend mislabeling),
+1 partial-disagreement disclosed (the specific +3.2 GiB/day rate, per
+the "Baseline-trend reproduction attempt" section — the underlying
+14-day-accumulation claim itself is accepted and now in the headline).
+Lens 3 — 2 angles REFUTED and corrected (spike attribution, gap-drift
+disclosure), 2 nits accepted. Overall: every REFUTED claim was corrected
+in this v3 revision; the only unresolved item is a disclosed, honest
+disagreement over one specific numeric rate (+3.2 GiB/day) that this
+session could not independently reproduce within a single instrument —
+reported as such rather than silently adopted or silently dropped. This
+satisfies the ≥2/3-survival bar item-by-item (nothing shipped
+unaddressed) while being transparent about the one point of genuine,
+unresolved numeric disagreement.**
 
 ## Provenance
 
@@ -481,6 +709,15 @@ here.
 - Extended floor series: `docs/dsj-series-07-18-to-07-21.txt` (138
   `disk_snapshot.json` commits, independently parsed) — source for the
   corrected 720 GiB / 2026-07-19 floor in Step 1.
+- Reduced trend series: `docs/disk_observer_series.tsv` (epoch, used_kb
+  pairs only, 11,578 records, 2026-07-24T23:03Z→2026-08-02T01:10Z,
+  extracted from the live `~/.disk_magician_state/disk_observer.jsonl{,
+  .1,.2}` rotated logs this pass) — source for every trend/OLS/spike
+  figure in the headline, "Baseline-trend reproduction attempt", and
+  "Spike attribution" sections. The raw ~48 MB of source JSONL was
+  deliberately **not** committed (host-local, reproducible from the live
+  logs while they remain on this machine); this reduced series is
+  sufficient to re-derive every number cited above.
 - Bead: `disk_magician-dgs` (this mission). Related beads verified this
   pass: `disk_magician-ax0` (CLOSED), `disk_magician-nea` (CLOSED),
   `disk_magician-w7m` (OPEN, unverified this pass), `disk_magician-rvf`
