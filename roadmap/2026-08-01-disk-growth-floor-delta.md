@@ -3,11 +3,16 @@
 Mission: `disk_magician-dgs` ("sidekick: root-cause-disk-always-growing").
 State/log: `~/roadmap/disk_magician/sidekick/root-cause-disk-always-growing/STATE.md`.
 Raw evidence: `~/roadmap/disk_magician/sidekick/root-cause-disk-always-growing/docs/`
-(12 ledger JSON extracts + 4 lane reports). Four anonymous sonnet subagent
-lanes ran in parallel; every non-trivial claim below was independently
-re-verified by this session (bead status checks, direct code reads, live
-`df`/`uptime`/`grep -n` probes) before being included — refute-by-default,
-survives only with a citation.
+(12 ledger JSON extracts + 4 lane reports + extended disk_snapshot.json
+series). Four anonymous sonnet subagent lanes ran in parallel; every
+non-trivial claim below was independently re-verified by this session
+(bead status checks, direct code reads, live `df`/`uptime`/`grep -n`
+probes) before being included — refute-by-default, survives only with a
+citation. **UPDATE (T+~30min, same session):** the main session's
+parallel `/history` and `/ms` recall lanes surfaced a lower verified
+floor and a live worktree-restoration event; both are folded in below
+(Step 1 and the new "Concurrent event" section) rather than left as a
+stale first draft.
 
 ## Headline finding: the mission's own premise partially does not hold
 
@@ -22,37 +27,60 @@ free space independently confirmed by `host-disk-guardian.log` bouncing
 on 2026-08-01/02. The mandatory floor-and-gap number below is correct as
 computed, but **do not read it as a daily growth rate** — see step 1.
 
-## Step 1 — Floor and gap (ledger-mandated, computed first)
+## Step 1 — Floor and gap (ledger-mandated, computed first; CORRECTED)
 
-Per repo CLAUDE.md: floor = lowest `df`-derived `disk_used_kb` in the most
-recent ~14 daily snapshots of `~/.disk_magician_backup/ledger/topdown-5g.json`.
+**Original draft used only `~/.disk_magician_backup/ledger/topdown-5g.json`,
+whose daily-commit history starts 2026-07-21 — that is not the full "most
+recent ~14 days" window.** `ledger/topdown-5g.json` and the older
+`backup/jeffreys-macbook-pro/disk_snapshot.json` are two halves of one
+continuous history split by a schema/path migration: `disk_snapshot.json`'s
+commit history ends 2026-07-21T05:19:26-07:00 (12:19 UTC), essentially the
+same moment `topdown-5g.json`'s daily commits begin — same `hostname`,
+same `disk_total_gb=926` matching current `df` total (971,350,180 KB =
+926.2 GiB) exactly, confirmed by direct `git show` of both files. The true
+14-day window (2026-07-19 → 2026-08-02) requires both files.
 
-| date (captured_at, UTC) | disk_used_kb | disk_used GiB |
-|---|---:|---:|
-| 2026-07-21T11:21:21Z | 816,834,172 | 778.99 |
-| 2026-07-22T11:26:33Z | 868,550,792 | 828.31 |
-| 2026-07-23T10:49:35Z | 894,052,008 | 852.63 |
-| 2026-07-24T10:49:10Z | 844,083,864 | 804.98 |
-| 2026-07-25T11:26:10Z | 870,897,352 | 830.55 |
-| 2026-07-26T11:26:06Z | 898,201,500 | 856.59 |
-| 2026-07-27T11:26:08Z | 878,795,836 | 838.09 |
-| 2026-07-28T11:23:50Z | 863,745,196 | 823.73 |
-| 2026-07-29T10:55:39Z | 861,880,804 | 821.95 |
-| 2026-07-30T11:25:29Z | 875,696,540 | 835.13 |
-| **2026-07-31T11:26:08Z** | **799,093,672** | **762.08 (FLOOR)** |
-| 2026-08-01T11:26:06Z | 835,097,676 | 796.41 |
+| date (captured_at, UTC) | disk_used | source |
+|---|---:|---|
+| 2026-07-19T01:39:06Z | **720 GiB (FLOOR)** | `disk_snapshot.json` @ `3eef45f`, independently verified via direct `git show` |
+| 2026-07-21T11:21:21Z | 778.99 GiB | `topdown-5g.json` |
+| 2026-07-22T11:26:33Z | 828.31 GiB | `topdown-5g.json` |
+| 2026-07-23T10:49:35Z | 852.63 GiB | `topdown-5g.json` |
+| 2026-07-24T10:49:10Z | 804.98 GiB | `topdown-5g.json` |
+| 2026-07-25T11:26:10Z | 830.55 GiB | `topdown-5g.json` |
+| 2026-07-26T11:26:06Z | 856.59 GiB | `topdown-5g.json` |
+| 2026-07-27T11:26:08Z | 838.09 GiB | `topdown-5g.json` |
+| 2026-07-28T11:23:50Z | 823.73 GiB | `topdown-5g.json` |
+| 2026-07-29T10:55:39Z | 821.95 GiB | `topdown-5g.json` |
+| 2026-07-30T11:25:29Z | 835.13 GiB | `topdown-5g.json` |
+| 2026-07-31T11:26:08Z | 762.08 GiB | `topdown-5g.json` (floor of the truncated 07-21-start window used in the first draft) |
+| 2026-08-01T11:26:06Z | 796.41 GiB | `topdown-5g.json` |
 
-**Floor = 762.08 GiB on 2026-07-31T11:26:08Z.** Live `df -k
-/System/Volumes/Data` at report time (2026-08-01T17:54 PDT / 2026-08-02
-T00:54Z) reads **862,674,740 KB used = 822.53 GiB, 45,290,576 KB free =
-43.19 GiB, 96% capacity.** Gap = 822.53 − 762.08 = **60.45 GiB over ~13.5
-hours.** Naively annualized that is an alarming ~107 GiB/day — **this is
-the wrong read** (see headline finding): the floor snapshot landed at a
-trough of the daily sawtooth and the live reading landed near a peak of
-the *same* oscillation (2026-08-01's own observed range is 762.23-836.95
-GiB, which brackets both numbers). The 7-day and 48h trend lines (net
--3.93 and -13.43 GiB/day) are the trustworthy growth-rate figures, not
-this single floor-to-instant delta.
+Pulling every ~35-min `disk_snapshot.json` commit between 2026-07-18 and
+07-21 (138 commits, all independently parsed) gives daily min/max:
+07-18 min=717/max=733, 07-19 min=720/max=859, 07-20 min=748/max=864,
+07-21 (partial) min=773/max=820 GiB. **07-18's 717 GiB is one calendar
+day outside the strict 14-day window (07-19-08-02); 07-19's 720 GiB is
+the correct in-window floor**, confirmed at the specific commit
+`3eef45f` (`disk_used_gb: 720, disk_free_gb: 148, disk_pct: 77,
+disk_total_gb: 926`). Note 07-19 alone swung from 720 to 859 GiB —
+the sawtooth pattern (see headline finding) was already present 2 weeks
+ago, not a new development.
+
+**Corrected floor = 720 GiB on 2026-07-19T01:39:06Z.** Live `df -k
+/System/Volumes/Data` readings taken during this session (all
+2026-08-02 UTC): 811.72 GiB (T+5min, 00:42Z), 822.53 GiB (T+20min,
+00:54Z), 804.28 GiB (T+24min, 00:58Z), **806.28 GiB (T+30min, 01:01Z,
+most recent)**. Gap = 806.28 − 720 = **86.28 GiB**, and this number
+moved by nearly 20 GiB across four readings taken 3-8 minutes apart
+during this very session — direct, first-hand corroboration of the
+sawtooth finding at fine granularity, not just the daily-snapshot
+evidence. **Do not read either the 86.28 GiB gap or the ~60 GiB gap
+from the first draft as a sustained daily rate** — both are single
+trough-to-instant readings of the same oscillating series. The 7-day
+and 48h trend lines from `disk_observer.jsonl` (net -3.93 and -13.43
+GiB/day, unchanged from the first draft) remain the trustworthy
+growth-rate figures.
 
 ## Step 2 — Per-path ≥5 GiB bucket delta table (ledger-only)
 
@@ -210,6 +238,42 @@ disk_frontier_scan.py`, current HEAD):**
   cleanup script. Left open for a future pass once a second natural
   fire has occurred to observe.
 
+## Concurrent event during this mission: worktree-deletion accident + restoration (real, timing-verified; size NOT independently confirmed)
+
+Bead `disk_magician-oja` ("Enforce 14-day worktree recency protection and
+ban ad-hoc cleanup scripts in GEMINI.md/CLAUDE.md") and GitHub issue
+`jleechanorg/disk_magician#51` are both real and independently checked by
+this session: `br show disk_magician-oja` → status CLOSED,
+`created_at: 2026-08-02T00:43:11Z`, `closed_at: 2026-08-02T00:43:14Z`
+(created and closed **3 seconds apart** — a record-keeping close of an
+already-finished action, not evidence of a multi-minute restore happening
+in real time at that instant). Its close reason states policy was added
+to CLAUDE.md/GEMINI.md banning ad-hoc cleanup scripts **and** "restored
+all 30 worktrees modified within 14 days" — i.e., a separate session
+apparently ran an ad-hoc cleanup that deleted 30 worktrees inside the
+14-day protection window, then had to restore them, then hardened policy
+to prevent recurrence.
+
+**Timing is significant:** this bead's timestamp (00:43:11Z) falls 6
+minutes after this very mission's `started_at` (00:37:43Z per
+`~/.hermes/runtime/sidekick-disk-rootcause-20260801.started_at`) — the
+accidental deletion-and-restore was very likely happening **concurrently
+with this mission's early measurement window**, which plausibly
+contributes to the fine-grained oscillation directly observed above
+(four `df` reads spanning 811.72→822.53→804.28→806.28 GiB across roughly
+20 minutes). **However, this session could not independently confirm the
+restoration's size or location**: a bounded `find -newermt` scan across
+`/Users/jleechan/projects`, `/Users/jleechan/projects_other`, and
+`~/.worktrees` (depth ≤4, threshold 2026-08-02T00:20:00Z onward) found
+**zero** matching directories — either the 30 restored worktrees live
+somewhere this scan didn't cover, mtimes were already overwritten by
+subsequent activity, or `git worktree add`/checkout doesn't touch parent
+directory mtimes at the depth this scan checked. **Treat "worktree
+restoration explains part of the regrowth" as a real, timing-correlated,
+but size-unquantified hypothesis** — a genuine candidate contributor to
+the noise in this mission's own live readings, not a confirmed GiB
+figure to add to any table above.
+
 ## Quick wins (safety-gated inventory, reported separately — NOT executed)
 
 Per repo policy this mission is READ-ONLY; the following is an inventory
@@ -217,9 +281,10 @@ only, ranked by size, for a human operator to act on:
 
 | Candidate | Size | Verdict | Why not actioned now |
 |---|---:|---|---|
-| `~/.colima` | 29 GiB | Not a delete candidate | Operational reclaim only (`colima stop/start` + in-VM `fstrim`); already down sharply from a prior ~186 GiB reading |
+| `~/.colima` | 29 GiB | Not a delete candidate | Operational reclaim only (`colima stop/start` + in-VM `fstrim`); already down sharply from a prior ~186 GiB reading. Repo has a `scripts/cleanup_colima.sh` (defaults dry-run) — an external investigation forwarded by the operator estimates ~15 GiB reclaimable via `colima compact`; NOT independently re-measured by this session in this pass, inventory only |
 | `~/.worktrees` large children | 7.7 GiB total | Blocked by 14-day rule | Already shrank from 34.87 GiB (07-29) to 7.7 GiB via another sweeper; closest child is 9 days old, needs 5 more days |
 | `venv.bak.20260703-*` ×3 | ~2.17 GiB | Blocked by 14-day rule | Parent worktree touched 5 days ago — CLAUDE.md protects the whole worktree, not just the `.bak` rename date |
+| macOS code-signing clone caches (`/var/folders/.../codesign*` or similar) | ~8.8 GiB (external estimate, unverified this pass) | Needs decision | Repo has `scripts/cleanup_code_sign_clones.sh` (requires `CODE_SIGN_CLONES_APPROVED=1`, defaults dry-run). Matches the known "code_sign_clone" leak class from the 2026-07-12 four-leak-classes finding — plausible, but this session did not re-measure the current size; treat the ~8.8 GiB figure as an external, unverified estimate until a fresh `du` confirms it |
 | `/private/tmp/ambientfix` | 1.7 GiB | Not safe | Active branch, 4 days old |
 | `/private/tmp` PR/AO scratch (6 dirs) | ~1.9 GiB | Not safe | All touched today (2026-08-01) or within 1-4 days, clean git worktrees — live agent work |
 | `~/.cursor` | 1.8 GiB | Needs decision | Real chat history + workspace cache, no obvious safe-delete subset |
@@ -227,12 +292,43 @@ only, ranked by size, for a human operator to act on:
 **No item is safe to delete today.** The only concrete near-term win,
 once the 14-day floor clears in 2-9 days, is re-running
 `scripts/worktree_hygiene.sh` scoped per-repo — worth ~9.9 GiB
-(`~/.worktrees` + `venv.bak` dirs combined). Note also:
-`safety.local.json` does not exist on this machine (only the gitignored
-template) — every `safety_check.sh` call defaults to "OK" because no
-machine-local rule fires; the 14-day-rule and never-delete-list checks
-above were cross-checked manually against
-`scripts/lib/worktree_recency.sh` instead of trusting that default.
+(`~/.worktrees` + `venv.bak` dirs combined). The colima-compact (~15 GiB)
+and code-sign-clone (~8.8 GiB) figures above are **externally-sourced
+estimates carried into this report at the operator's request, not
+independently re-measured by this mission** — flagged as such rather than
+presented with false precision. Note also: `safety.local.json` does not
+exist on this machine (only the gitignored template) — every
+`safety_check.sh` call defaults to "OK" because no machine-local rule
+fires; the 14-day-rule and never-delete-list checks above were
+cross-checked manually against `scripts/lib/worktree_recency.sh` instead
+of trusting that default.
+
+**Rejected as stale, not new:** an external investigation separately
+recommended "add `RunAtLoad=true` to launchd sweepers" — this duplicates
+the fix already shipped 2026-07-29 (see `roadmap/2026-07-29-disk-
+regrowth-rootcause-sidekick.md`) and independently re-confirmed holding
+in Step 3 above (`runs=1, exit 0` on all 4 jobs); it is not a new
+recommendation for this report.
+
+## Known traps checked and avoided this pass
+
+Prior missions' memory flagged recurring measurement traps; this pass
+explicitly checked each rather than re-falling into it:
+- The `residual_gb` vs `residual_delta_gb` field-confusion trap (root
+  cause of the now-fixed `disk_magician-nea`) — this report cites
+  `disk_used_kb`/`disk_used_gb` directly from each snapshot, not a delta
+  field, for every floor/gap number above.
+- "Sweeper never fired" claims require an interval-elapsed check before
+  being called a bug — Step 3 explicitly notes the 4 RunAtLoad-fixed
+  sweepers' `runs=1` is expected (7-day interval, fix landed 07-29, next
+  fire not due until ~08-05), not re-flagged as a regression.
+- APFS local snapshots were ruled out as a residual source by a prior
+  pass's live verification (`research-residual-296gib-20260730-
+  update1.md`) — not re-investigated here.
+- The documented permanent floor on this Mac (≈27.6-47.6 GiB: SSV +
+  Preboot + Recovery + APFS metadata) means `df`'s absolute used/free
+  numbers will never reach 0 GiB free even with everything reclaimable
+  reclaimed — none of this report's gap figures assume otherwise.
 
 ## What this pass changes about the prevention-gap picture
 
@@ -258,9 +354,18 @@ reclaim, any disk space.
   under the sidekick STATE dir.
 - Raw ledger extracts: `docs/ledger-<sha>.json` ×12 (2026-07-21→08-01),
   same STATE dir.
+- Extended floor series: `docs/dsj-series-07-18-to-07-21.txt` (138
+  `disk_snapshot.json` commits, independently parsed) — source for the
+  corrected 720 GiB / 2026-07-19 floor in Step 1.
 - Bead: `disk_magician-dgs` (this mission). Related beads verified this
   pass: `disk_magician-ax0` (CLOSED), `disk_magician-nea` (CLOSED),
   `disk_magician-w7m` (OPEN, unverified this pass), `disk_magician-rvf`
-  (OPEN, follow-up watchdog).
+  (OPEN, follow-up watchdog), `disk_magician-oja` (CLOSED — worktree
+  restoration + ad-hoc-script policy hardening, timing-correlated with
+  this mission's window, see "Concurrent event" section).
 - Prior reports: `roadmap/2026-07-29-disk-regrowth-rootcause-sidekick.md`,
   `roadmap/research-residual-296gib-20260730-update1.md`.
+- External input folded in via team-lead relay: verified 720 GiB/07-19
+  floor, worktree-restoration hypothesis (GH issue
+  `jleechanorg/disk_magician#51`), colima-compact/code-sign-clone quick-win
+  candidates (unverified estimates, flagged as such above).
