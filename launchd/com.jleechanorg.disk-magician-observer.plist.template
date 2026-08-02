@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Persistent read-only 60-second sampler for bead jleechan-tbe3. -->
+<!--
+  Persistent read-only 60-second sampler for bead jleechan-tbe3.
+
+  StandardOutPath/StandardErrorPath point at a real log file, not /dev/null
+  (fixed 2026-08-01/02, sweeper-health MISS): disk_observer.py's real data
+  output already goes to @HOME@/.disk_magician_state/disk_observer.jsonl via
+  --output above, independent of stdout/stderr — but routing stdout/stderr to
+  /dev/null meant a Python crash/traceback was invisible and the
+  sweeper-health watchdog could never confirm liveness from this job. Do NOT
+  touch RunAtLoad/KeepAlive/ThrottleInterval below — unrelated and correct.
+-->
+
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -34,8 +45,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>/dev/null</string>
+  <string>@HOME@/Library/Logs/disk-magician-observer.log</string>
   <key>StandardErrorPath</key>
-  <string>/dev/null</string>
+  <string>@HOME@/Library/Logs/disk-magician-observer.log</string>
 </dict>
 </plist>
