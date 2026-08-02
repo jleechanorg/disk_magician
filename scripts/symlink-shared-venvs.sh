@@ -195,26 +195,6 @@ process_repo() {
   log "  → $replaced replaced, $skipped_link already-symlinked, $skipped_python skipped (python mismatch)"
 }
 
-# Main loop
-log "=== SYMLINK SHARED VENVS ==="
-if [[ "$DRY_RUN" == true ]]; then
-  log "Mode: dry-run (use --clean to actually replace)"
-else
-  log "Mode: CLEAN (will rename existing venvs to .bak.<ts>)"
-fi
-log "Roots: ${ROOTS[*]}"
-log ""
-
-for root in "${ROOTS[@]}"; do
-  [[ -d "$root" ]] || { log "Root missing, skipping: $root"; continue; }
-  log "Scanning $root ..."
-
-  while IFS= read -r base; do
-    [[ -z "$base" ]] && continue
-    process_repo "$base"
-  done < <(find_base_repos "$root")
-done
-
 purge_bak_dirs() {
   local days="$1"
   log ""
@@ -243,6 +223,26 @@ purge_bak_dirs() {
   done
   log "  → $count backup(s) processed (total ${freed_kb}K)"
 }
+
+# Main loop
+log "=== SYMLINK SHARED VENVS ==="
+if [[ "$DRY_RUN" == true ]]; then
+  log "Mode: dry-run (use --clean to actually replace)"
+else
+  log "Mode: CLEAN (will rename existing venvs to .bak.<ts>)"
+fi
+log "Roots: ${ROOTS[*]}"
+log ""
+
+for root in "${ROOTS[@]}"; do
+  [[ -d "$root" ]] || { log "Root missing, skipping: $root"; continue; }
+  log "Scanning $root ..."
+
+  while IFS= read -r base; do
+    [[ -z "$base" ]] && continue
+    process_repo "$base"
+  done < <(find_base_repos "$root")
+done
 
 if [[ -n "$PURGE_BAK_DAYS" ]]; then
   purge_bak_dirs "$PURGE_BAK_DAYS"
