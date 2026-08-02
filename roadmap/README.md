@@ -2,6 +2,7 @@
 
 ## Recent activity (by day)
 
+- [2026-08-01](activity/2026-08-01.md) — Recreated all 30 git worktrees modified within 14 days; updated CLAUDE.md/GEMINI.md to strictly ban ad-hoc cleanup scripts and enforce 14-day recency protection; completed multi-cloud conversation sync to Google Drive and Dropbox; executed parallel subagent disk-root-cause forensic investigation (14-day floor 720 GiB used, live delta +85 GiB, reclaimed ~35 GiB).
 - [2026-07-20](activity/2026-07-20.md)
 - [2026-07-18](activity/2026-07-18.md) — ez-gh-actions Phase 2 workspace mount (production-verified); 650-agent /swarm identified 53.24GiB of 200GiB-target candidates (all ≤5GiB); executed SAFE tier conservatively (15.17GiB reclaimed); found+remediated a live GitHub PAT exposure; caught a report bug (`.ao/data/worktrees` auto-export stubs) before deleting anything.
 - [2026-07-17](activity/2026-07-17.md) — Root-caused Colima's regrowth via the 1-min fast-swing observer log: 33.20→43.44 GiB in a 90-min window from CI-runner churn, while the automated trim-guard was broken (`shlock` stale-lock detection failure, confirmed reproducible). Manually recovered (+38.4 GiB), fixed the guard, filed [jleechan-wy3s](https://github.com/jleechanorg/disk_magician/issues/24) for both bugs. Also cut `~/dk2d_evidence` to a strict 2-day retention per user request (57→1 dirs, −19 GiB).

@@ -1,5 +1,39 @@
 # disk_magician — agent instructions
 
+## Investigation methodology — always find the floor, always show the buckets
+
+Disk-fill investigations in this repo MUST follow a fixed pre-analysis
+sequence (added 2026-07-30 after four "200 GiB does not exist" misses that
+underestimated cumulative-reservoir growth):
+
+1. **Find the last-week floor** before proposing anything. The floor is
+   the **lowest `df used` in the most recent ~14 daily snapshots** (NOT
+   proxies, NOT a single fresh `du`, NOT current df). Pull it from the
+   git-backed ledger in `~/.disk_magician_backup/ledger/topdown-5g.json`
+   via `git -C ~/.disk_magician_backup log -- ledger/topdown-5g.json | head`
+   then `git show <sha>:ledger/topdown-5g.json`. State the floor date +
+   value and the gap (current used − floor used) before any other
+   measurement. **The gap-to-floor grounds every proposal.**
+
+2. **Pull per-directory granularity buckets** from that same ledger (the
+   schema stores every ≥5 GiB entry it observed with `size_mb`). Do NOT
+   run a fresh `du` sweep on the loaded disk — `du` repeatedly stalls
+   >60s on this box under load, and a stalled du is a timed-out du.
+   Compare the buckets at the floor snapshot vs the current snapshot
+   and present the **per-path before/after delta table**. Every "x GiB"
+   cited in the report must be from the ledger, not from a proxy.
+
+3. **Then** supplement with cheap spot-checks only for items the ledger
+   doesn't cover (small dirs, new dirs created after the last snapshot).
+   Always re-measure per item before deletion (smoke-test memory:
+   0.00002 GiB "verified" was actually 2.4 GiB+).
+
+The canonical read of this rule lives at
+`~/.claude/CLAUDE.md` → "Disk diagnosis — three concurrent lanes"
+(composition: whole-disk top-down + snapshot deltas + safety-gated quick
+wins). The floor-and-buckets requirement above is the **specific
+pre-analysis order** for this repo's investigations, on top of that.
+
 ## Cross-repo authority: dir switching is ALWAYS allowed from this repo
 
 This repo's purpose is machine-wide disk maintenance — its work routinely
@@ -30,6 +64,10 @@ integration test that runs the downstream writer/materializer, verifies the
 canonical root is unchanged, and rejects self-referential links. A dry-run or
 isolated dedup test alone is insufficient because the destructive behavior can
 occur only when a second tool later writes through the alias.
+## Strict ban on ad-hoc cleanup scripts (hard)
+
+Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the 14-day recency protection gate (`mtime > 14 days`). Writing ad-hoc scripts bypasses safety gates and is strictly banned.
+
 ## Worktree 14-day rule (hard) — recency is measured, never proxied
 
 **A git worktree touched within the last 14 days is PROTECTED.** No script,
