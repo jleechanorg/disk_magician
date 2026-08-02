@@ -309,3 +309,32 @@ Concrete tests, cheapest first:
   "What would prove this" test 4.
 - Whether APFS/SIP applies any protection to these paths distinct from
   TCC/Sandbox.kext (Q4) — no source found either way.
+
+## RESOLVED — cleared by a host reboot (2026-08-02, ~16:26 PT)
+
+After a reboot (`uptime` showed "up 33 mins" vs. 6+ days before), the
+identical `du`/`ls` commands that failed 100% of the time across every
+load level tested (64, 85, 192, 264, 750-1000+) **succeeded immediately**
+at load1≈14-34:
+
+- `~/Library/Mail`: **3.4 GiB**
+- `~/Library/Messages`: **1.0 GiB**
+- `~/Library/Application Support/MobileSync/Backup`: **0 B** (genuinely
+  empty — no device backups currently stored)
+
+This is strong retroactive support for the leading theory in this doc
+(an Endpoint Security AUTH-event race, likely tied to a long-lived
+first-party subscription/daemon state that a fresh boot resets) over the
+alternative "these paths are permanently special" framing — the block
+was persistent-but-not-permanent, and cleared with the one intervention
+(reboot) never tried this session.
+
+**Major correction to prior assumptions carried through tonight's other
+reports:** Mail + Messages + MobileSync sum to only **4.4 GiB total**,
+nowhere near the ~75-165 GiB estimate in
+`roadmap/research-residual-296gib-20260730.md` that this entire
+investigation thread was implicitly chasing. Whatever accounts for the
+remaining ~250+ GiB residual, it is NOT primarily these three paths —
+that framing should be retired. The residual's real composition remains
+open; worth a fresh frontier scan now that both the scanner bug is fixed
+AND the box is freshly rebooted (calm load, working directory access).
