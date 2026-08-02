@@ -5,9 +5,11 @@
 # daily 04:05 sweep) and jleechan-etjw (Colima re-inflates ~30G/hr against
 # sparse prunes): a cadence gap between how fast these two trees grow and how
 # often the existing daily/weekly sweepers run. This script is a THRESHOLD
-# trigger meant to run frequently (every 2h via launchd) — it only does real
-# work when free space has actually dropped below threshold, so idle fires
-# are a single log line.
+# trigger meant to run frequently (every 30min via launchd, tightened from 2h
+# on 2026-08-01 after a 46->13.7 GiB free-space swing in 90 min blew past the
+# old 2h cadence) — it only does real work when free space has actually
+# dropped below threshold, so idle fires are a single log line and never
+# touch the work lock below.
 #
 # Never runs anything beyond cleanup_tmp.sh (--clean [--large]) and
 # cleanup_colima.sh --clean — both scripts own their own safety semantics

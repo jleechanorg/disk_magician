@@ -249,6 +249,25 @@ assert_contains "logs full-sweep trigger" "full sweep triggered" "$LOG_CONTENT"
 assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_contains "runs cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
 
+echo "Test 11: launchd plist template + lock TTL match the intended 30-min cadence"
+PLIST_TEMPLATE="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-pressure-sweep.plist.template"
+if [[ -f "$PLIST_TEMPLATE" ]]; then
+  PLIST_CONTENT="$(cat "$PLIST_TEMPLATE")"
+  assert_contains "StartInterval is 1800s (30min, tightened from 7200s/2h)" "<integer>1800</integer>" "$PLIST_CONTENT"
+  assert_not_contains "StartInterval is no longer the old 2h value" "<integer>7200</integer>" "$PLIST_CONTENT"
+else
+  echo "  FAIL: plist template not found at $PLIST_TEMPLATE"
+  FAIL=$(( FAIL + 1 ))
+fi
+# The work lock (TTL 3600s = 60min) is only acquired for an actual sweep run
+# and released via EXIT trap the moment that run finishes — it must stay
+# well above any single sweep's worst-case runtime (2 steps * 600s STEP_TIMEOUT)
+# so a crash-reclaim window doesn't fire mid-legitimate-run, but it does NOT
+# throttle idle fires or the 30-min StartInterval itself (see plist template
+# comment). This assertion pins that TTL value so a future edit can't silently
+# shrink it below the dual-step worst case without a test failure.
+assert_contains "lock TTL is still 3600s (60min)" 'LOCK_TTL_SEC=3600' "$(cat "$SOURCE_SCRIPT")"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

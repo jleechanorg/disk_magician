@@ -7,15 +7,23 @@
   sparse prunes) — the daily/weekly sweeper cadence is too slow for these two
   trees' observed growth rate.
 
-  Schedule:  Every 2 hours (StartInterval=7200s). No off-hour restriction —
-             the script self-gates on free-space threshold (default 40GB), so
-             idle fires cost one log line and exit immediately.
+  Schedule:  Every 30 minutes (StartInterval=1800s; tightened 2026-08-01,
+             was 7200s/2h — a 46->13.7 GiB free-space swing in 90 min at a
+             ~30 GiB/hr rate blew past the 2h cadence undetected). No
+             off-hour restriction — the script self-gates on free-space
+             threshold (default 40GB), so idle fires cost one log line and
+             exit immediately; the mkdir-based work lock (TTL 60min) is only
+             acquired once a fire decides to actually clean, and is released
+             via EXIT trap the moment that run finishes — it does NOT hold
+             across idle fires and does NOT throttle the 30-min cadence
+             under normal (<30min) sweep runtimes. The TTL exists solely to
+             reclaim a lock left behind by a crashed run, not to space out
+             fires.
   Action:    runs scripts/pressure_sweep.sh with no args (uses its built-in
              defaults). Never runs anything beyond cleanup_tmp.sh --clean
              --large (LARGE_TMP_APPROVED=1 on the pressure path; bead
              jleechan-nkzj) and cleanup_colima.sh --clean; both own their own
              safety semantics.
-             mkdir-based lock (TTL 60min) skips overlapping fires.
 
   Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
   scripts/install_launchd_sweepers.sh at install time. Do not commit a
@@ -36,7 +44,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>7200</integer>
+  <integer>1800</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-pressure-sweep.log</string>
   <key>StandardErrorPath</key>
