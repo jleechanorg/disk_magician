@@ -33,6 +33,28 @@ DEFAULT_LABELS = [
     "org.jleechanorg.ezgha",
 ]
 
+# Top-level $HOME buckets by measured_kb in the top-down 5GiB-granularity
+# ledger (~/.disk_magician_backup/ledger/topdown-5g.json, snapshot
+# 2026-08-02T08:23:13Z) as of bead disk_magician-pkq: the six heaviest
+# top-level directories under $HOME, rolled up from that snapshot's
+# granularity_buckets. Re-derive from the ledger if these go stale.
+DEFAULT_HOT_DIRS = [
+    ".codex",
+    ".cache",
+    "cb-demo",
+    "project_jleechanclaw",
+    "worktrees",
+    ".cmuxterm",
+]
+
+# Step-event attribution defaults (bead disk_magician-pkq): a >10 GiB swing
+# in host_disk.used_kb within a 30-minute rolling window could not be
+# attributed to any directory after the fact on 2026-08-01 because this
+# observer only recorded aggregate df numbers. These constants back the
+# --step-event-threshold-gib / --step-event-window-minutes CLI defaults.
+STEP_EVENT_THRESHOLD_GIB = 10
+STEP_EVENT_WINDOW_MINUTES = 30
+
 
 def run_command(argv: Sequence[str], timeout: int = 5) -> CommandResult:
     env = None
@@ -330,6 +352,84 @@ def collect_swap(run: Runner) -> dict:
     return {**values, "error": None}
 
 
+def collect_hot_dir_sizes(home: Path, run: Runner, hot_dirs: Sequence[str] = DEFAULT_HOT_DIRS) -> dict:
+    """Cheap, non-recursive-output top-level sizing for a handful of known-hot
+    parent directories. Reuses `_du_kb` (a single `du -sk` per path, same
+    shallow idiom already used by `collect_colima`) rather than a deep sweep
+    — this repo's CLAUDE.md bans stalling `du` sweeps under load, but a
+    single summary call per known-hot dir is the sanctioned exception.
+    """
+    sizes = {}
+    for name in hot_dirs:
+        path = home / name
+        sizes[name] = _du_kb(path, run) if path.exists() else None
+    return sizes
+
+
+def check_step_event(
+    history: list,
+    now_epoch: int,
+    used_kb: Optional[int],
+    window_seconds: int = STEP_EVENT_WINDOW_MINUTES * 60,
+    threshold_kb: int = STEP_EVENT_THRESHOLD_GIB * 1024 * 1024,
+) -> Optional[dict]:
+    """Track (epoch, used_kb) samples in a rolling window and report when the
+    delta versus the oldest in-window sample exceeds threshold_kb. Mutates
+    `history` in place (pruning stale entries, appending the current sample)
+    so callers can keep passing the same list across a watch loop.
+    """
+    history[:] = [(epoch, kb) for epoch, kb in history if now_epoch - epoch <= window_seconds]
+    event = None
+    if used_kb is not None and history:
+        oldest_epoch, oldest_kb = history[0]
+        delta_kb = used_kb - oldest_kb
+        if abs(delta_kb) > threshold_kb:
+            event = {
+                "delta_kb": delta_kb,
+                "direction": "grew" if delta_kb > 0 else "shrank",
+                "window_seconds": now_epoch - oldest_epoch,
+            }
+    if used_kb is not None:
+        history.append((now_epoch, used_kb))
+    return event
+
+
+def build_step_event_record(
+    now_epoch: int,
+    event: dict,
+    home: Path,
+    run: Runner,
+    hot_dirs: Sequence[str] = DEFAULT_HOT_DIRS,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "tool": "disk_observer_step_event",
+        "timestamp": datetime.fromtimestamp(now_epoch, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "epoch": now_epoch,
+        "delta_kb": event["delta_kb"],
+        "direction": event["direction"],
+        "window_seconds": event["window_seconds"],
+        "hot_dirs_kb": collect_hot_dir_sizes(home, run, hot_dirs),
+    }
+
+
+def seed_step_event_history(path: Path, window_seconds: int, now_epoch: int) -> list:
+    """Bootstrap the rolling window from the main disk_observer.jsonl on
+    process (re)start, so a launchd restart mid-window doesn't blind the
+    watch loop to a swing already in progress.
+    """
+    history = []
+    for record in read_records([path]):
+        epoch = record.get("epoch")
+        used_kb = (record.get("host_disk") or {}).get("used_kb")
+        if epoch is None or used_kb is None:
+            continue
+        epoch = _int(epoch)
+        if now_epoch - epoch <= window_seconds:
+            history.append((epoch, _int(used_kb)))
+    return history
+
+
 def collect_sample(
     home: Path,
     now_epoch: Optional[int] = None,
@@ -450,6 +550,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         child.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
         child.add_argument("--keep", type=int, default=4)
         child.add_argument("--max-age-days", type=int, default=7)
+        child.add_argument(
+            "--step-events-output",
+            type=Path,
+            default=Path.home() / ".disk_magician_state" / "step_events.jsonl",
+        )
+        child.add_argument("--step-event-threshold-gib", type=float, default=STEP_EVENT_THRESHOLD_GIB)
+        child.add_argument("--step-event-window-minutes", type=int, default=STEP_EVENT_WINDOW_MINUTES)
+        child.add_argument("--hot-dirs", type=str, default=",".join(DEFAULT_HOT_DIRS))
     report = subparsers.add_parser("report")
     report.add_argument("--input", type=Path, default=Path.home() / ".disk_magician_state" / "disk_observer.jsonl")
     report.add_argument("--limit", type=int, default=10)
@@ -469,7 +577,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.max_bytes < 1024 or args.keep < 1 or args.max_age_days < 1:
         print("--max-bytes must be >=1024; --keep and --max-age-days must be >=1", file=sys.stderr)
         return 2
+    if args.step_event_threshold_gib <= 0 or args.step_event_window_minutes <= 0:
+        print("--step-event-threshold-gib and --step-event-window-minutes must be >0", file=sys.stderr)
+        return 2
+
+    step_event_threshold_kb = int(args.step_event_threshold_gib * 1024 * 1024)
+    step_event_window_seconds = args.step_event_window_minutes * 60
+    hot_dirs = [name.strip() for name in args.hot_dirs.split(",") if name.strip()]
+
     previous_epoch = int(time.time()) - args.interval
+    step_event_history = (
+        seed_step_event_history(args.output, step_event_window_seconds, previous_epoch)
+        if args.command == "watch"
+        else []
+    )
     while True:
         now_epoch = int(time.time())
         sample = collect_sample(Path.home(), now_epoch, previous_epoch)
@@ -478,6 +599,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_age_seconds=args.max_age_days * 86400,
         )
         print(json.dumps({"timestamp": sample["timestamp"], "output": str(args.output)}), flush=True)
+
+        used_kb = (sample.get("host_disk") or {}).get("used_kb")
+        step_event = check_step_event(
+            step_event_history, now_epoch, used_kb,
+            window_seconds=step_event_window_seconds, threshold_kb=step_event_threshold_kb,
+        )
+        if step_event is not None:
+            step_record = build_step_event_record(now_epoch, step_event, Path.home(), run_command, hot_dirs)
+            append_sample(
+                args.step_events_output, step_record, args.max_bytes, args.keep,
+                max_age_seconds=args.max_age_days * 86400,
+            )
+            print(
+                json.dumps({
+                    "step_event": step_record["direction"],
+                    "delta_kb": step_record["delta_kb"],
+                    "output": str(args.step_events_output),
+                }),
+                flush=True,
+            )
+
         if args.command == "once":
             return 0
         previous_epoch = now_epoch
