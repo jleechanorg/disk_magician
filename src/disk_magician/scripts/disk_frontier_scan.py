@@ -32,7 +32,6 @@ Design contract (roadmap doc, "post-critic" section):
 import argparse
 import collections
 import concurrent.futures
-import errno
 import heapq
 import json
 import os
@@ -73,29 +72,6 @@ GDU_FTS_ERROR_RE = re.compile(
     r"^gdu: fts_read failed: (.+): (No such file or directory|"
     r"Permission denied|Operation not permitted|Input/output error|Interrupted system call)$"
 )
-
-# EINTR retry constants — macOS Mail/Notes indexers intermittently hold an
-# exclusive lock during readdir; syscall returns errno.EINTR. Retry with
-# bounded exponential backoff so the frontier scanner no longer silently
-# drops ~400 paths (~30-60 GiB of Mail/Messages/MobileSync/Backup) into
-# inventory_interrupted_system_call. See
-# roadmap/research-residual-296gib-20260730-update1.md for the
-# investigation that motivated this.
-EINTR_RETRY_BASE_S = 0.05   # initial backoff between retries
-EINTR_RETRY_MAX_S = 2.0     # hard ceiling so a long-lived lock can't stall
-                            # the whole scan
-EINTR_RETRY_MAX = 7         # ≈ 0.05..2.0s exponential; bounded ~2s total
-
-# module-level path-cause stats (for run-finalization reporting)
-_path_status_log = collections.Counter()
-
-
-def log_path_status(_path, cause, *, after_attempts=1):
-    """Append a structured per-path cause to the run's status log. Cheap,
-    only called when retry success or final failure happens. The _path
-    arg is reserved for per-path cause accounting (future use); counts
-    are coarse for now."""
-    _path_status_log[(cause, after_attempts)] += 1
 
 
 class AdjustableSemaphore:
@@ -410,43 +386,25 @@ def list_children(path):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
-    or a double-count.
-
-    EINTR retry: macOS Mail/Notes indexers intermittently hold an exclusive
-    lock and delivery returns EINTR (errno=4). Without retry, ~400 paths
-    silently drop into inventory_interrupted_system_call and never recover
-    (see research/residual-296gib-20260730-update1.md). Retry with bounded
-    exponential backoff capped at EINTR_RETRY_MAX so we don't stall the
-    whole scan on a long-lived lock.
-    """
+    or a double-count."""
     children = []
-    backoff = EINTR_RETRY_BASE_S
-    for attempt in range(1, EINTR_RETRY_MAX + 1):
-        try:
-            with os.scandir(path) as it:
-                for entry in it:
-                    try:
-                        is_symlink = entry.is_symlink()
-                    except OSError:
-                        continue
-                    children.append((entry.path, is_symlink))
-            if attempt > 1:
-                log_path_status(path, "inventory_interrupted_system_call_retry_succeeded", after_attempts=attempt)
-            return children, None
-        except PermissionError:
-            return None, "permission_denied_or_tcc"
-        except FileNotFoundError:
-            return None, "path_disappeared"
-        except NotADirectoryError:
-            return None, "not_a_directory"
-        except OSError as exc:
-            if exc.errno == errno.EINTR and attempt < EINTR_RETRY_MAX:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, EINTR_RETRY_MAX_S)
-                continue
-            return None, f"enumeration_errno_{exc.errno}"
-    # exhausted EINTR retries
-    return None, "inventory_interrupted_system_call"
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    is_symlink = entry.is_symlink()
+                except OSError:
+                    continue
+                children.append((entry.path, is_symlink))
+    except PermissionError:
+        return None, "permission_denied_or_tcc"
+    except FileNotFoundError:
+        return None, "path_disappeared"
+    except NotADirectoryError:
+        return None, "not_a_directory"
+    except OSError as exc:
+        return None, f"enumeration_errno_{exc.errno}"
+    return children, None
 
 
 DATA_ROOT_PRIORITY = {
@@ -790,25 +748,7 @@ class FrontierScanner:
             remaining_kb = max(0, direct_kb)
             try:
                 direct_files = []
-                # EINTR retry (same rationale as list_children above).
-                _backoff = EINTR_RETRY_BASE_S
-                _got_entries = False
-                entries = []  # always bound on the consumer side
-                for _attempt in range(1, EINTR_RETRY_MAX + 1):
-                    try:
-                        entries = list(os.scandir(path))
-                        if _attempt > 1:
-                            log_path_status(path, "oversize_eintr_retry_succeeded", after_attempts=_attempt)
-                        _got_entries = True
-                        break
-                    except OSError as _exc:
-                        if _exc.errno == errno.EINTR and _attempt < EINTR_RETRY_MAX:
-                            time.sleep(_backoff)
-                            _backoff = min(_backoff * 2, EINTR_RETRY_MAX_S)
-                            continue
-                        log_path_status(path, "oversize_eintr_exhausted", after_attempts=_attempt)
-                        break
-                if _got_entries:
+                with os.scandir(path) as entries:
                     for entry in entries:
                         try:
                             if not entry.is_file(follow_symlinks=False):
@@ -819,17 +759,17 @@ class FrontierScanner:
                         file_kb = (st.st_blocks * 512 + 1023) // 1024
                         if st.st_nlink == 1 and file_kb > self.granularity_kb:
                             direct_files.append((entry.path, file_kb))
-                    for file_path, file_kb in sorted(direct_files):
-                        if file_kb > remaining_kb:
-                            continue
-                        self.oversize_files.append(
-                            {
-                                "path": file_path,
-                                "measured_kb": file_kb,
-                                "reason": "indivisible_file",
-                            }
-                        )
-                        remaining_kb -= file_kb
+                for file_path, file_kb in sorted(direct_files):
+                    if file_kb > remaining_kb:
+                        continue
+                    self.oversize_files.append(
+                        {
+                            "path": file_path,
+                            "measured_kb": file_kb,
+                            "reason": "indivisible_file",
+                        }
+                    )
+                    remaining_kb -= file_kb
             except OSError:
                 pass
 
@@ -909,9 +849,10 @@ class FrontierScanner:
             self.inventory_backend = "gdu_one_pass"
             return True
 
+        gdu_budget = max(0.001, min(self.remaining_budget() * 0.5, 1200.0))
         result = run_gdu_inventory(
             manifest_items,
-            max(0.001, self.remaining_budget()),
+            gdu_budget,
             self.tracker,
             self.max_nodes,
         )

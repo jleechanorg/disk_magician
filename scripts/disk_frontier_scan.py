@@ -849,9 +849,10 @@ class FrontierScanner:
             self.inventory_backend = "gdu_one_pass"
             return True
 
+        gdu_budget = max(0.001, min(self.remaining_budget() * 0.5, 1200.0))
         result = run_gdu_inventory(
             manifest_items,
-            max(0.001, self.remaining_budget()),
+            gdu_budget,
             self.tracker,
             self.max_nodes,
         )

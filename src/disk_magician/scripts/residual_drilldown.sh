@@ -105,18 +105,27 @@ except Exception as e:
 
 disk_used_gb = data.get("disk_used_gb")
 
-if "residual_delta_gb" in data:
-    residual_gb = data["residual_delta_gb"]
-    source = "residual_delta_gb"
+# Gate on the ABSOLUTE unmeasured residual, not the snapshot-to-snapshot
+# delta. residual_delta_gb is typically ~0.4 GB even when the absolute
+# residual is 400-800+ GB, which made this sweeper a permanent no-op
+# (disk_magician-nea). residual_delta_gb is kept only as a last-resort
+# fallback signal, never the primary gate.
+if "residual_gb" in data:
+    residual_gb = data["residual_gb"]
+    source = "residual_gb"
 else:
     coverage_pct = data.get("snapshot_coverage_pct")
     if coverage_pct is None:
         coverage_pct = (data.get("snapshot_metadata") or {}).get("coverage_pct")
-    if coverage_pct is None or disk_used_gb is None:
-        print("MISSING\tresidual_delta_gb absent AND snapshot_coverage_pct/disk_used_gb absent")
+    if coverage_pct is not None and disk_used_gb is not None:
+        residual_gb = round(disk_used_gb * (100.0 - float(coverage_pct)) / 100.0, 1)
+        source = "fallback:100-coverage_pct"
+    elif "residual_delta_gb" in data:
+        residual_gb = data["residual_delta_gb"]
+        source = "fallback:residual_delta_gb"
+    else:
+        print("MISSING\tresidual_gb absent AND snapshot_coverage_pct/disk_used_gb absent AND residual_delta_gb absent")
         sys.exit(0)
-    residual_gb = round(disk_used_gb * (100.0 - float(coverage_pct)) / 100.0, 1)
-    source = "fallback:100-coverage_pct"
 
 print(f"OK\t{residual_gb}\t{source}\t{disk_used_gb}")
 PY
