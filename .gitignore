@@ -29,3 +29,8 @@ storage/
 # /disk-report scratch dir — per-lane drill-down JSON, isolation invariant
 # (see skills/disk-report/SKILL.md step 5); never a shared mutable file
 docs/.disk-report-scratch/
+
+# Shared venv symlink + linked worktrees (machine-local, never committed —
+# see "Shared Venv & Worktree Storage Policy" in CLAUDE.md)
+.venv
+.worktrees/
