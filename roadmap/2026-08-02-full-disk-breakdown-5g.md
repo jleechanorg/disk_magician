@@ -1,5 +1,10 @@
 # Full disk breakdown — ledger snapshot 2026-07-29 (bd607f5, 12,076 buckets)
 
+**SUPERSEDED** by `2026-08-02-full-disk-breakdown-5g-REVISED-postreboot.md` (fresh post-reboot scan, Mail/Messages now directly measured, falsifies the ~75-165 GiB residual estimate this doc implicitly carried forward). Kept for provenance.
+
+---
+
+
 df used 822.0 GiB = measured 557.5 + residual 258.4 (+ small delta)
 
 | GiB | Path (indent = child) |
