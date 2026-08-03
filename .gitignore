@@ -22,7 +22,11 @@ config.d/
 safety.local.json
 
 # Machine-local runtime data (never commit)
-.beads/
+# NOTE: .beads/issues.jsonl is intentionally NOT ignored here — it's the
+# portable source of truth for bead history (see .beads/.gitignore for the
+# actual local-only files: *.db, *.lock, .br_history/, etc). A prior blanket
+# `.beads/` rule here silently made this repo's entire bead history
+# machine-local-only since inception; fixed 2026-08-03.
 storage/
 .qdrant-initialized
 
