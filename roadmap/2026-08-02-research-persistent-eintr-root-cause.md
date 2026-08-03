@@ -338,3 +338,33 @@ remaining ~250+ GiB residual, it is NOT primarily these three paths —
 that framing should be retired. The residual's real composition remains
 open; worth a fresh frontier scan now that both the scanner bug is fixed
 AND the box is freshly rebooted (calm load, working directory access).
+
+## THE 277 GiB RESIDUAL, SOLVED (2026-08-02, post-reboot follow-up)
+
+After the reboot resolved the Mail/Messages EINTR (see section above),
+the fresh frontier scan's residual (277 GiB) was investigated directly
+via `frontier_unfinished` (208 permission-denied/interrupted entries) and
+targeted `sudo -n du` (passwordless sudo is scoped narrowly to `du`, not
+general commands — confirmed by testing).
+
+**Answer: 251.3 of 277 GiB (91%) is now concretely attributed:**
+
+| Path | Size | What it is |
+|------|------|------------|
+| `/private/var/dirs_cleaner` | **225.3 GiB** | Apple's own `dirs_cleaner(8)` utility ("recursively deletes the entire contents of each directory argument" — man page, on-system, primary source). 9 subdirectories with randomized 2-char names (`41`=107G, `1L`=36G, `xu`=20G, `QW`=19G, `bT`=16G, `B8`=12G, `Zn`=8.2G, `p0`=4.4G, `NQ`=2.6G, `qn`=13M) — classic mktemp-style staging-before-delete pattern. A crash report exists for this exact process (`~/Library/Application Support/CrashReporter/dirs_cleaner_93B5DEFF-...plist`, dated 2026-07-16), though that's 2+ weeks old — the 9 separate batches suggest repeated failed/incomplete async-delete cycles over time, not one isolated crash. One entry (under `xu/`) has a corrupted "filename" that is actually a mangled shell `$PATH` string (500+ chars) — a bug artifact in whatever wrote there; the `iso_bin_` prefix suggests Colima/Lima ISO-bootstrap tooling as a candidate source.
+| `.Spotlight-V100` | 26.0 GiB | Spotlight's index store — normal, expected, not a leak. |
+| (remainder, ~46 small entries) | ~0.4 GiB | Root-owned daemon caches (biome, analyticsd, locationd, accessoryupdater, etc.) — all individually small, genuinely nothing here. |
+
+**This is very likely the real, durable "always growing" driver this
+entire session was chasing** — not the Colima fstrim sawtooth (amplitude,
+self-correcting), not Mail/Messages (ruled out at 4.4 GiB total), but a
+macOS-internal deferred-delete mechanism that has been silently failing
+to complete, accumulating scratch content across multiple cycles.
+
+**Not remediated this session** — deletion here needs either (a) running
+`dirs_cleaner` itself against this path with real root (my sudo grant is
+`du`-only, no delete capability), or (b) understanding why the
+async-delete mechanism keeps failing before just clearing the backlog
+again (same failure would likely recur). Flagged as a P1 follow-up, not
+executed without explicit operator authorization on a root-owned system
+path.
