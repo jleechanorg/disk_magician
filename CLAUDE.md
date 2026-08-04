@@ -28,6 +28,13 @@ underestimated cumulative-reservoir growth):
    Always re-measure per item before deletion (smoke-test memory:
    0.00002 GiB "verified" was actually 2.4 GiB+).
 
+4. **System Residual & Mega-Table Invariant**: All disk breakdown reports
+   must subdivide directory nodes >5 GiB down to child buckets $\le$5 GiB
+   (or opaque leaves). When residual unaccounted space is >10 GiB, run
+   `./scripts/check_system_residual.sh` to check system staging paths
+   (`/private/var/dirs_cleaner`) and `deleted_helper` unified logs for
+   `removefile error ENAMETOOLONG`. Clean via `./disk_magician.sh cleanup-dirs-cleaner --clean`.
+
 The canonical read of this rule lives at
 `~/.claude/CLAUDE.md` → "Disk diagnosis — three concurrent lanes"
 (composition: whole-disk top-down + snapshot deltas + safety-gated quick

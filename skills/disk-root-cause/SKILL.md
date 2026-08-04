@@ -27,7 +27,25 @@ The 900-second wall-clock cap is the infinite-process guard; live whole-volume r
 
 The displayed Data equation must use one accepted leaf ledger: `<=5 GiB bounded path buckets + indivisible files above 5 GiB + measured tail + purgeable estimate + residual = Data used`. Recursively subdivide every directory above 5 GiB; roll accepted descendants up only when their combined size stays at or below 5 GiB. Never display a larger directory as a normal bucket. Permission, time, node, depth, and cross-device limits stay on the named unfinished frontier and inside residual rather than masquerading as a large bucket. An indivisible file above 5 GiB is a separately labeled final path-level explanation, not a directory bucket. Never reuse an earlier parent observation. A hidden measured-total equation does not validate the displayed buckets. Capture Data used before and after the namespace walk; when it changes, report the residual interval and mark the measurement non-atomic.
 
-The top-down scanner prefers one NUL-delimited, multi-root GNU `gdu` inventory process. Never sum independent per-shard `du` processes: hardlink deduplication is process-local. The one pass preserves hardlink dedup across logical top-level shards and supplies the complete postorder directory tree used to select non-overlapping <=5 GiB display rows without rescanning descendants. Allocation held directly by a large directory is shown as <=5 GiB `direct files + directory metadata` segments; unique-link indivisible files above 5 GiB are named separately. Localized permission/TCC errors taint their subtree and every ancestor, so partial ancestor totals are rejected while clean siblings remain attributable. Unknown diagnostics, malformed output, or timeout fail closed to the bounded frontier fallback (`gdu`, then `dua`, then macOS `du`). Fast backends must not be wrapped in `taskpolicy -b`, which can starve them under host I/O pressure. Symlink leaves never pull their targets into the ledger.
+## System Residual Triage & `/private/var/dirs_cleaner` Protocol
+
+When the residual gap (the unaccounted space between `df` used space and measured leaf buckets) exceeds **10 GiB**, do NOT assume the data is untraceable. Execute the deterministic system residual diagnostic:
+
+```bash
+./scripts/check_system_residual.sh
+```
+
+This inspects:
+1. **`/private/var/dirs_cleaner`**: Staging directory used by Apple's `CacheDelete.framework/deleted_helper`. Look for accumulation resulting from Apple's `removefile()` API failing with `ENAMETOOLONG` (File name too long) when attempting to purge deeply-nested scratch paths.
+2. **Unified System Logs**: `log show --predicate 'process == "deleted_helper" AND eventMessage CONTAINS "removefile error"' --last 7d` to confirm whether `deleted_helper` is repeatedly aborting its purge passes.
+
+If `/private/var/dirs_cleaner` has accumulated staged content and `deleted_helper` is idle (`ps aux | grep deleted_helper` returns empty), safely remediate via:
+
+```bash
+./disk_magician.sh cleanup_dirs_cleaner --clean
+```
+
+This uses `find -delete` (fd-relative traversal) to delete staged batch contents cleanly, bypassing Apple's `removefile` path-length bug.
 
 **Pair with** `disk_magician` skill (measurement + safe cleanup) and the `CLAUDE.md` / `AGENTS.md` in this repo (cross-repo authorization + never-delete list).
 

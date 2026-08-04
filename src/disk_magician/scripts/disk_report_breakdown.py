@@ -249,9 +249,20 @@ def write_report(out_path, args, snapshot, rows, gaps, measured_total_kb, residu
         f"- **Invariant (b) sum(top-level) + residual + free == df total:** "
         f"{'PASS' if gap_b_pass else 'FAIL'} (gap: {gib(gap_b):.2f} GiB; "
         f"measured={gib(measured_total_kb):.2f} GiB, residual={gib(residual_kb):.2f} GiB)",
+    ]
+
+    if residual_kb > 10 * GIB_KB:
+        lines.append(
+            f"- ⚠️ **UNATTRIBUTED SPACE WARNING:** Residual space is {gib(residual_kb):.2f} GiB (>10 GiB). "
+            "Inspect system staging dirs (`/private/var/dirs_cleaner`) and unified logs (`deleted_helper` ENAMETOOLONG errors) "
+            "via `./scripts/check_system_residual.sh` or run `./disk_magician.sh cleanup_dirs_cleaner --clean` if staged."
+        )
+
+    lines.extend([
         "",
         "| GiB | Path |",
         "|---:|---|",
+    ])
     ]
     for row in rows:
         indent = "  " * row["depth"]

@@ -21,6 +21,8 @@ Commands:
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
+  check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
+  cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
 
 Options:
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
@@ -221,6 +223,12 @@ case "$CMD" in
     ;;
   state)
     "$SCRIPT_DIR/scripts/state_repo.sh" "$@"
+    ;;
+  check_system_residual|check-system-residual)
+    "$SCRIPT_DIR/scripts/check_system_residual.sh" "$@"
+    ;;
+  cleanup_dirs_cleaner|cleanup-dirs-cleaner)
+    "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
     ;;
   -h|--help)
     usage

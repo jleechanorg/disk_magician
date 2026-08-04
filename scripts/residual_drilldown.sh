@@ -154,6 +154,15 @@ fi
 
 echo "residual_drilldown: residual ${residual_gb} GB >= threshold ${THRESHOLD_GB} GB (source: ${residual_source}) — drilling down."
 
+# ────────── SYSTEM RESIDUAL CHECK ──────────
+if [[ -f "$SCRIPT_DIR/check_system_residual.sh" ]]; then
+  sys_res="$("$SCRIPT_DIR/check_system_residual.sh" 2>/dev/null || true)"
+  if grep -q "WARNING:" <<< "$sys_res"; then
+    echo "residual_drilldown: System residual warning detected:"
+    echo "$sys_res"
+  fi
+fi
+
 # ────────── GATHER CANDIDATES ──────────
 # Preferred: selfheal's frontier-discover state file, if it exists yet.
 # Fallback: invoke disk_snapshot.sh --discover (read-only) and parse its
