@@ -263,7 +263,6 @@ def write_report(out_path, args, snapshot, rows, gaps, measured_total_kb, residu
         "| GiB | Path |",
         "|---:|---|",
     ])
-    ]
     for row in rows:
         indent = "  " * row["depth"]
         marker = "▼ " if row["expanded"] else ""
