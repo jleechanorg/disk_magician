@@ -39,6 +39,9 @@ jobs:
       - name: Verify package-tree synchronization
         run: bash scripts/sync_package_tree.sh --check
 
+      - name: Verify pyproject version monotonicity
+        run: python3 scripts/check_version_monotonic.py
+
       - name: Check shell syntax and ShellCheck errors
         run: |
           while IFS= read -r -d '' candidate; do

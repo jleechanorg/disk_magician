@@ -85,6 +85,37 @@ print(f"{state['streak']}\t{coverage_pct if coverage_pct is not None else 'unkno
 PY
 }
 
+# ────────── Step-event attribution (bead disk_magician-pkq) ──────────
+STEP_EVENTS_FILE="${DISK_MAGICIAN_STEP_EVENTS_FILE:-$STATE_DIR/step_events.jsonl}"
+
+get_recent_step_events() {
+  [[ -f "$STEP_EVENTS_FILE" ]] || { echo "0	none	0"; return; }
+  python3 - "$STEP_EVENTS_FILE" <<'PY'
+import json, sys, time
+events_file = sys.argv[1]
+try:
+    with open(events_file, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    records = []
+    for line in lines:
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            continue
+    if not records:
+        print("0\tnone\t0")
+        sys.exit(0)
+    now = time.time()
+    recent = [r for r in records if now - r.get("epoch", 0) <= 86400]
+    latest = records[-1]
+    delta_gib = round(abs(latest.get("delta_kb", 0)) / (1024 * 1024), 1)
+    direction = latest.get("direction", "unknown")
+    print(f"{len(recent)}\t{direction}\t{delta_gib}")
+except Exception:
+    print("0\tnone\t0")
+PY
+}
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --silence)   set_silenced; exit 0 ;;
@@ -95,6 +126,8 @@ if [[ $# -gt 0 ]]; then
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct <<< "$(update_coverage_streak)"
       echo "Coverage streak: ${status_streak} (coverage_pct=${status_coverage_pct}, escalate at ${STREAK_ESCALATE_AT})"
+      IFS=$'\t' read -r step_count step_dir step_gib <<< "$(get_recent_step_events)"
+      echo "Recent step events (24h): ${step_count} (latest: ${step_dir} ${step_gib} GiB)"
       exit 0
       ;;
     -h|--help)   usage; exit 0 ;;
@@ -114,6 +147,8 @@ free_gb=$(( avail_kb / 1024 / 1024 ))
 used_pct=$(( (total_kb - avail_kb) * 100 / total_kb ))
 
 IFS=$'\t' read -r coverage_streak coverage_pct <<< "$(update_coverage_streak)"
+IFS=$'\t' read -r step_count step_dir step_gib <<< "$(get_recent_step_events)"
+
 streak_alert=false
 if [[ "$coverage_streak" != "unknown" && "$coverage_streak" -ge "$STREAK_ESCALATE_AT" ]]; then
   streak_alert=true
@@ -124,11 +159,14 @@ space_alert=false
 
 if [[ "$space_alert" == true || "$streak_alert" == true ]]; then
   if is_silenced; then
-    echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak})."
+    echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
     if [[ "$space_alert" == true ]]; then
       echo "🚨 WARNING: Low Disk Space! Only ${free_gb} GB free (${used_pct}% capacity)." >&2
       echo "Run './disk_magician.sh clean' to reclaim space." >&2
+      if [[ "$step_count" -gt 0 ]]; then
+        echo "ℹ️  Step-event attribution: ${step_count} rapid swing(s) recorded in last 24h (latest: ${step_dir} ${step_gib} GiB)." >&2
+      fi
     fi
     if [[ "$streak_alert" == true ]]; then
       echo "🚨 WARNING: Snapshot coverage has been low for ${coverage_streak} consecutive checks (coverage_pct=${coverage_pct})." >&2
@@ -137,5 +175,5 @@ if [[ "$space_alert" == true || "$streak_alert" == true ]]; then
     exit 1
   fi
 else
-  echo "Disk OK: ${free_gb} GB free (${used_pct}% capacity). Coverage streak: ${coverage_streak} (coverage_pct=${coverage_pct})."
+  echo "Disk OK: ${free_gb} GB free (${used_pct}% capacity). Coverage streak: ${coverage_streak} (coverage_pct=${coverage_pct}). Step events (24h): ${step_count}."
 fi

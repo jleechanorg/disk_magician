@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hourly watchdog: size-gated truncate-in-place for runaway cursor-agent debug logs.
+
+  Addresses incident disk_magician-ax0 (findings_wiki/cursor-agent-debug-log-unbounded-growth.md):
+  Headless cursor-agent sessions continuously write session logs to
+  $TMPDIR/cursor-agent-logs-*/session-*.log and /private/tmp/cursor-agent-logs-*/session-*.log.
+
+  Safety & mechanism:
+  - Copytruncate pattern (`: > "$file"`): truncates in place without renaming or unlinking.
+  - Active writers holding open file descriptors continue appending without error.
+  - Only truncates files exceeding the size threshold (default: 2048 MB = 2 GB).
+
+  Schedule:
+  - StartInterval: 3600 (hourly)
+  - RunAtLoad: true (ensures execution on login / reboot)
+
+  Template uses @HOME@, @REPO_ROOT@, and @BASH@ placeholders, resolved by
+  scripts/install_launchd_sweepers.sh at install time.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.disk-magician.cursor-logs-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/watchdog_cursor_logs.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-cursor-logs-watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-cursor-logs-watchdog.log</string>
+</dict>
+</plist>

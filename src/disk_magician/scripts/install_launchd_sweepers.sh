@@ -121,6 +121,8 @@ if [[ ${#SELECTED[@]} -gt 0 ]]; then
   for name in "${SELECTED[@]}"; do
     src="$LAUNCHD_SRC/${name}"
     [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist"
+    [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist.template"
+    [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.template"
     [[ -f "$src" ]] || { echo "not found: $name" >&2; exit 2; }
     if [[ "$name" == *apfs-snapshots* ]]; then
       install_launchdaemon "$src"
@@ -130,7 +132,7 @@ if [[ ${#SELECTED[@]} -gt 0 ]]; then
   done
 else
   shopt -s nullglob
-  for src in "$LAUNCHD_SRC"/com.disk-magician.*.plist; do
+  for src in "$LAUNCHD_SRC"/com.disk-magician.*.plist "$LAUNCHD_SRC"/com.disk-magician.*.plist.template; do
     if [[ "$(basename "$src")" == "com.disk-magician.apfs-snapshots.plist" ]]; then
       echo "Skipping com.disk-magician.apfs-snapshots.plist (requires root privileges; run: sudo ./scripts/install_launchd_sweepers.sh apfs-snapshots to install as a system LaunchDaemon)"
       continue

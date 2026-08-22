@@ -512,13 +512,15 @@ def _delta(previous: dict, current: dict) -> dict:
     }
 
 
-def build_report(records: Sequence[dict], limit: int = 10) -> dict:
+def build_report(records: Sequence[dict], limit: int = 10, step_events: Sequence[dict] = ()) -> dict:
     swings = [_delta(previous, current) for previous, current in zip(records, records[1:])]
     return {
         "schema_version": 1,
         "tool": "disk_observer_report",
         "sample_count": len(records),
         "interval_count": len(swings),
+        "step_event_count": len(step_events),
+        "recent_step_events": list(step_events)[-limit:],
         "largest_host_free_space_decreases": sorted(swings, key=lambda item: item["host_available_delta_kb"])[:limit],
         "largest_host_free_space_increases": sorted(swings, key=lambda item: item["host_available_delta_kb"], reverse=True)[:limit],
         "largest_colima_growth": sorted(swings, key=lambda item: item["colima_allocated_delta_kb"], reverse=True)[:limit],
@@ -560,6 +562,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         child.add_argument("--hot-dirs", type=str, default=",".join(DEFAULT_HOT_DIRS))
     report = subparsers.add_parser("report")
     report.add_argument("--input", type=Path, default=Path.home() / ".disk_magician_state" / "disk_observer.jsonl")
+    report.add_argument("--step-events-input", type=Path, default=Path.home() / ".disk_magician_state" / "step_events.jsonl")
     report.add_argument("--limit", type=int, default=10)
     return parser.parse_args(argv)
 
@@ -568,7 +571,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     if args.command == "report":
         paths = [Path(f"{args.input}.{index}") for index in range(4, 0, -1)] + [args.input]
-        print(json.dumps(build_report(read_records(paths), args.limit), indent=2, sort_keys=True))
+        step_paths = [Path(f"{args.step_events_input}.{index}") for index in range(4, 0, -1)] + [args.step_events_input]
+        print(json.dumps(build_report(read_records(paths), args.limit, read_records(step_paths)), indent=2, sort_keys=True))
         return 0
 
     if args.interval < 30 or args.interval > 60:
@@ -586,11 +590,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     hot_dirs = [name.strip() for name in args.hot_dirs.split(",") if name.strip()]
 
     previous_epoch = int(time.time()) - args.interval
-    step_event_history = (
-        seed_step_event_history(args.output, step_event_window_seconds, previous_epoch)
-        if args.command == "watch"
-        else []
-    )
+    step_event_history = seed_step_event_history(args.output, step_event_window_seconds, previous_epoch)
     while True:
         now_epoch = int(time.time())
         sample = collect_sample(Path.home(), now_epoch, previous_epoch)

@@ -268,13 +268,52 @@ class DiskObserverTest(unittest.TestCase):
                 "processes": [{"pid": 2, "rss_kb": 900, "command": "docker"}],
             },
         ]
-        report = observer.build_report(records, limit=5)
+        step_events = [
+            {
+                "schema_version": 1,
+                "tool": "disk_observer_step_event",
+                "timestamp": "2026-07-14T01:01:00Z",
+                "epoch": 160,
+                "delta_kb": 15 * 1024 * 1024,
+                "direction": "grew",
+                "window_seconds": 60,
+                "hot_dirs_kb": {".codex": 5000},
+            }
+        ]
+        report = observer.build_report(records, limit=5, step_events=step_events)
         swing = report["largest_host_free_space_decreases"][0]
         self.assertEqual(swing["host_available_delta_kb"], -300)
         self.assertEqual(swing["colima_allocated_delta_kb"], 250)
         self.assertEqual(swing["docker_writable_delta_bytes"], 200)
         self.assertEqual(swing["docker_events"][0]["action"], "start")
         self.assertEqual(swing["top_processes"][0]["command"], "docker")
+        self.assertEqual(report["step_event_count"], 1)
+        self.assertEqual(report["recent_step_events"][0]["direction"], "grew")
+
+    def test_seed_step_event_history_filters_by_window(self):
+        observer = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "samples.jsonl"
+            samples = [
+                {"epoch": 1000, "host_disk": {"used_kb": 100_000}},
+                {"epoch": 2000, "host_disk": {"used_kb": 110_000}},
+                {"epoch": 3000, "host_disk": {"used_kb": 120_000}},
+            ]
+            with log.open("w", encoding="utf-8") as f:
+                for s in samples:
+                    f.write(json.dumps(s) + "\n")
+
+            # Window of 1500s at now=3200 -> only epoch 2000 and 3000 in window (3200-2000=1200 <= 1500; 3200-1000=2200 > 1500)
+            history = observer.seed_step_event_history(log, window_seconds=1500, now_epoch=3200)
+            self.assertEqual(history, [(2000, 110_000), (3000, 120_000)])
+
+    def test_fsevents_projects_launchd_template_is_valid(self):
+        template = ROOT / "launchd" / "com.disk-magician.fsevents-projects.plist.template"
+        self.assertTrue(template.exists(), "fsevents-projects plist template must exist")
+        text = template.read_text(encoding="utf-8")
+        self.assertIn("<key>Label</key>\n  <string>com.disk-magician.fsevents-projects</string>", text)
+        self.assertIn("watch_projects_fsevents.sh", text)
+        self.assertIn("<key>RunAtLoad</key>\n  <true/>", text)
 
 
 if __name__ == "__main__":

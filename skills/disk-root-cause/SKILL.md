@@ -86,18 +86,79 @@ python3 -c "import json,sys; d=json.load(open('$SNAP')); print('schema_version:'
 
 If `schema_version != 2`, the snapshot is pre-v2 (coverage inflates by parent/child double-count). Use `coverage_pct_raw_v1` from `snapshot_metadata` for trend continuity and note the inflation. Note: historical snapshots pre-dating 2026-07-21 used `backup/$(hostname -s)/disk_snapshot.json`; live snapshots use `snapshots/disk_snapshot.json` and `ledger/topdown-5g.json`.
 
-## Phase 0.5 — consult prior memory (structural floors & known gaps)
+## Phase 0.5 — consult prior memory & multi-agent history (structural floors & known gaps)
 
-Before launching expensive live scans or attempting to account for large residuals, consult recent memory files for documented structural floors (e.g., the 213.9 GiB TCC/SIP/Full-Disk-Access baseline from `feedback_2026-07-15` and `feedback_2026-08-21`):
+Before launching expensive live scans or attempting to account for large residuals or missing resources:
 
-```bash
-# Check recent project memory files for structural floors, TCC/SIP gaps, and attribution notes
-ls -t ~/.claude/projects/*/memory/*.md 2>/dev/null | head -30 | while read -r f; do
-  grep -iE 'tcc|sip|fda|213|residual|gap|mobilesync|attribution' "$f" >/dev/null && echo "  -> $f"
-done
-```
+1. **Check documented structural floors:** Consult recent project memory files for documented floors (e.g., the 213.9 GiB TCC/SIP/Full-Disk-Access baseline from `feedback_2026-07-15` and `feedback_2026-08-21`, `MobileSync`, and `/System/Library` protected containers):
+   ```bash
+   ls -t ~/.claude/projects/*/memory/*.md 2>/dev/null | head -30 | while read -r f; do
+     grep -iE 'tcc|sip|fda|213|residual|gap|mobilesync|attribution' "$f" >/dev/null && echo "  -> $f"
+   done
+   ```
+   If documented memory explains a static residual (such as ~213.9 GiB protected under macOS TCC/MobileSync/SIP), cite the memory file and incorporate that floor directly instead of spending minutes probing inaccessible paths.
 
-If documented memory explains a static residual (such as ~213.9 GiB protected under macOS TCC/MobileSync/SIP), cite the memory file and incorporate that floor directly instead of spending minutes probing inaccessible paths.
+2. **Multi-source `/history` search (mandatory coverage):**
+   When investigating "who deleted X", "when did Y happen", or "what agent did Z", **searches MUST NOT be limited to Claude Code alone**. An incomplete search creates false negatives (e.g. 2026-07-27 incident where searching only Claude/Codex missed the sweep context, whereas full multi-agent search + frontier inventory diff resolved the mystery; see `feedback_2026-07-27_history_must_cover_agy_cursor.md`). Always execute parallel searches across all available sources (per `~/.claude/skills/history-search/SKILL.md`):
+   - **Antigravity CLI / Transcripts (`~/.gemini`):** Search `~/.gemini/antigravity-cli/log/cli-*.log` and `~/.gemini/antigravity-cli/brain/*/system_generated/logs/transcript.jsonl` (and Dropbox exports `~/Library/CloudStorage/Dropbox/conversation-backups/antigravity/`).
+   - **Cursor (`~/.cursor`):** Search `~/.cursor/prompt_history.json` and `~/.cursor/chats/`.
+   - **Hermes (`~/.hermes`):** Query messages in SQLite via FTS5 (`~/.hermes/state.db`).
+   - **Codex (`~/.codex`):** Query SQLite threads (`~/.codex/state_5.sqlite`) and session logs.
+   - **OpenCode (`~/.local/share/opencode`):** Search `~/.local/share/opencode/storage/session_diff/`.
+   - **Claude Code (`~/.claude`):** Search project memory `~/.claude/projects/*/memory/*.md` and session JSONL `~/.claude/projects/*/*.jsonl`.
+
+3. **Snapshot inventory diff for deletions:**
+   When investigating missing files, worktrees, or large reclaimed allocations, diff a recent full-inventory log (e.g., `~/Library/Logs/disk-magician-frontier.log` or snapshot ledger) against current disk state. Classify gone paths by bucket and temporal cluster to pinpoint the exact reclaim window.
+
+## Worktree Removal Forensics — Admin Record Verification
+
+When investigating vanished or deleted git worktrees, **never infer `git worktree remove` solely because a worktree is missing from `git worktree list --porcelain`** (`feedback_2026-07-27_git_worktree_missing_recheck_admin_dir.md`).
+`git worktree list` is merely a point-in-time snapshot. When a worktree directory is deleted via manual `rm -rf` or an ad-hoc script, the git administrative metadata under `.git/worktrees/<name>/` remains intact until `git worktree prune` or `git gc` runs.
+
+**Durable Verification Procedure:**
+1. Check git administrative directory:
+   ```bash
+   ls -la "$(git rev-parse --git-dir)/worktrees/<name>/"
+   cat "$(git rev-parse --git-dir)/worktrees/<name>/gitdir"
+   ```
+2. Interpret findings:
+   - **Admin directory exists + working tree directory missing:** Deletion was **NOT** `git worktree remove` (which cleanly deletes the admin directory); it was manual `rm -rf` or unlinked deletion.
+   - **Admin directory is gone:** Removal occurred through `git worktree remove` or `git worktree prune` / `git gc`. Check `git config --get gc.worktreePruneExpire` (e.g., `7.days.ago`) to see if opportunistic pruning is enabled.
+   - **Check timestamps carefully:** Check the `gitdir` file mtime vs directory mtime. A recently updated admin directory mtime may reflect a subsequent recreation (e.g., `git worktree add *_recreated`), not the original deletion time.
+
+## Worktree Recency & The 14-Day Protection Rule (Fail-Closed)
+
+**A git worktree touched within the last 14 days is strictly PROTECTED.**
+Recency MUST be measured directly from content, never approximated with proxies (`feedback_2026-07-27_worktree_recency_proxies_wrong.md`, PR #50):
+
+- **Canonical helper:** Always source `scripts/lib/worktree_recency.sh` and call `worktree_age_days <path>` or `worktree_is_recently_active <path> [min_days]`.
+- **Banned Proxies:**
+  - `stat <wt>/.git`: In a linked worktree, `.git` is a one-line `gitdir:` pointer written once at `git worktree add` time. It measures creation age, not edit recency.
+  - `stat <wt>`: Directory mtime only changes when top-level directory entries are added/removed. Edits deep in the tree leave it unchanged.
+- **Single-Pass AWK Max Mtime:** `worktree_recency.sh` computes the max content mtime in a single-pass `find ... | awk` over non-pruned files (pruning `.git`, `node_modules`, `venv`, `.venv`, `__pycache__`), avoiding the SIGPIPE trap of `sort -rn | head -1` under `set -o pipefail`.
+- **Fail-Closed Contract:** If a worktree cannot be walked, permissions are denied, or the find returns nothing, the helper prints `now` (age 0 = protected). Unknowns always resolve toward active/protected.
+
+## mem0 & Qdrant Diagnosis Recipe (Launcher vs API Key)
+
+When `Memory.from_config()` or `m.search()` fails with connection refused, Qdrant exceptions, or `mem0 unavailable`, **do NOT deduce that an API key is missing or invalid**. On this workstation, mem0 runs locally via FastEmbed + Ollama (no external embedder API key required). The root cause is almost always a launchd/launcher configuration or storage path issue (`feedback_2026-07-27_mem0_qdrant_diagnosis_recipe.md`).
+
+Execute the mandatory 4-step diagnostic recipe:
+1. **Network reachability probe:**
+   ```bash
+   lsof -nP -iTCP:6333 -sTCP:LISTEN
+   curl -sS -m 3 http://127.0.0.1:6333/healthz
+   ```
+   If both fail, Qdrant is not running or not bound. Proceed to step 2.
+2. **Inspect launchd status and error log:**
+   ```bash
+   launchctl print "gui/$(id -u)/ai.hermes.qdrant" | grep -E "state|runs|program|last exit"
+   tail -30 ~/Library/Logs/ai.hermes.qdrant.err.log
+   ```
+   - If error shows `no usable Docker context after 60s, giving up` repeated: the launcher is attempting to use Docker when native Qdrant should be used. The fix is to configure `ai.hermes.qdrant.plist` to execute the native binary `/Users/jleechan/.local/bin/qdrant` directly with explicit `WorkingDirectory`, `KeepAlive=true`, and `ProcessType: Interactive`.
+3. **Inspect runtime cwd and permissions:**
+   Check stdout/stderr for `Failed to create snapshots temp directory` or `Read-only file system (os error 30)`. This occurs when launchd defaults cwd to `/var/empty`. Fix: Ensure `WorkingDirectory` is set to `/Users/jleechan/.local/share/qdrant/storage` and absolute paths are set in `config.yaml` (`storage_path` and `snapshots_path`).
+4. **Inspect client helper API compatibility (mem0 2.x migration):**
+   If Qdrant is healthy but helpers raise `Top-level entity parameters ... are not supported in search()`, update helper calls: mem0 2.x replaced `user_id=` with `filters={'user_id': ...}` for `m.search()` and `m.get_all()`.
 
 ## Phase 1 — floor + deltas (snapshot history)
 
@@ -179,6 +240,10 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 4. **Colima wedges with I/O errors when host disk hits 100%** — fstrim can't run; **must** `colima stop && colima start` first. 49.6→6.8 GB recovery verified live.
 5. **No `ez-mac-runner` launchd job exists** — confirms via `launchctl list | grep ez` before any VACATE-style directive. (bead `feedback_2026-07-12_no_ez_mac_runner_launchd_job`)
 6. **`backup/Mac/` was a stale host profile** — removed in v0.2.1 commit.
+7. **Inferring `git worktree remove` solely from `git worktree list` absence** — always inspect `.git/worktrees/<name>/` admin records. Admin directory presence proves deletion was manual `rm -rf`, not clean `git worktree remove`. (bead `disk_magician-shb` / `feedback_2026-07-27_git_worktree_missing_recheck_admin_dir`)
+8. **Incomplete `/history` sweeps** — skipping Antigravity (`~/.gemini`), Cursor (`~/.cursor`), or Hermes (`~/.hermes`) yields false negatives. Always run full multi-agent search and pair with snapshot inventory diffs. (bead `disk_magician-ols` / `feedback_2026-07-27_history_must_cover_agy_cursor`)
+9. **Misattributing mem0/Qdrant connection failures to API keys** — embedder is local (FastEmbed+Ollama); connection failure indicates a launchd/launcher or cwd/path issue. Follow the 4-step recipe. (bead `disk_magician-8f4` / `feedback_2026-07-27_mem0_qdrant_diagnosis_recipe`)
+10. **Proxying worktree recency via `stat <wt>/.git` or `stat <wt>`** — both measure creation age and over-state staleness. Use `scripts/lib/worktree_recency.sh` which fails closed to age 0 (protected). (bead `disk_magician-hhh` / `feedback_2026-07-27_worktree_recency_proxies_wrong`)
 
 ## Anti-patterns to flag in code review
 
