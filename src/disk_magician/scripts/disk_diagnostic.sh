@@ -12,6 +12,7 @@ HISTORY_LOG="$WORK/history.log"
 QUICK_LOG="$WORK/quick.log"
 QUICK_AUDIT_LOG="$WORK/quick-audit.log"
 WORKTREE_LOG="$WORK/worktree-hygiene.log"
+MEMORY_LOG="$WORK/memory.log"
 
 budget="${DISK_MAGICIAN_TOPDOWN_BUDGET_SECONDS:-900}"
 workers="${DISK_MAGICIAN_TOPDOWN_WORKERS:-8}"
@@ -19,6 +20,31 @@ max_nodes="${DISK_MAGICIAN_TOPDOWN_MAX_NODES:-}"
 granularity="${DISK_MAGICIAN_GRANULARITY_GIB:-5}"
 quick_budget="${DISK_MAGICIAN_QUICK_BUDGET_SECONDS:-120}"
 topdown_root="${DISK_MAGICIAN_TOPDOWN_ROOT:-}"
+
+(
+  python3 - <<'PY'
+import glob, os, re
+
+mem_files = sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/memory/*.md")), key=os.path.getmtime, reverse=True)[:30]
+pattern = re.compile(r"tcc|sip|fda|213|residual|gap|mobilesync|attribution", re.IGNORECASE)
+found = []
+for f in mem_files:
+    try:
+        with open(f, "r", errors="ignore") as fp:
+            if pattern.search(fp.read()):
+                found.append(f)
+    except Exception:
+        pass
+
+print("── Prior memory references found ──")
+if found:
+    for f in found[:10]:
+        print(f"  -> {f}")
+else:
+    print("  none found")
+PY
+) >"$MEMORY_LOG" 2>&1 &
+memory_pid=$!
 
 frontier_args=(
   --granularity-gib "$granularity"
@@ -79,7 +105,13 @@ quick_pid=$!
 wait "$topdown_pid"; topdown_rc=$?
 wait "$history_pid"; history_rc=$?
 wait "$quick_pid"; quick_rc=$?
+wait "$memory_pid"; memory_rc=$?
 render_rc=0
+
+if [[ -s "$MEMORY_LOG" ]]; then
+  cat "$MEMORY_LOG"
+  echo
+fi
 
 echo "=== Lane 1/3: top-down whole-disk accounting (directory/path buckets <=${granularity} GiB) ==="
 if [[ "$topdown_rc" -eq 0 && -s "$TOPDOWN_JSON" ]]; then

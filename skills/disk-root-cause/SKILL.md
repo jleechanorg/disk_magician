@@ -79,17 +79,29 @@ disk-magician audit
 
 # Authenticate the data source
 df -h /System/Volumes/Data
-hostname -s                                                    # = directory key in ~/.disk_magician_backup
-SNAP=~/.disk_magician_backup/backup/$(hostname -s)/disk_snapshot.json
+SNAP=~/.disk_magician_backup/snapshots/disk_snapshot.json
 git -C ~/.disk_magician_backup log --oneline -1 -- "$SNAP" 2>/dev/null
 python3 -c "import json,sys; d=json.load(open('$SNAP')); print('schema_version:', d.get('schema_version'), 'coverage:', d.get('snapshot_coverage_pct'))"
 ```
 
-If `schema_version != 2`, the snapshot is pre-v2 (coverage inflates by parent/child double-count). Use `coverage_pct_raw_v1` from `snapshot_metadata` for trend continuity and note the inflation.
+If `schema_version != 2`, the snapshot is pre-v2 (coverage inflates by parent/child double-count). Use `coverage_pct_raw_v1` from `snapshot_metadata` for trend continuity and note the inflation. Note: historical snapshots pre-dating 2026-07-21 used `backup/$(hostname -s)/disk_snapshot.json`; live snapshots use `snapshots/disk_snapshot.json` and `ledger/topdown-5g.json`.
+
+## Phase 0.5 — consult prior memory (structural floors & known gaps)
+
+Before launching expensive live scans or attempting to account for large residuals, consult recent memory files for documented structural floors (e.g., the 213.9 GiB TCC/SIP/Full-Disk-Access baseline from `feedback_2026-07-15` and `feedback_2026-08-21`):
+
+```bash
+# Check recent project memory files for structural floors, TCC/SIP gaps, and attribution notes
+ls -t ~/.claude/projects/*/memory/*.md 2>/dev/null | head -30 | while read -r f; do
+  grep -iE 'tcc|sip|fda|213|residual|gap|mobilesync|attribution' "$f" >/dev/null && echo "  -> $f"
+done
+```
+
+If documented memory explains a static residual (such as ~213.9 GiB protected under macOS TCC/MobileSync/SIP), cite the memory file and incorporate that floor directly instead of spending minutes probing inaccessible paths.
 
 ## Phase 1 — floor + deltas (snapshot history)
 
-`~/.disk_magician_backup` is a git repo. Every commit is a snapshot. The skill reads history with `git log --all` (+ reflog for orphaned commits per the 07-11 incident) and `git show <sha>:backup/<host>/disk_snapshot.json`.
+`~/.disk_magician_backup` is a git repo. Every commit is a snapshot. The skill reads history with `git log --all` (+ reflog for orphaned commits per the 07-11 incident) and `git show <sha>:snapshots/disk_snapshot.json` (or `<sha>:ledger/topdown-5g.json` / `<sha>:backup/<host>/disk_snapshot.json` for legacy pre-migration commits).
 
 Three deltas, always reported:
 

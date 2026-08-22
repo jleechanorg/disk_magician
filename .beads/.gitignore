@@ -48,3 +48,4 @@ redirect
 # fsqlite namespace marker files (runtime, not portable config)
 *.db-fsqlite-ns-gate
 *.db-fsqlite-ns-use
+*.vacuum-fsqlite-ns-*

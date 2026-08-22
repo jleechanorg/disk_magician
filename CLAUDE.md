@@ -6,6 +6,13 @@ Disk-fill investigations in this repo MUST follow a fixed pre-analysis
 sequence (added 2026-07-30 after four "200 GiB does not exist" misses that
 underestimated cumulative-reservoir growth):
 
+0. **Consult prior memory files before live probes.** Check recent memory files
+   (`~/.claude/projects/*/memory/*.md` or `memory/`) for documented structural
+   floors (e.g. `feedback_2026-07-15` documenting the 213.9 GiB TCC/SIP/FDA
+   inaccessible floor, `MobileSync`, and `/System/Library` protected containers).
+   When a large residual appears, do not spend 40 minutes on live `du` sweeps
+   over inaccessible permissions; incorporate the documented structural floor first.
+
 1. **Find the last-week floor** before proposing anything. The floor is
    the **lowest `df used` in the most recent ~14 daily snapshots** (NOT
    proxies, NOT a single fresh `du`, NOT current df). Pull it from the
