@@ -81,6 +81,8 @@ age_path_days_ago "$STALE_WT/README.md" 30
 age_path_days_ago "$STALE_WT/.git" 30
 mkdir -p "$STALE_WT/venv.bak.20260101"
 age_path_days_ago "$STALE_WT/venv.bak.20260101" 10
+mkdir -p "$STALE_WT/.venv.bak.20260101"
+age_path_days_ago "$STALE_WT/.venv.bak.20260101" 10
 
 # (b) RECENT worktree (<14d — touched "now") whose venv.bak.* dir looks
 # ancient on its own (60d) -> must stay protected because the PARENT is young.
@@ -113,6 +115,8 @@ OUT1_CONTENT=$(cat "$OUT1")
 
 assert_contains "(a) stale bak dir flagged in dry-run" \
   "would purge $STALE_WT/venv.bak.20260101" "$OUT1_CONTENT"
+assert_contains "(a) stale .venv bak dir flagged in dry-run" \
+  "would purge $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
 assert_not_contains "(b) recent-worktree bak dir NOT flagged" \
   "would purge $RECENT_WT/venv.bak.20251201" "$OUT1_CONTENT"
 assert_contains "(b) recent-worktree bak dir reported protected" \
@@ -122,7 +126,7 @@ assert_not_contains "(d) unmeasurable-worktree bak dir NOT flagged" \
 assert_contains "(d) unmeasurable-worktree bak dir reported protected (fail-closed)" \
   "skip (parent worktree < 14d, protected): $UNMEASURABLE_WT/venv.bak.20250101" "$OUT1_CONTENT"
 
-if [[ -d "$STALE_WT/venv.bak.20260101" && -d "$RECENT_WT/venv.bak.20251201" && -d "$UNMEASURABLE_WT/venv.bak.20250101" ]]; then
+if [[ -d "$STALE_WT/venv.bak.20260101" && -d "$STALE_WT/.venv.bak.20260101" && -d "$RECENT_WT/venv.bak.20251201" && -d "$UNMEASURABLE_WT/venv.bak.20250101" ]]; then
   record_pass "dry-run deleted nothing"
 else
   record_fail "dry-run deleted nothing" "a bak dir vanished during a dry-run"
@@ -141,10 +145,10 @@ set -e
 OUT2_CONTENT=$(cat "$OUT2")
 if [[ "$RC2" -eq 3 ]]; then record_pass "(c) refused with expected exit code 3"; else record_fail "(c) refused with expected exit code 3" "rc=$RC2"; fi
 assert_contains "(c) refusal message" "requires WORKTREE APPROVED=1" "$OUT2_CONTENT"
-if [[ -d "$STALE_WT/venv.bak.20260101" ]]; then
-  record_pass "(c) stale bak dir still on disk after refused --clean"
+if [[ -d "$STALE_WT/venv.bak.20260101" && -d "$STALE_WT/.venv.bak.20260101" ]]; then
+  record_pass "(c) stale bak dirs still on disk after refused --clean"
 else
-  record_fail "(c) stale bak dir still on disk after refused --clean" "bak dir removed without approval"
+  record_fail "(c) stale bak dirs still on disk after refused --clean" "bak dir removed without approval"
 fi
 
 echo
@@ -155,10 +159,10 @@ env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   WORKTREE_APPROVED=1 \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
   >"$OUT3" 2>&1
-if [[ ! -d "$STALE_WT/venv.bak.20260101" ]]; then
-  record_pass "stale bak dir actually removed with approval"
+if [[ ! -d "$STALE_WT/venv.bak.20260101" && ! -d "$STALE_WT/.venv.bak.20260101" ]]; then
+  record_pass "stale bak dirs actually removed with approval"
 else
-  record_fail "stale bak dir actually removed with approval" "still present: $STALE_WT/venv.bak.20260101"
+  record_fail "stale bak dirs actually removed with approval" "still present in: $STALE_WT"
 fi
 if [[ -d "$RECENT_WT/venv.bak.20251201" ]]; then
   record_pass "recent-worktree bak dir survives real --clean run"

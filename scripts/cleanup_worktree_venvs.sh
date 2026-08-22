@@ -457,7 +457,7 @@ purge_bak_dirs() {
           log "    FAILED to purge $bak_path"
         fi
       fi
-    done < <(find "$root" -mindepth 2 -maxdepth 6 -type d -name "venv.bak.*" -print0 2>/dev/null || true)
+    done < <(find "$root" -mindepth 2 -maxdepth 6 -type d \( -name "venv.bak.*" -o -name ".venv.bak.*" -o -name "venv.bak" -o -name ".venv.bak" \) -print0 2>/dev/null || true)
   done
 
   log ""

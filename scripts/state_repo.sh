@@ -3,6 +3,7 @@
 # roadmap/2026-07-21-generic-split-state-repo-design.md).
 # Subcommands: init | status | remote <url> | push
 set -euo pipefail
+export GIT_TERMINAL_PROMPT=0
 
 SR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="$(python3 "$SR_SCRIPT_DIR/resolve_state_repo_path.py")"
