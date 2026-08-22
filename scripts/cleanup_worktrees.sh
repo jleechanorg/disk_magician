@@ -202,9 +202,6 @@ classify_repo_local_worktree() {
     fi
 
     local min_age=$MIN_AGE_DAYS
-    if [[ "$wt_path" == *"/.ao/data/worktrees/"* || "$wt_path" == *"/ao/data/worktrees/"* ]]; then
-        min_age=1
-    fi
 
     if [[ "$locked" == "1" ]]; then
         # Stale lock detection: only auto-unlock automated/orchestrator worktrees
@@ -301,6 +298,12 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
             abs_subdir=$(cd "$subdir" && pwd -P)
             if is_worktree_active "$abs_subdir"; then
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "active"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
+            if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
+                age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 continue
             fi

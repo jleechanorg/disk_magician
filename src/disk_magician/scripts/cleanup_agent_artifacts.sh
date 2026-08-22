@@ -12,6 +12,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 # Optional extra dirs (colon-separated absolute or ~ paths):
 #   DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS="$HOME/my-agent-app"
@@ -33,10 +35,10 @@ TARGETS=(
 # mtime gate in days. -1 = no gate (clear unconditionally).
 # Parallel to TARGETS. Bump a value to be MORE conservative (keep more).
 TARGETS_MTIME_GATE_DAYS=(
-  -1   # ~/.cursor/worktrees
+   14  # ~/.cursor/worktrees — 14-day worktree floor
   -1   # ~/.cursor/chats
   -1   # ~/.claude/debug
-  -1   # ~/.config/superpowers/worktrees
+   14  # ~/.config/superpowers/worktrees — 14-day worktree floor
   -1   # ShipIt (todesktop)
   -1   # ShipIt (antigravity)
   -1   # ms-playwright
@@ -108,10 +110,23 @@ expand_path() {
 
 clear_dir_contents() {
   local path="$1"
+  local gate_days="${2:--1}"
   if [[ ! -d "$path" ]]; then
     return 0
   fi
   if [[ "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+  if [[ "$path" == *"worktrees"* ]]; then
+    # Per-worktree recency check
+    for child in "$path"/*; do
+      [[ -d "$child" ]] || continue
+      if worktree_is_recently_active "$child" "${gate_days:-14}"; then
+        continue
+      fi
+      rm -rf "$child" 2>/dev/null || true
+    done
+    rmdir "$path" 2>/dev/null || true
     return 0
   fi
   find "$path" -depth -mindepth 1 -delete 2>/dev/null || true
@@ -131,6 +146,15 @@ gate_check() {
   if [[ "$gate_days" -lt 0 ]]; then
     echo "passed"
     return
+  fi
+  if [[ "$path" == *"worktrees"* ]]; then
+    if worktree_is_recently_active "$path" "$gate_days"; then
+      echo "skipped-recent"
+      return
+    else
+      echo "passed"
+      return
+    fi
   fi
   local mtime_epoch now_epoch age_days
   mtime_epoch=$(mtime_epoch_of "$path")
@@ -156,6 +180,9 @@ for target in "${TARGETS[@]}"; do
     mtime_epoch=$(mtime_epoch_of "$expanded")
     now_epoch=$(date '+%s')
     age_days=$(( (now_epoch - mtime_epoch) / 86400 ))
+    if [[ "$expanded" == *"worktrees"* ]]; then
+      age_days="$(worktree_age_days "$expanded" 2>/dev/null || echo "$age_days")"
+    fi
     if [[ "$gate_days" -lt 0 ]]; then
       echo "  $(size_of "$expanded")  $target  (age=${age_days}d, gate=none)"
     else
@@ -181,11 +208,14 @@ for target in "${TARGETS[@]}"; do
   fi
   GATE_RESULT[$target_index]="$result"
   if [[ "$result" == "passed" ]]; then
-    clear_dir_contents "$expanded"
+    clear_dir_contents "$expanded" "$gate_days"
   elif [[ "$result" == "skipped-recent" ]]; then
     mtime_epoch=$(mtime_epoch_of "$expanded")
     now_epoch=$(date '+%s')
     age_days=$(( (now_epoch - mtime_epoch) / 86400 ))
+    if [[ "$expanded" == *"worktrees"* ]]; then
+      age_days="$(worktree_age_days "$expanded" 2>/dev/null || echo "$age_days")"
+    fi
     echo "  GATE-SKIP (${age_days}d < ${gate_days}d): $target"
   fi
   target_index=$(( target_index + 1 ))

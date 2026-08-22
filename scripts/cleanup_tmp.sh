@@ -7,6 +7,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -495,6 +497,18 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
     # Also skip if the worktree dir IS the parent repo's toplevel
     if [[ "$(cd "$subdir" && pwd)" == "$(cd "$parent_work_tree" && pwd)" ]]; then
+      continue
+    fi
+
+    # 14-day recency floor (worktree safety rule)
+    if worktree_is_recently_active "$subdir" 14; then
+      log "Skipping recently active worktree pointer (<14d): $subdir"
+      continue
+    fi
+
+    # Unsaved work guard
+    if worktree_has_unsaved_work "$subdir"; then
+      log "Skipping worktree pointer with unsaved work: $subdir"
       continue
     fi
 

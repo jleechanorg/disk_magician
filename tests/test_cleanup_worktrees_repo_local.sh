@@ -104,6 +104,17 @@ setup_fixture_repo() {
   local spaced_dir="$main_repo/.claude/worktrees/wt spaced path"
   git -C "$main_repo" worktree add -B wt-spaced "$spaced_dir" "$BASE_SHA" >/dev/null
 
+  local ao_wt_dir="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-young"
+  mkdir -p "$(dirname "$ao_wt_dir")"
+  git -C "$main_repo" worktree add -B wt-ao-young "$ao_wt_dir" "$BASE_SHA" >/dev/null
+  age_worktree_days_ago "$ao_wt_dir" 3
+
+  # Antigravity orphan worktree (unregistered in git, but modified 2 days ago)
+  local ag_orphan_dir="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/orphan-recent"
+  mkdir -p "$ag_orphan_dir/src"
+  echo "code" > "$ag_orphan_dir/src/app.py"
+  age_worktree_days_ago "$ag_orphan_dir" 2
+
   for wt in wt-ancestor wt-dirty wt-untracked wt-ahead wt-locked "wt spaced path"; do
     age_worktree_days_ago "$main_repo/.claude/worktrees/$wt" 30
   done
@@ -128,9 +139,11 @@ assert_contains "untracked reason" ".claude/worktrees/wt-untracked | untracked" 
 assert_contains "ahead reason" ".claude/worktrees/wt-ahead | ahead-of-main" "$OUT_CONTENT"
 assert_contains "locked reason" ".claude/worktrees/wt-locked | locked" "$OUT_CONTENT"
 assert_contains "young reason" ".claude/worktrees/wt-young | young" "$OUT_CONTENT"
+assert_contains "ao young worktree preserved by 14d floor" ".ao/data/worktrees/main-repo/wt-ao-young | young" "$OUT_CONTENT"
+assert_contains "antigravity recent orphan preserved by 14d floor" "antigravity  PRESERVE" "$OUT_CONTENT"
 assert_contains "spaced path eligible" ".claude/worktrees/wt spaced path" "$OUT_CONTENT"
 assert_contains "summary eligible count" "Repo-local:  2 eligible" "$OUT_CONTENT"
-assert_contains "summary preserved count" "Repo-local:  2 eligible, 5 preserved." "$OUT_CONTENT"
+assert_contains "summary preserved count" "Repo-local:  2 eligible, 6 preserved." "$OUT_CONTENT"
 
 echo "Test: --clean without WORKTREE_APPROVED refuses before deletion"
 OUT_REFUSE="$TMP_ROOT/refuse.out"
