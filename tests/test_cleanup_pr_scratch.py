@@ -155,8 +155,9 @@ class TestCleanupPrScratch(unittest.TestCase):
         git_dir = self.tmp_dir / "pr-git-scratch"
         git_dir.mkdir()
         subprocess.run(["git", "init", "-q", str(git_dir)], check=True)
-        subprocess.run(["git", "-C", str(git_dir), "config", "user.name", "Test"], check=True)
-        subprocess.run(["git", "-C", str(git_dir), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(git_dir), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(git_dir), "config", "user.email", "jleechan2015@users.noreply.github.com"], check=True)
+
         (git_dir / "file.txt").write_text("initial")
         subprocess.run(["git", "-C", str(git_dir), "add", "file.txt"], check=True)
         subprocess.run(["git", "-C", str(git_dir), "commit", "-q", "-m", "init"], check=True)

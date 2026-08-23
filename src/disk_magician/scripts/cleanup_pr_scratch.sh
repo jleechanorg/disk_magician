@@ -181,20 +181,24 @@ fi
 
 # Normalize and deduplicate tmp directories
 CANONICAL_TMP_DIRS=()
-for tdir in "${TMP_DIRS[@]}"; do
-  [[ -d "$tdir" ]] || continue
-  canon="$(cd "$tdir" 2>/dev/null && pwd -P)" || canon="$tdir"
-  already=false
-  for c in "${CANONICAL_TMP_DIRS[@]}"; do
-    if [[ "$c" == "$canon" ]]; then
-      already=true
-      break
+if [[ ${#TMP_DIRS[@]} -gt 0 ]]; then
+  for tdir in "${TMP_DIRS[@]}"; do
+    [[ -d "$tdir" ]] || continue
+    canon="$(cd "$tdir" 2>/dev/null && pwd -P)" || canon="$tdir"
+    already=false
+    if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
+      for c in "${CANONICAL_TMP_DIRS[@]}"; do
+        if [[ "$c" == "$canon" ]]; then
+          already=true
+          break
+        fi
+      done
+    fi
+    if [[ "$already" == false ]]; then
+      CANONICAL_TMP_DIRS+=("$canon")
     fi
   done
-  if [[ "$already" == false ]]; then
-    CANONICAL_TMP_DIRS+=("$canon")
-  fi
-done
+fi
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
@@ -215,34 +219,41 @@ path_size_kb() {
 
 is_protected_root() {
   local base="$1" root
-  for root in "${PROTECTED_TMP_ROOTS[@]}"; do
-    [[ "$base" == "$root" ]] && return 0
-  done
+  if [[ ${#PROTECTED_TMP_ROOTS[@]} -gt 0 ]]; then
+    for root in "${PROTECTED_TMP_ROOTS[@]}"; do
+      [[ "$base" == "$root" ]] && return 0
+    done
+  fi
   return 1
 }
 
 is_protected_tmp_path() {
   local path="$1" root
-  for root in "${PROTECTED_TMP_ROOTS[@]}"; do
-    case "/$path/" in
-      *"/$root/"*) return 0 ;;
-    esac
-  done
+  if [[ ${#PROTECTED_TMP_ROOTS[@]} -gt 0 ]]; then
+    for root in "${PROTECTED_TMP_ROOTS[@]}"; do
+      case "/$path/" in
+        *"/$root/"*) return 0 ;;
+      esac
+    done
+  fi
   return 1
 }
 
 matches_scratch_pattern() {
   local base="$1" pat
-  for pat in "${PATTERNS[@]}"; do
-    # shellcheck disable=SC2254
-    case "$base" in
-      $pat) return 0 ;;
-    esac
-  done
+  if [[ ${#PATTERNS[@]} -gt 0 ]]; then
+    for pat in "${PATTERNS[@]}"; do
+      # shellcheck disable=SC2254
+      case "$base" in
+        $pat) return 0 ;;
+      esac
+    done
+  fi
   return 1
 }
 
 has_recent_activity() {
+
   local target="$1" hours="$2" mins hit_file
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
@@ -332,74 +343,77 @@ DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
 
-for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
-  [[ -d "$tmp_dir" ]] || continue
-  log "Scanning $tmp_dir for PR scratch & analyzer entries ..."
+if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
+  for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
+    [[ -d "$tmp_dir" ]] || continue
+    log "Scanning $tmp_dir for PR scratch & analyzer entries ..."
 
-  while IFS= read -r -d '' item; do
-    base="$(basename "$item")"
-    [[ -n "$base" ]] || continue
+    while IFS= read -r -d '' item; do
+      base="$(basename "$item")"
+      [[ -n "$base" ]] || continue
 
-    if ! matches_scratch_pattern "$base"; then
-      continue
-    fi
-
-    if is_protected_root "$base" || is_protected_tmp_path "$item"; then
-      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $item"
-      continue
-    fi
-
-    case "$base" in
-      com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive) continue ;;
-    esac
-
-    if has_active_marker "$item"; then
-      log "Skipping active-use marker (.in-use/.keep present): $item"
-      continue
-    fi
-
-    if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
-      log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
-      continue
-    fi
-
-    if has_open_files "$item"; then
-      log "Skipping in-use path (open files): $item"
-      continue
-    fi
-
-    if [[ -d "$item/.git" || -f "$item/.git" ]]; then
-      if worktree_has_unsaved_work "$item"; then
-        log "Skipping scratch worktree with unsaved work (uncommitted/unpushed/no-upstream): $item"
+      if ! matches_scratch_pattern "$base"; then
         continue
       fi
-    fi
 
-    kb=$(path_size_kb "$item")
-    if [[ "$DRY_RUN" == true ]]; then
-      log "DRY RUN: would remove: $item  (${kb} KB)"
-      if [[ -d "$item" ]]; then
-        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-      else
-        FILES_DELETED=$(( FILES_DELETED + 1 ))
-      fi
-      TOTAL_KB=$(( TOTAL_KB + kb ))
-    else
-      if ! _safety_reason="$(safety_gate "$item" 2>/dev/null)"; then
-        echo "SAFETY-SKIP $item ($_safety_reason)"
+      if is_protected_root "$base" || is_protected_tmp_path "$item"; then
+        log "Skipping protected root (in PROTECTED_TMP_ROOTS): $item"
         continue
       fi
-      log "Removing: $item  (${kb} KB)"
-      if [[ -d "$item" ]]; then
-        rm -rf "$item"
-        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-      else
-        rm -f "$item"
-        FILES_DELETED=$(( FILES_DELETED + 1 ))
+
+      case "$base" in
+        com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive) continue ;;
+      esac
+
+      if has_active_marker "$item"; then
+        log "Skipping active-use marker (.in-use/.keep present): $item"
+        continue
       fi
-      TOTAL_KB=$(( TOTAL_KB + kb ))
-    fi
-  done < <(find_cmd "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
-done
+
+      if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
+        log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
+        continue
+      fi
+
+      if has_open_files "$item"; then
+        log "Skipping in-use path (open files): $item"
+        continue
+      fi
+
+      if [[ -d "$item/.git" || -f "$item/.git" ]]; then
+        if worktree_has_unsaved_work "$item"; then
+          log "Skipping scratch worktree with unsaved work (uncommitted/unpushed/no-upstream): $item"
+          continue
+        fi
+      fi
+
+      kb=$(path_size_kb "$item")
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY RUN: would remove: $item  (${kb} KB)"
+        if [[ -d "$item" ]]; then
+          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+        else
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+        fi
+        TOTAL_KB=$(( TOTAL_KB + kb ))
+      else
+        if ! _safety_reason="$(safety_gate "$item" 2>/dev/null)"; then
+          echo "SAFETY-SKIP $item ($_safety_reason)"
+          continue
+        fi
+        log "Removing: $item  (${kb} KB)"
+        if [[ -d "$item" ]]; then
+          rm -rf "$item"
+          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+        else
+          rm -f "$item"
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+        fi
+        TOTAL_KB=$(( TOTAL_KB + kb ))
+      fi
+    done < <(find_cmd "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
+  done
+fi
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+
