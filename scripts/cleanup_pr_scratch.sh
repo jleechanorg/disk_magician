@@ -272,7 +272,7 @@ has_active_marker() {
 
 
 has_open_files() {
-  local target="$1" lsof_bin hit_file err_file diagnostic rc=0
+  local target="$1" lsof_bin out rc=0
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
   elif [[ -x /usr/sbin/lsof ]]; then
@@ -287,33 +287,23 @@ has_open_files() {
     log "Open-file check unavailable for $target ($lsof_bin is not executable) — fail-closed, treating as active."
     return 0
   fi
-  hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
-  err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
   if [[ -d "$target" ]]; then
-    "$lsof_bin" +w +D "$target" >"$hit_file" 2>"$err_file" || rc=$?
+    out="$("$lsof_bin" +w +D "$target" 2>/dev/null)" || rc=$?
   else
-    "$lsof_bin" +w "$target" >"$hit_file" 2>"$err_file" || rc=$?
+    out="$("$lsof_bin" +w "$target" 2>/dev/null)" || rc=$?
   fi
 
-  if [[ -s "$hit_file" ]]; then
-    rm -f "$hit_file" "$err_file"
+  if [[ -n "$out" ]]; then
     return 0
   fi
-  rm -f "$hit_file"
-  if [[ -s "$err_file" ]]; then
-    diagnostic=$(head -n 1 "$err_file")
-    rm -f "$err_file"
-    log "Open-file check failed for $target (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
-    return 0
-  fi
-  rm -f "$err_file"
   if (( rc != 1 && rc != 0 )); then
     log "Open-file check failed for $target (lsof rc=${rc}) — fail-closed, treating as active."
     return 0
   fi
   return 1
 }
+
 
 worktree_has_unsaved_work() {
   local wt="$1" git_bin upstream
