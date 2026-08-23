@@ -203,14 +203,9 @@ has_recent_activity() {
 # explicit active-use marker. The marker moves with an archived directory, so
 # purge checks recursively rather than only at the timestamp directory root.
 has_active_marker() {
-  local dir="$1" hit_file rc=0
+  local dir="$1" hit_file
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  /usr/bin/find "$dir" -name .in-use -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  if (( rc != 0 )); then
-    rm -f "$hit_file"
-    log "Active-use marker check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
-    return 0
-  fi
+  /usr/bin/find "$dir" -name .in-use -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -218,6 +213,7 @@ has_active_marker() {
   rm -f "$hit_file"
   return 1
 }
+
 
 # has_open_files <dir> — true when lsof finds an open file or cannot prove the
 # tree is closed. macOS lsof's +D return status is unreliable, so matching

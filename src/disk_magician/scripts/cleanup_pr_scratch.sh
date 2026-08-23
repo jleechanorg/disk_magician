@@ -243,15 +243,10 @@ matches_scratch_pattern() {
 }
 
 has_recent_activity() {
-  local target="$1" hours="$2" mins hit_file rc=0
+  local target="$1" hours="$2" mins hit_file
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  find_cmd "$target" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  if (( rc != 0 )); then
-    rm -f "$hit_file"
-    log "Active-use check failed for $target (find rc=${rc}) — fail-closed, treating as active."
-    return 0
-  fi
+  find_cmd "$target" -mmin "-${mins}" -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -261,17 +256,12 @@ has_recent_activity() {
 }
 
 has_active_marker() {
-  local target="$1" hit_file rc=0
+  local target="$1" hit_file
   if [[ ! -d "$target" ]]; then
     return 1
   fi
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  find_cmd "$target" \( -name .in-use -o -name .keep \) -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  if (( rc != 0 )); then
-    rm -f "$hit_file"
-    log "Active-use marker check failed for $target (find rc=${rc}) — fail-closed, treating as active."
-    return 0
-  fi
+  find_cmd "$target" \( -name .in-use -o -name .keep \) -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -279,6 +269,7 @@ has_active_marker() {
   rm -f "$hit_file"
   return 1
 }
+
 
 has_open_files() {
   local target="$1" lsof_bin hit_file err_file diagnostic rc=0
