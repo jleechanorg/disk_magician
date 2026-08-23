@@ -38,3 +38,4 @@ docs/.disk-report-scratch/
 # see "Shared Venv & Worktree Storage Policy" in CLAUDE.md)
 .venv
 .worktrees/
+uv.lock
