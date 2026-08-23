@@ -795,6 +795,89 @@ fi
 assert_contains "GREEN 8b: approved dir is actually archived (evaluation proceeded)" \
   "Archiving: $G8B_PRIVATE_TMP/worktree_stale_dir ->" "$G8B_OUT_CONTENT"
 
+echo "GREEN 9a: aged archive entry is purged during standard run WITHOUT --large (bead disk_magician-f0f)"
+G9A_PRIVATE_TMP="$TMP_ROOT/g9a-private-tmp"
+G9A_TMP="$TMP_ROOT/g9a-tmp"
+G9A_ARCHIVE="$TMP_ROOT/g9a-archive"
+G9A_BIN="$TMP_ROOT/g9a-bin"
+mkdir -p "$G9A_PRIVATE_TMP" "$G9A_TMP" "$G9A_ARCHIVE/20200101T000000Z/already_archived_dir"
+touch "$G9A_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
+set_old_mtime "$G9A_ARCHIVE/20200101T000000Z"
+make_find_shim "$G9A_BIN" "$G9A_PRIVATE_TMP" "$G9A_TMP"
+
+G9A_OUT="$TMP_ROOT/g9a.out"
+if run_capture "$G9A_OUT" env -i HOME="$TMP_ROOT/g9a-home" \
+  PATH="$G9A_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G9A_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean; then
+  G9A_RC=0
+else
+  G9A_RC=$?
+fi
+G9A_OUT_CONTENT=$(cat "$G9A_OUT")
+assert_rc "GREEN 9a: exits 0" 0 "$G9A_RC"
+assert_contains "GREEN 9a: logs purging the aged archive entry without --large" \
+  "Purging aged archive" "$G9A_OUT_CONTENT"
+assert_missing "GREEN 9a: aged archive entry actually reclaimed without --large" "$G9A_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 9a: actual purge is counted as a removed dir without --large" \
+  "Dirs removed: 1" "$G9A_OUT_CONTENT"
+
+echo "GREEN 9b: over-cap archive entry is purged during standard run WITHOUT --large (bead disk_magician-f0f)"
+G9B_PRIVATE_TMP="$TMP_ROOT/g9b-private-tmp"
+G9B_TMP="$TMP_ROOT/g9b-tmp"
+G9B_ARCHIVE="$TMP_ROOT/g9b-archive"
+G9B_BIN="$TMP_ROOT/g9b-bin"
+G9B_ENTRY="$G9B_ARCHIVE/20200101T000000Z/already_archived_dir"
+mkdir -p "$G9B_PRIVATE_TMP" "$G9B_TMP" "$G9B_ENTRY"
+touch "$G9B_ENTRY/payload.bin" "$G9B_ENTRY/.in-use"
+set_old_mtime "$G9B_ARCHIVE/20200101T000000Z"
+make_find_shim "$G9B_BIN" "$G9B_PRIVATE_TMP" "$G9B_TMP"
+
+G9B_OUT="$TMP_ROOT/g9b.out"
+if run_capture "$G9B_OUT" env -i HOME="$TMP_ROOT/g9b-home" \
+  PATH="$G9B_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=48 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G9B_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --clean; then
+  G9B_RC=0
+else
+  G9B_RC=$?
+fi
+G9B_OUT_CONTENT=$(cat "$G9B_OUT")
+assert_rc "GREEN 9b: exits 0" 0 "$G9B_RC"
+assert_contains "GREEN 9b: logs over-cap purge without --large" \
+  "Purging over-cap archive" "$G9B_OUT_CONTENT"
+assert_missing "GREEN 9b: over-cap marked entry actually reclaimed without --large" \
+  "$G9B_ARCHIVE/20200101T000000Z"
+
+echo "GREEN 9c: standard dry-run reports aged archive without deleting (bead disk_magician-f0f)"
+G9C_PRIVATE_TMP="$TMP_ROOT/g9c-private-tmp"
+G9C_TMP="$TMP_ROOT/g9c-tmp"
+G9C_ARCHIVE="$TMP_ROOT/g9c-archive"
+G9C_BIN="$TMP_ROOT/g9c-bin"
+mkdir -p "$G9C_PRIVATE_TMP" "$G9C_TMP" "$G9C_ARCHIVE/20200101T000000Z/already_archived_dir"
+touch "$G9C_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
+set_old_mtime "$G9C_ARCHIVE/20200101T000000Z"
+make_find_shim "$G9C_BIN" "$G9C_PRIVATE_TMP" "$G9C_TMP"
+
+G9C_OUT="$TMP_ROOT/g9c.out"
+if run_capture "$G9C_OUT" env -i HOME="$TMP_ROOT/g9c-home" \
+  PATH="$G9C_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G9C_ARCHIVE" \
+  bash "$SOURCE_SCRIPT" --dry-run; then
+  G9C_RC=0
+else
+  G9C_RC=$?
+fi
+G9C_OUT_CONTENT=$(cat "$G9C_OUT")
+assert_rc "GREEN 9c: exits 0" 0 "$G9C_RC"
+assert_contains "GREEN 9c: logs DRY RUN preview of aged archive purge" \
+  "DRY RUN: would purge aged archive" "$G9C_OUT_CONTENT"
+assert_exists "GREEN 9c: entry is preserved during dry run" "$G9C_ARCHIVE/20200101T000000Z"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

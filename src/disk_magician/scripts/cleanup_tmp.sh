@@ -35,6 +35,10 @@ LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
 # process holding fds into an archived dir keeps it alive forever and the
 # quarantine grows unboundedly — the leak class this repo exists to prevent.
 LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
+# Overridable so sandboxed tests can point archiving at a fixture tree
+# instead of the real /private/tmp; production always uses the default.
+ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
+
 
 if [[ -f "$CONFIG_FILE" ]]; then
   read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168"
@@ -297,8 +301,9 @@ worktree_has_unsaved_work() {
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
   local path="$1" kb="$2" ts dest
+  local archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-$ARCHIVE_ROOT}"
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  dest="$ARCHIVE_ROOT/$ts"
+  dest="$archive_root/$ts"
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
@@ -327,7 +332,8 @@ warn_if_long_lived() {
 # because quarantined content can become active during its recovery window.
 # Entries older than LARGE_TMP_ARCHIVE_MAX_HOURS are purged unconditionally.
 purge_aged_archives() {
-  [[ -d "$ARCHIVE_ROOT" ]] || return 0
+  local archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-$ARCHIVE_ROOT}"
+  [[ -d "$archive_root" ]] || return 0
   local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
   local now_epoch d kb entry_mtime age_hours
   now_epoch="$(date +%s)"
@@ -401,7 +407,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
-      claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
+      claude-*|system-*|com.apple.*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
     esac
 
     kb=$(remove_path "$subdir")
@@ -458,7 +464,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
     # Skip essential system or user active directories
     case "$(basename "$subdir")" in
-      claude-*|system-*|com.apple.*|PowerlogHelperd*) continue ;;
+      claude-*|system-*|com.apple.*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
     esac
 
     # Parse the gitdir: line from the pointer file
@@ -587,9 +593,6 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
 fi
 
 if [[ "$INCLUDE_LARGE" == true ]]; then
-  # Overridable so sandboxed tests can point archiving at a fixture tree
-  # instead of the real /private/tmp; production always uses the default.
-  ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
   log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
   while IFS= read -r -d '' d; do
     base="$(basename "$d")"
@@ -653,8 +656,11 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
     ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
     DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
   done < <(find /private/tmp -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-
-  purge_aged_archives
 fi
+
+# Always purge aged archives if the archive directory exists, regardless of --large.
+# This prevents _disk_magician_archive quarantine from accumulating indefinitely
+# when standard/regular cleanup_tmp.sh runs occur without --large.
+purge_aged_archives
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Dirs archived: ${DIRS_ARCHIVED}  Total archived: ${ARCHIVED_KB} KB"

@@ -45,6 +45,8 @@ DEFAULT_HOT_DIRS = [
     "project_jleechanclaw",
     "worktrees",
     ".cmuxterm",
+    ".aside",
+    "/private/tmp",
 ]
 
 # Step-event attribution defaults (bead disk_magician-pkq): a >10 GiB swing
@@ -361,7 +363,10 @@ def collect_hot_dir_sizes(home: Path, run: Runner, hot_dirs: Sequence[str] = DEF
     """
     sizes = {}
     for name in hot_dirs:
-        path = home / name
+        if name.startswith("/") or name.startswith("~"):
+            path = Path(os.path.expanduser(name)) if name.startswith("~") else Path(name)
+        else:
+            path = home / name
         sizes[name] = _du_kb(path, run) if path.exists() else None
     return sizes
 

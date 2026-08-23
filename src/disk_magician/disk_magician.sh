@@ -23,6 +23,8 @@ Commands:
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
+  cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
+  prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
 
 Options:
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
@@ -229,6 +231,12 @@ case "$CMD" in
     ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
+    ;;
+  cleanup_pr_scratch|cleanup-pr-scratch)
+    "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
+    ;;
+  prune_aside_sessions|prune-aside-sessions)
+    "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
     ;;
   -h|--help)
     usage
