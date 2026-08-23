@@ -42,6 +42,7 @@ class TestCleanupPrScratch(unittest.TestCase):
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         return res
 
+
     def test_dry_run_preserves_everything(self):
         """Default dry-run mode previews but does not delete files/directories."""
         d1 = self.tmp_dir / "pr9128-wizard"
@@ -75,7 +76,7 @@ class TestCleanupPrScratch(unittest.TestCase):
         self._backdate(f1)
 
         res = self._run_script(["--clean"])
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
         self.assertIn("Removing:", res.stderr)
         self.assertFalse(d1.exists())
         self.assertFalse(d2.exists())
@@ -105,7 +106,7 @@ class TestCleanupPrScratch(unittest.TestCase):
             self._backdate(d)
 
         res = self._run_script(["--clean"])
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
 
         for d in matching_dirs:
             self.assertFalse(d.exists(), f"Expected {d.name} to be removed")
@@ -126,7 +127,7 @@ class TestCleanupPrScratch(unittest.TestCase):
         self._backdate(stale_dir)
 
         res = self._run_script(["--clean", "--min-age-hours", "48"])
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
         self.assertTrue(fresh_dir.exists())
         self.assertFalse(stale_dir.exists())
         self.assertIn("Skipping recently active path", res.stderr)
@@ -144,7 +145,7 @@ class TestCleanupPrScratch(unittest.TestCase):
         self._backdate(keep_dir)
 
         res = self._run_script(["--clean"])
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
         self.assertTrue(in_use_dir.exists())
         self.assertTrue(keep_dir.exists())
         self.assertIn("Skipping active-use marker", res.stderr)
@@ -154,6 +155,8 @@ class TestCleanupPrScratch(unittest.TestCase):
         git_dir = self.tmp_dir / "pr-git-scratch"
         git_dir.mkdir()
         subprocess.run(["git", "init", "-q", str(git_dir)], check=True)
+        subprocess.run(["git", "-C", str(git_dir), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(git_dir), "config", "user.email", "test@example.com"], check=True)
         (git_dir / "file.txt").write_text("initial")
         subprocess.run(["git", "-C", str(git_dir), "add", "file.txt"], check=True)
         subprocess.run(["git", "-C", str(git_dir), "commit", "-q", "-m", "init"], check=True)
@@ -161,7 +164,7 @@ class TestCleanupPrScratch(unittest.TestCase):
         self._backdate(git_dir)
 
         res = self._run_script(["--clean"])
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
         self.assertTrue(git_dir.exists())
         self.assertIn("Skipping scratch worktree with unsaved work", res.stderr)
 
@@ -179,10 +182,11 @@ class TestCleanupPrScratch(unittest.TestCase):
             ["--clean"],
             env_extra={"DISK_MAGICIAN_PROTECTED_TMP_ROOTS": "worldarchitect.ai pr-protected-custom"},
         )
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
         self.assertTrue(prot_dir.exists())
         self.assertTrue(pr_prot_dir.exists())
         self.assertIn("Skipping protected root", res.stderr)
+
 
     def test_argument_validation(self):
         """Invalid flags or argument types return exit code 2."""
