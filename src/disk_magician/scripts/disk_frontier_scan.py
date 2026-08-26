@@ -686,6 +686,14 @@ class FrontierScanner:
         self.level1_paths = []
         self.skip_sibling_volumes = args.no_sibling_volumes
         self.skip_purgeable = args.no_purgeable
+        # Default skip-list: ~/.claude/session-env/<uuid>/ dirs.
+        # 23,520 entries × 4 KiB each = 91 MiB total, but the BFS hits each
+        # one and burns ~95% of the wall-clock budget on them. See
+        # findings_wiki/2026-08-25-snapshot-pipeline-debug-audit.md.
+        # Operators may extend via --exclude-prefix.
+        default_excludes = ["/.claude/session-env/"]
+        extra = getattr(args, "exclude_prefix", None) or []
+        self.exclude_prefix_patterns = list(default_excludes) + list(extra)
 
     def _apply_inventory_partition(self, records, error_items, manifest):
         """Build one safe byte ledger and one <=granularity display frontier."""
@@ -952,6 +960,18 @@ class FrontierScanner:
         return kb
 
     def process_node(self, path, depth, is_symlink):
+        # skip-list: short-circuit known-noisy namespaces that consume the
+        # BFS time budget without contributing real disk weight (e.g.
+        # `~/.claude/session-env/<uuid>/` = 23,520 dirs × 4 KiB = 91 MiB
+        # but eats 95% of frontier_unfinished). Recorded as
+        # `excluded_skip_list` so operators can see the skip in the report.
+        for pattern in self.exclude_prefix_patterns:
+            if pattern in path:
+                self.frontier_unfinished.append(
+                    {"path": path, "depth": depth, "reason": "excluded_skip_list"}
+                )
+                return
+
         if not self.try_take_node_slot():
             self.frontier_unfinished.append(
                 {"path": path, "depth": depth, "reason": "node_budget_exhausted"}
@@ -1477,6 +1497,13 @@ def parse_args(argv):
     )
     p.add_argument("--no-sibling-volumes", action="store_true", default=False)
     p.add_argument("--no-purgeable", action="store_true", default=False)
+    p.add_argument(
+        "--exclude-prefix",
+        action="append",
+        default=None,
+        help="extra path substring to skip during BFS (matched against full path; "
+             "can be repeated). Default skip-list: /.claude/session-env/",
+    )
     p.add_argument("--debug-concurrency", action="store_true", default=False,
                     help="print MAX_CONCURRENT_DU=<n> to stderr at the end (test hook)")
     p.add_argument("--disk-used-kb-override", type=int, default=None,
