@@ -335,6 +335,15 @@ if [[ -d "$ag_worktrees" ]]; then
     fi
 fi
 
+# Aside browser sessions check
+aside_dir="$HOME/.aside"
+if [[ -d "$aside_dir/u" ]]; then
+    size_kb=$(du -sk "$aside_dir/u" 2>/dev/null | awk '{print $1+0}' || echo 0)
+    if [[ $size_kb -gt $((500 * 1024)) ]]; then
+        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >14d and dedups)"
+    fi
+fi
+
 # ── 5. Cleanup Execution ─────────────────────────────────────────────────────
 if [[ "$MODE" == "audit" ]]; then
     echo
@@ -359,6 +368,11 @@ if [[ "$MODE" == "clean" ]]; then
     # Run Temp Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
         run_category "Temp files" "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg
+    fi
+
+    # Run PR Scratch & Analyzer Cleanup
+    if [[ -f "$SCRIPT_DIR/cleanup_pr_scratch.sh" ]]; then
+        run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
     fi
 
     # Run Worktree Cleanup only after explicit approval.
@@ -411,6 +425,11 @@ if [[ "$MODE" == "clean-all" ]]; then
         run_category "Sessions" "$SCRIPT_DIR/cleanup_sessions.sh" $clean_arg
     else
         echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
+    fi
+
+    # Aside browser sessions (prune stale >14d and dedup static assets)
+    if [[ -f "$SCRIPT_DIR/prune_aside_sessions.sh" ]]; then
+        run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
     fi
 
     # Clean large temp directories after explicit large-temp approval.

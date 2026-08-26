@@ -200,6 +200,50 @@ class DiskObserverTest(unittest.TestCase):
         self.assertEqual(shrink_event["direction"], "shrank")
         self.assertEqual(shrink_event["delta_kb"], -delta_kb)
 
+    def test_default_hot_dirs_and_collect_hot_dir_sizes_paths(self):
+        observer = load_module()
+        self.assertIn(".aside", observer.DEFAULT_HOT_DIRS)
+        self.assertIn("/private/tmp", observer.DEFAULT_HOT_DIRS)
+
+        calls = []
+
+        def fake_run(argv, timeout=8):
+            calls.append(tuple(argv))
+            return observer.CommandResult(0, f"54321\t{argv[-1]}\n", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "user_home"
+            home.mkdir()
+            abs_target = Path(tmp) / "custom_abs"
+            abs_target.mkdir()
+            (home / ".codex").mkdir()
+            (home / ".aside" / "u" / "0").mkdir(parents=True)
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                sizes = observer.collect_hot_dir_sizes(
+                    home,
+                    fake_run,
+                    hot_dirs=[
+                        ".codex",
+                        "missing_rel",
+                        str(abs_target),
+                        "/missing/abs",
+                        "~/.aside/u/0",
+                        "~/missing_tilde",
+                    ],
+                )
+
+        self.assertEqual(sizes[".codex"], 54321)
+        self.assertIsNone(sizes["missing_rel"])
+        self.assertEqual(sizes[str(abs_target)], 54321)
+        self.assertIsNone(sizes["/missing/abs"])
+        self.assertEqual(sizes["~/.aside/u/0"], 54321)
+        self.assertIsNone(sizes["~/missing_tilde"])
+        du_targets = [call[2] for call in calls if call[0] == "du"]
+        self.assertIn(str(home / ".codex"), du_targets)
+        self.assertIn(str(abs_target), du_targets)
+        self.assertIn(str(home / ".aside" / "u" / "0"), du_targets)
+
     def test_step_event_record_includes_non_recursive_hot_dir_sizes(self):
         observer = load_module()
         calls = []
@@ -212,15 +256,30 @@ class DiskObserverTest(unittest.TestCase):
             return observer.CommandResult(0, f"12345\t{argv[-1]}\n", "", False)
 
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            hot_dirs = [".codex", ".cache", "missing_dir"]
+            home = Path(tmp) / "home"
+            home.mkdir()
+            abs_dir = Path(tmp) / "private_tmp"
+            abs_dir.mkdir()
+
             (home / ".codex").mkdir()
             (home / ".cache").mkdir()
+            (home / ".aside" / "u" / "0").mkdir(parents=True)
             # "missing_dir" deliberately not created, to exercise the
             # does-not-exist -> None path without shelling out.
 
+            hot_dirs = [
+                ".codex",
+                ".cache",
+                "missing_dir",
+                str(abs_dir),
+                "/nonexistent/abs/path",
+                "~/.aside/u/0",
+                "~/nonexistent/tilde/path",
+            ]
+
             event = {"delta_kb": 11 * 1024 * 1024, "direction": "grew", "window_seconds": 1500}
-            record = observer.build_step_event_record(1_700_000_000, event, home, fake_run, hot_dirs)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                record = observer.build_step_event_record(1_700_000_000, event, home, fake_run, hot_dirs)
 
         self.assertEqual(record["schema_version"], 1)
         self.assertEqual(record["tool"], "disk_observer_step_event")
@@ -229,10 +288,14 @@ class DiskObserverTest(unittest.TestCase):
         self.assertEqual(record["window_seconds"], 1500)
         self.assertEqual(record["hot_dirs_kb"][".codex"], 12345)
         self.assertEqual(record["hot_dirs_kb"][".cache"], 12345)
+        self.assertEqual(record["hot_dirs_kb"][str(abs_dir)], 12345)
+        self.assertEqual(record["hot_dirs_kb"]["~/.aside/u/0"], 12345)
         self.assertIsNone(record["hot_dirs_kb"]["missing_dir"])
+        self.assertIsNone(record["hot_dirs_kb"]["/nonexistent/abs/path"])
+        self.assertIsNone(record["hot_dirs_kb"]["~/nonexistent/tilde/path"])
         # Exactly one du call per existing hot dir — no recursive tree walk.
         du_calls = [call for call in calls if call[0] == "du"]
-        self.assertEqual(len(du_calls), 2)
+        self.assertEqual(len(du_calls), 4)
         for call in du_calls:
             self.assertEqual(call[0:2], ("du", "-sk"))
 

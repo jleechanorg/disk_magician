@@ -25,10 +25,12 @@ class LedgerError(ValueError):
 
 
 def validate_ledger(ledger: dict, *, label: str) -> None:
-    for key in ("disk_used_kb", "residual_kb", "buckets"):
+    for key in ("disk_used_kb", "residual_kb"):
         if key not in ledger:
             raise LedgerError(f"{label}: missing required key {key!r}")
-    buckets = ledger["buckets"]
+    if "buckets" not in ledger and "granularity_buckets" not in ledger:
+        raise LedgerError(f"{label}: missing required key 'buckets' or 'granularity_buckets'")
+    buckets = ledger.get("granularity_buckets", ledger.get("buckets", []))
     if not isinstance(buckets, list):
         raise LedgerError(f"{label}: 'buckets' must be a list")
     total = 0
@@ -51,6 +53,9 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
                 "unexplained >=5 GiB aggregate without child breakdown"
             )
         total += size
+    for item in ledger.get("oversize_indivisible_files", []):
+        total += item.get("measured_kb", 0)
+    total += ledger.get("purgeable_kb", 0)
     residual = ledger["residual_kb"]
     used = ledger["disk_used_kb"]
     if total + residual != used:
@@ -61,8 +66,14 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
 
 
 def compute_deltas(base: dict, target: dict) -> "tuple[list, int]":
-    base_by_path = {b["path"]: b["measured_kb"] for b in base["buckets"]}
-    target_by_path = {b["path"]: b["measured_kb"] for b in target["buckets"]}
+    base_buckets = base.get("granularity_buckets", base.get("buckets", []))
+    target_buckets = target.get("granularity_buckets", target.get("buckets", []))
+    base_by_path = {b["path"]: b["measured_kb"] for b in base_buckets}
+    target_by_path = {b["path"]: b["measured_kb"] for b in target_buckets}
+    for item in base.get("oversize_indivisible_files", []):
+        base_by_path[item["path"]] = item["measured_kb"]
+    for item in target.get("oversize_indivisible_files", []):
+        target_by_path[item["path"]] = item["measured_kb"]
     paths = set(base_by_path) | set(target_by_path)
     deltas = [
         (path, target_by_path.get(path, 0) - base_by_path.get(path, 0))

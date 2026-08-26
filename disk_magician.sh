@@ -23,6 +23,16 @@ Commands:
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
+  cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
+  prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
+  cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
+  cleanup-worktrees      Safely prune stale linked worktrees >14d.
+  worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
+  cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
+  cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
+  cleanup-apfs-snapshots Clean stale APFS OS update snapshots older than retention.
+  cleanup-antigravity-brain Clean stale conversation task logs and media artifacts.
+  vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
 
 Options:
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
@@ -229,6 +239,36 @@ case "$CMD" in
     ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
+    ;;
+  cleanup_pr_scratch|cleanup-pr-scratch)
+    "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
+    ;;
+  prune_aside_sessions|prune-aside-sessions)
+    "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
+    ;;
+  cleanup_colima|cleanup-colima)
+    "$SCRIPT_DIR/scripts/cleanup_colima.sh" "$@"
+    ;;
+  cleanup_worktrees|cleanup-worktrees)
+    "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
+    ;;
+  worktree_hygiene|worktree-hygiene)
+    "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"
+    ;;
+  cleanup_dev_caches|cleanup-dev-caches)
+    "$SCRIPT_DIR/scripts/cleanup_dev_caches.sh" "$@"
+    ;;
+  cleanup_tmp|cleanup-tmp)
+    "$SCRIPT_DIR/scripts/cleanup_tmp.sh" "$@"
+    ;;
+  cleanup_apfs_snapshots|cleanup-apfs-snapshots)
+    "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
+    ;;
+  cleanup_antigravity_brain|cleanup-antigravity-brain)
+    "$SCRIPT_DIR/scripts/cleanup_antigravity_brain.sh" "$@"
+    ;;
+  vacuum_hermes_state|vacuum-hermes-state)
+    "$SCRIPT_DIR/scripts/vacuum_hermes_state.sh" "$@"
     ;;
   -h|--help)
     usage
