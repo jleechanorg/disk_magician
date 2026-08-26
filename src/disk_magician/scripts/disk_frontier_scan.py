@@ -686,12 +686,19 @@ class FrontierScanner:
         self.level1_paths = []
         self.skip_sibling_volumes = args.no_sibling_volumes
         self.skip_purgeable = args.no_purgeable
-        # Default skip-list: ~/.claude/session-env/<uuid>/ dirs.
-        # 23,520 entries × 4 KiB each = 91 MiB total, but the BFS hits each
-        # one and burns ~95% of the wall-clock budget on them. See
-        # findings_wiki/2026-08-25-snapshot-pipeline-debug-audit.md.
+        # Default skip-list: ~/.claude/session-env/<uuid>/ + ~/.dark-factory/logs/
+        # + ~/.gemini/history/. Each one is a known-noisy namespace that
+        # consumes BFS time budget without contributing meaningful disk-weight
+        # accounting:
+        #   - ~/.claude/session-env/  23,520 dirs × 4 KiB = 91 MiB
+        #   - ~/.dark-factory/logs/  97,762 log files × ~4 KiB = 383 MiB
+        #   - ~/.gemini/history/     1,916 entries × ~120 KiB = 231 MiB
         # Operators may extend via --exclude-prefix.
-        default_excludes = ["/.claude/session-env/"]
+        default_excludes = [
+            "/.claude/session-env/",
+            "/.dark-factory/logs/",
+            "/.gemini/history/",
+        ]
         extra = getattr(args, "exclude_prefix", None) or []
         self.exclude_prefix_patterns = list(default_excludes) + list(extra)
 
