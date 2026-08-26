@@ -20,8 +20,9 @@ echo "dummy file 2" > "$STAGING_DIR/batch_2/file2.txt"
 # 1. Test check_system_residual.sh in JSON mode
 export TARGET_DIR="$STAGING_DIR"
 export DISK_MAGICIAN_SKIP_PS_CHECK=1
+export DISK_MAGICIAN_SKIP_LOG_CHECK=1
 # Override TARGET_DIR in check_system_residual.sh via environment or temporary mock
-CHECK_OUT="$(bash -c "TARGET_DIR='$STAGING_DIR' '$CHECK_SCRIPT' --json")"
+CHECK_OUT="$(TARGET_DIR="$STAGING_DIR" DISK_MAGICIAN_SKIP_LOG_CHECK=1 bash "$CHECK_SCRIPT" --json)"
 grep -q '"dirs_cleaner_path": "' <<< "$CHECK_OUT"
 grep -q '"dirs_cleaner_mb":' <<< "$CHECK_OUT"
 

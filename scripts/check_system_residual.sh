@@ -5,7 +5,7 @@
 # and unified logs for deleted_helper ENAMETOOLONG errors when residual disk space is high.
 set -euo pipefail
 
-TARGET_DIR="/private/var/dirs_cleaner"
+TARGET_DIR="${TARGET_DIR:-/private/var/dirs_cleaner}"
 JSON_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
@@ -26,7 +26,7 @@ if [[ -d "$TARGET_DIR" ]]; then
 fi
 
 enametoolong_count=0
-if command -v log &>/dev/null; then
+if [[ "${DISK_MAGICIAN_SKIP_LOG_CHECK:-0}" != "1" ]] && command -v log &>/dev/null; then
   enametoolong_count="$(log show --predicate 'process == "deleted_helper" AND eventMessage CONTAINS "removefile error"' --last 7d 2>/dev/null | grep -c "removefile error" || echo "0")"
 fi
 
