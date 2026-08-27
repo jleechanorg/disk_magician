@@ -299,10 +299,15 @@ has_open_files() {
     return 0
   fi
 
+  local timeout_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout "${DISK_MAGICIAN_LSOF_TIMEOUT:-5s}")
+  fi
+
   if [[ -d "$target" ]]; then
-    out="$("$lsof_bin" +w +D "$target" 2>/dev/null)" || rc=$?
+    out="$("${timeout_cmd[@]}" "$lsof_bin" +w -X +D "$target" 2>/dev/null)" || rc=$?
   else
-    out="$("$lsof_bin" +w "$target" 2>/dev/null)" || rc=$?
+    out="$("${timeout_cmd[@]}" "$lsof_bin" +w -X "$target" 2>/dev/null)" || rc=$?
   fi
 
   if [[ -n "$out" ]]; then
