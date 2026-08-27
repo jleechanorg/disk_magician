@@ -18,6 +18,7 @@ Commands:
   clean-all     Clean all targets interactively (Docker VMs, old sessions).
   history       Show historical growth trends from git snapshots.
   history diff [ref]  Diff two committed ledger/topdown-5g.json snapshots.
+  history diff --days N  Attribute growth from the lowest-used ledger in N days.
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).

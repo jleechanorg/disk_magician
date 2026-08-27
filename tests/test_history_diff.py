@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """test_history_diff.py — unit + CLI-integration tests for
 scripts/history_diff.py (sandboxed: tempfile git repos, no real $HOME)."""
+import datetime
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -16,10 +18,10 @@ import history_diff as hd  # noqa: E402
 GIB_KB = 1024 * 1024
 
 
-def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual"):
+def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", captured_at="2026-07-21T00:00:00Z"):
     return {
         "schema_version": 1,
-        "captured_at": "2026-07-21T00:00:00Z",
+        "captured_at": captured_at,
         "hostname": "sandbox-host",
         "disk_used_kb": disk_used_kb,
         "residual_kb": residual_kb,
@@ -123,12 +125,18 @@ def _git(repo, *args):
     )
 
 
-def _write_ledger_commit(repo, ledger_obj, msg):
+def _write_ledger_commit(repo, ledger_obj, msg, committed_at=None):
     ledger_dir = repo / "ledger"
     ledger_dir.mkdir(exist_ok=True)
     (ledger_dir / "topdown-5g.json").write_text(json.dumps(ledger_obj))
     _git(repo, "add", "ledger/topdown-5g.json")
-    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg)
+    env = None
+    if committed_at:
+        env = {**os.environ, "GIT_AUTHOR_DATE": committed_at, "GIT_COMMITTER_DATE": committed_at}
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg],
+        capture_output=True, text=True, check=True, env=env,
+    )
 
 
 class TestCLIIntegration(unittest.TestCase):
@@ -176,6 +184,35 @@ class TestCLIIntegration(unittest.TestCase):
         result = self._run_cli("HEAD~2")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("+2.00 GiB", result.stdout)
+
+    def test_days_selects_lowest_valid_used_ledger_in_window(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        old = (now - datetime.timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        floor = (now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        head = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        _write_ledger_commit(
+            self.repo, ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}]),
+            "old", old,
+        )
+        _write_ledger_commit(
+            self.repo, ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}]),
+            "floor", floor,
+        )
+        _write_ledger_commit(
+            self.repo, ledger(5 * GIB_KB, 0, [
+                {"path": "/a", "measured_kb": 2 * GIB_KB},
+                {"path": "/growth", "measured_kb": 3 * GIB_KB},
+            ]), "head", head,
+        )
+        result = self._run_cli("--days", "3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("floor (3d):", result.stdout)
+        self.assertIn("+3.00 GiB  /growth", result.stdout)
+
+    def test_days_cannot_be_combined_with_explicit_ref(self):
+        result = self._run_cli("HEAD~1", "--days", "7")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot be combined", result.stderr)
 
     def test_fail_closed_on_oversize_bucket_refuses_diff(self):
         base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])

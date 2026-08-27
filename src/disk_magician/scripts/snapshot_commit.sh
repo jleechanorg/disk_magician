@@ -74,6 +74,10 @@ CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 # meaningful, not noise) — deviation from an earlier draft that skipped
 # no-op commits, corrected by tests/test_snapshot_commit.sh Test 2 (history
 # must accrue every run).
+# A prior diagnostic may have marked the generated ledger assume-unchanged.
+# That would make git add silently skip the only <=5 GiB mega-table used for
+# attribution, even when the renderer refreshed it successfully.
+git_id update-index --no-assume-unchanged ledger/topdown-5g.json ledger/topdown-5g.md 2>/dev/null || true
 git_id add -A
 git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty
 log "committed snapshot"

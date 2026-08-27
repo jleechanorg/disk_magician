@@ -122,6 +122,29 @@ def load_ledger_from_git(state_dir: pathlib.Path, ref: str) -> dict:
         raise LedgerError(f"{ref}:{LEDGER_REL_PATH}: not readable JSON — {exc}")
 
 
+def select_floor_ref(state_dir: pathlib.Path, days: int) -> "tuple[str, dict]":
+    """Return the lowest-used valid ledger committed within the requested window."""
+    result = subprocess.run(
+        ["git", "-C", str(state_dir), "log", f"--since={days}.days.ago", "--format=%H",
+         "--", LEDGER_REL_PATH],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise LedgerError(f"cannot read ledger history — {result.stderr.strip()}")
+    candidates = []
+    for ref in result.stdout.splitlines():
+        try:
+            ledger = load_ledger_from_git(state_dir, ref)
+            validate_ledger(ledger, label=ref)
+        except LedgerError:
+            continue
+        candidates.append((ledger["disk_used_kb"], ref, ledger))
+    if not candidates:
+        raise LedgerError(f"no valid ledger snapshots in the last {days} days")
+    _, ref, ledger = min(candidates, key=lambda item: (item[0], item[1]))
+    return ref, ledger
+
+
 def resolve_state_dir(explicit) -> pathlib.Path:
     if explicit:
         return pathlib.Path(explicit)
@@ -137,6 +160,8 @@ def main(argv) -> int:
     parser = argparse.ArgumentParser(prog="disk-magician history diff")
     parser.add_argument("ref", nargs="?", default=None,
                          help="base ref to diff against HEAD (default: HEAD~1)")
+    parser.add_argument("--days", type=int, default=None,
+                        help="select the lowest-used valid ledger from the last N days")
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--validate", metavar="LEDGER_JSON", default=None,
                          help="validate a single ledger file and exit (no diff)")
@@ -157,9 +182,16 @@ def main(argv) -> int:
         print(f"history diff: no state repo at {state_dir} (run: state init)", file=sys.stderr)
         return 1
 
+    if args.days is not None and args.days <= 0:
+        parser.error("--days must be positive")
+    if args.days is not None and args.ref is not None:
+        parser.error("--days cannot be combined with an explicit ref")
     base_ref = args.ref or "HEAD~1"
     try:
-        base = load_ledger_from_git(state_dir, base_ref)
+        if args.days is not None:
+            base_ref, base = select_floor_ref(state_dir, args.days)
+        else:
+            base = load_ledger_from_git(state_dir, base_ref)
         target = load_ledger_from_git(state_dir, "HEAD")
         validate_ledger(base, label=base_ref)
         validate_ledger(target, label="HEAD")
@@ -168,6 +200,12 @@ def main(argv) -> int:
         return 2
 
     deltas, residual_delta = compute_deltas(base, target)
+    if args.days is not None:
+        captured_at = base.get("captured_at", "unknown")
+        print(
+            f"floor ({args.days}d): {base['disk_used_kb'] / GIB_KB:.2f} GiB used "
+            f"at {captured_at} ({base_ref})"
+        )
     print(format_diff(deltas, residual_delta))
     return 0
 

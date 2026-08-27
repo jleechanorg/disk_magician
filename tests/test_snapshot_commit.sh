@@ -25,6 +25,7 @@ chmod +x "$STUB_BIN/snap.sh"
 run_sc() { # run_sc <home> <args...>
   env -i HOME="$1" PATH="/usr/bin:/bin" \
     DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
+    DISK_MAGICIAN_FRONTIER_JSON="${DM_TEST_FRONTIER:-$1/.disk_magician_state/frontier_last.json}" \
     bash "$SC" "${@:2}"
 }
 
@@ -72,6 +73,22 @@ OUT4=$(run_sc "$H4" 2>&1); RC4=$?
 [[ -f "$LEGACY/snapshots/disk_snapshot.json" ]] && ok "new-layout snapshots/ created in legacy repo" || bad "new layout" "missing"
 [[ -f "$LEGACY/backup/somehost/disk_snapshot.json" ]] && ok "existing backup/<host>/ left untouched" || bad "legacy preserved" "gone"
 [[ "$(cat "$LEGACY/backup/somehost/disk_snapshot.json")" == '{"pre":"existing"}' ]] && ok "legacy content byte-identical" || bad "legacy content" "changed"
+
+echo "Test 5: tracked 5G ledger is unmasked before snapshot staging"
+H5="$TMP_ROOT/h5"; mkdir -p "$H5/.disk_magician_state"
+DM_TEST_FRONTIER="$H5/.disk_magician_state/frontier_last.json"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$DM_TEST_FRONTIER" <<EOF
+{"captured_at":"$NOW","hostname":"test","disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/small","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true}}
+EOF
+run_sc "$H5" >/dev/null 2>&1
+SD5="$H5/.local/state/disk-magician"
+git -C "$SD5" update-index --assume-unchanged ledger/topdown-5g.json ledger/topdown-5g.md
+run_sc "$H5" >/dev/null 2>&1
+FLAGS5="$(git -C "$SD5" ls-files -v ledger/topdown-5g.json ledger/topdown-5g.md)"
+[[ "$FLAGS5" != h* ]] && ok "ledger index flags are not assume-unchanged" || bad "ledger flags" "$FLAGS5"
+git -C "$SD5" show HEAD:ledger/topdown-5g.json | grep -q 'granularity_buckets' \
+  && ok "validated 5G ledger committed" || bad "ledger commit" "missing ledger payload"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
