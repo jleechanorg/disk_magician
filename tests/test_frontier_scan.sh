@@ -211,6 +211,45 @@ PY
 [[ "$PERMISSION_TEST_OUT" == "True" ]] && ok "child enumeration identifies permission/TCC denial explicitly" \
   || bad "child enumeration hid permission/TCC denial: $PERMISSION_TEST_OUT"
 
+SYMLINK_STATUS_FAILURE_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import errno
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+class Entry:
+    path = "/root/uninspectable-link"
+
+    def is_symlink(self):
+        raise OSError(errno.EIO, "I/O error")
+
+class Scan:
+    def __enter__(self):
+        return iter([Entry()])
+
+    def __exit__(self, *args):
+        return False
+
+unfinished = []
+with mock.patch.object(m.os, "scandir", return_value=Scan()):
+    children, error = m.list_children("/root", unfinished)
+print(
+    children == [],
+    error is None,
+    unfinished == [{
+        "path": "/root/uninspectable-link",
+        "reason": "is_symlink_failed",
+        "errno": errno.EIO,
+    }],
+)
+PY
+)
+[[ "$SYMLINK_STATUS_FAILURE_OUT" == "True True True" ]] \
+  && ok "is_symlink OSError is retained as a named unfinished item" \
+  || bad "is_symlink OSError was silently omitted: $SYMLINK_STATUS_FAILURE_OUT"
+
 ROOT_PRIORITY_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import os
 import sys
@@ -866,6 +905,49 @@ PY
 )
 [[ "$NEGATIVE_DISPLAY_TAIL_OUT" == "True True True True" ]] && ok "negative display tail fails closed instead of algebraically balancing" \
   || bad "display overcount was hidden by a negative balancing tail: $NEGATIVE_DISPLAY_TAIL_OUT"
+
+COVERAGE_ROOT_MISMATCH_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+scanner = SimpleNamespace(
+    root="/fixture",
+    measured={"/fixture/covered/file": 1},
+    inventory_buckets=[{"path": "/fixture/covered/file", "measured_kb": 1}],
+    oversize_files=[], frontier_unfinished=[], deduped=[], warnings=[],
+    nodes_processed=1, tracker=SimpleNamespace(peak=lambda: 1),
+    level1_paths=["/fixture/covered", "/fixture/missing"],
+    inventory_backend="gdu_one_pass", shallow_enumeration_depth=0,
+    fda_preflight={"status": "granted", "targets": []},
+)
+args = SimpleNamespace(
+    workers=1, max_depth=6, max_nodes=100_000_000, wall_clock_cap=10,
+    timeout_tiers=[10], granularity_gib=5,
+)
+report = m.build_report(
+    scanner,
+    {"total_kb": 10, "used_kb": 10, "free_kb": 0},
+    {},
+    {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+     "local_snapshots": [], "local_snapshots_count": 0},
+    0.1,
+    args,
+)
+envelope = report["coverage_envelope"]
+print(
+    envelope["complete"] is False,
+    envelope["measured_top_level_roots"] == 1,
+    envelope["reachable_top_level_roots"] == 2,
+    envelope["unfinished_top_level_roots"] == 1,
+)
+PY
+)
+[[ "$COVERAGE_ROOT_MISMATCH_OUT" == "True True True True" ]] \
+  && ok "coverage envelope rejects a complete-mode root-count mismatch" \
+  || bad "coverage envelope accepted incomplete top-level attribution: $COVERAGE_ROOT_MISMATCH_OUT"
 
 GDU_DUA_FALLBACK_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
 import subprocess

@@ -66,6 +66,38 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         )
 
 
+def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
+    """Reject legacy or partial ledgers on the attribution-diff path.
+
+    ``--validate`` intentionally remains a structural/partial validation
+    utility, but a history comparison must never present incomplete rows as a
+    full-disk attribution delta.
+    """
+    envelope = ledger.get("coverage_envelope")
+    accounting = ledger.get("accounting_equation")
+    reachable = envelope.get("reachable_top_level_roots") if isinstance(envelope, dict) else None
+    measured = envelope.get("measured_top_level_roots") if isinstance(envelope, dict) else None
+    unfinished = envelope.get("unfinished_top_level_roots") if isinstance(envelope, dict) else None
+    if ledger.get("mode") != "complete":
+        raise LedgerError(f"{label}: full-attribution ledger required (mode is not complete)")
+    if not isinstance(envelope, dict) or envelope.get("complete") is not True:
+        raise LedgerError(f"{label}: full-attribution ledger required (coverage envelope incomplete)")
+    if envelope.get("fda_preflight_status") != "granted":
+        raise LedgerError(f"{label}: full-attribution ledger required (FDA preflight not granted)")
+    if (
+        type(reachable) is not int
+        or type(measured) is not int
+        or type(unfinished) is not int
+        or measured != reachable
+        or unfinished != 0
+    ):
+        raise LedgerError(f"{label}: full-attribution ledger required (top-level roots incomplete)")
+    if not isinstance(ledger.get("frontier_unfinished"), list) or ledger["frontier_unfinished"]:
+        raise LedgerError(f"{label}: full-attribution ledger required (frontier unfinished)")
+    if not isinstance(accounting, dict) or accounting.get("displayed_balanced") is not True:
+        raise LedgerError(f"{label}: full-attribution ledger required (displayed equation unbalanced)")
+
+
 def compute_deltas(base: dict, target: dict) -> "tuple[list, int]":
     base_buckets = base.get("granularity_buckets", base.get("buckets", []))
     target_buckets = target.get("granularity_buckets", target.get("buckets", []))
@@ -137,6 +169,7 @@ def select_floor_ref(state_dir: pathlib.Path, days: int) -> "tuple[str, dict]":
         try:
             ledger = load_ledger_from_git(state_dir, ref)
             validate_ledger(ledger, label=ref)
+            validate_full_attribution_ledger(ledger, label=ref)
         except LedgerError:
             continue
         candidates.append((ledger["disk_used_kb"], ref, ledger))
@@ -165,12 +198,17 @@ def main(argv) -> int:
 
     if args.validate:
         try:
-            validate_ledger(load_ledger_from_file(pathlib.Path(args.validate)),
-                             label=args.validate)
+            ledger = load_ledger_from_file(pathlib.Path(args.validate))
+            validate_ledger(ledger, label=args.validate)
         except LedgerError as exc:
             print(f"history diff: {exc}", file=sys.stderr)
             return 2
-        print(f"history diff: {args.validate} is a valid <=5 GiB ledger")
+        try:
+            validate_full_attribution_ledger(ledger, label=args.validate)
+        except LedgerError:
+            print(f"history diff: {args.validate} is valid structural partial/legacy ledger")
+        else:
+            print(f"history diff: {args.validate} is a valid full-attribution ledger")
         return 0
 
     state_dir = resolve_state_dir(args.state_dir)
@@ -191,6 +229,8 @@ def main(argv) -> int:
         target = load_ledger_from_git(state_dir, "HEAD")
         validate_ledger(base, label=base_ref)
         validate_ledger(target, label="HEAD")
+        validate_full_attribution_ledger(base, label=base_ref)
+        validate_full_attribution_ledger(target, label="HEAD")
     except LedgerError as exc:
         print(f"history diff: {exc}", file=sys.stderr)
         return 2

@@ -43,12 +43,26 @@ def write_status(out_dir, status, reason, captured_at, age_hours, report=None):
 
 
 def complete_coverage_envelope(report):
-    """Return true only when the scanner made an explicit full-pass claim."""
+    """Return true only when the report proves full, balanced attribution."""
     envelope = report.get("coverage_envelope")
+    accounting = report.get("accounting_equation")
+    reachable = envelope.get("reachable_top_level_roots") if isinstance(envelope, dict) else None
+    measured = envelope.get("measured_top_level_roots") if isinstance(envelope, dict) else None
+    unfinished = envelope.get("unfinished_top_level_roots") if isinstance(envelope, dict) else None
     return (
         report.get("mode") == "complete"
         and isinstance(envelope, dict)
         and envelope.get("complete") is True
+        and envelope.get("fda_preflight_status") == "granted"
+        and type(reachable) is int
+        and type(measured) is int
+        and type(unfinished) is int
+        and measured == reachable
+        and unfinished == 0
+        and isinstance(report.get("frontier_unfinished"), list)
+        and not report["frontier_unfinished"]
+        and isinstance(accounting, dict)
+        and accounting.get("displayed_balanced") is True
     )
 
 
@@ -100,6 +114,7 @@ def main():
         "schema_version": 1,
         "mode": report.get("mode"),
         "coverage_envelope": report.get("coverage_envelope"),
+        "frontier_unfinished": report.get("frontier_unfinished"),
         "captured_at": captured_at,
         "hostname": report.get("hostname"),
         "disk_used_kb": report.get("disk_used_kb"),

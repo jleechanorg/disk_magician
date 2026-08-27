@@ -21,6 +21,16 @@ GIB_KB = 1024 * 1024
 def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", captured_at="2026-07-21T00:00:00Z"):
     return {
         "schema_version": 1,
+        "mode": "complete",
+        "coverage_envelope": {
+            "complete": True,
+            "fda_preflight_status": "granted",
+            "reachable_top_level_roots": 1,
+            "measured_top_level_roots": 1,
+            "unfinished_top_level_roots": 0,
+        },
+        "frontier_unfinished": [],
+        "accounting_equation": {"displayed_balanced": True},
         "captured_at": captured_at,
         "hostname": "sandbox-host",
         "disk_used_kb": disk_used_kb,
@@ -258,6 +268,34 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn("/opaque", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_diff_rejects_legacy_ledger(self):
+        base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        for key in ("mode", "coverage_envelope", "frontier_unfinished", "accounting_equation"):
+            base.pop(key)
+        _write_ledger_commit(self.repo, base, "legacy")
+        target = ledger(2 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 1 * GIB_KB},
+            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+        ])
+        _write_ledger_commit(self.repo, target, "target")
+        result = self._run_cli()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("full-attribution ledger required", result.stderr)
+
+    def test_diff_rejects_partial_ledger(self):
+        base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        _write_ledger_commit(self.repo, base, "base")
+        partial = ledger(2 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 1 * GIB_KB},
+            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+        ])
+        partial["mode"] = "partial"
+        partial["coverage_envelope"]["complete"] = False
+        _write_ledger_commit(self.repo, partial, "partial")
+        result = self._run_cli()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("full-attribution ledger required", result.stderr)
+
     def test_missing_state_repo_exits_1(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--state-dir", str(self.tmp / "nope")],
@@ -275,6 +313,19 @@ class TestCLIIntegration(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_validate_mode_labels_legacy_as_structural_partial(self):
+        led_path = self.tmp / "legacy.json"
+        legacy = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        for key in ("mode", "coverage_envelope", "frontier_unfinished", "accounting_equation"):
+            legacy.pop(key)
+        led_path.write_text(json.dumps(legacy))
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--validate", str(led_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("structural partial/legacy", result.stdout)
 
     def test_validate_mode_invalid_file(self):
         led_path = self.tmp / "bad.json"

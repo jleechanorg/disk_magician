@@ -23,6 +23,10 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "coverage_envelope": {
                 "complete": envelope_complete,
                 "status": "complete" if envelope_complete else "partial",
+                "fda_preflight_status": "granted",
+                "reachable_top_level_roots": 1,
+                "measured_top_level_roots": 1,
+                "unfinished_top_level_roots": 0,
             },
             "captured_at": captured,
             "hostname": "testhost",
@@ -35,6 +39,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
             ],
             "oversize_indivisible_files": [],
             "accounting_equation": {"displayed_balanced": True},
+            "frontier_unfinished": [],
         }
         path = os.path.join(self.tmp, "frontier_last.json")
         with open(path, "w") as f:
@@ -55,6 +60,29 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertIn("0.5", md)
         status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
         self.assertEqual(status["status"], "published")
+
+    def test_publisher_requires_every_full_attribution_evidence_gate(self):
+        mutations = {
+            "mode": lambda d: d.update(mode="partial"),
+            "envelope_complete": lambda d: d["coverage_envelope"].update(complete=False),
+            "fda": lambda d: d["coverage_envelope"].update(fda_preflight_status="denied"),
+            "root_count": lambda d: d["coverage_envelope"].update(measured_top_level_roots=0),
+            "unfinished_root": lambda d: d["coverage_envelope"].update(unfinished_top_level_roots=1),
+            "frontier": lambda d: d.update(frontier_unfinished=[{"path": "/blocked"}]),
+            "equation": lambda d: d["accounting_equation"].update(displayed_balanced=False),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                frontier = self._fixture(age_hours=1)
+                data = json.load(open(frontier))
+                mutate(data)
+                with open(frontier, "w") as f:
+                    json.dump(data, f)
+                rc, out, err = run(frontier, self.out_dir)
+                self.assertEqual(rc, 0, err)
+                self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+                status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
+                self.assertEqual(status["status"], "partial")
 
     def test_partial_envelope_preserves_published_table_and_records_status(self):
         frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)

@@ -79,7 +79,7 @@ H5="$TMP_ROOT/h5"; mkdir -p "$H5/.disk_magician_state"
 DM_TEST_FRONTIER="$H5/.disk_magician_state/frontier_last.json"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$DM_TEST_FRONTIER" <<EOF
-{"captured_at":"$NOW","hostname":"test","mode":"complete","coverage_envelope":{"complete":true,"status":"complete"},"disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/small","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true}}
+{"captured_at":"$NOW","hostname":"test","mode":"complete","coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/small","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true}}
 EOF
 run_sc "$H5" >/dev/null 2>&1
 SD5="$H5/.local/state/disk-magician"
@@ -95,7 +95,7 @@ H6="$TMP_ROOT/h6"; mkdir -p "$H6/.disk_magician_state"
 DM_TEST_FRONTIER="$H6/.disk_magician_state/frontier_last.json"
 NOW6="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$DM_TEST_FRONTIER" <<EOF
-{"captured_at":"$NOW6","hostname":"test","mode":"complete","coverage_envelope":{"complete":true,"status":"complete"},"disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/published","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true}}
+{"captured_at":"$NOW6","hostname":"test","mode":"complete","coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/published","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true}}
 EOF
 run_sc "$H6" >/dev/null 2>&1
 SD6="$H6/.local/state/disk-magician"

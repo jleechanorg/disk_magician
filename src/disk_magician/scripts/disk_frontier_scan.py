@@ -464,18 +464,32 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     }
 
 
-def list_children(path):
+def list_children(path, unfinished=None):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
-    or a double-count."""
+    or a double-count.
+
+    ``DirEntry.is_symlink`` can fail independently of ``scandir``. Keep that
+    entry in the unfinished frontier instead of silently dropping it. The
+    optional collector preserves the two-value return contract for callers
+    that only need the child list.
+    """
     children = []
     try:
         with os.scandir(path) as it:
             for entry in it:
                 try:
                     is_symlink = entry.is_symlink()
-                except OSError:
+                except OSError as exc:
+                    if unfinished is not None:
+                        item = {
+                            "path": entry.path,
+                            "reason": "is_symlink_failed",
+                        }
+                        if exc.errno is not None:
+                            item["errno"] = exc.errno
+                        unfinished.append(item)
                     continue
                 children.append((entry.path, is_symlink))
     except PermissionError:
@@ -1122,7 +1136,9 @@ class FrontierScanner:
             and depth <= self.shallow_enumeration_depth
             and depth < self.max_depth
         ):
-            children, enumeration_error = list_children(path)
+            children, enumeration_error = list_children(
+                path, self.frontier_unfinished
+            )
             if children is None:
                 self.frontier_unfinished.append(
                     {
@@ -1161,7 +1177,9 @@ class FrontierScanner:
                 elif self.remaining_budget() <= 0:
                     granularity_reason = "granularity_time_budget_exhausted"
                 else:
-                    children, enumeration_error = list_children(path)
+                    children, enumeration_error = list_children(
+                        path, self.frontier_unfinished
+                    )
                     if children:
                         return [
                             (child_path, depth + 1, child_symlink)
@@ -1202,7 +1220,7 @@ class FrontierScanner:
             )
             return
 
-        children, enumeration_error = list_children(path)
+        children, enumeration_error = list_children(path, self.frontier_unfinished)
         if children is None:
             self.frontier_unfinished.append(
                 {
@@ -1227,7 +1245,9 @@ class FrontierScanner:
         except OSError as exc:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
-        level1, root_enumeration_error = list_children(self.root)
+        level1, root_enumeration_error = list_children(
+            self.root, self.frontier_unfinished
+        )
         if level1 is None:
             return {
                 "error": f"could not enumerate root: {self.root}",
@@ -1480,17 +1500,26 @@ def build_report(
     for item in scanner.frontier_unfinished:
         reasons[item.get("reason") or "unknown"].append(item.get("path"))
     fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
-    coverage_complete = mode == "complete" and fda_status["status"] == "granted"
+    reachable_top_level_roots = len(top_level_ledger)
+    measured_top_level_roots = sum(
+        1
+        for item in top_level_ledger
+        if item["status"] in ("measured", "measured_by_descendants", "deduped")
+    )
+    unfinished_top_level_roots = sum(
+        1 for item in top_level_ledger if item["status"] == "unfinished"
+    )
+    coverage_complete = (
+        mode == "complete"
+        and fda_status["status"] == "granted"
+        and unfinished_top_level_roots == 0
+        and measured_top_level_roots == reachable_top_level_roots
+    )
     coverage_envelope = {
         "complete": coverage_complete,
-        "reachable_top_level_roots": len(top_level_ledger),
-        "measured_top_level_roots": sum(
-            1 for item in top_level_ledger
-            if item["status"] in ("measured", "measured_by_descendants", "deduped")
-        ),
-        "unfinished_top_level_roots": sum(
-            1 for item in top_level_ledger if item["status"] == "unfinished"
-        ),
+        "reachable_top_level_roots": reachable_top_level_roots,
+        "measured_top_level_roots": measured_top_level_roots,
+        "unfinished_top_level_roots": unfinished_top_level_roots,
         "fda_preflight_status": fda_status["status"],
     }
     limits = {
