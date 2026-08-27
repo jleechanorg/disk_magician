@@ -82,14 +82,14 @@ isolated dedup test alone is insufficient because the destructive behavior can
 occur only when a second tool later writes through the alias.
 ## Strict ban on ad-hoc cleanup scripts (hard)
 
-Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the 14-day recency protection gate (`mtime > 14 days`). Writing ad-hoc scripts bypasses safety gates and is strictly banned.
+Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the 7-day recency protection gate (`mtime > 7 days`). Writing ad-hoc scripts bypasses safety gates and is strictly banned.
 
-## Worktree 14-day rule (hard) — recency is measured, never proxied
+## Worktree 7-day rule (hard) — recency is measured, never proxied
 
-**A git worktree touched within the last 14 days is PROTECTED.** No script,
+**A git worktree touched within the last 7 days is PROTECTED.** No script,
 sweeper, launchd job, or agent in this repo may delete, archive, strip
 (including its `venv/`), or `git worktree remove` it — regardless of merged
-PR, clean status, zero-ahead, or disk pressure. 14 days is a floor, not a
+PR, clean status, zero-ahead, or disk pressure. 7 days is a floor, not a
 target; `safety_min_stale_days` may raise it, never lower it.
 
 **Measure recency, never proxy it.** The only sanctioned implementation is

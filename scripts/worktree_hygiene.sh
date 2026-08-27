@@ -32,7 +32,7 @@ source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 
 EXECUTE=false
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
@@ -51,7 +51,7 @@ WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--execute] [--min-age N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--max-candidates N] [-h|--help]
+Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--max-candidates N] [-h|--help]
 
 Repeatable worktree-hygiene sweep: IDENTIFY -> TRIAGE -> CLASSIFY -> (optionally) DELETE.
 
@@ -59,7 +59,8 @@ Options:
   --execute     Actually delete SAFE-classified worktrees via
                 'git worktree remove --force' (default: dry-run/report-only).
                 Requires WORKTREE_APPROVED=1 in the environment.
-  --min-age N   Minimum worktree age in days for candidacy (default: 14).
+  --min-age N   Minimum worktree age in days for candidacy (default: 7).
+  --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths to scan (default:
                 CLAUDE_WORKTREE_REPOS env override, else auto-discover --
                 same logic as cleanup_worktrees.sh).
@@ -415,8 +416,8 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
             --execute) EXECUTE=true ;;
-            --min-age)
-                [[ $# -ge 2 ]] || { echo "--min-age requires a value" >&2; exit 2; }
+            --min-age|--days)
+                [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
                 MIN_AGE_DAYS="$2"
                 shift
                 ;;

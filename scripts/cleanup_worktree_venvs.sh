@@ -51,7 +51,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 ROOTS=("$HOME/projects")
 PURGE_BAK_DAYS=""
 
@@ -63,34 +63,35 @@ LOCK_TTL_SEC="${DISK_MAGICIAN_CLEANUP_VENVS_LOCK_TTL_SEC:-3600}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--roots p1,p2,...] [--purge-bak-days N] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--days N] [--roots p1,p2,...] [--purge-bak-days N] [-h|--help]
 
 Strip Python venvs from dormant Git worktrees.
 
 Options:
   --clean                Actually strip the venvs (default: dry-run).
-                         Requires WORKTREE APPROVED=1 in env.
+                         Requires WORKTREE_APPROVED=1 in env.
   --dry-run              Print what would be stripped without touching disk.
-  --min-age N            Minimum worktree age in days to qualify (default: 14).
+  --min-age N            Minimum worktree age in days to qualify (default: 7).
+  --days N               Alias for --min-age N.
   --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
                          Each root's <repo>/.claude/worktrees/* agent working
                          copies are scanned automatically in addition.
   --purge-bak-days N     Also purge venv.bak.* dirs older than N days, but only
                          inside worktrees already past --min-age (default: dry-run;
-                         requires --clean + WORKTREE APPROVED=1 to actually delete).
+                         requires --clean + WORKTREE_APPROVED=1 to actually delete).
   -h, --help             Show this help.
 
 Environment:
-  WORKTREE APPROVED=1    Required to permit --clean. Aligns with the
+  WORKTREE_APPROVED=1    Required to permit --clean. Aligns with the
                          worktree-safety rule in CLAUDE.md.
   DISK_MAGICIAN_STATE_DIR  Overrides the lock directory's parent (tests only).
 
 Examples:
   $(basename "$0") --dry-run
   $(basename "$0") --min-age 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean
+  WORKTREE_APPROVED=1 $(basename "$0") --clean
   $(basename "$0") --purge-bak-days 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean --purge-bak-days 30
+  WORKTREE_APPROVED=1 $(basename "$0") --clean --purge-bak-days 30
 EOF
 }
 
@@ -104,8 +105,8 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
-    --min-age)
-      [[ $# -ge 2 ]] || { echo "--min-age requires a value" >&2; exit 2; }
+    --min-age|--days)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       MIN_AGE_DAYS="$2"
       shift 2
       ;;

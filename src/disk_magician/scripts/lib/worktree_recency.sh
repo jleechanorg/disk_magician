@@ -104,7 +104,7 @@ worktree_age_days() {
 #        PROTECTED and must not be deleted, stripped, or archived.
 # rc 1 = older than the floor; eligible for whatever the caller does next.
 worktree_is_recently_active() {
-    local wt="${1:-}" min_days="${2:-14}" age
+    local wt="${1:-}" min_days="${2:-7}" age
     age="$(worktree_age_days "$wt")"
     (( age < min_days ))
 }

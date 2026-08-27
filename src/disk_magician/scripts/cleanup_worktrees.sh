@@ -14,12 +14,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPO_LOCAL_REPOS=()
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--repos p1,p2,...] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
 
 Clean orphaned Antigravity worktrees and governed repo-local .claude/worktrees.
 
@@ -27,7 +27,8 @@ Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 14).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 7).
+  --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 \$HOME/projects/worldarchitect.ai).
   -h, --help    Show this help.
@@ -35,7 +36,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted.
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 7).
 EOF
 }
 
@@ -43,8 +44,8 @@ while [[ $# -gt 0 ]]; do
     case "${1:-}" in
         --clean) DRY_RUN=false ;;
         --dry-run) DRY_RUN=true ;;
-        --min-age)
-            [[ $# -ge 2 ]] || { echo "--min-age requires a value" >&2; exit 2; }
+        --min-age|--days)
+            [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
             MIN_AGE_DAYS="$2"
             shift
             ;;
