@@ -464,7 +464,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     }
 
 
-def list_children(path, unfinished=None):
+def list_children(path, unfinished=None, remaining_budget=None):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
@@ -479,6 +479,10 @@ def list_children(path, unfinished=None):
     try:
         with os.scandir(path) as it:
             for entry in it:
+                # A directory with millions of children can otherwise keep an
+                # already-expired scan walking well past its wall-clock cap.
+                if remaining_budget is not None and remaining_budget() <= 0:
+                    return None, "time_budget_exhausted"
                 try:
                     is_symlink = entry.is_symlink()
                 except OSError as exc:
@@ -1137,7 +1141,7 @@ class FrontierScanner:
             and depth < self.max_depth
         ):
             children, enumeration_error = list_children(
-                path, self.frontier_unfinished
+                path, self.frontier_unfinished, self.remaining_budget
             )
             if children is None:
                 self.frontier_unfinished.append(
@@ -1178,7 +1182,7 @@ class FrontierScanner:
                     granularity_reason = "granularity_time_budget_exhausted"
                 else:
                     children, enumeration_error = list_children(
-                        path, self.frontier_unfinished
+                        path, self.frontier_unfinished, self.remaining_budget
                     )
                     if children:
                         return [
@@ -1220,7 +1224,9 @@ class FrontierScanner:
             )
             return
 
-        children, enumeration_error = list_children(path, self.frontier_unfinished)
+        children, enumeration_error = list_children(
+            path, self.frontier_unfinished, self.remaining_budget
+        )
         if children is None:
             self.frontier_unfinished.append(
                 {
@@ -1246,7 +1252,7 @@ class FrontierScanner:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
         level1, root_enumeration_error = list_children(
-            self.root, self.frontier_unfinished
+            self.root, self.frontier_unfinished, self.remaining_budget
         )
         if level1 is None:
             return {
