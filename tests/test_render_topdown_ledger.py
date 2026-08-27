@@ -38,7 +38,14 @@ class TestRenderTopdownLedger(unittest.TestCase):
                 {"path": "/Users/x/small", "measured_kb": 1048576},  # 1.0 GiB
             ],
             "oversize_indivisible_files": [],
-            "accounting_equation": {"displayed_balanced": True},
+            "accounting_equation": {
+                "displayed_balanced": True, "display_ledger_valid": True,
+                "data_used_kb": 500 * 1024 * 1024,
+                "displayed_buckets_kb": 4194304,
+                "oversize_indivisible_files_kb": 0,
+                "sub_granularity_tail_kb": 519568384,
+                "purgeable_kb": 1024, "residual_kb": 524288,
+            },
             "frontier_unfinished": [],
         }
         path = os.path.join(self.tmp, "frontier_last.json")
@@ -70,6 +77,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "unfinished_root": lambda d: d["coverage_envelope"].update(unfinished_top_level_roots=1),
             "frontier": lambda d: d.update(frontier_unfinished=[{"path": "/blocked"}]),
             "equation": lambda d: d["accounting_equation"].update(displayed_balanced=False),
+            "forged_equation": lambda d: d["accounting_equation"].update(displayed_buckets_kb=1),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label):

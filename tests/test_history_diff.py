@@ -19,6 +19,8 @@ GIB_KB = 1024 * 1024
 
 
 def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", captured_at="2026-07-21T00:00:00Z"):
+    bucket_total = sum(item.get("measured_kb", 0) for item in buckets)
+    tail = disk_used_kb - bucket_total - residual_kb
     return {
         "schema_version": 1,
         "mode": "complete",
@@ -30,7 +32,12 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
             "unfinished_top_level_roots": 0,
         },
         "frontier_unfinished": [],
-        "accounting_equation": {"displayed_balanced": True},
+        "accounting_equation": {
+            "displayed_balanced": tail >= 0, "display_ledger_valid": tail >= 0,
+            "data_used_kb": disk_used_kb, "displayed_buckets_kb": bucket_total,
+            "oversize_indivisible_files_kb": 0, "sub_granularity_tail_kb": tail,
+            "purgeable_kb": 0, "residual_kb": residual_kb,
+        },
         "captured_at": captured_at,
         "hostname": "sandbox-host",
         "disk_used_kb": disk_used_kb,

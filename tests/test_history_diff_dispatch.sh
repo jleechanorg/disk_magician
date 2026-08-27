@@ -19,7 +19,7 @@ gib=$((1024*1024))
 cat > "$STATE/ledger/topdown-5g.json" <<EOF
 {"schema_version":1,"mode":"complete","disk_used_kb":$((4*gib)),"residual_kb":0,
  "residual_label":"t","buckets":[{"path":"/a","measured_kb":$((4*gib))}],
- "coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"accounting_equation":{"displayed_balanced":true}}
+ "coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"accounting_equation":{"displayed_balanced":true,"display_ledger_valid":true,"data_used_kb":$((4*gib)),"displayed_buckets_kb":$((4*gib)),"oversize_indivisible_files_kb":0,"sub_granularity_tail_kb":0,"purgeable_kb":0,"residual_kb":0}}
 EOF
 git -C "$STATE" add -A
 git -C "$STATE" -c user.name=t -c user.email=t@t commit -qm base
@@ -27,7 +27,7 @@ cat > "$STATE/ledger/topdown-5g.json" <<EOF
 {"schema_version":1,"mode":"complete","disk_used_kb":$((8*gib)),"residual_kb":0,
  "residual_label":"t","buckets":[{"path":"/a","measured_kb":$((4*gib))},
  {"path":"/fixture_growth","measured_kb":$((4*gib))}],
- "coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"accounting_equation":{"displayed_balanced":true}}
+ "coverage_envelope":{"complete":true,"fda_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"frontier_unfinished":[],"accounting_equation":{"displayed_balanced":true,"display_ledger_valid":true,"data_used_kb":$((8*gib)),"displayed_buckets_kb":$((8*gib)),"oversize_indivisible_files_kb":0,"sub_granularity_tail_kb":0,"purgeable_kb":0,"residual_kb":0}}
 EOF
 git -C "$STATE" add -A
 git -C "$STATE" -c user.name=t -c user.email=t@t commit -qm grown

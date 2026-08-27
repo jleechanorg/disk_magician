@@ -49,6 +49,26 @@ def complete_coverage_envelope(report):
     reachable = envelope.get("reachable_top_level_roots") if isinstance(envelope, dict) else None
     measured = envelope.get("measured_top_level_roots") if isinstance(envelope, dict) else None
     unfinished = envelope.get("unfinished_top_level_roots") if isinstance(envelope, dict) else None
+    buckets = report.get("granularity_buckets") or []
+    oversize = report.get("oversize_indivisible_files") or []
+    try:
+        bucket_total = sum(item["measured_kb"] for item in buckets)
+        oversize_total = sum(item["measured_kb"] for item in oversize)
+    except (KeyError, TypeError):
+        return False
+    equation_keys = (
+        "data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
+        "sub_granularity_tail_kb", "purgeable_kb", "residual_kb",
+    )
+    equation_values = [accounting.get(key) for key in equation_keys] if isinstance(accounting, dict) else []
+    accounting_reconciles = (
+        len(equation_values) == len(equation_keys)
+        and all(type(value) is int and value >= 0 for value in equation_values)
+        and accounting["displayed_buckets_kb"] == bucket_total
+        and accounting["oversize_indivisible_files_kb"] == oversize_total
+        and accounting["data_used_kb"] == report.get("disk_used_kb")
+        and accounting["data_used_kb"] == sum(equation_values[1:])
+    )
     return (
         report.get("mode") == "complete"
         and isinstance(envelope, dict)
@@ -63,6 +83,8 @@ def complete_coverage_envelope(report):
         and not report["frontier_unfinished"]
         and isinstance(accounting, dict)
         and accounting.get("displayed_balanced") is True
+        and accounting.get("display_ledger_valid") is True
+        and accounting_reconciles
     )
 
 

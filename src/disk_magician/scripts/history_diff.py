@@ -96,6 +96,20 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
         raise LedgerError(f"{label}: full-attribution ledger required (frontier unfinished)")
     if not isinstance(accounting, dict) or accounting.get("displayed_balanced") is not True:
         raise LedgerError(f"{label}: full-attribution ledger required (displayed equation unbalanced)")
+    keys = ("data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
+            "sub_granularity_tail_kb", "purgeable_kb", "residual_kb")
+    values = [accounting.get(key) for key in keys]
+    buckets = ledger.get("granularity_buckets", ledger.get("buckets", []))
+    oversize = ledger.get("oversize_indivisible_files", [])
+    if (
+        accounting.get("display_ledger_valid") is not True
+        or not all(type(value) is int and value >= 0 for value in values)
+        or values[0] != ledger.get("disk_used_kb")
+        or values[0] != sum(values[1:])
+        or values[1] != sum(item.get("measured_kb", 0) for item in buckets)
+        or values[2] != sum(item.get("measured_kb", 0) for item in oversize)
+    ):
+        raise LedgerError(f"{label}: full-attribution ledger required (displayed equation invalid)")
 
 
 def compute_deltas(base: dict, target: dict) -> "tuple[list, int]":
