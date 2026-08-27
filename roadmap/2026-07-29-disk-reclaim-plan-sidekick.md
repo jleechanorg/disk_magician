@@ -146,6 +146,14 @@ and the 2026-07-22 sudo-failure precedent below):
 | **291-406 GiB unattributed residual, restated** (two measurement passes today: frontier-BFS scan captured 2026-07-28T11:23:50Z = 291.0 GiB; live `disk_snapshot.json` checked this pass = 406.5 GiB — two distinct data points, not reconciled, per the "never mix measurement passes" rule) | See the FDA row above — this is the same bucket, restated for completeness since it's the number most often cited as "the 200 GiB target." | Same as FDA row. | No separate command; resolved by the FDA decision above, not independently actionable. |
 | 42.2 GiB of `.claude/worktrees/*` under `~/projects/worldarchitect.ai` (131 agent/workflow worktrees, sampled at exactly 2 days old — well inside the mandatory 14-day floor) | Confirmed correctly protected by the existing worktree-recency rule; re-verified this pass indirectly via the full `worktree_hygiene.sh` census, which classified all of them PRESERVE (young), none SAFE | None — this is working as designed, not a bug | No action. Re-check with `worktree_hygiene.sh` once these age past 14 days. |
 
+**FDA status correction (2026-08-27):** The current interactive shell can read
+`~/Library/Application Support/MobileSync`, `~/Library/Mail`, and
+`~/Library/Messages`. The FDA row above records the historical status of this
+2026-07-29 pass; it is no longer accurate to describe those paths as unreadable
+because cmux lacks Full Disk Access. Before relying on fresh attribution, the
+scanner must run an access preflight in its own process and record any remaining
+denials; an FDA grant alone does not prove complete coverage.
+
 ## Corrections from /ms and /history recall (added post-scope-change, 2026-07-29 ~05:05 PDT)
 
 - **Two prior bugs this plan's earlier draft would have re-diagnosed from

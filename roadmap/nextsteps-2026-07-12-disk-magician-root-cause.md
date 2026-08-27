@@ -911,6 +911,16 @@ independently verifiable source; ordinary user-shell retries cannot resolve it.
    process fix in the /swarm extraction lanes (per-directory size+status,
    never aggregate globs).
 
+### FDA status correction — 2026-08-27
+
+The older blocks above preserve the historical state in which cmux could not
+read the protected Library paths. The current interactive shell can read
+`~/Library/Application Support/MobileSync`, `~/Library/Mail`, and
+`~/Library/Messages`. The remaining attribution work must therefore begin with
+an access preflight executed by the scanner itself, record any paths still
+denied, and keep scan-budget exhaustion separate from permission residuals;
+FDA availability alone does not establish complete coverage.
+
 ### PR / merge state (verified this run via gh)
 
 - [PR #28](https://github.com/jleechanorg/disk_magician/pull/28): OPEN — sole carrier of the cleanup_tmp --large safety fix

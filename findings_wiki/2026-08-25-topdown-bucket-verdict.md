@@ -5,6 +5,13 @@
 **Cross-reference sources:** `~/.gemini/antigravity-cli/brain/<dir>/tasks/*.log` (skipped per `feedback_2026-08-25_brain_logs_are_work_transcripts_not_cleanup_records.md`); `~/.claude/projects/-Users-jleechan-projects-other-disk-magician/memory/*.md` (47+ docs); `scripts/lib/worktree_recency.sh` (canonical 14-day helper, PR #50 commit 9d702c6)
 **Total tracked in this table:** ~75 GiB across 31 buckets + 8.3 GiB state.db
 
+> **Status correction (2026-08-27):** The non-FDA-shell statements in this
+> 2026-08-25 report are historical observations, not current capability claims.
+> A current FDA-enabled verification confirmed that this shell can read
+> representative MobileSync, Mail, and Messages paths. A fresh FDA-enabled
+> frontier scan is still required before claiming full attribution; readability
+> alone does not prove that the scan completed or that its ledger is current.
+
 ## Verdict table
 
 | Bucket | Size (GiB) | Verdict | Reason / Source |
@@ -68,8 +75,8 @@
 - **`Library/Application Support/Google/Chrome` (3.5 GiB)**: chrome cache — gated on closing Chrome.
 - **`Library/Application Support/Aside` (2.8 GiB) + `.aside` (1.5 GiB)**: gated on closing Aside.
 
-### What's structural and unfixable without Full Disk Access
-- **213.9 GiB TCC/SIP `~/Library` gap**: per `project_2026-07-15_disk_swing_mechanisms_confirmed.md`, this is a permission wall (MobileSync backups likely the largest single piece, Mail, Messages, ~20 protected subtrees, 4 SIP dotdirs). Out of scope for non-FDA shells. NOT in the topdown mega-table because the scanner cannot reach these paths.
+### Historical structural gap (measured before FDA verification)
+- **213.9 GiB TCC/SIP `~/Library` gap**: per `project_2026-07-15_disk_swing_mechanisms_confirmed.md`, the 2026-08-25 audit encountered a permission wall (MobileSync backups likely the largest single piece, Mail, Messages, ~20 protected subtrees, 4 SIP dotdirs). It was out of scope for that non-FDA shell and absent from that topdown mega-table because the scanner could not reach those paths. The 2026-08-27 FDA verification supersedes the capability claim, pending a fresh scan.
 - **APFS local snapshots + container min-size pinning**: separate structural contributor, ~291 GiB residual per `project_2026-07-29_disk_rootcause_producers_and_decisions.md`.
 
 ### What's structural and requires user decision (NOT auto-clean)
@@ -97,11 +104,11 @@
 | `Library/Application Support/Google/Chrome` cache cleanup | ~3.5 | Close Chrome first |
 | `Library/Application Support/Aside` + `.aside` cleanup | ~4.3 | Close Aside first |
 | **Subtotal (app-gated, regenerable)** | **~10.9** | App-close gates only |
-| Structural TCC/SIP `~/Library` gap | ~213.9 | Requires Full Disk Access (OUT OF SCOPE) |
-| APFS local snapshots | unknown | Requires FDA (OUT OF SCOPE) |
+| Historical TCC/SIP `~/Library` gap | ~213.9 | FDA was unavailable to the 2026-08-25 audit; rerun with verified FDA |
+| APFS local snapshots | unknown | Requires a fresh FDA-enabled measurement (not current out-of-scope status) |
 
 **Note:** Topdown ledger covers ~75.9 GiB in the top 30 + state.db. The remaining ~760 GiB is dominated by:
-- The TCC/SIP `~/Library` blind spot (~213.9 GiB structural)
+- The historical TCC/SIP `~/Library` blind spot (~213.9 GiB structural; requires fresh FDA measurement now)
 - APFS container min-size + local snapshots
 - Worktrees <14d PROTECTED (per 14-day rule)
 - Per-repo `.git` history (~6 GiB across `.worktrees/` + `~/.hermes/.git`)
@@ -109,4 +116,4 @@
 - Abandoned `~/.worktrees/*` siblings (~30 GiB per #2)
 - Unowned `/private/tmp` scratch (~8.4 GiB per #3)
 
-The top-30 cross-reference confirms NO NEW SAFE-CLEAN targets beyond app-gated caches. The reclaim story is still: close apps, run existing scripts (`cleanup_antigravity_brain.sh --clean`, `cleanup_code_sign_clones.sh`), and accept the structural TCC/SIP gap.
+The top-30 cross-reference confirmed NO NEW SAFE-CLEAN targets beyond app-gated caches at the time. The prior recommendation to accept the structural TCC/SIP gap was based on the 2026-08-25 non-FDA audit; with FDA now verified, rerun attribution before treating that gap as structural.

@@ -56,6 +56,50 @@ print(eval(sys.argv[2]))
 }
 
 # ─────────────────────────────────────────────────────────────
+section "0. Scanner-process Full Disk Access preflight"
+FDA_PREFLIGHT_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
+import os
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+root = os.path.join(sys.argv[1], "fda-preflight")
+readable = os.path.join(root, "readable")
+denied = os.path.join(root, "denied")
+missing = os.path.join(root, "missing")
+os.makedirs(readable, exist_ok=True)
+os.makedirs(denied, exist_ok=True)
+
+def fake_open(path, flags):
+    if path == denied:
+        raise PermissionError(1, "Operation not permitted", path)
+    if path == missing:
+        raise FileNotFoundError(2, "No such file or directory", path)
+    return 41
+
+with mock.patch.object(m.os, "open", side_effect=fake_open), \
+     mock.patch.object(m.os, "close") as close:
+    result = m.fda_preflight({
+        "mobile_sync": os.path.join(root, "readable"),
+        "mail": denied,
+        "messages": missing,
+    })
+
+print(
+    result["status"] == "partial",
+    result["probes"]["mobile_sync"]["status"] == "readable",
+    result["probes"]["mail"]["status"] == "permission_denied_or_tcc",
+    result["probes"]["messages"]["status"] == "missing",
+    close.call_count == 1,
+)
+PY
+)
+[[ "$FDA_PREFLIGHT_OUT" == "True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes read-only handles" \
+  || bad "FDA preflight did not report per-target access correctly: $FDA_PREFLIGHT_OUT"
+
+# ─────────────────────────────────────────────────────────────
 section "1. Valid JSON + required schema keys"
 T1="$WORK/t1"
 mkdir -p "$T1/a" "$T1/b"
@@ -84,6 +128,13 @@ for key in $REQUIRED_KEYS; do
     bad "top-level key MISSING: $key"
   fi
 done
+
+# Publication is permitted only when the scanner declares a complete coverage
+# envelope backed by its own FDA probe; keep that contract mechanically tied to
+# the emitted report rather than trusting an external scheduler assumption.
+ENVELOPE_OK=$(json_get "$OUT1" "d['coverage_envelope']['complete'] == (d['mode'] == 'complete' and d['fda_preflight']['status'] == 'granted') and d['limits']['full_disk_access_preflight'] == d['fda_preflight']")
+[[ "$ENVELOPE_OK" == "True" ]] && ok "coverage envelope is derived from complete scan plus scanner FDA preflight" \
+  || bad "coverage envelope does not fail closed on incomplete/FDA-denied scans: $ENVELOPE_OK"
 
 # ─────────────────────────────────────────────────────────────
 section "2. Symlink realpath dedup — no double count (critic BLOCKER, live-verified /etc,/tmp,/var case)"

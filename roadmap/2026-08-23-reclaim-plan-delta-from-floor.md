@@ -233,9 +233,17 @@ These are real but require operator judgment:
 
 ## Operator-decision (unchanged from 2026-07-29 plan, restated for completeness)
 
-1. **FDA to cmux** — unlock 213.9-406.5 GiB residual measurement gap (still unmeasured)
+1. **FDA to cmux** — historical measurement-unlock item; the current interactive
+   shell can read `~/Library/Application Support/MobileSync`,
+   `~/Library/Mail`, and `~/Library/Messages`.
 2. **APFS local-snapshot thinning** — needs interactive `sudo`; **documented failed 2026-07-22** under LaunchAgent; can never be automated
 3. **291-406 GiB unattributed residual** — same as #1
+
+**FDA status correction (2026-08-27):** The old “still unmeasured” wording in
+this operator-decision list described the 2026-08-23 state. The next attribution
+run must execute a scanner-process access preflight, record remaining denials,
+and only then classify residual coverage; shell-level FDA access is not by
+itself proof of a complete mega-table.
 
 ## What this pass does NOT claim
 

@@ -25,6 +25,13 @@ safety_rule: none (catalog / reference)
 
 # Last-month disk-issues catalog — 2026-07-26 → 2026-08-25
 
+> **Status correction (2026-08-27):** Any statement in this historical
+> catalog that the active shell lacked Full Disk Access is scoped to the
+> cited earlier audit. FDA-enabled verification on 2026-08-27 confirmed that
+> this shell can read representative MobileSync, Mail, and Messages paths.
+> Those paths are no longer current out-of-scope claims; fresh attribution is
+> still pending a new scan.
+
 Operator ask: "look at last month of /history /ms disk issues". Sources
 are `/ms` (16 last-month memory docs), `/history` real-record (git log of
 `~/.disk_magician_backup` + roadmap/ docs in this repo). Per
@@ -58,7 +65,7 @@ the same window.
 |---|---|---|---|
 | 1 | 2026-07-29 | **5-producer structural taxonomy: ~76 GiB reclaimable headroom without touching cache/.gemini** — agent venv bloat (~25 GiB), abandoned AO+Claude parents under `~/.worktrees` (~30 GiB), unowned `/private/tmp` scratch (~8.4 GiB), Antigravity `~/.gemini` (~12.7 GiB), `.git` history bloat (~6 GiB). Five fixes queued as separate beads, none fixed in-place because each is multi-line policy surface | `feedback_2026-07-29_root_cause_disk_full.md` § "Five root causes (ranked)"; bead `disk_magician-7v3` |
 | 2 | 2026-08-01 | **Sawtooth + baseline + one-time spike decomposition** — 115.9 GiB single-day swing (Colima fstrim/refill cycle, self-correcting), 86-102 GiB genuine 14-day accumulation (floor 720 GiB @ 07-19 → 806-822 GiB @ 08-01), +28.37 GiB / −21.09 GiB one-minute spike at 2026-08-02T00:30-00:58Z. Original "+3.2 GiB/day" headline REFUTED — reproduced range is −4.20 to +1.71 GiB/day depending on bucketing/estimator | `roadmap/2026-08-01-disk-growth-floor-delta.md`; companion doc to `feedback_2026-08-01_endpoint_average_is_not_a_rate.md` |
-| 3 | 2026-08-02 | **291 GiB residual** = TCC/SIP floor + APFS container min-size pinning + Mail/Messages EINTR-blocked paths — NOT a hidden consumer, a structural permission wall that no non-FDA shell can measure. Monitoring collapses under pressure (snapshot coverage 1%, frontier 0% for 3 nights) | `project_2026-07-29_disk_rootcause_producers_and_decisions.md`; `roadmap/2026-08-02-research-persistent-eintr-root-cause.md` (Endpoint Security AUTH-event root cause for Mail/Messages/MobileSync) |
+| 3 | 2026-08-02 | **291 GiB residual** = TCC/SIP floor + APFS container min-size pinning + Mail/Messages EINTR-blocked paths — NOT a hidden consumer, a structural permission wall that the non-FDA shell used for that historical audit could not measure. Monitoring collapsed under pressure (snapshot coverage 1%, frontier 0% for 3 nights) | `project_2026-07-29_disk_rootcause_producers_and_decisions.md`; `roadmap/2026-08-02-research-persistent-eintr-root-cause.md` (Endpoint Security AUTH-event root cause for Mail/Messages/MobileSync) |
 | 4 | 2026-08-23 | **Hidden producer tail: `/private/tmp` aggregate +45.75 GiB (largest single SAFE class)** + `~/.aside/u/0` +11.94 GiB (1,791 Aside session files 2026-08-03→08-22, missing from 2026-07-29 7-proposal scorecard) + `_disk_magician_archive/20260822T09*` self-inflicted ~+2.7 GiB. **`disk_observer.jsonl` `hot_dirs` is BLIND to /private/tmp and Aside** — missed ~75% of real producers in this window | `roadmap/2026-08-23-systematic-fix-update.md` § "New evidence"; `roadmap/2026-08-23-reclaim-plan-delta-from-floor.md` "Critical observation #1/#2/#3" |
 | 5 | 2026-07-29 | **Cursor-agent debug session logs have NO logging config** (no log-level flag, no rotation, no disable) — 45 GB / 18.5 GiB/day per PID. Same failure class: opencode single log hit 74.8 GiB (issue #12934, closed "not planned"); claude-code debug logs 20+ GiB recursive slow-op-logging (issue #16093, closed "not planned"). Vendor-declined across the board | `findings_wiki/cursor-agent-debug-log-unbounded-growth.md` § "Known-issue class"; `findings_wiki/cursor-agent-upstream-report.md` |
 

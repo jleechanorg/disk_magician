@@ -713,6 +713,13 @@ size-floor finding above), plus the TCC-blocked `Mail`/`Messages`/
 `Group Containers`/root-owned `/private/var` subtrees this session could
 not quantify without Full Disk Access or `sudo`.
 
+**FDA status correction (2026-08-27):** The current interactive shell can read
+`~/Library/Application Support/MobileSync`, `~/Library/Mail`, and
+`~/Library/Messages`. The preceding statement is historical evidence from this
+2026-07-29 pass, not the current access status. A fresh attribution run must
+perform an access preflight from the scanner process and preserve any paths it
+still cannot read; FDA availability alone is not a completeness claim.
+
 ## Durable artifacts
 
 - This report: `roadmap/2026-07-29-disk-regrowth-rootcause-sidekick.md`

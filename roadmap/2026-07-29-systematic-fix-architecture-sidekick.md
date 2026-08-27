@@ -192,6 +192,13 @@ to shrinking the TCC-blind measurement gap. If FDA is ever considered for
 an unattended `disk_magician` sweeper itself, that remains rejected per
 this layer.
 
+**FDA status correction (2026-08-27):** The current interactive shell can read
+`~/Library/Application Support/MobileSync`, `~/Library/Mail`, and
+`~/Library/Messages`; the FDA-to-cmux recommendation above reflects the older
+2026-07-29 status. The scanner still needs an in-process access preflight and
+must report any remaining denied paths, because FDA availability by itself does
+not establish full attribution.
+
 ## Explicitly rejected mechanisms (with the rule that kills them)
 
 - **Symlinking a tool-owned mutable scratch root (e.g. `/private/tmp/wa-pr-*`) into a central spool.** This repo's own hard rule: "Never replace a tool-owned mutable state root ... with a whole-directory symlink to another live state root ... Any exception must prove source and destination resolve to distinct physical paths." A symlink redirect has no distinct physical path by construction — disqualified on its face, not by degree.

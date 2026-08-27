@@ -82,3 +82,10 @@ becomes reclaimable (the rest is sealed System + Apple bookkeeping that
 cannot move). Until that grant lands, the 296 GiB will keep resisting
 ledger closure and any "200 GiB does not exist" conclusion stays
 incomplete.
+
+**FDA status correction (2026-08-27):** This recommendation records the
+2026-07-30 state. The current interactive shell can read
+`~/Library/Application Support/MobileSync`, `~/Library/Mail`, and
+`~/Library/Messages`. Re-run the probes through the scanner's own process,
+including an access preflight and explicit denied-path report, before treating
+the resulting attribution as complete.

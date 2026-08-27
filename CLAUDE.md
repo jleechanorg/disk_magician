@@ -8,10 +8,12 @@ underestimated cumulative-reservoir growth):
 
 0. **Consult prior memory files before live probes.** Check recent memory files
    (`~/.claude/projects/*/memory/*.md` or `memory/`) for documented structural
-   floors (e.g. `feedback_2026-07-15` documenting the 213.9 GiB TCC/SIP/FDA
-   inaccessible floor, `MobileSync`, and `/System/Library` protected containers).
-   When a large residual appears, do not spend 40 minutes on live `du` sweeps
-   over inaccessible permissions; incorporate the documented structural floor first.
+   findings. As of 2026-08-27, the scanner must establish its own effective
+   access with the FDA preflight; the invoking shell was readable for
+   `MobileSync`, `Mail`, and `Messages`, but that does not prove all protected
+   paths are readable. Treat older no-FDA findings as historical evidence, not
+   a current blanket exclusion. Measure directly with bounded timeouts instead
+   of assuming permission walls.
 
 1. **Find the last-week floor** before proposing anything. The floor is
    the **lowest `df used` in the most recent ~14 daily snapshots** (NOT

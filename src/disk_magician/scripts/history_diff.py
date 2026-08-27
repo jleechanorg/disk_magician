@@ -11,10 +11,11 @@ pipeline-corruption class documented in this repo's operator memory).
 """
 import argparse
 import json
-import os
 import pathlib
 import subprocess
 import sys
+
+import resolve_state_repo_path
 
 GIB_KB = 1024 * 1024
 LEDGER_REL_PATH = "ledger/topdown-5g.json"
@@ -148,12 +149,7 @@ def select_floor_ref(state_dir: pathlib.Path, days: int) -> "tuple[str, dict]":
 def resolve_state_dir(explicit) -> pathlib.Path:
     if explicit:
         return pathlib.Path(explicit)
-    env = os.environ.get("DISK_MAGICIAN_STATE_REPO")
-    if env:
-        return pathlib.Path(env)
-    home = pathlib.Path(os.environ.get("HOME", "/"))
-    xdg_state = pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
-    return xdg_state / "disk-magician"
+    return pathlib.Path(resolve_state_repo_path.resolve())
 
 
 def main(argv) -> int:

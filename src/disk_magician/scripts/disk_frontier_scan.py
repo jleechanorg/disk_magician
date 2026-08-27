@@ -32,6 +32,7 @@ Design contract (roadmap doc, "post-critic" section):
 import argparse
 import collections
 import concurrent.futures
+import errno
 import heapq
 import json
 import os
@@ -58,6 +59,12 @@ SHALLOW_ENUMERATION_MAX_DEPTH = 2
 LOW_FREE_GB_THRESHOLD = 15
 SCHEMA_VERSION = 2
 
+FDA_PROBE_RELATIVE_PATHS = {
+    "mobile_sync": os.path.join("Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("Library", "Mail"),
+    "messages": os.path.join("Library", "Messages"),
+}
+
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
 DUA_CMD = shutil.which("dua")
@@ -72,6 +79,81 @@ GDU_FTS_ERROR_RE = re.compile(
     r"^gdu: fts_read failed: (.+): (No such file or directory|"
     r"Permission denied|Operation not permitted|Input/output error|Interrupted system call)$"
 )
+
+
+def fda_preflight(paths=None):
+    """Probe FDA-sensitive directories from this scanner process.
+
+    Opening each directory with read-only flags is intentionally the only
+    operation performed: it tests the process's effective TCC/FDA access
+    without reading or mutating personal data. Missing targets are reported
+    separately from permission failures so an absent MobileSync backup does
+    not masquerade as a denied FDA grant.
+    """
+    if paths is None:
+        home = os.path.expanduser("~")
+        paths = {
+            name: os.path.join(home, relative)
+            for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
+        }
+
+    probes = {}
+    for name, path in paths.items():
+        probe = {"path": os.fspath(path)}
+        fd = None
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            probe["status"] = "missing"
+        except PermissionError as exc:
+            probe.update({"status": "permission_denied_or_tcc", "errno": exc.errno})
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EPERM):
+                probe.update({"status": "permission_denied_or_tcc", "errno": exc.errno})
+            else:
+                probe.update({"status": "error", "errno": exc.errno})
+        else:
+            probe["status"] = "readable"
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    # The access result is known; close failure must not turn
+                    # a successful read-only probe into a false denial.
+                    pass
+        probes[name] = probe
+
+    statuses = [probe["status"] for probe in probes.values()]
+    readable = [name for name, probe in probes.items() if probe["status"] == "readable"]
+    denied = [
+        name for name, probe in probes.items()
+        if probe["status"] == "permission_denied_or_tcc"
+    ]
+    errors = [
+        name for name, probe in probes.items()
+        if probe["status"] == "error"
+    ]
+    if denied and readable:
+        status = "partial"
+    elif denied:
+        status = "denied"
+    elif errors:
+        status = "indeterminate"
+    elif readable:
+        status = "granted"
+    elif statuses and all(item == "missing" for item in statuses):
+        status = "no_targets"
+    else:
+        status = "indeterminate"
+    return {
+        "status": status,
+        "probes": probes,
+        "readable": readable,
+        "permission_denied_or_tcc": denied,
+        "errors": errors,
+    }
 
 
 class AdjustableSemaphore:
@@ -679,6 +761,9 @@ class FrontierScanner:
         self.deduped = []
         self.frontier_unfinished = []
         self.warnings = []
+        # Capture effective access from this scanner process before any
+        # subprocess-backed inventory work begins. This is diagnostic only.
+        self.fda_preflight = fda_preflight()
         self.nodes_processed = 0
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
@@ -1394,9 +1479,24 @@ def build_report(
     reasons = collections.defaultdict(list)
     for item in scanner.frontier_unfinished:
         reasons[item.get("reason") or "unknown"].append(item.get("path"))
+    fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
+    coverage_complete = mode == "complete" and fda_status["status"] == "granted"
+    coverage_envelope = {
+        "complete": coverage_complete,
+        "reachable_top_level_roots": len(top_level_ledger),
+        "measured_top_level_roots": sum(
+            1 for item in top_level_ledger
+            if item["status"] in ("measured", "measured_by_descendants", "deduped")
+        ),
+        "unfinished_top_level_roots": sum(
+            1 for item in top_level_ledger if item["status"] == "unfinished"
+        ),
+        "fda_preflight_status": fda_status["status"],
+    }
     limits = {
         "sudo_used": False,
-        "full_disk_access": "not_inferred",
+        "full_disk_access": fda_status["status"],
+        "full_disk_access_preflight": fda_status,
         "permission_denied_or_tcc": reasons.get("permission_denied_or_tcc", []),
         "time_budget_exhausted": reasons.get("time_budget_exhausted", []),
         "node_budget_exhausted": reasons.get("node_budget_exhausted", []),
@@ -1460,6 +1560,8 @@ def build_report(
         "accounting_equation": accounting_equation,
         "apfs_accounting": apfs_accounting or {},
         "limits": limits,
+        "fda_preflight": fda_status,
+        "coverage_envelope": coverage_envelope,
         "nodes_processed": scanner.nodes_processed,
         "max_concurrent_du_observed": scanner.tracker.peak(),
         "warnings": scanner.warnings,

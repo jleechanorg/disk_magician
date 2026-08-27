@@ -156,6 +156,16 @@ class TestCLIIntegration(unittest.TestCase):
             capture_output=True, text=True,
         )
 
+    def _run_cli_without_state_override(self, *args, **env_overrides):
+        env = os.environ.copy()
+        env.pop("DISK_MAGICIAN_STATE_REPO", None)
+        env.pop("DISK_MAGICIAN_CONFIG", None)
+        env.update(env_overrides)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            capture_output=True, text=True, env=env,
+        )
+
     def test_default_diffs_head_minus_1_against_head(self):
         # Both buckets stay under the 5 GiB dir ceiling on purpose — this
         # test exercises ordering/wiring, not the ceiling edge case (that's
@@ -173,6 +183,30 @@ class TestCLIIntegration(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertIn("/fixture_growth", lines[0])
         self.assertEqual(lines[-1], "residual delta: +0.00 GiB")
+
+    def test_default_state_repo_matches_snapshot_config_resolver(self):
+        configured_repo = self.tmp / "configured-state"
+        configured_repo.mkdir()
+        _git(configured_repo, "init", "-q", "-b", "main")
+        base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        _write_ledger_commit(configured_repo, base, "base")
+        target = ledger(2 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 1 * GIB_KB},
+            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+        ])
+        _write_ledger_commit(configured_repo, target, "target")
+
+        config_home = self.tmp / "config-home"
+        config_path = config_home / "disk-magician" / "config.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(json.dumps({"state_repo_path": str(configured_repo)}))
+        result = self._run_cli_without_state_override(
+            HOME=str(self.tmp / "home"),
+            XDG_CONFIG_HOME=str(config_home),
+            XDG_STATE_HOME=str(self.tmp / "different-xdg-state"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+1.00 GiB  /growth", result.stdout)
 
     def test_explicit_ref_diffs_against_head(self):
         first = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])

@@ -15,6 +15,13 @@ live_state:
 safety_rule: workspace-level; never override CLAUDE.md hard list
 ---
 
+> **Status correction (2026-08-27):** The FDA limitation statements below
+> describe the 2026-08-25 audit and are historical. FDA-enabled verification
+> on 2026-08-27 confirmed that this shell can read representative MobileSync,
+> Mail, and Messages paths. Replace the old FDA gate with a fresh scan and
+> coverage check; do not treat the old residual as permanently opaque until
+> that run completes.
+
 # Remaining TODO — 2026-08-25 disk cleanup + snapshot health
 
 ## 1. Priority-ranked TODO table
@@ -36,7 +43,7 @@ safety_rule: workspace-level; never override CLAUDE.md hard list
 | 13 | Investigate `worldarchitect.ai.worktrees` (1.0 GiB ledger; not covered by `cleanup_worktrees.sh`) | ~1.0 (if cleanable) | Bucket-level inspection before verdict | `/tmp/cross-ref-verdict.md` INVESTIGATE row; `cleanup_worktrees.sh` only walks `<repo>/.claude/worktrees` | **LOW** |
 | 14 | Investigate `.local/share` (2.5 GiB; mixed uv tools etc.) | unknown | Exclude `~/.local/share/uv/tools/*` from any bulk enumeration | `feedback_2026-07-17_exclude_global_npm_dirs_from_bulk_cleanup.md`; INVESTIGATE row | **LOW** |
 | 15 | APFS local snapshots purge (`./scripts/cleanup_apfs_snapshots.sh`) | up to 291 GiB (residual unmapped) | **Interactive sudo password** — operator must enter manually | `project_2026-07-29_disk_rootcause_producers_and_decisions.md`; `diskm` has no `sudo` path under FDA shell | **LOW (blocked)** |
-| 16 | TCC/SIP `~/Library` gap (MobileSync, Mail, Messages, ~20 protected subtrees, 4 SIP dotdirs) | ~213.9 (structural) | **Requires Full Disk Access** for non-FDA shell | `project_2026-07-15_disk_swing_mechanisms_confirmed.md`; OUT OF SCOPE | **OUT OF SCOPE** |
+| 16 | TCC/SIP `~/Library` gap (MobileSync, Mail, Messages, ~20 protected subtrees, 4 SIP dotdirs) | ~213.9 (historical estimate) | FDA verified 2026-08-27; run a fresh scan and coverage check | `project_2026-07-15_disk_swing_mechanisms_confirmed.md`; historical non-FDA audit | **HIGH — RESCAN** |
 | 17 | Aside / Codex code_sign_clone disable upstream | 0 (workaround, not direct reclaim) | Upstream Electron/Chromium cooperation | `findings_wiki/2026-08-25-codesign-clone-killswitch-side-effects.md`; no documented mechanism for non-Chrome | **OUT OF SCOPE** |
 
 ## 2. Quick wins (gated only by env var or ~5 min manual; can run immediately)
@@ -51,7 +58,7 @@ safety_rule: workspace-level; never override CLAUDE.md hard list
 
 ## 3. Long-horizon (FDA, sudo, or upstream)
 
-- **FDA-required** (~213.9 GiB structural): MobileSync backups, Mail, Messages, ~20 protected `~/Library` subtrees, 4 SIP dotdirs. Cannot enumerate or delete without Full Disk Access on the shell. Diagnostic only via separate FDA-enabled audit; not part of the no-touch path.
+- **FDA-enabled rescan** (~213.9 GiB historical estimate): MobileSync backups, Mail, Messages, ~20 protected `~/Library` subtrees, 4 SIP dotdirs. FDA verification on 2026-08-27 confirms representative reads from this shell; run the frontier scan and verify coverage before updating the ledger or making cleanup decisions.
 - **Interactive-sudo APFS snapshots**: `disk_magician.sh cleanup-apfs-snapshots` requires TTY sudo password entry. The 2h pressure-sweep job already gates on `free<40G`; this reclaim is reserved for emergency.
 - **Aside / Codex code_sign_clone** kill switch: requires upstream cooperation in Electron / Chromium embedding. The Chrome flag (`--disable-features=MacAppCodeSignClone`) works; `LSEnvironment` is applied. For Aside/Codex, only `rm -rf` of clones works, gated by `cleanup_code_sign_clones.sh` after each app quit.
 - **Worktree venvs + abandoned worktrees** (~55 GiB combined): env-var gated (`WORKTREE_APPROVED=1`) — operator's choice. The 14-day rule + `worktree_recency.sh` (PR #50 commit 9d702c6) is the canonical gate; proxies (`stat <wt>/.git`) were banned 2026-07-26.
@@ -64,7 +71,7 @@ safety_rule: workspace-level; never override CLAUDE.md hard list
 - **Force `git worktree remove` on a `gitdir:`-pointer linked worktree without recency check**: same ban — proxies (`stat <wt>/.git` measures creation age, `stat <wt>` measures only top-level mtime) mis-flagged 2/30 worktrees by 7.6 days in the 2026-07-26 audit.
 - **Run `cleanup_apfs_snapshots.sh` without TTY sudo**: it fails closed; do not bypass. APFS container is structural — purge requires deliberate operator decision, not an autonomous sweep.
 - **Edit `safety.local.json` to whitelist codex/corral/protected paths to "free up space"**: that path is exactly what `feedback_2026-07-18_manifest_claim_without_durable_path` warns against — deletions become unverifiable and non-recoverable.
-- **Treat 491 GiB residual as "missing" or "leaked"**: per the cross-ref verdict, the residual is dominated by the **213.9 GiB TCC/SIP gap** + **APFS container min-size pinning** + **<14d worktrees PROTECTED** — not by an unnamed leak. Frontier scan with 0.2.58 will resolve any genuinely unmapped buckets.
+- **Treat 491 GiB residual as "missing" or "leaked"**: the 2026-08-25 cross-ref verdict attributed it to the **213.9 GiB TCC/SIP gap** + **APFS container min-size pinning** + **<14d worktrees PROTECTED** — not by an unnamed leak. That attribution was based on a non-FDA audit; rerun the frontier scan with verified FDA before retaining the residual as opaque.
 
 ## Notes
 

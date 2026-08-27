@@ -16,6 +16,12 @@ investigator: sidekick investigator (sonnet), operator dispatch 2026-08-25
 
 ## TL;DR
 
+> **Status correction (2026-08-27):** The non-FDA-shell statements below are
+> historical observations from the 2026-08-25 audit. FDA-enabled verification
+> on 2026-08-27 confirmed that this shell can read representative MobileSync,
+> Mail, and Messages paths. The snapshot/frontier pipeline must be rerun with
+> that access before the old residual is treated as an unmeasurable floor.
+
 The snapshot pipeline itself is **healthy** — 35-min cadence is held, lock works, commits land, push fires. But the operators (and prior agents) have been looking at STALE DATA presented as fresh. There are three distinct gaps:
 
 1. **The "all 24,224 buckets" mega-table is from a 12-hour-old frontier scan, not the latest snapshot.** `frontier_last.json` mtime = 2026-08-25T04:26:41 PDT (11:26 UTC), but disk snapshots keep committing every 41 min. The ledger file in working tree has been rewritten since (mtime 16:18 PDT = 23:18 UTC) yet the rendered content is identical to the 11:26 version *because `frontier_last.json` itself has been stale for 12 hours*.
@@ -152,7 +158,7 @@ The ledger names it: `"protected_or_apfs_allocation_not_attributable_by_this_ses
 
 The 27 GiB difference between the documented 491.1 and the 464 estimate is consistent with current-day growth since the 2026-07-29 snapshot (per `disk_rootcause_producers`, ~+4.97 GiB/day net × 27 days = ~134 GiB, but partially offset by ongoing reclaims; the structural floor is sticky).
 
-**The 491.1 GiB residual is NOT a mystery** — it's the documented TCC+APFS structural floor that no non-FDA shell can measure. Prior session investigators (`feedback_2026-08-21_consult_memory_before_live_probes.md`, lines 14-17) named this in exactly those terms. The problem is that the *same* 491.1 number keeps showing up across runs (because the underlying drivers have not been tackled) and gets re-investigated each session from scratch.
+**The 491.1 GiB residual was not a mystery to the 2026-08-25 non-FDA audit** — that report identified it as the documented TCC+APFS structural floor that its shell could not measure. FDA-enabled verification on 2026-08-27 supersedes the capability claim; the residual must be rescanned before it is called structurally unmeasurable. Prior session investigators (`feedback_2026-08-21_consult_memory_before_live_probes.md`, lines 14-17) named this in exactly those historical terms. The problem was that the *same* 491.1 number kept showing up across runs and getting re-investigated from scratch.
 
 ---
 

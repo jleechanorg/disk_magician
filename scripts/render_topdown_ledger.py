@@ -6,14 +6,50 @@ the frontier report is missing, unreadable, or older than 36h — the same
 staleness threshold scripts/disk_snapshot.sh already applies when embedding
 topdown_coverage into the snapshot JSON, so a stale scan never overwrites a
 fresher committed ledger with worse data.
+
+The mega-table is also publication-gated: only a fresh report that explicitly
+declares a complete coverage envelope may replace the last published table.
+Partial reports leave both table files untouched and record their status in a
+sidecar (``topdown-5g.status.json``).
 """
 import argparse, datetime, json, os, sys
 
 STALE_HOURS = 36
+LEDGER_JSON = "topdown-5g.json"
+LEDGER_MD = "topdown-5g.md"
+STATUS_JSON = "topdown-5g.status.json"
 
 
 def gib(kb):
     return (kb or 0) / 1024.0 / 1024.0
+
+
+def write_status(out_dir, status, reason, captured_at, age_hours, report=None):
+    report = report or {}
+    with open(os.path.join(out_dir, STATUS_JSON), "w") as f:
+        json.dump(
+            {
+                "status": status,
+                "reason": reason,
+                "captured_at": captured_at,
+                "age_hours": round(age_hours, 3),
+                "mode": report.get("mode"),
+                "coverage_envelope": report.get("coverage_envelope"),
+            },
+            f,
+            indent=2,
+        )
+        f.write("\n")
+
+
+def complete_coverage_envelope(report):
+    """Return true only when the scanner made an explicit full-pass claim."""
+    envelope = report.get("coverage_envelope")
+    return (
+        report.get("mode") == "complete"
+        and isinstance(envelope, dict)
+        and envelope.get("complete") is True
+    )
 
 
 def main():
@@ -37,16 +73,33 @@ def main():
         return 0
     age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
     if age_hours > STALE_HOURS:
+        if os.path.isdir(args.out_dir):
+            write_status(args.out_dir, "stale", "frontier_report_stale", captured_at, age_hours, report)
         return 0  # stale — leave prior ledger in place
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    if not complete_coverage_envelope(report):
+        # A partial scan is useful evidence, but it is not a replacement for
+        # the last coherent mega-table. Keep the published rows byte-for-byte
+        # stable and expose the current scan state separately.
+        write_status(
+            args.out_dir,
+            "partial",
+            "coverage_incomplete",
+            captured_at,
+            age_hours,
+            report,
+        )
+        return 0
 
     buckets = report.get("granularity_buckets") or []
     oversize = report.get("oversize_indivisible_files") or []
     equation = report.get("accounting_equation") or {}
 
-    os.makedirs(args.out_dir, exist_ok=True)
-
     ledger = {
         "schema_version": 1,
+        "mode": report.get("mode"),
+        "coverage_envelope": report.get("coverage_envelope"),
         "captured_at": captured_at,
         "hostname": report.get("hostname"),
         "disk_used_kb": report.get("disk_used_kb"),
@@ -56,7 +109,7 @@ def main():
         "oversize_indivisible_files": oversize,
         "accounting_equation": equation,
     }
-    with open(os.path.join(args.out_dir, "topdown-5g.json"), "w") as f:
+    with open(os.path.join(args.out_dir, LEDGER_JSON), "w") as f:
         json.dump(ledger, f, indent=2)
         f.write("\n")
 
@@ -76,8 +129,16 @@ def main():
     lines.append(f"| {gib(report.get('residual_kb')):.1f} | _residual (unattributed)_ |")
     lines.append("")
     lines.append(f"Balanced: {str(bool(equation.get('displayed_balanced'))).lower()}")
-    with open(os.path.join(args.out_dir, "topdown-5g.md"), "w") as f:
+    with open(os.path.join(args.out_dir, LEDGER_MD), "w") as f:
         f.write("\n".join(lines) + "\n")
+    write_status(
+        args.out_dir,
+        "published",
+        "complete_coverage",
+        captured_at,
+        age_hours,
+        report,
+    )
     return 0
 
 

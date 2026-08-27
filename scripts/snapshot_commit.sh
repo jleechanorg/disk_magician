@@ -76,8 +76,11 @@ CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 # must accrue every run).
 # A prior diagnostic may have marked the generated ledger assume-unchanged.
 # That would make git add silently skip the only <=5 GiB mega-table used for
-# attribution, even when the renderer refreshed it successfully.
-git_id update-index --no-assume-unchanged ledger/topdown-5g.json ledger/topdown-5g.md 2>/dev/null || true
+# attribution, even when the renderer refreshed it successfully. The status
+# sidecar is unmasked too, so a partial scan cannot hide the publication gate.
+git_id update-index --no-assume-unchanged \
+  ledger/topdown-5g.json ledger/topdown-5g.md ledger/topdown-5g.status.json \
+  2>/dev/null || true
 git_id add -A
 git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty
 log "committed snapshot"
