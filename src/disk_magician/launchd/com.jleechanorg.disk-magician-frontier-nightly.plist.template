@@ -11,8 +11,9 @@
              low-usage hour, avoids colliding with other on-the-hour/half-hour
              sweepers in this directory.
   Action:    runs scripts/disk_frontier_scan.sh with 5 GiB granularity, a
-             2700-second wall-clock cap, and the default state output. The cap
-             (45 min) bounds the scan
+             43200-second wall-clock cap, and the default state output. The cap
+             (12 hours) allows the full 5 GiB mega-table scan to finish while
+             still bounding the scan
              per the roadmap's backpressure requirement (graceful frontier
              report on cap, never an unbounded walk). --output-default writes
              to ~/.disk_magician_state/frontier_last.json (topdown lane
@@ -34,7 +35,7 @@
     <string>--granularity-gib</string>
     <string>5</string>
     <string>--wall-clock-cap</string>
-    <string>2700</string>
+    <string>43200</string>
     <string>--output-default</string>
   </array>
   <key>EnvironmentVariables</key>

@@ -9,7 +9,7 @@
 #
 # Wired in two places: the nightly launchd job
 # (com.jleechanorg.disk-magician-frontier-nightly) runs this with
-# --wall-clock-cap 2700 --output-default, and disk_snapshot.sh embeds the
+# --wall-clock-cap 43200 --output-default, and disk_snapshot.sh embeds the
 # resulting frontier_last.json summary as `topdown_coverage` when fresh.
 # Disable via config `topdown_enabled: false`. See
 # roadmap/2026-07-11-total-coverage-snapshot-v2.md.
