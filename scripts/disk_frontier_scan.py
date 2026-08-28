@@ -64,6 +64,11 @@ FDA_PROBE_RELATIVE_PATHS = {
     "mail": os.path.join("Library", "Mail"),
     "messages": os.path.join("Library", "Messages"),
 }
+FDA_SYSTEM_PROBE_PATHS = {
+    "spotlight": "/System/Volumes/Data/.Spotlight-V100",
+    "fseventsd": "/System/Volumes/Data/.fseventsd",
+    "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
+}
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
@@ -81,6 +86,18 @@ GDU_FTS_ERROR_RE = re.compile(
 )
 
 
+def fda_probe_paths(root):
+    """Return paths whose readability represents the scanner's actual scope."""
+    home = os.path.expanduser("~")
+    paths = {
+        name: os.path.join(home, relative)
+        for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
+    }
+    if os.path.realpath(root) == DEFAULT_ROOT:
+        paths.update(FDA_SYSTEM_PROBE_PATHS)
+    return paths
+
+
 def fda_preflight(paths=None):
     """Probe FDA-sensitive directories from this scanner process.
 
@@ -91,11 +108,7 @@ def fda_preflight(paths=None):
     not masquerade as a denied FDA grant.
     """
     if paths is None:
-        home = os.path.expanduser("~")
-        paths = {
-            name: os.path.join(home, relative)
-            for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
-        }
+        paths = fda_probe_paths(DEFAULT_ROOT)
 
     probes = {}
     for name, path in paths.items():
@@ -781,7 +794,7 @@ class FrontierScanner:
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
-        self.fda_preflight = fda_preflight()
+        self.fda_preflight = fda_preflight(fda_probe_paths(self.root))
         self.nodes_processed = 0
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0

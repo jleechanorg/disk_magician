@@ -99,6 +99,22 @@ PY
 [[ "$FDA_PREFLIGHT_OUT" == "True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes read-only handles" \
   || bad "FDA preflight did not report per-target access correctly: $FDA_PREFLIGHT_OUT"
 
+FDA_SCOPE_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+default = m.fda_probe_paths(m.DEFAULT_ROOT)
+synthetic = m.fda_probe_paths("/tmp/frontier-fixture")
+print(
+    "spotlight" in default,
+    default.get("spotlight") == "/System/Volumes/Data/.Spotlight-V100",
+    "spotlight" not in synthetic,
+)
+PY
+)
+[[ "$FDA_SCOPE_OUT" == "True True True" ]] && ok "FDA preflight includes protected system roots only for full-disk scans" \
+  || bad "FDA preflight scope does not cover full-disk protected roots: $FDA_SCOPE_OUT"
+
 # ─────────────────────────────────────────────────────────────
 section "1. Valid JSON + required schema keys"
 T1="$WORK/t1"
