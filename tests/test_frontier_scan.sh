@@ -1279,7 +1279,7 @@ leftover_tmp=$(find "$WORK" -name ".disk_frontier_scan.*.tmp" 2>/dev/null | wc -
   || bad "found $leftover_tmp leftover .tmp file(s) — atomic write did not clean up"
 
 # ─────────────────────────────────────────────────────────────
-section "11. gdu budget cap leaves margin for BFS fallback on gdu rejection (disk_magician-yq7)"
+section "11. gdu budget reserves a bounded fallback share on gdu rejection (disk_magician-yq7)"
 PYTHONPATH="$REPO_ROOT/scripts:$REPO_ROOT/src:${PYTHONPATH:-}" python3 - <<'PY_YQ7_TEST'
 import sys, unittest, time, tempfile, os
 from types import SimpleNamespace
@@ -1287,7 +1287,7 @@ from unittest import mock
 import disk_frontier_scan as m
 
 class TestYq7GduBudgetCap(unittest.TestCase):
-    def test_gdu_budget_is_capped_leaving_margin(self):
+    def test_gdu_budget_reserves_thirty_percent_for_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target_subdir = os.path.join(tmpdir, "a")
             os.mkdir(target_subdir)
@@ -1308,8 +1308,9 @@ class TestYq7GduBudgetCap(unittest.TestCase):
                 res = s.run_one_pass_inventory([(target_subdir, False)])
                 self.assertFalse(res)
                 self.assertEqual(len(captured_timeout), 1)
-                self.assertLessEqual(captured_timeout[0], 1200.0)
-                self.assertGreater(s.remaining_budget(), 1000.0)
+                self.assertGreater(captured_timeout[0], 1800.0)
+                self.assertLessEqual(captured_timeout[0], 1890.0)
+                self.assertGreater(s.remaining_budget(), 2600.0)
 
 suite = unittest.TestLoader().loadTestsFromTestCase(TestYq7GduBudgetCap)
 res = unittest.TextTestRunner().run(suite)
@@ -1317,7 +1318,7 @@ if not res.wasSuccessful():
     sys.exit(1)
 PY_YQ7_TEST
 if [[ $? -eq 0 ]]; then
-  ok "gdu budget cap reserves time for BFS fallback (disk_magician-yq7)"
+  ok "gdu budget reserves 30% for BFS fallback (disk_magician-yq7)"
 else
   bad "gdu budget cap test failed"
 fi
