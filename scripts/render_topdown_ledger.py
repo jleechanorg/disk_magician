@@ -15,6 +15,8 @@ sidecar (``topdown-5g.status.json``).
 import argparse, datetime, json, os, sys
 
 STALE_HOURS = 36
+GIB_KB = 1024 * 1024
+GRANULARITY_CEILING_KB = 5 * GIB_KB
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
@@ -51,11 +53,25 @@ def complete_coverage_envelope(report):
     unfinished = envelope.get("unfinished_top_level_roots") if isinstance(envelope, dict) else None
     buckets = report.get("granularity_buckets") or []
     oversize = report.get("oversize_indivisible_files") or []
-    try:
-        bucket_total = sum(item["measured_kb"] for item in buckets)
-        oversize_total = sum(item["measured_kb"] for item in oversize)
-    except (KeyError, TypeError):
+    if any(
+        not isinstance(item, dict)
+        or not item.get("path")
+        or type(item.get("measured_kb")) is not int
+        or item["measured_kb"] < 0
+        or item["measured_kb"] >= GRANULARITY_CEILING_KB
+        for item in buckets
+    ):
         return False
+    if any(
+        not isinstance(item, dict)
+        or not item.get("path")
+        or type(item.get("measured_kb")) is not int
+        or item["measured_kb"] < 0
+        for item in oversize
+    ):
+        return False
+    bucket_total = sum(item["measured_kb"] for item in buckets)
+    oversize_total = sum(item["measured_kb"] for item in oversize)
     equation_keys = (
         "data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
         "sub_granularity_tail_kb", "purgeable_kb", "residual_kb",

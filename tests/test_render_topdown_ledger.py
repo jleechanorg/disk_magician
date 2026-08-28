@@ -78,6 +78,17 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "frontier": lambda d: d.update(frontier_unfinished=[{"path": "/blocked"}]),
             "equation": lambda d: d["accounting_equation"].update(displayed_balanced=False),
             "forged_equation": lambda d: d["accounting_equation"].update(displayed_buckets_kb=1),
+            "oversize_directory_bucket": lambda d: (
+                d["granularity_buckets"][0].update(measured_kb=6 * 1024 * 1024),
+                d.update(disk_used_kb=7 * 1024 * 1024, residual_kb=0, purgeable_kb=0),
+                d["accounting_equation"].update(
+                    data_used_kb=7 * 1024 * 1024,
+                    displayed_buckets_kb=7 * 1024 * 1024,
+                    sub_granularity_tail_kb=0,
+                    purgeable_kb=0,
+                    residual_kb=0,
+                ),
+            ),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label):
