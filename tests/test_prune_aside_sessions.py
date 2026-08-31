@@ -333,6 +333,58 @@ exit 0
         child.mkdir()
         self.assertTrue(pruner.is_safe_session_path(child, self.u0_sessions))
 
+    def test_default_max_age_days_is_7(self):
+        """Default max_age_days must be 7 days."""
+        pruner = AsideSessionPruner(aside_dir=self.aside_dir)
+        self.assertEqual(pruner.max_age_days, 7)
+
+        # Session 8 days old (2026-08-15) vs ref_time 2026-08-23
+        s_8d = self._create_mock_session(self.u0_sessions, "2026-08-15_old", {"msg.txt": "8d"})
+        # Session 5 days old (2026-08-18) vs ref_time 2026-08-23
+        s_5d = self._create_mock_session(self.u0_sessions, "2026-08-18_recent", {"msg.txt": "5d"})
+
+        mock_lsof = self._create_mock_lsof_script()
+        pruner = AsideSessionPruner(
+            aside_dir=self.aside_dir,
+            dry_run=False,
+            lsof_bin=str(mock_lsof),
+            ref_time=self.ref_time,
+        )
+        stats = pruner.run()
+        self.assertEqual(stats["sessions_scanned"], 2)
+        self.assertEqual(stats["sessions_pruned"], 1)
+        self.assertEqual(stats["sessions_retained_recent"], 1)
+        self.assertFalse(s_8d.exists())
+        self.assertTrue(s_5d.exists())
+
+    def test_cli_parse_args(self):
+        """Test parse_args with various flag combinations."""
+        from scripts.prune_aside_sessions import parse_args
+        import unittest.mock
+
+        with unittest.mock.patch("sys.argv", ["prune_aside_sessions.py", "--clean", "--days", "5"]):
+            args = parse_args()
+            self.assertTrue(args.clean)
+            self.assertEqual(args.max_age_days, 5)
+
+        with unittest.mock.patch("sys.argv", ["prune_aside_sessions.py", "--apply", "--max-age-days", "10"]):
+            args = parse_args()
+            self.assertTrue(args.clean)
+            self.assertEqual(args.max_age_days, 10)
+
+        with unittest.mock.patch("sys.argv", ["prune_aside_sessions.py", "--dry-run"]):
+            args = parse_args()
+            self.assertFalse(args.clean)
+            self.assertEqual(args.max_age_days, 7)
+
+    def test_format_size_and_helpers(self):
+        """Test format_size formatting."""
+        self.assertEqual(format_size(500), "500.00 B")
+        self.assertEqual(format_size(1024), "1.00 KB")
+        self.assertEqual(format_size(1048576), "1.00 MB")
+        self.assertEqual(format_size(1073741824), "1.00 GB")
+
 
 if __name__ == "__main__":
     unittest.main()
+

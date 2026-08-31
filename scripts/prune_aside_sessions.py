@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_MAX_AGE_DAYS = 14
+DEFAULT_MAX_AGE_DAYS = 7
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
 DATE_PREFIX_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_.*)?$")
 
