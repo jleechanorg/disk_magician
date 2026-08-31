@@ -1,4 +1,5 @@
 import errno
+import os
 import pathlib
 import stat
 import sys
@@ -31,9 +32,18 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                 "fda": {
                     "status": "granted",
                     "probes": {
-                        "mobile_sync": {"status": "readable"},
-                        "mail": {"status": "readable"},
-                        "messages": {"status": "readable"},
+                        "mobile_sync": {
+                            "path": "/Users/jleechan/Library/Application Support/MobileSync/Backup",
+                            "status": "readable",
+                        },
+                        "mail": {
+                            "path": "/Users/jleechan/Library/Mail",
+                            "status": "readable",
+                        },
+                        "messages": {
+                            "path": "/Users/jleechan/Library/Messages",
+                            "status": "readable",
+                        },
                     },
                 },
             },
@@ -51,6 +61,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             "effective_uid": 0,
             "fda_preflight": valid["verifier"]["fda"],
             "run_started_at": 100.0,
+            "run_finished_at": 102.0,
             "now": 102.0,
         }
 
@@ -121,6 +132,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                 effective_uid=0,
                 fda_preflight=fda,
                 run_started_at=100.0,
+                run_finished_at=102.0,
                 now=102.0,
             )
         )
@@ -162,13 +174,23 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             fda_preflight={
                 "status": "granted",
                 "probes": {
-                    "mobile_sync": {"status": "readable"},
-                    "mail": {"status": "readable"},
-                    "messages": {"status": "readable"},
+                    "mobile_sync": {
+                        "path": "/Users/jleechan/Library/Application Support/MobileSync/Backup",
+                        "status": "readable",
+                    },
+                    "mail": {
+                        "path": "/Users/jleechan/Library/Mail",
+                        "status": "readable",
+                    },
+                    "messages": {
+                        "path": "/Users/jleechan/Library/Messages",
+                        "status": "readable",
+                    },
                 },
             },
             run_id="run-1",
             run_started_at=100.0,
+            run_finished_at=102.0,
             system_boundary_attestations=[
                 TestIntrinsicGateAccounting.valid_attestation(path=path)
                 for path in frontier.FDA_SYSTEM_PROBE_PATHS.values()
@@ -222,6 +244,21 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertTrue(report["coverage_envelope"]["complete"])
         self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
         self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 1)
+
+    def test_report_serializes_scanner_run_binding(self):
+        report = self.report(self.scanner())
+
+        self.assertEqual(report["run_id"], "run-1")
+        self.assertEqual(report["run_started_at"], 100.0)
+        self.assertEqual(report["run_finished_at"], 102.0)
+        self.assertEqual(
+            report["fda_probe_paths"],
+            {
+                "mobile_sync": "/Users/jleechan/Library/Application Support/MobileSync/Backup",
+                "mail": "/Users/jleechan/Library/Mail",
+                "messages": "/Users/jleechan/Library/Messages",
+            },
+        )
 
     def test_aggregate_partial_fda_with_catalog_attestation_is_complete(self):
         scanner = self.scanner()
@@ -287,6 +324,106 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertEqual(report["opaque_intrinsic_gates"], [])
         self.assertEqual(report["frontier_unfinished"][0]["path"], "/fixture/secret")
         self.assertFalse(report["coverage_envelope"]["complete"])
+
+    def test_transplanted_attestations_from_another_run_are_rejected(self):
+        scanner = self.scanner()
+        for attestation in scanner.system_boundary_attestations:
+            attestation["run_id"] = "run-2"
+
+        report = self.report(scanner)
+
+        self.assertEqual(report["mode"], "partial")
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(
+            {item["path"] for item in report["frontier_unfinished"]},
+            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()),
+        )
+        self.assertEqual(
+            [g for g in report["opaque_intrinsic_gates"] if g["reason"] == "permission_denied_intrinsic"],
+            [],
+        )
+
+    def test_attestation_outside_report_run_window_is_rejected(self):
+        for bad_time in (99.0, 103.0):
+            with self.subTest(bad_time=bad_time):
+                scanner = self.scanner()
+                scanner.system_boundary_attestations[0]["captured_at"] = bad_time
+
+                report = self.report(scanner)
+
+                self.assertEqual(report["mode"], "partial")
+                self.assertFalse(report["coverage_envelope"]["complete"])
+                self.assertIn(
+                    frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"],
+                    {item["path"] for item in report["frontier_unfinished"]},
+                )
+
+    def test_user_probe_substitution_is_rejected(self):
+        scanner = self.scanner()
+        scanner.fda_preflight = {
+            "status": "granted",
+            "probes": {
+                "mobile_sync": {"status": "readable"},
+                "mail": {"path": "/tmp/mail", "status": "readable"},
+                "messages": {"status": "readable"},
+            },
+        }
+
+        report = self.report(scanner)
+
+        self.assertEqual(report["mode"], "partial")
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(
+            {item["path"] for item in report["frontier_unfinished"]},
+            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()),
+        )
+
+    def test_user_probe_catalog_rejects_dot_segment_normalization_bypass(self):
+        forged_home = "/Users/reviewer/../../tmp/forged"
+        catalog = {
+            name: os.path.join(forged_home, relative)
+            for name, relative in frontier.FDA_PROBE_RELATIVE_PATHS.items()
+        }
+        preflight = {
+            "status": "granted",
+            "probes": {
+                name: {"path": path, "status": "readable"}
+                for name, path in catalog.items()
+            },
+        }
+
+        self.assertFalse(frontier.valid_user_probe_catalog(catalog))
+        self.assertIsNone(frontier.fda_user_probe_evidence(preflight))
+
+    def test_user_probe_catalog_requires_paths_for_readable_probes(self):
+        preflight = {
+            "status": "granted",
+            "probes": {
+                name: {"status": "readable"}
+                for name in frontier.FDA_PROBE_RELATIVE_PATHS
+            },
+        }
+        attestation = self.valid_attestation(
+            verifier={
+                "effective_uid": 0,
+                "access_context": "parent_scanner_confirmation",
+                "fda": preflight,
+            }
+        )
+
+        self.assertIsNone(frontier.fda_user_probe_evidence(preflight))
+        self.assertFalse(
+            frontier.verify_system_boundary_attestation(
+                attestation,
+                run_id="run-1",
+                path=frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"],
+                effective_uid=0,
+                fda_preflight=preflight,
+                run_started_at=100.0,
+                run_finished_at=102.0,
+                now=102.0,
+            )
+        )
 
     def test_reappeared_inventory_path_is_remeasured_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:

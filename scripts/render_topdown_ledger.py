@@ -12,7 +12,7 @@ declares a complete coverage envelope may replace the last published table.
 Partial reports leave both table files untouched and record their status in a
 sidecar (``topdown-5g.status.json``).
 """
-import argparse, datetime, json, os, sys
+import argparse, datetime, json, math, os, sys
 
 STALE_HOURS = 36
 GIB_KB = 1024 * 1024
@@ -25,6 +25,22 @@ BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
 INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
 INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
 SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
+SYSTEM_BOUNDARY_PROBES = {
+    "spotlight": "/System/Volumes/Data/.Spotlight-V100",
+    "fseventsd": "/System/Volumes/Data/.fseventsd",
+    "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
+}
+USER_PROBE_RELATIVE_PATHS = {
+    "mobile_sync": os.path.join("Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("Library", "Mail"),
+    "messages": os.path.join("Library", "Messages"),
+}
+USER_PROBE_NAMES = tuple(USER_PROBE_RELATIVE_PATHS.keys())
+ATTESTATION_KEYS = {
+    "run_id", "path", "status", "errno", "captured_at", "captured_during_run",
+    "path_is_symlink", "verifier", "identity_before", "identity_after",
+}
+GATE_OPTIONAL_KEYS = {"root_device", "path_device"}
 
 
 def gib(kb):
@@ -47,6 +63,199 @@ def write_status(out_dir, status, reason, captured_at, age_hours, report=None):
             indent=2,
         )
         f.write("\n")
+
+
+def is_normalized_absolute_path(path):
+    return (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and os.path.normpath(path) == path
+        and not any(component in (".", "..") for component in path.split(os.sep))
+    )
+
+
+def valid_user_probe_catalog(catalog):
+    if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
+        return False
+    mail_path = catalog.get("mail")
+    if not is_normalized_absolute_path(mail_path):
+        return False
+    expected_mail_suffix = "/" + USER_PROBE_RELATIVE_PATHS["mail"]
+    if not mail_path.endswith(expected_mail_suffix):
+        return False
+    user_home = mail_path[:-len(expected_mail_suffix)]
+    if not user_home or not os.path.isabs(user_home):
+        return False
+    if (
+        user_home == "/tmp"
+        or user_home.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
+        or user_home in ("/private/tmp", "/var/tmp")
+    ):
+        return False
+    for name, rel_path in USER_PROBE_RELATIVE_PATHS.items():
+        expected_path = os.path.join(user_home, rel_path)
+        if catalog.get(name) != expected_path:
+            return False
+    return True
+
+
+def valid_partial_run_binding(report):
+    run_id = report.get("run_id")
+    started = report.get("run_started_at")
+    finished = report.get("run_finished_at")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or type(started) not in (int, float)
+        or isinstance(started, bool)
+        or type(finished) not in (int, float)
+        or isinstance(finished, bool)
+        or not math.isfinite(started)
+        or not math.isfinite(finished)
+        or finished < started
+    ):
+        return False
+    catalog = report.get("fda_probe_paths")
+    if not valid_user_probe_catalog(catalog):
+        return False
+    attestations = report.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        return False
+    return all(
+        isinstance(item, dict)
+        and item.get("run_id") == run_id
+        and type(item.get("captured_at")) in (int, float)
+        and not isinstance(item.get("captured_at"), bool)
+        and math.isfinite(item["captured_at"])
+        and started <= item["captured_at"] <= finished
+        for item in attestations
+    )
+
+
+def valid_partial_system_boundary_contract(report):
+    """Return true only for the scanner's exact partial FDA evidence envelope."""
+    envelope = report.get("coverage_envelope")
+    if not isinstance(envelope, dict):
+        return False
+    if envelope.get("fda_user_preflight_status") != "granted":
+        return False
+    if not valid_partial_run_binding(report):
+        return False
+    preflight = report.get("fda_preflight")
+    if not isinstance(preflight, dict) or preflight.get("status") != "partial":
+        return False
+    probes = preflight.get("probes")
+    expected_probe_names = set(USER_PROBE_NAMES) | set(SYSTEM_BOUNDARY_PROBES)
+    if not isinstance(probes, dict) or set(probes) != expected_probe_names:
+        return False
+    user_probes = {}
+    for name in USER_PROBE_NAMES:
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or not isinstance(probe.get("path"), str)
+            or not probe["path"]
+            or probe["path"] != report["fda_probe_paths"][name]
+            or probe.get("status") != "readable"
+            or set(probe) != {"path", "status"}
+        ):
+            return False
+        user_probes[name] = probe
+    for name, path in SYSTEM_BOUNDARY_PROBES.items():
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or set(probe) - {"path", "status", "errno"}
+            or probe.get("path") != path
+            or probe.get("status") != "permission_denied_or_tcc"
+            or type(probe.get("errno")) is not int
+            or probe.get("errno") not in (1, 13)
+        ):
+            return False
+
+    attestations = report.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        return False
+    expected_fda = {"status": "granted", "probes": user_probes}
+    attested_paths = set()
+    run_ids = set()
+    attestation_by_path = {}
+    for item in attestations:
+        if not isinstance(item, dict) or set(item) != ATTESTATION_KEYS:
+            return False
+        path = item.get("path")
+        if path not in SYSTEM_BOUNDARY_PROBES.values() or path in attested_paths:
+            return False
+        if (
+            item.get("status") != "permission_denied"
+            or type(item.get("errno")) is not int
+            or item.get("errno") not in (1, 13)
+            or item.get("captured_during_run") is not True
+            or item.get("path_is_symlink") is not False
+            or not isinstance(item.get("run_id"), str)
+            or not item["run_id"]
+            or type(item.get("captured_at")) not in (int, float)
+            or isinstance(item.get("captured_at"), bool)
+            or not math.isfinite(item.get("captured_at"))
+        ):
+            return False
+        verifier = item.get("verifier")
+        if (
+            not isinstance(verifier, dict)
+            or set(verifier) != {"effective_uid", "access_context", "fda"}
+            or verifier.get("effective_uid") != 0
+            or verifier.get("access_context") != "parent_scanner_confirmation"
+            or verifier.get("fda") != expected_fda
+        ):
+            return False
+        for identity_name in ("identity_before", "identity_after"):
+            identity = item.get(identity_name)
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != {"st_dev", "st_ino"}
+                or any(type(identity.get(key)) is not int or identity[key] < 0 for key in ("st_dev", "st_ino"))
+            ):
+                return False
+        if item["identity_before"] != item["identity_after"]:
+            return False
+        attested_paths.add(path)
+        run_ids.add(item["run_id"])
+        attestation_by_path[path] = item
+    if attested_paths != set(SYSTEM_BOUNDARY_PROBES.values()) or len(run_ids) != 1:
+        return False
+    if any(
+        attestation_by_path[path]["errno"] != probes[name]["errno"]
+        for name, path in SYSTEM_BOUNDARY_PROBES.items()
+    ):
+        return False
+
+    gates = report.get("opaque_intrinsic_gates")
+    if not isinstance(gates, list) or len(gates) != len(SYSTEM_BOUNDARY_PROBES):
+        return False
+    gate_paths = set()
+    allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    for gate in gates:
+        if (
+            not isinstance(gate, dict)
+            or not INTRINSIC_GATE_KEYS.issubset(gate)
+            or not set(gate).issubset(allowed_gate_keys)
+            or gate.get("path") not in SYSTEM_BOUNDARY_PROBES.values()
+            or gate.get("path") in gate_paths
+            or gate.get("reason") != "permission_denied_intrinsic"
+            or gate.get("verification") != "parent_scanner_system_boundary_confirmation"
+            or gate.get("reclaimable") is not False
+            or type(gate.get("errno")) is not int
+            or gate.get("errno") not in (1, 13)
+            or any(type(gate[key]) is not int or gate[key] < 0 for key in GATE_OPTIONAL_KEYS if key in gate)
+            or gate["errno"] != attestation_by_path[gate["path"]]["errno"]
+            or (
+                "path_device" in gate
+                and gate["path_device"] != attestation_by_path[gate["path"]]["identity_before"]["st_dev"]
+            )
+        ):
+            return False
+        gate_paths.add(gate["path"])
+    return gate_paths == set(SYSTEM_BOUNDARY_PROBES.values())
 
 
 def complete_coverage_envelope(report):
@@ -125,7 +334,13 @@ def complete_coverage_envelope(report):
         report.get("mode") == "complete"
         and isinstance(envelope, dict)
         and envelope.get("complete") is True
-        and envelope.get("fda_preflight_status") == "granted"
+        and (
+            envelope.get("fda_preflight_status") == "granted"
+            or (
+                envelope.get("fda_preflight_status") == "partial"
+                and valid_partial_system_boundary_contract(report)
+            )
+        )
         and type(reachable) is int
         and type(measured) is int
         and type(unfinished) is int
@@ -190,6 +405,12 @@ def main():
         "coverage_envelope": report.get("coverage_envelope"),
         "frontier_unfinished": report.get("frontier_unfinished"),
         "opaque_intrinsic_gates": report.get("opaque_intrinsic_gates"),
+        "fda_preflight": report.get("fda_preflight"),
+        "fda_probe_paths": report.get("fda_probe_paths"),
+        "system_boundary_attestations": report.get("system_boundary_attestations"),
+        "run_id": report.get("run_id"),
+        "run_started_at": report.get("run_started_at"),
+        "run_finished_at": report.get("run_finished_at"),
         "captured_at": captured_at,
         "hostname": report.get("hostname"),
         "disk_used_kb": report.get("disk_used_kb"),

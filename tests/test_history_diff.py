@@ -16,6 +16,21 @@ sys.path.insert(0, str(REPO / "scripts"))
 import history_diff as hd  # noqa: E402
 
 GIB_KB = 1024 * 1024
+SYSTEM_BOUNDARY_PATHS = (
+    "/System/Volumes/Data/.Spotlight-V100",
+    "/System/Volumes/Data/.fseventsd",
+    "/System/Volumes/Data/.DocumentRevisions-V100",
+)
+USER_PROBE_PATHS = {
+    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
+    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+}
+FORGED_USER_PROBE_PATHS = {
+    "mobile_sync": "/Users/reviewer/../../tmp/forged/Library/Application Support/MobileSync/Backup",
+    "mail": "/Users/reviewer/../../tmp/forged/Library/Mail",
+    "messages": "/Users/reviewer/../../tmp/forged/Library/Messages",
+}
 
 
 def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", captured_at="2026-07-21T00:00:00Z"):
@@ -47,6 +62,54 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
         "buckets": buckets,
         "opaque_intrinsic_gates": [],
     }
+
+
+def attested_partial_ledger(disk_used_kb, residual_kb, buckets):
+    result = ledger(disk_used_kb, residual_kb, buckets)
+    user_probes = {
+        name: {"path": path, "status": "readable"}
+        for name, path in USER_PROBE_PATHS.items()
+    }
+    result.update(
+        run_id="run-1", run_started_at=100.0, run_finished_at=102.0,
+        fda_probe_paths=dict(USER_PROBE_PATHS),
+    )
+    result["coverage_envelope"].update(
+        fda_preflight_status="partial", fda_user_preflight_status="granted"
+    )
+    result["fda_preflight"] = {
+        "status": "partial",
+        "probes": {
+            **user_probes,
+            "spotlight": {"path": SYSTEM_BOUNDARY_PATHS[0], "status": "permission_denied_or_tcc", "errno": 13},
+            "fseventsd": {"path": SYSTEM_BOUNDARY_PATHS[1], "status": "permission_denied_or_tcc", "errno": 13},
+            "document_revisions": {"path": SYSTEM_BOUNDARY_PATHS[2], "status": "permission_denied_or_tcc", "errno": 13},
+        },
+    }
+    result["system_boundary_attestations"] = [
+        {
+            "run_id": "run-1", "path": path, "status": "permission_denied", "errno": 13,
+            "captured_at": 101.0, "captured_during_run": True, "path_is_symlink": False,
+            "verifier": {
+                "effective_uid": 0,
+                "access_context": "parent_scanner_confirmation",
+                "fda": {"status": "granted", "probes": user_probes},
+            },
+            "identity_before": {"st_dev": 1, "st_ino": 2},
+            "identity_after": {"st_dev": 1, "st_ino": 2},
+        }
+        for path in SYSTEM_BOUNDARY_PATHS
+    ]
+    result["opaque_intrinsic_gates"] = [
+        {
+            "path": path, "reason": "permission_denied_intrinsic", "errno": 13,
+            "root_device": 1, "path_device": 1,
+            "verification": "parent_scanner_system_boundary_confirmation",
+            "reclaimable": False,
+        }
+        for path in SYSTEM_BOUNDARY_PATHS
+    ]
+    return result
 
 
 class TestValidateLedger(unittest.TestCase):
@@ -139,6 +202,101 @@ class TestValidateLedger(unittest.TestCase):
         led["accounting_equation"]["display_ledger_valid"] = True
         hd.validate_ledger(led, label="negative-clone-adjustment")
         hd.validate_full_attribution_ledger(led, label="negative-clone-adjustment")
+
+    def test_attested_partial_system_boundary_ledger_is_full_attribution(self):
+        led = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+
+        hd.validate_ledger(led, label="attested-partial")
+        hd.validate_full_attribution_ledger(led, label="attested-partial")
+
+    def test_partial_system_boundary_contract_rejects_missing_or_malformed_evidence(self):
+        mutations = {
+            "missing_preflight": lambda d: d.pop("fda_preflight"),
+            "malformed_attestation": lambda d: d["system_boundary_attestations"][0].pop("verifier"),
+            "noncatalog_gate": lambda d: d["opaque_intrinsic_gates"][0].update(path="/Users/test/private"),
+            "unattested_gate": lambda d: d["opaque_intrinsic_gates"].pop(),
+            "incomplete_system_probe": lambda d: d["fda_preflight"]["probes"].update(
+                {"document_revisions": {"path": SYSTEM_BOUNDARY_PATHS[-1], "status": "readable"}}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                candidate = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+                mutate(candidate)
+                with self.assertRaises(hd.LedgerError):
+                    hd.validate_full_attribution_ledger(candidate, label=label)
+
+    def test_partial_contract_rejects_attestations_transplanted_from_another_run(self):
+        candidate = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        for attestation in candidate["system_boundary_attestations"]:
+            attestation["run_id"] = "run-2"
+
+        with self.assertRaises(hd.LedgerError):
+            hd.validate_full_attribution_ledger(candidate, label="transplanted-attestations")
+
+    def test_partial_contract_rejects_attestation_outside_run_window(self):
+        candidate = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        candidate["system_boundary_attestations"][0]["captured_at"] = 103.0
+
+        with self.assertRaises(hd.LedgerError):
+            hd.validate_full_attribution_ledger(candidate, label="outside-run-window")
+
+    def test_partial_contract_rejects_substituted_user_probe_path(self):
+        cases = [
+            ("single_probe_tmp", lambda d: d["fda_preflight"]["probes"]["mail"].update(path="/tmp/mail")),
+            ("catalog_tmp_exact", lambda d: (
+                d["fda_probe_paths"].update(mail="/tmp"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_tmp_mail", lambda d: (
+                d["fda_probe_paths"].update(mail="/tmp"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_foreign_home", lambda d: (
+                d["fda_probe_paths"].update(mail="/Users/other/Library/Mail"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/Users/other/Library/Mail"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/Users/other/Library/Mail") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_tmp_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/tmp/Library/Application Support/MobileSync/Backup",
+                    mail="/tmp/Library/Mail",
+                    messages="/tmp/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"]["mobile_sync"].update(path="/tmp/Library/Application Support/MobileSync/Backup"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp/Library/Mail"),
+                d["fda_preflight"]["probes"]["messages"].update(path="/tmp/Library/Messages"),
+                [a["verifier"]["fda"]["probes"].update({
+                    "mobile_sync": {"path": "/tmp/Library/Application Support/MobileSync/Backup", "status": "readable"},
+                    "mail": {"path": "/tmp/Library/Mail", "status": "readable"},
+                    "messages": {"path": "/tmp/Library/Messages", "status": "readable"},
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("non_canonical_relative", lambda d: (
+                d["fda_probe_paths"].update(mail=os.path.join(os.path.expanduser("~"), "Mail")),
+                d["fda_preflight"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_dot_segments", lambda d: (
+                d["fda_probe_paths"].update(FORGED_USER_PROBE_PATHS),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in FORGED_USER_PROBE_PATHS.items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in FORGED_USER_PROBE_PATHS.items()
+                }) for a in d["system_boundary_attestations"]],
+            )),
+        ]
+        for name, mutate in cases:
+            with self.subTest(case=name):
+                candidate = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+                mutate(candidate)
+                with self.assertRaises(hd.LedgerError):
+                    hd.validate_full_attribution_ledger(candidate, label=name)
 
 
 class TestComputeDeltas(unittest.TestCase):
@@ -250,6 +408,20 @@ class TestCLIIntegration(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertIn("/fixture_growth", lines[0])
         self.assertEqual(lines[-1], "residual delta: +0.00 GiB")
+
+    def test_cli_accepts_attested_partial_system_boundary_ledgers(self):
+        base = attested_partial_ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        _write_ledger_commit(self.repo, base, "base")
+        target = attested_partial_ledger(2 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 1 * GIB_KB},
+            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+        ])
+        _write_ledger_commit(self.repo, target, "target")
+
+        result = self._run_cli()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+1.00 GiB  /growth", result.stdout)
 
     def test_default_state_repo_matches_snapshot_config_resolver(self):
         configured_repo = self.tmp / "configured-state"

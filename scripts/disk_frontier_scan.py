@@ -35,6 +35,7 @@ import concurrent.futures
 import errno
 import heapq
 import json
+import math
 import os
 import plistlib
 import re
@@ -171,23 +172,63 @@ def fda_preflight(paths=None):
     }
 
 
+def is_normalized_absolute_path(path):
+    return (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and os.path.normpath(path) == path
+        and not any(component in (".", "..") for component in path.split(os.sep))
+    )
+
+
+def valid_user_probe_catalog(catalog):
+    if not isinstance(catalog, dict) or set(catalog) != set(FDA_PROBE_RELATIVE_PATHS):
+        return False
+    mail_path = catalog.get("mail")
+    if not is_normalized_absolute_path(mail_path):
+        return False
+    expected_mail_suffix = "/" + FDA_PROBE_RELATIVE_PATHS["mail"]
+    if not mail_path.endswith(expected_mail_suffix):
+        return False
+    user_home = mail_path[:-len(expected_mail_suffix)]
+    if not user_home or not os.path.isabs(user_home):
+        return False
+    if (
+        user_home == "/tmp"
+        or user_home.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
+        or user_home in ("/private/tmp", "/var/tmp")
+    ):
+        return False
+    for name, rel in FDA_PROBE_RELATIVE_PATHS.items():
+        if catalog.get(name) != os.path.join(user_home, rel):
+            return False
+    return True
+
+
 def fda_user_probe_evidence(preflight):
     """Extract FDA evidence for user roots, excluding system boundaries."""
     if not isinstance(preflight, dict) or not isinstance(preflight.get("probes"), dict):
         return None
     probes = preflight["probes"]
     user_probes = {}
+    catalog = {}
     for name in FDA_PROBE_RELATIVE_PATHS:
         probe = probes.get(name)
         if not isinstance(probe, dict) or probe.get("status") != "readable":
             return None
+        path = probe.get("path")
+        if not isinstance(path, str):
+            return None
+        catalog[name] = path
         user_probes[name] = probe
+    if not valid_user_probe_catalog(catalog):
+        return None
     return {"status": "granted", "probes": user_probes}
 
 
 def verify_system_boundary_attestation(
     attestation, *, run_id, path, effective_uid, fda_preflight,
-    run_started_at, now=None,
+    run_started_at, run_finished_at, now=None,
 ):
     """Accept only a same-run, privileged denial of a catalog path.
 
@@ -214,11 +255,18 @@ def verify_system_boundary_attestation(
         return False
     if isinstance(run_started_at, bool) or not isinstance(run_started_at, (int, float)):
         return False
+    if isinstance(run_finished_at, bool) or not isinstance(run_finished_at, (int, float)):
+        return False
+    if not all(math.isfinite(value) for value in (run_started_at, run_finished_at)):
+        return False
+    if run_finished_at < run_started_at:
+        return False
     current_time = time.time() if now is None else now
     if (
         isinstance(current_time, bool)
         or not isinstance(current_time, (int, float))
         or captured_at < run_started_at
+        or captured_at > run_finished_at
         or captured_at > current_time
     ):
         return False
@@ -935,11 +983,13 @@ class FrontierScanner:
         self.effective_uid = os.geteuid()
         self.run_id = uuid.uuid4().hex
         self.run_started_at = 0.0
+        self.run_finished_at = None
         self.system_boundary_attestations = []
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
-        self.fda_preflight = fda_preflight(fda_probe_paths(self.root))
+        self.fda_probe_catalog = fda_probe_paths(self.root)
+        self.fda_preflight = fda_preflight(self.fda_probe_catalog)
         self.nodes_processed = 0
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
@@ -1464,6 +1514,7 @@ class FrontierScanner:
 
         if GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
             self._capture_system_boundary_attestations()
+            self.run_finished_at = time.time()
             return None
 
         frontier = []
@@ -1539,6 +1590,7 @@ class FrontierScanner:
                                 enqueue(item)
 
         self._capture_system_boundary_attestations()
+        self.run_finished_at = time.time()
         return None
 
 
@@ -1604,6 +1656,7 @@ def build_report(
     }
     run_id = getattr(scanner, "run_id", None)
     run_started_at = getattr(scanner, "run_started_at", None)
+    run_finished_at = getattr(scanner, "run_finished_at", None)
     for item in scanner.frontier_unfinished:
         path = item.get("path", "")
         reason = item.get("reason") or "unknown"
@@ -1618,6 +1671,7 @@ def build_report(
                 effective_uid=effective_uid,
                 fda_preflight=fda_status,
                 run_started_at=run_started_at,
+                run_finished_at=run_finished_at,
             )
         ):
             attestation = attestations[path]
@@ -1885,6 +1939,13 @@ def build_report(
         "hostname": socket.gethostname(),
         "argv": sys.argv[1:],
         "root": scanner.root,
+        "run_id": run_id,
+        "run_started_at": run_started_at,
+        "run_finished_at": run_finished_at,
+        "fda_probe_paths": {
+            name: (getattr(scanner, "fda_probe_catalog", None) or fda_probe_paths(scanner.root))[name]
+            for name in FDA_PROBE_RELATIVE_PATHS
+        },
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_s": round(elapsed_s, 1),
         "config": {

@@ -11,6 +11,8 @@ pipeline-corruption class documented in this repo's operator memory).
 """
 import argparse
 import json
+import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -28,6 +30,22 @@ class LedgerError(ValueError):
 INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
 INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
 SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
+SYSTEM_BOUNDARY_PROBES = {
+    "spotlight": "/System/Volumes/Data/.Spotlight-V100",
+    "fseventsd": "/System/Volumes/Data/.fseventsd",
+    "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
+}
+USER_PROBE_RELATIVE_PATHS = {
+    "mobile_sync": os.path.join("Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("Library", "Mail"),
+    "messages": os.path.join("Library", "Messages"),
+}
+USER_PROBE_NAMES = tuple(USER_PROBE_RELATIVE_PATHS.keys())
+ATTESTATION_KEYS = {
+    "run_id", "path", "status", "errno", "captured_at", "captured_during_run",
+    "path_is_symlink", "verifier", "identity_before", "identity_after",
+}
+GATE_OPTIONAL_KEYS = {"root_device", "path_device"}
 
 
 def validate_intrinsic_gates(ledger: dict, *, label: str) -> None:
@@ -58,6 +76,198 @@ def validate_intrinsic_gates(ledger: dict, *, label: str) -> None:
             )
         ):
             raise LedgerError(f"{label}: invalid opaque intrinsic gate: {item!r}")
+
+
+def is_normalized_absolute_path(path):
+    return (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and os.path.normpath(path) == path
+        and not any(component in (".", "..") for component in path.split(os.sep))
+    )
+
+
+def validate_user_probe_catalog(catalog: dict, *, label: str) -> None:
+    if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete user probe catalog")
+    mail_path = catalog.get("mail")
+    if not is_normalized_absolute_path(mail_path):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid user probe catalog")
+    expected_mail_suffix = "/" + USER_PROBE_RELATIVE_PATHS["mail"]
+    if not mail_path.endswith(expected_mail_suffix):
+        raise LedgerError(f"{label}: partial FDA ledger has non-canonical mail probe path")
+    user_home = mail_path[:-len(expected_mail_suffix)]
+    if not user_home or not pathlib.PurePosixPath(user_home).is_absolute():
+        raise LedgerError(f"{label}: partial FDA ledger has invalid user home path")
+    if (
+        user_home == "/tmp"
+        or user_home.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
+        or user_home in ("/private/tmp", "/var/tmp")
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger substitutes /tmp for user probe root")
+    for name, rel_path in USER_PROBE_RELATIVE_PATHS.items():
+        expected_path = os.path.join(user_home, rel_path)
+        if catalog.get(name) != expected_path:
+            raise LedgerError(f"{label}: partial FDA ledger has non-canonical user probe {name!r}")
+
+
+def validate_partial_run_binding(ledger: dict, *, label: str) -> None:
+    run_id = ledger.get("run_id")
+    started = ledger.get("run_started_at")
+    finished = ledger.get("run_finished_at")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or type(started) not in (int, float)
+        or isinstance(started, bool)
+        or type(finished) not in (int, float)
+        or isinstance(finished, bool)
+        or not math.isfinite(started)
+        or not math.isfinite(finished)
+        or finished < started
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid scanner run window")
+    catalog = ledger.get("fda_probe_paths")
+    validate_user_probe_catalog(catalog, label=label)
+    attestations = ledger.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid system attestations")
+    for item in attestations:
+        captured_at = item.get("captured_at") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("run_id") != run_id
+            or type(captured_at) not in (int, float)
+            or isinstance(captured_at, bool)
+            or not math.isfinite(captured_at)
+            or not started <= captured_at <= finished
+        ):
+            raise LedgerError(f"{label}: attestation is outside the scanner run binding")
+
+
+def validate_partial_system_boundary_contract(ledger: dict, *, label: str) -> None:
+    """Validate the scanner's exact partial FDA system-boundary evidence."""
+    envelope = ledger.get("coverage_envelope")
+    if not isinstance(envelope, dict) or envelope.get("fda_user_preflight_status") != "granted":
+        raise LedgerError(f"{label}: partial FDA ledger missing granted user preflight")
+    validate_partial_run_binding(ledger, label=label)
+    preflight = ledger.get("fda_preflight")
+    probes = preflight.get("probes") if isinstance(preflight, dict) else None
+    expected_probe_names = set(USER_PROBE_NAMES) | set(SYSTEM_BOUNDARY_PROBES)
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "partial"
+        or not isinstance(probes, dict)
+        or set(probes) != expected_probe_names
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete preflight probes")
+    user_probes = {}
+    for name in USER_PROBE_NAMES:
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or not isinstance(probe.get("path"), str)
+            or not probe["path"]
+            or probe["path"] != ledger["fda_probe_paths"][name]
+            or probe.get("status") != "readable"
+            or set(probe) != {"path", "status"}
+        ):
+            raise LedgerError(f"{label}: partial FDA ledger has invalid user probe {name!r}")
+        user_probes[name] = probe
+    for name, path in SYSTEM_BOUNDARY_PROBES.items():
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or set(probe) - {"path", "status", "errno"}
+            or probe.get("path") != path
+            or probe.get("status") != "permission_denied_or_tcc"
+            or type(probe.get("errno")) is not int
+            or probe.get("errno") not in (1, 13)
+        ):
+            raise LedgerError(f"{label}: partial FDA ledger has invalid system probe {name!r}")
+
+    attestations = ledger.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete system attestations")
+    expected_fda = {"status": "granted", "probes": user_probes}
+    attestation_by_path = {}
+    run_ids = set()
+    for item in attestations:
+        if not isinstance(item, dict) or set(item) != ATTESTATION_KEYS:
+            raise LedgerError(f"{label}: invalid system-boundary attestation")
+        path = item.get("path")
+        if path not in SYSTEM_BOUNDARY_PROBES.values() or path in attestation_by_path:
+            raise LedgerError(f"{label}: non-catalog system-boundary attestation path")
+        if (
+            item.get("status") != "permission_denied"
+            or type(item.get("errno")) is not int
+            or item.get("errno") not in (1, 13)
+            or item.get("captured_during_run") is not True
+            or item.get("path_is_symlink") is not False
+            or not isinstance(item.get("run_id"), str)
+            or not item["run_id"]
+            or type(item.get("captured_at")) not in (int, float)
+            or isinstance(item.get("captured_at"), bool)
+            or not math.isfinite(item.get("captured_at"))
+        ):
+            raise LedgerError(f"{label}: malformed system-boundary attestation")
+        verifier = item.get("verifier")
+        if (
+            not isinstance(verifier, dict)
+            or set(verifier) != {"effective_uid", "access_context", "fda"}
+            or verifier.get("effective_uid") != 0
+            or verifier.get("access_context") != "parent_scanner_confirmation"
+            or verifier.get("fda") != expected_fda
+        ):
+            raise LedgerError(f"{label}: invalid system-boundary attestation verifier")
+        for identity_name in ("identity_before", "identity_after"):
+            identity = item.get(identity_name)
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != {"st_dev", "st_ino"}
+                or any(type(identity.get(key)) is not int or identity[key] < 0 for key in ("st_dev", "st_ino"))
+            ):
+                raise LedgerError(f"{label}: invalid system-boundary attestation identity")
+        if item["identity_before"] != item["identity_after"]:
+            raise LedgerError(f"{label}: system-boundary identity changed during attestation")
+        attestation_by_path[path] = item
+        run_ids.add(item["run_id"])
+    if set(attestation_by_path) != set(SYSTEM_BOUNDARY_PROBES.values()) or len(run_ids) != 1:
+        raise LedgerError(f"{label}: incomplete system-boundary attestations")
+    if any(
+        attestation_by_path[path]["errno"] != probes[name]["errno"]
+        for name, path in SYSTEM_BOUNDARY_PROBES.items()
+    ):
+        raise LedgerError(f"{label}: system probe and attestation evidence disagree")
+
+    gates = ledger.get("opaque_intrinsic_gates")
+    if not isinstance(gates, list) or len(gates) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: incomplete system-boundary opaque gates")
+    gate_paths = set()
+    allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    for gate in gates:
+        if (
+            not isinstance(gate, dict)
+            or not INTRINSIC_GATE_KEYS.issubset(gate)
+            or not set(gate).issubset(allowed_gate_keys)
+            or gate.get("path") not in SYSTEM_BOUNDARY_PROBES.values()
+            or gate.get("path") in gate_paths
+            or gate.get("reason") != "permission_denied_intrinsic"
+            or gate.get("verification") != "parent_scanner_system_boundary_confirmation"
+            or gate.get("reclaimable") is not False
+            or type(gate.get("errno")) is not int
+            or gate.get("errno") not in (1, 13)
+            or any(type(gate[key]) is not int or gate[key] < 0 for key in GATE_OPTIONAL_KEYS if key in gate)
+            or gate["errno"] != attestation_by_path[gate["path"]]["errno"]
+            or (
+                "path_device" in gate
+                and gate["path_device"] != attestation_by_path[gate["path"]]["identity_before"]["st_dev"]
+            )
+        ):
+            raise LedgerError(f"{label}: invalid system-boundary opaque gate")
+        gate_paths.add(gate["path"])
+    if gate_paths != set(SYSTEM_BOUNDARY_PROBES.values()):
+        raise LedgerError(f"{label}: incomplete system-boundary opaque gates")
 
 
 def validate_ledger(ledger: dict, *, label: str) -> None:
@@ -135,11 +345,12 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
 
 
 def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
-    """Reject legacy or partial ledgers on the attribution-diff path.
+    """Reject legacy or unattested partial ledgers on the attribution-diff path.
 
     ``--validate`` intentionally remains a structural/partial validation
     utility, but a history comparison must never present incomplete rows as a
-    full-disk attribution delta.
+    full-disk attribution delta. A scanner-attested system-boundary partial
+    aggregate is complete for this purpose.
     """
     envelope = ledger.get("coverage_envelope")
     accounting = ledger.get("accounting_equation")
@@ -150,7 +361,10 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
         raise LedgerError(f"{label}: full-attribution ledger required (mode is not complete)")
     if not isinstance(envelope, dict) or envelope.get("complete") is not True:
         raise LedgerError(f"{label}: full-attribution ledger required (coverage envelope incomplete)")
-    if envelope.get("fda_preflight_status") != "granted":
+    fda_status = envelope.get("fda_preflight_status")
+    if fda_status == "partial":
+        validate_partial_system_boundary_contract(ledger, label=label)
+    elif fda_status != "granted":
         raise LedgerError(f"{label}: full-attribution ledger required (FDA preflight not granted)")
     if (
         type(reachable) is not int

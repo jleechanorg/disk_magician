@@ -1,6 +1,21 @@
 import datetime, json, os, subprocess, tempfile, unittest, pathlib
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "render_topdown_ledger.py"
+SYSTEM_BOUNDARY_PATHS = (
+    "/System/Volumes/Data/.Spotlight-V100",
+    "/System/Volumes/Data/.fseventsd",
+    "/System/Volumes/Data/.DocumentRevisions-V100",
+)
+USER_PROBE_PATHS = {
+    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
+    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+}
+FORGED_USER_PROBE_PATHS = {
+    "mobile_sync": "/Users/reviewer/../../tmp/forged/Library/Application Support/MobileSync/Backup",
+    "mail": "/Users/reviewer/../../tmp/forged/Library/Mail",
+    "messages": "/Users/reviewer/../../tmp/forged/Library/Messages",
+}
 
 def run(frontier, out_dir):
     r = subprocess.run(
@@ -30,6 +45,10 @@ class TestRenderTopdownLedger(unittest.TestCase):
                 "unfinished_top_level_roots": 0,
             },
             "captured_at": captured,
+            "run_id": "run-1",
+            "run_started_at": 100.0,
+            "run_finished_at": 102.0,
+            "fda_probe_paths": dict(USER_PROBE_PATHS),
             "hostname": "testhost",
             "disk_used_kb": 500 * 1024 * 1024,
             "residual_kb": 524288,  # 0.5 GiB
@@ -55,6 +74,198 @@ class TestRenderTopdownLedger(unittest.TestCase):
         with open(path, "w") as f:
             json.dump(data, f)
         return path
+
+    def _attested_partial_fixture(self):
+        path = self._fixture(age_hours=1)
+        with open(path) as f:
+            data = json.load(f)
+        user_probes = {
+            name: {"path": path, "status": "readable"}
+            for name, path in USER_PROBE_PATHS.items()
+        }
+        data["coverage_envelope"].update(
+            fda_preflight_status="partial", fda_user_preflight_status="granted"
+        )
+        data["fda_preflight"] = {
+            "status": "partial",
+            "probes": {
+                **user_probes,
+                "spotlight": {"path": SYSTEM_BOUNDARY_PATHS[0], "status": "permission_denied_or_tcc", "errno": 13},
+                "fseventsd": {"path": SYSTEM_BOUNDARY_PATHS[1], "status": "permission_denied_or_tcc", "errno": 13},
+                "document_revisions": {"path": SYSTEM_BOUNDARY_PATHS[2], "status": "permission_denied_or_tcc", "errno": 13},
+            },
+        }
+        data["system_boundary_attestations"] = [
+            {
+                "run_id": "run-1", "path": path, "status": "permission_denied", "errno": 13,
+                "captured_at": 101.0, "captured_during_run": True, "path_is_symlink": False,
+                "verifier": {
+                    "effective_uid": 0,
+                    "access_context": "parent_scanner_confirmation",
+                    "fda": {"status": "granted", "probes": user_probes},
+                },
+                "identity_before": {"st_dev": 1, "st_ino": 2},
+                "identity_after": {"st_dev": 1, "st_ino": 2},
+            }
+            for path in SYSTEM_BOUNDARY_PATHS
+        ]
+        data["opaque_intrinsic_gates"] = [
+            {
+                "path": path, "reason": "permission_denied_intrinsic", "errno": 13,
+                "root_device": 1, "path_device": 1,
+                "verification": "parent_scanner_system_boundary_confirmation",
+                "reclaimable": False,
+            }
+            for path in SYSTEM_BOUNDARY_PATHS
+        ]
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def test_attested_partial_system_boundary_publishes_and_preserves_evidence(self):
+        frontier = self._attested_partial_fixture()
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        ledger_path = os.path.join(self.out_dir, "topdown-5g.json")
+        self.assertTrue(os.path.exists(ledger_path))
+        ledger = json.load(open(ledger_path))
+        self.assertEqual(ledger["coverage_envelope"]["fda_preflight_status"], "partial")
+        self.assertEqual(ledger["coverage_envelope"]["fda_user_preflight_status"], "granted")
+        self.assertEqual(len(ledger["system_boundary_attestations"]), 3)
+        self.assertEqual(
+            {gate["path"] for gate in ledger["opaque_intrinsic_gates"]},
+            set(SYSTEM_BOUNDARY_PATHS),
+        )
+        self.assertEqual(ledger["run_id"], "run-1")
+        self.assertEqual(ledger["run_started_at"], 100.0)
+        self.assertEqual(ledger["run_finished_at"], 102.0)
+        self.assertEqual(ledger["fda_probe_paths"], USER_PROBE_PATHS)
+        validated = subprocess.run(
+            ["python3", str(REPO / "scripts" / "history_diff.py"), "--validate", ledger_path],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertIn("valid full-attribution ledger", validated.stdout)
+
+    def test_transplanted_attestations_from_another_run_are_not_published(self):
+        frontier = self._attested_partial_fixture()
+        with open(frontier) as f:
+            data = json.load(f)
+        for attestation in data["system_boundary_attestations"]:
+            attestation["run_id"] = "run-2"
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+        status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
+        self.assertEqual(status["status"], "partial")
+
+    def test_attestation_outside_report_run_window_is_not_published(self):
+        frontier = self._attested_partial_fixture()
+        with open(frontier) as f:
+            data = json.load(f)
+        data["system_boundary_attestations"][0]["captured_at"] = 103.0
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+
+    def test_user_probe_substitution_is_not_published(self):
+        cases = [
+            ("single_probe_tmp", lambda d: d["fda_preflight"]["probes"]["mail"].update(path="/tmp/mail")),
+            ("catalog_tmp_exact", lambda d: (
+                d["fda_probe_paths"].update(mail="/tmp"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_foreign_home", lambda d: (
+                d["fda_probe_paths"].update(mail="/Users/other/Library/Mail"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/Users/other/Library/Mail"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/Users/other/Library/Mail") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_tmp_mail", lambda d: (
+                d["fda_probe_paths"].update(mail="/tmp/mail"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp/mail"),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp/mail") for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_tmp_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/tmp/Library/Application Support/MobileSync/Backup",
+                    mail="/tmp/Library/Mail",
+                    messages="/tmp/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"]["mobile_sync"].update(path="/tmp/Library/Application Support/MobileSync/Backup"),
+                d["fda_preflight"]["probes"]["mail"].update(path="/tmp/Library/Mail"),
+                d["fda_preflight"]["probes"]["messages"].update(path="/tmp/Library/Messages"),
+                [a["verifier"]["fda"]["probes"].update({
+                    "mobile_sync": {"path": "/tmp/Library/Application Support/MobileSync/Backup", "status": "readable"},
+                    "mail": {"path": "/tmp/Library/Mail", "status": "readable"},
+                    "messages": {"path": "/tmp/Library/Messages", "status": "readable"},
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("non_canonical_relative", lambda d: (
+                d["fda_probe_paths"].update(mail=os.path.join(os.path.expanduser("~"), "Mail")),
+                d["fda_preflight"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_dot_segments", lambda d: (
+                d["fda_probe_paths"].update(FORGED_USER_PROBE_PATHS),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in FORGED_USER_PROBE_PATHS.items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in FORGED_USER_PROBE_PATHS.items()
+                }) for a in d["system_boundary_attestations"]],
+            )),
+        ]
+        for name, mutate in cases:
+            with self.subTest(case=name):
+                frontier = self._attested_partial_fixture()
+                with open(frontier) as f:
+                    data = json.load(f)
+                mutate(data)
+                with open(frontier, "w") as f:
+                    json.dump(data, f)
+
+                rc, _, err = run(frontier, self.out_dir)
+
+                self.assertEqual(rc, 0, err)
+                self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+
+    def test_partial_system_boundary_contract_rejects_missing_or_malformed_evidence(self):
+        mutations = {
+            "missing_preflight": lambda d: d.pop("fda_preflight"),
+            "malformed_attestation": lambda d: d["system_boundary_attestations"][0].pop("verifier"),
+            "noncatalog_gate": lambda d: d["opaque_intrinsic_gates"][0].update(path="/Users/test/private"),
+            "unattested_gate": lambda d: d["opaque_intrinsic_gates"].pop(),
+            "incomplete_system_probe": lambda d: d["fda_preflight"]["probes"].update(
+                {"document_revisions": {"path": SYSTEM_BOUNDARY_PATHS[-1], "status": "readable"}}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                frontier = self._attested_partial_fixture()
+                with open(frontier) as f:
+                    data = json.load(f)
+                mutate(data)
+                with open(frontier, "w") as f:
+                    json.dump(data, f)
+
+                rc, _, err = run(frontier, self.out_dir)
+
+                self.assertEqual(rc, 0, err)
+                self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
 
     def test_fresh_report_writes_json_and_md(self):
         frontier = self._fixture(age_hours=1)
