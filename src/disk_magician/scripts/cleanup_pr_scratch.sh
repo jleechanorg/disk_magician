@@ -283,7 +283,7 @@ has_active_marker() {
 
 
 has_open_files() {
-  local target="$1" lsof_bin out rc=0
+  local target="$1" lsof_bin out rc=0 timeout_cmd="" timeout_sec="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-10}"
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
   elif [[ -x /usr/sbin/lsof ]]; then
@@ -299,10 +299,25 @@ has_open_files() {
     return 0
   fi
 
-  if [[ -d "$target" ]]; then
-    out="$("$lsof_bin" +w +D "$target" 2>/dev/null)" || rc=$?
+  if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+    timeout_cmd="$DISK_MAGICIAN_TIMEOUT_BIN"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout"
+  fi
+
+  local cmd=()
+  if [[ -n "$timeout_cmd" ]]; then
+    cmd=("$timeout_cmd" "$timeout_sec" "$lsof_bin")
   else
-    out="$("$lsof_bin" +w "$target" 2>/dev/null)" || rc=$?
+    cmd=("$lsof_bin")
+  fi
+
+  if [[ -d "$target" ]]; then
+    out="$("${cmd[@]}" +w +D "$target" 2>/dev/null)" || rc=$?
+  else
+    out="$("${cmd[@]}" +w "$target" 2>/dev/null)" || rc=$?
   fi
 
   if [[ -n "$out" ]]; then
@@ -314,6 +329,7 @@ has_open_files() {
   fi
   return 1
 }
+
 
 
 worktree_has_unsaved_work() {

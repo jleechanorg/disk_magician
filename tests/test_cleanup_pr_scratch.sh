@@ -69,11 +69,14 @@ assert_exists() {
 }
 
 assert_missing() {
-  local name="$1" path="$2"
+  local name="$1" path="$2" extra="${3:-}"
   if [[ ! -e "$path" ]]; then
     record_pass "$name"
   else
     record_fail "$name" "expected path to be absent: $path"
+    if [[ -n "$extra" ]]; then
+      printf '        | %s\n' "${extra//$'\n'/$'\n        | '}"
+    fi
   fi
 }
 
@@ -142,13 +145,13 @@ echo "pr" > "$T3_DIR/pr9999_report.md"
 set_old_mtime "$T3_DIR"
 
 T3_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T3_DIR" 2>&1)
-assert_missing "T3: pr[0-9]* matched and deleted" "$T3_DIR/pr832-evidence-fix"
-assert_missing "T3: pr-* matched and deleted" "$T3_DIR/pr-analyzer-123"
-assert_missing "T3: pr_* matched and deleted" "$T3_DIR/pr_custom_debug"
-assert_missing "T3: pr9* matched and deleted" "$T3_DIR/pr9001-deep-scan"
-assert_missing "T3: claude-* matched and deleted" "$T3_DIR/claude-mcp-scratch"
-assert_missing "T3: claude_* matched and deleted" "$T3_DIR/claude_ctx_temp"
-assert_missing "T3: pr9999_report.md file matched and deleted" "$T3_DIR/pr9999_report.md"
+assert_missing "T3: pr[0-9]* matched and deleted" "$T3_DIR/pr832-evidence-fix" "$T3_OUT"
+assert_missing "T3: pr-* matched and deleted" "$T3_DIR/pr-analyzer-123" "$T3_OUT"
+assert_missing "T3: pr_* matched and deleted" "$T3_DIR/pr_custom_debug" "$T3_OUT"
+assert_missing "T3: pr9* matched and deleted" "$T3_DIR/pr9001-deep-scan" "$T3_OUT"
+assert_missing "T3: claude-* matched and deleted" "$T3_DIR/claude-mcp-scratch" "$T3_OUT"
+assert_missing "T3: claude_* matched and deleted" "$T3_DIR/claude_ctx_temp" "$T3_OUT"
+assert_missing "T3: pr9999_report.md file matched and deleted" "$T3_DIR/pr9999_report.md" "$T3_OUT"
 assert_exists "T3: unrelated_user_code preserved" "$T3_DIR/unrelated_user_code"
 assert_exists "T3: unrelated_file.txt preserved" "$T3_DIR/unrelated_file.txt"
 assert_exists "T3: system-cache preserved" "$T3_DIR/system-cache"

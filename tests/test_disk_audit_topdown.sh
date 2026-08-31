@@ -68,6 +68,7 @@ scanner = SimpleNamespace(
     root=root,
     measured=measured,
     observed=observed,
+    fda_preflight={"status": "not_inferred", "probes": {}, "readable": [], "permission_denied_or_tcc": [], "errors": []},
     frontier_unfinished=[], deduped=[], warnings=[], nodes_processed=3,
     tracker=SimpleNamespace(peak=lambda: 2),
     level1_paths=[f"{root}/large", f"{root}/small-group"],

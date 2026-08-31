@@ -37,5 +37,8 @@ docs/.disk-report-scratch/
 # Shared venv symlink + linked worktrees (machine-local, never committed —
 # see "Shared Venv & Worktree Storage Policy" in CLAUDE.md)
 .venv
+venv/
+venv
 .worktrees/
 uv.lock
+
