@@ -5,6 +5,20 @@
 # Supports --discover to scan home folder for large untracked folders.
 set -euo pipefail
 
+# A snapshot writer may never invoke another snapshot writer.  The launchd
+# orchestrator is the sole owner of this process tree; fail closed if its
+# environment re-enters this script before another expensive scan starts.
+SNAPSHOT_REENTRY_DEPTH="${DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH:-0}"
+if ! [[ "$SNAPSHOT_REENTRY_DEPTH" =~ ^[0-9]+$ ]]; then
+  echo "Error: invalid DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH." >&2
+  exit 75
+fi
+if (( SNAPSHOT_REENTRY_DEPTH > 0 )); then
+  echo "Error: nested snapshot invocation rejected." >&2
+  exit 75
+fi
+export DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH=1
+
 OUTPUT=""
 DRY_RUN=false
 DISCOVER=false
