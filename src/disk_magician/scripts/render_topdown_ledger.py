@@ -58,7 +58,7 @@ def complete_coverage_envelope(report):
         or not item.get("path")
         or type(item.get("measured_kb")) is not int
         or item["measured_kb"] < 0
-        or item["measured_kb"] >= GRANULARITY_CEILING_KB
+        or item["measured_kb"] > GRANULARITY_CEILING_KB
         for item in buckets
     ):
         return False

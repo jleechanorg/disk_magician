@@ -122,7 +122,7 @@ dir_size_kb() {
     return
   fi
 
-  local remaining path_budget path_deadline result fallback_budget
+  local remaining path_budget path_deadline dua_budget result fallback_budget
   remaining=$(remaining_measurement_seconds)
   (( remaining > 0 )) || { echo ""; return; }
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
@@ -132,7 +132,12 @@ dir_size_kb() {
   (( path_budget > remaining )) && path_budget="$remaining"
   path_deadline=$(( $(date +%s) + path_budget ))
 
-  result=$(dua_size_kb "$path" "$path_budget")
+  # Do not let the primary scanner consume the entire shared deadline.  A
+  # bounded du fallback is valuable when dua stalls on a busy filesystem.
+  dua_budget=$(( path_budget * 70 / 100 ))
+  (( dua_budget < 1 )) && dua_budget=1
+  (( dua_budget > path_budget )) && dua_budget="$path_budget"
+  result=$(dua_size_kb "$path" "$dua_budget")
 
   if [[ -z "$result" ]]; then
     fallback_budget=$(( path_deadline - $(date +%s) ))

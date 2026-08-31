@@ -68,6 +68,31 @@ class TestRenderTopdownLedger(unittest.TestCase):
         status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
         self.assertEqual(status["status"], "published")
 
+    def test_exact_5g_bucket_publishes_and_history_accepts_it(self):
+        frontier = self._fixture(age_hours=1)
+        with open(frontier) as f:
+            data = json.load(f)
+        data["granularity_buckets"][0]["measured_kb"] = 5 * 1024 * 1024
+        data["accounting_equation"].update(
+            displayed_buckets_kb=6 * 1024 * 1024,
+            sub_granularity_tail_kb=517471232,
+        )
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, out, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        ledger = os.path.join(self.out_dir, "topdown-5g.json")
+        self.assertTrue(os.path.exists(ledger))
+        validated = subprocess.run(
+            ["python3", str(REPO / "scripts" / "history_diff.py"), "--validate", ledger],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertIn("valid full-attribution ledger", validated.stdout)
+
     def test_publisher_requires_every_full_attribution_evidence_gate(self):
         mutations = {
             "mode": lambda d: d.update(mode="partial"),

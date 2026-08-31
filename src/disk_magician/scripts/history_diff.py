@@ -43,20 +43,25 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
             raise LedgerError(f"{label}: bucket missing path/measured_kb: {item!r}")
         if kind not in ("dir", "file"):
             raise LedgerError(f"{label}: bucket {path!r} has unknown kind {kind!r}")
-        if kind == "dir" and size >= 5 * GIB_KB:
-            # A directory aggregate at/above the ceiling should have been
+        if kind == "dir" and size > 5 * GIB_KB:
+            # A directory aggregate above the ceiling should have been
             # broken into child buckets — refuse rather than diff a partial
             # picture. A single indivisible FILE (kind="file") is exempt: it
             # is already a leaf and cannot be decomposed further, mirroring
             # disk_frontier_scan.py's oversize_indivisible_files category.
             raise LedgerError(
                 f"{label}: bucket {path!r} is {size / GIB_KB:.2f} GiB — "
-                "unexplained >=5 GiB aggregate without child breakdown"
+                "unexplained >5 GiB aggregate without child breakdown"
             )
         total += size
     for item in ledger.get("oversize_indivisible_files", []):
         total += item.get("measured_kb", 0)
     total += ledger.get("purgeable_kb", 0)
+    accounting = ledger.get("accounting_equation") or {}
+    sub_granularity_tail = accounting.get("sub_granularity_tail_kb", 0)
+    if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
+        raise LedgerError(f"{label}: invalid sub-granularity tail")
+    total += sub_granularity_tail
     residual = ledger["residual_kb"]
     used = ledger["disk_used_kb"]
     if total + residual != used:

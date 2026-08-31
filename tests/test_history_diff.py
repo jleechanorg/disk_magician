@@ -62,13 +62,14 @@ class TestValidateLedger(unittest.TestCase):
             hd.validate_ledger(led, label="missing-key")
 
     def test_oversize_bucket_rejected(self):
-        led = ledger(6 * GIB_KB, 0, [{"path": "/big", "measured_kb": 5 * GIB_KB}])
+        led = ledger(6 * GIB_KB, 0, [{"path": "/big", "measured_kb": 5 * GIB_KB + 1}])
         with self.assertRaises(hd.LedgerError) as ctx:
             hd.validate_ledger(led, label="oversize")
         self.assertIn("/big", str(ctx.exception))
 
     def test_reconciliation_mismatch_rejected(self):
         led = ledger(10, 1, [{"path": "/a", "measured_kb": 5}])
+        led["accounting_equation"]["sub_granularity_tail_kb"] = 0
         with self.assertRaises(hd.LedgerError) as ctx:
             hd.validate_ledger(led, label="unbalanced")
         self.assertIn("reconciliation", str(ctx.exception))
