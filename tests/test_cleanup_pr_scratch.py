@@ -36,6 +36,7 @@ class TestCleanupPrScratch(unittest.TestCase):
 
     def _run_script(self, args, env_extra=None):
         env = os.environ.copy()
+        env.setdefault("DISK_MAGICIAN_SKIP_LSOF_CHECK", "1")
         if env_extra:
             env.update(env_extra)
         cmd = ["bash", str(SCRIPT_PATH), "--tmp-dir", str(self.tmp_dir)] + args
@@ -189,6 +190,46 @@ class TestCleanupPrScratch(unittest.TestCase):
         self.assertIn("Skipping protected root", res.stderr)
 
 
+    def test_open_files_protection(self):
+        """Directories containing open files are preserved."""
+        d1 = self.tmp_dir / "pr-busy-dir"
+        d1.mkdir()
+        busy_file = d1 / "busy.txt"
+        busy_file.write_text("busy content")
+        self._backdate(d1)
+
+        # Open file in python process holding lock/handle
+        with open(busy_file, "r") as fh:
+            res = self._run_script(["--clean", "--min-age-hours", "0"], env_extra={"DISK_MAGICIAN_SKIP_LSOF_CHECK": "0"})
+            self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
+            self.assertTrue(d1.exists())
+            self.assertIn("Skipping in-use path (open files)", res.stderr)
+
+    def test_lsof_error_fail_closed(self):
+        """If lsof fails or returns an error, treat as active (fail-closed)."""
+        d1 = self.tmp_dir / "pr-lsof-error"
+        d1.mkdir()
+        self._backdate(d1)
+
+        fake_lsof = self.test_root / "fake_lsof.sh"
+        fake_lsof.write_text("#!/bin/sh\nexit 2\n")
+        fake_lsof.chmod(0o755)
+
+        res = self._run_script(["--clean"], env_extra={"DISK_MAGICIAN_LSOF_BIN": str(fake_lsof), "DISK_MAGICIAN_SKIP_LSOF_CHECK": "0"})
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(d1.exists())
+        self.assertIn("fail-closed, treating as active", res.stderr)
+
+    def test_custom_pattern_and_min_age_days(self):
+        """--pattern and --min-age-days flags configure matching and thresholds."""
+        d1 = self.tmp_dir / "custom-branch-scratch"
+        d1.mkdir()
+        self._backdate(d1)
+
+        res = self._run_script(["--clean", "--pattern", "custom-*", "--min-age-days", "2"])
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse(d1.exists())
+
     def test_argument_validation(self):
         """Invalid flags or argument types return exit code 2."""
         res = self._run_script(["--nonexistent-flag"])
@@ -200,3 +241,4 @@ class TestCleanupPrScratch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
