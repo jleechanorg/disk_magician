@@ -117,6 +117,14 @@ class TestValidateLedger(unittest.TestCase):
         with self.assertRaises(hd.LedgerError):
             hd.validate_ledger(led, label="sized-intrinsic-gate")
 
+    def test_schema_v2_requires_opaque_intrinsic_gates(self):
+        led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        del led["opaque_intrinsic_gates"]
+
+        with self.assertRaises(hd.LedgerError) as ctx:
+            hd.validate_ledger(led, label="missing-intrinsic-gates")
+        self.assertIn("opaque_intrinsic_gates", str(ctx.exception))
+
     def test_positive_clone_adjustment_is_rejected(self):
         led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
         led["accounting_equation"]["clone_shared_adjustment_kb"] = 1

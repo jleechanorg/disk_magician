@@ -31,9 +31,11 @@ SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
 
 
 def validate_intrinsic_gates(ledger: dict, *, label: str) -> None:
-    gates = ledger.get("opaque_intrinsic_gates")
-    if gates is None:
+    if "opaque_intrinsic_gates" not in ledger:
+        if ledger.get("schema_version") == 2:
+            raise LedgerError(f"{label}: missing required key 'opaque_intrinsic_gates'")
         return  # structural partial/legacy ledgers may predate this metadata
+    gates = ledger["opaque_intrinsic_gates"]
     if not isinstance(gates, list):
         raise LedgerError(f"{label}: 'opaque_intrinsic_gates' must be a list")
     allowed = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
