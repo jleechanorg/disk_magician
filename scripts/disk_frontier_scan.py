@@ -1000,8 +1000,22 @@ class FrontierScanner:
             return False
 
         self.nodes_processed = len(result["records"])
-        self.frontier_unfinished.extend(pending_unfinished)
+        reconciled_errors = []
         for item in result["error_paths"]:
+            if item.get("reason") == "inventory_path_disappeared":
+                path = item.get("path")
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    pass
+                else:
+                    recovered_kb = self.measure_one(path, is_symlink=stat.S_ISLNK(st.st_mode))
+                    if recovered_kb is not None:
+                        result["records"][path] = recovered_kb
+                        continue
+            reconciled_errors.append(item)
+        self.frontier_unfinished.extend(pending_unfinished)
+        for item in reconciled_errors:
             try:
                 rel = os.path.relpath(item["path"], self.root)
                 depth = 0 if rel == os.curdir else len(rel.split(os.sep))
@@ -1014,7 +1028,7 @@ class FrontierScanner:
                 "were excluded from accepted ancestor totals"
             )
         self._apply_inventory_partition(
-            result["records"], result["error_paths"], manifest_items
+            result["records"], reconciled_errors, manifest_items
         )
         self.observed = result["records"]
         self.inventory_backend = "gdu_one_pass"

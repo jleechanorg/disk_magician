@@ -1,6 +1,7 @@
 import errno
 import pathlib
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -108,6 +109,45 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertEqual(report["frontier_unfinished"], [])
         self.assertTrue(report["coverage_envelope"]["complete"])
         self.assertEqual(report["top_level_ledger"][0]["status"], "measured_with_opaque_gates")
+
+    def test_reappeared_inventory_path_is_remeasured_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            failed = root / "System" / "Library" / "Speech"
+            failed.mkdir(parents=True)
+            safe = root / "System" / "Library" / "AssetsV2"
+            safe.mkdir(parents=True)
+            args = SimpleNamespace(
+                root=str(root), resolve_root=False, workers=1, max_depth=6,
+                max_nodes=100_000, wall_clock_cap=10, timeout_tiers=[10],
+                no_sibling_volumes=True, no_purgeable=True, granularity_gib=5,
+                shallow_enumeration_depth=0,
+            )
+            scanner = frontier.FrontierScanner(args)
+            scanner.start_time = frontier.time.time()
+            result = {
+                "usable": True,
+                "records": {str(safe): 4},
+                "error_paths": [{
+                    "path": str(failed),
+                    "reason": "inventory_path_disappeared",
+                }],
+                "unknown_errors": [], "returncode": 1,
+                "timed_out": False, "stderr": "",
+            }
+            with mock.patch.object(frontier, "run_gdu_inventory", return_value=result), \
+                 mock.patch.object(frontier, "run_du", return_value=852) as measure:
+                self.assertTrue(scanner.run_one_pass_inventory([(str(root / "System"), False)]))
+
+            self.assertEqual(scanner.frontier_unfinished, [])
+            self.assertEqual(scanner.measured[str(failed)], 852)
+            self.assertEqual(
+                [item for item in scanner.inventory_buckets if item["path"] == str(failed)],
+                [{"path": str(failed), "measured_kb": 852}],
+            )
+            self.assertEqual(measure.call_count, 1)
+            self.assertEqual(measure.call_args.args[0], str(failed))
+            self.assertLessEqual(measure.call_args.args[1], 1)
 
 
 if __name__ == "__main__":
