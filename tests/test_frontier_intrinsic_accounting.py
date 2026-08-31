@@ -16,6 +16,114 @@ GIB_KB = 1024 * 1024
 
 
 class TestIntrinsicGateAccounting(unittest.TestCase):
+    def test_root_without_scan_home_cannot_grant_user_fda_evidence(self):
+        invalid_homes = (
+            None,
+            "",
+            "relative/home",
+            "/Users/fixture/../other",
+            "/Users/fixture/",
+            "/var/root",
+            "/var/empty",
+            "/tmp",
+            "/private/tmp",
+            "/Users/fixture/child",
+        )
+        for home in invalid_homes:
+            with self.subTest(home=home), \
+                 mock.patch.object(frontier.os, "geteuid", return_value=0), \
+                 mock.patch.dict(
+                     frontier.os.environ,
+                     {} if home is None else {"DISK_MAGICIAN_SCAN_USER_HOME": home},
+                     clear=True,
+                 ):
+                self.assertIsNone(frontier.scan_user_home())
+                paths = frontier.fda_probe_paths("/fixture")
+                self.assertNotIn("mobile_sync", paths)
+                self.assertIsNone(frontier.fda_user_probe_evidence(frontier.fda_preflight(paths)))
+
+    def test_root_scan_home_rejects_symlink_alias(self):
+        with mock.patch.object(frontier.os, "geteuid", return_value=0), \
+             mock.patch.dict(
+                 frontier.os.environ,
+                 {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/link"},
+                 clear=True,
+             ), \
+             mock.patch.object(frontier.os.path, "realpath", return_value="/Users/real"):
+            self.assertIsNone(frontier.scan_user_home())
+            paths = frontier.fda_probe_paths("/fixture")
+            self.assertNotIn("mobile_sync", paths)
+            self.assertIsNone(frontier.fda_user_probe_evidence(frontier.fda_preflight(paths)))
+
+    def test_root_scan_home_selects_exact_user_fda_probe_paths(self):
+        with mock.patch.object(frontier.os, "geteuid", return_value=0), \
+             mock.patch.dict(
+                 frontier.os.environ,
+                 {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/fixture"},
+                 clear=True,
+             ):
+            self.assertEqual(frontier.scan_user_home(), "/Users/fixture")
+            self.assertEqual(
+                frontier.fda_probe_paths("/fixture"),
+                {
+                    "mobile_sync": "/Users/fixture/Library/Application Support/MobileSync/Backup",
+                    "mail": "/Users/fixture/Library/Mail",
+                    "messages": "/Users/fixture/Library/Messages",
+                },
+            )
+
+    def test_nonroot_controlled_home_selects_exact_user_fda_probe_paths_and_report_catalog(self):
+        expected = {
+            "mobile_sync": "/Users/fixture/Library/Application Support/MobileSync/Backup",
+            "mail": "/Users/fixture/Library/Mail",
+            "messages": "/Users/fixture/Library/Messages",
+        }
+        scanner = self.scanner(effective_uid=501)
+        with mock.patch.object(frontier.os, "geteuid", return_value=501), \
+             mock.patch.dict(frontier.os.environ, {"HOME": "/Users/fixture"}, clear=True):
+            self.assertEqual(frontier.scan_user_home(), "/Users/fixture")
+            self.assertEqual(frontier.fda_probe_paths("/fixture"), expected)
+            scanner.fda_probe_catalog = frontier.fda_probe_paths(scanner.root)
+            report = self.report(scanner)
+
+        self.assertEqual(report["fda_probe_paths"], expected)
+
+    def test_report_carries_configured_root_scan_home_probe_paths(self):
+        scanner = self.scanner()
+        with mock.patch.object(frontier.os, "geteuid", return_value=0), \
+             mock.patch.dict(
+                 frontier.os.environ,
+                 {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/fixture"},
+                 clear=True,
+             ):
+            scanner.fda_probe_catalog = frontier.fda_probe_paths(scanner.root)
+            report = self.report(scanner)
+
+        self.assertEqual(
+            report["fda_probe_paths"],
+            {
+                "mobile_sync": "/Users/fixture/Library/Application Support/MobileSync/Backup",
+                "mail": "/Users/fixture/Library/Mail",
+                "messages": "/Users/fixture/Library/Messages",
+            },
+        )
+
+    def test_report_preserves_empty_root_scan_home_catalog(self):
+        scanner = self.scanner()
+        scanner.fda_probe_catalog = {}
+        with mock.patch.object(frontier.os, "geteuid", return_value=0), \
+             mock.patch.dict(
+                 frontier.os.environ,
+                 {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/fixture"},
+                 clear=True,
+             ):
+            report = self.report(scanner)
+
+        self.assertEqual(
+            report["fda_probe_paths"],
+            {"mobile_sync": None, "mail": None, "messages": None},
+        )
+
     @staticmethod
     def valid_attestation(**overrides):
         attestation = {
@@ -108,7 +216,11 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         path = frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"]
         identity = SimpleNamespace(st_dev=7, st_ino=8, st_mode=stat.S_IFDIR)
         fda = self.valid_attestation()["verifier"]["fda"]
-        with mock.patch.object(frontier.os.path, "realpath", return_value=path), \
+        with mock.patch.object(
+            frontier.os.path,
+            "realpath",
+            side_effect=lambda candidate: path if candidate == path else candidate,
+        ), \
              mock.patch.object(frontier.os.path, "islink", return_value=False), \
              mock.patch.object(frontier.os, "lstat", return_value=identity), \
              mock.patch.object(

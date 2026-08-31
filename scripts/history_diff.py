@@ -87,6 +87,15 @@ def is_normalized_absolute_path(path):
     )
 
 
+def is_valid_scan_user_home(path):
+    return (
+        is_normalized_absolute_path(path)
+        and os.path.dirname(path) == "/Users"
+        and bool(os.path.basename(path))
+        and os.path.realpath(path) == path
+    )
+
+
 def validate_user_probe_catalog(catalog: dict, *, label: str) -> None:
     if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
         raise LedgerError(f"{label}: partial FDA ledger has incomplete user probe catalog")
@@ -97,7 +106,7 @@ def validate_user_probe_catalog(catalog: dict, *, label: str) -> None:
     if not mail_path.endswith(expected_mail_suffix):
         raise LedgerError(f"{label}: partial FDA ledger has non-canonical mail probe path")
     user_home = mail_path[:-len(expected_mail_suffix)]
-    if not user_home or not pathlib.PurePosixPath(user_home).is_absolute():
+    if not is_valid_scan_user_home(user_home):
         raise LedgerError(f"{label}: partial FDA ledger has invalid user home path")
     if (
         user_home == "/tmp"

@@ -89,13 +89,26 @@ GDU_FTS_ERROR_RE = re.compile(
 )
 
 
+def scan_user_home():
+    """Return the user home whose FDA-sensitive paths are in scanner scope."""
+    if os.geteuid() != 0:
+        configured_home = os.path.expanduser("~")
+        return configured_home if is_normalized_absolute_path(configured_home) else None
+    configured_home = os.environ.get("DISK_MAGICIAN_SCAN_USER_HOME")
+    if not is_valid_scan_user_home(configured_home):
+        return None
+    return configured_home
+
+
 def fda_probe_paths(root):
     """Return paths whose readability represents the scanner's actual scope."""
-    home = os.path.expanduser("~")
-    paths = {
-        name: os.path.join(home, relative)
-        for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
-    }
+    home = scan_user_home()
+    paths = {}
+    if home is not None:
+        paths.update({
+            name: os.path.join(home, relative)
+            for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
+        })
     if os.path.realpath(root) == DEFAULT_ROOT:
         paths.update(FDA_SYSTEM_PROBE_PATHS)
     return paths
@@ -181,6 +194,15 @@ def is_normalized_absolute_path(path):
     )
 
 
+def is_valid_scan_user_home(path):
+    return (
+        is_normalized_absolute_path(path)
+        and os.path.dirname(path) == "/Users"
+        and bool(os.path.basename(path))
+        and os.path.realpath(path) == path
+    )
+
+
 def valid_user_probe_catalog(catalog):
     if not isinstance(catalog, dict) or set(catalog) != set(FDA_PROBE_RELATIVE_PATHS):
         return False
@@ -191,7 +213,7 @@ def valid_user_probe_catalog(catalog):
     if not mail_path.endswith(expected_mail_suffix):
         return False
     user_home = mail_path[:-len(expected_mail_suffix)]
-    if not user_home or not os.path.isabs(user_home):
+    if not is_valid_scan_user_home(user_home):
         return False
     if (
         user_home == "/tmp"
@@ -1916,6 +1938,9 @@ def build_report(
         "fda_preflight_status": fda_status["status"],
         "fda_user_preflight_status": "granted" if user_fda is not None else "indeterminate",
     }
+    fda_probe_catalog = getattr(scanner, "fda_probe_catalog", None)
+    if fda_probe_catalog is None:
+        fda_probe_catalog = fda_probe_paths(scanner.root)
     limits = {
         "sudo_used": effective_uid == 0,
         "full_disk_access": fda_status["status"],
@@ -1943,7 +1968,7 @@ def build_report(
         "run_started_at": run_started_at,
         "run_finished_at": run_finished_at,
         "fda_probe_paths": {
-            name: (getattr(scanner, "fda_probe_catalog", None) or fda_probe_paths(scanner.root))[name]
+            name: fda_probe_catalog.get(name)
             for name in FDA_PROBE_RELATIVE_PATHS
         },
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

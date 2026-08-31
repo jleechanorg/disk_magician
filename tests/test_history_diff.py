@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "history_diff.py"
@@ -254,11 +255,6 @@ class TestValidateLedger(unittest.TestCase):
                 d["fda_preflight"]["probes"]["mail"].update(path="/tmp"),
                 [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp") for a in d["system_boundary_attestations"]],
             )),
-            ("catalog_foreign_home", lambda d: (
-                d["fda_probe_paths"].update(mail="/Users/other/Library/Mail"),
-                d["fda_preflight"]["probes"]["mail"].update(path="/Users/other/Library/Mail"),
-                [a["verifier"]["fda"]["probes"]["mail"].update(path="/Users/other/Library/Mail") for a in d["system_boundary_attestations"]],
-            )),
             ("catalog_tmp_home", lambda d: (
                 d["fda_probe_paths"].update(
                     mobile_sync="/tmp/Library/Application Support/MobileSync/Backup",
@@ -272,6 +268,36 @@ class TestValidateLedger(unittest.TestCase):
                     "mobile_sync": {"path": "/tmp/Library/Application Support/MobileSync/Backup", "status": "readable"},
                     "mail": {"path": "/tmp/Library/Mail", "status": "readable"},
                     "messages": {"path": "/tmp/Library/Messages", "status": "readable"},
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_var_root_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/var/root/Library/Application Support/MobileSync/Backup",
+                    mail="/var/root/Library/Mail",
+                    messages="/var/root/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_var_empty_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/var/empty/Library/Application Support/MobileSync/Backup",
+                    mail="/var/empty/Library/Mail",
+                    messages="/var/empty/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
                 }) for a in d["system_boundary_attestations"]],
             )),
             ("non_canonical_relative", lambda d: (
@@ -297,6 +323,15 @@ class TestValidateLedger(unittest.TestCase):
                 mutate(candidate)
                 with self.assertRaises(hd.LedgerError):
                     hd.validate_full_attribution_ledger(candidate, label=name)
+
+    def test_partial_contract_rejects_symlink_alias_home(self):
+        catalog = {
+            name: os.path.join("/Users/link", relative)
+            for name, relative in hd.USER_PROBE_RELATIVE_PATHS.items()
+        }
+        with mock.patch.object(hd.os.path, "realpath", return_value="/Users/real"):
+            with self.assertRaises(hd.LedgerError):
+                hd.validate_user_probe_catalog(catalog, label="symlink-alias")
 
 
 class TestComputeDeltas(unittest.TestCase):

@@ -115,6 +115,54 @@ PY
 [[ "$FDA_SCOPE_OUT" == "True True True" ]] && ok "FDA preflight includes protected system roots only for full-disk scans" \
   || bad "FDA preflight scope does not cover full-disk protected roots: $FDA_SCOPE_OUT"
 
+ROOT_FDA_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(m.os.environ, {}, clear=True):
+    missing = m.fda_probe_paths("/fixture")
+    missing_evidence = m.fda_user_probe_evidence(m.fda_preflight(missing))
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(
+         m.os.environ,
+         {"DISK_MAGICIAN_SCAN_USER_HOME": "/var/root"},
+         clear=True,
+     ):
+    rejected_root = m.fda_probe_paths("/fixture")
+    rejected_root_evidence = m.fda_user_probe_evidence(
+        m.fda_preflight(rejected_root)
+    )
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(
+         m.os.environ,
+         {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/fixture"},
+         clear=True,
+     ):
+    configured = m.fda_probe_paths("/fixture")
+
+print(
+    "mobile_sync" not in missing,
+    missing_evidence is None,
+    configured == {
+        "mobile_sync": "/Users/fixture/Library/Application Support/MobileSync/Backup",
+        "mail": "/Users/fixture/Library/Mail",
+        "messages": "/Users/fixture/Library/Messages",
+    },
+    "mobile_sync" not in rejected_root,
+    rejected_root_evidence is None,
+)
+PY
+)
+[[ "$ROOT_FDA_OUT" == "True True True True True" ]] && ok "root FDA probes reject /var/root and fail closed without explicit home" \
+  || bad "root FDA probe home handling is unsafe: $ROOT_FDA_OUT"
+
 # ─────────────────────────────────────────────────────────────
 section "1. Valid JSON + required schema keys"
 T1="$WORK/t1"

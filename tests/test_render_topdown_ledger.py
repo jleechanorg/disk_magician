@@ -1,6 +1,9 @@
-import datetime, json, os, subprocess, tempfile, unittest, pathlib
+import datetime, json, os, subprocess, tempfile, unittest, pathlib, sys
+from unittest import mock
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "render_topdown_ledger.py"
+sys.path.insert(0, str(REPO / "scripts"))
+import render_topdown_ledger as renderer  # noqa: E402
 SYSTEM_BOUNDARY_PATHS = (
     "/System/Volumes/Data/.Spotlight-V100",
     "/System/Volumes/Data/.fseventsd",
@@ -187,11 +190,6 @@ class TestRenderTopdownLedger(unittest.TestCase):
                 d["fda_preflight"]["probes"]["mail"].update(path="/tmp"),
                 [a["verifier"]["fda"]["probes"]["mail"].update(path="/tmp") for a in d["system_boundary_attestations"]],
             )),
-            ("catalog_foreign_home", lambda d: (
-                d["fda_probe_paths"].update(mail="/Users/other/Library/Mail"),
-                d["fda_preflight"]["probes"]["mail"].update(path="/Users/other/Library/Mail"),
-                [a["verifier"]["fda"]["probes"]["mail"].update(path="/Users/other/Library/Mail") for a in d["system_boundary_attestations"]],
-            )),
             ("catalog_tmp_mail", lambda d: (
                 d["fda_probe_paths"].update(mail="/tmp/mail"),
                 d["fda_preflight"]["probes"]["mail"].update(path="/tmp/mail"),
@@ -210,6 +208,36 @@ class TestRenderTopdownLedger(unittest.TestCase):
                     "mobile_sync": {"path": "/tmp/Library/Application Support/MobileSync/Backup", "status": "readable"},
                     "mail": {"path": "/tmp/Library/Mail", "status": "readable"},
                     "messages": {"path": "/tmp/Library/Messages", "status": "readable"},
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_var_root_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/var/root/Library/Application Support/MobileSync/Backup",
+                    mail="/var/root/Library/Mail",
+                    messages="/var/root/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }) for a in d["system_boundary_attestations"]],
+            )),
+            ("catalog_var_empty_home", lambda d: (
+                d["fda_probe_paths"].update(
+                    mobile_sync="/var/empty/Library/Application Support/MobileSync/Backup",
+                    mail="/var/empty/Library/Mail",
+                    messages="/var/empty/Library/Messages",
+                ),
+                d["fda_preflight"]["probes"].update({
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
+                }),
+                [a["verifier"]["fda"].update(probes={
+                    name: {"path": path, "status": "readable"}
+                    for name, path in d["fda_probe_paths"].items()
                 }) for a in d["system_boundary_attestations"]],
             )),
             ("non_canonical_relative", lambda d: (
@@ -242,6 +270,14 @@ class TestRenderTopdownLedger(unittest.TestCase):
 
                 self.assertEqual(rc, 0, err)
                 self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+
+    def test_user_probe_catalog_rejects_symlink_alias_home(self):
+        catalog = {
+            name: os.path.join("/Users/link", relative)
+            for name, relative in renderer.USER_PROBE_RELATIVE_PATHS.items()
+        }
+        with mock.patch.object(renderer.os.path, "realpath", return_value="/Users/real"):
+            self.assertFalse(renderer.valid_user_probe_catalog(catalog))
 
     def test_partial_system_boundary_contract_rejects_missing_or_malformed_evidence(self):
         mutations = {
