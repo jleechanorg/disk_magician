@@ -1002,7 +1002,10 @@ class FrontierScanner:
         self.nodes_processed = len(result["records"])
         reconciled_errors = []
         for item in result["error_paths"]:
-            if item.get("reason") == "inventory_path_disappeared":
+            if item.get("reason") in (
+                "inventory_path_disappeared",
+                "inventory_interrupted_system_call",
+            ):
                 path = item.get("path")
                 try:
                     st = os.lstat(path)

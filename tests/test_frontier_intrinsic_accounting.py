@@ -149,6 +149,43 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             self.assertEqual(measure.call_args.args[0], str(failed))
             self.assertLessEqual(measure.call_args.args[1], 1)
 
+    def test_reappeared_interrupted_inventory_path_is_remeasured_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            failed = root / "Users" / "jleechan" / "Evernote"
+            failed.mkdir(parents=True)
+            args = SimpleNamespace(
+                root=str(root), resolve_root=False, workers=1, max_depth=6,
+                max_nodes=100_000, wall_clock_cap=10, timeout_tiers=[10],
+                no_sibling_volumes=True, no_purgeable=True, granularity_gib=5,
+                shallow_enumeration_depth=0,
+            )
+            scanner = frontier.FrontierScanner(args)
+            scanner.start_time = frontier.time.time()
+            result = {
+                "usable": True,
+                "records": {},
+                "error_paths": [{
+                    "path": str(failed),
+                    "reason": "inventory_interrupted_system_call",
+                }],
+                "unknown_errors": [], "returncode": 1,
+                "timed_out": False, "stderr": "",
+            }
+            with mock.patch.object(frontier, "run_gdu_inventory", return_value=result), \
+                 mock.patch.object(frontier, "run_du", return_value=852) as measure:
+                self.assertTrue(scanner.run_one_pass_inventory([(str(root / "Users"), False)]))
+
+            self.assertEqual(scanner.frontier_unfinished, [])
+            self.assertEqual(scanner.measured[str(failed)], 852)
+            self.assertEqual(
+                scanner.inventory_buckets,
+                [{"path": str(failed), "measured_kb": 852}],
+            )
+            self.assertEqual(measure.call_count, 1)
+            self.assertEqual(measure.call_args.args[0], str(failed))
+            self.assertLessEqual(measure.call_args.args[1], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
