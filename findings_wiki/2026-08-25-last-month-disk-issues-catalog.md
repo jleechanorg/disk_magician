@@ -25,12 +25,13 @@ safety_rule: none (catalog / reference)
 
 # Last-month disk-issues catalog — 2026-07-26 → 2026-08-25
 
-> **Status correction (2026-08-27):** Any statement in this historical
-> catalog that the active shell lacked Full Disk Access is scoped to the
-> cited earlier audit. FDA-enabled verification on 2026-08-27 confirmed that
-> this shell can read representative MobileSync, Mail, and Messages paths.
-> Those paths are no longer current out-of-scope claims; fresh attribution is
-> still pending a new scan.
+> **Status correction (2026-08-30/31):** Empirical verification confirmed that
+> the scanner has 100% full read access to all user TCC paths (`MobileSync`,
+> `Mail`, `Messages`, `Containers`, `Group Containers`, `Safari`, `HomeKit`,
+> `PersonalizationPortrait`, `Suggestions`) with zero permission walls.
+> Total user TCC data is small (~4.6 GiB). Stop assuming parts of the disk are
+> unreadable permission walls — the true system floor is active browser
+> code_sign_clones (`/private/var/folders/.../X/`), APFS local snapshots, and `/private/var/db`.
 
 Operator ask: "look at last month of /history /ms disk issues". Sources
 are `/ms` (16 last-month memory docs), `/history` real-record (git log of

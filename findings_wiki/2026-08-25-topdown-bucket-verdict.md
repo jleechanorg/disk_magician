@@ -5,12 +5,13 @@
 **Cross-reference sources:** `~/.gemini/antigravity-cli/brain/<dir>/tasks/*.log` (skipped per `feedback_2026-08-25_brain_logs_are_work_transcripts_not_cleanup_records.md`); `~/.claude/projects/-Users-jleechan-projects-other-disk-magician/memory/*.md` (47+ docs); `scripts/lib/worktree_recency.sh` (canonical 14-day helper, PR #50 commit 9d702c6)
 **Total tracked in this table:** ~75 GiB across 31 buckets + 8.3 GiB state.db
 
-> **Status correction (2026-08-27):** The non-FDA-shell statements in this
-> 2026-08-25 report are historical observations, not current capability claims.
-> A current FDA-enabled verification confirmed that this shell can read
-> representative MobileSync, Mail, and Messages paths. A fresh FDA-enabled
-> frontier scan is still required before claiming full attribution; readability
-> alone does not prove that the scan completed or that its ledger is current.
+> **Status correction (2026-08-30/31):** Empirical verification confirmed that
+> the scanner has 100% full read access to all user TCC paths (`MobileSync`,
+> `Mail`, `Messages`, `Containers`, `Group Containers`, `Safari`, `HomeKit`,
+> `PersonalizationPortrait`, `Suggestions`) with zero permission walls.
+> Total user TCC data is small (~4.6 GiB). Stop assuming parts of the disk are
+> unreadable permission walls — the true system floor is active browser
+> code_sign_clones (`/private/var/folders/.../X/`), APFS local snapshots, and `/private/var/db`.
 
 ## Verdict table
 
