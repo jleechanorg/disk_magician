@@ -363,8 +363,10 @@ def collect_hot_dir_sizes(home: Path, run: Runner, hot_dirs: Sequence[str] = DEF
     """
     sizes = {}
     for name in hot_dirs:
-        if name.startswith("/") or name.startswith("~"):
-            path = Path(os.path.expanduser(name)) if name.startswith("~") else Path(name)
+        if name.startswith("~"):
+            path = Path(os.path.expanduser(name))
+        elif name.startswith("/"):
+            path = Path(name)
         else:
             path = home / name
         sizes[name] = _du_kb(path, run) if path.exists() else None
