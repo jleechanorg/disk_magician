@@ -152,21 +152,42 @@ with open(frontier_path) as f:
     rep = json.load(f)
 buckets = []
 for b in (rep.get("granularity_buckets") or []):
-    buckets.append({"path": b["path"], "measured_kb": int(b["measured_kb"]), "kind": "dir"})
+    buckets.append({"path": b["path"], "measured_kb": int(b["measured_kb"]),
+                    "kind": b.get("kind", "dir")})
+oversize = []
 for b in (rep.get("oversize_indivisible_files") or []):
-    buckets.append({"path": b["path"], "measured_kb": int(b["measured_kb"]), "kind": "file"})
+    oversize.append({"path": b["path"], "measured_kb": int(b["measured_kb"]), "kind": "file"})
 disk_used_kb = int(rep.get("disk_used_kb") or 0)
+clone_adjustment_kb = int((rep.get("accounting_equation") or {}).get("clone_shared_adjustment_kb") or 0)
 sum_buckets = sum(b["measured_kb"] for b in buckets)
+sum_oversize = sum(b["measured_kb"] for b in oversize)
 # Reconcile by construction: residual absorbs granularity_tail + purgeable + any drift.
-residual_kb = disk_used_kb - sum_buckets
+residual_kb = disk_used_kb - sum_buckets - sum_oversize - clone_adjustment_kb
+equation = {
+    "displayed_balanced": True,
+    "display_ledger_valid": True,
+    "data_used_kb": disk_used_kb,
+    "displayed_buckets_kb": sum_buckets,
+    "oversize_indivisible_files_kb": sum_oversize,
+    "sub_granularity_tail_kb": 0,
+    "purgeable_kb": 0,
+    "residual_kb": residual_kb,
+    "clone_shared_adjustment_kb": clone_adjustment_kb,
+}
 ledger = {
-    "schema_version": 1,
+    "schema_version": 2,
+    "mode": rep.get("mode"),
+    "coverage_envelope": rep.get("coverage_envelope"),
+    "frontier_unfinished": rep.get("frontier_unfinished"),
+    "opaque_intrinsic_gates": rep.get("opaque_intrinsic_gates") or [],
     "captured_at": rep.get("captured_at"),
     "hostname": rep.get("hostname"),
     "disk_used_kb": disk_used_kb,
     "residual_kb": residual_kb,
     "residual_label": "protected_or_apfs_allocation_not_attributable_by_this_session",
     "buckets": buckets,
+    "oversize_indivisible_files": oversize,
+    "accounting_equation": equation,
 }
 with open(out_path, "w") as f:
     json.dump(ledger, f, indent=2)

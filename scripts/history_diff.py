@@ -25,7 +25,44 @@ class LedgerError(ValueError):
     """Ledger fails schema, the <=5 GiB ceiling, or reconciliation."""
 
 
+INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
+INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
+SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
+
+
+def validate_intrinsic_gates(ledger: dict, *, label: str) -> None:
+    gates = ledger.get("opaque_intrinsic_gates")
+    if gates is None:
+        return  # structural partial/legacy ledgers may predate this metadata
+    if not isinstance(gates, list):
+        raise LedgerError(f"{label}: 'opaque_intrinsic_gates' must be a list")
+    allowed = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    for item in gates:
+        if (
+            not isinstance(item, dict)
+            or not INTRINSIC_GATE_KEYS.issubset(item)
+            or not set(item).issubset(allowed)
+            or not all(
+                isinstance(item.get(key), str) and item[key]
+                for key in ("path", "reason", "verification")
+            )
+            or type(item.get("reclaimable")) is not bool
+            or item["reclaimable"] is not False
+            or SIZE_KEYS.intersection(item)
+            or any(
+                type(item[key]) is not int or item[key] < 0
+                for key in INTRINSIC_GATE_OPTIONAL_KEYS
+                if key in item
+            )
+        ):
+            raise LedgerError(f"{label}: invalid opaque intrinsic gate: {item!r}")
+
+
 def validate_ledger(ledger: dict, *, label: str) -> None:
+    if not isinstance(ledger, dict):
+        raise LedgerError(f"{label}: ledger must be an object")
+    if ledger.get("schema_version") != 2:
+        raise LedgerError(f"{label}: unsupported schema_version (expected 2)")
     for key in ("disk_used_kb", "residual_kb"):
         if key not in ledger:
             raise LedgerError(f"{label}: missing required key {key!r}")
@@ -39,14 +76,16 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         path = item.get("path")
         size = item.get("measured_kb")
         kind = item.get("kind", "dir")
-        if not path or not isinstance(size, int):
+        if not path or type(size) is not int or size < 0:
             raise LedgerError(f"{label}: bucket missing path/measured_kb: {item!r}")
-        if kind not in ("dir", "file"):
+        if kind not in ("dir", "file", "direct_allocation_segment"):
             raise LedgerError(f"{label}: bucket {path!r} has unknown kind {kind!r}")
-        if kind == "dir" and size > 5 * GIB_KB:
+        if kind in ("dir", "direct_allocation_segment") and size > 5 * GIB_KB:
             # A directory aggregate above the ceiling should have been
             # broken into child buckets — refuse rather than diff a partial
-            # picture. A single indivisible FILE (kind="file") is exempt: it
+            # picture. A direct-allocation segment above the ceiling is also
+            # invalid because it claims a bounded synthetic slice. A single
+            # indivisible FILE (kind="file") is exempt: it
             # is already a leaf and cannot be decomposed further, mirroring
             # disk_frontier_scan.py's oversize_indivisible_files category.
             raise LedgerError(
@@ -54,21 +93,43 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
                 "unexplained >5 GiB aggregate without child breakdown"
             )
         total += size
-    for item in ledger.get("oversize_indivisible_files", []):
-        total += item.get("measured_kb", 0)
-    total += ledger.get("purgeable_kb", 0)
+    oversize = ledger.get("oversize_indivisible_files", [])
+    if not isinstance(oversize, list):
+        raise LedgerError(f"{label}: 'oversize_indivisible_files' must be a list")
+    for item in oversize:
+        if (
+            not isinstance(item, dict)
+            or not item.get("path")
+            or type(item.get("measured_kb")) is not int
+            or item["measured_kb"] < 0
+        ):
+            raise LedgerError(f"{label}: invalid oversize indivisible file: {item!r}")
+        total += item["measured_kb"]
+    purgeable = ledger.get("purgeable_kb", 0)
+    if type(purgeable) is not int or purgeable < 0:
+        raise LedgerError(f"{label}: invalid purgeable_kb")
+    total += purgeable
     accounting = ledger.get("accounting_equation") or {}
     sub_granularity_tail = accounting.get("sub_granularity_tail_kb", 0)
     if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
         raise LedgerError(f"{label}: invalid sub-granularity tail")
     total += sub_granularity_tail
+    clone_adjustment = accounting.get("clone_shared_adjustment_kb", 0)
+    if type(clone_adjustment) is not int or clone_adjustment > 0:
+        raise LedgerError(f"{label}: invalid clone_shared_adjustment_kb (must be signed <= 0)")
+    if ledger.get("accounting_equation") is not None and "clone_shared_adjustment_kb" not in accounting:
+        raise LedgerError(f"{label}: missing required accounting field 'clone_shared_adjustment_kb'")
+    total += clone_adjustment
     residual = ledger["residual_kb"]
     used = ledger["disk_used_kb"]
+    if type(residual) is not int or residual < 0 or type(used) is not int or used < 0:
+        raise LedgerError(f"{label}: disk_used_kb and residual_kb must be non-negative integers")
     if total + residual != used:
         raise LedgerError(
             f"{label}: buckets ({total} KiB) + residual ({residual} KiB) "
             f"!= disk_used_kb ({used} KiB) — reconciliation failed"
         )
+    validate_intrinsic_gates(ledger, label=label)
 
 
 def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
@@ -104,13 +165,16 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
     keys = ("data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
             "sub_granularity_tail_kb", "purgeable_kb", "residual_kb")
     values = [accounting.get(key) for key in keys]
+    clone_adjustment = accounting.get("clone_shared_adjustment_kb")
     buckets = ledger.get("granularity_buckets", ledger.get("buckets", []))
     oversize = ledger.get("oversize_indivisible_files", [])
     if (
         accounting.get("display_ledger_valid") is not True
         or not all(type(value) is int and value >= 0 for value in values)
+        or type(clone_adjustment) is not int
+        or clone_adjustment > 0
         or values[0] != ledger.get("disk_used_kb")
-        or values[0] != sum(values[1:])
+        or values[0] != sum(values[1:]) + clone_adjustment
         or values[1] != sum(item.get("measured_kb", 0) for item in buckets)
         or values[2] != sum(item.get("measured_kb", 0) for item in oversize)
     ):

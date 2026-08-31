@@ -22,7 +22,7 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
     bucket_total = sum(item.get("measured_kb", 0) for item in buckets)
     tail = disk_used_kb - bucket_total - residual_kb
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "complete",
         "coverage_envelope": {
             "complete": True,
@@ -37,6 +37,7 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
             "data_used_kb": disk_used_kb, "displayed_buckets_kb": bucket_total,
             "oversize_indivisible_files_kb": 0, "sub_granularity_tail_kb": tail,
             "purgeable_kb": 0, "residual_kb": residual_kb,
+            "clone_shared_adjustment_kb": 0,
         },
         "captured_at": captured_at,
         "hostname": "sandbox-host",
@@ -44,6 +45,7 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
         "residual_kb": residual_kb,
         "residual_label": residual_label,
         "buckets": buckets,
+        "opaque_intrinsic_gates": [],
     }
 
 
@@ -90,6 +92,45 @@ class TestValidateLedger(unittest.TestCase):
             hd.validate_ledger(oversize_dir, label="oversize-dir")
         oversize_file = ledger(6 * GIB_KB, 0, [{"path": "/big.img", "measured_kb": 6 * GIB_KB, "kind": "file"}])
         hd.validate_ledger(oversize_file, label="oversize-file")  # must not raise
+
+    def test_direct_allocation_segment_is_a_bounded_bucket(self):
+        led = ledger(3 * GIB_KB, 1 * GIB_KB, [{
+            "path": "/data [direct files + directory metadata]",
+            "measured_kb": 1 * GIB_KB,
+            "kind": "direct_allocation_segment",
+        }])
+        hd.validate_ledger(led, label="direct-segment")
+
+    def test_intrinsic_gate_requires_metadata_and_has_no_size(self):
+        led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        led["opaque_intrinsic_gates"] = [{
+            "path": "/private/var/db/protected",
+            "reason": "permission_denied_intrinsic",
+            "root_device": 1,
+            "path_device": 2,
+            "verification": "root-owned persistent state",
+            "reclaimable": False,
+        }]
+        hd.validate_ledger(led, label="intrinsic-gate")
+
+        led["opaque_intrinsic_gates"][0]["measured_kb"] = 1
+        with self.assertRaises(hd.LedgerError):
+            hd.validate_ledger(led, label="sized-intrinsic-gate")
+
+    def test_positive_clone_adjustment_is_rejected(self):
+        led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        led["accounting_equation"]["clone_shared_adjustment_kb"] = 1
+        with self.assertRaises(hd.LedgerError):
+            hd.validate_ledger(led, label="positive-clone-adjustment")
+
+    def test_negative_clone_adjustment_is_in_exact_display_equation(self):
+        led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}])
+        led["accounting_equation"]["clone_shared_adjustment_kb"] = -1 * GIB_KB
+        led["accounting_equation"]["sub_granularity_tail_kb"] = 0
+        led["accounting_equation"]["displayed_balanced"] = True
+        led["accounting_equation"]["display_ledger_valid"] = True
+        hd.validate_ledger(led, label="negative-clone-adjustment")
+        hd.validate_full_attribution_ledger(led, label="negative-clone-adjustment")
 
 
 class TestComputeDeltas(unittest.TestCase):

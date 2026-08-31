@@ -791,6 +791,7 @@ class FrontierScanner:
         self.inventory_backend = None
         self.deduped = []
         self.frontier_unfinished = []
+        self.effective_uid = os.geteuid()
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
@@ -1407,11 +1408,68 @@ def build_report(
         ),
     }
 
-    mode = "complete" if not scanner.frontier_unfinished else "partial"
+    operational_unfinished = []
+    opaque_intrinsic_gates = []
+    fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
+    effective_uid = getattr(scanner, "effective_uid", os.geteuid())
+    for item in scanner.frontier_unfinished:
+        path = item.get("path", "")
+        reason = item.get("reason") or "unknown"
+        intrinsic = None
+        if (
+            reason in ("inventory_permission_denied", "permission_denied_or_tcc")
+            and effective_uid == 0
+            and fda_status["status"] == "granted"
+        ):
+            try:
+                with os.scandir(path) as entries:
+                    next(entries, None)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    intrinsic = {
+                        "path": path,
+                        "reason": "permission_denied_intrinsic",
+                        "errno": exc.errno,
+                        "verification": "privileged_scandir_denied",
+                        "reclaimable": False,
+                    }
+        elif reason in ("path_disappeared", "inventory_path_disappeared"):
+            try:
+                os.lstat(path)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    intrinsic = {
+                        "path": path,
+                        "reason": "vanished_during_scan",
+                        "errno": exc.errno,
+                        "verification": "lstat_enoent_at_capture",
+                        "reclaimable": False,
+                    }
+        elif reason == "cross_device_boundary":
+            try:
+                path_dev = os.lstat(path).st_dev
+            except OSError:
+                path_dev = None
+            if path_dev is not None and path_dev != scanner.root_dev:
+                intrinsic = {
+                    "path": path,
+                    "reason": "cross_device_boundary",
+                    "root_device": scanner.root_dev,
+                    "path_device": path_dev,
+                    "verification": "lstat_device_mismatch_at_capture",
+                    "reclaimable": False,
+                }
+        if intrinsic is None:
+            operational_unfinished.append(item)
+        else:
+            opaque_intrinsic_gates.append(intrinsic)
+
+    mode = "complete" if not operational_unfinished else "partial"
 
     measured_by_top = collections.defaultdict(int)
     exact_measured = {}
     unfinished_by_top = collections.defaultdict(list)
+    intrinsic_by_top = collections.defaultdict(list)
     deduped_top = set()
 
     def top_child(path):
@@ -1431,10 +1489,14 @@ def build_report(
         measured_by_top[top] += kb
         if os.sep not in rel:
             exact_measured[top] = kb
-    for item in scanner.frontier_unfinished:
+    for item in operational_unfinished:
         top, _ = top_child(item.get("path", ""))
         if top is not None:
             unfinished_by_top[top].append(item.get("reason") or "unfinished")
+    for item in opaque_intrinsic_gates:
+        top, _ = top_child(item.get("path", ""))
+        if top is not None:
+            intrinsic_by_top[top].append(item.get("reason") or "intrinsic")
     for item in scanner.deduped:
         top, _ = top_child(item.get("path", ""))
         if top is not None:
@@ -1444,13 +1506,31 @@ def build_report(
     for original_path in sorted(scanner.level1_paths):
         path = os.path.realpath(original_path)
         reasons = sorted(set(unfinished_by_top[path]))
+        intrinsic_reasons = sorted(set(intrinsic_by_top[path]))
+        cross_device_only = (
+            intrinsic_reasons == ["cross_device_boundary"]
+            and not reasons
+            and path not in exact_measured
+            and not measured_by_top[path]
+            and path not in deduped_top
+        )
+        if cross_device_only:
+            continue
         if path in exact_measured and not reasons:
-            status, size_kb = "measured", exact_measured[path]
+            status = "measured_with_opaque_gates" if intrinsic_reasons else "measured"
+            size_kb = exact_measured[path]
         elif measured_by_top[path]:
-            status = "partial" if reasons else "measured_by_descendants"
+            if reasons:
+                status = "partial"
+            elif intrinsic_reasons:
+                status = "measured_with_opaque_gates"
+            else:
+                status = "measured_by_descendants"
             size_kb = measured_by_top[path]
         elif path in deduped_top and not reasons:
             status, size_kb = "deduped", None
+        elif intrinsic_reasons and not reasons:
+            status, size_kb = "measured_with_opaque_gates", None
         else:
             status, size_kb = "unfinished", None
             if not reasons:
@@ -1461,6 +1541,7 @@ def build_report(
                 "status": status,
                 "measured_kb": size_kb,
                 "unfinished_reasons": reasons,
+                "intrinsic_gate_reasons": intrinsic_reasons,
             }
         )
 
@@ -1492,13 +1573,16 @@ def build_report(
             f"{-granularity_tail_raw_kb} KiB; displayed equation rejected"
         )
 
+    clone_shared_adjustment_kb = min(0, residual_raw_kb)
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
         "measured_kb": measured_total_kb,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "residual_kb": residual_kb,
+        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
         "balanced": (
             measured_total_kb + purgeable_info["purgeable_kb"] + residual_kb
+            + clone_shared_adjustment_kb
             == disk_stats["used_kb"]
         ),
         "displayed_buckets_kb": granularity_bucket_total_kb,
@@ -1513,6 +1597,7 @@ def build_report(
             + granularity_tail_kb
             + purgeable_info["purgeable_kb"]
             + residual_kb
+            + clone_shared_adjustment_kb
             == disk_stats["used_kb"]
         ),
         "measurement_non_atomic": used_before_kb != used_after_kb,
@@ -1520,14 +1605,15 @@ def build_report(
         "residual_reclaimable": False,
     }
     reasons = collections.defaultdict(list)
-    for item in scanner.frontier_unfinished:
+    for item in operational_unfinished:
         reasons[item.get("reason") or "unknown"].append(item.get("path"))
-    fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
     reachable_top_level_roots = len(top_level_ledger)
     measured_top_level_roots = sum(
         1
         for item in top_level_ledger
-        if item["status"] in ("measured", "measured_by_descendants", "deduped")
+        if item["status"] in (
+            "measured", "measured_by_descendants", "measured_with_opaque_gates", "deduped"
+        )
     )
     unfinished_top_level_roots = sum(
         1 for item in top_level_ledger if item["status"] == "unfinished"
@@ -1537,6 +1623,8 @@ def build_report(
         and fda_status["status"] == "granted"
         and unfinished_top_level_roots == 0
         and measured_top_level_roots == reachable_top_level_roots
+        and accounting_equation["display_ledger_valid"]
+        and accounting_equation["displayed_balanced"]
     )
     coverage_envelope = {
         "complete": coverage_complete,
@@ -1546,7 +1634,7 @@ def build_report(
         "fda_preflight_status": fda_status["status"],
     }
     limits = {
-        "sudo_used": False,
+        "sudo_used": effective_uid == 0,
         "full_disk_access": fda_status["status"],
         "full_disk_access_preflight": fda_status,
         "permission_denied_or_tcc": reasons.get("permission_denied_or_tcc", []),
@@ -1599,7 +1687,8 @@ def build_report(
         "oversize_indivisible_files": oversize_files,
         "oversize_indivisible_files_total_kb": oversize_files_total_kb,
         "deduped": scanner.deduped,
-        "frontier_unfinished": scanner.frontier_unfinished,
+        "frontier_unfinished": operational_unfinished,
+        "opaque_intrinsic_gates": opaque_intrinsic_gates,
         "sibling_volumes": sibling_volumes,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "purgeable_estimate_method": purgeable_info["purgeable_estimate_method"],
@@ -1607,6 +1696,7 @@ def build_report(
         "local_snapshots_count": purgeable_info["local_snapshots_count"],
         "residual_kb": residual_kb,
         "residual_raw_kb": residual_raw_kb,
+        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
         "residual_negative_clamped": residual_negative_clamped,
         "clones_suspected": residual_negative_clamped,
         "accounting_equation": accounting_equation,

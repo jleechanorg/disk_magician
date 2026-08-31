@@ -20,6 +20,11 @@ GRANULARITY_CEILING_KB = 5 * GIB_KB
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
+SCHEMA_VERSION = 2
+BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
+INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
+INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
+SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
 
 
 def gib(kb):
@@ -46,6 +51,10 @@ def write_status(out_dir, status, reason, captured_at, age_hours, report=None):
 
 def complete_coverage_envelope(report):
     """Return true only when the report proves full, balanced attribution."""
+    if not isinstance(report, dict):
+        return False
+    if report.get("schema_version") != SCHEMA_VERSION:
+        return False
     envelope = report.get("coverage_envelope")
     accounting = report.get("accounting_equation")
     reachable = envelope.get("reachable_top_level_roots") if isinstance(envelope, dict) else None
@@ -53,12 +62,36 @@ def complete_coverage_envelope(report):
     unfinished = envelope.get("unfinished_top_level_roots") if isinstance(envelope, dict) else None
     buckets = report.get("granularity_buckets") or []
     oversize = report.get("oversize_indivisible_files") or []
+    intrinsic_gates = report.get("opaque_intrinsic_gates")
+    if not isinstance(intrinsic_gates, list):
+        return False
+    allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    if any(
+        not isinstance(item, dict)
+        or not INTRINSIC_GATE_KEYS.issubset(item)
+        or not set(item).issubset(allowed_gate_keys)
+        or not all(
+            isinstance(item.get(key), str) and item[key]
+            for key in ("path", "reason", "verification")
+        )
+        or type(item.get("reclaimable")) is not bool
+        or item["reclaimable"] is not False
+        or SIZE_KEYS.intersection(item)
+        or any(
+            type(item[key]) is not int or item[key] < 0
+            for key in INTRINSIC_GATE_OPTIONAL_KEYS
+            if key in item
+        )
+        for item in intrinsic_gates
+    ):
+        return False
     if any(
         not isinstance(item, dict)
         or not item.get("path")
         or type(item.get("measured_kb")) is not int
         or item["measured_kb"] < 0
         or item["measured_kb"] > GRANULARITY_CEILING_KB
+        or item.get("kind", "dir") not in BUCKET_KINDS
         for item in buckets
     ):
         return False
@@ -77,13 +110,16 @@ def complete_coverage_envelope(report):
         "sub_granularity_tail_kb", "purgeable_kb", "residual_kb",
     )
     equation_values = [accounting.get(key) for key in equation_keys] if isinstance(accounting, dict) else []
+    clone_adjustment = accounting.get("clone_shared_adjustment_kb") if isinstance(accounting, dict) else None
     accounting_reconciles = (
         len(equation_values) == len(equation_keys)
         and all(type(value) is int and value >= 0 for value in equation_values)
+        and type(clone_adjustment) is int
+        and clone_adjustment <= 0
         and accounting["displayed_buckets_kb"] == bucket_total
         and accounting["oversize_indivisible_files_kb"] == oversize_total
         and accounting["data_used_kb"] == report.get("disk_used_kb")
-        and accounting["data_used_kb"] == sum(equation_values[1:])
+        and accounting["data_used_kb"] == sum(equation_values[1:]) + clone_adjustment
     )
     return (
         report.get("mode") == "complete"
@@ -149,10 +185,11 @@ def main():
     equation = report.get("accounting_equation") or {}
 
     ledger = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "mode": report.get("mode"),
         "coverage_envelope": report.get("coverage_envelope"),
         "frontier_unfinished": report.get("frontier_unfinished"),
+        "opaque_intrinsic_gates": report.get("opaque_intrinsic_gates"),
         "captured_at": captured_at,
         "hostname": report.get("hostname"),
         "disk_used_kb": report.get("disk_used_kb"),

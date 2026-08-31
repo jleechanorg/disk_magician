@@ -19,6 +19,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "%Y-%m-%dT%H:%M:%SZ"
         )
         data = {
+            "schema_version": 2,
             "mode": mode,
             "coverage_envelope": {
                 "complete": envelope_complete,
@@ -45,8 +46,10 @@ class TestRenderTopdownLedger(unittest.TestCase):
                 "oversize_indivisible_files_kb": 0,
                 "sub_granularity_tail_kb": 519568384,
                 "purgeable_kb": 1024, "residual_kb": 524288,
+                "clone_shared_adjustment_kb": 0,
             },
             "frontier_unfinished": [],
+            "opaque_intrinsic_gates": [],
         }
         path = os.path.join(self.tmp, "frontier_last.json")
         with open(path, "w") as f:
@@ -58,6 +61,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
         rc, out, err = run(frontier, self.out_dir)
         self.assertEqual(rc, 0, err)
         j = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
+        self.assertEqual(j["schema_version"], 2)
         self.assertEqual(j["residual_kb"], 524288)
         self.assertEqual(len(j["granularity_buckets"]), 2)
         md = open(os.path.join(self.out_dir, "topdown-5g.md")).read()
@@ -92,6 +96,64 @@ class TestRenderTopdownLedger(unittest.TestCase):
         )
         self.assertEqual(validated.returncode, 0, validated.stderr)
         self.assertIn("valid full-attribution ledger", validated.stdout)
+
+    def test_opaque_intrinsic_gate_is_published_without_a_size(self):
+        frontier = self._fixture(age_hours=1)
+        with open(frontier) as f:
+            data = json.load(f)
+        gate = {
+            "path": "/private/var/db/protected",
+            "reason": "permission_denied_intrinsic",
+            "errno": 1,
+            "verification": "root-owned persistent state",
+            "reclaimable": False,
+        }
+        data["opaque_intrinsic_gates"] = [gate]
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        ledger = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
+        self.assertEqual(ledger["opaque_intrinsic_gates"], [gate])
+
+    def test_opaque_intrinsic_gate_with_size_is_rejected(self):
+        frontier = self._fixture(age_hours=1)
+        with open(frontier) as f:
+            data = json.load(f)
+        data["opaque_intrinsic_gates"] = [{
+            "path": "/private/var/db/protected",
+            "reason": "permission_denied_intrinsic",
+            "verification": "root-owned persistent state",
+            "reclaimable": False,
+            "measured_kb": 123,
+        }]
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+
+    def test_negative_clone_adjustment_is_preserved_in_display_equation(self):
+        frontier = self._fixture(age_hours=1)
+        with open(frontier) as f:
+            data = json.load(f)
+        adjustment = -1 * 1024 * 1024
+        data["accounting_equation"]["clone_shared_adjustment_kb"] = adjustment
+        data["accounting_equation"]["sub_granularity_tail_kb"] += -adjustment
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        ledger = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
+        self.assertEqual(
+            ledger["accounting_equation"]["clone_shared_adjustment_kb"], adjustment
+        )
 
     def test_publisher_requires_every_full_attribution_evidence_gate(self):
         mutations = {
