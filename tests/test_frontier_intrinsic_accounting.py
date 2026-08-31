@@ -1,5 +1,6 @@
 import errno
 import pathlib
+import stat
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,118 @@ GIB_KB = 1024 * 1024
 
 
 class TestIntrinsicGateAccounting(unittest.TestCase):
+    @staticmethod
+    def valid_attestation(**overrides):
+        attestation = {
+            "run_id": "run-1",
+            "path": frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"],
+            "status": "permission_denied",
+            "errno": errno.EACCES,
+            "captured_at": 101.0,
+            "captured_during_run": True,
+            "path_is_symlink": False,
+            "verifier": {
+                "effective_uid": 0,
+                "access_context": "parent_scanner_confirmation",
+                "fda": {
+                    "status": "granted",
+                    "probes": {
+                        "mobile_sync": {"status": "readable"},
+                        "mail": {"status": "readable"},
+                        "messages": {"status": "readable"},
+                    },
+                },
+            },
+            "identity_before": {"st_dev": 1, "st_ino": 44},
+            "identity_after": {"st_dev": 1, "st_ino": 44},
+        }
+        attestation.update(overrides)
+        return attestation
+
+    def test_system_boundary_attestation_requires_all_same_run_evidence(self):
+        valid = self.valid_attestation()
+        kwargs = {
+            "run_id": "run-1",
+            "path": frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"],
+            "effective_uid": 0,
+            "fda_preflight": valid["verifier"]["fda"],
+            "run_started_at": 100.0,
+            "now": 102.0,
+        }
+
+        self.assertTrue(frontier.verify_system_boundary_attestation(valid, **kwargs))
+        aggregate_fda = {
+            "status": "partial",
+            "probes": {
+                **valid["verifier"]["fda"]["probes"],
+                "spotlight": {"status": "permission_denied_or_tcc"},
+                "fseventsd": {"status": "permission_denied_or_tcc"},
+                "document_revisions": {"status": "permission_denied_or_tcc"},
+            },
+        }
+        aggregate_candidate = self.valid_attestation(
+            verifier={
+                "effective_uid": 0,
+                "access_context": "parent_scanner_confirmation",
+                "fda": valid["verifier"]["fda"],
+            }
+        )
+        self.assertTrue(
+            frontier.verify_system_boundary_attestation(
+                aggregate_candidate,
+                **{**kwargs, "fda_preflight": aggregate_fda},
+            )
+        )
+        for name, change in (
+            ("stale run", {"run_id": "old-run"}),
+            ("arbitrary path", {"path": "/Users/jleechan/private"}),
+            ("readable result", {"status": "readable"}),
+            ("timeout result", {"status": "timeout"}),
+            ("identity mismatch", {"identity_after": {"st_dev": 1, "st_ino": 45}}),
+            ("missing FDA evidence", {"verifier": {"effective_uid": 0}}),
+            ("captured before run", {"captured_at": 99.0}),
+            ("captured after run", {"captured_at": 103.0}),
+        ):
+            with self.subTest(name=name):
+                candidate = self.valid_attestation(**change)
+                self.assertFalse(
+                    frontier.verify_system_boundary_attestation(candidate, **kwargs)
+                )
+
+    def test_system_boundary_attestation_captures_denial_and_stable_identity(self):
+        path = frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"]
+        identity = SimpleNamespace(st_dev=7, st_ino=8, st_mode=stat.S_IFDIR)
+        fda = self.valid_attestation()["verifier"]["fda"]
+        with mock.patch.object(frontier.os.path, "realpath", return_value=path), \
+             mock.patch.object(frontier.os.path, "islink", return_value=False), \
+             mock.patch.object(frontier.os, "lstat", return_value=identity), \
+             mock.patch.object(
+                 frontier.os, "scandir",
+                 side_effect=PermissionError(errno.EPERM, "denied", path),
+             ):
+            attestation = frontier.capture_system_boundary_attestation(
+                path,
+                run_id="run-1",
+                effective_uid=0,
+                fda_preflight=fda,
+                run_started_at=100.0,
+                now=101.0,
+            )
+
+        self.assertTrue(
+            frontier.verify_system_boundary_attestation(
+                attestation,
+                run_id="run-1",
+                path=path,
+                effective_uid=0,
+                fda_preflight=fda,
+                run_started_at=100.0,
+                now=102.0,
+            )
+        )
+        self.assertEqual(attestation["identity_before"], {"st_dev": 7, "st_ino": 8})
+        self.assertEqual(attestation["identity_after"], {"st_dev": 7, "st_ino": 8})
+
     def scanner(self, *, effective_uid=0):
         return SimpleNamespace(
             root="/fixture",
@@ -27,7 +140,18 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             ],
             oversize_files=[],
             frontier_unfinished=[
-                {"path": "/fixture/data/denied", "reason": "inventory_permission_denied"},
+                {
+                    "path": frontier.FDA_SYSTEM_PROBE_PATHS["spotlight"],
+                    "reason": "inventory_permission_denied",
+                },
+                {
+                    "path": frontier.FDA_SYSTEM_PROBE_PATHS["fseventsd"],
+                    "reason": "inventory_permission_denied",
+                },
+                {
+                    "path": frontier.FDA_SYSTEM_PROBE_PATHS["document_revisions"],
+                    "reason": "inventory_permission_denied",
+                },
                 {"path": "/fixture/data/gone", "reason": "inventory_path_disappeared"},
                 {"path": "/fixture/home", "reason": "cross_device_boundary"},
             ],
@@ -35,7 +159,20 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             tracker=SimpleNamespace(peak=lambda: 1),
             level1_paths=["/fixture/data", "/fixture/home"],
             inventory_backend="gdu_one_pass", shallow_enumeration_depth=0,
-            fda_preflight={"status": "granted", "probes": {}},
+            fda_preflight={
+                "status": "granted",
+                "probes": {
+                    "mobile_sync": {"status": "readable"},
+                    "mail": {"status": "readable"},
+                    "messages": {"status": "readable"},
+                },
+            },
+            run_id="run-1",
+            run_started_at=100.0,
+            system_boundary_attestations=[
+                TestIntrinsicGateAccounting.valid_attestation(path=path)
+                for path in frontier.FDA_SYSTEM_PROBE_PATHS.values()
+            ],
         )
 
     @staticmethod
@@ -53,7 +190,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
     @staticmethod
     def fake_scandir(path):
-        if path.endswith(("/denied", "/secret")):
+        if path.endswith(("/denied", "/secret", ".Spotlight-V100")):
             raise PermissionError(errno.EPERM, "denied", path)
         raise AssertionError(f"unexpected scandir: {path}")
 
@@ -86,6 +223,26 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
         self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 1)
 
+    def test_aggregate_partial_fda_with_catalog_attestation_is_complete(self):
+        scanner = self.scanner()
+        scanner.fda_preflight = {
+            "status": "partial",
+            "probes": {
+                **scanner.fda_preflight["probes"],
+                "spotlight": {"status": "permission_denied_or_tcc"},
+                "fseventsd": {"status": "permission_denied_or_tcc"},
+                "document_revisions": {"status": "permission_denied_or_tcc"},
+            },
+        }
+
+        report = self.report(scanner)
+
+        self.assertEqual(report["mode"], "complete")
+        self.assertEqual(report["frontier_unfinished"], [])
+        self.assertTrue(report["coverage_envelope"]["complete"])
+        self.assertEqual(report["fda_preflight"]["status"], "partial")
+        self.assertEqual(report["coverage_envelope"]["fda_preflight_status"], "partial")
+
     def test_unprivileged_permission_failure_remains_unfinished(self):
         report = self.report(self.scanner(effective_uid=501))
 
@@ -105,10 +262,31 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
         report = self.report(scanner)
 
-        self.assertEqual(report["mode"], "complete")
-        self.assertEqual(report["frontier_unfinished"], [])
-        self.assertTrue(report["coverage_envelope"]["complete"])
-        self.assertEqual(report["top_level_ledger"][0]["status"], "measured_with_opaque_gates")
+        self.assertEqual(report["mode"], "partial")
+        self.assertIn(
+            "inventory_permission_denied",
+            {item["reason"] for item in report["frontier_unfinished"]},
+        )
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(report["top_level_ledger"][0]["status"], "unfinished")
+
+    def test_arbitrary_path_attestation_remains_operational_partial(self):
+        scanner = self.scanner()
+        scanner.frontier_unfinished = [{
+            "path": "/fixture/secret",
+            "reason": "inventory_permission_denied",
+        }]
+        scanner.level1_paths = ["/fixture/secret"]
+        scanner.system_boundary_attestations = [
+            self.valid_attestation(path="/fixture/secret")
+        ]
+
+        report = self.report(scanner)
+
+        self.assertEqual(report["mode"], "partial")
+        self.assertEqual(report["opaque_intrinsic_gates"], [])
+        self.assertEqual(report["frontier_unfinished"][0]["path"], "/fixture/secret")
+        self.assertFalse(report["coverage_envelope"]["complete"])
 
     def test_reappeared_inventory_path_is_remeasured_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:

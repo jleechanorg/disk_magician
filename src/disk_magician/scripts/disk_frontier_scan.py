@@ -46,6 +46,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 DEFAULT_ROOT = "/System/Volumes/Data"
 DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_last.json")
@@ -69,6 +70,7 @@ FDA_SYSTEM_PROBE_PATHS = {
     "fseventsd": "/System/Volumes/Data/.fseventsd",
     "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
 }
+SYSTEM_BOUNDARY_ATTESTATION_PATHS = frozenset(FDA_SYSTEM_PROBE_PATHS.values())
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
@@ -167,6 +169,145 @@ def fda_preflight(paths=None):
         "permission_denied_or_tcc": denied,
         "errors": errors,
     }
+
+
+def fda_user_probe_evidence(preflight):
+    """Extract FDA evidence for user roots, excluding system boundaries."""
+    if not isinstance(preflight, dict) or not isinstance(preflight.get("probes"), dict):
+        return None
+    probes = preflight["probes"]
+    user_probes = {}
+    for name in FDA_PROBE_RELATIVE_PATHS:
+        probe = probes.get(name)
+        if not isinstance(probe, dict) or probe.get("status") != "readable":
+            return None
+        user_probes[name] = probe
+    return {"status": "granted", "probes": user_probes}
+
+
+def verify_system_boundary_attestation(
+    attestation, *, run_id, path, effective_uid, fda_preflight,
+    run_started_at, now=None,
+):
+    """Accept only a same-run, privileged denial of a catalog path.
+
+    Attestations are evidence, not an alternate permission path. Every field
+    needed to turn a permission frontier into an opaque intrinsic gate is
+    checked here so malformed, stale, or user-supplied results stay partial.
+    """
+    if not isinstance(attestation, dict) or not isinstance(run_id, str) or not run_id:
+        return False
+    if attestation.get("run_id") != run_id or attestation.get("path") != path:
+        return False
+    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+        return False
+    if attestation.get("path_is_symlink") is not False:
+        return False
+    if attestation.get("status") != "permission_denied":
+        return False
+    if attestation.get("errno") not in (errno.EACCES, errno.EPERM):
+        return False
+    if attestation.get("captured_during_run") is not True:
+        return False
+    captured_at = attestation.get("captured_at")
+    if isinstance(captured_at, bool) or not isinstance(captured_at, (int, float)):
+        return False
+    if isinstance(run_started_at, bool) or not isinstance(run_started_at, (int, float)):
+        return False
+    current_time = time.time() if now is None else now
+    if (
+        isinstance(current_time, bool)
+        or not isinstance(current_time, (int, float))
+        or captured_at < run_started_at
+        or captured_at > current_time
+    ):
+        return False
+
+    verifier = attestation.get("verifier")
+    if not isinstance(verifier, dict):
+        return False
+    user_fda = fda_user_probe_evidence(fda_preflight)
+    if (
+        effective_uid != 0
+        or verifier.get("effective_uid") != effective_uid
+        or verifier.get("access_context") != "parent_scanner_confirmation"
+        or verifier.get("fda") != user_fda
+    ):
+        return False
+    if user_fda is None:
+        return False
+
+    before = attestation.get("identity_before")
+    after = attestation.get("identity_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    identity_keys = ("st_dev", "st_ino")
+    if any(
+        type(identity.get(key)) is not int or identity[key] < 0
+        for identity in (before, after)
+        for key in identity_keys
+    ):
+        return False
+    return all(before[key] == after[key] for key in identity_keys)
+
+
+def capture_system_boundary_attestation(
+    path, *, run_id, effective_uid, fda_preflight, run_started_at, now=None,
+):
+    """Capture a denial probe for one exact canonical system boundary path."""
+    captured_at = time.time() if now is None else now
+    attestation = {
+        "run_id": run_id,
+        "path": path,
+        "status": "invalid",
+        "captured_at": captured_at,
+        "captured_during_run": True,
+        "path_is_symlink": False,
+        "verifier": {
+            "effective_uid": effective_uid,
+            "access_context": "parent_scanner_confirmation",
+            "fda": fda_user_probe_evidence(fda_preflight),
+        },
+    }
+    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+        return attestation
+    try:
+        if os.path.realpath(path) != path or os.path.islink(path):
+            return attestation
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode):
+            return attestation
+        attestation["identity_before"] = {
+            "st_dev": before.st_dev,
+            "st_ino": before.st_ino,
+        }
+        try:
+            with os.scandir(path) as entries:
+                next(entries, None)
+        except TimeoutError:
+            attestation["status"] = "timeout"
+            return attestation
+        except (PermissionError, OSError) as exc:
+            if not isinstance(exc, PermissionError) and exc.errno not in (errno.EACCES, errno.EPERM):
+                attestation["status"] = "error"
+                attestation["errno"] = exc.errno
+                return attestation
+            attestation["status"] = "permission_denied"
+            attestation["errno"] = exc.errno
+        else:
+            attestation["status"] = "readable"
+            return attestation
+        after = os.lstat(path)
+        attestation["identity_after"] = {
+            "st_dev": after.st_dev,
+            "st_ino": after.st_ino,
+        }
+    except TimeoutError:
+        attestation["status"] = "timeout"
+    except OSError as exc:
+        attestation["status"] = "error"
+        attestation["errno"] = exc.errno
+    return attestation
 
 
 class AdjustableSemaphore:
@@ -792,6 +933,9 @@ class FrontierScanner:
         self.deduped = []
         self.frontier_unfinished = []
         self.effective_uid = os.geteuid()
+        self.run_id = uuid.uuid4().hex
+        self.run_started_at = 0.0
+        self.system_boundary_attestations = []
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
@@ -818,6 +962,27 @@ class FrontierScanner:
         ]
         extra = getattr(args, "exclude_prefix", None) or []
         self.exclude_prefix_patterns = list(default_excludes) + list(extra)
+
+    def _capture_system_boundary_attestations(self):
+        """Capture only exact catalog paths denied during this run."""
+        paths = {
+            item.get("path")
+            for item in self.frontier_unfinished
+            if item.get("reason") in (
+                "inventory_permission_denied", "permission_denied_or_tcc"
+            )
+            and item.get("path") in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+        }
+        self.system_boundary_attestations = [
+            capture_system_boundary_attestation(
+                path,
+                run_id=self.run_id,
+                effective_uid=self.effective_uid,
+                fda_preflight=self.fda_preflight,
+                run_started_at=self.run_started_at,
+            )
+            for path in sorted(paths)
+        ]
 
     def _apply_inventory_partition(self, records, error_items, manifest):
         """Build one safe byte ledger and one <=granularity display frontier."""
@@ -1281,6 +1446,7 @@ class FrontierScanner:
 
     def run(self):
         self.start_time = time.time()
+        self.run_started_at = self.start_time
         try:
             self.root_dev = os.stat(self.root).st_dev
         except OSError as exc:
@@ -1297,6 +1463,7 @@ class FrontierScanner:
         self.level1_paths = [path for path, _ in level1]
 
         if GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
+            self._capture_system_boundary_attestations()
             return None
 
         frontier = []
@@ -1371,6 +1538,7 @@ class FrontierScanner:
                             for item in result:
                                 enqueue(item)
 
+        self._capture_system_boundary_attestations()
         return None
 
 
@@ -1429,27 +1597,42 @@ def build_report(
     opaque_intrinsic_gates = []
     fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
     effective_uid = getattr(scanner, "effective_uid", os.geteuid())
+    attestations = {
+        item.get("path"): item
+        for item in (getattr(scanner, "system_boundary_attestations", None) or [])
+        if isinstance(item, dict)
+    }
+    run_id = getattr(scanner, "run_id", None)
+    run_started_at = getattr(scanner, "run_started_at", None)
     for item in scanner.frontier_unfinished:
         path = item.get("path", "")
         reason = item.get("reason") or "unknown"
         intrinsic = None
         if (
             reason in ("inventory_permission_denied", "permission_denied_or_tcc")
-            and effective_uid == 0
-            and fda_status["status"] == "granted"
+            and path in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+            and verify_system_boundary_attestation(
+                attestations.get(path),
+                run_id=run_id,
+                path=path,
+                effective_uid=effective_uid,
+                fda_preflight=fda_status,
+                run_started_at=run_started_at,
+            )
         ):
-            try:
-                with os.scandir(path) as entries:
-                    next(entries, None)
-            except OSError as exc:
-                if exc.errno in (errno.EACCES, errno.EPERM):
-                    intrinsic = {
-                        "path": path,
-                        "reason": "permission_denied_intrinsic",
-                        "errno": exc.errno,
-                        "verification": "privileged_scandir_denied",
-                        "reclaimable": False,
-                    }
+            attestation = attestations[path]
+            identity = attestation["identity_before"]
+            intrinsic = {
+                "path": path,
+                "reason": "permission_denied_intrinsic",
+                "errno": attestation["errno"],
+                "root_device": getattr(scanner, "root_dev", None),
+                "path_device": identity["st_dev"],
+                "verification": "parent_scanner_system_boundary_confirmation",
+                "reclaimable": False,
+            }
+            if intrinsic["root_device"] is None:
+                del intrinsic["root_device"]
         elif reason in ("path_disappeared", "inventory_path_disappeared"):
             try:
                 os.lstat(path)
@@ -1635,9 +1818,37 @@ def build_report(
     unfinished_top_level_roots = sum(
         1 for item in top_level_ledger if item["status"] == "unfinished"
     )
+    user_fda = fda_user_probe_evidence(fda_status)
+    system_fda_ready = fda_status["status"] == "granted"
+    if fda_status["status"] == "partial":
+        probes = fda_status.get("probes")
+        system_denied_paths = set()
+        system_probe_statuses_valid = isinstance(probes, dict)
+        if system_probe_statuses_valid:
+            for name, system_path in FDA_SYSTEM_PROBE_PATHS.items():
+                probe = probes.get(name)
+                if not isinstance(probe, dict):
+                    system_probe_statuses_valid = False
+                    break
+                if probe.get("status") == "permission_denied_or_tcc":
+                    system_denied_paths.add(system_path)
+                else:
+                    system_probe_statuses_valid = False
+                    break
+        attested_paths = {
+            item["path"]
+            for item in opaque_intrinsic_gates
+            if item.get("reason") == "permission_denied_intrinsic"
+        }
+        system_fda_ready = (
+            system_probe_statuses_valid
+            and bool(system_denied_paths)
+            and system_denied_paths.issubset(attested_paths)
+        )
     coverage_complete = (
         mode == "complete"
-        and fda_status["status"] == "granted"
+        and user_fda is not None
+        and system_fda_ready
         and unfinished_top_level_roots == 0
         and measured_top_level_roots == reachable_top_level_roots
         and accounting_equation["display_ledger_valid"]
@@ -1649,6 +1860,7 @@ def build_report(
         "measured_top_level_roots": measured_top_level_roots,
         "unfinished_top_level_roots": unfinished_top_level_roots,
         "fda_preflight_status": fda_status["status"],
+        "fda_user_preflight_status": "granted" if user_fda is not None else "indeterminate",
     }
     limits = {
         "sudo_used": effective_uid == 0,
@@ -1706,6 +1918,7 @@ def build_report(
         "deduped": scanner.deduped,
         "frontier_unfinished": operational_unfinished,
         "opaque_intrinsic_gates": opaque_intrinsic_gates,
+        "system_boundary_attestations": list(attestations.values()),
         "sibling_volumes": sibling_volumes,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "purgeable_estimate_method": purgeable_info["purgeable_estimate_method"],
