@@ -378,7 +378,7 @@ purge_aged_archives() {
     fi
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$archive_root" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
 }
 
 log "$(dry_prefix)cleanup_tmp.sh starting"
