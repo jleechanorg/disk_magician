@@ -59,7 +59,7 @@ Options:
   --execute     Actually delete SAFE-classified worktrees via
                 'git worktree remove --force' (default: dry-run/report-only).
                 Requires WORKTREE_APPROVED=1 in the environment.
-  --min-age N   Minimum worktree age in days for candidacy (default: 7).
+  --min-age N   Minimum worktree age in days for candidacy (default: 14).
   --repos LIST  Comma-separated main repo paths to scan (default:
                 CLAUDE_WORKTREE_REPOS env override, else auto-discover --
                 same logic as cleanup_worktrees.sh).

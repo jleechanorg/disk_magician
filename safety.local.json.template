@@ -43,5 +43,6 @@
       "reason": "OpenClaw repository backup archives — review and prune only after verified push"
     }
   ],
-  "min_stale_days": 7
+  "_comment_min_stale_days": "Minimum age in days before a worktree or cache is considered stale. Hard floor: 14 days; this setting may only INCREASE the floor.",
+  "min_stale_days": 14
 }

@@ -62,16 +62,18 @@ LOCK_DIR="$STATE_DIR/cleanup_worktree_venvs.lock"
 LOCK_TTL_SEC="${DISK_MAGICIAN_CLEANUP_VENVS_LOCK_TTL_SEC:-3600}"
 
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--roots p1,p2,...] [--purge-bak-days N] [-h|--help]
+  cat <<'EOF'
+Usage: cleanup_worktree_venvs.sh [--clean] [--dry-run] [--min-age DAYS]
+                                [--roots PATH,...] [--purge-bak-days N]
+                                [-h|--help]
 
-Strip Python venvs from dormant Git worktrees.
+Safely prunes Python virtual environments in stale git worktrees (>14 days old).
 
 Options:
   --clean                Actually strip the venvs (default: dry-run).
                          Requires WORKTREE APPROVED=1 in env.
   --dry-run              Print what would be stripped without touching disk.
-  --min-age N            Minimum worktree age in days to qualify (default: 7).
+  --min-age N            Minimum worktree age in days to qualify (default: 14).
   --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
                          Each root's <repo>/.claude/worktrees/* agent working
                          copies are scanned automatically in addition.

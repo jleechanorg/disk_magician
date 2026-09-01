@@ -117,7 +117,7 @@ assert report["config"]["granularity_gib"] == 5.0
 assert report["apfs_accounting"]["equation_balanced"] is True
 assert report["apfs_accounting"]["volumes"][0]["roles"] == ["Data"]
 assert report["limits"]["sudo_used"] is False
-assert report["limits"]["full_disk_access"] in ("not_inferred", "partial", "yes", "no", "granted", "denied", "no_targets", "indeterminate")
+assert report["limits"]["full_disk_access"] in ("not_inferred", "partial", "granted", "denied", "no_targets")
 assert mod.DEFAULT_MAX_NODES == 100_000_000
 PY
 then

@@ -257,9 +257,6 @@ case "$CMD" in
   cleanup_worktrees|cleanup-worktrees)
     "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
     ;;
-  prune_stale_worktrees|prune-stale-worktrees)
-    python3 "$SCRIPT_DIR/scripts/prune_stale_worktrees.py" "$@"
-    ;;
   worktree_hygiene|worktree-hygiene)
     "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"
     ;;

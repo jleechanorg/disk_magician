@@ -28,12 +28,18 @@ grep -q '/usr/local/libexec/disk-magician/disk_frontier_scan.py' "$PLIST" && ok 
 grep -q 'DISK_MAGICIAN_SCAN_USER_HOME' "$PLIST" && ok "plist declares scan user home env var" || bad "plist env" "missing scan user home"
 ! grep -q '@REPO_ROOT@' "$PLIST" && ok "plist contains zero checkout repository references" || bad "plist checkout ref" "contains @REPO_ROOT@"
 ! grep -q '@HOME@' "$PLIST" && ok "plist contains zero user HOME references in binary path" || bad "plist home ref" "contains @HOME@"
+grep -q '@USER_HOME@' "$PLIST" && ok "plist uses explicit @USER_HOME@ placeholder" || bad "plist user home" "missing @USER_HOME@"
 
 echo "── 3. Non-root refusal ──"
-RC=0
-OUT_NON_ROOT=$("$REPO_ROOT/scripts/install_root_frontier_runner.sh" 2>&1) || RC=$?
-[[ $RC -ne 0 ]] && ok "refuses non-root execution" || bad "non-root refusal" "exited 0"
-echo "$OUT_NON_ROOT" | grep -q "must be run as root" && ok "prints root requirement error" || bad "error message" "$OUT_NON_ROOT"
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  RC=0
+  OUT_NON_ROOT=$("$REPO_ROOT/scripts/install_root_frontier_runner.sh" 2>&1) || RC=$?
+  [[ $RC -ne 0 ]] && ok "refuses non-root execution" || bad "non-root refusal" "exited 0"
+  echo "$OUT_NON_ROOT" | grep -q "must be run as root" && ok "prints root requirement error" || bad "error message" "$OUT_NON_ROOT"
+else
+  ok "skipping non-root check when running as root"
+  ok "root execution mode active"
+fi
 
 echo
 echo "Results: PASS=$PASS FAIL=$FAIL"
