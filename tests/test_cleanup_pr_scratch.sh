@@ -293,6 +293,24 @@ assert_rc "T10: non-integer min-age-hours returns non-zero" 2 "$AGE_RC"
 HELP_OUT=$(bash "$TARGET_SCRIPT" --help 2>&1)
 assert_contains "T10: --help displays usage" "Usage: cleanup_pr_scratch.sh" "$HELP_OUT"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: Read-only entry does not abort the whole sweep (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 11: Read-Only Entry Does Not Abort Sweep"
+T11_DIR="$TMP_TEST_ROOT/t11_tmp"
+mkdir -p "$T11_DIR/pr-readonly-dir/nested" "$T11_DIR/pr-normal-dir"
+echo "data" > "$T11_DIR/pr-readonly-dir/nested/file.txt"
+echo "data" > "$T11_DIR/pr-normal-dir/file.txt"
+chmod -w "$T11_DIR/pr-readonly-dir/nested"
+set_old_mtime "$T11_DIR"
+
+T11_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_DIR" 2>&1)
+T11_RC=$?
+chmod +w "$T11_DIR/pr-readonly-dir/nested" 2>/dev/null || true
+assert_rc "T11: sweep exits 0 despite a read-only entry" 0 "$T11_RC"
+assert_missing "T11: read-only dir still removed (chmod u+w recovers it)" "$T11_DIR/pr-readonly-dir"
+assert_missing "T11: sibling dir also removed (sweep did not abort)" "$T11_DIR/pr-normal-dir"
+
 echo
 echo "=== Test Results: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

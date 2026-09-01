@@ -403,13 +403,26 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         fi
         log "Removing: $item  (${kb} KB)"
         if [[ -d "$item" ]]; then
-          rm -rf "$item"
-          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+          # Best-effort write-permission fix before rm -rf: a single
+          # read-only entry under $item would otherwise abort this whole
+          # sweep under `set -euo pipefail` instead of just skipping that
+          # one item (bead disk_magician-qap).
+          chmod -R u+w "$item" 2>/dev/null || true
+          if rm -rf "$item" 2>/dev/null; then
+            DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+          else
+            echo "SKIP (rm failed): $item"
+          fi
         else
-          rm -f "$item"
-          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          chmod u+w "$item" 2>/dev/null || true
+          if rm -f "$item" 2>/dev/null; then
+            FILES_DELETED=$(( FILES_DELETED + 1 ))
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+          else
+            echo "SKIP (rm failed): $item"
+          fi
         fi
-        TOTAL_KB=$(( TOTAL_KB + kb ))
       fi
     done < <(find_cmd "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
   done
