@@ -14,6 +14,7 @@ Commands:
   setup         Configure local backup repository, create GitHub remote, and schedule jobs.
   snapshot      Perform disk usage breakdown and write to backup JSON.
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
+  frontier      Run the full-disk frontier scanner and optionally persist its state.
   clean         Clean safe targets (caches, temp files, orphaned worktrees).
   clean-all     Clean all targets interactively (Docker VMs, old sessions).
   history       Show historical growth trends from git snapshots.
@@ -186,6 +187,9 @@ case "$CMD" in
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
     "$SCRIPT_DIR/scripts/disk_diagnostic.sh" "$@"
+    ;;
+  frontier)
+    exec python3 "$SCRIPT_DIR/scripts/disk_frontier_scan.py" "$@"
     ;;
   clean)
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"

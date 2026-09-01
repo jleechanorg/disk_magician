@@ -35,6 +35,7 @@ import concurrent.futures
 import errno
 import heapq
 import json
+import math
 import os
 import plistlib
 import re
@@ -46,6 +47,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 DEFAULT_ROOT = "/System/Volumes/Data"
 DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_last.json")
@@ -64,6 +66,12 @@ FDA_PROBE_RELATIVE_PATHS = {
     "mail": os.path.join("Library", "Mail"),
     "messages": os.path.join("Library", "Messages"),
 }
+FDA_SYSTEM_PROBE_PATHS = {
+    "spotlight": "/System/Volumes/Data/.Spotlight-V100",
+    "fseventsd": "/System/Volumes/Data/.fseventsd",
+    "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
+}
+SYSTEM_BOUNDARY_ATTESTATION_PATHS = frozenset(FDA_SYSTEM_PROBE_PATHS.values())
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
@@ -81,6 +89,67 @@ GDU_FTS_ERROR_RE = re.compile(
 )
 
 
+def scan_user_home():
+    """Return the user home whose FDA-sensitive paths are in scanner scope."""
+    if os.geteuid() != 0:
+        configured_home = os.path.expanduser("~")
+        return configured_home if is_valid_scan_user_home(configured_home) else None
+    configured_home = os.environ.get("DISK_MAGICIAN_SCAN_USER_HOME")
+    if not is_valid_scan_user_home(configured_home):
+        return None
+    return configured_home
+
+
+def fda_probe_paths(root):
+    """Return paths whose readability represents the scanner's actual scope."""
+    home = scan_user_home()
+    paths = {}
+    if home is not None:
+        paths.update({
+            name: os.path.join(home, relative)
+            for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
+        })
+    if os.path.realpath(root) == DEFAULT_ROOT:
+        paths.update(FDA_SYSTEM_PROBE_PATHS)
+    return paths
+
+
+def _open_directory_no_follow(path):
+    """Open an absolute directory without following any path component."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    supports_dir_fd = os.open in getattr(os, "supports_dir_fd", ())
+    if (
+        nofollow is None
+        or directory is None
+        or not os.path.isabs(path)
+        or not supports_dir_fd
+    ):
+        raise OSError(
+            errno.ENOTSUP,
+            "descriptor-relative no-follow open unavailable",
+            path,
+        )
+    flags = os.O_RDONLY | directory
+    flags |= nofollow
+
+    fd = os.open(os.sep, flags)
+    try:
+        for component in path.split(os.sep):
+            if not component:
+                continue
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def fda_preflight(paths=None):
     """Probe FDA-sensitive directories from this scanner process.
 
@@ -91,19 +160,14 @@ def fda_preflight(paths=None):
     not masquerade as a denied FDA grant.
     """
     if paths is None:
-        home = os.path.expanduser("~")
-        paths = {
-            name: os.path.join(home, relative)
-            for name, relative in FDA_PROBE_RELATIVE_PATHS.items()
-        }
+        paths = fda_probe_paths(DEFAULT_ROOT)
 
     probes = {}
     for name, path in paths.items():
         probe = {"path": os.fspath(path)}
         fd = None
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
-            fd = os.open(path, flags)
+            fd = _open_directory_no_follow(path)
         except FileNotFoundError:
             probe["status"] = "missing"
         except PermissionError as exc:
@@ -154,6 +218,228 @@ def fda_preflight(paths=None):
         "permission_denied_or_tcc": denied,
         "errors": errors,
     }
+
+
+def is_normalized_absolute_path(path):
+    return (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and os.path.normpath(path) == path
+        and not any(component in (".", "..") for component in path.split(os.sep))
+    )
+
+
+def is_canonical_absolute_literal_path(path):
+    return is_normalized_absolute_path(path) and os.path.realpath(path) == path
+
+
+def is_valid_scan_user_home(path):
+    return (
+        is_canonical_absolute_literal_path(path)
+        and os.path.dirname(path) == "/Users"
+        and bool(os.path.basename(path))
+    )
+
+
+def valid_user_probe_catalog(catalog):
+    if not isinstance(catalog, dict) or set(catalog) != set(FDA_PROBE_RELATIVE_PATHS):
+        return False
+    if any(
+        not is_canonical_absolute_literal_path(catalog.get(name))
+        for name in FDA_PROBE_RELATIVE_PATHS
+    ):
+        return False
+    mail_path = catalog.get("mail")
+    expected_mail_suffix = "/" + FDA_PROBE_RELATIVE_PATHS["mail"]
+    if not mail_path.endswith(expected_mail_suffix):
+        return False
+    user_home = mail_path[:-len(expected_mail_suffix)]
+    if not is_valid_scan_user_home(user_home):
+        return False
+    if (
+        user_home == "/tmp"
+        or user_home.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
+        or user_home in ("/private/tmp", "/var/tmp")
+    ):
+        return False
+    for name, rel in FDA_PROBE_RELATIVE_PATHS.items():
+        if catalog.get(name) != os.path.join(user_home, rel):
+            return False
+    return True
+
+
+def fda_user_probe_evidence(preflight):
+    """Extract FDA evidence for user roots, excluding system boundaries."""
+    if not isinstance(preflight, dict) or not isinstance(preflight.get("probes"), dict):
+        return None
+    probes = preflight["probes"]
+    user_probes = {}
+    catalog = {}
+    for name in FDA_PROBE_RELATIVE_PATHS:
+        probe = probes.get(name)
+        if not isinstance(probe, dict) or probe.get("status") != "readable":
+            return None
+        path = probe.get("path")
+        if not isinstance(path, str):
+            return None
+        catalog[name] = path
+        user_probes[name] = probe
+    if not valid_user_probe_catalog(catalog):
+        return None
+    return {"status": "granted", "probes": user_probes}
+
+
+def valid_granted_user_fda_contract(preflight, catalog):
+    """Return true only when granted preflight proves the exact user catalog."""
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "granted"
+        or not valid_user_probe_catalog(catalog)
+    ):
+        return False
+    probes = preflight.get("probes")
+    if not isinstance(probes, dict):
+        return False
+    return all(
+        isinstance(probe, dict)
+        and set(probe) == {"path", "status"}
+        and probe.get("path") == catalog[name]
+        and probe.get("status") == "readable"
+        for name in FDA_PROBE_RELATIVE_PATHS
+        for probe in [probes.get(name)]
+    )
+
+
+def verify_system_boundary_attestation(
+    attestation, *, run_id, path, effective_uid, fda_preflight,
+    run_started_at, run_finished_at, now=None,
+):
+    """Accept only a same-run, privileged denial of a catalog path.
+
+    Attestations are evidence, not an alternate permission path. Every field
+    needed to turn a permission frontier into an opaque intrinsic gate is
+    checked here so malformed, stale, or user-supplied results stay partial.
+    """
+    if not isinstance(attestation, dict) or not isinstance(run_id, str) or not run_id:
+        return False
+    if attestation.get("run_id") != run_id or attestation.get("path") != path:
+        return False
+    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+        return False
+    if attestation.get("path_is_symlink") is not False:
+        return False
+    if attestation.get("status") != "permission_denied":
+        return False
+    if attestation.get("errno") not in (errno.EACCES, errno.EPERM):
+        return False
+    if attestation.get("captured_during_run") is not True:
+        return False
+    captured_at = attestation.get("captured_at")
+    if isinstance(captured_at, bool) or not isinstance(captured_at, (int, float)):
+        return False
+    if isinstance(run_started_at, bool) or not isinstance(run_started_at, (int, float)):
+        return False
+    if isinstance(run_finished_at, bool) or not isinstance(run_finished_at, (int, float)):
+        return False
+    if not all(math.isfinite(value) for value in (run_started_at, run_finished_at)):
+        return False
+    if run_finished_at < run_started_at:
+        return False
+    current_time = time.time() if now is None else now
+    if (
+        isinstance(current_time, bool)
+        or not isinstance(current_time, (int, float))
+        or captured_at < run_started_at
+        or captured_at > run_finished_at
+        or captured_at > current_time
+    ):
+        return False
+
+    verifier = attestation.get("verifier")
+    if not isinstance(verifier, dict):
+        return False
+    user_fda = fda_user_probe_evidence(fda_preflight)
+    if (
+        effective_uid != 0
+        or verifier.get("effective_uid") != effective_uid
+        or verifier.get("access_context") != "parent_scanner_confirmation"
+        or verifier.get("fda") != user_fda
+    ):
+        return False
+    if user_fda is None:
+        return False
+
+    before = attestation.get("identity_before")
+    after = attestation.get("identity_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    identity_keys = ("st_dev", "st_ino")
+    if any(
+        type(identity.get(key)) is not int or identity[key] < 0
+        for identity in (before, after)
+        for key in identity_keys
+    ):
+        return False
+    return all(before[key] == after[key] for key in identity_keys)
+
+
+def capture_system_boundary_attestation(
+    path, *, run_id, effective_uid, fda_preflight, run_started_at, now=None,
+):
+    """Capture a denial probe for one exact canonical system boundary path."""
+    captured_at = time.time() if now is None else now
+    attestation = {
+        "run_id": run_id,
+        "path": path,
+        "status": "invalid",
+        "captured_at": captured_at,
+        "captured_during_run": True,
+        "path_is_symlink": False,
+        "verifier": {
+            "effective_uid": effective_uid,
+            "access_context": "parent_scanner_confirmation",
+            "fda": fda_user_probe_evidence(fda_preflight),
+        },
+    }
+    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+        return attestation
+    try:
+        if os.path.realpath(path) != path or os.path.islink(path):
+            return attestation
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode):
+            return attestation
+        attestation["identity_before"] = {
+            "st_dev": before.st_dev,
+            "st_ino": before.st_ino,
+        }
+        try:
+            with os.scandir(path) as entries:
+                next(entries, None)
+        except TimeoutError:
+            attestation["status"] = "timeout"
+            return attestation
+        except (PermissionError, OSError) as exc:
+            if not isinstance(exc, PermissionError) and exc.errno not in (errno.EACCES, errno.EPERM):
+                attestation["status"] = "error"
+                attestation["errno"] = exc.errno
+                return attestation
+            attestation["status"] = "permission_denied"
+            attestation["errno"] = exc.errno
+        else:
+            attestation["status"] = "readable"
+            return attestation
+        after = os.lstat(path)
+        attestation["identity_after"] = {
+            "st_dev": after.st_dev,
+            "st_ino": after.st_ino,
+        }
+    except TimeoutError:
+        attestation["status"] = "timeout"
+    except OSError as exc:
+        attestation["status"] = "error"
+        attestation["errno"] = exc.errno
+    return attestation
 
 
 class AdjustableSemaphore:
@@ -464,7 +750,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     }
 
 
-def list_children(path, unfinished=None):
+def list_children(path, unfinished=None, remaining_budget=None):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
@@ -479,6 +765,10 @@ def list_children(path, unfinished=None):
     try:
         with os.scandir(path) as it:
             for entry in it:
+                # A directory with millions of children can otherwise keep an
+                # already-expired scan walking well past its wall-clock cap.
+                if remaining_budget is not None and remaining_budget() <= 0:
+                    return None, "time_budget_exhausted"
                 try:
                     is_symlink = entry.is_symlink()
                 except OSError as exc:
@@ -774,10 +1064,16 @@ class FrontierScanner:
         self.inventory_backend = None
         self.deduped = []
         self.frontier_unfinished = []
+        self.effective_uid = os.geteuid()
+        self.run_id = uuid.uuid4().hex
+        self.run_started_at = 0.0
+        self.run_finished_at = None
+        self.system_boundary_attestations = []
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
-        self.fda_preflight = fda_preflight()
+        self.fda_probe_catalog = fda_probe_paths(self.root)
+        self.fda_preflight = fda_preflight(self.fda_probe_catalog)
         self.nodes_processed = 0
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
@@ -800,6 +1096,27 @@ class FrontierScanner:
         ]
         extra = getattr(args, "exclude_prefix", None) or []
         self.exclude_prefix_patterns = list(default_excludes) + list(extra)
+
+    def _capture_system_boundary_attestations(self):
+        """Capture only exact catalog paths denied during this run."""
+        paths = {
+            item.get("path")
+            for item in self.frontier_unfinished
+            if item.get("reason") in (
+                "inventory_permission_denied", "permission_denied_or_tcc"
+            )
+            and item.get("path") in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+        }
+        self.system_boundary_attestations = [
+            capture_system_boundary_attestation(
+                path,
+                run_id=self.run_id,
+                effective_uid=self.effective_uid,
+                fda_preflight=self.fda_preflight,
+                run_started_at=self.run_started_at,
+            )
+            for path in sorted(paths)
+        ]
 
     def _apply_inventory_partition(self, records, error_items, manifest):
         """Build one safe byte ledger and one <=granularity display frontier."""
@@ -963,7 +1280,11 @@ class FrontierScanner:
             self.inventory_backend = "gdu_one_pass"
             return True
 
-        gdu_budget = max(0.001, min(self.remaining_budget() * 0.5, 1200.0))
+        # The one-pass inventory is the only backend that can produce a
+        # full-depth 5 GiB partition on this machine. Reserve a bounded 30%
+        # for fail-closed frontier fallback, but do not impose a short fixed
+        # ceiling that guarantees fallback before the inventory can finish.
+        gdu_budget = max(0.001, self.remaining_budget() * 0.7)
         result = run_gdu_inventory(
             manifest_items,
             gdu_budget,
@@ -978,8 +1299,25 @@ class FrontierScanner:
             return False
 
         self.nodes_processed = len(result["records"])
-        self.frontier_unfinished.extend(pending_unfinished)
+        reconciled_errors = []
         for item in result["error_paths"]:
+            if item.get("reason") in (
+                "inventory_path_disappeared",
+                "inventory_interrupted_system_call",
+            ):
+                path = item.get("path")
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    pass
+                else:
+                    recovered_kb = self.measure_one(path, is_symlink=stat.S_ISLNK(st.st_mode))
+                    if recovered_kb is not None:
+                        result["records"][path] = recovered_kb
+                        continue
+            reconciled_errors.append(item)
+        self.frontier_unfinished.extend(pending_unfinished)
+        for item in reconciled_errors:
             try:
                 rel = os.path.relpath(item["path"], self.root)
                 depth = 0 if rel == os.curdir else len(rel.split(os.sep))
@@ -992,7 +1330,7 @@ class FrontierScanner:
                 "were excluded from accepted ancestor totals"
             )
         self._apply_inventory_partition(
-            result["records"], result["error_paths"], manifest_items
+            result["records"], reconciled_errors, manifest_items
         )
         self.observed = result["records"]
         self.inventory_backend = "gdu_one_pass"
@@ -1137,7 +1475,7 @@ class FrontierScanner:
             and depth < self.max_depth
         ):
             children, enumeration_error = list_children(
-                path, self.frontier_unfinished
+                path, self.frontier_unfinished, self.remaining_budget
             )
             if children is None:
                 self.frontier_unfinished.append(
@@ -1178,7 +1516,7 @@ class FrontierScanner:
                     granularity_reason = "granularity_time_budget_exhausted"
                 else:
                     children, enumeration_error = list_children(
-                        path, self.frontier_unfinished
+                        path, self.frontier_unfinished, self.remaining_budget
                     )
                     if children:
                         return [
@@ -1220,7 +1558,9 @@ class FrontierScanner:
             )
             return
 
-        children, enumeration_error = list_children(path, self.frontier_unfinished)
+        children, enumeration_error = list_children(
+            path, self.frontier_unfinished, self.remaining_budget
+        )
         if children is None:
             self.frontier_unfinished.append(
                 {
@@ -1240,13 +1580,14 @@ class FrontierScanner:
 
     def run(self):
         self.start_time = time.time()
+        self.run_started_at = self.start_time
         try:
             self.root_dev = os.stat(self.root).st_dev
         except OSError as exc:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
         level1, root_enumeration_error = list_children(
-            self.root, self.frontier_unfinished
+            self.root, self.frontier_unfinished, self.remaining_budget
         )
         if level1 is None:
             return {
@@ -1256,6 +1597,8 @@ class FrontierScanner:
         self.level1_paths = [path for path, _ in level1]
 
         if GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
+            self._capture_system_boundary_attestations()
+            self.run_finished_at = time.time()
             return None
 
         frontier = []
@@ -1330,6 +1673,8 @@ class FrontierScanner:
                             for item in result:
                                 enqueue(item)
 
+        self._capture_system_boundary_attestations()
+        self.run_finished_at = time.time()
         return None
 
 
@@ -1384,11 +1729,85 @@ def build_report(
         ),
     }
 
-    mode = "complete" if not scanner.frontier_unfinished else "partial"
+    operational_unfinished = []
+    opaque_intrinsic_gates = []
+    fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
+    effective_uid = getattr(scanner, "effective_uid", os.geteuid())
+    attestations = {
+        item.get("path"): item
+        for item in (getattr(scanner, "system_boundary_attestations", None) or [])
+        if isinstance(item, dict)
+    }
+    run_id = getattr(scanner, "run_id", None)
+    run_started_at = getattr(scanner, "run_started_at", None)
+    run_finished_at = getattr(scanner, "run_finished_at", None)
+    for item in scanner.frontier_unfinished:
+        path = item.get("path", "")
+        reason = item.get("reason") or "unknown"
+        intrinsic = None
+        if (
+            reason in ("inventory_permission_denied", "permission_denied_or_tcc")
+            and path in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+            and verify_system_boundary_attestation(
+                attestations.get(path),
+                run_id=run_id,
+                path=path,
+                effective_uid=effective_uid,
+                fda_preflight=fda_status,
+                run_started_at=run_started_at,
+                run_finished_at=run_finished_at,
+            )
+        ):
+            attestation = attestations[path]
+            identity = attestation["identity_before"]
+            intrinsic = {
+                "path": path,
+                "reason": "permission_denied_intrinsic",
+                "errno": attestation["errno"],
+                "root_device": getattr(scanner, "root_dev", None),
+                "path_device": identity["st_dev"],
+                "verification": "parent_scanner_system_boundary_confirmation",
+                "reclaimable": False,
+            }
+            if intrinsic["root_device"] is None:
+                del intrinsic["root_device"]
+        elif reason in ("path_disappeared", "inventory_path_disappeared"):
+            try:
+                os.lstat(path)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    intrinsic = {
+                        "path": path,
+                        "reason": "vanished_during_scan",
+                        "errno": exc.errno,
+                        "verification": "lstat_enoent_at_capture",
+                        "reclaimable": False,
+                    }
+        elif reason == "cross_device_boundary":
+            try:
+                path_dev = os.lstat(path).st_dev
+            except OSError:
+                path_dev = None
+            if path_dev is not None and path_dev != scanner.root_dev:
+                intrinsic = {
+                    "path": path,
+                    "reason": "cross_device_boundary",
+                    "root_device": scanner.root_dev,
+                    "path_device": path_dev,
+                    "verification": "lstat_device_mismatch_at_capture",
+                    "reclaimable": False,
+                }
+        if intrinsic is None:
+            operational_unfinished.append(item)
+        else:
+            opaque_intrinsic_gates.append(intrinsic)
+
+    mode = "complete" if not operational_unfinished else "partial"
 
     measured_by_top = collections.defaultdict(int)
     exact_measured = {}
     unfinished_by_top = collections.defaultdict(list)
+    intrinsic_by_top = collections.defaultdict(list)
     deduped_top = set()
 
     def top_child(path):
@@ -1408,10 +1827,14 @@ def build_report(
         measured_by_top[top] += kb
         if os.sep not in rel:
             exact_measured[top] = kb
-    for item in scanner.frontier_unfinished:
+    for item in operational_unfinished:
         top, _ = top_child(item.get("path", ""))
         if top is not None:
             unfinished_by_top[top].append(item.get("reason") or "unfinished")
+    for item in opaque_intrinsic_gates:
+        top, _ = top_child(item.get("path", ""))
+        if top is not None:
+            intrinsic_by_top[top].append(item.get("reason") or "intrinsic")
     for item in scanner.deduped:
         top, _ = top_child(item.get("path", ""))
         if top is not None:
@@ -1421,13 +1844,31 @@ def build_report(
     for original_path in sorted(scanner.level1_paths):
         path = os.path.realpath(original_path)
         reasons = sorted(set(unfinished_by_top[path]))
+        intrinsic_reasons = sorted(set(intrinsic_by_top[path]))
+        cross_device_only = (
+            intrinsic_reasons == ["cross_device_boundary"]
+            and not reasons
+            and path not in exact_measured
+            and not measured_by_top[path]
+            and path not in deduped_top
+        )
+        if cross_device_only:
+            continue
         if path in exact_measured and not reasons:
-            status, size_kb = "measured", exact_measured[path]
+            status = "measured_with_opaque_gates" if intrinsic_reasons else "measured"
+            size_kb = exact_measured[path]
         elif measured_by_top[path]:
-            status = "partial" if reasons else "measured_by_descendants"
+            if reasons:
+                status = "partial"
+            elif intrinsic_reasons:
+                status = "measured_with_opaque_gates"
+            else:
+                status = "measured_by_descendants"
             size_kb = measured_by_top[path]
         elif path in deduped_top and not reasons:
             status, size_kb = "deduped", None
+        elif intrinsic_reasons and not reasons:
+            status, size_kb = "measured_with_opaque_gates", None
         else:
             status, size_kb = "unfinished", None
             if not reasons:
@@ -1438,6 +1879,7 @@ def build_report(
                 "status": status,
                 "measured_kb": size_kb,
                 "unfinished_reasons": reasons,
+                "intrinsic_gate_reasons": intrinsic_reasons,
             }
         )
 
@@ -1469,13 +1911,16 @@ def build_report(
             f"{-granularity_tail_raw_kb} KiB; displayed equation rejected"
         )
 
+    clone_shared_adjustment_kb = min(0, residual_raw_kb)
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
         "measured_kb": measured_total_kb,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "residual_kb": residual_kb,
+        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
         "balanced": (
             measured_total_kb + purgeable_info["purgeable_kb"] + residual_kb
+            + clone_shared_adjustment_kb
             == disk_stats["used_kb"]
         ),
         "displayed_buckets_kb": granularity_bucket_total_kb,
@@ -1490,6 +1935,7 @@ def build_report(
             + granularity_tail_kb
             + purgeable_info["purgeable_kb"]
             + residual_kb
+            + clone_shared_adjustment_kb
             == disk_stats["used_kb"]
         ),
         "measurement_non_atomic": used_before_kb != used_after_kb,
@@ -1497,23 +1943,61 @@ def build_report(
         "residual_reclaimable": False,
     }
     reasons = collections.defaultdict(list)
-    for item in scanner.frontier_unfinished:
+    for item in operational_unfinished:
         reasons[item.get("reason") or "unknown"].append(item.get("path"))
-    fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
     reachable_top_level_roots = len(top_level_ledger)
     measured_top_level_roots = sum(
         1
         for item in top_level_ledger
-        if item["status"] in ("measured", "measured_by_descendants", "deduped")
+        if item["status"] in (
+            "measured", "measured_by_descendants", "measured_with_opaque_gates", "deduped"
+        )
     )
     unfinished_top_level_roots = sum(
         1 for item in top_level_ledger if item["status"] == "unfinished"
     )
+    fda_probe_catalog = getattr(scanner, "fda_probe_catalog", None)
+    if fda_probe_catalog is None:
+        fda_probe_catalog = fda_probe_paths(scanner.root)
+    user_fda = fda_user_probe_evidence(fda_status)
+    granted_user_fda = valid_granted_user_fda_contract(fda_status, fda_probe_catalog)
+    system_fda_ready = fda_status["status"] == "granted"
+    if fda_status["status"] == "partial":
+        probes = fda_status.get("probes")
+        system_denied_paths = set()
+        system_probe_statuses_valid = isinstance(probes, dict)
+        if system_probe_statuses_valid:
+            for name, system_path in FDA_SYSTEM_PROBE_PATHS.items():
+                probe = probes.get(name)
+                if not isinstance(probe, dict):
+                    system_probe_statuses_valid = False
+                    break
+                if probe.get("status") == "permission_denied_or_tcc":
+                    system_denied_paths.add(system_path)
+                else:
+                    system_probe_statuses_valid = False
+                    break
+        attested_paths = {
+            item["path"]
+            for item in opaque_intrinsic_gates
+            if item.get("reason") == "permission_denied_intrinsic"
+        }
+        system_fda_ready = (
+            system_probe_statuses_valid
+            and bool(system_denied_paths)
+            and system_denied_paths.issubset(attested_paths)
+        )
     coverage_complete = (
         mode == "complete"
-        and fda_status["status"] == "granted"
+        and (
+            granted_user_fda
+            or (fda_status["status"] == "partial" and user_fda is not None)
+        )
+        and system_fda_ready
         and unfinished_top_level_roots == 0
         and measured_top_level_roots == reachable_top_level_roots
+        and accounting_equation["display_ledger_valid"]
+        and accounting_equation["displayed_balanced"]
     )
     coverage_envelope = {
         "complete": coverage_complete,
@@ -1521,9 +2005,10 @@ def build_report(
         "measured_top_level_roots": measured_top_level_roots,
         "unfinished_top_level_roots": unfinished_top_level_roots,
         "fda_preflight_status": fda_status["status"],
+        "fda_user_preflight_status": "granted" if user_fda is not None else "indeterminate",
     }
     limits = {
-        "sudo_used": False,
+        "sudo_used": effective_uid == 0,
         "full_disk_access": fda_status["status"],
         "full_disk_access_preflight": fda_status,
         "permission_denied_or_tcc": reasons.get("permission_denied_or_tcc", []),
@@ -1545,6 +2030,13 @@ def build_report(
         "hostname": socket.gethostname(),
         "argv": sys.argv[1:],
         "root": scanner.root,
+        "run_id": run_id,
+        "run_started_at": run_started_at,
+        "run_finished_at": run_finished_at,
+        "fda_probe_paths": {
+            name: fda_probe_catalog.get(name)
+            for name in FDA_PROBE_RELATIVE_PATHS
+        },
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_s": round(elapsed_s, 1),
         "config": {
@@ -1576,7 +2068,9 @@ def build_report(
         "oversize_indivisible_files": oversize_files,
         "oversize_indivisible_files_total_kb": oversize_files_total_kb,
         "deduped": scanner.deduped,
-        "frontier_unfinished": scanner.frontier_unfinished,
+        "frontier_unfinished": operational_unfinished,
+        "opaque_intrinsic_gates": opaque_intrinsic_gates,
+        "system_boundary_attestations": list(attestations.values()),
         "sibling_volumes": sibling_volumes,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "purgeable_estimate_method": purgeable_info["purgeable_estimate_method"],
@@ -1584,6 +2078,7 @@ def build_report(
         "local_snapshots_count": purgeable_info["local_snapshots_count"],
         "residual_kb": residual_kb,
         "residual_raw_kb": residual_raw_kb,
+        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
         "residual_negative_clamped": residual_negative_clamped,
         "clones_suspected": residual_negative_clamped,
         "accounting_equation": accounting_equation,

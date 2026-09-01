@@ -72,32 +72,123 @@ missing = os.path.join(root, "missing")
 os.makedirs(readable, exist_ok=True)
 os.makedirs(denied, exist_ok=True)
 
-def fake_open(path, flags):
-    if path == denied:
-        raise PermissionError(1, "Operation not permitted", path)
-    if path == missing:
-        raise FileNotFoundError(2, "No such file or directory", path)
-    return 41
+fd_paths = {}
+next_fd = [41]
+successful_opens = [0]
 
-with mock.patch.object(m.os, "open", side_effect=fake_open), \
-     mock.patch.object(m.os, "close") as close:
-    result = m.fda_preflight({
-        "mobile_sync": os.path.join(root, "readable"),
-        "mail": denied,
-        "messages": missing,
-    })
+def fake_open(path, flags, *, dir_fd=None):
+    if dir_fd is None:
+        resolved = os.path.normpath(path)
+    else:
+        resolved = os.path.normpath(os.path.join(fd_paths[dir_fd], path))
+    if resolved == denied:
+        raise PermissionError(1, "Operation not permitted", path)
+    if resolved == missing:
+        raise FileNotFoundError(2, "No such file or directory", path)
+    fd = next_fd[0]
+    next_fd[0] += 1
+    fd_paths[fd] = resolved
+    successful_opens[0] += 1
+    return fd
+
+def fake_close(fd):
+    fd_paths.pop(fd, None)
+
+with mock.patch.object(m.os, "open", side_effect=fake_open) as open_mock, \
+     mock.patch.object(m.os, "close", side_effect=fake_close) as close:
+    with mock.patch.object(m.os, "supports_dir_fd", (open_mock,)):
+        result = m.fda_preflight({
+            "mobile_sync": os.path.join(root, "readable"),
+            "mail": denied,
+            "messages": missing,
+        })
+
+root_opens = [call for call in open_mock.call_args_list if call.args[0] == os.sep]
+component_opens = [
+    call for call in open_mock.call_args_list if call.args[0] != os.sep
+]
 
 print(
     result["status"] == "partial",
     result["probes"]["mobile_sync"]["status"] == "readable",
     result["probes"]["mail"]["status"] == "permission_denied_or_tcc",
     result["probes"]["messages"]["status"] == "missing",
-    close.call_count == 1,
+    len(root_opens) == 3,
+    all(call.kwargs.get("dir_fd") is None for call in root_opens),
+    all(
+        not os.path.isabs(call.args[0]) and call.kwargs.get("dir_fd") is not None
+        for call in component_opens
+    ),
+    close.call_count == successful_opens[0] and not fd_paths,
 )
 PY
 )
-[[ "$FDA_PREFLIGHT_OUT" == "True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes read-only handles" \
+[[ "$FDA_PREFLIGHT_OUT" == "True True True True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes descriptor-relative read-only handles" \
   || bad "FDA preflight did not report per-target access correctly: $FDA_PREFLIGHT_OUT"
+
+FDA_SCOPE_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import sys
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+default = m.fda_probe_paths(m.DEFAULT_ROOT)
+synthetic = m.fda_probe_paths("/tmp/frontier-fixture")
+print(
+    "spotlight" in default,
+    default.get("spotlight") == "/System/Volumes/Data/.Spotlight-V100",
+    "spotlight" not in synthetic,
+)
+PY
+)
+[[ "$FDA_SCOPE_OUT" == "True True True" ]] && ok "FDA preflight includes protected system roots only for full-disk scans" \
+  || bad "FDA preflight scope does not cover full-disk protected roots: $FDA_SCOPE_OUT"
+
+ROOT_FDA_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import os
+import sys
+from unittest import mock
+
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(m.os.environ, {}, clear=True):
+    missing = m.fda_probe_paths("/fixture")
+    missing_evidence = m.fda_user_probe_evidence(m.fda_preflight(missing))
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(
+         m.os.environ,
+         {"DISK_MAGICIAN_SCAN_USER_HOME": "/var/root"},
+         clear=True,
+     ):
+    rejected_root = m.fda_probe_paths("/fixture")
+    rejected_root_evidence = m.fda_user_probe_evidence(
+        m.fda_preflight(rejected_root)
+    )
+
+with mock.patch.object(m.os, "geteuid", return_value=0), \
+     mock.patch.dict(
+         m.os.environ,
+         {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/fixture"},
+         clear=True,
+     ):
+    configured = m.fda_probe_paths("/fixture")
+
+print(
+    "mobile_sync" not in missing,
+    missing_evidence is None,
+    configured == {
+        "mobile_sync": "/Users/fixture/Library/Application Support/MobileSync/Backup",
+        "mail": "/Users/fixture/Library/Mail",
+        "messages": "/Users/fixture/Library/Messages",
+    },
+    "mobile_sync" not in rejected_root,
+    rejected_root_evidence is None,
+)
+PY
+)
+[[ "$ROOT_FDA_OUT" == "True True True True True" ]] && ok "root FDA probes reject /var/root and fail closed without explicit home" \
+  || bad "root FDA probe home handling is unsafe: $ROOT_FDA_OUT"
 
 # ─────────────────────────────────────────────────────────────
 section "1. Valid JSON + required schema keys"
@@ -132,7 +223,7 @@ done
 # Publication is permitted only when the scanner declares a complete coverage
 # envelope backed by its own FDA probe; keep that contract mechanically tied to
 # the emitted report rather than trusting an external scheduler assumption.
-ENVELOPE_OK=$(json_get "$OUT1" "d['coverage_envelope']['complete'] == (d['mode'] == 'complete' and d['fda_preflight']['status'] == 'granted') and d['limits']['full_disk_access_preflight'] == d['fda_preflight']")
+ENVELOPE_OK=$(json_get "$OUT1" "d['coverage_envelope']['complete'] == (d['mode'] == 'complete' and d['fda_preflight']['status'] == 'granted' and d['coverage_envelope']['fda_user_preflight_status'] == 'granted') and d['limits']['full_disk_access_preflight'] == d['fda_preflight']")
 [[ "$ENVELOPE_OK" == "True" ]] && ok "coverage envelope is derived from complete scan plus scanner FDA preflight" \
   || bad "coverage envelope does not fail closed on incomplete/FDA-denied scans: $ENVELOPE_OK"
 
@@ -1279,7 +1370,7 @@ leftover_tmp=$(find "$WORK" -name ".disk_frontier_scan.*.tmp" 2>/dev/null | wc -
   || bad "found $leftover_tmp leftover .tmp file(s) — atomic write did not clean up"
 
 # ─────────────────────────────────────────────────────────────
-section "11. gdu budget cap leaves margin for BFS fallback on gdu rejection (disk_magician-yq7)"
+section "11. gdu budget reserves a bounded fallback share on gdu rejection (disk_magician-yq7)"
 PYTHONPATH="$REPO_ROOT/scripts:$REPO_ROOT/src:${PYTHONPATH:-}" python3 - <<'PY_YQ7_TEST'
 import sys, unittest, time, tempfile, os
 from types import SimpleNamespace
@@ -1287,7 +1378,7 @@ from unittest import mock
 import disk_frontier_scan as m
 
 class TestYq7GduBudgetCap(unittest.TestCase):
-    def test_gdu_budget_is_capped_leaving_margin(self):
+    def test_gdu_budget_reserves_thirty_percent_for_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target_subdir = os.path.join(tmpdir, "a")
             os.mkdir(target_subdir)
@@ -1308,8 +1399,9 @@ class TestYq7GduBudgetCap(unittest.TestCase):
                 res = s.run_one_pass_inventory([(target_subdir, False)])
                 self.assertFalse(res)
                 self.assertEqual(len(captured_timeout), 1)
-                self.assertLessEqual(captured_timeout[0], 1200.0)
-                self.assertGreater(s.remaining_budget(), 1000.0)
+                self.assertGreater(captured_timeout[0], 1800.0)
+                self.assertLessEqual(captured_timeout[0], 1890.0)
+                self.assertGreater(s.remaining_budget(), 2600.0)
 
 suite = unittest.TestLoader().loadTestsFromTestCase(TestYq7GduBudgetCap)
 res = unittest.TextTestRunner().run(suite)
@@ -1317,7 +1409,7 @@ if not res.wasSuccessful():
     sys.exit(1)
 PY_YQ7_TEST
 if [[ $? -eq 0 ]]; then
-  ok "gdu budget cap reserves time for BFS fallback (disk_magician-yq7)"
+  ok "gdu budget reserves 30% for BFS fallback (disk_magician-yq7)"
 else
   bad "gdu budget cap test failed"
 fi

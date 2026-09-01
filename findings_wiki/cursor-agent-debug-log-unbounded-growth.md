@@ -1,3 +1,14 @@
+---
+title: cursor-agent debug session logs grow unbounded
+hostname: jeffreys-macbook-pro.local
+date: 2026-07-29
+status: mitigated
+paths:
+  - $TMPDIR/cursor-agent-logs-501
+  - ~/Library/Application Support/Cursor
+safety_rule: none
+---
+
 # cursor-agent debug session logs grow unbounded (45 GB single file)
 
 **Date found:** 2026-07-29 · **Beads:** disk_magician-ax0 (incident, closed),

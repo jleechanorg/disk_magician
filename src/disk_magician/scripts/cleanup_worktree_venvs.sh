@@ -8,7 +8,7 @@
 # requirements.txt` if the worktree is revisited.
 #
 # Defaults to dry-run. To actually strip, the safety rule requires the literal
-# `WORKTREE APPROVED` env var in addition to --clean, matching the worktree
+# `WORKTREE_APPROVED` env var in addition to --clean, matching the worktree
 # cleanup policy in the repo CLAUDE.md.
 #
 # --purge-bak-days N (bead disk_magician-7v3) additionally purges venv.bak.*
@@ -37,7 +37,7 @@
 #     by the .git file pointer that `git worktree add` creates)
 #   - Never strips a venv that is itself a symlink (already centralized)
 #   - Never strips a venv whose parent lacks a readable .git pointer
-#   - Refuses to run --clean without WORKTREE APPROVED=1 in the environment
+#   - Refuses to run --clean without WORKTREE_APPROVED=1 in the environment
 #   - --purge-bak-days never touches a venv.bak.* dir whose parent worktree
 #     is inside the --min-age protected floor (fail closed if unmeasurable —
 #     worktree_age_days's own fail-closed contract covers this)
@@ -62,10 +62,12 @@ LOCK_DIR="$STATE_DIR/cleanup_worktree_venvs.lock"
 LOCK_TTL_SEC="${DISK_MAGICIAN_CLEANUP_VENVS_LOCK_TTL_SEC:-3600}"
 
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--days N] [--roots p1,p2,...] [--purge-bak-days N] [-h|--help]
+  cat <<'EOF'
+Usage: cleanup_worktree_venvs.sh [--clean] [--dry-run] [--min-age N] [--days N]
+                                [--roots PATH,...] [--purge-bak-days N]
+                                [-h|--help]
 
-Strip Python venvs from dormant Git worktrees.
+Safely prunes Python virtual environments in stale git worktrees (>7 days old).
 
 Options:
   --clean                Actually strip the venvs (default: dry-run).
@@ -87,11 +89,11 @@ Environment:
   DISK_MAGICIAN_STATE_DIR  Overrides the lock directory's parent (tests only).
 
 Examples:
-  $(basename "$0") --dry-run
-  $(basename "$0") --min-age 30 --dry-run
-  WORKTREE_APPROVED=1 $(basename "$0") --clean
-  $(basename "$0") --purge-bak-days 30 --dry-run
-  WORKTREE_APPROVED=1 $(basename "$0") --clean --purge-bak-days 30
+  cleanup_worktree_venvs.sh --dry-run
+  cleanup_worktree_venvs.sh --min-age 30 --dry-run
+  WORKTREE_APPROVED=1 cleanup_worktree_venvs.sh --clean
+  cleanup_worktree_venvs.sh --purge-bak-days 30 --dry-run
+  WORKTREE_APPROVED=1 cleanup_worktree_venvs.sh --clean --purge-bak-days 30
 EOF
 }
 
@@ -278,12 +280,12 @@ acquire_cleanup_venvs_lock() {
 # repo worktree-safety rule (which guards against accidental mass deletion).
 if [[ "$DRY_RUN" == false ]]; then
   if [[ "${WORKTREE_APPROVED:-}" != "1" ]]; then
-    echo "ERROR: --clean requires WORKTREE APPROVED=1 in the environment." >&2
+    echo "ERROR: --clean requires WORKTREE_APPROVED=1 in the environment." >&2
     echo "       This script strips files inside Git worktrees, which the" >&2
     echo "       repo CLAUDE.md flags as requiring explicit approval." >&2
     echo "" >&2
     echo "Re-run as:" >&2
-    echo "  WORKTREE APPROVED=1 $0 --clean" >&2
+    echo "  WORKTREE_APPROVED=1 $0 --clean" >&2
     exit 3
   fi
 fi
@@ -305,7 +307,7 @@ fi
 
 log "=== STRIP DORMANT WORKTREE VENVS ==="
 if [[ "$DRY_RUN" == true ]]; then
-  log "Mode: dry-run (use WORKTREE APPROVED=1 $0 --clean to actually strip)"
+  log "Mode: dry-run (use WORKTREE_APPROVED=1 $0 --clean to actually strip)"
 else
   log "Mode: CLEAN (destructive)"
 fi
@@ -395,7 +397,7 @@ log "  Skipped (too young):    $SKIPPED_TOO_YOUNG  (< ${MIN_AGE_DAYS} days old)"
 log "  Skipped (centralized):  $SKIPPED_ALREADY_CENTRALIZED  (symlink / broken)"
 if [[ "$DRY_RUN" == true ]]; then
   log ""
-  log "This was a DRY-RUN. Re-run with WORKTREE APPROVED=1 $0 --clean to apply."
+  log "This was a DRY-RUN. Re-run with WORKTREE_APPROVED=1 $0 --clean to apply."
 fi
 
 # --purge-bak-days (bead disk_magician-7v3): purge venv.bak.* dirs older than
@@ -469,7 +471,7 @@ purge_bak_dirs() {
   log "  Skipped (bak dir < ${purge_days}d): $skipped_young_bak"
   if [[ "$DRY_RUN" == true ]]; then
     log ""
-    log "This was a DRY-RUN. Re-run with WORKTREE APPROVED=1 $0 --clean --purge-bak-days ${purge_days} to apply."
+    log "This was a DRY-RUN. Re-run with WORKTREE_APPROVED=1 $0 --clean --purge-bak-days ${purge_days} to apply."
   fi
 }
 

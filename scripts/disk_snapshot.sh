@@ -5,6 +5,20 @@
 # Supports --discover to scan home folder for large untracked folders.
 set -euo pipefail
 
+# A snapshot writer may never invoke another snapshot writer.  The launchd
+# orchestrator is the sole owner of this process tree; fail closed if its
+# environment re-enters this script before another expensive scan starts.
+SNAPSHOT_REENTRY_DEPTH="${DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH:-0}"
+if ! [[ "$SNAPSHOT_REENTRY_DEPTH" =~ ^[0-9]+$ ]]; then
+  echo "Error: invalid DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH." >&2
+  exit 75
+fi
+if (( SNAPSHOT_REENTRY_DEPTH > 0 )); then
+  echo "Error: nested snapshot invocation rejected." >&2
+  exit 75
+fi
+export DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH=1
+
 OUTPUT=""
 DRY_RUN=false
 DISCOVER=false
@@ -108,7 +122,7 @@ dir_size_kb() {
     return
   fi
 
-  local remaining path_budget path_deadline result fallback_budget
+  local remaining path_budget path_deadline dua_budget result fallback_budget
   remaining=$(remaining_measurement_seconds)
   (( remaining > 0 )) || { echo ""; return; }
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
@@ -118,7 +132,12 @@ dir_size_kb() {
   (( path_budget > remaining )) && path_budget="$remaining"
   path_deadline=$(( $(date +%s) + path_budget ))
 
-  result=$(dua_size_kb "$path" "$path_budget")
+  # Do not let the primary scanner consume the entire shared deadline.  A
+  # bounded du fallback is valuable when dua stalls on a busy filesystem.
+  dua_budget=$(( path_budget * 70 / 100 ))
+  (( dua_budget < 1 )) && dua_budget=1
+  (( dua_budget > path_budget )) && dua_budget="$path_budget"
+  result=$(dua_size_kb "$path" "$dua_budget")
 
   if [[ -z "$result" ]]; then
     fallback_budget=$(( path_deadline - $(date +%s) ))
@@ -797,7 +816,6 @@ fi
 # absent/corrupt/disabled fails open to omitting the field entirely (same
 # fail-open posture as the dedup pass above — this must never crash a
 # snapshot over a sibling tool's file).
-FRONTIER_LAST_FILE="$HOME/.disk_magician_state/frontier_last.json"
 TOPDOWN_ENABLED=$(python3 -c "
 import json, sys
 try:
@@ -807,36 +825,89 @@ except Exception:
     print('true')
 " "$CONFIG_FILE" 2>/dev/null || echo "true")
 
-TOPDOWN_JSON=$(python3 - "$FRONTIER_LAST_FILE" "$TOPDOWN_ENABLED" <<'PY' 2>/dev/null
-import datetime, json, sys
+TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$HOME/.disk_magician_state/frontier_last.json" <<'PY' 2>/dev/null
+import datetime, json, os, sys
 
-path, enabled = sys.argv[1], sys.argv[2]
-if enabled != "true":
+enabled = sys.argv[1]
+candidates = [p for p in sys.argv[2:] if p]
+if enabled != "true" or not candidates:
     print("null")
     sys.exit(0)
 
-try:
-    with open(path) as f:
-        d = json.load(f)
-    captured_at = d["captured_at"]
-    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
-    if age_hours > 36:
-        result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
-    else:
-        result = {
-            "mode": d.get("mode"),
+explicit_override = bool(sys.argv[2])
+loaded = []
+
+for idx, path in enumerate(candidates):
+    if not os.path.isfile(path) or not os.access(path, os.R_OK):
+        if explicit_override and idx == 0:
+            break
+        continue
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        captured_at = d["captured_at"]
+        ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+        # coverage_envelope.complete is authoritative when present (it is the
+        # scanner's own derived completeness verdict, factoring in FDA grant
+        # status and root-count parity — see disk_frontier_scan.py
+        # coverage_complete). Falling back to bare mode == "complete" only
+        # when the envelope is absent (legacy snapshots) avoids treating a
+        # fresh-but-unproven scan (mode complete, envelope incomplete) as
+        # equal to a genuinely complete one.
+        coverage_envelope = d.get("coverage_envelope")
+        if isinstance(coverage_envelope, dict) and "complete" in coverage_envelope:
+            is_complete = bool(coverage_envelope["complete"])
+        else:
+            is_complete = d.get("mode") == "complete"
+        is_fresh = age_hours <= 36.0
+        loaded.append({
+            "path": path,
+            "data": d,
             "captured_at": captured_at,
-            "age_hours": round(age_hours, 1),
-            "measured_total_kb": d.get("measured_total_kb"),
-            "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
-            "residual_kb": d.get("residual_kb"),
-            "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
-            "local_snapshots_count": d.get("local_snapshots_count"),
-        }
-    print(json.dumps(result))
-except Exception:
+            "age_hours": age_hours,
+            "is_complete": is_complete,
+            "is_fresh": is_fresh,
+            "ts": ts,
+        })
+        if explicit_override and idx == 0:
+            break
+    except Exception:
+        # A corrupt explicit override must fail closed the same way a
+        # missing one does (see the idx == 0 branch above) — falling
+        # through to the root-daemon/user-state candidates here would
+        # silently ignore the caller's explicit request.
+        if explicit_override and idx == 0:
+            break
+        continue
+
+if not loaded:
     print("null")
+    sys.exit(0)
+
+def score(c):
+    return (
+        1 if c["is_fresh"] and c["is_complete"] else 0,
+        1 if c["is_fresh"] else 0,
+        c["ts"].timestamp(),
+    )
+
+best = max(loaded, key=score)
+if not best["is_fresh"]:
+    result = {"stale": True, "captured_at": best["captured_at"], "age_hours": round(best["age_hours"], 1)}
+else:
+    d = best["data"]
+    result = {
+        "mode": d.get("mode"),
+        "captured_at": best["captured_at"],
+        "age_hours": round(best["age_hours"], 1),
+        "measured_total_kb": d.get("measured_total_kb"),
+        "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+        "residual_kb": d.get("residual_kb"),
+        "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
+        "local_snapshots_count": d.get("local_snapshots_count"),
+    }
+print(json.dumps(result))
 PY
 )
 if [[ -z "$TOPDOWN_JSON" ]]; then

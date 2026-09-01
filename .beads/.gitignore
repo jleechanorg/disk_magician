@@ -49,3 +49,5 @@ redirect
 *.db-fsqlite-ns-gate
 *.db-fsqlite-ns-use
 *.vacuum-fsqlite-ns-*
+*.db-wal-cert*
+*.db.fsqlite-migration-state

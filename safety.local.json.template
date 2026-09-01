@@ -16,19 +16,33 @@
     "~/.codex/state*.sqlite",
     "~/.codex/log",
     "~/.claude/projects",
-    "~/.disk_magician_backup"
+    "~/.disk_magician_backup",
+    "~/.hermes/state.db*"
   ],
   "protected_live_paths": [
     {
       "path": "~/example/live-daemon-workdir",
       "reason": "example: cwd of a running daemon — check pgrep before removing this entry"
+    },
+    {
+      "path": "~/.hermes/checkpoints",
+      "reason": "Hermes live daemon state checkpoints"
+    },
+    {
+      "path": "~/.cmuxterm",
+      "reason": "Active cmux terminal process session state"
     }
   ],
   "needs_decision": [
     {
       "path": "~/example/clone-with-unpushed-commits",
       "reason": "example: full clone holding unpushed commits — push or discard first"
+    },
+    {
+      "path": "~/.openclaw/repo-backups",
+      "reason": "OpenClaw repository backup archives — review and prune only after verified push"
     }
   ],
+  "_comment_min_stale_days": "Minimum age in days before a worktree or cache is considered stale. Hard floor: 7 days; this setting may only INCREASE the floor.",
   "min_stale_days": 7
 }
