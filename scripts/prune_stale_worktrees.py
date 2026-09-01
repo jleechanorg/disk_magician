@@ -83,7 +83,8 @@ def discover_worktrees():
         except Exception:
             pass
 
-    for extra in ['/Users/jleechan/.ao/data/worktrees', '/Users/jleechan/.gemini/antigravity/worktrees', '/Users/jleechan/.worktrees', '/Users/jleechan/worktrees']:
+    for extra in [os.path.expanduser(p) for p in
+                  ['~/.ao/data/worktrees', '~/.gemini/antigravity/worktrees', '~/.worktrees', '~/worktrees']]:
         if os.path.exists(extra):
             for root, dirs, files in os.walk(extra):
                 if '.git' in files:
