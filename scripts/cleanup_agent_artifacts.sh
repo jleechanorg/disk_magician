@@ -115,17 +115,22 @@ expand_path() {
 # rm -rf — an old worktree can still hold real, unpushed work (CodeRabbit
 # review of PR #55).
 worktree_has_unsaved_work() {
-  local wt="$1" git_bin upstream
+  local wt="$1" git_bin upstream status_out status_rc rev_out rev_rc
   git_bin=$(command -v git 2>/dev/null) || return 0
   "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  if [[ -n "$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-    return 0
-  fi
+  # Check the PROBE's own exit code, not just whether it printed anything —
+  # empty stdout from a failed `git status`/`git rev-list` (corrupted repo,
+  # permission error) must not read the same as "confirmed clean" (Codex
+  # finding in /advice re-review of PR #55: the prior version fell through
+  # to "safe to delete" on a failed probe).
+  status_out="$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)"; status_rc=$?
+  [[ "$status_rc" -ne 0 ]] && return 0
+  [[ -n "$status_out" ]] && return 0
   upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
   [[ -z "$upstream" ]] && return 0
-  if [[ -n "$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)" ]]; then
-    return 0
-  fi
+  rev_out="$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)"; rev_rc=$?
+  [[ "$rev_rc" -ne 0 ]] && return 0
+  [[ -n "$rev_out" ]] && return 0
   return 1
 }
 

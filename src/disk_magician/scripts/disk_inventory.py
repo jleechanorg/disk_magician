@@ -488,7 +488,12 @@ def _effective_min_stale_days(repo_root: Optional[Path] = None) -> int:
     lib = (repo_root or Path(__file__).resolve().parent) / "safety_lib.sh"
     if not lib.is_file():
         return 7
-    rc, out = _run(["bash", "-c", f"source {lib} && safety_min_stale_days"])
+    # Pass the path as an argv element (accessed via "$0" in the script),
+    # not interpolated into the command string — a path containing spaces
+    # or shell metacharacters would otherwise break `source` silently and
+    # fall back to 7, masking a raised floor (Codex finding in /advice
+    # re-review of PR #55).
+    rc, out = _run(["bash", "-c", 'source "$0" && safety_min_stale_days', str(lib)])
     try:
         return max(7, int(out.strip())) if rc == 0 else 7
     except ValueError:

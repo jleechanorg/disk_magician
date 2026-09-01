@@ -44,6 +44,13 @@ ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}
 # change nor honored the override the sibling scripts respect (found in
 # /advice review of PR #55).
 WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+# Hard floor: 7 days, may only be raised, never lowered (CLAUDE.md
+# invariant). Missed in the sibling scripts' clamp sweep (found in /advice
+# re-review of PR #55) -- WORKTREE_MIN_AGE_DAYS=0 would otherwise let this
+# script's orphaned-worktree-pointer guard qualify every pointer for removal.
+if [[ ! "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ || "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]]; then
+  WORKTREE_MIN_AGE_DAYS=7
+fi
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
