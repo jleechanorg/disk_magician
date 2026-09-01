@@ -297,9 +297,8 @@ worktree_has_unsaved_work() {
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
   local path="$1" kb="$2" ts dest
-  local archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-$ARCHIVE_ROOT}"
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  dest="$archive_root/$ts"
+  dest="$ARCHIVE_ROOT/$ts"
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
@@ -328,8 +327,7 @@ warn_if_long_lived() {
 # because quarantined content can become active during its recovery window.
 # Entries older than LARGE_TMP_ARCHIVE_MAX_HOURS are purged unconditionally.
 purge_aged_archives() {
-  local archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-$ARCHIVE_ROOT}"
-  [[ -d "$archive_root" ]] || return 0
+  [[ -d "$ARCHIVE_ROOT" ]] || return 0
   local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
   local now_epoch d kb entry_mtime age_hours
   now_epoch="$(date +%s)"

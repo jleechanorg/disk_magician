@@ -86,4 +86,22 @@ if ! echo "$OUTPUT_JSON" | grep -q '"sessions_scanned"'; then
   exit 1
 fi
 
+# Test --apply and disk_magician.sh dispatcher integration
+MOCK_APPLY_SID="2026-07-01_apply_test"
+mkdir -p "$MOCK_SESSIONS/$MOCK_APPLY_SID"
+echo "apply test data" > "$MOCK_SESSIONS/$MOCK_APPLY_SID/test.txt"
+
+echo "Testing disk_magician.sh prune-aside-sessions --apply..."
+OUTPUT_DISPATCH=$("$REPO_ROOT/disk_magician.sh" prune-aside-sessions --apply --aside-dir "$MOCK_ASIDE")
+if ! echo "$OUTPUT_DISPATCH" | grep -q "CLEAN / APPLY"; then
+  echo "FAIL: Expected CLEAN / APPLY from disk_magician.sh dispatcher"
+  exit 1
+fi
+
+if [[ -d "$MOCK_SESSIONS/$MOCK_APPLY_SID" ]]; then
+  echo "FAIL: --apply failed to prune stale session $MOCK_APPLY_SID"
+  exit 1
+fi
+
 echo "ALL SHELL INTEGRATION TESTS PASSED"
+

@@ -71,6 +71,7 @@ scanner = SimpleNamespace(
     frontier_unfinished=[], deduped=[], warnings=[], nodes_processed=3,
     tracker=SimpleNamespace(peak=lambda: 2),
     level1_paths=[f"{root}/large", f"{root}/small-group"],
+    fda_preflight={"status": "not_inferred"},
 )
 args = SimpleNamespace(workers=2, max_depth=6, max_nodes=50,
                        wall_clock_cap=10, timeout_tiers=[1], granularity_gib=5.0)
