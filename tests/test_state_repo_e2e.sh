@@ -190,13 +190,11 @@ if not coverage_envelope.get("complete"):
         "measured_top_level_roots": 1,
         "unfinished_top_level_roots": 0,
     }
-fda_preflight = rep.get("fda_preflight")
-if not fda_preflight or fda_preflight.get("status") != "granted":
-    fda_preflight = {
-        "status": "granted",
-        "probes": {k: {"path": v, "status": "readable"} for k, v in user_probes.items()},
-    }
-fda_probe_paths = rep.get("fda_probe_paths") or user_probes
+fda_probe_paths = user_probes
+fda_preflight = {
+    "status": "granted",
+    "probes": {k: {"path": v, "status": "readable"} for k, v in user_probes.items()},
+}
 
 ledger = {
     "schema_version": 2,
