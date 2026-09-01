@@ -342,6 +342,7 @@ log "$(dry_prefix)cleanup_pr_scratch.sh starting (roots: ${CANONICAL_TMP_DIRS[*]
 DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
+RM_FAILED=0
 
 if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
@@ -413,6 +414,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
             TOTAL_KB=$(( TOTAL_KB + kb ))
           else
             echo "SKIP (rm failed): $item"
+            RM_FAILED=$(( RM_FAILED + 1 ))
           fi
         else
           chmod u+w "$item" 2>/dev/null || true
@@ -421,6 +423,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
             TOTAL_KB=$(( TOTAL_KB + kb ))
           else
             echo "SKIP (rm failed): $item"
+            RM_FAILED=$(( RM_FAILED + 1 ))
           fi
         fi
       fi
@@ -428,5 +431,5 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   done
 fi
 
-log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"
 

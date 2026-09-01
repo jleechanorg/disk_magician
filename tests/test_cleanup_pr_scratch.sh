@@ -22,7 +22,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_pr_scratch.sh"
 
 TMP_TEST_ROOT=$(mktemp -d -t test_pr_scratch.XXXXXX)
-trap 'rm -rf "$TMP_TEST_ROOT"' EXIT
+# chflags -R nouchg first: Test 12 deliberately sets the macOS uchg
+# (immutable) flag to simulate a chmod-immune deletion target, and
+# rm -rf cannot remove a uchg-flagged file even as the owner. Without
+# this, an abnormal exit between "set uchg" and "clear uchg" leaks a
+# permanently undeletable tree under TMPDIR (found in /advice review of
+# PR #60 -- Opus found one such leaked tree still on disk from a prior
+# run). command -v guards for non-macOS hosts where chflags may be absent.
+trap 'command -v chflags >/dev/null 2>&1 && chflags -R nouchg "$TMP_TEST_ROOT" 2>/dev/null; rm -rf "$TMP_TEST_ROOT"' EXIT
 
 PASS=0
 FAIL=0
