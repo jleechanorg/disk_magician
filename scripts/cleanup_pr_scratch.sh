@@ -417,7 +417,15 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
             RM_FAILED=$(( RM_FAILED + 1 ))
           fi
         else
-          chmod u+w "$item" 2>/dev/null || true
+          # Skip chmod entirely when $item is a symlink: `chmod` (unlike
+          # `chmod -R` on a symlink-to-dir operand) follows a top-level
+          # symlink-to-file and would silently loosen permissions on
+          # whatever real file it points at, outside this sweep's scope --
+          # and unlink permission for the symlink itself comes from the
+          # containing directory, not the symlink's own mode, so this
+          # chmod was never needed for a symlink anyway (found in /advice
+          # review of PR #60 -- Opus).
+          [[ -L "$item" ]] || chmod u+w "$item" 2>/dev/null || true
           if rm -f "$item" 2>/dev/null; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))

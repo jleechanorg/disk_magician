@@ -29,7 +29,15 @@ TMP_TEST_ROOT=$(mktemp -d -t test_pr_scratch.XXXXXX)
 # permanently undeletable tree under TMPDIR (found in /advice review of
 # PR #60 -- Opus found one such leaked tree still on disk from a prior
 # run). command -v guards for non-macOS hosts where chflags may be absent.
-trap 'command -v chflags >/dev/null 2>&1 && chflags -R nouchg "$TMP_TEST_ROOT" 2>/dev/null; rm -rf "$TMP_TEST_ROOT"' EXIT
+# The whole chflags leg is wrapped in `( ... ) || true`, not cosmetic: this
+# file has `set -euo pipefail` at the top, and a trap handler string
+# executes as a script under the caller's active options -- a bare
+# `A && B; C` does NOT protect C from errexit if A or B fails, because `;`
+# is a sequence separator, not an errexit boundary. Without the `|| true`
+# here, a missing `chflags` binary OR a failing `chflags` call would both
+# abort the trap before `rm -rf` ever ran (found in /advice review of
+# PR #60 -- Codex).
+trap '(command -v chflags >/dev/null 2>&1 && chflags -R nouchg "$TMP_TEST_ROOT" 2>/dev/null) || true; rm -rf "$TMP_TEST_ROOT"' EXIT
 
 PASS=0
 FAIL=0
@@ -350,9 +358,37 @@ if command -v chflags >/dev/null 2>&1; then
   chmod -R u+w "$T12_DIR" 2>/dev/null || true
   assert_rc "T12: sweep exits 0 despite a chmod-immune entry" 0 "$T12_RC"
   assert_contains "T12: unremovable item is SKIP-logged" "SKIP (rm failed)" "$T12_OUT"
+  assert_contains "T12: summary reports the RM_FAILED count" "Skipped (rm failed): 1" "$T12_OUT"
   assert_missing "T12: sibling dir still removed (sweep did not abort)" "$T12_DIR/pr-normal-dir2"
 else
   record_pass "T12: chflags unavailable on this platform, skipping (not a failure)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 13: symlink target permissions untouched (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 13: Symlink Target Permissions Are Not Modified"
+T13_DIR="$TMP_TEST_ROOT/t13_tmp"
+T13_EXTERNAL="$TMP_TEST_ROOT/t13_external_file.txt"
+mkdir -p "$T13_DIR"
+echo "external data" > "$T13_EXTERNAL"
+chmod 444 "$T13_EXTERNAL"
+ln -s "$T13_EXTERNAL" "$T13_DIR/pr-stale-symlink"
+set_old_mtime "$T13_DIR"
+# set_old_mtime's `touch -t` follows symlinks by default, so it only
+# backdated $T13_EXTERNAL (the target); backdate the symlink's own mtime
+# with `-h` so the recency check doesn't see it as freshly created.
+touch -h -t 202001010000 "$T13_DIR/pr-stale-symlink"
+T13_PERMS_BEFORE="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+
+T13_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T13_DIR" 2>&1)
+T13_PERMS_AFTER="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+chmod u+w "$T13_EXTERNAL" 2>/dev/null || true
+assert_missing "T13: stale symlink itself removed" "$T13_DIR/pr-stale-symlink"
+if [[ "$T13_PERMS_BEFORE" == "$T13_PERMS_AFTER" ]]; then
+  record_pass "T13: external symlink target permissions unchanged ($T13_PERMS_BEFORE)"
+else
+  record_fail "T13: external symlink target permissions unchanged" "was $T13_PERMS_BEFORE, now $T13_PERMS_AFTER"
 fi
 
 echo
