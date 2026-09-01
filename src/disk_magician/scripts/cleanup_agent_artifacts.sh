@@ -108,6 +108,27 @@ expand_path() {
   eval echo "$path"
 }
 
+# worktree_has_unsaved_work <path> — true (rc 0) if uncommitted/untracked
+# changes or unpushed commits exist, or if that can't be proven (fail
+# closed). Mirrors cleanup_pr_scratch.sh's helper of the same name: age
+# alone (worktree_is_recently_active) does not prove a worktree is safe to
+# rm -rf — an old worktree can still hold real, unpushed work (CodeRabbit
+# review of PR #55).
+worktree_has_unsaved_work() {
+  local wt="$1" git_bin upstream
+  git_bin=$(command -v git 2>/dev/null) || return 0
+  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  if [[ -n "$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)" ]]; then
+    return 0
+  fi
+  upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
+  [[ -z "$upstream" ]] && return 0
+  if [[ -n "$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 clear_dir_contents() {
   local path="$1"
   local gate_days="${2:--1}"
@@ -122,6 +143,9 @@ clear_dir_contents() {
     for child in "$path"/*; do
       [[ -d "$child" ]] || continue
       if worktree_is_recently_active "$child" "${gate_days:-7}"; then
+        continue
+      fi
+      if worktree_has_unsaved_work "$child"; then
         continue
       fi
       rm -rf "$child" 2>/dev/null || true

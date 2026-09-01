@@ -135,6 +135,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Hard floor: 7 days, may only be raised (env, CLI, or config), never
+# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
+# or --min-age 0 would delete every dormant worktree regardless of age.
+if [[ ! "$MIN_AGE_DAYS" =~ ^[0-9]+$ || "$MIN_AGE_DAYS" -lt 7 ]]; then
+  MIN_AGE_DAYS=7
+fi
+
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 size_kb() {

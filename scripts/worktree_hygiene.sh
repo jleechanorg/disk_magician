@@ -446,6 +446,13 @@ main() {
         shift
     done
 
+    # Hard floor: 7 days, may only be raised (env, CLI, or config), never
+    # lowered (CLAUDE.md invariant). Without this clamp, --min-age 0 would
+    # let every dormant worktree qualify for deletion regardless of age.
+    if [[ ! "$MIN_AGE_DAYS" =~ ^[0-9]+$ || "$MIN_AGE_DAYS" -lt 7 ]]; then
+        MIN_AGE_DAYS=7
+    fi
+
     if [[ ${#REPOS[@]} -eq 0 ]]; then
         while IFS= read -r repo; do
             [[ -n "$repo" ]] && REPOS+=("$repo")

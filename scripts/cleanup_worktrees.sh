@@ -21,7 +21,7 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >7 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=7 days old, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
@@ -121,6 +121,13 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
             done < <(echo "$discovered_repos_str" | tr ' ' '\n' | sort -u)
         fi
     fi
+fi
+
+# Hard floor: 7 days, may only be raised (env, CLI, or config), never
+# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
+# or --min-age 0 would delete every dormant worktree regardless of age.
+if [[ ! "$MIN_AGE_DAYS" =~ ^[0-9]+$ || "$MIN_AGE_DAYS" -lt 7 ]]; then
+  MIN_AGE_DAYS=7
 fi
 
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"

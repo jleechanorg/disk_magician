@@ -112,6 +112,22 @@ JSON
 days="$(safety_min_stale_days)"
 assert_rc "default staleness floor is 7 days" 7 "$days"
 
+# The floor may only INCREASE, never decrease (CLAUDE.md hard invariant) —
+# a config value below 7 must clamp to 7, not pass through (CodeRabbit
+# review of PR #55: this previously only rejected negatives, letting 0-6
+# silently defeat the floor for every caller).
+cat > "$SANDBOX/safety.local.json" <<'JSON'
+{"min_stale_days": 3}
+JSON
+days="$(safety_min_stale_days)"
+assert_rc "min_stale_days below 7 clamps to the hard floor" 7 "$days"
+
+cat > "$SANDBOX/safety.local.json" <<'JSON'
+{"min_stale_days": 0}
+JSON
+days="$(safety_min_stale_days)"
+assert_rc "min_stale_days of 0 clamps to the hard floor" 7 "$days"
+
 echo "fail-closed on unreadable file:"
 echo '{not json' > "$SANDBOX/safety.local.json"
 rc=0; safety_is_protected "$TMP_ROOT/unrelated/dir" >/dev/null 2>&1 || rc=$?

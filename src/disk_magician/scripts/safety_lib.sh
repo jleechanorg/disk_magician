@@ -148,6 +148,10 @@ try:
 except (OSError, ValueError):
     sys.exit(1)
 value = cfg.get("min_stale_days", 7)
-print(int(value) if isinstance(value, (int, float)) and int(value) >= 0 else 7)
+# Hard floor: this setting may only INCREASE the 7-day floor, never lower
+# it (CLAUDE.md invariant). Clamp instead of merely rejecting negatives —
+# a config value of 0-6 previously passed through unclamped, silently
+# defeating the floor for every caller of safety_min_stale_days.
+print(max(7, int(value)) if isinstance(value, (int, float)) else 7)
 PY
 }

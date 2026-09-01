@@ -477,13 +477,33 @@ def _ao_reference_map(
     return references, True
 
 
+def _effective_min_stale_days(repo_root: Optional[Path] = None) -> int:
+    """Effective worktree-staleness floor: safety_lib.sh's safety_min_stale_days()
+    when reachable (respects an operator-raised safety.local.json floor —
+    see CLAUDE.md's "may only INCREASE the floor" rule), else the hard
+    default of 7. A hardcoded 7 here would silently ignore a raised floor
+    and reintroduce the exact class of bug the hard-floor invariant exists
+    to prevent.
+    """
+    lib = (repo_root or Path(__file__).resolve().parent) / "safety_lib.sh"
+    if not lib.is_file():
+        return 7
+    rc, out = _run(["bash", "-c", f"source {lib} && safety_min_stale_days"])
+    try:
+        return max(7, int(out.strip())) if rc == 0 else 7
+    except ValueError:
+        return 7
+
+
 def inventory_paths(
     roots: Sequence[Path], now_epoch: Optional[int] = None,
     open_files: Optional[Sequence[dict]] = None,
     ao_metadata_roots: Sequence[Path] = (),
     open_file_attribution_complete: Optional[bool] = None,
     open_file_attribution_error: Optional[str] = None,
+    min_stale_days: Optional[int] = None,
 ) -> dict:
+    min_stale_days = max(7, min_stale_days) if min_stale_days is not None else _effective_min_stale_days()
     now_epoch = int(time.time()) if now_epoch is None else now_epoch
     if open_files is None:
         collected = collect_open_files()
@@ -521,6 +541,7 @@ def inventory_paths(
                 eligible_worktree = (
                     ao_attribution_complete
                     and open_file_attribution_complete
+                    and measured.get("measurement_errors", 0) == 0
                     and git.get("pr_attribution_complete") is True
                     and not git.get("pull_requests")
                     and bool(git.get("branch"))
@@ -528,7 +549,7 @@ def inventory_paths(
                     and git.get("registered_worktree") is True
                     and git.get("dirty") is False
                     and git.get("ahead_of_upstream") == 0
-                    and age_days is not None and age_days >= 7
+                    and age_days is not None and age_days >= min_stale_days
                     and not active and not ao_refs and not _is_protected(child)
                 )
                 if _is_protected(child):
