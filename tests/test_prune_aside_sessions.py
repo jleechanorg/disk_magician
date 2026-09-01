@@ -70,7 +70,7 @@ class TestPruneAsideSessions(unittest.TestCase):
 
         return sdir
 
-    def _create_mock_lsof_script(self, locked_paths: list = None, fail: bool = False, rc1_with_stderr: bool = False) -> Path:
+    def _create_mock_lsof_script(self, locked_paths: list = None, fail: bool = False, rc1_with_stderr: bool = False, rc0_with_stderr: bool = False) -> Path:
         """Create a mock lsof binary for testing Signal B."""
         mock_bin = self.temp_dir / "mock_lsof.sh"
         locked_list = " ".join([f'"{p}"' for p in (locked_paths or [])])
@@ -81,6 +81,12 @@ class TestPruneAsideSessions(unittest.TestCase):
             # must fail closed rather than be read as lsof's normal
             # "no matches" result (+advice review of PR #59).
             mock_bin.write_text("#!/bin/sh\necho 'lsof: WARNING: can not stat() path' 1>&2\nexit 1\n")
+        elif rc0_with_stderr:
+            # rc=0, empty stdout, non-empty stderr: lsof completed but also
+            # emitted a diagnostic -- same anomaly class as rc=1+stderr,
+            # must fail closed rather than be read as "confirmed no open
+            # files" (found in /advice review of PR #59, second round).
+            mock_bin.write_text("#!/bin/sh\necho 'lsof: WARNING: can not stat() path' 1>&2\nexit 0\n")
         elif not locked_paths:
             mock_bin.write_text("#!/bin/sh\nexit 1\n")
         else:
@@ -265,6 +271,32 @@ exit 0
         )
 
         mock_lsof = self._create_mock_lsof_script(rc1_with_stderr=True)
+
+        pruner = AsideSessionPruner(
+            aside_dir=self.aside_dir,
+            max_age_days=14,
+            dry_run=False,
+            lsof_bin=str(mock_lsof),
+            ref_time=self.ref_time,
+        )
+        stats = pruner.run()
+
+        self.assertEqual(stats["sessions_retained_in_use"], 1)
+        self.assertEqual(stats["sessions_pruned"], 0)
+        self.assertTrue(old_session.exists())
+
+    def test_lsof_rc0_with_stderr_fails_closed(self):
+        """rc=0 + empty stdout + non-empty stderr must also fail closed --
+        same anomaly class as rc=1+stderr, just the other returncode lsof
+        can complete "successfully" with while still emitting a diagnostic
+        (found in /advice review of PR #59, second round)."""
+        old_session = self._create_mock_session(
+            self.u0_sessions,
+            "2026-07-15_old_session",
+            {"data.txt": "data"},
+        )
+
+        mock_lsof = self._create_mock_lsof_script(rc0_with_stderr=True)
 
         pruner = AsideSessionPruner(
             aside_dir=self.aside_dir,

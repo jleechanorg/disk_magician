@@ -140,7 +140,12 @@ def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> T
         # straight into the stdout-parsing loop, which found nothing in the
         # (empty) stdout and returned the same unsafe "confirmed no open
         # files" result the fast-path guard was meant to prevent.
-        if res.returncode == 1 and res.stderr.strip():
+        if res.returncode in (0, 1) and res.stderr.strip():
+            # Same anomaly, both returncodes: check_open_files() below
+            # already fails closed on rc=0/1 + stderr; this function must
+            # match it rather than parsing stdout that lsof itself flagged
+            # as diagnostically incomplete (found in /advice review of
+            # PR #59 -- rc=1 case fixed above, rc=0 was still open).
             return False, set()
 
         if res.returncode == 1 and not res.stdout.strip():
