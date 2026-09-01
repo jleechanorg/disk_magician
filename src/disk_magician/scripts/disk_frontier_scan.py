@@ -248,6 +248,27 @@ def fda_user_probe_evidence(preflight):
     return {"status": "granted", "probes": user_probes}
 
 
+def valid_granted_user_fda_contract(preflight, catalog):
+    """Return true only when granted preflight proves the exact user catalog."""
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "granted"
+        or not valid_user_probe_catalog(catalog)
+    ):
+        return False
+    probes = preflight.get("probes")
+    if not isinstance(probes, dict):
+        return False
+    return all(
+        isinstance(probe, dict)
+        and set(probe) == {"path", "status"}
+        and probe.get("path") == catalog[name]
+        and probe.get("status") == "readable"
+        for name in FDA_PROBE_RELATIVE_PATHS
+        for probe in [probes.get(name)]
+    )
+
+
 def verify_system_boundary_attestation(
     attestation, *, run_id, path, effective_uid, fda_preflight,
     run_started_at, run_finished_at, now=None,
@@ -1894,7 +1915,11 @@ def build_report(
     unfinished_top_level_roots = sum(
         1 for item in top_level_ledger if item["status"] == "unfinished"
     )
+    fda_probe_catalog = getattr(scanner, "fda_probe_catalog", None)
+    if fda_probe_catalog is None:
+        fda_probe_catalog = fda_probe_paths(scanner.root)
     user_fda = fda_user_probe_evidence(fda_status)
+    granted_user_fda = valid_granted_user_fda_contract(fda_status, fda_probe_catalog)
     system_fda_ready = fda_status["status"] == "granted"
     if fda_status["status"] == "partial":
         probes = fda_status.get("probes")
@@ -1923,7 +1948,10 @@ def build_report(
         )
     coverage_complete = (
         mode == "complete"
-        and user_fda is not None
+        and (
+            granted_user_fda
+            or (fda_status["status"] == "partial" and user_fda is not None)
+        )
         and system_fda_ready
         and unfinished_top_level_roots == 0
         and measured_top_level_roots == reachable_top_level_roots
@@ -1938,9 +1966,6 @@ def build_report(
         "fda_preflight_status": fda_status["status"],
         "fda_user_preflight_status": "granted" if user_fda is not None else "indeterminate",
     }
-    fda_probe_catalog = getattr(scanner, "fda_probe_catalog", None)
-    if fda_probe_catalog is None:
-        fda_probe_catalog = fda_probe_paths(scanner.root)
     limits = {
         "sudo_used": effective_uid == 0,
         "full_disk_access": fda_status["status"],
