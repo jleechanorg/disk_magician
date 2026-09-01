@@ -117,7 +117,15 @@ expand_path() {
 worktree_has_unsaved_work() {
   local wt="$1" git_bin upstream status_out status_rc rev_out rev_rc
   git_bin=$(command -v git 2>/dev/null) || return 0
-  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  # Distinguish "genuinely not a git worktree" (no .git at all — nothing to
+  # lose, safe to proceed) from ".git exists but rev-parse still failed"
+  # (corrupted repo, permission error — must fail closed, not read the same
+  # as "not a worktree"). Codex finding in /advice round 4: the prior form
+  # returned 1 (safe to delete) on ANY rev-parse failure.
+  if [[ ! -e "$wt/.git" ]]; then
+    return 1
+  fi
+  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   # Check the PROBE's own exit code, not just whether it printed anything —
   # empty stdout from a failed `git status`/`git rev-list` (corrupted repo,
   # permission error) must not read the same as "confirmed clean" (Codex
