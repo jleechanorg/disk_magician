@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_MAX_AGE_DAYS = 14
+DEFAULT_MAX_AGE_DAYS = 7
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
 DATE_PREFIX_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_.*)?$")
 
@@ -127,7 +127,27 @@ def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> T
             text=True,
             timeout=15,
         )
-        # rc=1 with empty output is lsof's standard 'no matches' result
+        # rc=1 with empty stdout is lsof's standard 'no matches' result -- but
+        # only when stderr is also empty. +w turns lsof's warnings ON (not
+        # off -- see `lsof -h`'s "+|-w Warnings (+)"; the run below deliberately
+        # asks for them), so any stderr content on rc=1 is a genuine anomaly,
+        # not the normal no-matches case; fail closed on it instead of
+        # treating it as "confirmed no open files" (found in /advice review
+        # of PR #59). This check must cover EVERY rc=1 path, not just the
+        # stdout-empty fast path below it -- a first round of this fix only
+        # gated the fast path, so rc=1 + empty stdout + non-empty stderr fell
+        # through the "returncode not in (0, 1)" check (1 IS in that set)
+        # straight into the stdout-parsing loop, which found nothing in the
+        # (empty) stdout and returned the same unsafe "confirmed no open
+        # files" result the fast-path guard was meant to prevent.
+        if res.returncode in (0, 1) and res.stderr.strip():
+            # Same anomaly, both returncodes: check_open_files() below
+            # already fails closed on rc=0/1 + stderr; this function must
+            # match it rather than parsing stdout that lsof itself flagged
+            # as diagnostically incomplete (found in /advice review of
+            # PR #59 -- rc=1 case fixed above, rc=0 was still open).
+            return False, set()
+
         if res.returncode == 1 and not res.stdout.strip():
             return True, set()
 
@@ -177,7 +197,8 @@ def check_open_files(session_dir: Path, lsof_bin: Optional[str] = None) -> bool:
         return True
 
     try:
-        # +w suppresses warning messages; +D causes lsof to search directory recursively
+        # +w turns lsof's warnings ON (not off -- see `lsof -h`'s
+        # "+|-w Warnings (+)"); +D causes lsof to search directory recursively.
         res = subprocess.run(
             [bin_path, "+w", "+D", str(session_dir)],
             stdout=subprocess.PIPE,
@@ -187,8 +208,11 @@ def check_open_files(session_dir: Path, lsof_bin: Optional[str] = None) -> bool:
         )
         if res.stdout.strip():
             return True
-        # On macOS/Linux: rc=0 with empty stdout, or rc=1 with empty stdout means no open files found.
-        if res.returncode in (0, 1) and not res.stdout.strip():
+        # rc=0 or rc=1 with empty stdout means no open files found -- but
+        # only when stderr is also empty. Any stderr content here is a
+        # genuine anomaly (warnings are deliberately requested via +w above),
+        # not the normal case; fail closed on it (/advice review of PR #59).
+        if res.returncode in (0, 1) and not res.stderr.strip():
             return False
         # Any other returncode or diagnostic output is treated as in-use (fail-closed)
         return True

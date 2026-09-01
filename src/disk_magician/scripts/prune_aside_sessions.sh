@@ -30,7 +30,7 @@ Prune stale Aside browser sessions (~/.aside/u/*/sessions/) and deduplicate asse
 Options:
   --clean, --apply     Execute actual deletion of stale sessions and deduplication (default: dry-run)
   --dry-run            Preview actions without modifying or deleting files (default)
-  --max-age-days N     Age threshold in days for session pruning (default: 14)
+  --max-age-days N     Age threshold in days for session pruning (default: 7)
   --days N             Alias for --max-age-days
   --aside-dir PATH     Override path to ~/.aside directory
   --sessions-dir PATH  Override path to a specific sessions directory (repeatable)

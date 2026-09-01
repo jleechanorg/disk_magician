@@ -361,6 +361,7 @@ log "$(dry_prefix)cleanup_pr_scratch.sh starting (roots: ${CANONICAL_TMP_DIRS[*]
 DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
+RM_FAILED=0
 
 if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
@@ -421,18 +422,53 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           continue
         fi
         log "Removing: $item  (${kb} KB)"
-        if [[ -d "$item" ]]; then
-          rm -rf "$item"
-          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+        if [[ -L "$item" ]]; then
+          # Symlink operand: handled before the -d test and never chmod'd.
+          # `-d "$item"` is true for a symlink-to-directory, so checking
+          # -d first would route it into the chmod -R branch below --
+          # GNU coreutils chmod -R derefs and recurses into a symlink-to-dir
+          # operand by default (BSD/macOS chmod does not), so on a Linux
+          # host that would silently widen permissions on whatever real
+          # tree the symlink points at, outside this sweep's scope. Never
+          # chmod a symlink operand at all: unlink permission for the
+          # symlink itself comes from the containing directory, not the
+          # symlink's own mode or its target's mode (found in /advice
+          # review of PR #60 -- Opus, symlink-to-file case; symlink-to-dir
+          # case hoisted here for the same reason before it ships).
+          if rm -f "$item" 2>/dev/null; then
+            FILES_DELETED=$(( FILES_DELETED + 1 ))
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+          else
+            echo "SKIP (rm failed): $item"
+            RM_FAILED=$(( RM_FAILED + 1 ))
+          fi
+        elif [[ -d "$item" ]]; then
+          # Best-effort write-permission fix before rm -rf: a single
+          # read-only entry under $item would otherwise abort this whole
+          # sweep under `set -euo pipefail` instead of just skipping that
+          # one item (bead disk_magician-qap).
+          chmod -R u+w "$item" 2>/dev/null || true
+          if rm -rf "$item" 2>/dev/null; then
+            DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+          else
+            echo "SKIP (rm failed): $item"
+            RM_FAILED=$(( RM_FAILED + 1 ))
+          fi
         else
-          rm -f "$item"
-          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          chmod u+w "$item" 2>/dev/null || true
+          if rm -f "$item" 2>/dev/null; then
+            FILES_DELETED=$(( FILES_DELETED + 1 ))
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+          else
+            echo "SKIP (rm failed): $item"
+            RM_FAILED=$(( RM_FAILED + 1 ))
+          fi
         fi
-        TOTAL_KB=$(( TOTAL_KB + kb ))
       fi
     done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
   done
 fi
 
-log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"
 
