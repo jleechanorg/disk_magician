@@ -121,8 +121,11 @@ worktree_has_unsaved_work() {
   # lose, safe to proceed) from ".git exists but rev-parse still failed"
   # (corrupted repo, permission error — must fail closed, not read the same
   # as "not a worktree"). Codex finding in /advice round 4: the prior form
-  # returned 1 (safe to delete) on ANY rev-parse failure.
-  if [[ ! -e "$wt/.git" ]]; then
+  # returned 1 (safe to delete) on ANY rev-parse failure. -e alone follows
+  # symlinks, so a DANGLING .git symlink (corrupted metadata, not "absent")
+  # would still read as absent and wrongly take the safe branch — also
+  # check -L (Codex finding in /advice round 5).
+  if [[ ! -e "$wt/.git" && ! -L "$wt/.git" ]]; then
     return 1
   fi
   "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
