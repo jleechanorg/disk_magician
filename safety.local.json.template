@@ -9,7 +9,7 @@
     "Sections: never_delete = hard invariants (strings or {path, reason});",
     "protected_live_paths = dirs owned by running processes; needs_decision =",
     "paths a human must push-or-discard before reclaim; min_stale_days =",
-    "staleness floor for any age-gated cleanup (default 14)."
+    "staleness floor for any age-gated cleanup (default 7)."
   ],
   "never_delete": [
     "~/.codex/sessions*",
@@ -43,6 +43,6 @@
       "reason": "OpenClaw repository backup archives — review and prune only after verified push"
     }
   ],
-  "_comment_min_stale_days": "Minimum age in days before a worktree or cache is considered stale. Hard floor: 14 days; this setting may only INCREASE the floor.",
-  "min_stale_days": 14
+  "_comment_min_stale_days": "Minimum age in days before a worktree or cache is considered stale. Hard floor: 7 days; this setting may only INCREASE the floor.",
+  "min_stale_days": 7
 }

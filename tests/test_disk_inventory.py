@@ -325,6 +325,53 @@ class DiskInventoryTest(unittest.TestCase):
         self.assertEqual(open_failure_lane["classification"], "unknown")
         self.assertEqual(open_failure_lane["reclaim_ceiling_bytes"], 0)
 
+    def test_measurement_errors_fail_close_an_otherwise_eligible_worktree(self):
+        # An unreadable subtree (permission-denied file, EINTR, etc.) must
+        # not silently combine with an old mtime to approve reclaim of a
+        # worktree we could not actually measure (CodeRabbit review of
+        # PR #55): eligibility must require measurement_errors == 0.
+        inventory = load_module()
+        now = int(time.time())
+        old = now - 40 * 86400
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            remote = base / "remote.git"
+            main = base / "main"
+            lanes = base / "lanes"
+            worktree = lanes / "lane"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main", str(main)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "config", "user.email", "fixture@users.noreply.github.com"], check=True)
+            subprocess.run(["git", "-C", str(main), "config", "user.name", "Fixture User"], check=True)
+            (main / "README.md").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(main), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(main), "commit", "-m", "base"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(main), "push", "-u", "origin", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-b", "lane", str(worktree)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(worktree), "branch", "--set-upstream-to", "origin/main"], check=True, capture_output=True)
+            for path in sorted(worktree.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                os.utime(path, (old, old), follow_symlinks=False)
+            os.utime(worktree, (old, old))
+
+            real_walk_measure = inventory._walk_measure
+
+            def flaky_walk_measure(path, now_epoch):
+                measured = dict(real_walk_measure(path, now_epoch))
+                if path == worktree:
+                    measured["measurement_errors"] = 1
+                    measured["latest_mtime_epoch"] = old
+                return measured
+
+            with mock.patch.object(inventory, "_walk_measure", side_effect=flaky_walk_measure):
+                result = inventory.inventory_paths(
+                    [lanes], now_epoch=now, open_files=[], ao_metadata_roots=[]
+                )
+
+        lane = result["roots"][0]["entries"][0]
+        self.assertNotEqual(lane["classification"], "approval_required")
+        self.assertEqual(lane["reclaim_ceiling_bytes"], 0)
+
     def test_simulator_inventory_is_ledger_only_with_supported_commands(self):
         inventory = load_module()
         with tempfile.TemporaryDirectory() as tmp:

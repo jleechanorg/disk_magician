@@ -14,20 +14,21 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPO_LOCAL_REPOS=()
 
 usage() {
   cat <<'EOF'
-Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age DAYS] [--repos PATH,...]
+Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >14 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=7 days old, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 14).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 7).
+  --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
   -h, --help    Show this help.
@@ -35,7 +36,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted.
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 7).
 EOF
 }
 
@@ -43,8 +44,8 @@ while [[ $# -gt 0 ]]; do
     case "${1:-}" in
         --clean) DRY_RUN=false ;;
         --dry-run) DRY_RUN=true ;;
-        --min-age)
-            [[ $# -ge 2 ]] || { echo "--min-age requires a value" >&2; exit 2; }
+        --min-age|--days)
+            [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
             MIN_AGE_DAYS="$2"
             shift
             ;;
@@ -122,9 +123,19 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-if [[ -n "${WORKTREE_MIN_AGE_DAYS:-}" && "$MIN_AGE_DAYS" == 14 && "$#" -eq 0 ]]; then
-    MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS}"
+# Hard floor: 7 days, may only be raised (env, CLI, or config), never
+# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
+# or --min-age 0 would delete every dormant worktree regardless of age.
+# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
+# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
+# would otherwise propagate as a fail-open crash into every downstream
+# comparison, not just this clamp (found live by both /advice reviewers).
+if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
+else
+  MIN_AGE_DAYS=7
 fi
+[[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
 
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"

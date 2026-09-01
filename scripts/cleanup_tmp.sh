@@ -38,6 +38,26 @@ LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
 ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
+# Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
+# / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
+# this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
+# change nor honored the override the sibling scripts respect (found in
+# /advice review of PR #55).
+WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+# Hard floor: 7 days, may only be raised, never lowered (CLAUDE.md
+# invariant). Missed in the sibling scripts' clamp sweep (found in /advice
+# re-review of PR #55) -- WORKTREE_MIN_AGE_DAYS=0 would otherwise let this
+# script's orphaned-worktree-pointer guard qualify every pointer for removal.
+# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
+# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
+# would otherwise propagate as a fail-open crash into every downstream
+# comparison, not just this clamp (found live by both /advice reviewers).
+if [[ "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  WORKTREE_MIN_AGE_DAYS=$((10#$WORKTREE_MIN_AGE_DAYS))
+else
+  WORKTREE_MIN_AGE_DAYS=7
+fi
+[[ "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]] && WORKTREE_MIN_AGE_DAYS=7
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -270,23 +290,37 @@ has_open_files() {
 # nuanced classification lives in worktree_hygiene.sh. Returns 1 only for a
 # provably clean-and-pushed worktree (or a non-git dir with nothing to lose).
 worktree_has_unsaved_work() {
-  local wt="$1" git_bin upstream
+  local wt="$1" git_bin upstream status_out status_rc rev_out rev_rc
   git_bin=$(command -v git 2>/dev/null) || {
     log "git unavailable — cannot prove worktree $wt is clean; treating as unsafe."
     return 0
   }
-  # Not a git worktree at all → no git work to lose here.
-  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  # Uncommitted or untracked changes.
-  if [[ -n "$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-    return 0
+  # Not a git worktree at all → no git work to lose here. -e alone follows
+  # symlinks, so also check -L: a DANGLING .git symlink is corrupted
+  # metadata, not "absent", and must fall through to the fail-closed
+  # rev-parse branch below (Codex finding in /advice round 5 re-review of
+  # PR #55).
+  if [[ ! -e "$wt/.git" && ! -L "$wt/.git" ]]; then
+    return 1
   fi
+  # .git exists (or is a dangling symlink) but rev-parse still failed ->
+  # corrupted repo / permission error, must fail closed, not read the same
+  # as "not a worktree" (same class of fix as cleanup_agent_artifacts.sh's
+  # copy, ported here since this file's own copy was found unfixed in
+  # /advice round 5 -- it's part of this PR's diff, not out of scope).
+  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  # Check the PROBE's own exit code, not just whether it printed anything —
+  # empty stdout from a failed `git status`/`git rev-list` must not read
+  # the same as "confirmed clean".
+  status_out="$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)"; status_rc=$?
+  [[ "$status_rc" -ne 0 ]] && return 0
+  [[ -n "$status_out" ]] && return 0
   # Unpushed commits, or no upstream to compare against → fail closed.
   upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
   [[ -z "$upstream" ]] && return 0
-  if [[ -n "$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)" ]]; then
-    return 0
-  fi
+  rev_out="$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)"; rev_rc=$?
+  [[ "$rev_rc" -ne 0 ]] && return 0
+  [[ -n "$rev_out" ]] && return 0
   return 1
 }
 
@@ -500,9 +534,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
 
-    # 14-day recency floor (worktree safety rule)
-    if worktree_is_recently_active "$subdir" 14; then
-      log "Skipping recently active worktree pointer (<14d): $subdir"
+    # Worktree safety rule floor (same WORKTREE_MIN_AGE_DAYS as the other
+    # worktree-cleanup scripts)
+    if worktree_is_recently_active "$subdir" "$WORKTREE_MIN_AGE_DAYS"; then
+      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_DAYS}d): $subdir"
       continue
     fi
 

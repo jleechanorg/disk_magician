@@ -85,4 +85,4 @@ disk_magician/
 
 ## 4. Integrations & Skills
 
-Skills will be created for major LLM agents (Claude Code, Codex, Hermes, Openclaw) instructing them to use this CLI to diagnose, validate, and clean local systems, ensuring standard output formats and respecting guardrails (such as requiring approval for files modified < 14 days ago).
+Skills will be created for major LLM agents (Claude Code, Codex, Hermes, Openclaw) instructing them to use this CLI to diagnose, validate, and clean local systems, ensuring standard output formats and respecting guardrails (such as requiring approval for files modified < 7 days ago).

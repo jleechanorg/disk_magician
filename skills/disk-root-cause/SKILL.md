@@ -97,7 +97,7 @@ Before launching expensive live scans or attempting to account for large residua
    done
    ```
     If documented memory explains a static residual (such as ~213.9 GiB protected under macOS TCC/SIP), cite the memory file as context, but **never assume MobileSync holds space without verifying `~/Library/Application Support/MobileSync/Backup`** (empirically confirmed 0 bytes on 2026-08-25).
-    - **Worktree Accumulation Vector**: The dominant driver of cumulative unbudgeted disk growth is often hundreds of stale git worktrees (>14d) across multi-repo checkouts (`worldarchitect.ai`, `jleechanclaw`, etc.). Always check linked worktree recency and use parallel push-before-delete automation.
+    - **Worktree Accumulation Vector**: The dominant driver of cumulative unbudgeted disk growth is often hundreds of stale git worktrees (>7d) across multi-repo checkouts (`worldarchitect.ai`, `jleechanclaw`, etc.). Always check linked worktree recency and use `scripts/worktree_hygiene.sh` for the safe push-then-delete triage flow (sequential, not parallel).
 
 2. **Multi-source `/history` search (mandatory coverage):**
    When investigating "who deleted X", "when did Y happen", or "what agent did Z", **searches MUST NOT be limited to Claude Code alone**. An incomplete search creates false negatives (e.g. 2026-07-27 incident where searching only Claude/Codex missed the sweep context, whereas full multi-agent search + frontier inventory diff resolved the mystery; see `feedback_2026-07-27_history_must_cover_agy_cursor.md`). Always execute parallel searches across all available sources (per `~/.claude/skills/history-search/SKILL.md`):
@@ -127,9 +127,9 @@ When investigating vanished or deleted git worktrees, **never infer `git worktre
    - **Admin directory is gone:** Removal occurred through `git worktree remove` or `git worktree prune` / `git gc`. Check `git config --get gc.worktreePruneExpire` (e.g., `7.days.ago`) to see if opportunistic pruning is enabled.
    - **Check timestamps carefully:** Check the `gitdir` file mtime vs directory mtime. A recently updated admin directory mtime may reflect a subsequent recreation (e.g., `git worktree add *_recreated`), not the original deletion time.
 
-## Worktree Recency & The 14-Day Protection Rule (Fail-Closed)
+## Worktree Recency & The 7-Day Protection Rule (Fail-Closed)
 
-**A git worktree touched within the last 14 days is strictly PROTECTED.**
+**A git worktree touched within the last 7 days is strictly PROTECTED.**
 Recency MUST be measured directly from content, never approximated with proxies (`feedback_2026-07-27_worktree_recency_proxies_wrong.md`, PR #50):
 
 - **Canonical helper:** Always source `scripts/lib/worktree_recency.sh` and call `worktree_age_days <path>` or `worktree_is_recently_active <path> [min_days]`.
@@ -228,7 +228,7 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 | `./scripts/cleanup_dev_caches.sh --clean` (via `disk_audit.sh --clean`) | uv/pre-commit/cursor-agent/claude-cli caches | DISK_MAGICIAN_AUTO_CLEAN=1 |
 | `user_scope/scripts/cleanup-ao-sessions.sh --drop-bak --days N` | .bak chains (post-6poe fix) | N chosen by caller |
 | `./scripts/cleanup_colima.sh --clean` | Docker prune + fstrim (compresses host sparse disk) | Nothing (preserves running containers via docker prune semantics) |
-| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | pre-WORKTREE-APPROVED if plan targets stale; the 14-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 14-day rule" |
+| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | requires `WORKTREE_APPROVED=1` if plan targets stale; the 7-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 7-day rule" |
 | `./scripts/cleanup_apfs_snapshots.sh --clean` | OS update snapshots >24h old | sudo (script silently fails without) |
 | `cleanup-ao-sessions.sh --days 0` | Force ALL AO backups drop (aggressive) | User OK |
 | `tmutil thinlocalsnapshots` | APFS local TM snapshots reclaim | sudo + user OK (impacts Time Machine reversibility) |
