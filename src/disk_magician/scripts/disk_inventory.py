@@ -528,7 +528,7 @@ def inventory_paths(
                     and git.get("registered_worktree") is True
                     and git.get("dirty") is False
                     and git.get("ahead_of_upstream") == 0
-                    and age_days is not None and age_days >= 14
+                    and age_days is not None and age_days >= 7
                     and not active and not ao_refs and not _is_protected(child)
                 )
                 if _is_protected(child):

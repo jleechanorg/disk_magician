@@ -35,10 +35,10 @@ TARGETS=(
 # mtime gate in days. -1 = no gate (clear unconditionally).
 # Parallel to TARGETS. Bump a value to be MORE conservative (keep more).
 TARGETS_MTIME_GATE_DAYS=(
-   14  # ~/.cursor/worktrees — 14-day worktree floor
+   7   # ~/.cursor/worktrees — 7-day worktree floor
   -1   # ~/.cursor/chats
   -1   # ~/.claude/debug
-   14  # ~/.config/superpowers/worktrees — 14-day worktree floor
+   7   # ~/.config/superpowers/worktrees — 7-day worktree floor
   -1   # ShipIt (todesktop)
   -1   # ShipIt (antigravity)
   -1   # ms-playwright
@@ -121,7 +121,7 @@ clear_dir_contents() {
     # Per-worktree recency check
     for child in "$path"/*; do
       [[ -d "$child" ]] || continue
-      if worktree_is_recently_active "$child" "${gate_days:-14}"; then
+      if worktree_is_recently_active "$child" "${gate_days:-7}"; then
         continue
       fi
       rm -rf "$child" 2>/dev/null || true

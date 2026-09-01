@@ -1,11 +1,11 @@
 #!/bin/bash
-# set_gc_worktree_prune.sh — pin gc.worktreePruneExpire to 14.days.ago for all
+# set_gc_worktree_prune.sh — pin gc.worktreePruneExpire to 7.days.ago for all
 # bare git repos in known locations, so `git worktree prune` reaps sleeping
 # worktree links automatically. Idempotent. Dry-run by default; --apply to mutate.
 #
 # Why: default git behavior keeps worktree metadata for 3 months when the
 # metadata path is gone, but never reaps existing-but-sleeping worktrees.
-# Bounding this to 14 days matches the 14-day worktree safety floor and prevents
+# Bounding this to 7 days matches the 7-day worktree safety floor and prevents
 # ~/projects/* and ~/.worktrees/* from accumulating indefinitely.
 #
 # Background: observed 265+ sleeping worktree directories in ~/projects since
@@ -16,7 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-DAYS="${DAYS:-14}"
+DAYS="${DAYS:-7}"
 APPLY=false
 # arg parsing for --apply
 while [[ $# -gt 0 ]]; do
