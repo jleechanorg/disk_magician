@@ -22,7 +22,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_pr_scratch.sh"
 
 TMP_TEST_ROOT=$(mktemp -d -t test_pr_scratch.XXXXXX)
-trap 'rm -rf "$TMP_TEST_ROOT"' EXIT
+# chflags -R nouchg first: Test 12 deliberately sets the macOS uchg
+# (immutable) flag to simulate a chmod-immune deletion target, and
+# rm -rf cannot remove a uchg-flagged file even as the owner. Without
+# this, an abnormal exit between "set uchg" and "clear uchg" leaks a
+# permanently undeletable tree under TMPDIR (found in /advice review of
+# PR #60 -- Opus found one such leaked tree still on disk from a prior
+# run). command -v guards for non-macOS hosts where chflags may be absent.
+# The whole chflags leg is wrapped in `( ... ) || true`, not cosmetic: this
+# file has `set -euo pipefail` at the top, and a trap handler string
+# executes as a script under the caller's active options -- a bare
+# `A && B; C` does NOT protect C from errexit if A or B fails, because `;`
+# is a sequence separator, not an errexit boundary. Without the `|| true`
+# here, a missing `chflags` binary OR a failing `chflags` call would both
+# abort the trap before `rm -rf` ever ran (found in /advice review of
+# PR #60 -- Codex).
+trap '(command -v chflags >/dev/null 2>&1 && chflags -R nouchg "$TMP_TEST_ROOT" 2>/dev/null) || true; rm -rf "$TMP_TEST_ROOT"' EXIT
 
 PASS=0
 FAIL=0
@@ -292,6 +307,121 @@ assert_rc "T10: non-integer min-age-hours returns non-zero" 2 "$AGE_RC"
 
 HELP_OUT=$(bash "$TARGET_SCRIPT" --help 2>&1)
 assert_contains "T10: --help displays usage" "Usage: cleanup_pr_scratch.sh" "$HELP_OUT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: Read-only entry does not abort the whole sweep (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 11: Read-Only Entry Does Not Abort Sweep"
+T11_DIR="$TMP_TEST_ROOT/t11_tmp"
+mkdir -p "$T11_DIR/pr-readonly-dir/nested" "$T11_DIR/pr-normal-dir"
+echo "data" > "$T11_DIR/pr-readonly-dir/nested/file.txt"
+echo "data" > "$T11_DIR/pr-normal-dir/file.txt"
+chmod -w "$T11_DIR/pr-readonly-dir/nested"
+set_old_mtime "$T11_DIR"
+
+# set +e/-e around the capture, matching the T10 pattern above: without it,
+# a regression to the pre-fix bare `rm -rf` (which exits non-zero here)
+# kills this whole test script under set -euo pipefail instead of failing
+# this one assertion cleanly -- and skips the chmod-restore below, leaking
+# a permanently read-only tree in TMPDIR (found in /advice review of PR #60,
+# reproduced by Opus against the pre-fix commit).
+set +e
+T11_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_DIR" 2>&1)
+T11_RC=$?
+set -e
+chmod -R u+w "$T11_DIR" 2>/dev/null || true
+assert_rc "T11: sweep exits 0 despite a read-only entry" 0 "$T11_RC"
+assert_missing "T11: read-only dir still removed (chmod u+w recovers it)" "$T11_DIR/pr-readonly-dir"
+assert_missing "T11: sibling dir also removed (sweep did not abort)" "$T11_DIR/pr-normal-dir"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: chmod-immune entry (chflags uchg) is SKIP-logged, not fatal (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 12: chmod-Immune Entry Is Skipped, Not Fatal"
+if command -v chflags >/dev/null 2>&1; then
+  T12_DIR="$TMP_TEST_ROOT/t12_tmp"
+  mkdir -p "$T12_DIR/pr-immutable-dir" "$T12_DIR/pr-normal-dir2"
+  echo "data" > "$T12_DIR/pr-immutable-dir/file.txt"
+  echo "data" > "$T12_DIR/pr-normal-dir2/file.txt"
+  set_old_mtime "$T12_DIR"
+  # uchg (user immutable) survives chmod -- only chflags nouchg or root can
+  # clear it, so this exercises the "chmod couldn't help, rm still fails"
+  # branch that Test 11 alone does not reach. Applied AFTER set_old_mtime,
+  # which touches every file and would itself fail on an already-uchg path.
+  chflags uchg "$T12_DIR/pr-immutable-dir/file.txt"
+
+  set +e
+  T12_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T12_DIR" 2>&1)
+  T12_RC=$?
+  set -e
+  chflags nouchg "$T12_DIR/pr-immutable-dir/file.txt" 2>/dev/null || true
+  chmod -R u+w "$T12_DIR" 2>/dev/null || true
+  assert_rc "T12: sweep exits 0 despite a chmod-immune entry" 0 "$T12_RC"
+  assert_contains "T12: unremovable item is SKIP-logged" "SKIP (rm failed)" "$T12_OUT"
+  assert_contains "T12: summary reports the RM_FAILED count" "Skipped (rm failed): 1" "$T12_OUT"
+  assert_missing "T12: sibling dir still removed (sweep did not abort)" "$T12_DIR/pr-normal-dir2"
+else
+  record_pass "T12: chflags unavailable on this platform, skipping (not a failure)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 13: symlink target permissions untouched (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 13: Symlink Target Permissions Are Not Modified"
+T13_DIR="$TMP_TEST_ROOT/t13_tmp"
+T13_EXTERNAL="$TMP_TEST_ROOT/t13_external_file.txt"
+mkdir -p "$T13_DIR"
+echo "external data" > "$T13_EXTERNAL"
+chmod 444 "$T13_EXTERNAL"
+ln -s "$T13_EXTERNAL" "$T13_DIR/pr-stale-symlink"
+set_old_mtime "$T13_DIR"
+# set_old_mtime's `touch -t` follows symlinks by default, so it only
+# backdated $T13_EXTERNAL (the target); backdate the symlink's own mtime
+# with `-h` so the recency check doesn't see it as freshly created.
+touch -h -t 202001010000 "$T13_DIR/pr-stale-symlink"
+T13_PERMS_BEFORE="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+
+T13_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T13_DIR" 2>&1)
+T13_PERMS_AFTER="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+chmod u+w "$T13_EXTERNAL" 2>/dev/null || true
+assert_missing "T13: stale symlink itself removed" "$T13_DIR/pr-stale-symlink"
+if [[ "$T13_PERMS_BEFORE" == "$T13_PERMS_AFTER" ]]; then
+  record_pass "T13: external symlink target permissions unchanged ($T13_PERMS_BEFORE)"
+else
+  record_fail "T13: external symlink target permissions unchanged" "was $T13_PERMS_BEFORE, now $T13_PERMS_AFTER"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 14: symlink-to-directory operand is never chmod'd (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+# `-d "$item"` is true for a symlink-to-directory, so the deletion loop
+# must check `-L` before `-d` to route it to plain `rm -f` instead of the
+# `chmod -R u+w` dir branch -- GNU coreutils `chmod -R` derefs and
+# recurses into a symlink-to-dir operand by default (unlike BSD/macOS),
+# which would widen permissions inside the external target tree on Linux.
+echo "Test 14: Symlink-to-Directory Operand Is Never chmod'd"
+T14_DIR="$TMP_TEST_ROOT/t14_tmp"
+T14_EXTERNAL_DIR="$TMP_TEST_ROOT/t14_external_dir"
+mkdir -p "$T14_DIR" "$T14_EXTERNAL_DIR"
+echo "data" > "$T14_EXTERNAL_DIR/file.txt"
+chmod 555 "$T14_EXTERNAL_DIR"
+chmod 444 "$T14_EXTERNAL_DIR/file.txt"
+ln -s "$T14_EXTERNAL_DIR" "$T14_DIR/pr-stale-dir-symlink"
+set_old_mtime "$T14_DIR"
+touch -h -t 202001010000 "$T14_DIR/pr-stale-dir-symlink"
+T14_DIR_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+
+T14_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T14_DIR" 2>&1)
+T14_DIR_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+chmod -R u+w "$T14_EXTERNAL_DIR" 2>/dev/null || true
+assert_missing "T14: stale directory symlink itself removed" "$T14_DIR/pr-stale-dir-symlink"
+if [[ "$T14_DIR_PERMS_BEFORE" == "$T14_DIR_PERMS_AFTER" && "$T14_FILE_PERMS_BEFORE" == "$T14_FILE_PERMS_AFTER" ]]; then
+  record_pass "T14: external target dir+file permissions unchanged ($T14_DIR_PERMS_BEFORE/$T14_FILE_PERMS_BEFORE)"
+else
+  record_fail "T14: external target dir+file permissions unchanged" "dir was $T14_DIR_PERMS_BEFORE now $T14_DIR_PERMS_AFTER; file was $T14_FILE_PERMS_BEFORE now $T14_FILE_PERMS_AFTER"
+fi
 
 echo
 echo "=== Test Results: $PASS pass, $FAIL fail ==="
