@@ -11,6 +11,8 @@ pipeline-corruption class documented in this repo's operator memory).
 """
 import argparse
 import json
+import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -25,7 +27,299 @@ class LedgerError(ValueError):
     """Ledger fails schema, the <=5 GiB ceiling, or reconciliation."""
 
 
+INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
+INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
+SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
+SYSTEM_BOUNDARY_PROBES = {
+    "spotlight": "/System/Volumes/Data/.Spotlight-V100",
+    "fseventsd": "/System/Volumes/Data/.fseventsd",
+    "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
+}
+USER_PROBE_RELATIVE_PATHS = {
+    "mobile_sync": os.path.join("Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("Library", "Mail"),
+    "messages": os.path.join("Library", "Messages"),
+}
+USER_PROBE_NAMES = tuple(USER_PROBE_RELATIVE_PATHS.keys())
+ATTESTATION_KEYS = {
+    "run_id", "path", "status", "errno", "captured_at", "captured_during_run",
+    "path_is_symlink", "verifier", "identity_before", "identity_after",
+}
+GATE_OPTIONAL_KEYS = {"root_device", "path_device"}
+
+
+def validate_intrinsic_gates(ledger: dict, *, label: str) -> None:
+    if "opaque_intrinsic_gates" not in ledger:
+        if ledger.get("schema_version") == 2:
+            raise LedgerError(f"{label}: missing required key 'opaque_intrinsic_gates'")
+        return  # structural partial/legacy ledgers may predate this metadata
+    gates = ledger["opaque_intrinsic_gates"]
+    if not isinstance(gates, list):
+        raise LedgerError(f"{label}: 'opaque_intrinsic_gates' must be a list")
+    allowed = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    for item in gates:
+        if (
+            not isinstance(item, dict)
+            or not INTRINSIC_GATE_KEYS.issubset(item)
+            or not set(item).issubset(allowed)
+            or not all(
+                isinstance(item.get(key), str) and item[key]
+                for key in ("path", "reason", "verification")
+            )
+            or type(item.get("reclaimable")) is not bool
+            or item["reclaimable"] is not False
+            or SIZE_KEYS.intersection(item)
+            or any(
+                type(item[key]) is not int or item[key] < 0
+                for key in INTRINSIC_GATE_OPTIONAL_KEYS
+                if key in item
+            )
+        ):
+            raise LedgerError(f"{label}: invalid opaque intrinsic gate: {item!r}")
+
+
+def is_normalized_absolute_path(path):
+    return (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and os.path.normpath(path) == path
+        and not any(component in (".", "..") for component in path.split(os.sep))
+    )
+
+
+def is_canonical_absolute_literal_path(path):
+    return is_normalized_absolute_path(path) and os.path.realpath(path) == path
+
+
+def is_valid_scan_user_home(path):
+    return (
+        is_canonical_absolute_literal_path(path)
+        and os.path.dirname(path) == "/Users"
+        and bool(os.path.basename(path))
+    )
+
+
+def validate_user_probe_catalog(catalog: dict, *, label: str) -> None:
+    if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete user probe catalog")
+    if any(
+        not is_canonical_absolute_literal_path(catalog.get(name))
+        for name in USER_PROBE_RELATIVE_PATHS
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has non-canonical user probe path")
+    mail_path = catalog.get("mail")
+    expected_mail_suffix = "/" + USER_PROBE_RELATIVE_PATHS["mail"]
+    if not mail_path.endswith(expected_mail_suffix):
+        raise LedgerError(f"{label}: partial FDA ledger has non-canonical mail probe path")
+    user_home = mail_path[:-len(expected_mail_suffix)]
+    if not is_valid_scan_user_home(user_home):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid user home path")
+    if (
+        user_home == "/tmp"
+        or user_home.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
+        or user_home in ("/private/tmp", "/var/tmp")
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger substitutes /tmp for user probe root")
+    for name, rel_path in USER_PROBE_RELATIVE_PATHS.items():
+        expected_path = os.path.join(user_home, rel_path)
+        if catalog.get(name) != expected_path:
+            raise LedgerError(f"{label}: partial FDA ledger has non-canonical user probe {name!r}")
+
+
+def validate_partial_run_binding(ledger: dict, *, label: str) -> None:
+    run_id = ledger.get("run_id")
+    started = ledger.get("run_started_at")
+    finished = ledger.get("run_finished_at")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or type(started) not in (int, float)
+        or isinstance(started, bool)
+        or type(finished) not in (int, float)
+        or isinstance(finished, bool)
+        or not math.isfinite(started)
+        or not math.isfinite(finished)
+        or finished < started
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid scanner run window")
+    catalog = ledger.get("fda_probe_paths")
+    validate_user_probe_catalog(catalog, label=label)
+    attestations = ledger.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: partial FDA ledger has invalid system attestations")
+    for item in attestations:
+        captured_at = item.get("captured_at") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("run_id") != run_id
+            or type(captured_at) not in (int, float)
+            or isinstance(captured_at, bool)
+            or not math.isfinite(captured_at)
+            or not started <= captured_at <= finished
+        ):
+            raise LedgerError(f"{label}: attestation is outside the scanner run binding")
+
+
+def validate_partial_system_boundary_contract(ledger: dict, *, label: str) -> None:
+    """Validate the scanner's exact partial FDA system-boundary evidence."""
+    envelope = ledger.get("coverage_envelope")
+    if not isinstance(envelope, dict) or envelope.get("fda_user_preflight_status") != "granted":
+        raise LedgerError(f"{label}: partial FDA ledger missing granted user preflight")
+    validate_partial_run_binding(ledger, label=label)
+    preflight = ledger.get("fda_preflight")
+    probes = preflight.get("probes") if isinstance(preflight, dict) else None
+    expected_probe_names = set(USER_PROBE_NAMES) | set(SYSTEM_BOUNDARY_PROBES)
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "partial"
+        or not isinstance(probes, dict)
+        or set(probes) != expected_probe_names
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete preflight probes")
+    user_probes = {}
+    for name in USER_PROBE_NAMES:
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or not isinstance(probe.get("path"), str)
+            or not probe["path"]
+            or probe["path"] != ledger["fda_probe_paths"][name]
+            or probe.get("status") != "readable"
+            or set(probe) != {"path", "status"}
+        ):
+            raise LedgerError(f"{label}: partial FDA ledger has invalid user probe {name!r}")
+        user_probes[name] = probe
+    for name, path in SYSTEM_BOUNDARY_PROBES.items():
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or set(probe) - {"path", "status", "errno"}
+            or probe.get("path") != path
+            or probe.get("status") != "permission_denied_or_tcc"
+            or type(probe.get("errno")) is not int
+            or probe.get("errno") not in (1, 13)
+        ):
+            raise LedgerError(f"{label}: partial FDA ledger has invalid system probe {name!r}")
+
+    attestations = ledger.get("system_boundary_attestations")
+    if not isinstance(attestations, list) or len(attestations) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: partial FDA ledger has incomplete system attestations")
+    expected_fda = {"status": "granted", "probes": user_probes}
+    attestation_by_path = {}
+    run_ids = set()
+    for item in attestations:
+        if not isinstance(item, dict) or set(item) != ATTESTATION_KEYS:
+            raise LedgerError(f"{label}: invalid system-boundary attestation")
+        path = item.get("path")
+        if path not in SYSTEM_BOUNDARY_PROBES.values() or path in attestation_by_path:
+            raise LedgerError(f"{label}: non-catalog system-boundary attestation path")
+        if (
+            item.get("status") != "permission_denied"
+            or type(item.get("errno")) is not int
+            or item.get("errno") not in (1, 13)
+            or item.get("captured_during_run") is not True
+            or item.get("path_is_symlink") is not False
+            or not isinstance(item.get("run_id"), str)
+            or not item["run_id"]
+            or type(item.get("captured_at")) not in (int, float)
+            or isinstance(item.get("captured_at"), bool)
+            or not math.isfinite(item.get("captured_at"))
+        ):
+            raise LedgerError(f"{label}: malformed system-boundary attestation")
+        verifier = item.get("verifier")
+        if (
+            not isinstance(verifier, dict)
+            or set(verifier) != {"effective_uid", "access_context", "fda"}
+            or verifier.get("effective_uid") != 0
+            or verifier.get("access_context") != "parent_scanner_confirmation"
+            or verifier.get("fda") != expected_fda
+        ):
+            raise LedgerError(f"{label}: invalid system-boundary attestation verifier")
+        for identity_name in ("identity_before", "identity_after"):
+            identity = item.get(identity_name)
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != {"st_dev", "st_ino"}
+                or any(type(identity.get(key)) is not int or identity[key] < 0 for key in ("st_dev", "st_ino"))
+            ):
+                raise LedgerError(f"{label}: invalid system-boundary attestation identity")
+        if item["identity_before"] != item["identity_after"]:
+            raise LedgerError(f"{label}: system-boundary identity changed during attestation")
+        attestation_by_path[path] = item
+        run_ids.add(item["run_id"])
+    if set(attestation_by_path) != set(SYSTEM_BOUNDARY_PROBES.values()) or len(run_ids) != 1:
+        raise LedgerError(f"{label}: incomplete system-boundary attestations")
+    if any(
+        attestation_by_path[path]["errno"] != probes[name]["errno"]
+        for name, path in SYSTEM_BOUNDARY_PROBES.items()
+    ):
+        raise LedgerError(f"{label}: system probe and attestation evidence disagree")
+
+    gates = ledger.get("opaque_intrinsic_gates")
+    if not isinstance(gates, list) or len(gates) != len(SYSTEM_BOUNDARY_PROBES):
+        raise LedgerError(f"{label}: incomplete system-boundary opaque gates")
+    gate_paths = set()
+    allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
+    for gate in gates:
+        if (
+            not isinstance(gate, dict)
+            or not INTRINSIC_GATE_KEYS.issubset(gate)
+            or not set(gate).issubset(allowed_gate_keys)
+            or gate.get("path") not in SYSTEM_BOUNDARY_PROBES.values()
+            or gate.get("path") in gate_paths
+            or gate.get("reason") != "permission_denied_intrinsic"
+            or gate.get("verification") != "parent_scanner_system_boundary_confirmation"
+            or gate.get("reclaimable") is not False
+            or type(gate.get("errno")) is not int
+            or gate.get("errno") not in (1, 13)
+            or any(type(gate[key]) is not int or gate[key] < 0 for key in GATE_OPTIONAL_KEYS if key in gate)
+            or gate["errno"] != attestation_by_path[gate["path"]]["errno"]
+            or (
+                "path_device" in gate
+                and gate["path_device"] != attestation_by_path[gate["path"]]["identity_before"]["st_dev"]
+            )
+        ):
+            raise LedgerError(f"{label}: invalid system-boundary opaque gate")
+        gate_paths.add(gate["path"])
+    if gate_paths != set(SYSTEM_BOUNDARY_PROBES.values()):
+        raise LedgerError(f"{label}: incomplete system-boundary opaque gates")
+
+
+def validate_granted_user_fda_contract(ledger: dict, *, label: str) -> None:
+    """Validate exact user FDA evidence for a granted attribution ledger."""
+    envelope = ledger.get("coverage_envelope")
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("fda_preflight_status") != "granted"
+        or envelope.get("fda_user_preflight_status") != "granted"
+    ):
+        raise LedgerError(f"{label}: granted FDA ledger missing user preflight")
+    catalog = ledger.get("fda_probe_paths")
+    validate_user_probe_catalog(catalog, label=label)
+    preflight = ledger.get("fda_preflight")
+    probes = preflight.get("probes") if isinstance(preflight, dict) else None
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "granted"
+        or not isinstance(probes, dict)
+    ):
+        raise LedgerError(f"{label}: granted FDA ledger has invalid user preflight")
+    for name in USER_PROBE_NAMES:
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or set(probe) != {"path", "status"}
+            or probe.get("path") != catalog[name]
+            or probe.get("status") != "readable"
+        ):
+            raise LedgerError(f"{label}: granted FDA ledger has invalid user probe {name!r}")
+
+
 def validate_ledger(ledger: dict, *, label: str) -> None:
+    if not isinstance(ledger, dict):
+        raise LedgerError(f"{label}: ledger must be an object")
+    if ledger.get("schema_version") != 2:
+        raise LedgerError(f"{label}: unsupported schema_version (expected 2)")
     for key in ("disk_used_kb", "residual_kb"):
         if key not in ledger:
             raise LedgerError(f"{label}: missing required key {key!r}")
@@ -39,39 +333,69 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         path = item.get("path")
         size = item.get("measured_kb")
         kind = item.get("kind", "dir")
-        if not path or not isinstance(size, int):
+        if not path or type(size) is not int or size < 0:
             raise LedgerError(f"{label}: bucket missing path/measured_kb: {item!r}")
-        if kind not in ("dir", "file"):
+        if kind not in ("dir", "file", "direct_allocation_segment"):
             raise LedgerError(f"{label}: bucket {path!r} has unknown kind {kind!r}")
-        if kind == "dir" and size >= 5 * GIB_KB:
-            # A directory aggregate at/above the ceiling should have been
+        if kind in ("dir", "direct_allocation_segment") and size > 5 * GIB_KB:
+            # A directory aggregate above the ceiling should have been
             # broken into child buckets — refuse rather than diff a partial
-            # picture. A single indivisible FILE (kind="file") is exempt: it
+            # picture. A direct-allocation segment above the ceiling is also
+            # invalid because it claims a bounded synthetic slice. A single
+            # indivisible FILE (kind="file") is exempt: it
             # is already a leaf and cannot be decomposed further, mirroring
             # disk_frontier_scan.py's oversize_indivisible_files category.
             raise LedgerError(
                 f"{label}: bucket {path!r} is {size / GIB_KB:.2f} GiB — "
-                "unexplained >=5 GiB aggregate without child breakdown"
+                "unexplained >5 GiB aggregate without child breakdown"
             )
         total += size
-    for item in ledger.get("oversize_indivisible_files", []):
-        total += item.get("measured_kb", 0)
-    total += ledger.get("purgeable_kb", 0)
+    oversize = ledger.get("oversize_indivisible_files", [])
+    if not isinstance(oversize, list):
+        raise LedgerError(f"{label}: 'oversize_indivisible_files' must be a list")
+    for item in oversize:
+        if (
+            not isinstance(item, dict)
+            or not item.get("path")
+            or type(item.get("measured_kb")) is not int
+            or item["measured_kb"] < 0
+        ):
+            raise LedgerError(f"{label}: invalid oversize indivisible file: {item!r}")
+        total += item["measured_kb"]
+    purgeable = ledger.get("purgeable_kb", 0)
+    if type(purgeable) is not int or purgeable < 0:
+        raise LedgerError(f"{label}: invalid purgeable_kb")
+    total += purgeable
+    accounting = ledger.get("accounting_equation") or {}
+    sub_granularity_tail = accounting.get("sub_granularity_tail_kb", 0)
+    if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
+        raise LedgerError(f"{label}: invalid sub-granularity tail")
+    total += sub_granularity_tail
+    clone_adjustment = accounting.get("clone_shared_adjustment_kb", 0)
+    if type(clone_adjustment) is not int or clone_adjustment > 0:
+        raise LedgerError(f"{label}: invalid clone_shared_adjustment_kb (must be signed <= 0)")
+    if ledger.get("accounting_equation") is not None and "clone_shared_adjustment_kb" not in accounting:
+        raise LedgerError(f"{label}: missing required accounting field 'clone_shared_adjustment_kb'")
+    total += clone_adjustment
     residual = ledger["residual_kb"]
     used = ledger["disk_used_kb"]
+    if type(residual) is not int or residual < 0 or type(used) is not int or used < 0:
+        raise LedgerError(f"{label}: disk_used_kb and residual_kb must be non-negative integers")
     if total + residual != used:
         raise LedgerError(
             f"{label}: buckets ({total} KiB) + residual ({residual} KiB) "
             f"!= disk_used_kb ({used} KiB) — reconciliation failed"
         )
+    validate_intrinsic_gates(ledger, label=label)
 
 
 def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
-    """Reject legacy or partial ledgers on the attribution-diff path.
+    """Reject legacy or unattested partial ledgers on the attribution-diff path.
 
     ``--validate`` intentionally remains a structural/partial validation
     utility, but a history comparison must never present incomplete rows as a
-    full-disk attribution delta.
+    full-disk attribution delta. A scanner-attested system-boundary partial
+    aggregate is complete for this purpose.
     """
     envelope = ledger.get("coverage_envelope")
     accounting = ledger.get("accounting_equation")
@@ -82,7 +406,12 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
         raise LedgerError(f"{label}: full-attribution ledger required (mode is not complete)")
     if not isinstance(envelope, dict) or envelope.get("complete") is not True:
         raise LedgerError(f"{label}: full-attribution ledger required (coverage envelope incomplete)")
-    if envelope.get("fda_preflight_status") != "granted":
+    fda_status = envelope.get("fda_preflight_status")
+    if fda_status == "partial":
+        validate_partial_system_boundary_contract(ledger, label=label)
+    elif fda_status == "granted":
+        validate_granted_user_fda_contract(ledger, label=label)
+    else:
         raise LedgerError(f"{label}: full-attribution ledger required (FDA preflight not granted)")
     if (
         type(reachable) is not int
@@ -99,13 +428,16 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
     keys = ("data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
             "sub_granularity_tail_kb", "purgeable_kb", "residual_kb")
     values = [accounting.get(key) for key in keys]
+    clone_adjustment = accounting.get("clone_shared_adjustment_kb")
     buckets = ledger.get("granularity_buckets", ledger.get("buckets", []))
     oversize = ledger.get("oversize_indivisible_files", [])
     if (
         accounting.get("display_ledger_valid") is not True
         or not all(type(value) is int and value >= 0 for value in values)
+        or type(clone_adjustment) is not int
+        or clone_adjustment > 0
         or values[0] != ledger.get("disk_used_kb")
-        or values[0] != sum(values[1:])
+        or values[0] != sum(values[1:]) + clone_adjustment
         or values[1] != sum(item.get("measured_kb", 0) for item in buckets)
         or values[2] != sum(item.get("measured_kb", 0) for item in oversize)
     ):

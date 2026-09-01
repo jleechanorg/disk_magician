@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Root-owned frontier runner: runs immutable root-owned scanner from
+  /usr/local/libexec/disk-magician/disk_frontier_scan.py with full privilege,
+  binding DISK_MAGICIAN_SCAN_USER_HOME to provide complete 17/17 volume
+  root attribution without user-writable script execution (bead disk_magician-4y6).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-frontier-root</string>
+  <key>UserName</key>
+  <string>root</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/usr/local/libexec/disk-magician/disk_frontier_scan.py</string>
+    <string>--granularity-gib</string>
+    <string>5</string>
+    <string>--wall-clock-cap</string>
+    <string>43200</string>
+    <string>--output</string>
+    <string>/var/db/disk-magician/frontier_last.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISK_MAGICIAN_SCAN_USER_HOME</key>
+    <string>@USER_HOME@</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>41</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/disk-magician-frontier-root.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/disk-magician-frontier-root.log</string>
+</dict>
+</plist>

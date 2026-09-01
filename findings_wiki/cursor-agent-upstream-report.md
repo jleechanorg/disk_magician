@@ -1,3 +1,13 @@
+---
+title: Upstream Bug Report - Unbounded Debug Session Log Growth
+hostname: jeffreys-macbook-pro.local
+date: 2026-07-29
+status: active
+paths:
+  - $TMPDIR/cursor-agent-logs-501
+safety_rule: none
+---
+
 # Upstream Bug Report: Unbounded Debug Session Log Growth & High-Frequency `commitScoring` Loop in Cursor CLI Agent
 
 **Target:** Cursor Community Forum / Cursor Upstream Support  

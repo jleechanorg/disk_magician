@@ -419,6 +419,40 @@ else
   bad "default first-pass cap does not stay at 20s"
 fi
 
+RESERVE_BIN="$WORK/budget_reserve_bin"
+RESERVE_LOG="$WORK/budget_reserve.log"
+mkdir -p "$RESERVE_BIN"
+: > "$RESERVE_LOG"
+cat > "$RESERVE_BIN/timeout" <<'SH'
+#!/usr/bin/env bash
+limit="$1"
+shift
+printf '%s\t%s\n' "$(basename "$1")" "$limit" >> "${RESERVE_LOG:?}"
+RESERVE_TIMEOUT_SECONDS="$limit" "$@"
+SH
+cat > "$RESERVE_BIN/dua" <<'SH'
+#!/usr/bin/env bash
+exit 124
+SH
+cat > "$RESERVE_BIN/du" <<'SH'
+#!/usr/bin/env bash
+printf '4096\t%s\n' "${@: -1}"
+SH
+chmod +x "$RESERVE_BIN/timeout" "$RESERVE_BIN/dua" "$RESERVE_BIN/du"
+
+RESERVE_OUT="$WORK/budget_reserve.json"
+if HOME="$BUDGET_HOME" PATH="$RESERVE_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  RESERVE_LOG="$RESERVE_LOG" DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 timeout 10 \
+  "$SNAP_SCRIPT" --output "$RESERVE_OUT" >/dev/null 2>&1 && \
+  python3 -c "import json; d=json.load(open('$RESERVE_OUT')); assert d['directories']['parity'] == 4096" 2>/dev/null && \
+  [[ "$(awk -F '\t' '$1 == "dua" {print $2; exit}' "$RESERVE_LOG")" == "14" ]] && \
+  [[ "$(awk -F '\t' '$1 == "du" {print $2; exit}' "$RESERVE_LOG")" -gt 0 ]]; then
+  ok "dua reserves 30% of the shared 20s path deadline for a real du fallback"
+else
+  bad "dua consumed the fallback reserve (calls=$(tr '\n' ';' < "$RESERVE_LOG"))"
+fi
+
 RETRY_HOME="$WORK/budget_retry_home"
 RETRY_BIN="$WORK/budget_retry_bin"
 RETRY_LOG="$WORK/budget_retry.log"
@@ -488,11 +522,11 @@ assert m["measurement_budget_exhausted"] is False
 PY
 then
   expected_retry_log=$(cat <<EOF
-20	$RETRY_HOME/slow-a
-20	$RETRY_HOME/slow-b
-20	$RETRY_HOME/retry-selected
-20	$RETRY_HOME/fast-sentinel
-90	$RETRY_HOME/retry-selected
+14	$RETRY_HOME/slow-a
+14	$RETRY_HOME/slow-b
+14	$RETRY_HOME/retry-selected
+14	$RETRY_HOME/fast-sentinel
+63	$RETRY_HOME/retry-selected
 EOF
 )
   if [[ "$(cat "$RETRY_LOG")" == "$expected_retry_log" ]]; then
