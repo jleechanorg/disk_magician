@@ -127,8 +127,13 @@ def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> T
             text=True,
             timeout=15,
         )
-        # rc=1 with empty output is lsof's standard 'no matches' result
-        if res.returncode == 1 and not res.stdout.strip():
+        # rc=1 with empty stdout is lsof's standard 'no matches' result -- but
+        # only when stderr is also empty. +w suppresses routine permission
+        # warnings, so any surviving stderr content on rc=1 is a genuine
+        # anomaly, not the normal no-matches case; fail closed on it instead
+        # of treating it as "confirmed no open files" (found in /advice
+        # review of PR #59).
+        if res.returncode == 1 and not res.stdout.strip() and not res.stderr.strip():
             return True, set()
 
         if res.returncode not in (0, 1):
@@ -187,8 +192,12 @@ def check_open_files(session_dir: Path, lsof_bin: Optional[str] = None) -> bool:
         )
         if res.stdout.strip():
             return True
-        # On macOS/Linux: rc=0 with empty stdout, or rc=1 with empty stdout means no open files found.
-        if res.returncode in (0, 1) and not res.stdout.strip():
+        # On macOS/Linux: rc=0 with empty stdout, or rc=1 with empty stdout
+        # means no open files found -- but only when stderr is also empty
+        # (+w suppresses routine permission warnings, so surviving stderr
+        # content here is a genuine anomaly, not the normal case; fail
+        # closed on it, per /advice review of PR #59).
+        if res.returncode in (0, 1) and not res.stdout.strip() and not res.stderr.strip():
             return False
         # Any other returncode or diagnostic output is treated as in-use (fail-closed)
         return True
