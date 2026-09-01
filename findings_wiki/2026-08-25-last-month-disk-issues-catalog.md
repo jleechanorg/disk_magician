@@ -69,7 +69,7 @@ the same window.
 | 5 | 2026-07-29 ~02:30 PDT | **45.4 GiB single file** | Cursor-agent session log PID 95634 — killed by operator (operator decision pending → executed); cursor-agent debug log unbounded growth class | `findings_wiki/cursor-agent-debug-log-unbounded-growth.md`; bead `disk_magician-ax0` |
 | 6 | 2026-08-25 | **+98.0 GiB free** (7.5 → 110.0) | Parallel worktree sweep: 285 stale worktrees (>14d) pruned after safe remote backup push + 5.3 GiB colima datadisk trim | `feedback_2026-08-25_worktree_parallel_reclaim_and_mobilesync_debunk.md` |
 
-**Reclaim total observed: ~442 GiB across 6 events** (note: items 1+3+4 partially overlap temporally; net 30-day delta is ~+105.83 GiB floor→latest, see §2 #2).
+**Positive reclaim subtotal: ~402.5 GiB across 5 reclaim events (1,2,3,5,6)** — item 4 (−40.47 GiB) is passive masking (growth hidden by an in-VM trim), not reclaim, and is excluded here. Signed net across all 6 rows is ~362.0 GiB. (Note: items 1+3+4 partially overlap temporally; net 30-day delta is ~+105.83 GiB floor→latest, see §2 #2.)
 
 ---
 
@@ -173,7 +173,7 @@ roadmap/2026-08-23-{read-only-evidence-bundle,reclaim-plan-delta-from-floor,syst
 1. **The single largest SAFE class right now is `/private/tmp` aggregate (+45.75 GiB), not Colima, not venv, not worktree.** The 2026-07-29 7-proposal scorecard missed the hidden tail (33 other `pr9XXX-*` + `pr-XXX-*` paths in the tail, ~+38 GiB beyond the visible tip).
 2. **Aside session files (1,791 files, +11.94 GiB) are a NEW class.** Missing from prior taxonomy. Cross-check signal: `lsof +D ~/.aside/u/0` returns zero holders for retired sessions.
 3. **The disk_magician tool is its own producer.** `_disk_magician_archive/20260822T09*` +2.7 GiB written by disk_magician itself during its own archive operations.
-4. **`disk_observer.jsonl` `hot_dirs` is structurally blind to /private/tmp and Aside** — observer missed ~75% of real producers in this window. Needs observer coverage extension.
+4. **`disk_observer.jsonl` `hot_dirs` was structurally blind to /private/tmp and Aside as of this window** — observer missed ~75% of real producers. Fixed as of PR #57 (2026-08-31/09-01): `DEFAULT_HOT_DIRS` now tracks `/private/tmp`, `.aside`, `.ollama`, `.openclaw`, `.hermes`, `.gemini`, `/private/var/folders`, `Library/Application Support/Cursor`, `Library/Application Support/Aside`, and `Library/Caches` (see row 4 in §1 above, `scripts/disk_observer.py`).
 5. **All 4 launchd jobs healthy on cadence** (2026-08-23 read-only audit) — the prevention architecture from 2026-07-29 is actually working at the cadence level; the +105.83 GiB net is the producer side outrunning the reclaim rate, not a sweeper failure.
 6. **RunAtLoad is the durable fix for any sweeper that can't tolerate multi-day startup silence** — `StartInterval` + reboot cadence + sleep-dropped calendar windows are three independent failure modes, all bypassed by `RunAtLoad=true`.
 7. **Path-string tools (`du`, `nuke_dir`/`removefile`) hit ENAMETOOLONG deterministically per path; fd-relative tools (`find -delete`, `os.scandir`) sidestep it.** When a deletion tool fails consistently on the same subtree, switch tool class before retrying the same one.

@@ -12,7 +12,7 @@
 
 ## Executive summary
 
-- Released fail-closed FDA evidence hardening in `15b8a08` (package 0.2.82), then corrected the CI-home-dependent scanner test fixture in `87f4438`.
+- Released fail-closed FDA evidence hardening in `15b8a08` (package 0.2.82, intermediate — final PR #57 package is 0.2.85), then corrected the CI-home-dependent scanner test fixture in `87f4438`.
 - The deployed 0.2.82 snapshot at `2026-09-01T01:59:18Z` completed but is not full attribution: snapshot coverage 59.9%, residual 295.5 GiB, and its embedded frontier remains partial (11/17 roots, 203 unfinished entries).
 - `/er` therefore remains FAIL for a current complete ledger. The only safe completion path is a dedicated immutable root runner; the current user LaunchAgent and existing root APFS plist must not be elevated or reused.
 - A noninteractive privilege probe still reports `sudo: a password is required`; confirm the active terminal's sudo ticket before attempting installation.
@@ -34,7 +34,7 @@ This work block ran in `/Users/jleechan/projects_other/disk_magician` on `main`.
 1. Install and verify a separate root-owned frontier runner — [disk_magician-4y6](br://disk_magician-4y6). It must copy fixed scanner code/config beneath `/usr/local/libexec/disk-magician`, use a distinct root-owned `/Library/LaunchDaemons` plist, and write atomically to a root-owned readable state path. Acceptance: no ProgramArguments or imports resolve through the checkout, `$HOME`, user configuration, or PATH; ownership/modes prove root-only writes; `launchctl print` confirms the exact job. (Blocked on interactive `sudo` password requirement).
 2. Run the installed root runner with `DISK_MAGICIAN_SCAN_USER_HOME=/Users/jleechan`, then publish only if its new report has `mode=complete`, `coverage_envelope.complete=true`, 17/17 measured roots, and zero unfinished paths. Run the deployed snapshot, `history diff --days 7`, `history diff --days 30`, and a new `/er`; do not treat the 2026-08-31 complete ledger as fresh proof. (Blocked on runner installation).
 3. [DONE] Diagnosed the failed CI at `87f4438`: fixed `test_disk_audit_topdown.sh` to allow `"no_targets"` in `report["limits"]["full_disk_access"]` when run on CI runners where TCC paths do not exist; fixed `test_safety_lib.sh` 7-day default; repaired test fixtures in `test_history_diff_dispatch.sh` and `test_state_repo_e2e.sh`.
-4. [DONE] Corrected the catalog ownership split — [disk_magician-q6h](br://disk_magician-q6h), [GitHub issue #56](https://github.com/jleechanorg/disk_magician/issues/56). Cleaned `DEFAULT_HOT_DIRS` and `config.json.template`, added catalog purity tests in `test_disk_observer.py`, synced package tree, and bumped to `0.2.83`.
+4. [DONE] Corrected the catalog ownership split — [disk_magician-q6h](br://disk_magician-q6h), [GitHub issue #56](https://github.com/jleechanorg/disk_magician/issues/56). Cleaned `DEFAULT_HOT_DIRS` and `config.json.template`, added catalog purity tests in `test_disk_observer.py`, synced package tree, and bumped to `0.2.83` (intermediate package-tree sync — final PR #57 package is `0.2.85`, after two further /advice-driven fix rounds on the root runner installer and frontier tiebreak).
 
 ## PR / merge state
 

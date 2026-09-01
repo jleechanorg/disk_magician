@@ -198,8 +198,13 @@ if not coverage_envelope.get("complete"):
         "unfinished_top_level_roots": 0 if real_mode == "complete" else 1,
     }
 fda_probe_paths = user_probes
+# Align with real_mode/coverage_envelope above rather than a bare hardcoded
+# "granted": if the scanner genuinely reported partial, fda_preflight must
+# say so too, not claim granted access it didn't have (found in CodeRabbit
+# review of PR #57 -- same self-consistency class as the coverage_envelope
+# fix above).
 fda_preflight = {
-    "status": "granted",
+    "status": "granted" if real_mode == "complete" else "partial",
     "probes": {k: {"path": v, "status": "readable"} for k, v in user_probes.items()},
 }
 

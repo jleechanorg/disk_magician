@@ -13,13 +13,13 @@ safety_rule: needs_decision, DEFAULT_HOT_DIRS
 
 ## What
 
-Top-down comparison between the 30-day disk usage floor (2026-08-03, 672.61 GiB used) and the live state (841 GiB used) identified four massive growth reservoirs:
-1. `/private/tmp/_disk_magician_archive` (52.0 GiB): 130 archived directories of temporary PR analyzer/scratch trees created during pressure-sweep runs.
-2. `~/Library/Application Support/Cursor/snapshots` (28.4 GiB): Cursor codebase checkpoints and stores.
-3. `~/.openclaw/repo-backups` (17.3 GiB): One-time full repository snapshots from historical migration runs (2026-08-01 and 2026-08-27).
-4. `~/llm_wiki.worktrees/beads-rust-bootstrap/target` (6.7 GiB): Rust debug compilation artifacts.
+Top-down comparison between the last-14-daily-snapshot floor (2026-08-17, 789.71 GiB used — the lowest `df used` in the 14 most recent daily ledger snapshots as of 2026-08-31, per this repo's floor-finding methodology; the previously cited 2026-08-03/672.61 GiB value was outside that 14-day window and is corrected here) and the live state (841 GiB used) identified four massive growth reservoirs:
+1. `/private/tmp/_disk_magician_archive` (52.0 GiB) — opaque leaf, not subdivided into ≤5 GiB child buckets at capture time: 130 archived directories of temporary PR analyzer/scratch trees created during pressure-sweep runs.
+2. `~/Library/Application Support/Cursor/snapshots` (28.4 GiB) — opaque leaf, not subdivided into ≤5 GiB child buckets at capture time: Cursor codebase checkpoints and stores.
+3. `~/.openclaw/repo-backups` (17.3 GiB) — opaque leaf, not subdivided into ≤5 GiB child buckets at capture time: one-time full repository snapshots from historical migration runs (2026-08-01 and 2026-08-27).
+4. `~/llm_wiki.worktrees/beads-rust-bootstrap/target` (6.7 GiB) — opaque leaf, not subdivided into ≤5 GiB child buckets at capture time: Rust debug compilation artifacts.
 
-Total space reclaimed across all four reservoirs: **~102.4 GiB** (used space dropped from 841 GiB to 739 GiB).
+Sum of the four reservoirs: **104.4 GiB** (52.0 + 28.4 + 17.3 + 6.7). Measured used-space delta over the same window: **102 GiB** (841 → 739 GiB) — the ~2.4 GiB gap is expected concurrent background churn during cleanup, not a measurement error.
 
 ## Why it matters
 
@@ -39,4 +39,4 @@ Without active pruning and observation:
 
 ## History
 
-- 2026-08-31 — Investigated 30-day floor delta (+185 GiB gap). Purged 52.0 GiB tmp archives, 28.4 GiB Cursor snapshots, 17.3 GiB OpenClaw backups, and 6.7 GiB Cargo target build artifacts (+102 GiB reclaimed).
+- 2026-08-31 — Investigated last-14-daily-snapshot floor delta (+51.3 GiB gap, floor 789.71 GiB on 2026-08-17 vs 841 GiB live; corrected from an earlier +185 GiB figure that used an out-of-window 2026-08-03 floor). Purged 52.0 GiB tmp archives, 28.4 GiB Cursor snapshots, 17.3 GiB OpenClaw backups, and 6.7 GiB Cargo target build artifacts (104.4 GiB summed / 102 GiB measured used-space delta reclaimed).

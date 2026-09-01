@@ -17,7 +17,7 @@
     "~/.codex/log",
     "~/.claude/projects",
     "~/.disk_magician_backup",
-    "~/.hermes/state.db"
+    "~/.hermes/state.db*"
   ],
   "protected_live_paths": [
     {

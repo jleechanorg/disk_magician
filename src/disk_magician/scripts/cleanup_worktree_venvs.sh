@@ -88,11 +88,11 @@ Environment:
   DISK_MAGICIAN_STATE_DIR  Overrides the lock directory's parent (tests only).
 
 Examples:
-  $(basename "$0") --dry-run
-  $(basename "$0") --min-age 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean
-  $(basename "$0") --purge-bak-days 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean --purge-bak-days 30
+  cleanup_worktree_venvs.sh --dry-run
+  cleanup_worktree_venvs.sh --min-age 30 --dry-run
+  WORKTREE APPROVED=1 cleanup_worktree_venvs.sh --clean
+  cleanup_worktree_venvs.sh --purge-bak-days 30 --dry-run
+  WORKTREE APPROVED=1 cleanup_worktree_venvs.sh --clean --purge-bak-days 30
 EOF
 }
 

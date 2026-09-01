@@ -156,6 +156,15 @@ fi
 chown root:wheel "$STATE_DIR"
 chmod 755 "$STATE_DIR"
 
+# Validate the interpreter the plist hardcodes can actually run the freshly
+# installed scanner BEFORE registering the LaunchDaemon — otherwise a
+# missing/incompatible /usr/bin/python3 only surfaces as a silent nightly
+# launchd failure, not an install-time error.
+if ! /usr/bin/python3 "$LIBEXEC_DIR/disk_frontier_scan.py" --help >/dev/null 2>&1; then
+  echo "Error: /usr/bin/python3 cannot execute $LIBEXEC_DIR/disk_frontier_scan.py — aborting before daemon install" >&2
+  exit 1
+fi
+
 sed -e "s|@USER_HOME@|$USER_HOME|g" "$PLIST_TEMPLATE" > "$PLIST_DST"
 chown root:wheel "$PLIST_DST"
 chmod 644 "$PLIST_DST"
