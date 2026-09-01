@@ -180,15 +180,22 @@ user_probes = {
     "mail": f"{user_home}/Library/Mail",
     "messages": f"{user_home}/Library/Messages",
 }
+real_mode = rep.get("mode") or "complete"
 coverage_envelope = rep.get("coverage_envelope") or {}
 if not coverage_envelope.get("complete"):
+    # Only backstop the FDA fields (unobtainable in a CI sandbox with no
+    # TCC grant) — "complete" here must track real_mode, not be forced
+    # True regardless of it. Forcing it True unconditionally produced a
+    # self-contradictory ledger (mode "partial" + envelope "complete")
+    # whenever the scanner genuinely reported partial (found in /advice
+    # review of PR #57).
     coverage_envelope = {
-        "complete": True,
+        "complete": real_mode == "complete",
         "fda_preflight_status": "granted",
         "fda_user_preflight_status": "granted",
         "reachable_top_level_roots": 1,
         "measured_top_level_roots": 1,
-        "unfinished_top_level_roots": 0,
+        "unfinished_top_level_roots": 0 if real_mode == "complete" else 1,
     }
 fda_probe_paths = user_probes
 fda_preflight = {
@@ -198,12 +205,7 @@ fda_preflight = {
 
 ledger = {
     "schema_version": 2,
-    # Preserve the real scanner's mode when it reported one — only backstop
-    # missing FDA/coverage metadata (unobtainable in a CI sandbox with no
-    # TCC grant), never silently overwrite a genuine "partial" result with
-    # "complete" (found in /advice review of PR #57: an unconditional
-    # override here would mask a real operational_unfinished regression).
-    "mode": rep.get("mode") or "complete",
+    "mode": real_mode,
     "coverage_envelope": coverage_envelope,
     "frontier_unfinished": rep.get("frontier_unfinished") or [],
     "opaque_intrinsic_gates": rep.get("opaque_intrinsic_gates") or [],
