@@ -848,7 +848,18 @@ for idx, path in enumerate(candidates):
         captured_at = d["captured_at"]
         ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
         age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
-        is_complete = d.get("mode") == "complete" or bool(d.get("coverage_envelope", {}).get("complete"))
+        # coverage_envelope.complete is authoritative when present (it is the
+        # scanner's own derived completeness verdict, factoring in FDA grant
+        # status and root-count parity — see disk_frontier_scan.py
+        # coverage_complete). Falling back to bare mode == "complete" only
+        # when the envelope is absent (legacy snapshots) avoids treating a
+        # fresh-but-unproven scan (mode complete, envelope incomplete) as
+        # equal to a genuinely complete one.
+        coverage_envelope = d.get("coverage_envelope")
+        if isinstance(coverage_envelope, dict) and "complete" in coverage_envelope:
+            is_complete = bool(coverage_envelope["complete"])
+        else:
+            is_complete = d.get("mode") == "complete"
         is_fresh = age_hours <= 36.0
         loaded.append({
             "path": path,
@@ -862,6 +873,12 @@ for idx, path in enumerate(candidates):
         if explicit_override and idx == 0:
             break
     except Exception:
+        # A corrupt explicit override must fail closed the same way a
+        # missing one does (see the idx == 0 branch above) — falling
+        # through to the root-daemon/user-state candidates here would
+        # silently ignore the caller's explicit request.
+        if explicit_override and idx == 0:
+            break
         continue
 
 if not loaded:

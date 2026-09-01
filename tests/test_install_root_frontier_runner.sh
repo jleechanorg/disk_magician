@@ -41,6 +41,24 @@ else
   ok "root execution mode active"
 fi
 
+echo "── 4. Symlink-ancestor rejection (TOCTOU/privilege-escalation guard) ──"
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT
+ATTACKER_DIR="$TMPD/attacker-controlled"
+mkdir -p "$ATTACKER_DIR"
+FAKE_LIBEXEC_PARENT="$TMPD/usr-local-libexec"
+mkdir -p "$FAKE_LIBEXEC_PARENT"
+ln -s "$ATTACKER_DIR" "$FAKE_LIBEXEC_PARENT/disk-magician"
+
+RC=0
+OUT_SYMLINK=$(DISK_MAGICIAN_LIBEXEC_DIR="$FAKE_LIBEXEC_PARENT/disk-magician" \
+  DISK_MAGICIAN_STATE_DIR="$TMPD/state" \
+  "$REPO_ROOT/scripts/install_root_frontier_runner.sh" --dry-run 2>&1) || RC=$?
+[[ $RC -ne 0 ]] && ok "refuses to install through a pre-planted symlink" \
+  || bad "symlink rejection" "exited 0 with LIBEXEC_DIR as symlink: $OUT_SYMLINK"
+echo "$OUT_SYMLINK" | grep -q "refusing to install through symlink" \
+  && ok "prints symlink refusal error" || bad "symlink error message" "$OUT_SYMLINK"
+
 echo
 echo "Results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

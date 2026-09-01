@@ -1,84 +1,56 @@
-import datetime
 import json
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DISK_SNAPSHOT_SH = os.path.join(REPO_ROOT, "scripts", "disk_snapshot.sh")
+
+# Extract the actual embedded frontier-tiebreak Python heredoc from
+# disk_snapshot.sh and execute it directly, instead of re-implementing the
+# scoring logic here. A hand-copied reimplementation can silently drift from
+# the real script (found in /advice review of PR #57: this file previously
+# duplicated the pre-fix logic, so it kept passing even after the real
+# heredoc's completeness/fail-closed bugs were fixed).
+_HEREDOC_RE = re.compile(
+    r"^TOPDOWN_JSON=\$\(python3 - .*?<<'PY'[^\n]*\n(.*?)\nPY\n\)",
+    re.S | re.M,
+)
+
+
+def _extract_frontier_heredoc() -> str:
+    with open(DISK_SNAPSHOT_SH) as f:
+        content = f.read()
+    match = _HEREDOC_RE.search(content)
+    if not match:
+        raise AssertionError(
+            "could not find the TOPDOWN_JSON frontier-tiebreak heredoc in "
+            f"{DISK_SNAPSHOT_SH} — has it been renamed or restructured?"
+        )
+    return match.group(1)
+
+
+_FRONTIER_HEREDOC_SOURCE = _extract_frontier_heredoc()
+compile(_FRONTIER_HEREDOC_SOURCE, "disk_snapshot.sh::frontier_heredoc", "exec")
+
 
 def rank_frontier_candidates(enabled, explicit_override_path, root_path, user_path):
-    candidates = [p for p in [explicit_override_path, root_path, user_path] if p]
-    if enabled != "true" or not candidates:
+    """Run the real disk_snapshot.sh frontier-tiebreak heredoc as a subprocess."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _FRONTIER_HEREDOC_SOURCE, enabled, explicit_override_path, root_path, user_path],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, f"heredoc exited {proc.returncode}: {proc.stderr}"
+    stdout = proc.stdout.strip()
+    if not stdout or stdout == "null":
         return None
-
-    explicit_override = bool(explicit_override_path)
-    loaded = []
-
-    for idx, path in enumerate(candidates):
-        if not os.path.isfile(path) or not os.access(path, os.R_OK):
-            if explicit_override and idx == 0:
-                break
-            continue
-        try:
-            with open(path) as f:
-                d = json.load(f)
-            captured_at = d["captured_at"]
-            ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=datetime.timezone.utc
-            )
-            age_hours = (
-                datetime.datetime.now(datetime.timezone.utc) - ts
-            ).total_seconds() / 3600.0
-            is_complete = d.get("mode") == "complete" or bool(
-                d.get("coverage_envelope", {}).get("complete")
-            )
-            is_fresh = age_hours <= 36.0
-            loaded.append(
-                {
-                    "path": path,
-                    "data": d,
-                    "captured_at": captured_at,
-                    "age_hours": age_hours,
-                    "is_complete": is_complete,
-                    "is_fresh": is_fresh,
-                    "ts": ts,
-                }
-            )
-            if explicit_override and idx == 0:
-                break
-        except Exception:
-            continue
-
-    if not loaded:
-        return None
-
-    def score(c):
-        return (
-            1 if c["is_fresh"] and c["is_complete"] else 0,
-            1 if c["is_fresh"] else 0,
-            c["ts"].timestamp(),
-        )
-
-    best = max(loaded, key=score)
-    if not best["is_fresh"]:
-        return {
-            "stale": True,
-            "captured_at": best["captured_at"],
-            "age_hours": round(best["age_hours"], 1),
-            "source_path": best["path"],
-        }
-    d = best["data"]
-    return {
-        "mode": d.get("mode"),
-        "captured_at": best["captured_at"],
-        "age_hours": round(best["age_hours"], 1),
-        "source_path": best["path"],
-        "measured_total_kb": d.get("measured_total_kb"),
-        "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
-        "residual_kb": d.get("residual_kb"),
-        "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
-        "local_snapshots_count": d.get("local_snapshots_count"),
-    }
+    return json.loads(stdout)
 
 
 class TestFrontierCandidateRanking(unittest.TestCase):
@@ -94,15 +66,23 @@ class TestFrontierCandidateRanking(unittest.TestCase):
             json.dump(data, f)
         return path
 
-    def test_complete_user_scan_beats_newer_partial_root_scan(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
-        user_ts = (now - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        root_ts = (now - datetime.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def _write_raw(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
 
+    def _ts(self, **delta_kwargs):
+        import datetime
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (now - datetime.timedelta(**delta_kwargs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_complete_user_scan_beats_newer_partial_root_scan(self):
         user_file = self._write_json(
             "user.json",
             {
-                "captured_at": user_ts,
+                "captured_at": self._ts(hours=2),
                 "mode": "complete",
                 "coverage_envelope": {"complete": True},
                 "measured_total_kb": 1000,
@@ -111,7 +91,7 @@ class TestFrontierCandidateRanking(unittest.TestCase):
         root_file = self._write_json(
             "root.json",
             {
-                "captured_at": root_ts,
+                "captured_at": self._ts(minutes=30),
                 "mode": "partial",
                 "coverage_envelope": {"complete": False},
                 "measured_total_kb": 800,
@@ -120,18 +100,13 @@ class TestFrontierCandidateRanking(unittest.TestCase):
 
         res = rank_frontier_candidates("true", "", root_file, user_file)
         self.assertIsNotNone(res)
-        self.assertEqual(res["source_path"], user_file)
-        self.assertEqual(res["mode"], "complete")
+        self.assertEqual(res["measured_total_kb"], 1000)
 
     def test_complete_root_scan_beats_older_complete_user_scan(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
-        user_ts = (now - datetime.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        root_ts = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
         user_file = self._write_json(
             "user.json",
             {
-                "captured_at": user_ts,
+                "captured_at": self._ts(hours=5),
                 "mode": "complete",
                 "coverage_envelope": {"complete": True},
                 "measured_total_kb": 1000,
@@ -140,7 +115,7 @@ class TestFrontierCandidateRanking(unittest.TestCase):
         root_file = self._write_json(
             "root.json",
             {
-                "captured_at": root_ts,
+                "captured_at": self._ts(hours=1),
                 "mode": "complete",
                 "coverage_envelope": {"complete": True},
                 "measured_total_kb": 1200,
@@ -149,18 +124,13 @@ class TestFrontierCandidateRanking(unittest.TestCase):
 
         res = rank_frontier_candidates("true", "", root_file, user_file)
         self.assertIsNotNone(res)
-        self.assertEqual(res["source_path"], root_file)
         self.assertEqual(res["measured_total_kb"], 1200)
 
     def test_explicit_override_is_used_strictly_without_fallback(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
-        override_ts = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        root_ts = (now - datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
         override_file = self._write_json(
             "override.json",
             {
-                "captured_at": override_ts,
+                "captured_at": self._ts(hours=1),
                 "mode": "complete",
                 "coverage_envelope": {"complete": True},
                 "measured_total_kb": 9999,
@@ -169,7 +139,7 @@ class TestFrontierCandidateRanking(unittest.TestCase):
         root_file = self._write_json(
             "root.json",
             {
-                "captured_at": root_ts,
+                "captured_at": self._ts(minutes=10),
                 "mode": "complete",
                 "coverage_envelope": {"complete": True},
                 "measured_total_kb": 1200,
@@ -178,8 +148,63 @@ class TestFrontierCandidateRanking(unittest.TestCase):
 
         res = rank_frontier_candidates("true", override_file, root_file, "")
         self.assertIsNotNone(res)
-        self.assertEqual(res["source_path"], override_file)
         self.assertEqual(res["measured_total_kb"], 9999)
+
+    def test_coverage_envelope_complete_false_beats_bare_mode_complete(self):
+        # mode == "complete" alone must NOT be treated as equivalent to a
+        # genuinely complete scan when coverage_envelope says otherwise
+        # (e.g. FDA was not granted, so the scanner itself flagged the run
+        # incomplete despite finishing without an unfinished frontier).
+        unproven_file = self._write_json(
+            "unproven.json",
+            {
+                "captured_at": self._ts(minutes=5),
+                "mode": "complete",
+                "coverage_envelope": {"complete": False},
+                "measured_total_kb": 500,
+            },
+        )
+        genuinely_complete_file = self._write_json(
+            "genuine.json",
+            {
+                "captured_at": self._ts(hours=3),
+                "mode": "complete",
+                "coverage_envelope": {"complete": True},
+                "measured_total_kb": 700,
+            },
+        )
+
+        res = rank_frontier_candidates("true", "", unproven_file, genuinely_complete_file)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["measured_total_kb"], 700)
+
+    def test_legacy_snapshot_without_coverage_envelope_falls_back_to_mode(self):
+        legacy_file = self._write_json(
+            "legacy.json",
+            {
+                "captured_at": self._ts(minutes=5),
+                "mode": "complete",
+                "measured_total_kb": 321,
+            },
+        )
+        res = rank_frontier_candidates("true", "", legacy_file, "")
+        self.assertIsNotNone(res)
+        self.assertEqual(res["measured_total_kb"], 321)
+
+    def test_corrupt_explicit_override_fails_closed_without_fallback(self):
+        corrupt_override = self._write_raw("override.json", "{not valid json")
+        root_file = self._write_json(
+            "root.json",
+            {
+                "captured_at": self._ts(minutes=10),
+                "mode": "complete",
+                "coverage_envelope": {"complete": True},
+                "measured_total_kb": 1200,
+            },
+        )
+
+        res = rank_frontier_candidates("true", corrupt_override, root_file, "")
+        self.assertIsNone(res)
 
 
 if __name__ == "__main__":

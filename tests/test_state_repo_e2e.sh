@@ -198,7 +198,12 @@ fda_preflight = {
 
 ledger = {
     "schema_version": 2,
-    "mode": "complete",
+    # Preserve the real scanner's mode when it reported one — only backstop
+    # missing FDA/coverage metadata (unobtainable in a CI sandbox with no
+    # TCC grant), never silently overwrite a genuine "partial" result with
+    # "complete" (found in /advice review of PR #57: an unconditional
+    # override here would mask a real operational_unfinished regression).
+    "mode": rep.get("mode") or "complete",
     "coverage_envelope": coverage_envelope,
     "frontier_unfinished": rep.get("frontier_unfinished") or [],
     "opaque_intrinsic_gates": rep.get("opaque_intrinsic_gates") or [],
