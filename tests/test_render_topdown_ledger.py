@@ -43,6 +43,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
                 "complete": envelope_complete,
                 "status": "complete" if envelope_complete else "partial",
                 "fda_preflight_status": "granted",
+                "fda_user_preflight_status": "granted",
                 "reachable_top_level_roots": 1,
                 "measured_top_level_roots": 1,
                 "unfinished_top_level_roots": 0,
@@ -52,6 +53,13 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "run_started_at": 100.0,
             "run_finished_at": 102.0,
             "fda_probe_paths": dict(USER_PROBE_PATHS),
+            "fda_preflight": {
+                "status": "granted",
+                "probes": {
+                    name: {"path": path, "status": "readable"}
+                    for name, path in USER_PROBE_PATHS.items()
+                },
+            },
             "hostname": "testhost",
             "disk_used_kb": 500 * 1024 * 1024,
             "residual_kb": 524288,  # 0.5 GiB
@@ -77,6 +85,35 @@ class TestRenderTopdownLedger(unittest.TestCase):
         with open(path, "w") as f:
             json.dump(data, f)
         return path
+
+    def test_granted_report_requires_exact_user_fda_evidence(self):
+        mutations = {
+            "missing_user_status": lambda d: d["coverage_envelope"].pop(
+                "fda_user_preflight_status"
+            ),
+            "mismatched_user_status": lambda d: d["coverage_envelope"].update(
+                fda_user_preflight_status="indeterminate"
+            ),
+            "missing_preflight": lambda d: d.pop("fda_preflight"),
+            "missing_catalog": lambda d: d.pop("fda_probe_paths"),
+            "missing_user_probe": lambda d: d["fda_preflight"]["probes"].pop("mail"),
+            "unreadable_user_probe": lambda d: d["fda_preflight"]["probes"]["mail"].update(
+                status="permission_denied_or_tcc"
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                frontier = self._fixture(age_hours=1)
+                with open(frontier) as f:
+                    data = json.load(f)
+                mutate(data)
+                with open(frontier, "w") as f:
+                    json.dump(data, f)
+
+                rc, _, err = run(frontier, self.out_dir)
+
+                self.assertEqual(rc, 0, err)
+                self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
 
     def _attested_partial_fixture(self):
         path = self._fixture(age_hours=1)

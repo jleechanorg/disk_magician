@@ -43,11 +43,20 @@ def ledger(disk_used_kb, residual_kb, buckets, residual_label="test-residual", c
         "coverage_envelope": {
             "complete": True,
             "fda_preflight_status": "granted",
+            "fda_user_preflight_status": "granted",
             "reachable_top_level_roots": 1,
             "measured_top_level_roots": 1,
             "unfinished_top_level_roots": 0,
         },
         "frontier_unfinished": [],
+        "fda_probe_paths": dict(USER_PROBE_PATHS),
+        "fda_preflight": {
+            "status": "granted",
+            "probes": {
+                name: {"path": path, "status": "readable"}
+                for name, path in USER_PROBE_PATHS.items()
+            },
+        },
         "accounting_equation": {
             "displayed_balanced": tail >= 0, "display_ledger_valid": tail >= 0,
             "data_used_kb": disk_used_kb, "displayed_buckets_kb": bucket_total,
@@ -209,6 +218,28 @@ class TestValidateLedger(unittest.TestCase):
 
         hd.validate_ledger(led, label="attested-partial")
         hd.validate_full_attribution_ledger(led, label="attested-partial")
+
+    def test_granted_ledger_requires_exact_user_fda_evidence(self):
+        mutations = {
+            "missing_user_status": lambda d: d["coverage_envelope"].pop(
+                "fda_user_preflight_status"
+            ),
+            "mismatched_user_status": lambda d: d["coverage_envelope"].update(
+                fda_user_preflight_status="indeterminate"
+            ),
+            "missing_preflight": lambda d: d.pop("fda_preflight"),
+            "missing_catalog": lambda d: d.pop("fda_probe_paths"),
+            "missing_user_probe": lambda d: d["fda_preflight"]["probes"].pop("mail"),
+            "unreadable_user_probe": lambda d: d["fda_preflight"]["probes"]["mail"].update(
+                status="permission_denied_or_tcc"
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                candidate = ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+                mutate(candidate)
+                with self.assertRaises(hd.LedgerError):
+                    hd.validate_full_attribution_ledger(candidate, label=label)
 
     def test_partial_system_boundary_contract_rejects_missing_or_malformed_evidence(self):
         mutations = {

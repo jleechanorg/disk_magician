@@ -279,6 +279,36 @@ def validate_partial_system_boundary_contract(ledger: dict, *, label: str) -> No
         raise LedgerError(f"{label}: incomplete system-boundary opaque gates")
 
 
+def validate_granted_user_fda_contract(ledger: dict, *, label: str) -> None:
+    """Validate exact user FDA evidence for a granted attribution ledger."""
+    envelope = ledger.get("coverage_envelope")
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("fda_preflight_status") != "granted"
+        or envelope.get("fda_user_preflight_status") != "granted"
+    ):
+        raise LedgerError(f"{label}: granted FDA ledger missing user preflight")
+    catalog = ledger.get("fda_probe_paths")
+    validate_user_probe_catalog(catalog, label=label)
+    preflight = ledger.get("fda_preflight")
+    probes = preflight.get("probes") if isinstance(preflight, dict) else None
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "granted"
+        or not isinstance(probes, dict)
+    ):
+        raise LedgerError(f"{label}: granted FDA ledger has invalid user preflight")
+    for name in USER_PROBE_NAMES:
+        probe = probes.get(name)
+        if (
+            not isinstance(probe, dict)
+            or set(probe) != {"path", "status"}
+            or probe.get("path") != catalog[name]
+            or probe.get("status") != "readable"
+        ):
+            raise LedgerError(f"{label}: granted FDA ledger has invalid user probe {name!r}")
+
+
 def validate_ledger(ledger: dict, *, label: str) -> None:
     if not isinstance(ledger, dict):
         raise LedgerError(f"{label}: ledger must be an object")
@@ -373,7 +403,9 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
     fda_status = envelope.get("fda_preflight_status")
     if fda_status == "partial":
         validate_partial_system_boundary_contract(ledger, label=label)
-    elif fda_status != "granted":
+    elif fda_status == "granted":
+        validate_granted_user_fda_contract(ledger, label=label)
+    else:
         raise LedgerError(f"{label}: full-attribution ledger required (FDA preflight not granted)")
     if (
         type(reachable) is not int

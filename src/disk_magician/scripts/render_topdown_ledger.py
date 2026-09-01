@@ -267,6 +267,36 @@ def valid_partial_system_boundary_contract(report):
     return gate_paths == set(SYSTEM_BOUNDARY_PROBES.values())
 
 
+def valid_granted_user_fda_contract(report):
+    """Return true only when a granted report carries exact user FDA proof."""
+    envelope = report.get("coverage_envelope")
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("fda_preflight_status") != "granted"
+        or envelope.get("fda_user_preflight_status") != "granted"
+    ):
+        return False
+    catalog = report.get("fda_probe_paths")
+    if not valid_user_probe_catalog(catalog):
+        return False
+    preflight = report.get("fda_preflight")
+    probes = preflight.get("probes") if isinstance(preflight, dict) else None
+    if (
+        not isinstance(preflight, dict)
+        or preflight.get("status") != "granted"
+        or not isinstance(probes, dict)
+    ):
+        return False
+    return all(
+        isinstance(probe, dict)
+        and set(probe) == {"path", "status"}
+        and probe.get("path") == catalog[name]
+        and probe.get("status") == "readable"
+        for name in USER_PROBE_NAMES
+        for probe in [probes.get(name)]
+    )
+
+
 def complete_coverage_envelope(report):
     """Return true only when the report proves full, balanced attribution."""
     if not isinstance(report, dict):
@@ -344,7 +374,7 @@ def complete_coverage_envelope(report):
         and isinstance(envelope, dict)
         and envelope.get("complete") is True
         and (
-            envelope.get("fda_preflight_status") == "granted"
+            valid_granted_user_fda_contract(report)
             or (
                 envelope.get("fda_preflight_status") == "partial"
                 and valid_partial_system_boundary_contract(report)
