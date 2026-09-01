@@ -29,7 +29,6 @@ Commands:
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
-  prune-worktrees-parallel Multi-threaded worktree pruner with per-repo locks and backup-branch preservation.
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
@@ -258,9 +257,6 @@ case "$CMD" in
     ;;
   cleanup_worktrees|cleanup-worktrees|prune_worktrees|prune-worktrees)
     "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
-    ;;
-  prune_worktrees_parallel|prune-worktrees-parallel)
-    exec python3 "$SCRIPT_DIR/scripts/prune_stale_worktrees.py" "$@"
     ;;
   cleanup_worktree_venvs|cleanup-worktree-venvs)
     "$SCRIPT_DIR/scripts/cleanup_worktree_venvs.sh" "$@"
