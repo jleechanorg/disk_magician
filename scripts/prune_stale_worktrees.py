@@ -40,14 +40,15 @@ def is_worktree_locked_by_process(wt_path: str) -> bool:
         return False
 
 def discover_worktrees():
+    # Extra repo roots beyond the two default scan dirs below (comma-separated),
+    # for repos that don't live under ~/projects or ~/projects_other. Same env
+    # var name as cleanup_worktrees.sh's --repos default, for consistency.
+    # No hardcoded machine-specific paths here (found in /wa review of PR #55 --
+    # matches the observer-catalog-purity fix in issue #56/PR #57).
     repos = [
-        '/Users/jleechan/projects/worldarchitect.ai',
-        '/Users/jleechan/projects/dark-factory',
-        '/Users/jleechan/projects/merge_train',
-        '/Users/jleechan/projects_other/disk_magician',
-        '/Users/jleechan/project_worldaiclaw/worldai_claw',
+        r.strip() for r in os.environ.get('CLAUDE_WORKTREE_REPOS', '').split(',') if r.strip()
     ]
-    for p in ['/Users/jleechan/projects', '/Users/jleechan/projects_other']:
+    for p in [os.path.expanduser('~/projects'), os.path.expanduser('~/projects_other')]:
         if os.path.exists(p):
             for d in os.listdir(p):
                 full = os.path.join(p, d)
