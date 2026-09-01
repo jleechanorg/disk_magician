@@ -93,7 +93,7 @@ def scan_user_home():
     """Return the user home whose FDA-sensitive paths are in scanner scope."""
     if os.geteuid() != 0:
         configured_home = os.path.expanduser("~")
-        return configured_home if is_normalized_absolute_path(configured_home) else None
+        return configured_home if is_valid_scan_user_home(configured_home) else None
     configured_home = os.environ.get("DISK_MAGICIAN_SCAN_USER_HOME")
     if not is_valid_scan_user_home(configured_home):
         return None
@@ -114,6 +114,42 @@ def fda_probe_paths(root):
     return paths
 
 
+def _open_directory_no_follow(path):
+    """Open an absolute directory without following any path component."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    supports_dir_fd = os.open in getattr(os, "supports_dir_fd", ())
+    if (
+        nofollow is None
+        or directory is None
+        or not os.path.isabs(path)
+        or not supports_dir_fd
+    ):
+        raise OSError(
+            errno.ENOTSUP,
+            "descriptor-relative no-follow open unavailable",
+            path,
+        )
+    flags = os.O_RDONLY | directory
+    flags |= nofollow
+
+    fd = os.open(os.sep, flags)
+    try:
+        for component in path.split(os.sep):
+            if not component:
+                continue
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def fda_preflight(paths=None):
     """Probe FDA-sensitive directories from this scanner process.
 
@@ -130,9 +166,8 @@ def fda_preflight(paths=None):
     for name, path in paths.items():
         probe = {"path": os.fspath(path)}
         fd = None
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
-            fd = os.open(path, flags)
+            fd = _open_directory_no_follow(path)
         except FileNotFoundError:
             probe["status"] = "missing"
         except PermissionError as exc:
@@ -194,21 +229,27 @@ def is_normalized_absolute_path(path):
     )
 
 
+def is_canonical_absolute_literal_path(path):
+    return is_normalized_absolute_path(path) and os.path.realpath(path) == path
+
+
 def is_valid_scan_user_home(path):
     return (
-        is_normalized_absolute_path(path)
+        is_canonical_absolute_literal_path(path)
         and os.path.dirname(path) == "/Users"
         and bool(os.path.basename(path))
-        and os.path.realpath(path) == path
     )
 
 
 def valid_user_probe_catalog(catalog):
     if not isinstance(catalog, dict) or set(catalog) != set(FDA_PROBE_RELATIVE_PATHS):
         return False
-    mail_path = catalog.get("mail")
-    if not is_normalized_absolute_path(mail_path):
+    if any(
+        not is_canonical_absolute_literal_path(catalog.get(name))
+        for name in FDA_PROBE_RELATIVE_PATHS
+    ):
         return False
+    mail_path = catalog.get("mail")
     expected_mail_suffix = "/" + FDA_PROBE_RELATIVE_PATHS["mail"]
     if not mail_path.endswith(expected_mail_suffix):
         return False

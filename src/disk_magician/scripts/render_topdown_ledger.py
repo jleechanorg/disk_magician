@@ -74,21 +74,27 @@ def is_normalized_absolute_path(path):
     )
 
 
+def is_canonical_absolute_literal_path(path):
+    return is_normalized_absolute_path(path) and os.path.realpath(path) == path
+
+
 def is_valid_scan_user_home(path):
     return (
-        is_normalized_absolute_path(path)
+        is_canonical_absolute_literal_path(path)
         and os.path.dirname(path) == "/Users"
         and bool(os.path.basename(path))
-        and os.path.realpath(path) == path
     )
 
 
 def valid_user_probe_catalog(catalog):
     if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
         return False
-    mail_path = catalog.get("mail")
-    if not is_normalized_absolute_path(mail_path):
+    if any(
+        not is_canonical_absolute_literal_path(catalog.get(name))
+        for name in USER_PROBE_RELATIVE_PATHS
+    ):
         return False
+    mail_path = catalog.get("mail")
     expected_mail_suffix = "/" + USER_PROBE_RELATIVE_PATHS["mail"]
     if not mail_path.endswith(expected_mail_suffix):
         return False

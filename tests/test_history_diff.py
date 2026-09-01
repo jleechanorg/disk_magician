@@ -364,6 +364,21 @@ class TestValidateLedger(unittest.TestCase):
             with self.assertRaises(hd.LedgerError):
                 hd.validate_user_probe_catalog(catalog, label="symlink-alias")
 
+    def test_probe_catalog_rejects_child_symlink_alias(self):
+        catalog = {
+            name: os.path.join("/Users/fixture", relative)
+            for name, relative in hd.USER_PROBE_RELATIVE_PATHS.items()
+        }
+
+        def fake_realpath(path):
+            if path == catalog["mail"]:
+                return "/tmp/forged/Library/Mail"
+            return path
+
+        with mock.patch.object(hd.os.path, "realpath", side_effect=fake_realpath):
+            with self.assertRaises(hd.LedgerError):
+                hd.validate_user_probe_catalog(catalog, label="child-symlink-alias")
+
 
 class TestComputeDeltas(unittest.TestCase):
     def test_growth_sorted_first_shrink_last(self):

@@ -316,6 +316,20 @@ class TestRenderTopdownLedger(unittest.TestCase):
         with mock.patch.object(renderer.os.path, "realpath", return_value="/Users/real"):
             self.assertFalse(renderer.valid_user_probe_catalog(catalog))
 
+    def test_user_probe_catalog_rejects_child_symlink_alias(self):
+        catalog = {
+            name: os.path.join("/Users/fixture", relative)
+            for name, relative in renderer.USER_PROBE_RELATIVE_PATHS.items()
+        }
+
+        def fake_realpath(path):
+            if path == catalog["mail"]:
+                return "/tmp/forged/Library/Mail"
+            return path
+
+        with mock.patch.object(renderer.os.path, "realpath", side_effect=fake_realpath):
+            self.assertFalse(renderer.valid_user_probe_catalog(catalog))
+
     def test_partial_system_boundary_contract_rejects_missing_or_malformed_evidence(self):
         mutations = {
             "missing_preflight": lambda d: d.pop("fda_preflight"),

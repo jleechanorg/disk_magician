@@ -72,31 +72,58 @@ missing = os.path.join(root, "missing")
 os.makedirs(readable, exist_ok=True)
 os.makedirs(denied, exist_ok=True)
 
-def fake_open(path, flags):
-    if path == denied:
-        raise PermissionError(1, "Operation not permitted", path)
-    if path == missing:
-        raise FileNotFoundError(2, "No such file or directory", path)
-    return 41
+fd_paths = {}
+next_fd = [41]
+successful_opens = [0]
 
-with mock.patch.object(m.os, "open", side_effect=fake_open), \
-     mock.patch.object(m.os, "close") as close:
-    result = m.fda_preflight({
-        "mobile_sync": os.path.join(root, "readable"),
-        "mail": denied,
-        "messages": missing,
-    })
+def fake_open(path, flags, *, dir_fd=None):
+    if dir_fd is None:
+        resolved = os.path.normpath(path)
+    else:
+        resolved = os.path.normpath(os.path.join(fd_paths[dir_fd], path))
+    if resolved == denied:
+        raise PermissionError(1, "Operation not permitted", path)
+    if resolved == missing:
+        raise FileNotFoundError(2, "No such file or directory", path)
+    fd = next_fd[0]
+    next_fd[0] += 1
+    fd_paths[fd] = resolved
+    successful_opens[0] += 1
+    return fd
+
+def fake_close(fd):
+    fd_paths.pop(fd, None)
+
+with mock.patch.object(m.os, "open", side_effect=fake_open) as open_mock, \
+     mock.patch.object(m.os, "close", side_effect=fake_close) as close:
+    with mock.patch.object(m.os, "supports_dir_fd", (open_mock,)):
+        result = m.fda_preflight({
+            "mobile_sync": os.path.join(root, "readable"),
+            "mail": denied,
+            "messages": missing,
+        })
+
+root_opens = [call for call in open_mock.call_args_list if call.args[0] == os.sep]
+component_opens = [
+    call for call in open_mock.call_args_list if call.args[0] != os.sep
+]
 
 print(
     result["status"] == "partial",
     result["probes"]["mobile_sync"]["status"] == "readable",
     result["probes"]["mail"]["status"] == "permission_denied_or_tcc",
     result["probes"]["messages"]["status"] == "missing",
-    close.call_count == 1,
+    len(root_opens) == 3,
+    all(call.kwargs.get("dir_fd") is None for call in root_opens),
+    all(
+        not os.path.isabs(call.args[0]) and call.kwargs.get("dir_fd") is not None
+        for call in component_opens
+    ),
+    close.call_count == successful_opens[0] and not fd_paths,
 )
 PY
 )
-[[ "$FDA_PREFLIGHT_OUT" == "True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes read-only handles" \
+[[ "$FDA_PREFLIGHT_OUT" == "True True True True True True True True" ]] && ok "FDA preflight reports scanner-process access per target and closes descriptor-relative read-only handles" \
   || bad "FDA preflight did not report per-target access correctly: $FDA_PREFLIGHT_OUT"
 
 FDA_SCOPE_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'

@@ -88,6 +88,82 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
         self.assertEqual(report["fda_probe_paths"], expected)
 
+    def test_nonroot_scan_home_rejects_tmp_before_deriving_fda_paths(self):
+        for home in ("/tmp", "/Users/../tmp"):
+            with self.subTest(home=home), \
+                 mock.patch.object(frontier.os, "geteuid", return_value=501), \
+                 mock.patch.dict(frontier.os.environ, {"HOME": home}, clear=True):
+                self.assertIsNone(frontier.scan_user_home())
+                self.assertEqual(frontier.fda_probe_paths("/fixture"), {})
+
+    def test_fda_preflight_rejects_child_symlink_for_user_probes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for symlink_name, symlink_relative in frontier.FDA_PROBE_RELATIVE_PATHS.items():
+                with self.subTest(symlink_name=symlink_name):
+                    home = pathlib.Path(temp_dir) / symlink_name / "home"
+                    outside = pathlib.Path(temp_dir) / symlink_name / "outside"
+                    home.mkdir(parents=True)
+                    outside.mkdir(parents=True)
+                    paths = {}
+                    for name, relative in frontier.FDA_PROBE_RELATIVE_PATHS.items():
+                        path = home / relative
+                        target = outside / relative
+                        target.mkdir(parents=True)
+                        if name == symlink_name:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.symlink_to(target, target_is_directory=True)
+                        else:
+                            path.mkdir(parents=True)
+                        paths[name] = str(path)
+
+                    preflight = frontier.fda_preflight(paths)
+
+                    self.assertNotEqual(preflight["status"], "granted")
+                    self.assertIsNone(frontier.fda_user_probe_evidence(preflight))
+
+    def test_fda_preflight_fails_closed_without_dir_fd_open_support(self):
+        paths = {
+            "mail": "/Users/fixture/Library/Mail",
+            "messages": "/Users/fixture/Library/Messages",
+        }
+
+        with mock.patch.object(frontier.os, "supports_dir_fd", set()), \
+             mock.patch.object(frontier.os, "open") as unsafe_open:
+            with self.assertRaises(OSError) as raised:
+                frontier._open_directory_no_follow(paths["mail"])
+            self.assertEqual(raised.exception.errno, errno.ENOTSUP)
+            preflight = frontier.fda_preflight(paths)
+
+        self.assertEqual(preflight["status"], "indeterminate")
+        self.assertEqual(preflight["errors"], list(paths))
+        self.assertNotEqual(preflight["status"], "granted")
+        unsafe_open.assert_not_called()
+        for probe in preflight["probes"].values():
+            self.assertEqual(probe["status"], "error")
+            self.assertEqual(probe["errno"], errno.ENOTSUP)
+
+    def test_fda_preflight_fails_closed_without_directory_open_support(self):
+        paths = {
+            "mail": "/Users/fixture/Library/Mail",
+            "messages": "/Users/fixture/Library/Messages",
+        }
+
+        with mock.patch.object(frontier.os, "O_DIRECTORY", None), \
+             mock.patch.object(frontier.os, "open") as unsafe_open, \
+             mock.patch.object(frontier.os, "supports_dir_fd", {unsafe_open}):
+            with self.assertRaises(OSError) as raised:
+                frontier._open_directory_no_follow(paths["mail"])
+            self.assertEqual(raised.exception.errno, errno.ENOTSUP)
+            preflight = frontier.fda_preflight(paths)
+
+        self.assertEqual(preflight["status"], "indeterminate")
+        self.assertEqual(preflight["errors"], list(paths))
+        self.assertIsNone(frontier.fda_user_probe_evidence(preflight))
+        unsafe_open.assert_not_called()
+        for probe in preflight["probes"].values():
+            self.assertEqual(probe["status"], "error")
+            self.assertEqual(probe["errno"], errno.ENOTSUP)
+
     def test_report_carries_configured_root_scan_home_probe_paths(self):
         scanner = self.scanner()
         with mock.patch.object(frontier.os, "geteuid", return_value=0), \
@@ -506,6 +582,20 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
         self.assertFalse(frontier.valid_user_probe_catalog(catalog))
         self.assertIsNone(frontier.fda_user_probe_evidence(preflight))
+
+    def test_user_probe_catalog_rejects_child_symlink_alias(self):
+        catalog = {
+            name: os.path.join("/Users/fixture", relative)
+            for name, relative in frontier.FDA_PROBE_RELATIVE_PATHS.items()
+        }
+
+        def fake_realpath(path):
+            if path == catalog["mail"]:
+                return "/tmp/forged/Library/Mail"
+            return path
+
+        with mock.patch.object(frontier.os.path, "realpath", side_effect=fake_realpath):
+            self.assertFalse(frontier.valid_user_probe_catalog(catalog))
 
     def test_user_probe_catalog_requires_paths_for_readable_probes(self):
         preflight = {

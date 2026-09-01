@@ -87,21 +87,27 @@ def is_normalized_absolute_path(path):
     )
 
 
+def is_canonical_absolute_literal_path(path):
+    return is_normalized_absolute_path(path) and os.path.realpath(path) == path
+
+
 def is_valid_scan_user_home(path):
     return (
-        is_normalized_absolute_path(path)
+        is_canonical_absolute_literal_path(path)
         and os.path.dirname(path) == "/Users"
         and bool(os.path.basename(path))
-        and os.path.realpath(path) == path
     )
 
 
 def validate_user_probe_catalog(catalog: dict, *, label: str) -> None:
     if not isinstance(catalog, dict) or set(catalog) != set(USER_PROBE_RELATIVE_PATHS):
         raise LedgerError(f"{label}: partial FDA ledger has incomplete user probe catalog")
+    if any(
+        not is_canonical_absolute_literal_path(catalog.get(name))
+        for name in USER_PROBE_RELATIVE_PATHS
+    ):
+        raise LedgerError(f"{label}: partial FDA ledger has non-canonical user probe path")
     mail_path = catalog.get("mail")
-    if not is_normalized_absolute_path(mail_path):
-        raise LedgerError(f"{label}: partial FDA ledger has invalid user probe catalog")
     expected_mail_suffix = "/" + USER_PROBE_RELATIVE_PATHS["mail"]
     if not mail_path.endswith(expected_mail_suffix):
         raise LedgerError(f"{label}: partial FDA ledger has non-canonical mail probe path")
