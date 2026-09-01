@@ -328,6 +328,23 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertEqual(attestation["identity_after"], {"st_dev": 7, "st_ino": 8})
 
     def scanner(self, *, effective_uid=0):
+        fda_preflight = {
+            "status": "granted",
+            "probes": {
+                "mobile_sync": {
+                    "path": "/Users/jleechan/Library/Application Support/MobileSync/Backup",
+                    "status": "readable",
+                },
+                "mail": {
+                    "path": "/Users/jleechan/Library/Mail",
+                    "status": "readable",
+                },
+                "messages": {
+                    "path": "/Users/jleechan/Library/Messages",
+                    "status": "readable",
+                },
+            },
+        }
         return SimpleNamespace(
             root="/fixture",
             root_dev=1,
@@ -359,23 +376,11 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             tracker=SimpleNamespace(peak=lambda: 1),
             level1_paths=["/fixture/data", "/fixture/home"],
             inventory_backend="gdu_one_pass", shallow_enumeration_depth=0,
-            fda_preflight={
-                "status": "granted",
-                "probes": {
-                    "mobile_sync": {
-                        "path": "/Users/jleechan/Library/Application Support/MobileSync/Backup",
-                        "status": "readable",
-                    },
-                    "mail": {
-                        "path": "/Users/jleechan/Library/Mail",
-                        "status": "readable",
-                    },
-                    "messages": {
-                        "path": "/Users/jleechan/Library/Messages",
-                        "status": "readable",
-                    },
-                },
+            fda_probe_catalog={
+                name: probe["path"]
+                for name, probe in fda_preflight["probes"].items()
             },
+            fda_preflight=fda_preflight,
             run_id="run-1",
             run_started_at=100.0,
             run_finished_at=102.0,
