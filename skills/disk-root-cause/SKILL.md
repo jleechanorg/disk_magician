@@ -228,7 +228,7 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 | `./scripts/cleanup_dev_caches.sh --clean` (via `disk_audit.sh --clean`) | uv/pre-commit/cursor-agent/claude-cli caches | DISK_MAGICIAN_AUTO_CLEAN=1 |
 | `user_scope/scripts/cleanup-ao-sessions.sh --drop-bak --days N` | .bak chains (post-6poe fix) | N chosen by caller |
 | `./scripts/cleanup_colima.sh --clean` | Docker prune + fstrim (compresses host sparse disk) | Nothing (preserves running containers via docker prune semantics) |
-| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | pre-WORKTREE-APPROVED if plan targets stale; the 7-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 7-day rule" |
+| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | requires `WORKTREE_APPROVED=1` if plan targets stale; the 7-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 7-day rule" |
 | `./scripts/cleanup_apfs_snapshots.sh --clean` | OS update snapshots >24h old | sudo (script silently fails without) |
 | `cleanup-ao-sessions.sh --days 0` | Force ALL AO backups drop (aggressive) | User OK |
 | `tmutil thinlocalsnapshots` | APFS local TM snapshots reclaim | sudo + user OK (impacts Time Machine reversibility) |

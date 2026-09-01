@@ -160,7 +160,7 @@ fmt_kb() {
 # A long-dormant worktree whose parent repo has pruned its `.git/worktrees/`
 # metadata will have a .git file pointing at a missing dir — but the file's
 # presence is itself the signal that this dir was created as a worktree and
-# the 14d age gate is the real safety check. Demanding the gitdir also exist
+# the 7d age gate is the real safety check. Demanding the gitdir also exist
 # would cause us to skip exactly the worktrees we most want to drain.
 is_likely_worktree() {
   local p="$1"
