@@ -34,7 +34,13 @@ if [[ "$DRY_RUN" != true && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-USER_HOME="${DISK_MAGICIAN_SCAN_USER_HOME:-/Users/$TARGET_USER}"
+USER_HOME="/Users/$TARGET_USER"
+# Same sudo -E / root-cron threat model as the LIBEXEC_DIR/STATE_DIR
+# overrides below: gated to non-root so an inherited env var can't inject
+# into the plist this produces. Real installs should use --user instead.
+if [[ "$(id -u)" -ne 0 ]]; then
+  USER_HOME="${DISK_MAGICIAN_SCAN_USER_HOME:-$USER_HOME}"
+fi
 if [[ "$DRY_RUN" != true && ! -d "$USER_HOME" ]]; then
   echo "Error: target user home $USER_HOME does not exist" >&2
   exit 1
@@ -132,6 +138,12 @@ fi
 chown root:wheel "$LIBEXEC_DIR"
 chmod 755 "$LIBEXEC_DIR"
 
+# rm -f first: cp writes THROUGH an existing symlink at the destination
+# rather than replacing it, so a symlink pre-planted at this exact leaf
+# path would otherwise let cp copy root-trusted content to an
+# attacker-chosen target. Removing any pre-existing entry first forces cp
+# to create a fresh regular file here instead.
+rm -f "$LIBEXEC_DIR/disk_frontier_scan.py"
 cp "$REPO_ROOT/scripts/disk_frontier_scan.py" "$LIBEXEC_DIR/disk_frontier_scan.py"
 chown root:wheel "$LIBEXEC_DIR/disk_frontier_scan.py"
 chmod 755 "$LIBEXEC_DIR/disk_frontier_scan.py"
