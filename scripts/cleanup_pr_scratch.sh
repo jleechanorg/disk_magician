@@ -403,18 +403,13 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         fi
         log "Removing: $item  (${kb} KB)"
         if [[ -d "$item" ]]; then
-          chmod -R u+w "$item" 2>/dev/null || true
-          if rm -rf "$item" 2>/dev/null; then
-            DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-            TOTAL_KB=$(( TOTAL_KB + kb ))
-          fi
+          rm -rf "$item"
+          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
         else
-          chmod u+w "$item" 2>/dev/null || true
-          if rm -f "$item" 2>/dev/null; then
-            FILES_DELETED=$(( FILES_DELETED + 1 ))
-            TOTAL_KB=$(( TOTAL_KB + kb ))
-          fi
+          rm -f "$item"
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
         fi
+        TOTAL_KB=$(( TOTAL_KB + kb ))
       fi
     done < <(find_cmd "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
   done

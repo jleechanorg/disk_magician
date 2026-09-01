@@ -29,8 +29,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-USER_HOME="/Users/$TARGET_USER"
-if [[ ! -d "$USER_HOME" ]]; then
+if [[ "$DRY_RUN" != true && "$(id -u)" -ne 0 ]]; then
+  echo "Error: installer must be run as root (e.g. sudo $0)" >&2
+  exit 1
+fi
+
+USER_HOME="${DISK_MAGICIAN_SCAN_USER_HOME:-/Users/$TARGET_USER}"
+if [[ "$DRY_RUN" != true && ! -d "$USER_HOME" ]]; then
   echo "Error: target user home $USER_HOME does not exist" >&2
   exit 1
 fi
@@ -53,11 +58,6 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "[dry-run] Would create directory: $STATE_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would install LaunchDaemon: $PLIST_DST"
   exit 0
-fi
-
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Error: installer must be run as root (e.g. sudo $0)" >&2
-  exit 1
 fi
 
 mkdir -p "$LIBEXEC_DIR"

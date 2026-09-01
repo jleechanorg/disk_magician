@@ -816,9 +816,9 @@ fi
 # absent/corrupt/disabled fails open to omitting the field entirely (same
 # fail-open posture as the dedup pass above — this must never crash a
 # snapshot over a sibling tool's file).
-if [[ -n "${DISK_MAGICIAN_FRONTIER_LAST:-}" && -f "${DISK_MAGICIAN_FRONTIER_LAST}" ]]; then
+if [[ -n "${DISK_MAGICIAN_FRONTIER_LAST:-}" ]]; then
   FRONTIER_LAST_FILE="${DISK_MAGICIAN_FRONTIER_LAST}"
-elif [[ -f "/var/db/disk-magician/frontier_last.json" && -r "/var/db/disk-magician/frontier_last.json" ]]; then
+elif [[ -f "/var/db/disk-magician/frontier_last.json" && -r "/var/db/disk-magician/frontier_last.json" && ( ! -f "$HOME/.disk_magician_state/frontier_last.json" || "/var/db/disk-magician/frontier_last.json" -nt "$HOME/.disk_magician_state/frontier_last.json" ) ]]; then
   FRONTIER_LAST_FILE="/var/db/disk-magician/frontier_last.json"
 else
   FRONTIER_LAST_FILE="$HOME/.disk_magician_state/frontier_last.json"
