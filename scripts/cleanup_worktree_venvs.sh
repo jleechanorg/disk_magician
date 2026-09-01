@@ -2,7 +2,7 @@
 # cleanup_worktree_venvs.sh — Strip Python venvs from dormant Git worktrees.
 #
 # Walks configured roots (default: ~/projects) and removes venv/.venv directories
-# whose parent worktree is older than --min-age days (default 14, per the
+# whose parent worktree is older than --min-age days (default 7, per the
 # project worktree safety rule). The worktree shell (source + .git) is preserved;
 # only the venv is removed. Re-create with `python -m venv .venv && pip install -r
 # requirements.txt` if the worktree is revisited.

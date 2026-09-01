@@ -63,7 +63,7 @@ do NOT need `APPROVE DIR SWITCH` to edit, commit, or push in other repos when
 the work is disk-maintenance scoped (fixing a sweeper that lives elsewhere,
 committing snapshot history, installing/repairing launchd jobs). All other
 global safety rules still apply unchanged: never-delete list, force-push
-approval, merge gates, `WORKTREE APPROVED` for young worktrees.
+approval, merge gates, `WORKTREE_APPROVED` for young worktrees.
 
 ## Never-delete list (hard)
 

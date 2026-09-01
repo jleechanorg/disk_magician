@@ -28,7 +28,7 @@ This skill teaches Codex how to integrate with `disk_magician` to perform automa
 
 ## Codex Safety Policies
 - Codex agent session files inside `~/.codex/sessions` are protected under the global AGENTS policy and must never be deleted unless explicitly requested.
-- Respect the worktree 14-day rule — single source of truth is the repo `CLAUDE.md` section "Worktree 14-day rule". A worktree touched within 14 days is protected and needs explicit `WORKTREE APPROVED` user authorization. Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.
+- Respect the worktree 7-day rule — single source of truth is the repo `CLAUDE.md` section "Worktree 7-day rule". A worktree touched within 7 days is protected and needs explicit `WORKTREE_APPROVED` user authorization. Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.
 - **Worktree Removal Forensics:** Never infer `git worktree remove` solely from `git worktree list` absence. Always inspect `ls -la $(git rev-parse --git-dir)/worktrees/<name>/` and `.git/worktrees/<name>/gitdir`. Admin directory presence confirms manual `rm -rf` rather than clean `git worktree remove`.
 - **Multi-Agent History Search:** History sweeps must cover Antigravity (`~/.gemini`), Cursor (`~/.cursor`), Hermes (`~/.hermes`), Claude (`~/.claude`), and Codex (`~/.codex`) in parallel (see `~/.claude/skills/history-search/SKILL.md`).
 

@@ -31,5 +31,5 @@ This skill teaches the Openclaw orchestration agent how to use `disk_magician` t
 
 ## Openclaw Guardrails
 - Check active tmux sessions list before deleting any directories under `~/.ao-sessions`.
-- Always request user authorization for directories modified within the last 14 days.
-- Worktrees specifically: see the repo `CLAUDE.md` section "Worktree 14-day rule" (single source of truth). Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.
+- Always request user authorization for directories modified within the last 7 days.
+- Worktrees specifically: see the repo `CLAUDE.md` section "Worktree 7-day rule" (single source of truth). Recency comes from `scripts/lib/worktree_recency.sh`; never re-derive it from `stat <wt>/.git` or `stat <wt>` (both measure worktree creation, not use), and treat unmeasurable as protected.

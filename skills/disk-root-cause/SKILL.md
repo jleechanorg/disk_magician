@@ -129,7 +129,7 @@ When investigating vanished or deleted git worktrees, **never infer `git worktre
 
 ## Worktree Recency & The 14-Day Protection Rule (Fail-Closed)
 
-**A git worktree touched within the last 14 days is strictly PROTECTED.**
+**A git worktree touched within the last 7 days is strictly PROTECTED.**
 Recency MUST be measured directly from content, never approximated with proxies (`feedback_2026-07-27_worktree_recency_proxies_wrong.md`, PR #50):
 
 - **Canonical helper:** Always source `scripts/lib/worktree_recency.sh` and call `worktree_age_days <path>` or `worktree_is_recently_active <path> [min_days]`.
@@ -228,7 +228,7 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 | `./scripts/cleanup_dev_caches.sh --clean` (via `disk_audit.sh --clean`) | uv/pre-commit/cursor-agent/claude-cli caches | DISK_MAGICIAN_AUTO_CLEAN=1 |
 | `user_scope/scripts/cleanup-ao-sessions.sh --drop-bak --days N` | .bak chains (post-6poe fix) | N chosen by caller |
 | `./scripts/cleanup_colima.sh --clean` | Docker prune + fstrim (compresses host sparse disk) | Nothing (preserves running containers via docker prune semantics) |
-| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | pre-WORKTREE-APPROVED if plan targets stale; the 14-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 14-day rule" |
+| `./scripts/cleanup_worktrees.sh --clean` | Antigravity worktree GC | pre-WORKTREE-APPROVED if plan targets stale; the 7-day floor is non-negotiable — see repo `CLAUDE.md` "Worktree 7-day rule" |
 | `./scripts/cleanup_apfs_snapshots.sh --clean` | OS update snapshots >24h old | sudo (script silently fails without) |
 | `cleanup-ao-sessions.sh --days 0` | Force ALL AO backups drop (aggressive) | User OK |
 | `tmutil thinlocalsnapshots` | APFS local TM snapshots reclaim | sudo + user OK (impacts Time Machine reversibility) |
