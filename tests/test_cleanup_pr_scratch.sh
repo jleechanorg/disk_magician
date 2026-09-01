@@ -304,12 +304,49 @@ echo "data" > "$T11_DIR/pr-normal-dir/file.txt"
 chmod -w "$T11_DIR/pr-readonly-dir/nested"
 set_old_mtime "$T11_DIR"
 
+# set +e/-e around the capture, matching the T10 pattern above: without it,
+# a regression to the pre-fix bare `rm -rf` (which exits non-zero here)
+# kills this whole test script under set -euo pipefail instead of failing
+# this one assertion cleanly -- and skips the chmod-restore below, leaking
+# a permanently read-only tree in TMPDIR (found in /advice review of PR #60,
+# reproduced by Opus against the pre-fix commit).
+set +e
 T11_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_DIR" 2>&1)
 T11_RC=$?
-chmod +w "$T11_DIR/pr-readonly-dir/nested" 2>/dev/null || true
+set -e
+chmod -R u+w "$T11_DIR" 2>/dev/null || true
 assert_rc "T11: sweep exits 0 despite a read-only entry" 0 "$T11_RC"
 assert_missing "T11: read-only dir still removed (chmod u+w recovers it)" "$T11_DIR/pr-readonly-dir"
 assert_missing "T11: sibling dir also removed (sweep did not abort)" "$T11_DIR/pr-normal-dir"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: chmod-immune entry (chflags uchg) is SKIP-logged, not fatal (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 12: chmod-Immune Entry Is Skipped, Not Fatal"
+if command -v chflags >/dev/null 2>&1; then
+  T12_DIR="$TMP_TEST_ROOT/t12_tmp"
+  mkdir -p "$T12_DIR/pr-immutable-dir" "$T12_DIR/pr-normal-dir2"
+  echo "data" > "$T12_DIR/pr-immutable-dir/file.txt"
+  echo "data" > "$T12_DIR/pr-normal-dir2/file.txt"
+  set_old_mtime "$T12_DIR"
+  # uchg (user immutable) survives chmod -- only chflags nouchg or root can
+  # clear it, so this exercises the "chmod couldn't help, rm still fails"
+  # branch that Test 11 alone does not reach. Applied AFTER set_old_mtime,
+  # which touches every file and would itself fail on an already-uchg path.
+  chflags uchg "$T12_DIR/pr-immutable-dir/file.txt"
+
+  set +e
+  T12_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T12_DIR" 2>&1)
+  T12_RC=$?
+  set -e
+  chflags nouchg "$T12_DIR/pr-immutable-dir/file.txt" 2>/dev/null || true
+  chmod -R u+w "$T12_DIR" 2>/dev/null || true
+  assert_rc "T12: sweep exits 0 despite a chmod-immune entry" 0 "$T12_RC"
+  assert_contains "T12: unremovable item is SKIP-logged" "SKIP (rm failed)" "$T12_OUT"
+  assert_missing "T12: sibling dir still removed (sweep did not abort)" "$T12_DIR/pr-normal-dir2"
+else
+  record_pass "T12: chflags unavailable on this platform, skipping (not a failure)"
+fi
 
 echo
 echo "=== Test Results: $PASS pass, $FAIL fail ==="
