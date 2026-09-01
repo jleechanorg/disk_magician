@@ -38,6 +38,12 @@ LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
 ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
+# Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
+# / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
+# this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
+# change nor honored the override the sibling scripts respect (found in
+# /advice review of PR #55).
+WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -500,9 +506,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
 
-    # 14-day recency floor (worktree safety rule)
-    if worktree_is_recently_active "$subdir" 14; then
-      log "Skipping recently active worktree pointer (<14d): $subdir"
+    # Worktree safety rule floor (same WORKTREE_MIN_AGE_DAYS as the other
+    # worktree-cleanup scripts)
+    if worktree_is_recently_active "$subdir" "$WORKTREE_MIN_AGE_DAYS"; then
+      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_DAYS}d): $subdir"
       continue
     fi
 
