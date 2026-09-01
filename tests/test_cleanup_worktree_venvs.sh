@@ -227,5 +227,23 @@ assert_contains "agent-tree venv flagged for stripping" \
   "would strip $CLAUDE_WT/venv" "$OUT6_CONTENT"
 
 echo
+echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides ==="
+# bash's `-lt`/`(( ))` parse a leading-zero numeral like "08" as octal
+# (invalid digit -> arithmetic error) if compared without a base prefix;
+# a naive regex-only clamp lets "08" through unclamped and later crashes /
+# fails open downstream (found live by both /advice reviewers, PR #55).
+OUT7_ZERO=$(WORKTREE_MIN_AGE_DAYS=0 bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
+assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 7-day floor" "Min age:    7 days" "$OUT7_ZERO"
+
+OUT7_OCTAL=$(WORKTREE_MIN_AGE_DAYS=08 bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
+assert_contains "WORKTREE_MIN_AGE_DAYS=08 normalizes without an octal error" "Min age:    8 days" "$OUT7_OCTAL"
+[[ "$OUT7_OCTAL" != *"value too great for base"* ]] \
+  && record_pass "no arithmetic error on leading-zero input" \
+  || record_fail "no arithmetic error on leading-zero input" "$OUT7_OCTAL"
+
+OUT7_RAISED=$(WORKTREE_MIN_AGE_DAYS=30 bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
+assert_contains "a raised floor (30) is preserved, not clamped down" "Min age:    30 days" "$OUT7_RAISED"
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

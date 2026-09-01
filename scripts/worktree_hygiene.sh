@@ -449,9 +449,17 @@ main() {
     # Hard floor: 7 days, may only be raised (env, CLI, or config), never
     # lowered (CLAUDE.md invariant). Without this clamp, --min-age 0 would
     # let every dormant worktree qualify for deletion regardless of age.
-    if [[ ! "$MIN_AGE_DAYS" =~ ^[0-9]+$ || "$MIN_AGE_DAYS" -lt 7 ]]; then
+    # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a
+    # leading-zero numeral like "08" as octal (invalid digit -> arithmetic
+    # error), which would otherwise propagate as a fail-open crash into
+    # every downstream comparison, not just this clamp (found live by both
+    # /advice reviewers).
+    if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+        MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
+    else
         MIN_AGE_DAYS=7
     fi
+    [[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
 
     if [[ ${#REPOS[@]} -eq 0 ]]; then
         while IFS= read -r repo; do

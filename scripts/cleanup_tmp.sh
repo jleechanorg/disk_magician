@@ -48,9 +48,16 @@ WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 # invariant). Missed in the sibling scripts' clamp sweep (found in /advice
 # re-review of PR #55) -- WORKTREE_MIN_AGE_DAYS=0 would otherwise let this
 # script's orphaned-worktree-pointer guard qualify every pointer for removal.
-if [[ ! "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ || "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]]; then
+# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
+# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
+# would otherwise propagate as a fail-open crash into every downstream
+# comparison, not just this clamp (found live by both /advice reviewers).
+if [[ "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  WORKTREE_MIN_AGE_DAYS=$((10#$WORKTREE_MIN_AGE_DAYS))
+else
   WORKTREE_MIN_AGE_DAYS=7
 fi
+[[ "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]] && WORKTREE_MIN_AGE_DAYS=7
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
