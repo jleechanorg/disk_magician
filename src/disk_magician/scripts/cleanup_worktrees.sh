@@ -123,10 +123,6 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-if [[ -n "${WORKTREE_MIN_AGE_DAYS:-}" && "$MIN_AGE_DAYS" == 14 && "$#" -eq 0 ]]; then
-    MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS}"
-fi
-
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"
 

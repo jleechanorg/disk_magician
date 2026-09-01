@@ -144,7 +144,7 @@ RC2=$?
 set -e
 OUT2_CONTENT=$(cat "$OUT2")
 if [[ "$RC2" -eq 3 ]]; then record_pass "(c) refused with expected exit code 3"; else record_fail "(c) refused with expected exit code 3" "rc=$RC2"; fi
-assert_contains "(c) refusal message" "requires WORKTREE APPROVED=1" "$OUT2_CONTENT"
+assert_contains "(c) refusal message" "requires WORKTREE_APPROVED=1" "$OUT2_CONTENT"
 if [[ -d "$STALE_WT/venv.bak.20260101" && -d "$STALE_WT/.venv.bak.20260101" ]]; then
   record_pass "(c) stale bak dirs still on disk after refused --clean"
 else
