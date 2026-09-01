@@ -70,12 +70,17 @@ class TestPruneAsideSessions(unittest.TestCase):
 
         return sdir
 
-    def _create_mock_lsof_script(self, locked_paths: list = None, fail: bool = False) -> Path:
+    def _create_mock_lsof_script(self, locked_paths: list = None, fail: bool = False, rc1_with_stderr: bool = False) -> Path:
         """Create a mock lsof binary for testing Signal B."""
         mock_bin = self.temp_dir / "mock_lsof.sh"
         locked_list = " ".join([f'"{p}"' for p in (locked_paths or [])])
         if fail:
             mock_bin.write_text("#!/bin/sh\nexit 2\n")
+        elif rc1_with_stderr:
+            # rc=1, empty stdout, non-empty stderr: the anomaly case that
+            # must fail closed rather than be read as lsof's normal
+            # "no matches" result (+advice review of PR #59).
+            mock_bin.write_text("#!/bin/sh\necho 'lsof: WARNING: can not stat() path' 1>&2\nexit 1\n")
         elif not locked_paths:
             mock_bin.write_text("#!/bin/sh\nexit 1\n")
         else:
@@ -234,6 +239,32 @@ exit 0
         )
 
         mock_lsof = self._create_mock_lsof_script(fail=True)
+
+        pruner = AsideSessionPruner(
+            aside_dir=self.aside_dir,
+            max_age_days=14,
+            dry_run=False,
+            lsof_bin=str(mock_lsof),
+            ref_time=self.ref_time,
+        )
+        stats = pruner.run()
+
+        self.assertEqual(stats["sessions_retained_in_use"], 1)
+        self.assertEqual(stats["sessions_pruned"], 0)
+        self.assertTrue(old_session.exists())
+
+    def test_lsof_rc1_with_stderr_fails_closed(self):
+        """rc=1 + empty stdout + non-empty stderr must fail closed, not be
+        read as lsof's normal "no matches" result. This is the exact gap a
+        first-round fix left open (only guarded the fast path, not the
+        general fallthrough) -- found in /advice review of PR #59."""
+        old_session = self._create_mock_session(
+            self.u0_sessions,
+            "2026-07-15_old_session",
+            {"data.txt": "data"},
+        )
+
+        mock_lsof = self._create_mock_lsof_script(rc1_with_stderr=True)
 
         pruner = AsideSessionPruner(
             aside_dir=self.aside_dir,
