@@ -816,13 +816,6 @@ fi
 # absent/corrupt/disabled fails open to omitting the field entirely (same
 # fail-open posture as the dedup pass above — this must never crash a
 # snapshot over a sibling tool's file).
-if [[ -n "${DISK_MAGICIAN_FRONTIER_LAST:-}" ]]; then
-  FRONTIER_LAST_FILE="${DISK_MAGICIAN_FRONTIER_LAST}"
-elif [[ -f "/var/db/disk-magician/frontier_last.json" && -r "/var/db/disk-magician/frontier_last.json" && ( ! -f "$HOME/.disk_magician_state/frontier_last.json" || "/var/db/disk-magician/frontier_last.json" -nt "$HOME/.disk_magician_state/frontier_last.json" ) ]]; then
-  FRONTIER_LAST_FILE="/var/db/disk-magician/frontier_last.json"
-else
-  FRONTIER_LAST_FILE="$HOME/.disk_magician_state/frontier_last.json"
-fi
 TOPDOWN_ENABLED=$(python3 -c "
 import json, sys
 try:
@@ -832,36 +825,72 @@ except Exception:
     print('true')
 " "$CONFIG_FILE" 2>/dev/null || echo "true")
 
-TOPDOWN_JSON=$(python3 - "$FRONTIER_LAST_FILE" "$TOPDOWN_ENABLED" <<'PY' 2>/dev/null
-import datetime, json, sys
+TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$HOME/.disk_magician_state/frontier_last.json" <<'PY' 2>/dev/null
+import datetime, json, os, sys
 
-path, enabled = sys.argv[1], sys.argv[2]
-if enabled != "true":
+enabled = sys.argv[1]
+candidates = [p for p in sys.argv[2:] if p]
+if enabled != "true" or not candidates:
     print("null")
     sys.exit(0)
 
-try:
-    with open(path) as f:
-        d = json.load(f)
-    captured_at = d["captured_at"]
-    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
-    if age_hours > 36:
-        result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
-    else:
-        result = {
-            "mode": d.get("mode"),
+explicit_override = bool(sys.argv[2])
+loaded = []
+
+for idx, path in enumerate(candidates):
+    if not os.path.isfile(path) or not os.access(path, os.R_OK):
+        if explicit_override and idx == 0:
+            break
+        continue
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        captured_at = d["captured_at"]
+        ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+        is_complete = d.get("mode") == "complete" or bool(d.get("coverage_envelope", {}).get("complete"))
+        is_fresh = age_hours <= 36.0
+        loaded.append({
+            "path": path,
+            "data": d,
             "captured_at": captured_at,
-            "age_hours": round(age_hours, 1),
-            "measured_total_kb": d.get("measured_total_kb"),
-            "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
-            "residual_kb": d.get("residual_kb"),
-            "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
-            "local_snapshots_count": d.get("local_snapshots_count"),
-        }
-    print(json.dumps(result))
-except Exception:
+            "age_hours": age_hours,
+            "is_complete": is_complete,
+            "is_fresh": is_fresh,
+            "ts": ts,
+        })
+        if explicit_override and idx == 0:
+            break
+    except Exception:
+        continue
+
+if not loaded:
     print("null")
+    sys.exit(0)
+
+def score(c):
+    return (
+        1 if c["is_fresh"] and c["is_complete"] else 0,
+        1 if c["is_fresh"] else 0,
+        c["ts"].timestamp(),
+    )
+
+best = max(loaded, key=score)
+if not best["is_fresh"]:
+    result = {"stale": True, "captured_at": best["captured_at"], "age_hours": round(best["age_hours"], 1)}
+else:
+    d = best["data"]
+    result = {
+        "mode": d.get("mode"),
+        "captured_at": best["captured_at"],
+        "age_hours": round(best["age_hours"], 1),
+        "measured_total_kb": d.get("measured_total_kb"),
+        "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+        "residual_kb": d.get("residual_kb"),
+        "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
+        "local_snapshots_count": d.get("local_snapshots_count"),
+    }
+print(json.dumps(result))
 PY
 )
 if [[ -z "$TOPDOWN_JSON" ]]; then
