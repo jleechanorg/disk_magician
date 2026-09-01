@@ -32,7 +32,7 @@ source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 
 EXECUTE=false
-MIN_AGE_DAYS=7
+MIN_AGE_DAYS=14
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false

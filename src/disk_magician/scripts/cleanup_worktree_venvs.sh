@@ -51,7 +51,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-MIN_AGE_DAYS=7
+MIN_AGE_DAYS=14
 ROOTS=("$HOME/projects")
 PURGE_BAK_DAYS=""
 

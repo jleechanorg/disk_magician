@@ -9,7 +9,7 @@
     "Sections: never_delete = hard invariants (strings or {path, reason});",
     "protected_live_paths = dirs owned by running processes; needs_decision =",
     "paths a human must push-or-discard before reclaim; min_stale_days =",
-    "staleness floor for any age-gated cleanup (default 7)."
+    "staleness floor for any age-gated cleanup (default 14)."
   ],
   "never_delete": [
     "~/.codex/sessions*",
