@@ -391,6 +391,38 @@ else
   record_fail "T13: external symlink target permissions unchanged" "was $T13_PERMS_BEFORE, now $T13_PERMS_AFTER"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 14: symlink-to-directory operand is never chmod'd (bead disk_magician-qap)
+# ─────────────────────────────────────────────────────────────────────────────
+# `-d "$item"` is true for a symlink-to-directory, so the deletion loop
+# must check `-L` before `-d` to route it to plain `rm -f` instead of the
+# `chmod -R u+w` dir branch -- GNU coreutils `chmod -R` derefs and
+# recurses into a symlink-to-dir operand by default (unlike BSD/macOS),
+# which would widen permissions inside the external target tree on Linux.
+echo "Test 14: Symlink-to-Directory Operand Is Never chmod'd"
+T14_DIR="$TMP_TEST_ROOT/t14_tmp"
+T14_EXTERNAL_DIR="$TMP_TEST_ROOT/t14_external_dir"
+mkdir -p "$T14_DIR" "$T14_EXTERNAL_DIR"
+echo "data" > "$T14_EXTERNAL_DIR/file.txt"
+chmod 555 "$T14_EXTERNAL_DIR"
+chmod 444 "$T14_EXTERNAL_DIR/file.txt"
+ln -s "$T14_EXTERNAL_DIR" "$T14_DIR/pr-stale-dir-symlink"
+set_old_mtime "$T14_DIR"
+touch -h -t 202001010000 "$T14_DIR/pr-stale-dir-symlink"
+T14_DIR_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+
+T14_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T14_DIR" 2>&1)
+T14_DIR_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+chmod -R u+w "$T14_EXTERNAL_DIR" 2>/dev/null || true
+assert_missing "T14: stale directory symlink itself removed" "$T14_DIR/pr-stale-dir-symlink"
+if [[ "$T14_DIR_PERMS_BEFORE" == "$T14_DIR_PERMS_AFTER" && "$T14_FILE_PERMS_BEFORE" == "$T14_FILE_PERMS_AFTER" ]]; then
+  record_pass "T14: external target dir+file permissions unchanged ($T14_DIR_PERMS_BEFORE/$T14_FILE_PERMS_BEFORE)"
+else
+  record_fail "T14: external target dir+file permissions unchanged" "dir was $T14_DIR_PERMS_BEFORE now $T14_DIR_PERMS_AFTER; file was $T14_FILE_PERMS_BEFORE now $T14_FILE_PERMS_AFTER"
+fi
+
 echo
 echo "=== Test Results: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
