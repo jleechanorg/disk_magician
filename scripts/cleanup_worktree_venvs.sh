@@ -62,10 +62,12 @@ LOCK_DIR="$STATE_DIR/cleanup_worktree_venvs.lock"
 LOCK_TTL_SEC="${DISK_MAGICIAN_CLEANUP_VENVS_LOCK_TTL_SEC:-3600}"
 
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--roots p1,p2,...] [--purge-bak-days N] [-h|--help]
+  cat <<'EOF'
+Usage: cleanup_worktree_venvs.sh [--clean] [--dry-run] [--min-age DAYS]
+                                [--roots PATH,...] [--purge-bak-days N]
+                                [-h|--help]
 
-Strip Python venvs from dormant Git worktrees.
+Safely prunes Python virtual environments in stale git worktrees (>14 days old).
 
 Options:
   --clean                Actually strip the venvs (default: dry-run).
@@ -86,11 +88,11 @@ Environment:
   DISK_MAGICIAN_STATE_DIR  Overrides the lock directory's parent (tests only).
 
 Examples:
-  $(basename "$0") --dry-run
-  $(basename "$0") --min-age 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean
-  $(basename "$0") --purge-bak-days 30 --dry-run
-  WORKTREE APPROVED=1 $(basename "$0") --clean --purge-bak-days 30
+  cleanup_worktree_venvs.sh --dry-run
+  cleanup_worktree_venvs.sh --min-age 30 --dry-run
+  WORKTREE APPROVED=1 cleanup_worktree_venvs.sh --clean
+  cleanup_worktree_venvs.sh --purge-bak-days 30 --dry-run
+  WORKTREE APPROVED=1 cleanup_worktree_venvs.sh --clean --purge-bak-days 30
 EOF
 }
 

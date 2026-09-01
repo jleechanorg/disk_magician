@@ -3,6 +3,13 @@ title: Remaining TODO list — disk cleanup + snapshot health (post-30d-floor sw
 hostname: jeffreys-macbook-pro
 date: 2026-08-25
 status: active
+paths:
+  - ~/.aside
+  - ~/.gemini
+  - ~/.hermes
+  - ~/.codex
+  - /private/tmp
+  - /private/var/folders
 companion: 2026-08-25-reclaim-catalog.md, 2026-08-25-topdown-bucket-verdict.md, /tmp/cross-ref-verdict.md
 live_state:
   used: 775 GiB

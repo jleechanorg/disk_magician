@@ -1,3 +1,19 @@
+---
+title: Successful Reclaims Catalog
+hostname: jeffreys-macbook-pro.local
+date: 2026-08-25
+status: active
+paths:
+  - /private/tmp
+  - /private/var/dirs_cleaner
+  - ~/.colima
+  - ~/.aside
+  - ~/.gemini
+  - ~/.codex
+  - ~/.worktrees
+safety_rule: none (reclaim catalog)
+---
+
 # Successful Reclaims Catalog — compiled from /ms + git history
 
 **Compiled:** 2026-08-25
