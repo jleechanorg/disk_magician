@@ -223,7 +223,7 @@ done
 # Publication is permitted only when the scanner declares a complete coverage
 # envelope backed by its own FDA probe; keep that contract mechanically tied to
 # the emitted report rather than trusting an external scheduler assumption.
-ENVELOPE_OK=$(json_get "$OUT1" "d['coverage_envelope']['complete'] == (d['mode'] == 'complete' and d['fda_preflight']['status'] == 'granted') and d['limits']['full_disk_access_preflight'] == d['fda_preflight']")
+ENVELOPE_OK=$(json_get "$OUT1" "d['coverage_envelope']['complete'] == (d['mode'] == 'complete' and d['fda_preflight']['status'] == 'granted' and d['coverage_envelope']['fda_user_preflight_status'] == 'granted') and d['limits']['full_disk_access_preflight'] == d['fda_preflight']")
 [[ "$ENVELOPE_OK" == "True" ]] && ok "coverage envelope is derived from complete scan plus scanner FDA preflight" \
   || bad "coverage envelope does not fail closed on incomplete/FDA-denied scans: $ENVELOPE_OK"
 

@@ -204,6 +204,14 @@ class DiskObserverTest(unittest.TestCase):
         observer = load_module()
         self.assertIn(".aside", observer.DEFAULT_HOT_DIRS)
         self.assertIn("/private/tmp", observer.DEFAULT_HOT_DIRS)
+        self.assertIn(".ollama", observer.DEFAULT_HOT_DIRS)
+        self.assertIn(".openclaw", observer.DEFAULT_HOT_DIRS)
+        self.assertIn(".hermes", observer.DEFAULT_HOT_DIRS)
+        self.assertIn(".gemini", observer.DEFAULT_HOT_DIRS)
+        self.assertIn("/private/var/folders", observer.DEFAULT_HOT_DIRS)
+        self.assertIn("Library/Application Support/Cursor", observer.DEFAULT_HOT_DIRS)
+        self.assertIn("Library/Application Support/Aside", observer.DEFAULT_HOT_DIRS)
+        self.assertIn("Library/Caches", observer.DEFAULT_HOT_DIRS)
 
         calls = []
 
@@ -370,14 +378,45 @@ class DiskObserverTest(unittest.TestCase):
             history = observer.seed_step_event_history(log, window_seconds=1500, now_epoch=3200)
             self.assertEqual(history, [(2000, 110_000), (3000, 120_000)])
 
-    def test_fsevents_projects_launchd_template_is_valid(self):
-        template = ROOT / "launchd" / "com.disk-magician.fsevents-projects.plist.template"
-        self.assertTrue(template.exists(), "fsevents-projects plist template must exist")
-        text = template.read_text(encoding="utf-8")
-        self.assertIn("<key>Label</key>\n  <string>com.disk-magician.fsevents-projects</string>", text)
-        self.assertIn("watch_projects_fsevents.sh", text)
-        self.assertIn("<key>RunAtLoad</key>\n  <true/>", text)
+    def test_default_hot_dirs_are_strictly_portable(self):
+        observer = load_module()
+        disallowed = {"cb-demo", "project_jleechanclaw", "worktrees", ".cmuxterm"}
+        for item in observer.DEFAULT_HOT_DIRS:
+            self.assertNotIn(item, disallowed, f"Host-specific path {item!r} found in DEFAULT_HOT_DIRS")
+            self.assertFalse(item.startswith("project_"), f"Host-specific project path {item!r} found in DEFAULT_HOT_DIRS")
+        expected_dirs = [
+            ".codex",
+            ".cache",
+            ".aside",
+            ".ollama",
+            ".openclaw",
+            ".hermes",
+            ".gemini",
+            "/private/tmp",
+            "/private/var/folders",
+            "Library/Application Support/Cursor",
+            "Library/Application Support/Aside",
+            "Library/Caches",
+        ]
+        self.assertEqual(observer.DEFAULT_HOT_DIRS, expected_dirs)
+
+    def test_config_template_contains_no_host_specific_defaults(self):
+        template_path = ROOT / "config.json.template"
+        with template_path.open(encoding="utf-8") as f:
+            cfg = json.load(f)
+        monitored_paths = [m.get("path", "") for m in cfg.get("monitored_dirs", [])]
+        monitored_keys = [m.get("key", "") for m in cfg.get("monitored_dirs", [])]
+        self.assertNotIn("dev_cache_bazel", monitored_keys)
+        for p in monitored_paths:
+            self.assertNotIn("Snapchat", p)
+            self.assertNotIn("jleechan", p)
+        for g in cfg.get("monitored_globs", []):
+            self.assertNotIn("wa-", g.get("pattern", ""))
+            self.assertNotIn("project_", g.get("pattern", ""))
+        self.assertEqual(cfg.get("protected_tmp_roots"), [])
+        self.assertEqual(cfg.get("downloads_evidence_patterns"), [])
 
 
 if __name__ == "__main__":
     unittest.main()
+

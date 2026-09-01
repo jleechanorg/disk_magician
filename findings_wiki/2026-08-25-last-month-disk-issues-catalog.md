@@ -2,7 +2,19 @@
 title: Last-month disk-issues catalog (2026-07-26 → 2026-08-25)
 hostname: jeffreys-macbook-pro.local
 date: 2026-08-25
-status: living reference
+status: active
+paths:
+  - /private/tmp
+  - /private/var/folders
+  - /private/var/dirs_cleaner
+  - ~/.aside
+  - ~/.ollama
+  - ~/.gemini
+  - ~/.codex
+  - ~/.colima
+  - ~/Library/Application Support/Cursor
+  - ~/Library/Application Support/Aside
+  - ~/Library/Caches
 sources:
   - ~/.claude/projects/-Users-jleechan-projects-other-disk-magician/memory/*.md (16 last-month docs)
   - ~/.disk_magician_backup git log (last 30 days: 1 non-snapshot commit + ~1000 hourly snapshot commits)
@@ -55,8 +67,9 @@ the same window.
 | 3 | 2026-08-02 | **+172.4 GiB free** (99.4 → 271.8) | `/private/var/dirs_cleaner` 225.3 GiB reclaimed via `sudo -n find -mindepth 1 -delete` batch-by-batch — 9 batches (oldest mtime 2026-07-11); confirmed `du -sh` 0B after | `project_2026-08-02_dirs_cleaner_225gib_root_cause_and_fix.md`; `roadmap/2026-08-02-research-dirs-cleaner-os-mechanism.md` |
 | 4 | 2026-08-22 (with floor→latest measurement 08-11→08-22) | **−40.47 GiB passive** (Colima datadisk only) | `com.jleechanorg.disk-magician-pressure-sweep` in-VM `fstrim -av` masked ~38% of real gross growth in the 30-min sweep job — last fired 2026-08-23 01:24:34 UTC, trimmed 3.8 GiB that single run | `roadmap/2026-08-23-read-only-evidence-bundle.md` § "Passive reclaim masking real growth"; `roadmap/2026-08-23-reclaim-plan-delta-from-floor.md` |
 | 5 | 2026-07-29 ~02:30 PDT | **45.4 GiB single file** | Cursor-agent session log PID 95634 — killed by operator (operator decision pending → executed); cursor-agent debug log unbounded growth class | `findings_wiki/cursor-agent-debug-log-unbounded-growth.md`; bead `disk_magician-ax0` |
+| 6 | 2026-08-25 | **+98.0 GiB free** (7.5 → 110.0) | Parallel worktree sweep: 285 stale worktrees (>14d) pruned after safe remote backup push + 5.3 GiB colima datadisk trim | `feedback_2026-08-25_worktree_parallel_reclaim_and_mobilesync_debunk.md` |
 
-**Reclaim total observed: ~344 GiB across 5 events** (note: items 1+3+4 partially overlap temporally; net 30-day delta is ~+105.83 GiB floor→latest, see §2 #2).
+**Positive reclaim subtotal: ~402.5 GiB across 5 reclaim events (1,2,3,5,6)** — item 4 (−40.47 GiB) is passive masking (growth hidden by an in-VM trim), not reclaim, and is excluded here. Signed net across all 6 rows is ~362.0 GiB. (Note: items 1+3+4 partially overlap temporally; net 30-day delta is ~+105.83 GiB floor→latest, see §2 #2.)
 
 ---
 
@@ -67,7 +80,7 @@ the same window.
 | 1 | 2026-07-29 | **5-producer structural taxonomy: ~76 GiB reclaimable headroom without touching cache/.gemini** — agent venv bloat (~25 GiB), abandoned AO+Claude parents under `~/.worktrees` (~30 GiB), unowned `/private/tmp` scratch (~8.4 GiB), Antigravity `~/.gemini` (~12.7 GiB), `.git` history bloat (~6 GiB). Five fixes queued as separate beads, none fixed in-place because each is multi-line policy surface | `feedback_2026-07-29_root_cause_disk_full.md` § "Five root causes (ranked)"; bead `disk_magician-7v3` |
 | 2 | 2026-08-01 | **Sawtooth + baseline + one-time spike decomposition** — 115.9 GiB single-day swing (Colima fstrim/refill cycle, self-correcting), 86-102 GiB genuine 14-day accumulation (floor 720 GiB @ 07-19 → 806-822 GiB @ 08-01), +28.37 GiB / −21.09 GiB one-minute spike at 2026-08-02T00:30-00:58Z. Original "+3.2 GiB/day" headline REFUTED — reproduced range is −4.20 to +1.71 GiB/day depending on bucketing/estimator | `roadmap/2026-08-01-disk-growth-floor-delta.md`; companion doc to `feedback_2026-08-01_endpoint_average_is_not_a_rate.md` |
 | 3 | 2026-08-02 | **291 GiB residual** = TCC/SIP floor + APFS container min-size pinning + Mail/Messages EINTR-blocked paths — NOT a hidden consumer, a structural permission wall that the non-FDA shell used for that historical audit could not measure. Monitoring collapsed under pressure (snapshot coverage 1%, frontier 0% for 3 nights) | `project_2026-07-29_disk_rootcause_producers_and_decisions.md`; `roadmap/2026-08-02-research-persistent-eintr-root-cause.md` (Endpoint Security AUTH-event root cause for Mail/Messages/MobileSync) |
-| 4 | 2026-08-23 | **Hidden producer tail: `/private/tmp` aggregate +45.75 GiB (largest single SAFE class)** + `~/.aside/u/0` +11.94 GiB (1,791 Aside session files 2026-08-03→08-22, missing from 2026-07-29 7-proposal scorecard) + `_disk_magician_archive/20260822T09*` self-inflicted ~+2.7 GiB. **`disk_observer.jsonl` `hot_dirs` is BLIND to /private/tmp and Aside** — missed ~75% of real producers in this window | `roadmap/2026-08-23-systematic-fix-update.md` § "New evidence"; `roadmap/2026-08-23-reclaim-plan-delta-from-floor.md` "Critical observation #1/#2/#3" |
+| 4 | 2026-08-23 | **Hidden producer tail: `/private/tmp` aggregate +45.75 GiB (largest single SAFE class)** + `~/.aside/u/0` +11.94 GiB (1,791 Aside session files 2026-08-03→08-22, missing from 2026-07-29 7-proposal scorecard) + `_disk_magician_archive/20260822T09*` self-inflicted ~+2.7 GiB. **`disk_observer.jsonl` `hot_dirs` catalog extended** to track `/private/tmp`, `.aside`, `.ollama`, `.openclaw`, `.hermes`, `.gemini`, `/private/var/folders`, `Library/Application Support/Cursor`, `Library/Application Support/Aside`, `Library/Caches` | `roadmap/2026-08-23-systematic-fix-update.md` § "New evidence"; `roadmap/2026-08-23-reclaim-plan-delta-from-floor.md` "Critical observation #1/#2/#3" |
 | 5 | 2026-07-29 | **Cursor-agent debug session logs have NO logging config** (no log-level flag, no rotation, no disable) — 45 GB / 18.5 GiB/day per PID. Same failure class: opencode single log hit 74.8 GiB (issue #12934, closed "not planned"); claude-code debug logs 20+ GiB recursive slow-op-logging (issue #16093, closed "not planned"). Vendor-declined across the board | `findings_wiki/cursor-agent-debug-log-unbounded-growth.md` § "Known-issue class"; `findings_wiki/cursor-agent-upstream-report.md` |
 
 ---
@@ -160,7 +173,7 @@ roadmap/2026-08-23-{read-only-evidence-bundle,reclaim-plan-delta-from-floor,syst
 1. **The single largest SAFE class right now is `/private/tmp` aggregate (+45.75 GiB), not Colima, not venv, not worktree.** The 2026-07-29 7-proposal scorecard missed the hidden tail (33 other `pr9XXX-*` + `pr-XXX-*` paths in the tail, ~+38 GiB beyond the visible tip).
 2. **Aside session files (1,791 files, +11.94 GiB) are a NEW class.** Missing from prior taxonomy. Cross-check signal: `lsof +D ~/.aside/u/0` returns zero holders for retired sessions.
 3. **The disk_magician tool is its own producer.** `_disk_magician_archive/20260822T09*` +2.7 GiB written by disk_magician itself during its own archive operations.
-4. **`disk_observer.jsonl` `hot_dirs` is structurally blind to /private/tmp and Aside** — observer missed ~75% of real producers in this window. Needs observer coverage extension.
+4. **`disk_observer.jsonl` `hot_dirs` was structurally blind to /private/tmp and Aside as of this window** — observer missed ~75% of real producers. Fixed as of PR #57 (2026-08-31/09-01): `DEFAULT_HOT_DIRS` now tracks `/private/tmp`, `.aside`, `.ollama`, `.openclaw`, `.hermes`, `.gemini`, `/private/var/folders`, `Library/Application Support/Cursor`, `Library/Application Support/Aside`, and `Library/Caches` (see row 4 in §1 above, `scripts/disk_observer.py`).
 5. **All 4 launchd jobs healthy on cadence** (2026-08-23 read-only audit) — the prevention architecture from 2026-07-29 is actually working at the cadence level; the +105.83 GiB net is the producer side outrunning the reclaim rate, not a sweeper failure.
 6. **RunAtLoad is the durable fix for any sweeper that can't tolerate multi-day startup silence** — `StartInterval` + reboot cadence + sleep-dropped calendar windows are three independent failure modes, all bypassed by `RunAtLoad=true`.
 7. **Path-string tools (`du`, `nuke_dir`/`removefile`) hit ENAMETOOLONG deterministically per path; fd-relative tools (`find -delete`, `os.scandir`) sidestep it.** When a deletion tool fails consistently on the same subtree, switch tool class before retrying the same one.

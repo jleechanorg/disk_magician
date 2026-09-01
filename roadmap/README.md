@@ -2,6 +2,7 @@
 
 ## Recent activity (by day)
 
+- [2026-09-01](activity/2026-09-01.md) — FDA attribution hardening, fresh partial snapshot, secure root-runner blocker, and machine-specific catalog audit.
 - [2026-08-01](activity/2026-08-01.md) — Recreated all 30 git worktrees modified within 14 days; updated CLAUDE.md/GEMINI.md to strictly ban ad-hoc cleanup scripts and enforce 14-day recency protection; completed multi-cloud conversation sync to Google Drive and Dropbox; executed parallel subagent disk-root-cause forensic investigation (14-day floor 720 GiB used, live delta +85 GiB, reclaimed ~35 GiB).
 - [2026-07-20](activity/2026-07-20.md)
 - [2026-07-18](activity/2026-07-18.md) — ez-gh-actions Phase 2 workspace mount (production-verified); 650-agent /swarm identified 53.24GiB of 200GiB-target candidates (all ≤5GiB); executed SAFE tier conservatively (15.17GiB reclaimed); found+remediated a live GitHub PAT exposure; caught a report bug (`.ao/data/worktrees` auto-export stubs) before deleting anything.

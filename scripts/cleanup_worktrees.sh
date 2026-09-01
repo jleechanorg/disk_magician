@@ -18,10 +18,10 @@ MIN_AGE_DAYS=14
 REPO_LOCAL_REPOS=()
 
 usage() {
-    cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--repos p1,p2,...] [-h|--help]
+  cat <<'EOF'
+Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age DAYS] [--repos PATH,...]
 
-Clean orphaned Antigravity worktrees and governed repo-local .claude/worktrees.
+Safely prunes stale linked git worktrees (default: >14 days old, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
@@ -29,7 +29,7 @@ Options:
   --dry-run     Print actions without touching disk (default).
   --min-age N   Minimum worktree age in days for repo-local removal (default: 14).
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
-                \$HOME/projects/worldarchitect.ai).
+                $HOME/projects/worldarchitect.ai).
   -h, --help    Show this help.
 
 Environment:

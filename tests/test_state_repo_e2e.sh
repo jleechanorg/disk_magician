@@ -174,12 +174,52 @@ equation = {
     "residual_kb": residual_kb,
     "clone_shared_adjustment_kb": clone_adjustment_kb,
 }
+user_home = "/Users/testuser"
+user_probes = {
+    "mobile_sync": f"{user_home}/Library/Application Support/MobileSync/Backup",
+    "mail": f"{user_home}/Library/Mail",
+    "messages": f"{user_home}/Library/Messages",
+}
+real_mode = rep.get("mode") or "complete"
+coverage_envelope = rep.get("coverage_envelope") or {}
+if not coverage_envelope.get("complete"):
+    # Only backstop the FDA fields (unobtainable in a CI sandbox with no
+    # TCC grant) — "complete" here must track real_mode, not be forced
+    # True regardless of it. Forcing it True unconditionally produced a
+    # self-contradictory ledger (mode "partial" + envelope "complete")
+    # whenever the scanner genuinely reported partial (found in /advice
+    # review of PR #57).
+    coverage_envelope = {
+        "complete": real_mode == "complete",
+        "fda_preflight_status": "granted",
+        "fda_user_preflight_status": "granted",
+        "reachable_top_level_roots": 1,
+        "measured_top_level_roots": 1,
+        "unfinished_top_level_roots": 0 if real_mode == "complete" else 1,
+    }
+fda_probe_paths = user_probes
+# Align with real_mode/coverage_envelope above rather than a bare hardcoded
+# "granted": if the scanner genuinely reported partial, fda_preflight must
+# say so too, not claim granted access it didn't have (found in CodeRabbit
+# review of PR #57 -- same self-consistency class as the coverage_envelope
+# fix above).
+fda_preflight = {
+    "status": "granted" if real_mode == "complete" else "partial",
+    "probes": {k: {"path": v, "status": "readable"} for k, v in user_probes.items()},
+}
+
 ledger = {
     "schema_version": 2,
-    "mode": rep.get("mode"),
-    "coverage_envelope": rep.get("coverage_envelope"),
-    "frontier_unfinished": rep.get("frontier_unfinished"),
+    "mode": real_mode,
+    "coverage_envelope": coverage_envelope,
+    "frontier_unfinished": rep.get("frontier_unfinished") or [],
     "opaque_intrinsic_gates": rep.get("opaque_intrinsic_gates") or [],
+    "fda_preflight": fda_preflight,
+    "fda_probe_paths": fda_probe_paths,
+    "system_boundary_attestations": rep.get("system_boundary_attestations"),
+    "run_id": rep.get("run_id"),
+    "run_started_at": rep.get("run_started_at"),
+    "run_finished_at": rep.get("run_finished_at"),
     "captured_at": rep.get("captured_at"),
     "hostname": rep.get("hostname"),
     "disk_used_kb": disk_used_kb,
