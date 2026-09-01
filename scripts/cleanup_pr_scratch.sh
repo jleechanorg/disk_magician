@@ -403,10 +403,12 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         fi
         log "Removing: $item  (${kb} KB)"
         if [[ -d "$item" ]]; then
-          rm -rf "$item"
+          chmod -R u+w "$item" 2>/dev/null || true
+          rm -rf "$item" 2>/dev/null || true
           DIRS_DELETED=$(( DIRS_DELETED + 1 ))
         else
-          rm -f "$item"
+          chmod u+w "$item" 2>/dev/null || true
+          rm -f "$item" 2>/dev/null || true
           FILES_DELETED=$(( FILES_DELETED + 1 ))
         fi
         TOTAL_KB=$(( TOTAL_KB + kb ))

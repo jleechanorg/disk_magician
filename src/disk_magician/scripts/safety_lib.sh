@@ -131,14 +131,14 @@ findings_wiki_docs() {
   [[ "$found" == true ]]
 }
 
-# safety_min_stale_days — staleness floor in days (default 14 when unset).
+# safety_min_stale_days — staleness floor in days (default 7 when unset).
 safety_min_stale_days() {
   local safety_file
   if ! safety_file="$(safety_file_in_use)"; then
-    echo 14
+    echo 7
     return 0
   fi
-  python3 - "$safety_file" <<'PY' || echo 14
+  python3 - "$safety_file" <<'PY' || echo 7
 import json
 import sys
 
@@ -147,7 +147,7 @@ try:
         cfg = json.load(fh)
 except (OSError, ValueError):
     sys.exit(1)
-value = cfg.get("min_stale_days", 14)
-print(int(value) if isinstance(value, (int, float)) and int(value) >= 0 else 14)
+value = cfg.get("min_stale_days", 7)
+print(int(value) if isinstance(value, (int, float)) and int(value) >= 0 else 7)
 PY
 }

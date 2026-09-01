@@ -33,20 +33,24 @@ DEFAULT_LABELS = [
     "org.jleechanorg.ezgha",
 ]
 
-# Top-level $HOME buckets by measured_kb in the top-down 5GiB-granularity
-# ledger (~/.disk_magician_backup/ledger/topdown-5g.json, snapshot
-# 2026-08-02T08:23:13Z) as of bead disk_magician-pkq: the six heaviest
-# top-level directories under $HOME, rolled up from that snapshot's
-# granularity_buckets. Re-derive from the ledger if these go stale.
+# Top-level $HOME buckets and growth hotspots by measured_kb in the top-down
+# 5GiB-granularity ledger and 30-day memory catalog. Includes tool session
+# stores (.aside, .gemini, .codex), local model weights (.ollama), agent
+# database state (.hermes), scratch (/private/tmp, /private/var/folders),
+# and IDE/app support caches (Cursor, Aside, Library/Caches).
 DEFAULT_HOT_DIRS = [
     ".codex",
     ".cache",
-    "cb-demo",
-    "project_jleechanclaw",
-    "worktrees",
-    ".cmuxterm",
     ".aside",
+    ".ollama",
+    ".openclaw",
+    ".hermes",
+    ".gemini",
     "/private/tmp",
+    "/private/var/folders",
+    "Library/Application Support/Cursor",
+    "Library/Application Support/Aside",
+    "Library/Caches",
 ]
 
 # Step-event attribution defaults (bead disk_magician-pkq): a >10 GiB swing

@@ -9,26 +9,39 @@
     "Sections: never_delete = hard invariants (strings or {path, reason});",
     "protected_live_paths = dirs owned by running processes; needs_decision =",
     "paths a human must push-or-discard before reclaim; min_stale_days =",
-    "staleness floor for any age-gated cleanup (default 14)."
+    "staleness floor for any age-gated cleanup (default 7)."
   ],
   "never_delete": [
     "~/.codex/sessions*",
     "~/.codex/state*.sqlite",
     "~/.codex/log",
     "~/.claude/projects",
-    "~/.disk_magician_backup"
+    "~/.disk_magician_backup",
+    "~/.hermes/state.db"
   ],
   "protected_live_paths": [
     {
       "path": "~/example/live-daemon-workdir",
       "reason": "example: cwd of a running daemon — check pgrep before removing this entry"
+    },
+    {
+      "path": "~/.hermes/checkpoints",
+      "reason": "Hermes live daemon state checkpoints"
+    },
+    {
+      "path": "~/.cmuxterm",
+      "reason": "Active cmux terminal process session state"
     }
   ],
   "needs_decision": [
     {
       "path": "~/example/clone-with-unpushed-commits",
       "reason": "example: full clone holding unpushed commits — push or discard first"
+    },
+    {
+      "path": "~/.openclaw/repo-backups",
+      "reason": "OpenClaw repository backup archives — review and prune only after verified push"
     }
   ],
-  "min_stale_days": 14
+  "min_stale_days": 7
 }

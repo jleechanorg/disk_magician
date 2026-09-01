@@ -110,7 +110,7 @@ cat > "$SANDBOX/safety.local.json" <<'JSON'
 {}
 JSON
 days="$(safety_min_stale_days)"
-assert_rc "min_stale_days defaults to 14" 14 "$days"
+assert_rc "min_stale_days defaults to 7" 7 "$days"
 
 echo "fail-closed on unreadable file:"
 echo '{not json' > "$SANDBOX/safety.local.json"

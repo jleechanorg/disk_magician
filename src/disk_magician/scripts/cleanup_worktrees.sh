@@ -14,7 +14,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS=7
 REPO_LOCAL_REPOS=()
 
 usage() {
@@ -27,7 +27,7 @@ Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 14).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 7).
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 \$HOME/projects/worldarchitect.ai).
   -h, --help    Show this help.

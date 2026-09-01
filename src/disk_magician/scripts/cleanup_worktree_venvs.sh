@@ -51,7 +51,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS=7
 ROOTS=("$HOME/projects")
 PURGE_BAK_DAYS=""
 
@@ -71,7 +71,7 @@ Options:
   --clean                Actually strip the venvs (default: dry-run).
                          Requires WORKTREE APPROVED=1 in env.
   --dry-run              Print what would be stripped without touching disk.
-  --min-age N            Minimum worktree age in days to qualify (default: 14).
+  --min-age N            Minimum worktree age in days to qualify (default: 7).
   --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
                          Each root's <repo>/.claude/worktrees/* agent working
                          copies are scanned automatically in addition.

@@ -1,4 +1,27 @@
-# Cross-reference verdict — top 30 topdown buckets
+---
+title: Cross-reference verdict — topdown buckets
+hostname: jeffreys-macbook-pro.local
+date: 2026-08-25
+status: active
+paths:
+  - /Users/jleechan/projects_reference
+  - /Users/jleechan/worldarchitect.ai
+  - /Users/jleechan/Library/Application Support/Google
+  - /Users/jleechan/Library/Application Support/Aside
+  - /Users/jleechan/Library/Application Support/Cursor
+  - /Users/jleechan/Library/Caches
+  - /Users/jleechan/.codex
+  - /Users/jleechan/.aside
+  - /Users/jleechan/.ollama
+  - /Users/jleechan/.openclaw
+  - /Users/jleechan/.hermes
+  - /Users/jleechan/.gemini
+  - /private/tmp
+  - /private/var/folders
+safety_rule: none (cross-reference catalog)
+---
+
+# Cross-reference verdict — topdown buckets
 
 **Mission:** safe-cleanup-30d-floor, Lane B audit
 **Source of truth:** `~/.disk_magician_backup/ledger/topdown-5g.md` (snapshot 2026-08-25 11:26 UTC, 24,224 buckets, 838 GiB total)
@@ -46,6 +69,16 @@
 | `/Users/jleechan/repos` | 1.3 | PROTECTED | 7.9 GiB measured; mixed repos dir. PROTECTED — working repositories. |
 | `/Users/jleechan/Library/Caches/ms-playwright` | 1.3 | SAFE-CLEAN | 1.8 GiB measured; Playwright browser cache. Regenerable — `npx playwright install` re-creates. Standard cache. |
 | `/Users/jleechan/.aside` | 1.3 | GATED-APP | 1.5 GiB Aside app state. Aside is running — must close before delete. |
+| `/Users/jleechan/.aside/u/0/sessions` | 11.9 | TOOL-OWNED-GATED | 1,791 Aside session files; prunable when sessions >14d with no active lsof handles (`prune_aside_sessions.py`). |
+| `/Users/jleechan/.ollama/models` | 15.0 | SAFE-CLEAN | Local Ollama model weights and manifests (`cleanup_ollama.sh`); regenerable via `ollama pull`. |
+| `/private/var/folders/.../X` | 4.3 | GATED-APP | Chromium/Electron code_sign_clones (`cleanup_code_sign_clones.sh`); gated on closing running browsers. |
+| `/private/tmp/pr-*` | 45.8 | SAFE-CLEAN | Abandoned PR analyzer / CI scratch (>48h mtime, no open files, clean worktrees); managed by `cleanup_pr_scratch.sh`. |
+| `/private/tmp/_disk_magician_archive` | 2.7 | SAFE-CLEAN | Self-archive directory from disk_magician backup runs; safe to auto-rotate / clean. |
+| `/Users/jleechan/Library/Application Support/Cursor` | 2.4 | GATED-APP | Cursor agent session debug logs and snapshots; managed by `watchdog_cursor_logs.sh`. |
+| `/Users/jleechan/Library/Application Support/Aside/AsideUpdater` | 0.8 | GATED-APP | Aside updater cache and sandbox state; gated on closing Aside. |
+| `/Users/jleechan/Library/Caches/org.swift.swiftpm` | 1.0 | SAFE-CLEAN | Swift Package Manager build cache; regenerable. |
+| `/Users/jleechan/Library/Caches/Aside` | 0.5 | GATED-APP | Aside browser cache; regenerable when Aside is closed. |
+| `/Users/jleechan/.openclaw/repo-backups` | 1.5 | NEEDS-DECISION | OpenClaw repository backup archives; prune only after verified remote push. |
 | `/Users/jleechan/projects/worktree_factory_pr755_quarantine` | 1.3 | PROTECTED | 1.3 GiB; factory project. Worktree 14-day rule applies. |
 | `/Users/jleechan/.hermes/state.db` | 8.3 | NEVER-DELETE | Oversize indivisible SQLite file (8.3 GiB, schema 4, written 2026-08-25 13:45 today). Hermes state DB — actively written by the live hermes process. Treating as live state; deletion breaks hermes. Out of scope for cleanup. |
 
@@ -53,13 +86,13 @@
 
 | Verdict | Count | Total (GiB) | Action |
 |---|---:|---:|---|
-| NEVER-DELETE | 6 | ~13.8 | Hard-blocked (CLAUDE.md / codex permanent corpus) |
+| NEVER-DELETE | 6 | ~13.8 | Hard-blocked (CLAUDE.md / codex permanent corpus / hermes state.db) |
 | PROTECTED | 17 | ~46.7 | Worktree 14-day rule or live working state — measure, do not proxy |
-| GATED-APP | 4 | ~8.6 | Close app first (Chrome, Aside, Cursor/ShipIt) |
-| SAFE-CLEAN | 1 | ~1.8 | Regenerable cache (ms-playwright) |
-| MIXED (PARTIAL-CLEAN) | 1 | 0.065 (cleanable) | `.gemini` brain dirs >7d only — `cleanup_antigravity_brain.sh --clean` |
-| INVESTIGATE | 2 | ~5.0 | `.local/share` + `worldarchitect.ai.worktrees` — need bucket-level inspection before any verdict |
-| **Total tracked** | **31 + state.db** | **~75.9** | |
+| GATED-APP | 9 | ~24.9 | Close app first (Chrome, Aside, Cursor/ShipIt, code_sign_clones) |
+| SAFE-CLEAN | 6 | ~67.6 | Regenerable cache / scratch (/private/tmp pr-*, _disk_magician_archive, ollama, swiftpm, playwright) |
+| MIXED (PARTIAL-CLEAN) | 2 | ~12.0 | `.gemini` brain dirs >14d + `.aside/u/*/sessions` >14d (two-signal lsof gate) |
+| NEEDS-DECISION / INVESTIGATE | 3 | ~6.5 | `.local/share` + `worldarchitect.ai.worktrees` + `~/.openclaw/repo-backups` |
+| **Total tracked** | **41 + state.db** | **~171.5** | |
 
 ## Key findings from cross-reference
 

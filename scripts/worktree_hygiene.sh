@@ -32,7 +32,7 @@ source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 
 EXECUTE=false
-MIN_AGE_DAYS=14
+MIN_AGE_DAYS=7
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
@@ -59,7 +59,7 @@ Options:
   --execute     Actually delete SAFE-classified worktrees via
                 'git worktree remove --force' (default: dry-run/report-only).
                 Requires WORKTREE_APPROVED=1 in the environment.
-  --min-age N   Minimum worktree age in days for candidacy (default: 14).
+  --min-age N   Minimum worktree age in days for candidacy (default: 7).
   --repos LIST  Comma-separated main repo paths to scan (default:
                 CLAUDE_WORKTREE_REPOS env override, else auto-discover --
                 same logic as cleanup_worktrees.sh).
