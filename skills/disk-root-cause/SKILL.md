@@ -97,7 +97,7 @@ Before launching expensive live scans or attempting to account for large residua
    done
    ```
     If documented memory explains a static residual (such as ~213.9 GiB protected under macOS TCC/SIP), cite the memory file as context, but **never assume MobileSync holds space without verifying `~/Library/Application Support/MobileSync/Backup`** (empirically confirmed 0 bytes on 2026-08-25).
-    - **Worktree Accumulation Vector**: The dominant driver of cumulative unbudgeted disk growth is often hundreds of stale git worktrees (>14d) across multi-repo checkouts (`worldarchitect.ai`, `jleechanclaw`, etc.). Always check linked worktree recency and use parallel push-before-delete automation.
+    - **Worktree Accumulation Vector**: The dominant driver of cumulative unbudgeted disk growth is often hundreds of stale git worktrees (>7d) across multi-repo checkouts (`worldarchitect.ai`, `jleechanclaw`, etc.). Always check linked worktree recency and use parallel push-before-delete automation.
 
 2. **Multi-source `/history` search (mandatory coverage):**
    When investigating "who deleted X", "when did Y happen", or "what agent did Z", **searches MUST NOT be limited to Claude Code alone**. An incomplete search creates false negatives (e.g. 2026-07-27 incident where searching only Claude/Codex missed the sweep context, whereas full multi-agent search + frontier inventory diff resolved the mystery; see `feedback_2026-07-27_history_must_cover_agy_cursor.md`). Always execute parallel searches across all available sources (per `~/.claude/skills/history-search/SKILL.md`):
@@ -127,7 +127,7 @@ When investigating vanished or deleted git worktrees, **never infer `git worktre
    - **Admin directory is gone:** Removal occurred through `git worktree remove` or `git worktree prune` / `git gc`. Check `git config --get gc.worktreePruneExpire` (e.g., `7.days.ago`) to see if opportunistic pruning is enabled.
    - **Check timestamps carefully:** Check the `gitdir` file mtime vs directory mtime. A recently updated admin directory mtime may reflect a subsequent recreation (e.g., `git worktree add *_recreated`), not the original deletion time.
 
-## Worktree Recency & The 14-Day Protection Rule (Fail-Closed)
+## Worktree Recency & The 7-Day Protection Rule (Fail-Closed)
 
 **A git worktree touched within the last 7 days is strictly PROTECTED.**
 Recency MUST be measured directly from content, never approximated with proxies (`feedback_2026-07-27_worktree_recency_proxies_wrong.md`, PR #50):

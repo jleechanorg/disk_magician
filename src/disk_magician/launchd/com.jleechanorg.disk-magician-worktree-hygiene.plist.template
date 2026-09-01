@@ -26,7 +26,7 @@
   Hard safety gates already enforced by the script itself (see
   scripts/worktree_hygiene.sh and scripts/lib/worktree_repo_discovery.sh):
     - skip anything with uncommitted or untracked changes
-    - skip anything younger than --min-age days (default 14 -- far more
+    - skip anything younger than --min-age days (default 7 -- far more
       conservative than the 24h floor asked for)
     - skip anything a live tmux pane's cwd is currently inside
       (worktree_has_live_tmux_pane, jleechan-dqiz)
