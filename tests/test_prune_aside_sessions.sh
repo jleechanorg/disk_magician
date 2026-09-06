@@ -12,14 +12,22 @@ MOCK_ASIDE="$TEST_TMP/.aside"
 MOCK_SESSIONS="$MOCK_ASIDE/u/0/sessions"
 mkdir -p "$MOCK_SESSIONS"
 
-# 1. Create stale session (>14 days old: 2026-07-20)
-OLD_SID="2026-07-20_old123"
+# Dates are computed relative to "now" (not hardcoded) so this test doesn't
+# rot as time passes — a hardcoded "recent" date silently becomes "old" a
+# few weeks later. All tests below use --days 14 as the threshold.
+OLD_DATE="$(date -v-40d +%Y-%m-%d)"
+RECENT_DATE="$(date -v-3d +%Y-%m-%d)"
+CUSTOM_OLD_STAMP="$(date -v-40d +%Y%m%d)0000"
+APPLY_TEST_DATE="$(date -v-40d +%Y-%m-%d)"
+
+# 1. Create stale session (>14 days old)
+OLD_SID="${OLD_DATE}_old123"
 mkdir -p "$MOCK_SESSIONS/$OLD_SID/tmp"
 echo '{"msg": "old"}' > "$MOCK_SESSIONS/$OLD_SID/messages.jsonl"
 echo "sample png data" > "$MOCK_SESSIONS/$OLD_SID/tmp/screenshot.png"
 
-# 2. Create recent session (recent: 2026-08-22)
-RECENT_SID="2026-08-22_recent456"
+# 2. Create recent session (well within 14 days)
+RECENT_SID="${RECENT_DATE}_recent456"
 mkdir -p "$MOCK_SESSIONS/$RECENT_SID"
 echo '{"msg": "recent"}' > "$MOCK_SESSIONS/$RECENT_SID/messages.jsonl"
 
@@ -27,8 +35,8 @@ echo '{"msg": "recent"}' > "$MOCK_SESSIONS/$RECENT_SID/messages.jsonl"
 CUSTOM_OLD_SID="custom_old_session"
 mkdir -p "$MOCK_SESSIONS/$CUSTOM_OLD_SID"
 echo "custom data" > "$MOCK_SESSIONS/$CUSTOM_OLD_SID/data.txt"
-touch -t 202607200000 "$MOCK_SESSIONS/$CUSTOM_OLD_SID/data.txt"
-touch -t 202607200000 "$MOCK_SESSIONS/$CUSTOM_OLD_SID"
+touch -t "$CUSTOM_OLD_STAMP" "$MOCK_SESSIONS/$CUSTOM_OLD_SID/data.txt"
+touch -t "$CUSTOM_OLD_STAMP" "$MOCK_SESSIONS/$CUSTOM_OLD_SID"
 
 # Test --help
 "$REPO_ROOT/scripts/prune_aside_sessions.sh" --help >/dev/null
@@ -87,7 +95,7 @@ if ! echo "$OUTPUT_JSON" | grep -q '"sessions_scanned"'; then
 fi
 
 # Test --apply and disk_magician.sh dispatcher integration
-MOCK_APPLY_SID="2026-07-01_apply_test"
+MOCK_APPLY_SID="${APPLY_TEST_DATE}_apply_test"
 mkdir -p "$MOCK_SESSIONS/$MOCK_APPLY_SID"
 echo "apply test data" > "$MOCK_SESSIONS/$MOCK_APPLY_SID/test.txt"
 
