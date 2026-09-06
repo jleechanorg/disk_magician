@@ -392,6 +392,12 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "Supervisor logs" "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg
     fi
 
+    # Run disk-magician's own uv-cache cleanup (orphaned builds from prior
+    # `uv tool install --force --reinstall` deploys; safe cache-only prune).
+    if [[ -f "$SCRIPT_DIR/cleanup_uv_cache.sh" ]]; then
+        run_category "uv cache (disk-magician builds)" "$SCRIPT_DIR/cleanup_uv_cache.sh" $clean_arg
+    fi
+
     # Post-job style docker prune (dangling only; safe for Colima)
     if [[ -f "$SCRIPT_DIR/post_job_docker_prune.sh" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
