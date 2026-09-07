@@ -10,14 +10,14 @@ SHOW_DIRECTORY_BREAKDOWN=true
 
 for arg in "$@"; do
     case "$arg" in
-        clean|--clean)       MODE="clean" ;;
-        clean-all|--clean-all) MODE="clean-all" ;;
+        clean|--clean|--routine) MODE="clean" ;;
+        clean-all|--clean-all)   MODE="clean-all" ;;
         --dry-run)       DRY_RUN=true ;;
         --live)          LIVE=true ;;
         --no-history)    SHOW_HISTORY=false ;;
         --skip-directory-breakdown) SHOW_DIRECTORY_BREAKDOWN=false ;;
         --help|-h)
-            echo "Usage: $0 [clean|--clean|clean-all|--clean-all] [--dry-run] [--live] [--no-history] [--skip-directory-breakdown]"
+            echo "Usage: $0 [clean|--clean|clean-all|--clean-all|--routine] [--dry-run] [--live] [--no-history] [--skip-directory-breakdown]"
             exit 0
             ;;
         *)
@@ -175,6 +175,7 @@ run_category() {
     local label="$1"
     shift
     CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
+    echo "  ▶ Category: $label"
     local rc=0
     "$@" || rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -375,40 +376,47 @@ if [[ "$MODE" == "clean" ]]; then
     
     section "Executing Safe Cleanups"
 
-    # Run Cache Cleanup
+    # Run Cache Cleanup (Tier 1: Developer Caches)
     if [[ -f "$SCRIPT_DIR/cleanup_dev_caches.sh" ]]; then
         run_category "Dev caches" "$SCRIPT_DIR/cleanup_dev_caches.sh" $clean_arg
     fi
 
-    # Run Temp Cleanup
+    # Run Temp Cleanup (Tier 1: Ephemeral Temp)
     if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
         run_category "Temp files" "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg
     fi
 
-    # Run PR Scratch & Analyzer Cleanup
+    # Run PR Scratch & Analyzer Cleanup (Tier 1: Scratch)
     if [[ -f "$SCRIPT_DIR/cleanup_pr_scratch.sh" ]]; then
         run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
     fi
 
-    # Run Worktree Cleanup only after explicit approval.
-    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
-        run_category "Worktrees" "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg
-    else
-        echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
+    # Rebuildable Xcode DerivedData & simulator caches (Tier 2: Xcode, bead disk_magician-wgo)
+    if [[ -f "$SCRIPT_DIR/cleanup_xcode.sh" ]]; then
+        run_category "Xcode DerivedData & simulator caches" "$SCRIPT_DIR/cleanup_xcode.sh" $clean_arg
     fi
 
-    # Run LLM Inspector Cleanup
-    if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
-        run_category "LLM inspector" "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg
+    # Colima VM Docker prune & in-VM fstrim (Tier 3: Container VM, bead disk_magician-wgo)
+    if [[ -f "$SCRIPT_DIR/cleanup_colima.sh" ]]; then
+        run_category "Colima VM disk (Docker prune + fstrim)" "$SCRIPT_DIR/cleanup_colima.sh" $clean_arg
     fi
 
-    # Run Supervisor Launchd Logs Cleanup (rotated logs > 7d)
+    # Stale Aside browser sessions & asset deduplication (Tier 4: Browser Sessions, bead disk_magician-wgo)
+    if [[ -f "$SCRIPT_DIR/prune_aside_sessions.sh" ]]; then
+        run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
+    fi
+
+    # Antigravity brain session log compaction (Tier 5: Agent State, bead disk_magician-wgo)
+    if [[ -f "$SCRIPT_DIR/cleanup_antigravity_brain.sh" ]]; then
+        run_category "Antigravity brain compaction" "$SCRIPT_DIR/cleanup_antigravity_brain.sh" $clean_arg
+    fi
+
+    # Run Supervisor Launchd Logs Cleanup (Tier 5: Rotated Logs)
     if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
         run_category "Supervisor logs" "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg
     fi
 
-    # Run disk-magician's own uv-cache cleanup (orphaned builds from prior
-    # `uv tool install --force --reinstall` deploys; safe cache-only prune).
+    # Run disk-magician's own uv-cache cleanup (Tier 5: Orphaned uv builds)
     if [[ -f "$SCRIPT_DIR/cleanup_uv_cache.sh" ]]; then
         run_category "uv cache (disk-magician builds)" "$SCRIPT_DIR/cleanup_uv_cache.sh" $clean_arg
     fi
@@ -420,6 +428,27 @@ if [[ "$MODE" == "clean" ]]; then
         else
             run_category "Post-job docker prune" "$SCRIPT_DIR/post_job_docker_prune.sh"
         fi
+    fi
+
+    # Run Worktree Cleanup only after explicit approval (Tier 6: Worktrees)
+    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
+        run_category "Worktrees" "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg
+    else
+        echo "  Worktrees: skipped (requires WORKTREE_APPROVED=1)"
+    fi
+
+    # Worktree venvs (Tier 6: Worktree Venvs, bead disk_magician-wgo)
+    if [[ -f "$SCRIPT_DIR/cleanup_worktree_venvs.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+            echo "  Worktree venvs: skipped (requires WORKTREE_APPROVED=1)"
+        else
+            run_category "Worktree venvs (>=7d dormant)" "$SCRIPT_DIR/cleanup_worktree_venvs.sh" $clean_arg
+        fi
+    fi
+
+    # Run LLM Inspector Cleanup
+    if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
+        run_category "LLM inspector" "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg
     fi
 
     # Broad agent artifacts include app chats/worktrees; keep opt-in.

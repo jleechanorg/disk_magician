@@ -220,7 +220,20 @@ Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost
 ↘ Evidence / proofs (commit SHAs, snapshot JSON keys, df outputs, du numbers)
 ```
 
-## Cleanup-command catalogue (read-only — never auto-runs)
+## 6-tier routine cleanup stack (canonical remediation)
+
+When recommending or executing cleanups on this workstation, reference the canonical 6-tier routine cleanup stack (invoked via `./disk_magician.sh clean` or `./disk_magician.sh clean --routine`):
+
+| Tier | Name | Target Paths & Action | Yield | Safety & Gating |
+|---|---|---|---|---|
+| **Tier 1** | Developer Caches & Temp | `cleanup_dev_caches.sh`, `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh` | 3–15 GiB | Safe; rebuildable caches & >240min `/private/tmp` |
+| **Tier 2** | Xcode & Simulators | `cleanup_xcode.sh` (`DerivedData` & simulator caches) | 10–50+ GiB | Safe; fully rebuildable build artifacts |
+| **Tier 3** | Container VM & Docker | `cleanup_colima.sh` (Docker prune + in-VM `fstrim -av`) | 20–80+ GiB | Safe; preserves active containers & named volumes |
+| **Tier 4** | Browser Sessions & Assets | `prune_aside_sessions.sh` (`~/.aside/u/*/sessions/` >7d/14d + dedup) | 10–30+ GiB | Safe; verifies no open process handles via lsof |
+| **Tier 5** | Agent State & Logs | `cleanup_antigravity_brain.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh` | 5–20 GiB | Safe; lossless compaction of stale logs >14d |
+| **Tier 6** | Worktrees & Worktree Venvs | `cleanup_worktree_venvs.sh`, `cleanup_worktrees.sh` | 20–100+ GiB | **Safety-gated**: strictly enforces 7-day recency floor (`worktree_age_days >= 7`); requires `WORKTREE_APPROVED=1` |
+
+## Additional cleanup-command catalogue (read-only — never auto-runs)
 
 | Cmd | Use | Requires |
 |---|---|---|
