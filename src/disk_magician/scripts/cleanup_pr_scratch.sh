@@ -8,6 +8,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_safety.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -334,27 +336,6 @@ has_open_files() {
 }
 
 
-
-worktree_has_unsaved_work() {
-  local wt="$1" git_bin upstream
-  git_bin=$(command -v git 2>/dev/null) || {
-    log "git unavailable — cannot prove worktree $wt is clean; treating as unsafe."
-    return 0
-  }
-  # Not a git worktree at all -> no git work to lose here.
-  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  # Uncommitted or untracked changes.
-  if [[ -n "$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-    return 0
-  fi
-  # Unpushed commits, or no upstream to compare against -> fail closed.
-  upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
-  [[ -z "$upstream" ]] && return 0
-  if [[ -n "$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)" ]]; then
-    return 0
-  fi
-  return 1
-}
 
 log "$(dry_prefix)cleanup_pr_scratch.sh starting (roots: ${CANONICAL_TMP_DIRS[*]:-none}, patterns: ${PATTERNS[*]}, min-age: ${MIN_AGE_HOURS}h)"
 

@@ -14,6 +14,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_safety.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 
 # Optional extra dirs (colon-separated absolute or ~ paths):
 #   DISK_MAGICIAN_EXTRA_ARTIFACT_DIRS="$HOME/my-agent-app"
@@ -106,43 +108,6 @@ expand_path() {
   local path="$1"
   path="${path/#\~/$HOME}"
   eval echo "$path"
-}
-
-# worktree_has_unsaved_work <path> — true (rc 0) if uncommitted/untracked
-# changes or unpushed commits exist, or if that can't be proven (fail
-# closed). Mirrors cleanup_pr_scratch.sh's helper of the same name: age
-# alone (worktree_is_recently_active) does not prove a worktree is safe to
-# rm -rf — an old worktree can still hold real, unpushed work (CodeRabbit
-# review of PR #55).
-worktree_has_unsaved_work() {
-  local wt="$1" git_bin upstream status_out status_rc rev_out rev_rc
-  git_bin=$(command -v git 2>/dev/null) || return 0
-  # Distinguish "genuinely not a git worktree" (no .git at all — nothing to
-  # lose, safe to proceed) from ".git exists but rev-parse still failed"
-  # (corrupted repo, permission error — must fail closed, not read the same
-  # as "not a worktree"). Codex finding in /advice round 4: the prior form
-  # returned 1 (safe to delete) on ANY rev-parse failure. -e alone follows
-  # symlinks, so a DANGLING .git symlink (corrupted metadata, not "absent")
-  # would still read as absent and wrongly take the safe branch — also
-  # check -L (Codex finding in /advice round 5).
-  if [[ ! -e "$wt/.git" && ! -L "$wt/.git" ]]; then
-    return 1
-  fi
-  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  # Check the PROBE's own exit code, not just whether it printed anything —
-  # empty stdout from a failed `git status`/`git rev-list` (corrupted repo,
-  # permission error) must not read the same as "confirmed clean" (Codex
-  # finding in /advice re-review of PR #55: the prior version fell through
-  # to "safe to delete" on a failed probe).
-  status_out="$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)"; status_rc=$?
-  [[ "$status_rc" -ne 0 ]] && return 0
-  [[ -n "$status_out" ]] && return 0
-  upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
-  [[ -z "$upstream" ]] && return 0
-  rev_out="$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)"; rev_rc=$?
-  [[ "$rev_rc" -ne 0 ]] && return 0
-  [[ -n "$rev_out" ]] && return 0
-  return 1
 }
 
 clear_dir_contents() {

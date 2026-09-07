@@ -65,6 +65,11 @@ not_loaded=0
 invalid=0
 ok=0
 
+# Capture launchctl list once before iterating labels.
+# Calling `launchctl list` inside the loop 16+ times induces subshell IPC pressure
+# and intermittent pipe drops on macOS Sequoia/Sonoma under heavy concurrency.
+LAUNCHCTL_LIST="$(launchctl list 2>/dev/null || true)"
+
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
   if [[ ! -f "$plist" ]]; then
@@ -87,7 +92,7 @@ for label in "${KNOWN_LABELS[@]}"; do
     invalid=$(( invalid + 1 ))
     continue
   fi
-  if ! launchctl list 2>/dev/null | grep -qF "$label"; then
+  if ! grep -qF "$label" <<< "$LAUNCHCTL_LIST"; then
     echo "  NOT LOADED      $label  (plist valid but launchctl has no record — try: launchctl load \"$plist\")"
     not_loaded=$(( not_loaded + 1 ))
     continue
