@@ -9,6 +9,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_safety.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -279,48 +281,6 @@ has_open_files() {
     log "Open-file check failed for $dir (lsof rc=${rc}) — fail-closed, treating as active."
     return 0
   fi
-  return 1
-}
-
-# worktree_has_unsaved_work <dir> — fail-closed git-safety guard (codex review
-# 2026-07-22). Returns 0 (treat as UNSAFE → skip) when a git worktree has
-# uncommitted/untracked changes, unpushed commits, or no upstream to compare
-# against — so cleanup_tmp never archives (then later purges) a worktree whose
-# only copy of that work is on disk. cleanup_tmp is not git-recovery-aware; the
-# nuanced classification lives in worktree_hygiene.sh. Returns 1 only for a
-# provably clean-and-pushed worktree (or a non-git dir with nothing to lose).
-worktree_has_unsaved_work() {
-  local wt="$1" git_bin upstream status_out status_rc rev_out rev_rc
-  git_bin=$(command -v git 2>/dev/null) || {
-    log "git unavailable — cannot prove worktree $wt is clean; treating as unsafe."
-    return 0
-  }
-  # Not a git worktree at all → no git work to lose here. -e alone follows
-  # symlinks, so also check -L: a DANGLING .git symlink is corrupted
-  # metadata, not "absent", and must fall through to the fail-closed
-  # rev-parse branch below (Codex finding in /advice round 5 re-review of
-  # PR #55).
-  if [[ ! -e "$wt/.git" && ! -L "$wt/.git" ]]; then
-    return 1
-  fi
-  # .git exists (or is a dangling symlink) but rev-parse still failed ->
-  # corrupted repo / permission error, must fail closed, not read the same
-  # as "not a worktree" (same class of fix as cleanup_agent_artifacts.sh's
-  # copy, ported here since this file's own copy was found unfixed in
-  # /advice round 5 -- it's part of this PR's diff, not out of scope).
-  "$git_bin" -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  # Check the PROBE's own exit code, not just whether it printed anything —
-  # empty stdout from a failed `git status`/`git rev-list` must not read
-  # the same as "confirmed clean".
-  status_out="$("$git_bin" -C "$wt" status --porcelain 2>/dev/null)"; status_rc=$?
-  [[ "$status_rc" -ne 0 ]] && return 0
-  [[ -n "$status_out" ]] && return 0
-  # Unpushed commits, or no upstream to compare against → fail closed.
-  upstream=$("$git_bin" -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 0
-  [[ -z "$upstream" ]] && return 0
-  rev_out="$("$git_bin" -C "$wt" rev-list "${upstream}..HEAD" 2>/dev/null)"; rev_rc=$?
-  [[ "$rev_rc" -ne 0 ]] && return 0
-  [[ -n "$rev_out" ]] && return 0
   return 1
 }
 
