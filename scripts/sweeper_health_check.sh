@@ -28,26 +28,40 @@ set -euo pipefail
 
 DRY_RUN=true
 VERBOSE=false
+AUTO_REPAIR=false
+NOTIFY=true
 THRESHOLD_DAYS=7
 PLIST_DIR="$HOME/Library/LaunchAgents"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTALLER="${DISK_MAGICIAN_INSTALLER:-$REPO_ROOT/scripts/install_launchd_sweepers.sh}"
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --threshold-days) THRESHOLD_DAYS="$2"; shift 2 ;;
     --threshold)      THRESHOLD_DAYS="$2"; shift 2 ;;
     --plist-dir)      PLIST_DIR="$2"; shift 2 ;;
+    --auto-repair)    AUTO_REPAIR=true; shift ;;
+    --notify)         NOTIFY=true; shift ;;
+    --no-notify)      NOTIFY=false; shift ;;
     --verbose)        VERBOSE=true; shift ;;
     --dry-run)        DRY_RUN=true; shift ;;
     --no-dry-run)     DRY_RUN=false; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--threshold-days N] [--plist-dir DIR] [--verbose] [--dry-run]
+Usage: $(basename "$0") [--threshold-days N] [--plist-dir DIR] [--auto-repair] [--notify|--no-notify] [--verbose] [--dry-run]
 
 Options:
   --threshold-days N   Maximum log age in days before a sweeper is flagged MISS
                        (default: 7)
   --plist-dir DIR      Directory to scan for cleanup / disk-magician plists
                        (default: ~/Library/LaunchAgents)
+  --auto-repair        Automatically re-install corrupted or missing plists from
+                       repository templates via install_launchd_sweepers.sh
+  --notify / --no-notify
+                       Send operator alert notification via cmux notify when degraded
+                       (default: enabled)
   --verbose            Print per-sweeper details for OK sweepers too
   --dry-run            No-op retained for parity with other disk_magician scripts
                        (this script is read-only by default)
@@ -139,15 +153,38 @@ echo
 MISS_COUNT=0
 WARN_COUNT=0
 OK_COUNT=0
+CORRUPT_COUNT=0
+REPAIR_LABELS=()
 
 while IFS= read -r plist; do
   [[ -z "$plist" ]] && continue
   label=$(basename "$plist" .plist)
+
+  # Structural XML and plist validation (disk_magician-zwb):
+  # Detect malformed XML or truncated plists missing the root <dict> / Label key.
+  if command -v plutil >/dev/null 2>&1; then
+    if ! plutil -lint "$plist" >/dev/null 2>&1; then
+      CORRUPT_COUNT=$(( CORRUPT_COUNT + 1 ))
+      MISS_COUNT=$(( MISS_COUNT + 1 ))
+      REPAIR_LABELS+=("$label")
+      printf "  [CORRUPT] %-42s plist=%s  (fails plutil -lint)\n" "$label" "$plist"
+      continue
+    fi
+    if ! plutil -extract Label raw -o - "$plist" >/dev/null 2>&1; then
+      CORRUPT_COUNT=$(( CORRUPT_COUNT + 1 ))
+      MISS_COUNT=$(( MISS_COUNT + 1 ))
+      REPAIR_LABELS+=("$label")
+      printf "  [CORRUPT] %-42s plist=%s  (missing top-level Label / bare <array>)\n" "$label" "$plist"
+      continue
+    fi
+  fi
+
   log_path=$(extract_log_path "$plist" "$label")
 
   if [[ ! -e "$log_path" ]]; then
     age_days_str="n/a"
     MISS_COUNT=$(( MISS_COUNT + 1 ))
+    REPAIR_LABELS+=("$label")
     printf "  [MISS] %-44s log=%s  (file does not exist)\n" "$label" "$log_path"
     continue
   fi
@@ -194,8 +231,33 @@ done < "$PLIST_TMP"
 echo
 log "Summary: $OK_COUNT OK, $WARN_COUNT WARN, $MISS_COUNT MISS (of $PLIST_COUNT)"
 
+if [[ $CORRUPT_COUNT -gt 0 ]]; then
+  log "CORRUPT: $CORRUPT_COUNT sweeper plist(s) malformed -- run bash scripts/install_launchd_sweepers.sh or pass --auto-repair."
+fi
+
+# Operator notification trigger (disk_magician-sweeper-health-auto-repair-dzm)
+if [[ "$NOTIFY" == true && ($MISS_COUNT -gt 0 || $WARN_COUNT -gt 0 || $CORRUPT_COUNT -gt 0) ]]; then
+  if command -v cmux >/dev/null 2>&1; then
+    notify_body="Sweeper health degraded: ${MISS_COUNT} silent/corrupt"
+    [[ $CORRUPT_COUNT -gt 0 ]] && notify_body="${notify_body} (${CORRUPT_COUNT} corrupt)"
+    [[ $WARN_COUNT -gt 0 ]] && notify_body="${notify_body}, ${WARN_COUNT} warnings"
+    cmux notify --title "disk-magician" --body "$notify_body" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Auto-repair flow (disk_magician-sweeper-health-auto-repair-dzm)
+if [[ "$AUTO_REPAIR" == true && ${#REPAIR_LABELS[@]} -gt 0 ]]; then
+  echo
+  log "Auto-repair: repairing ${#REPAIR_LABELS[@]} degraded sweeper(s)..."
+  if [[ -x "$INSTALLER" ]]; then
+    DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" "$INSTALLER" "${REPAIR_LABELS[@]}" || log "Auto-repair: installer exited with code $?"
+  else
+    log "Auto-repair: installer not executable: $INSTALLER"
+  fi
+fi
+
 if [[ $MISS_COUNT -gt 0 ]]; then
-  log "FAIL: $MISS_COUNT sweeper(s) appear silent — investigate plist or script."
+  log "FAIL: $MISS_COUNT sweeper(s) appear silent or corrupt — investigate plist or script."
   exit 1
 fi
 
