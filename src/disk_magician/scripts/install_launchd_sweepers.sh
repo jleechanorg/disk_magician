@@ -36,6 +36,42 @@ resolve_bash() {
 BASH_BIN="$(resolve_bash)"
 mkdir -p "$DEST"
 
+# Concurrency lock (disk_magician-4mw): mkdir-based lock mirroring
+# cleanup_worktree_venvs.sh's acquire_cleanup_venvs_lock (bead
+# disk_magician-w7m). Contention = log one line and skip this run entirely
+# (exit 0) -- never queue, never block. Added 2026-09-07 after the fleet was
+# observed flapping with a SEPARATE agent session on this machine
+# independently running this exact installer -- the leading hypothesis being
+# two uncoordinated invocations interleaving install_plist()'s per-label
+# `launchctl bootout` then `launchctl bootstrap` calls against each other.
+STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+LOCK_DIR="$STATE_DIR/install_launchd_sweepers.lock"
+LOCK_TTL_SEC="${DISK_MAGICIAN_INSTALL_SWEEPERS_LOCK_TTL_SEC:-900}"
+
+acquire_install_lock() {
+  mkdir -p "$(dirname "$LOCK_DIR")"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT
+    return 0
+  fi
+  local held_pid age
+  held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+  age=$(( $(date +%s) - $(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s) ))
+  if [[ "$age" -gt "$LOCK_TTL_SEC" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$LOCK_DIR/pid"
+      trap 'rm -rf "$LOCK_DIR"' EXIT
+      return 0
+    fi
+  fi
+  echo "install_launchd_sweepers: already running (lock held by pid ${held_pid:-?}, age ${age}s) -- not queuing" >&2
+  return 1
+}
+
+acquire_install_lock || exit 0
+
 retired_labels=(
   com.disk-magician.gemini-dedup
   com.jleechan.disk-magician-gemini-dedup
