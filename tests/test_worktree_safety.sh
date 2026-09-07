@@ -130,41 +130,42 @@ fi
 
 echo "── Case 9: Git status probe command failure is unsafe (rc 0, fail closed) ──"
 # Build a fake git wrapper that fails on `status` or `rev-list`
+REAL_GIT="$(command -v git)"
 FAKE_BIN="$TMPROOT/fakebin"
 mkdir -p "$FAKE_BIN"
-cat > "$FAKE_BIN/git" <<'GIT_STUB'
+cat > "$FAKE_BIN/git" <<GIT_STUB
 #!/usr/bin/env bash
-if [[ "$*" == *"status --porcelain"* ]]; then
+if [[ "\$*" == *"status --porcelain"* ]]; then
   exit 128
 fi
-exec /usr/bin/git "$@"
+exec "$REAL_GIT" "\$@"
 GIT_STUB
 chmod +x "$FAKE_BIN/git"
 
-if ( PATH="$FAKE_BIN:$PATH" worktree_has_unsaved_work "$CLONE" ); then
+if ( export PATH="$FAKE_BIN:$PATH"; hash -r; worktree_has_unsaved_work "$CLONE" ); then
   ok "git status probe failure reported unsafe (rc 0)"
 else
   bad "git status probe failure reported safe — FAIL-OPEN ERROR"
 fi
 
 echo "── Case 10: Git rev-list probe command failure is unsafe (rc 0, fail closed) ──"
-cat > "$FAKE_BIN/git" <<'GIT_STUB2'
+cat > "$FAKE_BIN/git" <<GIT_STUB2
 #!/usr/bin/env bash
-if [[ "$*" == *"rev-list"* ]]; then
+if [[ "\$*" == *"rev-list"* ]]; then
   exit 128
 fi
-exec /usr/bin/git "$@"
+exec "$REAL_GIT" "\$@"
 GIT_STUB2
 chmod +x "$FAKE_BIN/git"
 
-if ( PATH="$FAKE_BIN:$PATH" worktree_has_unsaved_work "$CLONE" ); then
+if ( export PATH="$FAKE_BIN:$PATH"; hash -r; worktree_has_unsaved_work "$CLONE" ); then
   ok "git rev-list probe failure reported unsafe (rc 0)"
 else
   bad "git rev-list probe failure reported safe — FAIL-OPEN ERROR"
 fi
 
 echo "── Case 11: Missing git command on PATH is unsafe (rc 0, fail closed) ──"
-if ( PATH="/nonexistent" worktree_has_unsaved_work "$CLONE" ); then
+if ( export PATH="/nonexistent"; hash -r; worktree_has_unsaved_work "$CLONE" ); then
   ok "missing git command reported unsafe (rc 0)"
 else
   bad "missing git command reported safe — FAIL-OPEN ERROR"
