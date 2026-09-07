@@ -154,8 +154,103 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 
+# Regression test for beads disk_magician-zwb and disk_magician-dzm:
+# Malformed / bare-array plists, cmux notify alerting, and auto-repair flow.
+CORRUPT_TEST_DIR=$(mktemp -d -t sweeper_health_corrupt.XXXXXX)
+mkdir -p "$CORRUPT_TEST_DIR/logs" "$CORRUPT_TEST_DIR/launchd"
+
+# Invalid XML plist
+cat > "$CORRUPT_TEST_DIR/launchd/com.jleechan.cleanup-badxml.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechan.cleanup-badxml</string>
+</plist>
+EOF
+
+# Bare array plist (missing dict wrapper)
+cat > "$CORRUPT_TEST_DIR/launchd/com.jleechan.cleanup-barearray.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>Label</key>
+    <string>com.jleechan.cleanup-barearray</string>
+  </dict>
+</array>
+</plist>
+EOF
+
+# Mock cmux to capture notification calls
+MOCK_CMUX_DIR=$(mktemp -d -t mock_cmux.XXXXXX)
+export MOCK_CMUX_LOG="$MOCK_CMUX_DIR/cmux_notify.log"
+cat > "$MOCK_CMUX_DIR/cmux" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$MOCK_CMUX_LOG"
+exit 0
+EOF
+chmod +x "$MOCK_CMUX_DIR/cmux"
+
+set +e
+OUT_CORRUPT=$(PATH="$MOCK_CMUX_DIR:$PATH" "$SCRIPT" --plist-dir "$CORRUPT_TEST_DIR/launchd" 2>&1)
+RC_CORRUPT=$?
+set -e
+
+[[ $RC_CORRUPT -eq 1 ]] && { echo "  PASS  corrupt plists exit 1"; PASS=$(( PASS + 1 )); } \
+                        || { echo "  FAIL  corrupt plists exit rc=$RC_CORRUPT"; FAIL=$(( FAIL + 1 )); }
+
+if grep -q "\[CORRUPT\] com.jleechan.cleanup-badxml.*fails plutil -lint" <<<"$OUT_CORRUPT"; then
+  echo "  PASS  bad XML plist flagged CORRUPT (fails plutil -lint)"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  bad XML plist not flagged CORRUPT"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+if grep -q "\[CORRUPT\] com.jleechan.cleanup-barearray.*missing top-level Label" <<<"$OUT_CORRUPT"; then
+  echo "  PASS  bare array plist flagged CORRUPT (missing top-level Label)"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  bare array plist not flagged CORRUPT"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Notification assertion (disk_magician-dzm)
+if [[ -f "$MOCK_CMUX_LOG" ]] && grep -q "Sweeper health degraded" "$MOCK_CMUX_LOG"; then
+  echo "  PASS  cmux notify triggered on degraded sweeper"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  cmux notify was not triggered on degraded sweeper"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Auto-repair assertion (disk_magician-dzm)
+MOCK_INSTALLER="$CORRUPT_TEST_DIR/mock_installer.sh"
+export MOCK_INSTALLER_LOG="$CORRUPT_TEST_DIR/installer_invocations.log"
+cat > "$MOCK_INSTALLER" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$MOCK_INSTALLER_LOG"
+exit 0
+EOF
+chmod +x "$MOCK_INSTALLER"
+
+set +e
+OUT_REPAIR=$(DISK_MAGICIAN_INSTALLER="$MOCK_INSTALLER" PATH="$MOCK_CMUX_DIR:$PATH" \
+  "$SCRIPT" --plist-dir "$CORRUPT_TEST_DIR/launchd" --auto-repair 2>&1)
+set -e
+
+if [[ -f "$MOCK_INSTALLER_LOG" ]] && grep -q "com.jleechan.cleanup-badxml" "$MOCK_INSTALLER_LOG" && grep -q "com.jleechan.cleanup-barearray" "$MOCK_INSTALLER_LOG"; then
+  echo "  PASS  auto-repair invoked installer for corrupted plists"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  auto-repair did not invoke installer for corrupted plists"
+  FAIL=$(( FAIL + 1 ))
+fi
+
 # Cleanup
-rm -rf "$TMP_DIR" "$ALL_FRESH_DIR"
+rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
