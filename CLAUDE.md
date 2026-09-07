@@ -76,6 +76,30 @@ The canonical read of this rule lives at
 wins). The floor-and-buckets requirement above is the **specific
 pre-analysis order** for this repo's investigations, on top of that.
 
+## 6-tier routine cleanup stack — unified safe maintenance
+
+When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`). Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
+
+1. **Tier 1: Developer Caches & Temp (Safe, 3–15 GiB)**:
+   - Scripts: `cleanup_dev_caches.sh`, `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`
+   - Targets: compiler, npm, cargo, test caches, and `/private/tmp` ephemera older than retention.
+2. **Tier 2: Xcode & Simulator Caches (Safe, 10–50+ GiB)**:
+   - Script: `cleanup_xcode.sh`
+   - Targets: rebuildable `~/Library/Developer/Xcode/DerivedData` and CoreSimulator temp/caches.
+3. **Tier 3: Container VM & Docker Disk Reclaim (Safe, 20–80+ GiB)**:
+   - Script: `cleanup_colima.sh`
+   - Targets: Colima VM Docker prune (unused images/containers) + in-VM `fstrim -av` to shrink the host sparse disk (`~/.colima/_lima`).
+4. **Tier 4: Browser Sessions & Assets (Safe, 10–30+ GiB)**:
+   - Script: `prune_aside_sessions.sh`
+   - Targets: stale Aside browser sessions (`~/.aside/u/*/sessions/` >7d/14d) and static asset hardlink deduplication across retained sessions.
+5. **Tier 5: Agent State Compaction & Rotated Logs (Safe, 5–20 GiB)**:
+   - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
+   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>14d), truncates rotated supervisor logs, prunes orphaned uv-tool build wheels.
+6. **Tier 6: Worktrees & Worktree Venvs (Safety-Gated, 20–100+ GiB)**:
+   - Scripts: `cleanup_worktree_venvs.sh`, `cleanup_worktrees.sh` (or `prune-worktrees`)
+   - Targets: strips `.venv`/`venv` from dormant git worktrees (>=7d inactivity) and prunes merged/stale worktrees (>=7d inactivity).
+   - **GATING**: Strictly enforces the **7-day recency floor** (`worktree_age_days >= 7`). Requires `WORKTREE_APPROVED=1` in environment to execute `--clean`.
+
 ## Cross-repo authority: dir switching is ALWAYS allowed from this repo
 
 This repo's purpose is machine-wide disk maintenance — its work routinely

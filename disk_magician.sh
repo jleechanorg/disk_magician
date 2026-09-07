@@ -15,7 +15,8 @@ Commands:
   snapshot      Perform disk usage breakdown and write to backup JSON.
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   frontier      Run the full-disk frontier scanner and optionally persist its state.
-  clean         Clean safe targets (caches, temp files, orphaned worktrees).
+  clean         Clean safe targets across 6-tier routine stack (caches, temp, Docker, Xcode, worktrees).
+  routine       Alias for clean --routine (runs unified 6-tier routine stack).
   clean-all     Clean all targets interactively (Docker VMs, old sessions).
   history       Show historical growth trends from git snapshots.
   history diff [ref]  Diff two committed ledger/topdown-5g.json snapshots.
@@ -40,6 +41,7 @@ Commands:
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
 
 Options:
+  --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
   -h, --help    Show this help menu.
 EOF
@@ -193,7 +195,7 @@ case "$CMD" in
   frontier)
     exec python3 "$SCRIPT_DIR/scripts/disk_frontier_scan.py" "$@"
     ;;
-  clean)
+  clean|routine)
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
     
