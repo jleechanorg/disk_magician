@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-LAUNCHD_SRC="$REPO_ROOT/launchd"
+LAUNCHD_SRC="${DISK_MAGICIAN_LAUNCHD_SRC:-$REPO_ROOT/launchd}"
 DEST="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 UNLOAD_LEGACY=false
 SELECTED=()
@@ -114,6 +114,22 @@ install_plist() {
       -e "s|@HOME@|$HOME|g" \
       -e "s|@BASH@|$BASH_BIN|g" \
       "$src" > "$dst"
+  # Preflight (disk_magician-zwb): plutil -lint alone does NOT catch a plist
+  # truncated to a top-level <array> with no <dict> wrapper -- that's
+  # syntactically legal plist XML and passes -lint clean (the actual
+  # 2026-08-31 mass-corruption failure mode). Checking for a top-level Label
+  # key is the cheapest reliable signal that the <dict> wrapper survived.
+  # Never bootstrap a plist that fails either check.
+  if ! plutil -lint "$dst" >/dev/null 2>&1; then
+    echo "ABORT: $dst fails plutil -lint -- refusing to bootstrap a malformed plist for $label" >&2
+    rm -f "$dst"
+    return 1
+  fi
+  if ! plutil -extract Label raw -o - "$dst" >/dev/null 2>&1; then
+    echo "ABORT: $dst has no top-level Label key (likely missing its <dict> wrapper) -- refusing to bootstrap $label" >&2
+    rm -f "$dst"
+    return 1
+  fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$dst"
   echo "installed $label -> $dst"
@@ -153,17 +169,25 @@ install_launchdaemon() {
   echo "Successfully installed and bootstrapped root LaunchDaemon $label"
 }
 
+ERRORS=0
+
 if [[ ${#SELECTED[@]} -gt 0 ]]; then
   for name in "${SELECTED[@]}"; do
-    src="$LAUNCHD_SRC/${name}"
-    [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist"
-    [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist.template"
-    [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.template"
+    if [[ -f "$name" ]]; then
+      src="$name"
+    else
+      src="$LAUNCHD_SRC/${name}"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.disk-magician.${name%.plist}.plist.template"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.template"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.plist"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.plist.template"
+    fi
     [[ -f "$src" ]] || { echo "not found: $name" >&2; exit 2; }
     if [[ "$name" == *apfs-snapshots* ]]; then
-      install_launchdaemon "$src"
+      install_launchdaemon "$src" || ERRORS=$(( ERRORS + 1 ))
     else
-      install_plist "$src"
+      install_plist "$src" || ERRORS=$(( ERRORS + 1 ))
     fi
   done
 else
@@ -173,15 +197,20 @@ else
       echo "Skipping com.disk-magician.apfs-snapshots.plist (requires root privileges; run: sudo ./scripts/install_launchd_sweepers.sh apfs-snapshots to install as a system LaunchDaemon)"
       continue
     fi
-    install_plist "$src"
+    install_plist "$src" || ERRORS=$(( ERRORS + 1 ))
   done
   # Control-loop jobs (distinct com.jleechanorg.disk-magician-* prefix, .plist.template
   # suffix). Same install_plist() path — label/dst are read from file content, not
   # filename. e.g. com.jleechanorg.disk-magician-drilldown.plist.template (4h residual
   # drilldown cadence, see roadmap/2026-07-11-total-coverage-snapshot-v2.md).
   for src in "$LAUNCHD_SRC"/com.jleechanorg.disk-magician-*.plist.template; do
-    install_plist "$src"
+    install_plist "$src" || ERRORS=$(( ERRORS + 1 ))
   done
+fi
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "Encountered $ERRORS error(s) during sweeper installation." >&2
+  exit 1
 fi
 
 echo "Done. Logs under /tmp/disk-magician-*.log"
