@@ -203,6 +203,21 @@ if [[ "$LIVE" != true ]]; then
     _load_snapshot || true
 fi
 
+# ── 0. Automation fleet health ───────────────────────────────────────────────
+# Root cause 2026-09-06: every accounting section below trusts data collected
+# by launchd jobs. If those jobs are silently unloaded (found: up to 16 of
+# them, including the watchdog whose job is to detect exactly this, dead for
+# 6+ days with zero visible error), the floor/history numbers below are stale
+# or absent and no amount of du/accounting rigor fixes that. This MUST run
+# first, unconditionally, in every mode (audit/clean/clean-all) — it is the
+# check that used to only happen if a human remembered to run it manually.
+section "Automation Fleet Health"
+if [[ -x "$SCRIPT_DIR/check_launchd_fleet.sh" ]]; then
+    "$SCRIPT_DIR/check_launchd_fleet.sh" || true
+else
+    echo "  check_launchd_fleet.sh not found — skipping (n/a off macOS or non-standard checkout)"
+fi
+
 # ── 1. Overall disk status ───────────────────────────────────────────────────
 section "Disk Status"
 echo "  Volume usage:"

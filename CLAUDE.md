@@ -6,6 +6,31 @@ Disk-fill investigations in this repo MUST follow a fixed pre-analysis
 sequence (added 2026-07-30 after four "200 GiB does not exist" misses that
 underestimated cumulative-reservoir growth):
 
+-1. **Verify disk_magician's own launchd fleet is alive BEFORE trusting any
+    floor/history number.** Run `./disk_magician.sh check-launchd-fleet`
+    (also runs automatically as the first section of `audit`/`clean`).
+    Root cause (2026-09-06): up to 16 of this repo's launchd jobs — including
+    the `sweeper-health` watchdog whose entire purpose is to catch exactly
+    this — were found silently unloaded for 6+ days (mass event, zero visible
+    error; a malformed plist missing its `<dict>` wrapper is invisible even
+    to `launchctl list`). This has recurred under at least 3 different root
+    mechanisms (2026-07-22 shlock bug, 2026-07-29 interval-elapsed
+    false-negative, 2026-09-06 mass plist corruption). On 2026-09-06 the fleet
+    was also observed **actively flapping** — jobs transitioning
+    loaded/unloaded within tens of seconds to minutes of a fresh
+    `install_launchd_sweepers.sh` run, with plists confirmed valid throughout
+    and `sfltool dumpbtm` showing "enabled, allowed" disposition (i.e. macOS
+    Background Task Management is not the one disabling them). The exact
+    external trigger was NOT pinned down in that session — repair is not
+    durable; if the disk-fill pattern recurs shortly after a repair, re-run
+    `check-launchd-fleet` rather than assuming one clean run means it stays
+    clean. **Do not assume "installed" means
+    "running."** If the fleet check reports anything unhealthy, say so as the
+    PRIMARY finding before any accounting — a floor computed from a dead
+    collector is not a floor, and the underlying automation gap is the actual
+    answer to "why do I have to keep re-explaining this," not a symptom to
+    route around. Repair: `bash scripts/install_launchd_sweepers.sh`.
+
 0. **Consult prior memory files before live probes & recognize full disk readability.**
    Empirical verification on 2026-08-30/31 confirmed that **ALL user-data and TCC
    paths (`MobileSync`, `Mail`, `Messages`, `Containers`, `Group Containers`, `Safari`,
