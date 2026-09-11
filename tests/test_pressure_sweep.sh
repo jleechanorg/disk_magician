@@ -23,7 +23,7 @@ mkdir -p "$MOCK_BIN" "$STATE_DIR"
 
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/usr/bin/env bash
-echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
 exit 0
 MOCK
 
@@ -89,7 +89,7 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs no-op line" "free 50 GB >= threshold" "$LOG_CONTENT"
 assert_not_contains "skips cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
 
-echo "Test 2: triggered clean path passes --large and LARGE_TMP_APPROVED=1"
+echo "Test 2: triggered clean path passes --large, LARGE_TMP_APPROVED=1, and 4h pressure retention"
 : > "$INVOCATION_LOG"
 : > "$LOG_FILE"
 rm -rf "$STATE_DIR/pressure_sweep.lock"
@@ -97,16 +97,34 @@ run_pressure 8
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs triggered sweep" "sweep triggered (dry_run=false)" "$LOG_CONTENT"
-assert_contains "cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
 
-echo "Test 3: dry-run passes --dry-run --large without LARGE_TMP_APPROVED"
+echo "Test 2b: custom pressure retention overrides are passed to cleanup_tmp"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
+  DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS=2 \
+  DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS=6 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "cleanup_tmp overrides honored" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=2 ARCHIVE_HOURS=6" "$INVOCATIONS"
+
+echo "Test 3: dry-run passes --dry-run --large without LARGE_TMP_APPROVED but with 4h pressure retention"
 : > "$INVOCATION_LOG"
 : > "$LOG_FILE"
 rm -rf "$STATE_DIR/pressure_sweep.lock"
 run_pressure 8 --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
-assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
+assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima dry-run" "cleanup_colima --dry-run" "$INVOCATIONS"
 
 echo "Test 4: healthy free space + Colima over ceiling triggers colima-only sweep"
