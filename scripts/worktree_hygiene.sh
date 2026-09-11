@@ -563,7 +563,8 @@ main() {
                 safe_count=$(( safe_count + 1 ))
                 if [[ "$EXECUTE" == true ]]; then
                     ledger_line "DELETE" "$wt_path" ""
-                    git -C "$repo_abs" worktree remove --force "$wt_path"
+                    git -C "$repo_abs" worktree unlock "$wt_path" 2>/dev/null || true
+                    git -C "$repo_abs" worktree remove --force --force "$wt_path" || echo "WARN: failed to remove $wt_path"
                 fi
             else
                 ledger_line "NEEDS-REVIEW" "$wt_path" "$reason"

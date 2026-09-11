@@ -19,8 +19,11 @@
 # TMP_WORKTREES_APPROVED=1 for the same pressure-only path (roadmap
 # 2026-07-22-disk-regrowth-rootcause.md §3.2 — without it, every
 # wt_*/worktree_* dir under /private/tmp is structurally un-sweepable even
-# under critical pressure). cleanup_tmp.sh's own mtime/lsof/protected-root
-# gates still apply unchanged; this only lifts the worktree-specific opt-in.
+# under critical pressure). Under pressure, passes LARGE_TMP_ACTIVE_HOURS=4
+# and LARGE_TMP_ARCHIVE_RETENTION_HOURS=4 (configurable via
+# DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS / DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS)
+# to accelerate eviction of quarantined scratch archives without waiting 24h.
+# cleanup_tmp.sh's own mtime/lsof/protected-root gates still apply unchanged.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -211,10 +214,12 @@ if [[ "$SWEEP_MODE" == "colima-only" ]]; then
 else
 before_gb="$(free_gb)"
 log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
+pressure_active_hours="${LARGE_TMP_ACTIVE_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS:-4}}"
+pressure_archive_hours="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS:-4}}"
 if [[ "$DRY_RUN" != true ]]; then
-  tmp_step=(env LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+  tmp_step=(env LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
 else
-  tmp_step=("$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+  tmp_step=(env LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
 fi
 if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
