@@ -14,9 +14,10 @@ SILENCE_FILE="$HOME/.disk_magician_alert.silenced"
 
 # ────────── Coverage-streak escalation (reuses SILENCE_FILE above; no new
 # alert mechanism, per roadmap/2026-07-11-total-coverage-snapshot-v2.md) ──────────
-HOSTNAME_SHORT="$(hostname -s 2>/dev/null || hostname)"
-BACKUP_DIR="${DISK_MAGICIAN_BACKUP_DIR:-$HOME/.disk_magician_backup/backup}"
-SNAPSHOT_FILE="${DISK_MAGICIAN_SNAPSHOT_FILE:-$BACKUP_DIR/$HOSTNAME_SHORT/disk_snapshot.json}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/resolve_snapshot_json.sh
+source "$SCRIPT_DIR/lib/resolve_snapshot_json.sh"
+SNAPSHOT_FILE="$(resolve_snapshot_json)"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 STREAK_FILE="$STATE_DIR/coverage_streak.json"
 STREAK_ESCALATE_AT=3
@@ -122,6 +123,7 @@ if [[ $# -gt 0 ]]; then
     --unsilence) unset_silenced; exit 0 ;;
     --status)
       echo "Check path: $CHECK_PATH"
+      echo "Snapshot file: $SNAPSHOT_FILE"
       echo "Threshold: ${THRESHOLD_GB} GB"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct <<< "$(update_coverage_streak)"

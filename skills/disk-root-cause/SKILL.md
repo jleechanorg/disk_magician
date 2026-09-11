@@ -165,13 +165,19 @@ Execute the mandatory 4-step diagnostic recipe:
 
 `~/.disk_magician_backup` is a git repo. Every commit is a snapshot. The skill reads history with `git log --all` (+ reflog for orphaned commits per the 07-11 incident) and `git show <sha>:snapshots/disk_snapshot.json` (or `<sha>:ledger/topdown-5g.json` / `<sha>:backup/<host>/disk_snapshot.json` for legacy pre-migration commits).
 
+**Floor precedence (hard):** primary floor = lowest `disk_used_kb` in the last
+~14 commits to `ledger/topdown-5g.json`. Only use `disk_snapshot.json`
+`disk_used_gb` mins when **coverage ≥ 70%** for that commit; ignore sub-70%
+mins entirely (bogus floors). If the ledger has no commit within **48h**, state
+ledger staleness and do not cite HEAD ledger buckets as current.
+
 Three deltas, always reported:
 
 | Window | Find | Compare to |
 |---|---|---|
-| **Last week** (7 d) | min `disk_used_gb` in window | live `df -k` |
-| **Last month** (30 d) | min `disk_used_gb` in window | live `df -k` |
-| **All time floor** | min `disk_used_gb` over all reachable + reflog-recovered commits | live `df -k` |
+| **Last week** (7 d) | min ledger `disk_used_kb` (14-commit window) **or** min `disk_used_gb` with coverage ≥ 70% | live `df -k` |
+| **Last month** (30 d) | same rule on longer `git log` window | live `df -k` |
+| **All time floor** | min over reachable history with coverage ≥ 70% when using snapshots | live `df -k` |
 
 Pull both `disk_used_gb` (denominator, in GiB — verified to use `1024*1024` divisor in `disk_snapshot.sh:200-201`) and `disk_free_gb`. Compute:
 

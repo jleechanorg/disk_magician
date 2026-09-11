@@ -49,6 +49,15 @@ underestimated cumulative-reservoir growth):
    then `git show <sha>:ledger/topdown-5g.json`. State the floor date +
    value and the gap (current used − floor used) before any other
    measurement. **The gap-to-floor grounds every proposal.**
+   **Coverage gate (hard):** never treat `disk_snapshot.json`'s
+   `disk_used_gb` as a floor when `snapshot_coverage_pct` (or
+   `snapshot_metadata.coverage_pct`) is **< 70%** — low-coverage mins
+   are bogus (e.g. 714 GiB at 5.5% coverage). Prefer the ledger floor when
+   `ledger/topdown-5g.json` has a commit within **48h**; if the ledger is
+   older, say so and do not invent bucket deltas from stale ledger HEAD.
+   Live snapshot path:
+   `~/.disk_magician_backup/snapshots/disk_snapshot.json` (legacy
+   `backup/<host>/` is frozen — bead `disk_magician-q9x`).
 
 2. **Pull per-directory granularity buckets** from that same ledger (the
    schema stores every ≥5 GiB entry it observed with `size_mb`). Do NOT
