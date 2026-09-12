@@ -2,6 +2,7 @@
 
 ## Recent activity (by day)
 
+- [2026-09-11](activity/2026-09-11.md) — 30d disk-recurrence root cause; plutil -extract plist-corruption mechanism pinned and fixed; fleet 16/16; plan PR1–PR3 + /innov (PR #69).
 - [2026-09-01](activity/2026-09-01.md) — FDA attribution hardening, fresh partial snapshot, secure root-runner blocker, and machine-specific catalog audit.
 - [2026-08-01](activity/2026-08-01.md) — Recreated all 30 git worktrees modified within 14 days; updated CLAUDE.md/GEMINI.md to strictly ban ad-hoc cleanup scripts and enforce 14-day recency protection; completed multi-cloud conversation sync to Google Drive and Dropbox; executed parallel subagent disk-root-cause forensic investigation (14-day floor 720 GiB used, live delta +85 GiB, reclaimed ~35 GiB).
 - [2026-07-20](activity/2026-07-20.md)
