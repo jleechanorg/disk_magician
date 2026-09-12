@@ -14,9 +14,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-HOSTNAME_SHORT="$(hostname -s 2>/dev/null || hostname)"
-BACKUP_DIR="${DISK_MAGICIAN_BACKUP_DIR:-$HOME/.disk_magician_backup/backup}"
-SNAPSHOT_FILE="${DISK_MAGICIAN_SNAPSHOT_FILE:-$BACKUP_DIR/$HOSTNAME_SHORT/disk_snapshot.json}"
+# shellcheck source=lib/resolve_snapshot_json.sh
+source "$SCRIPT_DIR/lib/resolve_snapshot_json.sh"
+SNAPSHOT_FILE="$(resolve_snapshot_json)"
 
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 DISCOVER_LAST="${DISK_MAGICIAN_DISCOVER_LAST:-$STATE_DIR/discover_last.json}"
@@ -142,7 +142,7 @@ residual_gb="$(echo "$residual_info" | cut -f2)"
 residual_source="$(echo "$residual_info" | cut -f3)"
 
 if [[ "$residual_source" == fallback:* ]]; then
-  echo "residual_drilldown: residual_delta_gb not present in snapshot yet (selfheal work pending) — using fallback derived from 100-coverage_pct: ${residual_gb} GB"
+  echo "residual_drilldown: using fallback ${residual_source} — estimated unmeasured residual ${residual_gb} GB"
 fi
 
 # ────────── FAST NO-OP PATH ──────────

@@ -20,6 +20,7 @@
 # 1 if any are missing/unloaded/invalid. Read-only; never modifies anything.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_DIR="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
 # Canonical fleet — keep in sync with scripts/install_launchd_sweepers.sh's
@@ -103,9 +104,25 @@ done
 total=${#KNOWN_LABELS[@]}
 echo "  Fleet: $ok/$total loaded and valid."
 
+fleet_unhealthy=0
 if [[ $((missing + not_loaded + invalid)) -gt 0 ]]; then
   echo "  ⚠️  $((missing + not_loaded + invalid)) job(s) unhealthy — floor/history data below may be stale or absent."
   echo "  Repair: bash scripts/install_launchd_sweepers.sh   (rewrites every plist from its template and reloads it)"
-  exit 1
+  fleet_unhealthy=1
 fi
+
+if [[ -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
+  ledger_line="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1)" || ledger_rc=$?
+  ledger_rc="${ledger_rc:-0}"
+  if [[ "$ledger_line" == STALE* ]]; then
+    echo "  ⚠️  Published ledger stale — ${ledger_line#STALE	}"
+    echo "  Bucket deltas from ledger/topdown-5g.json are not trustworthy until a complete frontier scan publishes a new table."
+    echo "  Repair: ./disk_magician.sh frontier (deep scan) or wait for com.jleechanorg.disk-magician-frontier-nightly; partial FDA gaps may need root frontier (bead disk_magician-4y6)."
+    fleet_unhealthy=1
+  elif [[ "$ledger_rc" -eq 0 ]]; then
+    echo "  Ledger: ${ledger_line#OK	}"
+  fi
+fi
+
+[[ "$fleet_unhealthy" -eq 1 ]] && exit 1
 exit 0
