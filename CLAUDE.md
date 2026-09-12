@@ -24,7 +24,16 @@ underestimated cumulative-reservoir growth):
     external trigger was NOT pinned down in that session — repair is not
     durable; if the disk-fill pattern recurs shortly after a repair, re-run
     `check-launchd-fleet` rather than assuming one clean run means it stays
-    clean. **Do not assume "installed" means
+    clean. **Pinned 2026-09-11:** the corruption mechanism is
+    `plutil -extract <key> <fmt> <plist>` run WITHOUT `-o -` — plutil then
+    overwrites the plist with the extracted value (first byte becomes `[`/`{`),
+    and the auto-repair reinstall is what makes it look like flapping. Agents
+    inspecting a live plist MUST use `plutil -extract <key> raw -o - <plist>`
+    or `plutil -p <plist>`; never the bare form. If the fleet flips
+    healthy→corrupt inside a session, compare plist mtimes to your own
+    commands first
+    (`findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md`).
+    **Do not assume "installed" means
     "running."** If the fleet check reports anything unhealthy, say so as the
     PRIMARY finding before any accounting — a floor computed from a dead
     collector is not a floor, and the underlying automation gap is the actual

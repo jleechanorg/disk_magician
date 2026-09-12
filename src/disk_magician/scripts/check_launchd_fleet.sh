@@ -78,7 +78,16 @@ for label in "${KNOWN_LABELS[@]}"; do
     continue
   fi
   if ! plutil -lint "$plist" >/dev/null 2>&1; then
-    echo "  INVALID PLIST   $label  ($plist fails plutil -lint — launchd will silently refuse to load it)"
+    # A plist whose first byte is '[' or '{' is the signature of
+    # `plutil -extract <key> <fmt> <plist>` run WITHOUT `-o -`: plutil then
+    # overwrites the input file with the extracted value (reproduced
+    # 2026-09-11; findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md).
+    first_byte="$(head -c 1 "$plist" 2>/dev/null || true)"
+    hint=""
+    if [[ "$first_byte" == "[" || "$first_byte" == "{" ]]; then
+      hint=" — file starts with '$first_byte': overwritten by a \`plutil -extract\` call missing \`-o -\` (see findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md)"
+    fi
+    echo "  INVALID PLIST   $label  ($plist fails plutil -lint — launchd will silently refuse to load it${hint})"
     invalid=$(( invalid + 1 ))
     continue
   fi

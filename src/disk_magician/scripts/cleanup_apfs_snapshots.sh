@@ -66,8 +66,10 @@ TMP_SNAP=$(mktemp -t apfs_snap.XXXXXX)
 trap 'rm -f "$TMP_ACTIVE" "$TMP_SNAP"' EXIT
 
 if diskutil info -plist / > "$TMP_ACTIVE" 2>/dev/null; then
-  ACTIVE_SNAPSHOT_NAME=$(/usr/bin/plutil -extract APFSSnapshotName raw "$TMP_ACTIVE" 2>/dev/null || true)
-  ACTIVE_DEV_NODE=$(/usr/bin/plutil -extract DeviceNode raw "$TMP_ACTIVE" 2>/dev/null || true)
+  # `-o -` is mandatory: without it plutil overwrites the input file with the
+  # extracted value, so the second extract would read a one-line raw string.
+  ACTIVE_SNAPSHOT_NAME=$(/usr/bin/plutil -extract APFSSnapshotName raw -o - "$TMP_ACTIVE" 2>/dev/null || true)
+  ACTIVE_DEV_NODE=$(/usr/bin/plutil -extract DeviceNode raw -o - "$TMP_ACTIVE" 2>/dev/null || true)
 fi
 if [[ -n "$ACTIVE_SNAPSHOT_NAME" ]]; then
   log "Active mounted root snapshot: $ACTIVE_SNAPSHOT_NAME (${ACTIVE_DEV_NODE:-unknown dev node})"
