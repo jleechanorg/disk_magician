@@ -27,12 +27,10 @@ STATE_REPO="$WORK/state_repo"
 mkdir -p "$STATE_REPO/snapshots"
 echo '{}' > "$STATE_REPO/snapshots/disk_snapshot.json"
 LEGACY_HOST="$WORK/backup_host"
-mkdir -p "$LEGACY_HOST/backup/testhost"
-echo '{}' > "$LEGACY_HOST/backup/testhost/disk_snapshot.json"
+HOST_SHORT="$(hostname -s 2>/dev/null || hostname)"
 
 export DISK_MAGICIAN_STATE_REPO="$STATE_REPO"
 export DISK_MAGICIAN_BACKUP_DIR="$LEGACY_HOST"
-# hostname for legacy path — use testhost file we created
 export HOME="$WORK/fakehome"
 mkdir -p "$HOME"
 # resolve_state_repo_path honors DISK_MAGICIAN_STATE_REPO
