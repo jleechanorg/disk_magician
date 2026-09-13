@@ -14,12 +14,14 @@ SILENCE_FILE="$HOME/.disk_magician_alert.silenced"
 
 # ────────── Coverage-streak escalation (reuses SILENCE_FILE above; no new
 # alert mechanism, per roadmap/2026-07-11-total-coverage-snapshot-v2.md) ──────────
-HOSTNAME_SHORT="$(hostname -s 2>/dev/null || hostname)"
-BACKUP_DIR="${DISK_MAGICIAN_BACKUP_DIR:-$HOME/.disk_magician_backup/backup}"
-SNAPSHOT_FILE="${DISK_MAGICIAN_SNAPSHOT_FILE:-$BACKUP_DIR/$HOSTNAME_SHORT/disk_snapshot.json}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/resolve_snapshot_json.sh
+source "$SCRIPT_DIR/lib/resolve_snapshot_json.sh"
+SNAPSHOT_FILE="$(resolve_snapshot_json)"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 STREAK_FILE="$STATE_DIR/coverage_streak.json"
 STREAK_ESCALATE_AT=3
+LEDGER_STALE_HOURS="${DISK_MAGICIAN_LEDGER_STALE_HOURS:-48}"
 
 usage() {
   cat <<EOF
@@ -122,6 +124,10 @@ if [[ $# -gt 0 ]]; then
     --unsilence) unset_silenced; exit 0 ;;
     --status)
       echo "Check path: $CHECK_PATH"
+      echo "Snapshot file: $SNAPSHOT_FILE"
+      if [[ -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
+        echo "Ledger freshness: $("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1 || true)"
+      fi
       echo "Threshold: ${THRESHOLD_GB} GB"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct <<< "$(update_coverage_streak)"
@@ -154,10 +160,17 @@ if [[ "$coverage_streak" != "unknown" && "$coverage_streak" -ge "$STREAK_ESCALAT
   streak_alert=true
 fi
 
+ledger_alert=false
+ledger_detail=""
+if [[ -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
+  ledger_detail="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1 || true)"
+  [[ "$ledger_detail" == STALE* ]] && ledger_alert=true
+fi
+
 space_alert=false
 [[ $free_gb -lt $THRESHOLD_GB ]] && space_alert=true
 
-if [[ "$space_alert" == true || "$streak_alert" == true ]]; then
+if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true ]]; then
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
@@ -171,6 +184,10 @@ if [[ "$space_alert" == true || "$streak_alert" == true ]]; then
     if [[ "$streak_alert" == true ]]; then
       echo "🚨 WARNING: Snapshot coverage has been low for ${coverage_streak} consecutive checks (coverage_pct=${coverage_pct})." >&2
       echo "Run 'scripts/residual_drilldown.sh' or check config.d/auto-candidates.json for untracked-growth proposals." >&2
+    fi
+    if [[ "$ledger_alert" == true ]]; then
+      echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})." >&2
+      echo "Run './disk_magician.sh frontier' or wait for frontier-nightly; bucket deltas are unreliable until a complete scan publishes." >&2
     fi
     exit 1
   fi

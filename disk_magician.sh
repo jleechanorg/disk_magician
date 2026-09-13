@@ -75,15 +75,9 @@ fi
 # uses to write), falling back to the legacy backup/<host>/ path so a repo
 # that hasn't taken a new-layout snapshot yet still reads its last one.
 resolve_dispatch_snapshot_json() {
-  local state_dir new_layout legacy
-  state_dir="$(python3 "$SCRIPT_DIR/scripts/resolve_state_repo_path.py" 2>/dev/null)"
-  new_layout="$state_dir/snapshots/disk_snapshot.json"
-  legacy="$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)/disk_snapshot.json"
-  if [[ -n "$state_dir" && -f "$new_layout" ]]; then
-    printf '%s\n' "$new_layout"
-  else
-    printf '%s\n' "$legacy"
-  fi
+  # shellcheck source=scripts/lib/resolve_snapshot_json.sh
+  source "$SCRIPT_DIR/scripts/lib/resolve_snapshot_json.sh"
+  resolve_snapshot_json
 }
 
 run_setup() {
