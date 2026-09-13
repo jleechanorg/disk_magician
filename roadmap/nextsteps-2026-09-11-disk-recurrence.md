@@ -59,3 +59,64 @@ Session 2026-09-11 in `~/projects_other/disk_magician` (branch `fix/plutil-extra
 ## Roadmap pointer
 
 - Appended `roadmap/activity/2026-09-11.md` (new date → link prepended to `roadmap/README.md` § Recent activity).
+
+---
+
+# Nextsteps — design → review → (failed) implementation round — 2026-09-13
+
+## Table of contents (round 2)
+
+- [Executive summary (round 2)](#executive-summary-round-2)
+- [Context (round 2)](#context-round-2)
+- [Bead index (round 2)](#bead-index-round-2)
+- [Work queue (round 2)](#work-queue-round-2)
+- [PR / merge state (round 2)](#pr--merge-state-round-2)
+- [Learnings pointer (round 2)](#learnings-pointer-round-2)
+- [Roadmap pointer (round 2)](#roadmap-pointer-round-2)
+
+## Executive summary (round 2)
+
+- **Done:** 5 parallel /sq design lanes produced specs + executor-grade plans (`docs/superpowers/{specs,plans}/2026-09-11-*`, commit `b5bd0fa`). One combined `/advice` run (Codex + Opus, ref `b5bd0fa`): Codex **REJECTED**, Opus **APPROVED-WITH-CHANGES**; verdict files archived at `docs/superpowers/reviews/2026-09-12-advice-{codex,opus}-designs-b5bd0fa.txt`. Every blocking finding is now in the owning bead.
+- **Not done:** implementation. All 4 coder lanes (`agy-pair-coder`) died at spawn on the Fable usage limit; lane worktrees `/tmp/dm-lane-{hyr-fleet,zyn-ledger,dcz-lsof,tli-deploy}` are clean at integration base `4df6cc7` (PR #69 + PR #68). Bead `disk_magician-v4a` routes the next attempt to sonnet/codexs coders.
+- **Design corrections that change the plan:** (1) `disk_magician-6wd` is *not* refuted — the lane's probe used UTC strings with BSD `find -newerBt` (local-time parser); Opus's corrected rerun found 3.74 GiB newborn under `/private/tmp` (21% of the 18 GiB event, in a null-`hot_dirs_kb` root). (2) The lsof-snapshot design fails open on non-canonical paths (`/var/folders` vs `/private/var/folders`) and reuses a stale snapshot for destructive decisions. (3) Fleet manifest misses the primary job (created by `disk_magician.sh:130-161`), one planned test can't pass as written, the plan itself invokes bare `uv tool install`, and component E would drop merged #68 code. (4) Deploy-guard override must reject detached HEAD. (5) `check_ledger_freshness.sh` already exists (PR #68 merged) — extend, never recreate; validate schema, not just timestamp.
+- **Priority order:** merge PR #69 (now conflict-free at 0.2.101) → fix designs per beads → re-spawn coders on sonnet → hyr → zyn → dcz → tli → 6wd re-probe.
+
+## Context (round 2)
+
+2026-09-12 22:40 → 2026-09-13 10:20 PDT, repo `disk_magician`, branch `fix/plutil-extract-plist-corruption-and-disk-recurrence-report` (PR #69). PR #68 merged mid-session (`be4da3f`, 0.2.100); PR #69 merged `origin/main` back in (version resolved to 0.2.101). Scope: design + review only; no production code changed this round. A sibling session owns the primary checkout; all work went through scratch worktrees.
+
+## Bead index (round 2)
+
+| Bead | Title | Status | Link |
+|------|-------|--------|------|
+| disk_magician-hyr | PR1 fleet-is-real-again — design reviewed, 6 blocking fixes recorded | open P2 | `br show disk_magician-hyr` |
+| disk_magician-zyn | PR2 ledger-fresh-and-queryable — extend #68's freshness checker; schema validation | open P2 | `br show disk_magician-zyn` |
+| disk_magician-dcz | PR3 single-lsof — re-snapshot before destructive step; canonicalize paths | open P2 | `br show disk_magician-dcz` |
+| disk_magician-tli | deploy guard — reuse `tools/deploy_uv_tool.sh`; reject detached HEAD | open P2 | `br show disk_magician-tli` |
+| disk_magician-6wd | birth-cohort attribution — REOPENED, partially validated (3.74 GiB) | open P2 | `br show disk_magician-6wd` |
+| disk_magician-v4a | coder lanes died on Fable limit → route to sonnet/codexs | open P2 | `br show disk_magician-v4a` |
+| disk_magician-bjk | attribute the 18 GiB anonymous step event (mtime + other roots) | open P2 | `br show disk_magician-bjk` |
+| disk_magician-j1c | cleanup_tmp.sh:534 non-additive EXIT trap | open P3 | `br show disk_magician-j1c` |
+| disk_magician-swb | orphaned MCP servers 8104/8108 decision | open P3 | `br show disk_magician-swb` |
+| disk_magician-4y6 | root frontier runner (needs `sudo`) | open P1 | `br show disk_magician-4y6` |
+
+## Work queue (round 2)
+
+1. **Merge PR #69** — https://github.com/jleechanorg/disk_magician/pull/69 (post-merge at 0.2.101; CI must be green; contains the plutil fix, report, designs, reviews).
+2. **Fix each design per its bead's BLOCKING list, then re-review only the changed docs** (`/advice` with the new ref; Codex must move off REJECTED). Owners: hyr, zyn, dcz, tli, 6wd. Acceptance: every BLOCKING item in `docs/superpowers/reviews/2026-09-12-advice-*.txt` has a matching doc change or a written rebuttal.
+3. **Re-spawn implementation** ([disk_magician-v4a](#bead-index-round-2)): `general-purpose` subagents, `model: sonnet`, coder + independent verifier per lane, worktrees `/tmp/dm-lane-*` (recreate from `origin/main` after #69 merges). Lane order if serial capacity only: hyr → zyn → dcz → tli.
+4. **6wd re-probe** ([disk_magician-6wd](#bead-index-round-2)): local-time `find -newerBt`, fresh step event, 6 bounded roots; decide build/kill in ≤1h.
+5. **Operator-only:** `sudo` for [disk_magician-4y6](#bead-index-round-2); decide [disk_magician-swb](#bead-index-round-2).
+
+## PR / merge state (round 2)
+
+- https://github.com/jleechanorg/disk_magician/pull/69 — **PR #69: OPEN** (draft; main merged in, 0.2.101)
+- https://github.com/jleechanorg/disk_magician/pull/68 — **PR #68: MERGED** (`be4da3f`)
+
+## Learnings pointer (round 2)
+
+- `~/roadmap/learnings-2026-09.md` — section `2026-09-13 — BSD find -newerBt is local-time; agy-pair-* agent types are Fable-bound`.
+
+## Roadmap pointer (round 2)
+
+- Appended `roadmap/activity/2026-09-13.md` (new date → README link).
