@@ -610,15 +610,63 @@ assert_contains "parent swap after lsof is detected" \
 assert_exists "child under swapped parent is preserved" "$CSC_PSWAP_CHILD/blob"
 
 
-echo "Test 9: pressure_sweep passes --large and LARGE_TMP_APPROVED when cleaning"
+echo "Test 9: pressure_sweep passes --large and LARGE_TMP_APPROVED when cleaning (confined to fixture roots — bead disk_magician-ka4)"
+# INCIDENT (2026-09-22, bead disk_magician-ka4): this test used to invoke the
+# REAL pressure_sweep.sh -> cleanup_tmp.sh --clean --large with NO root
+# confinement at all — cleanup_tmp.sh's --large branch hardcoded
+# `find /private/tmp` and scratch_roots_get_unique() hardcoded /private/tmp
+# + /tmp, so the run deleted real content under the host's /private/tmp and
+# $TMPDIR. Every scratch root below is now pinned inside this test's own
+# $TMP_ROOT via the override env vars scripts/lib/scratch_roots.sh exposes
+# for exactly this purpose, and DISK_MAGICIAN_TEST_SANDBOX is the mechanical
+# backstop (scripts/safety_lib.sh:sandbox_guard_roots) that aborts BEFORE
+# any deletion if a root ever resolves outside it again.
 PS_LOG="$TMP_ROOT/pressure-sweep.log"
 PS_STATE="$TMP_ROOT/pressure-state"
 mkdir -p "$PS_STATE"
+PS_SANDBOX="$TMP_ROOT/pressure-sandbox"
+PS_PRIVATE_TMP="$PS_SANDBOX/private-tmp"
+PS_TMP="$PS_SANDBOX/tmp"
+PS_USER_TMP="$PS_SANDBOX/user-tmp"
+PS_ARCHIVE_ROOT="$PS_PRIVATE_TMP/_disk_magician_archive"
+PS_DELETION_LOG="$TMP_ROOT/pressure-deletions.log"
+mkdir -p "$PS_PRIVATE_TMP" "$PS_TMP" "$PS_USER_TMP"
+# A stale, oversized top-level fixture dir so the --large branch has real
+# work to do (proves the archive path runs end-to-end against the fixture,
+# not just a no-op scan). LARGE_TMP_MIN_KB is lowered so a small fixture
+# file qualifies as "large" without a slow multi-hundred-MB dd.
+mkdir -p "$PS_PRIVATE_TMP/stale_large_dir"
+dd if=/dev/zero of="$PS_PRIVATE_TMP/stale_large_dir/payload" bs=1024 count=200 status=none
+STALE_STAMP="$(date -v-10H +%Y%m%d%H%M 2>/dev/null || date -d '-10 hours' +%Y%m%d%H%M)"
+# Stamp the directory entry itself, not just the file inside it —
+# has_recent_activity() / the --large scan's mtime check looks at every
+# entry under the candidate dir including the dir node itself, and mkdir -p
+# above left it at "now" (would otherwise always be skipped as
+# "recently active" regardless of the payload file's mtime).
+touch -t "$STALE_STAMP" "$PS_PRIVATE_TMP/stale_large_dir/payload" "$PS_PRIVATE_TMP/stale_large_dir"
+
+# Pre/post host-path snapshot (defense in depth on top of the sandbox
+# guard): proves this run never REMOVED anything from the REAL /private/tmp,
+# independent of any fixture wiring bug. Only the top-level NAME set is
+# compared (not full `ls -la`, which churns constantly from unrelated live
+# processes writing logs on a busy host) — a name disappearing is the
+# signal that matters; new names appearing is normal background activity.
+HOST_PRIVATE_TMP_NAMES_BEFORE="$TMP_ROOT/host-private-tmp-names-before.txt"
+HOST_PRIVATE_TMP_NAMES_AFTER="$TMP_ROOT/host-private-tmp-names-after.txt"
+ls -1 /private/tmp 2>/dev/null | sort > "$HOST_PRIVATE_TMP_NAMES_BEFORE" || true
+
 OUT9="$TMP_ROOT/pressure.out"
 if run_capture "$OUT9" env -i HOME="$TMP_ROOT/home-ps" \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=10 \
   DISK_MAGICIAN_STATE_DIR="$PS_STATE" \
   DISK_MAGICIAN_PRESSURE_LOG="$PS_LOG" \
+  DISK_MAGICIAN_TEST_SANDBOX="$PS_SANDBOX" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PS_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PS_TMP" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$PS_USER_TMP" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$PS_ARCHIVE_ROOT" \
+  DISK_MAGICIAN_DELETION_LOG="$PS_DELETION_LOG" \
+  LARGE_TMP_MIN_KB=100 \
   PATH="/usr/bin:/bin" bash "$REPO_ROOT/scripts/pressure_sweep.sh"; then
   RC9=0
 else RC9=$?; fi
@@ -626,6 +674,35 @@ assert_rc "pressure_sweep triggered path exits 0" 0 "$RC9"
 OUT9_CONTENT=$(cat "$OUT9")
 assert_contains "pressure_sweep logs --large" "cleanup_tmp.sh --clean --large" "$OUT9_CONTENT"
 assert_contains "pressure_sweep invokes cleanup_tmp step" "cleanup_tmp.sh" "$OUT9_CONTENT"
+assert_missing "stale large fixture dir archived out of the private-tmp fixture" "$PS_PRIVATE_TMP/stale_large_dir"
+assert_exists "stale large fixture dir landed in the fixture archive root" "$PS_ARCHIVE_ROOT"
+assert_exists "persistent deletion log was written to the fixture path" "$PS_DELETION_LOG"
+assert_contains "deletion log records the archived fixture path" "$PS_PRIVATE_TMP/stale_large_dir" "$(cat "$PS_DELETION_LOG" 2>/dev/null || true)"
+
+ls -1 /private/tmp 2>/dev/null | sort > "$HOST_PRIVATE_TMP_NAMES_AFTER" || true
+REMOVED_HOST_ENTRIES="$(comm -23 "$HOST_PRIVATE_TMP_NAMES_BEFORE" "$HOST_PRIVATE_TMP_NAMES_AFTER" || true)"
+if [[ -z "$REMOVED_HOST_ENTRIES" ]]; then
+  record_pass "no real top-level /private/tmp entry disappeared during the confined pressure_sweep run"
+else
+  record_fail "no real top-level /private/tmp entry disappeared during the confined pressure_sweep run" "removed: $REMOVED_HOST_ENTRIES"
+fi
+
+echo "Test 9b: sandbox_guard_roots aborts cleanup_tmp.sh --clean --large before any deletion when a root is outside DISK_MAGICIAN_TEST_SANDBOX"
+UNRELATED_SANDBOX="$TMP_ROOT/pressure-unrelated-sandbox"
+mkdir -p "$UNRELATED_SANDBOX"
+OUT9B="$TMP_ROOT/pressure-abort.out"
+if run_capture "$OUT9B" env -i HOME="$TMP_ROOT/home-ps-abort" \
+  DISK_MAGICIAN_TEST_SANDBOX="$UNRELATED_SANDBOX" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PS_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PS_TMP" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$PS_USER_TMP" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$PS_ARCHIVE_ROOT" \
+  LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
+  PATH="/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --large; then
+  RC9B=0
+else RC9B=$?; fi
+assert_rc "cleanup_tmp.sh aborts with rc=90 when a root is outside DISK_MAGICIAN_TEST_SANDBOX" 90 "$RC9B"
+assert_contains "abort message names sandbox_guard_roots" "sandbox_guard_roots" "$(cat "$OUT9B")"
 
 echo "Test 10: cleanup_colima trims through the proven active backend without an implicit restart"
 COLIMA_HOME=$(mktemp -d /tmp/dm-colima.XXXXXX)
