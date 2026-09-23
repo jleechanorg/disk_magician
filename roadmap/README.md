@@ -1,6 +1,7 @@
 # disk_magician roadmap
 
 ## Recent activity (by day)
+- [2026-09-22](activity/2026-09-22.md)
 
 - [2026-09-13](activity/2026-09-13.md) — Merged harness PR #68 (snapshot path, ledger freshness alerts, floor gates); beads qon/tli closed; ledger table still stale pending 4y6/zyn.
 - [2026-09-01](activity/2026-09-01.md) — FDA attribution hardening, fresh partial snapshot, secure root-runner blocker, and machine-specific catalog audit.
