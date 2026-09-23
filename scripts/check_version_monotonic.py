@@ -327,7 +327,8 @@ def find_historical_versions(repo_dir: Path, target_refs: list[str] | None = Non
     """Find all historical version strings from git tags, branch heads, and log diffs."""
     versions: Set[str] = set()
     versions.update(get_git_tags(repo_dir))
-    versions.update(get_git_branch_versions(repo_dir))
+    # No named branch tips (main/master/origin/*): the base's first-parent log
+    # already includes its tip, and any other branch may be unmerged.
     versions.update(get_git_log_versions(repo_dir, target_refs=target_refs))
     return versions
 

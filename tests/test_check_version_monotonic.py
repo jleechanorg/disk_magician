@@ -272,6 +272,25 @@ class TestGitHistoryMonotonicIntegration(unittest.TestCase):
         self.assertTrue(passed, f"main must PASS despite unmerged branch carrying 9.9.9: {msg}")
         self.assertNotIn("9.9.9", msg)
 
+    def test_unmerged_named_master_branch_higher_version_passes(self):
+        """Codex /advice round 3: branch tips named main/master/origin/master
+        were read unconditionally, so an unmerged `master` re-created the
+        original false red under a different branch name."""
+        self._write_pyproject("1.0.0")
+        self._commit("v1 on main")
+        self._add_origin_remote()
+        for branch in ("master", "origin-master-mirror"):
+            subprocess.run([GIT, "-C", str(self.repo), "checkout", "-b", branch], check=True, capture_output=True)
+            self._write_pyproject("9.9.9")
+            self._commit(f"9.9.9 on unmerged {branch}")
+            subprocess.run([GIT, "-C", str(self.repo), "push", "-u", "origin", branch], check=True, capture_output=True)
+            subprocess.run([GIT, "-C", str(self.repo), "checkout", "main"], check=True, capture_output=True)
+        subprocess.run([GIT, "-C", str(self.repo), "fetch", "-q", "origin"], check=True, capture_output=True)
+
+        passed, msg = run_check(repo_dir=self.repo)
+        self.assertTrue(passed, f"main must PASS despite unmerged master carrying 9.9.9: {msg}")
+        self.assertNotIn("9.9.9", msg)
+
     def test_main_history_regression_via_origin_fails(self):
         """A real regression against origin/main's own history must still
         FAIL -- the fix narrows the scan to the base's first-parent history
