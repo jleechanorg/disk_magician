@@ -42,12 +42,27 @@ scratch_roots_get_user_tmp() {
   fi
 }
 
+# scratch_roots_get_private_tmp / scratch_roots_get_tmp — the two static
+# scratch roots, each with a test-only override env var (same pattern as
+# DARWIN_USER_TEMP_DIR above). Production (env unset) behavior is unchanged:
+# literal /private/tmp and /tmp. Added for bead disk_magician-ka4: before
+# this, cleanup_tmp.sh's --large branch hardcoded `find /private/tmp`
+# directly with no override, so no test could confine it to a fixture
+# without PATH-shimming `find` itself.
+scratch_roots_get_private_tmp() {
+  local root="${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}"
+  [[ -d "$root" ]] && echo "$root"
+}
+
+scratch_roots_get_tmp() {
+  local root="${DISK_MAGICIAN_TMP_ROOT_OVERRIDE:-/tmp}"
+  [[ -d "$root" ]] && echo "$root"
+}
+
 # scratch_roots_get — one canonical root per line.
 scratch_roots_get() {
-  local root
-  for root in /private/tmp /tmp; do
-    [[ -d "$root" ]] && echo "$root"
-  done
+  scratch_roots_get_private_tmp
+  scratch_roots_get_tmp
   scratch_roots_get_user_tmp
 }
 

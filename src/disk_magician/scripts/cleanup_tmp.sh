@@ -43,7 +43,7 @@ LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
 LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
-ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-/private/tmp/_disk_magician_archive}"
+ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
 # Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
 # / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
 # this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
@@ -198,6 +198,18 @@ done < <(scratch_roots_get_unique)
 # branch below, which existed before scratch_roots.sh and predates the
 # root-list unification.
 USER_TMP="$(scratch_roots_get_user_tmp)"
+# PRIVATE_TMP_ROOT is consumed directly (not via TMP_DIRS) by the --large
+# branch below, which scans/archives top-level /private/tmp dirs separately
+# from the small-file loop above. Overridable via
+# DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE (scripts/lib/scratch_roots.sh) so
+# tests can confine --large to a fixture root instead of hardcoding
+# `find /private/tmp` (bead disk_magician-ka4).
+PRIVATE_TMP_ROOT="$(scratch_roots_get_private_tmp)"
+
+# Hard production guard (bead disk_magician-ka4): abort before any deletion
+# if DISK_MAGICIAN_TEST_SANDBOX is set and any resolved root falls outside
+# it. No-op in production (env unset).
+sandbox_guard_roots "${TMP_DIRS[@]:-}" "$ARCHIVE_ROOT" "${USER_TMP:-}" "${PRIVATE_TMP_ROOT:-}"
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
@@ -219,6 +231,7 @@ remove_path() {
       echo "SAFETY-SKIP "$path" ($_safety_reason)"
     else
       rm -rf "$path"
+      deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
     fi
   fi
   echo "$kb"
@@ -349,6 +362,7 @@ archive_path() {
     mkdir -p "$dest"
     log "Archiving: $path -> $dest/  (${kb} KB)"
     mv "$path" "$dest/"
+    deletion_log "cleanup_tmp.sh" "archive" "$kb" "$path -> $dest/"
   fi
   echo "$kb"
 }
@@ -391,6 +405,7 @@ purge_aged_archives() {
       else
         log "Purging over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h, activity guards bypassed): $d  (${kb} KB)"
         rm -rf "$d"
+        deletion_log "cleanup_tmp.sh" "purge_archive_overcap" "$kb" "$d"
       fi
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -416,6 +431,7 @@ purge_aged_archives() {
     else
       log "Purging aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
       rm -rf "$d"
+      deletion_log "cleanup_tmp.sh" "purge_archive" "$kb" "$d"
     fi
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -464,6 +480,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
         echo "SAFETY-SKIP "$f" ($_safety_reason)"
       else
         rm -f "$f"
+        deletion_log "cleanup_tmp.sh" "remove" "$local_kb" "$f"
       fi
     fi
     TOTAL_KB=$(( TOTAL_KB + local_kb ))
@@ -614,6 +631,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
             echo "SAFETY-SKIP "$f" ($_safety_reason)"
           else
             rm -f "$f"
+            deletion_log "cleanup_tmp.sh" "remove_dylib" 0 "$f"
           fi
           dylib_deleted=$(( dylib_deleted + 1 ))
         fi
@@ -630,8 +648,13 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
   fi
 fi
 
-if [[ "$INCLUDE_LARGE" == true ]]; then
-  log "Scanning /private/tmp for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
+if [[ "$INCLUDE_LARGE" == true && -z "$PRIVATE_TMP_ROOT" ]]; then
+  # Fail closed (bead disk_magician-ka4): an unresolvable private-tmp root
+  # (e.g. DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE pointing at a dir that
+  # doesn't exist) must never silently fall back to the real /private/tmp.
+  log "Skipping --large scan: private-tmp root is unavailable (resolution failed closed)"
+elif [[ "$INCLUDE_LARGE" == true ]]; then
+  log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
   while IFS= read -r -d '' d; do
     base="$(basename "$d")"
 
@@ -693,7 +716,7 @@ if [[ "$INCLUDE_LARGE" == true ]]; then
     archive_path "$d" "$kb" >/dev/null
     ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
     DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
-  done < <(find /private/tmp -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+  done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 
 # Always purge aged archives if the archive directory exists, regardless of --large.

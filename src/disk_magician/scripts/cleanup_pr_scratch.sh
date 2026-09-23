@@ -254,6 +254,11 @@ if [[ ${#TMP_DIRS[@]} -gt 0 ]]; then
   done
 fi
 
+# Hard production guard (bead disk_magician-ka4): abort before any deletion
+# if DISK_MAGICIAN_TEST_SANDBOX is set and any resolved root falls outside
+# it. No-op in production (env unset).
+sandbox_guard_roots "${CANONICAL_TMP_DIRS[@]:-}"
+
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
@@ -471,6 +476,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -f "$item" 2>/dev/null; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))
@@ -484,6 +490,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -rf "$item" 2>/dev/null; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))
@@ -493,6 +500,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -f "$item" 2>/dev/null; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))

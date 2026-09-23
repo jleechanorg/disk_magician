@@ -98,6 +98,11 @@ scratch_budget_evict_root() {
   local root="$1" budget_kb="$2" floor_minutes="$3"
   [[ -d "$root" ]] || return 0
 
+  # Hard production guard (bead disk_magician-ka4): abort before any
+  # deletion if DISK_MAGICIAN_TEST_SANDBOX is set and this root falls
+  # outside it. No-op in production (env unset).
+  sandbox_guard_roots "$root"
+
   if ! [[ "$budget_kb" =~ ^[0-9]+$ ]] || (( budget_kb <= 0 )); then
     return 0
   fi
@@ -195,6 +200,7 @@ scratch_budget_evict_root() {
           continue
         fi
       fi
+      deletion_log "$(basename "${0:-scratch_budget}")" "evict_budget" "$kb_i" "$item_i"
     fi
 
     freed_kb=$(( freed_kb + kb_i ))

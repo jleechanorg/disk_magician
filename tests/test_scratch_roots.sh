@@ -98,6 +98,33 @@ else
   record_fail "Test5: scratch_roots_get_unique dedups repeated root" "expected exactly 1 occurrence of /private/tmp, got $count_private_tmp"
 fi
 
+# --- Test 6: DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE / _TMP_ROOT_OVERRIDE ---
+# Bead disk_magician-ka4: before this, cleanup_tmp.sh's --large branch
+# hardcoded `find /private/tmp` directly with no override, so no test could
+# confine it to a fixture without PATH-shimming `find` itself.
+FAKE_PRIVATE_TMP="$TMP_TEST_ROOT/fake-private-tmp"
+FAKE_TMP="$TMP_TEST_ROOT/fake-tmp"
+mkdir -p "$FAKE_PRIVATE_TMP" "$FAKE_TMP"
+out="$(bash -c "source '$LIB'; DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE='$FAKE_PRIVATE_TMP' DISK_MAGICIAN_TMP_ROOT_OVERRIDE='$FAKE_TMP' scratch_roots_get_unique")"
+assert_contains "Test6: private-tmp override root included" "$FAKE_PRIVATE_TMP" "$out"
+assert_contains "Test6: tmp override root included" "$FAKE_TMP" "$out"
+if grep -qFx '/private/tmp' <<<"$out"; then
+  record_fail "Test6: real /private/tmp not returned when overridden" "found literal /private/tmp line in: $out"
+else
+  record_pass "Test6: real /private/tmp not returned when overridden"
+fi
+
+# --- Test 7: unresolvable override fails closed (no fallback to real root) --
+# A nonexistent override dir must be silently skipped, NEVER fall back to
+# the real /private/tmp or /tmp (that fallback would silently defeat any
+# test-sandbox confinement built on top of these getters).
+out="$(bash -c "source '$LIB'; DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE='$TMP_TEST_ROOT/does-not-exist-priv' scratch_roots_get_private_tmp" || true)"
+assert_eq_empty() {
+  local name="$1" actual="$2"
+  if [[ -z "$actual" ]]; then record_pass "$name"; else record_fail "$name" "expected empty output, got: $actual"; fi
+}
+assert_eq_empty "Test7: unresolvable private-tmp override yields nothing (fails closed, no fallback)" "$out"
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"

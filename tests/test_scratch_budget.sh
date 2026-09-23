@@ -21,6 +21,10 @@
 # 7. is_protected_root-matched candidates are preserved.
 # 8. Dry-run mode reports what would be evicted without deleting.
 # 9. Floor is clamped to a 60-minute minimum even if the caller passes less.
+# 10. Every real eviction appends a persistent deletion-log line (bead
+#     disk_magician-ka4).
+# 11. DISK_MAGICIAN_TEST_SANDBOX set + root outside it aborts before any
+#     deletion (bead disk_magician-ka4).
 #
 # Run: bash tests/test_scratch_budget.sh
 set -euo pipefail
@@ -30,6 +34,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TMP_TEST_ROOT="$(mktemp -d -t test_scratch_budget.XXXXXX)"
 trap 'chmod -R u+w "$TMP_TEST_ROOT" 2>/dev/null || true; rm -rf "$TMP_TEST_ROOT"' EXIT
+
+# Persistent-deletion-log fixture (bead disk_magician-ka4): every real test
+# invocation below points DISK_MAGICIAN_DELETION_LOG at this fixture file so
+# no test run ever writes to the real ~/Library/Logs/disk-magician-deletions.log.
+DELETION_LOG_FIXTURE="$TMP_TEST_ROOT/deletions.log"
 
 PASS=0
 FAIL=0
@@ -50,6 +59,15 @@ assert_missing() {
 assert_eq() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$actual" == "$expected" ]]; then record_pass "$name"; else record_fail "$name" "expected '$expected', got '$actual'"; fi
+}
+
+assert_contains() {
+  local name="$1" needle="$2" haystack="$3"
+  if grep -qF "$needle" <<<"$haystack"; then
+    record_pass "$name"
+  else
+    record_fail "$name" "expected output to contain: $needle"
+  fi
 }
 
 # make_kb_file <path> <kb> — a file of exactly <kb> KiB.
@@ -73,13 +91,20 @@ set_age_minutes() {
   touch -t "$stamp" "$path"
 }
 
-# run_budget <root> <budget_kb> <floor_minutes> <open_pred_basename|-> <protected_root_basename|-> <lsof_fails|0/1> <dry_run|true/false>
+# run_budget <root> <budget_kb> <floor_minutes> <open_pred_basename|-> <protected_root_basename|-> <lsof_fails|0/1> <dry_run|true/false> [test_sandbox_dir]
 # Prints "dirs=<n> files=<n> kb=<n>" then the remaining root listing.
+# DISK_MAGICIAN_DELETION_LOG always points at the fixture log (never the
+# real ~/Library/Logs path). [test_sandbox_dir], when given, sets
+# DISK_MAGICIAN_TEST_SANDBOX so the production sandbox_guard_roots() abort
+# can be exercised (bead disk_magician-ka4 acceptance criteria).
 run_budget() {
   local root="$1" budget_kb="$2" floor_minutes="$3" open_base="$4" protected_base="$5" lsof_fails="$6" dry_run="$7"
+  local sandbox_dir="${8:-}"
   DM_ROOT="$root" DM_BUDGET_KB="$budget_kb" DM_FLOOR_MIN="$floor_minutes" \
   DM_OPEN_BASE="$open_base" DM_PROTECTED_BASE="$protected_base" DM_LSOF_FAILS="$lsof_fails" \
-  DM_DRY_RUN="$dry_run" bash -c '
+  DM_DRY_RUN="$dry_run" \
+  DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
+  DISK_MAGICIAN_TEST_SANDBOX="$sandbox_dir" bash -c '
     set -euo pipefail
     source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
     source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
@@ -201,6 +226,49 @@ set_age_minutes "$R9/almostfresh/f" 30
 result="$(run_budget "$R9" 1024 0 - - 0 false)"
 assert_eq "Test9: 0-minute floor request clamps to 60min (30min-old item survives)" "dirs=0 files=0 kb=0" "$result"
 assert_exists "Test9: 30min-old item survives the clamped 60min floor" "$R9/almostfresh"
+
+# ===================== Test 10: persistent deletion log =====================
+# Test 2's eviction of $R2/old above already ran with DISK_MAGICIAN_DELETION_LOG
+# pointed at the fixture; verify the audit line actually landed (bead
+# disk_magician-ka4 acceptance criteria: every real removal is logged
+# independent of the caller's own stdout/stderr).
+if [[ -f "$DELETION_LOG_FIXTURE" ]]; then
+  record_pass "Test10: deletion log fixture file was created"
+else
+  record_fail "Test10: deletion log fixture file was created" "expected $DELETION_LOG_FIXTURE to exist"
+fi
+DELETION_LOG_CONTENT="$(cat "$DELETION_LOG_FIXTURE" 2>/dev/null || true)"
+assert_contains "Test10: deletion log records evicted path" "$R2/old" "$DELETION_LOG_CONTENT"
+assert_contains "Test10: deletion log records evict_budget action" "evict_budget" "$DELETION_LOG_CONTENT"
+# Tab-separated: ts<TAB>script<TAB>action<TAB>kb<TAB>path
+if awk -F'\t' -v needle="$R2/old" '$0 ~ needle && NF == 5 {found=1} END{exit !found}' "$DELETION_LOG_FIXTURE"; then
+  record_pass "Test10: deletion log line has 5 tab-separated fields"
+else
+  record_fail "Test10: deletion log line has 5 tab-separated fields" "expected a 5-field TSV line for $R2/old"
+fi
+
+# ===================== Test 11: sandbox_guard_roots aborts outside sandbox =====================
+# Bead disk_magician-ka4 acceptance criteria: when DISK_MAGICIAN_TEST_SANDBOX
+# is set, scratch_budget_evict_root must abort BEFORE any deletion if the
+# root resolves outside the sandbox — this is the mechanical backstop for
+# the 2026-09-22 incident (a real run deleted host /private/tmp + $TMPDIR
+# content because no such check existed).
+R11="$TMP_TEST_ROOT/t11"
+make_kb_file "$R11/old/f" 4096
+set_age_hours "$R11/old/f" 10
+UNRELATED_SANDBOX="$TMP_TEST_ROOT/unrelated-sandbox"
+mkdir -p "$UNRELATED_SANDBOX"
+set +e
+result11="$(run_budget "$R11" 1024 120 - - 0 false "$UNRELATED_SANDBOX" 2>&1)"
+rc11=$?
+set -e
+if [[ "$rc11" -eq 90 ]]; then
+  record_pass "Test11: sandbox_guard_roots aborts with rc=90 when root is outside sandbox"
+else
+  record_fail "Test11: sandbox_guard_roots aborts with rc=90 when root is outside sandbox" "expected rc=90, got rc=$rc11: $result11"
+fi
+assert_contains "Test11: abort message names the offending root" "$R11" "$result11"
+assert_exists "Test11: candidate untouched by the aborted run" "$R11/old"
 
 echo ""
 echo "===================================="
