@@ -24,6 +24,7 @@ CHECK_ONLY=false
 PATTERNS=(
   "disk_magician.sh"
   "config.json.template"
+  "config/*.txt"
   "scripts/*.sh"
   "scripts/*.py"
   "scripts/lib/*.sh"
