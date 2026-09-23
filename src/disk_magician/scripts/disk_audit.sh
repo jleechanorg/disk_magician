@@ -54,6 +54,7 @@ SNAP_CACHE=""
 SNAP_REASON=""
 SNAP_STALE_WARN=""
 SNAP_PARTIAL_WARN=""
+SNAP_SWAP_USED_GB=""
 
 _cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; return 0; }
 trap _cleanup_snap EXIT
@@ -74,6 +75,8 @@ except Exception:
 cov  = s.get("snapshot_coverage_pct", "")
 warn = s.get("snapshot_warning", "") or ""
 ts   = s.get("timestamp", "") or ""
+# Additive (bead disk_magician-8to); absent on pre-swap-tracking snapshots.
+swap_used_gb = s.get("swap_used_gb", "")
 # snapshot_metadata is the new top-level block (Lane B Section C).
 # Fall back to old fields for backward compat with pre-metadata
 # snapshots — that's the whole point of additive JSON changes.
@@ -95,7 +98,7 @@ try:
     age_min = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
 except Exception:
     pass
-print(f"OK\t{cov}\t{age_min}\t{warn}\t{age_sec}\t{status}")
+print(f"OK\t{cov}\t{age_min}\t{warn}\t{age_sec}\t{status}\t{swap_used_gb}")
 PY
 )
     local _status _warn
@@ -104,7 +107,7 @@ PY
     # so we cannot rely on positional reads when the 4th field
     # (snapshot_warning) is empty. awk preserves every column.
     eval "$(printf '%s' "$meta" | awk -F'\t' '{
-        printf("_status=%s\nSNAP_COVERAGE=%s\nSNAP_AGE_MIN=%s\n_warn=%s\nSNAP_AGE_SEC=%s\nSNAP_STATUS=%s\n", $1, $2, $3, $4, $5, $6)
+        printf("_status=%s\nSNAP_COVERAGE=%s\nSNAP_AGE_MIN=%s\n_warn=%s\nSNAP_AGE_SEC=%s\nSNAP_STATUS=%s\nSNAP_SWAP_USED_GB=%s\n", $1, $2, $3, $4, $5, $6, $7)
     }')"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
@@ -235,6 +238,13 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 fi
 
+# Swap warning (bead disk_magician-8to): a large swapfile is disk space
+# consumed outside the Data volume that disk_used_gb/du never account for.
+if [[ "$SNAP_USABLE" == true && -n "$SNAP_SWAP_USED_GB" ]] && \
+   awk -v v="$SNAP_SWAP_USED_GB" 'BEGIN{exit !(v+0 > 10)}'; then
+    echo "  ⚠️  Swap used: ${SNAP_SWAP_USED_GB} GiB (>10 GiB) — disk space consumed outside the Data volume (vm.swapusage)"
+fi
+
 # ── 2. Largest directories ───────────────────────────────────────────────────
 # The default three-lane orchestrator already provides the bounded top-down
 # partition, so it suppresses this older aggregate view to avoid reintroducing
@@ -273,6 +283,14 @@ fi
 if [[ "$SHOW_HISTORY" == true && -f "$SCRIPT_DIR/disk_history.sh" ]]; then
     section "Recent growth (last 7 days, regressions only)"
     "$SCRIPT_DIR/disk_history.sh" --days 7 --regressions || true
+fi
+
+# ── 3b. Uncovered sweeper roots (bead disk_magician-8to) ────────────────────
+# >=5 GiB directories (from existing discover/frontier data, no fresh du)
+# that no registered cleanup sweeper owns — see config/sweeper_roots.txt.
+if [[ -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
+    section "Uncovered Sweeper Roots (>=5 GiB, no registered cleanup owner)"
+    "$SCRIPT_DIR/check_uncovered_roots.sh" || true
 fi
 
 # ── 4. Actionable Cleanup Candidates ─────────────────────────────────────────

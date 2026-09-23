@@ -190,6 +190,43 @@ get_disk_stats() {
   }'
 }
 
+# ────────── SWAP / VM VOLUME (bead disk_magician-8to) ──────────
+# Swap and the hidden /System/Volumes/VM volume consume real disk space
+# outside the "Data volume" df accounting that disk_used_gb above is
+# computed from — a large swapfile can silently eat tens of GiB that never
+# show up in the primary floor/bucket accounting. Prints "<total_mb>
+# <used_mb>"; tolerates a missing/non-darwin sysctl by printing "0 0".
+get_swap_stats() {
+  if [[ "$OSTYPE" != "darwin"* ]] || ! command -v sysctl &>/dev/null; then
+    echo "0 0"
+    return
+  fi
+  sysctl vm.swapusage 2>/dev/null | awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "total" && $(i+1) == "=") { tot = $(i+2) }
+        if ($i == "used"  && $(i+1) == "=") { usd = $(i+2) }
+      }
+    }
+    END {
+      gsub(/M/, "", tot); gsub(/M/, "", usd)
+      if (tot == "") tot = 0
+      if (usd == "") usd = 0
+      printf "%s %s", tot, usd
+    }'
+}
+
+# /System/Volumes/VM backs the macOS swapfile(s) and sleepimage on modern
+# APFS layouts. Reports used KB; 0 when unmeasurable (non-darwin, or the
+# volume isn't mounted/visible).
+get_vm_volume_used_kb() {
+  local kb=""
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    kb=$(df -k /System/Volumes/VM 2>/dev/null | awk 'NR==2{print $3+0}')
+  fi
+  echo "${kb:-0}"
+}
+
 # ────────── DISCOVER MODE ──────────
 if [[ "$DISCOVER" == true ]]; then
   if [[ "$DISCOVER_JSON" != true ]]; then
@@ -403,6 +440,15 @@ MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECON
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
 disk_used_gb=$(awk "BEGIN{printf \"%.0f\", $disk_used_kb / 1024 / 1024}")
 disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
+
+# Additive swap/VM-volume accounting (bead disk_magician-8to). Never blocks
+# or slows the snapshot — both helpers are cheap (sysctl/df) and default to
+# "0 0" / 0 on any failure.
+read -r swap_total_mb swap_used_mb <<< "$(get_swap_stats)"
+swap_total_gb=$(awk "BEGIN{printf \"%.2f\", (${swap_total_mb:-0} + 0) / 1024}")
+swap_used_gb=$(awk "BEGIN{printf \"%.2f\", (${swap_used_mb:-0} + 0) / 1024}")
+vm_volume_used_kb=$(get_vm_volume_used_kb)
+vm_volume_used_gb=$(awk "BEGIN{printf \"%.2f\", (${vm_volume_used_kb:-0} + 0) / 1024 / 1024}")
 
 tracked_total_kb=0
 timeout_keys=()
@@ -922,6 +968,9 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_DISK_USED="$disk_used_gb" \
   SNAP_DISK_FREE="$disk_free_gb" \
   SNAP_DISK_PCT="$disk_pct" \
+  SNAP_SWAP_TOTAL_GB="$swap_total_gb" \
+  SNAP_SWAP_USED_GB="$swap_used_gb" \
+  SNAP_VM_VOLUME_USED_GB="$vm_volume_used_gb" \
   SNAP_COVERAGE_PCT="$coverage_pct" \
   SNAP_COVERAGE_PCT_RAW_V1="$coverage_pct_raw_v1" \
   SNAP_TRACKED_TOTAL_KB_RAW="$tracked_total_kb" \
@@ -956,6 +1005,12 @@ try:
         "disk_used_gb": int(os.environ.get("SNAP_DISK_USED") or 0),
         "disk_free_gb": int(os.environ.get("SNAP_DISK_FREE") or 0),
         "disk_pct": int(os.environ.get("SNAP_DISK_PCT") or 0),
+        # Additive (bead disk_magician-8to): swap + /System/Volumes/VM
+        # consume disk space outside the "Data volume" df accounting above.
+        # Readers must tolerate these keys being absent on older snapshots.
+        "swap_total_gb": float(os.environ.get("SNAP_SWAP_TOTAL_GB") or 0.0),
+        "swap_used_gb": float(os.environ.get("SNAP_SWAP_USED_GB") or 0.0),
+        "vm_volume_used_gb": float(os.environ.get("SNAP_VM_VOLUME_USED_GB") or 0.0),
         "snapshot_coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
         "residual_kb": int(os.environ.get("SNAP_RESIDUAL_KB") or 0),
         "residual_gb": float(os.environ.get("SNAP_RESIDUAL_GB") or 0.0),
