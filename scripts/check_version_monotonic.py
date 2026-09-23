@@ -177,7 +177,8 @@ def get_git_tags(repo_dir: Path) -> Set[str]:
                 line = line.strip()
                 if not line:
                     continue
-                m = re.search(r"(?:^|v)?(\d+(?:\.\d+)*(?:[a-zA-Z0-9\.\-\+]+)?)", line)
+                # Whole-name version tags only (v0.2.115); "evidence-pr-69" is not a version.
+                m = re.fullmatch(r"[vV]?(\d+(?:\.\d+)+(?:[-+.]?[0-9A-Za-z.]+)?)", line)
                 if m:
                     candidate = m.group(1)
                     try:

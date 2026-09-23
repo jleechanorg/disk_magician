@@ -229,6 +229,17 @@ class TestGitHistoryMonotonicIntegration(unittest.TestCase):
         self.assertIn("Version regression detected", msg)
         self.assertIn("0.3.0", msg)
 
+    def test_non_version_tags_are_ignored(self):
+        # Real repo tag from PR #69's evidence release parsed as version "69".
+        self._write_pyproject("0.2.100")
+        self._commit("v1")
+        for tag in ("evidence-pr-69", "release-2026-09-23", "pr70-backup"):
+            subprocess.run([GIT, "-C", str(self.repo), "tag", tag], check=True)
+
+        self.assertEqual(get_git_tags(self.repo), set())
+        passed, msg = run_check(repo_dir=self.repo)
+        self.assertTrue(passed, msg)
+
     def _add_origin_remote(self):
         """Wire up a bare 'origin' remote and push main, so the base-ref
         detection in get_base_ref() has a real origin/main to resolve."""
