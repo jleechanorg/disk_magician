@@ -118,7 +118,19 @@ while IFS= read -r -d '' candidate; do
   candidate_identity=$(path_identity "$candidate") || continue
   CANDIDATES[${#CANDIDATES[@]}]="$candidate"
   CANDIDATE_IDENTITIES[${#CANDIDATE_IDENTITIES[@]}]="$candidate_identity"
-done < <(find -P "$X_DIR" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
+done < <(
+  # A long-running app (e.g. Chrome) accumulates one code_sign_clone.XXXX per
+  # relaunch under its *.code_sign_clone parent while keeping only one mapped;
+  # judge each child separately so unmapped siblings are reclaimable.
+  find -P "$X_DIR" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null |
+    while IFS= read -r -d '' parent; do
+      if find -P "$parent" -mindepth 1 -maxdepth 1 -type d -name 'code_sign_clone.*' -print -quit 2>/dev/null | grep -q .; then
+        find -P "$parent" -mindepth 1 -maxdepth 1 -type d -name 'code_sign_clone.*' -print0 2>/dev/null
+      else
+        printf '%s\0' "$parent"
+      fi
+    done || true
+)
 
 DIRS_REMOVED=0
 TOTAL_KB=0
@@ -134,7 +146,8 @@ for i in "${!CANDIDATES[@]}"; do
   current_identity=$(path_identity "$d" 2>/dev/null || true)
   if [[ -z "$current_identity" || "$current_identity" != "$frozen_identity" \
         || "${current_identity##*:}" != "$CURRENT_UID" \
-        || -L "$d" || "$(dirname "$d")" != "$X_DIR" ]]; then
+        || -L "$d" || -L "$(dirname "$d")" \
+        || ( "$(dirname "$d")" != "$X_DIR" && "$(dirname "$(dirname "$d")")" != "$X_DIR" ) ]]; then
     log "Unsafe candidate ownership or identity changed — preserving: $d"
     continue
   fi
@@ -176,6 +189,7 @@ for i in "${!CANDIDATES[@]}"; do
     log "Removing: $d  (${kb} KB)"
     if ! _safety_reason="$(safety_gate "$d" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$d" ($_safety_reason)"
+      continue
     else
       rm -rf "$d"
     fi

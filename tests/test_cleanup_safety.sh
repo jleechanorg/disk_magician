@@ -430,6 +430,26 @@ assert_contains "active code_sign_clone reports owner process" \
   "pid=4242 command=AsideBrowser" "$(cat "$OUT8_ACTIVE")"
 assert_exists "active code_sign_clone with spaces is preserved" "$CSC_ACTIVE"
 
+# Long-running app: per-launch children under one parent; only the mapped child survives.
+CSC_NESTED="$TMP_ROOT/csc-nested"
+CSC_NESTED_PARENT="$CSC_NESTED/X/com.google.Chrome.code_sign_clone"
+mkdir -p "$CSC_NESTED/T" "$CSC_NESTED_PARENT/code_sign_clone.INUSE" "$CSC_NESTED_PARENT/code_sign_clone.STALE"
+CSC_NESTED="$(cd "$CSC_NESTED" && pwd -P)"
+CSC_NESTED_PARENT="$CSC_NESTED/X/com.google.Chrome.code_sign_clone"
+head -c 200000 /dev/zero > "$CSC_NESTED_PARENT/code_sign_clone.INUSE/blob"
+head -c 200000 /dev/zero > "$CSC_NESTED_PARENT/code_sign_clone.STALE/blob"
+OUT8_NESTED="$TMP_ROOT/csc-nested.out"
+if run_capture "$OUT8_NESTED" env -i HOME="$TMP_ROOT/home-csc" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_NESTED/T" \
+  FAKE_LSOF_ACTIVE="$CSC_NESTED_PARENT/code_sign_clone.INUSE" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_NESTED=0
+else RC8_NESTED=$?; fi
+assert_rc "nested code_sign_clone clean exits 0" 0 "$RC8_NESTED"
+assert_exists "mapped per-launch clone is preserved" "$CSC_NESTED_PARENT/code_sign_clone.INUSE/blob"
+assert_missing "unmapped per-launch clone is removed while sibling is in use" "$CSC_NESTED_PARENT/code_sign_clone.STALE"
+
 OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
 if run_capture "$OUT8_NO_LSOF" env -i HOME="$TMP_ROOT/home-csc" \
   FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 \
