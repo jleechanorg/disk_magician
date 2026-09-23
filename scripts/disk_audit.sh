@@ -464,6 +464,15 @@ if [[ "$MODE" == "clean" ]]; then
         fi
     fi
 
+    # ~/.claude/state per-task work dirs (Tier 6: Claude state, bead disk_magician-isw)
+    if [[ -f "$SCRIPT_DIR/cleanup_claude_state.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
+            echo "  Claude state (>=7d dormant): skipped (requires CLAUDE_STATE_APPROVED=1)"
+        else
+            run_category "Claude state (>=7d dormant)" "$SCRIPT_DIR/cleanup_claude_state.sh" $clean_arg
+        fi
+    fi
+
     # Run LLM Inspector Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
         run_category "LLM inspector" "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg
