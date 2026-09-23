@@ -450,6 +450,41 @@ assert_rc "nested code_sign_clone clean exits 0" 0 "$RC8_NESTED"
 assert_exists "mapped per-launch clone is preserved" "$CSC_NESTED_PARENT/code_sign_clone.INUSE/blob"
 assert_missing "unmapped per-launch clone is removed while sibling is in use" "$CSC_NESTED_PARENT/code_sign_clone.STALE"
 
+# SAFETY-SKIP must not be counted toward Dirs removed / Total freed. Uses a
+# dedicated HOME so this fixture's safety.local.json (protecting the stale
+# per-launch child) never leaks into the other code_sign_clone fixtures above.
+CSC_SKIP_HOME="$TMP_ROOT/home-csc-safety"
+CSC_SKIP="$TMP_ROOT/csc-safety-skip"
+CSC_SKIP_PARENT="$CSC_SKIP/X/com.google.Chrome.code_sign_clone"
+mkdir -p "$CSC_SKIP/T" "$CSC_SKIP_PARENT/code_sign_clone.INUSE" \
+  "$CSC_SKIP_PARENT/code_sign_clone.STALE" "$CSC_SKIP_HOME/.config/disk-magician"
+CSC_SKIP="$(cd "$CSC_SKIP" && pwd -P)"
+CSC_SKIP_PARENT="$CSC_SKIP/X/com.google.Chrome.code_sign_clone"
+head -c 200000 /dev/zero > "$CSC_SKIP_PARENT/code_sign_clone.INUSE/blob"
+head -c 200000 /dev/zero > "$CSC_SKIP_PARENT/code_sign_clone.STALE/blob"
+cat > "$CSC_SKIP_HOME/.config/disk-magician/safety.local.json" <<EOF
+{
+  "never_delete": [
+    {"path": "$CSC_SKIP_PARENT/code_sign_clone.STALE", "reason": "regression fixture"}
+  ]
+}
+EOF
+OUT8_SKIP="$TMP_ROOT/csc-safety-skip.out"
+if run_capture "$OUT8_SKIP" env -i HOME="$CSC_SKIP_HOME" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_SKIP/T" \
+  FAKE_LSOF_ACTIVE="$CSC_SKIP_PARENT/code_sign_clone.INUSE" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_SKIP=0
+else RC8_SKIP=$?; fi
+assert_rc "safety-skipped code_sign_clone clean exits 0" 0 "$RC8_SKIP"
+assert_contains "safety-protected clone reports SAFETY-SKIP" \
+  "SAFETY-SKIP" "$(cat "$OUT8_SKIP")"
+assert_exists "safety-protected per-launch clone is preserved" \
+  "$CSC_SKIP_PARENT/code_sign_clone.STALE/blob"
+assert_contains "SAFETY-SKIP is not counted toward dirs removed or freed" \
+  "Done. Dirs removed: 0  Total freed: 0 KB" "$(cat "$OUT8_SKIP")"
+
 OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
 if run_capture "$OUT8_NO_LSOF" env -i HOME="$TMP_ROOT/home-csc" \
   FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 \
