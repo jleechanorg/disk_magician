@@ -66,8 +66,14 @@ TMP_SNAP=$(mktemp -t apfs_snap.XXXXXX)
 trap 'rm -f "$TMP_ACTIVE" "$TMP_SNAP"' EXIT
 
 if diskutil info -plist / > "$TMP_ACTIVE" 2>/dev/null; then
-  # `-o -` is mandatory: without it plutil overwrites the input file with the
-  # extracted value, so the second extract would read a one-line raw string.
+  # `-o -` is required defense-in-depth: `plutil -extract <key> <fmt> <file>`
+  # without `-o` overwrites `<file>` with the extracted value for compound
+  # formats (json/xml1) — reproduced on 2026-09-23, see
+  # findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md.
+  # `raw` scalar extraction (used here) was independently tested on macOS
+  # 15.5/24F74 and did NOT overwrite the file even without `-o` — but the
+  # flag is free and matches the general hazard class, so keep it regardless
+  # of format or macOS version.
   ACTIVE_SNAPSHOT_NAME=$(/usr/bin/plutil -extract APFSSnapshotName raw -o - "$TMP_ACTIVE" 2>/dev/null || true)
   ACTIVE_DEV_NODE=$(/usr/bin/plutil -extract DeviceNode raw -o - "$TMP_ACTIVE" 2>/dev/null || true)
 fi
