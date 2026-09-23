@@ -27,12 +27,17 @@ class TestCleanupPrScratch(unittest.TestCase):
     def _backdate(self, path: Path):
         for root, dirs, files in os.walk(path):
             for d in dirs:
-                p = Path(root) / d
-                os.utime(p, (self.old_time, self.old_time))
+                self._utime_if_present(Path(root) / d)
             for f in files:
-                p = Path(root) / f
-                os.utime(p, (self.old_time, self.old_time))
+                self._utime_if_present(Path(root) / f)
         os.utime(path, (self.old_time, self.old_time))
+
+    def _utime_if_present(self, p: Path):
+        # git can drop transient files (e.g. .git/objects/maintenance.lock) mid-walk.
+        try:
+            os.utime(p, (self.old_time, self.old_time))
+        except FileNotFoundError:
+            pass
 
     def _run_script(self, args, env_extra=None):
         env = os.environ.copy()
@@ -158,6 +163,9 @@ class TestCleanupPrScratch(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(git_dir)], check=True)
         subprocess.run(["git", "-C", str(git_dir), "config", "user.name", "Test User"], check=True)
         subprocess.run(["git", "-C", str(git_dir), "config", "user.email", "jleechan2015@users.noreply.github.com"], check=True)
+        # Background auto-maintenance rewrites .git after _backdate (bead disk_magician-949).
+        subprocess.run(["git", "-C", str(git_dir), "config", "maintenance.auto", "false"], check=True)
+        subprocess.run(["git", "-C", str(git_dir), "config", "gc.auto", "0"], check=True)
 
         (git_dir / "file.txt").write_text("initial")
         subprocess.run(["git", "-C", str(git_dir), "add", "file.txt"], check=True)
