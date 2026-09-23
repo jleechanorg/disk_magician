@@ -11,6 +11,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_safety.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
+# shellcheck source=scripts/lib/scratch_budget.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -104,9 +108,15 @@ DRY_RUN=true
 INCLUDE_LARGE=false
 INCLUDE_OPENCODE_DYLIBS=false
 LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
+# Size-budget mode (bead disk_magician-d45): 0 disables. Env default lets
+# pressure_sweep.sh and launchd jobs enable it without a CLI edit.
+BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
+# Hard floor (minutes): never evict anything younger than this, regardless
+# of budget pressure. Default 2h; clamped to a 1h minimum in scratch_budget.sh.
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
 
 Delete stale agent git clones and temp files from system temp paths.
 
@@ -116,6 +126,16 @@ Options:
   --large      Include top-level /private/tmp dirs larger than LARGE_TMP_MIN_KB
   --opencode-dylibs
                Include closed OpenCode libopentui dylibs in DARWIN_USER_TEMP_DIR
+  --budget-gb N
+               Size-budget eviction: when a scratch root (see
+               scripts/lib/scratch_roots.sh) exceeds N GiB of matched
+               candidates, evict oldest-first (by content mtime) until
+               under budget. 0 disables (default; env
+               DISK_MAGICIAN_SCRATCH_BUDGET_GB).
+  --budget-floor-minutes N
+               Never evict anything younger than N minutes under budget
+               mode (default 120, hard minimum 60; env
+               DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help   Show this help
 EOF
 }
@@ -126,11 +146,36 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true ;;
     --large)   INCLUDE_LARGE=true ;;
     --opencode-dylibs) INCLUDE_OPENCODE_DYLIBS=true ;;
+    --budget-gb)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --budget-gb requires a numeric argument" >&2
+        exit 2
+      fi
+      BUDGET_GB="$2"; shift
+      ;;
+    --budget-gb=*) BUDGET_GB="${1#*=}" ;;
+    --budget-floor-minutes)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --budget-floor-minutes requires a numeric argument" >&2
+        exit 2
+      fi
+      BUDGET_FLOOR_MINUTES="$2"; shift
+      ;;
+    --budget-floor-minutes=*) BUDGET_FLOOR_MINUTES="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+
+if ! [[ "$BUDGET_GB" =~ ^[0-9]+$ ]]; then
+  echo "Error: --budget-gb must be a non-negative integer, got '$BUDGET_GB'" >&2
+  exit 2
+fi
+if ! [[ "$BUDGET_FLOOR_MINUTES" =~ ^[0-9]+$ ]]; then
+  echo "Error: --budget-floor-minutes must be a non-negative integer, got '$BUDGET_FLOOR_MINUTES'" >&2
+  exit 2
+fi
 
 if [[ "$INCLUDE_LARGE" == true && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0}" != "1" ]]; then
   echo "Refusing large /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." >&2
@@ -142,13 +187,17 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DY
   exit 0
 fi
 
-TMP_DIRS=("/private/tmp" "/tmp")
-# Add macOS user-specific temp dir if available
-USER_TMP=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
-if [[ -n "$USER_TMP" && -d "$USER_TMP" ]]; then
-  USER_TMP=$(cd "$USER_TMP" && pwd -P)
-  TMP_DIRS+=("$USER_TMP")
-fi
+# Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
+# canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
+# so the next scratch root only needs to be added in one place.
+TMP_DIRS=()
+while IFS= read -r _scratch_root; do
+  TMP_DIRS+=("$_scratch_root")
+done < <(scratch_roots_get_unique)
+# USER_TMP is consumed directly (not via TMP_DIRS) by the --opencode-dylibs
+# branch below, which existed before scratch_roots.sh and predates the
+# root-list unification.
+USER_TMP="$(scratch_roots_get_user_tmp)"
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
@@ -651,5 +700,21 @@ fi
 # This prevents _disk_magician_archive quarantine from accumulating indefinitely
 # when standard/regular cleanup_tmp.sh runs occur without --large.
 purge_aged_archives
+
+# Size-budget mode (bead disk_magician-d45): evicts oldest-first,
+# independent of the 24h/4h age gates above, so 0-24h scratch growth is no
+# longer structurally invisible to every sweeper. Runs last so the normal
+# age-based passes above get first crack at reclaiming space cheaply.
+BUDGET_DIRS_DELETED=0
+BUDGET_FILES_DELETED=0
+BUDGET_KB_FREED=0
+if [[ "$BUDGET_GB" -gt 0 ]]; then
+  BUDGET_KB=$(( BUDGET_GB * 1024 * 1024 ))
+  for tmp_dir in "${TMP_DIRS[@]}"; do
+    [[ -d "$tmp_dir" ]] || continue
+    scratch_budget_evict_root "$tmp_dir" "$BUDGET_KB" "$BUDGET_FLOOR_MINUTES"
+  done
+  log "$(dry_prefix)Budget mode done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Total freed: ${BUDGET_KB_FREED} KB"
+fi
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Dirs archived: ${DIRS_ARCHIVED}  Total archived: ${ARCHIVED_KB} KB"
