@@ -14,6 +14,9 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "check_uncovered_roots.py")
 
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+import check_uncovered_roots as cur_module  # noqa: E402
+
 GIB_KB = 1024 * 1024
 
 
@@ -172,20 +175,28 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         result = self._run_json()
         self.assertEqual(result["uncovered"], [])  # no crash, just no data
 
-    def test_never_delete_paths_classified_protected_not_uncovered(self):
+    def test_path_equal_or_under_never_delete_is_protected(self):
         # Reproduces the PR #72 review finding at 4e15d24: ~/.codex/sessions/...
         # and ~/.claude/projects printed as UNCOVERED, identical wording to a
         # real gap like /Applications. Both are on the real, committed
-        # safety.local.json.template never_delete list — classify_protected()
-        # cross-checks against it via the real scripts/safety_check.sh (HOME
-        # overridden to this fixture home, so it resolves to the committed
-        # template rather than this machine's real ~/.config override).
-        codex_sessions_sub = os.path.join(self.home, ".codex", "sessions", "2026", "08")
+        # safety.local.json.template never_delete list. classify_path_protection
+        # is loaded from that same file (HOME overridden to this fixture home,
+        # so it resolves to the committed template rather than this machine's
+        # real ~/.config override) — case (a): equal-to-or-under only.
+        #
+        # The codex-sessions bucket is placed one level DEEPER than the
+        # "~/.codex/sessions*" glob boundary (.../sessions/2026/08) on
+        # purpose: fnmatch's "*" absorbs the remaining path, so the walk
+        # classifies the *ancestor* ".../sessions" as the direct match and
+        # stops drilling there — the review-finding fix's whole point is
+        # that this reports the boundary, not a fragment two levels deeper.
+        codex_sessions_leaf = os.path.join(self.home, ".codex", "sessions", "2026", "08")
+        codex_sessions_boundary = os.path.join(self.home, ".codex", "sessions")
         claude_projects = os.path.join(self.home, ".claude", "projects")
         real_gap = os.path.join(self.home, "Applications")
         write_json(self.snapshot, {
             "granularity_buckets": [
-                {"path": codex_sessions_sub, "measured_kb": 20 * GIB_KB},
+                {"path": codex_sessions_leaf, "measured_kb": 20 * GIB_KB},
                 {"path": claude_projects, "measured_kb": 6 * GIB_KB},
                 {"path": real_gap, "measured_kb": 25 * GIB_KB},
             ],
@@ -199,9 +210,12 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         self.assertIn(real_gap, uncovered_paths)
         self.assertNotIn(real_gap, protected_paths)
 
-        for p in (codex_sessions_sub, claude_projects):
+        for p in (codex_sessions_boundary, claude_projects):
             self.assertIn(p, protected_paths, f"{p} should be PROTECTED")
             self.assertNotIn(p, uncovered_paths, f"{p} must not also appear as UNCOVERED")
+        self.assertNotIn(codex_sessions_leaf, protected_paths + uncovered_paths,
+                          "the fragment below the never_delete boundary must not be "
+                          "reported separately — the boundary node covers it")
 
         for e in result["protected"]:
             self.assertIn("never_delete", e["reason"])
@@ -213,9 +227,109 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         ])
         self.assertEqual(text_proc.returncode, 0, text_proc.stderr)
         self.assertIn("PROTECTED (never-delete, no sweeper by policy):", text_proc.stdout)
-        self.assertNotIn(f"UNCOVERED: {codex_sessions_sub}", text_proc.stdout)
+        self.assertNotIn(f"UNCOVERED: {codex_sessions_boundary}", text_proc.stdout)
         self.assertNotIn(f"UNCOVERED: {claude_projects}", text_proc.stdout)
         self.assertIn(f"UNCOVERED: {real_gap}", text_proc.stdout)
+
+    def test_ancestor_containing_never_delete_child_is_not_protected(self):
+        # PR #72 round-2 review finding at 81315fc: a directory that merely
+        # CONTAINS a never_delete path (but isn't itself equal to/under one)
+        # was wrongly reported PROTECTED. ~/.hermes/state.db* is a real
+        # never_delete literal in the committed template; make it small
+        # enough that it can't be isolated as its own >=threshold child, so
+        # the parent falls into the leaf-reporting remainder path.
+        # Every child stays individually below the 5 GiB threshold (so none
+        # of them can be isolated as its own drilled "big child") while the
+        # parent's combined total clears it — this is what forces the
+        # leaf-reporting remainder fallback at the PARENT level instead of
+        # the walk simply recursing into a big protected child on its own.
+        parent = os.path.join(self.home, ".hermes")
+        protected_child = os.path.join(parent, "state.db")   # matches never_delete
+        plain_child_a = os.path.join(parent, "other_state_a")
+        plain_child_b = os.path.join(parent, "other_state_b")
+        write_json(self.snapshot, {
+            "granularity_buckets": [
+                {"path": protected_child, "measured_kb": 2 * GIB_KB},
+                {"path": plain_child_a, "measured_kb": 4 * GIB_KB},
+                {"path": plain_child_b, "measured_kb": 4 * GIB_KB},
+            ],
+        })
+        open(self.registry, "w").close()
+
+        result = self._run_json()
+        protected_paths = [e["path"] for e in result["protected"]]
+        self.assertNotIn(parent, protected_paths,
+                          "a directory that only CONTAINS a never_delete path must "
+                          "not itself be PROTECTED")
+        self.assertNotIn(protected_child, protected_paths,
+                          "the protected child is too small to isolate on its own "
+                          "and must not be fabricated as its own PROTECTED entry")
+
+        contains = [e for e in result["uncovered"] if e["path"] == parent]
+        self.assertEqual(len(contains), 1, f"expected exactly one entry for {parent}: "
+                          f"{result['uncovered']}")
+        entry = contains[0]
+        self.assertEqual(entry["label"], "CONTAINS-PROTECTED")
+        # 10 GiB total minus the 2 GiB never_delete child == 8 GiB remainder.
+        self.assertAlmostEqual(entry["size_kb"], 8 * GIB_KB, delta=1)
+        self.assertIn("never_delete", entry["note"])
+
+    def test_needs_decision_path_is_labelled_needs_decision(self):
+        # Case (c): needs_decision is not never-delete — it gets its own
+        # label and still counts as an unswept gap. ~/.openclaw/repo-backups
+        # is a real needs_decision entry in the committed template.
+        nd_path = os.path.join(self.home, ".openclaw", "repo-backups")
+        write_json(self.snapshot, {
+            "granularity_buckets": [
+                {"path": nd_path, "measured_kb": 8 * GIB_KB},
+            ],
+        })
+        open(self.registry, "w").close()
+
+        result = self._run_json()
+        nd_paths = [e["path"] for e in result["needs_decision"]]
+        self.assertIn(nd_path, nd_paths)
+        self.assertNotIn(nd_path, [e["path"] for e in result["protected"]])
+        self.assertNotIn(nd_path, [e["path"] for e in result["uncovered"]])
+        entry = next(e for e in result["needs_decision"] if e["path"] == nd_path)
+        self.assertIn("needs_decision", entry["reason"])
+
+        text_proc = run([
+            "--snapshot", self.snapshot, "--discover", self.discover,
+            "--registry", self.registry, "--home", self.home, "--darwin-tmp", "",
+        ])
+        self.assertIn("NEEDS-DECISION (operator):", text_proc.stdout)
+        self.assertNotIn("PROTECTED (never-delete", text_proc.stdout)
+
+    def test_matches_real_safety_check_sh(self):
+        # Cross-validation guard against the in-process port
+        # (classify_path_protection) drifting from the real
+        # scripts/safety_check.sh / safety_lib.sh it mirrors.
+        repo_root = REPO_ROOT
+        rules = cur_module.load_safety_rules(repo_root, self.home)
+        cases = [
+            os.path.join(self.home, ".codex", "sessions", "2026", "08"),  # under never_delete
+            os.path.join(self.home, ".claude", "projects"),               # exact never_delete
+            os.path.join(self.home, "projects_other"),                    # not protected at all
+            os.path.join(self.home, ".openclaw", "repo-backups"),         # needs_decision
+        ]
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        safety_check = os.path.join(repo_root, "scripts", "safety_check.sh")
+        proc = subprocess.run(["bash", safety_check] + cases, capture_output=True,
+                               text=True, timeout=30, check=False, env=env)
+        real_protected = set()
+        for line in proc.stdout.splitlines():
+            if line.startswith("PROTECTED  "):
+                real_protected.add(line[len("PROTECTED  "):].split("  ", 1)[0])
+        for case in cases:
+            direct_hits, _descendant_hits = cur_module.classify_path_protection(case, rules, self.home)
+            mine_protected = bool(direct_hits)
+            self.assertEqual(
+                mine_protected, case in real_protected,
+                f"classify_path_protection disagrees with safety_check.sh for {case}: "
+                f"mine={mine_protected} real={case in real_protected}",
+            )
 
     def test_colima_registry_narrowed_to_actual_sweeper_subpaths(self):
         # bead disk_magician-ka4 review finding: a bare $HOME/.colima entry

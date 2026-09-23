@@ -18,13 +18,27 @@ coverage instead of literal absence of children.
 A directory with no sweeper is not automatically a gap: some paths
 (~/.codex/sessions, ~/.claude/projects, ...) are intentionally never swept
 by policy — this repo's never-delete list, in safety.local.json /
-safety.local.json.template. Rather than duplicating that list here, the
-result set is cross-checked against it via the existing scripts/safety_check.sh
-(reuses safety_lib.sh's never_delete/protected_live_paths/needs_decision
-matching verbatim). Matches are reported as PROTECTED, not UNCOVERED, so
-this tool never implies a policy-protected directory needs a new sweeper.
+safety.local.json.template. The tree walk is protection-aware (see
+classify_path_protection, ported from safety_lib.sh's safety_is_protected()
+matching — cross-validated against the real scripts/safety_check.sh by
+tests/test_check_uncovered_roots.py::test_matches_real_safety_check_sh
+rather than shelled out to per-node, which would be too slow during a
+recursive walk):
+  - a directory that itself EQUALS or sits UNDER a never_delete /
+    protected_live_paths rule is reported once as PROTECTED and never
+    drilled into — the whole subtree is off-limits by policy.
+  - under a needs_decision rule the same way, reported as NEEDS-DECISION —
+    an operator call, not a permanent policy exclusion, but still an
+    unswept gap worth surfacing under its own label.
+  - a directory that merely CONTAINS one of those paths somewhere inside
+    it (but isn't itself covered by a direct match) keeps drilling
+    normally; only when the contained path is too small to form its own
+    reportable child does it fall back to CONTAINS-PROTECTED /
+    CONTAINS-NEEDS-DECISION, sized as the directory's total minus whatever
+    is attributable to the excluded prefix. Never silently dropped.
 """
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -180,83 +194,218 @@ def pick_direct_kb(snapshot_path, discover_path, max_age_hours):
     return {}, "none"
 
 
-def find_uncovered(node, roots, threshold_kb, path_stack=None, out=None):
+SAFETY_SECTIONS = ("never_delete", "protected_live_paths", "needs_decision")
+PROTECTED_SECTIONS = ("never_delete", "protected_live_paths")
+
+
+def _safety_canon(raw, home):
+    """Mirror safety_lib.sh's canon(): expand a leading '~' via `home` (not
+    the process's real $HOME, so callers/tests can point safety patterns at
+    a fixture tree), expand $VARS, normpath, and strip the
+    /System/Volumes/Data firmlink prefix — same normalization
+    scripts/safety_lib.sh applies to both the candidate and the pattern."""
+    path = raw
+    if path == "~":
+        path = home
+    elif path.startswith("~/"):
+        path = home + path[1:]
+    path = os.path.expandvars(path)
+    path = os.path.normpath(path)
+    if path.startswith(drb.DATA_VOLUME_PREFIX + "/"):
+        path = path[len(drb.DATA_VOLUME_PREFIX):]
+    return path
+
+
+def load_safety_rules(repo_root, home):
+    """Load never_delete/protected_live_paths/needs_decision rules from the
+    same file scripts/safety_lib.sh's safety_file_in_use() resolves:
+    <repo-root>/safety.local.json (dev override) -> ~/.config/disk-magician/
+    safety.local.json (canonical machine-local file, under `home`) -> the
+    committed safety.local.json.template. Returns {section: [(pattern,
+    reason), ...]}. Missing/unreadable file yields empty rules for every
+    section — everything just stays UNCOVERED, which is the correct fail
+    mode here (the opposite of safety_lib.sh's own fail-CLOSED default for
+    actual deletions: a missing safety file must never fabricate a PROTECTED
+    verdict this tool then teaches people to ignore)."""
+    empty = {s: [] for s in SAFETY_SECTIONS}
+    for candidate in (
+        os.path.join(repo_root, "safety.local.json"),
+        os.path.join(home, ".config", "disk-magician", "safety.local.json"),
+        os.path.join(repo_root, "safety.local.json.template"),
+    ):
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            return empty
+        rules = {}
+        for section in SAFETY_SECTIONS:
+            entries = []
+            for item in cfg.get(section) or []:
+                if isinstance(item, str):
+                    entries.append((item, ""))
+                elif isinstance(item, dict) and item.get("path"):
+                    entries.append((item["path"], item.get("reason", "")))
+            rules[section] = entries
+        return rules
+    return empty
+
+
+def classify_path_protection(full, rules, home):
+    """Mirror scripts/safety_lib.sh's safety_is_protected() matching for a
+    single already-normalized absolute path (no Data-volume prefix).
+    Returns (direct_hits, descendant_hits), each a list of
+    (section, pattern, reason):
+      direct_hits      — `full` equals or is a descendant of the pattern
+                          (the pattern is an ancestor-or-self match of
+                          `full` via fnmatch against every ancestor,
+                          including `full` itself)
+      descendant_hits   — the pattern's fixed (non-glob) prefix lives
+                          INSIDE `full` (`full` is an ancestor of the
+                          protected path, not the protected path itself)
+    Ported to run in-process rather than shelling out to
+    scripts/safety_check.sh per node — this is called once per node visited
+    during a recursive tree walk, and a subprocess per node does not scale.
+    Cross-validated against the real scripts/safety_check.sh by
+    tests/test_check_uncovered_roots.py::test_matches_real_safety_check_sh.
+    """
+    parts = [p for p in full.rstrip("/").split("/") if p]
+    ancestors = ["/" + "/".join(parts[: i + 1]) for i in range(len(parts))] or ["/"]
+    target = full.rstrip("/")
+
+    direct_hits, descendant_hits = [], []
+    for section, entries in rules.items():
+        for raw, reason in entries:
+            pat = _safety_canon(raw, home)
+            if any(fnmatch.fnmatch(a, pat) for a in ancestors):
+                direct_hits.append((section, raw, reason))
+                continue
+            literal = pat.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0].rstrip("/")
+            if literal and (literal == target or literal.startswith(target + "/")):
+                descendant_hits.append((section, raw, reason))
+    return direct_hits, descendant_hits
+
+
+def _format_reason(section, raw, reason):
+    note = f" ({reason})" if reason else ""
+    return f"{section}: {raw}{note}"
+
+
+def _excluded_kb(direct_kb, full, hits, home):
+    """Sum direct_kb entries under `full` whose path is covered by one of
+    `hits`' canonicalized literal (non-glob) prefixes — mirrors
+    safety_lib.sh's own literal-prefix `startswith` check (same imprecision
+    on purpose: this must classify a path identically to
+    `scripts/safety_check.sh <path>`, not a stricter reimplementation)."""
+    literals = set()
+    for section, raw, _reason in hits:
+        pat = _safety_canon(raw, home)
+        literal = pat.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0].rstrip("/")
+        if literal:
+            literals.add(literal)
+    if not literals:
+        return 0
+    target = full.rstrip("/")
+    total = 0
+    for p, kb in direct_kb.items():
+        if not (p == target or p.startswith(target + "/")):
+            continue
+        if any(p == lit or p.startswith(lit) for lit in literals):
+            total += kb
+    return total
+
+
+def find_uncovered(node, roots, threshold_kb, rules, home, direct_kb,
+                    path_stack=None, uncovered_out=None, protected_out=None,
+                    needs_decision_out=None):
     """Drill from the tree root down to the smallest >=threshold_kb subtree
-    that is not covered by any registered sweeper root. Mirrors
+    that is not covered by a registered sweeper root (config/sweeper_roots.txt)
+    nor by this repo's never-delete/protected-live-path/needs-decision
+    policy (safety.local.json). See the module docstring for the full
+    PROTECTED / NEEDS-DECISION / CONTAINS-* classification rules. Mirrors
     disk_report_breakdown.find_opaque_leaves' recursion, but the stop
-    condition is "no >=threshold child AND not covered" instead of "no
-    children at all"."""
-    if out is None:
-        out = []
+    condition is "no >=threshold child AND not covered/protected" instead
+    of "no children at all".
+
+    Returns (uncovered_out, protected_out, needs_decision_out). Entries in
+    uncovered_out carry a "label" of "UNCOVERED", "CONTAINS-PROTECTED", or
+    "CONTAINS-NEEDS-DECISION" (the latter two also carry a "note" naming
+    what was excluded and why); protected_out/needs_decision_out entries
+    carry a "reason" naming the matched safety.local.json rule.
+    """
+    if uncovered_out is None:
+        uncovered_out, protected_out, needs_decision_out = [], [], []
     path_stack = path_stack or []
     full = drb.full_path(path_stack)
     total = drb.subtree_kb(node)
     if total < threshold_kb:
-        return out
+        return uncovered_out, protected_out, needs_decision_out
     if is_covered(full, roots):
-        return out
+        return uncovered_out, protected_out, needs_decision_out
+
+    direct_hits, descendant_hits = classify_path_protection(full, rules, home)
+
+    protected_direct = [h for h in direct_hits if h[0] in PROTECTED_SECTIONS]
+    if protected_direct:
+        section, raw, reason = protected_direct[0]
+        protected_out.append({
+            "path": full, "size_kb": total,
+            "reason": _format_reason(section, raw, reason),
+        })
+        return uncovered_out, protected_out, needs_decision_out
+
+    nd_direct = [h for h in direct_hits if h[0] == "needs_decision"]
+    if nd_direct:
+        section, raw, reason = nd_direct[0]
+        needs_decision_out.append({
+            "path": full, "size_kb": total,
+            "reason": _format_reason(section, raw, reason),
+        })
+        return uncovered_out, protected_out, needs_decision_out
+
     big_children = [
         (name, child) for name, child in node.children.items()
         if drb.subtree_kb(child) >= threshold_kb
     ]
-    if not big_children:
-        out.append({"path": full, "size_kb": total})
-        return out
-    for name, child in big_children:
-        find_uncovered(child, roots, threshold_kb, path_stack + [name], out)
-    return out
+    if big_children:
+        for name, child in big_children:
+            find_uncovered(child, roots, threshold_kb, rules, home, direct_kb,
+                            path_stack + [name], uncovered_out, protected_out,
+                            needs_decision_out)
+        return uncovered_out, protected_out, needs_decision_out
 
+    # Leaf-reporting case (no child alone reaches the threshold): if this
+    # node merely CONTAINS a protected/needs-decision path too small to
+    # isolate on its own, report the remainder instead of silently either
+    # calling the whole thing UNCOVERED or PROTECTED.
+    protected_descendants = [h for h in descendant_hits if h[0] in PROTECTED_SECTIONS]
+    if protected_descendants:
+        excluded = _excluded_kb(direct_kb, full, protected_descendants, home)
+        remainder = total - excluded
+        if remainder >= threshold_kb:
+            reasons = "; ".join(_format_reason(*h) for h in protected_descendants)
+            uncovered_out.append({
+                "path": full, "size_kb": remainder, "label": "CONTAINS-PROTECTED",
+                "note": f"excludes {round(excluded / GIB_KB, 1)} GiB under: {reasons}",
+            })
+        return uncovered_out, protected_out, needs_decision_out
 
-def classify_protected(entries, repo_root, home):
-    """Split `entries` into (still_uncovered, protected) using the existing
-    scripts/safety_check.sh — reused verbatim rather than re-implementing
-    never_delete/protected_live_paths/needs_decision glob+ancestor matching
-    here, so this stays in sync with the one machine-local safety source of
-    truth (safety.local.json, falling back to the committed
-    safety.local.json.template — see safety_lib.sh's resolution order).
+    nd_descendants = [h for h in descendant_hits if h[0] == "needs_decision"]
+    if nd_descendants:
+        excluded = _excluded_kb(direct_kb, full, nd_descendants, home)
+        remainder = total - excluded
+        if remainder >= threshold_kb:
+            reasons = "; ".join(_format_reason(*h) for h in nd_descendants)
+            uncovered_out.append({
+                "path": full, "size_kb": remainder, "label": "CONTAINS-NEEDS-DECISION",
+                "note": f"excludes {round(excluded / GIB_KB, 1)} GiB under: {reasons}",
+            })
+        return uncovered_out, protected_out, needs_decision_out
 
-    `home` is passed through as the subprocess's HOME env var so tests can
-    point safety_check.sh's `~`-relative patterns at a fixture tree (same
-    override this module already uses for $HOME registry-token expansion);
-    production callers pass the real $HOME, which is a no-op override.
-
-    Fails open on any error running safety_check.sh (missing script,
-    timeout, non-JSON-parseable output): nothing is reclassified as
-    protected, matching this tool's overall "never fabricate coverage"
-    posture — a broken safety check must not silently hide real gaps."""
-    if not entries:
-        return [], []
-    safety_check = os.path.join(repo_root, "scripts", "safety_check.sh")
-    if not os.path.exists(safety_check):
-        return entries, []
-    paths = [e["path"] for e in entries]
-    env = dict(os.environ)
-    env["HOME"] = home
-    try:
-        proc = subprocess.run(
-            ["bash", safety_check] + paths,
-            capture_output=True, text=True, timeout=30, check=False, env=env,
-        )
-    except Exception:
-        return entries, []
-    reasons = {}
-    for line in proc.stdout.splitlines():
-        if not line.startswith("PROTECTED  "):
-            continue
-        rest = line[len("PROTECTED  "):]
-        parts = rest.split("  ", 1)
-        path = parts[0]
-        reason = parts[1] if len(parts) > 1 else ""
-        reasons[path] = reason
-    still_uncovered, protected = [], []
-    for e in entries:
-        if e["path"] in reasons:
-            pe = dict(e)
-            pe["reason"] = reasons[e["path"]]
-            protected.append(pe)
-        else:
-            still_uncovered.append(e)
-    return still_uncovered, protected
+    uncovered_out.append({"path": full, "size_kb": total, "label": "UNCOVERED"})
+    return uncovered_out, protected_out, needs_decision_out
 
 
 def main(argv=None):
@@ -293,45 +442,51 @@ def main(argv=None):
     home = args.home or os.path.expanduser("~")
 
     roots = load_registry(args.registry, home=home, darwin_tmp=darwin_tmp)
+    rules = load_safety_rules(repo_root, home)
     direct_kb, source = pick_direct_kb(args.snapshot, args.discover, args.max_age_hours)
 
+    empty_result = {"source": source, "threshold_gib": args.threshold_gib,
+                     "uncovered": [], "protected": [], "needs_decision": []}
     if not direct_kb:
-        result = {"source": source, "threshold_gib": args.threshold_gib,
-                   "uncovered": [], "protected": []}
         if args.json:
-            print(json.dumps(result, indent=2))
+            print(json.dumps(empty_result, indent=2))
         else:
             print("check_uncovered_roots: no frontier/discover data available — skipping "
                   "(run `disk_magician.sh discover` or wait for the frontier scan).")
         return 0
 
     root_node = drb.build_tree(direct_kb)
-    uncovered = find_uncovered(root_node, roots, threshold_kb)
-    for e in uncovered:
+    uncovered, protected, needs_decision = find_uncovered(
+        root_node, roots, threshold_kb, rules, home, direct_kb,
+    )
+    for e in uncovered + protected + needs_decision:
         e["size_gib"] = round(e["size_kb"] / GIB_KB, 1)
-    uncovered, protected = classify_protected(uncovered, repo_root, home)
     uncovered.sort(key=lambda e: e["size_kb"], reverse=True)
     protected.sort(key=lambda e: e["size_kb"], reverse=True)
+    needs_decision.sort(key=lambda e: e["size_kb"], reverse=True)
 
     if args.json:
         print(json.dumps(
             {"source": source, "threshold_gib": args.threshold_gib,
-             "uncovered": uncovered, "protected": protected},
+             "uncovered": uncovered, "protected": protected,
+             "needs_decision": needs_decision},
             indent=2,
         ))
         return 0
 
-    if not uncovered and not protected:
+    if not uncovered and not protected and not needs_decision:
         print(f"check_uncovered_roots: no uncovered >= {args.threshold_gib:g} GiB "
               f"directories found (source: {source}).")
         return 0
 
     if uncovered:
-        print(f"check_uncovered_roots: {len(uncovered)} UNCOVERED directory(ies) "
-              f">= {args.threshold_gib:g} GiB with no registered sweeper owner "
-              f"(source: {source}):")
+        print(f"check_uncovered_roots: {len(uncovered)} UNCOVERED/CONTAINS-* "
+              f"directory(ies) >= {args.threshold_gib:g} GiB with no registered "
+              f"sweeper owner (source: {source}):")
         for e in uncovered:
-            print(f"  UNCOVERED: {e['path']}  ({e['size_gib']} GiB)")
+            label = e.get("label", "UNCOVERED")
+            note = f"  — {e['note']}" if e.get("note") else ""
+            print(f"  {label}: {e['path']}  ({e['size_gib']} GiB){note}")
 
     if protected:
         print(f"check_uncovered_roots: {len(protected)} PROTECTED (never-delete, no "
@@ -339,6 +494,13 @@ def main(argv=None):
               f"(source: {source}):")
         for e in protected:
             print(f"  PROTECTED (never-delete, no sweeper by policy): {e['path']}  "
+                  f"({e['size_gib']} GiB)  — {e['reason']}")
+
+    if needs_decision:
+        print(f"check_uncovered_roots: {len(needs_decision)} NEEDS-DECISION (operator) "
+              f"directory(ies) >= {args.threshold_gib:g} GiB (source: {source}):")
+        for e in needs_decision:
+            print(f"  NEEDS-DECISION (operator): {e['path']}  "
                   f"({e['size_gib']} GiB)  — {e['reason']}")
     return 0
 
