@@ -42,6 +42,9 @@ class TestCleanupPrScratch(unittest.TestCase):
     def _run_script(self, args, env_extra=None):
         env = os.environ.copy()
         env.setdefault("DISK_MAGICIAN_SKIP_LSOF_CHECK", "1")
+        # Bead disk_magician-ka4: never let a real deletion during this test
+        # append to the developer's real ~/Library/Logs/disk-magician-deletions.log.
+        env.setdefault("DISK_MAGICIAN_DELETION_LOG", str(self.test_root / "deletions.log"))
         if env_extra:
             env.update(env_extra)
         cmd = ["bash", str(SCRIPT_PATH), "--tmp-dir", str(self.tmp_dir)] + args
@@ -245,6 +248,52 @@ class TestCleanupPrScratch(unittest.TestCase):
 
         res2 = self._run_script(["--min-age-hours", "not_a_number"])
         self.assertEqual(res2.returncode, 2)
+
+    def test_deletion_log_records_real_removal(self):
+        """Bead disk_magician-ka4: every real removal appends a persistent,
+        tab-separated audit line, independent of the caller's own stdout/
+        stderr redirection."""
+        d1 = self.tmp_dir / "pr-deletion-log-target"
+        d1.mkdir()
+        self._backdate(d1)
+
+        deletion_log = self.test_root / "deletions.log"
+        res = self._run_script(
+            ["--clean"],
+            env_extra={"DISK_MAGICIAN_DELETION_LOG": str(deletion_log)},
+        )
+        self.assertEqual(res.returncode, 0, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
+        self.assertFalse(d1.exists())
+        self.assertTrue(deletion_log.exists(), "deletion log file was not created")
+        content = deletion_log.read_text()
+        self.assertIn(str(d1), content)
+        self.assertIn("cleanup_pr_scratch.sh", content)
+        line = next(ln for ln in content.splitlines() if str(d1) in ln)
+        self.assertEqual(len(line.split("\t")), 5, f"expected 5 tab-separated fields, got: {line!r}")
+
+    def test_sandbox_guard_aborts_outside_sandbox(self):
+        """Bead disk_magician-ka4 acceptance criteria: when
+        DISK_MAGICIAN_TEST_SANDBOX is set, cleanup_pr_scratch.sh must abort
+        (exit non-zero, delete nothing) before any deletion if a resolved
+        root falls outside it — the mechanical backstop for the 2026-09-22
+        incident where a test run deleted real host /private/tmp + $TMPDIR
+        content because no such check existed."""
+        d1 = self.tmp_dir / "pr-sandbox-guard-target"
+        d1.mkdir()
+        self._backdate(d1)
+
+        unrelated_sandbox = self.test_root.parent / f"unrelated-sandbox-{os.getpid()}"
+        unrelated_sandbox.mkdir(exist_ok=True)
+        try:
+            res = self._run_script(
+                ["--clean"],
+                env_extra={"DISK_MAGICIAN_TEST_SANDBOX": str(unrelated_sandbox)},
+            )
+            self.assertEqual(res.returncode, 90, f"rc={res.returncode}\nstdout={res.stdout}\nstderr={res.stderr}")
+            self.assertIn("sandbox_guard_roots", res.stderr)
+            self.assertTrue(d1.exists(), "sandbox guard should abort before any deletion")
+        finally:
+            shutil.rmtree(unrelated_sandbox, ignore_errors=True)
 
 
 if __name__ == "__main__":

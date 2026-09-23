@@ -286,6 +286,60 @@ fi
 # shrink it below the dual-step worst case without a test failure.
 assert_contains "lock TTL is still 3600s (60min)" 'LOCK_TTL_SEC=3600' "$(cat "$SOURCE_SCRIPT")"
 
+echo "Test 12: DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=0 disables budget args"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
+  DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=0 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "budget-gb=0 still runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_not_contains "budget-gb=0 omits --budget-gb from the invocation" " --budget-gb" "$INVOCATIONS"
+
+echo "Test 12b: default (no DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB set) also omits --budget-gb"
+# Safety-critical default: unlike --large (archive, reversible), budget
+# mode does an immediate real rm -rf, so it must stay opt-in, not
+# opt-out -- an unconfigured pressure sweep must behave exactly like it
+# did before this feature existed.
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "unconfigured default still runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_not_contains "unconfigured default omits --budget-gb (opt-in only)" " --budget-gb" "$INVOCATIONS"
+
+echo "Test 13: custom DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB is passed through"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
+  DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=5 \
+  DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES=90 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  bash "$SCRIPT"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

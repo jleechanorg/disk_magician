@@ -39,6 +39,12 @@ TMP_TEST_ROOT=$(mktemp -d -t test_pr_scratch.XXXXXX)
 # PR #60 -- Codex).
 trap '(command -v chflags >/dev/null 2>&1 && chflags -R nouchg "$TMP_TEST_ROOT" 2>/dev/null) || true; rm -rf "$TMP_TEST_ROOT"' EXIT
 
+# Bead disk_magician-ka4: this file's invocations don't use `env -i`, so
+# they inherit the real ambient environment (including the real $HOME) —
+# without this, every real removal below would append to the developer's
+# real ~/Library/Logs/disk-magician-deletions.log.
+export DISK_MAGICIAN_DELETION_LOG="$TMP_TEST_ROOT/deletions.log"
+
 PASS=0
 FAIL=0
 
@@ -422,6 +428,40 @@ if [[ "$T14_DIR_PERMS_BEFORE" == "$T14_DIR_PERMS_AFTER" && "$T14_FILE_PERMS_BEFO
 else
   record_fail "T14: external target dir+file permissions unchanged" "dir was $T14_DIR_PERMS_BEFORE now $T14_DIR_PERMS_AFTER; file was $T14_FILE_PERMS_BEFORE now $T14_FILE_PERMS_AFTER"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 15: persistent deletion log records a real removal (bead disk_magician-ka4)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 15: Persistent Deletion Log Records Real Removal"
+T15_DIR="$TMP_TEST_ROOT/t15_tmp"
+mkdir -p "$T15_DIR/pr-deletion-log-target"
+set_old_mtime "$T15_DIR"
+T15_LOG="$TMP_TEST_ROOT/t15-deletions.log"
+DISK_MAGICIAN_DELETION_LOG="$T15_LOG" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T15_DIR" >/dev/null 2>&1
+assert_missing "T15: target actually removed" "$T15_DIR/pr-deletion-log-target"
+assert_exists "T15: deletion log file created" "$T15_LOG"
+T15_LOG_CONTENT="$(cat "$T15_LOG" 2>/dev/null || true)"
+assert_contains "T15: deletion log records removed path" "$T15_DIR/pr-deletion-log-target" "$T15_LOG_CONTENT"
+assert_contains "T15: deletion log records script name" "cleanup_pr_scratch.sh" "$T15_LOG_CONTENT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 16: sandbox_guard_roots aborts before any deletion when a root is
+# outside DISK_MAGICIAN_TEST_SANDBOX (bead disk_magician-ka4 acceptance
+# criteria — mechanical backstop for the 2026-09-22 incident).
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 16: sandbox_guard_roots Aborts Outside Sandbox"
+T16_DIR="$TMP_TEST_ROOT/t16_tmp"
+mkdir -p "$T16_DIR/pr-sandbox-guard-target"
+set_old_mtime "$T16_DIR"
+T16_UNRELATED_SANDBOX="$TMP_TEST_ROOT/t16-unrelated-sandbox"
+mkdir -p "$T16_UNRELATED_SANDBOX"
+set +e
+T16_OUT=$(DISK_MAGICIAN_TEST_SANDBOX="$T16_UNRELATED_SANDBOX" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T16_DIR" 2>&1)
+T16_RC=$?
+set -e
+assert_rc "T16: aborts with rc=90 when root is outside sandbox" 90 "$T16_RC"
+assert_contains "T16: abort message names sandbox_guard_roots" "sandbox_guard_roots" "$T16_OUT"
+assert_exists "T16: target untouched by the aborted run" "$T16_DIR/pr-sandbox-guard-target"
 
 echo
 echo "=== Test Results: $PASS pass, $FAIL fail ==="

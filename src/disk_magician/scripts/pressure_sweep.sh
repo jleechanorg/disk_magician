@@ -30,6 +30,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
+# Size-budget scratch eviction (bead disk_magician-d45): passed through to
+# cleanup_tmp.sh's --budget-gb so a pressure sweep reclaims young-but-stale
+# (0-24h) scratch that the 4h/24h age-only gates above structurally cannot
+# see. Default 0 (disabled): unlike --large (archive, reversible within its
+# retention window), budget mode does an immediate, permanent `rm -rf` on
+# every scratch root (/private/tmp, /tmp, DARWIN_USER_TEMP_DIR) once past a
+# 2h-minimum floor -- a materially more aggressive default than anything
+# else this script runs unattended. Same opt-in-gate pattern this repo
+# already uses for LARGE_TMP_APPROVED / WORKTREE_APPROVED: an operator (or
+# the launchd plist) sets DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB
+# explicitly to activate it.
+SCRATCH_BUDGET_GB="${DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB:-0}"
+SCRATCH_BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 LOCK_DIR="$STATE_DIR/pressure_sweep.lock"
 LOCK_TTL_SEC=3600
@@ -48,7 +61,10 @@ Usage: $(basename "$0") [--threshold-gb N] [--dry-run]
 Free-space-gated sweep: if free space (df /System/Volumes/Data) is >=
 --threshold-gb (default: ${THRESHOLD_GB}; env DISK_MAGICIAN_PRESSURE_THRESHOLD_GB),
 exit immediately (one log line, no work). Otherwise run, in order:
-  1. scripts/cleanup_tmp.sh --clean --large  (mtime + large /private/tmp; LARGE_TMP_APPROVED=1)
+  1. scripts/cleanup_tmp.sh --clean --large --budget-gb N (mtime + large
+     /private/tmp + size-budget eviction of young-but-stale scratch;
+     LARGE_TMP_APPROVED=1; budget default ${SCRATCH_BUDGET_GB} GiB, env
+     DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB, 0 disables)
   2. scripts/cleanup_colima.sh --clean (docker-prune semantics + fstrim)
 each under a ${STEP_TIMEOUT}s timeout, logging free-GB before/after to
 ${LOG_FILE}.
@@ -216,10 +232,14 @@ before_gb="$(free_gb)"
 log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
 pressure_active_hours="${LARGE_TMP_ACTIVE_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS:-4}}"
 pressure_archive_hours="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS:-4}}"
+tmp_step_extra_args=(--large)
+if [[ "$SCRATCH_BUDGET_GB" != "0" ]]; then
+  tmp_step_extra_args+=(--budget-gb "$SCRATCH_BUDGET_GB" --budget-floor-minutes "$SCRATCH_BUDGET_FLOOR_MINUTES")
+fi
 if [[ "$DRY_RUN" != true ]]; then
-  tmp_step=(env LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+  tmp_step=(env LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" "${tmp_step_extra_args[@]}")
 else
-  tmp_step=(env LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" --large)
+  tmp_step=(env LARGE_TMP_ACTIVE_HOURS="$pressure_active_hours" LARGE_TMP_ARCHIVE_RETENTION_HOURS="$pressure_archive_hours" "$REPO_ROOT/scripts/cleanup_tmp.sh" "$clean_flag" "${tmp_step_extra_args[@]}")
 fi
 if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"

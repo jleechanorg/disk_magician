@@ -10,6 +10,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_safety.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
+# shellcheck source=scripts/lib/scratch_budget.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -73,10 +77,13 @@ fi
 DRY_RUN=true
 CLI_TMP_DIRS=()
 CLI_PATTERNS=()
+# Size-budget mode (bead disk_magician-d45): 0 disables.
+BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean|--apply] [--dry-run] [--min-age-hours <N>] [--min-age-days <N>] [--tmp-dir <DIR>] [--pattern <PAT>] [-h|--help]
+Usage: $(basename "$0") [--clean|--apply] [--dry-run] [--min-age-hours <N>] [--min-age-days <N>] [--tmp-dir <DIR>] [--pattern <PAT>] [--budget-gb <N>] [--budget-floor-minutes <N>] [-h|--help]
 
 Clean up abandoned PR analyzer and scratch work directories in /private/tmp.
 
@@ -87,6 +94,13 @@ Options:
   --min-age-days <N>  Minimum age in days (converted to hours).
   --tmp-dir <DIR>     Add or specify custom temporary directory to scan.
   --pattern <PAT>     Add custom glob pattern to match (e.g. "pr9*", "claude-*").
+  --budget-gb <N>     Size-budget eviction: evict oldest-first once a root's
+                      matched candidates exceed N GiB. 0 disables (default;
+                      env DISK_MAGICIAN_SCRATCH_BUDGET_GB).
+  --budget-floor-minutes <N>
+                      Never evict anything younger than N minutes under
+                      budget mode (default 120, hard minimum 60; env
+                      DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help          Show this help message.
 EOF
 }
@@ -149,6 +163,30 @@ while [[ $# -gt 0 ]]; do
       CLI_PATTERNS+=("${1#*=}")
       shift
       ;;
+    --budget-gb)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --budget-gb requires a numeric argument" >&2
+        exit 2
+      fi
+      BUDGET_GB="$2"
+      shift 2
+      ;;
+    --budget-gb=*)
+      BUDGET_GB="${1#*=}"
+      shift
+      ;;
+    --budget-floor-minutes)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --budget-floor-minutes requires a numeric argument" >&2
+        exit 2
+      fi
+      BUDGET_FLOOR_MINUTES="$2"
+      shift 2
+      ;;
+    --budget-floor-minutes=*)
+      BUDGET_FLOOR_MINUTES="${1#*=}"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -160,6 +198,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if ! [[ "$BUDGET_GB" =~ ^[0-9]+$ ]]; then
+  echo "Error: --budget-gb must be a non-negative integer, got '$BUDGET_GB'" >&2
+  exit 2
+fi
+if ! [[ "$BUDGET_FLOOR_MINUTES" =~ ^[0-9]+$ ]]; then
+  echo "Error: --budget-floor-minutes must be a non-negative integer, got '$BUDGET_FLOOR_MINUTES'" >&2
+  exit 2
+fi
 
 if ! [[ "$MIN_AGE_HOURS" =~ ^[0-9]+$ ]] || (( MIN_AGE_HOURS < 0 )); then
   echo "Error: min-age-hours must be a non-negative integer, got '$MIN_AGE_HOURS'" >&2
@@ -178,7 +225,12 @@ elif [[ -n "${DISK_MAGICIAN_PR_SCRATCH_ROOTS:-}" ]]; then
 elif [[ -n "${DISK_MAGICIAN_TMP_DIR:-}" ]]; then
   TMP_DIRS=("$DISK_MAGICIAN_TMP_DIR")
 else
-  TMP_DIRS=("/private/tmp" "/tmp")
+  # Root list (bead disk_magician-d45) owned by scripts/lib/scratch_roots.sh
+  # so the next scratch root (e.g. DARWIN_USER_TEMP_DIR) is added once for
+  # both cleanup_tmp.sh and this script.
+  while IFS= read -r _scratch_root; do
+    TMP_DIRS+=("$_scratch_root")
+  done < <(scratch_roots_get_unique)
 fi
 
 # Normalize and deduplicate tmp directories
@@ -201,6 +253,11 @@ if [[ ${#TMP_DIRS[@]} -gt 0 ]]; then
     fi
   done
 fi
+
+# Hard production guard (bead disk_magician-ka4): abort before any deletion
+# if DISK_MAGICIAN_TEST_SANDBOX is set and any resolved root falls outside
+# it. No-op in production (env unset).
+sandbox_guard_roots "${CANONICAL_TMP_DIRS[@]:-}"
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
@@ -419,6 +476,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -f "$item" 2>/dev/null; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))
@@ -432,6 +490,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -rf "$item" 2>/dev/null; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))
@@ -441,6 +500,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           if rm -f "$item" 2>/dev/null; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
+            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
           else
             echo "SKIP (rm failed): $item"
             RM_FAILED=$(( RM_FAILED + 1 ))
@@ -449,6 +509,18 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
       fi
     done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
   done
+fi
+
+BUDGET_DIRS_DELETED=0
+BUDGET_FILES_DELETED=0
+BUDGET_KB_FREED=0
+if [[ "$BUDGET_GB" -gt 0 && ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
+  BUDGET_KB=$(( BUDGET_GB * 1024 * 1024 ))
+  for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
+    [[ -d "$tmp_dir" ]] || continue
+    scratch_budget_evict_root "$tmp_dir" "$BUDGET_KB" "$BUDGET_FLOOR_MINUTES"
+  done
+  log "$(dry_prefix)Budget mode done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Total freed: ${BUDGET_KB_FREED} KB"
 fi
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"

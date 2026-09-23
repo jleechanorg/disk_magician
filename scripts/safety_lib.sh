@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # safety_lib.sh — machine-local safety guidelines for cleanup scripts.
 #
 # Source this file, then call:
@@ -115,6 +116,55 @@ safety_gate() {
   fi
   echo "${reason:-safety file unreadable — failing closed}"
   return 1
+}
+
+# sandbox_guard_roots <root> [<root> ...] — hard production guard (bead
+# disk_magician-ka4 incident: a completed test run's REAL cleanup_tmp.sh
+# --clean --large deleted content under host /private/tmp and $TMPDIR
+# because no fixture-confinement check existed). When
+# DISK_MAGICIAN_TEST_SANDBOX=<dir> is set (tests always set it), abort
+# BEFORE any deletion (exit 90, deletes nothing) if any given root resolves
+# outside <dir>. Production (env unset) is a no-op passthrough — this never
+# changes real cleanup behavior.
+sandbox_guard_roots() {
+  local sandbox="${DISK_MAGICIAN_TEST_SANDBOX:-}"
+  [[ -z "$sandbox" ]] && return 0
+  local canon_sandbox
+  canon_sandbox="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$sandbox" 2>/dev/null)"
+  if [[ -z "$canon_sandbox" ]]; then
+    echo "FATAL sandbox_guard_roots: cannot resolve DISK_MAGICIAN_TEST_SANDBOX=$sandbox — aborting before any deletion." >&2
+    exit 90
+  fi
+  local root canon_root
+  for root in "$@"; do
+    [[ -z "$root" ]] && continue
+    canon_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null)"
+    case "$canon_root" in
+      "$canon_sandbox"|"$canon_sandbox"/*) continue ;;
+      *)
+        echo "FATAL sandbox_guard_roots: DISK_MAGICIAN_TEST_SANDBOX=$sandbox set but root '$root' resolves to '${canon_root:-<unresolvable>}', outside sandbox '$canon_sandbox' — aborting before any deletion." >&2
+        exit 90
+        ;;
+    esac
+  done
+}
+
+# deletion_log <script-name> <action> <kb> <path> — appends a persistent,
+# tab-separated audit line for every ACTUAL (non-dry-run) removal/archival,
+# independent of the caller's own stdout/stderr redirection or EXIT trap
+# (bead disk_magician-ka4: the 2026-09-22 incident's per-run "Removing:" log
+# lived only in the test's own mktemp dir and was deleted by its EXIT trap,
+# so the actually-removed set was unrecoverable). Default path:
+# ~/Library/Logs/disk-magician-deletions.log; override (tests set this
+# inside their own fixture root) via DISK_MAGICIAN_DELETION_LOG. Best-effort:
+# a log-write failure never blocks or fails the caller's cleanup.
+deletion_log() {
+  local script="$1" action="$2" kb="$3" path="$4"
+  local log_path="${DISK_MAGICIAN_DELETION_LOG:-$HOME/Library/Logs/disk-magician-deletions.log}"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$script" "$action" "$kb" "$path" \
+    >>"$log_path" 2>/dev/null || true
 }
 
 # findings_wiki_docs — list machine-local finding docs (fork-tracked knowledge
