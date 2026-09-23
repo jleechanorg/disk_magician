@@ -177,7 +177,8 @@ def get_git_tags(repo_dir: Path) -> Set[str]:
                 line = line.strip()
                 if not line:
                     continue
-                m = re.search(r"(?:^|v)?(\d+(?:\.\d+)*(?:[a-zA-Z0-9\.\-\+]+)?)", line)
+                # Whole-name version tags only (v0.2.115); "evidence-pr-69" is not a version.
+                m = re.fullmatch(r"[vV]?(\d+(?:\.\d+)+(?:[-+.]?[0-9A-Za-z.]+)?)", line)
                 if m:
                     candidate = m.group(1)
                     try:
@@ -215,17 +216,89 @@ def get_git_branch_versions(repo_dir: Path, refs: Iterable[str] = ("origin/main"
     return versions
 
 
+def _ref_exists(repo_dir: Path, ref: str) -> bool:
+    """Check whether `ref` resolves in the given repository."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def get_base_ref(repo_dir: Path) -> str | None:
+    """Determine the base ref whose first-parent history should be scanned
+    for historical versions.
+
+    An unmerged branch (e.g. an open PR) must never contribute a version to
+    this scan -- only the mainline the current work is/would-be based on:
+
+    - In CI (checkout has fetch-depth: 0, `origin/main` present): the base is
+      `origin/main` itself, the authoritative mainline tip.
+    - Locally: the base is HEAD's merge-base with `origin/main`, so a
+      developer's possibly-stale local checkout doesn't need a fresh fetch to
+      get a safe (if slightly conservative) answer; CI remains the
+      authoritative check against the true current mainline.
+    - If no `origin/main` remote-tracking ref exists at all (e.g. isolated
+      fixture repos in tests), fall back to a local `main`/`master` branch,
+      and finally to HEAD's own first-parent history.
+    """
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    has_origin_main = _ref_exists(repo_dir, "origin/main")
+
+    if is_ci and has_origin_main:
+        return "origin/main"
+
+    if has_origin_main:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(repo_dir), "merge-base", "HEAD", "origin/main"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+        # origin/main exists but no merge-base with HEAD (e.g. unrelated
+        # histories) -- fall through to local-branch fallbacks rather than
+        # silently scanning nothing.
+
+    for ref in ("main", "master"):
+        if _ref_exists(repo_dir, ref):
+            return ref
+
+    if _ref_exists(repo_dir, "HEAD"):
+        return "HEAD"
+
+    return None
+
+
 def get_git_log_versions(repo_dir: Path, target_refs: list[str] | None = None) -> Set[str]:
-    """Retrieve all pyproject.toml versions recorded in git diff history."""
+    """Retrieve pyproject.toml versions recorded in the base's first-parent
+    history (plus any explicitly requested refs).
+
+    Never scans `--all` refs: an unmerged branch (e.g. another open PR) must
+    not be able to fail this check for everyone else. See bead
+    disk_magician-cse.
+    """
     versions: Set[str] = set()
     cmds: list[list[str]] = []
 
     if target_refs:
         for ref in target_refs:
-            cmds.append(["git", "-C", str(repo_dir), "log", ref, "-p", "--", "pyproject.toml"])
+            cmds.append(["git", "-C", str(repo_dir), "log", ref, "--first-parent", "-p", "--", "pyproject.toml"])
     else:
-        cmds.append(["git", "-C", str(repo_dir), "log", "--all", "-p", "--", "pyproject.toml"])
-        cmds.append(["git", "-C", str(repo_dir), "log", "-p", "--", "pyproject.toml"])
+        base_ref = get_base_ref(repo_dir)
+        if base_ref:
+            cmds.append(["git", "-C", str(repo_dir), "log", base_ref, "--first-parent", "-p", "--", "pyproject.toml"])
+        else:
+            cmds.append(["git", "-C", str(repo_dir), "log", "--first-parent", "-p", "--", "pyproject.toml"])
 
     for cmd in cmds:
         try:
