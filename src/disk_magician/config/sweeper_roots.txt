@@ -57,8 +57,11 @@ $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
 $HOME/Library/Developer/CoreSimulator/Temp	cleanup_xcode.sh	line 12
 $HOME/Library/Developer/CoreSimulator/Caches	cleanup_xcode.sh	line 13
 
-# cleanup_colima.sh
-$HOME/.colima	cleanup_colima.sh	COLIMA_LIMA/COLIMA_DOCKER_SOCKET, line 64-65
+# cleanup_colima.sh — narrowed to the exact subpaths it touches, not the
+# whole ~/.colima tree (bead disk_magician-ka4 review finding: a bare
+# $HOME/.colima entry over-claimed coverage of any other content under it).
+$HOME/.colima/_lima	cleanup_colima.sh	COLIMA_LIMA, line 64
+$HOME/.colima/default/docker.sock	cleanup_colima.sh	COLIMA_DOCKER_SOCKET, line 65
 
 # prune_aside_sessions.sh (Tier 4)
 $HOME/.aside/u	prune_aside_sessions.sh	disk_audit.sh Aside browser sessions check
@@ -111,8 +114,12 @@ $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS arr
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 
-# NOTE: $HOME/.codex/sessions is intentionally NOT registered here even
-# though disk_audit.sh prints a REVIEW line for it — this repo's
-# never-delete list (CLAUDE.md) protects it from any sweeper, so it should
-# keep surfacing as an uncovered/no-owner root rather than being marked
-# "covered" (which would wrongly imply it's a sweeper's responsibility).
+# NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
+# and $HOME/.claude/projects are intentionally NOT registered here as
+# "covered" even though they will never get a sweeper — this repo's
+# never-delete list protects them, so marking them "covered" would wrongly
+# imply a sweeper owns them. scripts/check_uncovered_roots.py instead
+# cross-checks its result set against safety.local.json's never_delete list
+# (via scripts/safety_check.sh, reused rather than duplicated here) and
+# reports these as PROTECTED (never-delete, no sweeper by policy) rather
+# than UNCOVERED or COVERED.

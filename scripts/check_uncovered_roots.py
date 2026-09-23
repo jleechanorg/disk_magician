@@ -14,6 +14,15 @@ smallest >=threshold subtree that is not covered by a registered sweeper
 root (config/sweeper_roots.txt) — the same "opaque leaf" drill-down pattern
 disk_report_breakdown uses for undecomposed buckets, gated on sweeper
 coverage instead of literal absence of children.
+
+A directory with no sweeper is not automatically a gap: some paths
+(~/.codex/sessions, ~/.claude/projects, ...) are intentionally never swept
+by policy — this repo's never-delete list, in safety.local.json /
+safety.local.json.template. Rather than duplicating that list here, the
+result set is cross-checked against it via the existing scripts/safety_check.sh
+(reuses safety_lib.sh's never_delete/protected_live_paths/needs_decision
+matching verbatim). Matches are reported as PROTECTED, not UNCOVERED, so
+this tool never implies a policy-protected directory needs a new sweeper.
 """
 import argparse
 import glob
@@ -198,6 +207,58 @@ def find_uncovered(node, roots, threshold_kb, path_stack=None, out=None):
     return out
 
 
+def classify_protected(entries, repo_root, home):
+    """Split `entries` into (still_uncovered, protected) using the existing
+    scripts/safety_check.sh — reused verbatim rather than re-implementing
+    never_delete/protected_live_paths/needs_decision glob+ancestor matching
+    here, so this stays in sync with the one machine-local safety source of
+    truth (safety.local.json, falling back to the committed
+    safety.local.json.template — see safety_lib.sh's resolution order).
+
+    `home` is passed through as the subprocess's HOME env var so tests can
+    point safety_check.sh's `~`-relative patterns at a fixture tree (same
+    override this module already uses for $HOME registry-token expansion);
+    production callers pass the real $HOME, which is a no-op override.
+
+    Fails open on any error running safety_check.sh (missing script,
+    timeout, non-JSON-parseable output): nothing is reclassified as
+    protected, matching this tool's overall "never fabricate coverage"
+    posture — a broken safety check must not silently hide real gaps."""
+    if not entries:
+        return [], []
+    safety_check = os.path.join(repo_root, "scripts", "safety_check.sh")
+    if not os.path.exists(safety_check):
+        return entries, []
+    paths = [e["path"] for e in entries]
+    env = dict(os.environ)
+    env["HOME"] = home
+    try:
+        proc = subprocess.run(
+            ["bash", safety_check] + paths,
+            capture_output=True, text=True, timeout=30, check=False, env=env,
+        )
+    except Exception:
+        return entries, []
+    reasons = {}
+    for line in proc.stdout.splitlines():
+        if not line.startswith("PROTECTED  "):
+            continue
+        rest = line[len("PROTECTED  "):]
+        parts = rest.split("  ", 1)
+        path = parts[0]
+        reason = parts[1] if len(parts) > 1 else ""
+        reasons[path] = reason
+    still_uncovered, protected = [], []
+    for e in entries:
+        if e["path"] in reasons:
+            pe = dict(e)
+            pe["reason"] = reasons[e["path"]]
+            protected.append(pe)
+        else:
+            still_uncovered.append(e)
+    return still_uncovered, protected
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default_state_dir = os.path.expanduser(
@@ -235,7 +296,8 @@ def main(argv=None):
     direct_kb, source = pick_direct_kb(args.snapshot, args.discover, args.max_age_hours)
 
     if not direct_kb:
-        result = {"source": source, "threshold_gib": args.threshold_gib, "uncovered": []}
+        result = {"source": source, "threshold_gib": args.threshold_gib,
+                   "uncovered": [], "protected": []}
         if args.json:
             print(json.dumps(result, indent=2))
         else:
@@ -245,27 +307,39 @@ def main(argv=None):
 
     root_node = drb.build_tree(direct_kb)
     uncovered = find_uncovered(root_node, roots, threshold_kb)
-    uncovered.sort(key=lambda e: e["size_kb"], reverse=True)
     for e in uncovered:
         e["size_gib"] = round(e["size_kb"] / GIB_KB, 1)
+    uncovered, protected = classify_protected(uncovered, repo_root, home)
+    uncovered.sort(key=lambda e: e["size_kb"], reverse=True)
+    protected.sort(key=lambda e: e["size_kb"], reverse=True)
 
     if args.json:
         print(json.dumps(
-            {"source": source, "threshold_gib": args.threshold_gib, "uncovered": uncovered},
+            {"source": source, "threshold_gib": args.threshold_gib,
+             "uncovered": uncovered, "protected": protected},
             indent=2,
         ))
         return 0
 
-    if not uncovered:
+    if not uncovered and not protected:
         print(f"check_uncovered_roots: no uncovered >= {args.threshold_gib:g} GiB "
               f"directories found (source: {source}).")
         return 0
 
-    print(f"check_uncovered_roots: {len(uncovered)} UNCOVERED directory(ies) "
-          f">= {args.threshold_gib:g} GiB with no registered sweeper owner "
-          f"(source: {source}):")
-    for e in uncovered:
-        print(f"  UNCOVERED: {e['path']}  ({e['size_gib']} GiB)")
+    if uncovered:
+        print(f"check_uncovered_roots: {len(uncovered)} UNCOVERED directory(ies) "
+              f">= {args.threshold_gib:g} GiB with no registered sweeper owner "
+              f"(source: {source}):")
+        for e in uncovered:
+            print(f"  UNCOVERED: {e['path']}  ({e['size_gib']} GiB)")
+
+    if protected:
+        print(f"check_uncovered_roots: {len(protected)} PROTECTED (never-delete, no "
+              f"sweeper by policy) directory(ies) >= {args.threshold_gib:g} GiB "
+              f"(source: {source}):")
+        for e in protected:
+            print(f"  PROTECTED (never-delete, no sweeper by policy): {e['path']}  "
+                  f"({e['size_gib']} GiB)  — {e['reason']}")
     return 0
 
 

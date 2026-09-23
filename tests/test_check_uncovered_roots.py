@@ -172,6 +172,89 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         result = self._run_json()
         self.assertEqual(result["uncovered"], [])  # no crash, just no data
 
+    def test_never_delete_paths_classified_protected_not_uncovered(self):
+        # Reproduces the PR #72 review finding at 4e15d24: ~/.codex/sessions/...
+        # and ~/.claude/projects printed as UNCOVERED, identical wording to a
+        # real gap like /Applications. Both are on the real, committed
+        # safety.local.json.template never_delete list — classify_protected()
+        # cross-checks against it via the real scripts/safety_check.sh (HOME
+        # overridden to this fixture home, so it resolves to the committed
+        # template rather than this machine's real ~/.config override).
+        codex_sessions_sub = os.path.join(self.home, ".codex", "sessions", "2026", "08")
+        claude_projects = os.path.join(self.home, ".claude", "projects")
+        real_gap = os.path.join(self.home, "Applications")
+        write_json(self.snapshot, {
+            "granularity_buckets": [
+                {"path": codex_sessions_sub, "measured_kb": 20 * GIB_KB},
+                {"path": claude_projects, "measured_kb": 6 * GIB_KB},
+                {"path": real_gap, "measured_kb": 25 * GIB_KB},
+            ],
+        })
+        open(self.registry, "w").close()  # no sweeper covers anything
+
+        result = self._run_json()
+        uncovered_paths = [e["path"] for e in result["uncovered"]]
+        protected_paths = [e["path"] for e in result["protected"]]
+
+        self.assertIn(real_gap, uncovered_paths)
+        self.assertNotIn(real_gap, protected_paths)
+
+        for p in (codex_sessions_sub, claude_projects):
+            self.assertIn(p, protected_paths, f"{p} should be PROTECTED")
+            self.assertNotIn(p, uncovered_paths, f"{p} must not also appear as UNCOVERED")
+
+        for e in result["protected"]:
+            self.assertIn("never_delete", e["reason"])
+
+        # Text-mode output must use the exact wording the review asked for.
+        text_proc = run([
+            "--snapshot", self.snapshot, "--discover", self.discover,
+            "--registry", self.registry, "--home", self.home, "--darwin-tmp", "",
+        ])
+        self.assertEqual(text_proc.returncode, 0, text_proc.stderr)
+        self.assertIn("PROTECTED (never-delete, no sweeper by policy):", text_proc.stdout)
+        self.assertNotIn(f"UNCOVERED: {codex_sessions_sub}", text_proc.stdout)
+        self.assertNotIn(f"UNCOVERED: {claude_projects}", text_proc.stdout)
+        self.assertIn(f"UNCOVERED: {real_gap}", text_proc.stdout)
+
+    def test_colima_registry_narrowed_to_actual_sweeper_subpaths(self):
+        # bead disk_magician-ka4 review finding: a bare $HOME/.colima entry
+        # over-claimed coverage of the whole tree; cleanup_colima.sh only
+        # ever touches _lima and default/docker.sock.
+        colima_lima = os.path.join(self.home, ".colima", "_lima")
+        colima_other = os.path.join(self.home, ".colima", "not_touched_by_sweeper")
+        write_json(self.snapshot, {
+            "granularity_buckets": [
+                {"path": colima_lima, "measured_kb": 30 * GIB_KB},
+                {"path": colima_other, "measured_kb": 6 * GIB_KB},
+            ],
+        })
+        with open(self.registry, "w") as f:
+            f.write(f"{os.path.join(self.home, '.colima', '_lima')}\tcleanup_colima.sh\tCOLIMA_LIMA\n")
+            f.write(f"{os.path.join(self.home, '.colima', 'default', 'docker.sock')}\tcleanup_colima.sh\tCOLIMA_DOCKER_SOCKET\n")
+
+        result = self._run_json()
+        paths = [e["path"] for e in result["uncovered"]]
+        self.assertNotIn(colima_lima, paths)
+        self.assertIn(colima_other, paths)
+
+    def test_repo_registry_colima_entries_are_narrowed(self):
+        # Guards against a future regression re-widening config/sweeper_roots.txt
+        # back to a bare $HOME/.colima entry.
+        registry_path = os.path.join(REPO_ROOT, "config", "sweeper_roots.txt")
+        with open(registry_path) as f:
+            content = f.read()
+        for line in content.splitlines():
+            if line.lstrip().startswith("#") or not line.strip():
+                continue
+            pattern = line.split("\t", 1)[0].strip()
+            if pattern == "$HOME/.colima":
+                self.fail("config/sweeper_roots.txt must not list the bare $HOME/.colima "
+                          "root — narrow it to the exact cleanup_colima.sh subpaths "
+                          "(_lima, default/docker.sock)")
+        self.assertIn("$HOME/.colima/_lima", content)
+        self.assertIn("$HOME/.colima/default/docker.sock", content)
+
     def test_drill_down_finds_uncovered_sibling_under_partially_covered_parent(self):
         parent = os.path.join(self.home, "parent")
         covered_child = os.path.join(parent, "covered_child")
