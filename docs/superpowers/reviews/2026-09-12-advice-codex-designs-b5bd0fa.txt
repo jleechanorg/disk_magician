@@ -1,0 +1,35 @@
+VERDICT: REJECTED
+
+COVERAGE: Read all ten requested specs/plans, both roadmap context files, `CLAUDE.md`, and the named implementation/test surfaces including cleanup, fleet installer/checker, ledger renderer/history, deploy helper, alert, drilldown, dispatcher, and package sync. I did not inspect the supplied parallel PR or the external deployed alert script, consistent with the checkout-only boundary; no tests were executed.
+
+FINDINGS:
+
+1. BLOCKING — `cleanup-tmp-single-lsof` spec:181-224; plan:57-78. One snapshot is reused for later destructive archive/purge decisions; a process can open a later candidate after the snapshot. That weakens the existing immediate open-file guard. Fix: retain a fresh pre-destruction kernel observation or coordination protocol, and add a race test that opens an FD after snapshot initialization.
+
+2. BLOCKING — `birth-cohort-attribution-design.md:52-91`; plan:3-24. The probe narrowed `/private/var/folders` to one temp subtree and `~/roadmap` to one evidence subtree, while admitting other null/unprobed roots. Zero matches refutes only that sample, not the mechanism or bead. Fix: mark it inconclusive/scope-limited and do not close the bead as refuted unless the originally scoped roots are covered under separate authorization.
+
+3. BLOCKING — `fleet-is-real-again.md:43-46,448-451`. Manifest records are written only by `install_launchd_sweepers.sh`, but the primary `com.jleechanorg.disk-magician` job is created separately by `disk_magician.sh:130-161`. “All labels have manifests / 0 HASH-UNKNOWN” is therefore unachievable. Fix: manage that primary job through the manifest-producing installer or explicitly exclude it and adjust acceptance criteria.
+
+4. BLOCKING — `fleet-is-real-again.md:89-122`. The planned hash check is after the `NOT LOADED` `continue`, yet the test expects both `NOT LOADED` and `HASH-DRIFT` for one fixture. It cannot pass as written. Fix: use a loaded drift fixture or move/redefine the check and its reporting semantics.
+
+5. BLOCKING — `fleet-is-real-again.md:402-425`. It instructs bare `uv tool install --force --reinstall .`, recreating the deploy bypass identified by the deploy-guard design. Fix: deploy only through `tools/deploy_uv_tool.sh` from clean `HEAD == origin/main`, or make deployment a separately gated post-merge step.
+
+6. BLOCKING — `deploy-guard.md:103-120,264-285`. The override permits a detached arbitrary commit (`current_branch=HEAD`) and records `approved_from_branch=true` whenever the environment variable is set, even when deploying main. Fix: reject detached HEAD; set the record flag only when a non-main SHA actually required the approved override; add both negative tests.
+
+7. BLOCKING — ledger spec:401-420; plan:372-448. `check_ledger_freshness.sh` treats any parseable JSON with a recent timestamp as fresh, without validating schema or reconciliation. That can certify corrupt data as “fresh and queryable.” Fix: structurally validate with `history_diff.validate_ledger`, reject future timestamps, and test parseable-but-invalid ledgers.
+
+8. BLOCKING — fleet plan:293-313. Reconciliation of the external 378-line alert script is not self-contained: neither its source nor a complete behavior/interface contract is included, and the proposed test covers only failure delivery. Fix: vendor and review an exact source revision or specify its complete interface and deterministic success/failure fakes.
+
+9. BLOCKING — fleet and ledger plans both create/edit the same freshness and fleet/alert/drilldown surfaces already named as changed by the supplied parallel work. No ownership or reconciliation step exists. Fix: first adopt one canonical checker/API, then rebase plans onto it with explicit shared-hunk ownership and integration tests.
+
+10. NON-BLOCKING — `fleet-is-real-again.md:404-411` conflicts with `scripts/sync_package_tree.sh:24-63`: the sync glob cannot remove old packaged `launchd/*.plist` files after root files become `*.plist.template`. Fix: explicitly remove stale generated mirrors or extend and test orphan reconciliation.
+
+PER-DESIGN: fleet — REQUIRES CHANGES; deletion/worktree protections remain scoped, but manifest coverage, executable tests, deployment, alert sourcing, and integration are blocked.
+
+PER-DESIGN: ledger — REQUIRES CHANGES; partial-ledger preservation is sound, but freshness validation and shared-work reconciliation are blocked.
+
+PER-DESIGN: lsof — REJECTED AS DESIGNED; it weakens an existing deletion safety guarantee.
+
+PER-DESIGN: deploy-guard — REQUIRES CHANGES; default guard is sound, but override semantics permit unintended detached deployment.
+
+PER-DESIGN: birth-cohort — REFUTATION NOT SOUND; evidence is a negative result for a narrowed sample, not a clean mechanism-level refutation.
