@@ -221,9 +221,19 @@ for i in "${!CANDIDATES[@]}"; do
     if ! _safety_reason="$(safety_gate "$d" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$d" ($_safety_reason)"
       continue
-    else
-      rm -rf "$d"
     fi
+    # safety_gate spawns a subprocess and takes measurable time; revalidate
+    # identity one more time immediately before the actual deletion so that
+    # window cannot be used for a same-uid path swap either.
+    presubmit_identity=$(path_identity "$d" 2>/dev/null || true)
+    presubmit_parent_identity=$(path_identity "$(dirname "$d")" 2>/dev/null || true)
+    if [[ "$presubmit_identity" != "$frozen_identity" \
+          || "$presubmit_parent_identity" != "$frozen_parent_identity" \
+          || -L "$(dirname "$d")" ]]; then
+      log "Candidate changed after safety_gate — preserving: $d"
+      continue
+    fi
+    rm -rf "$d"
   fi
   TOTAL_KB=$(( TOTAL_KB + kb ))
   DIRS_REMOVED=$(( DIRS_REMOVED + 1 ))
