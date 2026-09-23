@@ -229,6 +229,57 @@ class TestGitHistoryMonotonicIntegration(unittest.TestCase):
         self.assertIn("Version regression detected", msg)
         self.assertIn("0.3.0", msg)
 
+    def _add_origin_remote(self):
+        """Wire up a bare 'origin' remote and push main, so the base-ref
+        detection in get_base_ref() has a real origin/main to resolve."""
+        bare = self.tmp / "origin.git"
+        subprocess.run([GIT, "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+        subprocess.run([GIT, "-C", str(self.repo), "remote", "add", "origin", str(bare)], check=True, capture_output=True)
+        subprocess.run([GIT, "-C", str(self.repo), "push", "-u", "origin", "main"], check=True, capture_output=True)
+
+    def test_unmerged_side_branch_higher_version_passes(self):
+        """Bead disk_magician-cse: an open PR (unmerged branch, pushed to
+        origin) carrying a higher version bump must NOT fail main's check.
+        Reproduces the exact incident: main 0.2.100 vs. PR #69's 0.2.101 on
+        an unmerged branch turning main's CI red via `git log --all`."""
+        self._write_pyproject("0.1.0")
+        self._commit("v1 on main")
+        self._write_pyproject("0.2.0")
+        self._commit("v2 on main")
+        self._add_origin_remote()
+
+        # Open PR: side branch bumps far higher, pushed to origin, never merged.
+        subprocess.run([GIT, "-C", str(self.repo), "checkout", "-b", "fix/higher-version"], check=True, capture_output=True)
+        self._write_pyproject("9.9.9")
+        self._commit("bump to 9.9.9 on unmerged PR branch")
+        subprocess.run([GIT, "-C", str(self.repo), "push", "-u", "origin", "fix/higher-version"], check=True, capture_output=True)
+
+        # Back on main, still at 0.2.0 -- this is what CI checks out for main.
+        subprocess.run([GIT, "-C", str(self.repo), "checkout", "main"], check=True, capture_output=True)
+
+        passed, msg = run_check(repo_dir=self.repo)
+        self.assertTrue(passed, f"main must PASS despite unmerged branch carrying 9.9.9: {msg}")
+        self.assertNotIn("9.9.9", msg)
+
+    def test_main_history_regression_via_origin_fails(self):
+        """A real regression against origin/main's own history must still
+        FAIL -- the fix narrows the scan to the base's first-parent history
+        plus tags, it must not silently pass everything."""
+        self._write_pyproject("0.1.0")
+        self._commit("v1 on main")
+        self._write_pyproject("0.2.50")
+        self._commit("v2 on main")
+        self._add_origin_remote()
+
+        # Regress the working tree below main's own committed history.
+        self._write_pyproject("0.2.23")
+
+        passed, msg = run_check(repo_dir=self.repo)
+        self.assertFalse(passed)
+        self.assertIn("Version regression detected", msg)
+        self.assertIn("0.2.23", msg)
+        self.assertIn("0.2.50", msg)
+
     def test_cli_invocation_pass_and_fail(self):
         self._write_pyproject("0.1.0")
         self._commit("v1")
