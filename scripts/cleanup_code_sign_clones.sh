@@ -13,6 +13,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 
 DRY_RUN=true
 MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
+# A code_sign_clone is extracted at app launch and briefly has no open
+# handles before the app opens files inside it. Per-launch children are now
+# judged individually (no longer shielded by a mapped sibling under the same
+# parent), so require a minimum age before a candidate is even eligible —
+# guards against deleting a clone mid-extraction/mid-launch.
+MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-600}"
 
 usage() {
   cat <<EOF
@@ -57,6 +63,10 @@ path_mtime() {
   stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%S' "$1" 2>/dev/null \
     || stat -c '%y' "$1" 2>/dev/null \
     || echo unknown
+}
+
+path_mtime_epoch() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null
 }
 
 lsof_state() {
@@ -110,14 +120,19 @@ if [[ "${X_IDENTITY##*:}" != "$CURRENT_UID" ]]; then
   exit 0
 fi
 
-# Freeze both the candidate paths and their filesystem identities before any
-# lsof checks. Revalidation below prevents a replaced path from being removed.
+# Freeze the candidate paths, their filesystem identities, and their
+# immediate parent's identity before any lsof checks. Revalidation below
+# prevents a replaced path — or a replaced *.code_sign_clone parent one
+# level up, for nested per-launch children — from being removed.
 CANDIDATES=()
 CANDIDATE_IDENTITIES=()
+CANDIDATE_PARENT_IDENTITIES=()
 while IFS= read -r -d '' candidate; do
   candidate_identity=$(path_identity "$candidate") || continue
+  parent_identity=$(path_identity "$(dirname "$candidate")") || continue
   CANDIDATES[${#CANDIDATES[@]}]="$candidate"
   CANDIDATE_IDENTITIES[${#CANDIDATE_IDENTITIES[@]}]="$candidate_identity"
+  CANDIDATE_PARENT_IDENTITIES[${#CANDIDATE_PARENT_IDENTITIES[@]}]="$parent_identity"
 done < <(
   # A long-running app (e.g. Chrome) accumulates one code_sign_clone.XXXX per
   # relaunch under its *.code_sign_clone parent while keeping only one mapped;
@@ -138,17 +153,31 @@ TOTAL_KB=0
 for i in "${!CANDIDATES[@]}"; do
   d="${CANDIDATES[$i]}"
   frozen_identity="${CANDIDATE_IDENTITIES[$i]}"
+  frozen_parent_identity="${CANDIDATE_PARENT_IDENTITIES[$i]}"
   kb=$(path_size_kb "$d")
   if [[ "$kb" -lt "$MIN_KB" ]]; then
     continue
   fi
 
   current_identity=$(path_identity "$d" 2>/dev/null || true)
+  current_parent_identity=$(path_identity "$(dirname "$d")" 2>/dev/null || true)
   if [[ -z "$current_identity" || "$current_identity" != "$frozen_identity" \
         || "${current_identity##*:}" != "$CURRENT_UID" \
+        || -z "$current_parent_identity" || "$current_parent_identity" != "$frozen_parent_identity" \
         || -L "$d" || -L "$(dirname "$d")" \
         || ( "$(dirname "$d")" != "$X_DIR" && "$(dirname "$(dirname "$d")")" != "$X_DIR" ) ]]; then
     log "Unsafe candidate ownership or identity changed — preserving: $d"
+    continue
+  fi
+
+  mtime_epoch=$(path_mtime_epoch "$d" 2>/dev/null || true)
+  if [[ ! "$mtime_epoch" =~ ^[0-9]+$ ]]; then
+    log "Cannot read mtime — preserving: $d"
+    continue
+  fi
+  age_sec=$(( $(date +%s) - mtime_epoch ))
+  if [[ "$age_sec" -lt "$MIN_AGE_SEC" ]]; then
+    log "Too young (${age_sec}s < ${MIN_AGE_SEC}s) — preserving: $d"
     continue
   fi
 
@@ -182,7 +211,9 @@ for i in "${!CANDIDATES[@]}"; do
     fi
     final_identity=$(path_identity "$d" 2>/dev/null || true)
     final_x_identity=$(path_identity "$X_DIR" 2>/dev/null || true)
-    if [[ "$final_identity" != "$frozen_identity" || "$final_x_identity" != "$X_IDENTITY" ]]; then
+    final_parent_identity=$(path_identity "$(dirname "$d")" 2>/dev/null || true)
+    if [[ "$final_identity" != "$frozen_identity" || "$final_x_identity" != "$X_IDENTITY" \
+          || "$final_parent_identity" != "$frozen_parent_identity" || -L "$(dirname "$d")" ]]; then
       log "Candidate changed after lsof recheck — preserving: $d"
       continue
     fi

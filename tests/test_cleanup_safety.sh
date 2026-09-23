@@ -401,7 +401,7 @@ mkdir -p "$FAKE_BIN8_NO_LSOF"
 cp "$FAKE_BIN8/getconf" "$FAKE_BIN8/stat" "$FAKE_BIN8_NO_LSOF/"
 
 OUT8_REFUSE="$TMP_ROOT/csc-refuse.out"
-if run_capture "$OUT8_REFUSE" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+if run_capture "$OUT8_REFUSE" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_REFUSE=0
 else RC8_REFUSE=$?; fi
 assert_rc "code_sign_clone clean requires approval" 0 "$RC8_REFUSE"
@@ -409,7 +409,7 @@ assert_contains "code_sign_clone refusal message" "Refusing code_sign_clone dele
 assert_exists "large clone preserved without approval" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
 OUT8_DRY="$TMP_ROOT/csc-dry.out"
-if run_capture "$OUT8_DRY" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+if run_capture "$OUT8_DRY" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_DRY=0
 else RC8_DRY=$?; fi
 assert_rc "code_sign_clone dry-run exits 0" 0 "$RC8_DRY"
@@ -419,7 +419,7 @@ assert_exists "code_sign_clone dry-run does not delete" "$CSC_X/at.studio.AsideB
 OUT8_ACTIVE="$TMP_ROOT/csc-active.out"
 if run_capture "$OUT8_ACTIVE" env -i HOME="$TMP_ROOT/home-csc" \
   FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_LSOF_ACTIVE="$CSC_ACTIVE" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_ACTIVE=0
 else RC8_ACTIVE=$?; fi
@@ -442,7 +442,7 @@ OUT8_NESTED="$TMP_ROOT/csc-nested.out"
 if run_capture "$OUT8_NESTED" env -i HOME="$TMP_ROOT/home-csc" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_NESTED/T" \
   FAKE_LSOF_ACTIVE="$CSC_NESTED_PARENT/code_sign_clone.INUSE" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_NESTED=0
 else RC8_NESTED=$?; fi
@@ -473,7 +473,7 @@ OUT8_SKIP="$TMP_ROOT/csc-safety-skip.out"
 if run_capture "$OUT8_SKIP" env -i HOME="$CSC_SKIP_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_SKIP/T" \
   FAKE_LSOF_ACTIVE="$CSC_SKIP_PARENT/code_sign_clone.INUSE" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_SKIP=0
 else RC8_SKIP=$?; fi
@@ -487,7 +487,7 @@ assert_contains "SAFETY-SKIP is not counted toward dirs removed or freed" \
 
 OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
 if run_capture "$OUT8_NO_LSOF" env -i HOME="$TMP_ROOT/home-csc" \
-  FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 \
+  FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 \
   PATH="$FAKE_BIN8_NO_LSOF:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_NO_LSOF=0
@@ -500,7 +500,7 @@ assert_exists "clone is preserved without lsof" "$CSC_X/at.studio.AsideBrowser.c
 OUT8_FOREIGN="$TMP_ROOT/csc-foreign-owner.out"
 if run_capture "$OUT8_FOREIGN" env -i HOME="$TMP_ROOT/home-csc" \
   FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_FOREIGN=0
 else RC8_FOREIGN=$?; fi
@@ -512,7 +512,7 @@ assert_exists "symlinked clone target is preserved" "$CSC_SYMLINK_TARGET/blob"
 
 OUT8_LSOF_FAIL="$TMP_ROOT/csc-lsof-fail.out"
 if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-csc" \
-  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_LSOF_FAIL=0
 else RC8_LSOF_FAIL=$?; fi
@@ -525,7 +525,7 @@ if run_capture "$OUT8_RACE" env -i HOME="$TMP_ROOT/home-csc" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
   FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
   FAKE_LSOF_RACE_TARGET="$CSC_RACE" FAKE_LSOF_STATE="$TMP_ROOT/csc-lsof-count" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_RACE=0
 else RC8_RACE=$?; fi
@@ -538,7 +538,7 @@ OUT8_CLEAN="$TMP_ROOT/csc-clean.out"
 if run_capture "$OUT8_CLEAN" env -i HOME="$TMP_ROOT/home-csc" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
   FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_CLEAN=0
 else RC8_CLEAN=$?; fi
@@ -548,6 +548,66 @@ assert_exists "active clone remains during approved clean" "$CSC_ACTIVE"
 assert_exists "foreign-owned clone remains during approved clean" "$CSC_FOREIGN"
 assert_exists "replacement clone remains during approved clean" "$CSC_RACE"
 assert_exists "small clone preserved above threshold" "$CSC_X/com.tiny.code_sign_clone"
+
+# A clone still being extracted (default MIN_AGE_SEC, no override) must
+# survive even when it is large enough and lsof reports no open handles yet.
+CSC_FRESH_HOME="$TMP_ROOT/home-csc-fresh"
+CSC_FRESH="$TMP_ROOT/csc-fresh"
+CSC_FRESH_CLONE="$CSC_FRESH/X/at.studio.JustLaunched.code_sign_clone"
+mkdir -p "$CSC_FRESH/T" "$CSC_FRESH_CLONE" "$CSC_FRESH_HOME"
+head -c 200000 /dev/zero > "$CSC_FRESH_CLONE/blob"
+OUT8_FRESH="$TMP_ROOT/csc-fresh.out"
+if run_capture "$OUT8_FRESH" env -i HOME="$CSC_FRESH_HOME" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_FRESH/T" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_FRESH=0
+else RC8_FRESH=$?; fi
+assert_rc "fresh code_sign_clone clean exits 0" 0 "$RC8_FRESH"
+assert_contains "fresh candidate reported too young" "Too young" "$(cat "$OUT8_FRESH")"
+assert_exists "clone still being extracted survives default age floor" "$CSC_FRESH_CLONE/blob"
+
+# Swapping the immediate *.code_sign_clone parent for a same-uid directory
+# after the initial freeze must preserve the candidate, not just detect a
+# swapped scan root or a swapped candidate itself.
+CSC_PSWAP_HOME="$TMP_ROOT/home-csc-pswap"
+CSC_PSWAP="$TMP_ROOT/csc-pswap"
+CSC_PSWAP_PARENT="$CSC_PSWAP/X/com.example.PSwap.code_sign_clone"
+CSC_PSWAP_CHILD="$CSC_PSWAP_PARENT/code_sign_clone.ORIG"
+mkdir -p "$CSC_PSWAP/T" "$CSC_PSWAP_CHILD" "$CSC_PSWAP_HOME"
+head -c 200000 /dev/zero > "$CSC_PSWAP_CHILD/blob"
+CSC_PSWAP="$(cd "$CSC_PSWAP" && pwd -P)"
+CSC_PSWAP_PARENT="$CSC_PSWAP/X/com.example.PSwap.code_sign_clone"
+CSC_PSWAP_CHILD="$CSC_PSWAP_PARENT/code_sign_clone.ORIG"
+FAKE_BIN8_PSWAP="$TMP_ROOT/bin-csc-pswap"
+mkdir -p "$FAKE_BIN8_PSWAP"
+cp "$FAKE_BIN8/getconf" "$FAKE_BIN8/stat" "$FAKE_BIN8_PSWAP/"
+cat > "$FAKE_BIN8_PSWAP/lsof" <<EOF
+#!/usr/bin/env bash
+target="\${!#}"
+if [[ "\$target" == "$CSC_PSWAP_CHILD" ]]; then
+  # Swap the immediate parent for a brand-new directory while preserving the
+  # child's own inode (mv keeps it on the same filesystem) — the exact TOCTOU
+  # codex advice review flagged: only the parent's identity changes.
+  mv "$CSC_PSWAP_PARENT" "${CSC_PSWAP_PARENT}.bak"
+  mkdir -p "$CSC_PSWAP_PARENT"
+  mv "${CSC_PSWAP_PARENT}.bak/code_sign_clone.ORIG" "$CSC_PSWAP_CHILD"
+  rm -rf "${CSC_PSWAP_PARENT}.bak"
+fi
+exit 1
+EOF
+chmod +x "$FAKE_BIN8_PSWAP/lsof"
+OUT8_PSWAP="$TMP_ROOT/csc-pswap.out"
+if run_capture "$OUT8_PSWAP" env -i HOME="$CSC_PSWAP_HOME" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PSWAP/T" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8_PSWAP:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_PSWAP=0
+else RC8_PSWAP=$?; fi
+assert_rc "parent-swap code_sign_clone clean exits 0" 0 "$RC8_PSWAP"
+assert_contains "parent swap after lsof is detected" \
+  "Candidate changed after lsof recheck — preserving: $CSC_PSWAP_CHILD" "$(cat "$OUT8_PSWAP")"
+assert_exists "child under swapped parent is preserved" "$CSC_PSWAP_CHILD/blob"
 
 
 echo "Test 9: pressure_sweep passes --large and LARGE_TMP_APPROVED when cleaning"
