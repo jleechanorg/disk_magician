@@ -1,0 +1,125 @@
+# sweeper_roots.txt — registry of directory roots actually cleaned by this
+# repo's cleanup sweepers (bead disk_magician-8to). Used by
+# scripts/check_uncovered_roots.py to flag >=5 GiB directories (from
+# existing discover/frontier data — no fresh du) that no sweeper owns.
+#
+# Format: tab-separated, one root per line.
+#   <root_pattern>\t<owning_script>\t<note>
+#
+# root_pattern may use:
+#   $HOME                  expanded to the live $HOME (or --home override)
+#   $DARWIN_USER_TEMP_DIR  expanded to the canonicalized (realpath'd)
+#                          `getconf DARWIN_USER_TEMP_DIR` value (or
+#                          --darwin-tmp override); entries using this token
+#                          are skipped when it cannot be resolved
+#   a trailing *           glob-expanded against the live filesystem
+#                          (metadata-only listing, never a du)
+#
+# This registry is built by reading the actual scripts, not guessed — see
+# the note beside each entry for the exact source line. It is intentionally
+# separate from scripts/lib/scratch_roots.sh (added by a sibling lane,
+# feat/scratch-size-budget, for a different purpose — TMPDIR scratch size
+# budgeting). The two should be unified into one canonical roots source
+# after both land; see PR description "Known duplication" note.
+#
+# Known uncovered today (do NOT add without also fixing the sweeper that
+# should cover it — see PR description):
+#   $HOME/.claude/state            (34 GiB, 2026-09-22 measurement) — no
+#                                   sweeper in scripts/cleanup_*.sh targets
+#                                   this path; cleanup_supervisor_logs.sh
+#                                   only covers $HOME/.claude/supervisor.
+#   $DARWIN_USER_TEMP_DIR          (21 GiB, 2026-09-22 measurement) — only
+#                                   cleanup_sessions.sh touches this root,
+#                                   and only the narrow
+#                                   "${TMP_DIR}ao-<session-id>" subpaths
+#                                   (scripts/cleanup_sessions.sh:56,117);
+#                                   the bulk of the tree (PR-review scratch,
+#                                   com.apple.fileproviderd cache, etc.) is
+#                                   untouched by any sweeper.
+
+# cleanup_dev_caches.sh
+$HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
+$HOME/.cache/uv	cleanup_dev_caches.sh	line 105
+$HOME/.cache/pre-commit	cleanup_dev_caches.sh	line 109
+$HOME/.local/share/opencode	cleanup_dev_caches.sh	line 113
+$HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 149
+$HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
+$HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
+$HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
+$HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
+
+# cleanup_tmp.sh / cleanup_pr_scratch.sh
+/private/tmp	cleanup_tmp.sh	ARCHIVE_ROOT + --large branch target
+/tmp	cleanup_pr_scratch.sh	TMP_DIRS array, line 181
+
+# cleanup_xcode.sh
+$HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
+$HOME/Library/Developer/CoreSimulator/Temp	cleanup_xcode.sh	line 12
+$HOME/Library/Developer/CoreSimulator/Caches	cleanup_xcode.sh	line 13
+
+# cleanup_colima.sh — narrowed to the exact subpaths it touches, not the
+# whole ~/.colima tree (bead disk_magician-ka4 review finding: a bare
+# $HOME/.colima entry over-claimed coverage of any other content under it).
+$HOME/.colima/_lima	cleanup_colima.sh	COLIMA_LIMA, line 64
+$HOME/.colima/default/docker.sock	cleanup_colima.sh	COLIMA_DOCKER_SOCKET, line 65
+
+# prune_aside_sessions.sh (Tier 4)
+$HOME/.aside/u	prune_aside_sessions.sh	disk_audit.sh Aside browser sessions check
+
+# cleanup_antigravity_brain.sh
+$HOME/.gemini/antigravity-cli/brain	cleanup_antigravity_brain.sh	BRAIN_DIR default, line 15
+
+# cleanup_supervisor_logs.sh
+$HOME/.claude/supervisor	cleanup_supervisor_logs.sh	SUPERVISOR_DIR, line 15
+
+# cleanup_worktrees.sh / cleanup_worktree_venvs.sh (Tier 6, WORKTREE_APPROVED-gated)
+$HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
+$HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
+$HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
+$HOME/projects/*/.claude/worktrees	cleanup_worktree_venvs.sh	worktree_repo_discovery.sh:19,73
+$HOME/projects/*/*/.claude/worktrees	cleanup_worktree_venvs.sh	depth-4 .claude/worktrees scan, line 230
+
+# cleanup_llm_inspector.sh
+$HOME/.llm-inspector	cleanup_llm_inspector.sh	INSPECTOR_DIR, line 8
+
+# cleanup_code_sign_clones.sh — the "X" code_sign_clone dir is the sibling
+# of DARWIN_USER_TEMP_DIR (.../T), not DARWIN_USER_TEMP_DIR itself.
+$DARWIN_USER_TEMP_DIR/../X	cleanup_code_sign_clones.sh	user_tmp/../X, line 81-92
+
+# cleanup_dirs_cleaner.sh
+/private/var/dirs_cleaner	cleanup_dirs_cleaner.sh	TARGET_DIR default, line 25
+
+# cleanup_downloads_evidence.sh
+$HOME/Downloads	cleanup_downloads_evidence.sh	EVIDENCE_ROOT default, line 32
+
+# cleanup_sessions.sh — only ~/.ao-sessions itself is fully covered; the
+# DARWIN_USER_TEMP_DIR/ao-<sid> subpaths it also touches are a narrow glob
+# inside an otherwise-uncovered root, so DARWIN_USER_TEMP_DIR stays out of
+# this registry by design (see "Known uncovered today" above).
+$HOME/.ao-sessions	cleanup_sessions.sh	AO_SESSIONS_DIR, line 55
+
+# cleanup_agent_artifacts.sh
+$HOME/.cursor/worktrees	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.cursor/chats	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.claude/debug	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.config/superpowers/worktrees	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/Library/Caches/com.todesktop.230313mzl4w4u92.ShipIt	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/Library/Caches/com.google.antigravity.ShipIt	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/Library/Caches/ms-playwright	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/Library/Caches/ms-playwright-go	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/Library/Caches/pip	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
+
+# cleanup_ollama.sh
+$HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
+
+# NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
+# and $HOME/.claude/projects are intentionally NOT registered here as
+# "covered" even though they will never get a sweeper — this repo's
+# never-delete list protects them, so marking them "covered" would wrongly
+# imply a sweeper owns them. scripts/check_uncovered_roots.py instead
+# cross-checks its result set against safety.local.json's never_delete list
+# (via scripts/safety_check.sh, reused rather than duplicated here) and
+# reports these as PROTECTED (never-delete, no sweeper by policy) rather
+# than UNCOVERED or COVERED.

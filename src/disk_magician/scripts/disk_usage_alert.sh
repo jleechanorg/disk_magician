@@ -118,6 +118,23 @@ except Exception:
 PY
 }
 
+# ────────── Swap warning (bead disk_magician-8to; additive snapshot keys) ──────────
+# swap_used_gb is additive and absent on pre-swap-tracking snapshots — tolerate
+# a missing key/file by returning "unknown" (never alerts).
+get_swap_used_gb() {
+  [[ -f "$SNAPSHOT_FILE" ]] || { echo "unknown"; return; }
+  python3 - "$SNAPSHOT_FILE" <<'PY'
+import json, sys
+try:
+    snap = json.load(open(sys.argv[1]))
+except Exception:
+    print("unknown")
+    sys.exit(0)
+v = snap.get("swap_used_gb")
+print(v if v is not None else "unknown")
+PY
+}
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --silence)   set_silenced; exit 0 ;;
@@ -170,7 +187,13 @@ fi
 space_alert=false
 [[ $free_gb -lt $THRESHOLD_GB ]] && space_alert=true
 
-if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true ]]; then
+swap_used_gb="$(get_swap_used_gb)"
+swap_alert=false
+if [[ "$swap_used_gb" != "unknown" ]] && awk -v v="$swap_used_gb" 'BEGIN{exit !(v+0 > 10)}'; then
+  swap_alert=true
+fi
+
+if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true ]]; then
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
@@ -188,6 +211,9 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
     if [[ "$ledger_alert" == true ]]; then
       echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})." >&2
       echo "Run './disk_magician.sh frontier' or wait for frontier-nightly; bucket deltas are unreliable until a complete scan publishes." >&2
+    fi
+    if [[ "$swap_alert" == true ]]; then
+      echo "🚨 WARNING: Swap used: ${swap_used_gb} GiB (>10 GB) — disk space consumed outside the Data volume (vm.swapusage)." >&2
     fi
     exit 1
   fi
