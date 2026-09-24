@@ -20,6 +20,12 @@ GRANULARITY_CEILING_KB = 5 * GIB_KB
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
+# Freshest scan of ANY completeness level (bead disk_magician-zyn Component
+# F) — written on every fresh, reconciling, non-empty run regardless of
+# whether it also qualifies for the strict canonical publish below. Consumers
+# needing the full-attribution guarantee keep reading LEDGER_JSON exactly as
+# before; check_ledger_freshness.sh / growth_top10.py read this one first.
+PARTIAL_LEDGER_JSON = "topdown-5g.partial.json"
 SCHEMA_VERSION = 2
 BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
 INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
@@ -400,6 +406,69 @@ def complete_coverage_envelope(report):
     )
 
 
+def build_ledger_dict(report, captured_at):
+    """Build the ledger dict written to both LEDGER_JSON and
+    PARTIAL_LEDGER_JSON. Pure — same field set the canonical write always
+    used, extracted so the two write paths share one source of truth instead
+    of a second copy drifting out of sync."""
+    buckets = report.get("granularity_buckets") or []
+    oversize = report.get("oversize_indivisible_files") or []
+    equation = report.get("accounting_equation") or {}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": report.get("mode"),
+        "coverage_envelope": report.get("coverage_envelope"),
+        "frontier_unfinished": report.get("frontier_unfinished"),
+        "opaque_intrinsic_gates": report.get("opaque_intrinsic_gates"),
+        "fda_preflight": report.get("fda_preflight"),
+        "fda_probe_paths": report.get("fda_probe_paths"),
+        "system_boundary_attestations": report.get("system_boundary_attestations"),
+        "run_id": report.get("run_id"),
+        "run_started_at": report.get("run_started_at"),
+        "run_finished_at": report.get("run_finished_at"),
+        "captured_at": captured_at,
+        "hostname": report.get("hostname"),
+        "disk_used_kb": report.get("disk_used_kb"),
+        "residual_kb": report.get("residual_kb"),
+        "purgeable_kb": report.get("purgeable_kb"),
+        "granularity_buckets": buckets,
+        "oversize_indivisible_files": oversize,
+        "accounting_equation": equation,
+    }
+
+
+def unfinished_top_level_roots(report):
+    return [
+        item.get("path")
+        for item in (report.get("frontier_unfinished") or [])
+        if isinstance(item, dict) and item.get("path")
+    ]
+
+
+def write_partial_ledger(out_dir, ledger, report):
+    """Self-validate and write PARTIAL_LEDGER_JSON — the freshest scan of any
+    completeness level. Fail-closed: on any validation error, skip the write,
+    leave a prior partial.json (if any) untouched, and print one line to
+    stderr. This must never crash a snapshot over a sibling tool's file."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import history_diff
+    except ImportError as exc:
+        print(f"render_topdown_ledger: skipping partial artifact — history_diff import failed: {exc}",
+              file=sys.stderr)
+        return
+    partial = dict(ledger)
+    partial["unfinished_top_level_roots"] = unfinished_top_level_roots(report)
+    try:
+        history_diff.validate_ledger(partial, label="partial-candidate")
+    except history_diff.LedgerError as exc:
+        print(f"render_topdown_ledger: skipping partial artifact — {exc}", file=sys.stderr)
+        return
+    with open(os.path.join(out_dir, PARTIAL_LEDGER_JSON), "w") as f:
+        json.dump(partial, f, indent=2)
+        f.write("\n")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--frontier", required=True)
@@ -426,6 +495,18 @@ def main():
         return 0  # stale — leave prior ledger in place
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    ledger = build_ledger_dict(report, captured_at)
+    buckets = ledger["granularity_buckets"]
+    oversize = ledger["oversize_indivisible_files"]
+    equation = ledger["accounting_equation"]
+
+    # Freshest scan of any completeness level — written before the strict
+    # gate below, regardless of whether this run also qualifies for the
+    # canonical publish (spec Q1: "on every fresh, reconciling, non-empty
+    # run"). Self-validated and fail-closed inside write_partial_ledger.
+    write_partial_ledger(args.out_dir, ledger, report)
+
     if not complete_coverage_envelope(report):
         # A partial scan is useful evidence, but it is not a replacement for
         # the last coherent mega-table. Keep the published rows byte-for-byte
@@ -440,31 +521,6 @@ def main():
         )
         return 0
 
-    buckets = report.get("granularity_buckets") or []
-    oversize = report.get("oversize_indivisible_files") or []
-    equation = report.get("accounting_equation") or {}
-
-    ledger = {
-        "schema_version": SCHEMA_VERSION,
-        "mode": report.get("mode"),
-        "coverage_envelope": report.get("coverage_envelope"),
-        "frontier_unfinished": report.get("frontier_unfinished"),
-        "opaque_intrinsic_gates": report.get("opaque_intrinsic_gates"),
-        "fda_preflight": report.get("fda_preflight"),
-        "fda_probe_paths": report.get("fda_probe_paths"),
-        "system_boundary_attestations": report.get("system_boundary_attestations"),
-        "run_id": report.get("run_id"),
-        "run_started_at": report.get("run_started_at"),
-        "run_finished_at": report.get("run_finished_at"),
-        "captured_at": captured_at,
-        "hostname": report.get("hostname"),
-        "disk_used_kb": report.get("disk_used_kb"),
-        "residual_kb": report.get("residual_kb"),
-        "purgeable_kb": report.get("purgeable_kb"),
-        "granularity_buckets": buckets,
-        "oversize_indivisible_files": oversize,
-        "accounting_equation": equation,
-    }
     with open(os.path.join(args.out_dir, LEDGER_JSON), "w") as f:
         json.dump(ledger, f, indent=2)
         f.write("\n")

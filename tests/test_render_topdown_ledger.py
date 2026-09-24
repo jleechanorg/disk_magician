@@ -538,5 +538,97 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertFalse(os.path.isdir(self.out_dir))
 
+
+class TestPartialLedgerArtifact(unittest.TestCase):
+    """Bead disk_magician-zyn Component F: topdown-5g.partial.json is
+    written on every fresh, reconciling, non-empty run regardless of
+    completeness — never a replacement for the strict-gated canonical
+    files, which must stay byte-for-byte unaffected by this addition."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out_dir = os.path.join(self.tmp, "ledger")
+
+    def _fixture(self, age_hours, *, mode="complete", envelope_complete=True):
+        return TestRenderTopdownLedger._fixture(self, age_hours, mode=mode, envelope_complete=envelope_complete)
+
+    def _partial_path(self):
+        return os.path.join(self.out_dir, "topdown-5g.partial.json")
+
+    def test_partial_ledger_written_on_incomplete_run(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        rc, out, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["schema_version"], 2)
+        self.assertEqual(partial["mode"], "partial")
+        validated = subprocess.run(
+            ["python3", str(REPO / "scripts" / "history_diff.py"), "--validate", self._partial_path()],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertIn("valid structural partial/legacy ledger", validated.stdout)
+
+    def test_partial_ledger_written_on_complete_run_matches_canonical(self):
+        frontier = self._fixture(age_hours=1)
+        rc, out, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        canonical = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
+        partial = json.load(open(self._partial_path()))
+        # Partial carries one extra key (unfinished_top_level_roots); every
+        # other field must match the canonical write exactly — same source
+        # dict, per build_ledger_dict.
+        self.assertEqual(partial.pop("unfinished_top_level_roots"), [])
+        self.assertEqual(partial, canonical)
+
+    def test_partial_ledger_includes_unfinished_top_level_roots(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            data = json.load(f)
+        data["frontier_unfinished"] = [{"path": "/blocked"}, {"not_a_path": True}, "garbage"]
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, out, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["unfinished_top_level_roots"], ["/blocked"])
+
+    def test_partial_ledger_skips_on_invalid_ledger_and_preserves_prior(self):
+        os.makedirs(self.out_dir)
+        prior_path = self._partial_path()
+        with open(prior_path, "w") as f:
+            f.write('{"prior": "partial"}\n')
+
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            data = json.load(f)
+        # Break structural reconciliation: bucket+residual+purgeable+tail no
+        # longer sums to disk_used_kb.
+        data["disk_used_kb"] = 1
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, out, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(open(prior_path).read(), '{"prior": "partial"}\n')
+        self.assertIn("skipping partial artifact", err)
+
+    def test_stale_frontier_report_does_not_touch_partial(self):
+        os.makedirs(self.out_dir)
+        prior_path = self._partial_path()
+        with open(prior_path, "w") as f:
+            f.write('{"prior": "partial"}\n')
+        frontier = self._fixture(age_hours=40)
+
+        rc, out, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(open(prior_path).read(), '{"prior": "partial"}\n')
+
+
 if __name__ == "__main__":
     unittest.main()
