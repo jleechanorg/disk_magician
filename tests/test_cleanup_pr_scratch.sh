@@ -132,7 +132,7 @@ echo "claude" > "$T2_DIR/claude-session-old/ctx.json"
 echo "file" > "$T2_DIR/pr54_output.log"
 set_old_mtime "$T2_DIR"
 
-T2_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T2_DIR" 2>&1)
+T2_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T2_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T2_DIR" 2>&1)
 assert_contains "T2: indicates removal" "Removing:" "$T2_OUT"
 assert_missing "T2: pr9* dir removed" "$T2_DIR/pr9128-wizard"
 assert_missing "T2: pr-* dir removed" "$T2_DIR/pr-stale-run"
@@ -142,7 +142,7 @@ assert_missing "T2: pr* file removed" "$T2_DIR/pr54_output.log"
 # Also verify --apply alias
 mkdir -p "$T2_DIR/pr_apply_test"
 set_old_mtime "$T2_DIR/pr_apply_test"
-T2_APPLY_OUT=$(bash "$TARGET_SCRIPT" --apply --tmp-dir "$T2_DIR" 2>&1)
+T2_APPLY_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T2_DIR" bash "$TARGET_SCRIPT" --apply --tmp-dir "$T2_DIR" 2>&1)
 assert_missing "T2: --apply removes target" "$T2_DIR/pr_apply_test"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +162,7 @@ echo "dummy" > "$T3_DIR/unrelated_file.txt"
 echo "pr" > "$T3_DIR/pr9999_report.md"
 set_old_mtime "$T3_DIR"
 
-T3_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T3_DIR" 2>&1)
+T3_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T3_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T3_DIR" 2>&1)
 assert_missing "T3: pr[0-9]* matched and deleted" "$T3_DIR/pr832-evidence-fix"
 assert_missing "T3: pr-* matched and deleted" "$T3_DIR/pr-analyzer-123"
 assert_missing "T3: pr_* matched and deleted" "$T3_DIR/pr_custom_debug"
@@ -190,7 +190,7 @@ set_old_mtime "$T4_DIR/pr-stale"
 set_old_mtime "$T4_DIR/pr-nested-active"
 touch "$T4_DIR/pr-nested-active/subdir/newfile.txt"
 
-T4_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T4_DIR" --min-age-hours 48 2>&1)
+T4_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T4_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T4_DIR" --min-age-hours 48 2>&1)
 assert_exists "T4: fresh dir preserved" "$T4_DIR/pr-fresh"
 assert_contains "T4: logs recently active skip for fresh dir" "Skipping recently active path" "$T4_OUT"
 assert_missing "T4: stale dir removed" "$T4_DIR/pr-stale"
@@ -200,7 +200,7 @@ assert_exists "T4: nested-active dir preserved" "$T4_DIR/pr-nested-active"
 T4B_DIR="$TMP_TEST_ROOT/t4b_tmp"
 mkdir -p "$T4B_DIR/pr-days-test"
 set_old_mtime "$T4B_DIR/pr-days-test"
-T4B_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T4B_DIR" --min-age-days 2 2>&1)
+T4B_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T4B_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T4B_DIR" --min-age-days 2 2>&1)
 assert_missing "T4: --min-age-days 2 deletes stale directory" "$T4B_DIR/pr-days-test"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,7 +213,7 @@ touch "$T5_DIR/pr-inuse/.in-use"
 touch "$T5_DIR/pr-keep/.keep"
 set_old_mtime "$T5_DIR"
 
-T5_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T5_DIR" 2>&1)
+T5_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T5_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T5_DIR" 2>&1)
 assert_exists "T5: .in-use dir preserved" "$T5_DIR/pr-inuse"
 assert_exists "T5: .keep dir preserved" "$T5_DIR/pr-keep"
 assert_missing "T5: normal dir removed" "$T5_DIR/pr-normal"
@@ -235,7 +235,7 @@ HOLDER_PID=$!
 # Give lsof a moment to see the open file
 sleep 0.5
 
-T6_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T6_DIR" --min-age-hours 0 2>&1)
+T6_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T6_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T6_DIR" --min-age-hours 0 2>&1)
 kill "$HOLDER_PID" 2>/dev/null || true
 wait "$HOLDER_PID" 2>/dev/null || true
 
@@ -259,7 +259,7 @@ exit 2
 EOF
 chmod +x "$FAKE_LSOF"
 
-T7_OUT=$(DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T7_DIR" --min-age-hours 0 2>&1)
+T7_OUT=$(DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T7_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T7_DIR" --min-age-hours 0 2>&1)
 assert_exists "T7: preserved when lsof errors (fail closed)" "$T7_DIR/pr-lsof-fail"
 assert_contains "T7: logs fail-closed open-file check failure" "fail-closed, treating as active" "$T7_OUT"
 
@@ -277,7 +277,7 @@ git -C "$T8_DIR/pr-git-uncommitted" commit -q -m "init"
 echo "dirty" >> "$T8_DIR/pr-git-uncommitted/file.txt"
 set_old_mtime "$T8_DIR"
 
-T8_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T8_DIR" 2>&1)
+T8_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T8_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T8_DIR" 2>&1)
 assert_exists "T8: uncommitted worktree preserved" "$T8_DIR/pr-git-uncommitted"
 assert_contains "T8: logs unsaved work skip" "Skipping scratch worktree with unsaved work" "$T8_OUT"
 
@@ -289,7 +289,7 @@ T9_DIR="$TMP_TEST_ROOT/t9_tmp"
 mkdir -p "$T9_DIR/worldarchitect.ai" "$T9_DIR/pr-custom-protected"
 set_old_mtime "$T9_DIR"
 
-T9_OUT=$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS="worldarchitect.ai pr-custom-protected" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T9_DIR" 2>&1)
+T9_OUT=$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS="worldarchitect.ai pr-custom-protected" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T9_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T9_DIR" 2>&1)
 assert_exists "T9: worldarchitect.ai preserved" "$T9_DIR/worldarchitect.ai"
 assert_exists "T9: pr-custom-protected preserved" "$T9_DIR/pr-custom-protected"
 assert_contains "T9: logs protected root skip" "Skipping protected root" "$T9_OUT"
@@ -332,7 +332,7 @@ set_old_mtime "$T11_DIR"
 # a permanently read-only tree in TMPDIR (found in /advice review of PR #60,
 # reproduced by Opus against the pre-fix commit).
 set +e
-T11_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_DIR" 2>&1)
+T11_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T11_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_DIR" 2>&1)
 T11_RC=$?
 set -e
 chmod -R u+w "$T11_DIR" 2>/dev/null || true
@@ -357,7 +357,7 @@ if command -v chflags >/dev/null 2>&1; then
   chflags uchg "$T12_DIR/pr-immutable-dir/file.txt"
 
   set +e
-  T12_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T12_DIR" 2>&1)
+  T12_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T12_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T12_DIR" 2>&1)
   T12_RC=$?
   set -e
   chflags nouchg "$T12_DIR/pr-immutable-dir/file.txt" 2>/dev/null || true
@@ -387,7 +387,7 @@ set_old_mtime "$T13_DIR"
 touch -h -t 202001010000 "$T13_DIR/pr-stale-symlink"
 T13_PERMS_BEFORE="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
 
-T13_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T13_DIR" 2>&1)
+T13_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T13_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T13_DIR" 2>&1)
 T13_PERMS_AFTER="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
 chmod u+w "$T13_EXTERNAL" 2>/dev/null || true
 assert_missing "T13: stale symlink itself removed" "$T13_DIR/pr-stale-symlink"
@@ -418,7 +418,7 @@ touch -h -t 202001010000 "$T14_DIR/pr-stale-dir-symlink"
 T14_DIR_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
 T14_FILE_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
 
-T14_OUT=$(bash "$TARGET_SCRIPT" --clean --tmp-dir "$T14_DIR" 2>&1)
+T14_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T14_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T14_DIR" 2>&1)
 T14_DIR_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
 T14_FILE_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
 chmod -R u+w "$T14_EXTERNAL_DIR" 2>/dev/null || true
@@ -456,7 +456,7 @@ set_old_mtime "$T16_DIR"
 T16_UNRELATED_SANDBOX="$TMP_TEST_ROOT/t16-unrelated-sandbox"
 mkdir -p "$T16_UNRELATED_SANDBOX"
 set +e
-T16_OUT=$(DISK_MAGICIAN_TEST_SANDBOX="$T16_UNRELATED_SANDBOX" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T16_DIR" 2>&1)
+T16_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T16_UNRELATED_SANDBOX" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T16_DIR" 2>&1)
 T16_RC=$?
 set -e
 assert_rc "T16: aborts with rc=90 when root is outside sandbox" 90 "$T16_RC"

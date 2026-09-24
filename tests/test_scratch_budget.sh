@@ -270,6 +270,76 @@ fi
 assert_contains "Test11: abort message names the offending root" "$R11" "$result11"
 assert_exists "Test11: candidate untouched by the aborted run" "$R11/old"
 
+# ===================== Test 12: unmeasurable content mtime is preserved =====================
+# PR #71 /advice request-changes (Opus): scratch_budget_content_mtime()
+# returned 0 (epoch) when stat/find failed on a subtree. Sorting oldest-first
+# by mtime made that item sort FIRST for eviction -- the opposite of the
+# "cannot measure -> preserve" rule this repo enforces everywhere else
+# (worktree_recency.sh, safety_gate). An item whose content mtime cannot be
+# determined must never be evicted, regardless of how over-budget the root is.
+R12="$TMP_TEST_ROOT/t12"
+make_kb_file "$R12/unmeasurable/f" 4096
+make_kb_file "$R12/measurable/f" 4096
+set_age_hours "$R12/unmeasurable/f" 10
+set_age_hours "$R12/measurable/f" 10
+result12="$(
+  DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" bash -c '
+    set -euo pipefail
+    source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
+    source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
+    source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+
+    DRY_RUN=false
+    log() { echo "LOG: $*" >&2; }
+    path_size_kb() { du -sk "$1" 2>/dev/null | awk "{print \$1+0}"; }
+    is_protected_root() { return 1; }
+    is_protected_tmp_path() { return 1; }
+    has_open_files() { return 1; }
+    # Override the real content-mtime probe: "unmeasurable" always fails to
+    # measure (mirrors an unreadable subtree / a stat race), everything else
+    # measures normally. Emits the empty-string sentinel the fixed
+    # scratch_budget_content_mtime() itself now returns on failure (Test13) --
+    # NOT the pre-fix "0" fallback, which a naive test could confuse with a
+    # coincidental TSV-parsing side effect rather than the real fix.
+    scratch_budget_content_mtime() {
+      if [[ "$(basename "$1")" == "unmeasurable" ]]; then
+        echo ""
+        return 0
+      fi
+      find "$1" -type f -exec stat -f "%m" {} + 2>/dev/null \
+        | awk "{if (\$1+0>m) m=\$1+0} END{print m+0}"
+    }
+
+    BUDGET_DIRS_DELETED=0
+    BUDGET_FILES_DELETED=0
+    BUDGET_KB_FREED=0
+    scratch_budget_evict_root "'"$R12"'" 1024 120 >/dev/null
+    echo "dirs=$BUDGET_DIRS_DELETED files=$BUDGET_FILES_DELETED kb=$BUDGET_KB_FREED"
+  ' 2>&1
+)"
+BUDGET_COUNTS_LINE="$(tail -n1 <<<"$result12")"
+assert_exists "Test12: unmeasurable-mtime item is preserved, never evicted" "$R12/unmeasurable"
+assert_missing "Test12: measurable item evicted instead" "$R12/measurable"
+assert_eq "Test12: exactly one eviction (the measurable item)" "dirs=1 files=0 kb=4096" "$BUDGET_COUNTS_LINE"
+# The decisive assertion: an explicit preserve decision, not an accidental
+# survival. Pre-fix, the enumeration loop unconditionally appends every
+# candidate to the eviction-candidates file regardless of mtime validity and
+# never logs this message -- so this line only appears once the enumeration
+# loop explicitly filters out an unmeasurable candidate before eviction.
+assert_contains "Test12: preserve decision is explicit and logged" \
+  "cannot measure content mtime" "$result12"
+
+# ===================== Test 13: content_mtime returns empty, not "0", on failure =====================
+# Direct unit coverage of the contract change: a genuinely unmeasurable path
+# (does not exist) must yield an empty string, never the string "0" (which a
+# caller could confuse with a legitimate epoch-0 file and treat as ancient).
+R13_MISSING="$TMP_TEST_ROOT/t13-does-not-exist"
+mtime13="$(bash -c '
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  scratch_budget_content_mtime "'"$R13_MISSING"'"
+')"
+assert_eq "Test13: content_mtime is empty (not \"0\") for a missing/unmeasurable path" "" "$mtime13"
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"

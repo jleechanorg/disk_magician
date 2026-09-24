@@ -203,6 +203,54 @@ MD
 rc=0; bash "$SANDBOX/scripts/findings_lint.sh" >/dev/null 2>&1 || rc=$?
 assert_rc "lint rejects malformed frontmatter" 1 "$rc"
 
+
+# ===================== sandbox_guard_roots: mandatory-context enforcement =====================
+# PR #71 /advice HOLD (Codex + Opus, both request-changes): sandbox_guard_roots
+# was purely opt-in — a test that forgot to set DISK_MAGICIAN_TEST_SANDBOX ran
+# against real production roots with no guard at all. Fix: a shared test
+# helper (tests/lib/sandbox_env.sh) exports DISK_MAGICIAN_TEST_CONTEXT=1; any
+# invocation with that flag set MUST also set DISK_MAGICIAN_TEST_SANDBOX, or
+# sandbox_guard_roots now aborts (rc=90) before any deletion — turning a
+# forgotten sandbox from "silently unsafe" into "fails loudly".
+GUARD_LIB="$REPO_ROOT/scripts/safety_lib.sh"
+GUARD_ROOT="$TMP_ROOT/guard-root"
+mkdir -p "$GUARD_ROOT"
+
+rc=0
+out="$(DISK_MAGICIAN_TEST_CONTEXT=1 bash -c '
+  set -euo pipefail
+  source "'"$GUARD_LIB"'"
+  sandbox_guard_roots "'"$GUARD_ROOT"'"
+  echo "UNREACHABLE"
+' 2>&1)" || rc=$?
+assert_rc "sandbox_guard_roots: TEST_CONTEXT set, no TEST_SANDBOX -> aborts rc=90" 90 "$rc"
+assert_contains "abort message explains the missing sandbox" "DISK_MAGICIAN_TEST_SANDBOX" "$out"
+if [[ "$out" == *"UNREACHABLE"* ]]; then
+  record_fail "sandbox_guard_roots: aborts BEFORE returning to caller" "caller code after the call still ran"
+else
+  record_pass "sandbox_guard_roots: aborts BEFORE returning to caller"
+fi
+
+rc=0
+out="$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$GUARD_ROOT" bash -c '
+  set -euo pipefail
+  source "'"$GUARD_LIB"'"
+  sandbox_guard_roots "'"$GUARD_ROOT"'"
+  echo "REACHED"
+' 2>&1)" || rc=$?
+assert_rc "sandbox_guard_roots: TEST_CONTEXT + matching TEST_SANDBOX -> passes" 0 "$rc"
+assert_contains "guard returns control when root is inside the sandbox" "REACHED" "$out"
+
+rc=0
+out="$(bash -c '
+  set -euo pipefail
+  source "'"$GUARD_LIB"'"
+  sandbox_guard_roots "'"$GUARD_ROOT"'"
+  echo "REACHED"
+' 2>&1)" || rc=$?
+assert_rc "sandbox_guard_roots: production (both unset) stays a no-op" 0 "$rc"
+assert_contains "production passthrough unchanged" "REACHED" "$out"
+
 echo
 echo "Results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
