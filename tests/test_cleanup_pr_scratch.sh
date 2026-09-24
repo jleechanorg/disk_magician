@@ -437,7 +437,8 @@ T15_DIR="$TMP_TEST_ROOT/t15_tmp"
 mkdir -p "$T15_DIR/pr-deletion-log-target"
 set_old_mtime "$T15_DIR"
 T15_LOG="$TMP_TEST_ROOT/t15-deletions.log"
-DISK_MAGICIAN_DELETION_LOG="$T15_LOG" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T15_DIR" >/dev/null 2>&1
+DISK_MAGICIAN_DELETION_LOG="$T15_LOG" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T15_DIR" \
+  bash "$TARGET_SCRIPT" --clean --tmp-dir "$T15_DIR" >/dev/null 2>&1
 assert_missing "T15: target actually removed" "$T15_DIR/pr-deletion-log-target"
 assert_exists "T15: deletion log file created" "$T15_LOG"
 T15_LOG_CONTENT="$(cat "$T15_LOG" 2>/dev/null || true)"

@@ -61,6 +61,11 @@ assert_eq() {
   if [[ "$actual" == "$expected" ]]; then record_pass "$name"; else record_fail "$name" "expected '$expected', got '$actual'"; fi
 }
 
+assert_rc() {
+  local name="$1" expected="$2" actual="$3"
+  if [[ "$actual" -eq "$expected" ]]; then record_pass "$name"; else record_fail "$name" "expected rc=$expected, got rc=$actual"; fi
+}
+
 assert_contains() {
   local name="$1" needle="$2" haystack="$3"
   if grep -qF "$needle" <<<"$haystack"; then
@@ -339,6 +344,45 @@ mtime13="$(bash -c '
   scratch_budget_content_mtime "'"$R13_MISSING"'"
 ')"
 assert_eq "Test13: content_mtime is empty (not \"0\") for a missing/unmeasurable path" "" "$mtime13"
+
+# ===================== Test 14: a `stat` failure on a top-level FILE must not abort the caller =====================
+# /advice review of PR #78 (Opus, PR #71 follow-up): the FILE branch of
+# scratch_budget_content_mtime() ran a bare `stat -f '%m' "$path" 2>/dev/null`
+# with no `|| true`. Under the callers' `set -euo pipefail`, a `stat` failure
+# (e.g. a file that vanishes between the caller's `-f` check and this
+# function's own `stat` call -- the same TOCTOU class as the disk_magician-lsl
+# incident) aborts the ENTIRE calling script instead of yielding "unmeasurable,
+# preserve". Reproduced with a `stat` PATH shim that fails for exactly one
+# real, existing file (so bash's builtin `[[ -f ]]` test still succeeds, only
+# the external `stat` command fails).
+R14="$TMP_TEST_ROOT/t14"
+mkdir -p "$R14"
+touch "$R14/racy-file.txt"
+STAT_SHIM_BIN="$TMP_TEST_ROOT/t14-bin"
+mkdir -p "$STAT_SHIM_BIN"
+cat > "$STAT_SHIM_BIN/stat" <<EOF
+#!/usr/bin/env bash
+last=""
+for arg in "\$@"; do last="\$arg"; done
+if [[ "\$last" == "$R14/racy-file.txt" ]]; then
+  exit 1
+fi
+exec /usr/bin/stat "\$@"
+EOF
+chmod +x "$STAT_SHIM_BIN/stat"
+
+set +e
+result14="$(PATH="$STAT_SHIM_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  echo "before call"
+  mtime="$(scratch_budget_content_mtime "'"$R14/racy-file.txt"'")"
+  echo "after call: mtime=[$mtime]"
+' 2>&1)"
+rc14=$?
+set -e
+assert_rc "Test14: caller script survives a stat failure on a top-level file" 0 "$rc14"
+assert_contains "Test14: caller reaches the line after the failed-stat call" "after call: mtime=[]" "$result14"
 
 echo ""
 echo "===================================="
