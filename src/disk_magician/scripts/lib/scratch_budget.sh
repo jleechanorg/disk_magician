@@ -89,14 +89,20 @@ _scratch_budget_snapshot_has_prefix() {
 # non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
   local path="$1" epoch
+  # PR #71 /advice follow-up (Opus, PR #78): every `stat`/`find` call below is
+  # neutralized with `|| true` so a failure (e.g. the path vanishing between
+  # the caller's enumeration and this call -- the same TOCTOU class as bead
+  # disk_magician-lsl) can never abort the caller under `set -euo pipefail`.
+  # A bare failing command here previously aborted the ENTIRE cleanup script
+  # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    stat -f '%m' "$path" 2>/dev/null
+    stat -f '%m' "$path" 2>/dev/null || true
     return
   fi
   epoch="$(find "$path" -type f -exec stat -f '%m' {} + 2>/dev/null \
-      | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
+      | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
   if [[ -z "$epoch" ]]; then
-    epoch="$(stat -f '%m' "$path" 2>/dev/null)"
+    epoch="$(stat -f '%m' "$path" 2>/dev/null || true)"
   fi
   echo "$epoch"
 }
