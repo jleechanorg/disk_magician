@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # test_sandbox_context_lint.sh — guard test (bead disk_magician-lsl /
-# PR #71 /advice HOLD, Codex + Opus; extended after PR #78's own /advice
-# round found this lint was shell-only and missed a Python destructive
-# caller). Any tests/*.sh or tests/*.py file that resolves a script
-# variable to cleanup_tmp.sh, cleanup_pr_scratch.sh, or pressure_sweep.sh
-# AND invokes it with a destructive flag (--clean, --apply, --large, or
-# --budget*) must also reference BOTH DISK_MAGICIAN_TEST_CONTEXT and
+# PR #71 /advice HOLD, Codex + Opus; extended twice more after PR #78's own
+# /advice rounds: round 1 found this lint was shell-only and missed a
+# Python destructive caller; round 2 found it only recognized the three CLI
+# script names and missed direct scratch_budget_evict_root() library
+# calls). Any tests/*.sh or tests/*.py file that either (a) resolves a
+# script variable to cleanup_tmp.sh, cleanup_pr_scratch.sh, or
+# pressure_sweep.sh and invokes it with a destructive flag (--clean,
+# --apply, --large, or --budget*), or (b) sources scripts/lib/
+# scratch_budget.sh and calls scratch_budget_evict_root() directly, must
+# also reference BOTH DISK_MAGICIAN_TEST_CONTEXT and
 # DISK_MAGICIAN_TEST_SANDBOX somewhere in the same file. Without both,
 # scripts/safety_lib.sh's sandbox_guard_roots() has nothing to confine
 # destructive roots to, and a forgotten sandbox degrades from "test bug" to
@@ -39,6 +43,19 @@ invokes_destructive_script_sh() {
   grep -Eq 'bash "\$[A-Za-z_]+"[^#]*--(clean|apply|large|budget)' "$f"
 }
 
+# invokes_destructive_library_call <file> — true if a shell test sources
+# scripts/lib/scratch_budget.sh AND calls scratch_budget_evict_root()
+# directly (bypassing the cleanup_tmp.sh/cleanup_pr_scratch.sh CLI entirely,
+# e.g. tests/test_scratch_budget.sh's run_budget() harness). tests/lib/
+# sandbox_env.sh names scratch_budget_evict_root as a covered destructive
+# path (PR #78 /advice round 2, Codex) -- this closes the gap where the
+# first two checks only recognized the three CLI script names.
+invokes_destructive_library_call() {
+  local f="$1"
+  grep -Eq 'scripts/lib/scratch_budget\.sh' "$f" || return 1
+  grep -Eq 'scratch_budget_evict_root' "$f"
+}
+
 # invokes_destructive_script_py <file> — true if a Python test both (a)
 # names one of the target scripts (by basename, however the path is built)
 # and (b) passes a destructive flag as a literal CLI argument.
@@ -64,7 +81,9 @@ check_file() {
 while IFS= read -r -d '' f; do
   base="$(basename "$f")"
   [[ "$base" == "$SELF" ]] && continue
-  invokes_destructive_script_sh "$f" && check_file "$f"
+  if invokes_destructive_script_sh "$f" || invokes_destructive_library_call "$f"; then
+    check_file "$f"
+  fi
 done < <(find "$SCRIPT_DIR" -maxdepth 1 -name 'test_*.sh' -print0)
 
 while IFS= read -r -d '' f; do

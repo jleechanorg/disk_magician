@@ -31,6 +31,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/lib/sandbox_env.sh"
 
 TMP_TEST_ROOT="$(mktemp -d -t test_scratch_budget.XXXXXX)"
 trap 'chmod -R u+w "$TMP_TEST_ROOT" 2>/dev/null || true; rm -rf "$TMP_TEST_ROOT"' EXIT
@@ -99,16 +100,21 @@ set_age_minutes() {
 # run_budget <root> <budget_kb> <floor_minutes> <open_pred_basename|-> <protected_root_basename|-> <lsof_fails|0/1> <dry_run|true/false> [test_sandbox_dir]
 # Prints "dirs=<n> files=<n> kb=<n>" then the remaining root listing.
 # DISK_MAGICIAN_DELETION_LOG always points at the fixture log (never the
-# real ~/Library/Logs path). [test_sandbox_dir], when given, sets
-# DISK_MAGICIAN_TEST_SANDBOX so the production sandbox_guard_roots() abort
-# can be exercised (bead disk_magician-ka4 acceptance criteria).
+# real ~/Library/Logs path). Every call carries DISK_MAGICIAN_TEST_CONTEXT
+# (tests/lib/sandbox_env.sh names scratch_budget_evict_root as a covered
+# destructive path -- PR #78 /advice round 2, Codex) and defaults
+# DISK_MAGICIAN_TEST_SANDBOX to $TMP_TEST_ROOT, which contains every test's
+# <root> fixture. [test_sandbox_dir], when given, overrides the sandbox to
+# something NOT containing <root> so the production sandbox_guard_roots()
+# abort can be exercised (bead disk_magician-ka4 acceptance criteria, Test11).
 run_budget() {
   local root="$1" budget_kb="$2" floor_minutes="$3" open_base="$4" protected_base="$5" lsof_fails="$6" dry_run="$7"
-  local sandbox_dir="${8:-}"
+  local sandbox_dir="${8:-$TMP_TEST_ROOT}"
   DM_ROOT="$root" DM_BUDGET_KB="$budget_kb" DM_FLOOR_MIN="$floor_minutes" \
   DM_OPEN_BASE="$open_base" DM_PROTECTED_BASE="$protected_base" DM_LSOF_FAILS="$lsof_fails" \
   DM_DRY_RUN="$dry_run" \
   DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   DISK_MAGICIAN_TEST_SANDBOX="$sandbox_dir" bash -c '
     set -euo pipefail
     source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
@@ -288,7 +294,9 @@ make_kb_file "$R12/measurable/f" 4096
 set_age_hours "$R12/unmeasurable/f" 10
 set_age_hours "$R12/measurable/f" 10
 result12="$(
-  DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" bash -c '
+  DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_TEST_ROOT" bash -c '
     set -euo pipefail
     source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
     source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
