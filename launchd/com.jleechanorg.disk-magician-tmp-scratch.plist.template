@@ -5,19 +5,29 @@
   bead jleechan-dqiz (AO worktree scratch under /private/tmp/worldarchitect-pr*
   and pr*-evidence-* only got cleaned reactively, via pressure_sweep.sh's
   cleanup_tmp.sh --large step, once free space had already dropped below
-  40GB). This job runs the same already-safety-gated cleanup_tmp.sh --large
-  path on a fixed hourly cadence instead, so stale scratch (>24h,
-  LARGE_TMP_ACTIVE_HOURS gate) gets archived well before it can contribute
-  to a pressure event, not just after one starts.
+  40GB). This job runs scripts/tmp_scratch_sweep.sh --clean (bead
+  disk_magician-tmp-scratch-sweep-wrapper-impl-ruo), which wraps the
+  already-safety-gated cleanup_tmp.sh --large path AND cleanup_claude_state.sh
+  --clean (bead disk_magician-isw's ~/.claude/state clone sweeper) on a fixed
+  hourly cadence, so stale scratch (>24h, LARGE_TMP_ACTIVE_HOURS gate for
+  cleanup_tmp.sh; 7-day floor for cleanup_claude_state.sh) gets reclaimed
+  well before either can contribute to a pressure event, not just after one
+  starts.
 
-  Safety: cleanup_tmp.sh --large is unchanged — it still only acts on
-  top-level /private/tmp dirs with no file mtime within the last 24h
-  (LARGE_TMP_ACTIVE_HOURS), skips the DEFAULT_PROTECTED_TMP_ROOTS list,
-  archives (never immediately rm -rf's) into
-  /private/tmp/_disk_magician_archive/<ts>/, and only purges an archived
-  copy after its own retention window. LARGE_TMP_APPROVED=1 here mirrors
-  exactly how pressure_sweep.sh already auto-approves the same flag for the
-  same script.
+  Safety: neither wrapped script's own behavior changed — cleanup_tmp.sh
+  --large still only acts on top-level /private/tmp dirs with no file mtime
+  within the last 24h (LARGE_TMP_ACTIVE_HOURS), skips the
+  DEFAULT_PROTECTED_TMP_ROOTS list, archives (never immediately rm -rf's)
+  into /private/tmp/_disk_magician_archive/<ts>/, and only purges an
+  archived copy after its own retention window. Each script's own
+  *_APPROVED=1 approval gate is now set by the wrapper itself (per-command,
+  via `env`), not by this plist's EnvironmentVariables — mirroring exactly
+  how pressure_sweep.sh already auto-approves the same LARGE_TMP_APPROVED
+  flag for the same script. The wrapper runs cleanup_tmp.sh first, then
+  cleanup_claude_state.sh even if the tmp step failed (failure-continue),
+  and exits nonzero if either step failed so a persistent failure is visible
+  in this job's StandardErrorPath log / exit status rather than looking
+  healthy.
 
   Schedule:  Every hour (StartInterval=3600s) — matches jleechan-dqiz's
              literal "hourly stale-clone sweeper" interim ask. Idle fires
@@ -36,16 +46,13 @@
   <key>ProgramArguments</key>
   <array>
     <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/cleanup_tmp.sh</string>
+    <string>@REPO_ROOT@/scripts/tmp_scratch_sweep.sh</string>
     <string>--clean</string>
-    <string>--large</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
-    <key>LARGE_TMP_APPROVED</key>
-    <string>1</string>
   </dict>
   <key>StartInterval</key>
   <integer>3600</integer>
