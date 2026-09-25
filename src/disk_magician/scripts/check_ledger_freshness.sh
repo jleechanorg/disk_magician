@@ -150,6 +150,22 @@ def check_partial(state_dir):
              None, None, f"invalid:{exc}")
         return
 
+    # A structurally-valid ledger can still be functionally empty: zero
+    # granularity buckets and zero oversize files means the scan measured
+    # nothing (its residual absorbs the whole disk). validate_ledger accepts
+    # this shape as reconciled (0 + 0 + residual == disk_used_kb), but an
+    # empty scan is not evidence the pipeline is alive -- accepting it as
+    # "fresh" would silence the stale-ledger alert on a scan that keeps
+    # failing early (e.g. an FDA gap), exactly the same suppression outcome
+    # as the crash bug above, reached through valid input instead of a
+    # crash (found in /advice review round 2 of this PR).
+    buckets = partial.get("granularity_buckets") or partial.get("buckets") or []
+    oversize = partial.get("oversize_indivisible_files") or []
+    if not buckets and not oversize:
+        emit(False, None, safe_get(partial, "captured_at"), safe_get(partial, "mode"),
+             None, None, "empty_scan")
+        return
+
     captured_at = partial.get("captured_at")
     try:
         ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(

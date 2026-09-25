@@ -235,6 +235,48 @@ class TestGrowthTop10(unittest.TestCase):
         self.assertIn("/p7", lines[2])
         self.assertNotIn("/shrunk", result.stdout)  # negative delta excluded
 
+    def test_falls_back_to_canonical_when_partial_has_non_dict_bucket_item(self):
+        # /advice round 2 (Codex): validate_ledger assumes each bucket item
+        # is a dict and calls .get() on it directly, so a bare string bucket
+        # entry raises AttributeError, not LedgerError. load_current must
+        # catch that broadly and fall back to canonical rather than crash
+        # the whole CLI.
+        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
+        _commit_ledger(self.repo, floor, "floor")
+        target = full_attribution_ledger(6 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 4 * GIB_KB},
+            {"path": "/growth", "measured_kb": 2 * GIB_KB},
+        ])
+        _commit_ledger(self.repo, target, "target")
+        malformed = structural_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
+        malformed["granularity_buckets"].append("not-a-dict-bucket-entry")
+        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", malformed)
+
+        result = self._run_cli()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("current (canonical)", result.stdout)
+
+    def test_coverage_suffix_does_not_crash_on_non_dict_coverage_envelope(self):
+        # /advice round 2 (Codex): coverage_suffix crashes on a list
+        # coverage_envelope (`envelope.get(...)` on a list). validate_ledger
+        # does not constrain this field's type, so a malformed-but-otherwise-
+        # valid partial must degrade gracefully instead of crashing the CLI.
+        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
+        _commit_ledger(self.repo, floor, "floor")
+        partial = structural_ledger(5 * GIB_KB, 0, [
+            {"path": "/a", "measured_kb": 4 * GIB_KB},
+            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+        ])
+        partial["coverage_envelope"] = ["not", "a", "dict"]
+        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", partial)
+
+        result = self._run_cli()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("current (partial)", result.stdout)
+        self.assertIn("(partial)", result.stdout)
+
     def test_days_and_limit_must_be_positive(self):
         result_days = self._run_cli("--days", "0")
         self.assertNotEqual(result_days.returncode, 0)

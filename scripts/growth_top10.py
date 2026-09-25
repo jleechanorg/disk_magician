@@ -36,13 +36,21 @@ def resolve_state_dir(explicit):
 def load_current(state_dir):
     """Return (ledger, source_label) — working-tree read, partial first, no
     commit-lag. Falls back to the canonical file on any read/validation
-    failure. Neither valid: (None, None)."""
+    failure. Neither valid: (None, None).
+
+    Catches Exception broadly, not just (OSError, ValueError, LedgerError):
+    validate_ledger assumes each bucket item is a dict and calls .get() on
+    it directly, so a malformed-but-parseable ledger (e.g. a bucket entry
+    that is a bare string) raises AttributeError, not LedgerError. Without
+    this broad catch, a malformed partial.json would crash the whole CLI
+    instead of falling back to the canonical file (found in /advice review
+    round 2 of this PR)."""
     for rel, label in ((PARTIAL_LEDGER_JSON, "partial"), (LEDGER_JSON, "canonical")):
         path = state_dir / "ledger" / rel
         try:
             ledger = json.loads(path.read_text())
             history_diff.validate_ledger(ledger, label=label)
-        except (OSError, ValueError, history_diff.LedgerError):
+        except Exception:
             continue
         return ledger, label
     return None, None
@@ -51,7 +59,9 @@ def load_current(state_dir):
 def coverage_suffix(ledger):
     if ledger.get("mode") == "complete":
         return ""
-    envelope = ledger.get("coverage_envelope") or {}
+    envelope = ledger.get("coverage_envelope")
+    if not isinstance(envelope, dict):
+        return " (partial)"
     measured = envelope.get("measured_top_level_roots")
     reachable = envelope.get("reachable_top_level_roots")
     if measured is None or reachable is None:

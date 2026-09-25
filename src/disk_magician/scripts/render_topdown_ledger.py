@@ -464,6 +464,17 @@ def write_partial_ledger(out_dir, ledger, report):
     except history_diff.LedgerError as exc:
         print(f"render_topdown_ledger: skipping partial artifact — {exc}", file=sys.stderr)
         return
+    # A structurally-valid ledger can still be functionally empty: zero
+    # buckets and zero oversize files means nothing was measured (its
+    # residual absorbs the whole disk) — the "non-empty run" this function's
+    # docstring already promises, now enforced. An empty partial published
+    # as "fresh" would let a scan that keeps failing early (e.g. an FDA gap)
+    # silence check_ledger_freshness.sh's stale-ledger alert indefinitely
+    # (found in /advice review round 2 of this PR).
+    if not partial.get("granularity_buckets") and not partial.get("oversize_indivisible_files"):
+        print("render_topdown_ledger: skipping partial artifact — empty scan (no buckets or oversize files)",
+              file=sys.stderr)
+        return
     with open(os.path.join(out_dir, PARTIAL_LEDGER_JSON), "w") as f:
         json.dump(partial, f, indent=2)
         f.write("\n")

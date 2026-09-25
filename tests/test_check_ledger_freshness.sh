@@ -45,6 +45,9 @@ print(dt.strftime('%Y-%m-%dT%H:%M:%SZ'))
 
 write_partial() {
   # $1: dest path, $2: captured_at ISO8601, $3: mode
+  # Includes one non-empty bucket: a fully-empty partial (zero buckets, zero
+  # oversize files) is rejected as an empty scan (case 12) — this fixture
+  # represents a real, non-degenerate partial ledger.
   python3 -c "
 import json, sys
 path, captured_at, mode = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -53,8 +56,8 @@ ledger = {
     'mode': mode,
     'coverage_envelope': {'measured_top_level_roots': 5, 'reachable_top_level_roots': 10},
     'disk_used_kb': 1000,
-    'residual_kb': 1000,
-    'granularity_buckets': [],
+    'residual_kb': 500,
+    'granularity_buckets': [{'path': '/a', 'measured_kb': 500}],
     'oversize_indivisible_files': [],
     'opaque_intrinsic_gates': [],
     'captured_at': captured_at,
@@ -230,6 +233,37 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE11" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "
   && ok "absent status.json (no reconciliation target) still accepts a fresh valid partial" \
   || bad "expected OK rc=0 label=PARTIAL got rc=$rc out=$out"
 rm -rf "$WORK11"
+
+# --- Case 12: a structurally-valid but functionally EMPTY partial ledger
+# (zero buckets, zero oversize files, residual absorbs the whole disk) must
+# not be accepted as fresh. /advice round 2 (Codex + Opus, both
+# independently) found this: a fresh partial that measured 0 of N roots
+# still reconciles (0 + residual == disk_used_kb) and would silence the
+# stale-ledger alert indefinitely on a scan that keeps failing early.
+WORK12="$(mktemp -d)"
+git init -q "$WORK12/repo"
+STATE12="$WORK12/repo"
+mkdir -p "$STATE12/ledger"
+echo '{"disk_used_kb":1}' > "$STATE12/ledger/topdown-5g.json"
+python3 -c "
+import json
+ledger = {
+    'schema_version': 2, 'mode': 'partial',
+    'coverage_envelope': {'measured_top_level_roots': 0, 'reachable_top_level_roots': 40},
+    'disk_used_kb': 500000000, 'residual_kb': 500000000,
+    'granularity_buckets': [], 'oversize_indivisible_files': [], 'opaque_intrinsic_gates': [],
+    'captured_at': '$(iso_offset_hours -1)',
+}
+json.dump(ledger, open('$STATE12/ledger/topdown-5g.partial.json', 'w'))
+"
+git -C "$STATE12" add ledger/topdown-5g.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE12" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE12" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *empty_scan* ]] \
+  && ok "rejects a structurally-valid but empty (0 roots measured) partial ledger" \
+  || bad "expected STALE rc=1 empty_scan got rc=$rc out=$out"
+rm -rf "$WORK12"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

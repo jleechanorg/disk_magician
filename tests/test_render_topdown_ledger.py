@@ -617,6 +617,29 @@ class TestPartialLedgerArtifact(unittest.TestCase):
         self.assertEqual(open(prior_path).read(), '{"prior": "partial"}\n')
         self.assertIn("skipping partial artifact", err)
 
+    def test_partial_ledger_skips_on_empty_scan(self):
+        # /advice round 2 (Codex + Opus, both independently): a structurally
+        # valid but functionally empty partial (zero buckets, zero oversize
+        # files, residual absorbs the whole disk) still reconciles and would
+        # let check_ledger_freshness.sh accept it as fresh, silencing the
+        # stale-ledger alert on a scan that keeps failing early.
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            data = json.load(f)
+        removed = sum(b["measured_kb"] for b in data["granularity_buckets"])
+        data["granularity_buckets"] = []
+        data["oversize_indivisible_files"] = []
+        data["accounting_equation"]["displayed_buckets_kb"] = 0
+        data["accounting_equation"]["sub_granularity_tail_kb"] += removed
+        with open(frontier, "w") as f:
+            json.dump(data, f)
+
+        rc, out, err = run(frontier, self.out_dir)
+
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(self._partial_path()))
+        self.assertIn("empty scan", err)
+
     def test_stale_frontier_report_does_not_touch_partial(self):
         os.makedirs(self.out_dir)
         prior_path = self._partial_path()
