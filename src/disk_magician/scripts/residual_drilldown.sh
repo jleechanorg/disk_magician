@@ -11,6 +11,10 @@
 # "Control loop" section). Never touches disk_snapshot.sh.
 set -euo pipefail
 
+# launchd runs this with PATH=/usr/bin:/bin:/usr/sbin:/sbin; Homebrew's
+# timeout/gtimeout live outside it, which silently unbounded the time caps below.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
