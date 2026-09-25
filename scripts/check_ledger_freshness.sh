@@ -166,10 +166,10 @@ def check_partial(state_dir):
 
     # Reconciliation: when status.json reports the SAME captured_at (the
     # common case — both are written by the same render_topdown_ledger.py
-    # run), its mode/coverage_envelope must agree with the partial ledger's.
+    # run), its mode/coverage_envelope must agree with the partial ledger.
     # A same-timestamp disagreement between the two sidecar files is exactly
     # the corruption class this exists to catch. Different captured_at
-    # values mean they are from different runs (normal — e.g. a later run's
+    # values mean they are from different runs (normal — e.g. a later run
     # frontier report was itself stale, so it wrote a new status but no new
     # partial) and impose no constraint.
     #
@@ -177,8 +177,20 @@ def check_partial(state_dir):
     # reconcile against" — no constraint. Anything else abnormal (present
     # but unparseable, or present but not a JSON object) means reconciliation
     # cannot be proven, so it fails closed rather than silently proceeding as
-    # if unconstrained — a status.json that exists but can't be trusted is a
+    # if unconstrained — a status.json that exists but cannot be trusted is a
     # louder red flag than one that was never written.
+    #
+    # NOTE for future edits: this whole heredoc runs through /bin/bash on
+    # macOS CI, which is bash 3.2 (Apple ships no newer bash, for licensing
+    # reasons). bash 3.2 mis-parses a heredoc-in-command-substitution
+    # ($(python3 - ... <<PY_MARKER ... PY_MARKER)) when the heredoc BODY
+    # contains a literal apostrophe character, even though the heredoc
+    # delimiter itself is quoted — confirmed live: with one apostrophe
+    # present bash reported an unexpected EOF while looking for a matching
+    # quote character, and with three present, later syntax broke with a
+    # syntax-error-near-unexpected-token message. Do not use an apostrophe
+    # or a contraction anywhere in this heredoc: comments, docstrings, or
+    # f-strings. Spell out "cannot", "does not"; rephrase any possessive.
     try:
         with open(status_path) as f:
             status = json.load(f)
