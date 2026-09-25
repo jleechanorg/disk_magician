@@ -12,6 +12,11 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 FAKE_BIN="$TMP_ROOT/bin"
 mkdir -p "$FAKE_BIN"
+# sweeper_health_check.sh hard-fails before reaching any sweeper logic if
+# $HOME/Library/LaunchAgents does not exist (see its own plist-dir guard).
+# The fake $HOME below needs that directory present (empty is fine — 0
+# plists) so the run actually reaches the ledger-freshness check.
+mkdir -p "$TMP_ROOT/home/Library/LaunchAgents"
 cat > "$FAKE_BIN/check_ledger_freshness.sh" <<'MOCK'
 #!/usr/bin/env bash
 echo -e "STALE\tno_published_ledger_commit"
