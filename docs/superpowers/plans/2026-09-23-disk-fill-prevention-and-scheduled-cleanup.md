@@ -47,19 +47,17 @@ all 8 PRs in this plan's dependency table (#69–#76) are now MERGED to
 #69/#70/#73 CLEAN, #71/#72/#74/#75 BLOCKED on bead `cse`'s
 version-monotonicity gate until #73 merged) is preserved for provenance
 only — every PR-merge dependency in this plan (Tasks 1–5, 8) is therefore
-already satisfied. The one dependency that is *not* satisfied is new as of
-2026-09-24 and is **not** a merged PR: `scripts/lib/scratch_budget.sh` as
-shipped in #71 was rejected by both reviewers over four safety gaps
-(missing sandboxed/enforced-mode distinction, unmeasurable candidates
-deleted instead of preserved, `SKIP_LSOF` usable in production,
-`path_size_kb` miscomputation). These are being fixed on local branch
-`fix/scratch-safety-hardening` by a sibling lane (not yet a PR as of
-2026-09-24). **Task 4b (enable scratch-budget eviction) additionally
-depends on that branch's PR merging to `origin/main`** — do not enable a
-15 GiB production eviction budget against the unhardened eviction path.
-Verify via `env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --state merged
---head fix/scratch-safety-hardening --json number` returning a non-empty
-array before starting Task 4b — not `git log --oneline | grep`, which is
+already satisfied. A dependency that was *not* satisfied as of 2026-09-24
+and was **not** a merged PR: `scripts/lib/scratch_budget.sh` as shipped in
+#71 was rejected by both reviewers over four safety gaps (missing
+sandboxed/enforced-mode distinction, unmeasurable candidates deleted
+instead of preserved, `SKIP_LSOF` usable in production, `path_size_kb`
+miscomputation). **Round-5 update (2026-09-25): fixed and merged as PR
+#78** (`27df9d93b77dc5d89ea035bb2a10cd4357a554a5`) — **Task 4b's gate is
+now satisfied.** Verify via `env -u GH_TOKEN -u GITHUB_TOKEN gh pr list
+--state merged --head fix/scratch-safety-hardening --json number`
+returning a non-empty array before starting Task 4b (re-check live rather
+than trusting this note) — not `git log --oneline | grep`, which is
 unreliable here: this repo squash-merges, so merged commit subjects on
 `origin/main` are PR titles, never branch names.
 
@@ -68,7 +66,8 @@ the script they extend (Task 1 → #70, Task 2 → #74, Task 3 → #72) — all
 merged, so Tasks 1–3 can start immediately. Task 4c (TemporaryItems filter
 fix) depended on #71 merged — merged, can start immediately. Task 4b
 (enable scratch-budget eviction) depends on Task 4c closed **and** the
-lane-A `fix/scratch-safety-hardening` PR merged (see above). Task 4
+lane-A `fix/scratch-safety-hardening` PR merged (see above — satisfied as
+of PR #78, 2026-09-25). Task 4
 (register DARWIN_USER_TEMP_DIR as covered) depended on #72 merged (satisfied)
 and depends on Task 4b closed. Task 5 (A1 helper) depended on #72 merged
 (satisfied; it registers an entry in `config/sweeper_roots.txt`, which
@@ -401,18 +400,21 @@ merged (beads `d45`/`ka4`) — the earlier draft of this task only depended
 on `cse`+`8to`, which would let it run before the feature it enables even
 existed; fixed. **Also depends on Task 4c below** — do not enable eviction
 before the `TemporaryItems` filter gap is closed. **Round-4 gate (added
-2026-09-24, do not skip):** additionally depends on local branch
-`fix/scratch-safety-hardening` merging to `origin/main` first. Both
-reviewers rejected `scripts/lib/scratch_budget.sh` as shipped in #71 over
-four safety gaps (missing sandboxed/enforced-mode distinction, unmeasurable
+2026-09-24, SATISFIED 2026-09-25 — round-5, do not skip the re-check
+below):** additionally depended on local branch
+`fix/scratch-safety-hardening` merging to `origin/main`. Both reviewers
+rejected `scripts/lib/scratch_budget.sh` as shipped in #71 over four
+safety gaps (missing sandboxed/enforced-mode distinction, unmeasurable
 candidates deleted instead of preserved, `SKIP_LSOF` usable in production,
-`path_size_kb` miscomputation); a sibling lane is fixing these on that
-branch (not yet a PR as of 2026-09-24). Enabling a 15 GiB production
-eviction budget before that branch's fixes merge would run the unhardened
-eviction path live. Verify via `env -u GH_TOKEN -u GITHUB_TOKEN gh pr list
---state merged --head fix/scratch-safety-hardening --json number`
-returning a non-empty array (not `git log --oneline | grep`, unreliable
-under this repo's squash-merge convention) before starting this task.
+`path_size_kb` miscomputation); fixed on that branch and merged as PR #78
+(`27df9d93b77dc5d89ea035bb2a10cd4357a554a5`, 2026-09-25). Enabling a 15
+GiB production eviction budget before that branch's fixes merged would
+have run the unhardened eviction path live — no longer applicable, but
+verify via `env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --state merged
+--head fix/scratch-safety-hardening --json number` returning a non-empty
+array (re-check live rather than trusting this note; not `git log
+--oneline | grep`, unreliable under this repo's squash-merge convention)
+before starting this task.
 
 ### Task 4c (new): Close the TemporaryItems eviction-filter gap (round-3 `/advice` finding)
 

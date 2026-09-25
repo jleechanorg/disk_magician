@@ -51,9 +51,15 @@ age bands the fleet doesn't look at yet. The published ledger
 `origin/main`.** The round-3 `mergeStateStatus` snapshot immediately below
 is preserved for provenance only. A round-4 dependency independent of
 these merges: `scripts/lib/scratch_budget.sh` as merged in #71 was
-rejected by both reviewers over four safety gaps and is being re-hardened
-on local branch `fix/scratch-safety-hardening` by a sibling lane (not yet
-a PR as of 2026-09-24) — see B4b's updated dependency below.
+rejected by both reviewers over four safety gaps and was re-hardened on
+local branch `fix/scratch-safety-hardening` by a sibling lane. **Round-5
+update (2026-09-25): merged as PR #78** (`fix: mandatory sandbox guard,
+preserve unmeasurable mtime, du arithmetic`, merge commit
+`27df9d93b77dc5d89ea035bb2a10cd4357a554a5`) — confirmed live via `gh pr
+list --state merged --head fix/scratch-safety-hardening --json
+number,mergedAt,mergeCommit`. B4b's dependency (below) is now satisfied;
+re-verify live before executing rather than trusting this note, in case
+`origin/main` moves again.
 
 Seven draft PRs were open as of 2026-09-23. `gh pr list`'s `mergeable`
 field (conflict-free check only) reported `MERGEABLE` for all seven, but
@@ -74,7 +80,7 @@ All 8 are merged.
 | #69 | — | `plutil -extract` corruption fix + 30d disk-recurrence report | MERGED |
 | #75 | 949 | Fix flaky `test_git_unsaved_work_protection` | MERGED |
 | #70 | jui | `cleanup_code_sign_clones.sh` reclaims per-launch **children**, not just top-level clones | MERGED |
-| #71 | d45/ka4 | `scripts/lib/scratch_roots.sh` (bash-array registry) + `scripts/lib/scratch_budget.sh` (size-budget+age eviction), wires `$TMPDIR` into `cleanup_tmp.sh` and `pressure_sweep.sh` | MERGED — but see round-4 dependency note above: `scratch_budget.sh`'s eviction logic is being re-hardened on `fix/scratch-safety-hardening` before Task 4b may enable it |
+| #71 | d45/ka4 | `scripts/lib/scratch_roots.sh` (bash-array registry) + `scripts/lib/scratch_budget.sh` (size-budget+age eviction), wires `$TMPDIR` into `cleanup_tmp.sh` and `pressure_sweep.sh` | MERGED — round-4 dependency note above: `scratch_budget.sh`'s eviction logic needed re-hardening on `fix/scratch-safety-hardening` before Task 4b could enable it; **round-5 (2026-09-25): merged as PR #78** (`27df9d93b77dc5d89ea035bb2a10cd4357a554a5`) — gate satisfied |
 | #74 | isw | `scripts/cleanup_claude_state.sh` (gated `~/.claude/state` sweeper), wires into `disk_audit.sh` | MERGED |
 | #72 | 8to | `config/sweeper_roots.txt` (flat-text registry) + `scripts/check_uncovered_roots.py/.sh` + Colima swap/VM volume tracking in `disk_snapshot.sh` | MERGED |
 | #76 | — | `check_version_monotonic.py` follow-up (cse), stops reading named branch tips | MERGED |
@@ -180,15 +186,49 @@ scope (user-approved 2026-09-24, "finish all"):
     resolves to literal `/private/tmp`; `agent-worktrees` matches neither
     the `wt_*|worktree_*` unsaved-work guard nor
     `DEFAULT_PROTECTED_TMP_ROOTS`). Fixed: the default moved one more level
-    away, to `/private/var/tmp/agent-worktrees` — confirmed live via `grep
-    -rn '/private/var/tmp' scripts/*.sh scripts/lib/*.sh` returning zero
-    matches, i.e. no sweeper in this repo scans `/private/var/tmp` at all.
-    `mkdir -p`, never registered with `scratch_budget.sh` or the Stop hook.
-    Cleanup of that root is explicitly out of scope for this bead pair — a
-    follow-up bead would extend the existing 7-day-floor
-    `cleanup_worktrees.sh` path to cover it; until then it is simply not
-    auto-swept, which is now actually true (unlike the round-4b claim,
-    which was made before the `/private/tmp` scanning gap above was found).
+    away, to `/private/var/tmp/agent-worktrees`. **Round-6 correction
+    (2026-09-25, independent Codex + Opus team-lead-requested closure
+    round, both flagged the same gap):** confirmed live via `grep -rn
+    '/private/var/tmp' scripts/*.sh scripts/lib/*.sh config/
+    launchd/*.template` returning zero *literal path* matches, but that is
+    not proof of categorical immunity — `scripts/worktree_hygiene.sh`
+    discovers a repo's worktrees via `git -C <repo> worktree list`, which
+    is indifferent to the worktree's physical parent directory, so a
+    worktree this helper creates against a repo `worktree_hygiene.sh`
+    already scans (its own auto-discovery always includes
+    `~/projects/worldarchitect.ai`) WOULD be found there regardless of
+    living under `/private/var/tmp`. Two things keep this safe today: (1)
+    that discovery only applies when the *calling repo* is one
+    `worktree_hygiene.sh` scans — disk_magician itself is not, since it
+    lives outside `~/projects/`; (2) its own launchd job runs
+    report-only (`--skip-push --skip-gh`, no `--execute`) today, so even a
+    discovered worktree is not currently auto-deleted through that path.
+    Both are properties of the *existing* sweeper's current config, not
+    something this bead pair changes or should rely on remaining true
+    forever — restated accurately: this root has no sweeper of its own
+    and is not registered with `scratch_budget.sh` or the Stop hook, but a
+    *repo-discovery-based* sweeper (`worktree_hygiene.sh`) could
+    legitimately reach a worktree here in the future depending on which
+    repo it's created against and that job's own execute-mode
+    configuration — which is actually fine, since that sweeper already
+    enforces the correct 7-day floor via `worktree_recency.sh`, unlike the
+    B4/Stop-hook risk this whole redesign exists to avoid. Cleanup of this
+    root for repos `worktree_hygiene.sh` doesn't already scan is
+    explicitly out of scope for this bead pair — a follow-up bead would
+    extend its `CLAUDE_WORKTREE_REPOS`/discovery config to cover them.
+
+    **Root-ownership hardening (round-6 addition, both reviewers
+    independently flagged this):** `/private/var/tmp` is
+    world-writable-sticky (`drwxrwxrwt root:wheel`), so a plain `mkdir -p`
+    on a predictable child path does not prove this session created or
+    owns it — another local actor could pre-create `agent-worktrees` as a
+    directory owned by someone else, or as a symlink into a swept
+    location, before this helper first runs. `agent_worktree_create` must
+    reject (not silently proceed into) an existing `$AGENT_WORKTREE_ROOT`
+    that is a symlink or not owned by the current user, checked with `[[
+    -L ]]`/`[[ -O ]]` immediately after `mkdir -p` — see the updated bead
+    contracts (`9n1` test case, `2nw` implementation) for the exact
+    checks.
     Bead `disk_magician-orchestrator-worktree-not-clone-2nw`, TDD pair
     `disk_magician-9n1`.
   - Document the pattern in `findings_wiki/` as a cross-repo finding
@@ -310,17 +350,19 @@ evicts scratch that is both stale and large. **Rollback:** revert the
 value to `0` in the template and reinstall via
 `scripts/install_launchd_sweepers.sh` — eviction stops on the next fire,
 with no data-loss risk from the rollback step itself. Must not run before
-B4c closes. **Round-4 gate (added 2026-09-24):** must also not run before
-local branch `fix/scratch-safety-hardening` merges to `origin/main`. Both
-reviewers rejected `scratch_budget.sh` as shipped in #71 over four
-additional safety gaps (missing sandboxed/enforced-mode distinction,
-unmeasurable candidates deleted instead of preserved, `SKIP_LSOF` usable
-in production, `path_size_kb` miscomputation), being fixed on that branch
-by a sibling lane (not yet a PR as of 2026-09-24). Verify via `env -u
-GH_TOKEN -u GITHUB_TOKEN gh pr list --state merged --head
+B4c closes. **Round-4 gate (added 2026-09-24, SATISFIED 2026-09-25 —
+round-5):** must also not run before local branch
+`fix/scratch-safety-hardening` merges to `origin/main`. Both reviewers
+rejected `scratch_budget.sh` as shipped in #71 over four additional safety
+gaps (missing sandboxed/enforced-mode distinction, unmeasurable candidates
+deleted instead of preserved, `SKIP_LSOF` usable in production,
+`path_size_kb` miscomputation), fixed on that branch and merged as PR #78
+(`27df9d93b77dc5d89ea035bb2a10cd4357a554a5`, 2026-09-25). Verify via `env
+-u GH_TOKEN -u GITHUB_TOKEN gh pr list --state merged --head
 fix/scratch-safety-hardening --json number` returning a non-empty array
-before enabling — not `git log --oneline | grep`, which is unreliable
-here: this repo squash-merges, so merged commit subjects on `origin/main`
+before enabling (re-check live rather than trusting this note) — not
+`git log --oneline | grep`, which is unreliable here: this repo
+squash-merges, so merged commit subjects on `origin/main`
 are PR titles, never branch names.
 
 **B4c. Close the `TemporaryItems` eviction-filter gap (round-3 `/advice`
@@ -486,10 +528,11 @@ retains its own remaining precondition, listed below.
   gated on B4c closing first, so the worst case (eviction enabled before
   the filter gap closes) has no path through the dependency graph;
   rollback for B4b is reverting the plist's budget value to `0` and
-  reinstalling. **Round-4 addition (2026-09-24):** B4b is also gated on
-  local branch `fix/scratch-safety-hardening` merging (four additional
-  safety gaps both reviewers found in `scratch_budget.sh` as shipped —
-  see B4b's own text); same rollback applies if that gate is ever bypassed
+  reinstalling. **Round-4 addition (2026-09-24), satisfied 2026-09-25:**
+  B4b was also gated on local branch `fix/scratch-safety-hardening`
+  merging (four additional safety gaps both reviewers found in
+  `scratch_budget.sh` as shipped — see B4b's own text); merged as PR #78.
+  Same rollback applies if that gate is ever bypassed
   in error.
 - A2's redesigned `agent_worktree.sh` helper (round-4b/4c, 2026-09-24)
   deliberately does not reuse A1's `agent_scratch_create`/managed-scratch
@@ -498,6 +541,16 @@ retains its own remaining precondition, listed below.
   `CLAUDE.md` 7-day protection window — and deliberately does not default
   to anywhere under `/private/tmp` at all (round-4c: `cleanup_tmp.sh
   --large` itself, independent of B4/A3, scans one level deep there) — see
-  A2's own text for the fix (`/private/var/tmp/agent-worktrees`, a root no
-  existing sweeper in this repo touches). Rollback: none needed, since
-  nothing added by B1-B4/A3 in this plan touches that root.
+  A2's own text for the fix (`/private/var/tmp/agent-worktrees`) and its
+  round-6 correction (no destructive sweeper in this repo currently
+  reaches that root by path or by repo-scoped `git worktree list`
+  discovery for disk_magician itself, but a future change to
+  `worktree_hygiene.sh`'s scan config or execute-mode could legitimately
+  reach a worktree there for OTHER calling repos — which is safe, not a
+  regression, since that sweeper already enforces the 7-day floor
+  correctly). Also added: root-ownership/symlink rejection in
+  `agent_worktree_create` (round-6, both reviewers independently flagged
+  the world-writable-sticky `/private/var/tmp` parent). Rollback: none
+  needed for either addition, since nothing added by B1-B4/A3 in this plan
+  touches that root, and the ownership check is a pure additional
+  rejection case with no existing-caller behavior change.
