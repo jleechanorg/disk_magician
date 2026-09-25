@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# test_sweeper_health_ledger_warn.sh — proves sweeper_health_check.sh WARNs
+# and exits 1 when check_ledger_freshness.sh reports STALE.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET="$REPO_ROOT/scripts/sweeper_health_check.sh"
+
+TMP_ROOT=$(mktemp -d -t sweeper_health_ledger_test.XXXXXX)
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+FAKE_BIN="$TMP_ROOT/bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/check_ledger_freshness.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo -e "STALE\tno_published_ledger_commit"
+exit 1
+MOCK
+chmod +x "$FAKE_BIN/check_ledger_freshness.sh"
+cp "$TARGET" "$FAKE_BIN/sweeper_health_check.sh"
+chmod +x "$FAKE_BIN/sweeper_health_check.sh"
+
+# sweeper_health_check.sh resolves its own SCRIPT_DIR internally, so the
+# stub above only wins if it is invoked via the copy that resolves
+# check_ledger_freshness.sh relative to $FAKE_BIN, which is the case here
+# because both files are copied into the same directory.
+set +e
+OUTPUT="$(cd "$FAKE_BIN" && DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" HOME="$TMP_ROOT/home" ./sweeper_health_check.sh 2>&1)"
+RC=$?
+set -e
+
+PASS=0
+FAIL=0
+if echo "$OUTPUT" | grep -qiE '\[WARN\].*ledger.*stale|\[WARN\].*stale.*ledger'; then
+  echo "  PASS  emits a WARN line mentioning ledger + stale"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  no WARN line mentioning ledger + stale found in:"
+  echo "$OUTPUT"
+  FAIL=$(( FAIL + 1 ))
+fi
+if [[ "$RC" == "1" ]]; then
+  echo "  PASS  exits 1 when ledger is stale"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  exit code was $RC, expected 1"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+if (( FAIL > 0 )); then
+  exit 1
+fi
+echo "All sweeper_health_ledger_warn tests passed."
