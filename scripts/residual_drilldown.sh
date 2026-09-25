@@ -88,6 +88,50 @@ is_never_delete() {
   return 1
 }
 
+# Uncovered-roots alert — orthogonal to the residual-size check below, so it
+# runs once, near the top, on every invocation, regardless of which exit path
+# this script takes below. Fail-soft under `set -euo pipefail`: a missing or
+# failing check_uncovered_roots.sh, malformed JSON, or a timeout can never
+# change this script's own exit code or output (each risky step `return`s 0
+# on failure, and the call itself is `|| true`). NOTE: originally implemented
+# as an append after this file's final line (bead disk_magician-drilldown-
+# uncovered-alert-impl-bv6's literal Reuse anchor); moved here because that
+# line is unreachable whenever an earlier `exit` fires (this script has 6
+# early-exit points) — see PR body for the full rationale.
+#
+# The real check_uncovered_roots.sh takes ~6.5s against live state (it reads
+# frontier/discover JSON, not a cached value), so DISK_MAGICIAN_UNCOVERED_TIMEOUT_S
+# defaults to 30s, not a short cap — a short cap would mean the alert never
+# fires in production. Accepting ~6.5s extra per invocation of a background
+# launchd job is fine; see PR body.
+UNCOVERED_TIMEOUT_S="${DISK_MAGICIAN_UNCOVERED_TIMEOUT_S:-30}"
+UNCOVERED_ROOTS_CMD="${DISK_MAGICIAN_UNCOVERED_ROOTS_CMD:-$SCRIPT_DIR/check_uncovered_roots.sh}"
+
+uncovered_alert() {
+  local uncovered_json uncovered_count top_path rc
+  if command -v timeout >/dev/null 2>&1; then
+    uncovered_json="$(timeout "$UNCOVERED_TIMEOUT_S" "$UNCOVERED_ROOTS_CMD" --json 2>/dev/null)"
+    rc=$?
+  else
+    echo "residual_drilldown: no 'timeout' binary on PATH — running uncovered-roots check unbounded." >&2
+    uncovered_json="$("$UNCOVERED_ROOTS_CMD" --json 2>/dev/null)"
+    rc=$?
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 124 ]]; then
+      echo "residual_drilldown: uncovered-roots check timed out after ${UNCOVERED_TIMEOUT_S}s, skipping alert." >&2
+    fi
+    return 0
+  fi
+  uncovered_count="$(echo "$uncovered_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('uncovered', [])))" 2>/dev/null)" || return 0
+  if [[ "${uncovered_count:-0}" -gt 0 ]]; then
+    top_path="$(echo "$uncovered_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['uncovered']; print(d[0]['path'] if d else '')" 2>/dev/null || echo '')"
+    echo "residual_drilldown: UNCOVERED — $uncovered_count root(s) with no registered sweeper owner (top: $top_path). See config/sweeper_roots.txt."
+  fi
+  return 0
+}
+uncovered_alert || true
+
 if [[ ! -f "$SNAPSHOT_FILE" ]]; then
   echo "residual_drilldown: no snapshot at $SNAPSHOT_FILE — nothing to drill down on, no-op."
   exit 0
