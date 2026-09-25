@@ -180,6 +180,13 @@ if [[ "$LEDGER_STATUS_TOKEN" != "OK" ]]; then
     "${LEDGER_STATUS_LINE//$'\t'/ }"
 fi
 
+LEDGER_STATUS_LINE="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>/dev/null || true)"
+LEDGER_STATUS_TOKEN="${LEDGER_STATUS_LINE%%$'\t'*}"
+if [[ "$LEDGER_STATUS_TOKEN" != "OK" ]]; then
+  WARN_COUNT=$(( WARN_COUNT + 1 ))
+  printf "  [WARN] %-44s (%s)\n" "ledger/topdown-5g.json stale" "$LEDGER_STATUS_LINE"
+fi
+
 while IFS= read -r plist; do
   [[ -z "$plist" ]] && continue
   label=$(basename "$plist" .plist)
