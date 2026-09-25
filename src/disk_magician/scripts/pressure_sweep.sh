@@ -226,10 +226,10 @@ clean_flag="--clean"
 
 # ────────── STEP 1: cleanup_tmp.sh (--large when sweeping) ──────────
 if [[ "$SWEEP_MODE" == "colima-only" ]]; then
-  log "pressure_sweep: step 1/2 skipped (colima-only mode — host free space is healthy)."
+  log "pressure_sweep: step 1/3 skipped (colima-only mode — host free space is healthy)."
 else
 before_gb="$(free_gb)"
-log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
+log "pressure_sweep: step 1/3 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
 pressure_active_hours="${LARGE_TMP_ACTIVE_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS:-4}}"
 pressure_archive_hours="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS:-4}}"
 tmp_step_extra_args=(--large)
@@ -243,26 +243,42 @@ else
 fi
 if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
-  log "pressure_sweep: step 1/2 cleanup_tmp.sh done — free after: ${after_gb} GB"
+  log "pressure_sweep: step 1/3 cleanup_tmp.sh done — free after: ${after_gb} GB"
 else
   rc=$?
-  log "pressure_sweep: step 1/2 cleanup_tmp.sh FAILED or timed out (rc=${rc}) — continuing to step 2."
+  log "pressure_sweep: step 1/3 cleanup_tmp.sh FAILED or timed out (rc=${rc}) — continuing to step 2."
 fi
 fi
 
 # ────────── STEP 2: cleanup_colima.sh ──────────
 if [[ "$SWEEP_MODE" == "tmp-only" ]]; then
-  log "pressure_sweep: step 2/2 skipped (tmp-only mode — Colima under ceiling)."
+  log "pressure_sweep: step 2/3 skipped (tmp-only mode — Colima under ceiling)."
 else
 before_gb="$(free_gb)"
-log "pressure_sweep: step 2/2 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
+log "pressure_sweep: step 2/3 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
 if run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" "$clean_flag" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
-  log "pressure_sweep: step 2/2 cleanup_colima.sh done — free after: ${after_gb} GB"
+  log "pressure_sweep: step 2/3 cleanup_colima.sh done — free after: ${after_gb} GB"
 else
   rc=$?
-  log "pressure_sweep: step 2/2 cleanup_colima.sh FAILED or timed out (rc=${rc})."
+  log "pressure_sweep: step 2/3 cleanup_colima.sh FAILED or timed out (rc=${rc})."
 fi
+fi
+
+# ────────── STEP 3: cleanup_code_sign_clones.sh ──────────
+before_gb="$(free_gb)"
+log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh ${clean_flag} — free before: ${before_gb} GB"
+if [[ "$DRY_RUN" != true ]]; then
+  codesign_step=(env CODE_SIGN_CLONES_APPROVED=1 "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$clean_flag")
+else
+  codesign_step=("$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$clean_flag")
+fi
+if run_step_timeout "${codesign_step[@]}" >> "$LOG_FILE" 2>&1; then
+  after_gb="$(free_gb)"
+  log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh done — free after: ${after_gb} GB"
+else
+  rc=$?
+  log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh FAILED or timed out (rc=${rc})."
 fi
 
 log "pressure_sweep: sweep complete."

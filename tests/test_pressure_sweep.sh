@@ -150,7 +150,7 @@ env -i \
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs colima-only trigger" "Colima 40 GB >= ceiling 35 GB — colima-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-1 skip" "step 1/2 skipped (colima-only mode" "$LOG_CONTENT"
+assert_contains "logs step-1 skip" "step 1/3 skipped (colima-only mode" "$LOG_CONTENT"
 assert_not_contains "does not run cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
 assert_contains "runs cleanup_colima" "cleanup_colima --clean" "$INVOCATIONS"
 
@@ -210,7 +210,7 @@ env -i \
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs tmp-only trigger" "/private/tmp 35 GB >= ceiling 30 GB — tmp-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-2 skip" "step 2/2 skipped (tmp-only mode" "$LOG_CONTENT"
+assert_contains "logs step-2 skip" "step 2/3 skipped (tmp-only mode" "$LOG_CONTENT"
 assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_not_contains "does not run cleanup_colima" "cleanup_colima" "$INVOCATIONS"
 
