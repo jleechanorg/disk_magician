@@ -31,17 +31,21 @@ chmod +x "$FAKE_BIN/sweeper_health_check.sh"
 # check_ledger_freshness.sh relative to $FAKE_BIN, which is the case here
 # because both files are copied into the same directory.
 set +e
-OUTPUT="$(cd "$FAKE_BIN" && DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" HOME="$TMP_ROOT/home" ./sweeper_health_check.sh 2>&1)"
+OUTPUT="$(cd "$FAKE_BIN" && DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" HOME="$TMP_ROOT/home" ./sweeper_health_check.sh --no-notify 2>&1)"
 RC=$?
 set -e
 
 PASS=0
 FAIL=0
-if echo "$OUTPUT" | grep -qiE '\[WARN\].*ledger.*stale|\[WARN\].*stale.*ledger'; then
-  echo "  PASS  emits a WARN line mentioning ledger + stale"
+# Assert the stub's unique reason string, not just the generic "stale" text
+# in the production label — the label alone would also match an UNKNOWN
+# result, an absent helper, or the real host's own stale ledger, so it
+# can't prove this specific stub actually ran.
+if echo "$OUTPUT" | grep -qiE '\[WARN\].*ledger' && echo "$OUTPUT" | grep -qF "no_published_ledger_commit"; then
+  echo "  PASS  emits a WARN line mentioning ledger, carrying the stub's reason"
   PASS=$(( PASS + 1 ))
 else
-  echo "  FAIL  no WARN line mentioning ledger + stale found in:"
+  echo "  FAIL  no WARN line mentioning ledger + the stub's reason found in:"
   echo "$OUTPUT"
   FAIL=$(( FAIL + 1 ))
 fi

@@ -265,7 +265,7 @@ else
 fi
 
 # Cleanup
-rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR"
+rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR" "$FAKE_LEDGER_BIN"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
