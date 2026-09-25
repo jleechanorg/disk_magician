@@ -182,9 +182,11 @@ fi
 
 LEDGER_STATUS_LINE="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>/dev/null || true)"
 LEDGER_STATUS_TOKEN="${LEDGER_STATUS_LINE%%$'\t'*}"
+LEDGER_WARN=false
 if [[ "$LEDGER_STATUS_TOKEN" != "OK" ]]; then
   WARN_COUNT=$(( WARN_COUNT + 1 ))
-  printf "  [WARN] %-44s (%s)\n" "ledger/topdown-5g.json stale" "$LEDGER_STATUS_LINE"
+  LEDGER_WARN=true
+  printf "  [WARN] %-44s (%s)\n" "ledger/topdown-5g.json ${LEDGER_STATUS_TOKEN:-UNKNOWN} — stale mega-table risk" "${LEDGER_STATUS_LINE//$'\t'/ }"
 fi
 
 while IFS= read -r plist; do
