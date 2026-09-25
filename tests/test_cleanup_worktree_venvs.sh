@@ -54,7 +54,7 @@ mk_worktree() {
 # age_path_days_ago <path> <days> — backdate a single path's mtime.
 age_path_days_ago() {
   local path="$1" days="$2" ts
-  ts=$(date -v-"${days}"d +%Y%m%d%H%M)
+  ts=$(date -v-"${days}"d +%Y%m%d%H%M 2>/dev/null || date -d "-${days} days" +%Y%m%d%H%M)
   touch -t "$ts" "$path"
 }
 
@@ -310,7 +310,8 @@ if "$GIT8" --version >/dev/null 2>&1; then
   "$GIT8" -C "$R8/repoA" init -q
   "$GIT8" -C "$R8/repoA" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
   "$GIT8" -C "$R8/repoA" worktree add -q "$R8/repoA/nested/deep/wtA" >/dev/null 2>&1
-  find "$R8/repoA/nested/deep/wtA" -exec touch -t "$(date -v-30d +%Y%m%d%H%M)" {} + 2>/dev/null
+  ts30=$(date -v-30d +%Y%m%d%H%M 2>/dev/null || date -d "-30 days" +%Y%m%d%H%M)
+  find "$R8/repoA/nested/deep/wtA" -exec touch -t "$ts30" {} + 2>/dev/null
   mk_stale_wt_with_venv "$R8/repoA/nested/deep/wtA"
 fi
 # (4) deep tree (depth 5-6) under node_modules holding a worktree-shaped dir —
