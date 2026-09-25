@@ -33,7 +33,13 @@ echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
 exit 0
 MOCK
 
-chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh"
+cat > "$MOCK_BIN/cleanup_code_sign_clones.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "cleanup_code_sign_clones $* CODE_SIGN_CLONES_APPROVED=${CODE_SIGN_CLONES_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+exit 0
+MOCK
+
+chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh" "$MOCK_BIN/cleanup_code_sign_clones.sh"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
@@ -339,6 +345,22 @@ env -i \
   bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
+echo "Test 12: triggered clean path invokes cleanup_code_sign_clones.sh with CODE_SIGN_CLONES_APPROVED=1"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+run_pressure 10
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "step 3 invoked" "cleanup_code_sign_clones" "$INVOCATIONS"
+assert_contains "step 3 sets CODE_SIGN_CLONES_APPROVED=1" "CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
+
+echo "Test 13: dry-run path invokes cleanup_code_sign_clones.sh WITHOUT the approval env var"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+run_pressure 10 --dry-run
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "step 3 invoked in dry-run" "cleanup_code_sign_clones" "$INVOCATIONS"
+assert_contains "step 3 does not set approval in dry-run" "CODE_SIGN_CLONES_APPROVED=0" "$INVOCATIONS"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
