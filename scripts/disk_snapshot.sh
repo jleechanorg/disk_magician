@@ -227,6 +227,99 @@ get_vm_volume_used_kb() {
   echo "${kb:-0}"
 }
 
+# ────────── APFS PER-VOLUME CONSUMED + CONTAINER FREE (bead disk_magician-rpv) ──────────
+# disk_used_gb/disk_free_gb above are df's view of the Data volume only. The
+# same APFS container also carries System/Preboot/Update/VM volumes whose
+# CapacityInUse can shift within one 35-min interval (kernel staging,
+# snapshot churn, swap growth) with zero corresponding change under any
+# monitored_dirs path — one of the non-file signals disk_magician-rpv needs
+# to attribute df's observed ±8-62 GiB swings. Bounded by `timeout`; any
+# failure (non-darwin, missing diskutil, malformed plist) degrades to "{}"
+# rather than aborting the snapshot. Piping `diskutil apfs list -plist`
+# straight into `plutil -convert json -o - -` (stdin in, stdout out) never
+# touches a file on disk, so it cannot hit the plutil-corrupts-live-plist
+# footgun that bit this repo's own launchd plists (2026-09-11 postmortem).
+# disk_frontier_scan.py's get_sibling_volumes()/get_purgeable_info() compute
+# the equivalent per-volume/purgeable data for the nightly frontier scan;
+# this is a separate, dependency-free probe sized for the 35-min cadence
+# rather than an import of that heavier module.
+get_apfs_volume_stats_json() {
+  if [[ "$OSTYPE" != "darwin"* ]] || ! command -v diskutil &>/dev/null || ! command -v plutil &>/dev/null; then
+    echo "{}"
+    return
+  fi
+  local plist_json
+  plist_json=$(timeout 8 diskutil apfs list -plist 2>/dev/null | timeout 5 plutil -convert json -o - - 2>/dev/null)
+  if [[ -z "$plist_json" ]]; then
+    echo "{}"
+    return
+  fi
+  printf '%s' "$plist_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("{}")
+    sys.exit(0)
+result = {"volumes_bytes": {}, "container_free_bytes": None, "container_capacity_bytes": None}
+for container in data.get("Containers", []):
+    volumes = container.get("Volumes", []) or []
+    roles_seen = {r for v in volumes for r in (v.get("Roles") or [])}
+    if "Data" not in roles_seen:
+        continue
+    result["container_free_bytes"] = container.get("CapacityFree")
+    result["container_capacity_bytes"] = container.get("CapacityCeiling")
+    for v in volumes:
+        for role in (v.get("Roles") or []):
+            if role in ("Data", "VM", "Preboot", "Update"):
+                result["volumes_bytes"][role] = v.get("CapacityInUse")
+    break
+print(json.dumps(result))
+' 2>/dev/null || echo "{}"
+}
+
+# tmutil listlocalsnapshots is the verifiable proxy for purgeable/reclaimable
+# local-snapshot space — diskutil exposes no distinct "purgeable" field on
+# this macOS version (verified empirically; disk_frontier_scan.py's
+# get_purgeable_info() docstring records the same finding). Prints
+# "<count>\t<comma-joined snapshot names>"; degrades to "0\t" on any failure.
+get_local_snapshots_line() {
+  if [[ "$OSTYPE" != "darwin"* ]] || ! command -v tmutil &>/dev/null; then
+    printf '0\t\n'
+    return
+  fi
+  local raw names count
+  raw=$(timeout 10 tmutil listlocalsnapshots / 2>/dev/null)
+  if [[ -z "$raw" ]]; then
+    printf '0\t\n'
+    return
+  fi
+  names=$(printf '%s\n' "$raw" | grep -v '^Snapshots for' | sed '/^[[:space:]]*$/d' | paste -sd, -)
+  count=0
+  [[ -n "$names" ]] && count=$(printf '%s' "$names" | awk -F, '{print NF}')
+  printf '%s\t%s\n' "$count" "$names"
+}
+
+# Colima's guest disk (~/.colima/_lima/colima/diffdisk — NOT _lima/_disks,
+# see this repo's CLAUDE.md) is a sparse file: its logical size is unrelated
+# to host bytes actually consumed. `stat`'s block count and `du`'s block
+# count are two independent syscalls over that sparseness and have been
+# observed to disagree, so both are recorded rather than picking one. Prints
+# "<stat_allocated_bytes>\t<du_allocated_kb>"; degrades to "0\t0" when the
+# diffdisk doesn't exist (Colima not installed/never started).
+get_colima_diffdisk_stats() {
+  local diffdisk="$HOME/.colima/_lima/colima/diffdisk"
+  if [[ ! -f "$diffdisk" ]]; then
+    printf '0\t0\n'
+    return
+  fi
+  local stat_blocks stat_bytes du_kb
+  stat_blocks=$(timeout 5 stat -f "%b" "$diffdisk" 2>/dev/null)
+  stat_bytes=$(( ${stat_blocks:-0} * 512 ))
+  du_kb=$(timeout 10 du -k "$diffdisk" 2>/dev/null | awk '{print $1+0}')
+  printf '%s\t%s\n' "$stat_bytes" "${du_kb:-0}"
+}
+
 # ────────── DISCOVER MODE ──────────
 if [[ "$DISCOVER" == true ]]; then
   if [[ "$DISCOVER_JSON" != true ]]; then
@@ -449,6 +542,13 @@ swap_total_gb=$(awk "BEGIN{printf \"%.2f\", (${swap_total_mb:-0} + 0) / 1024}")
 swap_used_gb=$(awk "BEGIN{printf \"%.2f\", (${swap_used_mb:-0} + 0) / 1024}")
 vm_volume_used_kb=$(get_vm_volume_used_kb)
 vm_volume_used_gb=$(awk "BEGIN{printf \"%.2f\", (${vm_volume_used_kb:-0} + 0) / 1024 / 1024}")
+
+# Additive non-file signals (bead disk_magician-rpv): per-APFS-volume
+# consumed, container free/purgeable, local snapshot count, Colima diffdisk
+# allocation. Same never-blocks-the-snapshot posture as swap/VM above.
+apfs_volume_stats_json=$(get_apfs_volume_stats_json)
+read -r local_snapshots_count local_snapshot_names_csv <<< "$(get_local_snapshots_line)"
+read -r colima_diffdisk_stat_bytes colima_diffdisk_du_kb <<< "$(get_colima_diffdisk_stats)"
 
 tracked_total_kb=0
 timeout_keys=()
@@ -971,6 +1071,12 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_SWAP_TOTAL_GB="$swap_total_gb" \
   SNAP_SWAP_USED_GB="$swap_used_gb" \
   SNAP_VM_VOLUME_USED_GB="$vm_volume_used_gb" \
+  SNAP_DISK_FREE_KB="$disk_free_kb" \
+  SNAP_APFS_VOLUMES="$apfs_volume_stats_json" \
+  SNAP_LOCAL_SNAPSHOTS_COUNT="$local_snapshots_count" \
+  SNAP_LOCAL_SNAPSHOT_NAMES="$local_snapshot_names_csv" \
+  SNAP_COLIMA_DIFFDISK_STAT_BYTES="$colima_diffdisk_stat_bytes" \
+  SNAP_COLIMA_DIFFDISK_DU_KB="$colima_diffdisk_du_kb" \
   SNAP_COVERAGE_PCT="$coverage_pct" \
   SNAP_COVERAGE_PCT_RAW_V1="$coverage_pct_raw_v1" \
   SNAP_TRACKED_TOTAL_KB_RAW="$tracked_total_kb" \
@@ -1012,6 +1118,10 @@ try:
         "swap_used_gb": float(os.environ.get("SNAP_SWAP_USED_GB") or 0.0),
         "vm_volume_used_gb": float(os.environ.get("SNAP_VM_VOLUME_USED_GB") or 0.0),
         "snapshot_coverage_pct": float(os.environ.get("SNAP_COVERAGE_PCT") or 0.0),
+        # Additive (bead disk_magician-rpv): non-file signals for correlating
+        # df swings that file-birth/mtime probes could not explain — see
+        # scripts/correlate_disk_swings.py. Old snapshots lack these keys;
+        # readers must tolerate their absence the same as swap_total_gb above.
         "residual_kb": int(os.environ.get("SNAP_RESIDUAL_KB") or 0),
         "residual_gb": float(os.environ.get("SNAP_RESIDUAL_GB") or 0.0),
         "snapshot_metadata": {
@@ -1035,6 +1145,54 @@ try:
             "measurement_budget_exhausted": os.environ.get("SNAP_MEASUREMENT_BUDGET_EXHAUSTED") == "true",
         }
     }
+
+    # Additive non-file signals (bead disk_magician-rpv). See
+    # scripts/correlate_disk_swings.py for how these are used to attribute
+    # df-observed swings that no file-birth/mtime probe explained.
+    def _bytes_to_gb(value):
+        return round((value or 0) / 1024 / 1024 / 1024, 3)
+
+    try:
+        apfs_volume_stats = json.loads(os.environ.get("SNAP_APFS_VOLUMES") or "{}")
+    except (TypeError, ValueError):
+        apfs_volume_stats = {}
+    volumes_bytes = apfs_volume_stats.get("volumes_bytes") or {}
+    data["apfs_volumes_gb"] = {
+        role: _bytes_to_gb(volumes_bytes.get(role))
+        for role in ("Data", "VM", "Preboot", "Update")
+    }
+    container_free_bytes = apfs_volume_stats.get("container_free_bytes")
+    container_capacity_bytes = apfs_volume_stats.get("container_capacity_bytes")
+    data["apfs_container_free_gb"] = (
+        _bytes_to_gb(container_free_bytes) if container_free_bytes is not None else None
+    )
+    data["apfs_container_capacity_gb"] = (
+        _bytes_to_gb(container_capacity_bytes) if container_capacity_bytes is not None else None
+    )
+    # Purgeable estimate: diskutil exposes no distinct "purgeable" field on
+    # this macOS version (verified empirically; matches disk_frontier_scan.py
+    # get_purgeable_info()'s docstring finding). df's Available already nets
+    # out reclaimable local-snapshot space while APFSContainerFree does not,
+    # so the gap between the two is used as an estimate. Not clamped at 0 —
+    # a small negative value is sampling skew between the two probes and is
+    # useful to the correlator as a noise-floor signal, not an error.
+    disk_free_kb_precise = int(os.environ.get("SNAP_DISK_FREE_KB") or 0)
+    if container_free_bytes is not None:
+        data["apfs_purgeable_estimate_gb"] = round(
+            disk_free_kb_precise / 1024 / 1024 - _bytes_to_gb(container_free_bytes), 3
+        )
+    else:
+        data["apfs_purgeable_estimate_gb"] = None
+    local_snapshot_names_raw = os.environ.get("SNAP_LOCAL_SNAPSHOT_NAMES") or ""
+    data["local_snapshots_count"] = int(os.environ.get("SNAP_LOCAL_SNAPSHOTS_COUNT") or 0)
+    data["local_snapshot_names"] = [n for n in local_snapshot_names_raw.split(",") if n]
+    data["colima_diffdisk_stat_allocated_gb"] = _bytes_to_gb(
+        int(os.environ.get("SNAP_COLIMA_DIFFDISK_STAT_BYTES") or 0)
+    )
+    data["colima_diffdisk_du_allocated_gb"] = round(
+        int(os.environ.get("SNAP_COLIMA_DIFFDISK_DU_KB") or 0) / 1024 / 1024, 3
+    )
+
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
     if residual_delta:
         data["residual_delta_gb"] = float(residual_delta)
