@@ -149,5 +149,87 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE7" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$
   || bad "expected OK rc=0 label=PARTIAL got rc=$rc out=$out"
 rm -rf "$WORK7"
 
+# --- Case 8: malformed (non-dict) partial ledger must never crash the
+# check and must never suppress the STALE alert. /advice review (Codex +
+# Opus, both independently) reproduced a real bug here: a bare JSON array
+# partial.json made the validation-error handler call `.get()` on a list,
+# crashing the inline python3 helper. Since check_launchd_fleet.sh and
+# disk_usage_alert.sh both invoke this script with `2>&1`, the traceback led
+# the captured text and `== STALE*` silently failed to match — the
+# stale-ledger alert never fired even though the canonical ledger WAS stale.
+# This case reproduces it exactly as those consumers would see it (stdout
+# and stderr merged) and asserts the output still starts with STALE.
+WORK8="$(mktemp -d)"
+git init -q "$WORK8/repo"
+STATE8="$WORK8/repo"
+mkdir -p "$STATE8/ledger"
+echo '{"disk_used_kb":1}' > "$STATE8/ledger/topdown-5g.json"
+echo '[1,2]' > "$STATE8/ledger/topdown-5g.partial.json"
+git -C "$STATE8" add ledger/topdown-5g.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE8" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE8" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" != *Traceback* ]] \
+  && ok "non-dict partial ledger never crashes; STALE alert still fires" \
+  || bad "expected clean STALE rc=1 (no traceback) got rc=$rc out=$out"
+rm -rf "$WORK8"
+
+# --- Case 9: status.json present but unparseable must fail closed (reject
+# the partial), not silently proceed as if there were no status to
+# reconcile against. Codex review: "missing, unreadable, non-object, or
+# timestamp-different status files still yield OK, contrary to the stated
+# required reconciliation."
+WORK9="$(mktemp -d)"
+git init -q "$WORK9/repo"
+STATE9="$WORK9/repo"
+mkdir -p "$STATE9/ledger"
+echo '{"disk_used_kb":1}' > "$STATE9/ledger/topdown-5g.json"
+echo 'not{valid json' > "$STATE9/ledger/topdown-5g.status.json"
+write_partial "$STATE9/ledger/topdown-5g.partial.json" "$(iso_offset_hours -1)" "partial"
+git -C "$STATE9" add ledger/topdown-5g.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE9" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE9" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_unreadable* ]] \
+  && ok "unparseable (but present) status.json fails closed, not silently accepted" \
+  || bad "expected STALE rc=1 status_unreadable got rc=$rc out=$out"
+rm -rf "$WORK9"
+
+# --- Case 10: status.json present but not a JSON object (e.g. a bare list)
+# must also fail closed for the same reason as case 9.
+WORK10="$(mktemp -d)"
+git init -q "$WORK10/repo"
+STATE10="$WORK10/repo"
+mkdir -p "$STATE10/ledger"
+echo '{"disk_used_kb":1}' > "$STATE10/ledger/topdown-5g.json"
+echo '[1,2,3]' > "$STATE10/ledger/topdown-5g.status.json"
+write_partial "$STATE10/ledger/topdown-5g.partial.json" "$(iso_offset_hours -1)" "partial"
+git -C "$STATE10" add ledger/topdown-5g.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE10" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE10" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_malformed* ]] \
+  && ok "non-object status.json fails closed, not silently accepted" \
+  || bad "expected STALE rc=1 status_malformed got rc=$rc out=$out"
+rm -rf "$WORK10"
+
+# --- Case 11: status.json genuinely absent (never written yet) still
+# allows a fresh valid partial through — absence is not the same as an
+# unreadable/malformed file; there is nothing to reconcile against.
+WORK11="$(mktemp -d)"
+git init -q "$WORK11/repo"
+STATE11="$WORK11/repo"
+mkdir -p "$STATE11/ledger"
+echo '{"disk_used_kb":1}' > "$STATE11/ledger/topdown-5g.json"
+write_partial "$STATE11/ledger/topdown-5g.partial.json" "$(iso_offset_hours -1)" "partial"
+git -C "$STATE11" add ledger/topdown-5g.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE11" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE11" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 0 && "$out" == OK* && "$out" == *label=PARTIAL* ]] \
+  && ok "absent status.json (no reconciliation target) still accepts a fresh valid partial" \
+  || bad "expected OK rc=0 label=PARTIAL got rc=$rc out=$out"
+rm -rf "$WORK11"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

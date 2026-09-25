@@ -121,67 +121,107 @@ def emit(valid, age_hours, captured_at, mode, measured, reachable, reason):
     ]))
 
 
-partial_path = os.path.join(state_dir, "ledger", "topdown-5g.partial.json")
-status_path = os.path.join(state_dir, "ledger", "topdown-5g.status.json")
+def safe_get(obj, key):
+    """dict.get that degrades to None for any non-dict (a malformed partial/
+    status file, e.g. a JSON array, must never crash this check — see the
+    top-level guard below for why that matters)."""
+    return obj.get(key) if isinstance(obj, dict) else None
 
-try:
-    with open(partial_path) as f:
-        partial = json.load(f)
-except FileNotFoundError:
-    emit(False, None, None, None, None, None, "missing")
-    sys.exit(0)
-except (OSError, ValueError) as exc:
-    emit(False, None, None, None, None, None, f"unreadable:{exc}")
-    sys.exit(0)
 
-try:
-    import history_diff
-    history_diff.validate_ledger(partial, label="partial")
-except Exception as exc:
-    emit(False, None, partial.get("captured_at"), partial.get("mode"), None, None, f"invalid:{exc}")
-    sys.exit(0)
+def check_partial(state_dir):
+    partial_path = os.path.join(state_dir, "ledger", "topdown-5g.partial.json")
+    status_path = os.path.join(state_dir, "ledger", "topdown-5g.status.json")
 
-captured_at = partial.get("captured_at")
-try:
-    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=datetime.timezone.utc
-    )
-except (TypeError, ValueError):
-    emit(False, None, captured_at, partial.get("mode"), None, None, "invalid_captured_at")
-    sys.exit(0)
+    try:
+        with open(partial_path) as f:
+            partial = json.load(f)
+    except FileNotFoundError:
+        emit(False, None, None, None, None, None, "missing")
+        return
+    except (OSError, ValueError) as exc:
+        emit(False, None, None, None, None, None, f"unreadable:{exc}")
+        return
 
-age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
-if age_hours < -0.1:
-    emit(False, age_hours, captured_at, partial.get("mode"), None, None, "captured_at_in_future")
-    sys.exit(0)
+    try:
+        import history_diff
+        history_diff.validate_ledger(partial, label="partial")
+    except Exception as exc:
+        emit(False, None, safe_get(partial, "captured_at"), safe_get(partial, "mode"),
+             None, None, f"invalid:{exc}")
+        return
 
-# Reconciliation: when status.json reports the SAME captured_at (the common
-# case — both are written by the same render_topdown_ledger.py run), its
-# mode/coverage_envelope must agree with the partial ledger's. A same-
-# timestamp disagreement between the two sidecar files is exactly the
-# corruption class this exists to catch. Different captured_at values mean
-# they are from different runs (normal — e.g. a later run's frontier report
-# was itself stale, so it wrote a new status but no new partial) and impose
-# no constraint.
-try:
-    with open(status_path) as f:
-        status = json.load(f)
-except (OSError, ValueError):
-    status = None
+    captured_at = partial.get("captured_at")
+    try:
+        ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except (TypeError, ValueError):
+        emit(False, None, captured_at, partial.get("mode"), None, None, "invalid_captured_at")
+        return
 
-if isinstance(status, dict) and status.get("captured_at") == captured_at:
-    if (
-        status.get("mode") != partial.get("mode")
-        or status.get("coverage_envelope") != partial.get("coverage_envelope")
-    ):
+    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+    if age_hours < -0.1:
+        emit(False, age_hours, captured_at, partial.get("mode"), None, None, "captured_at_in_future")
+        return
+
+    # Reconciliation: when status.json reports the SAME captured_at (the
+    # common case — both are written by the same render_topdown_ledger.py
+    # run), its mode/coverage_envelope must agree with the partial ledger's.
+    # A same-timestamp disagreement between the two sidecar files is exactly
+    # the corruption class this exists to catch. Different captured_at
+    # values mean they are from different runs (normal — e.g. a later run's
+    # frontier report was itself stale, so it wrote a new status but no new
+    # partial) and impose no constraint.
+    #
+    # A genuinely ABSENT status.json (FileNotFoundError) is "nothing to
+    # reconcile against" — no constraint. Anything else abnormal (present
+    # but unparseable, or present but not a JSON object) means reconciliation
+    # cannot be proven, so it fails closed rather than silently proceeding as
+    # if unconstrained — a status.json that exists but can't be trusted is a
+    # louder red flag than one that was never written.
+    try:
+        with open(status_path) as f:
+            status = json.load(f)
+    except FileNotFoundError:
+        status = None
+    except (OSError, ValueError) as exc:
         emit(False, age_hours, captured_at, partial.get("mode"), None, None,
-             "status_reconciliation_mismatch")
-        sys.exit(0)
+             f"status_unreadable:{exc}")
+        return
 
-envelope = partial.get("coverage_envelope") or {}
-measured = envelope.get("measured_top_level_roots")
-reachable = envelope.get("reachable_top_level_roots")
-emit(True, age_hours, captured_at, partial.get("mode"), measured, reachable, "")
+    if status is not None:
+        if not isinstance(status, dict):
+            emit(False, age_hours, captured_at, partial.get("mode"), None, None,
+                 "status_malformed")
+            return
+        if status.get("captured_at") == captured_at and (
+            status.get("mode") != partial.get("mode")
+            or status.get("coverage_envelope") != partial.get("coverage_envelope")
+        ):
+            emit(False, age_hours, captured_at, partial.get("mode"), None, None,
+                 "status_reconciliation_mismatch")
+            return
+
+    envelope = partial.get("coverage_envelope")
+    measured = safe_get(envelope, "measured_top_level_roots")
+    reachable = safe_get(envelope, "reachable_top_level_roots")
+    emit(True, age_hours, captured_at, partial.get("mode"), measured, reachable, "")
+
+
+# Top-level guard: no input shape (malformed JSON, wrong JSON type, missing
+# keys anywhere in the chain) may ever let an uncaught traceback reach
+# stdout/stderr. check_launchd_fleet.sh and disk_usage_alert.sh both invoke
+# this whole script with `2>&1` and pattern-match the captured text on
+# `== STALE*`; a traceback leading that text silently defeats the match and
+# suppresses the stale-ledger alert entirely — reproduced live with a
+# `topdown-5g.partial.json` containing a bare JSON array (`[1,2]`): the
+# validation-error handler called `.get()` on a list, crashed, and the
+# alert never fired even though the canonical ledger was stale (found in
+# /advice review of this PR).
+try:
+    check_partial(state_dir)
+except Exception as exc:
+    emit(False, None, None, None, None, None, f"unexpected_error:{exc}")
 PY
 )"
 
