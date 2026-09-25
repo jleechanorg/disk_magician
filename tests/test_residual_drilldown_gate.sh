@@ -100,5 +100,15 @@ else
   bad "expected no-op output unaffected by timeout: $out"
 fi
 
+# Production runs under launchd's default PATH, which has no `timeout`
+# (Homebrew installs it outside /usr/bin). The cap must still apply there.
+rc=0
+out="$(timeout 5 env PATH=/usr/bin:/bin:/usr/sbin:/sbin DISK_MAGICIAN_UNCOVERED_ROOTS_CMD="$SLEEPY_STUB" DISK_MAGICIAN_UNCOVERED_TIMEOUT_S=1 "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1)" || rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "uncovered-roots check timed out" <<< "$out"; then
+  ok "timeout cap applies under launchd's default PATH"
+else
+  bad "expected bounded run under launchd PATH, got rc=$rc: $out"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
