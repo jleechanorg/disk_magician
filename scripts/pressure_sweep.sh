@@ -378,6 +378,5 @@ if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
   log "ERROR: failed to record receipt finish"
   exit 1
 fi
-fi
 
 log "pressure_sweep: sweep complete."
