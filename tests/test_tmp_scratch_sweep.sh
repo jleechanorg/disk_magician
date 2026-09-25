@@ -67,7 +67,10 @@ fi
 
 echo "Test 4: failure-continue — cleanup_claude_state still runs if cleanup_tmp exits 1"
 : > "$INVOCATION_LOG"
+set +e
 INVOCATION_LOG="$INVOCATION_LOG" TMP_MOCK_EXIT=1 bash "$SCRIPT" --clean
+WRAPPER_RC=$?
+set -e
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_claude_state still ran after cleanup_tmp failure" "cleanup_claude_state --clean CLAUDE_STATE_APPROVED=1" "$INVOCATIONS"
 
@@ -77,6 +80,28 @@ INVOCATION_LOG="$INVOCATION_LOG" bash "$SCRIPT" --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run, no approval" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 assert_contains "cleanup_claude_state dry-run, no approval" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
+
+echo "Test 6: exit code — wrapper exits nonzero if a step failed (round-1 /advice finding:"
+echo "        hardcoded exit 0 masked failures from an unattended hourly launchd job)"
+if [[ "$WRAPPER_RC" -ne 0 ]]; then
+  echo "  PASS  wrapper propagates nonzero exit when cleanup_tmp failed"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  wrapper exited 0 despite cleanup_tmp failing (rc=$WRAPPER_RC)"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+echo "Test 7: exit code — wrapper exits 0 when both steps succeed"
+: > "$INVOCATION_LOG"
+INVOCATION_LOG="$INVOCATION_LOG" bash "$SCRIPT" --clean
+CLEAN_RC=$?
+if [[ "$CLEAN_RC" -eq 0 ]]; then
+  echo "  PASS  wrapper exits 0 when both steps succeed"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  wrapper exited $CLEAN_RC despite both steps succeeding"
+  FAIL=$(( FAIL + 1 ))
+fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
