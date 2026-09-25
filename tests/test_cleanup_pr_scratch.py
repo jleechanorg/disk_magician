@@ -42,6 +42,15 @@ class TestCleanupPrScratch(unittest.TestCase):
     def _run_script(self, args, env_extra=None):
         env = os.environ.copy()
         env.setdefault("DISK_MAGICIAN_SKIP_LSOF_CHECK", "1")
+        # /advice review of PR #78 (Codex, PR #71 follow-up): every real
+        # destructive invocation must carry both mandatory sandbox env vars,
+        # not just --tmp-dir confinement -- tests/test_sandbox_context_lint.sh
+        # enforces this for tests/*.sh; this is the Python-suite equivalent.
+        # DISK_MAGICIAN_SKIP_LSOF_CHECK above is honored only inside a
+        # sandbox (scripts/cleanup_pr_scratch.sh:has_open_files), so this is
+        # also required for that bypass to keep working here.
+        env.setdefault("DISK_MAGICIAN_TEST_CONTEXT", "1")
+        env.setdefault("DISK_MAGICIAN_TEST_SANDBOX", str(self.tmp_dir))
         # Bead disk_magician-ka4: never let a real deletion during this test
         # append to the developer's real ~/Library/Logs/disk-magician-deletions.log.
         env.setdefault("DISK_MAGICIAN_DELETION_LOG", str(self.test_root / "deletions.log"))

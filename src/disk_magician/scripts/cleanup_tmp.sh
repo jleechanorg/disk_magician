@@ -215,7 +215,17 @@ log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
 path_size_kb() {
-  du -sk "$1" 2>/dev/null | awk '{print $1+0}' || echo 0
+  # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
+  # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
+  # Take the first numeric field of the LAST line; default to 0 when there
+  # is no line at all. A one-line-per-input-line awk (the old
+  # `{print $1+0}`) instead produced a multi-line "kb" value that broke
+  # every downstream `$(( total_kb + kb ))` / `[[ $kb -lt N ]]` caller.
+  # `du`'s own exit status is neutralized with `|| true` (not just its
+  # stderr) so a `du` failure never makes this function's caller (e.g.
+  # `kb=$(path_size_kb "$path")` under `set -eo pipefail`) abort the whole
+  # script instead of falling back to 0.
+  { du -sk "$1" 2>/dev/null || true; } | awk '{f=$1} END{print f+0}'
 }
 
 remove_path() {

@@ -273,7 +273,13 @@ find_cmd() {
 }
 
 path_size_kb() {
-  du -sk "$1" 2>/dev/null | awk '{print $1+0}' || echo 0
+  # Bead disk_magician-lsl: same fragility as cleanup_tmp.sh's twin --
+  # `du -sk` can emit zero, one, or multiple lines under a TOCTOU race /
+  # BSD-du edge case. Take the first numeric field of the LAST line;
+  # default to 0 when there is no line at all. `du`'s own exit status is
+  # neutralized with `|| true` so a `du` failure never aborts the caller
+  # under `set -eo pipefail`.
+  { du -sk "$1" 2>/dev/null || true; } | awk '{f=$1} END{print f+0}'
 }
 
 is_protected_root() {
@@ -343,8 +349,16 @@ has_active_marker() {
 
 has_open_files() {
   local target="$1" lsof_bin out rc=0 timeout_cmd="" timeout_sec="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-5}"
+  # PR #71 /advice request-changes (Opus): DISK_MAGICIAN_SKIP_LSOF_CHECK is a
+  # test-only escape hatch. Restrict it to a sandboxed test context
+  # (DISK_MAGICIAN_TEST_SANDBOX set, same gate sandbox_guard_roots enforces)
+  # -- in production it must be ignored (with a logged warning), never
+  # allowed to silently disable the open-file safety check ahead of --clean.
   if [[ "${DISK_MAGICIAN_SKIP_LSOF_CHECK:-0}" == "1" ]]; then
-    return 1
+    if [[ -n "${DISK_MAGICIAN_TEST_SANDBOX:-}" ]]; then
+      return 1
+    fi
+    log "DISK_MAGICIAN_SKIP_LSOF_CHECK=1 ignored outside a sandboxed test context (DISK_MAGICIAN_TEST_SANDBOX unset) — open-file check still enforced for $target."
   fi
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
