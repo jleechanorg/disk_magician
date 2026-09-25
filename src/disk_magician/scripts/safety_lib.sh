@@ -122,13 +122,27 @@ safety_gate() {
 # disk_magician-ka4 incident: a completed test run's REAL cleanup_tmp.sh
 # --clean --large deleted content under host /private/tmp and $TMPDIR
 # because no fixture-confinement check existed). When
-# DISK_MAGICIAN_TEST_SANDBOX=<dir> is set (tests always set it), abort
-# BEFORE any deletion (exit 90, deletes nothing) if any given root resolves
-# outside <dir>. Production (env unset) is a no-op passthrough — this never
-# changes real cleanup behavior.
+# DISK_MAGICIAN_TEST_SANDBOX=<dir> is set, abort BEFORE any deletion (exit
+# 90, deletes nothing) if any given root resolves outside <dir>. Production
+# (env unset) is a no-op passthrough — this never changes real cleanup
+# behavior.
+#
+# MANDATORY enforcement (PR #71 /advice HOLD, bead disk_magician-lsl
+# follow-up): a bare opt-in sandbox is not a guard — a test that simply
+# forgets to set DISK_MAGICIAN_TEST_SANDBOX runs unconfined. tests/lib/
+# sandbox_env.sh exports DISK_MAGICIAN_TEST_CONTEXT=1 for every test that
+# invokes a destructive cleanup path; if that flag is set with no sandbox,
+# abort here too instead of silently no-op'ing. Production never sets
+# DISK_MAGICIAN_TEST_CONTEXT, so this never changes real cleanup behavior.
 sandbox_guard_roots() {
   local sandbox="${DISK_MAGICIAN_TEST_SANDBOX:-}"
-  [[ -z "$sandbox" ]] && return 0
+  if [[ -z "$sandbox" ]]; then
+    if [[ -n "${DISK_MAGICIAN_TEST_CONTEXT:-}" ]]; then
+      echo "FATAL sandbox_guard_roots: DISK_MAGICIAN_TEST_CONTEXT=${DISK_MAGICIAN_TEST_CONTEXT} set but DISK_MAGICIAN_TEST_SANDBOX is unset — a test context must confine destructive roots to a sandbox; aborting before any deletion." >&2
+      exit 90
+    fi
+    return 0
+  fi
   local canon_sandbox
   canon_sandbox="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$sandbox" 2>/dev/null)"
   if [[ -z "$canon_sandbox" ]]; then

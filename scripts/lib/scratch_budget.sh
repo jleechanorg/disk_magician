@@ -76,21 +76,35 @@ _scratch_budget_snapshot_has_prefix() {
 }
 
 # scratch_budget_content_mtime <path> — newest content mtime under <path> in
-# epoch seconds (0 if it cannot be determined). Uses the same batched
-# `find -exec stat +` approach as worktree_last_activity_epoch: one process
-# fan-out, not one `stat` per file.
+# epoch seconds, or EMPTY STRING if it cannot be determined (stat/find
+# failure, unreadable subtree). Uses the same batched `find -exec stat +`
+# approach as worktree_last_activity_epoch: one process fan-out, not one
+# `stat` per file.
+#
+# CONTRACT (bead disk_magician-lsl follow-up / PR #71 /advice request-changes,
+# Opus): this used to fall back to the string "0" (epoch 1970) on failure,
+# which sorts FIRST for oldest-first eviction -- the opposite of this repo's
+# "cannot measure -> preserve" rule (worktree_recency.sh, safety_gate). "0" is
+# also ambiguous with a legitimate epoch-0 file. Callers MUST treat a
+# non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
   local path="$1" epoch
+  # PR #71 /advice follow-up (Opus, PR #78): every `stat`/`find` call below is
+  # neutralized with `|| true` so a failure (e.g. the path vanishing between
+  # the caller's enumeration and this call -- the same TOCTOU class as bead
+  # disk_magician-lsl) can never abort the caller under `set -euo pipefail`.
+  # A bare failing command here previously aborted the ENTIRE cleanup script
+  # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    stat -f '%m' "$path" 2>/dev/null || echo 0
+    stat -f '%m' "$path" 2>/dev/null || true
     return
   fi
   epoch="$(find "$path" -type f -exec stat -f '%m' {} + 2>/dev/null \
-      | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
+      | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
   if [[ -z "$epoch" ]]; then
-    epoch="$(stat -f '%m' "$path" 2>/dev/null || echo 0)"
+    epoch="$(stat -f '%m' "$path" 2>/dev/null || true)"
   fi
-  echo "${epoch:-0}"
+  echo "$epoch"
 }
 
 # scratch_budget_evict_root <root> <budget_kb> <floor_minutes>
@@ -141,6 +155,18 @@ scratch_budget_evict_root() {
     mtime="$(scratch_budget_content_mtime "$item")"
     kb=$(path_size_kb "$item")
     total_kb=$(( total_kb + kb ))
+    # "cannot measure -> preserve" (bead disk_magician-lsl follow-up): a
+    # non-numeric mtime (stat/find failure, unreadable subtree) is excluded
+    # from the eviction candidate list entirely -- never written to
+    # candidates_file, so it can never sort first and never gets evicted.
+    # kb still counts toward total_kb above since the space is real; only
+    # eviction ELIGIBILITY is affected. Filtering here (rather than writing
+    # an empty first field) also keeps every candidates_file row a
+    # well-formed 3-field TSV line for the `IFS=$'\t' read` below.
+    if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
+      log "scratch_budget: cannot measure content mtime for $item — preserving (excluded from eviction)."
+      continue
+    fi
     printf '%s\t%s\t%s\n' "$mtime" "$kb" "$item" >>"$candidates_file"
   done < <(find "$root" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
 
