@@ -184,6 +184,63 @@ class TestCorrelateDiskSwings(unittest.TestCase):
         self.assertIn("Colima diffdisk (du)", text_proc.stdout)
         self.assertIn("Data volume confirms", text_proc.stdout)
 
+    def test_sibling_volume_signals_are_not_attributed(self):
+        # /advice review (Codex + Opus, both high confidence, 2026-09-25):
+        # disk_used_gb is df Used for the Data volume specifically. VM,
+        # Preboot, Update, swap, and container-free live on other volumes
+        # or the shared container pool and cannot causally move Data's own
+        # Used figure — crediting them records a coincidence, not a cause,
+        # and swap/vm_volume_used_gb/apfs_volumes_gb.VM would triple-count
+        # one physical VM-volume change. This swing's VM volume moves in
+        # the SAME direction and by MORE than the swing itself (a
+        # deliberately extreme coincidence), and colima does not move at
+        # all — a correlator that summed sibling-volume deltas would report
+        # this as fully (or over-) attributed; it must report 0% attributed
+        # instead.
+        t = BASE_TIME
+        snap1 = _base_snapshot(800, covered=True)
+        self._write(t, snap1)
+        t = t + timedelta(minutes=35)
+        snap2 = _base_snapshot(810, covered=True)  # +10 GiB swing
+        snap2["apfs_volumes_gb"]["Data"] = 810.0  # consistency check still confirms the swing
+        snap2["apfs_volumes_gb"]["VM"] = 40.0  # +20 GiB — same direction, larger than the swing
+        snap2["swap_used_gb"] = 5.0  # +4 GiB — also same direction
+        snap2["apfs_container_free_gb"] = 25.0  # -5 GiB — shrinking, could look like "consumption"
+        # colima_diffdisk_du_allocated_gb left unchanged (0 delta) from the base fixture.
+        self._write(t, snap2)
+
+        proc = self._run_correlator()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        summary = json.loads(proc.stdout)
+        self.assertEqual(summary["covered_swings"], 1, summary)
+        self.assertEqual(summary["hit_80pct_bar"], 0, summary)
+
+        text_proc = self._run_correlator_text()
+        self.assertIn("Attributed: 0.00 GiB (0.0%)", text_proc.stdout)
+        self.assertNotIn("VM volume", text_proc.stdout)
+        self.assertNotIn("container free", text_proc.stdout)
+        self.assertNotIn("swap used", text_proc.stdout)
+
+    def test_single_tick_probe_failure_does_not_lose_coverage(self):
+        # A snapshot where disk_snapshot.sh recorded null for a probe that
+        # failed on that one tick (see disk_snapshot.sh's null-vs-zero fix)
+        # must still count as post-deploy coverage — has_coverage checks key
+        # existence, not a non-null value, precisely so a transient failure
+        # cannot make an otherwise fully-deployed snapshot look pre-deploy.
+        t = BASE_TIME
+        snap1 = _base_snapshot(800, covered=True)
+        self._write(t, snap1)
+        t = t + timedelta(minutes=35)
+        snap2 = _base_snapshot(812, covered=True)
+        snap2["colima_diffdisk_du_allocated_gb"] = None  # probe failed this tick
+        self._write(t, snap2)
+
+        proc = self._run_correlator()
+        summary = json.loads(proc.stdout)
+        self.assertEqual(summary["covered_swings"], 1, summary)
+        self.assertEqual(summary["uncovered_swings"], 0, summary)
+        self.assertEqual(summary["hit_80pct_bar"], 0, summary)
+
     def test_corrupt_commit_is_skipped_not_fatal(self):
         t = BASE_TIME
         self._write(t, _base_snapshot(800, covered=True))

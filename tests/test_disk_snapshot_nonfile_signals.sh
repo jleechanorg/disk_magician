@@ -206,10 +206,13 @@ fi
 
 # ────────── Failing-tool degradation: when diskutil/tmutil are present on
 # PATH but fail (nonzero exit / empty output — e.g. a transient diskutil
-# hang or a locked-down sandbox), the new probes must degrade to
-# null/0/empty rather than aborting the whole snapshot. Real full PATH is
-# kept (prepended, not replaced) so every other tool disk_snapshot.sh needs
-# still resolves normally — only diskutil/tmutil are shadowed.
+# hang or a locked-down sandbox), the new probes must degrade to null
+# (never a fabricated 0 — /advice review, Codex + Opus, both high
+# confidence, 2026-09-25: a silent 0 on probe failure would read to the
+# correlator as a real multi-GiB swing) rather than aborting the whole
+# snapshot. Real full PATH is kept (prepended, not replaced) so every other
+# tool disk_snapshot.sh needs still resolves normally — only diskutil/tmutil
+# are shadowed.
 FAILING_BIN="$TMP/failing_bin"
 mkdir -p "$FAILING_BIN"
 cat > "$FAILING_BIN/diskutil" <<'EOF'
@@ -234,14 +237,60 @@ else
   python3 - "$BARE_OUT" <<'PY' || FAIL_BARE=1
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["apfs_volumes_gb"] == {"Data": 0.0, "VM": 0.0, "Preboot": 0.0, "Update": 0.0}, d["apfs_volumes_gb"]
+assert d["apfs_volumes_gb"] == {"Data": None, "VM": None, "Preboot": None, "Update": None}, d["apfs_volumes_gb"]
 assert d["apfs_container_free_gb"] is None, d["apfs_container_free_gb"]
 assert d["apfs_purgeable_estimate_gb"] is None, d["apfs_purgeable_estimate_gb"]
-assert d["local_snapshots_count"] == 0, d["local_snapshots_count"]
-assert d["local_snapshot_names"] == [], d["local_snapshot_names"]
-print("PASS: missing diskutil/tmutil degrades to null/0/empty, snapshot still succeeds")
+assert d["local_snapshots_count"] is None, d["local_snapshots_count"]
+assert d["local_snapshot_names"] is None, d["local_snapshot_names"]
+print("PASS: missing diskutil/tmutil degrades to null (never a fabricated 0), snapshot still succeeds")
 PY
   [[ "${FAIL_BARE:-0}" == "1" ]] && fail "no-diskutil/tmutil degradation assertions failed"
+fi
+
+# ────────── Colima measurement failure vs missing file: a diffdisk that
+# EXISTS but whose stat/du calls fail must read null (measurement failed),
+# distinct from a genuinely absent diffdisk (real 0 — Colima not running).
+# Shims a failing `stat`/`du` scoped ONLY to this one run via a wrapper that
+# fails for the diffdisk path and delegates every other path to the real
+# tool, so the rest of disk_snapshot.sh's own du-heavy directory measurement
+# is unaffected.
+COLIMA_FAIL_BIN="$TMP/colima_fail_bin"
+mkdir -p "$COLIMA_FAIL_BIN"
+REAL_STAT="$(command -v stat)"
+REAL_DU="$(command -v du)"
+cat > "$COLIMA_FAIL_BIN/stat" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [[ "\$a" == *"/.colima/_lima/colima/diffdisk" ]] && exit 1
+done
+exec "$REAL_STAT" "\$@"
+EOF
+chmod +x "$COLIMA_FAIL_BIN/stat"
+cat > "$COLIMA_FAIL_BIN/du" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [[ "\$a" == *"/.colima/_lima/colima/diffdisk" ]] && exit 1
+done
+exec "$REAL_DU" "\$@"
+EOF
+chmod +x "$COLIMA_FAIL_BIN/du"
+COLIMA_FAIL_OUT="$TMP/colima_fail_out.json"
+PATH="$COLIMA_FAIL_BIN:$FAKE_BIN:$PATH" HOME="$FAKE_HOME" \
+  DISK_MAGICIAN_CONFIG="$TMP/config.json" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=30 \
+  timeout 30 bash "$SNAPSHOT_SH" --output "$COLIMA_FAIL_OUT" >"$TMP/colima_fail_stderr.log" 2>&1
+colima_fail_rc=$?
+if [[ $colima_fail_rc -ne 0 ]]; then
+  fail "disk_snapshot.sh exited $colima_fail_rc with a failing stat/du on an existing diffdisk: $(cat "$TMP/colima_fail_stderr.log")"
+else
+  python3 - "$COLIMA_FAIL_OUT" <<'PY' || FAIL_COLIMA=1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["colima_diffdisk_stat_allocated_gb"] is None, d["colima_diffdisk_stat_allocated_gb"]
+assert d["colima_diffdisk_du_allocated_gb"] is None, d["colima_diffdisk_du_allocated_gb"]
+print("PASS: existing diffdisk with failing stat/du reads null, not a fabricated 0")
+PY
+  [[ "${FAIL_COLIMA:-0}" == "1" ]] && fail "colima stat/du failure-vs-zero assertions failed"
 fi
 
 if [[ $FAIL -eq 0 ]]; then

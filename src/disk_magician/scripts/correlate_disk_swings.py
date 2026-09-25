@@ -14,14 +14,32 @@ and `git show` only, never a write to that repo — it is another lane's
 ledger, not this script's to mutate), finds swings of >= --min-swing-gib
 GiB within <= --max-window-minutes minutes, and attributes each swing's
 magnitude to the additive non-file signals disk_snapshot.sh now records
-(scripts/disk_snapshot.sh, same bead): per-APFS-volume capacity_in_use,
-container free, local snapshot count, and Colima diffdisk allocation.
+(scripts/disk_snapshot.sh, same bead).
 
 Attribution method (deliberately mechanical, not hand-picked per swing):
 for each candidate signal, compute its own delta over the same window; if
 the signal moved in the same direction as the swing, count
 min(|signal_delta|, remaining unattributed magnitude) as attributed to it.
-This lets the data show which signals matter rather than assuming it.
+
+Volume-boundary constraint on candidate signals (/advice review, Codex +
+Opus, both high confidence, 2026-09-25): disk_used_gb is `df`'s Used figure
+for /System/Volumes/Data specifically (see get_disk_stats() in
+disk_snapshot.sh) — it is NOT a whole-container figure. VM, Preboot, and
+Update are separate APFS volumes in the same container; their growth moves
+the container's shared free-space pool (and therefore disk_free_gb) but
+cannot move Data's own Used figure. Crediting a Data-volume swing to
+VM/Preboot/Update/swap/container-free growth records a coincidence, not a
+cause, and — because `swap_used_gb`, `vm_volume_used_gb`, and
+`apfs_volumes_gb["VM"]` all measure the same underlying VM-volume change —
+would let one physical event get credited up to three times, which is
+exactly the fabricated attribution this script exists to avoid. Colima's
+diffdisk lives on the Data volume itself, so it is the only signal here
+that can be a genuine sub-component of a Data-volume swing, and is the only
+one in ATTRIBUTION_SIGNALS. The other recorded fields (apfs_volumes_gb.VM/
+Preboot/Update, apfs_container_free_gb, apfs_purgeable_estimate_gb,
+swap_used_gb, vm_volume_used_gb) remain in the snapshot for their own sake
+(explaining disk_free_gb / whole-container swings is a separate, unbuilt
+analysis) but are deliberately excluded here.
 
 The Data-volume's own apfs_volumes_gb["Data"] delta is reported separately
 as a consistency check (it should nearly equal the swing itself, since
@@ -30,7 +48,11 @@ the attribution sum, which would otherwise be circular.
 
 Old snapshots predate this bead and lack every new key — a swing where
 either endpoint is missing them has NO_COVERAGE and is reported as such
-rather than silently attributed 0%.
+rather than silently attributed 0%. A signal that disk_snapshot.sh could not
+measure this tick (probe failure, e.g. a `du` timeout on the diffdisk) is
+recorded as JSON `null`, never a fabricated `0` — see disk_snapshot.sh's
+null-vs-zero handling, same review — so a transient probe failure cannot be
+misread here as a real multi-GiB swing in the signal itself.
 """
 from __future__ import annotations
 
@@ -44,29 +66,23 @@ from datetime import datetime, timezone
 DEFAULT_BACKUP_REPO = os.path.expanduser("~/.disk_magician_backup")
 DEFAULT_RELPATH = "snapshots/disk_snapshot.json"
 
-# (dotted path into the snapshot dict, human label). Deliberately excludes
-# apfs_volumes_gb.Data (see module docstring: reported as a consistency
-# check, not summed into attribution) and both local_snapshots_count and
-# apfs_purgeable_estimate_gb (the latter is a df-vs-APFSContainerFree
-# *estimate* derived from apfs_container_free_gb; including both would
-# double-count the same underlying signal — apfs_container_free_gb is the
-# more direct measurement and is used instead).
+# (dotted path into the snapshot dict, human label). See module docstring
+# "Volume-boundary constraint": only a signal that can be a genuine
+# sub-component of disk_used_gb (the Data volume's own df Used) belongs
+# here. VM/Preboot/Update/swap/container-free are excluded — they live on
+# other APFS volumes or the shared container pool and cannot causally move
+# Data's own Used figure; apfs_volumes_gb.Data itself is excluded because it
+# IS the swing (reported separately as a consistency check, not summed).
 ATTRIBUTION_SIGNALS = [
     ("colima_diffdisk_du_allocated_gb", "Colima diffdisk (du)"),
-    ("apfs_volumes_gb.VM", "VM volume CapacityInUse"),
-    ("apfs_volumes_gb.Preboot", "Preboot volume CapacityInUse"),
-    ("apfs_volumes_gb.Update", "Update volume CapacityInUse"),
-    ("swap_used_gb", "swap used"),
-    ("vm_volume_used_gb", "VM volume df-used (cross-check vs apfs VM)"),
-    ("apfs_container_free_gb", "container free (inverted: shrinking ~ consumption elsewhere)"),
 ]
 
-# Keys whose presence marks a snapshot as "post-deploy" for this bead —
-# any one of them missing means the snapshot predates disk_snapshot.sh's
-# non-file-signal tracking and cannot be used for attribution.
+# Keys whose presence marks a snapshot as "post-deploy" for this bead — this
+# checks KEY EXISTENCE, not a non-null value, because a transient probe
+# failure on one tick (recorded as null, see disk_snapshot.sh) must not make
+# an otherwise-fully-deployed snapshot look like it predates the bead.
 COVERAGE_MARKER_KEYS = (
     "apfs_volumes_gb",
-    "apfs_container_free_gb",
     "local_snapshots_count",
     "colima_diffdisk_du_allocated_gb",
 )
@@ -103,7 +119,11 @@ def get_nested(d, dotted_path):
 
 
 def has_coverage(snapshot):
-    return all(snapshot.get(key) is not None for key in COVERAGE_MARKER_KEYS)
+    # Key existence, not non-null value: a probe that failed on this one
+    # tick is recorded as null (see disk_snapshot.sh's null-vs-zero fix),
+    # and that single-tick failure must not make an otherwise fully-deployed
+    # snapshot look pre-deploy.
+    return all(key in snapshot for key in COVERAGE_MARKER_KEYS)
 
 
 def parse_timestamp(snapshot, fallback_iso):

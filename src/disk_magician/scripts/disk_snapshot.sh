@@ -283,15 +283,26 @@ print(json.dumps(result))
 # this macOS version (verified empirically; disk_frontier_scan.py's
 # get_purgeable_info() docstring records the same finding). Prints
 # "<count>\t<comma-joined snapshot names>"; degrades to "0\t" on any failure.
+#
+# Null-vs-zero (/advice review, Codex + Opus, both high confidence,
+# 2026-09-25): "we measured and got zero" and "we could not measure" must
+# stay distinguishable, or a transient tool failure reads to the correlator
+# as a real multi-GiB swing in the signal itself. A genuine tmutil failure
+# (nonzero exit, e.g. timeout) prints count "-1" (never a legitimate count),
+# which the JSON builder below turns into null — never a fabricated 0.
 get_local_snapshots_line() {
   if [[ "$OSTYPE" != "darwin"* ]] || ! command -v tmutil &>/dev/null; then
-    printf '0\t\n'
+    printf -- '-1\t\n'
     return
   fi
-  local raw names count
+  local raw rc names count
   raw=$(timeout 10 tmutil listlocalsnapshots / 2>/dev/null)
-  if [[ -z "$raw" ]]; then
-    printf '0\t\n'
+  rc=$?
+  # Real tmutil success always emits at least the "Snapshots for disk /:"
+  # header, so empty output plus a nonzero exit both mean the call itself
+  # failed (killed by timeout, tmutil error) — never "confirmed zero".
+  if [[ $rc -ne 0 || -z "$raw" ]]; then
+    printf -- '-1\t\n'
     return
   fi
   names=$(printf '%s\n' "$raw" | grep -v '^Snapshots for' | sed '/^[[:space:]]*$/d' | paste -sd, -)
@@ -305,19 +316,37 @@ get_local_snapshots_line() {
 # to host bytes actually consumed. `stat`'s block count and `du`'s block
 # count are two independent syscalls over that sparseness and have been
 # observed to disagree, so both are recorded rather than picking one. Prints
-# "<stat_allocated_bytes>\t<du_allocated_kb>"; degrades to "0\t0" when the
-# diffdisk doesn't exist (Colima not installed/never started).
+# "<stat_allocated_bytes>\t<du_allocated_kb>". A missing diffdisk (Colima not
+# installed/never started) is a real, meaningful 0 — there truly is zero
+# Colima disk usage — but a failure of `stat`/`du` on an *existing* diffdisk
+# (permission error, timeout) is a measurement failure and must not be
+# reported as that same 0; each measurement independently prints "-1" on
+# failure, which the JSON builder below turns into null (/advice review,
+# Codex + Opus, both high confidence, 2026-09-25: a `du` timeout silently
+# recording 0 would read to the correlator as a fabricated multi-GiB swing).
 get_colima_diffdisk_stats() {
   local diffdisk="$HOME/.colima/_lima/colima/diffdisk"
   if [[ ! -f "$diffdisk" ]]; then
     printf '0\t0\n'
     return
   fi
-  local stat_blocks stat_bytes du_kb
+  local stat_blocks stat_rc du_raw du_rc stat_bytes du_kb
   stat_blocks=$(timeout 5 stat -f "%b" "$diffdisk" 2>/dev/null)
-  stat_bytes=$(( ${stat_blocks:-0} * 512 ))
-  du_kb=$(timeout 10 du -k "$diffdisk" 2>/dev/null | awk '{print $1+0}')
-  printf '%s\t%s\n' "$stat_bytes" "${du_kb:-0}"
+  stat_rc=$?
+  if [[ $stat_rc -ne 0 || -z "$stat_blocks" ]]; then
+    stat_bytes="-1"
+  else
+    stat_bytes=$(( stat_blocks * 512 ))
+  fi
+  du_raw=$(timeout 10 du -k "$diffdisk" 2>/dev/null)
+  du_rc=$?
+  if [[ $du_rc -ne 0 || -z "$du_raw" ]]; then
+    du_kb="-1"
+  else
+    du_kb=$(printf '%s' "$du_raw" | awk '{print $1+0}')
+    [[ -z "$du_kb" ]] && du_kb="-1"
+  fi
+  printf '%s\t%s\n' "$stat_bytes" "$du_kb"
 }
 
 # ────────── DISCOVER MODE ──────────
@@ -1149,8 +1178,16 @@ try:
     # Additive non-file signals (bead disk_magician-rpv). See
     # scripts/correlate_disk_swings.py for how these are used to attribute
     # df-observed swings that no file-birth/mtime probe explained.
+    #
+    # Null-vs-zero (/advice review, Codex + Opus, both high confidence,
+    # 2026-09-25): "probe failed" and "probe measured a real zero" must stay
+    # distinguishable everywhere below, or a transient failure reads to the
+    # correlator as a real multi-GiB swing in the signal itself. A missing
+    # dict key (not merely a falsy value) means "not measured this tick" —
+    # never coerced to 0 via `or 0` the way this file's older swap/VM
+    # fields are, since those predate this bead's stricter null discipline.
     def _bytes_to_gb(value):
-        return round((value or 0) / 1024 / 1024 / 1024, 3)
+        return round(value / 1024 / 1024 / 1024, 3)
 
     try:
         apfs_volume_stats = json.loads(os.environ.get("SNAP_APFS_VOLUMES") or "{}")
@@ -1158,7 +1195,7 @@ try:
         apfs_volume_stats = {}
     volumes_bytes = apfs_volume_stats.get("volumes_bytes") or {}
     data["apfs_volumes_gb"] = {
-        role: _bytes_to_gb(volumes_bytes.get(role))
+        role: (_bytes_to_gb(volumes_bytes[role]) if volumes_bytes.get(role) is not None else None)
         for role in ("Data", "VM", "Preboot", "Update")
     }
     container_free_bytes = apfs_volume_stats.get("container_free_bytes")
@@ -1183,14 +1220,26 @@ try:
         )
     else:
         data["apfs_purgeable_estimate_gb"] = None
-    local_snapshot_names_raw = os.environ.get("SNAP_LOCAL_SNAPSHOT_NAMES") or ""
-    data["local_snapshots_count"] = int(os.environ.get("SNAP_LOCAL_SNAPSHOTS_COUNT") or 0)
-    data["local_snapshot_names"] = [n for n in local_snapshot_names_raw.split(",") if n]
-    data["colima_diffdisk_stat_allocated_gb"] = _bytes_to_gb(
-        int(os.environ.get("SNAP_COLIMA_DIFFDISK_STAT_BYTES") or 0)
+    # -1 is get_local_snapshots_line()'s failure sentinel (a real count is
+    # never negative) — surface as null, not a fabricated 0 snapshot count.
+    local_snapshots_count_raw = int(os.environ.get("SNAP_LOCAL_SNAPSHOTS_COUNT") or -1)
+    if local_snapshots_count_raw < 0:
+        data["local_snapshots_count"] = None
+        data["local_snapshot_names"] = None
+    else:
+        local_snapshot_names_raw = os.environ.get("SNAP_LOCAL_SNAPSHOT_NAMES") or ""
+        data["local_snapshots_count"] = local_snapshots_count_raw
+        data["local_snapshot_names"] = [n for n in local_snapshot_names_raw.split(",") if n]
+    # -1 is get_colima_diffdisk_stats()'s failure sentinel for each
+    # measurement independently (stat/du can fail even when the diffdisk
+    # file exists and is legitimately non-empty).
+    colima_stat_bytes_raw = int(os.environ.get("SNAP_COLIMA_DIFFDISK_STAT_BYTES") or -1)
+    data["colima_diffdisk_stat_allocated_gb"] = (
+        _bytes_to_gb(colima_stat_bytes_raw) if colima_stat_bytes_raw >= 0 else None
     )
-    data["colima_diffdisk_du_allocated_gb"] = round(
-        int(os.environ.get("SNAP_COLIMA_DIFFDISK_DU_KB") or 0) / 1024 / 1024, 3
+    colima_du_kb_raw = int(os.environ.get("SNAP_COLIMA_DIFFDISK_DU_KB") or -1)
+    data["colima_diffdisk_du_allocated_gb"] = (
+        round(colima_du_kb_raw / 1024 / 1024, 3) if colima_du_kb_raw >= 0 else None
     )
 
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
