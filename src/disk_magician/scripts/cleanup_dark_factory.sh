@@ -63,8 +63,13 @@ fi
 
 is_live() { grep -qF "$1" "$LIVE_REFS"; }
 
-# rc 0 when no file under $1 was modified within $DAYS days.
-is_stale() { [[ -z "$(find "$1" -newermt "-${DAYS} days" -print -quit 2>/dev/null)" ]]; }
+# rc 0 when no file under $1 was modified within $DAYS days. Fails closed: if
+# find cannot read part of the tree, recency is unknown and the path is kept.
+is_stale() {
+  local hit
+  hit="$(find "$1" -newermt "-${DAYS} days" -print -quit 2>/dev/null)" || return 1
+  [[ -z "$hit" ]]
+}
 
 total_kb=0
 count=0
@@ -97,10 +102,11 @@ if [[ -d "$RELEASES_DIR" ]]; then
     find "$BIN_DIR" -maxdepth 1 -type l -exec readlink {} + 2>/dev/null || true
     grep -rhoE "$RELEASES_DIR/[^/\"' ]+" "$UNIT_DIR" 2>/dev/null || true
     grep -oE "$RELEASES_DIR/[^/\"' ]+" "$LIVE_REFS" || true
-  } | grep -oE "$RELEASES_DIR/[^/]+" | sort -u >"$keep"
+  } | { grep -oE "$RELEASES_DIR/[^/]+" || true; } | sort -u >"$keep"
   ls -1t "$RELEASES_DIR" | head -n "$KEEP_RELEASES" | sed "s#^#$RELEASES_DIR/#" >>"$keep"
-  log "Releases kept (referenced or newest $KEEP_RELEASES): $(sort -u "$keep" | xargs -n1 basename 2>/dev/null | cut -c1-7 | tr '\n' ' ')"
+  log "Releases kept (referenced or newest $KEEP_RELEASES): $(sort -u "$keep" | sed 's#.*/##' | cut -c1-7 | tr '\n' ' ')"
   for rel in "$RELEASES_DIR"/*/; do
+    [[ -d "$rel" ]] || continue
     rel="${rel%/}"
     grep -qxF "$rel" "$keep" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
