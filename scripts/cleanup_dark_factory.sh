@@ -80,15 +80,35 @@ root_ok() {
 # Every path a live process is using: exe, cwd, argv, environment, open files.
 LIVE_REFS="$(mktemp)"
 trap 'rm -f "$LIVE_REFS"' EXIT
-if [[ -d /proc/self ]]; then
+# DISK_MAGICIAN_TEST_NO_PROC forces the ps/lsof branch (test-only override).
+if [[ -d /proc/self && -z "${DISK_MAGICIAN_TEST_NO_PROC:-}" ]]; then
+  nondumpable=0
   for p in /proc/[0-9]*; do
-    { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; tr '\0' '\n' <"$p/environ"; } 2>/dev/null || true
+    if [[ -O "$p" ]]; then
+      # argv of our own processes must be read; a failure while the process
+      # still exists (and is not a zombie) means the reference set is incomplete.
+      if ! tr '\0' '\n' <"$p/cmdline" 2>/dev/null; then
+        if [[ -d "$p" ]] && ! grep -qE '^State:[[:space:]]*Z' "$p/status" 2>/dev/null; then
+          scan_fail "cannot read argv of own process $p"
+        fi
+        continue
+      fi
+      # cwd/environ/fds are denied by the kernel for non-dumpable processes
+      # (systemd --user, ssh-agent); dark-factory's processes are dumpable.
+      { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/environ"; } 2>/dev/null \
+        || nondumpable=$(( nondumpable + 1 ))
+      find "$p/fd" -maxdepth 1 -type l -printf '%l\n' 2>/dev/null || true
+    else
+      { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
+    fi
   done >"$LIVE_REFS"
-  find /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' >>"$LIVE_REFS" 2>/dev/null || true
+  (( nondumpable == 0 )) || log "Note: $nondumpable own non-dumpable process(es); argv scanned, cwd/env/fds kernel-restricted"
 else
   # macOS: argv and environment from ps; cwd, exe, and open files from lsof.
+  # Any nonzero exit means a partial scan.
   ps -axwwE -o command= >"$LIVE_REFS" 2>/dev/null || scan_fail "ps failed"
-  lsof_out="$(lsof -nP -u "$(id -u)" -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+  lsof_raw="$(lsof -nP -w -u "$(id -u)" -Fn 2>/dev/null)" || scan_fail "lsof incomplete"
+  lsof_out="$(sed -n 's/^n//p' <<<"${lsof_raw:-}")"
   [[ -n "$lsof_out" ]] || scan_fail "lsof returned nothing"
   printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
 fi
@@ -163,7 +183,10 @@ if root_ok "$RELEASES_DIR"; then
         cat "$f" || scan_fail "cannot read $f"
       done <"$units"
       cat "$LIVE_REFS"
-    } | sed -e "s#%h#$HOME#g" -e "s#\${HOME}#$HOME#g" -e "s#\$HOME#$HOME#g" -e "s#~/#$HOME/#g" \
+    } | python3 -c 'import re,sys
+for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
+    sys.stdout.buffer.write(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), l))' \
+      | sed -e "s#%h#$HOME#g" -e "s#\${HOME}#$HOME#g" -e "s#\$HOME#$HOME#g" -e "s#~/#$HOME/#g" \
       | { grep -oE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
   rm -f "$units"

@@ -159,6 +159,26 @@ kill "$ARGVP" "$ENVP" 2>/dev/null || true
 check "run named by logical path in a live argv kept" '[[ -d "$T/h7dreal/.dark-factory/runs/argv" ]]'
 check "release named only in a live process env kept" '[[ -d "$T/h7dreal/.local/share/dark-factory/releases/r1" ]]'
 
+echo "Test 8: systemd \\xHH-escaped unit path; macOS-branch partial ps/lsof scans refuse --clean"
+H8="$T/h8"; mk7 "$H8"
+printf '[Service]\nExecStart=%%h/.local/share/dark\\x2dfactory/releases/r1/bin/dark-factory\n' >"$H8/.config/systemd/user/esc.service"
+run7 "$H8" --clean >"$T/t8.out" 2>&1 || true
+check "release named via \\x2d-escaped unit path kept" '[[ -d "$H8/.local/share/dark-factory/releases/r1" ]]'
+# Shimmed ps/lsof drive the macOS branch on any host.
+SHIM="$T/shim"; mkdir -p "$SHIM"
+mkshims() {  # mkshims <ps_rc> <lsof_rc>
+  printf '#!/bin/sh\necho "bash %s"\nexit %s\n' "$SCRIPT cleanup_dark_factory" "$1" >"$SHIM/ps"
+  printf '#!/bin/sh\nprintf "p1\\nn%%s\\n" "$(pwd -P)"\nexit %s\n' "$2" >"$SHIM/lsof"
+  chmod +x "$SHIM/ps" "$SHIM/lsof"
+}
+run8() { local h="$1"; shift; PATH="$SHIM:$PATH" DISK_MAGICIAN_TEST_NO_PROC=1 run7 "$h" "$@"; }
+mkshims 0 0; H8b="$T/h8b"; mk7 "$H8b"; rc=0; run8 "$H8b" --clean >"$T/t8b.out" 2>&1 || rc=$?
+check "macOS branch with complete ps/lsof proceeds (control)" '[[ "$rc" -eq 0 && ! -e "$H8b/.dark-factory/runs/old" ]]'
+mkshims 0 1; H8c="$T/h8c"; mk7 "$H8c"; rc=0; run8 "$H8c" --clean >"$T/t8c.out" 2>&1 || rc=$?
+check "partial lsof (nonzero exit with output) refuses --clean" '[[ "$rc" -ne 0 && -d "$H8c/.dark-factory/runs/old" ]]'
+mkshims 1 0; H8d="$T/h8d"; mk7 "$H8d"; rc=0; run8 "$H8d" --clean >"$T/t8d.out" 2>&1 || rc=$?
+check "failing ps refuses --clean" '[[ "$rc" -ne 0 && -d "$H8d/.dark-factory/runs/old" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
