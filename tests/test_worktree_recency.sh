@@ -108,13 +108,19 @@ touch_at "$(( $(date +%s) + 86400 ))" "$WT/README.md"
 assert_eq "$(worktree_age_days "$WT")" "0" "future mtime clamps to age 0"
 
 echo "== case 7: partly unreadable tree fails closed even without pipefail =="
+# Every file is 30d old, so age 0 can only come from the fail-closed path.
 WT="$(mk_worktree partly_unreadable)"
-mkdir -p "$WT/locked"; touch "$WT/locked/fresh.py"
-touch_at "$(days_ago 30)" "$WT/src/deep/nested/code.py" "$WT/README.md"
+mkdir -p "$WT/locked"; touch "$WT/locked/old.py"
+touch_at "$(days_ago 30)" "$WT/locked/old.py" "$WT/src/deep/nested/code.py" "$WT/README.md"
 chmod 000 "$WT/locked"
-age7="$(bash -c "set +o pipefail; source '$REPO_ROOT/scripts/lib/worktree_recency.sh'; worktree_age_days '$WT'")"
-chmod 755 "$WT/locked"
-assert_eq "$age7" "0" "unreadable subtree treated as active (age 0)"
+if find "$WT" >/dev/null 2>&1; then
+    chmod 755 "$WT/locked"
+    ok "SKIPPED: mode 000 does not block find here (privileged user); unreadable case not exercisable"
+else
+    age7="$(bash -c 'set +o pipefail; source "$1"; worktree_age_days "$2"' _ "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
+    chmod 755 "$WT/locked"
+    assert_eq "$age7" "0" "unreadable subtree treated as active (age 0)"
+fi
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
