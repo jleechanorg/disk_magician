@@ -48,31 +48,22 @@ sandbox_guard_roots "$RELEASES_DIR" "$RUNS_DIR" "$SESSIONS_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# Every path a live process is using (exe, cwd, argv). Fail closed for --clean
-# when processes cannot be inspected.
-LIVE_REFS="$(mktemp)"
-trap 'rm -f "$LIVE_REFS"' EXIT
-if [[ -d /proc/self ]]; then
-  for p in /proc/[0-9]*; do
-    { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
-  done >"$LIVE_REFS"
-else
-  # macOS: argv from ps, cwd/exe from lsof.
-  ps -axww -o command= >"$LIVE_REFS" 2>/dev/null || true
-  lsof_out="$(lsof -nP -d cwd,txt -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
-  if [[ -z "$lsof_out" && "$DRY_RUN" == false ]]; then
-    echo "Cannot inspect live processes (no /proc, lsof empty) — refusing --clean." >&2
+# A scan that cannot see everything must not authorize deletion: --clean
+# aborts; a dry-run only warns.
+scan_fail() {
+  if [[ "$DRY_RUN" == false ]]; then
+    echo "Incomplete reference scan ($1) — refusing --clean." >&2
     exit 1
   fi
-  printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
-fi
-# Our own argv must be visible, or the scan is not seeing processes at all.
-if [[ "$DRY_RUN" == false ]] && ! grep -qF "cleanup_dark_factory" "$LIVE_REFS"; then
-  echo "Live-process scan did not see this process — refusing --clean." >&2
-  exit 1
-fi
+  log "WARN: incomplete reference scan ($1)"
+}
 
-is_live() { grep -qF "$1" "$LIVE_REFS"; }
+# Physical path of a root (ancestor symlinks resolved), so it compares equal
+# to the resolved paths that /proc, lsof, and realpath report.
+phys() { (cd -P "$1" 2>/dev/null && pwd) || printf '%s\n' "$1"; }
+
+# Escape a literal path for use inside an ERE.
+re_escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
 
 # Resolve each stdin path through every symlink (relative or chained).
 realpaths() { python3 -c 'import os,sys
@@ -85,6 +76,28 @@ root_ok() {
   if [[ -L "$1" ]]; then log "SKIP root (symlink): $1"; return 1; fi
   [[ -d "$1" ]]
 }
+
+# Every path a live process is using: exe, cwd, argv, and open files.
+LIVE_REFS="$(mktemp)"
+trap 'rm -f "$LIVE_REFS"' EXIT
+if [[ -d /proc/self ]]; then
+  for p in /proc/[0-9]*; do
+    { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
+  done >"$LIVE_REFS"
+  find /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' >>"$LIVE_REFS" 2>/dev/null || true
+else
+  # macOS: argv from ps; cwd, exe, and every open file of this user from lsof.
+  ps -axww -o command= >"$LIVE_REFS" 2>/dev/null || scan_fail "ps failed"
+  lsof_out="$(lsof -nP -u "$(id -u)" -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+  [[ -n "$lsof_out" ]] || scan_fail "lsof returned nothing"
+  printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
+fi
+# The scan must see this process's own argv and cwd, or it is not seeing processes.
+if ! grep -qF "cleanup_dark_factory" "$LIVE_REFS" || ! grep -qxF "$(pwd -P)" "$LIVE_REFS"; then
+  scan_fail "live-process scan did not see this process"
+fi
+
+is_live() { grep -qF "$1" "$LIVE_REFS"; }
 
 # rc 0 when no file under $1 was modified within $DAYS days. Fails closed: if
 # find cannot read part of the tree, recency is unknown and the path is kept.
@@ -120,26 +133,41 @@ remove() {
 
 # --- releases ---
 if root_ok "$RELEASES_DIR"; then
+  rel_logical="$RELEASES_DIR"
+  RELEASES_DIR="$(phys "$RELEASES_DIR")"
+  ref_re="($(re_escape "$rel_logical")|$(re_escape "$RELEASES_DIR"))/[^/\"' ]+"
+  units="$(mktemp)"
+  if [[ -d "$UNIT_DIR" ]]; then
+    find "$UNIT_DIR" \( -type f -o -type l \) >"$units" 2>/dev/null || scan_fail "unreadable $UNIT_DIR"
+  fi
+  if [[ -d "$BIN_DIR" ]]; then
+    [[ -r "$BIN_DIR" && -x "$BIN_DIR" ]] || scan_fail "unreadable $BIN_DIR"
+  fi
   keep="$(mktemp)"
   {
-    find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null | realpaths || true
-    find "$UNIT_DIR" -type f 2>/dev/null -exec cat {} + 2>/dev/null | sed "s#%h#$HOME#g" \
-      | { grep -oE "$RELEASES_DIR/[^/\"' ]+" || true; } || true
-    grep -oE "$RELEASES_DIR/[^/\"' ]+" "$LIVE_REFS" || true
-  } | { grep -oE "$RELEASES_DIR/[^/]+" || true; } | sort -u >"$keep"
+    find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
+    # Text references: bin shims, unit files (%h expanded), live argv.
+    {
+      grep -rIh . "$BIN_DIR" 2>/dev/null || true
+      while IFS= read -r f; do [[ -r "$f" ]] && cat "$f"; done <"$units"
+      cat "$LIVE_REFS"
+    } | sed "s#%h#$HOME#g" | { grep -oE "$ref_re" || true; }
+  } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
+  rm -f "$units"
   newest=0
   while IFS= read -r rel; do
+    (( newest >= KEEP_RELEASES )) && break
     rel="${rel%/}"
     [[ -L "$rel" ]] && continue
     echo "$rel" >>"$keep"
     newest=$(( newest + 1 ))
-    (( newest >= KEEP_RELEASES )) && break
   done < <(ls -1td "$RELEASES_DIR"/*/ 2>/dev/null || true)
-  log "Releases kept (referenced or newest $KEEP_RELEASES): $(sort -u "$keep" | sed 's#.*/##' | cut -c1-7 | tr '\n' ' ')"
+  log "Releases kept (referenced or newest $KEEP_RELEASES): $(sort -u "$keep" | while IFS= read -r k; do [[ -d "$k" ]] && basename "$k" | cut -c1-7; done | tr '\n' ' ')"
   for rel in "$RELEASES_DIR"/*/; do
     rel="${rel%/}"
     [[ -d "$rel" && ! -L "$rel" ]] || continue
     grep -qxF "$rel" "$keep" && continue
+    is_live "$rel" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
     remove "$rel" release
   done
@@ -148,6 +176,7 @@ fi
 
 # --- runs ---
 if root_ok "$RUNS_DIR"; then
+  RUNS_DIR="$(phys "$RUNS_DIR")"
   while IFS= read -r -d '' run; do
     [[ -L "$run" ]] && continue
     is_live "$run" && continue
@@ -158,6 +187,7 @@ fi
 
 # --- df-* AO session homes ---
 if root_ok "$SESSIONS_DIR"; then
+  SESSIONS_DIR="$(phys "$SESSIONS_DIR")"
   for sess in "$SESSIONS_DIR"/df-*/; do
     sess="${sess%/}"
     [[ -d "$sess" && ! -L "$sess" ]] || continue

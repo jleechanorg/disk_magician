@@ -93,6 +93,36 @@ check "non-dir entry does not take a newest-3 slot" '[[ -d "$R4/r6" ]]'
 check "symlinked release entry and target untouched" '[[ -L "$R4/zz-link" && -f "$H/outside/keepme/f" ]]'
 check "symlinked runs root not traversed" '[[ -f "$H/elsewhere/oldrun/f" ]]'
 
+echo "Test 5: symlinked HOME, symlinked unit file, plain-file shim, open file handle"
+mkdir -p "$T/h5real"; ln -s "$T/h5real" "$T/h5link"; H5="$T/h5link"; R5="$H5/.local/share/dark-factory/releases"
+mkdir -p "$R5" "$H5/.local/bin" "$H5/.config/systemd/user" "$H5/.dark-factory/runs" "$H5/.ao-sessions" "$H5/unitsrc"
+for i in 1 2 3 4 5 6 7; do mkdir -p "$R5/r$i/bin"; echo x >"$R5/r$i/bin/dark-factory"; age "$R5/r$i" $(( 100 - i )); done
+ln -s "$R5/r1/bin/dark-factory" "$H5/.local/bin/abs"                                  # logical path through symlinked HOME
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r2/bin/dark-factory\n' >"$H5/unitsrc/df.service"
+ln -s "$H5/unitsrc/df.service" "$H5/.config/systemd/user/df.service"                   # symlinked unit file
+printf '#!/bin/sh\nexec %s/r3/bin/dark-factory "$@"\n' "$R5" >"$H5/.local/bin/shim"; chmod +x "$H5/.local/bin/shim"  # plain-file shim
+mkdir -p "$H5/.dark-factory/runs/held"; echo x >"$H5/.dark-factory/runs/held/f"; age "$H5/.dark-factory/runs/held" 60
+sleep 120 <"$H5/.dark-factory/runs/held/f" & HOLDER=$!                                 # open fd only, cwd elsewhere
+HOME="$H5" DISK_MAGICIAN_TEST_SANDBOX="$H5" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
+  DISK_MAGICIAN_DELETION_LOG="$T/h5.log" bash "$SCRIPT" --clean >"$T/t5.out" 2>&1 || true
+kill "$HOLDER" 2>/dev/null || true
+check "release linked via symlinked HOME kept" '[[ -d "$R5/r1" ]]'
+check "release in symlinked unit file kept" '[[ -d "$R5/r2" ]]'
+check "release named in plain-file shim kept" '[[ -d "$R5/r3" ]]'
+check "unreferenced stale release removed (symlinked HOME)" '[[ ! -e "$R5/r4" ]]'
+check "run held open by a live process kept" '[[ -d "$H5/.dark-factory/runs/held" ]]'
+
+echo "Test 6: unreadable reference source refuses --clean"
+H6="$T/h6"; R6="$H6/.local/share/dark-factory/releases"
+mkdir -p "$R6/r1/bin" "$H6/.local/bin" "$H6/.config/systemd/user" "$H6/.dark-factory/runs/old" "$H6/.ao-sessions"
+echo x >"$R6/r1/bin/dark-factory"; age "$R6/r1" 90; echo x >"$H6/.dark-factory/runs/old/f"; age "$H6/.dark-factory/runs/old" 60
+chmod 000 "$H6/.config/systemd/user"
+rc6=0; HOME="$H6" DISK_MAGICIAN_TEST_SANDBOX="$H6" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
+  DISK_MAGICIAN_DELETION_LOG="$T/h6.log" bash "$SCRIPT" --clean --keep-releases 0 >"$T/t6.out" 2>&1 || rc6=$?
+chmod 755 "$H6/.config/systemd/user"
+check "--clean exits nonzero when unit dir unreadable" '[[ "$rc6" -ne 0 ]]'
+check "nothing deleted when a reference source is unreadable" '[[ -d "$R6/r1" && -d "$H6/.dark-factory/runs/old" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
