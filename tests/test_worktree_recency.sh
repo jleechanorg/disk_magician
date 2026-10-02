@@ -27,8 +27,10 @@ days_ago() { echo $(( $(date +%s) - ($1 * 86400) )); }
 # touch_at <epoch> <path...>
 touch_at() {
     local epoch="$1"; shift
-    touch -t "$(date -r "$epoch" +%Y%m%d%H%M.%S)" "$@"
+    python3 -c 'import os,sys; t=float(sys.argv[1]); [os.utime(p,(t,t),follow_symlinks=False) for p in sys.argv[2:]]' "$epoch" "$@"
 }
+# mtime_of <path> -> epoch (portable; GNU `stat -f` prints fs info instead)
+mtime_of() { python3 -c 'import os,sys; print(int(os.lstat(sys.argv[1]).st_mtime))' "$1"; }
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -57,7 +59,7 @@ touch "$WT/src/deep/nested/code.py"   # edited now
 assert_eq "$(worktree_age_days "$WT")" "0" "deep edit today is age 0"
 if worktree_is_recently_active "$WT" 14; then ok "protected by the 14-day floor"; else bad "NOT protected — this is the work-loss bug"; fi
 # Prove the old proxies would have failed here.
-GITPTR_AGE=$(( ( $(date +%s) - $(stat -f '%m' "$WT/.git") ) / 86400 ))
+GITPTR_AGE=$(( ( $(date +%s) - $(mtime_of "$WT/.git") ) / 86400 ))
 if (( GITPTR_AGE >= 14 )); then ok "old .git-pointer proxy would have said ${GITPTR_AGE}d (deletable) — regression covered"; else bad "fixture did not reproduce the old proxy's false-old reading"; fi
 
 echo "== case 2: git metadata must NOT count as activity =="
@@ -102,8 +104,23 @@ if worktree_is_recently_active "$TMPROOT/does-not-exist" 14; then ok "unmeasurab
 
 echo "== case 6: future mtime must not read as ancient =="
 WT="$(mk_worktree clock_skew)"
-touch -t "$(date -r "$(( $(date +%s) + 86400 ))" +%Y%m%d%H%M.%S)" "$WT/README.md"
+touch_at "$(( $(date +%s) + 86400 ))" "$WT/README.md"
 assert_eq "$(worktree_age_days "$WT")" "0" "future mtime clamps to age 0"
+
+echo "== case 7: partly unreadable tree fails closed even without pipefail =="
+# Every file is 30d old, so age 0 can only come from the fail-closed path.
+WT="$(mk_worktree partly_unreadable)"
+mkdir -p "$WT/locked"; touch "$WT/locked/old.py"
+touch_at "$(days_ago 30)" "$WT/locked/old.py" "$WT/src/deep/nested/code.py" "$WT/README.md"
+chmod 000 "$WT/locked"
+if find "$WT" >/dev/null 2>&1; then
+    chmod 755 "$WT/locked"
+    ok "SKIPPED: mode 000 does not block find here (privileged user); unreadable case not exercisable"
+else
+    age7="$(bash -c 'set +o pipefail; source "$1"; worktree_age_days "$2"' _ "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
+    chmod 755 "$WT/locked"
+    assert_eq "$age7" "0" "unreadable subtree treated as active (age 0)"
+fi
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
