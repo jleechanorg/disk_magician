@@ -80,9 +80,15 @@ worktree_last_activity_epoch() {
     # previously left every Linux worktree unmeasured and therefore "young".
     local stat_mtime=(stat -f '%m')
     stat -f '%m' / >/dev/null 2>&1 || stat_mtime=(stat -c '%Y')
-    candidate="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
-        -o -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')" || candidate=""
+    # find's own exit status is checked (not left to the caller's pipefail): a
+    # partly unreadable tree has unknown recency and must read as active.
+    local mtimes
+    if mtimes="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
+        -o -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null)"; then
+        candidate="$(awk '$1+0>m{m=$1+0} END{if (m>0) print m}' <<<"$mtimes")"
+    else
+        candidate=""
+    fi
     [[ -n "$candidate" ]] && (( candidate > newest )) && newest="$candidate"
 
     # Fail closed: no evidence at all -> treat as active right now.
