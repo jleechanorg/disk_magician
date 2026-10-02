@@ -193,6 +193,8 @@ if root_ok "$RELEASES_DIR"; then
   fi
   keep="$(mktemp)"
   REFTEXT="$(mktemp)"
+  # HOME escaped for a sed replacement (& \ and the # delimiter are special).
+  home_r="$(printf '%s' "$HOME" | sed 's/[&\\#]/\\&/g')"
   {
     find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
     # Text references: bin shims, unit files (%h expanded), live argv.
@@ -211,7 +213,7 @@ if root_ok "$RELEASES_DIR"; then
     } | python3 -c 'import re,sys
 for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     sys.stdout.buffer.write(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), l))' \
-      | sed -e "s#%h#$HOME#g" -e "s#\${HOME}#$HOME#g" -e "s#\$HOME#$HOME#g" -e "s#~/#$HOME/#g" \
+      | sed -e "s#%h#$home_r#g" -e "s#\${HOME}#$home_r#g" -e "s#\$HOME#$home_r#g" -e "s#~/#$home_r/#g" \
       | tee "$REFTEXT" | { grep -oE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
   rm -f "$units"

@@ -14,6 +14,8 @@ FAIL=0
 # Hosts usually have own non-dumpable processes (systemd --user); Test 10b
 # covers the gate itself, every other case runs with it approved.
 export DARK_FACTORY_UNSCANNABLE_APPROVED=1
+# wait_exec <pid> <pattern>: poll until the process's argv matches (it has exec'd).
+wait_exec() { local i; for i in $(seq 1 100); do ps -p "$1" -o command= 2>/dev/null | grep -q -- "$2" && return 0; sleep 0.1; done; return 1; }
 check() {
   if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS + 1)); else echo "  FAIL  $1"; FAIL=$((FAIL + 1)); fi
 }
@@ -106,6 +108,7 @@ ln -s "$H5/unitsrc/df.service" "$H5/.config/systemd/user/df.service"            
 printf '#!/bin/sh\nexec %s/r3/bin/dark-factory "$@"\n' "$R5" >"$H5/.local/bin/shim"; chmod +x "$H5/.local/bin/shim"  # plain-file shim
 mkdir -p "$H5/.dark-factory/runs/held"; echo x >"$H5/.dark-factory/runs/held/f"; age "$H5/.dark-factory/runs/held" 60
 sleep 120 <"$H5/.dark-factory/runs/held/f" & HOLDER=$!                                 # open fd only, cwd elsewhere
+wait_exec "$HOLDER" "sleep 120"
 HOME="$H5" DISK_MAGICIAN_TEST_SANDBOX="$H5" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
   DISK_MAGICIAN_DELETION_LOG="$T/h5.log" bash "$SCRIPT" --clean >"$T/t5.out" 2>&1 || true
 kill "$HOLDER" 2>/dev/null || true
@@ -156,7 +159,7 @@ mkdir -p "$T/h7dreal"; ln -s "$T/h7dreal" "$T/h7d"; H7d="$T/h7d"; mk7 "$H7d"
 mkdir -p "$H7d/.dark-factory/runs/argv"; echo x >"$H7d/.dark-factory/runs/argv/f"; age "$H7d/.dark-factory/runs/argv" 60
 ( cd /; exec -a "df-worker $H7d/.dark-factory/runs/argv/f" sleep 120 ) & ARGVP=$!
 DARK_FACTORY_RELEASE="$H7d/.local/share/dark-factory/releases/r1" sleep 120 & ENVP=$!
-sleep 0.3
+wait_exec "$ARGVP" "df-worker"; wait_exec "$ENVP" "sleep 120"
 run7 "$H7d" --clean >"$T/t7d.out" 2>&1 || true
 kill "$ARGVP" "$ENVP" 2>/dev/null || true
 check "run named by logical path in a live argv kept" '[[ -d "$T/h7dreal/.dark-factory/runs/argv" ]]'
@@ -205,7 +208,7 @@ check "release referenced with ';' terminator kept" '[[ -d "$H10/.local/share/da
 if [[ -d /proc/self ]] && python3 -c 'import ctypes; ctypes.CDLL(None).prctl' 2>/dev/null; then
   H10b="$T/h10b"; mk7 "$H10b"
   ( cd "$H10b/.dark-factory/runs/old" && exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(120)' ) & NDP=$!
-  sleep 0.5
+  for _ in $(seq 1 100); do readlink "/proc/$NDP/cwd" >/dev/null 2>&1 || break; sleep 0.1; done  # prctl applied
   rc=0; DARK_FACTORY_UNSCANNABLE_APPROVED= run7 "$H10b" --clean >"$T/t10b.out" 2>&1 || rc=$?
   check "own non-dumpable process refuses --clean without approval" '[[ "$rc" -ne 0 && -d "$H10b/.dark-factory/runs/old" ]]'
   check "refusal names the unscannable process" 'grep -q "$NDP" "$T/t10b.out"'
@@ -215,6 +218,14 @@ if [[ -d /proc/self ]] && python3 -c 'import ctypes; ctypes.CDLL(None).prctl' 2>
 else
   check "SKIPPED non-dumpable gate (no /proc or prctl)" 'true'
 fi
+
+echo "Test 11: HOME containing sed replacement metacharacters (& \\ #)"
+H11="$T/h&a#b"; mk7 "$H11"
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r1/bin/dark-factory\n' >"$H11/.config/systemd/user/df.service"
+printf '#!/bin/sh\nexec "$HOME/.local/share/dark-factory/releases/r2/bin/dark-factory"\n' >"$H11/.local/bin/shim"
+run7 "$H11" --clean --keep-releases 0 >"$T/t11.out" 2>&1 || true
+check "%h reference kept when HOME contains & and #" '[[ -d "$H11/.local/share/dark-factory/releases/r1" ]]'
+check "\$HOME shim reference kept when HOME contains & and #" '[[ -d "$H11/.local/share/dark-factory/releases/r2" && ! -e "$H11/.local/share/dark-factory/releases/r3" ]]'
 
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
