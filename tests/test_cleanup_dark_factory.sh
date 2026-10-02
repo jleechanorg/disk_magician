@@ -70,6 +70,29 @@ check "recent df-* session kept" '[[ -d "$SESS/df-recent" ]]'
 check "non-df session untouched" '[[ -d "$SESS/other-old" ]]'
 check "deletions logged" 'grep -q "remove_run" "$T/deletions.log"'
 
+echo "Test 4: reference styles, non-dir entries, symlinked entries and roots"
+H="$T/h4"; R4="$H/.local/share/dark-factory/releases"
+mkdir -p "$R4" "$H/.local/bin" "$H/.config/systemd/user" "$H/.dark-factory/runs" "$H/.ao-sessions" "$H/outside/keepme"
+for i in 1 2 3 4 5 6 7 8; do mkdir -p "$R4/r$i/bin"; echo x >"$R4/r$i/bin/dark-factory"; age "$R4/r$i" $(( 100 - i )); done
+ln -s "$R4/r1/bin/dark-factory" "$H/.local/bin/abs"                       # absolute
+ln -s "../share/dark-factory/releases/r2/bin/dark-factory" "$H/.local/bin/rel"  # relative
+ln -s "$R4/r3" "$H/.local/share/dark-factory/current"; ln -s "$H/.local/share/dark-factory/current/bin/dark-factory" "$H/.local/bin/chain"
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r4/bin/dark-factory\n' >"$H/.config/systemd/user/df.service"
+echo x >"$R4/zz-newest-file"                                              # newest entry, not a dir
+echo x >"$H/outside/keepme/f"; age "$H/outside" 60; ln -s "$H/outside" "$R4/zz-link"  # symlinked entry
+mkdir -p "$H/elsewhere/oldrun"; echo x >"$H/elsewhere/oldrun/f"; age "$H/elsewhere/oldrun" 60
+rmdir "$H/.dark-factory/runs"; ln -s "$H/elsewhere" "$H/.dark-factory/runs"   # symlinked root
+HOME="$H" DISK_MAGICIAN_TEST_SANDBOX="$H" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
+  DISK_MAGICIAN_DELETION_LOG="$H/deletions.log" bash "$SCRIPT" --clean >"$T/t4.out" 2>&1 || true
+check "absolute bin symlink release kept" '[[ -d "$R4/r1" ]]'
+check "relative bin symlink release kept" '[[ -d "$R4/r2" ]]'
+check "chained bin symlink release kept" '[[ -d "$R4/r3" ]]'
+check "systemd %h release kept" '[[ -d "$R4/r4" ]]'
+check "unreferenced stale release removed" '[[ ! -e "$R4/r5" ]]'
+check "non-dir entry does not take a newest-3 slot" '[[ -d "$R4/r6" ]]'
+check "symlinked release entry and target untouched" '[[ -L "$R4/zz-link" && -f "$H/outside/keepme/f" ]]'
+check "symlinked runs root not traversed" '[[ -f "$H/elsewhere/oldrun/f" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \

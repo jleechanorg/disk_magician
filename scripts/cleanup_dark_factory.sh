@@ -66,8 +66,25 @@ else
   fi
   printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
 fi
+# Our own argv must be visible, or the scan is not seeing processes at all.
+if [[ "$DRY_RUN" == false ]] && ! grep -qF "cleanup_dark_factory" "$LIVE_REFS"; then
+  echo "Live-process scan did not see this process — refusing --clean." >&2
+  exit 1
+fi
 
 is_live() { grep -qF "$1" "$LIVE_REFS"; }
+
+# Resolve each stdin path through every symlink (relative or chained).
+realpaths() { python3 -c 'import os,sys
+for l in sys.stdin:
+    l = l.rstrip("\n")
+    if l: print(os.path.realpath(l))'; }
+
+# A symlinked root would let rm act on its target outside the gated path.
+root_ok() {
+  if [[ -L "$1" ]]; then log "SKIP root (symlink): $1"; return 1; fi
+  [[ -d "$1" ]]
+}
 
 # rc 0 when no file under $1 was modified within $DAYS days. Fails closed: if
 # find cannot read part of the tree, recency is unknown and the path is kept.
@@ -102,18 +119,26 @@ remove() {
 }
 
 # --- releases ---
-if [[ -d "$RELEASES_DIR" ]]; then
+if root_ok "$RELEASES_DIR"; then
   keep="$(mktemp)"
   {
-    find "$BIN_DIR" -maxdepth 1 -type l -exec readlink {} + 2>/dev/null || true
-    grep -rhoE "$RELEASES_DIR/[^/\"' ]+" "$UNIT_DIR" 2>/dev/null || true
+    find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null | realpaths || true
+    find "$UNIT_DIR" -type f 2>/dev/null -exec cat {} + 2>/dev/null | sed "s#%h#$HOME#g" \
+      | { grep -oE "$RELEASES_DIR/[^/\"' ]+" || true; } || true
     grep -oE "$RELEASES_DIR/[^/\"' ]+" "$LIVE_REFS" || true
   } | { grep -oE "$RELEASES_DIR/[^/]+" || true; } | sort -u >"$keep"
-  ls -1t "$RELEASES_DIR" | head -n "$KEEP_RELEASES" | sed "s#^#$RELEASES_DIR/#" >>"$keep"
+  newest=0
+  while IFS= read -r rel; do
+    rel="${rel%/}"
+    [[ -L "$rel" ]] && continue
+    echo "$rel" >>"$keep"
+    newest=$(( newest + 1 ))
+    (( newest >= KEEP_RELEASES )) && break
+  done < <(ls -1td "$RELEASES_DIR"/*/ 2>/dev/null || true)
   log "Releases kept (referenced or newest $KEEP_RELEASES): $(sort -u "$keep" | sed 's#.*/##' | cut -c1-7 | tr '\n' ' ')"
   for rel in "$RELEASES_DIR"/*/; do
-    [[ -d "$rel" ]] || continue
     rel="${rel%/}"
+    [[ -d "$rel" && ! -L "$rel" ]] || continue
     grep -qxF "$rel" "$keep" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
     remove "$rel" release
@@ -122,8 +147,9 @@ if [[ -d "$RELEASES_DIR" ]]; then
 fi
 
 # --- runs ---
-if [[ -d "$RUNS_DIR" ]]; then
+if root_ok "$RUNS_DIR"; then
   while IFS= read -r -d '' run; do
+    [[ -L "$run" ]] && continue
     is_live "$run" && continue
     is_stale "$run" || continue
     remove "$run" run
@@ -131,10 +157,10 @@ if [[ -d "$RUNS_DIR" ]]; then
 fi
 
 # --- df-* AO session homes ---
-if [[ -d "$SESSIONS_DIR" ]]; then
+if root_ok "$SESSIONS_DIR"; then
   for sess in "$SESSIONS_DIR"/df-*/; do
-    [[ -d "$sess" ]] || continue
     sess="${sess%/}"
+    [[ -d "$sess" && ! -L "$sess" ]] || continue
     is_live "$sess" && { log "SKIP session (live process): $sess"; continue; }
     is_stale "$sess" || continue
     remove "$sess" session
