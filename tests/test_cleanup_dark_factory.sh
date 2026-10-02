@@ -179,6 +179,20 @@ check "partial lsof (nonzero exit with output) refuses --clean" '[[ "$rc" -ne 0 
 mkshims 1 0; H8d="$T/h8d"; mk7 "$H8d"; rc=0; run8 "$H8d" --clean >"$T/t8d.out" 2>&1 || rc=$?
 check "failing ps refuses --clean" '[[ "$rc" -ne 0 && -d "$H8d/.dark-factory/runs/old" ]]'
 
+echo "Test 9: symlinked ~/.local/bin and unit dir are scanned; non-numeric args rejected"
+H9a="$T/h9a"; mk7 "$H9a"; mkdir -p "$H9a/dotfiles/bin"; rmdir "$H9a/.local/bin"; ln -s "$H9a/dotfiles/bin" "$H9a/.local/bin"
+ln -s "$H9a/.local/share/dark-factory/releases/r1/bin/dark-factory" "$H9a/dotfiles/bin/dark-factory"
+rc=0; run7 "$H9a" --clean --keep-releases 0 >"$T/t9a.out" 2>&1 || rc=$?
+check "release linked from a symlinked ~/.local/bin kept, --clean ran" '[[ "$rc" -eq 0 && -d "$H9a/.local/share/dark-factory/releases/r1" && ! -e "$H9a/.local/share/dark-factory/releases/r2" ]]'
+H9="$T/h9"; mk7 "$H9"; mkdir -p "$H9/dotfiles/units"; rmdir "$H9/.config/systemd/user"; ln -s "$H9/dotfiles/units" "$H9/.config/systemd/user"
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r2/bin/dark-factory\n' >"$H9/dotfiles/units/df.service"
+rc=0; run7 "$H9" --clean --keep-releases 0 >"$T/t9.out" 2>&1 || rc=$?
+check "release named in a symlinked unit dir kept, --clean ran" '[[ "$rc" -eq 0 && -d "$H9/.local/share/dark-factory/releases/r2" && ! -e "$H9/.local/share/dark-factory/releases/r3" ]]'
+for bad in "--keep-releases foo" "--days 1x"; do
+  rc=0; run7 "$H9" --dry-run $bad >/dev/null 2>&1 || rc=$?
+  check "rejects $bad" '[[ "$rc" -eq 2 ]]'
+done
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \

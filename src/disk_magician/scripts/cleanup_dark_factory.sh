@@ -42,6 +42,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+[[ "$DAYS" =~ ^[0-9]+$ && "$KEEP_RELEASES" =~ ^[0-9]+$ ]] || { echo "--days and --keep-releases must be non-negative integers" >&2; exit 2; }
+
 floor="$(safety_min_stale_days)"
 (( DAYS < floor )) && DAYS="$floor"
 sandbox_guard_roots "$RELEASES_DIR" "$RUNS_DIR" "$SESSIONS_DIR"
@@ -159,6 +161,10 @@ remove() {
 if root_ok "$RELEASES_DIR"; then
   rel_logical="$RELEASES_DIR"
   RELEASES_DIR="$(phys "$RELEASES_DIR")"
+  # Scan reference dirs at their physical location, so a symlinked
+  # ~/.local/bin or unit dir (dotfile managers) is traversed.
+  [[ -d "$BIN_DIR" ]] && BIN_DIR="$(phys "$BIN_DIR")"
+  [[ -d "$UNIT_DIR" ]] && UNIT_DIR="$(phys "$UNIT_DIR")"
   ref_re="($(re_escape "$rel_logical")|$(re_escape "$RELEASES_DIR"))/[^/\"' ]+"
   units="$(mktemp)"
   if [[ -d "$UNIT_DIR" ]]; then
