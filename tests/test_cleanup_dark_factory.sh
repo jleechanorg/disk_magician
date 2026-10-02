@@ -123,6 +123,42 @@ chmod 755 "$H6/.config/systemd/user"
 check "--clean exits nonzero when unit dir unreadable" '[[ "$rc6" -ne 0 ]]'
 check "nothing deleted when a reference source is unreadable" '[[ -d "$R6/r1" && -d "$H6/.dark-factory/runs/old" ]]'
 
+echo "Test 7: per-file unreadable references refuse --clean; \$HOME/~ shims, logical argv, env refs"
+can_lock() { local d; d="$(mktemp -d "$T/lockprobe.XXXX")"; echo x >"$d/f"; chmod 000 "$d/f"; ! cat "$d/f" >/dev/null 2>&1; local r=$?; chmod 644 "$d/f"; return $r; }
+mk7() {  # mk7 <home>: 6 releases r1..r6 (r1 oldest), one stale run
+  local h="$1"; mkdir -p "$h/.local/share/dark-factory/releases" "$h/.local/bin" "$h/.config/systemd/user" "$h/.dark-factory/runs/old" "$h/.ao-sessions"
+  for i in 1 2 3 4 5 6; do mkdir -p "$h/.local/share/dark-factory/releases/r$i/bin"; echo x >"$h/.local/share/dark-factory/releases/r$i/bin/dark-factory"; age "$h/.local/share/dark-factory/releases/r$i" $(( 100 - i )); done
+  echo x >"$h/.dark-factory/runs/old/f"; age "$h/.dark-factory/runs/old" 60
+}
+run7() { local h="$1"; shift; HOME="$h" DISK_MAGICIAN_TEST_SANDBOX="$h" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory DISK_MAGICIAN_DELETION_LOG="$h/del.log" bash "$SCRIPT" "$@"; }
+if can_lock; then
+  H7a="$T/h7a"; mk7 "$H7a"
+  printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r1/bin/dark-factory\n' >"$H7a/.config/systemd/user/df.service"; chmod 000 "$H7a/.config/systemd/user/df.service"
+  rc=0; run7 "$H7a" --clean >"$T/t7a.out" 2>&1 || rc=$?; chmod 644 "$H7a/.config/systemd/user/df.service"
+  check "unreadable unit file refuses --clean, nothing deleted" '[[ "$rc" -ne 0 && -d "$H7a/.local/share/dark-factory/releases/r1" && -d "$H7a/.dark-factory/runs/old" ]]'
+  H7b="$T/h7b"; mk7 "$H7b"
+  printf '#!/bin/sh\nexec %s/.local/share/dark-factory/releases/r1/bin/dark-factory\n' "$H7b" >"$H7b/.local/bin/shim"; chmod 000 "$H7b/.local/bin/shim"
+  rc=0; run7 "$H7b" --clean >"$T/t7b.out" 2>&1 || rc=$?; chmod 755 "$H7b/.local/bin/shim"
+  check "unreadable bin shim refuses --clean, nothing deleted" '[[ "$rc" -ne 0 && -d "$H7b/.local/share/dark-factory/releases/r1" ]]'
+else
+  check "SKIPPED unreadable-file cases (privileged user)" 'true'
+fi
+H7c="$T/h7c"; mk7 "$H7c"
+printf '#!/bin/sh\nexec "$HOME/.local/share/dark-factory/releases/r1/bin/dark-factory"\n' >"$H7c/.local/bin/s1"
+printf '#!/bin/sh\nexec ${HOME}/.local/share/dark-factory/releases/r2/bin/dark-factory\n' >"$H7c/.local/bin/s2"
+printf '#!/bin/sh\nexec ~/.local/share/dark-factory/releases/r3/bin/dark-factory\n' >"$H7c/.local/bin/s3"
+run7 "$H7c" --clean >"$T/t7c.out" 2>&1 || true
+check "\$HOME, \${HOME}, ~ shims protect their releases" '[[ -d "$H7c/.local/share/dark-factory/releases/r1" && -d "$H7c/.local/share/dark-factory/releases/r2" && -d "$H7c/.local/share/dark-factory/releases/r3" ]]'
+mkdir -p "$T/h7dreal"; ln -s "$T/h7dreal" "$T/h7d"; H7d="$T/h7d"; mk7 "$H7d"
+mkdir -p "$H7d/.dark-factory/runs/argv"; echo x >"$H7d/.dark-factory/runs/argv/f"; age "$H7d/.dark-factory/runs/argv" 60
+( cd /; exec -a "df-worker $H7d/.dark-factory/runs/argv/f" sleep 120 ) & ARGVP=$!
+DARK_FACTORY_RELEASE="$H7d/.local/share/dark-factory/releases/r1" sleep 120 & ENVP=$!
+sleep 0.3
+run7 "$H7d" --clean >"$T/t7d.out" 2>&1 || true
+kill "$ARGVP" "$ENVP" 2>/dev/null || true
+check "run named by logical path in a live argv kept" '[[ -d "$T/h7dreal/.dark-factory/runs/argv" ]]'
+check "release named only in a live process env kept" '[[ -d "$T/h7dreal/.local/share/dark-factory/releases/r1" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \

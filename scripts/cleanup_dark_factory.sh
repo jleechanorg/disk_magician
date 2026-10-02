@@ -77,17 +77,17 @@ root_ok() {
   [[ -d "$1" ]]
 }
 
-# Every path a live process is using: exe, cwd, argv, and open files.
+# Every path a live process is using: exe, cwd, argv, environment, open files.
 LIVE_REFS="$(mktemp)"
 trap 'rm -f "$LIVE_REFS"' EXIT
 if [[ -d /proc/self ]]; then
   for p in /proc/[0-9]*; do
-    { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
+    { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; tr '\0' '\n' <"$p/environ"; } 2>/dev/null || true
   done >"$LIVE_REFS"
   find /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' >>"$LIVE_REFS" 2>/dev/null || true
 else
-  # macOS: argv from ps; cwd, exe, and every open file of this user from lsof.
-  ps -axww -o command= >"$LIVE_REFS" 2>/dev/null || scan_fail "ps failed"
+  # macOS: argv and environment from ps; cwd, exe, and open files from lsof.
+  ps -axwwE -o command= >"$LIVE_REFS" 2>/dev/null || scan_fail "ps failed"
   lsof_out="$(lsof -nP -u "$(id -u)" -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
   [[ -n "$lsof_out" ]] || scan_fail "lsof returned nothing"
   printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
@@ -97,7 +97,11 @@ if ! grep -qF "cleanup_dark_factory" "$LIVE_REFS" || ! grep -qxF "$(pwd -P)" "$L
   scan_fail "live-process scan did not see this process"
 fi
 
-is_live() { grep -qF "$1" "$LIVE_REFS"; }
+# Matches the physical path or, under a symlinked root, its logical form.
+is_live() {
+  grep -qF "$1" "$LIVE_REFS" && return 0
+  [[ -n "${2:-}" && "$2" != "$1" ]] && grep -qF "$2" "$LIVE_REFS"
+}
 
 # rc 0 when no file under $1 was modified within $DAYS days. Fails closed: if
 # find cannot read part of the tree, recency is unknown and the path is kept.
@@ -148,10 +152,19 @@ if root_ok "$RELEASES_DIR"; then
     find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
     # Text references: bin shims, unit files (%h expanded), live argv.
     {
-      grep -rIh . "$BIN_DIR" 2>/dev/null || true
-      while IFS= read -r f; do [[ -r "$f" ]] && cat "$f"; done <"$units"
+      for f in "$BIN_DIR"/*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        [[ -r "$f" ]] || scan_fail "unreadable $f"
+        grep -Ih . "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
+      done
+      while IFS= read -r f; do
+        [[ -e "$f" ]] || continue  # dangling unit symlink
+        [[ -r "$f" ]] || scan_fail "unreadable $f"
+        cat "$f" || scan_fail "cannot read $f"
+      done <"$units"
       cat "$LIVE_REFS"
-    } | sed "s#%h#$HOME#g" | { grep -oE "$ref_re" || true; }
+    } | sed -e "s#%h#$HOME#g" -e "s#\${HOME}#$HOME#g" -e "s#\$HOME#$HOME#g" -e "s#~/#$HOME/#g" \
+      | { grep -oE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
   rm -f "$units"
   newest=0
@@ -167,7 +180,7 @@ if root_ok "$RELEASES_DIR"; then
     rel="${rel%/}"
     [[ -d "$rel" && ! -L "$rel" ]] || continue
     grep -qxF "$rel" "$keep" && continue
-    is_live "$rel" && continue
+    is_live "$rel" "$rel_logical/${rel##*/}" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
     remove "$rel" release
   done
@@ -176,10 +189,11 @@ fi
 
 # --- runs ---
 if root_ok "$RUNS_DIR"; then
+  runs_logical="$RUNS_DIR"
   RUNS_DIR="$(phys "$RUNS_DIR")"
   while IFS= read -r -d '' run; do
     [[ -L "$run" ]] && continue
-    is_live "$run" && continue
+    is_live "$run" "$runs_logical/${run##*/}" && continue
     is_stale "$run" || continue
     remove "$run" run
   done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -mtime +"$DAYS" -print0)
@@ -187,11 +201,12 @@ fi
 
 # --- df-* AO session homes ---
 if root_ok "$SESSIONS_DIR"; then
+  sessions_logical="$SESSIONS_DIR"
   SESSIONS_DIR="$(phys "$SESSIONS_DIR")"
   for sess in "$SESSIONS_DIR"/df-*/; do
     sess="${sess%/}"
     [[ -d "$sess" && ! -L "$sess" ]] || continue
-    is_live "$sess" && { log "SKIP session (live process): $sess"; continue; }
+    is_live "$sess" "$sessions_logical/${sess##*/}" && { log "SKIP session (live process): $sess"; continue; }
     is_stale "$sess" || continue
     remove "$sess" session
   done
