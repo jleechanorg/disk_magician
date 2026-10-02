@@ -55,7 +55,7 @@ echo "Test 1: dry-run deletes nothing"
 run --dry-run >"$T/dry.out"
 check "dry-run left old run" '[[ -d "$RUNS/old" ]]'
 check "dry-run left oldest release" '[[ -d "$REL/r2" ]]'
-check "dry-run reports would-remove" 'grep -q "would remove run: $RUNS/old" "$T/dry.out"'
+check "dry-run reports would-remove" 'grep -qF "would remove run: $(cd -P "$RUNS" && pwd)/old" "$T/dry.out"'
 
 echo "Test 2: --clean applies retention"
 run --clean >"$T/clean.out"
