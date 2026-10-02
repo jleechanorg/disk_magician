@@ -27,6 +27,10 @@ Usage: $(basename "$0") [--clean] [--dry-run] [--days N] [--keep-releases N] [-h
   --clean            Actually delete (default: dry-run preview)
   --days N           Staleness threshold for runs/sessions/releases (default: 30, min 7)
   --keep-releases N  Always keep the N newest releases (default: 3)
+
+On Linux, --clean refuses while any of your processes hides its cwd/env/open
+files from you (non-dumpable, e.g. systemd --user); it lists them. Set
+DARK_FACTORY_UNSCANNABLE_APPROVED=1 to accept that they use no candidate path.
 EOF
 }
 
@@ -81,10 +85,12 @@ root_ok() {
 
 # Every path a live process is using: exe, cwd, argv, environment, open files.
 LIVE_REFS="$(mktemp)"
-trap 'rm -f "$LIVE_REFS"' EXIT
+UNSCANNABLE=""
+REFTEXT=""
+trap 'rm -f "$LIVE_REFS" "$UNSCANNABLE" "$REFTEXT"' EXIT
 # DISK_MAGICIAN_TEST_NO_PROC forces the ps/lsof branch (test-only override).
 if [[ -d /proc/self && -z "${DISK_MAGICIAN_TEST_NO_PROC:-}" ]]; then
-  nondumpable=0
+  UNSCANNABLE="$(mktemp)"
   for p in /proc/[0-9]*; do
     if [[ -O "$p" ]]; then
       # argv of our own processes must be read; a failure while the process
@@ -95,16 +101,28 @@ if [[ -d /proc/self && -z "${DISK_MAGICIAN_TEST_NO_PROC:-}" ]]; then
         fi
         continue
       fi
-      # cwd/environ/fds are denied by the kernel for non-dumpable processes
-      # (systemd --user, ssh-agent); dark-factory's processes are dumpable.
-      { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/environ"; } 2>/dev/null \
-        || nondumpable=$(( nondumpable + 1 ))
-      find "$p/fd" -maxdepth 1 -type l -printf '%l\n' 2>/dev/null || true
+      # The kernel denies cwd/environ/fds of non-dumpable processes even to
+      # their own uid (systemd --user, ssh-agent). Their usage is unknowable,
+      # so they gate --clean below unless explicitly approved.
+      if ! { readlink "$p/exe" && readlink "$p/cwd" && tr '\0' '\n' <"$p/environ" \
+             && find "$p/fd" -maxdepth 1 -type l -printf '%l\n'; } 2>/dev/null; then
+        if [[ -d "$p" ]] && ! grep -qE '^State:[[:space:]]*Z' "$p/status" 2>/dev/null; then
+          printf '%s %s\n' "${p#/proc/}" "$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null)" >>"$UNSCANNABLE"
+        fi
+      fi
     else
       { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
     fi
   done >"$LIVE_REFS"
-  (( nondumpable == 0 )) || log "Note: $nondumpable own non-dumpable process(es); argv scanned, cwd/env/fds kernel-restricted"
+  if [[ -s "$UNSCANNABLE" ]]; then
+    if [[ "$DRY_RUN" == false && "${DARK_FACTORY_UNSCANNABLE_APPROVED:-}" != 1 ]]; then
+      echo "Own processes whose cwd/env/open files the kernel hides (pid argv):" >&2
+      sed 's/^/  /' "$UNSCANNABLE" >&2
+      echo "They could be using a candidate path. Refusing --clean; set DARK_FACTORY_UNSCANNABLE_APPROVED=1 to accept." >&2
+      exit 1
+    fi
+    log "Note: $(wc -l <"$UNSCANNABLE" | tr -d ' ') own unscannable (non-dumpable) process(es); argv scanned only"
+  fi
 else
   # macOS: argv and environment from ps; cwd, exe, and open files from lsof.
   # Any nonzero exit means a partial scan.
@@ -174,6 +192,7 @@ if root_ok "$RELEASES_DIR"; then
     [[ -r "$BIN_DIR" && -x "$BIN_DIR" ]] || scan_fail "unreadable $BIN_DIR"
   fi
   keep="$(mktemp)"
+  REFTEXT="$(mktemp)"
   {
     find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
     # Text references: bin shims, unit files (%h expanded), live argv.
@@ -193,7 +212,7 @@ if root_ok "$RELEASES_DIR"; then
 for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     sys.stdout.buffer.write(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), l))' \
       | sed -e "s#%h#$HOME#g" -e "s#\${HOME}#$HOME#g" -e "s#\$HOME#$HOME#g" -e "s#~/#$HOME/#g" \
-      | { grep -oE "$ref_re" || true; }
+      | tee "$REFTEXT" | { grep -oE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
   rm -f "$units"
   newest=0
@@ -209,6 +228,9 @@ for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     rel="${rel%/}"
     [[ -d "$rel" && ! -L "$rel" ]] || continue
     grep -qxF "$rel" "$keep" && continue
+    # Substring match over all reference text, so any terminator (: ; ) etc.)
+    # still protects; over-protection (r1 vs r10) is the safe direction.
+    grep -qF -e "$rel" -e "$rel_logical/${rel##*/}" "$REFTEXT" && continue
     is_live "$rel" "$rel_logical/${rel##*/}" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
     remove "$rel" release

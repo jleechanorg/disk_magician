@@ -11,6 +11,9 @@ trap 'chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"' EXIT
 
 PASS=0
 FAIL=0
+# Hosts usually have own non-dumpable processes (systemd --user); Test 10b
+# covers the gate itself, every other case runs with it approved.
+export DARK_FACTORY_UNSCANNABLE_APPROVED=1
 check() {
   if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS + 1)); else echo "  FAIL  $1"; FAIL=$((FAIL + 1)); fi
 }
@@ -192,6 +195,26 @@ for bad in "--keep-releases foo" "--days 1x"; do
   rc=0; run7 "$H9" --dry-run $bad >/dev/null 2>&1 || rc=$?
   check "rejects $bad" '[[ "$rc" -eq 2 ]]'
 done
+
+echo "Test 10: odd reference terminators; own unscannable processes gate --clean"
+H10="$T/h10"; mk7 "$H10"
+printf '[Service]\nEnvironment=PYTHONPATH=%%h/.local/share/dark-factory/releases/r1:/usr/lib\nExecStart=/bin/sh -c "cd %%h/.local/share/dark-factory/releases/r2; ./bin/df"\n' >"$H10/.config/systemd/user/df.service"
+run7 "$H10" --clean --keep-releases 0 >"$T/t10.out" 2>&1 || true
+check "release referenced with ':' terminator kept" '[[ -d "$H10/.local/share/dark-factory/releases/r1" ]]'
+check "release referenced with ';' terminator kept" '[[ -d "$H10/.local/share/dark-factory/releases/r2" && ! -e "$H10/.local/share/dark-factory/releases/r3" ]]'
+if [[ -d /proc/self ]] && python3 -c 'import ctypes; ctypes.CDLL(None).prctl' 2>/dev/null; then
+  H10b="$T/h10b"; mk7 "$H10b"
+  ( cd "$H10b/.dark-factory/runs/old" && exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(120)' ) & NDP=$!
+  sleep 0.5
+  rc=0; DARK_FACTORY_UNSCANNABLE_APPROVED= run7 "$H10b" --clean >"$T/t10b.out" 2>&1 || rc=$?
+  check "own non-dumpable process refuses --clean without approval" '[[ "$rc" -ne 0 && -d "$H10b/.dark-factory/runs/old" ]]'
+  check "refusal names the unscannable process" 'grep -q "$NDP" "$T/t10b.out"'
+  rc=0; DARK_FACTORY_UNSCANNABLE_APPROVED=1 run7 "$H10b" --clean >"$T/t10c.out" 2>&1 || rc=$?
+  check "explicit approval lets --clean proceed" '[[ "$rc" -eq 0 ]]'
+  kill "$NDP" 2>/dev/null || true
+else
+  check "SKIPPED non-dumpable gate (no /proc or prctl)" 'true'
+fi
 
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
