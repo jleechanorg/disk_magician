@@ -21,6 +21,11 @@ LIB="$REPO_ROOT/scripts/lib/scratch_roots.sh"
 
 TMP_TEST_ROOT="$(mktemp -d -t test_scratch_roots.XXXXXX)"
 trap 'chmod -R u+w "$TMP_TEST_ROOT" 2>/dev/null || true; rm -rf "$TMP_TEST_ROOT"' EXIT
+# Tests 1-5 use a sandboxed private-tmp root so they pass on hosts without a
+# real /private/tmp (Linux).
+PRIV="$TMP_TEST_ROOT/private/tmp"
+mkdir -p "$PRIV"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PRIV"
 
 PASS=0
 FAIL=0
@@ -62,7 +67,7 @@ assert_line_count() {
 
 # --- Test 1: static roots always present -----------------------------
 out="$(bash -c "source '$LIB'; scratch_roots_get_unique")"
-assert_contains "Test1: /private/tmp always present" "/private/tmp" "$out"
+assert_contains "Test1: private-tmp root always present" "$PRIV" "$out"
 assert_contains "Test1: /tmp always present" "/tmp" "$out"
 
 # --- Test 2: DARWIN_USER_TEMP_DIR override is canonicalized ----------
@@ -79,19 +84,19 @@ chmod 000 "$UNREADABLE"
 out="$(bash -c "source '$LIB'; DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE='$UNREADABLE' scratch_roots_get_unique" 2>/dev/null)"
 chmod 755 "$UNREADABLE"
 assert_not_contains "Test3: unreadable DARWIN_USER_TEMP_DIR root skipped" "noaccess" "$out"
-assert_contains "Test3: static roots still returned when TMPDIR canon fails" "/private/tmp" "$out"
+assert_contains "Test3: static roots still returned when TMPDIR canon fails" "$PRIV" "$out"
 
 # --- Test 4: missing DARWIN_USER_TEMP_DIR is skipped without error ---
 out="$(bash -c "source '$LIB'; DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE='$TMP_TEST_ROOT/does-not-exist' scratch_roots_get_unique")"
 assert_not_contains "Test4: nonexistent TMPDIR override skipped" "does-not-exist" "$out"
-assert_contains "Test4: static roots still returned" "/private/tmp" "$out"
+assert_contains "Test4: static roots still returned" "$PRIV" "$out"
 
 # --- Test 5: dedup -----------------------------------------------------
 # Point the override AT /private/tmp itself (canonicalizes to the same
 # path already in the static list) to prove scratch_roots_get_unique
 # collapses the duplicate.
-out="$(bash -c "source '$LIB'; DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE='/private/tmp' scratch_roots_get_unique")"
-count_private_tmp="$(grep -cFx '/private/tmp' <<<"$out" || true)"
+out="$(bash -c "source '$LIB'; DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE='$PRIV' scratch_roots_get_unique")"
+count_private_tmp="$(grep -cFx "$PRIV" <<<"$out" || true)"
 if [[ "$count_private_tmp" -eq 1 ]]; then
   record_pass "Test5: scratch_roots_get_unique dedups repeated root"
 else
@@ -124,6 +129,16 @@ assert_eq_empty() {
   if [[ -z "$actual" ]]; then record_pass "$name"; else record_fail "$name" "expected empty output, got: $actual"; fi
 }
 assert_eq_empty "Test7: unresolvable private-tmp override yields nothing (fails closed, no fallback)" "$out"
+
+# --- Test 8: a missing static root returns 0, so set -e callers survive ---
+# On Linux /private/tmp never exists; returning 1 aborted cleanup_tmp.sh.
+for fn in scratch_roots_get_private_tmp scratch_roots_get_tmp; do
+  if bash -c "set -euo pipefail; source '$LIB'; DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE='$TMP_TEST_ROOT/missing' DISK_MAGICIAN_TMP_ROOT_OVERRIDE='$TMP_TEST_ROOT/missing' x=\"\$($fn)\"; echo reached" | grep -q reached; then
+    record_pass "Test8: $fn with missing root survives set -e"
+  else
+    record_fail "Test8: $fn with missing root survives set -e" "caller aborted"
+  fi
+done
 
 echo ""
 echo "===================================="
