@@ -56,9 +56,15 @@ if [[ -d /proc/self ]]; then
   for p in /proc/[0-9]*; do
     { readlink "$p/exe"; readlink "$p/cwd"; tr '\0' '\n' <"$p/cmdline"; } 2>/dev/null || true
   done >"$LIVE_REFS"
-elif [[ "$DRY_RUN" == false ]]; then
-  echo "Cannot inspect live processes (no /proc) — refusing --clean." >&2
-  exit 1
+else
+  # macOS: argv from ps, cwd/exe from lsof.
+  ps -axww -o command= >"$LIVE_REFS" 2>/dev/null || true
+  lsof_out="$(lsof -nP -d cwd,txt -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+  if [[ -z "$lsof_out" && "$DRY_RUN" == false ]]; then
+    echo "Cannot inspect live processes (no /proc, lsof empty) — refusing --clean." >&2
+    exit 1
+  fi
+  printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
 fi
 
 is_live() { grep -qF "$1" "$LIVE_REFS"; }
