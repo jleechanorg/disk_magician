@@ -23,13 +23,13 @@ predates it; this evidence does not assign failure to the new snapshot fix.
 The initial baseline HEAD is
 [5e75836d3380979fa0cb1e3fc650f20ea64925bd](https://github.com/jleechanorg/disk_magician/commit/5e75836d3380979fa0cb1e3fc650f20ea64925bd)
 (prod +1375/-155 including package mirrors; non-prod +1144/-6). Verification
-then advanced to current HEAD `88b6bffb3da191834f68979abd932e936d29d2b6` at
-22:46Z with reviewed file hashes unchanged. The pre-existing production work
-is now committed; these planning documents remain untracked. No production activation,
-heavy scan, or multi-hour validation is authorized by this design.
-Current-head reference:
-[88b6bffb3da191834f68979abd932e936d29d2b6](https://github.com/jleechanorg/disk_magician/commit/88b6bffb3da191834f68979abd932e936d29d2b6)
-(prod +1427/-25 including mirrors; non-prod +1245/-27).
+then advanced to the historical review context `88b6bffb3da191834f68979abd932e936d29d2b6`
+at 22:46Z with reviewed file hashes unchanged. Before implementation or each
+verification round, re-pin the actual source with `git rev-parse HEAD` and
+`git status --short`; do not treat that historical SHA as the current head.
+The pre-existing production work is now committed; these planning documents
+remain untracked. Production activation, heavy scans, and multi-hour
+validation remain gated by the safety tasks and the five exit criteria.
 
 ## Failure contract
 
@@ -147,13 +147,13 @@ extraction behavior and test native and non-macOS fixtures.
 
 ### 5. Deployment identity and rollback
 
-Reuse `tools/deploy_uv_tool.sh` and add a new verified atomic
-`~/.disk_magician_state/deployed.json` post-verification record with source
-SHA, installed version, package hashes, override state, and UTC time. Write it
-only after existing clean-source, revision, package-diff, and smoke checks; do
-not grant a branch override. A prior receipt is evidence, not proof rollback
-succeeded. Status reports uv snapshot and repo-root frontier/drilldown/
-pressure/cleanup consumers separately.
+Reuse `tools/deploy_uv_tool.sh` and have that existing tool emit a new
+verified atomic `~/.disk_magician_state/deployed.json` post-verification record
+with source SHA, installed version, package hashes, override state, and UTC
+time; this record does not exist yet. Write it only after existing clean-source,
+revision, package-diff, and smoke checks; do not grant a branch override. A
+prior receipt is evidence, not proof rollback succeeded. Status reports uv
+snapshot and repo-root frontier/drilldown/pressure/cleanup consumers separately.
 
 ### 6. Close existing enablement only under scoped authorization
 
@@ -182,34 +182,71 @@ claims those items are enabled or live today.
 | What does an interrupted job mean? | Unknown until a later bounded reconciliation | A log or process exit cannot prove cleanup or postcondition. |
 | Should lock skips count as failures? | Typed terminal `skipped_lock`, degraded only if policy says it blocks freshness | Operators can distinguish contention from errors without false success. |
 | Where is inventory authority? | Existing plist templates plus existing root registries | Avoids another catalog that can drift. |
-| Where is deployed identity authority? | `~/.disk_magician_state/deployed.json` written by `tools/deploy_uv_tool.sh` | Matches existing state and verified deploy ownership. |
+| Where is deployed identity authority? | The new `~/.disk_magician_state/deployed.json` post-verification record emitted by `tools/deploy_uv_tool.sh` | Keeps identity proof in the existing deploy owner; the record must not be treated as present before the tool writes it. |
 | When is prevention proven? | Fixture contracts, then observed scheduled cycles across restart/sleep, then 24-hour watch and seven-day recurrence evidence | A pending window is not a run; one green cycle is not recurrence prevention. |
 
-## Implementation preconditions
+## Execution boundaries
 
-- User explicitly authorizes implementation in a clean isolated source state;
-  this document grants no production activation.
-- Reconcile the listed Beads and current owner status; do not rely on old PR
-  or commit prose as live state.
-- Re-pin deployed package, launchd templates, and repository head before each
-  verification round. Preserve unrelated dirty changes and isolate source
-  edits.
-- Resolve the authoritative current snapshot and ledger paths; do not invent
-  absent baseline artifacts or run an unbounded `du` sweep.
-- Confirm package mirror rules if adding `scripts/*.py`, config, or template
-  files; bump the monotonic package version, run
-  `scripts/sync_package_tree.sh`, then `scripts/sync_package_tree.sh --check`
-  before a guarded deploy.
-- Obtain a fresh safety preflight before any future live cleanup test. Fixtures
-  must use temporary trees and must not delete live data.
+Implementation is authorized by the current execution contract in the plan.
+Re-pin the source, package, templates, and state before each verification;
+preserve unrelated work and existing seven-day, never-delete, partial-ledger,
+clean-main, and safety gates. Use temporary fixture trees for destructive-path
+tests and never delete live data during fixture validation. The scope includes
+the audited SQLite, Dark Factory, wiki-publish, CLI, scheduler, and package
+data fixes; unrelated cleanup or a new scanner, daemon, database, or classifier
+remains out of scope.
 
-## Explicit exclusions
+### 7. Safety fixes before activation
 
-This design does not authorize code implementation, deployment, launchd repair,
-cleanup, deletion, force-push, merge, credential work, a new scanner or daemon,
-database storage, LLM classification, broad policy edits, or live multi-hour
-validation. It does not weaken the seven-day worktree rule, never-delete list,
-partial publication gate, or clean-main deployment guard.
+The following safety work is a blocking implementation task before any
+scheduled `--clean` activation:
+
+- `scripts/cleanup_codex_db.sh` and `tests/test_cleanup_codex_db.sh`: apply
+  `busy_timeout` to every SQLite operation; acquire a per-database
+  single-maintainer lease; use a conservative active-open-client policy;
+  parse every `wal_checkpoint` result row, including exit-0 `busy` results;
+  verify post-operation state and classify busy/incomplete outcomes as
+  non-success. Add disposable concurrent SQLite reader/writer tests using real
+  temporary databases. This task never deletes databases.
+- `scripts/cleanup_agent_artifacts.sh`, `scripts/cleanup_dark_factory.sh`,
+  `tests/test_cleanup_dark_factory.sh`, and routine-clean regression tests:
+  remove the duplicate `~/.dark-factory/runs` target and delegate to the
+  existing canonical cleanup handler. Prove that the canonical guard and
+  per-candidate safety logging are used.
+- `scripts/cleanup_dev_caches.sh` and a focused wiki-publish fixture test:
+  remove automatic wiki-publish deletion until lifecycle provenance is known.
+  Unknown, active, recent, and protected entries remain; tests must prove
+  retention without inventing producer markers.
+
+No ad-hoc cleaner or alternate deletion runner is introduced.
+
+### 8. One CLI and scoped scheduler convergence
+
+Package `diskm` as an additional console name pointing to the existing
+`disk_magician.cli:main`; keep `disk-magician` as the same implementation until
+the new name is installed. Add dispatch/help tests and installed-wheel tests
+for `diskm status`, `diskm growth-top10`, and receipt/status paths. Helpers are
+private modules, not user interfaces.
+
+The first scheduler migration is limited to these existing templates and
+installer paths: `launchd/com.jleechanorg.disk-magician-frontier-nightly.plist.template`
+(snapshot/frontier consumer),
+`launchd/com.jleechanorg.disk-magician-pressure-sweep.plist.template`,
+`launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template`,
+`launchd/com.disk-magician.claude-state.plist.template`, and
+`launchd/com.disk-magician.codex-vacuum.plist.template`. Their operational
+pressure-sweep, tmp-scratch-sweep, cleanup-claude-state, and codex-vacuum
+subcommands route the existing helpers through the same CLI. Installed
+templates use stable `@HOME@/.local/bin/diskm` with identical arguments and
+environment. Other root consumers remain inventory findings until a later
+dispatch migration is explicitly scoped; this design does not claim all jobs
+are migrated. Validate installer behavior with
+`tests/test_install_launchd_sweepers_preflight.sh` and package/deploy parity
+with `tests/test_package_sync.sh` and `tests/test_deploy_uv_tool.sh`.
+
+Add `config/*.txt` to `pyproject.toml` package-data to close the existing
+`disk_magician-asb` gap, and prove it through the installed-wheel test. Do not
+create a new registry.
 
 ## Acceptance contract
 
@@ -237,16 +274,16 @@ Acceptance is staged and evidence-bearing:
 - [x] Receipt, status, catalog, and deployment work reuse existing owners.
 - [x] Existing package mirror and two-consumer deployment paths are named.
 - [x] Open Beads are reconciled without duplicating the Sep. 23 epic.
-- [x] No live activation or destructive test is implied.
+- [x] Safety fixes and scoped activation gates are explicit.
 - [x] Acceptance requires observed windows and seven-day recurrence evidence.
 - [x] All design decisions and evidence limitations are explicit.
 
 ## Review record
 
-`/advice` FAILED before reviewer input because the dirty checkout lacked an
-exact-SHA representation; no retry was made. `/web-advice` is SKIPPED because
-no external browser recipient was authorized. Reviewer D (Web advice) is
-unavailable (disabled by parent authorization boundary). The
-[audit](../reviews/2026-10-03-disk-reliability-audit.md) records the runner
-output and exact skill requirements. This `diskm` refinement is local review
-only; no review was rerun and no independent approval is claimed.
+Canonical `/advice` returned CHANGES REQUESTED on the frozen review clone. The
+targeted safety and scheduler corrections are incorporated above; no approval
+is claimed until the required independent rerun. `/web-advice` is SKIPPED
+because no external browser recipient was authorized. Reviewer D (Web advice)
+is unavailable (disabled by parent authorization boundary). The
+[audit](../reviews/2026-10-03-disk-reliability-audit.md) records the earlier
+runner output and exact skill requirements.
