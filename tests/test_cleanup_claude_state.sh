@@ -345,7 +345,7 @@ env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
 assert_contains "(safety_gate) candidate protected by safety rule is REFUSED" "REFUSED" "$OUT8_CONTENT"
-assert_contains "(safety_gate) safety reason reported in output" "never_delete rule" "$OUT8_CONTENT"
+assert_contains "(safety_gate) safety reason reported in output" "never_delete:" "$OUT8_CONTENT"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

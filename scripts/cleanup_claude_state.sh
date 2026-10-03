@@ -243,8 +243,15 @@ claude_state_git_check() {
 # both fail closed to "treat as open" (preserved). rc 1 = lsof confirmed
 # zero matches.
 claude_state_has_open_handles() {
-  local candidate="$1" out rc
-  out="$(timeout "$LSOF_TIMEOUT_SEC" lsof +D "$candidate" 2>&1)"
+  local candidate="$1" out rc lsof_bin
+  if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
+    lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif [[ -x /usr/sbin/lsof ]]; then
+    lsof_bin=/usr/sbin/lsof
+  else
+    lsof_bin="lsof"
+  fi
+  out="$(timeout "$LSOF_TIMEOUT_SEC" "$lsof_bin" -n -P +D "$candidate" 2>&1)"
   rc=$?
   if [[ -n "$out" ]]; then
     return 0
