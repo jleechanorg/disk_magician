@@ -194,7 +194,7 @@ H9="$T/h9"; mk7 "$H9"; mkdir -p "$H9/dotfiles/units"; rmdir "$H9/.config/systemd
 printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r2/bin/dark-factory\n' >"$H9/dotfiles/units/df.service"
 rc=0; run7 "$H9" --clean --keep-releases 0 >"$T/t9.out" 2>&1 || rc=$?
 check "release named in a symlinked unit dir kept, --clean ran" '[[ "$rc" -eq 0 && -d "$H9/.local/share/dark-factory/releases/r2" && ! -e "$H9/.local/share/dark-factory/releases/r3" ]]'
-for bad in "--keep-releases foo" "--days 1x"; do
+for bad in "--keep-releases foo" "--days 1x" "--keep-releases 9223372036854775808" "--days 18446744073709551616"; do
   rc=0; run7 "$H9" --dry-run $bad >/dev/null 2>&1 || rc=$?
   check "rejects $bad" '[[ "$rc" -eq 2 ]]'
 done
@@ -259,6 +259,7 @@ H14b="$T/h14b"; mk7 "$H14b"
 printf '\177ELF\0%s/.local/share/dark-factory/releases/r1\377\376/bin\0' "$H14b" >"$H14b/.local/bin/launcher"
 rc=0; LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 run7 "$H14b" --dry-run >"$T/t14b.out" 2>&1 || rc=$?
 check "non-UTF-8 bytes after a release path do not abort the scan" '[[ "$rc" -eq 0 ]] && grep -q "Would reclaim" "$T/t14b.out"'
+[[ "$rc" -eq 0 ]] || sed 's/^/        | /' "$T/t14b.out"
 
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"

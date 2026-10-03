@@ -7,6 +7,9 @@
 # units/drop-ins, or a live process; the newest --keep-releases releases;
 # anything with a file modified inside --days (floor: safety_min_stale_days).
 set -euo pipefail
+# Paths are byte strings: byte-wise tools avoid "illegal byte sequence"
+# aborts (BSD sed/tr) on non-UTF-8 names under a UTF-8 locale.
+export LC_ALL=C
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
@@ -46,7 +49,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ "$DAYS" =~ ^[0-9]+$ && "$KEEP_RELEASES" =~ ^[0-9]+$ ]] || { echo "--days and --keep-releases must be non-negative integers" >&2; exit 2; }
+# At most 6 digits, so bash's 64-bit arithmetic cannot overflow.
+[[ "$DAYS" =~ ^[0-9]{1,6}$ && "$KEEP_RELEASES" =~ ^[0-9]{1,6}$ ]] || { echo "--days and --keep-releases must be integers 0..999999" >&2; exit 2; }
 DAYS=$((10#$DAYS)); KEEP_RELEASES=$((10#$KEEP_RELEASES))  # leading zeros are not octal
 
 floor="$(safety_min_stale_days)"
