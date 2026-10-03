@@ -27,6 +27,21 @@ if [[ ! -x "$SCRIPT" ]]; then
   exit 2
 fi
 
+# Isolate check_ledger_freshness.sh: sweeper_health_check.sh resolves it
+# relative to its own SCRIPT_DIR, so this test invokes a copy alongside a
+# stub that always reports OK, instead of leaking the real (non-hermetic,
+# time-varying) ~/.disk_magician_backup ledger state into these assertions.
+FAKE_LEDGER_BIN=$(mktemp -d -t sweeper_health_ledger_stub.XXXXXX)
+cat > "$FAKE_LEDGER_BIN/check_ledger_freshness.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo -e "OK\ttest-isolated"
+exit 0
+MOCK
+chmod +x "$FAKE_LEDGER_BIN/check_ledger_freshness.sh"
+cp "$SCRIPT" "$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+chmod +x "$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+SCRIPT="$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+
 TMP_DIR=$(mktemp -d -t sweeper_health_test.XXXXXX)
 LOG_DIR="$TMP_DIR/logs"
 PLIST_DIR="$TMP_DIR/launchd"
@@ -250,7 +265,7 @@ else
 fi
 
 # Cleanup
-rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR"
+rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR" "$FAKE_LEDGER_BIN"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

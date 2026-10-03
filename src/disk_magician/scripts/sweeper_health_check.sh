@@ -156,6 +156,15 @@ OK_COUNT=0
 CORRUPT_COUNT=0
 REPAIR_LABELS=()
 
+LEDGER_STATUS_LINE="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>/dev/null || true)"
+LEDGER_STATUS_TOKEN="${LEDGER_STATUS_LINE%%$'\t'*}"
+LEDGER_WARN=false
+if [[ "$LEDGER_STATUS_TOKEN" != "OK" ]]; then
+  WARN_COUNT=$(( WARN_COUNT + 1 ))
+  LEDGER_WARN=true
+  printf "  [WARN] %-44s (%s)\n" "ledger/topdown-5g.json ${LEDGER_STATUS_TOKEN:-UNKNOWN} — stale mega-table risk" "${LEDGER_STATUS_LINE//$'\t'/ }"
+fi
+
 while IFS= read -r plist; do
   [[ -z "$plist" ]] && continue
   label=$(basename "$plist" .plist)
@@ -262,7 +271,11 @@ if [[ $MISS_COUNT -gt 0 ]]; then
 fi
 
 if [[ $WARN_COUNT -gt 0 ]]; then
-  log "WARN: $WARN_COUNT sweeper(s) logged errors in last 50 lines."
+  if [[ "$LEDGER_WARN" == true ]]; then
+    log "WARN: $WARN_COUNT check(s) degraded (includes a stale/unreadable ledger — see [WARN] lines above)."
+  else
+    log "WARN: $WARN_COUNT sweeper(s) logged errors in last 50 lines."
+  fi
   exit 1
 fi
 
