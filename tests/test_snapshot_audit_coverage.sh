@@ -411,12 +411,12 @@ if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["directories"]["parity"] == 1234
-assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 20
+assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 0
 PY
 then
-  ok "default first-pass cap stays short for every serial path"
+  ok "default per-path clamp is 0 (unclamped; honors configured timeouts)"
 else
-  bad "default first-pass cap does not stay at 20s"
+  bad "default per-path clamp is not 0"
 fi
 
 RESERVE_BIN="$WORK/budget_reserve_bin"
@@ -443,7 +443,7 @@ chmod +x "$RESERVE_BIN/timeout" "$RESERVE_BIN/dua" "$RESERVE_BIN/du"
 RESERVE_OUT="$WORK/budget_reserve.json"
 if HOME="$BUDGET_HOME" PATH="$RESERVE_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   RESERVE_LOG="$RESERVE_LOG" DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" \
-  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 timeout 10 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=20 DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 timeout 10 \
   "$SNAP_SCRIPT" --output "$RESERVE_OUT" >/dev/null 2>&1 && \
   python3 -c "import json; d=json.load(open('$RESERVE_OUT')); assert d['directories']['parity'] == 4096" 2>/dev/null && \
   [[ "$(awk -F '\t' '$1 == "dua" {print $2; exit}' "$RESERVE_LOG")" == "14" ]] && \
@@ -506,6 +506,7 @@ RETRY_OUT="$WORK/budget_retry.json"
 if HOME="$RETRY_HOME" PATH="$RETRY_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   RETRY_LOG="$RETRY_LOG" RETRY_STATE="$RETRY_STATE" \
   DISK_MAGICIAN_CONFIG="$RETRY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=1500 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=20 \
   timeout 10 "$SNAP_SCRIPT" --output "$RETRY_OUT" >/dev/null 2>&1 && \
   python3 - "$RETRY_OUT" <<'PY' 2>/dev/null
 import json, sys
