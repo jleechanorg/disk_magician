@@ -12,7 +12,7 @@ clean_flag="${1:---dry-run}"
 rc=0
 if [[ "$clean_flag" == "--clean" ]]; then
   env LARGE_TMP_APPROVED=1 "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large || rc=1
-  env CLAUDE_STATE_APPROVED=1 "$SCRIPT_DIR/cleanup_claude_state.sh" --clean || rc=1
+  "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 else
   "$SCRIPT_DIR/cleanup_tmp.sh" --dry-run --large || rc=1
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
