@@ -330,6 +330,8 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         raise LedgerError(f"{label}: 'buckets' must be a list")
     total = 0
     for item in buckets:
+        if not isinstance(item, dict):
+            raise LedgerError(f"{label}: bucket entry must be an object: {item!r}")
         path = item.get("path")
         size = item.get("measured_kb")
         kind = item.get("kind", "dir")
@@ -366,7 +368,10 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
     if type(purgeable) is not int or purgeable < 0:
         raise LedgerError(f"{label}: invalid purgeable_kb")
     total += purgeable
-    accounting = ledger.get("accounting_equation") or {}
+    accounting = ledger.get("accounting_equation")
+    if accounting is not None and not isinstance(accounting, dict):
+        raise LedgerError(f"{label}: accounting_equation must be an object")
+    accounting = accounting or {}
     sub_granularity_tail = accounting.get("sub_granularity_tail_kb", 0)
     if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
         raise LedgerError(f"{label}: invalid sub-granularity tail")
