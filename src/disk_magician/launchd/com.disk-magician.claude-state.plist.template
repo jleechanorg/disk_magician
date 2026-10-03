@@ -27,8 +27,8 @@
   <string>com.disk-magician.claude-state</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/cleanup_claude_state.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>cleanup-claude-state</string>
     <string>--dry-run</string>
   </array>
   <key>StartInterval</key>

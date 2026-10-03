@@ -35,8 +35,8 @@
   <string>com.jleechanorg.disk-magician-pressure-sweep</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/pressure_sweep.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>pressure-sweep</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
