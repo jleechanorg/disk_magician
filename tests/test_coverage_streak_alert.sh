@@ -36,7 +36,7 @@ json.dump(d, open(out, "w"))
 PY
 }
 alert() {
-  env HOME="$H" PATH="$BIN:/usr/bin:/bin:/opt/homebrew/bin" DISK_SNAPSHOT_JSON="$SNAP" DISK_MAGICIAN_STATE_DIR="$STATE" \
+  env HOME="$H" PATH="$BIN:/usr/bin:/bin:/opt/homebrew/bin" DISK_MAGICIAN_SNAPSHOT_FILE="$SNAP" DISK_MAGICIAN_STATE_DIR="$STATE" \
     bash "$ALERT" >"$WORK/out" 2>"$WORK/err"
   echo $?
 }
