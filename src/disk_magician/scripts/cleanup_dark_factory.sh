@@ -158,22 +158,28 @@ is_stale() {
 
 total_kb=0
 count=0
+# remove <physical path> <kind> [logical alias]: safety rules are written
+# against logical (~) paths, so a symlinked HOME is gated on both forms.
 remove() {
-  local path="$1" kind="$2" reason kb
+  local path="$1" kind="$2" alias="${3:-}" reason kb
   if ! reason="$(safety_gate "$path")"; then
     log "PROTECTED ($reason): $path"
     return 0
   fi
+  if [[ -n "$alias" && "$alias" != "$path" ]] && ! reason="$(safety_gate "$alias")"; then
+    log "PROTECTED ($reason): $alias"
+    return 0
+  fi
   kb="$(du -sk "$path" 2>/dev/null | awk '{print $1}')"
   kb="${kb:-0}"
-  total_kb=$(( total_kb + kb ))
-  count=$(( count + 1 ))
   if [[ "$DRY_RUN" == true ]]; then
+    total_kb=$(( total_kb + kb )); count=$(( count + 1 ))
     log "DRY RUN: would remove $kind: $path (${kb} KB)"
     return 0
   fi
   chmod -R u+w "$path" 2>/dev/null || true
-  if rm -rf "$path"; then
+  if rm -rf "$path" 2>/dev/null && [[ ! -e "$path" ]]; then
+    total_kb=$(( total_kb + kb )); count=$(( count + 1 ))
     deletion_log "cleanup_dark_factory" "remove_$kind" "$kb" "$path"
   else
     log "WARN: failed to remove $path"
@@ -244,7 +250,7 @@ for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     LC_ALL=C grep -aqF -e "$rel" -e "$rel_logical/${rel##*/}" "$REFTEXT" && continue
     is_live "$rel" "$rel_logical/${rel##*/}" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
-    remove "$rel" release
+    remove "$rel" release "$rel_logical/${rel##*/}"
   done
   rm -f "$keep"
 fi
@@ -257,8 +263,8 @@ if root_ok "$RUNS_DIR"; then
     [[ -L "$run" ]] && continue
     is_live "$run" "$runs_logical/${run##*/}" && continue
     is_stale "$run" || continue
-    remove "$run" run
-  done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -mtime +"$DAYS" -print0)
+    remove "$run" run "$runs_logical/${run##*/}"
+  done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" -print0)
 fi
 
 # --- df-* AO session homes ---
@@ -270,7 +276,7 @@ if root_ok "$SESSIONS_DIR"; then
     [[ -d "$sess" && ! -L "$sess" ]] || continue
     is_live "$sess" "$sessions_logical/${sess##*/}" && { log "SKIP session (live process): $sess"; continue; }
     is_stale "$sess" || continue
-    remove "$sess" session
+    remove "$sess" session "$sessions_logical/${sess##*/}"
   done
 fi
 

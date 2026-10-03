@@ -30,6 +30,7 @@ os.utime(root, (t, t))
 PY
 }
 
+can_lock() { local d; d="$(mktemp -d "$T/lockprobe.XXXX")"; echo x >"$d/f"; chmod 000 "$d/f"; ! cat "$d/f" >/dev/null 2>&1; local r=$?; chmod 644 "$d/f"; return $r; }
 REL="$T/.local/share/dark-factory/releases"
 RUNS="$T/.dark-factory/runs"
 SESS="$T/.ao-sessions"
@@ -69,7 +70,7 @@ check "newest 3 releases kept" '[[ -d "$REL/r4" && -d "$REL/r5" && -d "$REL/r6" 
 check "stale unreferenced releases removed" '[[ ! -e "$REL/r2" && ! -e "$REL/r3" ]]'
 check "stale run removed" '[[ ! -e "$RUNS/old" ]]'
 check "run with a recent file kept" '[[ -d "$RUNS/recent" ]]'
-check "unmeasurable run kept (fail closed)" '[[ -d "$RUNS/unreadable" ]]'
+if can_lock; then check "unmeasurable run kept (fail closed)" '[[ -d "$RUNS/unreadable" ]]'; else check "SKIPPED unmeasurable-run case (privileged user)" 'true'; fi
 check "stale df-* session removed" '[[ ! -e "$SESS/df-old" ]]'
 check "recent df-* session kept" '[[ -d "$SESS/df-recent" ]]'
 check "non-df session untouched" '[[ -d "$SESS/other-old" ]]'
@@ -126,11 +127,14 @@ chmod 000 "$H6/.config/systemd/user"
 rc6=0; HOME="$H6" DISK_MAGICIAN_TEST_SANDBOX="$H6" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
   DISK_MAGICIAN_DELETION_LOG="$T/h6.log" bash "$SCRIPT" --clean --keep-releases 0 >"$T/t6.out" 2>&1 || rc6=$?
 chmod 755 "$H6/.config/systemd/user"
-check "--clean exits nonzero when unit dir unreadable" '[[ "$rc6" -ne 0 ]]'
-check "nothing deleted when a reference source is unreadable" '[[ -d "$R6/r1" && -d "$H6/.dark-factory/runs/old" ]]'
+if can_lock; then
+  check "--clean exits nonzero when unit dir unreadable" '[[ "$rc6" -ne 0 ]]'
+  check "nothing deleted when a reference source is unreadable" '[[ -d "$R6/r1" && -d "$H6/.dark-factory/runs/old" ]]'
+else
+  check "SKIPPED unreadable-unit-dir case (privileged user)" 'true'
+fi
 
 echo "Test 7: per-file unreadable references refuse --clean; \$HOME/~ shims, logical argv, env refs"
-can_lock() { local d; d="$(mktemp -d "$T/lockprobe.XXXX")"; echo x >"$d/f"; chmod 000 "$d/f"; ! cat "$d/f" >/dev/null 2>&1; local r=$?; chmod 644 "$d/f"; return $r; }
 mk7() {  # mk7 <home>: 6 releases r1..r6 (r1 oldest), one stale run
   local h="$1"; mkdir -p "$h/.local/share/dark-factory/releases" "$h/.local/bin" "$h/.config/systemd/user" "$h/.dark-factory/runs/old" "$h/.ao-sessions"
   for i in 1 2 3 4 5 6; do mkdir -p "$h/.local/share/dark-factory/releases/r$i/bin"; echo x >"$h/.local/share/dark-factory/releases/r$i/bin/dark-factory"; age "$h/.local/share/dark-factory/releases/r$i" $(( 100 - i )); done
@@ -260,6 +264,24 @@ printf '\177ELF\0%s/.local/share/dark-factory/releases/r1\377\376/bin\0' "$H14b"
 rc=0; LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 run7 "$H14b" --dry-run >"$T/t14b.out" 2>&1 || rc=$?
 check "non-UTF-8 bytes after a release path do not abort the scan" '[[ "$rc" -eq 0 ]] && grep -q "Would reclaim" "$T/t14b.out"'
 [[ "$rc" -eq 0 ]] || sed 's/^/        | /' "$T/t14b.out"
+
+echo "Test 15: safety rules match logical paths under a symlinked HOME; non-dir run entries; failed rm not counted"
+mkdir -p "$T/h15real"; ln -s "$T/h15real" "$T/h15"; H15="$T/h15"; mk7 "$H15"
+mkdir -p "$H15/.dark-factory/runs/protected" "$H15/.config/disk-magician"; echo x >"$H15/.dark-factory/runs/protected/f"; age "$H15/.dark-factory/runs/protected" 60
+echo '{"never_delete": ["~/.dark-factory/runs/protected"]}' >"$H15/.config/disk-magician/safety.local.json"
+echo x >"$H15/.dark-factory/runs/index.db"; age "$H15/.dark-factory/runs/index.db" 60
+run7 "$H15" --clean >"$T/t15.out" 2>&1 || true
+check "never_delete rule written with ~ protects the run under a symlinked HOME" '[[ -d "$T/h15real/.dark-factory/runs/protected" ]]'
+check "non-directory entry in runs/ is not a candidate" '[[ -f "$T/h15real/.dark-factory/runs/index.db" ]]'
+check "stale run directory still removed" '[[ ! -e "$T/h15real/.dark-factory/runs/old" ]]'
+if can_lock; then
+  H15b="$T/h15b"; mk7 "$H15b"; chmod 555 "$H15b/.dark-factory/runs" "$H15b/.local/share/dark-factory/releases"
+  run7 "$H15b" --clean >"$T/t15b.out" 2>&1 || true
+  chmod 755 "$H15b/.dark-factory/runs" "$H15b/.local/share/dark-factory/releases"
+  check "failed removal is not counted as reclaimed" 'grep -q "Reclaimed: 0 item" "$T/t15b.out" && grep -q "WARN: failed to remove" "$T/t15b.out"'
+else
+  check "SKIPPED failed-removal case (privileged user)" 'true'
+fi
 
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
