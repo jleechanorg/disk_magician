@@ -342,7 +342,7 @@ launchd-unavailable cases.
 
 **Step 2: Run RED.**
 
-Run: `bash tests/test_disk_status.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`
 
 Expected: FAIL because `status` is not yet a dispatch command and dimensions
 are not joined.
@@ -355,7 +355,7 @@ publication commands.
 
 **Step 4: Run GREEN.**
 
-Run: `bash tests/test_disk_status.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`
 
 Run: `python3 -m pytest -q tests/test_disk_status.py`
 
@@ -379,8 +379,8 @@ use stable `@HOME@/.local/bin/diskm` with identical arguments and environment:
 - `launchd/com.disk-magician.claude-state.plist.template`
 - `launchd/com.disk-magician.codex-vacuum.plist.template`
 
-Update the 35-minute snapshot plist writer in `disk_magician.sh`
-`install_launchd()` to use the same stable installed `diskm snapshot` entry
+Update the snapshot plist writer in `disk_magician.sh`
+`run_setup()` (the measured interval is 1,800 seconds) to use the same stable installed `diskm snapshot` entry
 point, preserving its schedule and environment. Include both installer paths
 in the dispatch fixture tests.
 
@@ -479,7 +479,7 @@ postcondition receipt.
 
 Run: `python3 -m pytest -q tests/test_history_diff.py tests/test_render_topdown_ledger.py tests/test_snapshot_carry_forward.py tests/test_partial_history_diff.py tests/test_growth_top10.py tests/test_job_receipt.py tests/test_disk_status.py`
 
-Run: `bash tests/test_disk_status.sh && bash tests/test_deploy_uv_tool.sh && bash tests/test_package_sync.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`; then `bash tests/test_deploy_uv_tool.sh` and `bash tests/test_package_sync.sh`.
 
 Expected: all focused checks pass before any costly observation.
 
@@ -532,13 +532,19 @@ rollback by restoring its JSON alone.
 
 ## Review record
 
-Canonical `/advice` returned CHANGES REQUESTED on the frozen review clone. The
-targeted safety and scheduler corrections are incorporated in this plan; no
-independent approval is claimed until the required rerun. `/web-advice` is
-SKIPPED because no external browser recipient was authorized. Reviewer D (Web
-advice) is unavailable (disabled by parent authorization boundary). The
-[audit](../reviews/2026-10-03-disk-reliability-audit.md) records the earlier
-runner output and exact skill requirements.
+The first canonical `/advice` round returned CHANGES REQUESTED. The revised
+plan was independently approved by Codex and Opus on October 3 at
+23:22 UTC. The [round-two review record](https://gist.github.com/jleechan2015/67557ce3d89624b3b9e0c0a20db90da1)
+contains the exact source pin, coverage statement, reviewer outputs, and
+runner receipt. This approval covers the implementation plan, not the final
+code or deployed behavior. The optional browser review could not attach to
+the existing browser because the browser transport timed out; no external
+submission or browser verdict is claimed.
+
+Execution corrections from inspected code: the snapshot writer is
+`run_setup()` with a 1,800-second interval. Status behavior is covered by
+`tests/test_disk_status.py`; shell/installed dispatch is covered by
+`tests/test_cli_reliability.py`, without a duplicate status shell harness.
 
 ## Final self-review checklist
 
