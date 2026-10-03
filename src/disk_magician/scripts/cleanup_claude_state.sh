@@ -246,12 +246,14 @@ claude_state_has_open_handles() {
   local candidate="$1" out rc lsof_bin
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof_bin="$(command -v lsof)"
   elif [[ -x /usr/sbin/lsof ]]; then
     lsof_bin=/usr/sbin/lsof
   else
-    lsof_bin="lsof"
+    return 0  # no lsof -> fail closed
   fi
-  out="$(timeout "$LSOF_TIMEOUT_SEC" "$lsof_bin" -n -P +D "$candidate" 2>&1)"
+  out="$(timeout "$LSOF_TIMEOUT_SEC" "$lsof_bin" +D "$candidate" 2>&1)"
   rc=$?
   if [[ -n "$out" ]]; then
     return 0
