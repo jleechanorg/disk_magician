@@ -142,7 +142,7 @@ scratch_budget_evict_root() {
     base="$(basename "$item")"
     [[ -n "$base" ]] || continue
     case "$base" in
-      com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
+      com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive*|TemporaryItems) continue ;;
     esac
     if is_protected_root "$base" || is_protected_tmp_path "$item"; then
       log "scratch_budget: skipping protected root: $item"

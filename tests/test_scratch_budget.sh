@@ -392,6 +392,16 @@ set -e
 assert_rc "Test14: caller script survives a stat failure on a top-level file" 0 "$rc14"
 assert_contains "Test14: caller reaches the line after the failed-stat call" "after call: mtime=[]" "$result14"
 
+# ===================== Test 15: TemporaryItems basename excluded (round-3 /advice) =====================
+R15="$TMP_TEST_ROOT/t15"
+make_kb_file "$R15/TemporaryItems/f" 5120
+set_age_hours "$R15/TemporaryItems/f" 20
+make_kb_file "$R15/old_scratch/f" 5120
+set_age_hours "$R15/old_scratch/f" 5
+run_budget "$R15" 1024 60 - - 0 false >/dev/null
+assert_exists "Test15: TemporaryItems survives eviction even as the oldest/largest candidate" "$R15/TemporaryItems"
+assert_missing "Test15: plain old scratch dir is still evicted under the same budget pressure" "$R15/old_scratch"
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"
