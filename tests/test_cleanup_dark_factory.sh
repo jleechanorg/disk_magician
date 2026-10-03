@@ -249,6 +249,17 @@ printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/current/bin/
 run7 "$H13b" --clean --keep-releases 0 >"$T/t13b.out" 2>&1 || true
 check "unit reference via releases/current survives a late NUL in a bin text file" '[[ -d "$H13b/.local/share/dark-factory/releases/r1" && ! -e "$H13b/.local/share/dark-factory/releases/r2" ]]'
 
+echo "Test 14: symlinked wrapper outside releases; non-UTF-8 bytes in references"
+H14="$T/h14"; mk7 "$H14"; mkdir -p "$H14/dotfiles"
+printf '#!/bin/sh\nexec %s/.local/share/dark-factory/releases/r1/bin/dark-factory "$@"\n' "$H14" >"$H14/dotfiles/df-wrapper"; chmod +x "$H14/dotfiles/df-wrapper"
+ln -s "$H14/dotfiles/df-wrapper" "$H14/.local/bin/dark-factory"
+run7 "$H14" --clean --keep-releases 0 >"$T/t14.out" 2>&1 || true
+check "release exec'd by a symlinked out-of-releases wrapper kept" '[[ -d "$H14/.local/share/dark-factory/releases/r1" && ! -e "$H14/.local/share/dark-factory/releases/r2" ]]'
+H14b="$T/h14b"; mk7 "$H14b"
+printf '\177ELF\0%s/.local/share/dark-factory/releases/r1\377\376/bin\0' "$H14b" >"$H14b/.local/bin/launcher"
+rc=0; LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 run7 "$H14b" --dry-run >"$T/t14b.out" 2>&1 || rc=$?
+check "non-UTF-8 bytes after a release path do not abort the scan" '[[ "$rc" -eq 0 ]] && grep -q "Would reclaim" "$T/t14b.out"'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \

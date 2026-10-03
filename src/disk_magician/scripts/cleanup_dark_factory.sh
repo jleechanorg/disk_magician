@@ -74,9 +74,9 @@ re_escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
 
 # Resolve each stdin path through every symlink (relative or chained).
 realpaths() { python3 -c 'import os,sys
-for l in sys.stdin:
-    l = l.rstrip("\n")
-    if l: print(os.path.realpath(l))'; }
+for l in sys.stdin.buffer:  # bytes: paths need not be valid UTF-8
+    l = l.rstrip(b"\n")
+    if l: sys.stdout.buffer.write(os.path.realpath(l) + b"\n")'; }
 
 # A symlinked root would let rm act on its target outside the gated path.
 root_ok() {
@@ -200,7 +200,7 @@ if root_ok "$RELEASES_DIR"; then
     find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
     # Text references: bin shims, unit files (%h expanded), live argv.
     {
-      while IFS= read -r -d '' f; do  # includes dotfiles; symlinks handled above
+      while IFS= read -r -d '' f; do  # dotfiles included; symlinks read through to their target
         [[ -r "$f" ]] || scan_fail "unreadable $f"
         if LC_ALL=C grep -Iq . "$f" 2>/dev/null; then
           cat "$f" || scan_fail "cannot read $f"
@@ -208,7 +208,7 @@ if root_ok "$RELEASES_DIR"; then
           # Binary launcher (or empty file): extract embedded release paths.
           LC_ALL=C grep -aoE "$ref_re" "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
         fi
-      done < <(find "$BIN_DIR" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+      done < <(find -L "$BIN_DIR" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
       while IFS= read -r f; do
         [[ -e "$f" ]] || continue  # dangling unit symlink
         [[ -r "$f" ]] || scan_fail "unreadable $f"
