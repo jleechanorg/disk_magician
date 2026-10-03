@@ -146,6 +146,18 @@ mkdir -p "$ESCAPE_TARGET"
 : > "$ESCAPE_TARGET/secret.txt"
 ln -s "$ESCAPE_TARGET" "$ROOTS_DIR/escape-symlink-yzab"
 
+# (8) LINKED WORKTREE -- parent repo has a stash, but linked worktree is clean
+# and old -> ELIGIBLE (not falsely blocked by parent's stash).
+PARENT_REPO="$TMP_ROOT/parent_repo"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$PARENT_REPO"
+git -C "$PARENT_REPO" config user.email jleechan2015@users.noreply.github.com
+git -C "$PARENT_REPO" config user.name tester
+echo "parent stash" >> "$PARENT_REPO/README.md"
+git -C "$PARENT_REPO" stash -q
+LINKED_WT="$ROOTS_DIR/linked-wt-cdef"
+git -C "$PARENT_REPO" worktree add -q -b linked-wt-branch "$LINKED_WT"
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$LINKED_WT" -type f)
+
 echo
 echo "=== Test 1: dry-run classifies each fixture correctly ==="
 OUT1="$TMP_ROOT/out1.txt"
@@ -162,6 +174,7 @@ assert_contains "(4) unpushed commit -> NEEDS-REVIEW" "NEEDS-REVIEW $UNPUSHED  (
 assert_contains "(5) stash present -> NEEDS-REVIEW" "NEEDS-REVIEW $STASHED  (stash-present" "$OUT1_CONTENT"
 assert_contains "(6) unmeasurable age -> PRESERVE" "PRESERVE $UNMEASURABLE" "$OUT1_CONTENT"
 assert_contains "(7) symlink escape -> REFUSED" "REFUSED  $ROOTS_DIR/escape-symlink-yzab" "$OUT1_CONTENT"
+assert_contains "(8) linked worktree with parent stash -> ELIGIBLE" "ELIGIBLE $LINKED_WT" "$OUT1_CONTENT"
 
 if [[ -d "$OLD_CLEAN" && -d "$DIRTY" && -d "$UNPUSHED" ]]; then
   record_pass "dry-run deleted nothing"
@@ -264,6 +277,22 @@ if [[ $RC6 -ne 0 ]]; then
   record_pass "(projects guard) nonzero exit"
 else
   record_fail "(projects guard) nonzero exit" "expected nonzero exit, got $RC6"
+fi
+
+echo
+echo "=== Test 7: refuses to operate against ~/.codex ==="
+mkdir -p "$FAKE_HOME/.codex"
+OUT7="$TMP_ROOT/out7.txt"
+env -i HOME="$FAKE_HOME" PATH="$REAL_PATH" \
+  bash "$TARGET_SCRIPT" --root "$FAKE_HOME/.codex" --min-age 7 --dry-run \
+  >"$OUT7" 2>&1
+RC7=$?
+OUT7_CONTENT=$(cat "$OUT7")
+assert_contains "(codex guard) refuses when --root points at ~/.codex" "REFUSING" "$OUT7_CONTENT"
+if [[ $RC7 -ne 0 ]]; then
+  record_pass "(codex guard) nonzero exit"
+else
+  record_fail "(codex guard) nonzero exit" "expected nonzero exit, got $RC7"
 fi
 
 echo

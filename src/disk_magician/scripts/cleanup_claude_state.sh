@@ -260,6 +260,12 @@ if [[ -n "$PROJECTS_DIR_REAL" ]] && { [[ "$STATE_ROOT_REAL" == "$PROJECTS_DIR_RE
   exit 1
 fi
 
+CODEX_DIR_REAL="$(cd "$HOME/.codex" 2>/dev/null && pwd -P || true)"
+if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$STATE_ROOT_REAL" == "$CODEX_DIR_REAL" ]] || [[ "$STATE_ROOT_REAL" == "$CODEX_DIR_REAL"/* ]]; }; then
+  echo "REFUSING: resolved root $STATE_ROOT_REAL is ~/.codex or inside it -- hard-banned" >&2
+  exit 1
+fi
+
 if [[ "$DRY_RUN" == true ]]; then
   echo "=== CLAUDE STATE CLEANUP (DRY-RUN) === root=$STATE_ROOT_REAL min-age=${MIN_AGE_DAYS}d"
 else
@@ -295,6 +301,11 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
   fi
   if [[ -n "$PROJECTS_DIR_REAL" ]] && { [[ "$candidate_real" == "$PROJECTS_DIR_REAL" ]] || [[ "$candidate_real" == "$PROJECTS_DIR_REAL"/* ]]; }; then
     refuse_path "resolves-into-claude-projects" "$candidate"
+    REFUSED_COUNT=$((REFUSED_COUNT + 1))
+    continue
+  fi
+  if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$candidate_real" == "$CODEX_DIR_REAL" ]] || [[ "$candidate_real" == "$CODEX_DIR_REAL"/* ]]; }; then
+    refuse_path "resolves-into-codex" "$candidate"
     REFUSED_COUNT=$((REFUSED_COUNT + 1))
     continue
   fi

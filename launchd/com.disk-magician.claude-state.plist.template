@@ -1,16 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Periodic sweeper: reclaim dormant (>=7d) per-task workdirs in ~/.claude/state
+  Periodic sweeper: audit dormant (>=7d) per-task workdirs in ~/.claude/state
   (beads disk_magician-isw, disk_magician-p0v).
 
-  Action:    runs scripts/cleanup_claude_state.sh --clean under
+  Action:    runs scripts/cleanup_claude_state.sh --dry-run (REPORT ONLY).
+             Deliberately dry-run: writes a SAFE / NEEDS-REVIEW / PRESERVE
+             ledger to the log without unattended automated deletion.
+             Execution (--clean) requires interactive operator approval via
              CLAUDE_STATE_APPROVED=1.
              Enforces 7-day recency floor (worktree_recency.sh content age),
              preserves dirty/unpushed/stashed repos (flagged NEEDS-REVIEW),
              preserves active lsof file handles (fails closed on probe error),
              refuses symlinks escaping the state root, and refuses
-             ~/.claude/projects.
+             ~/.claude/projects and ~/.codex.
 
   Schedule:  Every 3 days (StartInterval=259200s).
              RunAtLoad=true ensures execution on login/reboot backstop.
@@ -26,13 +29,8 @@
   <array>
     <string>@BASH@</string>
     <string>@REPO_ROOT@/scripts/cleanup_claude_state.sh</string>
-    <string>--clean</string>
+    <string>--dry-run</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>CLAUDE_STATE_APPROVED</key>
-    <string>1</string>
-  </dict>
   <key>StartInterval</key>
   <integer>259200</integer>
   <key>RunAtLoad</key>
