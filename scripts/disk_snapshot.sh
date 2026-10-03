@@ -8,12 +8,16 @@ set -euo pipefail
 # A snapshot writer may never invoke another snapshot writer.  The launchd
 # orchestrator is the sole owner of this process tree; fail closed if its
 # environment re-enters this script before another expensive scan starts.
+# The orchestrator's internal `--measure-one` workers are the one sanctioned
+# re-entry: they measure a single path and never write a snapshot.
+MEASURE_ONE=false
+[[ "${1:-}" == "--measure-one" ]] && MEASURE_ONE=true
 SNAPSHOT_REENTRY_DEPTH="${DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH:-0}"
 if ! [[ "$SNAPSHOT_REENTRY_DEPTH" =~ ^[0-9]+$ ]]; then
   echo "Error: invalid DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH." >&2
   exit 75
 fi
-if (( SNAPSHOT_REENTRY_DEPTH > 0 )); then
+if (( SNAPSHOT_REENTRY_DEPTH > 0 )) && [[ "$MEASURE_ONE" != true ]]; then
   echo "Error: nested snapshot invocation rejected." >&2
   exit 75
 fi
@@ -33,6 +37,11 @@ LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS
 MEASURED_OK=0
 MEASURED_TOTAL=0
 
+if [[ "$MEASURE_ONE" == true ]]; then
+  [[ $# -eq 5 ]] || { echo "Usage: $0 --measure-one KEY PATH TIMEOUT OUTPUT_FILE" >&2; exit 2; }
+  M1_KEY="$2"; M1_PATH="$3"; M1_TIMEOUT="$4"; M1_OUT="$5"
+  set --
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output)   OUTPUT="$2"; shift 2 ;;
@@ -58,6 +67,8 @@ if [[ -z "$MEASURE_PATH_MAX_SECONDS" ]]; then
   MEASURE_PATH_MAX_SECONDS="${MEASURE_PATH_MAX_SECONDS:-0}"
 fi
 SNAPSHOT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+CARRY_STATE_FILE="$SNAPSHOT_STATE_DIR/last_good_measurements.json"
+export DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS"
 
 # Config resolution order:
 #   1. DISK_MAGICIAN_CONFIG env var (caller-supplied path, e.g. user_scope's
@@ -183,6 +194,30 @@ glob_size_kb() {
   done
   echo "$total"
 }
+
+# Internal worker mode for snapshot_measure.py: one dir_size_kb call, one JSON file.
+if [[ "$MEASURE_ONE" == true ]]; then
+  # set -u safe: the orchestrator passes its deadline; standalone use gets the key's own timeout.
+  MEASUREMENT_DEADLINE_EPOCH="${DISK_MAGICIAN_WORKER_DEADLINE_EPOCH:-$(( $(date +%s) + M1_TIMEOUT ))}"
+  # GNU timeout otherwise moves its child into a new process group, which the
+  # orchestrator's tree-kill must not depend on.
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    TIMEOUT_REAL="$(command -v "$TIMEOUT_CMD")"
+    timeout_fg() { "$TIMEOUT_REAL" --foreground "$@"; }
+    TIMEOUT_CMD=timeout_fg
+  fi
+  m1_start=$(date +%s)
+  m1_kb=$(dir_size_kb "$M1_PATH" "$M1_TIMEOUT")
+  m1_elapsed=$(( $(date +%s) - m1_start ))
+  m1_path_json="${M1_PATH//\\/\\\\}"; m1_path_json="${m1_path_json//\"/\\\"}"
+  m1_key_json="${M1_KEY//\\/\\\\}"; m1_key_json="${m1_key_json//\"/\\\"}"
+  if [[ -n "$m1_kb" ]]; then
+    printf '{"key":"%s","kb":%s,"path":"%s","elapsed_s":%s,"timed_out":false}\n' "$m1_key_json" "$m1_kb" "$m1_path_json" "$m1_elapsed" > "$M1_OUT"
+  else
+    printf '{"key":"%s","kb":null,"path":"%s","elapsed_s":%s,"timed_out":true}\n' "$m1_key_json" "$m1_path_json" "$m1_elapsed" > "$M1_OUT"
+  fi
+  exit 0
+fi
 
 get_disk_stats() {
   local target="/"
@@ -446,7 +481,12 @@ if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUD
   exit 2
 fi
 MEASUREMENT_STARTED_EPOCH=$(date +%s)
-MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECONDS ))
+# Hard measurement deadline (spec): start + min(budget, 860*scale). The outer
+# SNAPSHOT_BUDGET_SECONDS (1500) stays the reported budget and safety net.
+PHASE_SCALE="${DISK_MAGICIAN_PHASE_SCALE:-1}"
+MEASUREMENT_WINDOW=$(awk -v b="$SNAPSHOT_BUDGET_SECONDS" -v s="$PHASE_SCALE" 'BEGIN{ w = 860 * s; if (b < w) w = b; printf "%d", (w < 1 ? 1 : w) }')
+MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + MEASUREMENT_WINDOW ))
+ORCHESTRATOR_DEADLINE_EPOCH=$(awk -v st="$MEASUREMENT_STARTED_EPOCH" -v s="$PHASE_SCALE" -v md="$MEASUREMENT_DEADLINE_EPOCH" 'BEGIN{ d = st + 640 * s; if (md < d) d = md; printf "%d", d }')
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
 disk_used_gb=$(awk "BEGIN{printf \"%.0f\", $disk_used_kb / 1024 / 1024}")
 disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
@@ -490,7 +530,33 @@ add_entry() {
   printf "%s\t%s\t%s\n" "$key" "$val" "$src_path" >> "$DIRS_TEMP_FILE"
 }
 
-# Run dir checks
+# Run dir checks: bounded parallel orchestrator by default, the original serial
+# loop when workers=0 or the orchestrator fails (measure_mode records which).
+MEASURE_MODE=serial
+MEASURE_WORKERS_USED=0
+MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
+if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
+  ORCH_SCRIPT="${DISK_MAGICIAN_MEASURE_ORCHESTRATOR:-$SCRIPT_DIR/snapshot_measure.py}"
+  ORCH_OUT=$(mktemp -t disk_magician_orch.XXXXXX)
+  ORCH_META=$(mktemp -t disk_magician_orch_meta.XXXXXX)
+  ORCH_DIR=$(mktemp -d -t disk_magician_orch_dir.XXXXXX)
+  if python3 "$ORCH_SCRIPT" --config "$CONFIG_FILE" --snapshot-script "$SCRIPT_DIR/disk_snapshot.sh" \
+       --workers "$MEASURE_WORKERS_SETTING" --deadline-epoch "$ORCHESTRATOR_DEADLINE_EPOCH" \
+       --tmpdir "$ORCH_DIR" --meta-out "$ORCH_META" --carry-state "$CARRY_STATE_FILE" > "$ORCH_OUT" 2>/dev/null; then
+    MEASURE_MODE=parallel
+    MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
+    while IFS= read -r orch_line; do
+      orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
+      orch_size="${orch_rest%%$'\t'*}"; orch_rest="${orch_rest#*$'\t'}"
+      orch_path="${orch_rest%%$'\t'*}"
+      add_entry "$orch_key" "$orch_size" "$orch_path"
+    done < "$ORCH_OUT"
+  else
+    MEASURE_MODE=serial_fallback
+  fi
+  rm -rf "$ORCH_OUT" "$ORCH_META" "$ORCH_DIR"
+fi
+if [[ "$MEASURE_MODE" != "parallel" ]]; then
 while IFS=$'\t' read -r key path timeout retry_timeout; do
   size=$(dir_size_kb "$path" "$timeout")
   if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && "$retry_timeout" -gt 0 && \
@@ -510,30 +576,7 @@ for item in data.get("monitored_dirs", []):
     print(f"{item['key']}\t{item['path']}\t{item.get('timeout', 30)}\t{item.get('retry_timeout', 0)}")
 PY
 )
-
-# Run file glob checks
-while IFS=$'\t' read -r key pattern; do
-  size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size" "$pattern"
-done < <(python3 - "$CONFIG_FILE" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-for item in data.get("monitored_file_globs", []):
-    print(f"{item['key']}\t{item['pattern']}")
-PY
-)
-
-# Run glob checks
-while IFS=$'\t' read -r key pattern; do
-  size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size" "$pattern"
-done < <(python3 - "$CONFIG_FILE" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-for item in data.get("monitored_globs", []):
-    print(f"{item['key']}\t{item['pattern']}")
-PY
-)
+fi
 
 # Retry only explicitly selected slow directories after every configured entry
 # has received the short first pass. The existing global deadline remains the
@@ -642,6 +685,32 @@ PY
 )
   [[ -n "$LIBRARY_COVERAGE_JSON" ]] || LIBRARY_COVERAGE_JSON="null"
 fi
+# Globs run after lc_* and the library frontier so those are never starved by
+# slow per-directory globs; the shared measurement deadline still bounds them.
+# Run file glob checks
+while IFS=$'\t' read -r key pattern; do
+  size=$(glob_size_kb "$pattern")
+  add_entry "$key" "$size" "$pattern"
+done < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("monitored_file_globs", []):
+    print(f"{item['key']}\t{item['pattern']}")
+PY
+)
+
+# Run glob checks
+while IFS=$'\t' read -r key pattern; do
+  size=$(glob_size_kb "$pattern")
+  add_entry "$key" "$size" "$pattern"
+done < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("monitored_globs", []):
+    print(f"{item['key']}\t{item['pattern']}")
+PY
+)
+
 MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
 MEASUREMENT_BUDGET_EXHAUSTED=false
 if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
@@ -651,7 +720,6 @@ fi
 # ────────── CARRY-FORWARD (last-good values for timed-out keys) ──────────
 # A timed-out key is never a silent zero: it is carried from the last-good
 # store (with its age) or reported unmeasured. directories[] stays fresh-only.
-CARRY_STATE_FILE="$SNAPSHOT_STATE_DIR/last_good_measurements.json"
 CARRY_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 CARRY_JSON=""
 if python3 "$SCRIPT_DIR/snapshot_carry.py" from-tsv --tsv "$DIRS_TEMP_FILE" > "$CARRY_FRESH_FILE" 2>/dev/null; then
@@ -1067,6 +1135,8 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_MEASURED_TOTAL="$MEASURED_TOTAL" \
   SNAP_MEASUREMENT_BUDGET_SECONDS="$SNAPSHOT_BUDGET_SECONDS" \
   SNAP_MEASUREMENT_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS" \
+  SNAP_MEASURE_MODE="$MEASURE_MODE" \
+  SNAP_MEASURE_WORKERS="$MEASURE_WORKERS_USED" \
   SNAP_MEASUREMENT_ELAPSED_SECONDS="$MEASUREMENT_ELAPSED_SECONDS" \
   SNAP_MEASUREMENT_BUDGET_EXHAUSTED="$MEASUREMENT_BUDGET_EXHAUSTED" \
   SNAP_PREV_TS="$prev_snapshot_ts" \
@@ -1113,6 +1183,8 @@ try:
             "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
             "measurement_budget_seconds": int(os.environ.get("SNAP_MEASUREMENT_BUDGET_SECONDS") or 0),
             "measurement_path_max_seconds": int(os.environ.get("SNAP_MEASUREMENT_PATH_MAX_SECONDS") or 0),
+            "measure_mode": os.environ.get("SNAP_MEASURE_MODE") or "serial",
+            "measure_workers": int(os.environ.get("SNAP_MEASURE_WORKERS") or 0),
             "measurement_elapsed_seconds": int(os.environ.get("SNAP_MEASUREMENT_ELAPSED_SECONDS") or 0),
             "measurement_budget_exhausted": os.environ.get("SNAP_MEASUREMENT_BUDGET_EXHAUSTED") == "true",
         }

@@ -343,6 +343,9 @@ BUDGET_HOME="$WORK/budget_home"
 BUDGET_BIN="$WORK/budget_bin"
 BUDGET_LOG="$WORK/budget_invocations.log"
 BUDGET_CLOCK_STATE="$WORK/budget_clock_state"
+# These scenarios pin the serial measurement path (fake timeout/date stubs and
+# per-path deadline semantics); the parallel orchestrator has its own tests.
+export DISK_MAGICIAN_MEASURE_WORKERS=0
 SYSTEM_DATE=$(command -v date)
 mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
 : > "$BUDGET_LOG"
