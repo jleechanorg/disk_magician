@@ -25,7 +25,7 @@ DISCOVER=false
 DISCOVER_JSON=false
 DU_TIMEOUT=30
 SNAPSHOT_BUDGET_SECONDS="${DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS:-1500}"
-MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-20}"
+MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-}"
 LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS:-120}"
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
@@ -49,6 +49,15 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/snapshot_budget.sh
+source "$SCRIPT_DIR/lib/snapshot_budget.sh"
+# Per-path clamp: env > user config snapshot_measure.path_max_seconds > 0
+# (0 = unclamped: honor each path's configured timeout).
+if [[ -z "$MEASURE_PATH_MAX_SECONDS" ]]; then
+  MEASURE_PATH_MAX_SECONDS="$(snapshot_measure_setting path_max_seconds)"
+  MEASURE_PATH_MAX_SECONDS="${MEASURE_PATH_MAX_SECONDS:-0}"
+fi
+SNAPSHOT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 
 # Config resolution order:
 #   1. DISK_MAGICIAN_CONFIG env var (caller-supplied path, e.g. user_scope's
@@ -126,9 +135,10 @@ dir_size_kb() {
   remaining=$(remaining_measurement_seconds)
   (( remaining > 0 )) || { echo ""; return; }
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
-  [[ "$max_seconds" =~ ^[0-9]+$ && "$max_seconds" -gt 0 ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
-  path_budget="$to"
-  (( path_budget > max_seconds )) && path_budget="$max_seconds"
+  [[ "$max_seconds" =~ ^[0-9]+$ ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
+  : "${LOAD_FACTOR:=$(load_factor)}"
+  path_budget=$(scaled_path_budget "$to" "$LOAD_FACTOR")
+  (( max_seconds > 0 && path_budget > max_seconds )) && path_budget="$max_seconds"
   (( path_budget > remaining )) && path_budget="$remaining"
   path_deadline=$(( $(date +%s) + path_budget ))
 
@@ -427,8 +437,8 @@ if [[ ! "$SNAPSHOT_BUDGET_SECONDS" =~ ^[0-9]+$ || "$SNAPSHOT_BUDGET_SECONDS" -le
   echo "Error: DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS must be a positive integer." >&2
   exit 2
 fi
-if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -le 0 ]]; then
-  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a positive integer." >&2
+if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -lt 0 ]]; then
+  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a non-negative integer (0 = unclamped)." >&2
   exit 2
 fi
 if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUDGET_SECONDS" -le 0 ]]; then
@@ -482,9 +492,13 @@ add_entry() {
 # Run dir checks
 while IFS=$'\t' read -r key path timeout retry_timeout; do
   size=$(dir_size_kb "$path" "$timeout")
-  if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && \
-        "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ]]; then
+  if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && "$retry_timeout" -gt 0 && \
+        ( "$MEASURE_PATH_MAX_SECONDS" -eq 0 || "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ) ]]; then
     printf "%s\t%s\t%s\n" "$key" "$path" "$retry_timeout" >> "$RETRY_TEMP_FILE"
+  elif [[ -z "$size" && "$MEASURE_PATH_MAX_SECONDS" -eq 0 ]]; then
+    # Unclamped mode: every timed-out key gets one serial retry (own configured
+    # timeout) after all keys have had a first pass; the global deadline still wins.
+    printf "%s\t%s\t%s\n" "$key" "$path" "$timeout" >> "$RETRY_TEMP_FILE"
   else
     add_entry "$key" "$size" "$path"
   fi
@@ -539,7 +553,9 @@ if [[ -d "$containers_parent" ]]; then
   # Build a sorted list of (size_kb, name) inside the same remaining global
   # budget and per-path cap as the allowlist measurements.
   containers_budget=$(remaining_measurement_seconds)
-  (( containers_budget > MEASURE_PATH_MAX_SECONDS )) && containers_budget="$MEASURE_PATH_MAX_SECONDS"
+  containers_cap="$MEASURE_PATH_MAX_SECONDS"
+  (( containers_cap > 0 )) || containers_cap=20
+  (( containers_budget > containers_cap )) && containers_budget="$containers_cap"
   if [[ -n "$TIMEOUT_CMD" && "$containers_budget" -gt 0 ]]; then
     containers_listing=$("$TIMEOUT_CMD" "$containers_budget" du -sk "$containers_parent"/* 2>/dev/null \
       | sort -rn | head -20 || true)
@@ -871,7 +887,7 @@ except Exception:
     print('true')
 " "$CONFIG_FILE" 2>/dev/null || echo "true")
 
-TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$HOME/.disk_magician_state/frontier_last.json" <<'PY' 2>/dev/null
+TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$SNAPSHOT_STATE_DIR/frontier_last.json" <<'PY' 2>/dev/null
 import datetime, json, os, sys
 
 enabled = sys.argv[1]
