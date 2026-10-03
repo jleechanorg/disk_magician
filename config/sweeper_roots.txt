@@ -113,7 +113,7 @@ $HOME/Library/Caches/ms-playwright-go	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/Library/Caches/pip	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
-$HOME/.dark-factory/runs	cleanup_agent_artifacts.sh	TARGETS array (14d retention)
+$HOME/.dark-factory/runs	cleanup_dark_factory.sh	canonical 30-day retention; per-candidate recency/liveness/safety guards; routine opt-in AGENT_ARTIFACTS_APPROVED
 
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9

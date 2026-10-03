@@ -193,5 +193,53 @@ if ! grep -q "has no top-level Label key" "$OUT_WRAPPER"; then
   exit 1
 fi
 
+# Privileged frontier-root templates are owned by the dedicated root installer;
+# explicit selection must not manufacture a user LaunchAgent or call bootstrap.
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-frontier-root.plist.template" \
+  "$MOCK_LAUNCHD_SRC/com.jleechanorg.disk-magician-frontier-root.plist.template"
+: > "$BOOTSTRAP_LOG"
+set +e
+  PATH="$FAKE_BIN:$PATH" HOME="$TMP_ROOT/home" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$LAUNCHAGENTS_DIR" \
+  DISK_MAGICIAN_LAUNCHD_SRC="$MOCK_LAUNCHD_SRC" \
+  bash "$TARGET_SCRIPT" frontier-root \
+  >"$TMP_ROOT/out_root.txt" 2>&1
+RC_ROOT=$?
+set -e
+if [[ $RC_ROOT -eq 0 ]] || grep -q "bootstrap.*frontier-root" "$BOOTSTRAP_LOG" || \
+   [[ -f "$LAUNCHAGENTS_DIR/com.jleechanorg.disk-magician-frontier-root.plist" ]]; then
+  echo "FAIL: privileged frontier-root template was selected for user installation" >&2
+  cat "$TMP_ROOT/out_root.txt" >&2
+  exit 1
+fi
+
+# A missing packaged diskm command must be rejected before an existing plist is
+# replaced.  The fixture HOME is isolated so the host's command is irrelevant.
+cat > "$MOCK_LAUNCHD_SRC/com.disk-magician.needs-diskm.plist" <<'DISKM_PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.disk-magician.needs-diskm</string>
+  <key>ProgramArguments</key><array>
+    <string>@HOME@/.local/bin/diskm</string><string>snapshot</string>
+  </array>
+</dict></plist>
+DISKM_PLIST
+mkdir -p "$TMP_ROOT/home" "$LAUNCHAGENTS_DIR"
+printf 'keep-existing-plist\n' > "$LAUNCHAGENTS_DIR/com.disk-magician.needs-diskm.plist"
+: > "$BOOTSTRAP_LOG"
+set +e
+PATH="$FAKE_BIN:$PATH" HOME="$TMP_ROOT/home" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$LAUNCHAGENTS_DIR" \
+  bash "$TARGET_SCRIPT" "$MOCK_LAUNCHD_SRC/com.disk-magician.needs-diskm.plist" \
+  >"$TMP_ROOT/out_diskm.txt" 2>&1
+RC_DISKM=$?
+set -e
+if [[ $RC_DISKM -eq 0 ]] || [[ "$(cat "$LAUNCHAGENTS_DIR/com.disk-magician.needs-diskm.plist")" != 'keep-existing-plist' ]] || \
+   grep -q "bootstrap.*needs-diskm" "$BOOTSTRAP_LOG"; then
+  echo "FAIL: missing packaged diskm was not caught before replacement" >&2
+  cat "$TMP_ROOT/out_diskm.txt" >&2
+  exit 1
+fi
+
 echo "PASS: all install_launchd_sweepers preflight tests passed"
 exit 0
