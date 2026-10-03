@@ -51,8 +51,8 @@ INVOCATION_LOG="$INVOCATION_LOG" bash "$SCRIPT" --clean
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp invoked with --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 
-echo "Test 2: --clean invokes cleanup_claude_state.sh with CLAUDE_STATE_APPROVED=1"
-assert_contains "cleanup_claude_state invoked with --clean" "cleanup_claude_state --clean CLAUDE_STATE_APPROVED=1" "$INVOCATIONS"
+echo "Test 2: --clean invokes cleanup_claude_state.sh with --dry-run"
+assert_contains "cleanup_claude_state invoked with --dry-run" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 
 echo "Test 3: order — cleanup_tmp line precedes cleanup_claude_state line"
 TMP_LINE=$(grep -n "^cleanup_tmp" "$INVOCATION_LOG" | head -1 | cut -d: -f1)
@@ -72,7 +72,7 @@ INVOCATION_LOG="$INVOCATION_LOG" TMP_MOCK_EXIT=1 bash "$SCRIPT" --clean
 WRAPPER_RC=$?
 set -e
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
-assert_contains "cleanup_claude_state still ran after cleanup_tmp failure" "cleanup_claude_state --clean CLAUDE_STATE_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_claude_state still ran after cleanup_tmp failure" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 
 echo "Test 5: dry-run mode passes --dry-run to both, sets neither approval var"
 : > "$INVOCATION_LOG"
@@ -111,7 +111,7 @@ STATE_FAIL_RC=$?
 set -e
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp ran successfully in Test 8" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
-assert_contains "cleanup_claude_state ran and failed in Test 8" "cleanup_claude_state --clean CLAUDE_STATE_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_claude_state ran and failed in Test 8" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 if [[ "$STATE_FAIL_RC" -ne 0 ]]; then
   echo "  PASS  wrapper propagates nonzero exit when cleanup_claude_state failed alone"
   PASS=$(( PASS + 1 ))

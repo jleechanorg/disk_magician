@@ -156,7 +156,7 @@ claude_state_git_repos() {
   local candidate="$1"
   find "$candidate" \
     \( -name node_modules -o -name .venv -o -name venv -o -name __pycache__ \) -prune \
-    -o -maxdepth "$GIT_MAXDEPTH" -name .git \( -type d -o -type f \) -print \
+    -o -name .git \( -type d -o -type f \) -print \
     2>/dev/null
 }
 
@@ -214,6 +214,15 @@ claude_state_git_check() {
     fi
     if [[ -z "$contains" ]]; then
       echo "not-on-any-remote-branch"
+      return 1
+    fi
+  fi
+
+  # Also verify that no other local branch holds unpushed commits
+  local unpushed_branches
+  if unpushed_branches="$(git -C "$repo_dir" log --branches --not --remotes -n 1 --format="%h" 2>/dev/null)"; then
+    if [[ -n "$unpushed_branches" ]]; then
+      echo "unpushed-commits-on-branches"
       return 1
     fi
   fi
