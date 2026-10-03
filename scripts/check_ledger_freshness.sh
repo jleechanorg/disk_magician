@@ -85,7 +85,10 @@ IFS=$'\x1f' read -r c_valid c_age_hours p_valid p_age_hours p_captured_at p_mode
 import datetime, json, os, sys
 
 state_dir, script_dir, stale_hours_str, last_epoch_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-stale_hours = float(stale_hours_str)
+try:
+    stale_hours = float(stale_hours_str)
+except Exception:
+    stale_hours = 48.0
 last_epoch = float(last_epoch_str) if last_epoch_str else 0.0
 sys.path.insert(0, script_dir)
 
@@ -99,45 +102,49 @@ def safe_get(obj, key):
 
 def check_canonical():
     canon_path = os.path.join(state_dir, "ledger", "topdown-5g.json")
-    if last_epoch == 0.0 and not os.path.exists(canon_path):
-        return False, None, "no_published_ledger_commit"
+    if not os.path.exists(canon_path):
+        return False, None, "missing"
 
     try:
         with open(canon_path) as f:
             canon = json.load(f)
-    except FileNotFoundError:
-        canon = None
-    except Exception as exc:
+    except Exception:
         return False, None, "unreadable"
 
-    captured_at = safe_get(canon, "captured_at")
-    if captured_at:
-        try:
-            ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=datetime.timezone.utc
-            )
-            c_age = (now_dt - ts).total_seconds() / 3600.0
-            if c_age < -0.1:
-                return False, c_age, "captured_at_in_future"
-            if c_age > stale_hours:
-                return False, c_age, "captured_at_stale"
-            # Both capture time and commit time must be within threshold if committed
-            if last_epoch > 0:
-                commit_age = (now_dt.timestamp() - last_epoch) / 3600.0
-                if commit_age > stale_hours:
-                    return False, commit_age, "commit_stale"
-            return True, c_age, ""
-        except Exception:
-            return False, None, "invalid_captured_at"
+    if not isinstance(canon, dict):
+        return False, None, "not_an_object"
 
-    # Fallback to commit epoch if captured_at is missing from JSON
+    captured_at = safe_get(canon, "captured_at")
+    if not isinstance(captured_at, str):
+        return False, None, "missing_captured_at"
+
+    try:
+        ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except Exception:
+        return False, None, "invalid_captured_at"
+
+    if ts > now_dt:
+        return False, (now_dt - ts).total_seconds() / 3600.0, "captured_at_in_future"
+
+    c_age = (now_dt - ts).total_seconds() / 3600.0
+    if c_age > stale_hours:
+        return False, c_age, "captured_at_stale"
+
+    try:
+        import history_diff
+        history_diff.validate_ledger(canon, label="canonical")
+        history_diff.validate_full_attribution_ledger(canon, label="canonical")
+    except Exception:
+        return False, c_age, "invalid"
+
     if last_epoch > 0:
         commit_age = (now_dt.timestamp() - last_epoch) / 3600.0
-        if commit_age <= stale_hours and commit_age >= -0.1:
-            return True, commit_age, "commit_fallback"
-        return False, commit_age, "commit_stale"
+        if commit_age > stale_hours:
+            return False, commit_age, "commit_stale"
 
-    return False, None, "no_valid_timestamp"
+    return True, c_age, ""
 
 def check_partial():
     partial_path = os.path.join(state_dir, "ledger", "topdown-5g.partial.json")
@@ -171,7 +178,7 @@ def check_partial():
         return False, None, captured_at, safe_get(partial, "mode"), None, None, "invalid_captured_at"
 
     age_hours = (now_dt - ts).total_seconds() / 3600.0
-    if age_hours < -0.1:
+    if ts > now_dt:
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "captured_at_in_future"
     if age_hours > stale_hours:
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"

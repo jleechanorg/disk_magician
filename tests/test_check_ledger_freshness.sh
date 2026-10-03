@@ -15,8 +15,64 @@ trap 'rm -rf "$WORK"' EXIT
 git init -q "$WORK/repo"
 STATE="$WORK/repo"
 mkdir -p "$STATE/ledger"
-echo '{"disk_used_kb":1}' > "$STATE/ledger/topdown-5g.json"
-echo '{"status":"partial","reason":"coverage_incomplete"}' > "$STATE/ledger/topdown-5g.status.json"
+
+iso_offset_hours() {
+  python3 -c "
+import datetime, sys
+dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=float(sys.argv[1]))
+print(dt.strftime('%Y-%m-%dT%H:%M:%SZ'))
+" "$1"
+}
+
+python3 -c "
+import json, sys
+now_iso = sys.argv[1]
+home = '/Users/testuser'
+probes = {
+    'mobile_sync': home + '/Library/Application Support/MobileSync/Backup',
+    'mail': home + '/Library/Mail',
+    'messages': home + '/Library/Messages',
+}
+ledger = {
+    'schema_version': 2,
+    'mode': 'complete',
+    'coverage_envelope': {
+        'complete': True,
+        'status': 'complete',
+        'fda_preflight_status': 'granted',
+        'fda_user_preflight_status': 'granted',
+        'reachable_top_level_roots': 1,
+        'measured_top_level_roots': 1,
+        'unfinished_top_level_roots': 0,
+    },
+    'fda_probe_paths': probes,
+    'fda_preflight': {
+        'status': 'granted',
+        'probes': {k: {'path': v, 'status': 'readable'} for k, v in probes.items()},
+    },
+    'disk_used_kb': 1000,
+    'residual_kb': 0,
+    'granularity_buckets': [{'path': '/Users/testuser/a', 'measured_kb': 1000, 'kind': 'dir'}],
+    'oversize_indivisible_files': [],
+    'opaque_intrinsic_gates': [],
+    'frontier_unfinished': [],
+    'accounting_equation': {
+        'data_used_kb': 1000,
+        'displayed_buckets_kb': 1000,
+        'oversize_indivisible_files_kb': 0,
+        'sub_granularity_tail_kb': 0,
+        'purgeable_kb': 0,
+        'residual_kb': 0,
+        'clone_shared_adjustment_kb': 0,
+        'displayed_balanced': True,
+        'display_ledger_valid': True,
+    },
+    'captured_at': now_iso,
+}
+with open('$STATE/ledger/topdown-5g.json', 'w') as f:
+    json.dump(ledger, f)
+" "$(iso_offset_hours 0)"
+echo '{"status":"published","reason":"complete_coverage"}' > "$STATE/ledger/topdown-5g.status.json"
 git -C "$STATE" add ledger/topdown-5g.json ledger/topdown-5g.status.json
 git -C "$STATE" -c user.email=t@test -c user.name=t commit -q -m "init ledger"
 
@@ -34,13 +90,6 @@ out="$("$SCRIPT" 2>&1)" && rc=0 || rc=$?
 
 unset DISK_MAGICIAN_LEDGER_STALE_HOURS
 
-iso_offset_hours() {
-  python3 -c "
-import datetime, sys
-dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=float(sys.argv[1]))
-print(dt.strftime('%Y-%m-%dT%H:%M:%SZ'))
-" "$1"
-}
 
 write_partial() {
   python3 -c "
@@ -254,6 +303,35 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE13" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "
   && ok "recently committed canonical ledger with old capture timestamp is rejected as STALE" \
   || bad "expected STALE rc=1 got rc=$rc out=$out"
 rm -rf "$WORK13"
+
+# --- Case 14: recently committed canonical ledger with missing capture timestamp -> STALE ---
+WORK14="$(mktemp -d)"
+git init -q "$WORK14/repo"
+STATE14="$WORK14/repo"
+mkdir -p "$STATE14/ledger"
+echo '{"disk_used_kb":1}' > "$STATE14/ledger/topdown-5g.json"
+git -C "$STATE14" add ledger/topdown-5g.json
+git -C "$STATE14" -c user.email=t@test -c user.name=t commit -q -m "fresh commit missing capture"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE14" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* ]] \
+  && ok "recently committed canonical ledger with missing capture timestamp is rejected as STALE" \
+  || bad "expected STALE rc=1 got rc=$rc out=$out"
+rm -rf "$WORK14"
+
+# --- Case 15: canonical ledger with future capture timestamp -> STALE ---
+WORK15="$(mktemp -d)"
+git init -q "$WORK15/repo"
+STATE15="$WORK15/repo"
+mkdir -p "$STATE15/ledger"
+FUTURE_CAPTURED="$(iso_offset_hours 5)"
+echo "{\"disk_used_kb\":1000,\"captured_at\":\"$FUTURE_CAPTURED\"}" > "$STATE15/ledger/topdown-5g.json"
+git -C "$STATE15" add ledger/topdown-5g.json
+git -C "$STATE15" -c user.email=t@test -c user.name=t commit -q -m "future capture"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE15" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* ]] \
+  && ok "canonical ledger with future capture timestamp is rejected as STALE" \
+  || bad "expected STALE rc=1 got rc=$rc out=$out"
+rm -rf "$WORK15"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

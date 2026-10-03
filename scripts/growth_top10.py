@@ -125,7 +125,9 @@ def main(argv=None):
     floor = None
     floor_err = None
     try:
-        floor_ref, floor = history_diff.select_floor_ref(state_dir, args.days)
+        floor_ref, floor = history_diff.select_floor_ref(
+            state_dir, args.days, filter_capture_window=True, now=now
+        )
         is_fresh_floor, reason = validate_floor_freshness(floor, args.days, now)
         if not is_fresh_floor:
             floor = None
@@ -178,7 +180,20 @@ def main(argv=None):
 
     floor_used_kb = floor.get("disk_used_kb", 0)
     current_used_kb = current.get("disk_used_kb", 0)
-    gap_kb = current_used_kb - floor_used_kb
+
+    if comp["comparison_kind"] == "nonnumeric":
+        gap_kb = None
+        residual_delta = None
+    else:
+        gap_kb = current_used_kb - floor_used_kb
+        if current.get("publication_kind") == "partial" or current.get("mode") == "partial":
+            residual_delta = None
+        else:
+            residual_delta = current.get("residual_kb", 0) - floor.get("residual_kb", 0)
+
+    deltas = comp.get("deltas", [])
+    unknown = comp.get("unknown", [])
+    growing = [d for d in deltas if d.get("delta_kb", 0) > 0][:args.limit]
 
     if args.json:
         payload = {
@@ -191,11 +206,14 @@ def main(argv=None):
             "floor_used_kb": floor_used_kb,
             "current_used_kb": current_used_kb,
             "gap_kb": gap_kb,
-            "coverage": comp.get("coverage_envelope"),
+            "coverage": comp.get("coverage") or comp.get("coverage_envelope"),
             "measured_interval": comp.get("measured_interval"),
-            "deltas": comp.get("deltas", []),
-            "unknown": comp.get("unknown", []),
+            "top_growth": growing,
+            "deltas": deltas[:args.limit],
+            "unknown": unknown,
         }
+        if residual_delta is not None:
+            payload["residual_delta_kb"] = residual_delta
         print(json.dumps(payload, indent=2))
         if comp["comparison_kind"] == "nonnumeric":
             return 1
@@ -216,13 +234,10 @@ def main(argv=None):
         f"current ({current_source}): {current_gib:.2f} GiB used at "
         f"{current.get('captured_at', 'unknown')}{coverage_suffix(current)}"
     )
-    print(f"gap: {format_kb(gap_kb)}")
+    if gap_kb is not None:
+        print(f"gap: {format_kb(gap_kb)}")
     print()
     print(f"Top {args.limit} growing paths since floor:")
-
-    deltas = comp.get("deltas", [])
-    unknown = comp.get("unknown", [])
-    growing = [d for d in deltas if d.get("delta_kb", 0) > 0][:args.limit]
 
     if growing:
         for item in growing:
@@ -236,8 +251,8 @@ def main(argv=None):
     if unknown:
         print(f"unknown paths: {len(unknown)} paths unmeasured/carried/missing")
 
-    residual_delta = current.get("residual_kb", 0) - floor.get("residual_kb", 0)
-    print(f"residual delta: {format_kb(residual_delta)}")
+    if residual_delta is not None:
+        print(f"residual delta: {format_kb(residual_delta)}")
     return 0
 
 

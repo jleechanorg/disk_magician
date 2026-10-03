@@ -420,13 +420,38 @@ def complete_coverage_envelope(report):
 def build_scope(report):
     """Build scope from explicit scanner root and hostname; do not invent
     scope for old ledgers that lack it."""
+    if not isinstance(report, dict):
+        return None
     scope = report.get("scope")
-    if isinstance(scope, dict) and scope.get("hostname") and scope.get("root"):
-        return dict(scope)
     hostname = report.get("hostname")
     root = report.get("root")
-    if isinstance(hostname, str) and hostname and isinstance(root, str) and root:
+
+    if root is not None:
+        if not (isinstance(root, str) and is_normalized_absolute_path(root)):
+            return None
+    if hostname is not None:
+        if not (isinstance(hostname, str) and hostname):
+            return None
+
+    if isinstance(scope, dict):
+        s_host = scope.get("hostname")
+        s_root = scope.get("root")
+        if not (isinstance(s_host, str) and s_host):
+            return None
+        if not (isinstance(s_root, str) and is_normalized_absolute_path(s_root)):
+            return None
+        if root is not None and root != s_root:
+            return None
+        if hostname is not None and hostname != s_host:
+            return None
+        res = dict(scope)
+        res["hostname"] = s_host
+        res["root"] = s_root
+        return res
+
+    if root is not None and hostname is not None:
         return {"hostname": hostname, "root": root}
+
     return None
 
 
@@ -434,12 +459,15 @@ def build_ledger_dict(report, captured_at):
     """Build the base ledger dict for topdown-5g.json and
     topdown-5g.partial.json, preserving run_id, timestamps, root, scope, and
     coverage/carried/unmeasured fields when supplied."""
-    buckets = report.get("granularity_buckets") or []
-    oversize = report.get("oversize_indivisible_files") or []
-    equation = report.get("accounting_equation") or {}
+    schema_version = report.get("schema_version", SCHEMA_VERSION)
+    buckets = report.get("granularity_buckets")
+    if buckets is None and "buckets" in report:
+        buckets = report.get("buckets")
+    oversize = report.get("oversize_indivisible_files")
+    equation = report.get("accounting_equation")
 
     ledger = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "mode": report.get("mode"),
         "coverage_envelope": report.get("coverage_envelope"),
         "frontier_unfinished": report.get("frontier_unfinished"),
@@ -468,6 +496,15 @@ def build_ledger_dict(report, captured_at):
         ledger["scope"] = scope
 
     for opt_key in (
+        "coverage_fresh_pct",
+        "coverage_carried_pct",
+        "coverage_effective_pct",
+        "carried_keys",
+        "unmeasured_keys",
+        "measurement_window",
+        "top_level_ledger",
+        "accounting_version",
+        "partition_proofs",
         "fresh",
         "carried",
         "effective_coverage",
@@ -500,7 +537,7 @@ def write_partial_ledger(out_dir, ledger, report, captured_at, age_hours):
             file=sys.stderr,
         )
         return False
-    if age_hours < -0.1:
+    if age_hours < 0:
         print(
             f"render_topdown_ledger: skipping partial artifact — future timestamp ({captured_at})",
             file=sys.stderr,
@@ -531,7 +568,10 @@ def write_partial_ledger(out_dir, ledger, report, captured_at, age_hours):
         print(f"render_topdown_ledger: skipping partial artifact — validation crash avoided: {exc}", file=sys.stderr)
         return False
 
-    buckets = partial.get("granularity_buckets") or []
+    buckets = partial.get("granularity_buckets")
+    if buckets is None:
+        buckets = partial.get("buckets")
+    buckets = buckets or []
     oversize = partial.get("oversize_indivisible_files") or []
     if not buckets and not oversize:
         print(
@@ -560,14 +600,26 @@ def main():
     except (OSError, ValueError):
         return 0  # no frontier data yet — leave ledger untouched
 
+    if not isinstance(report, dict):
+        return 0
+
     captured_at = report.get("captured_at")
+    if not isinstance(captured_at, str):
+        return 0
     try:
         ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc
         )
     except (TypeError, ValueError):
         return 0
-    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if ts > now_utc:
+        print(
+            f"render_topdown_ledger: skipping publication — future timestamp ({captured_at})",
+            file=sys.stderr,
+        )
+        return 0
+    age_hours = (now_utc - ts).total_seconds() / 3600.0
     if age_hours > STALE_HOURS:
         if os.path.isdir(args.out_dir):
             write_status(args.out_dir, "stale", "frontier_report_stale", captured_at, age_hours, report)
@@ -576,9 +628,12 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     ledger = build_ledger_dict(report, captured_at)
-    buckets = ledger["granularity_buckets"]
-    oversize = ledger["oversize_indivisible_files"]
-    equation = ledger["accounting_equation"]
+    buckets = ledger.get("granularity_buckets")
+    if buckets is None:
+        buckets = ledger.get("buckets")
+    buckets = buckets or []
+    oversize = ledger.get("oversize_indivisible_files") or []
+    equation = ledger.get("accounting_equation") or {}
 
     partial_written = write_partial_ledger(args.out_dir, ledger, report, captured_at, age_hours)
 

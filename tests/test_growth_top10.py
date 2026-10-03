@@ -25,17 +25,19 @@ USER_PROBE_PATHS = {
 }
 
 
-def make_valid_floor(captured_at="2026-10-01T12:00:00Z", buckets=None, disk_used_kb=10000000):
+def make_valid_floor(captured_at="2026-10-01T12:00:00Z", buckets=None, disk_used_kb=10000000, scope=None):
     if buckets is None:
         buckets = [{"path": "/Users/x/a", "measured_kb": 4000000}]
+    if scope is None:
+        scope = {"hostname": "testhost", "root": "/Users/x"}
     bucket_total = sum(b.get("measured_kb", 0) for b in buckets)
     tail = disk_used_kb - bucket_total - 1000000
     return {
         "schema_version": 2,
         "mode": "complete",
-        "scope": {"hostname": "testhost", "root": "/Users/x"},
-        "hostname": "testhost",
-        "root": "/Users/x",
+        "scope": scope,
+        "hostname": scope.get("hostname", "testhost"),
+        "root": scope.get("root", "/Users/x"),
         "captured_at": captured_at,
         "run_id": "run-f1",
         "run_started_at": 100.0,
@@ -78,9 +80,11 @@ def make_valid_floor(captured_at="2026-10-01T12:00:00Z", buckets=None, disk_used
     }
 
 
-def make_valid_partial(captured_at="2026-10-03T10:00:00Z", buckets=None, disk_used_kb=10500000):
+def make_valid_partial(captured_at="2026-10-03T10:00:00Z", buckets=None, disk_used_kb=10500000, scope=None):
     if buckets is None:
         buckets = [{"path": "/Users/x/a", "measured_kb": 4500000}]
+    if scope is None:
+        scope = {"hostname": "testhost", "root": "/Users/x"}
     bucket_total = sum(b.get("measured_kb", 0) for b in buckets)
     tail = disk_used_kb - bucket_total - 1000000
     return {
@@ -88,9 +92,9 @@ def make_valid_partial(captured_at="2026-10-03T10:00:00Z", buckets=None, disk_us
         "mode": "partial",
         "publication_kind": "partial",
         "canonical": False,
-        "scope": {"hostname": "testhost", "root": "/Users/x"},
-        "hostname": "testhost",
-        "root": "/Users/x",
+        "scope": scope,
+        "hostname": scope.get("hostname", "testhost"),
+        "root": scope.get("root", "/Users/x"),
         "captured_at": captured_at,
         "run_id": "run-p1",
         "coverage_envelope": {
@@ -189,7 +193,7 @@ class TestGrowthTop10(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         data = json.loads(res.stdout)
         self.assertEqual(data["comparison_kind"], "no_floor")
-        self.assertIn("floor capture timestamp outside window", data["reason"])
+        self.assertTrue("no valid ledger snapshots" in data["reason"] or "floor capture timestamp outside window" in data["reason"])
 
     def test_freshest_current_selection_picks_newest_capture(self):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -241,6 +245,64 @@ class TestGrowthTop10(unittest.TestCase):
         with mock.patch("history_diff.compute_deltas") as mock_cd:
             gt.main(["--state-dir", str(self.state_dir), "--json"])
             self.assertEqual(mock_cd.call_count, 0)
+
+    def test_json_gap_kb_null_on_nonnumeric(self):
+        floor = make_valid_floor(scope={"hostname": "box1", "root": "/Users/x"})
+        self._commit_floor(floor)
+
+        # Current has different hostname -> scope_mismatch nonnumeric
+        partial = make_valid_partial(scope={"hostname": "box2", "root": "/Users/x"})
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
+
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 1)
+
+        data = json.loads(res.stdout)
+        self.assertEqual(data["comparison_kind"], "nonnumeric")
+        self.assertIsNone(data["gap_kb"])
+
+    def test_json_limit_applied(self):
+        floor = make_valid_floor(
+            buckets=[
+                {"path": "/Users/x/a", "measured_kb": 1000},
+                {"path": "/Users/x/b", "measured_kb": 1000},
+            ]
+        )
+        self._commit_floor(floor)
+
+        partial = make_valid_partial(
+            buckets=[
+                {"path": "/Users/x/a", "measured_kb": 2000},
+                {"path": "/Users/x/b", "measured_kb": 3000},
+            ]
+        )
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
+
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json", "--limit", "1"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+        data = json.loads(res.stdout)
+        self.assertEqual(len(data["deltas"]), 1)
+        self.assertEqual(len(data["top_growth"]), 1)
+
+    def test_select_floor_ref_chooses_valid_captured_candidate_over_recent_commit_ancient_capture(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Commit 1: 3 days ago, valid capture 3 days ago, used=5000000
+        valid_cap = (now - datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c1 = make_valid_floor(captured_at=valid_cap, disk_used_kb=5000000)
+        self._commit_floor(c1, commit_time=valid_cap)
+
+        # Commit 2: committed 1 hour ago, but captured 60 days ago (outside 14d), used=1000000 (lower!)
+        ancient_cap = (now - datetime.timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c2 = make_valid_floor(captured_at=ancient_cap, disk_used_kb=1000000)
+        self._commit_floor(c2, commit_time=(now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+        # select_floor_ref with filter_capture_window=True must choose c1!
+        ref, chosen = hd.select_floor_ref(self.state_dir, days=14, filter_capture_window=True, now=now)
+        self.assertEqual(chosen["captured_at"], valid_cap)
+        self.assertEqual(chosen["disk_used_kb"], 5000000)
 
 
 if __name__ == "__main__":

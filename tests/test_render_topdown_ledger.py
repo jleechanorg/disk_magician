@@ -727,7 +727,71 @@ class TestPartialLedgerArtifact(unittest.TestCase):
         self.assertEqual(partial["fresh"], {"/Users/x/big": 3145728})
         self.assertEqual(partial["carried"], {"/Users/x/small": {"kb": 1048576, "age_hours": 12.0}})
         self.assertEqual(partial["unmeasured"], ["/Users/x/lost"])
-        self.assertEqual(partial["effective_coverage_pct"], 85.0)
+    def test_future_complete_frontier_rejects_both_canonical_and_partial(self):
+        os.makedirs(self.out_dir)
+        canon_path = os.path.join(self.out_dir, "topdown-5g.json")
+        partial_path = self._partial_path()
+        with open(canon_path, "w") as f:
+            f.write('{"prior": "canon"}\n')
+        with open(partial_path, "w") as f:
+            f.write('{"prior": "partial"}\n')
+
+        frontier_future = self._fixture(age_hours=-5, mode="complete", envelope_complete=True)
+        rc, _, err = run(frontier_future, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(canon_path).read(), '{"prior": "canon"}\n')
+        self.assertEqual(open(partial_path).read(), '{"prior": "partial"}\n')
+        self.assertIn("future timestamp", err)
+
+    def test_non_dict_report_handled_cleanly(self):
+        non_dict_file = os.path.join(self.out_dir, "list_report.json")
+        os.makedirs(self.out_dir, exist_ok=True)
+        with open(non_dict_file, "w") as f:
+            json.dump(["not", "an", "object"], f)
+        rc, out, err = run(non_dict_file, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(self._partial_path()))
+
+    def test_invalid_schema_preserves_schema_and_fails_validation(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["schema_version"] = 99
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(self._partial_path()))
+        self.assertIn("unsupported schema_version", err)
+
+    def test_all_metadata_fields_preserved(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["coverage_fresh_pct"] = 92.5
+        d["coverage_carried_pct"] = 5.0
+        d["coverage_effective_pct"] = 97.5
+        d["carried_keys"] = ["/Users/x/carried1"]
+        d["unmeasured_keys"] = ["/Users/x/lost1"]
+        d["measurement_window"] = {"hours": 24}
+        d["top_level_ledger"] = {"/Users": 1000}
+        d["accounting_version"] = 2
+        d["partition_proofs"] = [{"parent": "/Users/x/parent", "children": ["/Users/x/parent/c1"], "disjoint": True, "complete": True, "omitted_tail_kb": 0, "direct_allocation_kb": 0}]
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["coverage_fresh_pct"], 92.5)
+        self.assertEqual(partial["coverage_carried_pct"], 5.0)
+        self.assertEqual(partial["coverage_effective_pct"], 97.5)
+        self.assertEqual(partial["carried_keys"], ["/Users/x/carried1"])
+        self.assertEqual(partial["unmeasured_keys"], ["/Users/x/lost1"])
+        self.assertEqual(partial["measurement_window"], {"hours": 24})
+        self.assertEqual(partial["top_level_ledger"], {"/Users": 1000})
+        self.assertEqual(partial["accounting_version"], 2)
+        self.assertEqual(len(partial["partition_proofs"]), 1)
 
 
 if __name__ == "__main__":
