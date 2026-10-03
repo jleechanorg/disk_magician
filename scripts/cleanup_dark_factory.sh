@@ -86,6 +86,18 @@ realpaths0() { python3 -c 'import os,sys
 for l in sys.stdin.buffer.read().split(b"\0"):
     if l: sys.stdout.buffer.write(os.path.realpath(l) + b"\n")'; }
 
+# Every existing ancestor of a reference dir must be searchable; otherwise
+# the dir only looks absent and its references would be skipped.
+require_reachable() {
+  local p="" part
+  local IFS=/
+  for part in ${1#/}; do
+    p="$p/$part"
+    [[ -e "$p" || -L "$p" ]] || return 0
+    if [[ -d "$p" && ! -x "$p" ]]; then scan_fail "unsearchable $p"; return 0; fi
+  done
+}
+
 # A symlinked root would let rm act on its target outside the gated path.
 root_ok() {
   if [[ -L "$1" ]]; then log "SKIP root (symlink): $1"; return 1; fi
@@ -194,6 +206,8 @@ remove() {
 if root_ok "$RELEASES_DIR"; then
   rel_logical="$RELEASES_DIR"
   RELEASES_DIR="$(phys "$RELEASES_DIR")"
+  require_reachable "$BIN_DIR"
+  require_reachable "$UNIT_DIR"
   # Scan reference dirs at their physical location, so a symlinked
   # ~/.local/bin or unit dir (dotfile managers) is traversed.
   [[ -d "$BIN_DIR" ]] && BIN_DIR="$(phys "$BIN_DIR")"

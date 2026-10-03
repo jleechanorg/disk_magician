@@ -300,6 +300,18 @@ printf '\177ELF\0%s/ref old/bin/dark-factory\0' "$R17" >"$H17/.local/bin/launche
 run7 "$H17" --clean --keep-releases 0 >"$T/t17.out" 2>&1 || true
 check "binary-referenced release with a space in its name kept" '[[ -d "$R17/ref old" && ! -e "$R17/r1" ]]'
 
+echo "Test 18: unsearchable ancestor of the unit dir refuses --clean"
+if can_lock; then
+  H18="$T/h18"; mk7 "$H18"
+  printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r1/bin/dark-factory\n' >"$H18/.config/systemd/user/df.service"
+  chmod 000 "$H18/.config"
+  rc=0; run7 "$H18" --clean --keep-releases 0 >"$T/t18.out" 2>&1 || rc=$?
+  chmod 755 "$H18/.config"
+  check "unsearchable ~/.config refuses --clean, nothing deleted" '[[ "$rc" -ne 0 && -d "$H18/.local/share/dark-factory/releases/r1" && -d "$H18/.local/share/dark-factory/releases/r2" ]]'
+else
+  check "SKIPPED unsearchable-ancestor case (privileged user)" 'true'
+fi
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
