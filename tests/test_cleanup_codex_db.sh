@@ -213,6 +213,29 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 7: Symlink rejection & external DB escape prevention
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 7: Symlink rejection and external DB escape prevention"
+EXTERNAL_DIR="$TMP_DIR/external"
+mkdir -p "$EXTERNAL_DIR"
+EXT_DB="$EXTERNAL_DIR/sensitive.sqlite"
+create_test_db "$EXT_DB" 100 50 2 # Has 50 freelist pages
+EXT_FREELIST_BEFORE=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+
+# Symlink inside mock codex directory pointing outside
+ln -s "$EXT_DB" "$MOCK_CODEX/logs_symlink.sqlite"
+
+OUT7_DIR=$("$SCRIPT" --clean --codex-dir "$MOCK_CODEX" 2>&1)
+EXT_FREELIST_AFTER=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+expect_eq "external DB untouched by directory scan" "$EXT_FREELIST_BEFORE" "$EXT_FREELIST_AFTER"
+
+# Direct --db pointing to a symlink
+OUT7_DIRECT=$("$SCRIPT" --clean --db "$MOCK_CODEX/logs_symlink.sqlite" 2>&1)
+EXT_FREELIST_AFTER_DIRECT=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+expect "refused direct symlink target" "refusing symlink target for safety" "$OUT7_DIRECT"
+expect_eq "external DB untouched by direct symlink flag" "$EXT_FREELIST_BEFORE" "$EXT_FREELIST_AFTER_DIRECT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]

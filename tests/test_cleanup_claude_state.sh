@@ -158,6 +158,34 @@ LINKED_WT="$ROOTS_DIR/linked-wt-cdef"
 git -C "$PARENT_REPO" worktree add -q -b linked-wt-branch "$LINKED_WT"
 while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$LINKED_WT" -type f)
 
+# (9) UNPUSHED COMMIT ON NON-HEAD BRANCH -- HEAD is on main and matches remote,
+# but a local feature branch has unpushed commits -> NEEDS-REVIEW.
+UNPUSHED_BRANCH="$ROOTS_DIR/unpushed-branch-ghij"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$UNPUSHED_BRANCH"
+git -C "$UNPUSHED_BRANCH" config user.email jleechan2015@users.noreply.github.com
+git -C "$UNPUSHED_BRANCH" config user.name tester
+git -C "$UNPUSHED_BRANCH" checkout -q -b feat-side-branch
+echo "side branch work" > "$UNPUSHED_BRANCH/side.txt"
+git -C "$UNPUSHED_BRANCH" add side.txt
+git -C "$UNPUSHED_BRANCH" commit -q -m "side branch unpushed commit"
+git -C "$UNPUSHED_BRANCH" checkout -q main
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$UNPUSHED_BRANCH" -type f)
+
+# (10) DEEP NESTED REPO (>3 levels deep) -- .git is at depth 5, has uncommitted changes -> NEEDS-REVIEW.
+DEEP_NESTED="$ROOTS_DIR/deep-nested-klmn"
+mkdir -p "$DEEP_NESTED/level1/level2/level3/level4"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$DEEP_NESTED/level1/level2/level3/level4/nested_repo"
+git -C "$DEEP_NESTED/level1/level2/level3/level4/nested_repo" config user.email jleechan2015@users.noreply.github.com
+git -C "$DEEP_NESTED/level1/level2/level3/level4/nested_repo" config user.name tester
+echo "nested dirty" >> "$DEEP_NESTED/level1/level2/level3/level4/nested_repo/README.md"
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$DEEP_NESTED" -type f)
+
+# (11) PROBE FAILURE FAILS CLOSED -- broken git repo -> NEEDS-REVIEW (fail closed).
+PROBE_FAIL="$ROOTS_DIR/probe-fail-opqr"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$PROBE_FAIL"
+echo "corrupted" > "$PROBE_FAIL/.git/refs/heads/main" # causes git commands to fail with fatal: corrupt ref
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$PROBE_FAIL" -type f)
+
 echo
 echo "=== Test 1: dry-run classifies each fixture correctly ==="
 OUT1="$TMP_ROOT/out1.txt"
@@ -175,6 +203,9 @@ assert_contains "(5) stash present -> NEEDS-REVIEW" "NEEDS-REVIEW $STASHED  (sta
 assert_contains "(6) unmeasurable age -> PRESERVE" "PRESERVE $UNMEASURABLE" "$OUT1_CONTENT"
 assert_contains "(7) symlink escape -> REFUSED" "REFUSED  $ROOTS_DIR/escape-symlink-yzab" "$OUT1_CONTENT"
 assert_contains "(8) linked worktree with parent stash -> ELIGIBLE" "ELIGIBLE $LINKED_WT" "$OUT1_CONTENT"
+assert_contains "(9) unpushed non-HEAD branch -> NEEDS-REVIEW" "NEEDS-REVIEW $UNPUSHED_BRANCH  (unpushed-commits-on-branches" "$OUT1_CONTENT"
+assert_contains "(10) deep nested dirty repo (>3 levels) -> NEEDS-REVIEW" "NEEDS-REVIEW $DEEP_NESTED  (dirty" "$OUT1_CONTENT"
+assert_contains "(11) probe error fails closed -> NEEDS-REVIEW" "NEEDS-REVIEW $PROBE_FAIL" "$OUT1_CONTENT"
 
 if [[ -d "$OLD_CLEAN" && -d "$DIRTY" && -d "$UNPUSHED" ]]; then
   record_pass "dry-run deleted nothing"
@@ -251,7 +282,7 @@ if [[ ! -d "$OLD_CLEAN" ]]; then
 else
   record_fail "(clean+approved) eligible old-clean deleted" "still present: $OLD_CLEAN"
 fi
-if [[ -d "$YOUNG" && -d "$DIRTY" && -d "$UNPUSHED" && -d "$STASHED" && -d "$UNMEASURABLE" ]]; then
+if [[ -d "$YOUNG" && -d "$DIRTY" && -d "$UNPUSHED" && -d "$STASHED" && -d "$UNMEASURABLE" && -d "$UNPUSHED_BRANCH" && -d "$DEEP_NESTED" && -d "$PROBE_FAIL" ]]; then
   record_pass "(clean+approved) NEEDS-REVIEW / young / unmeasurable all preserved"
 else
   record_fail "(clean+approved) NEEDS-REVIEW / young / unmeasurable all preserved" "one of the protected fixtures vanished"
@@ -294,6 +325,27 @@ if [[ $RC7 -ne 0 ]]; then
 else
   record_fail "(codex guard) nonzero exit" "expected nonzero exit, got $RC7"
 fi
+
+echo
+echo "=== Test 8: safety_gate refuses candidates protected by safety rules ==="
+FAKE_HOME8="$TMP_ROOT/home8"
+mkdir -p "$FAKE_HOME8/.config/disk-magician"
+cat > "$FAKE_HOME8/.config/disk-magician/safety.local.json" <<'JSON'
+{
+  "never_delete": ["*protected_by_safety*"]
+}
+JSON
+ROOTS_DIR8="$TMP_ROOT/state8"
+mkdir -p "$ROOTS_DIR8/protected_by_safety_candidate"
+echo "hello" > "$ROOTS_DIR8/protected_by_safety_candidate/file.txt"
+age_path_days_ago "$ROOTS_DIR8/protected_by_safety_candidate/file.txt" 30
+OUT8="$TMP_ROOT/out8.txt"
+env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR8" --min-age 7 --dry-run \
+  >"$OUT8" 2>&1
+OUT8_CONTENT=$(cat "$OUT8")
+assert_contains "(safety_gate) candidate protected by safety rule is REFUSED" "REFUSED" "$OUT8_CONTENT"
+assert_contains "(safety_gate) safety reason reported in output" "never_delete rule" "$OUT8_CONTENT"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

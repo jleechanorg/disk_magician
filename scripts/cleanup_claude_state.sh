@@ -26,10 +26,11 @@
 #     mtime in the tree, NOT directory mtime) >= --min-age days (default 7,
 #     the CLAUDE.md worktree floor -- may only be raised); unmeasurable
 #     content fails closed to age 0, i.e. preserved
-#   - every git repo/worktree found inside (bounded depth, default
-#     --maxdepth 3) is clean (no uncommitted/untracked changes), has no
-#     stash, and has no commits ahead of its upstream (or, when no upstream
-#     is configured, IS contained in at least one remote-tracking branch)
+#   - every git repo/worktree found inside (auditing nested repos at any
+#     depth, with node_modules, venvs, and .git trees pruned) is clean
+#     (no uncommitted/untracked changes), has no stash, and has no commits
+#     ahead of its upstream (or, when no upstream is configured, IS
+#     contained in at least one remote-tracking branch)
 #     -- any git repo failing this makes the WHOLE candidate NEEDS-REVIEW
 #   - no open file handles anywhere under the candidate (`lsof +D`,
 #     timeout-bounded); any lsof error, timeout, or unexpected output fails
@@ -48,12 +49,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${CLAUDE_STATE_MIN_AGE_DAYS:-7}"
 STATE_ROOT="${CLAUDE_STATE_ROOT:-$HOME/.claude/state}"
 LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-60}"
-GIT_MAXDEPTH="${CLAUDE_STATE_GIT_MAXDEPTH:-3}"
 
 usage() {
   cat <<'EOF'
@@ -79,9 +81,7 @@ Environment:
   CLAUDE_STATE_APPROVED=1        Required for --clean deletions.
   CLAUDE_STATE_MIN_AGE_DAYS      Default for --min-age when flag omitted.
   CLAUDE_STATE_ROOT              Default for --root when flag omitted.
-  CLAUDE_STATE_LSOF_TIMEOUT_SEC  lsof bound in seconds (default 20).
-  CLAUDE_STATE_GIT_MAXDEPTH      find -maxdepth for nested .git discovery
-                                 (default 3).
+  CLAUDE_STATE_LSOF_TIMEOUT_SEC  lsof bound in seconds (default 60).
 EOF
 }
 
@@ -122,6 +122,10 @@ else
 fi
 [[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
 
+if [[ "$DRY_RUN" == false ]]; then
+  sandbox_guard_roots "$STATE_ROOT"
+fi
+
 # realpath_or_empty <path> -- portable realpath (python3 is always present
 # on this machine; avoids depending on GNU coreutils' realpath -f).
 realpath_or_empty() {
@@ -156,7 +160,8 @@ claude_state_git_repos() {
   local candidate="$1"
   find "$candidate" \
     \( -name node_modules -o -name .venv -o -name venv -o -name __pycache__ \) -prune \
-    -o -name .git \( -type d -o -type f \) -print \
+    -o -name .git -type d -print -prune \
+    -o -name .git -type f -print \
     2>/dev/null
 }
 
@@ -218,13 +223,15 @@ claude_state_git_check() {
     fi
   fi
 
-  # Also verify that no other local branch holds unpushed commits
+  # Also verify that no other local branch holds unpushed commits (fail closed on probe error)
   local unpushed_branches
-  if unpushed_branches="$(git -C "$repo_dir" log --branches --not --remotes -n 1 --format="%h" 2>/dev/null)"; then
-    if [[ -n "$unpushed_branches" ]]; then
-      echo "unpushed-commits-on-branches"
-      return 1
-    fi
+  if ! unpushed_branches="$(git -C "$repo_dir" log --branches --not --remotes -n 1 --format="%h" 2>&1)"; then
+    echo "unpushed-branches-check-failed"
+    return 2
+  fi
+  if [[ -n "$unpushed_branches" ]]; then
+    echo "unpushed-commits-on-branches"
+    return 1
   fi
 
   echo "clean"
@@ -315,6 +322,13 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
   fi
   if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$candidate_real" == "$CODEX_DIR_REAL" ]] || [[ "$candidate_real" == "$CODEX_DIR_REAL"/* ]]; }; then
     refuse_path "resolves-into-codex" "$candidate"
+    REFUSED_COUNT=$((REFUSED_COUNT + 1))
+    continue
+  fi
+
+  safety_reason=""
+  if ! safety_reason="$(safety_gate "$candidate" 2>/dev/null)"; then
+    refuse_path "$safety_reason" "$candidate"
     REFUSED_COUNT=$((REFUSED_COUNT + 1))
     continue
   fi

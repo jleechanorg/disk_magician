@@ -24,10 +24,6 @@
 #
 # Known uncovered today (do NOT add without also fixing the sweeper that
 # should cover it — see PR description):
-#   $HOME/.claude/state            (34 GiB, 2026-09-22 measurement) — no
-#                                   sweeper in scripts/cleanup_*.sh targets
-#                                   this path; cleanup_supervisor_logs.sh
-#                                   only covers $HOME/.claude/supervisor.
 #   $DARWIN_USER_TEMP_DIR          (21 GiB, 2026-09-22 measurement) — only
 #                                   cleanup_sessions.sh touches this root,
 #                                   and only the narrow
@@ -117,6 +113,9 @@ $HOME/.dark-factory/runs	cleanup_agent_artifacts.sh	TARGETS array (14d retention
 
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
+
+# cleanup_claude_state.sh
+$HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs)
 
 # NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
 # and $HOME/.claude/projects are intentionally NOT registered here as

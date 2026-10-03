@@ -123,6 +123,10 @@ if [[ ${#TARGET_DBS[@]} -gt 0 ]]; then
       log "WARNING: Specified database does not exist: $db — skipping"
       continue
     fi
+    if [[ -L "$db" ]]; then
+      log "WARNING: Specified database is a symbolic link: $db — refusing symlink target for safety"
+      continue
+    fi
     CANDIDATES+=("$db")
   done
 else
@@ -145,8 +149,9 @@ else
   seen_dbs=()
   for db_pattern in "${primary_patterns[@]}"; do
     for db in $db_pattern; do
-      # Avoid duplicates and non-sqlite files
+      # Avoid duplicates, symlinks, and non-sqlite files
       [[ -f "$db" ]] || continue
+      [[ -L "$db" ]] && continue
       [[ "$db" == *-wal || "$db" == *-shm ]] && continue
       already_seen=false
       for s in "${seen_dbs[@]:-}"; do
@@ -169,6 +174,8 @@ if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
   exit 0
 fi
 
+CODEX_DIR_REAL="$(cd "$CODEX_DIR" 2>/dev/null && pwd -P || echo "")"
+
 total_checked=0
 total_vacuumed=0
 total_reclaimable=0
@@ -182,10 +189,24 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  # Fail-closed safety assertion: NEVER delete database files
+  # Fail-closed safety assertion: NEVER follow symlinks or mutate non-regular files
+  if [[ -L "$db" ]]; then
+    log "WARNING: $db is a symbolic link — refusing to mutate symlink target"
+    continue
+  fi
+
   if [[ ! -f "$db" ]]; then
     log "WARNING: $db is not a regular file — skipping"
     continue
+  fi
+
+  # Verify canonical path remains inside the intended directory
+  db_dir_real="$(cd "$(dirname "$db")" 2>/dev/null && pwd -P || echo "")"
+  if [[ ${#TARGET_DBS[@]} -eq 0 && -n "$CODEX_DIR_REAL" ]]; then
+    if [[ "$db_dir_real" != "$CODEX_DIR_REAL" ]]; then
+      log "WARNING: $db directory ($db_dir_real) resolves outside $CODEX_DIR ($CODEX_DIR_REAL) — skipping"
+      continue
+    fi
   fi
 
   total_checked=$(( total_checked + 1 ))
