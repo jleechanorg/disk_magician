@@ -11,17 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STATE_DIR="$(python3 "$SCRIPT_DIR/resolve_state_repo_path.py")"
 SNAP_BIN="${DISK_MAGICIAN_SNAPSHOT_BIN:-$SCRIPT_DIR/disk_snapshot.sh}"
-FRONTIER="${DISK_MAGICIAN_FRONTIER_JSON:-$HOME/.disk_magician_state/frontier_last.json}"
+RECEIPT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+FRONTIER="${DISK_MAGICIAN_FRONTIER_JSON:-$RECEIPT_STATE_DIR/frontier_last.json}"
 KEEP="${DISK_MAGICIAN_EVIDENCE_KEEP:-4}"
 log() { echo "[snapshot_commit] $*"; }
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
 
-# Concurrency guard (relocated from disk_magician.sh's legacy run_snapshot,
-# bead jleechan-q9mu): mkdir-based lock, stale-lock TTL 90 min (dead pid +
-# old enough -> steal), contention = log + exit 0 (skip this run, never
-# queue). This orchestrator is now the only path a 35-min tick reaches, so
-# the lock has to live here rather than in the now-bypassed caller.
-SNAPSHOT_LOCK_DIR="${HOME}/.disk_magician_state/snapshot.lock"
+# Concurrency guard: Use receipt STATE dir for snapshot lock override, distinct from state repository dir.
+SNAPSHOT_LOCK_DIR="${RECEIPT_STATE_DIR}/snapshot.lock"
 SNAPSHOT_LOCK_TTL_SEC=5400
 acquire_snapshot_lock() {
   mkdir -p "$(dirname "$SNAPSHOT_LOCK_DIR")"
@@ -44,18 +41,38 @@ acquire_snapshot_lock() {
   echo "snapshot: lock held by pid ${held_pid:-?} (age ${age}s) — skipping this run"
   return 1
 }
-acquire_snapshot_lock || exit 0
+
+if ! acquire_snapshot_lock; then
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit \
+    --outcome skipped_lock \
+    --reason "lock held by another run" \
+    --lock '{"held": true, "reason": "contention"}' >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# Record started before work
+RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commit --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}") || {
+  log "ERROR: failed to record receipt begin"
+  exit 1
+}
 
 # 1. Ensure the state repo exists (local-only auto-init).
 if [[ ! -f "$STATE_DIR/MACHINE" || ! -d "$STATE_DIR/.git" ]]; then
   DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" init >/dev/null 2>&1 || {
-    log "ERROR: state repo init failed for $STATE_DIR"; exit 1; }
+    log "ERROR: state repo init failed for $STATE_DIR"
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+      --outcome error --reason "state repo init failed" >/dev/null 2>&1 || true
+    exit 1
+  }
 fi
 mkdir -p "$STATE_DIR/snapshots" "$STATE_DIR/ledger" "$STATE_DIR/config" "$STATE_DIR/evidence"
 
 # 2. Write the snapshot.
 if ! bash "$SNAP_BIN" --output "$STATE_DIR/snapshots/disk_snapshot.json"; then
-  log "ERROR: snapshot writer failed"; exit 1
+  log "ERROR: snapshot writer failed"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error --reason "snapshot writer failed" >/dev/null 2>&1 || true
+  exit 1
 fi
 
 # 3. Refresh the 5G ledger (fail-open) and evidence retention.
@@ -68,38 +85,57 @@ python3 "$SCRIPT_DIR/retain_evidence.py" --frontier "$FRONTIER" \
 CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 [[ -n "$CFG" && -f "$CFG" ]] && cp "$CFG" "$STATE_DIR/config/config.json"
 
-# 5. Commit. Always commit (no diff-skip): each 35-min tick is a time-series
-# data point, and skipping identical-content ticks would silently break
-# history continuity (e.g. "disk free was still 100G at 14:35" is itself
-# meaningful, not noise) — deviation from an earlier draft that skipped
-# no-op commits, corrected by tests/test_snapshot_commit.sh Test 2 (history
-# must accrue every run).
-# A prior diagnostic may have marked the generated ledger assume-unchanged.
-# That would make git add silently skip the only <=5 GiB mega-table used for
-# attribution, even when the renderer refreshed it successfully. The status
-# sidecar is unmasked too, so a partial scan cannot hide the publication gate.
+# Capture actual snapshot and renderer publication status
+RENDER_STATUS="unknown"
+if [[ -f "$STATE_DIR/ledger/topdown-5g.status.json" ]]; then
+  RENDER_STATUS=$(python3 -c "import json; print(json.load(open('$STATE_DIR/ledger/topdown-5g.status.json')).get('status', 'unknown'))" 2>/dev/null || echo "unknown")
+elif [[ -f "$STATE_DIR/ledger/topdown-5g.json" ]]; then
+  RENDER_STATUS="published"
+fi
+
+# 5. Commit.
 git_id update-index --no-assume-unchanged \
   ledger/topdown-5g.json ledger/topdown-5g.md ledger/topdown-5g.status.json \
   2>/dev/null || true
 git_id add -A
-git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty
+if ! git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty; then
+  log "ERROR: git commit failed"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error \
+    --reason "git commit failed" \
+    --publication '{"committed": false, "pushed": false, "status": "commit_failed"}' >/dev/null 2>&1 || true
+  exit 1
+fi
 log "committed snapshot"
 
-# 6. Fail-safe push (never fatal). Capture (don't discard) the push guard's
-# output: a rejected push is often security-relevant (secret scan, credential
-# URL, history rewrite) and swallowing the reason would turn a real rejection
-# into an indistinguishable "will retry next run" — the guard's whole point
-# is to be visible when it fires.
+# 6. Fail-safe push (never fatal).
+PUSHED=false
+PUSH_STATUS="local_only"
+PUSH_OUT=""
 if git -C "$STATE_DIR" remote get-url origin >/dev/null 2>&1; then
   PUSH_OUT="$(DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" push 2>&1)"
   PUSH_RC=$?
   if [[ $PUSH_RC -eq 0 ]]; then
     log "pushed to origin"
+    PUSHED=true
+    PUSH_STATUS="pushed"
   else
     log "push failed — commit kept local, will retry next run"
+    PUSHED=false
+    PUSH_STATUS="push_failed"
   fi
   [[ -n "$PUSH_OUT" ]] && log "$PUSH_OUT"
 else
   log "local-only (no remote)"
 fi
+
+POSTCONDITION="{\"renderer_status\": \"$RENDER_STATUS\", \"freed_bytes\": null}"
+PUBLICATION="{\"committed\": true, \"pushed\": $PUSHED, \"status\": \"$PUSH_STATUS\"}"
+
+python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit \
+  --run-id "$RECEIPT_RUN_ID" \
+  --outcome success \
+  --postcondition "$POSTCONDITION" \
+  --publication "$PUBLICATION" >/dev/null 2>&1 || true
+
 exit 0
