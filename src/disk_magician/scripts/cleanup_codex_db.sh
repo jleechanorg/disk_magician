@@ -91,6 +91,19 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if ! [[ "$BUSY_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS must be an unsigned integer, got: $BUSY_TIMEOUT_MS" >&2
+  exit 2
+fi
+if ! [[ "$MIN_FREELIST" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --min-freelist / CODEX_DB_MIN_FREELIST must be an unsigned integer, got: $MIN_FREELIST" >&2
+  exit 2
+fi
+if ! [[ "$CHUNK_SIZE" =~ ^[0-9]+$ && "$CHUNK_SIZE" -gt 0 ]]; then
+  echo "ERROR: --chunk-size / CODEX_DB_CHUNK_SIZE must be a positive integer, got: $CHUNK_SIZE" >&2
+  exit 2
+fi
+
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
@@ -200,13 +213,18 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  # Verify canonical path remains inside the intended directory
+  # Hard link rejection: multiple hard links can link outside authorized directory
+  link_count="$(stat -f %l "$db" 2>/dev/null || stat -c %h "$db" 2>/dev/null || echo 1)"
+  if [[ "$link_count" -gt 1 ]]; then
+    log "WARNING: $db has multiple hard links (link count $link_count) — refusing hard-linked database for safety"
+    continue
+  fi
+
+  # Verify canonical path remains inside the intended directory (unconditionally for all candidates)
   db_dir_real="$(cd "$(dirname "$db")" 2>/dev/null && pwd -P || echo "")"
-  if [[ ${#TARGET_DBS[@]} -eq 0 && -n "$CODEX_DIR_REAL" ]]; then
-    if [[ "$db_dir_real" != "$CODEX_DIR_REAL" ]]; then
-      log "WARNING: $db directory ($db_dir_real) resolves outside $CODEX_DIR ($CODEX_DIR_REAL) — skipping"
-      continue
-    fi
+  if [[ -z "$CODEX_DIR_REAL" || "$db_dir_real" != "$CODEX_DIR_REAL" ]]; then
+    log "WARNING: $db directory ($db_dir_real) resolves outside $CODEX_DIR ($CODEX_DIR_REAL) — skipping"
+    continue
   fi
 
   total_checked=$(( total_checked + 1 ))
@@ -224,7 +242,7 @@ for db in "${CANDIDATES[@]}"; do
 
   if [[ $pragma_rc -ne 0 ]]; then
     if [[ "$pragma_out" == *"database is locked"* || $pragma_rc -eq 5 ]]; then
-      log "WARNING: Database locked (busy timeout reached): $db — skipping"
+      log "WARNING: Database is locked (busy timeout reached): $db — skipping"
       total_locked=$(( total_locked + 1 ))
     else
       log "WARNING: Failed to read pragmas from $db (code $pragma_rc): $pragma_out — skipping"

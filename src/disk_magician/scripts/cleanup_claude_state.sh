@@ -383,6 +383,7 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
   else
     echo "DELETING $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
     rm -rf -- "$candidate"
+    deletion_log "cleanup_claude_state.sh" "remove_dormant_state" "$size_kb_val" "$candidate"
   fi
 done
 

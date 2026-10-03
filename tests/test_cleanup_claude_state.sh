@@ -11,6 +11,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_claude_state.sh"
+# shellcheck source=tests/lib/sandbox_env.sh
+source "$SCRIPT_DIR/lib/sandbox_env.sh"
 
 TMP_ROOT=$(mktemp -d -t cleanup_claude_state.XXXXXX)
 BG_PIDS=()
@@ -22,6 +24,20 @@ cleanup() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+MOCK_LSOF="$TMP_ROOT/mock_lsof.sh"
+cat > "$MOCK_LSOF" <<'EOF'
+#!/usr/bin/env bash
+dir="${@: -1}"
+if [[ -n "${TEST_LSOF_ACTIVE_DIR:-}" && -n "${TEST_LSOF_ACTIVE_PID:-}" ]]; then
+  if [[ "$dir" == *"$TEST_LSOF_ACTIVE_DIR"* ]] && kill -0 "$TEST_LSOF_ACTIVE_PID" 2>/dev/null; then
+    echo "tail $TEST_LSOF_ACTIVE_PID $USER 3r REG $dir/README.md"
+    exit 0
+  fi
+fi
+exit 1
+EOF
+chmod +x "$MOCK_LSOF"
 
 PASS=0
 FAIL=0
@@ -189,7 +205,7 @@ while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$PROBE_FAIL" 
 echo
 echo "=== Test 1: dry-run classifies each fixture correctly ==="
 OUT1="$TMP_ROOT/out1.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT1" 2>&1
 OUT1_CONTENT=$(cat "$OUT1")
@@ -228,6 +244,7 @@ sleep 0.3
 
 OUT2="$TMP_ROOT/out2.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  TEST_LSOF_ACTIVE_DIR="$LSOF_ACTIVE" TEST_LSOF_ACTIVE_PID="$TAIL_PID" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT2" 2>&1
 OUT2_CONTENT=$(cat "$OUT2")
@@ -248,7 +265,7 @@ EOF
 chmod +x "$FAKE_BIN/lsof"
 
 OUT3="$TMP_ROOT/out3.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$FAKE_BIN/lsof" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT3" 2>&1
 OUT3_CONTENT=$(cat "$OUT3")
@@ -257,7 +274,7 @@ assert_contains "(lsof failure) old-clean now PRESERVE (fail closed)" "PRESERVE 
 echo
 echo "=== Test 4: --clean without CLAUDE_STATE_APPROVED=1 refuses, deletes nothing ==="
 OUT4="$TMP_ROOT/out4.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
   >"$OUT4" 2>&1
 OUT4_CONTENT=$(cat "$OUT4")
@@ -272,6 +289,9 @@ echo
 echo "=== Test 5: --clean WITH CLAUDE_STATE_APPROVED=1 deletes only ELIGIBLE ==="
 OUT5="$TMP_ROOT/out5.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
   >"$OUT5" 2>&1
 OUT5_CONTENT=$(cat "$OUT5")
@@ -340,12 +360,32 @@ mkdir -p "$ROOTS_DIR8/protected_by_safety_candidate"
 echo "hello" > "$ROOTS_DIR8/protected_by_safety_candidate/file.txt"
 age_path_days_ago "$ROOTS_DIR8/protected_by_safety_candidate/file.txt" 30
 OUT8="$TMP_ROOT/out8.txt"
-env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" \
+env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR8" --min-age 7 --dry-run \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
 assert_contains "(safety_gate) candidate protected by safety rule is REFUSED" "REFUSED" "$OUT8_CONTENT"
 assert_contains "(safety_gate) safety reason reported in output" "never_delete:" "$OUT8_CONTENT"
+
+echo
+echo "=== Test 9: sandbox_guard_roots aborts if candidate is outside sandbox ==="
+OUT9="$TMP_ROOT/out9.txt"
+set +e
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT/unrelated_sandbox" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
+  >"$OUT9" 2>&1
+RC9=$?
+set -e
+OUT9_CONTENT=$(cat "$OUT9")
+if [[ $RC9 -eq 90 ]]; then
+  record_pass "(sandbox guard) aborts with rc=90 when outside sandbox"
+else
+  record_fail "(sandbox guard) aborts with rc=90 when outside sandbox" "expected exit code 90, got $RC9"
+fi
+assert_contains "(sandbox guard) fatal sandbox message in output" "FATAL sandbox_guard_roots" "$OUT9_CONTENT"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
