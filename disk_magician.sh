@@ -21,11 +21,15 @@ Commands:
   history       Show historical growth trends from git snapshots.
   history diff [ref]  Diff two committed ledger/topdown-5g.json snapshots.
   history diff --days N  Attribute growth from the lowest-used ledger in N days.
+  history growth-top10 [--days N] [--limit N]  Top-N growing paths since the
+                N-day floor, reading current usage from the freshest local
+                ledger (partial-scan aware — no du, <10s).
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
+  ledger-freshness       Print OK|STALE|UNKNOWN for the published ledger, accepting a fresh valid partial scan.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
@@ -224,6 +228,11 @@ case "$CMD" in
       python3 "$SCRIPT_DIR/scripts/history_diff.py" "$@"
       exit $?
     fi
+    if [[ "${1:-}" == "growth-top10" ]]; then
+      shift
+      python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
+      exit $?
+    fi
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
     # Execute history from the BACKUP_DIR context so git history is tracked there
@@ -243,6 +252,9 @@ case "$CMD" in
     ;;
   check_launchd_fleet|check-launchd-fleet)
     "$SCRIPT_DIR/scripts/check_launchd_fleet.sh" "$@"
+    ;;
+  ledger_freshness|ledger-freshness)
+    "$SCRIPT_DIR/scripts/check_ledger_freshness.sh" "$@"
     ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
