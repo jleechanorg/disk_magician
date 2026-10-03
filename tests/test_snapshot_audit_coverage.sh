@@ -140,7 +140,7 @@ cat > "$DEDUP_CONFIG" <<JSON
 JSON
 
 DEDUP_OUT="$WORK/dedup_snap.json"
-DISK_MAGICIAN_CONFIG="$DEDUP_CONFIG" timeout 120 "$SNAP_SCRIPT" --output "$DEDUP_OUT" >/dev/null 2>&1
+DISK_MAGICIAN_STATE_DIR="$WORK/dedup_state" DISK_MAGICIAN_CONFIG="$DEDUP_CONFIG" timeout 120 "$SNAP_SCRIPT" --output "$DEDUP_OUT" >/dev/null 2>&1
 
 if [[ -f "$DEDUP_OUT" ]] && python3 -m json.tool < "$DEDUP_OUT" >/dev/null 2>&1; then
   ok "dedup snapshot produced valid JSON"

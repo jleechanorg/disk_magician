@@ -465,7 +465,8 @@ timeout_keys=()
 DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
 RETRY_TEMP_FILE=$(mktemp -t disk_magician_retries.XXXXXX)
 LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
+CARRY_FRESH_FILE=$(mktemp -t disk_magician_carry_fresh.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE" "$CARRY_FRESH_FILE"; }
 trap _cleanup_dirs_temp EXIT
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
@@ -647,6 +648,18 @@ if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
   MEASUREMENT_BUDGET_EXHAUSTED=true
 fi
 
+# ────────── CARRY-FORWARD (last-good values for timed-out keys) ──────────
+# A timed-out key is never a silent zero: it is carried from the last-good
+# store (with its age) or reported unmeasured. directories[] stays fresh-only.
+CARRY_STATE_FILE="$SNAPSHOT_STATE_DIR/last_good_measurements.json"
+CARRY_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+CARRY_JSON=""
+if python3 "$SCRIPT_DIR/snapshot_carry.py" from-tsv --tsv "$DIRS_TEMP_FILE" > "$CARRY_FRESH_FILE" 2>/dev/null; then
+  CARRY_JSON=$(python3 "$SCRIPT_DIR/snapshot_carry.py" merge --state "$CARRY_STATE_FILE" \
+    --fresh "$CARRY_FRESH_FILE" --now "$CARRY_NOW" --max-age-hours 72 --config "$CONFIG_FILE" 2>/dev/null || true)
+fi
+[[ -n "$CARRY_JSON" ]] || CARRY_JSON='{"fresh":{},"carried":{},"unmeasured":[],"gap_estimate_kb":{}}'
+
 # ────────── DEDUP TRIE (schema_version 2 — fixes inflated coverage_pct) ──────────
 # `tracked_total_kb` above is a naive sum with no overlap awareness, and the
 # config has real overlaps today: claude_root+claude_projects (parent+child),
@@ -663,7 +676,7 @@ fi
 # trie entirely and always counted — resolving containment for an expanded
 # glob is out of scope for this pass; none of the confirmed overlaps today
 # are glob-based.
-DEDUP_JSON=$(python3 - "$DIRS_TEMP_FILE" "$HOME" <<'PY' 2>/dev/null
+DEDUP_JSON=$(SNAP_CARRY_JSON="$CARRY_JSON" python3 - "$DIRS_TEMP_FILE" "$HOME" <<'PY' 2>/dev/null
 import json, os, sys
 
 temp_file, home = sys.argv[1], sys.argv[2]
@@ -723,21 +736,59 @@ try:
         return None, None
 
     for depth, is_symlink_alias, real, key, val in resolvable:
+        # A timed-out (null) entry measured nothing: it must neither count nor
+        # shadow a fresh child (a null claude_root used to hide claude_projects).
+        if val is None:
+            continue
         owner, reason = covered_by(real)
         if owner is not None:
             excluded.append({"key": key, "covered_by": owner, "reason": reason})
             continue
         kept_real_paths.append((real, key))
-        if val is not None:
-            tracked_total_kb_deduped += val
+        tracked_total_kb_deduped += val
 
     for key, val, src_path in rows:
         if key in unresolvable_keys and val is not None:
             tracked_total_kb_deduped += val
 
+    # Carried and gap-estimate entries are admitted only when they overlap no
+    # fresh entry and no earlier (shallower) carried entry: fresh always wins,
+    # and overlapping carried entries count once. This undercounts, never double counts.
+    carry = json.loads(os.environ.get("SNAP_CARRY_JSON") or "{}")
+    src_of = {key: src for key, _val, src in rows}
+
+    def real_of(key):
+        src = src_of.get(key)
+        if not src or is_glob(src):
+            return None
+        return os.path.realpath(os.path.normpath(expand(src)))
+
+    def overlaps(a, b):
+        return a == b or a.startswith(b.rstrip(os.sep) + os.sep) or b.startswith(a.rstrip(os.sep) + os.sep)
+
+    taken = [r for r, _k in kept_real_paths]
+
+    def admit(cands):
+        total = 0
+        placed = []
+        for key, kb in cands:
+            r = real_of(key)
+            if r is not None:
+                placed.append((len(r.split(os.sep)), r, kb))
+        for _d, r, kb in sorted(placed):
+            if any(overlaps(r, t) for t in taken):
+                continue
+            taken.append(r)
+            total += kb
+        return total
+
+    carried_kb_deduped = admit([(k, v["kb"]) for k, v in (carry.get("carried") or {}).items()])
+    gap_kb = admit(list((carry.get("gap_estimate_kb") or {}).items()))
     print(json.dumps({
         "tracked_total_kb_deduped": tracked_total_kb_deduped,
         "dedup_excluded": excluded,
+        "carried_kb_deduped": carried_kb_deduped,
+        "gap_kb": gap_kb,
     }))
 except Exception:
     # Fail open to "no dedup applied" rather than crashing the snapshot —
@@ -749,6 +800,8 @@ if [[ -z "$DEDUP_JSON" ]]; then
   DEDUP_JSON=$(printf '{"tracked_total_kb_deduped": null, "dedup_excluded": []}')
 fi
 tracked_total_kb_deduped=$(python3 -c "import json,sys; v=json.loads(sys.argv[1])['tracked_total_kb_deduped']; print(v if v is not None else '')" "$DEDUP_JSON")
+read -r carried_kb_deduped gap_kb < <(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('carried_kb_deduped') or 0, d.get('gap_kb') or 0)" "$DEDUP_JSON" 2>/dev/null || echo "0 0")
+carried_kb_deduped="${carried_kb_deduped:-0}"; gap_kb="${gap_kb:-0}"
 dedup_excluded_json=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['dedup_excluded']))" "$DEDUP_JSON")
 if [[ -z "$tracked_total_kb_deduped" ]]; then
   # Dedup pass failed open — fall back to the raw (undeduped) total so
@@ -766,9 +819,16 @@ coverage_pct_raw_v1=$(awk "BEGIN{
   if (used <= 0) { print 0; exit }
   printf \"%.1f\", 100 * $tracked_total_kb / used
 }")
+# fresh + carried + gap + unconfigured partition the used space (see spec section 4).
+coverage_carried_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $carried_kb_deduped / $disk_used_kb }")
+coverage_effective_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * ($tracked_total_kb_deduped + $carried_kb_deduped) / $disk_used_kb }")
+coverage_gap_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $gap_kb / $disk_used_kb }")
+coverage_unconfigured_pct=$(awk "BEGIN{ v = 100 - $coverage_effective_pct - $coverage_gap_pct; if (v < 0) v = 0; printf \"%.1f\", v }")
 warning=""
-if (( $(awk "BEGIN{print ($coverage_pct < 70)}") )); then
+if (( $(awk "BEGIN{print ($coverage_effective_pct < 70)}") )); then
   warning="low_coverage"
+elif python3 -c "import json,sys; sys.exit(0 if any(v['age_hours'] > 24 for v in json.loads(sys.argv[1]).get('carried', {}).values()) else 1)" "$CARRY_JSON" 2>/dev/null; then
+  warning="degraded_carry"
 fi
 
 # ────────── SNAPSHOT METADATA + STALENESS ──────────
@@ -989,6 +1049,12 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_VM_VOLUME_USED_GB="$vm_volume_used_gb" \
   SNAP_COVERAGE_PCT="$coverage_pct" \
   SNAP_COVERAGE_PCT_RAW_V1="$coverage_pct_raw_v1" \
+  SNAP_COVERAGE_CARRIED_PCT="$coverage_carried_pct" \
+  SNAP_COVERAGE_EFFECTIVE_PCT="$coverage_effective_pct" \
+  SNAP_COVERAGE_TIMEOUT_GAP_PCT="$coverage_gap_pct" \
+  SNAP_COVERAGE_UNCONFIGURED_PCT="$coverage_unconfigured_pct" \
+  SNAP_DISK_USED_KB="$disk_used_kb" \
+  SNAP_CARRY_JSON="$CARRY_JSON" \
   SNAP_TRACKED_TOTAL_KB_RAW="$tracked_total_kb" \
   SNAP_TRACKED_TOTAL_KB_DEDUPED="$tracked_total_kb_deduped" \
   SNAP_DEDUP_EXCLUDED="$dedup_excluded_json" \
@@ -1104,6 +1170,32 @@ try:
                     except ValueError:
                         dirs[k] = None
     data["directories"] = dirs
+    # Additive fresh/carried/unmeasured accounting (schema_version stays 2).
+    # snapshot_coverage_pct keeps its fresh-only meaning.
+    try:
+        carry = json.loads(os.environ.get("SNAP_CARRY_JSON") or "{}")
+    except (TypeError, ValueError):
+        carry = {}
+    carried = carry.get("carried") or {}
+    unmeasured = list(carry.get("unmeasured") or [])
+    for k, v in dirs.items():  # G2: a null directory is always carried or unmeasured
+        if v is None and k not in carried and k not in unmeasured:
+            unmeasured.append(k)
+    data["coverage_fresh_pct"] = data["snapshot_coverage_pct"]
+    data["coverage_carried_pct"] = float(os.environ.get("SNAP_COVERAGE_CARRIED_PCT") or 0.0)
+    data["coverage_effective_pct"] = float(os.environ.get("SNAP_COVERAGE_EFFECTIVE_PCT") or 0.0)
+    data["coverage_timeout_gap_pct"] = float(os.environ.get("SNAP_COVERAGE_TIMEOUT_GAP_PCT") or 0.0)
+    data["coverage_unconfigured_pct"] = float(os.environ.get("SNAP_COVERAGE_UNCONFIGURED_PCT") or 0.0)
+    td = data.get("topdown_coverage")
+    used_kb = int(os.environ.get("SNAP_DISK_USED_KB") or 0)
+    if (isinstance(td, dict) and not td.get("stale") and used_kb > 0
+            and isinstance(td.get("measured_total_kb"), int)
+            and (td.get("age_hours") is None or td["age_hours"] <= 36)):
+        data["coverage_frontier_pct"] = round(100.0 * td["measured_total_kb"] / used_kb, 1)
+    data["carried_keys"] = [{"key": k, "kb": v["kb"], "age_hours": v["age_hours"]} for k, v in carried.items()]
+    data["unmeasured_keys"] = unmeasured
+    data["fresh_keys_count"] = sum(1 for v in dirs.values() if v is not None)
+    data["total_keys_count"] = len(dirs)
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)
@@ -1113,6 +1205,12 @@ PY
 if [[ -z "$pretty_json" ]]; then
   echo "ERROR: snapshot JSON failed validation — refusing to write" >&2
   exit 1
+fi
+
+# Persist fresh non-null values as the new last-good store (partial runs included).
+if [[ "$DRY_RUN" == false ]]; then
+  python3 "$SCRIPT_DIR/snapshot_carry.py" update --state "$CARRY_STATE_FILE" \
+    --fresh "$CARRY_FRESH_FILE" --now "$CARRY_NOW" 2>/dev/null || true
 fi
 
 if [[ -n "$OUTPUT" && "$DRY_RUN" == false ]]; then

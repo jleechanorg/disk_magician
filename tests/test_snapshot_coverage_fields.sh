@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SNAP="$REPO_ROOT/scripts/disk_snapshot.sh"
 WORK="$(mktemp -d -t dm_cov_fields.XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap '[[ -n "${KEEP:-}" ]] || rm -rf "$WORK"' EXIT
 PASS=0; FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
@@ -78,7 +78,7 @@ PY
   then ok "$name"; else bad "$name ($(tail -1 "$WORK/pyerr"))"; fi
 }
 
-SIZES="claude_root:30000000,claude_projects:10000000,projects:40000000,other:5000000,gone:1000000"
+SIZES="/.claude/projects:10000000,/.claude:30000000,/projects:40000000,/other:5000000,/gone:1000000"
 
 echo "── baseline: nothing times out ──"
 rm -f "$STATE/last_good_measurements.json"
