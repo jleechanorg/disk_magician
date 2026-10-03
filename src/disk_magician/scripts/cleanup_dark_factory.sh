@@ -81,6 +81,10 @@ realpaths() { python3 -c 'import os,sys
 for l in sys.stdin.buffer:  # bytes: paths need not be valid UTF-8
     l = l.rstrip(b"\n")
     if l: sys.stdout.buffer.write(os.path.realpath(l) + b"\n")'; }
+# Same, for NUL-delimited input (names may contain newlines).
+realpaths0() { python3 -c 'import os,sys
+for l in sys.stdin.buffer.read().split(b"\0"):
+    if l: sys.stdout.buffer.write(os.path.realpath(l) + b"\n")'; }
 
 # A symlinked root would let rm act on its target outside the gated path.
 root_ok() {
@@ -207,7 +211,7 @@ if root_ok "$RELEASES_DIR"; then
   # HOME escaped for a sed replacement (& \ and the # delimiter are special).
   home_r="$(printf '%s' "$HOME" | sed 's/[&\\#]/\\&/g')"
   {
-    find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
+    find "$BIN_DIR" -maxdepth 1 -type l -print0 2>/dev/null | realpaths0 || true
     # Text references: bin shims, unit files (%h expanded), live argv.
     {
       while IFS= read -r -d '' f; do  # dotfiles included; symlinks read through to their target
@@ -226,8 +230,18 @@ if root_ok "$RELEASES_DIR"; then
       done <"$units"
       cat "$LIVE_REFS"
     } | tr '\0' '\n' | python3 -c 'import re,sys
-for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
-    sys.stdout.buffer.write(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), l))' \
+# systemd C escapes: \a \b \f \n \r \t \v \\ \" \x27 \s, \nnn, \xHH, \uXXXX, \UXXXXXXXX
+M = {b"a": b"\a", b"b": b"\b", b"f": b"\f", b"n": b"\n", b"r": b"\r", b"t": b"\t",
+     b"v": b"\v", b"\\": b"\\", b"\"": b"\"", b"\x27": b"\x27", b"s": b" "}
+def dec(m):
+    e = m.group(1)
+    if e[:1] == b"x": return bytes([int(e[1:], 16)])
+    if e[:1] in (b"u", b"U"): return chr(int(e[1:], 16)).encode("utf-8", "surrogatepass")
+    if e[:1].isdigit(): return bytes([int(e, 8) & 255])
+    return M[e]
+pat = re.compile(rb"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{3}|[abfnrtvs\\\"\x27])")
+for l in sys.stdin.buffer:
+    sys.stdout.buffer.write(pat.sub(dec, l))' \
       | sed -e "s#%h#$home_r#g" -e "s#\${HOME}#$home_r#g" -e "s#\$HOME#$home_r#g" -e "s#~/#$home_r/#g" \
       | tee "$REFTEXT" | { LC_ALL=C grep -aoE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"

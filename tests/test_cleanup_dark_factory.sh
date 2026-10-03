@@ -283,6 +283,16 @@ else
   check "SKIPPED failed-removal case (privileged user)" 'true'
 fi
 
+echo "Test 16: systemd C escapes beyond \\xHH; bin symlink with a newline in its name"
+H16="$T/h16"; mk7 "$H16"; R16="$H16/.local/share/dark-factory/releases"
+mkdir -p "$R16/r 0/bin"; echo x >"$R16/r 0/bin/dark-factory"; age "$R16/r 0" 120
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/r\\s0/bin/dark-factory\nEnvironment=X=%%h/.local/share/dark\\055factory/releases/r1/bin\n' >"$H16/.config/systemd/user/esc.service"
+ln -s "$R16/r2/bin/dark-factory" "$H16/.local/bin/$(printf 'nl\nname')"
+run7 "$H16" --clean --keep-releases 0 >"$T/t16.out" 2>&1 || true
+check "release named via \\s escape kept" '[[ -d "$R16/r 0" ]]'
+check "release named via octal \\055 escape kept" '[[ -d "$R16/r1" ]]'
+check "release linked from a bin symlink with a newline in its name kept" '[[ -d "$R16/r2" && ! -e "$R16/r3" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
