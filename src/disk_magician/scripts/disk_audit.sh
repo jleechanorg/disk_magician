@@ -499,6 +499,13 @@ if [[ "$MODE" == "clean" ]]; then
         echo "  Agent artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
     fi
 
+    # Canonical Dark Factory cleanup (releases, runs, sessions)
+    if [[ "${AGENT_ARTIFACTS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_dark_factory.sh" ]]; then
+        run_category "Dark Factory artifacts" "$SCRIPT_DIR/cleanup_dark_factory.sh" $clean_arg
+    else
+        echo "  Dark Factory artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
+    fi
+
     print_category_summary
 fi
 
