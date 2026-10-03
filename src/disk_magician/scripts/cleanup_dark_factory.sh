@@ -134,14 +134,14 @@ else
   printf '%s\n' "$lsof_out" >>"$LIVE_REFS"
 fi
 # The scan must see this process's own argv and cwd, or it is not seeing processes.
-if ! grep -qF "cleanup_dark_factory" "$LIVE_REFS" || ! grep -qxF "$(pwd -P)" "$LIVE_REFS"; then
+if ! LC_ALL=C grep -aqF "cleanup_dark_factory" "$LIVE_REFS" || ! LC_ALL=C grep -aqxF "$(pwd -P)" "$LIVE_REFS"; then
   scan_fail "live-process scan did not see this process"
 fi
 
 # Matches the physical path or, under a symlinked root, its logical form.
 is_live() {
-  grep -qF "$1" "$LIVE_REFS" && return 0
-  [[ -n "${2:-}" && "$2" != "$1" ]] && grep -qF "$2" "$LIVE_REFS"
+  LC_ALL=C grep -aqF "$1" "$LIVE_REFS" && return 0
+  [[ -n "${2:-}" && "$2" != "$1" ]] && LC_ALL=C grep -aqF "$2" "$LIVE_REFS"
 }
 
 # rc 0 when no file under $1 was modified within $DAYS days. Fails closed: if
@@ -200,8 +200,7 @@ if root_ok "$RELEASES_DIR"; then
     find "$BIN_DIR" -maxdepth 1 -type l 2>/dev/null || true
     # Text references: bin shims, unit files (%h expanded), live argv.
     {
-      for f in "$BIN_DIR"/*; do
-        [[ -f "$f" && ! -L "$f" ]] || continue
+      while IFS= read -r -d '' f; do  # includes dotfiles; symlinks handled above
         [[ -r "$f" ]] || scan_fail "unreadable $f"
         if LC_ALL=C grep -Iq . "$f" 2>/dev/null; then
           cat "$f" || scan_fail "cannot read $f"
@@ -209,18 +208,18 @@ if root_ok "$RELEASES_DIR"; then
           # Binary launcher (or empty file): extract embedded release paths.
           LC_ALL=C grep -aoE "$ref_re" "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
         fi
-      done
+      done < <(find "$BIN_DIR" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
       while IFS= read -r f; do
         [[ -e "$f" ]] || continue  # dangling unit symlink
         [[ -r "$f" ]] || scan_fail "unreadable $f"
         cat "$f" || scan_fail "cannot read $f"
       done <"$units"
       cat "$LIVE_REFS"
-    } | python3 -c 'import re,sys
+    } | tr '\0' '\n' | python3 -c 'import re,sys
 for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     sys.stdout.buffer.write(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), l))' \
       | sed -e "s#%h#$home_r#g" -e "s#\${HOME}#$home_r#g" -e "s#\$HOME#$home_r#g" -e "s#~/#$home_r/#g" \
-      | tee "$REFTEXT" | { grep -oE "$ref_re" || true; }
+      | tee "$REFTEXT" | { LC_ALL=C grep -aoE "$ref_re" || true; }
   } | realpaths | { grep -oE "^$(re_escape "$RELEASES_DIR")/[^/]+" || true; } | sort -u >"$keep"
   rm -f "$units"
   newest=0
@@ -238,7 +237,7 @@ for l in sys.stdin.buffer:  # systemd C-style \xHH escapes
     grep -qxF "$rel" "$keep" && continue
     # Substring match over all reference text, so any terminator (: ; ) etc.)
     # still protects; over-protection (r1 vs r10) is the safe direction.
-    grep -qF -e "$rel" -e "$rel_logical/${rel##*/}" "$REFTEXT" && continue
+    LC_ALL=C grep -aqF -e "$rel" -e "$rel_logical/${rel##*/}" "$REFTEXT" && continue
     is_live "$rel" "$rel_logical/${rel##*/}" && continue
     is_stale "$rel" || { log "SKIP release (recent): $rel"; continue; }
     remove "$rel" release

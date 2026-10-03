@@ -236,6 +236,19 @@ H12b="$T/h12b"; mk7 "$H12b"; mkdir -p "$H12b/.config/disk-magician"; echo '{"min
 run7 "$H12b" --dry-run --days 09 >"$T/t12b.out" 2>&1 || true
 check "--days 09 is raised to a 14-day floor" 'grep -q "threshold 14d" "$T/t12b.out"'
 
+echo "Test 13: hidden launchers; a NUL deep in a bin text file does not hide later references"
+H13="$T/h13"; mk7 "$H13"
+printf '#!/bin/sh\nexec %s/.local/share/dark-factory/releases/r1/bin/dark-factory\n' "$H13" >"$H13/.local/bin/.df-hidden-text"
+printf '\177ELF\0\0%s/.local/share/dark-factory/releases/r2/bin/dark-factory\0' "$H13" >"$H13/.local/bin/.df-hidden-bin"
+run7 "$H13" --clean --keep-releases 0 >"$T/t13.out" 2>&1 || true
+check "hidden text and binary launchers protect their releases" '[[ -d "$H13/.local/share/dark-factory/releases/r1" && -d "$H13/.local/share/dark-factory/releases/r2" && ! -e "$H13/.local/share/dark-factory/releases/r3" ]]'
+H13b="$T/h13b"; mk7 "$H13b"
+{ printf '#!/bin/sh\n'; head -c 1100000 /dev/zero | tr '\0' 'x'; printf '\n\0tail\n'; } >"$H13b/.local/bin/aaa-text-with-late-nul"
+ln -s "$H13b/.local/share/dark-factory/releases/r1" "$H13b/.local/share/dark-factory/releases/current"
+printf '[Service]\nExecStart=%%h/.local/share/dark-factory/releases/current/bin/dark-factory\n' >"$H13b/.config/systemd/user/df.service"
+run7 "$H13b" --clean --keep-releases 0 >"$T/t13b.out" 2>&1 || true
+check "unit reference via releases/current survives a late NUL in a bin text file" '[[ -d "$H13b/.local/share/dark-factory/releases/r1" && ! -e "$H13b/.local/share/dark-factory/releases/r2" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
