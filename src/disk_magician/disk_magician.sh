@@ -38,6 +38,7 @@ Commands:
   cleanup-apfs-snapshots Clean stale APFS OS update snapshots older than retention.
   cleanup-antigravity-brain Clean stale conversation task logs and media artifacts.
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
+  cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
 
 Options:
@@ -279,6 +280,9 @@ case "$CMD" in
     ;;
   cleanup_uv_cache|cleanup-uv-cache)
     "$SCRIPT_DIR/scripts/cleanup_uv_cache.sh" "$@"
+    ;;
+  cleanup_dark_factory|cleanup-dark-factory)
+    "$SCRIPT_DIR/scripts/cleanup_dark_factory.sh" "$@"
     ;;
   vacuum_hermes_state|vacuum-hermes-state)
     "$SCRIPT_DIR/scripts/vacuum_hermes_state.sh" "$@"
