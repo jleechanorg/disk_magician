@@ -53,7 +53,7 @@ done
 if [[ -n "$PRE_EXISTING" ]]; then
     cp "$PRE_EXISTING" "$LIVE_SNAP"
     ok "reusing existing snapshot $PRE_EXISTING (faster than re-measuring)"
-elif timeout 90 "$SNAP_SCRIPT" --output "$LIVE_SNAP" >/dev/null 2>&1; then
+elif DISK_MAGICIAN_STATE_DIR="$WORK/state" timeout 90 "$SNAP_SCRIPT" --output "$LIVE_SNAP" >/dev/null 2>&1; then
     if [[ -s "$LIVE_SNAP" ]]; then
         ok "live snapshot written to $LIVE_SNAP"
     else
