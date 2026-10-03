@@ -28,6 +28,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
+[[ ! -f "$RECEIPT_HELPER" ]] && RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
 # Size-budget scratch eviction (bead disk_magician-d45): passed through to
@@ -97,6 +99,9 @@ log() {
 
 free_gb() {
   if [[ -n "$FREE_GB_OVERRIDE" ]]; then
+    if [[ "$FREE_GB_OVERRIDE" == "__EMPTY__" ]]; then
+      return
+    fi
     echo "$FREE_GB_OVERRIDE"
     return
   fi
@@ -104,7 +109,7 @@ free_gb() {
   if [[ "$OSTYPE" == "darwin"* ]] && df "/System/Volumes/Data" >/dev/null 2>&1; then
     check_path="/System/Volumes/Data"
   fi
-  df -kP "$check_path" 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}'
+  ( df -kP "$check_path" 2>/dev/null || true ) | awk 'NR==2{print int($4/1024/1024)}'
 }
 
 TIMEOUT_CMD=""
@@ -118,10 +123,15 @@ run_step_timeout() {
   fi
 }
 
-current_free_gb="$(free_gb)"
+current_free_gb="$(free_gb || echo "")"
 
 if [[ -z "$current_free_gb" ]]; then
   log "pressure_sweep: could not read free space — no-op (fail safe, no cleanup attempted)."
+  python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+    --outcome blocked_safety \
+    --reason "could not read free space" \
+    --safety '{"status": "blocked_safety", "reason": "could not read free space"}' \
+    --precondition '{"free_gb": null}' >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -179,6 +189,10 @@ if [[ "$below_threshold" != "1" ]]; then
 
   if [[ "$over_colima_ceiling" != "1" && "$over_tmp_ceiling" != "1" ]]; then
     log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
+    python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+      --outcome skipped_threshold \
+      --reason "free >= threshold and neither colima nor tmp ceiling exceeded" \
+      --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}" >/dev/null 2>&1 || true
     exit 0
   fi
 
@@ -217,12 +231,26 @@ acquire_lock() {
 
 if ! acquire_lock; then
   log "pressure_sweep: lock held by another run (< ${LOCK_TTL_SEC}s old) — skipping this fire."
+  python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+    --outcome skipped_lock \
+    --reason "lock held by another run" \
+    --lock '{"held": true, "reason": "contention"}' >/dev/null 2>&1 || true
   exit 0
 fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
+RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job pressure_sweep --trigger "$SWEEP_MODE" --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}") || {
+  log "ERROR: failed to record receipt begin"
+  exit 1
+}
+
 clean_flag="--clean"
 [[ "$DRY_RUN" == true ]] && clean_flag="--dry-run"
+
+STEP1_RC=0
+STEP2_RC=0
+STEP1_TIMEOUT=false
+STEP2_TIMEOUT=false
 
 # ────────── STEP 1: cleanup_tmp.sh (--large when sweeping) ──────────
 if [[ "$SWEEP_MODE" == "colima-only" ]]; then
@@ -245,8 +273,11 @@ if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
   log "pressure_sweep: step 1/2 cleanup_tmp.sh done — free after: ${after_gb} GB"
 else
-  rc=$?
-  log "pressure_sweep: step 1/2 cleanup_tmp.sh FAILED or timed out (rc=${rc}) — continuing to step 2."
+  STEP1_RC=$?
+  if [[ $STEP1_RC -eq 124 || $STEP1_RC -eq 137 ]]; then
+    STEP1_TIMEOUT=true
+  fi
+  log "pressure_sweep: step 1/2 cleanup_tmp.sh FAILED or timed out (rc=${STEP1_RC}) — continuing to step 2."
 fi
 fi
 
@@ -260,9 +291,41 @@ if run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" "$clean_flag" >> "$LO
   after_gb="$(free_gb)"
   log "pressure_sweep: step 2/2 cleanup_colima.sh done — free after: ${after_gb} GB"
 else
-  rc=$?
-  log "pressure_sweep: step 2/2 cleanup_colima.sh FAILED or timed out (rc=${rc})."
+  STEP2_RC=$?
+  if [[ $STEP2_RC -eq 124 || $STEP2_RC -eq 137 ]]; then
+    STEP2_TIMEOUT=true
+  fi
+  log "pressure_sweep: step 2/2 cleanup_colima.sh FAILED or timed out (rc=${STEP2_RC})."
 fi
 fi
 
+FINAL_FREE_GB="$(free_gb)"
+OUTCOME="success"
+REASON=""
+
+if [[ "$STEP1_TIMEOUT" == true || "$STEP2_TIMEOUT" == true ]]; then
+  OUTCOME="timeout"
+  REASON="step execution timed out"
+elif [[ $STEP1_RC -ne 0 || $STEP2_RC -ne 0 ]]; then
+  OUTCOME="error"
+  REASON="step execution failed (step1_rc=$STEP1_RC, step2_rc=$STEP2_RC)"
+elif [[ "$DRY_RUN" == true ]]; then
+  OUTCOME="success_noop"
+  REASON="dry-run sweep completed without deletions"
+else
+  OUTCOME="success"
+  REASON="sweep completed"
+fi
+
+POSTCONDITION="{\"free_gb_before\": ${current_free_gb:-null}, \"free_gb_after\": ${FINAL_FREE_GB:-null}, \"freed_bytes\": null}"
+SAFETY="{\"status\": \"delegated\", \"reason\": \"delegated to cleanup_tmp and cleanup_colima\"}"
+
+python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+  --run-id "$RECEIPT_RUN_ID" \
+  --outcome "$OUTCOME" \
+  --reason "$REASON" \
+  --safety "$SAFETY" \
+  --postcondition "$POSTCONDITION" >/dev/null 2>&1 || true
+
 log "pressure_sweep: sweep complete."
+

@@ -34,6 +34,8 @@ exit 0
 MOCK
 
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh"
+cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
+chmod +x "$MOCK_BIN/job_receipt.py"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
@@ -52,7 +54,7 @@ run_pressure() {
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
     DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
     INVOCATION_LOG="$INVOCATION_LOG" \
-    bash "$SCRIPT" "$@"
+    /bin/bash "$SCRIPT" "$@"
 }
 
 PASS=0
@@ -88,6 +90,7 @@ LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs no-op line" "free 50 GB >= threshold" "$LOG_CONTENT"
 assert_not_contains "skips cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
+assert_contains "Test 1 receipt skipped_threshold" '"outcome": "skipped_threshold"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
 
 echo "Test 2: triggered clean path passes --large, LARGE_TMP_APPROVED=1, and 4h pressure retention"
 : > "$INVOCATION_LOG"
@@ -99,6 +102,8 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs triggered sweep" "sweep triggered (dry_run=false)" "$LOG_CONTENT"
 assert_contains "cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
+assert_contains "Test 2 receipt success" '"outcome": "success"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+assert_contains "Test 2 receipt freed_bytes null" '"freed_bytes": null' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
 
 echo "Test 2b: custom pressure retention overrides are passed to cleanup_tmp"
 : > "$INVOCATION_LOG"
@@ -114,7 +119,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS=2 \
   DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS=6 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp overrides honored" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=2 ARCHIVE_HOURS=6" "$INVOCATIONS"
 
@@ -126,6 +131,8 @@ run_pressure 8 --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima dry-run" "cleanup_colima --dry-run" "$INVOCATIONS"
+assert_contains "Test 3 receipt success_noop" '"outcome": "success_noop"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+
 
 echo "Test 4: healthy free space + Colima over ceiling triggers colima-only sweep"
 : > "$INVOCATION_LOG"
@@ -336,9 +343,45 @@ env -i \
   DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=5 \
   DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES=90 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
+echo "Test 14: lock contention records skipped_lock receipt"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+mkdir -p "$STATE_DIR/pressure_sweep.lock"
+date -u +%s > "$STATE_DIR/pressure_sweep.lock/acquired_at"
+run_pressure 8
+assert_contains "Test 14 skipped_lock receipt" '"outcome": "skipped_lock"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+
+echo "Test 15: unreadable free space records blocked_safety receipt"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+run_pressure "__EMPTY__"
+assert_contains "Test 15 blocked_safety receipt" '"outcome": "blocked_safety"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+assert_contains "Test 15 safety reason" 'could not read free space' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+
+
+echo "Test 16: step failure records outcome error even when shell exits 0"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
+#!/bin/bash
+exit 1
+MOCK
+chmod +x "$MOCK_BIN/cleanup_tmp.sh"
+run_pressure 8
+assert_contains "Test 16 outcome error receipt" '"outcome": "error"' "$(cat "$STATE_DIR/receipts/pressure_sweep.json")"
+cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
+#!/bin/bash
+echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
+exit 0
+MOCK
+chmod +x "$MOCK_BIN/cleanup_tmp.sh"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
