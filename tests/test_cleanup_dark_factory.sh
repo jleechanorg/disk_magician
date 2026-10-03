@@ -227,6 +227,15 @@ run7 "$H11" --clean --keep-releases 0 >"$T/t11.out" 2>&1 || true
 check "%h reference kept when HOME contains & and #" '[[ -d "$H11/.local/share/dark-factory/releases/r1" ]]'
 check "\$HOME shim reference kept when HOME contains & and #" '[[ -d "$H11/.local/share/dark-factory/releases/r2" && ! -e "$H11/.local/share/dark-factory/releases/r3" ]]'
 
+echo "Test 12: binary launcher with an embedded release path; leading-zero --days honors the floor"
+H12="$T/h12"; mk7 "$H12"
+printf '\177ELF\0\0\0%s/.local/share/dark-factory/releases/r1/bin/dark-factory\0\1\2' "$H12" >"$H12/.local/bin/launcher"; chmod +x "$H12/.local/bin/launcher"
+run7 "$H12" --clean --keep-releases 0 >"$T/t12.out" 2>&1 || true
+check "release path embedded in a binary launcher kept" '[[ -d "$H12/.local/share/dark-factory/releases/r1" && ! -e "$H12/.local/share/dark-factory/releases/r2" ]]'
+H12b="$T/h12b"; mk7 "$H12b"; mkdir -p "$H12b/.config/disk-magician"; echo '{"min_stale_days": 14}' >"$H12b/.config/disk-magician/safety.local.json"
+run7 "$H12b" --dry-run --days 09 >"$T/t12b.out" 2>&1 || true
+check "--days 09 is raised to a 14-day floor" 'grep -q "threshold 14d" "$T/t12b.out"'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \

@@ -47,6 +47,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$DAYS" =~ ^[0-9]+$ && "$KEEP_RELEASES" =~ ^[0-9]+$ ]] || { echo "--days and --keep-releases must be non-negative integers" >&2; exit 2; }
+DAYS=$((10#$DAYS)); KEEP_RELEASES=$((10#$KEEP_RELEASES))  # leading zeros are not octal
 
 floor="$(safety_min_stale_days)"
 (( DAYS < floor )) && DAYS="$floor"
@@ -202,7 +203,12 @@ if root_ok "$RELEASES_DIR"; then
       for f in "$BIN_DIR"/*; do
         [[ -f "$f" && ! -L "$f" ]] || continue
         [[ -r "$f" ]] || scan_fail "unreadable $f"
-        grep -Ih . "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
+        if LC_ALL=C grep -Iq . "$f" 2>/dev/null; then
+          cat "$f" || scan_fail "cannot read $f"
+        else
+          # Binary launcher (or empty file): extract embedded release paths.
+          LC_ALL=C grep -aoE "$ref_re" "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
+        fi
       done
       while IFS= read -r f; do
         [[ -e "$f" ]] || continue  # dangling unit symlink
