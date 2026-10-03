@@ -295,34 +295,11 @@ log "=== Section: ~/.cache/wiki-publish (shadow and review-council scratch) ==="
 WIKI_PUBLISH_CACHE="$HOME/.cache/wiki-publish"
 if [[ ! -d "$WIKI_PUBLISH_CACHE" ]]; then
   log "wiki-publish cache: not found, skipping"
-elif pgrep -f "wiki_publish.py" >/dev/null 2>&1; then
-  log "wiki-publish cache: SKIP — live wiki_publish process"
 else
   before_kb=$(size_kb "$WIKI_PUBLISH_CACHE")
-  log "wiki-publish cache: before $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE)"
-  for entry in "$WIKI_PUBLISH_CACHE"/*; do
-    [[ -e "$entry" ]] || continue
-    # Preserve advice logs directory
-    [[ "$(basename "$entry")" == "advice" ]] && continue
-    if [[ "$DRY_RUN" == true ]]; then
-      log "wiki-publish cache: [dry-run] would delete $entry"
-    else
-      log "wiki-publish cache: deleting $entry"
-      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
-        echo "SAFETY-SKIP $entry ($_safety_reason)"
-      else
-        rm -rf "$entry"
-      fi
-    fi
-  done
-  if [[ "$DRY_RUN" != true ]]; then
-    after_kb=$(size_kb "$WIKI_PUBLISH_CACHE")
-    freed_kb=$(( before_kb - after_kb ))
-    [[ $freed_kb -lt 0 ]] && freed_kb=0
-    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
-    log "wiki-publish cache: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
-  fi
+  log "wiki-publish cache: $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE) — retained; automatic deletion disabled until lifecycle provenance is known"
 fi
+
 
 echo
 if [[ "$DRY_RUN" == true ]]; then

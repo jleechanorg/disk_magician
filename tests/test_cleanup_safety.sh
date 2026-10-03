@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # test_cleanup_safety.sh — Regression coverage for cleanup safety gates.
 #
-# Run: bash tests/test_cleanup_safety.sh
+# Run: /bin/bash tests/test_cleanup_safety.sh
 set -euo pipefail
+export PATH="/bin:/usr/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -96,7 +97,11 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod +x "$bin_dir/tmutil"
+  cat > "$bin_dir/getconf" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$bin_dir/df" "$bin_dir/tmutil" "$bin_dir/getconf"
 }
 
 echo "=== cleanup safety regression tests ==="
@@ -1063,6 +1068,79 @@ else
   echo "  FAIL  dirty worktree preserved on disk (not archived/purged)"; FAIL=$(( FAIL + 1 ))
 fi
 git -C "$WTREPO9" worktree prune 2>/dev/null || true
+
+echo "Test 13: cleanup_agent_artifacts.sh leaves .dark-factory/runs alone (generic target removed)"
+HOME13="$TMP_ROOT/home13"
+DF_RUNS13="$HOME13/.dark-factory/runs"
+mkdir -p "$DF_RUNS13/run_alpha" "$DF_RUNS13/run_beta"
+echo "data" > "$DF_RUNS13/run_alpha/payload.txt"
+echo "data" > "$DF_RUNS13/run_beta/payload.txt"
+# Age run_alpha by 60 days
+python3 -c '
+import os, time, sys
+t = time.time() - 60 * 86400
+for d, dirs, files in os.walk(sys.argv[1]):
+  for f in files + dirs:
+    os.utime(os.path.join(d, f), (t, t))
+os.utime(sys.argv[1], (t, t))
+' "$DF_RUNS13/run_alpha"
+
+OUT13="$TMP_ROOT/agent-artifacts-df.out"
+if run_capture "$OUT13" env -i HOME="$HOME13" PATH="/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_agent_artifacts.sh" --clean; then
+  RC13=0
+else
+  RC13=$?
+fi
+OUT13_CONTENT=$(cat "$OUT13")
+assert_rc "cleanup_agent_artifacts.sh --clean exits 0" 0 "$RC13"
+assert_exists "stale run_alpha preserved by generic agent artifacts cleaner" "$DF_RUNS13/run_alpha/payload.txt"
+assert_exists "recent run_beta preserved by generic agent artifacts cleaner" "$DF_RUNS13/run_beta/payload.txt"
+assert_not_contains "cleanup_agent_artifacts output does not reference .dark-factory/runs" ".dark-factory/runs" "$OUT13_CONTENT"
+
+echo "Test 14: disk_audit.sh wires Dark Factory cleanup with AGENT_ARTIFACTS_APPROVED gating"
+AUDIT_FIXTURE_DF="$TMP_ROOT/audit-fixture-df"
+mkdir -p "$AUDIT_FIXTURE_DF/scripts"
+cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh"
+chmod +x "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh"
+cat > "$AUDIT_FIXTURE_DF/scripts/cleanup_dark_factory.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "stub cleanup_dark_factory ran with: $*"
+exit 0
+EOF
+chmod +x "$AUDIT_FIXTURE_DF/scripts/cleanup_dark_factory.sh"
+for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_llm_inspector.sh cleanup_supervisor_logs.sh; do
+  cat > "$AUDIT_FIXTURE_DF/scripts/$child" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$AUDIT_FIXTURE_DF/scripts/$child"
+done
+
+FAKE_BIN14="$TMP_ROOT/bin-audit-df"
+make_fake_bin "$FAKE_BIN14"
+
+# Without AGENT_ARTIFACTS_APPROVED=1: skipped
+OUT14_UNAPPROVED="$TMP_ROOT/audit-df-unapproved.out"
+if run_capture "$OUT14_UNAPPROVED" env -i HOME="$TMP_ROOT/home-audit-df" PATH="$FAKE_BIN14:/usr/bin:/bin" bash "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh" clean --dry-run --live --no-history; then
+  RC14_U=0
+else
+  RC14_U=$?
+fi
+OUT14_U_CONTENT=$(cat "$OUT14_UNAPPROVED")
+assert_rc "disk_audit clean exits 0 without approval" 0 "$RC14_U"
+assert_contains "Dark Factory artifacts skipped without approval" "Dark Factory artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)" "$OUT14_U_CONTENT"
+assert_not_contains "stub cleanup_dark_factory not called without approval" "stub cleanup_dark_factory" "$OUT14_U_CONTENT"
+
+# With AGENT_ARTIFACTS_APPROVED=1: executed
+OUT14_APPROVED="$TMP_ROOT/audit-df-approved.out"
+if run_capture "$OUT14_APPROVED" env -i HOME="$TMP_ROOT/home-audit-df" AGENT_ARTIFACTS_APPROVED=1 PATH="$FAKE_BIN14:/usr/bin:/bin" bash "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh" clean --dry-run --live --no-history; then
+  RC14_A=0
+else
+  RC14_A=$?
+fi
+OUT14_A_CONTENT=$(cat "$OUT14_APPROVED")
+assert_rc "disk_audit clean exits 0 with approval" 0 "$RC14_A"
+assert_contains "Dark Factory category executed with approval" "stub cleanup_dark_factory ran with: --dry-run" "$OUT14_A_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
