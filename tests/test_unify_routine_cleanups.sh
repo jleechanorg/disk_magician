@@ -43,6 +43,7 @@ EXPECTED_CATEGORIES=(
   "Colima VM disk (Docker prune + fstrim)"
   "Aside browser sessions"
   "Antigravity brain compaction"
+  "Codex SQLite vacuum"
   "Supervisor logs"
   "uv cache (disk-magician builds)"
   "Worktree venvs (>=7d dormant)"

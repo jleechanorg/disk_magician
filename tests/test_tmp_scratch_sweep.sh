@@ -23,7 +23,7 @@ MOCK
 cat > "$MOCK_BIN/cleanup_claude_state.sh" <<'MOCK'
 #!/usr/bin/env bash
 echo "cleanup_claude_state $* CLAUDE_STATE_APPROVED=${CLAUDE_STATE_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
-exit 0
+[[ "${CLAUDE_STATE_MOCK_EXIT:-0}" == "0" ]] && exit 0 || exit 1
 MOCK
 
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_claude_state.sh"
@@ -103,6 +103,22 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 
+echo "Test 8: exit code — wrapper exits nonzero if cleanup_claude_state fails alone while cleanup_tmp succeeds (bead disk_magician-p0v)"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" CLAUDE_STATE_MOCK_EXIT=1 bash "$SCRIPT" --clean
+STATE_FAIL_RC=$?
+set -e
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "cleanup_tmp ran successfully in Test 8" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_claude_state ran and failed in Test 8" "cleanup_claude_state --clean CLAUDE_STATE_APPROVED=1" "$INVOCATIONS"
+if [[ "$STATE_FAIL_RC" -ne 0 ]]; then
+  echo "  PASS  wrapper propagates nonzero exit when cleanup_claude_state failed alone"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  wrapper exited 0 despite cleanup_claude_state failing alone (rc=$STATE_FAIL_RC)"
+  FAIL=$(( FAIL + 1 ))
+fi
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

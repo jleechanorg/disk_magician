@@ -52,7 +52,7 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 DRY_RUN=true
 MIN_AGE_DAYS="${CLAUDE_STATE_MIN_AGE_DAYS:-7}"
 STATE_ROOT="${CLAUDE_STATE_ROOT:-$HOME/.claude/state}"
-LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-20}"
+LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-60}"
 GIT_MAXDEPTH="${CLAUDE_STATE_GIT_MAXDEPTH:-3}"
 
 usage() {
@@ -177,14 +177,18 @@ claude_state_git_check() {
     return 1
   fi
 
-  local stash
-  if ! stash="$(git -C "$repo_dir" stash list 2>&1)"; then
-    echo "git-stash-failed"
-    return 2
-  fi
-  if [[ -n "$stash" ]]; then
-    echo "stash-present"
-    return 1
+  # Only check stash for standalone clones, not linked worktrees
+  # (worktrees share the parent repo's stash list, which is global)
+  if [[ -d "$git_path" ]]; then
+    local stash
+    if ! stash="$(git -C "$repo_dir" stash list 2>&1)"; then
+      echo "git-stash-failed"
+      return 2
+    fi
+    if [[ -n "$stash" ]]; then
+      echo "stash-present"
+      return 1
+    fi
   fi
 
   local upstream

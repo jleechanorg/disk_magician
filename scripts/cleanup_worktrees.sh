@@ -73,6 +73,7 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     else
         # Auto-discover main repositories that have registered worktrees
         discovered_repos_str="$HOME/projects/worldarchitect.ai"
+        [[ -d "$HOME/project_worldaiclaw/worldai_claw" ]] && discovered_repos_str="${discovered_repos_str} $HOME/project_worldaiclaw/worldai_claw"
         
         find_repos_from_worktrees() {
             local search_dir="$1"
@@ -370,11 +371,16 @@ process_repo_local_worktrees() {
         abs_path=$(expand_path "$wt_path")
 
         local match=false
+        local base_name
+        base_name="$(basename "$abs_path")"
         if [[ "$abs_path" == *"/.claude/worktrees/"* || \
               "$abs_path" == *"/.ao/data/worktrees/"* || \
               "$abs_path" == *"/ao/data/worktrees/"* || \
               "$abs_path" == *"/antigravity/worktrees/"* || \
-              "$(basename "$abs_path")" == wt-* ]]; then
+              "$base_name" == wt-* || \
+              "$base_name" == wt_* || \
+              "$base_name" == worktree_* || \
+              "$base_name" == worktree-* ]]; then
             match=true
         fi
 

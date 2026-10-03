@@ -47,6 +47,7 @@ $HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
 $HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
+$HOME/.cache/wiki-publish	cleanup_dev_caches.sh	wiki-publish cache section
 
 # cleanup_tmp.sh / cleanup_pr_scratch.sh
 /private/tmp	cleanup_tmp.sh	ARCHIVE_ROOT + --large branch target
@@ -74,6 +75,8 @@ $HOME/.claude/supervisor	cleanup_supervisor_logs.sh	SUPERVISOR_DIR, line 15
 
 # cleanup_worktrees.sh / cleanup_worktree_venvs.sh (Tier 6, WORKTREE_APPROVED-gated)
 $HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
+$HOME/project_worldaiclaw	cleanup_worktree_venvs.sh	ROOTS, line 56
+$HOME/project_worldaiclaw/worldai_claw	cleanup_worktrees.sh	discovered_repos_str, line 76
 $HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
 $HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
 $HOME/projects/*/.claude/worktrees	cleanup_worktree_venvs.sh	worktree_repo_discovery.sh:19,73
@@ -110,6 +113,7 @@ $HOME/Library/Caches/ms-playwright-go	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/Library/Caches/pip	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.dark-factory/runs	cleanup_agent_artifacts.sh	TARGETS array (14d retention)
 
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9

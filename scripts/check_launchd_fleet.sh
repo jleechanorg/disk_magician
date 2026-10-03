@@ -36,6 +36,8 @@ KNOWN_LABELS=(
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
   com.jleechanorg.disk-magician-worktree-hygiene
+  com.disk-magician.claude-state
+  com.disk-magician.codex-vacuum
   com.disk-magician.colima-prune
   com.disk-magician.cursor-logs-watchdog
   com.disk-magician.fsevents-projects
