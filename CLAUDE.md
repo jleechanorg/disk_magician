@@ -1,5 +1,23 @@
 # disk_magician — agent instructions
 
+## One operational entry point — `diskm` (hard)
+
+Drive all disk operations through the Disk Magician CLI: diagnosis, history,
+status, cleanup, safety checks, and scheduled maintenance. Reuse an existing
+subcommand first. If a capability is missing, extend the same CLI and test its
+dispatch, safety gates, and outcomes; never invent an ad-hoc runner, parallel
+workflow, or separately operated script. Existing scripts are implementation
+helpers behind the CLI, not additional interfaces agents must discover.
+
+The desired public name is `diskm`. The current packaged executable is
+`disk-magician` (`disk_magician.cli:main`); use that verified entry point until
+`diskm` is registered as another name for the same implementation. Do not add
+a second dispatcher or a shell-only alias that scheduled jobs cannot use.
+New operational commands and scheduler integrations must use this shared
+dispatch. Migrate legacy direct-script schedules with behavior and safety
+checks; their current existence is not permission to add more. Build, package,
+and isolated test harnesses may call internal files directly.
+
 ## Investigation methodology — always find the floor, always show the buckets
 
 Disk-fill investigations in this repo MUST follow a fixed pre-analysis
