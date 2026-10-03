@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # test_snapshot_commit.sh — orchestrator write-path (sandboxed, stubbed snapshot writer).
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +13,7 @@ bad() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); }
 # Stub snapshot writer: honors --output, writes a minimal valid snapshot JSON.
 STUB_BIN="$TMP_ROOT/bin"; mkdir -p "$STUB_BIN"
 cat > "$STUB_BIN/snap.sh" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 out=""
 while [[ $# -gt 0 ]]; do case "$1" in --output) out="$2"; shift 2 ;; *) shift ;; esac; done
 [[ -n "$out" ]] || exit 1
@@ -26,7 +26,8 @@ run_sc() { # run_sc <home> <args...>
   env -i HOME="$1" PATH="/usr/bin:/bin" \
     DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
     DISK_MAGICIAN_FRONTIER_JSON="${DM_TEST_FRONTIER:-$1/.disk_magician_state/frontier_last.json}" \
-    bash "$SC" "${@:2}"
+    DISK_MAGICIAN_STATE_DIR="${DM_TEST_STATE_DIR:-$1/.disk_magician_state}" \
+    /bin/bash "$SC" "${@:2}"
 }
 
 echo "Test 1: fresh run auto-inits state repo, writes snapshot, commits"
@@ -36,14 +37,13 @@ SD1="$H1/.local/state/disk-magician"
 [[ $RC1 -eq 0 ]] && ok "exits 0" || bad "rc" "$RC1: $OUT1"
 [[ -f "$SD1/snapshots/disk_snapshot.json" ]] && ok "snapshot written under snapshots/" || bad "snapshot path" "missing"
 [[ -f "$SD1/config/config.json" ]] && ok "resolved config written" || bad "config path" "missing"
-# Capture the log into a variable before matching rather than piping a live
-# `git log` process straight into `grep` — a bare pipe here raced against
-# git's just-finished commit and intermittently reported no match even
-# though the commit was present a heartbeat later (grep-shim pipeline
-# corruption class: memory feedback_2026-07-20_grep_shim_truncates_pipelines).
 LOG1="$(git -C "$SD1" log --oneline 2>&1)"
 [[ "$LOG1" == *[Ss]napshot* ]] && ok "commit made" || bad "commit" "$LOG1"
 LASTC=$(git -C "$SD1" rev-list --count HEAD)
+RF1="$H1/.disk_magician_state/receipts/snapshot_commit.json"
+[[ -f "$RF1" ]] && ok "receipt file written" || bad "receipt file" "missing"
+grep -q '"outcome": "success"' "$RF1" && ok "receipt reports success" || bad "receipt outcome" "not success"
+grep -q '"committed": true' "$RF1" && ok "receipt reports committed true" || bad "receipt committed" "not true"
 
 echo "Test 2: second run commits a NEW snapshot (history accrues)"
 OUT2=$(run_sc "$H1" 2>&1)
@@ -61,6 +61,9 @@ OUT3=$(run_sc "$H3" 2>&1); RC3=$?
 [[ "$OUT3" == *[Pp]ush* ]] && ok "push outcome logged" || bad "push log" "$OUT3"
 LOG3="$(git -C "$SD3" log --oneline 2>&1)"
 [[ "$LOG3" == *[Ss]napshot* ]] && ok "commit preserved despite push failure" || bad "commit preserved" "$LOG3"
+RF3="$H3/.disk_magician_state/receipts/snapshot_commit.json"
+grep -q '"outcome": "success"' "$RF3" && ok "push failure still reports success outcome" || bad "push outcome" "not success"
+grep -q '"pushed": false' "$RF3" && ok "push failure records pushed false" || bad "push pushed" "not false"
 
 echo "Test 4: state_repo_path config grandfathers an existing repo in place"
 H4="$TMP_ROOT/h4"; mkdir -p "$H4/.config/disk-magician"
@@ -115,6 +118,32 @@ grep -q '"status": "partial"' "$SD6/ledger/topdown-5g.status.json" \
   && ok "partial status recorded" || bad "partial status" "missing or incorrect"
 git -C "$SD6" show HEAD:ledger/topdown-5g.status.json | grep -q '"status": "partial"' \
   && ok "partial status committed" || bad "partial status commit" "missing"
+
+echo "Test 7: lock contention skips run (exit 0) and records skipped_lock receipt"
+H7="$TMP_ROOT/h7"; mkdir -p "$H7/.disk_magician_state/snapshot.lock"
+echo "$$" > "$H7/.disk_magician_state/snapshot.lock/pid"
+OUT7=$(run_sc "$H7" 2>&1); RC7=$?
+[[ $RC7 -eq 0 ]] && ok "lock skip exits 0" || bad "lock skip rc" "$RC7: $OUT7"
+RF7="$H7/.disk_magician_state/receipts/snapshot_commit.json"
+[[ -f "$RF7" ]] && ok "receipt written on lock skip" || bad "receipt on lock skip" "missing"
+grep -q '"outcome": "skipped_lock"' "$RF7" && ok "receipt outcome is skipped_lock" || bad "receipt outcome" "not skipped_lock"
+
+echo "Test 8: git commit failure cannot report success (exits nonzero, outcome error)"
+H8="$TMP_ROOT/h8"; mkdir -p "$H8"
+run_sc "$H8" >/dev/null 2>&1
+SD8="$H8/.local/state/disk-magician"
+mkdir -p "$SD8/.git/hooks"
+cat > "$SD8/.git/hooks/pre-commit" <<'HOOK'
+#!/bin/sh
+exit 1
+HOOK
+chmod +x "$SD8/.git/hooks/pre-commit"
+OUT8=$(run_sc "$H8" 2>&1); RC8=$?
+[[ $RC8 -ne 0 ]] && ok "commit failure exits nonzero" || bad "commit failure rc" "unexpected exit 0"
+RF8="$H8/.disk_magician_state/receipts/snapshot_commit.json"
+[[ -f "$RF8" ]] && ok "receipt file written on commit failure" || bad "commit failure receipt" "missing"
+grep -q '"outcome": "error"' "$RF8" && ok "receipt outcome is error" || bad "commit failure outcome" "not error"
+grep -q '"committed": false' "$RF8" && ok "receipt publication.committed is false" || bad "receipt committed" "not false"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
