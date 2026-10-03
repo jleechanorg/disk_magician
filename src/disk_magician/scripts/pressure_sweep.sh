@@ -28,8 +28,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
-[[ ! -f "$RECEIPT_HELPER" ]] && RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py"
+RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
 # Size-budget scratch eviction (bead disk_magician-d45): passed through to
@@ -99,9 +98,6 @@ log() {
 
 free_gb() {
   if [[ -n "$FREE_GB_OVERRIDE" ]]; then
-    if [[ "$FREE_GB_OVERRIDE" == "__EMPTY__" ]]; then
-      return
-    fi
     echo "$FREE_GB_OVERRIDE"
     return
   fi
@@ -127,11 +123,13 @@ current_free_gb="$(free_gb || echo "")"
 
 if [[ -z "$current_free_gb" ]]; then
   log "pressure_sweep: could not read free space — no-op (fail safe, no cleanup attempted)."
-  python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+  if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
     --outcome blocked_safety \
     --reason "could not read free space" \
     --safety '{"status": "blocked_safety", "reason": "could not read free space"}' \
-    --precondition '{"free_gb": null}' >/dev/null 2>&1 || true
+    --precondition '{"free_gb": null}'; then
+    log "ERROR: failed to record blocked_safety receipt"
+  fi
   exit 0
 fi
 
@@ -189,10 +187,13 @@ if [[ "$below_threshold" != "1" ]]; then
 
   if [[ "$over_colima_ceiling" != "1" && "$over_tmp_ceiling" != "1" ]]; then
     log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
-    python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+    if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
       --outcome skipped_threshold \
       --reason "free >= threshold and neither colima nor tmp ceiling exceeded" \
-      --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}" >/dev/null 2>&1 || true
+      --safety '{"status": "not_applicable", "reason": "threshold_not_reached_no_mutation", "delegated": false}' \
+      --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}"; then
+      log "ERROR: failed to record skipped_threshold receipt"
+    fi
     exit 0
   fi
 
@@ -231,10 +232,12 @@ acquire_lock() {
 
 if ! acquire_lock; then
   log "pressure_sweep: lock held by another run (< ${LOCK_TTL_SEC}s old) — skipping this fire."
-  python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+  if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
     --outcome skipped_lock \
     --reason "lock held by another run" \
-    --lock '{"held": true, "reason": "contention"}' >/dev/null 2>&1 || true
+    --lock '{"held": true, "reason": "contention"}'; then
+    log "ERROR: failed to record skipped_lock receipt"
+  fi
   exit 0
 fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
@@ -318,14 +321,21 @@ else
 fi
 
 POSTCONDITION="{\"free_gb_before\": ${current_free_gb:-null}, \"free_gb_after\": ${FINAL_FREE_GB:-null}, \"freed_bytes\": null}"
-SAFETY="{\"status\": \"delegated\", \"reason\": \"delegated to cleanup_tmp and cleanup_colima\"}"
+if [[ "$DRY_RUN" == true ]]; then
+  SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
+else
+  SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp and cleanup_colima", "delegated": true}'
+fi
 
-python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
   --run-id "$RECEIPT_RUN_ID" \
   --outcome "$OUTCOME" \
   --reason "$REASON" \
   --safety "$SAFETY" \
-  --postcondition "$POSTCONDITION" >/dev/null 2>&1 || true
+  --postcondition "$POSTCONDITION"; then
+  log "ERROR: failed to record receipt finish"
+  exit 1
+fi
 
 log "pressure_sweep: sweep complete."
 

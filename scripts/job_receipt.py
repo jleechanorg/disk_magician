@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/job_receipt.py — Atomic typed job receipts for Disk Magician.
 
-Implements small standard-library typed atomic receipt helper:
+Implements standard-library typed atomic receipt helper:
 - Fixed terminal outcomes: skipped_lock, skipped_threshold, blocked_safety, error,
   timeout, success_noop, success.
 - Started without terminal => outcome 'unknown', freed_bytes unknown/null never fake zero.
@@ -10,7 +10,8 @@ Implements small standard-library typed atomic receipt helper:
   never overwrite active writer or prior success.
 - Atomic file write: temp file in same directory + flush + fsync + os.replace.
 - Concurrency serialization via fcntl.flock on a dedicated lock file.
-- Storage root: DISK_MAGICIAN_STATE_DIR (default: ~/.disk_magician_state).
+- Safe read: read path does not create directories or lock files.
+- Fail closed: corrupt existing JSON raises error and is never overwritten.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional
@@ -38,10 +41,26 @@ TERMINAL_OUTCOMES = {
     "success",
 }
 
+SKIP_OUTCOMES = {
+    "skipped_lock",
+    "skipped_threshold",
+    "blocked_safety",
+}
+
 ALL_ALLOWED_OUTCOMES = TERMINAL_OUTCOMES | {"unknown"}
 
 MAX_COMPLETED_RETENTION = 64
 MAX_ACTIVE_RETENTION = 2
+
+JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def validate_job_name(job: str) -> None:
+    """Validate job name contains only alphanumeric, hyphen, underscore."""
+    if not job or not isinstance(job, str) or not JOB_NAME_PATTERN.match(job):
+        raise ValueError(
+            f"Invalid job name '{job}'. Must be non-empty matching {JOB_NAME_PATTERN.pattern}"
+        )
 
 
 def now_utc_iso() -> str:
@@ -51,19 +70,30 @@ def now_utc_iso() -> str:
 
 def parse_iso(ts_str: str) -> datetime:
     """Parse ISO-8601 timestamp string into datetime."""
-    if ts_str.endswith("Z"):
-        ts_str = ts_str[:-1] + "+00:00"
-    return datetime.fromisoformat(ts_str)
+    if not isinstance(ts_str, str):
+        raise ValueError(f"Invalid timestamp type: {type(ts_str).__name__}")
+    ts = ts_str
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(ts)
+    except Exception as exc:
+        raise ValueError(f"Invalid ISO-8601 timestamp '{ts_str}': {exc}") from exc
+    if dt.tzinfo is None:
+        raise ValueError(f"Timestamp '{ts_str}' must be timezone-aware (UTC)")
+    return dt
 
 
 def compute_duration_seconds(start_iso: str, end_iso: str) -> float:
     """Compute duration in seconds between two ISO-8601 timestamps."""
-    try:
-        start_dt = parse_iso(start_iso)
-        end_dt = parse_iso(end_iso)
-        return max(0.0, round((end_dt - start_dt).total_seconds(), 3))
-    except Exception:
-        return 0.0
+    start_dt = parse_iso(start_iso)
+    end_dt = parse_iso(end_iso)
+    diff = (end_dt - start_dt).total_seconds()
+    if diff < 0:
+        raise ValueError(
+            f"ended_at ({end_iso}) is earlier than started_at ({start_iso}): negative duration"
+        )
+    return round(diff, 3)
 
 
 def resolve_state_dir(override: Optional[str] = None) -> Path:
@@ -77,6 +107,109 @@ def resolve_state_dir(override: Optional[str] = None) -> Path:
     return path
 
 
+def resolve_identity(revision: Optional[str] = None, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Resolve executing provenance and identity without ungrounded assertions."""
+    # 1. Check if deployed.json exists in state_dir
+    sd = state_dir or resolve_state_dir()
+    deployed_file = sd / "deployed.json"
+    if deployed_file.exists():
+        try:
+            with open(deployed_file, "r", encoding="utf-8") as f:
+                dep_data = json.load(f)
+            if isinstance(dep_data, dict) and "source_sha" in dep_data:
+                return {
+                    "kind": "installed_package",
+                    "source_sha": dep_data.get("source_sha"),
+                    "installed_version": dep_data.get("installed_version"),
+                    "package_root": dep_data.get("package_root"),
+                    "revision": dep_data.get("source_sha"),
+                }
+        except Exception:
+            pass
+
+    # 2. Check if running from git source checkout
+    try:
+        cur_file = Path(__file__).resolve()
+        repo_dir = cur_file.parent.parent
+        if (repo_dir / ".git").exists():
+            proc = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                sha = proc.stdout.strip()
+                return {
+                    "kind": "source_checkout",
+                    "source_sha": sha,
+                    "source_root": str(repo_dir),
+                    "revision": sha,
+                }
+    except Exception:
+        pass
+
+    if revision:
+        return {
+            "kind": "provided_revision",
+            "source_sha": revision,
+            "revision": revision,
+        }
+
+    return {
+        "kind": "unknown",
+        "source_sha": None,
+        "revision": None,
+    }
+
+
+def validate_receipt_dict(rec: Dict[str, Any], context: str = "receipt") -> None:
+    """Validate structure and required fields of a receipt dictionary."""
+    if not isinstance(rec, dict):
+        raise ValueError(f"{context} must be a dictionary")
+    for key in ("id", "job", "outcome", "times"):
+        if key not in rec:
+            raise ValueError(f"{context} missing required field '{key}'")
+    if rec["outcome"] not in ALL_ALLOWED_OUTCOMES:
+        raise ValueError(f"{context} has invalid outcome '{rec['outcome']}'")
+    times = rec.get("times")
+    if not isinstance(times, dict) or "started_at" not in times:
+        raise ValueError(f"{context} times must be a dict containing 'started_at'")
+    parse_iso(times["started_at"])
+    if times.get("ended_at") is not None:
+        parse_iso(times["ended_at"])
+        compute_duration_seconds(times["started_at"], times["ended_at"])
+
+
+def validate_store_data(data: Any, job: str) -> Dict[str, Any]:
+    """Validate full receipt store file structure; fail closed if invalid."""
+    if not isinstance(data, dict):
+        raise ValueError("Receipt store root must be a JSON object")
+    if data.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported schema_version {data.get('schema_version')}, expected {SCHEMA_VERSION}"
+        )
+    if data.get("job") != job:
+        raise ValueError(f"Store job mismatch: expected '{job}', found '{data.get('job')}'")
+    if not isinstance(data.get("active"), list):
+        raise ValueError("Receipt store 'active' must be a list")
+    if not isinstance(data.get("completed"), list):
+        raise ValueError("Receipt store 'completed' must be a list")
+
+    for act in data["active"]:
+        validate_receipt_dict(act, context=f"active receipt {act.get('id')}")
+    for comp in data["completed"]:
+        validate_receipt_dict(comp, context=f"completed receipt {comp.get('id')}")
+    if data.get("last_terminal") is not None:
+        validate_receipt_dict(data["last_terminal"], context="last_terminal")
+    if data.get("last_success") is not None:
+        validate_receipt_dict(data["last_success"], context="last_success")
+    if data.get("last_skipped") is not None:
+        validate_receipt_dict(data["last_skipped"], context="last_skipped")
+
+    return data
+
+
 class JobReceiptStore:
     """Manages atomic, serialized receipt storage for jobs."""
 
@@ -87,31 +220,33 @@ class JobReceiptStore:
     def _ensure_dir(self) -> None:
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_paths(self, job: str) -> tuple[Path, Path]:
-        self._ensure_dir()
-        safe_job = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in job)
-        receipt_path = self.receipts_dir / f"{safe_job}.json"
-        lock_path = self.receipts_dir / f"{safe_job}.lock"
+    def _get_paths(self, job: str, ensure_dir: bool = True) -> tuple[Path, Path]:
+        validate_job_name(job)
+        if ensure_dir:
+            self._ensure_dir()
+        receipt_path = self.receipts_dir / f"{job}.json"
+        lock_path = self.receipts_dir / f"{job}.lock"
         return receipt_path, lock_path
 
     def _load_data_unlocked(self, receipt_path: Path, job: str) -> Dict[str, Any]:
-        if receipt_path.exists():
-            try:
-                with open(receipt_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "job": job,
-            "active": [],
-            "last_success": None,
-            "last_skipped": None,
-            "last_terminal": None,
-            "completed": [],
-        }
+        """Load and validate store data. Fails closed on any error; only FileNotFoundError yields empty."""
+        try:
+            with open(receipt_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "job": job,
+                "active": [],
+                "last_success": None,
+                "last_skipped": None,
+                "last_terminal": None,
+                "completed": [],
+            }
+        except Exception as exc:
+            raise ValueError(f"Corrupt or unreadable receipt file at {receipt_path}: {exc}") from exc
+
+        return validate_store_data(raw, job)
 
     def _atomic_save_unlocked(self, receipt_path: Path, data: Dict[str, Any], job: str) -> None:
         # Enforce bounded retention
@@ -146,12 +281,16 @@ class JobReceiptStore:
         revision: Optional[str] = None,
         precondition: Optional[Dict[str, Any]] = None,
         lock: Optional[Dict[str, Any]] = None,
+        safety: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Record the start of a job run. Returns run_id."""
+        validate_job_name(job)
         run_id = str(uuid.uuid4())
         started_at = now_utc_iso()
+        identity_info = resolve_identity(revision, self.state_dir)
+        eff_rev = revision or identity_info.get("source_sha")
 
-        receipt_path, lock_path = self._get_paths(job)
+        receipt_path, lock_path = self._get_paths(job, ensure_dir=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -168,11 +307,12 @@ class JobReceiptStore:
                         "ended_at": None,
                         "duration_seconds": None,
                     },
-                    "installed_revision": revision,
+                    "installed_revision": eff_rev,
+                    "identity": identity_info,
                     "trigger": trigger,
                     "outcome": "unknown",
                     "lock": lock or {"held": True, "acquired": True},
-                    "safety": {"status": "in_progress", "reason": None, "delegated": False},
+                    "safety": safety or {"status": "in_progress", "reason": None, "delegated": False},
                     "candidates": {"count": None, "bytes": None},
                     "precondition": precondition or {"free_gb": None},
                     "postcondition": {"free_gb": None, "freed_bytes": None},
@@ -208,20 +348,27 @@ class JobReceiptStore:
         trigger: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Record a terminal receipt for a job run."""
+        validate_job_name(job)
         if outcome not in TERMINAL_OUTCOMES:
             raise ValueError(
                 f"Invalid terminal outcome '{outcome}'. Must be one of {sorted(TERMINAL_OUTCOMES)}"
             )
 
+        # Without run_id, only direct skip/blocked outcomes are allowed
+        if not run_id and outcome not in SKIP_OUTCOMES:
+            raise ValueError(
+                f"Outcome '{outcome}' requires an active run_id started by begin(). "
+                f"Only {sorted(SKIP_OUTCOMES)} may be recorded without a prior run_id."
+            )
+
         ended_at = now_utc_iso()
-        receipt_path, lock_path = self._get_paths(job)
+        receipt_path, lock_path = self._get_paths(job, ensure_dir=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 data = self._load_data_unlocked(receipt_path, job)
 
-                # Locate existing active record if run_id was provided
                 matching_active: Optional[Dict[str, Any]] = None
                 remaining_active: List[Dict[str, Any]] = []
                 for rec in data.get("active", []):
@@ -229,6 +376,11 @@ class JobReceiptStore:
                         matching_active = rec
                     else:
                         remaining_active.append(rec)
+
+                if run_id and not matching_active:
+                    raise ValueError(
+                        f"Cannot finish run_id '{run_id}': no active matching run found for job '{job}'"
+                    )
 
                 terminal_id = run_id or str(uuid.uuid4())
                 started_at = (
@@ -242,6 +394,23 @@ class JobReceiptStore:
                 # Freed bytes must default to None/null, never fake 0
                 if "freed_bytes" not in post:
                     post["freed_bytes"] = None
+                else:
+                    fb = post["freed_bytes"]
+                    if isinstance(fb, bool):
+                        raise ValueError("freed_bytes cannot be a boolean")
+                    if fb is not None and (not isinstance(fb, int) or fb < 0):
+                        raise ValueError(f"freed_bytes must be non-negative integer or null, got {fb}")
+
+                identity_info = (
+                    matching_active.get("identity")
+                    if matching_active and matching_active.get("identity")
+                    else resolve_identity(revision, self.state_dir)
+                )
+                eff_rev = (
+                    revision
+                    or (matching_active.get("installed_revision") if matching_active else None)
+                    or identity_info.get("source_sha")
+                )
 
                 rec_out: Dict[str, Any] = {
                     "schema_version": SCHEMA_VERSION,
@@ -254,8 +423,8 @@ class JobReceiptStore:
                         "ended_at": ended_at,
                         "duration_seconds": duration_sec,
                     },
-                    "installed_revision": revision
-                    or (matching_active.get("installed_revision") if matching_active else None),
+                    "installed_revision": eff_rev,
+                    "identity": identity_info,
                     "trigger": trigger
                     or (matching_active.get("trigger") if matching_active else "scheduled"),
                     "outcome": outcome,
@@ -293,22 +462,19 @@ class JobReceiptStore:
                     "reason": reason or (matching_active.get("reason") if matching_active else None),
                 }
 
-                # If matching active was found, remove it from active list
+                validate_receipt_dict(rec_out, context="terminal receipt")
+
                 if matching_active:
                     data["active"] = remaining_active
 
-                # Update last_terminal
                 data["last_terminal"] = rec_out
 
-                # Success identities: success or success_noop
                 if outcome in ("success", "success_noop"):
                     data["last_success"] = rec_out
 
-                # Skipped identities: skipped_lock or skipped_threshold
                 if outcome in ("skipped_lock", "skipped_threshold"):
                     data["last_skipped"] = rec_out
 
-                # Append to completed summaries
                 completed = data.get("completed", [])
                 completed.append(rec_out)
                 if len(completed) > MAX_COMPLETED_RETENTION:
@@ -329,9 +495,15 @@ class JobReceiptStore:
         reason: Optional[str] = None,
         lock: Optional[Dict[str, Any]] = None,
         precondition: Optional[Dict[str, Any]] = None,
+        safety: Optional[Dict[str, Any]] = None,
         trigger: str = "scheduled",
     ) -> Dict[str, Any]:
         """Convenience method for contender skips without touching active writer."""
+        validate_job_name(job)
+        if outcome not in SKIP_OUTCOMES:
+            raise ValueError(
+                f"record_skip only accepts outcomes {sorted(SKIP_OUTCOMES)}, got '{outcome}'"
+            )
         return self.finish(
             job=job,
             run_id=None,
@@ -339,12 +511,14 @@ class JobReceiptStore:
             reason=reason,
             lock=lock or {"held": True, "acquired": False, "reason": reason},
             precondition=precondition,
+            safety=safety or {"status": "not_applicable", "reason": reason, "delegated": False},
             trigger=trigger,
         )
 
     def read(self, job: str) -> Dict[str, Any]:
-        """Read current receipt state for a job."""
-        receipt_path, lock_path = self._get_paths(job)
+        """Read current receipt state for a job. Read path MUST NOT mutate disk, mkdir, or create locks."""
+        validate_job_name(job)
+        receipt_path, _ = self._get_paths(job, ensure_dir=False)
         if not receipt_path.exists():
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -356,15 +530,14 @@ class JobReceiptStore:
                 "completed": [],
             }
 
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        # Atomic os.replace ensures the file is always in a consistent state on POSIX filesystems
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_SH)
-            try:
-                return self._load_data_unlocked(receipt_path, job)
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
+            with open(receipt_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            raise ValueError(f"Corrupt or unreadable receipt file at {receipt_path}: {exc}") from exc
+
+        return validate_store_data(data, job)
 
 
 # Module-level convenience functions
@@ -392,11 +565,11 @@ def _parse_json_arg(val: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
     try:
         res = json.loads(val)
-        if isinstance(res, dict):
-            return res
-        return {"value": res}
-    except Exception:
-        return {"raw": val}
+    except Exception as exc:
+        raise ValueError(f"Invalid JSON string: {val} ({exc})") from exc
+    if not isinstance(res, dict):
+        raise ValueError(f"Expected JSON object (dict), got {type(res).__name__}")
+    return res
 
 
 def main() -> int:
@@ -410,6 +583,7 @@ def main() -> int:
     p_begin.add_argument("--revision", help="Installed source revision / git SHA")
     p_begin.add_argument("--precondition", help="Precondition JSON string")
     p_begin.add_argument("--lock", help="Lock JSON string")
+    p_begin.add_argument("--safety", help="Safety JSON string")
 
     # Subcommand: finish
     p_finish = subparsers.add_parser("finish", help="Record terminal receipt")
@@ -426,6 +600,16 @@ def main() -> int:
     p_finish.add_argument("--revision", help="Installed source revision")
     p_finish.add_argument("--trigger", help="Trigger kind")
     p_finish.add_argument("--freed-bytes", type=int, help="Bytes freed (omitted/null if unknown)")
+
+    # Subcommand: skip
+    p_skip = subparsers.add_parser("skip", help="Record skip or blocked outcome")
+    p_skip.add_argument("--job", required=True, help="Job name")
+    p_skip.add_argument("--outcome", required=True, choices=sorted(SKIP_OUTCOMES), help="Skip outcome")
+    p_skip.add_argument("--reason", help="Skip reason")
+    p_skip.add_argument("--lock", help="Lock state JSON")
+    p_skip.add_argument("--precondition", help="Precondition JSON")
+    p_skip.add_argument("--safety", help="Safety JSON")
+    p_skip.add_argument("--trigger", default="scheduled", help="Trigger kind")
 
     # Subcommand: read
     p_read = subparsers.add_parser("read", help="Read receipt state")
@@ -446,6 +630,7 @@ def main() -> int:
                 revision=args.revision,
                 precondition=_parse_json_arg(args.precondition),
                 lock=_parse_json_arg(args.lock),
+                safety=_parse_json_arg(args.safety),
             )
             print(run_id)
             return 0
@@ -466,6 +651,19 @@ def main() -> int:
                 postcondition=post,
                 publication=_parse_json_arg(args.publication),
                 revision=args.revision,
+                trigger=args.trigger,
+            )
+            print(json.dumps(rec))
+            return 0
+
+        elif args.subcommand == "skip":
+            rec = store.record_skip(
+                job=args.job,
+                outcome=args.outcome,
+                reason=args.reason,
+                lock=_parse_json_arg(args.lock),
+                precondition=_parse_json_arg(args.precondition),
+                safety=_parse_json_arg(args.safety),
                 trigger=args.trigger,
             )
             print(json.dumps(rec))

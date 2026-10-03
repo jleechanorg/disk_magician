@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """tests/test_job_receipt.py — Tests for atomic typed job receipts."""
 
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
 # Add scripts directory to sys.path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -22,7 +24,6 @@ class TestJobReceipt(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="dm_receipt_test_")
         self.state_dir = os.path.join(self.test_dir, "state")
-        os.makedirs(self.state_dir, exist_ok=True)
         os.environ["DISK_MAGICIAN_STATE_DIR"] = self.state_dir
 
     def tearDown(self):
@@ -101,7 +102,6 @@ class TestJobReceipt(unittest.TestCase):
     def test_freed_unknown_null_never_fake_zero(self):
         store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
         run_id = store.begin(job="test_job")
-        # Do not specify freed_bytes; must default to None / null, never 0
         rec = store.finish(job="test_job", run_id=run_id, outcome="success")
         self.assertIsNone(rec["postcondition"]["freed_bytes"])
 
@@ -135,7 +135,6 @@ class TestJobReceipt(unittest.TestCase):
         self.assertEqual(data["active"][0]["id"], writer_run)
 
         # 3. Contender attempts to run, hits lock, records skipped_lock
-        # Contender does not provide run_id or begins/finishes its own skip
         contender_rec = store.record_skip(
             job="sweep",
             outcome="skipped_lock",
@@ -185,7 +184,6 @@ class TestJobReceipt(unittest.TestCase):
             )
         data = store.read("job_retention")
         self.assertEqual(len(data["completed"]), 64)
-        # Most recent skip should be at the end
         self.assertEqual(data["completed"][-1]["reason"], "skip 69")
 
     def test_receipt_required_fields_and_types(self):
@@ -214,6 +212,7 @@ class TestJobReceipt(unittest.TestCase):
             "run",
             "times",
             "installed_revision",
+            "identity",
             "trigger",
             "outcome",
             "lock",
@@ -240,7 +239,6 @@ class TestJobReceipt(unittest.TestCase):
     def test_cli_helper_begin_finish_read(self):
         cli = str(SCRIPTS_DIR / "job_receipt.py")
 
-        # 1. begin
         p_begin = subprocess.run(
             [sys.executable, cli, "begin", "--job", "cli_job", "--trigger", "cli_test"],
             capture_output=True,
@@ -251,7 +249,6 @@ class TestJobReceipt(unittest.TestCase):
         run_id = p_begin.stdout.strip()
         self.assertTrue(run_id)
 
-        # 2. read while active
         p_read_active = subprocess.run(
             [sys.executable, cli, "read", "--job", "cli_job"],
             capture_output=True,
@@ -263,7 +260,6 @@ class TestJobReceipt(unittest.TestCase):
         self.assertEqual(len(data["active"]), 1)
         self.assertEqual(data["active"][0]["id"], run_id)
 
-        # 3. finish
         p_finish = subprocess.run(
             [
                 sys.executable,
@@ -284,7 +280,6 @@ class TestJobReceipt(unittest.TestCase):
         )
         self.assertEqual(p_finish.returncode, 0, p_finish.stderr)
 
-        # 4. read completed
         p_read_done = subprocess.run(
             [sys.executable, cli, "read", "--job", "cli_job", "--last"],
             capture_output=True,
@@ -295,6 +290,186 @@ class TestJobReceipt(unittest.TestCase):
         last_rec = json.loads(p_read_done.stdout)
         self.assertEqual(last_rec["id"], run_id)
         self.assertEqual(last_rec["outcome"], "success_noop")
+
+    # --- Review Corrections Reproduction Tests ---
+
+    def test_read_does_not_touch_disk_or_create_dirs_locks(self):
+        """Review item 1: read must not create directory or lock files."""
+        fresh_state = os.path.join(self.test_dir, "nonexistent_state")
+        store = job_receipt.JobReceiptStore(state_dir=fresh_state)
+
+        # Before read on absent state
+        self.assertFalse(os.path.exists(fresh_state))
+        data = store.read("snapshot_commit")
+        self.assertEqual(data["job"], "snapshot_commit")
+        self.assertEqual(data["completed"], [])
+        self.assertEqual(data["active"], [])
+        # Must STILL not exist
+        self.assertFalse(os.path.exists(fresh_state))
+
+        # Now test with existing state: writing one job then reading it must not create lock files
+        run_id = store.begin("writer_job")
+        store.finish("writer_job", run_id=run_id, outcome="success")
+        receipt_file = os.path.join(fresh_state, "receipts", "writer_job.json")
+        self.assertTrue(os.path.exists(receipt_file))
+        mtime_before = os.path.getmtime(receipt_file)
+        files_before = set(os.listdir(os.path.join(fresh_state, "receipts")))
+
+        # Read should not modify file or leave lock file
+        read_res = store.read("writer_job")
+        self.assertEqual(read_res["last_terminal"]["id"], run_id)
+        mtime_after = os.path.getmtime(receipt_file)
+        files_after = set(os.listdir(os.path.join(fresh_state, "receipts")))
+
+        self.assertEqual(mtime_before, mtime_after)
+        # Lock file should NOT be created by read
+        self.assertNotIn("writer_job.lock", files_after - files_before)
+
+    def test_corrupt_existing_receipt_fails_closed_and_preserves_bytes(self):
+        """Review item 2: corrupt json must raise error and not be overwritten."""
+        receipts_dir = os.path.join(self.state_dir, "receipts")
+        os.makedirs(receipts_dir, exist_ok=True)
+        corrupt_file = os.path.join(receipts_dir, "corrupt_job.json")
+        bad_bytes = b"{\n  \"schema_version\": 1,\n  \"job\": \"corrupt_job\",\n  [malformed json"
+        with open(corrupt_file, "wb") as f:
+            f.write(bad_bytes)
+
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        with self.assertRaises(ValueError):
+            store.read("corrupt_job")
+
+        with self.assertRaises(ValueError):
+            store.begin("corrupt_job")
+
+        with self.assertRaises(ValueError):
+            store.record_skip("corrupt_job", outcome="skipped_lock")
+
+        # Verify exact bytes preserved
+        with open(corrupt_file, "rb") as f:
+            self.assertEqual(f.read(), bad_bytes)
+
+    def test_finish_requires_active_matching_identity(self):
+        """Review item 3: finish with unstarted arbitrary run_id must be rejected."""
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        with self.assertRaises(ValueError):
+            store.finish("test_job", run_id="arbitrary-unstarted-id", outcome="success")
+
+        # record_skip must reject success
+        with self.assertRaises(ValueError):
+            store.record_skip("test_job", outcome="success")
+
+    def test_duration_validates_order_and_format(self):
+        """Review item 4: compute_duration_seconds must validate timestamps and reject inverted order."""
+        t1 = "2026-10-03T12:00:00Z"
+        t2 = "2026-10-03T12:01:00Z"
+        # t1 to t2 is 60s
+        self.assertEqual(job_receipt.compute_duration_seconds(t1, t2), 60.0)
+
+        # Inverted order should raise ValueError (not silently return 0.0)
+        with self.assertRaises(ValueError):
+            job_receipt.compute_duration_seconds(t2, t1)
+
+        # Bad format should raise ValueError
+        with self.assertRaises(ValueError):
+            job_receipt.compute_duration_seconds("not-a-time", t2)
+
+    def test_atomic_replace_failure_preserves_original(self):
+        """Review item 5: failed os.replace leaves original receipt intact with no leftover temp files."""
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        run1 = store.begin("atomic_job")
+        store.finish("atomic_job", run_id=run1, outcome="success")
+        receipt_file = os.path.join(self.state_dir, "receipts", "atomic_job.json")
+        run2 = store.begin("atomic_job")
+        with open(receipt_file, "rb") as f:
+            original_bytes = f.read()
+
+        with patch("os.replace", side_effect=OSError("Disk write failed")):
+            with self.assertRaises(OSError):
+                store.finish("atomic_job", run_id=run2, outcome="success")
+
+        # Original bytes must be byte-identical
+        with open(receipt_file, "rb") as f:
+            self.assertEqual(f.read(), original_bytes)
+
+        # No tmp files left in receipts directory
+        receipts_dir = os.path.join(self.state_dir, "receipts")
+        temp_files = [fn for fn in os.listdir(receipts_dir) if fn.endswith(".tmp")]
+        self.assertEqual(temp_files, [])
+
+    def test_job_name_validation(self):
+        """Review item 5: reject invalid job names."""
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        invalid_names = ["", "../escape", "/root", "foo/bar", "foo\\bar", "..", "."]
+        for name in invalid_names:
+            with self.assertRaises(ValueError):
+                store.begin(name)
+            with self.assertRaises(ValueError):
+                store.read(name)
+
+    def test_parse_json_arg_validation(self):
+        """Review item 2: _parse_json_arg must reject invalid/non-dict inputs."""
+        with self.assertRaises(ValueError):
+            job_receipt._parse_json_arg("not json")
+        with self.assertRaises(ValueError):
+            job_receipt._parse_json_arg("[1, 2, 3]")
+        with self.assertRaises(ValueError):
+            job_receipt._parse_json_arg("123")
+        self.assertEqual(job_receipt._parse_json_arg('{"a": 1}'), {"a": 1})
+        self.assertIsNone(job_receipt._parse_json_arg(None))
+        self.assertIsNone(job_receipt._parse_json_arg(""))
+
+    def test_concurrent_subprocess_writers(self):
+        """Review item 5: simultaneous subprocess writers begin/finish/skip prove no lost state."""
+        cli = str(SCRIPTS_DIR / "job_receipt.py")
+        env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": self.state_dir}
+
+        p_active = subprocess.run(
+            [sys.executable, cli, "begin", "--job", "concur_job", "--trigger", "active_writer"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(p_active.returncode, 0)
+        active_id = p_active.stdout.strip()
+
+        # Worker 1: repeatedly does begin -> finish
+        writer_code = f"""
+import subprocess, sys
+cli = {repr(cli)}
+env = {repr(env)}
+for i in range(5):
+    p = subprocess.run([sys.executable, cli, "begin", "--job", "concur_job", "--trigger", f"worker_{{i}}"], capture_output=True, text=True, check=True, env=env)
+    rid = p.stdout.strip()
+    subprocess.run([sys.executable, cli, "finish", "--job", "concur_job", "--run-id", rid, "--outcome", "success"], check=True, env=env)
+"""
+        # Workers 2, 3, 4: repeatedly do skip (contenders hitting lock)
+        skipper_code = f"""
+import subprocess, sys
+cli = {repr(cli)}
+env = {repr(env)}
+for i in range(10):
+    subprocess.run([sys.executable, cli, "skip", "--job", "concur_job", "--outcome", "skipped_lock", "--reason", f"contention_{{i}}"], check=True, env=env)
+"""
+        workers = [
+            subprocess.Popen([sys.executable, "-c", writer_code]),
+            subprocess.Popen([sys.executable, "-c", skipper_code]),
+            subprocess.Popen([sys.executable, "-c", skipper_code]),
+            subprocess.Popen([sys.executable, "-c", skipper_code]),
+        ]
+
+        for w in workers:
+            w.wait()
+            self.assertEqual(w.returncode, 0)
+
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        data = store.read("concur_job")
+        active_ids = [a["id"] for a in data["active"]]
+        self.assertIn(active_id, active_ids)
+        self.assertLessEqual(len(data["completed"]), 64)
+        self.assertGreaterEqual(len(data["completed"]), 20)
+        self.assertIsNotNone(data["last_terminal"])
+        self.assertIsNotNone(data["last_success"])
+        self.assertIsNotNone(data["last_skipped"])
 
 
 if __name__ == "__main__":

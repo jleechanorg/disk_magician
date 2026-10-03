@@ -43,15 +43,20 @@ acquire_snapshot_lock() {
 }
 
 if ! acquire_snapshot_lock; then
-  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit \
+  if ! python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit \
     --outcome skipped_lock \
     --reason "lock held by another run" \
-    --lock '{"held": true, "reason": "contention"}' >/dev/null 2>&1 || true
+    --lock '{"held": true, "reason": "contention"}' \
+    --safety '{"status": "not_applicable", "reason": "lock_contention_no_mutation", "delegated": false}' >/dev/null 2>&1; then
+    log "ERROR: failed to record skipped_lock receipt"
+  fi
   exit 0
 fi
 
 # Record started before work
-RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commit --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}") || {
+RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commit \
+  --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}" \
+  --safety '{"status": "not_applicable", "reason": "read_and_commit_only", "delegated": false}') || {
   log "ERROR: failed to record receipt begin"
   exit 1
 }
@@ -61,7 +66,7 @@ if [[ ! -f "$STATE_DIR/MACHINE" || ! -d "$STATE_DIR/.git" ]]; then
   DISK_MAGICIAN_STATE_REPO="$STATE_DIR" bash "$SCRIPT_DIR/state_repo.sh" init >/dev/null 2>&1 || {
     log "ERROR: state repo init failed for $STATE_DIR"
     python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
-      --outcome error --reason "state repo init failed" >/dev/null 2>&1 || true
+      --outcome error --reason "state repo init failed" >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
     exit 1
   }
 fi
@@ -71,7 +76,25 @@ mkdir -p "$STATE_DIR/snapshots" "$STATE_DIR/ledger" "$STATE_DIR/config" "$STATE_
 if ! bash "$SNAP_BIN" --output "$STATE_DIR/snapshots/disk_snapshot.json"; then
   log "ERROR: snapshot writer failed"
   python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
-    --outcome error --reason "snapshot writer failed" >/dev/null 2>&1 || true
+    --outcome error --reason "snapshot writer failed" >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
+  exit 1
+fi
+
+SNAP_FILE="$STATE_DIR/snapshots/disk_snapshot.json"
+if [[ ! -f "$SNAP_FILE" ]] || ! python3 - "$SNAP_FILE" <<'EOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or "disk_free_gb" not in data:
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+EOF
+then
+  log "ERROR: snapshot artifact invalid or missing"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error --reason "snapshot artifact invalid or missing" >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
   exit 1
 fi
 
@@ -87,23 +110,50 @@ CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 
 # Capture actual snapshot and renderer publication status
 RENDER_STATUS="unknown"
-if [[ -f "$STATE_DIR/ledger/topdown-5g.status.json" ]]; then
-  RENDER_STATUS=$(python3 -c "import json; print(json.load(open('$STATE_DIR/ledger/topdown-5g.status.json')).get('status', 'unknown'))" 2>/dev/null || echo "unknown")
-elif [[ -f "$STATE_DIR/ledger/topdown-5g.json" ]]; then
-  RENDER_STATUS="published"
+SIDECAR="$STATE_DIR/ledger/topdown-5g.status.json"
+if [[ -f "$SIDECAR" ]]; then
+  RENDER_STATUS=$(python3 - "$SIDECAR" <<'EOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(d.get("status", "unknown"))
+except Exception:
+    print("unknown")
+EOF
+)
 fi
 
 # 5. Commit.
 git_id update-index --no-assume-unchanged \
   ledger/topdown-5g.json ledger/topdown-5g.md ledger/topdown-5g.status.json \
   2>/dev/null || true
-git_id add -A
+
+if ! git_id add -A; then
+  log "ERROR: git add failed"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error \
+    --reason "git add failed" \
+    --publication '{"committed": false, "pushed": false, "status": "add_failed"}' >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
+  exit 1
+fi
+
 if ! git_id commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty; then
   log "ERROR: git commit failed"
   python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
     --outcome error \
     --reason "git commit failed" \
-    --publication '{"committed": false, "pushed": false, "status": "commit_failed"}' >/dev/null 2>&1 || true
+    --publication '{"committed": false, "pushed": false, "status": "commit_failed"}' >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
+  exit 1
+fi
+
+# Confirm expected snapshot content is present in new commit
+if ! git_id rev-parse HEAD:snapshots/disk_snapshot.json >/dev/null 2>&1; then
+  log "ERROR: snapshots/disk_snapshot.json missing from committed HEAD"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error \
+    --reason "snapshot file missing in committed HEAD" \
+    --publication '{"committed": false, "pushed": false, "status": "verification_failed"}' >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
   exit 1
 fi
 log "committed snapshot"
@@ -131,11 +181,16 @@ fi
 
 POSTCONDITION="{\"renderer_status\": \"$RENDER_STATUS\", \"freed_bytes\": null}"
 PUBLICATION="{\"committed\": true, \"pushed\": $PUSHED, \"status\": \"$PUSH_STATUS\"}"
+SAFETY='{"status": "not_applicable", "reason": "read_and_commit_only", "delegated": false}'
 
 python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit \
   --run-id "$RECEIPT_RUN_ID" \
   --outcome success \
+  --safety "$SAFETY" \
   --postcondition "$POSTCONDITION" \
-  --publication "$PUBLICATION" >/dev/null 2>&1 || true
+  --publication "$PUBLICATION" || {
+  log "ERROR: failed to write terminal success receipt"
+  exit 1
+}
 
 exit 0

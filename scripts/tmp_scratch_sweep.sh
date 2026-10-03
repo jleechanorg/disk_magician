@@ -38,16 +38,23 @@ else
   REASON="clean sweep completed"
 fi
 
-SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp and cleanup_claude_state"}'
+if [[ "$clean_flag" == "--dry-run" ]]; then
+  SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
+else
+  SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp and cleanup_claude_state", "delegated": true}'
+fi
 CANDIDATES='{"count": null, "bytes": null}'
 POSTCONDITION='{"freed_bytes": null}'
 
-python3 "$RECEIPT_HELPER" finish --job tmp_scratch_sweep \
+if ! python3 "$RECEIPT_HELPER" finish --job tmp_scratch_sweep \
   --run-id "$RECEIPT_RUN_ID" \
   --outcome "$OUTCOME" \
   --reason "$REASON" \
   --safety "$SAFETY" \
   --candidates "$CANDIDATES" \
-  --postcondition "$POSTCONDITION" >/dev/null 2>&1 || true
+  --postcondition "$POSTCONDITION"; then
+  echo "[tmp_scratch_sweep] ERROR: failed to record receipt finish" >&2
+  exit 1
+fi
 
 exit "$rc"

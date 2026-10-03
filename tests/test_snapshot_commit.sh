@@ -30,6 +30,32 @@ run_sc() { # run_sc <home> <args...>
     /bin/bash "$SC" "${@:2}"
 }
 
+assert_receipt_field() {
+  local rf="$1" key="$2" expected="$3" name="$4"
+  local actual
+  actual=$(python3 - "$rf" "$key" <<'EOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    keys = sys.argv[2].split(".")
+    curr = d
+    for k in keys:
+        if curr is None:
+            break
+        curr = curr.get(k)
+    print(json.dumps(curr) if not isinstance(curr, str) else curr)
+except Exception as e:
+    print(f"ERROR: {e}")
+EOF
+)
+  if [[ "$actual" == "$expected" ]]; then
+    ok "$name"
+  else
+    bad "$name" "expected '$expected', got '$actual'"
+  fi
+}
+
 echo "Test 1: fresh run auto-inits state repo, writes snapshot, commits"
 H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 OUT1=$(run_sc "$H1" 2>&1); RC1=$?
@@ -42,8 +68,9 @@ LOG1="$(git -C "$SD1" log --oneline 2>&1)"
 LASTC=$(git -C "$SD1" rev-list --count HEAD)
 RF1="$H1/.disk_magician_state/receipts/snapshot_commit.json"
 [[ -f "$RF1" ]] && ok "receipt file written" || bad "receipt file" "missing"
-grep -q '"outcome": "success"' "$RF1" && ok "receipt reports success" || bad "receipt outcome" "not success"
-grep -q '"committed": true' "$RF1" && ok "receipt reports committed true" || bad "receipt committed" "not true"
+assert_receipt_field "$RF1" "last_terminal.outcome" "success" "receipt reports success"
+assert_receipt_field "$RF1" "last_terminal.publication.committed" "true" "receipt reports committed true"
+assert_receipt_field "$RF1" "last_success.outcome" "success" "last_success recorded"
 
 echo "Test 2: second run commits a NEW snapshot (history accrues)"
 OUT2=$(run_sc "$H1" 2>&1)
@@ -62,8 +89,8 @@ OUT3=$(run_sc "$H3" 2>&1); RC3=$?
 LOG3="$(git -C "$SD3" log --oneline 2>&1)"
 [[ "$LOG3" == *[Ss]napshot* ]] && ok "commit preserved despite push failure" || bad "commit preserved" "$LOG3"
 RF3="$H3/.disk_magician_state/receipts/snapshot_commit.json"
-grep -q '"outcome": "success"' "$RF3" && ok "push failure still reports success outcome" || bad "push outcome" "not success"
-grep -q '"pushed": false' "$RF3" && ok "push failure records pushed false" || bad "push pushed" "not false"
+assert_receipt_field "$RF3" "last_terminal.outcome" "success" "push failure still reports success outcome"
+assert_receipt_field "$RF3" "last_terminal.publication.pushed" "false" "push failure records pushed false"
 
 echo "Test 4: state_repo_path config grandfathers an existing repo in place"
 H4="$TMP_ROOT/h4"; mkdir -p "$H4/.config/disk-magician"
@@ -126,7 +153,8 @@ OUT7=$(run_sc "$H7" 2>&1); RC7=$?
 [[ $RC7 -eq 0 ]] && ok "lock skip exits 0" || bad "lock skip rc" "$RC7: $OUT7"
 RF7="$H7/.disk_magician_state/receipts/snapshot_commit.json"
 [[ -f "$RF7" ]] && ok "receipt written on lock skip" || bad "receipt on lock skip" "missing"
-grep -q '"outcome": "skipped_lock"' "$RF7" && ok "receipt outcome is skipped_lock" || bad "receipt outcome" "not skipped_lock"
+assert_receipt_field "$RF7" "last_terminal.outcome" "skipped_lock" "receipt outcome is skipped_lock"
+assert_receipt_field "$RF7" "last_skipped.outcome" "skipped_lock" "last_skipped outcome is skipped_lock"
 
 echo "Test 8: git commit failure cannot report success (exits nonzero, outcome error)"
 H8="$TMP_ROOT/h8"; mkdir -p "$H8"
@@ -142,8 +170,8 @@ OUT8=$(run_sc "$H8" 2>&1); RC8=$?
 [[ $RC8 -ne 0 ]] && ok "commit failure exits nonzero" || bad "commit failure rc" "unexpected exit 0"
 RF8="$H8/.disk_magician_state/receipts/snapshot_commit.json"
 [[ -f "$RF8" ]] && ok "receipt file written on commit failure" || bad "commit failure receipt" "missing"
-grep -q '"outcome": "error"' "$RF8" && ok "receipt outcome is error" || bad "commit failure outcome" "not error"
-grep -q '"committed": false' "$RF8" && ok "receipt publication.committed is false" || bad "receipt committed" "not false"
+assert_receipt_field "$RF8" "last_terminal.outcome" "error" "receipt outcome is error"
+assert_receipt_field "$RF8" "last_terminal.publication.committed" "false" "receipt publication.committed is false"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

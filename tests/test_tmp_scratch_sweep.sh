@@ -48,6 +48,19 @@ assert_contains() {
   fi
 }
 
+assert_receipt_field() {
+  local name="$1" json_file="$2" py_expr="$3" expected="$4"
+  local actual
+  actual=$(python3 -c "import json, sys; d=json.load(open('$json_file')); print($py_expr)" 2>/dev/null || echo "__ERR__")
+  if [[ "$actual" == "$expected" ]]; then
+    echo "  PASS  $name"
+    PASS=$(( PASS + 1 ))
+  else
+    echo "  FAIL  $name (expected: $expected, got: $actual)"
+    FAIL=$(( FAIL + 1 ))
+  fi
+}
+
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --clean
@@ -83,8 +96,9 @@ INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash 
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run, no approval" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 assert_contains "cleanup_claude_state dry-run, no approval" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
-assert_contains "dry-run receipt outcome success_noop" '"outcome": "success_noop"' "$(cat "$STATE_DIR/receipts/tmp_scratch_sweep.json")"
-assert_contains "dry-run receipt freed_bytes null" '"freed_bytes": null' "$(cat "$STATE_DIR/receipts/tmp_scratch_sweep.json")"
+assert_receipt_field "dry-run receipt outcome success_noop" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success_noop"
+assert_receipt_field "dry-run receipt freed_bytes null" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "None"
+assert_receipt_field "dry-run receipt safety no_mutation" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "no_mutation"
 
 echo "Test 6: exit code — wrapper exits nonzero if a step failed"
 if [[ "$WRAPPER_RC" -ne 0 ]]; then
@@ -96,7 +110,7 @@ else
 fi
 # Re-run failure to check receipt outcome
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_EXIT=1 /bin/bash "$SCRIPT" --clean || true
-assert_contains "failure receipt outcome error" '"outcome": "error"' "$(cat "$STATE_DIR/receipts/tmp_scratch_sweep.json")"
+assert_receipt_field "failure receipt outcome error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
 
 echo "Test 7: exit code — wrapper exits 0 when both steps succeed"
 : > "$INVOCATION_LOG"
@@ -109,7 +123,8 @@ else
   echo "  FAIL  wrapper exited $CLEAN_RC despite both steps succeeding"
   FAIL=$(( FAIL + 1 ))
 fi
-assert_contains "clean receipt outcome success" '"outcome": "success"' "$(cat "$STATE_DIR/receipts/tmp_scratch_sweep.json")"
+assert_receipt_field "clean receipt outcome success" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success"
+assert_receipt_field "clean receipt safety delegated" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
 
 echo "Test 8: exit code — wrapper exits nonzero if cleanup_claude_state fails alone while cleanup_tmp succeeds"
 : > "$INVOCATION_LOG"
@@ -127,7 +142,7 @@ else
   echo "  FAIL  wrapper exited 0 despite cleanup_claude_state failing alone (rc=$STATE_FAIL_RC)"
   FAIL=$(( FAIL + 1 ))
 fi
-assert_contains "state failure receipt outcome error" '"outcome": "error"' "$(cat "$STATE_DIR/receipts/tmp_scratch_sweep.json")"
+assert_receipt_field "state failure receipt outcome error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
