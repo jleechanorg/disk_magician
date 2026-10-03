@@ -109,6 +109,12 @@ install_plist() {
   local src="$1" label dst
   label="$(grep -A1 '<key>Label</key>' "$src" | tail -1 | sed -n 's/.*<string>\([^<]*\)<\/string>.*/\1/p')"
   [[ -n "$label" ]] || { echo "skip (no label): $src" >&2; return 1; }
+  # Do not replace a working installed plist when its packaged entrypoint is
+  # absent.  This preflight is intentionally before sed writes the destination.
+  if grep -qF '@HOME@/.local/bin/diskm' "$src" && [[ ! -x "$HOME/.local/bin/diskm" ]]; then
+    echo "ABORT: $src requires packaged diskm at $HOME/.local/bin/diskm before replacing $label" >&2
+    return 1
+  fi
   dst="$DEST/${label}.plist"
   sed -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
       -e "s|@HOME@|$HOME|g" \
@@ -133,6 +139,16 @@ install_plist() {
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$dst"
   echo "installed $label -> $dst"
+}
+
+is_privileged_template() {
+  local src="$1"
+  # UserName=root is authoritative when present; the filename marker keeps the
+  # dedicated frontier-root installer from being bypassed by a future edit.
+  if grep -A1 '<key>UserName</key>' "$src" 2>/dev/null | grep -q '<string>root</string>'; then
+    return 0
+  fi
+  [[ "$(basename "$src")" == *frontier-root* ]]
 }
 
 install_launchdaemon() {
@@ -182,9 +198,13 @@ if [[ ${#SELECTED[@]} -gt 0 ]]; then
       [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.template"
       [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.plist"
       [[ -f "$src" ]] || src="$LAUNCHD_SRC/${name}.plist.template"
+      [[ -f "$src" ]] || src="$LAUNCHD_SRC/com.jleechanorg.disk-magician-${name%.plist}.plist.template"
     fi
     [[ -f "$src" ]] || { echo "not found: $name" >&2; exit 2; }
-    if [[ "$name" == *apfs-snapshots* ]]; then
+    if is_privileged_template "$src"; then
+      echo "Skipping privileged/root-owned template from user LaunchAgent installation: $src" >&2
+      ERRORS=$(( ERRORS + 1 ))
+    elif [[ "$name" == *apfs-snapshots* ]]; then
       install_launchdaemon "$src" || ERRORS=$(( ERRORS + 1 ))
     else
       install_plist "$src" || ERRORS=$(( ERRORS + 1 ))
@@ -204,6 +224,10 @@ else
   # filename. e.g. com.jleechanorg.disk-magician-drilldown.plist.template (4h residual
   # drilldown cadence, see roadmap/2026-07-11-total-coverage-snapshot-v2.md).
   for src in "$LAUNCHD_SRC"/com.jleechanorg.disk-magician-*.plist.template; do
+    if is_privileged_template "$src"; then
+      echo "Skipping privileged/root-owned template from user LaunchAgent installation: $src" >&2
+      continue
+    fi
     install_plist "$src" || ERRORS=$(( ERRORS + 1 ))
   done
 fi
