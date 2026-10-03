@@ -61,7 +61,7 @@ def test_atomic_write_survives_kill(tmp_path):
 
 
 def test_carry_within_72h_tagged_with_age(tmp_path):
-    r = merge(tmp_path, {"projects": state_entry(900, "2026-10-01T12:00:00Z")},
+    r = merge(tmp_path, {"projects": state_entry(900, "2026-10-02T12:00:00Z")},
               {"projects": {"kb": None, "path": "~/projects"}, "claude_root": {"kb": 5, "path": "~/.claude"}})
     assert r["carried"]["projects"] == {"kb": 900, "age_hours": 24.0}
     assert r["fresh"] == {"claude_root": 5}
@@ -115,7 +115,7 @@ def test_lc_and_glob_keys_never_carried(tmp_path):
 
 
 def test_72h_retention_and_48h_alert_age(tmp_path):
-    r = merge(tmp_path, {"projects": state_entry(900, "2026-09-30T11:00:00Z")},  # 49 h old
+    r = merge(tmp_path, {"projects": state_entry(900, "2026-10-01T11:00:00Z")},  # 49 h old
               {"projects": {"kb": None, "path": "~/projects"}, "claude_root": {"kb": 5, "path": "~/.claude"}})
     assert r["carried"]["projects"]["age_hours"] == 49.0  # still carried: retention 72 > alert 48
 
