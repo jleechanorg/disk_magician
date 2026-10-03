@@ -198,7 +198,8 @@ if root_ok "$RELEASES_DIR"; then
   # ~/.local/bin or unit dir (dotfile managers) is traversed.
   [[ -d "$BIN_DIR" ]] && BIN_DIR="$(phys "$BIN_DIR")"
   [[ -d "$UNIT_DIR" ]] && UNIT_DIR="$(phys "$UNIT_DIR")"
-  ref_re="($(re_escape "$rel_logical")|$(re_escape "$RELEASES_DIR"))/[^/\"' ]+"
+  root_re="($(re_escape "$rel_logical")|$(re_escape "$RELEASES_DIR"))"
+  ref_re="$root_re/[^/\"' ]+"
   units="$(mktemp)"
   if [[ -d "$UNIT_DIR" ]]; then
     find "$UNIT_DIR" \( -type f -o -type l \) >"$units" 2>/dev/null || scan_fail "unreadable $UNIT_DIR"
@@ -220,7 +221,8 @@ if root_ok "$RELEASES_DIR"; then
           cat "$f" || scan_fail "cannot read $f"
         else
           # Binary launcher (or empty file): extract embedded release paths.
-          LC_ALL=C grep -aoE "$ref_re" "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
+          # Whole printable run after the root, so names with spaces stay intact.
+          LC_ALL=C grep -aoE "$root_re/[[:print:]]+" "$f" 2>/dev/null || [[ $? -eq 1 ]] || scan_fail "cannot read $f"
         fi
       done < <(find -L "$BIN_DIR" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
       while IFS= read -r f; do

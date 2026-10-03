@@ -293,6 +293,13 @@ check "release named via \\s escape kept" '[[ -d "$R16/r 0" ]]'
 check "release named via octal \\055 escape kept" '[[ -d "$R16/r1" ]]'
 check "release linked from a bin symlink with a newline in its name kept" '[[ -d "$R16/r2" && ! -e "$R16/r3" ]]'
 
+echo "Test 17: binary launcher referencing a release whose name contains a space"
+H17="$T/h17"; mk7 "$H17"; R17="$H17/.local/share/dark-factory/releases"
+mkdir -p "$R17/ref old/bin"; echo x >"$R17/ref old/bin/dark-factory"; age "$R17/ref old" 120
+printf '\177ELF\0%s/ref old/bin/dark-factory\0' "$R17" >"$H17/.local/bin/launcher"
+run7 "$H17" --clean --keep-releases 0 >"$T/t17.out" 2>&1 || true
+check "binary-referenced release with a space in its name kept" '[[ -d "$R17/ref old" && ! -e "$R17/r1" ]]'
+
 echo "Test 3: empty install (no releases, no references) does not abort"
 E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory/runs" "$E/.ao-sessions"
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
