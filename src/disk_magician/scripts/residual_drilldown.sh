@@ -11,6 +11,11 @@
 # "Control loop" section). Never touches disk_snapshot.sh.
 set -euo pipefail
 
+# launchd's minimal PATH does not include the Homebrew coreutils timeout used
+# by the bounded checks below. Add known install locations without replacing
+# the caller's PATH.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -87,6 +92,62 @@ is_never_delete() {
   done
   return 1
 }
+
+# Uncovered-root ownership is orthogonal to the residual threshold, so run it
+# before any early exit. This alert is deliberately fail-soft: checker failure,
+# malformed JSON, missing checker/timeout, and timeout never alter the existing
+# residual-drilldown result and never claim that zero roots were uncovered.
+UNCOVERED_TIMEOUT_S="${DISK_MAGICIAN_UNCOVERED_TIMEOUT_S:-30}"
+UNCOVERED_ROOTS_CMD="${DISK_MAGICIAN_UNCOVERED_ROOTS_CMD:-$SCRIPT_DIR/check_uncovered_roots.sh}"
+
+uncovered_alert() {
+  local timeout_cmd uncovered_json alert_fields uncovered_count top_path rc
+
+  if [[ "$UNCOVERED_ROOTS_CMD" == */* && ! -x "$UNCOVERED_ROOTS_CMD" ]] ||
+     [[ "$UNCOVERED_ROOTS_CMD" != */* ]] && ! command -v "$UNCOVERED_ROOTS_CMD" >/dev/null 2>&1; then
+    echo "residual_drilldown: uncovered-roots checker unavailable ($UNCOVERED_ROOTS_CMD); skipping alert." >&2
+    return 0
+  fi
+
+  timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="$(command -v timeout)"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="$(command -v gtimeout)"
+  fi
+  if [[ -z "$timeout_cmd" ]]; then
+    echo "residual_drilldown: timeout unavailable; skipping uncovered-roots alert." >&2
+    return 0
+  fi
+
+  uncovered_json="$("$timeout_cmd" "$UNCOVERED_TIMEOUT_S" "$UNCOVERED_ROOTS_CMD" --json 2>/dev/null)"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 124 ]]; then
+      echo "residual_drilldown: uncovered-roots check timed out after ${UNCOVERED_TIMEOUT_S}s, skipping alert." >&2
+    else
+      echo "residual_drilldown: uncovered-roots checker failed (rc=$rc), skipping alert." >&2
+    fi
+    return 0
+  fi
+
+  if ! alert_fields="$(printf '%s' "$uncovered_json" | python3 -c 'import json, sys
+data = json.load(sys.stdin)
+roots = data.get("uncovered")
+if not isinstance(roots, list):
+    raise ValueError("uncovered is not a list")
+top = roots[0].get("path", "<unknown>") if roots else ""
+print(f"{len(roots)}\t{top}")' 2>/dev/null)"; then
+    echo "residual_drilldown: uncovered-roots checker returned malformed JSON; skipping alert." >&2
+    return 0
+  fi
+  IFS=$'\t' read -r uncovered_count top_path <<< "$alert_fields"
+  if [[ "$uncovered_count" =~ ^[1-9][0-9]*$ ]]; then
+    echo "residual_drilldown: UNCOVERED — $uncovered_count root(s) with no registered sweeper owner (top: $top_path). See config/sweeper_roots.txt."
+  fi
+  return 0
+}
+uncovered_alert || true
 
 if [[ ! -f "$SNAPSHOT_FILE" ]]; then
   echo "residual_drilldown: no snapshot at $SNAPSHOT_FILE — nothing to drill down on, no-op."
