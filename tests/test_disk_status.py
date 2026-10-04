@@ -82,6 +82,19 @@ def make_valid_strict_ledger(captured_at: str, disk_used_kb: int = 200, residual
     }
 
 
+def make_valid_partial_ledger(captured_at: str, disk_used_kb: int = 200, residual_kb: int = 200) -> dict:
+    """Create a schema_version 2 valid partial ledger that passes history_diff.validate_ledger."""
+    ledger = make_valid_strict_ledger(captured_at, disk_used_kb=disk_used_kb, residual_kb=residual_kb)
+    ledger["publication_kind"] = "partial"
+    ledger["canonical"] = False
+    ledger["mode"] = "partial"
+    ledger["coverage_envelope"]["complete"] = False
+    ledger["coverage_envelope"]["unfinished_top_level_roots"] = 1
+    ledger["frontier_unfinished"] = [{"path": "/Users/foo/Downloads"}]
+    ledger["unfinished_top_level_roots"] = ["/Users/foo/Downloads"]
+    return ledger
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -375,17 +388,11 @@ class TestDiskStatus(unittest.TestCase):
         self.assertEqual(res["status"], "degraded")
         self.assertIn("strict_ledger_stale", res["reason"])
 
-        # Strict missing, partial present -> degraded (never canonical)
+        # Strict missing, valid partial present -> degraded (never canonical)
         strict_file.unlink()
-        partial_data = {
-            "schema_version": 2,
-            "publication_kind": "partial",
-            "canonical": False,
-            "captured_at": self.now_str,
-            "scope": "shallow",
-        }
+        valid_partial = make_valid_partial_ledger(captured_at=self.now_str)
         with open(partial_file, "w", encoding="utf-8") as f:
-            json.dump(partial_data, f)
+            json.dump(valid_partial, f)
         res = evaluator.evaluate_publication()
         self.assertEqual(res["status"], "degraded")
         self.assertEqual(res["reason"], "partial_publication_only_no_strict_ledger")
@@ -414,8 +421,72 @@ class TestDiskStatus(unittest.TestCase):
         res = evaluator.evaluate_publication()
         self.assertEqual(res["status"], "invalid")
         self.assertIn("sidecar_malformed", res["reason"])
+        sidecar_file.unlink()
+
+        # Restore fresh valid strict ledger commit
+        with open(strict_file, "w", encoding="utf-8") as f:
+            json.dump(self.ledger_data, f)
+        fresh_commit_env = {
+            **os.environ,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "HERMES_SKIP_EXAMPLE_COM_GUARD": "1",
+            "GIT_AUTHOR_DATE": (self.now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "GIT_COMMITTER_DATE": (self.now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        subprocess.run(["git", "-C", str(self.state_repo), "add", "ledger/topdown-5g.json"], check=True, env=fresh_commit_env)
+        subprocess.run(["git", "-C", str(self.state_repo), "commit", "-m", "fresh strict commit"], check=True, env=fresh_commit_env)
+
+        # Terra repro: malformed partial {"schema_version":2,"publication_kind":"partial"} beside valid strict -> invalid
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump({"schema_version": 2, "publication_kind": "partial"}, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "invalid")
+
+        # Structurally valid partial with missing captured_at -> invalid
+        partial_missing_time = make_valid_partial_ledger(captured_at=self.now_str)
+        del partial_missing_time["captured_at"]
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump(partial_missing_time, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "invalid")
+
+        # Structurally valid partial with future captured_at -> invalid
+        future_time = (self.now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        partial_future_time = make_valid_partial_ledger(captured_at=future_time)
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump(partial_future_time, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "invalid")
+
+        # Structurally invalid partial with valid time -> invalid
+        bad_partial = make_valid_partial_ledger(captured_at=self.now_str)
+        bad_partial["residual_kb"] = 9999999
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump(bad_partial, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "invalid")
+        self.assertIn("partial_ledger_integrity_violation", res["reason"])
+
+        # Legitimate newer valid partial beside strict -> degraded
+        newer_partial = make_valid_partial_ledger(captured_at=self.now_str)
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump(newer_partial, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "degraded")
+
+        # Older valid partial beside strict -> strict healthy
+        older_time = (self.now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        older_partial = make_valid_partial_ledger(captured_at=older_time)
+        with open(partial_file, "w", encoding="utf-8") as f:
+            json.dump(older_partial, f)
+        res = evaluator.evaluate_publication()
+        self.assertEqual(res["status"], "healthy")
+        self.assertEqual(res["reason"], "strict_ledger_current_and_valid")
+        partial_file.unlink()
 
         # Publication-only mode flag returns only publication dimension
+        with open(sidecar_file, "w", encoding="utf-8") as f:
+            f.write("{broken json")
         result = evaluator.evaluate(publication_only=True)
         self.assertIn("publication", result["dimensions"])
         self.assertEqual(len(result["dimensions"]), 1)
