@@ -420,6 +420,40 @@ exit 0
         self.assertFalse(s_8d.exists())
         self.assertTrue(s_5d.exists())
 
+    def test_exact_boundary_retention(self):
+        """Exact 7.0d session is eligible for pruning (>=7d), while <7d is retained."""
+        # Session at exactly 7.0 days boundary
+        mtime_exact = self.ref_time - (7.0 * self.day_secs)
+        s_exact = self._create_mock_session(
+            self.u0_sessions,
+            "session_exact_7d",
+            {"state.json": "exact"},
+            mtime_epoch=mtime_exact,
+        )
+
+        # Session 1 second younger than boundary (6.99998d, <7d)
+        mtime_young = self.ref_time - (7.0 * self.day_secs) + 1.0
+        s_young = self._create_mock_session(
+            self.u0_sessions,
+            "session_sub_7d",
+            {"state.json": "young"},
+            mtime_epoch=mtime_young,
+        )
+
+        mock_lsof = self._create_mock_lsof_script()
+        pruner = AsideSessionPruner(
+            aside_dir=self.aside_dir,
+            dry_run=False,
+            lsof_bin=str(mock_lsof),
+            ref_time=self.ref_time,
+        )
+        stats = pruner.run()
+        self.assertEqual(stats["sessions_scanned"], 2)
+        self.assertEqual(stats["sessions_pruned"], 1)
+        self.assertEqual(stats["sessions_retained_recent"], 1)
+        self.assertFalse(s_exact.exists(), "Exact 7.0d session must be eligible for pruning")
+        self.assertTrue(s_young.exists(), "Sub-7.0d session (<7d) must be retained")
+
     def test_cli_parse_args(self):
         """Test parse_args with various flag combinations."""
         from scripts.prune_aside_sessions import parse_args

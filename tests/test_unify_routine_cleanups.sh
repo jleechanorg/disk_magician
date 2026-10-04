@@ -45,11 +45,46 @@ export DISK_MAGICIAN_WORKTREE_ROOTS="$FIXTURE_WORKTREES"
 export DISK_MAGICIAN_TEST_CONTEXT=1
 export DISK_MAGICIAN_TEST_SANDBOX="$TMP_DIR"
 export CLAUDE_STATE_ROOT="$FIXTURE_CLAUDE_STATE"
+FIXTURE_HOME="$TMP_DIR/fakehome"
+FIXTURE_BIN="$TMP_DIR/fakebin"
+FIXTURE_STATE="$TMP_DIR/fakestate"
+mkdir -p "$FIXTURE_HOME" "$FIXTURE_BIN" "$FIXTURE_STATE"
+
+# Isolate HOME and state so tests never scan live developer/docker paths
+export HOME="$FIXTURE_HOME"
+export DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE"
+export POST_JOB_DOCKER_PRUNE_LOG="$TMP_DIR/post-job.log"
+echo "{}" > "$FIXTURE_STATE/frontier_last.json"
+echo "{}" > "$FIXTURE_STATE/discover_last.json"
+
+# Provide lightweight hermetic shims for docker and colima
+cat > "$FIXTURE_BIN/docker" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"system df"* ]]; then
+  echo "TYPE TOTAL ACTIVE SIZE RECLAIMABLE"
+  echo "Images 0 0 0B 0B"
+  exit 0
+fi
+if [[ "$*" == *"context"* ]]; then
+  echo "unix:///nonexistent/docker.sock"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$FIXTURE_BIN/docker"
+
+cat > "$FIXTURE_BIN/colima" << 'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$FIXTURE_BIN/colima"
+
+export PATH="$FIXTURE_BIN:$PATH"
 
 # Run disk_audit.sh --clean --dry-run
 OUT_AUDIT="$TMP_DIR/audit_clean.log"
-bash "$TARGET_SCRIPT" --clean --dry-run >"$OUT_AUDIT" 2>&1
-RC_AUDIT=$?
+RC_AUDIT=0
+bash "$TARGET_SCRIPT" --clean --dry-run >"$OUT_AUDIT" 2>&1 || RC_AUDIT=$?
 
 if [[ $RC_AUDIT -ne 0 ]]; then
   echo "FAIL: disk_audit.sh --clean --dry-run exited with code $RC_AUDIT" >&2
@@ -92,8 +127,8 @@ fi
 
 # Run CLI disk_magician.sh routine --dry-run
 OUT_CLI="$TMP_DIR/cli_routine.log"
-DISK_MAGICIAN_AUTO_CLEAN=1 bash "$CLI_SCRIPT" routine --dry-run >"$OUT_CLI" 2>&1
-RC_CLI=$?
+RC_CLI=0
+DISK_MAGICIAN_AUTO_CLEAN=1 bash "$CLI_SCRIPT" routine --dry-run >"$OUT_CLI" 2>&1 || RC_CLI=$?
 
 if [[ $RC_CLI -ne 0 ]]; then
   echo "FAIL: disk_magician.sh routine --dry-run exited with code $RC_CLI" >&2
