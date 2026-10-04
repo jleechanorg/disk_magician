@@ -84,5 +84,16 @@ else
   bad "expected bounded launchd-PATH run: rc=$rc output=$out"
 fi
 
+# Candidates are runtime state: a run from an installed package copy must not
+# write into the package tree (it trips deploy_uv_tool's unexpected-file guard).
+cp -R "$REPO_ROOT/scripts" "$WORK/pkg-scripts"
+mkdir -p "$WORK/pkg" && mv "$WORK/pkg-scripts" "$WORK/pkg/scripts"
+HOME="$WORK/home" "$WORK/pkg/scripts/residual_drilldown.sh" --snapshot-file "$SNAP" >/dev/null 2>&1 || true
+if [[ -d "$DISK_MAGICIAN_STATE_DIR/config.d" && ! -e "$WORK/pkg/config.d" ]]; then
+  ok "candidates dir defaults to state dir, not package root"
+else
+  bad "candidates dir leaked into package root or missing from state dir"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
