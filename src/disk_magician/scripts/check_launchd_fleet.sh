@@ -28,7 +28,9 @@ PLIST_DIR="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 # reads committed launchd sources through job_inventory.py and never treats this
 # list as a second catalog.
 KNOWN_LABELS=(
-  com.disk-magician.apfs-snapshots
+  # Compatibility inventory intentionally excludes the privileged APFS label:
+  # the no-argument checker queries user LaunchAgents only. JSON inventory
+  # derives that system LaunchDaemon separately from its committed plist.
   com.jleechanorg.disk-magician
   com.jleechanorg.disk-magician-downloads-evidence
   com.jleechanorg.disk-magician-drilldown
