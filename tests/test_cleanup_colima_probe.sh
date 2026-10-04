@@ -117,7 +117,7 @@ case "\$1 \$2" in
     exit 0
     ;;
   "system df"*)
-    if [[ "$mode" == "hang_df" ]]; then
+    if [[ "$mode" == "hang_df" || ( "$mode" == "hang_after_df" && \$(grep -c "docker system df" "$COLIMA_INVOCATIONS") -gt 1 ) ]]; then
       sleep 10
       exit 0
     fi
@@ -457,5 +457,17 @@ assert "returns nonzero on explicit DOCKER_CONTEXT empty endpoint" "true" "$([[ 
 assert "logs DEGRADED/SKIPPED on explicit empty endpoint" "DEGRADED" "$(cat "$OUT15")"
 
 echo ""
+# The reporting probe must not prevent host disk trim after successful pruning.
+echo "--- Test 16: Failed post-prune report still trims ---"
+make_mock_docker hang_after_df
+: > "$COLIMA_INVOCATIONS"
+OUT16="$TMP_ROOT/t16.out"
+RC16=0
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECONDS=1 \
+  bash "$SCRIPT" --clean > "$OUT16" 2>&1 || RC16=$?
+assert "post-prune report failure returns degraded" "1" "$RC16"
+assert "post-prune report failure is visible" "DEGRADED: post-prune" "$(cat "$OUT16")"
+assert "post-prune report failure still attempts trim" "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+
 echo "PASSED: $TESTS_PASSED / $TESTS_RUN assertions"
 echo "All focused Colima probe tests complete."

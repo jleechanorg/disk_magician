@@ -113,18 +113,8 @@ get_builder_cache_mb() {
     return 1
   fi
 
-  # Prefer `docker builder du` (direct, parseable). Older engines may not
-  # support it; fall back to parsing `docker system df` for the "Build
-  # Cache" line.
+  # Use the daemon-wide Build Cache total; builder has no du subcommand.
   local out kb
-  if out=$(docker_probe builder du --format '{{size}}' 2>/dev/null); then
-    if [[ -n "$out" ]]; then
-      kb=$(du_format_to_kb "$out") || return 1
-      echo $(( (kb + 1023) / 1024 ))   # KB -> MB, rounding up
-      return 0
-    fi
-  fi
-
   if ! out=$(docker_probe system df 2>/dev/null); then
     return 1
   fi
@@ -208,7 +198,7 @@ ensure_log_dir
   # 2) Conditional builder cache prune when over the threshold.
   current_mb=""
   if ! current_mb=$(get_builder_cache_mb) || [[ -z "$current_mb" ]]; then
-    log "DEGRADED / SKIPPED: failed to measure builder cache size (builder du and fallback system df probes timed out or failed); skipping builder prune"
+    log "DEGRADED / SKIPPED: failed to measure builder cache size (docker system df probe timed out or failed); skipping builder prune"
     log "=== post-job prune end (degraded) ==="
     exit 1
   fi

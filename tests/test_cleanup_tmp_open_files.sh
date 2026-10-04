@@ -3,7 +3,7 @@
 # in cleanup_tmp.sh has_open_files (bead disk_magician-dcz).
 #
 # Verifies:
-# 1. Targetless machine format: fake lsof only accepts `+w -n -P -F n` and fails if +D.
+# 1. Targetless machine format: fake lsof only accepts `+w -n -P -F fnt` and fails if +D.
 # 2. Fresh scan: closed-then-open two-scan case proves fresh pre-mutation check (no stale cache).
 # 3. Canonical alias: candidate physical path resolution matches canonical path emitted by lsof.
 # 4. Strict prefix matching: exact match and slash-delimited prefix match, prefix collisions do not match.
@@ -159,9 +159,9 @@ EOF
 }
 echo "=== cleanup_tmp.sh open-file probes test suite (disk_magician-dcz) ==="
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 1: Fake lsof only accepts `+w -n -P -F n` and fails if +D is passed
+# Test 1: Fake lsof only accepts `+w -n -P -F fnt` and fails if +D is passed
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 1: Fake lsof requires targetless '+w -n -P -F n' and rejects '+D'"
+echo "Test 1: Fake lsof requires targetless '+w -n -P -F fnt' and rejects '+D'"
 T1_PRIVATE_TMP="$TMP_ROOT/t1-private-tmp"
 T1_TMP="$TMP_ROOT/t1-tmp"
 T1_ARCHIVE="$TMP_ROOT/t1-archive"
@@ -180,7 +180,7 @@ for arg in "$@"; do
   fi
 done
 # Strictly verify required targetless machine-format flags
-if [[ "$*" != "+w -n -P -F n" ]]; then
+if [[ "$*" != "+w -n -P -F fnt" ]]; then
   echo "ERROR: unexpected flags: $*" >&2
   exit 98
 fi
@@ -711,9 +711,9 @@ assert_rc "Test 8: exits 0" 0 "$T8_RC"
 assert_exists "Test 8: stubborn candidate is preserved when lsof times out / killed" "$T8_ARCHIVE/20200101T000000Z"
 assert_contains "Test 8: logs fail-closed on timeout escalation" "Open-file check failed" "$T8_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 9: lsof -F n stream parsing: empty n, p-only, all-empty, ordering
+# Test 9: lsof -F fnt stream parsing: empty n, p-only, all-empty, ordering
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 9: lsof -F n stream parsing: empty n accepted with path; p-only and all-empty rejected; order enforced"
+echo "Test 9: lsof -F fnt stream parsing: empty n accepted with path; p-only and all-empty rejected; order enforced"
 T9_PRIVATE_TMP="$TMP_ROOT/t9-private-tmp"
 T9_TMP="$TMP_ROOT/t9-tmp"
 T9_ARCHIVE="$TMP_ROOT/t9-archive"

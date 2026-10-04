@@ -315,14 +315,16 @@ else
   freed_kb=$(( before_kb - after_kb ))
   [[ $freed_kb -lt 0 ]] && freed_kb=0
   log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
+  report_status=0
   log "=== docker system df (after) ==="
   if ! docker_probe system df; then
     log "DEGRADED: post-prune docker system df probe failed or timed out."
-    exit 1
+    report_status=1
   fi
   if command -v colima >/dev/null 2>&1; then
     if ! fstrim_colima_disk; then
       recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
     fi
   fi
+  exit "$report_status"
 fi

@@ -44,7 +44,7 @@ assert() {
 # Build a mock docker binary that:
 #   - records every invocation to $INVOCATION_LOG
 #   - answers `docker info` with success
-#   - answers `docker builder du --format '{{size}}'` with $1 arg as size
+#   - rejects unsupported `docker builder du`
 #   - answers `docker system df` with a synthetic Build Cache line
 #   - returns success for `prune` commands (just records them)
 make_mock_docker() {
@@ -62,8 +62,8 @@ case "\$1" in
     ;;
   builder)
     if [[ "\$2" == "du" ]]; then
-      echo "$builder_cache_size"
-      exit 0
+      echo "unexpected unsupported builder du invocation" >&2
+      exit 64
     fi
     shift; shift
     if [[ "\$1" == "prune" ]]; then
@@ -231,6 +231,7 @@ run_under_mock "$TMP2/bin:$PATH" "$LOG2" --max-cache-mb 2048
 LOG2_CONTENT=$(cat "$LOG2")
 INV2_CONTENT=$(cat "$INV2")
 assert "logs builder cache size" "builder cache: 500MB" "$LOG2_CONTENT"
+assert "does not call unsupported builder du" "false" "$([[ "$INV2_CONTENT" == *"builder du"* ]] && echo true || echo false)"
 assert "logs threshold check" "threshold: 2048MB" "$LOG2_CONTENT"
 assert "skips builder prune when under threshold" "skipping builder prune" "$LOG2_CONTENT"
 assert "runs docker system prune" "docker system prune -f" "$INV2_CONTENT"
@@ -355,8 +356,8 @@ fi
 rm -rf "$TMP7"
 
 # ---------------------------------------------------------------------------
-# Test 8: builder du hang falls back to system df within deadline.
-echo "=== Test 8: builder du hang falls back to system df ==="
+# Test 8: unsupported builder du is never invoked; system df supplies total.
+echo "=== Test 8: system df supplies the cache total ==="
 TMP8=$(mktemp -d -t dj_prune_t8.XXXXXX)
 LOG8="$TMP8/post-job.log"
 LOG8_STDOUT="$TMP8/post-job.stdout"
@@ -371,15 +372,15 @@ dur8=$(( $(date +%s) - start8 ))
 LOG8_CONTENT=$(cat "$LOG8" 2>/dev/null || true)
 INV8_CONTENT=$(cat "$INV8" 2>/dev/null || true)
 assert "exits 0 when fallback system df succeeds" "0" "$RC8"
-assert "builder du hang bounded by deadline (<5s)" "true" "$([[ $dur8 -lt 5 ]] && echo true || echo false)"
-assert "measured cache from fallback system df" "builder cache: 3277MB" "$LOG8_CONTENT"
-assert "ran builder prune after fallback measurement" "docker builder prune" "$INV8_CONTENT"
+assert "cache measurement bounded by deadline (<5s)" "true" "$([[ $dur8 -lt 5 ]] && echo true || echo false)"
+assert "measured cache from system df" "builder cache: 3277MB" "$LOG8_CONTENT"
+assert "ran builder prune after cache measurement" "docker builder prune" "$INV8_CONTENT"
 rm -rf "$TMP8"
 
 # ---------------------------------------------------------------------------
-# Test 9: builder du hang AND system df hang — both bounded, no prune from
+# Test 9: system df hang — bounded, no prune from
 # invented 0MB cache, returns nonzero for degraded measurement.
-echo "=== Test 9: builder du and system df hangs fail closed ==="
+echo "=== Test 9: system df hang fails closed ==="
 TMP9=$(mktemp -d -t dj_prune_t9.XXXXXX)
 LOG9="$TMP9/post-job.log"
 LOG9_STDOUT="$TMP9/post-job.stdout"
@@ -393,8 +394,8 @@ DOCKER_PROBE_DEADLINE_SECONDS=1 run_under_mock "$TMP9/bin:$PATH" "$LOG9" --max-c
 dur9=$(( $(date +%s) - start9 ))
 LOG9_CONTENT=$(cat "$LOG9" 2>/dev/null || true)
 INV9_CONTENT=$(cat "$INV9" 2>/dev/null || true)
-assert "returns nonzero on dual probe hang" "true" "$([[ $RC9 -ne 0 ]] && echo true || echo false)"
-assert "dual hang bounded (<6s)" "true" "$([[ $dur9 -lt 6 ]] && echo true || echo false)"
+assert "returns nonzero on measurement probe hang" "true" "$([[ $RC9 -ne 0 ]] && echo true || echo false)"
+assert "measurement hang bounded (<6s)" "true" "$([[ $dur9 -lt 6 ]] && echo true || echo false)"
 assert "logs DEGRADED context" "DEGRADED" "$LOG9_CONTENT"
 assert "does not claim 0MB cache" "false" "$([[ "$LOG9_CONTENT" == *"builder cache: 0MB"* ]] && echo true || echo false)"
 if [[ "$INV9_CONTENT" == *"builder prune"* ]]; then

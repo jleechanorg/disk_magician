@@ -82,6 +82,20 @@ class ProbeRuntimeBoundaries(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertTrue(self.marker.exists())
 
+    def test_shared_memory_names_use_descriptor_type_and_reset_per_file(self):
+        cases = (
+            ("p1\nf3\ntPSXSHM\nnapple.shm.notification_center\nf4\ntREG\nn/unrelated/path\n", 1),
+            ("p1\nf3\ntPSXSEM\nnowned.semaphore\nf4\ntREG\nn/unrelated/path\n", 1),
+            ("p1\nf3\ntPSXSHM\nnbare\nf4\nnunknown-file-name\n", 0),
+            ("p1\nf3\ntPSXSHM\nnbare\np2\nnunknown-file-name\n", 0),
+            ("p1\nf3\ntPSXSHM\nnbare\nf4\ntREG\nn%s/held\n" % self.target.resolve(), 0),
+        )
+        for output, expected in cases:
+            with self.subTest(output=output):
+                self.lsof.write_text("#!/bin/sh\ncat <<'RECORDS'\n" + output + "RECORDS\n")
+                result = self.run_guard(DISK_MAGICIAN_TIMEOUT_BIN=str(self.timeout))
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_docker_timeout_resolver_supports_launchd_path(self):
         result = subprocess.run(
             ["/bin/bash", "-c", 'source "$1"; _resolve_timeout_cmd', "probe",

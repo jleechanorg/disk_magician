@@ -389,7 +389,7 @@ has_open_files() {
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
-  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F n >"$hit_file" 2>"$err_file" || rc=$?
+  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
   local diagnostic=""
   if [[ -s "$err_file" ]]; then
@@ -419,6 +419,7 @@ has_open_files() {
   local has_open=1
   local seen_process=0
   local current_process=0
+  local descriptor_type=""
   local seen_named_path=0
   local malformed=0
   local unknown_path=0
@@ -434,12 +435,14 @@ has_open_files() {
         if [[ "$val" =~ ^[0-9]+$ ]]; then
           seen_process=1
           current_process=1
+          descriptor_type=""
         else
           malformed=1
           break
         fi
         ;;
       f)
+        descriptor_type=""
         if (( current_process == 0 )); then
           malformed=1
           break
@@ -449,6 +452,13 @@ has_open_files() {
           malformed=1
           break
         fi
+        ;;
+      t)
+        if (( current_process == 0 )) || [[ -z "${line#t}" ]]; then
+          malformed=1
+          break
+        fi
+        descriptor_type="${line#t}"
         ;;
       n)
         if (( current_process == 0 )); then
@@ -461,7 +471,10 @@ has_open_files() {
           :
         else
           seen_named_path=1
-          if [[ "$val" == "/"* ]]; then
+          if [[ "$descriptor_type" == "PSXSHM" || "$descriptor_type" == "PSXSEM" ]]; then
+            # POSIX IPC names do not identify filesystem paths.
+            :
+          elif [[ "$val" == "/"* ]]; then
             # Check for non-canonical relative traversal components inside path
             if [[ "$val" == *"/../"* || "$val" == *"/.." ]]; then
               unknown_path=1
