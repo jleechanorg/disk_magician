@@ -760,25 +760,38 @@ if grep -qF "<-" "$OUT_SWAP_ORDER"; then
   exit 1
 fi
 
-# Assert both formerly-colliding labels and astral labels appear distinctly in the history table
-if ! grep -qF "\\U000e0001" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "\\ue0001" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "\\efoo" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "\\\\efoo" "$OUT_SWAP_ORDER"; then
-  echo "FAIL: expected distinct labels (\\U000e0001, \\ue0001, \\efoo, \\\\efoo) missing in history table!" >&2
-  cat "$OUT_SWAP_ORDER" >&2
-  exit 1
-fi
+# Assert both distinct sanitized labels and their separate values are bound correctly per column
+python3 - "$OUT_SWAP_ORDER" <<'PY'
+import sys
+lines = open(sys.argv[1]).readlines()
+header = None
+rows = []
+for line in lines:
+    if line.startswith("Date"):
+        header = line.split()
+    elif line.startswith("2026-10-"):
+        rows.append(line.split())
 
-# Assert values are properly separated and preserved across rows
-if ! grep -qF "20.0G" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "2.0G" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "10.0G" "$OUT_SWAP_ORDER" || \
-   ! grep -qF "1.0G" "$OUT_SWAP_ORDER"; then
-  echo "FAIL: expected separate directory sizes (20.0G, 2.0G, 10.0G, 1.0G) missing in history rows!" >&2
-  cat "$OUT_SWAP_ORDER" >&2
-  exit 1
-fi
+assert header is not None, "header line missing in history table"
+assert len(rows) >= 2, f"expected at least 2 history rows, got {len(rows)}"
+
+cols = header[3:]
+col_map = {name: idx + 3 for idx, name in enumerate(cols)}
+
+astral_hdr = r"\U000e0001"[:10]
+bmp_hdr = r"\ue0001"
+esc_hdr = r"\efoo"
+lit_hdr = r"\\efoo"
+
+for hdr in [astral_hdr, bmp_hdr, esc_hdr, lit_hdr]:
+    assert hdr in col_map, f"missing expected column header '{hdr}' in table: {cols}"
+
+for r in rows:
+    assert r[col_map[astral_hdr]] == "20.0G", f"expected 20.0G under {astral_hdr}, got {r[col_map[astral_hdr]]}"
+    assert r[col_map[bmp_hdr]] == "2.0G", f"expected 2.0G under {bmp_hdr}, got {r[col_map[bmp_hdr]]}"
+    assert r[col_map[esc_hdr]] == "10.0G", f"expected 10.0G under {esc_hdr}, got {r[col_map[esc_hdr]]}"
+    assert r[col_map[lit_hdr]] == "1.0G", f"expected 1.0G under {lit_hdr}, got {r[col_map[lit_hdr]]}"
+PY
 
 # Case 7: Hostile snapshot values and structure in disk_history.sh
 SNAP_MALFORMED="$TMP_DIR/snap_malformed.json"
@@ -795,6 +808,7 @@ data = {
         "bad_str": "12x",
         "bad_bool": True,
         "bad_nan": "nan",
+        "bad_neg": -1024,
         "valid_dir": 5242880
     }
 }
@@ -812,8 +826,8 @@ if [[ $RC_HIST_MALFORMED -ne 0 ]]; then
   exit 1
 fi
 
-if ! grep -qF "valid_dir" "$OUT_HIST_MALFORMED" || ! grep -qF "null" "$OUT_HIST_MALFORMED"; then
-  echo "FAIL: valid directory or null placeholder missing from malformed history output" >&2
+if ! grep -qF "valid_dir" "$OUT_HIST_MALFORMED" || ! grep -qF "bad_neg" "$OUT_HIST_MALFORMED" || ! grep -qF "null" "$OUT_HIST_MALFORMED"; then
+  echo "FAIL: valid directory or negative null placeholder missing from malformed history output" >&2
   cat "$OUT_HIST_MALFORMED" >&2
   exit 1
 fi
@@ -846,7 +860,7 @@ data = {
     "swap_used_gb": 2.0,
     "snapshot_metadata": {"measurement_status": "complete"},
     "directories": {
-        "float_rounded": 1048576.6,
+        "float_rounded": 512.6,
         "valid_str": "2097152",
         "bool_true": True,
         "bool_false": False,
@@ -864,9 +878,20 @@ OUT_AUDIT_COERCION="$TMP_DIR/audit_coercion.log"
 HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_AUDIT_COERCION" \
   bash "$TARGET_SCRIPT" --no-history >"$OUT_AUDIT_COERCION" 2>&1
 
-# Assert float was rounded and numeric string was accepted
-if ! grep -qF "float_rounded" "$OUT_AUDIT_COERCION" || ! grep -qF "valid_str" "$OUT_AUDIT_COERCION"; then
-  echo "FAIL: valid rounded float or numeric string missing from audit output" >&2
+# Assert float was rounded to 513K (not truncated to 512K) and numeric string was accepted at 2.0G
+if ! grep -qE "float_rounded[[:space:]]+513K" "$OUT_AUDIT_COERCION"; then
+  echo "FAIL: expected float_rounded rounded to 513K in audit output" >&2
+  cat "$OUT_AUDIT_COERCION" >&2
+  exit 1
+fi
+if grep -qF "512K" "$OUT_AUDIT_COERCION"; then
+  echo "FAIL: float_rounded was truncated to 512K instead of rounded" >&2
+  cat "$OUT_AUDIT_COERCION" >&2
+  exit 1
+fi
+
+if ! grep -qE "valid_str[[:space:]]+2\.0G" "$OUT_AUDIT_COERCION"; then
+  echo "FAIL: expected valid_str with 2.0G in audit output" >&2
   cat "$OUT_AUDIT_COERCION" >&2
   exit 1
 fi
