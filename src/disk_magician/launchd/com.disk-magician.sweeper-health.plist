@@ -27,6 +27,7 @@
     <string>@REPO_ROOT@/scripts/sweeper_health_check.sh</string>
     <string>--threshold-days</string>
     <string>7</string>
+    <string>--auto-repair</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>

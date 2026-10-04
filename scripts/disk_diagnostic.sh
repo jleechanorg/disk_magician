@@ -3,8 +3,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK="$(mktemp -d -t disk_diagnostic.XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+# shellcheck source=scripts/lib/agent_scratch.sh
+source "$SCRIPT_DIR/lib/agent_scratch.sh" || exit 1
+WORK="$(agent_scratch_create "disk_diagnostic" "$$-$(date +%s)")" || exit 1
+agent_scratch_trap_cleanup "$WORK" || exit 1
 
 TOPDOWN_JSON="$WORK/topdown.json"
 TOPDOWN_LOG="$WORK/topdown.log"

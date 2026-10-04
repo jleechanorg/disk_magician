@@ -1,6 +1,7 @@
 # disk_magician roadmap
 
 ## Recent activity (by day)
+- [2026-10-03](activity/2026-10-03.md) — 90d floor disk attribution (+194 GiB over floor); +21 GiB net reclaimed live (dev caches/wiki-publish +11.5 GiB, Codex SQLite vacuum +4.89 GiB, Colima trim +3.1 GiB, Claude state +2.07 GiB); automated launchd sweepers built for Claude state and Codex SQLite compaction.
 - [2026-09-22](activity/2026-09-22.md)
 
 - [2026-09-13](activity/2026-09-13.md) — Merged harness PR #68 (snapshot path, ledger freshness alerts, floor gates); beads qon/tli closed; ledger table still stale pending 4y6/zyn.

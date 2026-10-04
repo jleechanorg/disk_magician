@@ -22,7 +22,8 @@
   Action:    runs scripts/pressure_sweep.sh with no args (uses its built-in
              defaults). Never runs anything beyond cleanup_tmp.sh --clean
              --large (LARGE_TMP_APPROVED=1 on the pressure path; bead
-             jleechan-nkzj) and cleanup_colima.sh --clean; both own their own
+             jleechan-nkzj), cleanup_colima.sh --clean, and
+             cleanup_code_sign_clones.sh --clean; all three own their own
              safety semantics.
 
   Template uses @HOME@ / @REPO_ROOT@ / @BASH@ placeholders — resolved by
@@ -35,13 +36,15 @@
   <string>com.jleechanorg.disk-magician-pressure-sweep</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/pressure_sweep.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>pressure-sweep</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB</key>
+    <string>15</string>
   </dict>
   <key>StartInterval</key>
   <integer>1800</integer>

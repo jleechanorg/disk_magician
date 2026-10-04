@@ -290,6 +290,17 @@ else
   clean_dir_contents "dev bazel cache" "$DEV_BAZEL_CACHE" false
 fi
 
+# N. ~/.cache/wiki-publish — shadow and review-council test checkouts
+log "=== Section: ~/.cache/wiki-publish (shadow and review-council scratch) ==="
+WIKI_PUBLISH_CACHE="$HOME/.cache/wiki-publish"
+if [[ ! -d "$WIKI_PUBLISH_CACHE" ]]; then
+  log "wiki-publish cache: not found, skipping"
+else
+  before_kb=$(size_kb "$WIKI_PUBLISH_CACHE")
+  log "wiki-publish cache: $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE) — retained; automatic deletion disabled until lifecycle provenance is known"
+fi
+
+
 echo
 if [[ "$DRY_RUN" == true ]]; then
   log "=== DRY-RUN complete — no files deleted ==="

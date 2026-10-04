@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DRY_RUN=true
-THRESHOLD_DAYS=14
+THRESHOLD_DAYS=7
 BRAIN_DIR="${HOME}/.gemini/antigravity-cli/brain"
 
 usage() {
@@ -27,7 +27,7 @@ Safe compaction and retention tool for Antigravity brain:
 Options:
   --clean           Actually apply compaction (default: dry-run preview)
   --dry-run         Run in preview mode without modifying files (default)
-  --days N          Age threshold in days (default: 14)
+  --days N          Age threshold in days (default: 7)
   --brain-dir PATH  Override brain directory path
   -h, --help        Show this help message
 EOF

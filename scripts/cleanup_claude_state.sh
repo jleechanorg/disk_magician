@@ -26,10 +26,11 @@
 #     mtime in the tree, NOT directory mtime) >= --min-age days (default 7,
 #     the CLAUDE.md worktree floor -- may only be raised); unmeasurable
 #     content fails closed to age 0, i.e. preserved
-#   - every git repo/worktree found inside (bounded depth, default
-#     --maxdepth 3) is clean (no uncommitted/untracked changes), has no
-#     stash, and has no commits ahead of its upstream (or, when no upstream
-#     is configured, IS contained in at least one remote-tracking branch)
+#   - every git repo/worktree found inside (auditing nested repos at any
+#     depth, with node_modules, venvs, and .git trees pruned) is clean
+#     (no uncommitted/untracked changes), has no stash, and has no commits
+#     ahead of its upstream (or, when no upstream is configured, IS
+#     contained in at least one remote-tracking branch)
 #     -- any git repo failing this makes the WHOLE candidate NEEDS-REVIEW
 #   - no open file handles anywhere under the candidate (`lsof +D`,
 #     timeout-bounded); any lsof error, timeout, or unexpected output fails
@@ -48,12 +49,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${CLAUDE_STATE_MIN_AGE_DAYS:-7}"
 STATE_ROOT="${CLAUDE_STATE_ROOT:-$HOME/.claude/state}"
-LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-20}"
-GIT_MAXDEPTH="${CLAUDE_STATE_GIT_MAXDEPTH:-3}"
+LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-60}"
 
 usage() {
   cat <<'EOF'
@@ -79,9 +81,7 @@ Environment:
   CLAUDE_STATE_APPROVED=1        Required for --clean deletions.
   CLAUDE_STATE_MIN_AGE_DAYS      Default for --min-age when flag omitted.
   CLAUDE_STATE_ROOT              Default for --root when flag omitted.
-  CLAUDE_STATE_LSOF_TIMEOUT_SEC  lsof bound in seconds (default 20).
-  CLAUDE_STATE_GIT_MAXDEPTH      find -maxdepth for nested .git discovery
-                                 (default 3).
+  CLAUDE_STATE_LSOF_TIMEOUT_SEC  lsof bound in seconds (default 60).
 EOF
 }
 
@@ -132,6 +132,21 @@ except Exception:
     pass' "$1" 2>/dev/null
 }
 
+# Enforce canonical root in production: --root overrides are strictly restricted
+# to sandboxed test fixtures (DISK_MAGICIAN_TEST_SANDBOX or DISK_MAGICIAN_TEST_CONTEXT).
+canonical_default_root="$(realpath_or_empty "$HOME/.claude/state")"
+canonical_state_root="$(realpath_or_empty "$STATE_ROOT")"
+if [[ -z "${DISK_MAGICIAN_TEST_SANDBOX:-}" && -z "${DISK_MAGICIAN_TEST_CONTEXT:-}" ]]; then
+  if [[ -n "$canonical_default_root" && "$canonical_state_root" != "$canonical_default_root" ]]; then
+    echo "ERROR: --root override is only permitted in sandboxed test contexts (canonical root is $HOME/.claude/state)" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$DRY_RUN" == false ]]; then
+  sandbox_guard_roots "$STATE_ROOT"
+fi
+
 size_kb() {
   local path="$1"
   [[ -e "$path" ]] || { echo 0; return; }
@@ -156,7 +171,8 @@ claude_state_git_repos() {
   local candidate="$1"
   find "$candidate" \
     \( -name node_modules -o -name .venv -o -name venv -o -name __pycache__ \) -prune \
-    -o -maxdepth "$GIT_MAXDEPTH" -name .git \( -type d -o -type f \) -print \
+    -o -name .git -type d -print -prune \
+    -o -name .git -type f -print \
     2>/dev/null
 }
 
@@ -177,14 +193,18 @@ claude_state_git_check() {
     return 1
   fi
 
-  local stash
-  if ! stash="$(git -C "$repo_dir" stash list 2>&1)"; then
-    echo "git-stash-failed"
-    return 2
-  fi
-  if [[ -n "$stash" ]]; then
-    echo "stash-present"
-    return 1
+  # Only check stash for standalone clones, not linked worktrees
+  # (worktrees share the parent repo's stash list, which is global)
+  if [[ -d "$git_path" ]]; then
+    local stash
+    if ! stash="$(git -C "$repo_dir" stash list 2>&1)"; then
+      echo "git-stash-failed"
+      return 2
+    fi
+    if [[ -n "$stash" ]]; then
+      echo "stash-present"
+      return 1
+    fi
   fi
 
   local upstream
@@ -214,6 +234,17 @@ claude_state_git_check() {
     fi
   fi
 
+  # Also verify that no other local branch holds unpushed commits (fail closed on probe error)
+  local unpushed_branches
+  if ! unpushed_branches="$(git -C "$repo_dir" log --branches --not --remotes -n 1 --format="%h" 2>&1)"; then
+    echo "unpushed-branches-check-failed"
+    return 2
+  fi
+  if [[ -n "$unpushed_branches" ]]; then
+    echo "unpushed-commits-on-branches"
+    return 1
+  fi
+
   echo "clean"
   return 0
 }
@@ -223,9 +254,52 @@ claude_state_git_check() {
 # both fail closed to "treat as open" (preserved). rc 1 = lsof confirmed
 # zero matches.
 claude_state_has_open_handles() {
-  local candidate="$1" out rc
-  out="$(timeout "$LSOF_TIMEOUT_SEC" lsof +D "$candidate" 2>&1)"
-  rc=$?
+  local candidate="$1" out rc lsof_bin timeout_cmd
+  if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
+    lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof_bin="$(command -v lsof)"
+  elif [[ -x /usr/sbin/lsof ]]; then
+    lsof_bin=/usr/sbin/lsof
+  else
+    return 0  # no lsof -> fail closed
+  fi
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout"
+  elif [[ -x /opt/homebrew/bin/gtimeout ]]; then
+    timeout_cmd="/opt/homebrew/bin/gtimeout"
+  elif [[ -x /opt/homebrew/bin/timeout ]]; then
+    timeout_cmd="/opt/homebrew/bin/timeout"
+  elif [[ -x /usr/local/bin/gtimeout ]]; then
+    timeout_cmd="/usr/local/bin/gtimeout"
+  elif [[ -x /usr/local/bin/timeout ]]; then
+    timeout_cmd="/usr/local/bin/timeout"
+  else
+    timeout_cmd=""
+  fi
+
+  if [[ -n "$timeout_cmd" ]]; then
+    out="$("$timeout_cmd" "$LSOF_TIMEOUT_SEC" "$lsof_bin" +D "$candidate" 2>&1)"
+    rc=$?
+  else
+    out="$(python3 -c '
+import subprocess, sys
+try:
+    p = subprocess.run([sys.argv[2], "+D", sys.argv[3]], timeout=float(sys.argv[1]), capture_output=True, text=True)
+    sys.stdout.write(p.stdout + p.stderr)
+    sys.exit(p.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+' "$LSOF_TIMEOUT_SEC" "$lsof_bin" "$candidate" 2>&1)"
+    rc=$?
+  fi
+
   if [[ -n "$out" ]]; then
     return 0
   fi
@@ -253,6 +327,12 @@ fi
 PROJECTS_DIR_REAL="$(cd "$HOME/.claude/projects" 2>/dev/null && pwd -P || true)"
 if [[ -n "$PROJECTS_DIR_REAL" ]] && { [[ "$STATE_ROOT_REAL" == "$PROJECTS_DIR_REAL" ]] || [[ "$STATE_ROOT_REAL" == "$PROJECTS_DIR_REAL"/* ]]; }; then
   echo "REFUSING: resolved root $STATE_ROOT_REAL is ~/.claude/projects or inside it -- hard-banned" >&2
+  exit 1
+fi
+
+CODEX_DIR_REAL="$(cd "$HOME/.codex" 2>/dev/null && pwd -P || true)"
+if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$STATE_ROOT_REAL" == "$CODEX_DIR_REAL" ]] || [[ "$STATE_ROOT_REAL" == "$CODEX_DIR_REAL"/* ]]; }; then
+  echo "REFUSING: resolved root $STATE_ROOT_REAL is ~/.codex or inside it -- hard-banned" >&2
   exit 1
 fi
 
@@ -291,6 +371,18 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
   fi
   if [[ -n "$PROJECTS_DIR_REAL" ]] && { [[ "$candidate_real" == "$PROJECTS_DIR_REAL" ]] || [[ "$candidate_real" == "$PROJECTS_DIR_REAL"/* ]]; }; then
     refuse_path "resolves-into-claude-projects" "$candidate"
+    REFUSED_COUNT=$((REFUSED_COUNT + 1))
+    continue
+  fi
+  if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$candidate_real" == "$CODEX_DIR_REAL" ]] || [[ "$candidate_real" == "$CODEX_DIR_REAL"/* ]]; }; then
+    refuse_path "resolves-into-codex" "$candidate"
+    REFUSED_COUNT=$((REFUSED_COUNT + 1))
+    continue
+  fi
+
+  safety_reason=""
+  if ! safety_reason="$(safety_gate "$candidate" 2>/dev/null)"; then
+    refuse_path "$safety_reason" "$candidate"
     REFUSED_COUNT=$((REFUSED_COUNT + 1))
     continue
   fi
@@ -335,7 +427,12 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
     echo "ELIGIBLE $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
   else
     echo "DELETING $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
-    rm -rf -- "$candidate"
+    if rm -rf -- "$candidate" && [[ ! -e "$candidate" ]]; then
+      deletion_log "cleanup_claude_state.sh" "remove_dormant_state" "$size_kb_val" "$candidate"
+    else
+      echo "ERROR: Failed to completely remove dormant state directory: $candidate" >&2
+      deletion_log "cleanup_claude_state.sh" "failed_remove" "$size_kb_val" "$candidate"
+    fi
   fi
 done
 

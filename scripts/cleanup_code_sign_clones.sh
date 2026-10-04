@@ -70,19 +70,31 @@ path_mtime_epoch() {
 }
 
 lsof_state() {
-  local candidate="$1" output rc=0 pid command
-  output=$(lsof -Fpcn +D "$candidate" 2>/dev/null) || rc=$?
+  local candidate="$1" output diagnostics rc=0 pid command err_file
+  # Keep stdout (structured lsof records) separate from stderr diagnostics.
+  # rc=1 with empty stdout is the normal no-match result only when stderr is
+  # also empty; a diagnostic means inspection was incomplete and must fail
+  # closed. A bounded caller still owns the lsof invocation timeout.
+  err_file=$(mktemp "${TMPDIR:-/tmp}/disk-magician-lsof.XXXXXX" 2>/dev/null) || {
+    LSOF_DETAIL="unable to capture lsof diagnostics"
+    return 2
+  }
+  output=$(lsof -Fpcn +D "$candidate" 2>"$err_file") || rc=$?
+  diagnostics=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+  diagnostics="${diagnostics//$'\n'/; }"
   # macOS lsof may return 1 even when +D emitted valid matches. Structured
   # process + file records are authoritative; rc=1 means inactive only when
-  # the record stream is empty.
+  # the record stream and diagnostics are empty.
   if grep -q '^p' <<<"$output" && grep -q '^n' <<<"$output"; then
     pid=$(awk '/^p/{sub(/^p/, ""); print; exit}' <<<"$output")
     command=$(awk '/^c/{sub(/^c/, ""); print; exit}' <<<"$output")
     LSOF_DETAIL="pid=${pid:-unknown} command=${command:-unknown}"
     return 0
   fi
-  [[ "$rc" -eq 1 && -z "$output" ]] && return 1
+  [[ "$rc" -eq 1 && -z "$output" && -z "$diagnostics" ]] && return 1
   LSOF_DETAIL="rc=$rc"
+  [[ -n "$diagnostics" ]] && LSOF_DETAIL+=" diagnostics=${diagnostics}"
   return 2
 }
 

@@ -360,6 +360,15 @@ if [[ -d "$codex_sessions" ]]; then
     fi
 fi
 
+# Codex SQLite database check
+codex_dir="$HOME/.codex"
+if [[ -d "$codex_dir" ]]; then
+    codex_db_kb=$(find "$codex_dir" -maxdepth 1 -name "*.sqlite*" -type f -exec du -sk {} + 2>/dev/null | awk '{sum+=$1} END{print sum+0}')
+    if [[ $codex_db_kb -gt $((500 * 1024)) ]]; then
+        printf "  %-50s %8s  %s\n" "Codex SQLite databases" "$(fmt_size "$codex_db_kb")" "RUN: cleanup_codex_db.sh --clean (incremental vacuum & WAL truncate)"
+    fi
+fi
+
 # Antigravity worktrees check
 ag_worktrees="$HOME/.gemini/antigravity/worktrees"
 if [[ -d "$ag_worktrees" ]]; then
@@ -429,6 +438,11 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "Antigravity brain compaction" "$SCRIPT_DIR/cleanup_antigravity_brain.sh" $clean_arg
     fi
 
+    # Codex SQLite vacuum (Tier 5: Agent State Compaction)
+    if [[ -f "$SCRIPT_DIR/cleanup_codex_db.sh" ]]; then
+        run_category "Codex SQLite vacuum" "$SCRIPT_DIR/cleanup_codex_db.sh" $clean_arg
+    fi
+
     # Run Supervisor Launchd Logs Cleanup (Tier 5: Rotated Logs)
     if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
         run_category "Supervisor logs" "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg
@@ -483,6 +497,13 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "Agent artifacts" "$SCRIPT_DIR/cleanup_agent_artifacts.sh" $clean_arg
     else
         echo "  Agent artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
+    fi
+
+    # Canonical Dark Factory cleanup (releases, runs, sessions)
+    if [[ "${AGENT_ARTIFACTS_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_dark_factory.sh" ]]; then
+        run_category "Dark Factory artifacts" "$SCRIPT_DIR/cleanup_dark_factory.sh" $clean_arg
+    else
+        echo "  Dark Factory artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)"
     fi
 
     print_category_summary

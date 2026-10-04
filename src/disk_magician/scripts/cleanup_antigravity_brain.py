@@ -2,8 +2,8 @@
 """cleanup_antigravity_brain.py — Forensic compaction and retention tool for Antigravity CLI brain.
 
 Safe, non-destructive compaction of ~/.gemini/antigravity-cli/brain:
-  - Lossless gzip compression of stale task logs and full transcripts (>14d default).
-  - Cleaning of stale scratchpad dump files in old sessions (>14d default).
+  - Lossless gzip compression of stale task logs and full transcripts (>=7d default).
+  - Cleaning of stale scratchpad dump files in old sessions (>=7d default).
   - Pruning of 0-byte or empty orphaned session folders.
   - 100% preservation of active sessions (<24h), user-facing markdown artifacts,
     metadata JSON, and recent transcripts.
@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 DEFAULT_BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 DEFAULT_CONV_DIR = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
-DEFAULT_DAYS = 14
+DEFAULT_DAYS = 7
 ACTIVE_PROTECT_SECONDS = 86400  # 24 hours
 NOW = time.time()
 
