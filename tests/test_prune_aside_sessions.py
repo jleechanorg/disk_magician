@@ -421,8 +421,7 @@ exit 0
         self.assertTrue(s_5d.exists())
 
     def test_exact_boundary_retention(self):
-        """Exact 7.0d session is eligible for pruning (>=7d), while <7d is retained."""
-        # Session at exactly 7.0 days boundary
+        """Exactly seven days is pruned while a one-second-younger session remains."""
         mtime_exact = self.ref_time - (7.0 * self.day_secs)
         s_exact = self._create_mock_session(
             self.u0_sessions,
@@ -430,8 +429,6 @@ exit 0
             {"state.json": "exact"},
             mtime_epoch=mtime_exact,
         )
-
-        # Session 1 second younger than boundary (6.99998d, <7d)
         mtime_young = self.ref_time - (7.0 * self.day_secs) + 1.0
         s_young = self._create_mock_session(
             self.u0_sessions,
@@ -448,11 +445,12 @@ exit 0
             ref_time=self.ref_time,
         )
         stats = pruner.run()
+
         self.assertEqual(stats["sessions_scanned"], 2)
         self.assertEqual(stats["sessions_pruned"], 1)
         self.assertEqual(stats["sessions_retained_recent"], 1)
-        self.assertFalse(s_exact.exists(), "Exact 7.0d session must be eligible for pruning")
-        self.assertTrue(s_young.exists(), "Sub-7.0d session (<7d) must be retained")
+        self.assertFalse(s_exact.exists())
+        self.assertTrue(s_young.exists())
 
     def test_cli_parse_args(self):
         """Test parse_args with various flag combinations."""
@@ -484,4 +482,3 @@ exit 0
 
 if __name__ == "__main__":
     unittest.main()
-

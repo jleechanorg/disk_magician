@@ -19,29 +19,90 @@ package mirror/deploy scripts. No dependency or new service.
 
 ---
 
+
+## Authorized execution contract — October 3, 23:02 UTC
+
+The user has now authorized implementation of this redesign and the audit's
+safety fixes, parallel agents, `/nextsteps`, and merging the reviewed scoped
+work into `origin/main`. This supersedes this document's earlier planning-only
+boundary; it does not authorize unrelated cleanup, deletion of protected
+state, force-push, or weakening existing safety gates. Root owns integration
+and merge. Preserve `AGENTS.md` as the existing symlink to `CLAUDE.md`.
+
+Implementation includes the SQLite checkpoint/concurrent-client fix, per-run
+Dark Factory candidate checks, and wiki-publish lifecycle protection identified
+in the audit. Reuse existing handlers and candidate guards; add no alternate
+cleanup runner. Older relevant branches must be inspected for reusable
+implementations, especially partial ledger publication, before new code.
+
+### Five binary exit criteria
+
+Each criterion requires an independent agent to re-execute the checks against
+the final committed revision, record that revision and raw output, and compare
+the installed/runtime state where applicable. A worker report alone is not
+proof. Fixture results and live results remain distinct.
+
+| Criterion | Executable checks | External anchor / independent verifier |
+|---|---|---|
+| C1: One CLI and one policy source | `test "$(readlink AGENTS.md)" = CLAUDE.md`; after installation `diskm --help` and `disk-magician --help`; compare both command outputs and run dispatch tests through the installed console entry point | Actual packaged executables and filesystem symlink; verifier other than CLI author |
+| C2: Honest accounting and outcomes | `python3 -m unittest discover -s tests -p 'test_*.py' -v`; `bash tests/test_snapshot_commit.sh`; `bash tests/test_sweeper_health.sh`; installed `diskm status --json` and `diskm growth-top10 --json` checked against actual source artifacts, with missing/stale data explicitly unknown | State repo, published partial/complete artifacts and actual scheduled receipt; independent accounting verifier |
+| C3: Cleanup guards and SQLite results are real | `bash tests/test_cleanup_codex_db.sh`; `bash tests/test_cleanup_dark_factory.sh`; `bash tests/test_cleanup_safety.sh`; reproduce a busy WAL reader using real disposable SQLite databases; invoke installed cleanup CLI only in preview against live state | Actual sqlite3 rows and retained fixture paths, plus installed CLI preview; independent safety verifier; no live destructive test |
+| C4: Reviewed revision is merged and deployed | `git fetch origin main`; `git merge-base --is-ancestor HEAD origin/main`; `bash scripts/sync_package_tree.sh --check`; from a clean exact-main checkout `bash tools/deploy_uv_tool.sh --check`, guarded deploy, installed version/file hashes and a later scheduled outcome | GitHub merged state, origin/main, installed package bytes and scheduler process/artifact; root plus independent deployment verifier |
+| C5: Follow-through is complete and evidence claims are bounded | `br --no-auto-flush show disk_magician-disk-fill-prevention-scheduled-cleanup-q6l --json`; read required nextsteps, home learnings and activity artifacts; compare final status with raw checks and current refs | Canonical tracker plus durable roadmap; independent final scope audit |
+
+The existing test commands, CLI help, symlink and deployment preflight source
+were inspected before this contract. New `diskm status`/`growth-top10` commands
+are expected absent until implemented; their JSON flags and integration checks
+are explicit implementation requirements, not claims about the current binary.
+The complete-ledger floor may remain unavailable: success is truthful partial
+publication and explicit degradation, never fabricating a floor. Twenty-four-hour
+and seven-day recurrence observations are durable follow-up windows; the
+implementation goal can close only with those limits reported and owned, never
+with a claim that recurrence prevention was already demonstrated.
+
+### Execution lanes and timeline
+
+Estimated elapsed windows from 23:02:48Z: preparation and independent plan
+review 0–20 minutes; parallel bounded implementation 20–80 minutes; integrated
+independent verification 80–120 minutes; merge and guarded deployment 120–150
+minutes, revised when evidence changes. Three worker slots plus root are the
+runtime ceiling; initial available RAM was 9.17 GiB at pressure level 2.
+
+- Lane A owns renderer/history partial publication and comparison internals.
+- Lane B owns cleanup safety and SQLite checkpoint handling.
+- Lane C owns receipt/status internals and later deployment identity.
+- Root sequences shared CLI/package/template integration through a bounded
+  delegated unit after interfaces stabilize; workers do not edit shared files.
+- One independent verifier re-executes final checks after integration. Pair
+  coding transports keep separate author and verifier contexts.
+
+Use isolated source worktrees, explicit owned paths and explicit staging.
+Commit every completed green unit within 30 minutes. Report milestones at
++20, +40 and +60 minutes (hourly rollup), then every 20 minutes. Start remains
+2026-10-03T23:02:48Z; authorization expires 2026-10-04T07:02:48Z unless renewed
+by a live human message. Independent `/advice` plan approval is required
+before implementation; this is a workflow gate distinct from the user's
+scoped implementation authorization.
+
 ## Preconditions and sequencing
 
-1. Obtain explicit implementation authorization and create a clean isolated
-   source state. Do not borrow old approvals, PR claims, or deployment status.
+1. Use the authorized clean isolated source state. Do not borrow old approvals,
+   PR claims, or deployment status.
 2. Reconcile Beads `q6l`, `i2o`, `d45`, `zyn`, `4y6`, `mfq`, `s62`, `371`, and
    `asb`; update existing items only when authorized. Do not create a duplicate
    epic.
 3. Re-pin the source head, installed package, launchd templates, and current
-   state paths. Use `/tmp/disk-redesign-20261003-baseline.json` and
-   `/tmp/disk-redesign-20261003-daily-coverage.json`; current verification head
-   is [the reviewed October 3 change](https://github.com/jleechanorg/disk_magician/commit/88b6bffb3da191834f68979abd932e936d29d2b6)
-   (prod +1427/-25 including mirrors; non-prod +1245/-27), with reviewed hashes unchanged.
-   Preserve unrelated staged and untracked files.
-4. Do not run a heavy live scan, cleanup, or multi-hour watch during planning.
-   Fixture and read-only checks may run after implementation authorization.
-5. Before any future live cleanup, run fresh safety preflight. Direct
-   DarkFactory run cleanup and wiki-publish cleanup remain review leftovers:
-   require candidate classification, age/handle/owner checks, safety gate, and
-   deletion logging; do not implement those paths in this redesign.
-6. Resolve `diskm` as a packaged additional name for the same
+   state paths with `git rev-parse HEAD` and `git status --short`. Use
+   `/tmp/disk-redesign-20261003-baseline.json` and
+   `/tmp/disk-redesign-20261003-daily-coverage.json`. The earlier 88b6bff
+   review is historical context; the integration head must be measured again
+   before each verification round. Preserve unrelated staged and untracked files.
+4. Perform bounded fixture and read-only checks; do not run an unbounded live
+   scan. Live cleanup activation remains behind the safety task and C4.
+5. Resolve `diskm` as a packaged additional name for the same
    `disk_magician.cli:main` implementation. Current runtime remains
-   `disk-magician`; `diskm` is absent from the normal/login PATH and is not a
-   shell alias. Do not change runtime behavior in this planning task.
+   `disk-magician` until the packaged name is installed; do not create a shell
+   alias or second dispatcher.
 
 ## Task 1: Freeze the structural contract with adversarial fixtures
 
@@ -182,6 +243,41 @@ Run: `bash tests/test_sweeper_health.sh`
 Expected: existing behavior remains intact and each exercised path emits a
 typed receipt in the fixture state directory.
 
+## Task 3b: Close cleanup safety defects before activation
+
+**Files:** `scripts/cleanup_codex_db.sh`, `tests/test_cleanup_codex_db.sh`,
+`scripts/cleanup_agent_artifacts.sh`, `scripts/cleanup_dark_factory.sh`,
+`tests/test_cleanup_dark_factory.sh`, `scripts/cleanup_dev_caches.sh`, and a
+`tests/test_cleanup_wiki_publish.sh`.
+
+**Step 1: Write RED disposable concurrency fixtures.** Test that every SQLite
+operation applies `busy_timeout`, each database has a single-maintainer lease,
+active open clients are handled conservatively, and every `wal_checkpoint`
+result row is parsed, including an exit-0 `busy` row. Verify poststate and
+classify busy or incomplete work as non-success. Use real concurrent reader and
+writer processes against disposable temporary databases; never delete a
+database.
+
+**Step 2: Run the focused safety tests.** Run
+`bash tests/test_cleanup_codex_db.sh` and the existing cleanup safety tests;
+the new concurrency cases must be RED before their implementation.
+
+**Step 3: Implement the smallest safe fixes.** Keep the database path
+non-destructive; delegate Dark Factory handling to
+`cleanup_dark_factory.sh`, remove the duplicate `~/.dark-factory/runs` target,
+and prove the canonical guard and per-candidate safety logging. Remove
+automatic wiki-publish deletion until lifecycle provenance is known; retain
+unknown, active, recent, and protected entries without inventing producer
+markers. Do not add an ad-hoc cleaner.
+
+**Step 4: Run GREEN.** Run `bash tests/test_cleanup_codex_db.sh`,
+`bash tests/test_cleanup_dark_factory.sh`, `bash tests/test_cleanup_safety.sh`,
+and `bash tests/test_unify_routine_cleanups.sh`. Fixture output must show no
+database deletion and no unguarded candidate deletion.
+
+**Step 5: Hold activation.** Do not enable scheduled `--clean` execution
+until these tests pass and the independent verifier records their output.
+
 ## Task 4: Derive inventory from existing templates and registries
 
 **Files:**
@@ -192,9 +288,12 @@ typed receipt in the fixture state directory.
   reused without changing install behavior.
 - Modify: `config/sweeper_roots.txt` and `scripts/lib/scratch_roots.sh` only
   for the existing root-owner and coverage entries.
+- Modify: `pyproject.toml` to include `config/*.txt` as package data, so the
+  installed fleet inventory and sweeper roots are present.
 - Create: `tests/test_job_inventory.sh`
 - Test: `tests/test_check_launchd_fleet.sh`
 - Test: `tests/test_install_launchd_sweepers_preflight.sh`
+- Test: `tests/test_package_sync.sh` and `tests/test_deploy_uv_tool.sh`
 
 **Step 1: Write RED drift tests.** Assert every installed job template has a
 label, entrypoint, execution kind, receipt owner, and coverage owner; assert
@@ -221,6 +320,10 @@ Run: `bash tests/test_check_launchd_fleet.sh`
 
 Run: `bash tests/test_install_launchd_sweepers_preflight.sh`
 
+Run: `bash tests/test_package_sync.sh`
+
+Run: `bash tests/test_deploy_uv_tool.sh`
+
 Expected: all pass, including malformed plist and missing-label protections.
 
 ## Task 5: Add the read-only status command
@@ -229,7 +332,7 @@ Expected: all pass, including malformed plist and missing-label protections.
 
 - Modify: `disk_magician.sh` to dispatch `status` without cleanup or repair.
 - Create: Python 3 standard-library `scripts/disk_status.py`.
-- Create: `tests/test_disk_status.sh`
+- Create: `tests/test_cli_reliability.py`
 - Create: `tests/test_disk_status.py`
 
 **Step 1: Write RED fixtures.** Provide fixture outputs for healthy, stale
@@ -239,7 +342,7 @@ launchd-unavailable cases.
 
 **Step 2: Run RED.**
 
-Run: `bash tests/test_disk_status.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`
 
 Expected: FAIL because `status` is not yet a dispatch command and dimensions
 are not joined.
@@ -252,21 +355,46 @@ publication commands.
 
 **Step 4: Run GREEN.**
 
-Run: `bash tests/test_disk_status.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`
 
 Run: `python3 -m pytest -q tests/test_disk_status.py`
 
 Expected: healthy fixtures exit 0 and every degraded/unknown fixture exits
 nonzero with the correct dimension, without a mutation.
 
-**Step 5: Wire through the canonical entry point.** Add the packaged `diskm`
-name in `pyproject.toml` pointing to the same `disk_magician.cli:main`, then
-add CLI dispatch and `--help` tests for `status` and `growth-top10`. Route
-scheduled invocations through that dispatch; keep `disk_status.py`,
-`growth_top10.py`, and receipt helpers private behind it. Use the existing
-`disk-magician` command until a future installation check proves `diskm` is
-registered. Do not create a shell alias, second dispatcher, or independent
-runner.
+**Step 5: Wire through the canonical packaged entry point and scoped
+scheduler templates.** Add the packaged `diskm` name in `pyproject.toml`
+pointing to the same `disk_magician.cli:main`, then add installed dispatch and
+`--help` tests for `status`, `growth-top10`, and receipt/status paths. Route
+the existing pressure-sweep, tmp-scratch-sweep, cleanup-claude-state, and
+codex-vacuum helpers through that dispatch. Add a `frontier-nightly` dispatch
+that executes the existing `disk_frontier_scan.sh` wrapper (the existing
+`frontier` direct-Python command is not equivalent). Update these exact templates to
+use stable `@HOME@/.local/bin/diskm` with identical arguments and environment:
+
+- `launchd/com.jleechanorg.disk-magician-frontier-nightly.plist.template`
+  (nightly frontier wrapper consumer)
+- `launchd/com.jleechanorg.disk-magician-pressure-sweep.plist.template`
+- `launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template`
+- `launchd/com.disk-magician.claude-state.plist.template`
+- `launchd/com.disk-magician.codex-vacuum.plist.template`
+- `launchd/com.jleechanorg.disk-magician-drilldown.plist.template`
+  (Task 7 uncovered-root alert owner; route through `diskm residual-drilldown`
+  so the deployed helper actually reaches its scheduled caller)
+
+Update the snapshot plist writer in `disk_magician.sh`
+`run_setup()` (the measured interval is 1,800 seconds) to use the same stable installed `diskm snapshot` entry
+point, preserving its schedule and environment. Include both installer paths
+in the dispatch fixture tests.
+
+Keep `disk_status.py`, `growth_top10.py`, and receipt helpers private behind
+the CLI. Use the existing `disk-magician` command until the packaged `diskm`
+installation check proves the additional name is registered; do not create a
+shell alias, second dispatcher, or independent runner. Other root consumers
+remain inventory findings until a later dispatch migration is explicitly
+scoped; this task does not claim all jobs are migrated. Validate with
+`bash tests/test_install_launchd_sweepers_preflight.sh`,
+`bash tests/test_package_sync.sh`, and `bash tests/test_deploy_uv_tool.sh`.
 
 ## Task 6: Reuse the existing deployment guard and package mirror
 
@@ -354,7 +482,7 @@ postcondition receipt.
 
 Run: `python3 -m pytest -q tests/test_history_diff.py tests/test_render_topdown_ledger.py tests/test_snapshot_carry_forward.py tests/test_partial_history_diff.py tests/test_growth_top10.py tests/test_job_receipt.py tests/test_disk_status.py`
 
-Run: `bash tests/test_disk_status.sh && bash tests/test_deploy_uv_tool.sh && bash tests/test_package_sync.sh`
+Run: `python3 -m unittest discover -s tests -p 'test_disk_status.py' -v`; then `bash tests/test_deploy_uv_tool.sh` and `bash tests/test_package_sync.sh`.
 
 Expected: all focused checks pass before any costly observation.
 
@@ -407,13 +535,19 @@ rollback by restoring its JSON alone.
 
 ## Review record
 
-`/advice` was attempted through the canonical runner and FAILED before any
-reviewer input because the dirty checkout was not represented by an exact SHA;
-no retry was made. `/web-advice` is SKIPPED because no external browser recipient
-was authorized. Reviewer D (Web advice) is unavailable (disabled by parent
-authorization boundary). The [audit](../reviews/2026-10-03-disk-reliability-audit.md)
-records the runner output and exact skill requirements. No independent approval
-is claimed.
+The first canonical `/advice` round returned CHANGES REQUESTED. The revised
+plan was independently approved by Codex and Opus on October 3 at
+23:22 UTC. The [round-two review record](https://gist.github.com/jleechan2015/67557ce3d89624b3b9e0c0a20db90da1)
+contains the exact source pin, coverage statement, reviewer outputs, and
+runner receipt. This approval covers the implementation plan, not the final
+code or deployed behavior. The optional browser review could not attach to
+the existing browser because the browser transport timed out; no external
+submission or browser verdict is claimed.
+
+Execution corrections from inspected code: the snapshot writer is
+`run_setup()` with a 1,800-second interval. Status behavior is covered by
+`tests/test_disk_status.py`; shell/installed dispatch is covered by
+`tests/test_cli_reliability.py`, without a duplicate status shell harness.
 
 ## Final self-review checklist
 
@@ -423,6 +557,6 @@ is claimed.
 - [x] Package mirror and two deployment consumers are explicit.
 - [x] Existing safety and seven-day rules remain in force.
 - [x] Live observation is last, bounded, and cannot be faked by timestamps.
-- [x] No task authorizes implementation, deploy, cleanup, merge, or push before
-  the stated preconditions.
+- [x] Implementation is authorized within the named tasks; deployment, cleanup
+  activation, merge, and push remain behind their explicit safety and C4 gates.
 - [x] All design decisions and evidence limitations are explicit.

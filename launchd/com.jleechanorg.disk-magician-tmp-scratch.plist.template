@@ -44,8 +44,8 @@
   <string>com.jleechanorg.disk-magician-tmp-scratch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/tmp_scratch_sweep.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>tmp-scratch-sweep</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>

@@ -23,8 +23,8 @@
   <string>com.jleechanorg.disk-magician-drilldown</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/residual_drilldown.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>residual-drilldown</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

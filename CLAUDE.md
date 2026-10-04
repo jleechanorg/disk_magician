@@ -1,5 +1,23 @@
 # disk_magician — agent instructions
 
+## One operational entry point — `diskm` (hard)
+
+Drive all disk operations through the Disk Magician CLI: diagnosis, history,
+status, cleanup, safety checks, and scheduled maintenance. Reuse an existing
+subcommand first. If a capability is missing, extend the same CLI and test its
+dispatch, safety gates, and outcomes; never invent an ad-hoc runner, parallel
+workflow, or separately operated script. Existing scripts are implementation
+helpers behind the CLI, not additional interfaces agents must discover.
+
+The desired public name is `diskm`. The current packaged executable is
+`disk-magician` (`disk_magician.cli:main`); use that verified entry point until
+`diskm` is registered as another name for the same implementation. Do not add
+a second dispatcher or a shell-only alias that scheduled jobs cannot use.
+New operational commands and scheduler integrations must use this shared
+dispatch. Migrate legacy direct-script schedules with behavior and safety
+checks; their current existence is not permission to add more. Build, package,
+and isolated test harnesses may call internal files directly.
+
 ## Investigation methodology — always find the floor, always show the buckets
 
 Disk-fill investigations in this repo MUST follow a fixed pre-analysis
@@ -194,17 +212,22 @@ SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
 
 **Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 
-1. The 35-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
+1. The 30-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
    **uv-tool-packaged copy** at
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from
    `src/disk_magician/` — NOT the repo root files.
-2. The drilldown / frontier-nightly / pressure-sweep launchd jobs run
-   **repo-root scripts** directly (`@REPO_ROOT@` substitution).
+2. The snapshot, frontier-nightly, pressure-sweep, tmp-scratch, Claude-state,
+   Codex-vacuum, and residual-drilldown templates use the installed `diskm`
+   entry point. Other
+   jobs still use **repo-root scripts** (`@REPO_ROOT@` substitution); inspect
+   `diskm status --json` for their actual installed paths.
 
 After changing root scripts: run `scripts/sync_package_tree.sh` (use
 `--check` in review), **bump the version in pyproject.toml** (uv caches
-wheels by version), then `uv tool install --force --reinstall <repo path>`.
-Verify the deployed tree, not the repo, before claiming production behavior
+wheels by version), then run `tools/deploy_uv_tool.sh` from a clean checkout
+exactly matching `origin/main`. The guard checks both CLI names and package
+hashes before atomically publishing `~/.disk_magician_state/deployed.json`.
+Verify the deployed tree and scheduled receipts before claiming production behavior
 (stale-deploy incident 2026-07-11: v2 code was committed for hours while
 production ran v1).
 

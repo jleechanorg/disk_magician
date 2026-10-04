@@ -19,6 +19,21 @@
 # job. The symlink keeps the script version-controlled in this repo.
 set -euo pipefail
 
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SCRIPT_SOURCE" ]]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+  SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+  [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+
+# shellcheck source=scripts/lib/docker_probe.sh
+if [[ -f "$SCRIPT_DIR/lib/docker_probe.sh" ]]; then
+  source "$SCRIPT_DIR/lib/docker_probe.sh"
+elif [[ -f "$SCRIPT_DIR/../scripts/lib/docker_probe.sh" ]]; then
+  source "$SCRIPT_DIR/../scripts/lib/docker_probe.sh"
+fi
+
 # ---- Defaults ------------------------------------------------------------
 DRY_RUN=false
 MAX_CACHE_MB=2048
@@ -88,53 +103,40 @@ fmt_kb() {
   }"
 }
 
-# Read the current builder cache size in MB. Returns 0 when docker is
-# unavailable or the call fails — better to under-prune than to crash
-# and abandon the job hook.
+# Read the current builder cache size in MB using bounded docker_probe.
+# Returns 1 when probes fail or time out — never invent a zero cache on failure.
 get_builder_cache_mb() {
   if ! command -v docker &>/dev/null; then
-    echo 0
-    return
+    return 1
   fi
-  if ! docker info &>/dev/null; then
-    echo 0
-    return
+  if ! docker_probe info &>/dev/null; then
+    return 1
   fi
 
-  # Prefer `docker builder du` (direct, parseable). Older engines may not
-  # support it; fall back to parsing `docker system df` for the "Build
-  # Cache" line.
+  # Use the daemon-wide Build Cache total; builder has no du subcommand.
   local out kb
-  if out=$(docker builder du --format '{{size}}' 2>/dev/null); then
-    if [[ -n "$out" ]]; then
-      kb=$(du_format_to_kb "$out") || { echo 0; return; }
-      echo $(( (kb + 1023) / 1024 ))   # KB -> MB, rounding up
-      return
-    fi
+  if ! out=$(docker_probe system df 2>/dev/null); then
+    return 1
   fi
-
-  out=$(docker system df 2>/dev/null || true)
   if [[ -z "$out" ]]; then
-    echo 0
-    return
+    return 1
   fi
 
   # Lines look like: "Build Cache     15     0     2.1GB     1.5GB"
   # Columns: TYPE, TOTAL, ACTIVE, SIZE, RECLAIMABLE
-  # Extract the SIZE column (4th field).
+  # If TYPE is two words ("Build Cache"), SIZE is 5th field; otherwise 4th.
   local line val
-  line=$(echo "$out" | awk 'BEGIN{IGNORECASE=1} /build[ -]?cache/ {print; exit}')
+  line=$(printf "%s\n" "$out" | awk 'tolower($0) ~ /build[ -]?cache/ {print; exit}')
   if [[ -z "$line" ]]; then
-    echo 0
-    return
+    return 1
   fi
-  val=$(echo "$line" | awk '{print $4}')
+  val=$(echo "$line" | awk '{if ($2 ~ /^[Cc]ache$/) print $5; else print $4}')
   if [[ -z "$val" ]]; then
-    echo 0
-    return
+    return 1
   fi
-  kb=$(size_to_kb "$val") || { echo 0; return; }
+  kb=$(size_to_kb "$val") || return 1
   echo $(( (kb + 1023) / 1024 ))
+  return 0
 }
 
 # Convert a Docker-formatted size string (e.g. "2.1G", "543M", "1024kB",
@@ -156,20 +158,9 @@ du_format_to_kb() {
   }'
 }
 
-# Convert a `du -h`-style size string (e.g. "2.1G", "543M", "1024K") to KB.
+# Convert a `du -h`-style size string (e.g. "2.1G", "2.1GB", "543M", "1024K") to KB.
 size_to_kb() {
-  local s="$1"
-  if [[ -z "$s" ]]; then echo 0; return 1; fi
-  awk -v s="$s" 'BEGIN{
-    n = s; sub(/[A-Za-z]+$/, "", n);
-    suffix = s; sub(/^[0-9.]+/, "", suffix);
-    if (suffix == "" || suffix == "B" || suffix == "K")      mul = 1
-    else if (suffix == "M") mul = 1024
-    else if (suffix == "G") mul = 1024 * 1024
-    else if (suffix == "T") mul = 1024 * 1024 * 1024
-    else { print 0; exit 1 }
-    printf "%d", (n * mul) + 0.5
-  }'
+  du_format_to_kb "$1"
 }
 
 # ---- Main ----------------------------------------------------------------
@@ -188,10 +179,10 @@ ensure_log_dir
     exit 0
   fi
 
-  if ! docker info &>/dev/null; then
-    log "docker daemon not reachable; skipping prune (not an error)"
-    log "=== post-job prune end (no-op) ==="
-    exit 0
+  if ! docker_probe info &>/dev/null; then
+    log "DEGRADED / SKIPPED: docker daemon unreachable or probe timed out; skipping prune"
+    log "=== post-job prune end (degraded) ==="
+    exit 1
   fi
 
   # 1) Always run docker system prune (cheap, safe — only dangling objects).
@@ -205,7 +196,12 @@ ensure_log_dir
   fi
 
   # 2) Conditional builder cache prune when over the threshold.
-  current_mb=$(get_builder_cache_mb)
+  current_mb=""
+  if ! current_mb=$(get_builder_cache_mb) || [[ -z "$current_mb" ]]; then
+    log "DEGRADED / SKIPPED: failed to measure builder cache size (docker system df probe timed out or failed); skipping builder prune"
+    log "=== post-job prune end (degraded) ==="
+    exit 1
+  fi
   log "builder cache: ${current_mb}MB (threshold: ${MAX_CACHE_MB}MB)"
 
   if [[ "$current_mb" -gt "$MAX_CACHE_MB" ]]; then

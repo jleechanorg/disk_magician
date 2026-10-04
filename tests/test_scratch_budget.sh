@@ -115,7 +115,7 @@ run_budget() {
   DM_DRY_RUN="$dry_run" \
   DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
-  DISK_MAGICIAN_TEST_SANDBOX="$sandbox_dir" bash -c '
+  DISK_MAGICIAN_TEST_SANDBOX="$sandbox_dir" DISK_MAGICIAN_LSOF_BIN=/usr/bin/true bash -c '
     set -euo pipefail
     source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
     source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
@@ -296,7 +296,7 @@ set_age_hours "$R12/measurable/f" 10
 result12="$(
   DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
-  DISK_MAGICIAN_TEST_SANDBOX="$TMP_TEST_ROOT" bash -c '
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_TEST_ROOT" DISK_MAGICIAN_LSOF_BIN=/usr/bin/true bash -c '
     set -euo pipefail
     source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
     source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
@@ -391,6 +391,49 @@ rc14=$?
 set -e
 assert_rc "Test14: caller script survives a stat failure on a top-level file" 0 "$rc14"
 assert_contains "Test14: caller reaches the line after the failed-stat call" "after call: mtime=[]" "$result14"
+
+# TemporaryItems is macOS-owned, even when older than eligible scratch.
+R15="$TMP_TEST_ROOT/t15"
+make_kb_file "$R15/TemporaryItems/f" 5120
+set_age_hours "$R15/TemporaryItems/f" 20
+make_kb_file "$R15/old_scratch/f" 5120
+set_age_hours "$R15/old_scratch/f" 5
+run_budget "$R15" 1024 60 - - 0 false >/dev/null
+assert_exists "Test15: macOS TemporaryItems survives budget pressure" "$R15/TemporaryItems"
+assert_missing "Test15: eligible scratch is still evicted" "$R15/old_scratch"
+
+# A container can hide a protected worktree below its immediate children.
+R16="$TMP_TEST_ROOT/t16"
+mkdir -p "$R16/container/checkout"
+/usr/bin/git -c init.defaultBranch=main init -q "$R16/container/checkout"
+make_kb_file "$R16/container/checkout/uncommitted" 4096
+stamp16="$(date -v-3H +%Y%m%d%H%M)"
+find "$R16/container" -type f -exec touch -t "$stamp16" {} +
+make_kb_file "$R16/ordinary/f" 4096
+set_age_hours "$R16/ordinary/f" 10
+run_budget "$R16" 1024 120 - - 0 false >/dev/null
+assert_exists "Test16: nested worktree younger than seven days is preserved" "$R16/container/checkout/uncommitted"
+assert_missing "Test16: ordinary scratch is still evicted" "$R16/ordinary"
+
+# Generic scratch eviction must leave old repositories to their owning cleanup.
+R17="$TMP_TEST_ROOT/t17"
+mkdir -p "$R17/old-repo"
+/usr/bin/git -c init.defaultBranch=main init -q "$R17/old-repo"
+make_kb_file "$R17/old-repo/uncommitted" 4096
+stamp17="$(date -v-240H +%Y%m%d%H%M)"
+find "$R17/old-repo" -type f -exec touch -t "$stamp17" {} +
+run_budget "$R17" 1024 120 - - 0 false >/dev/null
+assert_exists "Test17: old uncommitted repository is preserved" "$R17/old-repo/uncommitted"
+
+if bash -c '
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  find() { return 1; }
+  _scratch_budget_contains_git "'"$TMP_TEST_ROOT"'"
+'; then
+  record_pass "Test18: failed repository traversal preserves the candidate"
+else
+  record_fail "Test18: failed repository traversal preserves the candidate" "inspection failure must not authorize eviction"
+fi
 
 echo ""
 echo "===================================="

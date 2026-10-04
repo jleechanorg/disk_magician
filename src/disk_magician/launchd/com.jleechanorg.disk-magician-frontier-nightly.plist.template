@@ -30,8 +30,8 @@
   <string>com.jleechanorg.disk-magician-frontier-nightly</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/disk_frontier_scan.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>frontier-nightly</string>
     <string>--granularity-gib</string>
     <string>5</string>
     <string>--wall-clock-cap</string>

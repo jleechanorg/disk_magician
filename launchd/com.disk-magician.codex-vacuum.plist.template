@@ -18,8 +18,8 @@
   <string>com.disk-magician.codex-vacuum</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/cleanup_codex_db.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>codex-vacuum</string>
     <string>--clean</string>
   </array>
   <key>StartInterval</key>

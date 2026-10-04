@@ -32,7 +32,6 @@ TARGETS=(
   # Idle/stale agent-app targets (regrowth-prevention Fix #6):
   "$HOME/.gemini/antigravity-ide"
   "$HOME/.gemini/antigravity-browser-profile"
-  "$HOME/.dark-factory/runs"
 )
 
 # mtime gate in days. -1 = no gate (clear unconditionally).
@@ -49,7 +48,6 @@ TARGETS_MTIME_GATE_DAYS=(
   -1   # pip cache
    30  # antigravity-ide — idle since 2026-05-29, 2.5 GB
    30  # antigravity-browser-profile — idle since 2026-03-28, 1.5 GB
-   7   # ~/.dark-factory/runs — 7-day run retention floor
 )
 
 
@@ -136,11 +134,6 @@ clear_dir_contents() {
     rmdir "$path" 2>/dev/null || true
     return 0
   fi
-  if [[ "$path" == *"runs"* ]]; then
-    # Per-run recency check for run pools like ~/.dark-factory/runs
-    find "$path" -mindepth 1 -maxdepth 1 -mtime +"${gate_days:-7}" -exec rm -rf {} + 2>/dev/null || true
-    return 0
-  fi
   find "$path" -depth -mindepth 1 -delete 2>/dev/null || true
   rmdir "$path" 2>/dev/null || true
 }
@@ -167,14 +160,6 @@ gate_check() {
       echo "passed"
       return
     fi
-  fi
-  if [[ "$path" == *"runs"* ]]; then
-    if find "$path" -mindepth 1 -maxdepth 1 -mtime +"$gate_days" -print -quit 2>/dev/null | grep -q .; then
-      echo "passed"
-    else
-      echo "skipped-recent"
-    fi
-    return
   fi
   local mtime_epoch now_epoch age_days
   mtime_epoch=$(mtime_epoch_of "$path")
@@ -255,8 +240,6 @@ for target in "${TARGETS[@]}"; do
       echo "  $(size_of "$expanded")  $target  (kept — safety-skipped)"
     elif [[ "$DRY_RUN" == true ]]; then
       echo "  $(size_of "$expanded")  $target  (dry-run — would clear)"
-    elif [[ "$target" == *"runs"* ]]; then
-      echo "  $(size_of "$expanded")  $target  (pruned runs older than ${gate_days}d)"
     else
       echo "  $(size_of "$expanded")  $target  (NOT removed — see warnings above)"
     fi

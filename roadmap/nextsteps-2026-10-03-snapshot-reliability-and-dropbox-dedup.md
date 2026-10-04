@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [Executive summary](#executive-summary)
+- [2026-10-03 reliability integration refresh](#2026-10-03-reliability-integration-refresh)
 - [Context](#context)
 - [Bead index](#bead-index)
 - [Work queue](#work-queue)
@@ -18,6 +19,88 @@
 - **Merge fallout:** six open PRs (#77 #80 #81 #84 #85 #86) are now behind main (0.2.124) and will fail the version-monotonic check; #80 likely conflicts with #90 in `disk_snapshot.sh`.
 - Local disk free jumped to ~111 GiB at the end of this block (was 13-30 GiB); cause not identified (another actor is also cleaning/deleting — ~3.7k duplicate Dropbox files vanished before we deleted them).
 - Beads: [disk_magician-xqm](#bead-index) (Dropbox dedup), [disk_magician-dbp](#bead-index) (rebase PRs), [disk_magician-hwa](#bead-index) (snapshot follow-ups), [disk_magician-i56](#bead-index), [disk_magician-e50](#bead-index).
+
+## 2026-10-03 reliability integration refresh
+
+This section owns the current reliability implementation handoff. The older
+Dropbox, backup, and snapshot queue below is historical provenance and does
+not authorize resuming unrelated operations. The implementation contract is
+`docs/superpowers/plans/2026-10-03-disk-reliability-redesign.md`.
+
+### Implemented scope and verification boundary
+
+The packaged `diskm` entry point shares `disk_magician.cli:main` with
+`disk-magician`; `AGENTS.md` remains a symlink to `CLAUDE.md`. This phase routes
+the primary snapshot and six named scheduled jobs through the installed CLI.
+Other fleet consumers remain visible in the actual installed-plist inventory;
+they are not represented as migrated.
+
+The accounting change publishes partial scans separately, protects the
+canonical complete ledger, and refuses numeric growth for missing, carried,
+stale, overlapping, or incomparable buckets. The current live frontier was
+replayed into an isolated output directory: it remained partial and produced
+no strict floor. The 30-day audit found 23/29 latest-per-day samples below 70%
+coverage, 984 snapshot commits, and zero canonical-ledger updates. These are
+dated audit results, not a claim that present coverage is healthy.
+
+Typed job receipts distinguish active, skipped, blocked, failed, and completed
+work. Status joins actual fleet routing, measurement, publication, outcomes,
+safety, budgets, and deployed identity independently. A loaded plist, process
+exit code, or touched log cannot substitute for verified postconditions.
+
+Cleanup changes preserve unknown wiki-publish lifecycles, use the canonical
+Dark Factory cleaner, protect TemporaryItems and every repository container
+from generic scratch-budget deletion, and harden SQLite ownership, leases,
+busy results, and inspection failures. The producer helper owns one private
+scratch leaf and preserves the caller's signal/exit behavior. The residual-drilldown uncovered-root alert uses its existing checker and
+reaches the scheduler through the same packaged dispatcher. The 15 GiB
+scheduled scratch budget and bounded codesign stage require these guards.
+No live destructive test or global agent hook is part of this implementation.
+
+### Remaining execution and durable owners
+
+This source handoff is written before final merge and deployment. The
+canonical Beads and published final evidence are the authority for later
+runtime completion; do not infer deployment from this document or a commit.
+
+| Item | Owner and closing evidence |
+|---|---|
+| `disk_magician-disk-fill-prevention-scheduled-cleanup-q6l` | Root integrates and checks C1–C5; keep the broader epic open while existing children or observation windows remain |
+| `disk_magician-zyn` | Partial publication: actual installed renderer/receipt and preserved complete ledger |
+| `disk_magician-sweeper-health-ledger-warn-impl-s62` | Typed status and health warning: fixtures plus actual installed status readback |
+| `disk_magician-7yv` | SQLite: real disposable busy reader/writer, guarded path tests, installed preview, and deployed bytes |
+| `disk_magician-mda` | Wiki-publish: unknown lifecycle retention, fixtures, and deployed bytes |
+| `disk_magician-cjc` | Historical uppercase `H` correction: retained provenance and real Git fixture |
+| `disk_magician-6aa` | Canonical Dark Factory retention: deployed route and later scheduled outcome; fixture success alone does not close it |
+| `disk_magician-asb` | Wheel includes the complete launchd catalog and sweeper registry; deployed manifest matches source |
+| `disk_magician-disk-fill-prevention-scheduled-cleanup-q6l.1` | Nested/recent/dirty repositories remain protected by generic scratch budget; independent fixture verification before activation |
+| `disk_magician-disk-fill-prevention-scheduled-cleanup-q6l.2` | Root owns the 24-hour and seven-day read-only observation windows; pending until real intervals elapse |
+| `disk_magician-4y6` | Root attribution remains a separate privileged-runner follow-up; strict floor may correctly remain unavailable |
+
+1. Freeze the combined source, complete independent semantic and executable
+   verification, and publish the exact-head raw evidence.
+2. Merge the authorized scoped change, then deploy only from a clean checkout
+   equal to live `origin/main` using `tools/deploy_uv_tool.sh`.
+3. Verify both installed CLI names, full deployed manifest, actual scheduled
+   arguments, and a new scheduled snapshot receipt. Preserve known degraded
+   or unknown status dimensions instead of manufacturing healthy results.
+4. Record runtime proof in the existing Beads, home learnings, and the evidence
+   record. Observe the 24-hour and seven-day windows in later sessions; these
+   windows remain pending until real receipts exist.
+
+### Review and evidence references
+
+The canonical Codex and Opus plan review returned APPROVED. Its
+[review receipt and synthesis](https://gist.github.com/jleechan2015/67557ce3d89624b3b9e0c0a20db90da1)
+bind that verdict to the reviewed plan, not final code or deployment. The
+optional browser transport timed out before submission, so no browser verdict
+is claimed. The original standards audit is in
+`docs/superpowers/reviews/2026-10-03-disk-reliability-audit.md`.
+
+Raw implementation and independent checks are retained under
+`/tmp/disk-reliability-20261003*`; the final published evidence record must
+include the source pin, commands, results, deployed identity, and explicit
+pending observations. Root is the single canonical Beads writer.
 
 ## Context
 
@@ -38,6 +121,13 @@ Session started from a "disk is full again" request on a 98-99% full Data volume
 | disk_magician-mq9 | disk_audit: show carried keys + fresh vs effective coverage | `br show disk_magician-mq9` |
 | disk_magician-asb | `config/sweeper_roots.txt` missing from wheel package-data | `br show disk_magician-asb` |
 | disk_magician-4y6 | Root-privileged frontier job never installed (needs sudo) | `br show disk_magician-4y6` |
+| [disk_magician-disk-fill-prevention-scheduled-cleanup-q6l](#bead-index) | Native reliability epic; keep existing child DAG and current execution contract | `br show disk_magician-disk-fill-prevention-scheduled-cleanup-q6l` |
+| [disk_magician-zyn](#bead-index) | Partial-ledger publication task; inspect existing implementation before reuse | `br show disk_magician-zyn` |
+| [disk_magician-sweeper-health-ledger-warn-impl-s62](#bead-index) | Typed publication/receipt health warning | `br show disk_magician-sweeper-health-ledger-warn-impl-s62` |
+| [disk_magician-7yv](#bead-index) | SQLite checkpoint-busy and concurrent-client safety | `br show disk_magician-7yv` |
+| [disk_magician-mda](#bead-index) | Wiki-publish lifecycle and active-consumer safety | `br show disk_magician-mda` |
+| [disk_magician-cjc](#bead-index) | Correct uppercase `git ls-files -v` interpretation | `br show disk_magician-cjc` |
+| [disk_magician-6aa](#bead-index) | Dark Factory retention safety and deployed proof | `br show disk_magician-6aa` |
 
 ## Work queue
 

@@ -168,7 +168,7 @@ STUB13="$TMP_ROOT/stub13"; mkdir -p "$STUB13"
 cat > "$STUB13/snap.sh" <<'EOF'
 #!/usr/bin/env bash
 out=""; while [[ $# -gt 0 ]]; do case "$1" in --output) out="$2"; shift 2;; *) shift;; esac; done
-mkdir -p "$(dirname "$out")"; printf '{"schema_version":2}\n' > "$out"
+mkdir -p "$(dirname "$out")"; printf '{"schema_version":2,"disk_free_gb":100}\n' > "$out"
 EOF
 chmod +x "$STUB13/snap.sh"
 OUT13=$(env -i HOME="$H13" PATH="/usr/bin:/bin" DISK_MAGICIAN_SNAPSHOT_BIN="$STUB13/snap.sh" \

@@ -186,43 +186,42 @@ class TestCleanupAntigravityBrain(unittest.TestCase):
         self.assertEqual(stats["scratch_files_removed"], 1)
 
     def test_exact_boundary_coverage(self):
-        """Verify >=7d inclusive boundary: exactly 7.0d is eligible; 6.99d is preserved."""
-        # 1. Nonempty session at exactly 7.0 days boundary (eligible)
+        """Exactly seven days is eligible; one second younger remains protected."""
         sid_exact = "session-exact-7d"
         sdir_exact = self._create_mock_session(sid_exact, age_days=7.0)
 
-        # 2. Empty session at exactly 7.0 days boundary (eligible for pruning)
-        empty_exact_sid = "empty-exact-7d"
-        empty_exact_sdir = self.brain_dir / empty_exact_sid
+        empty_exact_sdir = self.brain_dir / "empty-exact-7d"
         empty_exact_sdir.mkdir()
         target_mtime_exact = self.now - (7.0 * self.day)
         os.utime(empty_exact_sdir, (target_mtime_exact, target_mtime_exact))
 
-        # 3. Nonempty session just below boundary: 1 second before cutoff (too recent, preserved)
         sub_boundary_days = (7.0 * self.day - 1.0) / self.day
-        sid_recent = "session-sub-boundary-6d"
-        sdir_recent = self._create_mock_session(sid_recent, age_days=sub_boundary_days)
-
-        # 4. Empty session just below boundary: 1 second before cutoff (too recent, preserved)
-        empty_recent_sid = "empty-sub-boundary-6d"
-        empty_recent_sdir = self.brain_dir / empty_recent_sid
+        sdir_recent = self._create_mock_session(
+            "session-sub-boundary-7d", age_days=sub_boundary_days
+        )
+        empty_recent_sdir = self.brain_dir / "empty-sub-boundary-7d"
         empty_recent_sdir.mkdir()
         target_mtime_recent = self.now - (7.0 * self.day) + 1.0
         os.utime(empty_recent_sdir, (target_mtime_recent, target_mtime_recent))
 
-        compactor = BrainCompactor(brain_dir=self.brain_dir, threshold_days=7, dry_run=False, now=self.now)
+        compactor = BrainCompactor(
+            brain_dir=self.brain_dir,
+            threshold_days=7,
+            dry_run=False,
+            now=self.now,
+        )
         stats = compactor.scan_and_compact()
 
-        # Exact 7.0d sessions must be compacted / pruned
-        self.assertFalse(empty_exact_sdir.exists(), "Exact 7.0d empty session must be pruned")
-        self.assertTrue((sdir_exact / ".system_generated" / "tasks" / "task-1.log.gz").exists(), "Exact 7.0d log must be compressed")
-        self.assertFalse((sdir_exact / "scratch" / "raw_payloads.json").exists(), "Exact 7.0d scratch must be removed")
-
-        # Sub-boundary (1s before cutoff) sessions must be preserved unmutated
-        self.assertTrue(empty_recent_sdir.exists(), "Sub-boundary empty session must be preserved")
-        self.assertTrue((sdir_recent / ".system_generated" / "tasks" / "task-1.log").exists(), "Sub-boundary log must remain uncompressed")
-        self.assertTrue((sdir_recent / "scratch" / "raw_payloads.json").exists(), "Sub-boundary scratch must be preserved")
-
+        self.assertFalse(empty_exact_sdir.exists())
+        self.assertTrue(
+            (sdir_exact / ".system_generated" / "tasks" / "task-1.log.gz").exists()
+        )
+        self.assertFalse((sdir_exact / "scratch" / "raw_payloads.json").exists())
+        self.assertTrue(empty_recent_sdir.exists())
+        self.assertTrue(
+            (sdir_recent / ".system_generated" / "tasks" / "task-1.log").exists()
+        )
+        self.assertTrue((sdir_recent / "scratch" / "raw_payloads.json").exists())
         self.assertEqual(stats["empty_pruned"], 1)
         self.assertEqual(stats["files_compressed"], 2)
         self.assertEqual(stats["scratch_files_removed"], 1)
@@ -231,4 +230,3 @@ class TestCleanupAntigravityBrain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
