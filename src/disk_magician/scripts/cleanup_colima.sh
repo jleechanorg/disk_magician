@@ -93,19 +93,19 @@ prove_colima_docker_backend() {
   local context endpoint
   if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
     context="$DOCKER_CONTEXT"
-    if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
-      log "DEGRADED / SKIPPED: Docker context inspect failed or timed out for context '$context'."
+    if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || [[ -z "$endpoint" ]]; then
+      log "DEGRADED / SKIPPED: Docker context inspect failed, timed out, or returned empty endpoint for context '$context'."
       return 10
     fi
   elif [[ -n "${DOCKER_HOST:-}" ]]; then
     endpoint="$DOCKER_HOST"
   else
-    if ! context=$(docker_probe context show 2>/dev/null); then
-      log "DEGRADED / SKIPPED: Docker context show failed or timed out."
+    if ! context=$(docker_probe context show 2>/dev/null) || [[ -z "$context" ]]; then
+      log "DEGRADED / SKIPPED: Docker context show failed, timed out, or returned empty context."
       return 10
     fi
-    if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
-      log "DEGRADED / SKIPPED: Docker context inspect failed or timed out for context '$context'."
+    if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || [[ -z "$endpoint" ]]; then
+      log "DEGRADED / SKIPPED: Docker context inspect failed, timed out, or returned empty endpoint for context '$context'."
       return 10
     fi
   fi
@@ -128,12 +128,12 @@ select_colima_docker_backend() {
     return $?
   fi
 
-  if ! context=$(docker_probe context show 2>/dev/null); then
-    log "DEGRADED / SKIPPED: Docker backend identity probe timed out or failed (docker context show)."
+  if ! context=$(docker_probe context show 2>/dev/null) || [[ -z "$context" ]]; then
+    log "DEGRADED / SKIPPED: Docker backend identity probe timed out, failed, or returned empty context (docker context show)."
     return 10
   fi
-  if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
-    log "DEGRADED / SKIPPED: Docker backend identity probe timed out or failed (docker context inspect)."
+  if ! endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || [[ -z "$endpoint" ]]; then
+    log "DEGRADED / SKIPPED: Docker backend identity probe timed out, failed, or returned empty endpoint (docker context inspect)."
     return 10
   fi
 
@@ -143,12 +143,12 @@ select_colima_docker_backend() {
   fi
 
   if ! colima_socket_is_trusted; then
-    log "Docker endpoint ${endpoint:-unknown} is not Colima, and the expected Colima socket is missing, not a socket, symlinked, or not user-owned — skipping."
+    log "Docker endpoint $endpoint is not Colima, and the expected Colima socket is missing, not a socket, symlinked, or not user-owned — skipping."
     return 1
   fi
 
   export DOCKER_HOST="unix://$COLIMA_DOCKER_SOCKET"
-  log "Selected proven Colima Docker socket because Docker context ${context:-unknown} points to ${endpoint:-unknown}."
+  log "Selected proven Colima Docker socket because Docker context $context points to $endpoint."
   prove_colima_docker_backend
   return $?
 }
