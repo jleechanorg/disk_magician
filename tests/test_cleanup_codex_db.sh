@@ -8,12 +8,12 @@
 # 4. Large freelist chunked vacuuming works across multiple batches.
 # 5. Directory discovery via --codex-dir correctly discovers and processes databases.
 # 6. Safety invariant: databases are never deleted, empty/0-byte DBs are skipped safely, non-incremental DBs handled.
-# 7. Numeric validation rejects invalid/zero chunk and timeout args from CLI and CODEX_DB_* environment.
+# 7. Numeric validation rejects SQL-injection, invalid, zero, and huge overflow values without arithmetic wrapping.
 # 8. Single-maintainer lease:
 #    - Two real processes with barrier: maintainer 2 skips leased DB, exits non-zero.
 #    - Stale lease PID is NOT stolen or deleted.
-#    - Symlink alias paths to same physical database share lease.
-#    - Termination (SIGTERM) releases owned lease and halts maintenance.
+#    - Legal canonical-equivalent path alias shares physical lease.
+#    - Termination (SIGTERM) returns 143/non-zero, halts maintenance without vacuum/checkpoint, and removes owned lease.
 #    - Lease cleanup removes only own PID and rmdir; unexpected contents in lease dir are retained.
 # 9. Conservative active-open-client policy:
 #    - PID-scoped real native lsof fixture for active reader skips DB and exits non-zero.
@@ -23,7 +23,7 @@
 #    - Malformed lsof stdout fails closed.
 #    - Missing lsof capability fails closed.
 #    - lsof timeout fails closed.
-# 10. REAL exit-0 wal_checkpoint busy row handled as non-success, with DB inode/data retained.
+# 10. REAL exit-0 wal_checkpoint busy row handled as non-success, with DB inode/data retained, printed into test log.
 # 11. Checkpoint parser matrix:
 #     - Multiple rows [0|0|0, 1|5|5] (success+busy) treated as non-success.
 #     - Multiple rows [0|-1|-1, 1|5|5] (no-WAL+busy) treated as non-success.
@@ -36,7 +36,14 @@
 # 13. Timeout configured on EVERY SQLite call (read probes, vacuum loop, checkpoint, poststate) with captured-args assertion.
 # 14. Poststate verification: freelist drop to 0, WAL truncation to 0 bytes, DB identity preserved, incomplete vacuum fails.
 # 15. Explicit missing requested database fails closed without false success.
-# 16. Numeric bounds validation rejects oversized values.
+# 16. Path guards:
+#     - Symlink database leaf refused for safety, data/freelist preserved.
+#     - Multiple hard links refused for safety, data/freelist preserved.
+#     - External database outside canonical CODEX_DIR refused for safety.
+#     - Parent symlink escape outside canonical CODEX_DIR refused for safety.
+# 17. Pragma row count & constraints schema validation:
+#     - Initial pragma requires exact 4 rows and sensible bounds.
+#     - Poststate pragma requires exact 3 rows and sensible bounds.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +76,7 @@ cleanup_test_env() {
 }
 trap cleanup_test_env EXIT
 
+export CODEX_DIR="$TMP_DIR"
 export DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state"
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 
@@ -307,9 +315,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 7: Numeric validation (CLI and environment)
+# Test 7: Numeric validation (SQL injection, invalid, zero, huge overflow bounds)
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 7: Numeric validation rejects invalid and zero chunk args from CLI and environment"
+echo "Test 7: Numeric validation rejects invalid, SQL injection, and overflow values"
 set +e
 OUT7_ZERO=$("$SCRIPT" --dry-run --db "$DB1" --chunk-size 0 2>&1)
 RC7_ZERO=$?
@@ -317,17 +325,29 @@ OUT7_NEG=$("$SCRIPT" --dry-run --db "$DB1" --chunk-size -5 2>&1)
 RC7_NEG=$?
 OUT7_ALPHA=$("$SCRIPT" --dry-run --db "$DB1" --chunk-size abc 2>&1)
 RC7_ALPHA=$?
+OUT7_SQL_INJECT=$("$SCRIPT" --busy-timeout "5000; DROP TABLE t" 2>&1)
+RC7_SQL_INJECT=$?
+OUT7_ENV_SQL=$(CODEX_DB_BUSY_TIMEOUT_MS="5000; DROP TABLE t" "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_ENV_SQL=$?
+OUT7_ALPHA_MIN_FL=$("$SCRIPT" --min-freelist abc 2>&1)
+RC7_ALPHA_MIN_FL=$?
 OUT7_ENV_ZERO=$(CODEX_DB_CHUNK_SIZE=0 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
 RC7_ENV_ZERO=$?
 OUT7_ENV_OCTAL=$(CODEX_DB_CHUNK_SIZE=08 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
 RC7_ENV_OCTAL=$?
+OUT7_OVERFLOW=$(CODEX_DB_CHUNK_SIZE=18446744073709551617 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_OVERFLOW=$?
 set -e
 
 expect_eq "--chunk-size 0 exits with error (2)" "2" "$RC7_ZERO"
 expect_eq "--chunk-size -5 exits with error (2)" "2" "$RC7_NEG"
 expect_eq "--chunk-size abc exits with error (2)" "2" "$RC7_ALPHA"
+expect_eq "rejects SQL injection --busy-timeout (2)" "2" "$RC7_SQL_INJECT"
+expect_eq "rejects SQL injection in env CODEX_DB_BUSY_TIMEOUT_MS (2)" "2" "$RC7_ENV_SQL"
+expect_eq "rejects alphabetic --min-freelist (2)" "2" "$RC7_ALPHA_MIN_FL"
 expect_eq "CODEX_DB_CHUNK_SIZE=0 exits with error (2)" "2" "$RC7_ENV_ZERO"
 expect_eq "CODEX_DB_CHUNK_SIZE=08 accepted safely" "0" "$RC7_ENV_OCTAL"
+expect_eq "huge 18446744073709551617 rejected without arithmetic wrap (2)" "2" "$RC7_OVERFLOW"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 8: Per-database single-maintainer lease, aliases, and termination trap
@@ -385,9 +405,8 @@ fi
 OUT8_M1=$(cat "$OUT8_M1_FILE")
 expect "maintainer 1 succeeded" "[clean]" "$OUT8_M1"
 
-# Verify symlink alias shares physical lease
-DB8_LINK="$TMP_DIR/test8_alias.sqlite"
-ln -s "$DB8" "$DB8_LINK"
+# Verify legal canonical-equivalent path alias shares physical lease (e.g. ./ within authorized dir)
+DB8_ALIAS="$TMP_DIR/./test8_lease.sqlite"
 rm -f "$BARRIER_INSIDE" "$BARRIER_RELEASE"
 
 PATH="$M1_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8" >/dev/null 2>&1 &
@@ -396,14 +415,14 @@ TEST_PIDS+=("$M1_ALIAS_PID")
 wait_for_barrier "$BARRIER_INSIDE" 5
 
 set +e
-OUT8_ALIAS=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8_LINK" 2>&1)
+OUT8_ALIAS=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8_ALIAS" 2>&1)
 RC8_ALIAS=$?
 set -e
 
 touch "$BARRIER_RELEASE"
 wait "$M1_ALIAS_PID" 2>/dev/null || true
 
-expect "symlink alias detected physical lease contention" "lease held by another maintainer" "$OUT8_ALIAS"
+expect "path alias detected physical lease contention" "lease held by another maintainer" "$OUT8_ALIAS"
 expect_eq "alias contention exited non-zero" "1" "$RC8_ALIAS"
 
 # Verify stale lease preservation (no stale lease stealing)
@@ -421,17 +440,24 @@ expect "stale lease was not stolen" "lease held by another maintainer" "$OUT8_ST
 expect_eq "stale lease PID untouched" "99997" "$(cat "$STALE_LEASE/pid")"
 rm -rf "$STALE_LEASE"
 
-# Verify SIGTERM releases owned lease and halts maintenance
+# Verify SIGTERM returns 143/non-zero, halts maintenance without vacuum/checkpoint, and removes owned lease
 rm -f "$BARRIER_INSIDE" "$BARRIER_RELEASE"
-PATH="$M1_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8" >"$TMP_DIR/term.out" 2>&1 &
+TERM_OUT="$TMP_DIR/term.out"
+PATH="$M1_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8" >"$TERM_OUT" 2>&1 &
 TERM_PID=$!
 TEST_PIDS+=("$TERM_PID")
 wait_for_barrier "$BARRIER_INSIDE" 5
 
 kill -TERM "$TERM_PID" 2>/dev/null || true
-wait "$TERM_PID" 2>/dev/null || true
+set +e
+wait "$TERM_PID" 2>/dev/null
+TERM_RC=$?
+set -e
 
+expect_eq "termination returns 143" "143" "$TERM_RC"
 expect_eq "owned lease removed upon SIGTERM" "0" "$([[ -d "$STATE8/codex_db_leases/${DB8_ID}.lease" ]] && echo 1 || echo 0)"
+expect_not "no clean summary after SIGTERM" "[clean]" "$(cat "$TERM_OUT")"
+expect_not "no vacuum complete after SIGTERM" "Codex DB vacuum complete" "$(cat "$TERM_OUT")"
 rm -rf "$M1_BIN"
 
 # Verify lease cleanup removes only own PID and rmdir; unexpected contents in lease dir are retained
@@ -441,7 +467,6 @@ cat > "$M1_BIN/sqlite3" <<SHIM
 #!/bin/bash
 if [[ "\$*" == *"PRAGMA"* && ! -f "$BARRIER_INSIDE" ]]; then
   touch "$BARRIER_INSIDE"
-  # Inject unexpected content into active lease directory
   touch "$STATE8/codex_db_leases/${DB8_ID}.lease/unexpected_file.txt"
   cnt=0
   while [[ ! -f "$BARRIER_RELEASE" ]]; do
@@ -495,7 +520,6 @@ READER_PID9=$!
 TEST_PIDS+=("$READER_PID9")
 wait_for_barrier "$READY9_R" 5
 
-# Restrict native lsof to test-owned child PID while preserving original file arguments
 WRAP_LSOF_READER="$TMP_DIR/wrap_lsof_reader"
 cat > "$WRAP_LSOF_READER" <<SHIM
 #!/bin/bash
@@ -698,6 +722,7 @@ ROWS_AFTER=$("$REAL_SQLITE3" "$DB10" "SELECT count(*) FROM t WHERE payload != 'b
 INTEG10=$("$REAL_SQLITE3" "$DB10" "PRAGMA integrity_check;")
 
 EVIDENCE_CONTENT=$(cat "$EVIDENCE10" 2>/dev/null || echo "")
+echo "  [evidence] Test 10 exact sqlite3 output: $EVIDENCE_CONTENT"
 expect "sqlite3 returned rc=0" "RC:0" "$EVIDENCE_CONTENT"
 expect "sqlite3 returned busy=1 row" "OUT:1|" "$EVIDENCE_CONTENT"
 
@@ -875,7 +900,6 @@ DISAPPEAR_BIN="$TMP_DIR/disappear_bin"
 mkdir -p "$DISAPPEAR_BIN"
 cat > "$DISAPPEAR_BIN/sqlite3" <<SHIM
 #!/bin/bash
-# Right before SQLite query runs, external actor moves the DB away
 if [[ -f "$DB12" ]]; then
   mv "$DB12" "${DB12}.moved"
 fi
@@ -964,7 +988,7 @@ mkdir -p "$POST_FAIL_BIN"
 cat > "$POST_FAIL_BIN/sqlite3" <<SHIM
 #!/bin/bash
 if [[ "\$*" == *"PRAGMA freelist_count;"* && "\$*" != *"auto_vacuum"* ]]; then
-  echo "4096 100 25" # fake non-zero poststate freelist
+  printf '4096\n100\n25\n' # fake non-zero poststate freelist (3 rows)
   exit 0
 fi
 exec "$REAL_SQLITE3" "\$@"
@@ -997,14 +1021,128 @@ expect_eq "missing requested db exits non-zero" "1" "$RC15"
 expect_not "summary lacks vacuum complete on missing db" "Codex DB vacuum complete" "$OUT15"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 16: Safe bounds validation rejects oversized chunk and timeout
+# Test 16: Path guards (symlink leaf, hardlinks, external db, parent symlink escape)
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 16: Safe bounds validation rejects oversized chunk and timeout"
+echo "Test 16: Path guards enforce containment, reject symlink leaves and multiple hardlinks"
+DB16="$TMP_DIR/test16_target.sqlite"
+create_test_db "$DB16" 100 50 2
+DB16_FL_BEFORE=$("$REAL_SQLITE3" "$DB16" "PRAGMA freelist_count;")
+
+# Case 16A: Symlink database leaf is refused for safety
+DB16_SYM="$TMP_DIR/test16_symlink.sqlite"
+ln -s "$DB16" "$DB16_SYM"
+
 set +e
-OUT16_BOUNDS=$(CODEX_DB_CHUNK_SIZE=999999999 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
-RC16_BOUNDS=$?
+OUT16_SYM=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" "$SCRIPT" --clean --db "$DB16_SYM" 2>&1)
+RC16_SYM=$?
 set -e
-expect_eq "oversized chunk size exits with error (2)" "2" "$RC16_BOUNDS"
+
+DB16_FL_AFTER_SYM=$("$REAL_SQLITE3" "$DB16" "PRAGMA freelist_count;")
+expect "refused symlink leaf database" "refusing symlink target for safety" "$OUT16_SYM"
+expect_eq "symlink leaf target freelist untouched" "$DB16_FL_BEFORE" "$DB16_FL_AFTER_SYM"
+expect_eq "symlink leaf exits non-zero" "1" "$RC16_SYM"
+rm -f "$DB16_SYM"
+
+# Case 16B: Multiple hard links rejected for safety
+DB16_HARD="$TMP_DIR/test16_hardlink.sqlite"
+ln "$DB16" "$DB16_HARD"
+
+set +e
+OUT16_HARD=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" "$SCRIPT" --clean --db "$DB16_HARD" 2>&1)
+RC16_HARD=$?
+set -e
+
+DB16_FL_AFTER_HARD=$("$REAL_SQLITE3" "$DB16" "PRAGMA freelist_count;")
+expect "refused multiple hard links" "has multiple hard links" "$OUT16_HARD"
+expect_eq "hardlinked database freelist untouched" "$DB16_FL_BEFORE" "$DB16_FL_AFTER_HARD"
+expect_eq "multiple hard links exits non-zero" "1" "$RC16_HARD"
+rm -f "$DB16_HARD"
+
+# Case 16C: External database outside canonical CODEX_DIR refused without matching --codex-dir
+EXTERNAL_DIR="$TMP_DIR/external"
+mkdir -p "$EXTERNAL_DIR"
+EXT_DB="$EXTERNAL_DIR/external.sqlite"
+create_test_db "$EXT_DB" 100 50 2
+EXT_FL_BEFORE=$("$REAL_SQLITE3" "$EXT_DB" "PRAGMA freelist_count;")
+
+set +e
+OUT16_EXT=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" "$SCRIPT" --clean --db "$EXT_DB" 2>&1)
+RC16_EXT=$?
+set -e
+
+EXT_FL_AFTER=$("$REAL_SQLITE3" "$EXT_DB" "PRAGMA freelist_count;")
+expect "refused external db outside CODEX_DIR" "resolves outside" "$OUT16_EXT"
+expect_eq "external database freelist untouched" "$EXT_FL_BEFORE" "$EXT_FL_AFTER"
+expect_eq "external database exits non-zero" "1" "$RC16_EXT"
+
+# Case 16D: Parent symlink escape outside canonical CODEX_DIR refused
+OUTSIDE_DIR="$TMP_DIR/outside_dir"
+mkdir -p "$OUTSIDE_DIR"
+OUTSIDE_DB="$OUTSIDE_DIR/escaped.sqlite"
+create_test_db "$OUTSIDE_DB" 100 50 2
+OUTSIDE_FL_BEFORE=$("$REAL_SQLITE3" "$OUTSIDE_DB" "PRAGMA freelist_count;")
+
+ln -s "$OUTSIDE_DIR" "$TMP_DIR/symlink_parent"
+set +e
+OUT16_ESCAPE=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" "$SCRIPT" --clean --db "$TMP_DIR/symlink_parent/escaped.sqlite" 2>&1)
+RC16_ESCAPE=$?
+set -e
+
+OUTSIDE_FL_AFTER=$("$REAL_SQLITE3" "$OUTSIDE_DB" "PRAGMA freelist_count;")
+expect "refused realpath escape through parent symlink" "resolves outside" "$OUT16_ESCAPE"
+expect_eq "escaped database freelist untouched" "$OUTSIDE_FL_BEFORE" "$OUTSIDE_FL_AFTER"
+expect_eq "escaped parent symlink exits non-zero" "1" "$RC16_ESCAPE"
+rm -rf "$TMP_DIR/symlink_parent" "$OUTSIDE_DIR" "$EXTERNAL_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 17: Pragma row count & constraints schema validation
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 17: Pragma schema validation rejects missing/extra rows and invalid constraints"
+PRAGMA_TEST_BIN="$TMP_DIR/pragma_test_bin"
+mkdir -p "$PRAGMA_TEST_BIN"
+
+# Case 17A: Initial pragma returns only 3 rows instead of exact 4
+cat > "$PRAGMA_TEST_BIN/sqlite3" <<SHIM
+#!/bin/bash
+if [[ "\$*" == *"PRAGMA auto_vacuum"* ]]; then
+  printf '4096\n100\n50\n' # only 3 rows
+  exit 0
+fi
+exec "$REAL_SQLITE3" "\$@"
+SHIM
+chmod +x "$PRAGMA_TEST_BIN/sqlite3"
+
+DB17A="$TMP_DIR/test17a.sqlite"
+create_test_db "$DB17A" 100 50 2
+set +e
+OUT17A=$(PATH="$PRAGMA_TEST_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state17a" "$SCRIPT" --clean --db "$DB17A" 2>&1)
+RC17A=$?
+set -e
+
+expect "rejected incomplete initial pragma rows" "Expected exactly 4 pragma rows" "$OUT17A"
+expect_eq "incomplete initial pragma exits non-zero" "1" "$RC17A"
+
+# Case 17B: Poststate pragma returns 2 rows instead of exact 3
+cat > "$PRAGMA_TEST_BIN/sqlite3" <<SHIM
+#!/bin/bash
+if [[ "\$*" == *"PRAGMA freelist_count;"* && "\$*" != *"auto_vacuum"* ]]; then
+  printf '4096\n100\n' # only 2 rows
+  exit 0
+fi
+exec "$REAL_SQLITE3" "\$@"
+SHIM
+chmod +x "$PRAGMA_TEST_BIN/sqlite3"
+
+DB17B="$TMP_DIR/test17b.sqlite"
+create_test_db "$DB17B" 100 50 2
+set +e
+OUT17B=$(PATH="$PRAGMA_TEST_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state17b" "$SCRIPT" --clean --db "$DB17B" 2>&1)
+RC17B=$?
+set -e
+
+expect "rejected incomplete poststate pragma rows" "Expected exactly 3 poststate pragma rows" "$OUT17B"
+expect_eq "incomplete poststate pragma exits non-zero" "1" "$RC17B"
+rm -rf "$PRAGMA_TEST_BIN"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

@@ -121,34 +121,48 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Numeric validation (applies to CLI args and CODEX_DB_* environment variables)
-validate_int_gte_zero() {
-  local val="$1" name="$2"
+# Numeric validation (rejects out-of-bounds without bash arithmetic overflow)
+validate_numeric_param() {
+  local val="$1" name="$2" is_positive="$3" max_val="$4"
   if ! [[ "$val" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: $name requires a non-negative integer, got '$val'" >&2
+    echo "ERROR: $name must be an unsigned integer, got: '$val'" >&2
     exit 2
   fi
+  # Strip leading zeros
+  local norm="${val#"${val%%[!0]*}"}"
+  [[ -z "$norm" ]] && norm="0"
+
+  if [[ "$is_positive" == true && "$norm" == "0" ]]; then
+    echo "ERROR: $name must be a positive integer, got: '$val'" >&2
+    exit 2
+  fi
+
+  local max_len=${#max_val}
+  local norm_len=${#norm}
+  if (( norm_len > max_len )) || { (( norm_len == max_len )) && [[ "$norm" > "$max_val" ]]; }; then
+    echo "ERROR: $name exceeds maximum allowed ($max_val), got: '$val'" >&2
+    exit 2
+  fi
+  printf '%s\n' "$norm"
 }
 
-validate_int_gt_zero() {
-  local val="$1" name="$2" max_val="${3:-}"
-  if ! [[ "$val" =~ ^[0-9]+$ ]] || (( 10#$val <= 0 )); then
-    echo "ERROR: $name requires a positive integer, got '$val'" >&2
-    exit 2
+BUSY_TIMEOUT_MS=$(validate_numeric_param "$BUSY_TIMEOUT_MS" "--busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS" true "3600000")
+MIN_FREELIST=$(validate_numeric_param "$MIN_FREELIST" "--min-freelist / CODEX_DB_MIN_FREELIST" false "1000000000")
+CHUNK_SIZE=$(validate_numeric_param "$CHUNK_SIZE" "--chunk-size / CODEX_DB_CHUNK_SIZE" true "10000000")
+
+get_hardlink_count() {
+  local f="$1"
+  local count=""
+  if count=$(stat -c %h "$f" 2>/dev/null) && [[ "$count" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$count"
+    return 0
   fi
-  if [[ -n "$max_val" ]] && (( 10#$val > max_val )); then
-    echo "ERROR: $name exceeds maximum allowed ($max_val), got '$val'" >&2
-    exit 2
+  if count=$(stat -f %l "$f" 2>/dev/null) && [[ "$count" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$count"
+    return 0
   fi
+  return 1
 }
-
-validate_int_gt_zero "$BUSY_TIMEOUT_MS" "--busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS" 3600000
-validate_int_gte_zero "$MIN_FREELIST" "--min-freelist / CODEX_DB_MIN_FREELIST"
-validate_int_gt_zero "$CHUNK_SIZE" "--chunk-size / CODEX_DB_CHUNK_SIZE" 10000000
-
-BUSY_TIMEOUT_MS=$(( 10#$BUSY_TIMEOUT_MS ))
-MIN_FREELIST=$(( 10#$MIN_FREELIST ))
-CHUNK_SIZE=$(( 10#$CHUNK_SIZE ))
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -253,9 +267,34 @@ db_uri() {
   printf 'file:%s?mode=%s\n' "$real_p" "$mode"
 }
 
+CURRENT_TARGET_DB=""
+CURRENT_EXPECTED_DEV_INODE=""
+
 run_sqlite() {
   local uri="$1" sql="$2"
-  sqlite3 -cmd ".timeout $BUSY_TIMEOUT_MS" "$uri" "$sql"
+  if [[ -n "$CURRENT_TARGET_DB" && -n "$CURRENT_EXPECTED_DEV_INODE" ]]; then
+    if ! verify_db_identity "$CURRENT_TARGET_DB" "$CURRENT_EXPECTED_DEV_INODE"; then
+      log "ERROR: Database identity changed or disappeared before query: $CURRENT_TARGET_DB" >&2
+      return 1
+    fi
+  fi
+
+  local out rc=0
+  set +e
+  out=$(sqlite3 -cmd ".timeout $BUSY_TIMEOUT_MS" "$uri" "$sql" 2>&1)
+  rc=$?
+  set -e
+
+  if [[ -n "$CURRENT_TARGET_DB" && -n "$CURRENT_EXPECTED_DEV_INODE" ]]; then
+    if ! verify_db_identity "$CURRENT_TARGET_DB" "$CURRENT_EXPECTED_DEV_INODE"; then
+      log "ERROR: Database identity changed or disappeared after query: $CURRENT_TARGET_DB" >&2
+      printf '%s\n' "$out"
+      return 1
+    fi
+  fi
+
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 check_active_open_clients() {
@@ -433,6 +472,9 @@ parse_wal_checkpoint() {
   return 0
 }
 
+# Canonical CODEX_DIR resolution
+CODEX_DIR_REAL="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$CODEX_DIR" 2>/dev/null || true)"
+
 # Resolve candidate databases
 CANDIDATES=()
 any_non_success=false
@@ -440,6 +482,11 @@ if [[ ${#TARGET_DBS[@]} -gt 0 ]]; then
   for db in "${TARGET_DBS[@]}"; do
     if [[ ! -e "$db" ]]; then
       log "WARNING: Specified database does not exist: $db — skipping" >&2
+      any_non_success=true
+      continue
+    fi
+    if [[ -L "$db" ]]; then
+      log "WARNING: Specified database is a symbolic link: $db — refusing symlink target for safety" >&2
       any_non_success=true
       continue
     fi
@@ -470,6 +517,7 @@ else
   for db_pattern in "${primary_patterns[@]}"; do
     for db in $db_pattern; do
       [[ -f "$db" ]] || continue
+      [[ -L "$db" ]] && continue
       [[ "$db" == *-wal || "$db" == *-shm ]] && continue
       already_seen=false
       for s in "${seen_dbs[@]:-}"; do
@@ -503,9 +551,36 @@ total_freed=0
 total_locked=0
 
 for db in "${CANDIDATES[@]}"; do
+  # Fail-closed safety assertion: NEVER follow symlink leaves
+  if [[ -L "$db" ]]; then
+    log "WARNING: $db is a symbolic link — refusing symlink target for safety" >&2
+    any_non_success=true
+    continue
+  fi
+
   # Check existence: must exist and be regular file
   if [[ ! -e "$db" || ! -f "$db" ]]; then
     log "WARNING: $db is not a regular file — skipping" >&2
+    any_non_success=true
+    continue
+  fi
+
+  # Check hard link count portably across BSD/macOS and Linux
+  link_count=""
+  if ! link_count=$(get_hardlink_count "$db") || [[ -z "$link_count" || ! "$link_count" =~ ^[0-9]+$ ]]; then
+    log "WARNING: $db could not determine link count — refusing database for safety" >&2
+    any_non_success=true
+    continue
+  elif (( link_count != 1 )); then
+    log "WARNING: $db has multiple hard links (link count $link_count) — refusing hard-linked database for safety" >&2
+    any_non_success=true
+    continue
+  fi
+
+  # Verify canonical parent directory matches canonical CODEX_DIR
+  db_dir_real="$(python3 -c 'import os, sys; print(os.path.realpath(os.path.dirname(sys.argv[1])))' "$db" 2>/dev/null || true)"
+  if [[ -z "$CODEX_DIR_REAL" || "$db_dir_real" != "$CODEX_DIR_REAL" ]]; then
+    log "WARNING: $db directory ($db_dir_real) resolves outside $CODEX_DIR ($CODEX_DIR_REAL) — skipping" >&2
     any_non_success=true
     continue
   fi
@@ -523,6 +598,10 @@ for db in "${CANDIDATES[@]}"; do
   }
 
   total_checked=$(( total_checked + 1 ))
+
+  # Set current target DB and expected dev/inode for centralized run_sqlite checks
+  CURRENT_TARGET_DB="$db"
+  CURRENT_EXPECTED_DEV_INODE="$db_physical_id"
 
   # Acquire per-database single-maintainer lease
   current_lease=""
@@ -585,16 +664,41 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  read -r page_size page_count freelist_count auto_vacuum <<< "$(echo "$pragma_out" | tr '\n' ' ')"
-  page_size="${page_size:-0}"
-  page_count="${page_count:-0}"
-  freelist_count="${freelist_count:-0}"
-  auto_vacuum="${auto_vacuum:-0}"
+  pragma_lines=()
+  while IFS= read -r pline; do
+    [[ -z "$pline" ]] && continue
+    pragma_lines+=("$pline")
+  done <<< "$pragma_out"
 
-  if ! [[ "$page_size" =~ ^[0-9]+$ && "$freelist_count" =~ ^[0-9]+$ && "$auto_vacuum" =~ ^[0-9]+$ ]]; then
-    log "WARNING: Malformed pragma response from $db: $pragma_out — skipping" >&2
+  if [[ ${#pragma_lines[@]} -ne 4 ]]; then
+    log "WARNING: Expected exactly 4 pragma rows from $db, got ${#pragma_lines[@]}: '$pragma_out' — skipping" >&2
     any_non_success=true
     [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+    CURRENT_TARGET_DB=""
+    CURRENT_EXPECTED_DEV_INODE=""
+    continue
+  fi
+
+  page_size="${pragma_lines[0]}"
+  page_count="${pragma_lines[1]}"
+  freelist_count="${pragma_lines[2]}"
+  auto_vacuum="${pragma_lines[3]}"
+
+  if ! [[ "$page_size" =~ ^[0-9]+$ && "$page_count" =~ ^[0-9]+$ && "$freelist_count" =~ ^[0-9]+$ && "$auto_vacuum" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Malformed pragma response from $db: '$pragma_out' — skipping" >&2
+    any_non_success=true
+    [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+    CURRENT_TARGET_DB=""
+    CURRENT_EXPECTED_DEV_INODE=""
+    continue
+  fi
+
+  if (( page_size < 512 || page_size > 65536 )) || (( auto_vacuum < 0 || auto_vacuum > 2 )) || (( freelist_count > page_count )); then
+    log "WARNING: Invalid pragma values from $db (page_size=$page_size, page_count=$page_count, freelist=$freelist_count, auto_vacuum=$auto_vacuum) — skipping" >&2
+    any_non_success=true
+    [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+    CURRENT_TARGET_DB=""
+    CURRENT_EXPECTED_DEV_INODE=""
     continue
   fi
 
@@ -741,26 +845,55 @@ for db in "${CANDIDATES[@]}"; do
     vacuum_failed=true
     checkpoint_failed=true
   else
-    read -r post_ps post_pc post_fl <<< "$(echo "$post_pragma" | tr '\n' ' ')"
-    if ! [[ "$post_ps" =~ ^[0-9]+$ && "$post_pc" =~ ^[0-9]+$ && "$post_fl" =~ ^[0-9]+$ ]]; then
-      log "WARNING: Malformed poststate pragma output for $db: $post_pragma" >&2
+    post_lines=()
+    while IFS= read -r post_line; do
+      [[ -z "$post_line" ]] && continue
+      post_lines+=("$post_line")
+    done <<< "$post_pragma"
+
+    if [[ ${#post_lines[@]} -ne 3 ]]; then
+      log "WARNING: Expected exactly 3 poststate pragma rows from $db, got ${#post_lines[@]}: '$post_pragma'" >&2
       vacuum_failed=true
       checkpoint_failed=true
     else
-      if [[ "$needs_vacuum" == true && "$vacuum_failed" == false ]]; then
-        if (( post_fl != 0 )); then
-          log "WARNING: Freelist was not reduced to 0 after vacuum for $db (before: $freelist_count, after: $post_fl)" >&2
-          vacuum_failed=true
+      post_ps="${post_lines[0]}"
+      post_pc="${post_lines[1]}"
+      post_fl="${post_lines[2]}"
+
+      if ! [[ "$post_ps" =~ ^[0-9]+$ && "$post_pc" =~ ^[0-9]+$ && "$post_fl" =~ ^[0-9]+$ ]]; then
+        log "WARNING: Malformed poststate pragma output for $db: '$post_pragma'" >&2
+        vacuum_failed=true
+        checkpoint_failed=true
+      elif (( post_ps < 512 || post_ps > 65536 || post_fl > post_pc )); then
+        log "WARNING: Invalid poststate pragma values for $db: '$post_pragma'" >&2
+        vacuum_failed=true
+        checkpoint_failed=true
+      else
+        if [[ "$needs_vacuum" == true && "$vacuum_failed" == false ]]; then
+          if (( post_fl != 0 )); then
+            log "WARNING: Freelist was not reduced to 0 after vacuum for $db (before: $freelist_count, after: $post_fl)" >&2
+            vacuum_failed=true
+          fi
         fi
       fi
     fi
   fi
 
-  # Check that WAL file is truncated to 0 bytes after clean TRUNCATE checkpoint
-  if [[ "$checkpoint_failed" == false && -f "$wal_file" ]]; then
-    if (( wal_size_after > 0 )); then
-      log "WARNING: WAL file not truncated to 0 bytes after checkpoint for $db (size: $wal_size_after)" >&2
-      checkpoint_failed=true
+  # Reread actual canonical WAL size after last query (fail closed if metadata unreadable or size > 0)
+  if [[ "$checkpoint_failed" == false ]]; then
+    real_wal=""
+    if ! real_wal=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$wal_file" 2>/dev/null); then
+      real_wal="$wal_file"
+    fi
+    if [[ -e "$real_wal" ]]; then
+      wal_sz=""
+      if ! wal_sz=$(file_size_bytes "$real_wal") || [[ -z "$wal_sz" || ! "$wal_sz" =~ ^[0-9]+$ ]]; then
+        log "WARNING: Could not read WAL file size for $db — fail closed" >&2
+        checkpoint_failed=true
+      elif (( wal_sz > 0 )); then
+        log "WARNING: WAL file not truncated to 0 bytes after checkpoint for $db (size: $wal_sz)" >&2
+        checkpoint_failed=true
+      fi
     fi
   fi
 
@@ -778,6 +911,8 @@ for db in "${CANDIDATES[@]}"; do
   fi
 
   [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+  CURRENT_TARGET_DB=""
+  CURRENT_EXPECTED_DEV_INODE=""
 done
 
 echo
