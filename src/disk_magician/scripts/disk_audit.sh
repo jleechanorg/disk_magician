@@ -66,7 +66,7 @@ _load_snapshot() {
     
     local meta
     meta=$(python3 - "$SNAPSHOT_JSON" "$SNAP_CACHE" <<'PY' 2>/dev/null || true
-import json, sys, datetime, re
+import json, sys, datetime, re, math
 src, cache = sys.argv[1], sys.argv[2]
 try:
     with open(src) as f:
@@ -76,32 +76,49 @@ except Exception:
 
 raw_cov = s.get("snapshot_coverage_pct", "")
 cov = ""
-if isinstance(raw_cov, (int, float)):
-    cov = str(raw_cov)
-elif isinstance(raw_cov, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_cov.strip()):
-    cov = raw_cov.strip()
+try:
+    if isinstance(raw_cov, (int, float)) and not isinstance(raw_cov, bool):
+        val = float(raw_cov)
+        if math.isfinite(val) and 0.0 <= val <= 100.0:
+            cov = str(raw_cov)
+    elif isinstance(raw_cov, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_cov.strip()):
+        val = float(raw_cov.strip())
+        if math.isfinite(val) and 0.0 <= val <= 100.0:
+            cov = str(val)
+except Exception:
+    cov = ""
 
-warn = str(s.get("snapshot_warning", "") or "").replace("\n", " ").strip()
+warn = str(s.get("snapshot_warning", "") or "").replace("\n", " ").replace("\r", " ").strip()
 ts   = str(s.get("timestamp", "") or "").strip()
 
 raw_swap = s.get("swap_used_gb", "")
 swap_used_gb = ""
-if isinstance(raw_swap, (int, float)):
-    swap_used_gb = str(raw_swap)
-elif isinstance(raw_swap, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', str(raw_swap).strip()):
-    swap_used_gb = str(raw_swap).strip()
+try:
+    if isinstance(raw_swap, (int, float)) and not isinstance(raw_swap, bool):
+        val = float(raw_swap)
+        if math.isfinite(val) and val >= 0.0:
+            swap_used_gb = str(raw_swap)
+    elif isinstance(raw_swap, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', str(raw_swap).strip()):
+        val = float(str(raw_swap).strip())
+        if math.isfinite(val) and val >= 0.0:
+            swap_used_gb = str(val)
+except Exception:
+    swap_used_gb = ""
 
 meta_block = s.get("snapshot_metadata") or {}
 if not isinstance(meta_block, dict):
     meta_block = {}
 
-status = str(meta_block.get("measurement_status", "") or "").replace("\n", " ").strip()
+status = str(meta_block.get("measurement_status", "") or "").replace("\n", " ").replace("\r", " ").strip()
 raw_age_sec = meta_block.get("age_seconds", "")
 age_sec = ""
-if isinstance(raw_age_sec, int):
-    age_sec = str(raw_age_sec)
-elif isinstance(raw_age_sec, str) and raw_age_sec.strip().isdigit():
-    age_sec = raw_age_sec.strip()
+try:
+    if isinstance(raw_age_sec, int) and not isinstance(raw_age_sec, bool) and raw_age_sec >= 0:
+        age_sec = str(raw_age_sec)
+    elif isinstance(raw_age_sec, str) and raw_age_sec.strip().isdigit():
+        age_sec = raw_age_sec.strip()
+except Exception:
+    age_sec = ""
 
 dirs = s.get("directories", {}) or {}
 if isinstance(dirs, dict):
@@ -110,7 +127,7 @@ if isinstance(dirs, dict):
             if v is None:
                 continue
             try:
-                clean_k = str(k).replace("\t", " ").replace("\n", " ").strip()
+                clean_k = str(k).replace("\t", " ").replace("\n", " ").replace("\r", " ").strip()
                 fh.write(f"{clean_k}\t{int(v)}\n")
             except Exception:
                 pass
@@ -145,16 +162,19 @@ PY
     #   ≥ 65%  — accept with partial-coverage warning when < 70% or low_coverage flag
     local min_cov="${DISK_MAGICIAN_MIN_COVERAGE:-65}"
     local hard_floor=50
-    if ! awk -v c="${SNAP_COVERAGE:-0}" "BEGIN{exit !(c+0 >= 0)}"; then
-        SNAP_REASON="coverage invalid (${SNAP_COVERAGE:-?})"; return 1
+    if [[ -z "$SNAP_COVERAGE" ]]; then
+        SNAP_REASON="coverage missing or invalid"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${hard_floor} — re-measuring live"; return 1
+    if ! awk -v c="$SNAP_COVERAGE" "BEGIN{exit !(c+0 >= 0 && c+0 <= 100)}"; then
+        SNAP_REASON="coverage invalid (${SNAP_COVERAGE})"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${min_cov} — re-measuring live"; return 1
+    if awk -v c="$SNAP_COVERAGE" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${hard_floor} — re-measuring live"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" 'BEGIN{exit !(c+0 < 70)}'; then
+    if awk -v c="$SNAP_COVERAGE" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${min_cov} — re-measuring live"; return 1
+    fi
+    if awk -v c="$SNAP_COVERAGE" 'BEGIN{exit !(c+0 < 70)}'; then
         SNAP_PARTIAL_WARN="partial coverage ${SNAP_COVERAGE}% (<70% — some paths timed out)"
     fi
     if [[ "$_warn" == *"low_coverage"* ]]; then
