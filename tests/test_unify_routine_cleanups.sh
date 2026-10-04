@@ -11,7 +11,6 @@
 #    - Tier 5: Antigravity brain compaction, Codex SQLite vacuum, Supervisor logs, uv cache
 #    - Tier 6: Worktree venvs (>=7d dormant)
 # 2. All categories execute without error in dry-run mode.
-# 3. Worktree venvs require WORKTREE_APPROVED=1 to execute in non-dry-run mode.
 
 set -euo pipefail
 
@@ -48,14 +47,20 @@ export CLAUDE_STATE_ROOT="$FIXTURE_CLAUDE_STATE"
 FIXTURE_HOME="$TMP_DIR/fakehome"
 FIXTURE_BIN="$TMP_DIR/fakebin"
 FIXTURE_STATE="$TMP_DIR/fakestate"
-mkdir -p "$FIXTURE_HOME" "$FIXTURE_BIN" "$FIXTURE_STATE"
+FIXTURE_LOGS="$TMP_DIR/logs"
+mkdir -p "$FIXTURE_HOME" "$FIXTURE_BIN" "$FIXTURE_STATE" "$FIXTURE_LOGS"
 
-# Isolate HOME and state so tests never scan live developer/docker paths
+# Isolate HOME, state, and logs so tests never scan live developer/docker paths
 export HOME="$FIXTURE_HOME"
 export DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE"
-export POST_JOB_DOCKER_PRUNE_LOG="$TMP_DIR/post-job.log"
+export POST_JOB_DOCKER_PRUNE_LOG="$FIXTURE_LOGS/post-job.log"
+export LOG_FILE="$FIXTURE_LOGS/ambient_should_not_be_written.log"
 echo "{}" > "$FIXTURE_STATE/frontier_last.json"
 echo "{}" > "$FIXTURE_STATE/discover_last.json"
+
+# In-fixture code_sign_clone to verify override detection without getconf
+mkdir -p "$TMP_DIR/X/fixture.code_sign_clone"
+dd if=/dev/zero of="$TMP_DIR/X/fixture.code_sign_clone/payload" bs=1m count=105 status=none
 
 # Provide lightweight hermetic shims for docker and colima
 cat > "$FIXTURE_BIN/docker" << 'EOF'
@@ -92,8 +97,8 @@ chmod +x "$FIXTURE_BIN/uv"
 cat > "$FIXTURE_BIN/getconf" << 'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == "DARWIN_USER_TEMP_DIR" ]]; then
-  echo "${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-$TMPDIR}"
-  exit 0
+  echo "FAIL: ambient getconf DARWIN_USER_TEMP_DIR called despite override" >&2
+  exit 99
 fi
 /usr/bin/getconf "$@"
 EOF
@@ -174,6 +179,29 @@ fi
 if ! grep -qF "All attempted categories completed without error." "$OUT_CLI"; then
   echo "FAIL: zero-failure summary not found in disk_magician.sh routine" >&2
   cat "$OUT_CLI" >&2
+  exit 1
+fi
+
+# Verify user-temp override precedence in audit findings (X/fixture.code_sign_clone)
+if ! grep -qF "code_sign_clone caches (var/folders X)" "$OUT_AUDIT"; then
+  echo "FAIL: expected code_sign_clone caches in audit output from fixture override" >&2
+  cat "$OUT_AUDIT" >&2
+  exit 1
+fi
+
+# Verify post-job docker prune log isolation and env precedence
+if [[ ! -s "$FIXTURE_LOGS/post-job.log" ]]; then
+  echo "FAIL: expected post_job_docker_prune.sh to write to POST_JOB_DOCKER_PRUNE_LOG" >&2
+  exit 1
+fi
+
+if [[ -f "$FIXTURE_LOGS/ambient_should_not_be_written.log" ]]; then
+  echo "FAIL: post_job_docker_prune.sh wrote to ambient LOG_FILE instead of POST_JOB_DOCKER_PRUNE_LOG" >&2
+  exit 1
+fi
+
+if [[ -f "$FIXTURE_HOME/.disk_magician_backup/post-job.log" ]]; then
+  echo "FAIL: post_job_docker_prune.sh wrote to fallback backup directory instead of fixture log" >&2
   exit 1
 fi
 

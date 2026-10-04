@@ -277,6 +277,23 @@ assert "treats equal-to-threshold as 'skip'" "skipping builder prune" "$LOG6_CON
 rm -rf "$TMP6"
 
 # ---------------------------------------------------------------------------
+# Test 7: POST_JOB_DOCKER_PRUNE_LOG takes precedence over ambient LOG_FILE.
+echo "=== Test 7: POST_JOB_DOCKER_PRUNE_LOG precedence over LOG_FILE ==="
+TMP7=$(mktemp -d -t dj_prune_t7.XXXXXX)
+LOG7_SPECIFIC="$TMP7/specific.log"
+LOG7_AMBIENT="$TMP7/ambient.log"
+INV7="$TMP7/invocations.log"
+mkdir -p "$TMP7/bin"
+make_mock_docker "$TMP7/bin" "$INV7" "100MB"
+POST_JOB_DOCKER_PRUNE_LOG="$LOG7_SPECIFIC" LOG_FILE="$LOG7_AMBIENT" PATH="$TMP7/bin:$PATH" "$SCRIPT" --dry-run >/dev/null 2>&1
+assert "writes to POST_JOB_DOCKER_PRUNE_LOG" "dry_run: true" "$(cat "$LOG7_SPECIFIC" 2>/dev/null || echo "")"
+if [[ -f "$LOG7_AMBIENT" ]]; then
+  echo "  FAIL Test 7: ambient LOG_FILE should not be written when POST_JOB_DOCKER_PRUNE_LOG is set"
+  exit 1
+fi
+rm -rf "$TMP7"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "PASSED: $TESTS_PASSED / $TESTS_RUN assertions"
 echo "All tests complete."

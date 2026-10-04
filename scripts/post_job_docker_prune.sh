@@ -22,9 +22,9 @@ set -euo pipefail
 # ---- Defaults ------------------------------------------------------------
 DRY_RUN=false
 MAX_CACHE_MB=2048
-# Resolve log file from env (LOG_FILE is the common name; POST_JOB_DOCKER_PRUNE_LOG
-# is the script-specific override). Default lives under the disk_magician backup dir.
-LOG_FILE="${LOG_FILE:-${POST_JOB_DOCKER_PRUNE_LOG:-$HOME/.disk_magician_backup/post-job.log}}"
+# Resolve log file from env (POST_JOB_DOCKER_PRUNE_LOG is the script-specific override;
+# LOG_FILE is the common fallback). Default lives under the disk_magician backup dir.
+LOG_FILE="${POST_JOB_DOCKER_PRUNE_LOG:-${LOG_FILE:-$HOME/.disk_magician_backup/post-job.log}}"
 RUNNER_NAME="${RUNNER_NAME:-unknown}"
 GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-unknown}"
 
