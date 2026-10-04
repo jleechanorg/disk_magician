@@ -85,6 +85,9 @@ if [[ "$mode" != missing-diskm ]]; then
   cat > "$DISK_MAGICIAN_TOOL_ROOT/bin/diskm" <<'ENTRY'
 #!/usr/bin/env bash
 if [[ "${UV_MODE:-normal}" == fail-diskm ]]; then exit 8; fi
+if [[ "${UV_MODE:-normal}" == mutate-after-comparison ]]; then
+  printf 'late mutation\n' >> "$DISK_MAGICIAN_TOOL_ROOT/lib/python3.13/site-packages/disk_magician/fixture.txt"
+fi
 if [[ "${UV_MODE:-normal}" == different-help ]]; then
   printf '%s\n' 'diskm help differs'
 else
@@ -144,7 +147,7 @@ assert receipt["deployed_at"].endswith("Z")
 assert receipt["package_root"] == os.path.realpath(os.path.join(tool_root, "lib/python3.13/site-packages/disk_magician"))
 assert receipt["package_hashes"] == expected_hashes
 assert receipt["source_root"] == os.path.realpath(source_root)
-assert receipt["override_state"] == "none"
+assert receipt["override_state"] is False
 PY
 then
   ok "receipt records exact SHA, version, resolved roots, and package hashes"
@@ -181,6 +184,7 @@ assert_failed_preserves_receipt missing-diskm env UV_MODE=missing-diskm DISK_MAG
 assert_failed_preserves_receipt failing-disk-magician env UV_MODE=fail-disk-magician DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" "$TREE/scripts/deploy_uv_tool.sh"
 assert_failed_preserves_receipt failing-diskm env UV_MODE=fail-diskm DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" "$TREE/scripts/deploy_uv_tool.sh"
 assert_failed_preserves_receipt differing-help env UV_MODE=different-help DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" "$TREE/scripts/deploy_uv_tool.sh"
+assert_failed_preserves_receipt changed-package-after-comparison env UV_MODE=mutate-after-comparison DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" "$TREE/scripts/deploy_uv_tool.sh"
 assert_failed_preserves_receipt changed-source-during-install env UV_MODE=mutate-source DISK_MAGICIAN_UV_BIN="$UV_STUB" DISK_MAGICIAN_TOOL_ROOT="$TOOL_ROOT" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" "$TREE/scripts/deploy_uv_tool.sh"
 git -C "$TREE" restore pyproject.toml
 
