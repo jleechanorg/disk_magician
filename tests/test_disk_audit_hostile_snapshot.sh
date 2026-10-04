@@ -778,11 +778,15 @@ for line in lines:
     elif in_data:
         rows.append(line.split())
 
-assert header is not None, "header line missing in history table"
-assert len(rows) >= 2, f"expected at least 2 history rows, got {len(rows)}"
+def check(cond, msg):
+    if not cond:
+        raise SystemExit(f"FAIL: {msg}")
+
+check(header is not None, "header line missing in history table")
+check(len(rows) >= 2, f"expected at least 2 history rows, got {len(rows)}")
 
 cols = header[3:]
-assert len(cols) == len(set(cols)), f"duplicate header detected: {cols}"
+check(len(cols) == len(set(cols)), f"duplicate header detected: {cols}")
 col_map = {name: idx + 3 for idx, name in enumerate(cols)}
 
 astral_hdr = r"\U000e0001"
@@ -791,13 +795,13 @@ esc_hdr = r"\efoo"
 lit_hdr = r"\\efoo"
 
 for hdr in [astral_hdr, bmp_hdr, esc_hdr, lit_hdr]:
-    assert hdr in col_map, f"missing expected column header '{hdr}' in table: {cols}"
+    check(hdr in col_map, f"missing expected column header '{hdr}' in table: {cols}")
 
 for r in rows:
-    assert r[col_map[astral_hdr]] == "20.0G", f"expected 20.0G under {astral_hdr}, got {r[col_map[astral_hdr]]}"
-    assert r[col_map[bmp_hdr]] == "2.0G", f"expected 2.0G under {bmp_hdr}, got {r[col_map[bmp_hdr]]}"
-    assert r[col_map[esc_hdr]] == "10.0G", f"expected 10.0G under {esc_hdr}, got {r[col_map[esc_hdr]]}"
-    assert r[col_map[lit_hdr]] == "1.0G", f"expected 1.0G under {lit_hdr}, got {r[col_map[lit_hdr]]}"
+    check(r[col_map[astral_hdr]] == "20.0G", f"expected 20.0G under {astral_hdr}, got {r[col_map[astral_hdr]]}")
+    check(r[col_map[bmp_hdr]] == "2.0G", f"expected 2.0G under {bmp_hdr}, got {r[col_map[bmp_hdr]]}")
+    check(r[col_map[esc_hdr]] == "10.0G", f"expected 10.0G under {esc_hdr}, got {r[col_map[esc_hdr]]}")
+    check(r[col_map[lit_hdr]] == "1.0G", f"expected 1.0G under {lit_hdr}, got {r[col_map[lit_hdr]]}")
 PY
 
 # Case 7: Hostile snapshot values and structure in disk_history.sh
@@ -833,7 +837,7 @@ if [[ $RC_HIST_MALFORMED -ne 0 ]]; then
   exit 1
 fi
 
-# Verify exact column binding in Case 7 table: bad_neg is null and valid_dir is 5.0G
+# Verify exact column binding in Case 7 table: all invalid columns are null and valid_dir is 5.0G
 python3 - "$OUT_HIST_MALFORMED" <<'PY'
 import sys
 lines = open(sys.argv[1]).readlines()
@@ -851,19 +855,25 @@ for line in lines:
     elif in_data:
         rows.append(line.split())
 
-assert header is not None, "header line missing in Case 7 table"
-assert len(rows) >= 1, f"expected at least 1 history row in Case 7, got {len(rows)}"
+def check(cond, msg):
+    if not cond:
+        raise SystemExit(f"FAIL: {msg}")
+
+check(header is not None, "header line missing in Case 7 table")
+check(len(rows) >= 1, f"expected at least 1 history row in Case 7, got {len(rows)}")
 
 cols = header[3:]
-assert len(cols) == len(set(cols)), f"duplicate header in Case 7: {cols}"
+check(len(cols) == len(set(cols)), f"duplicate header in Case 7: {cols}")
 col_map = {name: idx + 3 for idx, name in enumerate(cols)}
 
-assert "bad_neg" in col_map, f"bad_neg column missing in Case 7: {cols}"
-assert "valid_dir" in col_map, f"valid_dir column missing in Case 7: {cols}"
+for k in ["bad_str", "bad_bool", "bad_nan", "bad_neg"]:
+    check(k in col_map, f"missing {k} column in Case 7: {cols}")
+check("valid_dir" in col_map, f"valid_dir column missing in Case 7: {cols}")
 
 for r in rows:
-    assert r[col_map["bad_neg"]] == "null", f"expected null under bad_neg, got {r[col_map['bad_neg']]}"
-    assert r[col_map["valid_dir"]] == "5.0G", f"expected 5.0G under valid_dir, got {r[col_map['valid_dir']]}"
+    for k in ["bad_str", "bad_bool", "bad_nan", "bad_neg"]:
+        check(r[col_map[k]] == "null", f"expected null under {k}, got {r[col_map[k]]}")
+    check(r[col_map["valid_dir"]] == "5.0G", f"expected 5.0G under valid_dir, got {r[col_map['valid_dir']]}")
 PY
 
 # Case 7b: Hostile non-dict JSON root in disk_history.sh
