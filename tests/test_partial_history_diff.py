@@ -385,6 +385,143 @@ class TestPartialHistoryDiff(unittest.TestCase):
             self.assertEqual(mock_cd.call_count, 0)
             self.assertIn(res["comparison_kind"], ("exact_path", "partial"))
 
+    def test_actual_carried_keys_objects(self):
+        floor = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1000, "key": "key_a"}],
+        )
+        current = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1500, "key": "key_a"}],
+            carried_keys=[
+                {"key": "key_a", "kb": 1500, "age_hours": 4.0},
+                {"key": "unmapped_k", "kb": 300, "age_hours": 5.0},
+            ],
+        )
+        res = phd.compare_ledgers(floor, current, now=NOW)
+        self.assertEqual(res["deltas"], [])
+        unknown_reasons = {u["path"]: u["reason"] for u in res["unknown"]}
+        self.assertEqual(unknown_reasons.get("/Users/x/a"), "carried")
+        self.assertEqual(unknown_reasons.get("unmapped_k"), "carried")
+
+    def test_kind_and_method_mismatch(self):
+        floor = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1000, "kind": "file"}],
+        )
+        cur_kind = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1500, "kind": "dir"}],
+        )
+        res1 = phd.compare_ledgers(floor, cur_kind, now=NOW)
+        self.assertEqual(res1["deltas"], [])
+        self.assertEqual(res1["unknown"][0]["reason"], "kind_mismatch")
+
+        cur_method = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1500, "kind": "file", "method": "exact"}],
+        )
+        floor_method = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1000, "kind": "file", "method": "fast"}],
+        )
+        res2 = phd.compare_ledgers(floor_method, cur_method, now=NOW)
+        self.assertEqual(res2["deltas"], [])
+        self.assertEqual(res2["unknown"][0]["reason"], "method_mismatch")
+
+    def test_invalid_bucket_time_and_stale_bucket_interval(self):
+        floor = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1000}],
+        )
+        cur_invalid_time = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1500, "measured_at": "invalid_date"}],
+        )
+        res1 = phd.compare_ledgers(floor, cur_invalid_time, now=NOW)
+        self.assertEqual(res1["deltas"], [])
+        self.assertEqual(res1["unknown"][0]["reason"], "invalid_bucket_time")
+
+        cur_stale_bucket = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/a", "measured_kb": 1500, "measured_at": "2026-09-30T10:00:00Z"}],
+        )
+        res2 = phd.compare_ledgers(floor, cur_stale_bucket, now=NOW)
+        self.assertEqual(res2["deltas"], [])
+        self.assertEqual(res2["unknown"][0]["reason"], "stale_bucket_measurement")
+
+    def test_root_ancestor_overlap(self):
+        floor = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            scope={"hostname": "box1", "root": "/"},
+            root="/",
+            buckets=[{"path": "/", "measured_kb": 10000}],
+        )
+        current = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            scope={"hostname": "box1", "root": "/"},
+            root="/",
+            buckets=[{"path": "/", "measured_kb": 12000}, {"path": "/a", "measured_kb": 500}],
+        )
+        res = phd.compare_ledgers(floor, current, now=NOW)
+        self.assertEqual(res["deltas"], [])
+        unknown_paths = {u["path"]: u["reason"] for u in res["unknown"]}
+        self.assertEqual(unknown_paths.get("/"), "ancestor_descendant_overlap")
+        self.assertEqual(unknown_paths.get("/a"), "ancestor_descendant_overlap")
+
+    def test_partition_invalidation_unfinished_opaque_and_stale(self):
+        floor = make_ledger(
+            captured_at="2026-10-01T12:00:00Z",
+            buckets=[{"path": "/Users/x/parent", "measured_kb": 4000}],
+        )
+        proof = {
+            "parent": "/Users/x/parent",
+            "children": ["/Users/x/parent/child"],
+            "complete": True,
+            "disjoint": True,
+            "omitted_tail_kb": 0,
+            "direct_allocation_kb": 0,
+        }
+
+        # 1. frontier_unfinished under parent
+        cur_unfinished = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/parent/child", "measured_kb": 4500}],
+            partition_proofs=[proof],
+        )
+        cur_unfinished["frontier_unfinished"] = [{"path": "/Users/x/parent/unreadable", "reason": "timeout"}]
+        res1 = phd.compare_ledgers(floor, cur_unfinished, now=NOW)
+        self.assertEqual(res1["deltas"], [])
+
+        # 2. opaque_intrinsic_gates under parent
+        cur_opaque = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/parent/child", "measured_kb": 4500}],
+            partition_proofs=[proof],
+        )
+        cur_opaque["opaque_intrinsic_gates"] = [{"path": "/Users/x/parent/gate", "reason": "permission_denied_intrinsic"}]
+        res2 = phd.compare_ledgers(floor, cur_opaque, now=NOW)
+        self.assertEqual(res2["deltas"], [])
+
+        # 3. stale child
+        cur_stale = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/parent/child", "measured_kb": 4500, "measured_at": "2026-09-30T10:00:00Z"}],
+            partition_proofs=[proof],
+        )
+        res3 = phd.compare_ledgers(floor, cur_stale, now=NOW)
+        self.assertEqual(res3["deltas"], [])
+
+        # 4. Positive control
+        cur_valid = make_ledger(
+            captured_at="2026-10-03T10:00:00Z",
+            buckets=[{"path": "/Users/x/parent/child", "measured_kb": 4500}],
+            partition_proofs=[proof],
+        )
+        res4 = phd.compare_ledgers(floor, cur_valid, now=NOW)
+        self.assertEqual(len(res4["deltas"]), 1)
+        self.assertEqual(res4["deltas"][0]["delta_kb"], 500)
+
 
 if __name__ == "__main__":
     unittest.main()
