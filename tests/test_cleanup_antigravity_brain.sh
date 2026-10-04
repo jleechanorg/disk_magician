@@ -64,4 +64,46 @@ if [[ ! -f "$MOCK_BRAIN/$OLD_SID/report.md" ]]; then
   exit 1
 fi
 
+# 4. Test default threshold (7 days) without --days flag on a 9-day-old session
+echo "Testing default 7-day threshold without --days flag..."
+DEFAULT_SID="default-session-9d"
+mkdir -p "$MOCK_BRAIN/$DEFAULT_SID/.system_generated/tasks"
+mkdir -p "$MOCK_BRAIN/$DEFAULT_SID/scratch"
+python3 -c 'print("Default task log line output\n" * 100)' > "$MOCK_BRAIN/$DEFAULT_SID/.system_generated/tasks/task-1.log"
+echo "Scratch data..." > "$MOCK_BRAIN/$DEFAULT_SID/scratch/dump.json"
+echo "# Default Report" > "$MOCK_BRAIN/$DEFAULT_SID/report.md"
+
+# Set mtime to 9 days ago
+NINE_DAYS_AGO="$(python3 -c 'import time; t = time.localtime(time.time() - 9*86400); print(time.strftime("%Y%m%d%H%M", t))')"
+touch -t "$NINE_DAYS_AGO" "$MOCK_BRAIN/$DEFAULT_SID"
+find "$MOCK_BRAIN/$DEFAULT_SID" -exec touch -t "$NINE_DAYS_AGO" {} +
+
+OUTPUT_DEF_DRY=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --dry-run --brain-dir "$MOCK_BRAIN")
+if ! echo "$OUTPUT_DEF_DRY" | grep -q "DRY-RUN"; then
+  echo "FAIL: Expected DRY-RUN in default output"
+  exit 1
+fi
+if [[ ! -f "$MOCK_BRAIN/$DEFAULT_SID/scratch/dump.json" ]]; then
+  echo "FAIL: Dry run without --days deleted scratch file"
+  exit 1
+fi
+
+OUTPUT_DEF_CLEAN=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean --brain-dir "$MOCK_BRAIN")
+if ! echo "$OUTPUT_DEF_CLEAN" | grep -q "CLEAN"; then
+  echo "FAIL: Expected CLEAN in default output"
+  exit 1
+fi
+if [[ -f "$MOCK_BRAIN/$DEFAULT_SID/scratch/dump.json" ]]; then
+  echo "FAIL: Clean mode without --days failed to delete scratch file"
+  exit 1
+fi
+if [[ ! -f "$MOCK_BRAIN/$DEFAULT_SID/.system_generated/tasks/task-1.log.gz" ]]; then
+  echo "FAIL: Clean mode without --days failed to compress task log"
+  exit 1
+fi
+if [[ ! -f "$MOCK_BRAIN/$DEFAULT_SID/report.md" ]]; then
+  echo "FAIL: Clean mode without --days deleted markdown artifact!"
+  exit 1
+fi
+
 echo "ALL BASH TESTS PASSED"

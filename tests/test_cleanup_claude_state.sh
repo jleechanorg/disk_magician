@@ -205,7 +205,8 @@ while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$PROBE_FAIL" 
 echo
 echo "=== Test 1: dry-run classifies each fixture correctly ==="
 OUT1="$TMP_ROOT/out1.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT1" 2>&1
 OUT1_CONTENT=$(cat "$OUT1")
@@ -244,6 +245,7 @@ sleep 0.3
 
 OUT2="$TMP_ROOT/out2.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   TEST_LSOF_ACTIVE_DIR="$LSOF_ACTIVE" TEST_LSOF_ACTIVE_PID="$TAIL_PID" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT2" 2>&1
@@ -265,7 +267,8 @@ EOF
 chmod +x "$FAKE_BIN/lsof"
 
 OUT3="$TMP_ROOT/out3.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$FAKE_BIN/lsof" \
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" DISK_MAGICIAN_LSOF_BIN="$FAKE_BIN/lsof" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT3" 2>&1
 OUT3_CONTENT=$(cat "$OUT3")
@@ -274,7 +277,10 @@ assert_contains "(lsof failure) old-clean now PRESERVE (fail closed)" "PRESERVE 
 echo
 echo "=== Test 4: --clean without CLAUDE_STATE_APPROVED=1 refuses, deletes nothing ==="
 OUT4="$TMP_ROOT/out4.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
   >"$OUT4" 2>&1
 OUT4_CONTENT=$(cat "$OUT4")
@@ -325,6 +331,7 @@ FAKE_HOME="$TMP_ROOT/home2"
 mkdir -p "$FAKE_HOME/.claude/projects"
 OUT6="$TMP_ROOT/out6.txt"
 env -i HOME="$FAKE_HOME" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   bash "$TARGET_SCRIPT" --root "$FAKE_HOME/.claude/projects" --min-age 7 --dry-run \
   >"$OUT6" 2>&1
 RC6=$?
@@ -341,6 +348,7 @@ echo "=== Test 7: refuses to operate against ~/.codex ==="
 mkdir -p "$FAKE_HOME/.codex"
 OUT7="$TMP_ROOT/out7.txt"
 env -i HOME="$FAKE_HOME" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   bash "$TARGET_SCRIPT" --root "$FAKE_HOME/.codex" --min-age 7 --dry-run \
   >"$OUT7" 2>&1
 RC7=$?
@@ -366,7 +374,8 @@ mkdir -p "$ROOTS_DIR8/protected_by_safety_candidate"
 echo "hello" > "$ROOTS_DIR8/protected_by_safety_candidate/file.txt"
 age_path_days_ago "$ROOTS_DIR8/protected_by_safety_candidate/file.txt" 30
 OUT8="$TMP_ROOT/out8.txt"
-env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR8" --min-age 7 --dry-run \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
@@ -427,6 +436,23 @@ if [[ -f "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log" ]] && grep -q
 else
   record_fail "(failed removal) deletion audit log recorded failed_remove" "failed_remove audit record missing"
 fi
+
+echo
+echo "=== Test 11: --root override refused outside test context ==="
+OUT11="$TMP_ROOT/out11.txt"
+set +e
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR10" --min-age 7 --dry-run \
+  >"$OUT11" 2>&1
+RC11=$?
+set -e
+OUT11_CONTENT=$(cat "$OUT11")
+if [[ $RC11 -eq 2 ]]; then
+  record_pass "(--root guard) refuses root override outside test context with rc=2"
+else
+  record_fail "(--root guard) refuses root override outside test context with rc=2" "expected rc=2, got $RC11"
+fi
+assert_contains "(--root guard) descriptive error printed" "only permitted in sandboxed test contexts" "$OUT11_CONTENT"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

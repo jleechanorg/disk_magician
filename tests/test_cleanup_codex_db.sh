@@ -1277,6 +1277,18 @@ expect_eq "owned lease removed upon fail-closed unstatable WAL" "0" "$([[ -d "$S
 
 rm -rf "$STAT_SHIM_DIR"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Directory discovery with whitespace in --codex-dir
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Directory discovery handles path with whitespace without word-splitting"
+MOCK_SPACES="$TMP_DIR/mock codex with spaces"
+mkdir -p "$MOCK_SPACES"
+create_test_db "$MOCK_SPACES/logs_space_1.sqlite" 100 50 2
+OUT13=$("$SCRIPT" --dry-run --codex-dir "$MOCK_SPACES" 2>&1)
+RC13=$?
+expect_eq "directory with spaces exit code 0" "0" "$RC13"
+expect "discovered db in directory with spaces" "logs_space_1.sqlite" "$OUT13"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]

@@ -522,18 +522,15 @@ else
   fi
 
   shopt -s nullglob
-  primary_patterns=(
-    "$CODEX_DIR"/logs_*.sqlite
-    "$CODEX_DIR"/state_*.sqlite
-    "$CODEX_DIR"/thread_history_*.sqlite
-    "$CODEX_DIR"/memories_*.sqlite
-    "$CODEX_DIR"/goals_*.sqlite
-    "$CODEX_DIR"/queue_*.sqlite
-    "$CODEX_DIR"/*.sqlite
-  )
   seen_dbs=()
-  for db_pattern in "${primary_patterns[@]}"; do
-    for db in $db_pattern; do
+  for db in \
+    "$CODEX_DIR"/logs_*.sqlite \
+    "$CODEX_DIR"/state_*.sqlite \
+    "$CODEX_DIR"/thread_history_*.sqlite \
+    "$CODEX_DIR"/memories_*.sqlite \
+    "$CODEX_DIR"/goals_*.sqlite \
+    "$CODEX_DIR"/queue_*.sqlite \
+    "$CODEX_DIR"/*.sqlite; do
       [[ -f "$db" ]] || continue
       [[ -L "$db" ]] && continue
       [[ "$db" == *-wal || "$db" == *-shm ]] && continue
@@ -548,7 +545,6 @@ else
         seen_dbs+=("$db")
         CANDIDATES+=("$db")
       fi
-    done
   done
   shopt -u nullglob
 fi

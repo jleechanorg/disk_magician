@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 DEFAULT_BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 DEFAULT_CONV_DIR = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
-DEFAULT_DAYS = 14
+DEFAULT_DAYS = 7
 ACTIVE_PROTECT_SECONDS = 86400  # 24 hours
 NOW = time.time()
 
