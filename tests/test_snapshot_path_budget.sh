@@ -19,26 +19,19 @@ mkdir -p "$HOME_DIR/target" "$BIN" "$STATE" "$HOME_DIR/.config/disk-magician"
 CFG="$WORK/config.json"
 LOG="$WORK/calls.log"
 
-# dua stub: sleeps STUB_SLEEP, then reports 2 MiB (or fails first N calls).
-cat > "$BIN/dua" <<'SH'
+# du stub: sleeps STUB_SLEEP, then reports 2 MiB (or fails first N calls).
+cat > "$BIN/du" <<'SH'
 #!/usr/bin/env bash
-echo "dua $*" >> "${STUB_LOG:?}"
+echo "du $*" >> "${STUB_LOG:?}"
 if [[ -n "${STUB_FAIL_FIRST:-}" ]]; then
   n=0; [[ -f "$STUB_STATE_FILE" ]] && read -r n < "$STUB_STATE_FILE"
   n=$((n + 1)); echo "$n" > "$STUB_STATE_FILE"
   (( n <= STUB_FAIL_FIRST )) && exit 124
 fi
 sleep "${STUB_SLEEP:-0}"
-printf '%s b total\n' 2097152
+for a in "$@"; do [[ "$a" == -* ]] && continue; printf '2048\t%s\n' "$a"; done
 SH
-# du stub: slow when STUB_SLEEP is set, prints one row per path argument.
-cat > "$BIN/du" <<'SH'
-#!/usr/bin/env bash
-[[ -n "${STUB_DU_FAIL:-}" ]] && exit 124
-sleep "${STUB_SLEEP:-0}"
-for a in "$@"; do [[ "$a" == -* ]] && continue; printf '4096\t%s\n' "$a"; done
-SH
-chmod +x "$BIN/dua" "$BIN/du"
+chmod +x "$BIN/du"
 
 write_cfg() { # key timeout [extra json]
   cat > "$CFG" <<JSON
@@ -64,7 +57,7 @@ run_snap "$OUT" DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=0 STUB_SLEEP=3
   && ok "clamp 0 accepted and a 3s measurement under a 10s config timeout is non-null" \
   || bad "clamp 0 rejected or value null ($(head -c 200 "$WORK/stderr"))"
 
-echo "── default is unclamped and dua gets the configured budget ──"
+echo "── default is unclamped and du gets the configured budget ──"
 : > "$LOG"; write_cfg big 100
 OUT="$WORK/default.json"
 run_snap "$OUT"
@@ -95,7 +88,7 @@ fi
 echo "── test_every_key_retries_once ──"
 : > "$LOG"; rm -f "$WORK/fail_count"; write_cfg flaky 10
 OUT="$WORK/retry.json"
-run_snap "$OUT" STUB_FAIL_FIRST=1 STUB_DU_FAIL=1
+run_snap "$OUT" STUB_FAIL_FIRST=1
 [[ "$(jget "$OUT" "d['directories']['flaky']")" == 2048 ]] \
   && ok "first attempt fails, serial retry recovers the key (no retry_timeout configured)" \
   || bad "no generic retry (got $(jget "$OUT" "d['directories']['flaky']"))"

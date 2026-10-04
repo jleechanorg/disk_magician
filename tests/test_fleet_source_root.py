@@ -172,6 +172,39 @@ class FleetSourceRootTests(unittest.TestCase):
             helper = next(record for record in fleet["records"] if record["label"] == "com.example.repo-helper")
             self.assertEqual(helper["expected_execution_root"], str(self.package_root.resolve()))
 
+    def test_direct_checker_resolves_manifest_and_ignores_inherited_override(self):
+        state_dir, _ = self._prepare_status_tree()
+        cases = (
+            ({"source_root": str(self.source_root)}, self.source_root, self.other_root, "healthy", self.source_root),
+            ({"source_root": str(self.source_root)}, self.other_root, self.other_root, "degraded", self.source_root),
+            ("not json", self.source_root, self.source_root, "degraded", self.package_root),
+            (None, self.source_root, self.source_root, "degraded", self.package_root),
+            ({"source_root": "relative/path"}, self.source_root, self.source_root, "degraded", self.package_root),
+        )
+        for manifest, installed_root, override, expected_status, expected_root in cases:
+            with self.subTest(manifest=manifest, installed_root=str(installed_root)):
+                self._write_manifest(state_dir, manifest)
+                self._write_installed(installed_root)
+                result = subprocess.run(
+                    ["/bin/bash", str(self.package_root / "scripts/check_launchd_fleet.sh"), "--fleet-only", "--json"],
+                    env={
+                        **os.environ,
+                        "HOME": "/tmp/home",
+                        "PATH": f"{self.fakebin}:{os.environ.get('PATH', '')}",
+                        "DISK_MAGICIAN_OSTYPE": "darwin-test",
+                        "DISK_MAGICIAN_LAUNCHCTL_UID": "501",
+                        "DISK_MAGICIAN_LAUNCHAGENTS_DIR": str(self.agents),
+                        "DISK_MAGICIAN_STATE_DIR": str(state_dir),
+                        "DISK_MAGICIAN_EXPECTED_SOURCE_ROOT": str(override),
+                    },
+                    text=True, capture_output=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0 if expected_status == "healthy" else 1, result.stderr + result.stdout)
+                fleet = json.loads(result.stdout)
+                self.assertEqual(fleet["status"], expected_status)
+                helper = next(record for record in fleet["records"] if record["label"] == "com.example.repo-helper")
+                self.assertEqual(helper["expected_execution_root"], str(expected_root.resolve()))
+
     def test_public_fleet_cli_uses_manifest_source_root_and_rejects_other_root(self):
         matching = self._run_fleet()
         self.assertEqual(matching.returncode, 0, matching.stderr + matching.stdout)

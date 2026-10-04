@@ -78,10 +78,8 @@ if [[ "$JSON_MODE" == true ]]; then
     exit 2
   fi
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  expected_source_root="${DISK_MAGICIAN_EXPECTED_SOURCE_ROOT:-$repo_root}"
   exec python3 "$SCRIPT_DIR/job_inventory.py" \
     --repo-root "$repo_root" \
-    --expected-source-root "$expected_source_root" \
     --json
 fi
 

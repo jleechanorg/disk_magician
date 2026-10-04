@@ -29,13 +29,17 @@ exit 99
 EOF
   chmod +x "$dispatcher_root/scripts/disk_diagnostic.sh"
 
+  for preceding in "" "--no-history"; do
+  args=(audit)
+  [[ -z "$preceding" ]] || args+=("$preceding")
+  args+=(--help)
   output=""
   rc=0
   output="$(env \
     AUDIT_HELP_LAUNCH_LOG="$helper_log" \
     DISK_MAGICIAN_SNAPSHOT_FILE="$SNAPSHOT" \
     HOME="$WORK/home" \
-    bash "$dispatcher_root/disk_magician.sh" audit --help 2>&1)" || rc=$?
+    bash "$dispatcher_root/disk_magician.sh" "${args[@]}" 2>&1)" || rc=$?
 
   if [[ "$rc" -ne 0 ]]; then
     echo "FAIL: $(basename "$source") audit --help exited $rc"
@@ -52,6 +56,7 @@ EOF
     printf '%s\n' "$output"
     exit 1
   fi
+  done
 done
 
 echo "PASS: audit --help shows usage without launching diagnostic scanners"

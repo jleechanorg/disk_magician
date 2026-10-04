@@ -12,9 +12,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="$(python3 "$SCRIPT_DIR/resolve_state_repo_path.py")"
 SNAP_BIN="${DISK_MAGICIAN_SNAPSHOT_BIN:-$SCRIPT_DIR/disk_snapshot.sh}"
 RECEIPT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
-FRONTIER="$(python3 "$SCRIPT_DIR/frontier_selection.py" \
-  --root "/var/db/disk-magician/frontier_last.json" \
-  --state "$RECEIPT_STATE_DIR/frontier_last.json" 2>/dev/null || true)"
 KEEP="${DISK_MAGICIAN_EVIDENCE_KEEP:-4}"
 log() { echo "[snapshot_commit] $*"; }
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
@@ -22,11 +19,18 @@ git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-mag
 # Concurrency guard: Use receipt STATE dir for snapshot lock override, distinct from state repository dir.
 SNAPSHOT_LOCK_DIR="${RECEIPT_STATE_DIR}/snapshot.lock"
 SNAPSHOT_LOCK_TTL_SEC=5400
+TRANSACTION_DIR=""
+cleanup_frontier_pin() {
+  if [[ -n "$TRANSACTION_DIR" ]]; then
+    rm -f -- "$TRANSACTION_DIR/frontier.json"
+    rmdir -- "$TRANSACTION_DIR"
+  fi
+}
 acquire_snapshot_lock() {
   mkdir -p "$(dirname "$SNAPSHOT_LOCK_DIR")"
   if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
     echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
-    trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+    trap 'cleanup_frontier_pin; rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
     return 0
   fi
   local held_pid age
@@ -36,7 +40,7 @@ acquire_snapshot_lock() {
     rm -rf "$SNAPSHOT_LOCK_DIR"
     if mkdir "$SNAPSHOT_LOCK_DIR" 2>/dev/null; then
       echo $$ > "$SNAPSHOT_LOCK_DIR/pid"
-      trap 'rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
+      trap 'cleanup_frontier_pin; rm -rf "$SNAPSHOT_LOCK_DIR"' EXIT
       return 0
     fi
   fi
@@ -54,6 +58,14 @@ if ! acquire_snapshot_lock; then
   fi
   exit 0
 fi
+
+# Freeze the selected bytes once, after acquiring the transaction lock.
+TRANSACTION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/disk_magician_snapshot.XXXXXX") || exit 1
+FRONTIER=$(python3 "$SCRIPT_DIR/frontier_selection.py" \
+  --root "/var/db/disk-magician/frontier_last.json" \
+  --state "$RECEIPT_STATE_DIR/frontier_last.json" \
+  --freeze-to "$TRANSACTION_DIR/frontier.json") || exit 1
+export DISK_MAGICIAN_FRONTIER_JSON="$FRONTIER"
 
 # Record started before work
 RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commit \

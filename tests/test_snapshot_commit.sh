@@ -263,5 +263,50 @@ grep -R -q 'publisher-alias' "$H12/.local/state/disk-magician/evidence" 2>/dev/n
   && ok "publisher retained selected alias evidence" \
   || bad "publisher alias evidence" "selected source was not retained"
 
+echo "Test 13: transaction pins frontier bytes before the writer changes the source"
+H13="$TMP_ROOT/h13"; mkdir -p "$H13/.disk_magician_state"
+cp "$H5/.disk_magician_state/frontier_last.json" "$H13/.disk_magician_state/frontier_last.json"
+cat > "$STUB_BIN/interleave.sh" <<'EOF'
+#!/bin/bash
+python3 - "$@" <<'PYTHON'
+import json, os, sys
+from pathlib import Path
+source = Path(os.environ["HOME"]) / ".disk_magician_state/frontier_last.json"
+# A concurrent producer replaces the original after transaction selection.
+source.write_text(json.dumps({"captured_at": "2026-01-01T00:00:00Z", "marker": "replacement"}))
+pinned = Path(os.environ["DISK_MAGICIAN_FRONTIER_JSON"])
+data = json.loads(pinned.read_text()) if pinned.is_file() else {}
+out = sys.argv[sys.argv.index("--output") + 1]
+Path(out).write_text(json.dumps({"disk_free_gb": 100, "frontier_used_kb": data.get("disk_used_kb"), "frontier_path": str(pinned)}))
+PYTHON
+EOF
+run_interleave() {
+  env -i HOME="$1" PATH="/usr/bin:/bin" \
+    DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/interleave.sh" \
+    DISK_MAGICIAN_FRONTIER_JSON="$1/.disk_magician_state/frontier_last.json" \
+    DISK_MAGICIAN_STATE_DIR="$1/.disk_magician_state" /bin/bash "$SC"
+}
+OUT13=$(run_interleave "$H13" 2>&1); RC13=$?
+[[ $RC13 -eq 0 ]] && ok "interleaved publisher exits 0" || bad "interleaved rc" "$RC13: $OUT13"
+SD13="$H13/.local/state/disk-magician"
+assert_receipt_field "$SD13/snapshots/disk_snapshot.json" frontier_used_kb 1048576 "writer consumed original frontier"
+assert_receipt_field "$SD13/ledger/topdown-5g.json" disk_used_kb 1048576 "ledger published original frontier"
+EVIDENCE13=$(find "$SD13/evidence" -name 'frontier-*.json' -type f | head -1)
+cmp -s "$H5/.disk_magician_state/frontier_last.json" "$EVIDENCE13" \
+  && ok "evidence retained original frontier bytes" || bad "pinned evidence" "changed or missing"
+PIN13=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontier_path"])' "$SD13/snapshots/disk_snapshot.json")
+[[ ! -e "$PIN13" ]] && ok "transaction pin cleaned after publication" || bad "pin cleanup" "$PIN13 still exists"
+
+echo "Test 14: absent frontier remains absent when producer creates it mid-transaction"
+H14="$TMP_ROOT/h14"; mkdir -p "$H14/.disk_magician_state"
+OUT14=$(run_interleave "$H14" 2>&1); RC14=$?
+SD14="$H14/.local/state/disk-magician"
+[[ $RC14 -eq 0 ]] && ok "absent interleaved publisher exits 0" || bad "absent interleaved rc" "$RC14: $OUT14"
+PIN14=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontier_path"])' "$SD14/snapshots/disk_snapshot.json")
+[[ "$PIN14" != "$H14/.disk_magician_state/frontier_last.json" && -n "$PIN14" ]] \
+  && ok "missing selection uses strict sentinel path" || bad "missing sentinel" "$PIN14"
+[[ -z "$(find "$SD14/evidence" -name 'frontier-*.json' -type f)" ]] \
+  && ok "new source is not retained by absent transaction" || bad "absent evidence" "unexpected evidence"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

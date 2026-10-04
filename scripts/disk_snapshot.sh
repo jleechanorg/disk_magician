@@ -101,11 +101,6 @@ elif command -v gtimeout &>/dev/null; then
   TIMEOUT_CMD="gtimeout"
 fi
 
-DUA_CMD=""
-if command -v dua &>/dev/null; then
-  DUA_CMD="dua"
-fi
-
 # --measure-one sets this to a per-attempt sidecar. Keeping it separate from
 # numeric stdout preserves the existing kb-or-empty contract for all callers.
 MEASURE_DIAGNOSTIC_FILE=""
@@ -126,46 +121,6 @@ remaining_measurement_seconds() {
   (( remaining > 0 )) && echo "$remaining" || echo 0
 }
 
-# dua reports allocated bytes by default (the same quantity as du -sk) and is
-# parallel-by-default. Its ANSI reset can leave a trailing blank line, so take
-# the last numeric row rather than the last physical line.
-dua_size_kb() {
-  local path="$1"
-  local to="$2"
-  [[ -n "$DUA_CMD" && -n "$TIMEOUT_CMD" && "$to" -gt 0 ]] || { echo ""; return; }
-  local output bytes rc err_file stderr_text
-  if [[ -n "${MEASURE_DIAGNOSTIC_FILE:-}" ]]; then
-    err_file="${MEASURE_DIAGNOSTIC_FILE}.dua.stderr"
-  else
-    err_file="/dev/null"
-  fi
-  if output=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>"$err_file"); then
-    :
-  else
-    rc=$?
-    stderr_text=""
-    [[ "$err_file" != "/dev/null" && -f "$err_file" ]] && stderr_text=$(head -c 256 "$err_file" 2>/dev/null || true)
-    if [[ "$rc" -eq 124 ]]; then
-      record_measure_diagnostic backend_timeout dua "$rc" "$stderr_text"
-    else
-      record_measure_diagnostic backend_error dua "$rc" "$stderr_text"
-    fi
-    [[ "$err_file" != "/dev/null" ]] && rm -f "$err_file"
-    echo ""
-    return
-  fi
-  [[ "$err_file" != "/dev/null" ]] && rm -f "$err_file"
-  bytes=$(printf '%s\n' "$output" | sed -E 's/\x1b\[[0-9;]*m//g' \
-    | awk '$1 ~ /^[0-9]+$/ { value=$1 } END { if (value != "") print value }')
-  if [[ "$bytes" =~ ^[0-9]+$ ]]; then
-    record_measure_diagnostic success dua 0 ""
-    echo $(( (bytes + 1023) / 1024 ))
-  else
-    record_measure_diagnostic backend_error dua 0 "invalid dua output"
-    echo ""
-  fi
-}
-
 dir_size_kb() {
   local raw_path="$1"
   local to="${2:-$DU_TIMEOUT}"
@@ -181,54 +136,49 @@ dir_size_kb() {
     return
   fi
 
-  local remaining path_budget path_deadline dua_budget result fallback_budget
+  local remaining path_budget result=""
   remaining=$(remaining_measurement_seconds)
-  (( remaining > 0 )) || { echo ""; return; }
+  if (( remaining <= 0 )); then
+    record_measure_diagnostic orchestrator_deadline "" "" "measurement deadline exhausted"
+    echo ""
+    return
+  fi
+  if [[ -z "$TIMEOUT_CMD" ]]; then
+    record_measure_diagnostic backend_unavailable du "" "timeout command unavailable"
+    echo ""
+    return
+  fi
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
   [[ "$max_seconds" =~ ^[0-9]+$ ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
   : "${LOAD_FACTOR:=$(load_factor)}"
   path_budget=$(scaled_path_budget "$to" "$LOAD_FACTOR")
   (( max_seconds > 0 && path_budget > max_seconds )) && path_budget="$max_seconds"
   (( path_budget > remaining )) && path_budget="$remaining"
-  path_deadline=$(( $(date +%s) + path_budget ))
-
-  # Do not let the primary scanner consume the entire shared deadline.  A
-  # bounded du fallback is valuable when dua stalls on a busy filesystem.
-  dua_budget=$(( path_budget * 70 / 100 ))
-  (( dua_budget < 1 )) && dua_budget=1
-  (( dua_budget > path_budget )) && dua_budget="$path_budget"
-  result=$(dua_size_kb "$path" "$dua_budget")
-
-  if [[ -z "$result" ]]; then
-    fallback_budget=$(( path_deadline - $(date +%s) ))
-    remaining=$(remaining_measurement_seconds)
-    (( fallback_budget > remaining )) && fallback_budget="$remaining"
-    if [[ -n "$TIMEOUT_CMD" && "$fallback_budget" -gt 0 ]]; then
-      local du_stdout du_stderr du_rc du_value
-      du_stdout=$(mktemp -t disk_magician_du.XXXXXX)
-      du_stderr=$(mktemp -t disk_magician_du_err.XXXXXX)
-      if "$TIMEOUT_CMD" "$fallback_budget" du -sk "$path" >"$du_stdout" 2>"$du_stderr"; then
-        du_value=$(awk 'BEGIN{n=0; ok=1} /^[0-9]+[[:space:]]/ {n++; v=$1; next} NF {ok=0} END{if(ok && n==1) print v}' "$du_stdout")
-        if [[ "$du_value" =~ ^[0-9]+$ ]]; then
-          result="$du_value"
-          record_measure_diagnostic success du 0 ""
-        else
-          record_measure_diagnostic backend_error du 0 "malformed du output"
-        fi
-      else
-        du_rc=$?
-        if [[ "$du_rc" -eq 124 ]]; then
-          record_measure_diagnostic backend_timeout du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
-        else
-          record_measure_diagnostic backend_error du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
-        fi
-      fi
-      rm -f "$du_stdout" "$du_stderr"
+  # A numeric dua result can omit unreadable children while exiting zero.
+  # Use one bounded du walk whose nonzero exit rejects partial totals.
+  local du_stdout du_stderr du_rc du_value
+  du_stdout=$(mktemp -t disk_magician_du.XXXXXX)
+  du_stderr=$(mktemp -t disk_magician_du_err.XXXXXX)
+  if "$TIMEOUT_CMD" "$path_budget" du -sk "$path" >"$du_stdout" 2>"$du_stderr"; then
+    du_value=$(awk 'BEGIN{n=0; ok=1} /^[0-9]+[[:space:]]/ {n++; v=$1; next} NF {ok=0} END{if(ok && n==1) print v}' "$du_stdout")
+    if [[ "$du_value" =~ ^[0-9]+$ ]]; then
+      result="$du_value"
+      record_measure_diagnostic success du 0 ""
+    else
+      record_measure_diagnostic backend_error du 0 "malformed du output"
+    fi
+  else
+    du_rc=$?
+    if [[ "$du_rc" -eq 124 ]]; then
+      record_measure_diagnostic backend_timeout du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
+    else
+      record_measure_diagnostic backend_error du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
     fi
   fi
+  rm -f "$du_stdout" "$du_stderr"
 
   if [[ -z "$result" ]]; then
-    # Both bounded attempts failed/timed out -> surface as null (empty string).
+    # An unsuccessful measurement is null (empty string), never zero.
     echo ""
     return
   fi
@@ -281,7 +231,7 @@ try:
 except OSError:
     pass
 kb = int(kb_text) if kb_text.isdigit() else None
-reason = "success" if kb is not None else (diagnostic.get("reason") or "backend_timeout")
+reason = "success" if kb is not None else (diagnostic.get("reason") or "missing_diagnostic")
 data = {"key": key, "kb": kb, "path": path, "elapsed_s": int(elapsed),
         "timed_out": reason == "backend_timeout", "reason": reason}
 for name in ("backend", "stderr"):
@@ -292,7 +242,7 @@ if diagnostic.get("backend_exit", "").lstrip("-").isdigit():
 with open(out, "w") as f:
     json.dump(data, f, separators=(",", ":"))
 PY
-  rm -f "$M1_DIAGNOSTIC_FILE" "${M1_DIAGNOSTIC_FILE}.dua.stderr"
+  rm -f "$M1_DIAGNOSTIC_FILE"
   exit 0
 fi
 

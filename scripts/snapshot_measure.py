@@ -123,7 +123,7 @@ def _attempt_diagnostic(key, path, attempt, reason, started, **details):
         "key": key,
         "path": path,
         "attempt": attempt,
-        "reason": reason,
+        "reason": _bounded_text(reason),
         "elapsed_s": round(max(0.0, time.monotonic() - started), 3),
     }
     for name in ("backend", "backend_exit", "stderr", "kb"):

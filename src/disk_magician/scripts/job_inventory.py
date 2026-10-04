@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from job_receipt import resolve_state_dir
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -352,7 +354,21 @@ def _installed_path(record: dict[str, Any]) -> Path:
     return Path(os.environ.get("DISK_MAGICIAN_LAUNCHAGENTS_DIR", str(home / "Library/LaunchAgents"))) / f"{record['label']}.plist"
 
 
+def _deployed_source_root(repo_root: Path) -> Path:
+    """Use the deployment manifest for template routing, falling back to this tree."""
+    try:
+        manifest = json.loads((resolve_state_dir() / "deployed.json").read_text())
+        source_root = manifest.get("source_root") if isinstance(manifest, dict) else None
+        if isinstance(source_root, str) and Path(source_root).is_absolute():
+            return Path(source_root).resolve()
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return repo_root
+
+
 def fleet(repo_root: Path, expected_source_root: Path | None = None) -> dict[str, Any]:
+    if expected_source_root is None:
+        expected_source_root = _deployed_source_root(repo_root)
     records, source_paths = catalog(repo_root)
     for record in records:
         _expected_fields(record, repo_root, expected_source_root)

@@ -207,10 +207,12 @@ case "$CMD" in
     exec python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
     ;;
   audit)
-    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-      usage
-      exit 0
-    fi
+    for audit_arg in "$@"; do
+      if [[ "$audit_arg" == "-h" || "$audit_arg" == "--help" ]]; then
+        usage
+        exit 0
+      fi
+    done
     # Default diagnosis: top-down accounting, snapshot deltas, and safe
     # quick-win analysis run concurrently and render as one ordered report.
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"

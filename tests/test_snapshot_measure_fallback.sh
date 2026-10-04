@@ -13,17 +13,12 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 H="$WORK/home"; BIN="$WORK/bin"; STATE="$WORK/state"
 mkdir -p "$H/a" "$H/b" "$H/Library/Containers/appone" "$H/globdir1" "$BIN" "$STATE"
 CALLS="$WORK/calls.log"
-cat > "$BIN/dua" <<'SH'
-#!/usr/bin/env bash
-echo "dua ${@: -1}" >> "${CALLS:?}"
-printf '%s b total\n' 2097152
-SH
 cat > "$BIN/du" <<'SH'
 #!/usr/bin/env bash
 echo "du ${@: -1}" >> "${CALLS:?}"
-for a in "$@"; do [[ "$a" == -* ]] && continue; printf '4096\t%s\n' "$a"; done
+for a in "$@"; do [[ "$a" == -* ]] && continue; printf '2048\t%s\n' "$a"; done
 SH
-chmod +x "$BIN/dua" "$BIN/du"
+chmod +x "$BIN/du"
 CFG="$WORK/config.json"
 cat > "$CFG" <<JSON
 {"monitored_dirs": [{"key": "a", "path": "$H/a", "timeout": 10}, {"key": "b", "path": "$H/b", "timeout": 10}],
@@ -64,7 +59,6 @@ glob_line=$(grep -n "globdir1" "$CALLS" | head -1 | cut -d: -f1)
 
 echo "── test_null_glob_key_listed_in_unmeasured ──"
 printf '#!/usr/bin/env bash\nexit 124\n' > "$BIN/du"
-printf '#!/usr/bin/env bash\nexit 124\n' > "$BIN/dua"
 run_snap "$WORK/ng.json" DISK_MAGICIAN_MEASURE_WORKERS=0
 [[ "$(jget "$WORK/ng.json" "'globs' in d['unmeasured_keys'] and d['directories']['globs'] is None")" == True ]] \
   && ok "timed-out glob key is reported unmeasured" || bad "null glob not in unmeasured_keys"
