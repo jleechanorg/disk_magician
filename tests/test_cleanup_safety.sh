@@ -917,7 +917,7 @@ if run_capture "$OUT10_INITIAL_BLOCKED" env -i HOME="$COLIMA_HOME" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_INITIAL_BLOCKED=0
 else RC10_INITIAL_BLOCKED=$?; fi
-assert_rc "cleanup_colima initial Docker failure exits safely" 0 "$RC10_INITIAL_BLOCKED"
+assert_rc "cleanup_colima initial Docker failure reports degraded" 1 "$RC10_INITIAL_BLOCKED"
 assert_contains "cleanup_colima initial Docker failure reaches guarded recovery" \
   "VACATE_CI_RUNNERS_APPROVED=1" "$(cat "$OUT10_INITIAL_BLOCKED")"
 assert_not_contains "cleanup_colima initial Docker failure never restarts without approval" \
@@ -947,7 +947,7 @@ if run_capture "$OUT10_INITIAL_UNKNOWN" env -i HOME="$COLIMA_HOME" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_INITIAL_UNKNOWN=0
 else RC10_INITIAL_UNKNOWN=$?; fi
-assert_rc "cleanup_colima initial Docker failure with unknown container state exits safely" 0 "$RC10_INITIAL_UNKNOWN"
+assert_rc "cleanup_colima initial Docker failure with unknown container state reports degraded" 1 "$RC10_INITIAL_UNKNOWN"
 assert_contains "cleanup_colima refuses restart when container state is unknown" \
   "could not prove that no containers are running" "$(cat "$OUT10_INITIAL_UNKNOWN")"
 assert_not_contains "cleanup_colima never restarts with unknown container state" \
@@ -962,7 +962,7 @@ if run_capture "$OUT10_INITIAL_RUNNING" env -i HOME="$COLIMA_HOME" \
   bash "$REPO_ROOT/scripts/cleanup_colima.sh" --clean; then
   RC10_INITIAL_RUNNING=0
 else RC10_INITIAL_RUNNING=$?; fi
-assert_rc "cleanup_colima initial Docker failure with running containers exits safely" 0 "$RC10_INITIAL_RUNNING"
+assert_rc "cleanup_colima initial Docker failure with running containers reports degraded" 1 "$RC10_INITIAL_RUNNING"
 assert_contains "cleanup_colima initial Docker failure preserves running containers" \
   "running containers remain" "$(cat "$OUT10_INITIAL_RUNNING")"
 assert_not_contains "cleanup_colima initial Docker failure never restarts with running containers" \

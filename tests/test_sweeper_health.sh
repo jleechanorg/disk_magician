@@ -104,9 +104,9 @@ import sys, os, json
 from datetime import datetime, timezone
 sys.path.insert(0, "'"$REPO_ROOT"'/scripts")
 USER_PROBE_PATHS = {
-    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
-    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
-    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+    "mobile_sync": os.path.join("/Users/testuser", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/testuser", "Library", "Mail"),
+    "messages": os.path.join("/Users/testuser", "Library", "Messages"),
 }
 l = {
     "schema_version": 2,
@@ -177,7 +177,7 @@ expect "empty log flagged MISS"        "[MISS] com.jleechan.cleanup-empty"
 expect "warn sweeper flagged WARN"     "[WARN] com.jleechan.cleanup-warn"
 expect "fresh sweeper reported OK"     "[OK]   com.jleechan.cleanup-fresh"
 expect "jleechanorg family matched"    "[OK]   com.jleechanorg.disk-magician-fresh"
-expect "summary line present"          "Summary: 2 OK, 1 WARN, 3 MISS"
+expect "summary line present"          "Summary: 2 OK, 2 WARN, 3 MISS"
 expect "FAIL message present"          "FAIL: 3 sweeper(s) appear silent"
 
 # Test the happy path: all sweepers healthy → exit 0.
@@ -188,8 +188,13 @@ write_plist "com.jleechan.cleanup-healthy-b" "$ALL_FRESH_DIR/logs/b.log" "$ALL_F
 write_log_at "$ALL_FRESH_DIR/logs/a.log" "$ONE_HOUR_AGO" "ok"
 write_log_at "$ALL_FRESH_DIR/logs/b.log" "$ONE_HOUR_AGO" "ok"
 
+git init -q "$TMP_DIR/state_repo"
+git -C "$TMP_DIR/state_repo" add ledger/topdown-5g.json
+git -C "$TMP_DIR/state_repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+  -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q -m "healthy ledger fixture"
+
 set +e
-OUT_HAPPY=$("$SCRIPT" --plist-dir "$ALL_FRESH_DIR/launchd" --threshold-days 7 --no-notify 2>&1)
+OUT_HAPPY=$("$SCRIPT" --plist-dir "$ALL_FRESH_DIR/launchd" --state-repo "$TMP_DIR/state_repo" --threshold-days 7 --no-notify 2>&1)
 RC_HAPPY=$?
 set -e
 
@@ -198,6 +203,7 @@ if [[ $RC_HAPPY -eq 0 ]] && grep -q "All sweepers healthy." <<<"$OUT_HAPPY"; the
   PASS=$(( PASS + 1 ))
 else
   echo "  FAIL  healthy system: rc=$RC_HAPPY"
+  printf '%s\n' "$OUT_HAPPY"
   FAIL=$(( FAIL + 1 ))
 fi
 
