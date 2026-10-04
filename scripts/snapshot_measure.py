@@ -198,6 +198,17 @@ def measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra
     return None, result
 
 
+def summarize_attempts(attempts):
+    """Keep failed or recovered measurements in their original key order."""
+    failures = []
+    for key, key_attempts in attempts.items():
+        if not key_attempts or all(a.get("reason") == "success" for a in key_attempts):
+            continue
+        status = "recovered" if key_attempts[-1].get("reason") == "success" else "failed"
+        failures.append({"key": key, "path": key_attempts[0]["path"], "status": status, "attempts": key_attempts})
+    return failures
+
+
 def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes=None, env_extra=None, diagnostics_out=None):
     env_extra = env_extra or {}
     os.makedirs(tmpdir, exist_ok=True)
@@ -240,14 +251,9 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda eb: job(eb[0], eb[1], 2), jobs))
     if diagnostics_out is not None:
-        failures = []
-        for entry in entries:
-            key_attempts = attempts.get(entry["key"], [])
-            if not key_attempts or all(a.get("reason") == "success" for a in key_attempts):
-                continue
-            status = "recovered" if results.get(entry["key"]) is not None else "failed"
-            failures.append({"key": entry["key"], "path": entry["path"], "status": status, "attempts": key_attempts})
-        diagnostics_out["measurement_failures"] = failures
+        diagnostics_out["measurement_failures"] = summarize_attempts(
+            {entry["key"]: attempts.get(entry["key"], []) for entry in entries}
+        )
     return results
 
 

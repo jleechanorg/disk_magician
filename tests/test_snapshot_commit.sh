@@ -308,5 +308,15 @@ PIN14=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontie
 [[ -z "$(find "$SD14/evidence" -name 'frontier-*.json' -type f)" ]] \
   && ok "new source is not retained by absent transaction" || bad "absent evidence" "unexpected evidence"
 
+echo "Test 15: frontier pin allocation failure leaves an error receipt"
+H15="$TMP_ROOT/h15"; mkdir -p "$H15"
+OUT15=$(env -i HOME="$H15" PATH="/usr/bin:/bin" TMPDIR="$H15/missing-tmp" \
+  DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
+  DISK_MAGICIAN_FRONTIER_JSON="$H15/absent.json" \
+  DISK_MAGICIAN_STATE_DIR="$H15/.disk_magician_state" /bin/bash "$SC" 2>&1); RC15=$?
+[[ $RC15 -ne 0 ]] && ok "pin allocation error exits nonzero" || bad "pin allocation rc" "$RC15"
+assert_receipt_field "$H15/.disk_magician_state/receipts/snapshot_commit.json" last_terminal.outcome error "pin allocation failure is recorded"
+[[ ! -d "$H15/.disk_magician_state/snapshot.lock" ]] && ok "pin failure releases lock" || bad "pin failure lock" "still present"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

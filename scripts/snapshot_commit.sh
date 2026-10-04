@@ -59,14 +59,6 @@ if ! acquire_snapshot_lock; then
   exit 0
 fi
 
-# Freeze the selected bytes once, after acquiring the transaction lock.
-TRANSACTION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/disk_magician_snapshot.XXXXXX") || exit 1
-FRONTIER=$(python3 "$SCRIPT_DIR/frontier_selection.py" \
-  --root "/var/db/disk-magician/frontier_last.json" \
-  --state "$RECEIPT_STATE_DIR/frontier_last.json" \
-  --freeze-to "$TRANSACTION_DIR/frontier.json") || exit 1
-export DISK_MAGICIAN_FRONTIER_JSON="$FRONTIER"
-
 # Record started before work
 RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commit \
   --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}" \
@@ -74,6 +66,19 @@ RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commi
   log "ERROR: failed to record receipt begin"
   exit 1
 }
+
+# Freeze the selected bytes once, after acquiring the transaction lock.
+if ! { TRANSACTION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/disk_magician_snapshot.XXXXXX") &&
+  FRONTIER=$(python3 "$SCRIPT_DIR/frontier_selection.py" \
+    --root "/var/db/disk-magician/frontier_last.json" \
+    --state "$RECEIPT_STATE_DIR/frontier_last.json" \
+    --freeze-to "$TRANSACTION_DIR/frontier.json"); }; then
+  log "ERROR: frontier freeze failed"
+  python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+    --outcome error --reason "frontier freeze failed" >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
+  exit 1
+fi
+export DISK_MAGICIAN_FRONTIER_JSON="$FRONTIER"
 
 # 1. Ensure the state repo exists (local-only auto-init).
 if [[ ! -f "$STATE_DIR/MACHINE" || ! -d "$STATE_DIR/.git" ]]; then

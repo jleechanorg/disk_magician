@@ -202,6 +202,34 @@ glob_size_kb() {
   echo "$total"
 }
 
+# Shared serialization for standalone workers and serial snapshot attempts.
+write_measurement_result() {
+  python3 - "$@" <<'PY'
+import json, sys
+
+out, key, path, kb_text, elapsed, diagnostic_file, attempt = sys.argv[1:]
+diagnostic = {}
+try:
+    with open(diagnostic_file) as f:
+        for line in f:
+            name, _, value = line.rstrip("\n").partition("=")
+            diagnostic[name] = value
+except OSError:
+    pass
+kb = int(kb_text) if kb_text.isdigit() else None
+reason = "success" if kb is not None else (diagnostic.get("reason") or "missing_diagnostic")
+data = {"key": key, "kb": kb, "path": path, "elapsed_s": int(elapsed),
+        "timed_out": reason == "backend_timeout", "reason": reason, "attempt": int(attempt)}
+for name in ("backend", "stderr"):
+    if diagnostic.get(name):
+        data[name] = diagnostic[name][:256]
+if diagnostic.get("backend_exit", "").lstrip("-").isdigit():
+    data["backend_exit"] = int(diagnostic["backend_exit"])
+with open(out, "w") as f:
+    json.dump(data, f, separators=(",", ":"))
+PY
+}
+
 # Internal worker mode for snapshot_measure.py: one dir_size_kb call, one JSON file.
 if [[ "$MEASURE_ONE" == true ]]; then
   # set -u safe: the orchestrator passes its deadline; standalone use gets the key's own timeout.
@@ -218,30 +246,7 @@ if [[ "$MEASURE_ONE" == true ]]; then
   export MEASURE_DIAGNOSTIC_FILE="$M1_DIAGNOSTIC_FILE"
   m1_kb=$(dir_size_kb "$M1_PATH" "$M1_TIMEOUT")
   m1_elapsed=$(( $(date +%s) - m1_start ))
-  python3 - "$M1_OUT" "$M1_KEY" "$M1_PATH" "$m1_kb" "$m1_elapsed" "$M1_DIAGNOSTIC_FILE" <<'PY'
-import json, sys
-
-out, key, path, kb_text, elapsed, diagnostic_file = sys.argv[1:]
-diagnostic = {}
-try:
-    with open(diagnostic_file) as f:
-        for line in f:
-            name, _, value = line.rstrip("\n").partition("=")
-            diagnostic[name] = value
-except OSError:
-    pass
-kb = int(kb_text) if kb_text.isdigit() else None
-reason = "success" if kb is not None else (diagnostic.get("reason") or "missing_diagnostic")
-data = {"key": key, "kb": kb, "path": path, "elapsed_s": int(elapsed),
-        "timed_out": reason == "backend_timeout", "reason": reason}
-for name in ("backend", "stderr"):
-    if diagnostic.get(name):
-        data[name] = diagnostic[name][:256]
-if diagnostic.get("backend_exit", "").lstrip("-").isdigit():
-    data["backend_exit"] = int(diagnostic["backend_exit"])
-with open(out, "w") as f:
-    json.dump(data, f, separators=(",", ":"))
-PY
+  write_measurement_result "$M1_OUT" "$M1_KEY" "$M1_PATH" "$m1_kb" "$m1_elapsed" "$M1_DIAGNOSTIC_FILE" 1
   rm -f "$M1_DIAGNOSTIC_FILE"
   exit 0
 fi
@@ -533,8 +538,24 @@ DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
 RETRY_TEMP_FILE=$(mktemp -t disk_magician_retries.XXXXXX)
 LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
 CARRY_FRESH_FILE=$(mktemp -t disk_magician_carry_fresh.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE" "$CARRY_FRESH_FILE"; }
+SERIAL_ATTEMPTS_FILE=$(mktemp -t disk_magician_serial_attempts.XXXXXX)
+SERIAL_RESULT_FILE=$(mktemp -t disk_magician_serial_result.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE" "$CARRY_FRESH_FILE" "$SERIAL_ATTEMPTS_FILE" "$SERIAL_RESULT_FILE" "${SERIAL_RESULT_FILE}.diag"; }
 trap _cleanup_dirs_temp EXIT
+
+measure_serial() {
+  local key="$1" path="$2" timeout="$3" attempt="$4" max_seconds="${5:-$MEASURE_PATH_MAX_SECONDS}"
+  local started elapsed size
+  started=$(date +%s)
+  MEASURE_DIAGNOSTIC_FILE="${SERIAL_RESULT_FILE}.diag"
+  : > "$MEASURE_DIAGNOSTIC_FILE"
+  size=$(dir_size_kb "$path" "$timeout" "$max_seconds")
+  elapsed=$(( $(date +%s) - started ))
+  write_measurement_result "$SERIAL_RESULT_FILE" "$key" "$path" "$size" "$elapsed" "$MEASURE_DIAGNOSTIC_FILE" "$attempt"
+  cat "$SERIAL_RESULT_FILE" >> "$SERIAL_ATTEMPTS_FILE"
+  printf '\n' >> "$SERIAL_ATTEMPTS_FILE"
+  printf '%s' "$size"
+}
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
 # the literal config path/pattern that produced this measurement — carried
@@ -588,7 +609,7 @@ if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
 fi
 if [[ "$MEASURE_MODE" != "parallel" ]]; then
 while IFS=$'\t' read -r key path timeout retry_timeout; do
-  size=$(dir_size_kb "$path" "$timeout")
+  size=$(measure_serial "$key" "$path" "$timeout" 1)
   if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && "$retry_timeout" -gt 0 && \
         ( "$MEASURE_PATH_MAX_SECONDS" -eq 0 || "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ) ]]; then
     printf "%s\t%s\t%s\n" "$key" "$path" "$retry_timeout" >> "$RETRY_TEMP_FILE"
@@ -612,9 +633,24 @@ fi
 # has received the short first pass. The existing global deadline remains the
 # final authority, so retries cannot extend the snapshot budget.
 while IFS=$'\t' read -r key path retry_timeout; do
-  size=$(dir_size_kb "$path" "$retry_timeout" "$retry_timeout")
+  size=$(measure_serial "$key" "$path" "$retry_timeout" 2 "$retry_timeout")
   add_entry "$key" "$size" "$path"
 done < "$RETRY_TEMP_FILE"
+
+if [[ "$MEASURE_MODE" != "parallel" ]]; then
+  MEASUREMENT_FAILURES_JSON=$(python3 - "$SCRIPT_DIR" "$SERIAL_ATTEMPTS_FILE" "$MEASUREMENT_FAILURES_JSON" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from snapshot_measure import summarize_attempts
+attempts = {}
+with open(sys.argv[2]) as source:
+    for line in source:
+        result = json.loads(line)
+        attempts.setdefault(result["key"], []).append(result)
+print(json.dumps(json.loads(sys.argv[3]) + summarize_attempts(attempts), separators=(",", ":")))
+PY
+)
+fi
 
 # ────────── TOP-20 LIBRARY/CONTAINERS SUBDIRS (additive) ──────────
 # Per Lane B Section C: the 50 GB Library/Containers blind spot. Track

@@ -326,6 +326,39 @@ class SnapshotDiagnosticsCliTests(unittest.TestCase):
         self.assertEqual(failure["attempts"][0]["reason"], "backend_error")
         self.assertEqual(failure["attempts"][0]["backend_exit"], 13)
 
+    def test_serial_and_orchestrator_fallback_preserve_backend_diagnostics(self):
+        bindir = self.tmp / "bin-serial"
+        bindir.mkdir()
+        scanner = bindir / "du"
+        scanner.write_text("#!/bin/sh\nprintf '4096\\tpartial\\n'\necho 'permission denied' >&2\nexit 1\n")
+        scanner.chmod(0o755)
+        failing_orchestrator = self.tmp / "failed-orchestrator.py"
+        failing_orchestrator.write_text("raise SystemExit(1)\n")
+        for mode in ("serial", "failing", "absent"):
+            with self.subTest(mode=mode):
+                output = self.tmp / f"snapshot-{mode}.json"
+                env = dict(os.environ, PATH=f"{bindir}:/opt/homebrew/bin:/usr/bin:/bin",
+                           HOME=str(self.tmp), DISK_MAGICIAN_CONFIG=str(self.cfg),
+                           DISK_MAGICIAN_STATE_DIR=str(self.tmp / f"state-{mode}"),
+                           DISK_MAGICIAN_MEASURE_WORKERS="0" if mode == "serial" else "1",
+                           DISK_MAGICIAN_LOAD_FACTOR_OVERRIDE="1", DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS="20")
+                if mode != "serial":
+                    env["DISK_MAGICIAN_MEASURE_ORCHESTRATOR"] = str(failing_orchestrator if mode == "failing" else self.tmp / "absent.py")
+                result = subprocess.run(["bash", str(SNAP), "--output", str(output)], env=env,
+                                        capture_output=True, text=True, timeout=25)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                snapshot = json.loads(output.read_text())
+                self.assertIsNone(snapshot["directories"]["projects"])
+                self.assertEqual(snapshot["snapshot_metadata"]["measure_mode"], "serial" if mode == "serial" else "serial_fallback")
+                failure = next(item for item in snapshot["snapshot_metadata"]["measurement_failures"] if item["key"] == "projects")
+                self.assertEqual(failure["status"], "failed")
+                self.assertEqual([attempt["attempt"] for attempt in failure["attempts"]], [1, 2])
+                for attempt in failure["attempts"]:
+                    self.assertEqual(attempt["reason"], "backend_error")
+                    self.assertEqual(attempt["backend_exit"], 1)
+                    self.assertIn("permission denied", attempt["stderr"])
+                    self.assertLessEqual(len(attempt["stderr"]), 256)
+
 
 if __name__ == "__main__":
     unittest.main()
