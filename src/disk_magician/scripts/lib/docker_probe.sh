@@ -45,6 +45,13 @@ _resolve_timeout_cmd() {
   elif command -v gtimeout >/dev/null 2>&1; then
     command -v gtimeout
   else
+    local candidate
+    for candidate in /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
     return 1
   fi
 }

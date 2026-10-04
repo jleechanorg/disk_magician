@@ -309,19 +309,11 @@ has_active_marker() {
 }
 
 
-# has_control_bytes <str> — true if string contains control characters (Bash 3.2-safe)
-has_control_bytes() {
-  local s="$1"
-  local nl=$'\n' cr=$'\r' tab=$'\t'
-  if [[ "$s" == *"$nl"* || "$s" == *"$cr"* || "$s" == *"$tab"* ]]; then
-    return 0
-  fi
-  if [[ "$s" =~ [[:cntrl:]] ]]; then
-    return 0
-  fi
-  return 1
+# lsof escapes ambiguous path bytes depending on locale; preserve those candidates.
+has_ambiguous_lsof_path() {
+  local LC_ALL=C
+  [[ "$1" == *[![:print:]]* || "$1" == *\\* ]]
 }
-
 
 # has_open_files <dir> — true when lsof finds an open file or cannot prove the
 # tree is closed. Uses bounded targetless machine-format lsof (-n -P -F n) with
@@ -332,8 +324,8 @@ has_control_bytes() {
 # Returns 1 only when authoritatively proven that no open files match.
 has_open_files() {
   local dir="$1"
-  if has_control_bytes "$dir"; then
-    log "Open-file check input path contains control characters for $dir — fail-closed, treating as active."
+  if has_ambiguous_lsof_path "$dir"; then
+    log "Open-file check input path contains control characters, non-ASCII bytes, or backslashes for $dir — fail-closed, treating as active."
     return 0
   fi
 
@@ -348,8 +340,8 @@ has_open_files() {
   fi
   [[ "$canon_dir" != "/" ]] && canon_dir="${canon_dir%/}"
 
-  if has_control_bytes "$canon_dir"; then
-    log "Open-file check canonical path contains control characters for $dir — fail-closed, treating as active."
+  if has_ambiguous_lsof_path "$canon_dir"; then
+    log "Open-file check canonical path contains control characters, non-ASCII bytes, or backslashes for $dir — fail-closed, treating as active."
     return 0
   fi
 
@@ -373,6 +365,14 @@ has_open_files() {
     timeout_bin="$(command -v timeout)"
   elif command -v gtimeout >/dev/null 2>&1; then
     timeout_bin="$(command -v gtimeout)"
+  else
+    local candidate
+    for candidate in /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+      if [[ -x "$candidate" ]]; then
+        timeout_bin="$candidate"
+        break
+      fi
+    done
   fi
   if [[ -z "$timeout_bin" || ! -x "$timeout_bin" ]]; then
     log "Open-file check unavailable for $dir (timeout executable not found or not executable) — fail-closed, treating as active."
@@ -380,11 +380,10 @@ has_open_files() {
   fi
 
   local timeout_sec="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-15}"
-  if ! [[ "$timeout_sec" =~ ^[0-9]+$ ]] || (( 10#$timeout_sec <= 0 )); then
+  if ! [[ "$timeout_sec" =~ ^[1-9][0-9]?$ ]] || (( timeout_sec > 60 )); then
     log "Open-file check invalid timeout '$timeout_sec' for $dir — fail-closed, treating as active."
     return 0
   fi
-  timeout_sec=$(( 10#$timeout_sec ))
 
   local hit_file err_file rc=0
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
