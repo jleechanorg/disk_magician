@@ -1,17 +1,19 @@
 ---
-title: FDA results are execution-route-specific for root frontier collection
+title: Root FDA preflight outcomes differ across observed invocation contexts
 hostname: jeffreys-macbook-pro.local
 date: 2026-10-04
 status: active
 paths:
   - /tmp/disk-collector-activation-20261004/first-root-probe-summary.json
   - /tmp/disk-frontier-home-20261004/deployed-root-preflight.json
+  - /tmp/disk-root-tcc-20261004.log
+  - /tmp/disk-root-runner-auth-20261004.log
 safety_rule: none
 ---
 
 ## What
 
-The scanner's FDA result differs by execution route. The immutable admin
+Two root scanner runs returned different FDA results. The immutable admin
 authtrampoline run recorded in
 `/tmp/disk-collector-activation-20261004/first-root-probe-summary.json`
 used root privileges but was denied on five of six probes (`mobile_sync`,
@@ -21,8 +23,11 @@ envelope. A later normal existing-sudo invocation of the installed CLI, using
 the validated `--scan-user-home /Users/jleechan` identity, recorded in
 `/tmp/disk-frontier-home-20261004/deployed-root-preflight.json`, read all six
 user and system probes in 2.4 seconds. This is evidence about these two
-process routes and runs, not a claim of global unreadability or global FDA
-grant.
+invocation contexts and runs, not a claim of global unreadability or global FDA
+grant. The runs were not a controlled comparison: time, interpreter, scanner
+version, and arguments also differed. Route-dependent TCC is a plausible
+explanation, not an isolated causal conclusion. The later JSON records root
+execution and arguments but does not attest its executable or parent process.
 
 ## Why it matters
 
@@ -32,8 +37,11 @@ full-volume or scheduled-daemon proof. The successful run deliberately used a
 two-second wall-clock cap and `--max-depth 0`; its `coverage_envelope.complete`
 was false with seven unfinished top-level roots. The remaining question is
 whether the intended root runner and its scheduled launchd route can collect
-and publish a complete result. At 09:06 UTC, the already-authorized root-runner update was awaiting
-macOS administrator authentication.
+and publish a complete result. At 09:12 UTC, the update request remained pending with no installer process.
+The authd log ties its osascript PID 68361 to engine 683, which rejected an
+expired cached credential and entered `builtin:authenticate` at 09:02:34 UTC.
+Waiting for administrator authentication is an inference from these records;
+no visible authentication prompt was captured.
 
 ## Guards / governance
 
@@ -55,6 +63,6 @@ tracked in [PR #98](https://github.com/jleechanorg/disk_magician/pull/98)
   `/Users/jleechan` identity read all 6 FDA probes in 2.4 seconds; the
   intentionally bounded run remained partial; raw result preserved in
   `deployed-root-preflight.json`.
-- 2026-10-04 — classified the discrepancy as execution-route-specific;
+- 2026-10-04 — recorded an invocation-context discrepancy;
   full-volume and scheduled-daemon behavior remain unproven pending the
   root-runner update and actual collection.
