@@ -8,7 +8,7 @@
 #    - Tier 2: Xcode DerivedData & simulator caches
 #    - Tier 3: Colima VM disk (Docker prune + fstrim)
 #    - Tier 4: Aside browser sessions
-#    - Tier 5: Antigravity brain compaction, Supervisor logs, uv cache
+#    - Tier 5: Antigravity brain compaction, Codex SQLite vacuum, Supervisor logs, uv cache
 #    - Tier 6: Worktree venvs (>=7d dormant)
 # 2. All categories execute without error in dry-run mode.
 # 3. Worktree venvs require WORKTREE_APPROVED=1 to execute in non-dry-run mode.

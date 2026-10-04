@@ -112,7 +112,7 @@ When cleaning or recommending disk cleanups on this workstation, execute the can
    - Targets: stale Aside browser sessions (`~/.aside/u/*/sessions/` >7d/14d) and static asset hardlink deduplication across retained sessions.
 5. **Tier 5: Agent State Compaction & Rotated Logs (Safe, 5–20 GiB)**:
    - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_codex_db.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
-   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>7d), vacuums ~/.codex SQLite databases, truncates rotated supervisor logs, prunes orphaned uv-tool build wheels.
+   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>=7d), vacuums ~/.codex SQLite databases, prunes stale rotated supervisor logs, prunes orphaned uv-tool build wheels.
 6. **Tier 6: Worktrees & Worktree Venvs (Safety-Gated, 20–100+ GiB)**:
    - Scripts: `cleanup_worktree_venvs.sh`, `cleanup_worktrees.sh` (or `prune-worktrees`)
    - Targets: strips `.venv`/`venv` from dormant git worktrees (>=7d inactivity) and prunes merged/stale worktrees (>=7d inactivity).
