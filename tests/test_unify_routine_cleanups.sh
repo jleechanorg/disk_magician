@@ -8,7 +8,7 @@
 #    - Tier 3: Colima VM disk (Docker prune + fstrim)
 #    - Tier 4: Aside browser sessions
 #    - Tier 5: Antigravity brain compaction, Codex SQLite vacuum, Supervisor logs, uv cache
-#    - Tier 6: Worktree venvs, Claude state
+#    - Tier 6: Worktree venvs (>=7d dormant), Claude state
 # 2. Approval gates are strictly enforced in active clean mode:
 #    - Worktrees and Worktree venvs require WORKTREE_APPROVED=1
 #    - Claude state requires CLAUDE_STATE_APPROVED=1
