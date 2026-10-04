@@ -101,6 +101,28 @@ fi
 exec /usr/bin/getconf "$@"
 SHIM
   chmod +x "$bin_dir/getconf"
+
+  cat > "$bin_dir/timeout" <<'SHIM'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SHIM
+  chmod +x "$bin_dir/timeout"
+
+  cat > "$bin_dir/lsof" <<'SHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == *"+D"* || "$arg" == "+D" ]]; then
+    echo "ERROR: +D is forbidden: $*" >&2
+    exit 99
+  fi
+done
+echo "p1234"
+echo "fcwd"
+echo "n/"
+exit 0
+SHIM
+  chmod +x "$bin_dir/lsof"
 }
 
 set_old_mtime() {

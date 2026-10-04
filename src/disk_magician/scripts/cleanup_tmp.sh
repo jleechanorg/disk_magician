@@ -310,49 +310,137 @@ has_active_marker() {
 
 
 # has_open_files <dir> — true when lsof finds an open file or cannot prove the
-# tree is closed. macOS lsof's +D return status is unreliable, so matching
-# stdout is authoritative while any stderr diagnostic fails closed.
+# tree is closed. Uses bounded targetless machine-format lsof (-n -P -F n).
+# Fails closed (returns 0, unsafe/active) on canonicalization failure, missing
+# lsof, missing timeout, timeout, nonzero status, stderr output, or malformed
+# records. Returns 1 only when authoritatively proven that no open files match.
 has_open_files() {
-  local dir="$1" lsof_bin hit_file err_file diagnostic rc=0
+  local dir="$1"
+  local canon_dir
+  canon_dir=$(cd "$dir" 2>/dev/null && pwd -P) || {
+    log "Open-file check canonicalization failed for $dir — fail-closed, treating as active."
+    return 0
+  }
+  if [[ -z "$canon_dir" ]]; then
+    log "Open-file check canonicalization failed for $dir — fail-closed, treating as active."
+    return 0
+  fi
+  [[ "$canon_dir" != "/" ]] && canon_dir="${canon_dir%/}"
+
+  local lsof_bin=""
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof_bin="$(command -v lsof)"
   elif [[ -x /usr/sbin/lsof ]]; then
     lsof_bin=/usr/sbin/lsof
-  elif lsof_bin=$(command -v lsof 2>/dev/null); then
-    :
-  else
-    log "Open-file check unavailable for $dir — fail-closed, treating as active."
+  fi
+  if [[ -z "$lsof_bin" || ! -x "$lsof_bin" ]]; then
+    log "Open-file check unavailable for $dir (lsof not found or not executable) — fail-closed, treating as active."
     return 0
   fi
-  if [[ ! -x "$lsof_bin" ]]; then
-    log "Open-file check unavailable for $dir ($lsof_bin is not executable) — fail-closed, treating as active."
+
+  local timeout_bin=""
+  if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+    timeout_bin="$DISK_MAGICIAN_TIMEOUT_BIN"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout_bin="$(command -v timeout)"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_bin="$(command -v gtimeout)"
+  fi
+  if [[ -z "$timeout_bin" || ! -x "$timeout_bin" ]]; then
+    log "Open-file check unavailable for $dir (timeout executable not found or not executable) — fail-closed, treating as active."
     return 0
   fi
+
+  local timeout_sec="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-15}"
+  if ! [[ "$timeout_sec" =~ ^[0-9]+$ ]] || (( 10#$timeout_sec <= 0 )); then
+    log "Open-file check invalid timeout '$timeout_sec' for $dir — fail-closed, treating as active."
+    return 0
+  fi
+  timeout_sec=$(( 10#$timeout_sec ))
+
+  local hit_file err_file rc=0
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
-  # Force warnings on: lsof documents +D authority/traversal failures as
-  # warnings, while -w suppresses the only signal that distinguishes them
-  # from the ordinary empty-search rc=1 result.
-  "$lsof_bin" +w +D "$dir" >"$hit_file" 2>"$err_file" || rc=$?
-  # macOS lsof 4.91 can print matching open files yet return 1 for +D, so
-  # stdout is the authoritative positive signal; rc only diagnoses errors
-  # when there were no matches.
-  if [[ -s "$hit_file" ]]; then
-    rm -f "$hit_file" "$err_file"
-    return 0
-  fi
-  rm -f "$hit_file"
+
+  "$timeout_bin" "$timeout_sec" "$lsof_bin" -n -P -F n >"$hit_file" 2>"$err_file" || rc=$?
+
+  local diagnostic=""
   if [[ -s "$err_file" ]]; then
     diagnostic=$(head -n 1 "$err_file")
-    rm -f "$err_file"
+  fi
+
+  if (( rc != 0 )); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (lsof rc=${rc}${diagnostic:+: $diagnostic}) — fail-closed, treating as active."
+    return 0
+  fi
+
+  if [[ -s "$err_file" ]]; then
+    rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
     return 0
   fi
   rm -f "$err_file"
-  if (( rc != 1 )); then
-    log "Open-file check failed for $dir (lsof rc=${rc}) — fail-closed, treating as active."
+
+  if [[ ! -s "$hit_file" ]]; then
+    rm -f "$hit_file"
+    log "Open-file check produced empty output for $dir — fail-closed, treating as active."
     return 0
   fi
+
+  local line tag val
+  local has_open=1
+  local seen_process=0
+  local malformed=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    tag="${line:0:1}"
+    case "$tag" in
+      p)
+        val="${line#p}"
+        if [[ "$val" =~ ^[0-9]+$ ]]; then
+          seen_process=1
+        else
+          malformed=1
+          break
+        fi
+        ;;
+      f)
+        val="${line#f}"
+        if ! [[ "$val" =~ ^[a-zA-Z0-9]+$ ]]; then
+          malformed=1
+          break
+        fi
+        ;;
+      n)
+        val="${line#n}"
+        if [[ -n "$val" ]]; then
+          if [[ "$val" == "$canon_dir" || "$val" == "$canon_dir/"* ]]; then
+            has_open=0
+            break
+          fi
+        fi
+        ;;
+      *)
+        malformed=1
+        break
+        ;;
+    esac
+  done < "$hit_file"
+  rm -f "$hit_file"
+
+  if (( malformed != 0 || seen_process == 0 )); then
+    log "Open-file check produced malformed output for $dir — fail-closed, treating as active."
+    return 0
+  fi
+
+  if (( has_open == 0 )); then
+    return 0
+  fi
+
   return 1
 }
 
@@ -708,11 +796,6 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
-      log "Skipping in-use large tmp dir: $d  (${kb} KB)"
-      continue
-    fi
-
     if [[ -e "$d/.in-use" ]]; then
       log "Skipping active-use marker (.in-use present): $d  (${kb} KB)"
       continue
@@ -720,6 +803,11 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
 
     if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
       log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d  (${kb} KB)"
+      continue
+    fi
+
+    if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
+      log "Skipping in-use large tmp dir: $d  (${kb} KB)"
       continue
     fi
 
