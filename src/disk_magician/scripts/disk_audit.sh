@@ -66,49 +66,76 @@ _load_snapshot() {
     
     local meta
     meta=$(python3 - "$SNAPSHOT_JSON" "$SNAP_CACHE" <<'PY' 2>/dev/null || true
-import json, sys, datetime
+import json, sys, datetime, re
 src, cache = sys.argv[1], sys.argv[2]
 try:
-    s = json.load(open(src))
+    with open(src) as f:
+        s = json.load(f)
 except Exception:
-    print("ERR\t\t\t\tparse_error"); sys.exit(0)
-cov  = s.get("snapshot_coverage_pct", "")
-warn = s.get("snapshot_warning", "") or ""
-ts   = s.get("timestamp", "") or ""
-# Additive (bead disk_magician-8to); absent on pre-swap-tracking snapshots.
-swap_used_gb = s.get("swap_used_gb", "")
-# snapshot_metadata is the new top-level block (Lane B Section C).
-# Fall back to old fields for backward compat with pre-metadata
-# snapshots — that's the whole point of additive JSON changes.
+    print("ERR\nparse_error"); sys.exit(0)
+
+raw_cov = s.get("snapshot_coverage_pct", "")
+cov = ""
+if isinstance(raw_cov, (int, float)):
+    cov = str(raw_cov)
+elif isinstance(raw_cov, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_cov.strip()):
+    cov = raw_cov.strip()
+
+warn = str(s.get("snapshot_warning", "") or "").replace("\n", " ").strip()
+ts   = str(s.get("timestamp", "") or "").strip()
+
+raw_swap = s.get("swap_used_gb", "")
+swap_used_gb = ""
+if isinstance(raw_swap, (int, float)):
+    swap_used_gb = str(raw_swap)
+elif isinstance(raw_swap, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', str(raw_swap).strip()):
+    swap_used_gb = str(raw_swap).strip()
+
 meta_block = s.get("snapshot_metadata") or {}
-status = meta_block.get("measurement_status", "")
-age_sec = meta_block.get("age_seconds", "")
+if not isinstance(meta_block, dict):
+    meta_block = {}
+
+status = str(meta_block.get("measurement_status", "") or "").replace("\n", " ").strip()
+raw_age_sec = meta_block.get("age_seconds", "")
+age_sec = ""
+if isinstance(raw_age_sec, int):
+    age_sec = str(raw_age_sec)
+elif isinstance(raw_age_sec, str) and raw_age_sec.strip().isdigit():
+    age_sec = raw_age_sec.strip()
+
 dirs = s.get("directories", {}) or {}
-with open(cache, "w") as fh:
-    for k, v in dirs.items():
-        if v is None:
-            continue
-        try:
-            fh.write(f"{k}\t{int(v)}\n")
-        except Exception:
-            pass
+if isinstance(dirs, dict):
+    with open(cache, "w") as fh:
+        for k, v in dirs.items():
+            if v is None:
+                continue
+            try:
+                clean_k = str(k).replace("\t", " ").replace("\n", " ").strip()
+                fh.write(f"{clean_k}\t{int(v)}\n")
+            except Exception:
+                pass
+
 age_min = ""
 try:
     t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    age_min = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
+    age_min = str(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60))
 except Exception:
     pass
-print(f"OK\t{cov}\t{age_min}\t{warn}\t{age_sec}\t{status}\t{swap_used_gb}")
+
+for val in ["OK", cov, age_min, warn, age_sec, status, swap_used_gb]:
+    print(val)
 PY
 )
     local _status _warn
-    # Use awk to split the tab-separated meta line into named shell
-    # variables. bash `read` with `<<<` collapses trailing empty fields,
-    # so we cannot rely on positional reads when the 4th field
-    # (snapshot_warning) is empty. awk preserves every column.
-    eval "$(printf '%s' "$meta" | awk -F'\t' '{
-        printf("_status=%s\nSNAP_COVERAGE=%s\nSNAP_AGE_MIN=%s\n_warn=%s\nSNAP_AGE_SEC=%s\nSNAP_STATUS=%s\nSNAP_SWAP_USED_GB=%s\n", $1, $2, $3, $4, $5, $6, $7)
-    }')"
+    {
+        read -r _status || true
+        read -r SNAP_COVERAGE || true
+        read -r SNAP_AGE_MIN || true
+        read -r _warn || true
+        read -r SNAP_AGE_SEC || true
+        read -r SNAP_STATUS || true
+        read -r SNAP_SWAP_USED_GB || true
+    } <<< "$meta"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
     fi
@@ -320,19 +347,19 @@ if [[ -z "$_user_tmp" ]] && command -v getconf &>/dev/null; then
     _user_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")"
 fi
 if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
-        _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
-        _csc_kb=0
-        _csc_count=0
-        while IFS= read -r -d '' d; do
-            kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
-            [[ "$kb" -lt 102400 ]] && continue
-            _csc_count=$(( _csc_count + 1 ))
-            _csc_kb=$(( _csc_kb + kb ))
-        done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
-        if [[ $_csc_count -gt 0 ]]; then
-            printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
-        fi
+    _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
+    _csc_kb=0
+    _csc_count=0
+    while IFS= read -r -d '' d; do
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
+        [[ "$kb" -lt 102400 ]] && continue
+        _csc_count=$(( _csc_count + 1 ))
+        _csc_kb=$(( _csc_kb + kb ))
+    done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
+    if [[ $_csc_count -gt 0 ]]; then
+        printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
     fi
+fi
 
 # AO session Playwright cache duplication
 ao_sessions="$HOME/.ao-sessions"

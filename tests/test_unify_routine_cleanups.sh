@@ -60,7 +60,7 @@ echo "{}" > "$FIXTURE_STATE/discover_last.json"
 
 # In-fixture code_sign_clone to verify override detection without getconf
 mkdir -p "$TMP_DIR/X/fixture.code_sign_clone"
-dd if=/dev/zero of="$TMP_DIR/X/fixture.code_sign_clone/payload" bs=1m count=105 status=none
+dd if=/dev/zero of="$TMP_DIR/X/fixture.code_sign_clone/payload" bs=1048576 count=105 status=none
 
 # Provide lightweight hermetic shims for docker and colima
 cat > "$FIXTURE_BIN/docker" << 'EOF'
