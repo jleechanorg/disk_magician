@@ -313,11 +313,23 @@ class DiskStatusEvaluator:
             )
 
         try:
+            fleet_env = os.environ.copy()
+            # A stale inherited override must never stand in for an absent or
+            # malformed deployment manifest.  Only a validated absolute
+            # source_root below may bind the fleet check to a deployed tree.
+            fleet_env.pop("DISK_MAGICIAN_EXPECTED_SOURCE_ROOT", None)
+            deployed_file = self.state_dir / "deployed.json"
+            deployed_data, deployed_error = read_json_file(deployed_file)
+            if not deployed_error and isinstance(deployed_data, dict):
+                source_root = deployed_data.get("source_root")
+                if isinstance(source_root, str) and Path(source_root).is_absolute():
+                    fleet_env["DISK_MAGICIAN_EXPECTED_SOURCE_ROOT"] = str(Path(source_root).expanduser().resolve())
             proc = subprocess.run(
                 ["/bin/bash", str(check_script), "--fleet-only", "--json"],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=fleet_env,
             )
             stdout = proc.stdout.strip()
             if proc.returncode in (0, 1, 2) and stdout.startswith("{"):

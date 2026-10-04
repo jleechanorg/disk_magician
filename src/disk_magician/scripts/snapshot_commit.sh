@@ -12,7 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="$(python3 "$SCRIPT_DIR/resolve_state_repo_path.py")"
 SNAP_BIN="${DISK_MAGICIAN_SNAPSHOT_BIN:-$SCRIPT_DIR/disk_snapshot.sh}"
 RECEIPT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
-FRONTIER="${DISK_MAGICIAN_FRONTIER_JSON:-$RECEIPT_STATE_DIR/frontier_last.json}"
+FRONTIER="$(python3 "$SCRIPT_DIR/frontier_selection.py" \
+  --root "/var/db/disk-magician/frontier_last.json" \
+  --state "$RECEIPT_STATE_DIR/frontier_last.json" 2>/dev/null || true)"
 KEEP="${DISK_MAGICIAN_EVIDENCE_KEEP:-4}"
 log() { echo "[snapshot_commit] $*"; }
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }

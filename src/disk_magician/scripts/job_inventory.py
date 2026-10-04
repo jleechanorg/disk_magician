@@ -122,9 +122,10 @@ def _materialize_args(args: list[Any], repo_root: Path) -> list[str]:
     return rendered
 
 
-def _expected_fields(record: dict[str, Any], repo_root: Path) -> None:
+def _expected_fields(record: dict[str, Any], repo_root: Path, expected_source_root: Path | None = None) -> None:
     expected_args = [str(arg) for arg in record.get("args", [])]
-    expected_materialized = _materialize_args(expected_args, repo_root)
+    materialization_root = expected_source_root or repo_root
+    expected_materialized = _materialize_args(expected_args, materialization_root)
     record["expected_program_arguments"] = expected_materialized
     record["expected_entrypoint"] = expected_materialized[0] if expected_materialized else "unknown"
     record["expected_execution_kind"] = record.get("execution_kind", "unknown")
@@ -351,10 +352,10 @@ def _installed_path(record: dict[str, Any]) -> Path:
     return Path(os.environ.get("DISK_MAGICIAN_LAUNCHAGENTS_DIR", str(home / "Library/LaunchAgents"))) / f"{record['label']}.plist"
 
 
-def fleet(repo_root: Path) -> dict[str, Any]:
+def fleet(repo_root: Path, expected_source_root: Path | None = None) -> dict[str, Any]:
     records, source_paths = catalog(repo_root)
     for record in records:
-        _expected_fields(record, repo_root)
+        _expected_fields(record, repo_root, expected_source_root)
         _clear_actual_fields(record)
     platform_hint = os.environ.get("DISK_MAGICIAN_OSTYPE")
     if platform_hint is None:
@@ -419,9 +420,11 @@ def fleet(repo_root: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="read-only disk_magician launchd inventory")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
+    parser.add_argument("--expected-source-root", help="source checkout used when launchd templates were installed")
     parser.add_argument("--json", action="store_true", help="emit installed fleet status JSON")
     args = parser.parse_args(argv)
-    result = fleet(Path(args.repo_root).resolve())
+    expected_source_root = Path(args.expected_source_root).expanduser().resolve() if args.expected_source_root else None
+    result = fleet(Path(args.repo_root).resolve(), expected_source_root=expected_source_root)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     if result["status"] == "healthy":
         return 0

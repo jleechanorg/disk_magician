@@ -38,10 +38,12 @@ _FRONTIER_HEREDOC_SOURCE = _extract_frontier_heredoc()
 compile(_FRONTIER_HEREDOC_SOURCE, "disk_snapshot.sh::frontier_heredoc", "exec")
 
 
-def rank_frontier_candidates(enabled, explicit_override_path, root_path, user_path):
+def rank_frontier_candidates(enabled, explicit_override_path, root_path, user_path, json_override=""):
     """Run the real disk_snapshot.sh frontier-tiebreak heredoc as a subprocess."""
     proc = subprocess.run(
-        [sys.executable, "-c", _FRONTIER_HEREDOC_SOURCE, enabled, explicit_override_path, root_path, user_path],
+        [sys.executable, "-c", _FRONTIER_HEREDOC_SOURCE, enabled, explicit_override_path, root_path, user_path,
+         os.path.join(REPO_ROOT, "scripts")],
+        env={**os.environ, "DISK_MAGICIAN_FRONTIER_JSON": json_override},
         capture_output=True,
         text=True,
         timeout=10,
@@ -101,6 +103,20 @@ class TestFrontierCandidateRanking(unittest.TestCase):
         res = rank_frontier_candidates("true", "", root_file, user_file)
         self.assertIsNotNone(res)
         self.assertEqual(res["measured_total_kb"], 1000)
+
+    def test_publisher_json_override_also_controls_snapshot_summary(self):
+        primary = self._write_json("primary.json", {
+            "captured_at": self._ts(minutes=5), "mode": "complete",
+            "coverage_envelope": {"complete": True}, "measured_total_kb": 321,
+        })
+        alias = self._write_json("alias.json", {
+            "captured_at": self._ts(minutes=1), "mode": "complete",
+            "coverage_envelope": {"complete": True}, "measured_total_kb": 999,
+        })
+        result = rank_frontier_candidates("true", alias, alias, alias, json_override=primary)
+        self.assertEqual(result["measured_total_kb"], 321)
+        missing = os.path.join(self.tmp, "missing.json")
+        self.assertIsNone(rank_frontier_candidates("true", alias, alias, alias, json_override=missing))
 
     def test_complete_root_scan_beats_older_complete_user_scan(self):
         user_file = self._write_json(

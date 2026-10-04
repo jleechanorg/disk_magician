@@ -23,6 +23,7 @@ import time
 MAX_WORKERS = 6
 GRACE = 2.0
 MIN_RETRY_SECONDS = 5
+MAX_DIAGNOSTIC_TEXT = 256
 
 
 def worker_count(cores, load1, pressure, avail_gb, override=None):
@@ -110,11 +111,36 @@ def load_entries(config_path):
     return entries
 
 
+def _bounded_text(value):
+    """Keep worker diagnostics useful without copying unbounded output."""
+    if value is None:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ")[:MAX_DIAGNOSTIC_TEXT]
+
+
+def _attempt_diagnostic(key, path, attempt, reason, started, **details):
+    result = {
+        "key": key,
+        "path": path,
+        "attempt": attempt,
+        "reason": reason,
+        "elapsed_s": round(max(0.0, time.monotonic() - started), 3),
+    }
+    for name in ("backend", "backend_exit", "stderr", "kb"):
+        if name in details and details[name] is not None:
+            value = details[name]
+            if name == "stderr":
+                value = _bounded_text(value)
+            result[name] = value
+    return result
+
+
 def measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra):
-    """Run one worker; returns kb or None. Never raises; a crash is None, not zero."""
+    """Run one worker and retain a bounded, structured attempt diagnostic."""
+    started = time.monotonic()
     now = time.time()
     if now >= deadline - 1:
-        return None
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "orchestrator_deadline", started)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", entry["key"])
     out = os.path.join(tmpdir, f"{safe}.{attempt}.json")
     env = dict(os.environ, DISK_MAGICIAN_WORKER_DEADLINE_EPOCH=str(int(deadline)), DUA_THREADS="1", **env_extra)
@@ -122,33 +148,67 @@ def measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra
         proc = subprocess.Popen(["bash", snapshot_script, "--measure-one", entry["key"], entry["path"],
                                  str(budget), out], env=env, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        return None
+    except OSError as exc:
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "launch_failure", started,
+                                          stderr=_bounded_text(exc))
+    timed_out = False
     try:
         proc.wait(timeout=max(0.1, deadline - time.time() + GRACE))
     except subprocess.TimeoutExpired:
+        timed_out = True
         kill_tree(proc.pid)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+    if timed_out:
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "orchestrator_deadline", started)
     try:
         with open(out) as f:
-            kb = json.load(f).get("kb")
-        return kb if isinstance(kb, int) else None
-    except (OSError, ValueError):
-        return None
+            worker = json.load(f)
+    except FileNotFoundError:
+        reason = "launch_failure" if proc.returncode == 127 else ("worker_exit_nonzero" if proc.returncode not in (0, None) else "missing_result")
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, reason, started,
+                                          backend_exit=proc.returncode)
+    except (OSError, ValueError, TypeError):
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "malformed_result", started,
+                                          backend_exit=proc.returncode)
+    if not isinstance(worker, dict):
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "malformed_result", started,
+                                          backend_exit=proc.returncode)
+    worker_elapsed = worker.get("elapsed_s")
+    elapsed = worker_elapsed if isinstance(worker_elapsed, (int, float)) and not isinstance(worker_elapsed, bool) else None
+    details = {name: worker.get(name) for name in ("backend", "backend_exit", "stderr") if worker.get(name) is not None}
+    if proc.returncode not in (0, None):
+        details.pop("backend_exit", None)
+        return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "worker_exit_nonzero", started,
+                                          backend_exit=proc.returncode, **details)
+    kb = worker.get("kb")
+    if type(kb) is int and kb >= 0:
+        result = _attempt_diagnostic(entry["key"], entry["path"], attempt, "success", started, kb=kb, **details)
+        if elapsed is not None:
+            result["elapsed_s"] = round(float(elapsed), 3)
+        return kb, result
+    reason = worker.get("reason")
+    if not isinstance(reason, str) or not reason:
+        reason = "backend_timeout" if worker.get("timed_out") else "malformed_result"
+    result = _attempt_diagnostic(entry["key"], entry["path"], attempt, reason, started, **details)
+    if elapsed is not None:
+        result["elapsed_s"] = round(float(elapsed), 3)
+    return None, result
 
 
-def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes=None, env_extra=None):
+def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes=None, env_extra=None, diagnostics_out=None):
     env_extra = env_extra or {}
     os.makedirs(tmpdir, exist_ok=True)
     results = {}
+    attempts = {}
     lock = threading.Lock()
 
     def job(entry, budget, attempt):
-        kb = measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra)
+        kb, diagnostic = measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra)
         with lock:
+            attempts.setdefault(entry["key"], []).append(diagnostic)
             if kb is not None:
                 results[entry["key"]] = kb
             else:
@@ -166,10 +226,28 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
     failed = [e for e in entries if results.get(e["key"]) is None]
     failed.sort(key=lambda e: -sizes.get(e["key"], 0))
     jobs = [(e, e["retry_timeout"] or e["timeout"]) for e in failed]
-    jobs = [(e, b) for e, b in jobs if deadline - time.time() >= MIN_RETRY_SECONDS]
+    runnable, skipped = [], []
+    for e, budget in jobs:
+        (runnable if deadline - time.time() >= MIN_RETRY_SECONDS else skipped).append((e, budget))
+    for e, _budget in skipped:
+        with lock:
+            attempts.setdefault(e["key"], []).append({
+                "key": e["key"], "path": e["path"], "attempt": 2,
+                "reason": "orchestrator_deadline", "elapsed_s": 0.0,
+            })
+    jobs = runnable
     if jobs:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda eb: job(eb[0], eb[1], 2), jobs))
+    if diagnostics_out is not None:
+        failures = []
+        for entry in entries:
+            key_attempts = attempts.get(entry["key"], [])
+            if not key_attempts or all(a.get("reason") == "success" for a in key_attempts):
+                continue
+            status = "recovered" if results.get(entry["key"]) is not None else "failed"
+            failures.append({"key": entry["key"], "path": entry["path"], "status": status, "attempts": key_attempts})
+        diagnostics_out["measurement_failures"] = failures
     return results
 
 
@@ -197,13 +275,15 @@ def main():
         except (OSError, ValueError):
             pass
 
-    results = orchestrate(entries, args.snapshot_script, workers, args.deadline_epoch, args.tmpdir, sizes)
+    diagnostics = {}
+    results = orchestrate(entries, args.snapshot_script, workers, args.deadline_epoch, args.tmpdir, sizes,
+                          diagnostics_out=diagnostics)
     for e in entries:  # config order, independent of completion order
         kb = results.get(e["key"])
         print(f"{e['key']}\t{'' if kb is None else kb}\t{e['path']}\t{e['timeout']}\t{e['retry_timeout']}")
     if args.meta_out:
         with open(args.meta_out, "w") as f:
-            json.dump({"measure_mode": "parallel", "measure_workers": workers}, f)
+            json.dump({"measure_mode": "parallel", "measure_workers": workers, **diagnostics}, f)
     return 0
 
 

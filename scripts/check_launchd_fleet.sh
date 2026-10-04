@@ -77,7 +77,12 @@ if [[ "$JSON_MODE" == true ]]; then
     echo "check_launchd_fleet: --json requires --fleet-only" >&2
     exit 2
   fi
-  exec python3 "$SCRIPT_DIR/job_inventory.py" --repo-root "$(cd "$SCRIPT_DIR/.." && pwd)" --json
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  expected_source_root="${DISK_MAGICIAN_EXPECTED_SOURCE_ROOT:-$repo_root}"
+  exec python3 "$SCRIPT_DIR/job_inventory.py" \
+    --repo-root "$repo_root" \
+    --expected-source-root "$expected_source_root" \
+    --json
 fi
 
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
