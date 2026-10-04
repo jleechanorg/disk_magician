@@ -117,7 +117,7 @@ case "\$1 \$2" in
     exit 0
     ;;
   "system df"*)
-    if [[ "$mode" == "hang_df" || ( "$mode" == "hang_after_df" && \$(grep -c "docker system df" "$COLIMA_INVOCATIONS") -gt 1 ) ]]; then
+    if [[ "$mode" == "hang_df" || ( "$mode" == "hang_after_df" && \$(grep -c "docker system df" "$COLIMA_INVOCATIONS") -gt 1 ) || ( "$mode" == "hang_before_df" && \$(grep -c "docker system df" "$COLIMA_INVOCATIONS") -eq 1 ) ]]; then
       sleep 10
       exit 0
     fi
@@ -468,6 +468,17 @@ env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECOND
 assert "post-prune report failure returns degraded" "1" "$RC16"
 assert "post-prune report failure is visible" "DEGRADED: post-prune" "$(cat "$OUT16")"
 assert "post-prune report failure still attempts trim" "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
+
+echo "--- Test 17: Failed pre-prune report does not block reclaim ---"
+make_mock_docker hang_before_df
+: > "$COLIMA_INVOCATIONS"
+OUT17="$TMP_ROOT/t17.out"
+RC17=0
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECONDS=1 \
+  bash "$SCRIPT" --clean > "$OUT17" 2>&1 || RC17=$?
+assert "pre-prune report failure remains degraded after successful post-report" "1" "$RC17"
+assert "pre-prune report failure still prunes" "docker system prune -f" "$(cat "$COLIMA_INVOCATIONS")"
+assert "pre-prune report failure still trims" "sudo fstrim -av" "$(cat "$COLIMA_INVOCATIONS")"
 
 echo "PASSED: $TESTS_PASSED / $TESTS_RUN assertions"
 echo "All focused Colima probe tests complete."

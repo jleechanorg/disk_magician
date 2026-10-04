@@ -15,7 +15,7 @@
   the exit code into an alerting channel (Slack/email/disk_usage_alert.sh) to
   turn this into an actual page.
 
-  Template uses @HOME@ placeholders. Do not commit a fully-resolved path.
+  Template uses @HOME@ and @REPO_ROOT@ placeholders. Do not commit a fully-resolved path.
 -->
 <plist version="1.0">
 <dict>
@@ -29,6 +29,11 @@
     <string>7</string>
     <string>--auto-repair</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISK_MAGICIAN_INSTALLER</key>
+    <string>@REPO_ROOT@/scripts/install_launchd_sweepers.sh</string>
+  </dict>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>

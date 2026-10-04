@@ -253,10 +253,11 @@ fi
 before_kb=$(size_kb "$COLIMA_LIMA")
 log "Colima _lima before: $(fmt_kb "$before_kb") ($COLIMA_LIMA)"
 log "Docker context: $(docker_probe context show 2>/dev/null || echo unknown)"
+report_status=0
 log "=== docker system df (before) ==="
 if ! docker_probe system df; then
   log "DEGRADED: docker system df probe failed or timed out."
-  exit 1
+  report_status=1
 fi
 
 log "=== builder prune (cap 5g reserved) ==="
@@ -315,7 +316,6 @@ else
   freed_kb=$(( before_kb - after_kb ))
   [[ $freed_kb -lt 0 ]] && freed_kb=0
   log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
-  report_status=0
   log "=== docker system df (after) ==="
   if ! docker_probe system df; then
     log "DEGRADED: post-prune docker system df probe failed or timed out."
@@ -326,5 +326,5 @@ else
       recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
     fi
   fi
-  exit "$report_status"
 fi
+exit "$report_status"
