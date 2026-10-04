@@ -105,8 +105,8 @@ agent_scratch_create() {
   fi
 
   local leaf="$runtime_dir/$run_id"
-  # Atomic mkdir for leaf — refuses existing leaf without reusing data
-  if ! mkdir "$leaf" 2>/dev/null; then
+  # Atomic mkdir for leaf with explicit mode 0700 — preserves private temporary permissions regardless of umask
+  if ! mkdir -m 0700 "$leaf" 2>/dev/null; then
     echo "agent_scratch_create: leaf already exists or cannot be created: $leaf" >&2
     return 1
   fi
@@ -313,11 +313,6 @@ _agent_scratch_on_exit() {
 _agent_scratch_on_signal() {
   local sig="$1"
   set +e
-  if [[ "${_AGENT_SCRATCH_EXIT_RAN:-0}" -eq 1 ]]; then
-    return 0
-  fi
-  _AGENT_SCRATCH_EXIT_RAN=1
-
   local sig_num=0
   case "$sig" in
     INT) sig_num=2 ;;
@@ -337,6 +332,14 @@ _agent_scratch_on_signal() {
     (exit "$__sig_status")
     eval "$prev_sig"
   fi
+
+  # If prev_sig called exit (e.g. exit 42), the shell transferred to EXIT trap
+  # (_agent_scratch_on_exit) and never reached this line.
+  # If we reach here, prev_sig returned normally.
+  if [[ "${_AGENT_SCRATCH_EXIT_RAN:-0}" -eq 1 ]]; then
+    return 0
+  fi
+  _AGENT_SCRATCH_EXIT_RAN=1
 
   if [[ -n "${_AGENT_SCRATCH_PREV_EXIT:-}" ]]; then
     (exit "$__sig_status")

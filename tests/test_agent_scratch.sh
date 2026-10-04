@@ -67,6 +67,15 @@ else
   record_fail "wrong path shape: $path"
 fi
 
+# Verify private leaf permissions 0700 under umask 022
+path_umask=$(umask 022 && agent_scratch_create "testruntime" "run_umask")
+mode_umask=$(stat -f "%Lp" "$path_umask" 2>/dev/null || stat -c "%a" "$path_umask" 2>/dev/null)
+if [[ "$mode_umask" == "700" ]]; then
+  record_pass "leaf created with mode 0700 under umask 022"
+else
+  record_fail "leaf mode was $mode_umask (expected 700)"
+fi
+
 echo "── 2. Input validation rejections ──"
 if agent_scratch_create "" "run123" 2>/dev/null; then
   record_fail "empty runtime accepted"
@@ -361,6 +370,114 @@ if [[ -f "$FAKE_ROOT/unreachable_term" ]]; then
   record_fail "execution continued after SIGTERM"
 else
   record_pass "process terminated on SIGTERM"
+fi
+
+# Prior INT handler explicit exit 42 chaining test
+path_int_exit42=$(agent_scratch_create "testruntime" "run_int_exit42")
+python3 - "$LIB" "$AGENT_SCRATCH_ROOT" "$path_int_exit42" "$FAKE_ROOT" "$HOME" <<'PY'
+import os, signal, subprocess, sys
+
+lib = sys.argv[1]
+scratch_root = sys.argv[2]
+path_leaf = sys.argv[3]
+fake_root = sys.argv[4]
+fake_home = sys.argv[5]
+
+code = f"""
+export AGENT_SCRATCH_ROOT="{scratch_root}"
+export DISK_MAGICIAN_TEST_SANDBOX="{fake_root}"
+export DISK_MAGICIAN_TEST_CONTEXT=1
+export HOME="{fake_home}"
+source "{lib}"
+trap 'echo OLD_EXIT:$?' EXIT
+trap 'echo SIGNAL_HANDLER; exit 42' INT
+agent_scratch_trap_cleanup "{path_leaf}"
+echo READY
+while true; do sleep 0.1; done
+"""
+
+proc = subprocess.Popen(["/bin/bash", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+line = proc.stdout.readline()
+if "READY" not in line:
+    sys.exit(10)
+proc.send_signal(signal.SIGINT)
+stdout, stderr = proc.communicate(timeout=5)
+if proc.returncode != 42:
+    sys.exit(11)
+if "SIGNAL_HANDLER" not in stdout:
+    sys.exit(12)
+if "OLD_EXIT:42" not in stdout:
+    sys.exit(13)
+if stdout.count("OLD_EXIT:") != 1:
+    sys.exit(14)
+sys.exit(0)
+PY
+int_exit42_rc=$?
+
+if [[ "$int_exit42_rc" -eq 0 ]]; then
+  record_pass "caller INT trap with exit 42 ran OLD_EXIT:42 once and preserved exit 42"
+else
+  record_fail "caller INT trap with exit 42 failed (rc=$int_exit42_rc)"
+fi
+
+if [[ ! -d "$path_int_exit42" ]]; then
+  record_pass "scratch dir removed on INT with caller exit 42"
+else
+  record_fail "scratch dir remained after INT with caller exit 42"
+fi
+
+# Prior TERM handler explicit exit 42 chaining test
+path_term_exit42=$(agent_scratch_create "testruntime" "run_term_exit42")
+python3 - "$LIB" "$AGENT_SCRATCH_ROOT" "$path_term_exit42" "$FAKE_ROOT" "$HOME" <<'PY'
+import os, signal, subprocess, sys
+
+lib = sys.argv[1]
+scratch_root = sys.argv[2]
+path_leaf = sys.argv[3]
+fake_root = sys.argv[4]
+fake_home = sys.argv[5]
+
+code = f"""
+export AGENT_SCRATCH_ROOT="{scratch_root}"
+export DISK_MAGICIAN_TEST_SANDBOX="{fake_root}"
+export DISK_MAGICIAN_TEST_CONTEXT=1
+export HOME="{fake_home}"
+source "{lib}"
+trap 'echo OLD_EXIT:$?' EXIT
+trap 'echo SIGNAL_HANDLER; exit 42' TERM
+agent_scratch_trap_cleanup "{path_leaf}"
+echo READY
+while true; do sleep 0.1; done
+"""
+
+proc = subprocess.Popen(["/bin/bash", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+line = proc.stdout.readline()
+if "READY" not in line:
+    sys.exit(10)
+proc.send_signal(signal.SIGTERM)
+stdout, stderr = proc.communicate(timeout=5)
+if proc.returncode != 42:
+    sys.exit(11)
+if "SIGNAL_HANDLER" not in stdout:
+    sys.exit(12)
+if "OLD_EXIT:42" not in stdout:
+    sys.exit(13)
+if stdout.count("OLD_EXIT:") != 1:
+    sys.exit(14)
+sys.exit(0)
+PY
+term_exit42_rc=$?
+
+if [[ "$term_exit42_rc" -eq 0 ]]; then
+  record_pass "caller TERM trap with exit 42 ran OLD_EXIT:42 once and preserved exit 42"
+else
+  record_fail "caller TERM trap with exit 42 failed (rc=$term_exit42_rc)"
+fi
+
+if [[ ! -d "$path_term_exit42" ]]; then
+  record_pass "scratch dir removed on TERM with caller exit 42"
+else
+  record_fail "scratch dir remained after TERM with caller exit 42"
 fi
 
 echo "── 7. Safety gate: protected leaf & unreadable safety file (finding 6) ──"
