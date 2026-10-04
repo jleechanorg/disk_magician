@@ -54,6 +54,7 @@ SNAP_REASON=""
 SNAP_STALE_WARN=""
 SNAP_PARTIAL_WARN=""
 SNAP_SWAP_USED_GB=""
+SNAP_DISPLAY_PATH=""
 
 _cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; return 0; }
 trap _cleanup_snap EXIT
@@ -65,13 +66,16 @@ _load_snapshot() {
     
     local meta
     meta=$(python3 - "$SNAPSHOT_JSON" "$SNAP_CACHE" <<'PY' 2>/dev/null || true
-import json, sys, datetime, re, math
+import json, sys, datetime, re, math, os, unicodedata
 src, cache = sys.argv[1], sys.argv[2]
 try:
     with open(src) as f:
         s = json.load(f)
 except Exception:
     print("ERR\nparse_error"); sys.exit(0)
+
+if not isinstance(s, dict):
+    print("ERR\nnot_a_dict"); sys.exit(0)
 
 raw_cov = s.get("snapshot_coverage_pct", "")
 cov = ""
@@ -93,23 +97,29 @@ def sanitize_str(s):
     out = []
     for c in s:
         code = ord(c)
-        if c == '\x1b':
+        if c == '\\':
+            out.append(r'\\')
+        elif c == '\x1b':
             out.append(r'\e')
         elif c == '\x07':
             out.append(r'\a')
-        elif c in ('\t', '\n', '\r'):
+        elif c == '\t':
+            out.append(r'\t')
+        elif c == '\n':
+            out.append(r'\n')
+        elif c == '\r':
+            out.append(r'\r')
+        elif c == ' ':
             out.append(' ')
-        elif 32 <= code < 127:
-            out.append(c)
-        elif 160 <= code < 0x202a:
-            out.append(c)
-        elif code < 32:
-            out.append(f'\\x{code:02x}')
         else:
-            out.append(f'\\u{code:04x}')
-    return ''.join(out).strip()
+            cat = unicodedata.category(c)
+            if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
+                out.append(f'\\x{code:02x}' if code < 256 else f'\\u{code:04x}')
+            else:
+                out.append(c)
+    return ''.join(out)
 
-warn = sanitize_str(s.get("snapshot_warning", ""))
+warn = sanitize_str(s.get("snapshot_warning", "")).strip()
 ts   = str(s.get("timestamp", "") or "").strip()
 
 raw_swap = s.get("swap_used_gb", "")
@@ -130,23 +140,16 @@ meta_block = s.get("snapshot_metadata") or {}
 if not isinstance(meta_block, dict):
     meta_block = {}
 
-status = sanitize_str(meta_block.get("measurement_status", ""))
+status = sanitize_str(meta_block.get("measurement_status", "")).strip()
 
-dirs = s.get("directories", {}) or {}
+dirs = s.get("directories")
 if isinstance(dirs, dict):
-    seen_keys = set()
     with open(cache, "w") as fh:
         for k, v in dirs.items():
             if v is None:
                 continue
             try:
                 clean_k = sanitize_str(str(k))
-                if clean_k in seen_keys:
-                    idx = 2
-                    while f"{clean_k}#{idx}" in seen_keys:
-                        idx += 1
-                    clean_k = f"{clean_k}#{idx}"
-                seen_keys.add(clean_k)
                 fh.write(f"{clean_k}\t{int(v)}\n")
             except Exception:
                 pass
@@ -170,7 +173,13 @@ try:
 except Exception:
     age_min = "invalid"
 
-for val in ["OK", cov, age_min, warn, status, swap_used_gb]:
+home = os.path.expanduser("~")
+disp_src = src
+if home and disp_src.startswith(home):
+    disp_src = "~" + disp_src[len(home):]
+sanitized_src = sanitize_str(disp_src)
+
+for val in ["OK", cov, age_min, warn, status, swap_used_gb, sanitized_src]:
     print(val)
 PY
 )
@@ -182,6 +191,7 @@ PY
         read -r _warn || true
         read -r SNAP_STATUS || true
         read -r SNAP_SWAP_USED_GB || true
+        read -r SNAP_DISPLAY_PATH || true
     } <<< "$meta"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
@@ -336,7 +346,7 @@ if [[ "$SHOW_DIRECTORY_BREAKDOWN" != true ]]; then
     :
 elif [[ "$SNAP_USABLE" == true ]]; then
     section "Largest directories (snapshot-ranked, top 20)"
-    printf "  Source:   %s\n" "${SNAPSHOT_JSON/#$HOME/~}"
+    printf "  Source:   %s\n" "${SNAP_DISPLAY_PATH:-${SNAPSHOT_JSON/#$HOME/~}}"
     printf "  Coverage: %s%%   Age: %s min\n" "${SNAP_COVERAGE:-?}" "${SNAP_AGE_MIN:-?}"
     if [[ -n "$SNAP_STATUS" ]]; then
         printf "  Snapshot measurement_status: %s\n" "$SNAP_STATUS"

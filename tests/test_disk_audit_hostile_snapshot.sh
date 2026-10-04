@@ -695,5 +695,203 @@ if ! grep -qF "81%" "$OUT_HIST_COLLISION" || ! grep -qF "176G" "$OUT_HIST_COLLIS
   exit 1
 fi
 
+# Case 6: Injective encoding & order-independent identity across git commits in disk_history.sh
+HIST_GIT_DIR="$TMP_DIR/test_git_repo"
+mkdir -p "$HIST_GIT_DIR/backup/test-host"
+git -C "$HIST_GIT_DIR" init -q
+git -C "$HIST_GIT_DIR" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$HIST_GIT_DIR" config user.name "jleechan"
+
+SNAP_GIT_PATH="$HIST_GIT_DIR/backup/test-host/disk_snapshot.json"
+
+# Commit 1: \x1bfoo is 10 GiB, literal \efoo is 1 GiB
+python3 -c "
+import json
+data = {
+    'timestamp': '2026-10-01T00:00:00Z',
+    'disk_total_gb': 926,
+    'disk_used_gb': 750,
+    'disk_free_gb': 176,
+    'disk_pct': 81,
+    'snapshot_coverage_pct': 85.0,
+    'directories': {
+        '\x1bfoo': 10485760,
+        r'\efoo': 1048576
+    }
+}
+with open('$SNAP_GIT_PATH', 'w') as f:
+    json.dump(data, f)
+"
+git -C "$HIST_GIT_DIR" add backup/test-host/disk_snapshot.json
+git -C "$HIST_GIT_DIR" commit -q -m "commit 1"
+
+# Commit 2: Exactly identical sizes, but key order reversed in JSON dictionary
+python3 -c "
+import json
+data = {
+    'timestamp': '2026-10-02T00:00:00Z',
+    'disk_total_gb': 926,
+    'disk_used_gb': 750,
+    'disk_free_gb': 176,
+    'disk_pct': 81,
+    'snapshot_coverage_pct': 85.0,
+    'directories': {
+        r'\efoo': 1048576,
+        '\x1bfoo': 10485760
+    }
+}
+with open('$SNAP_GIT_PATH', 'w') as f:
+    json.dump(data, f)
+"
+git -C "$HIST_GIT_DIR" add backup/test-host/disk_snapshot.json
+git -C "$HIST_GIT_DIR" commit -q -m "commit 2"
+
+OUT_SWAP_ORDER="$TMP_DIR/hist_swap_order.log"
+DISK_SNAPSHOT_JSON="$SNAP_GIT_PATH" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 2 >"$OUT_SWAP_ORDER" 2>&1
+
+# Assert no false regression was reported!
+if grep -qF "<-" "$OUT_SWAP_ORDER"; then
+  echo "FAIL: false regression detected across commits due to swapped key order!" >&2
+  cat "$OUT_SWAP_ORDER" >&2
+  exit 1
+fi
+
+# Assert no artificial #2 suffix exists
+if grep -qF "#2" "$OUT_SWAP_ORDER"; then
+  echo "FAIL: artificial #2 suffix detected in history table!" >&2
+  cat "$OUT_SWAP_ORDER" >&2
+  exit 1
+fi
+
+# Case 7: Hostile snapshot values and structure in disk_history.sh
+SNAP_MALFORMED="$TMP_DIR/snap_malformed.json"
+python3 - "$SNAP_MALFORMED" <<'PY'
+import json, sys
+data = {
+    "timestamp": "2026-10-02T00:00:00Z",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.0,
+    "directories": {
+        "bad_str": "12x",
+        "bad_bool": True,
+        "bad_nan": "nan",
+        "valid_dir": 5242880
+    }
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(data, f)
+PY
+
+OUT_HIST_MALFORMED="$TMP_DIR/hist_malformed.log"
+RC_HIST_MALFORMED=0
+DISK_SNAPSHOT_JSON="$SNAP_MALFORMED" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 1 >"$OUT_HIST_MALFORMED" 2>&1 || RC_HIST_MALFORMED=$?
+
+if [[ $RC_HIST_MALFORMED -ne 0 ]]; then
+  echo "FAIL: disk_history.sh crashed on malformed directory values with code $RC_HIST_MALFORMED" >&2
+  cat "$OUT_HIST_MALFORMED" >&2
+  exit 1
+fi
+
+if ! grep -qF "valid_dir" "$OUT_HIST_MALFORMED" || ! grep -qF "null" "$OUT_HIST_MALFORMED"; then
+  echo "FAIL: valid directory or null placeholder missing from malformed history output" >&2
+  cat "$OUT_HIST_MALFORMED" >&2
+  exit 1
+fi
+
+# Case 7b: Hostile non-dict JSON root in disk_history.sh
+SNAP_LIST_ROOT="$TMP_DIR/snap_list_root.json"
+echo '[1, 2, "not a dict"]' > "$SNAP_LIST_ROOT"
+OUT_HIST_LIST="$TMP_DIR/hist_list.log"
+# Should handle gracefully without unhandled AttributeError
+DISK_SNAPSHOT_JSON="$SNAP_LIST_ROOT" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 1 >"$OUT_HIST_LIST" 2>&1 || true
+if grep -q "AttributeError" "$OUT_HIST_LIST"; then
+  echo "FAIL: disk_history.sh raised AttributeError on non-dict root JSON" >&2
+  cat "$OUT_HIST_LIST" >&2
+  exit 1
+fi
+
+# Case 8: Control-bearing DISK_SNAPSHOT_JSON filename sanitization
+HOSTILE_FILENAME_SNAP="$TMP_DIR/"$'snap_hostile_\x1b[31malert\x07.json'
+cp "$SNAP_SKEW" "$HOSTILE_FILENAME_SNAP"
+
+OUT_AUDIT_FN="$TMP_DIR/audit_fn.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$HOSTILE_FILENAME_SNAP" \
+  bash "$TARGET_SCRIPT" >"$OUT_AUDIT_FN" 2>&1 || true
+
+if python3 -c "import sys; f=open('$OUT_AUDIT_FN', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\x1b' in data or b'\x07' in data) else 1)"; then
+  echo "FAIL: raw ESC or BEL bytes detected in disk_audit.sh output with hostile filename!" >&2
+  cat "$OUT_AUDIT_FN" >&2
+  exit 1
+fi
+
+if ! grep -qF "\\e[31malert\\a" "$OUT_AUDIT_FN"; then
+  echo "FAIL: sanitized filename \\e[31malert\\a not found in disk_audit.sh output" >&2
+  cat "$OUT_AUDIT_FN" >&2
+  exit 1
+fi
+
+OUT_HIST_FN="$TMP_DIR/hist_fn.log"
+DISK_SNAPSHOT_JSON="$HOSTILE_FILENAME_SNAP" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 1 >"$OUT_HIST_FN" 2>&1 || true
+
+if python3 -c "import sys; f=open('$OUT_HIST_FN', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\x1b' in data or b'\x07' in data) else 1)"; then
+  echo "FAIL: raw ESC or BEL bytes detected in disk_history.sh output with hostile filename!" >&2
+  cat "$OUT_HIST_FN" >&2
+  exit 1
+fi
+
+if ! grep -qF "\\e[31malert\\a" "$OUT_HIST_FN"; then
+  echo "FAIL: sanitized filename \\e[31malert\\a not found in disk_history.sh output" >&2
+  cat "$OUT_HIST_FN" >&2
+  exit 1
+fi
+
+# Case 9: Unicode format characters (U+200B, U+200E) and line separators (U+2028)
+SNAP_UNICODE="$TMP_DIR/snap_unicode.json"
+python3 - "$SNAP_UNICODE" "$RECENT_TS" <<'PY'
+import json, sys
+snap = {
+    "timestamp": sys.argv[2],
+    "hostname": "test-host",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {
+        "measurement_status": "complete"
+    },
+    "directories": {
+        "zwsp_\u200b_dir": 1048576,
+        "linesep_\u2028_dir": 2097152,
+        "bidi_\u200e_dir": 3145728
+    }
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(snap, f)
+PY
+
+OUT_AUDIT_UNICODE="$TMP_DIR/audit_unicode.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_UNICODE" \
+  bash "$TARGET_SCRIPT" >"$OUT_AUDIT_UNICODE" 2>&1
+
+if ! grep -qF "zwsp_\\u200b_dir" "$OUT_AUDIT_UNICODE" || \
+   ! grep -qF "linesep_\\u2028_dir" "$OUT_AUDIT_UNICODE" || \
+   ! grep -qF "bidi_\\u200e_dir" "$OUT_AUDIT_UNICODE"; then
+  echo "FAIL: unicode format characters or line separators not safely escaped in audit output" >&2
+  cat "$OUT_AUDIT_UNICODE" >&2
+  exit 1
+fi
+
+# Assert no raw unescaped U+200B, U+2028, or U+200E bytes exist in audit output
+if python3 -c "import sys; f=open('$OUT_AUDIT_UNICODE', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\xe2\x80\x8b' in data or b'\xe2\x80\xa8' in data or b'\xe2\x80\x8e' in data) else 1)"; then
+  echo "FAIL: raw unescaped unicode format/separator bytes found in audit output!" >&2
+  exit 1
+fi
+
 echo "PASS: hostile snapshot injection vectors, terminal escapes, and timestamp gates safely neutralized"
 exit 0

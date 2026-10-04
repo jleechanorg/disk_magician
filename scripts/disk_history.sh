@@ -14,6 +14,7 @@ import subprocess
 import argparse
 import re
 import math
+import unicodedata
 from datetime import datetime, timezone
 
 def run_cmd(cmd, cwd=None):
@@ -29,21 +30,27 @@ def sanitize_str(s):
     out = []
     for c in s:
         code = ord(c)
-        if c == '\x1b':
+        if c == '\\':
+            out.append(r'\\')
+        elif c == '\x1b':
             out.append(r'\e')
         elif c == '\x07':
             out.append(r'\a')
-        elif c in ('\t', '\n', '\r'):
+        elif c == '\t':
+            out.append(r'\t')
+        elif c == '\n':
+            out.append(r'\n')
+        elif c == '\r':
+            out.append(r'\r')
+        elif c == ' ':
             out.append(' ')
-        elif 32 <= code < 127:
-            out.append(c)
-        elif 160 <= code < 0x202a:
-            out.append(c)
-        elif code < 32:
-            out.append(f'\\x{code:02x}')
         else:
-            out.append(f'\\u{code:04x}')
-    return ''.join(out).strip()
+            cat = unicodedata.category(c)
+            if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
+                out.append(f'\\x{code:02x}' if code < 256 else f'\\u{code:04x}')
+            else:
+                out.append(c)
+    return ''.join(out)
 
 def fmt_kb(kb):
     gb = kb / 1024 / 1024
@@ -135,7 +142,7 @@ def main():
         commits.insert(0, ("WORKING", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")))
 
     if not commits:
-        print(f"No snapshots found in git history for {rel_path}", file=sys.stderr)
+        print(f"No snapshots found in git history for {sanitize_str(rel_path)}", file=sys.stderr)
         sys.exit(1)
 
     # We need to process commits from oldest to newest to track changes
@@ -157,16 +164,31 @@ def main():
             except Exception:
                 continue
 
-        raw_dirs = data.get("directories", {})
+        if not isinstance(data, dict):
+            continue
+
+        raw_dirs = data.get("directories")
+        if not isinstance(raw_dirs, dict):
+            raw_dirs = {}
         dirs = {}
         for k, v in raw_dirs.items():
             clean_k = sanitize_str(str(k))
-            if clean_k in dirs:
-                idx = 2
-                while f"{clean_k}#{idx}" in dirs:
-                    idx += 1
-                clean_k = f"{clean_k}#{idx}"
-            dirs[clean_k] = v
+            val_num = None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                try:
+                    fval = float(v)
+                    if math.isfinite(fval):
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            elif isinstance(v, str):
+                try:
+                    fval = float(v.strip())
+                    if math.isfinite(fval):
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            dirs[clean_k] = val_num
         all_keys.update(dirs.keys())
         try:
             ts_obj = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -310,7 +332,7 @@ def main():
                 print(f"  (skipped {len(no_data)} dirs with <3 numeric samples: {', '.join(no_data[:5])}{'...' if len(no_data) > 5 else ''})",
                       file=sys.stderr)
         # growth_rate mode prints its own table; do not also print the row table.
-        print(f"\nSource: git log -- {rel_path} ({len(commits)} snapshots shown)")
+        print(f"\nSource: git log -- {sanitize_str(rel_path)} ({len(commits)} snapshots shown)")
         return
 
     # Select top keys based on current size
@@ -386,7 +408,7 @@ def main():
         prev_coverage = snap["coverage"]
 
     print(f"\nLegend: sizes in KB. Regression = grew >1GB or >50% vs previous snapshot.")
-    print(f"Source: git log -- {rel_path} ({len(commits)} snapshots shown)")
+    print(f"Source: git log -- {sanitize_str(rel_path)} ({len(commits)} snapshots shown)")
 
 if __name__ == "__main__":
     main()
