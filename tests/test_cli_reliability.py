@@ -39,7 +39,11 @@ class ReliabilityDispatchTests(unittest.TestCase):
                     program = "#!/bin/bash\nexec python3 - \"$@\" <<'PY'\n" + program + "PY\n"
                 path.write_text(program)
                 path.chmod(0o755)
-                env = dict(os.environ, HOME=str(root), DISK_MAGICIAN_STATE_DIR="state with spaces")
+                env = dict(
+                    os.environ, HOME=str(root), DISK_MAGICIAN_STATE_DIR="state with spaces",
+                    DISK_MAGICIAN_TEST_CONTEXT="cli-dispatch-fixture",
+                    DISK_MAGICIAN_TEST_SANDBOX=str(root),
+                )
                 env["PATH"] = "/bin:/usr/bin:" + os.environ.get("PATH", "")
                 with self.subTest(command=command):
                     result = subprocess.run(
