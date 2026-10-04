@@ -1237,16 +1237,20 @@ rm -f "$CP_FLAG"
 
 cat > "$STAT_SHIM_DIR/sqlite3" <<SHIM
 #!/bin/bash
+"$REAL_SQLITE3" "\$@"
+sqlite_rc=\$?
 if [[ "\$*" == *"wal_checkpoint"* ]]; then
-  touch "$CP_FLAG"
+  # Inject the retained-WAL metadata fixture after the real checkpoint.
+  touch "$WAL18" "$CP_FLAG"
 fi
-exec "$REAL_SQLITE3" "\$@"
+exit "\$sqlite_rc"
 SHIM
 chmod +x "$STAT_SHIM_DIR/sqlite3"
 
 cat > "$STAT_SHIM_DIR/stat" <<SHIM
 #!/bin/bash
 if [[ -f "$CP_FLAG" && "\$*" == *"$WAL18"* && ( "\$*" == *"-f%z"* || "\$*" == *"-c%s"* ) ]]; then
+  touch "$TMP_DIR/stat18_failed"
   exit 1
 fi
 exec "$REAL_STAT" "\$@"
@@ -1258,6 +1262,8 @@ OUT18=$(PATH="$STAT_SHIM_DIR:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DI
 RC18=$?
 set -e
 
+expect_eq "real checkpoint completed before WAL fault" "1" "$([[ -f "$CP_FLAG" ]] && echo 1 || echo 0)"
+expect_eq "retained WAL metadata failure was exercised" "1" "$([[ -f "$TMP_DIR/stat18_failed" ]] && echo 1 || echo 0)"
 expect_gt "unstatable retained WAL poststate exits non-zero" "$RC18" 0
 expect_not "no clean summary on unstatable WAL" "[clean]" "$OUT18"
 expect_not "no vacuum complete summary on unstatable WAL" "Codex DB vacuum complete" "$OUT18"
