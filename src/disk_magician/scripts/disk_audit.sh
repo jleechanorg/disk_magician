@@ -48,7 +48,6 @@ fi
 SNAP_USABLE=false
 SNAP_COVERAGE=""
 SNAP_AGE_MIN=""
-SNAP_AGE_SEC=""
 SNAP_STATUS=""
 SNAP_CACHE=""
 SNAP_REASON=""
@@ -149,7 +148,7 @@ PY
         read -r SNAP_COVERAGE || true
         read -r SNAP_AGE_MIN || true
         read -r _warn || true
-        read -r SNAP_AGE_SEC || true
+        read -r _snap_age_sec || true
         read -r SNAP_STATUS || true
         read -r SNAP_SWAP_USED_GB || true
     } <<< "$meta"
