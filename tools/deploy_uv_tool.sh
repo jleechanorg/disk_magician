@@ -163,15 +163,19 @@ def package_hashes(root):
     return hashes
 
 source_is_still_pinned()
+verified_hashes = package_hashes(os.path.join(source_root, "src", "disk_magician"))
+if not verified_hashes or package_hashes(package_root) != verified_hashes:
+    raise RuntimeError("deployed package changed before receipt publication")
+source_is_still_pinned()
 payload = {
     "schema_version": 1,
     "source_sha": expected_sha,
     "installed_version": installed_version,
     "deployed_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "package_root": os.path.realpath(package_root),
-    "package_hashes": package_hashes(package_root),
+    "package_hashes": verified_hashes,
     "source_root": os.path.realpath(source_root),
-    "override_state": "none",
+    "override_state": False,
 }
 
 state_dir = os.path.dirname(os.path.realpath(receipt_path))
