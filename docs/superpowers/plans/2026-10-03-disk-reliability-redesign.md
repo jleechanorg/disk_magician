@@ -332,7 +332,7 @@ Expected: all pass, including malformed plist and missing-label protections.
 
 - Modify: `disk_magician.sh` to dispatch `status` without cleanup or repair.
 - Create: Python 3 standard-library `scripts/disk_status.py`.
-- Create: `tests/test_disk_status.sh`
+- Create: `tests/test_cli_reliability.py`
 - Create: `tests/test_disk_status.py`
 
 **Step 1: Write RED fixtures.** Provide fixture outputs for healthy, stale

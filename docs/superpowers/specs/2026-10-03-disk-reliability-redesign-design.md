@@ -27,9 +27,11 @@ then advanced to the historical review context `88b6bffb3da191834f68979abd932e93
 at 22:46Z with reviewed file hashes unchanged. Before implementation or each
 verification round, re-pin the actual source with `git rev-parse HEAD` and
 `git status --short`; do not treat that historical SHA as the current head.
-The pre-existing production work is now committed; these planning documents
-remain untracked. Production activation, heavy scans, and multi-hour
-validation remain gated by the safety tasks and the five exit criteria.
+At the original review snapshot, the pre-existing production work was
+committed and these planning documents were untracked. The documents are now
+tracked and implementation is authorized. Production activation, heavy scans,
+and multi-hour validation remain governed by the safety tasks and five exit
+criteria.
 
 ## Failure contract
 
