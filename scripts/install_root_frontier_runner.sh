@@ -55,6 +55,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   LIBEXEC_DIR="${DISK_MAGICIAN_LIBEXEC_DIR:-$LIBEXEC_DIR}"
   STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$STATE_DIR}"
 fi
+LAUNCHER_SRC="$REPO_ROOT/launchd/diskm_root_launcher.c"
 PLIST_DST="/Library/LaunchDaemons/com.jleechanorg.disk-magician-frontier-root.plist"
 PLIST_TEMPLATE="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-frontier-root.plist.template"
 
@@ -119,6 +120,7 @@ assert_safe_install_target "$STATE_DIR"
 if [[ "$DRY_RUN" == true ]]; then
   echo "[dry-run] Would create directory: $LIBEXEC_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would copy $REPO_ROOT/scripts/disk_frontier_scan.py -> $LIBEXEC_DIR/disk_frontier_scan.py (mode: 0755)"
+  echo "[dry-run] Would build FDA launcher $LAUNCHER_SRC -> $LIBEXEC_DIR/diskm (mode: 0755, rebuilt only when source changes)"
   echo "[dry-run] Would create directory: $STATE_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would install LaunchDaemon: $PLIST_DST"
   exit 0
@@ -148,6 +150,21 @@ cp "$REPO_ROOT/scripts/disk_frontier_scan.py" "$LIBEXEC_DIR/disk_frontier_scan.p
 chown root:wheel "$LIBEXEC_DIR/disk_frontier_scan.py"
 chmod 755 "$LIBEXEC_DIR/disk_frontier_scan.py"
 
+# FDA launcher: macOS TCC keys an ad-hoc signature by cdhash, so rebuilding
+# would silently void the user's Full Disk Access grant. Rebuild only when
+# the launcher source changes, and say so when it does.
+launcher_sha="$(shasum -a 256 "$LAUNCHER_SRC" | awk '{print $1}')"
+if [[ ! -x "$LIBEXEC_DIR/diskm" || "$(cat "$LIBEXEC_DIR/diskm.src.sha256" 2>/dev/null)" != "$launcher_sha" ]]; then
+  rm -f "$LIBEXEC_DIR/diskm.new" "$LIBEXEC_DIR/diskm.src.sha256"
+  /usr/bin/clang -O2 -Wall -o "$LIBEXEC_DIR/diskm.new" "$LAUNCHER_SRC"
+  /usr/bin/codesign --force --sign - --identifier com.jleechanorg.diskm "$LIBEXEC_DIR/diskm.new"
+  chown root:wheel "$LIBEXEC_DIR/diskm.new"
+  chmod 755 "$LIBEXEC_DIR/diskm.new"
+  mv -f "$LIBEXEC_DIR/diskm.new" "$LIBEXEC_DIR/diskm"
+  echo "$launcher_sha" > "$LIBEXEC_DIR/diskm.src.sha256"
+  echo "NOTICE: launcher (re)built. Grant Full Disk Access to $LIBEXEC_DIR/diskm in System Settings > Privacy & Security > Full Disk Access."
+fi
+
 mkdir -p "$STATE_DIR"
 if [[ -L "$STATE_DIR" ]]; then
   echo "Error: $STATE_DIR became a symlink after creation — aborting" >&2
@@ -160,8 +177,8 @@ chmod 755 "$STATE_DIR"
 # installed scanner BEFORE registering the LaunchDaemon — otherwise a
 # missing/incompatible /usr/bin/python3 only surfaces as a silent nightly
 # launchd failure, not an install-time error.
-if ! /usr/bin/python3 "$LIBEXEC_DIR/disk_frontier_scan.py" --help >/dev/null 2>&1; then
-  echo "Error: /usr/bin/python3 cannot execute $LIBEXEC_DIR/disk_frontier_scan.py — aborting before daemon install" >&2
+if ! "$LIBEXEC_DIR/diskm" --help >/dev/null 2>&1; then
+  echo "Error: $LIBEXEC_DIR/diskm cannot execute $LIBEXEC_DIR/disk_frontier_scan.py — aborting before daemon install" >&2
   exit 1
 fi
 

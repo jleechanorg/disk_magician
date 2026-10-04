@@ -30,6 +30,7 @@ PATTERNS=(
   "scripts/lib/*.sh"
   "launchd/*.plist"
   "launchd/*.plist.template"
+  "launchd/*.c"
 )
 
 drift=()
