@@ -12,16 +12,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DRY_RUN=true
 THRESHOLD_DAYS=7
-BRAIN_DIR="${HOME}/.gemini/antigravity-cli/brain"
+BRAIN_DIR="${DISK_MAGICIAN_BRAIN_DIR_OVERRIDE:-${HOME}/.gemini/antigravity-cli/brain}"
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--clean] [--dry-run] [--days N] [--brain-dir PATH] [-h|--help]
 
 Safe compaction and retention tool for Antigravity brain:
-  - Losslessly compresses stale task-*.log and transcript_full.jsonl (>N days)
-  - Cleans stale scratch files in completed sessions (>N days)
-  - Prunes empty 0-byte abandoned session dirs (>N days)
+  - Losslessly compresses stale task-*.log and transcript_full.jsonl (>=N days)
+  - Cleans stale scratch files in completed sessions (>=N days)
+  - Prunes empty 0-byte abandoned session dirs (>=N days)
   - Preserves 100% of active sessions (<24h), user-facing markdown artifacts, and recent logs
 
 Options:

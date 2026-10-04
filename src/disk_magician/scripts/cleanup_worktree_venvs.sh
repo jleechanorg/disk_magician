@@ -52,8 +52,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
-ROOTS=("$HOME/projects")
-[[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
+if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
+  IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
+else
+  ROOTS=("$HOME/projects")
+  [[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
+fi
 PURGE_BAK_DAYS=""
 
 # Concurrency lock (bead disk_magician-w7m). Overridable for tests via
