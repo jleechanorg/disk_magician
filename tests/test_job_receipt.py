@@ -232,7 +232,7 @@ class TestJobReceipt(unittest.TestCase):
         self.assertIn("ended_at", rec["times"])
         self.assertIn("duration_seconds", rec["times"])
         self.assertIsInstance(rec["times"]["duration_seconds"], (int, float))
-        self.assertEqual(rec["installed_revision"], "abc1234")
+        self.assertIsNone(rec["installed_revision"])
         self.assertEqual(rec["trigger"], "scheduled")
         self.assertEqual(rec["outcome"], "success")
 
@@ -418,55 +418,152 @@ class TestJobReceipt(unittest.TestCase):
         self.assertIsNone(job_receipt._parse_json_arg(None))
         self.assertIsNone(job_receipt._parse_json_arg(""))
 
+    def test_identity_deployed_different_root_not_installed_package(self):
+        """Blocker A: deployed.json points at /different/root with empty manifest must NOT return installed_package."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        deployed_path = os.path.join(self.state_dir, "deployed.json")
+        with open(deployed_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "source_sha": "fake_foreign_sha_9999",
+                    "installed_version": "9.9.9",
+                    "deployed_at": "2026-10-03T00:00:00Z",
+                    "package_root": "/different/root/that/does/not/match",
+                    "package_hashes": {},
+                },
+                f,
+            )
+
+        identity = job_receipt.resolve_identity(state_dir=Path(self.state_dir))
+        self.assertNotEqual(identity.get("kind"), "installed_package")
+        self.assertIsNone(identity.get("installed_revision"))
+
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        run_id = store.begin("ident_job")
+        rec = store.finish("ident_job", run_id=run_id, outcome="success")
+        self.assertIsNone(rec.get("installed_revision"))
+
+    def test_identity_deployed_same_root_mismatched_helper_hash(self):
+        """Blocker A: same-root deployed.json with mismatched helper-hash must return unknown."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        deployed_path = os.path.join(self.state_dir, "deployed.json")
+        helper_path = (SCRIPTS_DIR / "job_receipt.py").resolve()
+        helper_root = helper_path.parent.parent
+
+        with open(deployed_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "source_sha": "mismatched_sha_1234",
+                    "installed_version": "1.0.0",
+                    "deployed_at": "2026-10-03T00:00:00Z",
+                    "package_root": str(helper_root),
+                    "package_hashes": {
+                        "scripts/job_receipt.py": "0000000000000000000000000000000000000000000000000000000000000000"
+                    },
+                },
+                f,
+            )
+
+        identity = job_receipt.resolve_identity(
+            state_dir=Path(self.state_dir), helper_path_override=helper_path
+        )
+        self.assertEqual(identity.get("kind"), "unknown")
+        self.assertIsNone(identity.get("installed_revision"))
+
+    def test_identity_deployed_matching_root_and_correct_hashes(self):
+        """Blocker A: matching actual root and correct listed helper hashes returns verified installed_package."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        deployed_path = os.path.join(self.state_dir, "deployed.json")
+        helper_path = (SCRIPTS_DIR / "job_receipt.py").resolve()
+        helper_root = helper_path.parent.parent
+        actual_hash = job_receipt.sha256_file(helper_path)
+
+        with open(deployed_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "source_sha": "verified_deploy_sha_5678",
+                    "installed_version": "2.0.0",
+                    "deployed_at": "2026-10-03T00:00:00Z",
+                    "package_root": str(helper_root),
+                    "package_hashes": {
+                        "scripts/job_receipt.py": actual_hash,
+                    },
+                },
+                f,
+            )
+
+        identity = job_receipt.resolve_identity(
+            state_dir=Path(self.state_dir), helper_path_override=helper_path
+        )
+        self.assertEqual(identity.get("kind"), "installed_package")
+        self.assertEqual(identity.get("source_sha"), "verified_deploy_sha_5678")
+        self.assertEqual(identity.get("installed_revision"), "verified_deploy_sha_5678")
+
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        run_id = store.begin("verified_deploy_job")
+        rec = store.finish("verified_deploy_job", run_id=run_id, outcome="success")
+        self.assertEqual(rec.get("installed_revision"), "verified_deploy_sha_5678")
+
     def test_concurrent_subprocess_writers(self):
-        """Review item 5: simultaneous subprocess writers begin/finish/skip prove no lost state."""
-        cli = str(SCRIPTS_DIR / "job_receipt.py")
-        env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": self.state_dir}
+        """Blocker B: 5 success + 30 skip terminals: exactly 35 completed, 5 success, 30 skipped_lock, 35 unique IDs."""
+        cli = str((SCRIPTS_DIR / "job_receipt.py").resolve())
+        child_env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": self.state_dir}
 
         p_active = subprocess.run(
             [sys.executable, cli, "begin", "--job", "concur_job", "--trigger", "active_writer"],
             capture_output=True,
             text=True,
-            env=env,
+            env=child_env,
         )
         self.assertEqual(p_active.returncode, 0)
         active_id = p_active.stdout.strip()
 
-        # Worker 1: repeatedly does begin -> finish
-        writer_code = f"""
+        # Worker 1: 5 writer begin -> finish
+        writer_code = """
 import subprocess, sys
-cli = {repr(cli)}
-env = {repr(env)}
+cli = sys.argv[1]
 for i in range(5):
-    p = subprocess.run([sys.executable, cli, "begin", "--job", "concur_job", "--trigger", f"worker_{{i}}"], capture_output=True, text=True, check=True, env=env)
+    p = subprocess.run([sys.executable, cli, "begin", "--job", "concur_job", "--trigger", f"worker_{i}"], capture_output=True, text=True, check=True)
     rid = p.stdout.strip()
-    subprocess.run([sys.executable, cli, "finish", "--job", "concur_job", "--run-id", rid, "--outcome", "success"], check=True, env=env)
+    subprocess.run([sys.executable, cli, "finish", "--job", "concur_job", "--run-id", rid, "--outcome", "success"], check=True)
 """
-        # Workers 2, 3, 4: repeatedly do skip (contenders hitting lock)
-        skipper_code = f"""
+        # Workers 2, 3, 4: 10 skips each (30 skips total)
+        skipper_code = """
 import subprocess, sys
-cli = {repr(cli)}
-env = {repr(env)}
+cli = sys.argv[1]
 for i in range(10):
-    subprocess.run([sys.executable, cli, "skip", "--job", "concur_job", "--outcome", "skipped_lock", "--reason", f"contention_{{i}}"], check=True, env=env)
+    subprocess.run([sys.executable, cli, "skip", "--job", "concur_job", "--outcome", "skipped_lock", "--reason", f"contention_{i}"], check=True)
 """
         workers = [
-            subprocess.Popen([sys.executable, "-c", writer_code]),
-            subprocess.Popen([sys.executable, "-c", skipper_code]),
-            subprocess.Popen([sys.executable, "-c", skipper_code]),
-            subprocess.Popen([sys.executable, "-c", skipper_code]),
+            subprocess.Popen([sys.executable, "-c", writer_code, cli], env=child_env),
+            subprocess.Popen([sys.executable, "-c", skipper_code, cli], env=child_env),
+            subprocess.Popen([sys.executable, "-c", skipper_code, cli], env=child_env),
+            subprocess.Popen([sys.executable, "-c", skipper_code, cli], env=child_env),
         ]
 
         for w in workers:
-            w.wait()
+            w.wait(timeout=30)
             self.assertEqual(w.returncode, 0)
 
         store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
         data = store.read("concur_job")
+
         active_ids = [a["id"] for a in data["active"]]
         self.assertIn(active_id, active_ids)
-        self.assertLessEqual(len(data["completed"]), 64)
-        self.assertGreaterEqual(len(data["completed"]), 20)
+
+        # Assert EXACTLY 35 completed
+        self.assertEqual(len(data["completed"]), 35)
+        successes = [c for c in data["completed"] if c["outcome"] == "success"]
+        skips = [c for c in data["completed"] if c["outcome"] == "skipped_lock"]
+        self.assertEqual(len(successes), 5)
+        self.assertEqual(len(skips), 30)
+
+        completed_ids = [c["id"] for c in data["completed"]]
+        self.assertEqual(len(set(completed_ids)), 35)
+
         self.assertIsNotNone(data["last_terminal"])
         self.assertIsNotNone(data["last_success"])
         self.assertIsNotNone(data["last_skipped"])
