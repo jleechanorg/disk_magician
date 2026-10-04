@@ -48,13 +48,13 @@ fi
 SNAP_USABLE=false
 SNAP_COVERAGE=""
 SNAP_AGE_MIN=""
-SNAP_AGE_SEC=""
 SNAP_STATUS=""
 SNAP_CACHE=""
 SNAP_REASON=""
 SNAP_STALE_WARN=""
 SNAP_PARTIAL_WARN=""
 SNAP_SWAP_USED_GB=""
+SNAP_DISPLAY_PATH=""
 
 _cleanup_snap() { [[ -n "$SNAP_CACHE" && -f "$SNAP_CACHE" ]] && rm -f "$SNAP_CACHE"; return 0; }
 trap _cleanup_snap EXIT
@@ -66,51 +66,162 @@ _load_snapshot() {
     
     local meta
     meta=$(python3 - "$SNAPSHOT_JSON" "$SNAP_CACHE" <<'PY' 2>/dev/null || true
-import json, sys, datetime
+import json, sys, datetime, re, math, os, unicodedata
 src, cache = sys.argv[1], sys.argv[2]
 try:
-    s = json.load(open(src))
+    with open(src) as f:
+        s = json.load(f)
 except Exception:
-    print("ERR\t\t\t\tparse_error"); sys.exit(0)
-cov  = s.get("snapshot_coverage_pct", "")
-warn = s.get("snapshot_warning", "") or ""
-ts   = s.get("timestamp", "") or ""
-# Additive (bead disk_magician-8to); absent on pre-swap-tracking snapshots.
-swap_used_gb = s.get("swap_used_gb", "")
-# snapshot_metadata is the new top-level block (Lane B Section C).
-# Fall back to old fields for backward compat with pre-metadata
-# snapshots — that's the whole point of additive JSON changes.
+    print("ERR\nparse_error"); sys.exit(0)
+
+if not isinstance(s, dict):
+    print("ERR\nnot_a_dict"); sys.exit(0)
+
+raw_cov = s.get("snapshot_coverage_pct", "")
+cov = ""
+try:
+    if isinstance(raw_cov, (int, float)) and not isinstance(raw_cov, bool):
+        val = float(raw_cov)
+        if math.isfinite(val) and 0.0 <= val <= 100.0:
+            cov = str(raw_cov)
+    elif isinstance(raw_cov, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_cov.strip()):
+        val = float(raw_cov.strip())
+        if math.isfinite(val) and 0.0 <= val <= 100.0:
+            cov = str(val)
+except Exception:
+    cov = ""
+
+def sanitize_str(s):
+    if not isinstance(s, str):
+        return ""
+    out = []
+    for c in s:
+        code = ord(c)
+        if c == '\\':
+            out.append(r'\\')
+        elif c == '\x1b':
+            out.append(r'\e')
+        elif c == '\x07':
+            out.append(r'\a')
+        elif c == '\t':
+            out.append(r'\t')
+        elif c == '\n':
+            out.append(r'\n')
+        elif c == '\r':
+            out.append(r'\r')
+        elif c == ' ':
+            out.append(' ')
+        else:
+            cat = unicodedata.category(c)
+            if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
+                if code < 256:
+                    out.append(f'\\x{code:02x}')
+                elif code < 0x10000:
+                    out.append(f'\\u{code:04x}')
+                else:
+                    out.append(f'\\U{code:08x}')
+            else:
+                out.append(c)
+    return ''.join(out)
+
+warn = sanitize_str(s.get("snapshot_warning", "")).strip()
+ts   = str(s.get("timestamp", "") or "").strip()
+
+raw_swap = s.get("swap_used_gb", "")
+swap_used_gb = ""
+try:
+    if isinstance(raw_swap, (int, float)) and not isinstance(raw_swap, bool):
+        val = float(raw_swap)
+        if math.isfinite(val) and val >= 0.0:
+            swap_used_gb = str(raw_swap)
+    elif isinstance(raw_swap, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', str(raw_swap).strip()):
+        val = float(str(raw_swap).strip())
+        if math.isfinite(val) and val >= 0.0:
+            swap_used_gb = str(val)
+except Exception:
+    swap_used_gb = ""
+
 meta_block = s.get("snapshot_metadata") or {}
-status = meta_block.get("measurement_status", "")
-age_sec = meta_block.get("age_seconds", "")
-dirs = s.get("directories", {}) or {}
-with open(cache, "w") as fh:
-    for k, v in dirs.items():
-        if v is None:
-            continue
-        try:
-            fh.write(f"{k}\t{int(v)}\n")
-        except Exception:
-            pass
+if not isinstance(meta_block, dict):
+    meta_block = {}
+
+status = sanitize_str(meta_block.get("measurement_status", "")).strip()
+
+dirs = s.get("directories")
+if isinstance(dirs, dict):
+    with open(cache, "w") as fh:
+        for k, v in dirs.items():
+            if v is None:
+                continue
+            val_num = None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                try:
+                    fval = float(v)
+                    if math.isfinite(fval) and fval >= 0.0:
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            elif isinstance(v, str):
+                try:
+                    fval = float(v.strip())
+                    if math.isfinite(fval) and fval >= 0.0:
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            if val_num is not None:
+                try:
+                    clean_k = sanitize_str(str(k))
+                    fh.write(f"{clean_k}\t{val_num}\n")
+                except Exception:
+                    pass
+
 age_min = ""
 try:
-    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    age_min = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
+    if ts and isinstance(ts, str):
+        ts_clean = ts.strip()
+        if ts_clean.endswith("Z"):
+            ts_clean = ts_clean[:-1] + "+00:00"
+        t = datetime.datetime.fromisoformat(ts_clean)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        sec = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+        if sec >= -120:
+            age_min = str(int(max(0.0, sec) // 60))
+        else:
+            age_min = "future"
+    else:
+        age_min = "invalid"
 except Exception:
-    pass
-print(f"OK\t{cov}\t{age_min}\t{warn}\t{age_sec}\t{status}\t{swap_used_gb}")
+    age_min = "invalid"
+
+home = os.path.expanduser("~")
+disp_src = src
+if home and disp_src.startswith(home):
+    disp_src = "~" + disp_src[len(home):]
+sanitized_src = sanitize_str(disp_src)
+
+for val in ["OK", cov, age_min, warn, status, swap_used_gb, sanitized_src]:
+    print(val)
 PY
 )
     local _status _warn
-    # Use awk to split the tab-separated meta line into named shell
-    # variables. bash `read` with `<<<` collapses trailing empty fields,
-    # so we cannot rely on positional reads when the 4th field
-    # (snapshot_warning) is empty. awk preserves every column.
-    eval "$(printf '%s' "$meta" | awk -F'\t' '{
-        printf("_status=%s\nSNAP_COVERAGE=%s\nSNAP_AGE_MIN=%s\n_warn=%s\nSNAP_AGE_SEC=%s\nSNAP_STATUS=%s\nSNAP_SWAP_USED_GB=%s\n", $1, $2, $3, $4, $5, $6, $7)
-    }')"
+    {
+        read -r _status || true
+        read -r SNAP_COVERAGE || true
+        read -r SNAP_AGE_MIN || true
+        read -r _warn || true
+        read -r SNAP_STATUS || true
+        read -r SNAP_SWAP_USED_GB || true
+        read -r SNAP_DISPLAY_PATH || true
+    } <<< "$meta"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
+    fi
+    if [[ -z "$SNAP_AGE_MIN" || "$SNAP_AGE_MIN" == "invalid" ]]; then
+        SNAP_REASON="timestamp missing or invalid"; return 1
+    fi
+    if [[ "$SNAP_AGE_MIN" == "future" ]]; then
+        SNAP_REASON="timestamp is in the future"; return 1
     fi
     # Coverage gates (float-safe; avoid bash ${var%.*} truncating 69.8 → 69):
     #   < 50%  — hard reject (unusable snapshot)
@@ -118,16 +229,19 @@ PY
     #   ≥ 65%  — accept with partial-coverage warning when < 70% or low_coverage flag
     local min_cov="${DISK_MAGICIAN_MIN_COVERAGE:-65}"
     local hard_floor=50
-    if ! awk -v c="${SNAP_COVERAGE:-0}" "BEGIN{exit !(c+0 >= 0)}"; then
-        SNAP_REASON="coverage invalid (${SNAP_COVERAGE:-?})"; return 1
+    if [[ -z "$SNAP_COVERAGE" ]]; then
+        SNAP_REASON="coverage missing or invalid"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${hard_floor} — re-measuring live"; return 1
+    if ! awk -v c="$SNAP_COVERAGE" "BEGIN{exit !(c+0 >= 0 && c+0 <= 100)}"; then
+        SNAP_REASON="coverage invalid (${SNAP_COVERAGE})"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE:-?}% < ${min_cov} — re-measuring live"; return 1
+    if awk -v c="$SNAP_COVERAGE" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${hard_floor}"; return 1
     fi
-    if awk -v c="${SNAP_COVERAGE:-0}" 'BEGIN{exit !(c+0 < 70)}'; then
+    if awk -v c="$SNAP_COVERAGE" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${min_cov}"; return 1
+    fi
+    if awk -v c="$SNAP_COVERAGE" 'BEGIN{exit !(c+0 < 70)}'; then
         SNAP_PARTIAL_WARN="partial coverage ${SNAP_COVERAGE}% (<70% — some paths timed out)"
     fi
     if [[ "$_warn" == *"low_coverage"* ]]; then
@@ -253,7 +367,7 @@ if [[ "$SHOW_DIRECTORY_BREAKDOWN" != true ]]; then
     :
 elif [[ "$SNAP_USABLE" == true ]]; then
     section "Largest directories (snapshot-ranked, top 20)"
-    printf "  Source:   %s\n" "${SNAPSHOT_JSON/#$HOME/~}"
+    printf "  Source:   %s\n" "${SNAP_DISPLAY_PATH:-${SNAPSHOT_JSON/#$HOME/~}}"
     printf "  Coverage: %s%%   Age: %s min\n" "${SNAP_COVERAGE:-?}" "${SNAP_AGE_MIN:-?}"
     if [[ -n "$SNAP_STATUS" ]]; then
         printf "  Snapshot measurement_status: %s\n" "$SNAP_STATUS"
@@ -272,7 +386,7 @@ elif [[ "$SNAP_USABLE" == true ]]; then
         printf "    %-34s %8s\n" "$key" "$(fmt_size "$kb")"
     done
 else
-    section "Directory Breakdown (Live du)"
+    section "Directory Breakdown (Snapshot Unavailable)"
     echo "  Snapshot not usable ($SNAP_REASON). Run snapshot task first."
     if [[ -n "$SNAP_STALE_WARN" ]]; then
         echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
@@ -315,21 +429,22 @@ if command -v docker &>/dev/null; then
 fi
 
 # macOS code_sign_clone caches (Aside, Chrome, Codex, etc.)
-if command -v getconf &>/dev/null; then
-    _user_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
-    if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
-        _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
-        _csc_kb=0
-        _csc_count=0
-        while IFS= read -r -d '' d; do
-            kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
-            [[ "$kb" -lt 102400 ]] && continue
-            _csc_count=$(( _csc_count + 1 ))
-            _csc_kb=$(( _csc_kb + kb ))
-        done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
-        if [[ $_csc_count -gt 0 ]]; then
-            printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
-        fi
+_user_tmp="${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-}"
+if [[ -z "$_user_tmp" ]] && command -v getconf &>/dev/null; then
+    _user_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")"
+fi
+if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
+    _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
+    _csc_kb=0
+    _csc_count=0
+    while IFS= read -r -d '' d; do
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1+0}' || echo 0)
+        [[ "$kb" -lt 102400 ]] && continue
+        _csc_count=$(( _csc_count + 1 ))
+        _csc_kb=$(( _csc_kb + kb ))
+    done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
+    if [[ $_csc_count -gt 0 ]]; then
+        printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
     fi
 fi
 
@@ -354,7 +469,7 @@ fi
 # Codex sessions check
 codex_sessions="$HOME/.codex/sessions"
 if [[ -d "$codex_sessions" ]]; then
-    size_kb=$(du -sk "$codex_sessions" 2>/dev/null | awk '{print $1+0}' || echo 0)
+    size_kb=$(timeout 3s du -sk "$codex_sessions" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if [[ $size_kb -gt $((1 * 1024 * 1024)) ]]; then
         printf "  %-50s %8s  %s\n" "Codex Sessions directory" "$(fmt_size "$size_kb")" "REVIEW: stale session folders"
     fi
@@ -383,7 +498,7 @@ aside_dir="$HOME/.aside"
 if [[ -d "$aside_dir/u" ]]; then
     size_kb=$(du -sk "$aside_dir/u" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if [[ $size_kb -gt $((500 * 1024)) ]]; then
-        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >7d and dedups)"
+        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >=7d and dedups)"
     fi
 fi
 
@@ -525,7 +640,7 @@ if [[ "$MODE" == "clean-all" ]]; then
         echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
-    # Aside browser sessions (prune stale >7d and dedup static assets)
+    # Aside browser sessions (prune stale >=7d and dedup static assets)
     if [[ -f "$SCRIPT_DIR/prune_aside_sessions.sh" ]]; then
         run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
     fi

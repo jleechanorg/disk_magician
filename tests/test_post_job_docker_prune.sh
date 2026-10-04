@@ -433,6 +433,23 @@ assert "rejects unreasonable deadline (>60s)" "true" "$([[ $RC10_HIGH -ne 0 ]] &
 rm -rf "$TMP10"
 
 # ---------------------------------------------------------------------------
+# Test 11: POST_JOB_DOCKER_PRUNE_LOG takes precedence over ambient LOG_FILE.
+echo "=== Test 11: POST_JOB_DOCKER_PRUNE_LOG precedence over LOG_FILE ==="
+TMP11=$(mktemp -d -t dj_prune_t11.XXXXXX)
+LOG11_SPECIFIC="$TMP11/specific.log"
+LOG11_AMBIENT="$TMP11/ambient.log"
+INV11="$TMP11/invocations.log"
+mkdir -p "$TMP11/bin"
+make_mock_docker "$TMP11/bin" "$INV11" "100MB"
+POST_JOB_DOCKER_PRUNE_LOG="$LOG11_SPECIFIC" LOG_FILE="$LOG11_AMBIENT" PATH="$TMP11/bin:$PATH" "$SCRIPT" --dry-run >/dev/null 2>&1
+assert "writes to POST_JOB_DOCKER_PRUNE_LOG" "dry_run: true" "$(cat "$LOG11_SPECIFIC" 2>/dev/null || echo "")"
+if [[ -f "$LOG11_AMBIENT" ]]; then
+  echo "  FAIL Test 11: ambient LOG_FILE should not be written when POST_JOB_DOCKER_PRUNE_LOG is set"
+  exit 1
+fi
+rm -rf "$TMP11"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "PASSED: $TESTS_PASSED / $TESTS_RUN assertions"
 echo "All tests complete."
