@@ -373,6 +373,10 @@ if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
   exit 2
 fi
 target="${!#}"
+if [[ -n "${FAKE_LSOF_DIAGNOSTIC_TARGET:-}" && "$target" == "$FAKE_LSOF_DIAGNOSTIC_TARGET" ]]; then
+  echo "lsof: permission denied while inspecting candidate" >&2
+  exit 1
+fi
 if [[ -n "${FAKE_LSOF_ACTIVE:-}" && "$target" == "$FAKE_LSOF_ACTIVE" ]]; then
   printf 'p4242\ncAsideBrowser\nn%s/blob\n' "$target"
   # macOS lsof can return 1 despite emitting valid +D matches.
@@ -525,6 +529,27 @@ assert_rc "code_sign_clone clean skips when lsof fails" 0 "$RC8_LSOF_FAIL"
 assert_contains "code_sign_clone lsof failure is reported" "Skipping code_sign_clones: lsof failed" "$(cat "$OUT8_LSOF_FAIL")"
 assert_exists "code_sign_clone preserved when lsof fails" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
+# rc=1 with empty stdout is only the normal no-match result when stderr is
+# empty. A permission/error diagnostic must preserve the candidate instead of
+# being misclassified as inactive.
+CSC_DIAG="$TMP_ROOT/csc-lsof-diagnostic"
+CSC_DIAG_CLONE="$CSC_DIAG/X/com.example.PermissionDenied.code_sign_clone"
+mkdir -p "$CSC_DIAG/T" "$CSC_DIAG_CLONE"
+head -c 200000 /dev/zero > "$CSC_DIAG_CLONE/blob"
+CSC_DIAG="$(cd "$CSC_DIAG" && pwd -P)"
+CSC_DIAG_CLONE="$CSC_DIAG/X/com.example.PermissionDenied.code_sign_clone"
+OUT8_LSOF_DIAG="$TMP_ROOT/csc-lsof-diagnostic.out"
+if run_capture "$OUT8_LSOF_DIAG" env -i HOME="$TMP_ROOT/home-csc" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_DIAG/T" \
+  FAKE_LSOF_DIAGNOSTIC_TARGET="$CSC_DIAG_CLONE" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+  RC8_LSOF_DIAG=0
+else RC8_LSOF_DIAG=$?; fi
+assert_rc "code_sign_clone preserves candidate when lsof rc=1 has diagnostics" 0 "$RC8_LSOF_DIAG"
+assert_contains "diagnostic lsof failure is reported" "permission denied" "$(cat "$OUT8_LSOF_DIAG")"
+assert_exists "candidate with lsof diagnostic is preserved" "$CSC_DIAG_CLONE/blob"
+
 OUT8_RACE="$TMP_ROOT/csc-race.out"
 if run_capture "$OUT8_RACE" env -i HOME="$TMP_ROOT/home-csc" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
@@ -635,7 +660,19 @@ PS_TMP="$PS_SANDBOX/tmp"
 PS_USER_TMP="$PS_SANDBOX/user-tmp"
 PS_ARCHIVE_ROOT="$PS_PRIVATE_TMP/_disk_magician_archive"
 PS_DELETION_LOG="$TMP_ROOT/pressure-deletions.log"
-mkdir -p "$PS_PRIVATE_TMP" "$PS_TMP" "$PS_USER_TMP"
+PS_BIN="$TMP_ROOT/bin-pressure"
+mkdir -p "$PS_PRIVATE_TMP" "$PS_TMP" "$PS_USER_TMP" "$PS_SANDBOX/X" "$PS_BIN"
+# Keep the newly delegated code-sign stage inside the fixture too. HOME alone
+# does not redirect getconf DARWIN_USER_TEMP_DIR on macOS.
+cat > "$PS_BIN/getconf" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" ]]; then
+  printf '%s\n' "${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:?}"
+  exit 0
+fi
+exec /usr/bin/getconf "$@"
+EOF
+chmod +x "$PS_BIN/getconf"
 # A stale, oversized top-level fixture dir so the --large branch has real
 # work to do (proves the archive path runs end-to-end against the fixture,
 # not just a no-op scan). LARGE_TMP_MIN_KB is lowered so a small fixture
@@ -672,7 +709,7 @@ if run_capture "$OUT9" env -i HOME="$TMP_ROOT/home-ps" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$PS_ARCHIVE_ROOT" \
   DISK_MAGICIAN_DELETION_LOG="$PS_DELETION_LOG" \
   LARGE_TMP_MIN_KB=100 \
-  PATH="/usr/bin:/bin" bash "$REPO_ROOT/scripts/pressure_sweep.sh"; then
+  PATH="$PS_BIN:/usr/bin:/bin" bash "$REPO_ROOT/scripts/pressure_sweep.sh"; then
   RC9=0
 else RC9=$?; fi
 assert_rc "pressure_sweep triggered path exits 0" 0 "$RC9"
