@@ -67,6 +67,7 @@ $HOME/.claude/supervisor	cleanup_supervisor_logs.sh	SUPERVISOR_DIR, line 15
 $HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
 $HOME/project_worldaiclaw	cleanup_worktree_venvs.sh	ROOTS, line 56
 $HOME/project_worldaiclaw/worldai_claw	cleanup_worktrees.sh	discovered_repos_str, line 76
+$HOME/wc-wt	cleanup_worktree_venvs.sh	ROOTS default, line 60
 $HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
 $HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
 $HOME/projects/*/.claude/worktrees	cleanup_worktree_venvs.sh	worktree_repo_discovery.sh:19,73
@@ -104,6 +105,9 @@ $HOME/Library/Caches/pip	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.dark-factory/runs	cleanup_dark_factory.sh	canonical 30-day retention; per-candidate recency/liveness/safety guards; routine opt-in AGENT_ARTIFACTS_APPROVED
+$HOME/.dark-factory	cleanup_dark_factory.sh	state root for dark-factory runs, controller-snapshots, logs
+$HOME/.local/state/fsevents-projects.log	watch_projects_fsevents.sh	log rotation
+$HOME/.local/state/fsevents-projects.state.json	watch_projects_fsevents.sh	state file
 
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9

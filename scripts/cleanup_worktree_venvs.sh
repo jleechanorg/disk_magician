@@ -57,6 +57,7 @@ if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
 else
   ROOTS=("$HOME/projects")
   [[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
+  [[ -d "$HOME/wc-wt" ]] && ROOTS+=("$HOME/wc-wt")
 fi
 PURGE_BAK_DAYS=""
 

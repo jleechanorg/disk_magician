@@ -48,6 +48,7 @@ Commands:
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
+  cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
 
 Options:
@@ -336,6 +337,9 @@ case "$CMD" in
     ;;
   cleanup_dark_factory|cleanup-dark-factory)
     "$SCRIPT_DIR/scripts/cleanup_dark_factory.sh" "$@"
+    ;;
+  cleanup_code_sign_clones|cleanup-code-sign-clones)
+    "$SCRIPT_DIR/scripts/cleanup_code_sign_clones.sh" "$@"
     ;;
   vacuum_hermes_state|vacuum-hermes-state)
     "$SCRIPT_DIR/scripts/vacuum_hermes_state.sh" "$@"
