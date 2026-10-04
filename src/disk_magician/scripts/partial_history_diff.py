@@ -326,14 +326,14 @@ def validate_partition_proof(
         or not is_normalized_absolute_path(parent)
         or not isinstance(children, list)
         or not children
-        or len(children) != len(set(children))
         or not all(isinstance(c, str) and is_normalized_absolute_path(c) for c in children)
+        or len(children) != len(set(children))
         or disjoint is not True
         or complete is not True
-        or omitted != 0
-        or direct_alloc != 0
+        or type(omitted) is not int or omitted != 0
+        or type(direct_alloc) is not int or direct_alloc != 0
     ):
-        return (parent, False) if parent else (None, None)
+        return (parent, False) if isinstance(parent, str) and parent else (None, None)
 
     parent_prefix = parent if parent == "/" else parent.rstrip("/") + "/"
     if any(not c.startswith(parent_prefix) or c == parent for c in children):
@@ -384,6 +384,8 @@ def validate_partition_proof(
         return parent, False
 
     for c in children:
+        if child_buckets[c].get("method") != parent_buckets[parent].get("method"):
+            return parent, False
         c_ok, _, c_bucket_ts, _ = check_bucket_eligibility(
             child_buckets[c],
             child_ts,
@@ -654,6 +656,8 @@ def compare_ledgers(
 
     # Reconcile Case A: parent in base, children in current
     for parent, children in proven_parents_base_to_cur.items():
+        if parent in invalid_partition_parents:
+            continue
         base_kb = base_buckets[parent]["measured_kb"]
         cur_sum = sum(cur_buckets[c]["measured_kb"] for c in children)
         deltas.append({
@@ -669,6 +673,8 @@ def compare_ledgers(
 
     # Reconcile Case B: children in base, parent in current
     for parent, children in proven_parents_cur_to_base.items():
+        if parent in invalid_partition_parents:
+            continue
         base_sum = sum(base_buckets[c]["measured_kb"] for c in children)
         cur_kb = cur_buckets[parent]["measured_kb"]
         deltas.append({

@@ -377,6 +377,37 @@ class TestPartialHistoryDiff(unittest.TestCase):
         self.assertEqual(res["deltas"][0]["provenance"], "proven_partition_children")
         self.assertEqual(res["unknown"], [])
 
+    def test_partition_rejects_malformed_or_conflicting_proofs(self):
+        proof = {"parent": "/Users/x/p", "children": ["/Users/x/p/a"],
+                 "complete": True, "disjoint": True,
+                 "omitted_tail_kb": 0, "direct_allocation_kb": 0}
+        cases = [
+            ("unhashable child", [dict(proof, children=[{"path": "/Users/x/p/a"}])]),
+            ("boolean tail", [dict(proof, omitted_tail_kb=False)]),
+            ("boolean allocation", [dict(proof, direct_allocation_kb=False)]),
+            ("conflicting proof", [proof, dict(proof, complete=False)]),
+            ("reverse conflict", [dict(proof, complete=False), proof]),
+        ]
+        for label, proofs in cases:
+            with self.subTest(label=label):
+                floor = make_ledger(captured_at="2026-10-01T12:00:00Z",
+                                    buckets=[{"path": "/Users/x/p", "measured_kb": 4000}])
+                current = make_ledger(buckets=[{"path": "/Users/x/p/a", "measured_kb": 4500}],
+                                      partition_proofs=proofs)
+                result = phd.compare_ledgers(floor, current, now=NOW)
+                self.assertEqual(result["deltas"], [])
+                self.assertIn("invalid_partition_proof", [x["reason"] for x in result["unknown"]])
+
+    def test_partition_preserves_measurement_method(self):
+        proof = {"parent": "/Users/x/p", "children": ["/Users/x/p/a"],
+                 "complete": True, "disjoint": True,
+                 "omitted_tail_kb": 0, "direct_allocation_kb": 0}
+        floor = make_ledger(captured_at="2026-10-01T12:00:00Z",
+                            buckets=[{"path": "/Users/x/p", "measured_kb": 4000, "method": "allocated"}])
+        current = make_ledger(buckets=[{"path": "/Users/x/p/a", "measured_kb": 4500, "method": "apparent"}],
+                              partition_proofs=[proof])
+        self.assertEqual(phd.compare_ledgers(floor, current, now=NOW)["deltas"], [])
+
     def test_regression_guard_compute_deltas_never_called_for_partial(self):
         floor = make_ledger(captured_at="2026-10-01T12:00:00Z")
         current = make_ledger(captured_at="2026-10-03T10:00:00Z", mode="partial")
