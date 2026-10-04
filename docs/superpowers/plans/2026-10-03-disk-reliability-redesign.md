@@ -378,6 +378,9 @@ use stable `@HOME@/.local/bin/diskm` with identical arguments and environment:
 - `launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template`
 - `launchd/com.disk-magician.claude-state.plist.template`
 - `launchd/com.disk-magician.codex-vacuum.plist.template`
+- `launchd/com.jleechanorg.disk-magician-drilldown.plist.template`
+  (Task 7 uncovered-root alert owner; route through `diskm residual-drilldown`
+  so the deployed helper actually reaches its scheduled caller)
 
 Update the snapshot plist writer in `disk_magician.sh`
 `run_setup()` (the measured interval is 1,800 seconds) to use the same stable installed `diskm snapshot` entry

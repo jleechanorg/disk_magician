@@ -18,6 +18,7 @@ Commands:
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
+  residual-drilldown Run the scheduled residual and uncovered-root checks.
   pressure-sweep Run the existing free-space-gated maintenance job.
   tmp-scratch-sweep Run the existing scheduled scratch maintenance wrapper.
   clean         Clean safe targets across 6-tier routine stack (caches, temp, Docker, Xcode, worktrees).
@@ -216,6 +217,9 @@ case "$CMD" in
     ;;
   frontier-nightly)
     exec bash "$SCRIPT_DIR/scripts/disk_frontier_scan.sh" "$@"
+    ;;
+  residual-drilldown)
+    exec bash "$SCRIPT_DIR/scripts/residual_drilldown.sh" "$@"
     ;;
   pressure-sweep)
     exec bash "$SCRIPT_DIR/scripts/pressure_sweep.sh" "$@"

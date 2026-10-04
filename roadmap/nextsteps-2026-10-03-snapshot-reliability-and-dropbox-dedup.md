@@ -31,7 +31,7 @@ not authorize resuming unrelated operations. The implementation contract is
 
 The packaged `diskm` entry point shares `disk_magician.cli:main` with
 `disk-magician`; `AGENTS.md` remains a symlink to `CLAUDE.md`. This phase routes
-the primary snapshot and five named scheduled jobs through the installed CLI.
+the primary snapshot and six named scheduled jobs through the installed CLI.
 Other fleet consumers remain visible in the actual installed-plist inventory;
 they are not represented as migrated.
 
@@ -52,7 +52,8 @@ Cleanup changes preserve unknown wiki-publish lifecycles, use the canonical
 Dark Factory cleaner, protect TemporaryItems and every repository container
 from generic scratch-budget deletion, and harden SQLite ownership, leases,
 busy results, and inspection failures. The producer helper owns one private
-scratch leaf and preserves the caller's signal/exit behavior. The 15 GiB
+scratch leaf and preserves the caller's signal/exit behavior. The residual-drilldown uncovered-root alert uses its existing checker and
+reaches the scheduler through the same packaged dispatcher. The 15 GiB
 scheduled scratch budget and bounded codesign stage require these guards.
 No live destructive test or global agent hook is part of this implementation.
 
@@ -73,6 +74,7 @@ runtime completion; do not infer deployment from this document or a commit.
 | `disk_magician-6aa` | Canonical Dark Factory retention: deployed route and later scheduled outcome; fixture success alone does not close it |
 | `disk_magician-asb` | Wheel includes the complete launchd catalog and sweeper registry; deployed manifest matches source |
 | `disk_magician-disk-fill-prevention-scheduled-cleanup-q6l.1` | Nested/recent/dirty repositories remain protected by generic scratch budget; independent fixture verification before activation |
+| `disk_magician-disk-fill-prevention-scheduled-cleanup-q6l.2` | Root owns the 24-hour and seven-day read-only observation windows; pending until real intervals elapse |
 | `disk_magician-4y6` | Root attribution remains a separate privileged-runner follow-up; strict floor may correctly remain unavailable |
 
 1. Freeze the combined source, complete independent semantic and executable

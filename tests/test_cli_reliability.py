@@ -14,6 +14,7 @@ DISPATCH = {
     "status": "disk_status.py",
     "growth-top10": "growth_top10.py",
     "frontier-nightly": "disk_frontier_scan.sh",
+    "residual-drilldown": "residual_drilldown.sh",
     "pressure-sweep": "pressure_sweep.sh",
     "tmp-scratch-sweep": "tmp_scratch_sweep.sh",
     "cleanup-claude-state": "cleanup_claude_state.sh",
@@ -110,6 +111,7 @@ class ReliabilityDispatchTests(unittest.TestCase):
             "com.jleechanorg.disk-magician-frontier-nightly":
                 ["frontier-nightly", "--granularity-gib", "5", "--wall-clock-cap", "43200", "--output-default"],
             "com.jleechanorg.disk-magician-pressure-sweep": ["pressure-sweep"],
+            "com.jleechanorg.disk-magician-drilldown": ["residual-drilldown"],
             "com.jleechanorg.disk-magician-tmp-scratch": ["tmp-scratch-sweep", "--clean"],
             "com.disk-magician.claude-state": ["cleanup-claude-state", "--dry-run"],
             "com.disk-magician.codex-vacuum": ["codex-vacuum", "--clean"],

@@ -217,7 +217,8 @@ SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from
    `src/disk_magician/` — NOT the repo root files.
 2. The snapshot, frontier-nightly, pressure-sweep, tmp-scratch, Claude-state,
-   and Codex-vacuum templates use the installed `diskm` entry point. Other
+   Codex-vacuum, and residual-drilldown templates use the installed `diskm`
+   entry point. Other
    jobs still use **repo-root scripts** (`@REPO_ROOT@` substitution); inspect
    `diskm status --json` for their actual installed paths.
 
