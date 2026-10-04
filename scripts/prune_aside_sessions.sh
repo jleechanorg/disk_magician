@@ -57,15 +57,14 @@ for arg in "$@"; do
   esac
 done
 
-extra_args=()
 if [[ -n "${DISK_MAGICIAN_ASIDE_DIR_OVERRIDE:-}" ]]; then
   has_aside_dir=false
   for arg in "$@"; do
     [[ "$arg" == "--aside-dir" ]] && has_aside_dir=true
   done
   if [[ "$has_aside_dir" == false ]]; then
-    extra_args+=(--aside-dir "$DISK_MAGICIAN_ASIDE_DIR_OVERRIDE")
+    set -- --aside-dir "$DISK_MAGICIAN_ASIDE_DIR_OVERRIDE" "$@"
   fi
 fi
 
-exec "$PYTHON_BIN" "$SCRIPT_DIR/prune_aside_sessions.py" "${extra_args[@]}" "$@"
+exec "$PYTHON_BIN" "$SCRIPT_DIR/prune_aside_sessions.py" "$@"
