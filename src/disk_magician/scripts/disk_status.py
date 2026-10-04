@@ -313,11 +313,14 @@ class DiskStatusEvaluator:
             )
 
         try:
+            fleet_env = os.environ.copy()
+            fleet_env["DISK_MAGICIAN_STATE_DIR"] = str(self.state_dir)
             proc = subprocess.run(
                 ["/bin/bash", str(check_script), "--fleet-only", "--json"],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=fleet_env,
             )
             stdout = proc.stdout.strip()
             if proc.returncode in (0, 1, 2) and stdout.startswith("{"):

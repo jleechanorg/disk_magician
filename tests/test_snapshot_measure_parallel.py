@@ -80,8 +80,8 @@ def build_env(tmp_path):
 def build_real_env(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (bindir / "dua").write_text("#!/usr/bin/env bash\nprintf '%s b total\\n' 2097152\n")
-    (bindir / "dua").chmod(0o755)
+    (bindir / "du").write_text("#!/usr/bin/env bash\nprintf '2048\\t%s\\n' \"${@: -1}\"\n")
+    (bindir / "du").chmod(0o755)
     (tmp_path / "target").mkdir()
     return dict(os.environ, HOME=str(tmp_path), PATH=f"{bindir}:/opt/homebrew/bin:/usr/bin:/bin",
                 DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH="1", DISK_MAGICIAN_LOAD_FACTOR_OVERRIDE="1"), tmp_path

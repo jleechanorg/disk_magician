@@ -19,6 +19,13 @@ import job_inventory
 
 
 class JobInventoryTests(unittest.TestCase):
+    def setUp(self):
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        env = mock.patch.dict(os.environ, {"DISK_MAGICIAN_STATE_DIR": state_dir.name})
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_catalog_is_template_derived_and_matches_compatibility_labels(self):
         records, _ = job_inventory.catalog(ROOT)
         labels = {record["label"] for record in records}

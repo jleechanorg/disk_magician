@@ -20,17 +20,16 @@ cat > "$BIN/df" <<'SH'
 #!/usr/bin/env bash
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1000000000 100000000 900000000 10%% /\n'
 SH
-# dua: STUB_SIZES="suffix:kb,..." ; STUB_TIMEOUT="suffix,..." -> exit 124.
-cat > "$BIN/dua" <<'SH'
+# du: STUB_SIZES="suffix:kb,..." ; STUB_TIMEOUT="suffix,..." -> exit 124.
+cat > "$BIN/du" <<'SH'
 #!/usr/bin/env bash
 p="${@: -1}"
 IFS=, read -ra T <<< "${STUB_TIMEOUT:-}"; for s in "${T[@]}"; do [[ -n "$s" && "$p" == *"$s" ]] && exit 124; done
 IFS=, read -ra Z <<< "${STUB_SIZES:-}"
-for e in "${Z[@]}"; do [[ "$p" == *"${e%%:*}" ]] && { printf '%s b total\n' $(( ${e##*:} * 1024 )); exit 0; }; done
-printf '%s b total\n' 1024
+for e in "${Z[@]}"; do [[ "$p" == *"${e%%:*}" ]] && { printf '%s\t%s\n' "${e##*:}" "$p"; exit 0; }; done
+printf '1\t%s\n' "$p"
 SH
-printf '#!/usr/bin/env bash\nexit 124\n' > "$BIN/du"
-chmod +x "$BIN/df" "$BIN/dua" "$BIN/du"
+chmod +x "$BIN/df" "$BIN/du"
 
 CFG="$WORK/config.json"
 cat > "$CFG" <<JSON

@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SC="$REPO_ROOT/scripts/snapshot_commit.sh"
+FRONTIER_SELECTOR="$REPO_ROOT/scripts/frontier_selection.py"
 TMP_ROOT=$(mktemp -d -t snapshot_commit_test.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 PASS=0; FAIL=0
@@ -30,6 +31,21 @@ run_sc() { # run_sc <home> <args...>
     /bin/bash "$SC" "${@:2}"
 }
 
+run_selector() { # run_selector <root-frontier> <state-frontier>
+  env -i HOME="$TMP_ROOT/selector-home" PATH="/usr/bin:/bin" \
+    DISK_MAGICIAN_FRONTIER_JSON="${DISK_MAGICIAN_FRONTIER_JSON:-}" \
+    DISK_MAGICIAN_FRONTIER_LAST="${DISK_MAGICIAN_FRONTIER_LAST:-}" \
+    python3 "$FRONTIER_SELECTOR" --root "$1" --state "$2"
+}
+
+run_sc_alias() { # run_sc_alias <home> <frontier-alias>
+  env -i HOME="$1" PATH="/usr/bin:/bin" \
+    DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
+    DISK_MAGICIAN_FRONTIER_LAST="$2" \
+    DISK_MAGICIAN_STATE_DIR="$1/.disk_magician_state" \
+    /bin/bash "$SC"
+}
+
 assert_receipt_field() {
   local rf="$1" key="$2" expected="$3" name="$4"
   local actual
@@ -54,6 +70,20 @@ EOF
   else
     bad "$name" "expected '$expected', got '$actual'"
   fi
+}
+
+write_frontier_fixture() { # write_frontier_fixture <path> <captured_at> <mode> <complete> <marker>
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, sys
+path, captured_at, mode, complete, marker = sys.argv[1:]
+with open(path, "w") as f:
+    json.dump({
+        "captured_at": captured_at,
+        "mode": mode,
+        "coverage_envelope": {"complete": complete == "true"},
+        "marker": marker,
+    }, f)
+PY
 }
 
 echo "Test 1: fresh run auto-inits state repo, writes snapshot, commits"
@@ -172,6 +202,121 @@ RF8="$H8/.disk_magician_state/receipts/snapshot_commit.json"
 [[ -f "$RF8" ]] && ok "receipt file written on commit failure" || bad "commit failure receipt" "missing"
 assert_receipt_field "$RF8" "last_terminal.outcome" "error" "receipt outcome is error"
 assert_receipt_field "$RF8" "last_terminal.publication.committed" "false" "receipt publication.committed is false"
+
+echo "Test 9: shared frontier selector ranks complete/fresh root and rejects future candidates"
+H9="$TMP_ROOT/h9"; mkdir -p "$H9"
+ROOT9="$H9/root.json"; STATE9="$H9/state.json"
+NOW9="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STALE_ROOT9="$(python3 - "$NOW9" <<'PY'
+import datetime, sys
+ts = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print((ts - datetime.timedelta(hours=50)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+STALE_STATE9="$(python3 - "$NOW9" <<'PY'
+import datetime, sys
+ts = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print((ts - datetime.timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+FUTURE9="$(python3 - "$NOW9" <<'PY'
+import datetime, sys
+ts = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print((ts + datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+write_frontier_fixture "$ROOT9" "$NOW9" complete true root-complete
+write_frontier_fixture "$STATE9" "$FUTURE9" complete true future
+SELECT9="$(run_selector "$ROOT9" "$STATE9")"
+[[ "$SELECT9" == "$ROOT9" ]] && ok "future state candidate rejected and root selected" || bad "future candidate ranking" "expected $ROOT9, got $SELECT9"
+
+echo "Test 10: fresh partial beats stale complete, then latest stale is retained"
+write_frontier_fixture "$ROOT9" "$STALE_ROOT9" complete true stale-complete
+write_frontier_fixture "$STATE9" "$NOW9" partial false fresh-partial
+SELECT10="$(run_selector "$ROOT9" "$STATE9")"
+[[ "$SELECT10" == "$STATE9" ]] && ok "fresh candidate preferred over stale complete" || bad "fresh ranking" "expected $STATE9, got $SELECT10"
+write_frontier_fixture "$ROOT9" "$STALE_ROOT9" partial false older-partial
+write_frontier_fixture "$STATE9" "$STALE_STATE9" complete true newer-stale
+SELECT10B="$(run_selector "$ROOT9" "$STATE9")"
+[[ "$SELECT10B" == "$STATE9" ]] && ok "latest stale candidate selected when none are fresh" || bad "stale fallback" "expected $STATE9, got $SELECT10B"
+
+echo "Test 11: explicit JSON override and legacy LAST alias are strict and ordered"
+OVERRIDE11="$H9/override.json"; ALIAS11="$H9/alias.json"
+write_frontier_fixture "$OVERRIDE11" "$NOW9" complete true explicit
+write_frontier_fixture "$ALIAS11" "$NOW9" complete true alias
+SELECT11="$(DISK_MAGICIAN_FRONTIER_JSON="$OVERRIDE11" DISK_MAGICIAN_FRONTIER_LAST="$ALIAS11" run_selector "$ROOT9" "$STATE9")"
+[[ "$SELECT11" == "$OVERRIDE11" ]] && ok "JSON override wins over legacy alias" || bad "override priority" "expected $OVERRIDE11, got $SELECT11"
+rm -f "$OVERRIDE11"
+SELECT11B="$(DISK_MAGICIAN_FRONTIER_JSON="$OVERRIDE11" DISK_MAGICIAN_FRONTIER_LAST="$ALIAS11" run_selector "$ROOT9" "$STATE9")"
+[[ -z "$SELECT11B" ]] && ok "missing JSON override fails closed without alias fallback" || bad "missing override fail-closed" "got $SELECT11B"
+printf '{not valid json\n' > "$OVERRIDE11"
+SELECT11C="$(DISK_MAGICIAN_FRONTIER_JSON="$OVERRIDE11" DISK_MAGICIAN_FRONTIER_LAST="$ALIAS11" run_selector "$ROOT9" "$STATE9")"
+[[ -z "$SELECT11C" ]] && ok "corrupt JSON override fails closed without alias fallback" || bad "corrupt override fail-closed" "got $SELECT11C"
+
+echo "Test 12: publisher uses legacy alias source for evidence retention"
+H12="$TMP_ROOT/h12"; mkdir -p "$H12"
+ALIAS12="$H12/alias.json"
+write_frontier_fixture "$ALIAS12" "$NOW9" partial false publisher-alias
+OUT12=$(run_sc_alias "$H12" "$ALIAS12" 2>&1); RC12=$?
+[[ $RC12 -eq 0 ]] && ok "alias publisher run exits 0" || bad "alias publisher rc" "$RC12: $OUT12"
+grep -R -q 'publisher-alias' "$H12/.local/state/disk-magician/evidence" 2>/dev/null \
+  && ok "publisher retained selected alias evidence" \
+  || bad "publisher alias evidence" "selected source was not retained"
+
+echo "Test 13: transaction pins frontier bytes before the writer changes the source"
+H13="$TMP_ROOT/h13"; mkdir -p "$H13/.disk_magician_state"
+cp "$H5/.disk_magician_state/frontier_last.json" "$H13/.disk_magician_state/frontier_last.json"
+cat > "$STUB_BIN/interleave.sh" <<'EOF'
+#!/bin/bash
+python3 - "$@" <<'PYTHON'
+import json, os, sys
+from pathlib import Path
+source = Path(os.environ["HOME"]) / ".disk_magician_state/frontier_last.json"
+# A concurrent producer replaces the original after transaction selection.
+source.write_text(json.dumps({"captured_at": "2026-01-01T00:00:00Z", "marker": "replacement"}))
+pinned = Path(os.environ["DISK_MAGICIAN_FRONTIER_JSON"])
+data = json.loads(pinned.read_text()) if pinned.is_file() else {}
+out = sys.argv[sys.argv.index("--output") + 1]
+Path(out).write_text(json.dumps({"disk_free_gb": 100, "frontier_used_kb": data.get("disk_used_kb"), "frontier_path": str(pinned)}))
+PYTHON
+EOF
+run_interleave() {
+  env -i HOME="$1" PATH="/usr/bin:/bin" \
+    DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/interleave.sh" \
+    DISK_MAGICIAN_FRONTIER_JSON="$1/.disk_magician_state/frontier_last.json" \
+    DISK_MAGICIAN_STATE_DIR="$1/.disk_magician_state" /bin/bash "$SC"
+}
+OUT13=$(run_interleave "$H13" 2>&1); RC13=$?
+[[ $RC13 -eq 0 ]] && ok "interleaved publisher exits 0" || bad "interleaved rc" "$RC13: $OUT13"
+SD13="$H13/.local/state/disk-magician"
+assert_receipt_field "$SD13/snapshots/disk_snapshot.json" frontier_used_kb 1048576 "writer consumed original frontier"
+assert_receipt_field "$SD13/ledger/topdown-5g.json" disk_used_kb 1048576 "ledger published original frontier"
+EVIDENCE13=$(find "$SD13/evidence" -name 'frontier-*.json' -type f | head -1)
+cmp -s "$H5/.disk_magician_state/frontier_last.json" "$EVIDENCE13" \
+  && ok "evidence retained original frontier bytes" || bad "pinned evidence" "changed or missing"
+PIN13=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontier_path"])' "$SD13/snapshots/disk_snapshot.json")
+[[ ! -e "$PIN13" ]] && ok "transaction pin cleaned after publication" || bad "pin cleanup" "$PIN13 still exists"
+
+echo "Test 14: absent frontier remains absent when producer creates it mid-transaction"
+H14="$TMP_ROOT/h14"; mkdir -p "$H14/.disk_magician_state"
+OUT14=$(run_interleave "$H14" 2>&1); RC14=$?
+SD14="$H14/.local/state/disk-magician"
+[[ $RC14 -eq 0 ]] && ok "absent interleaved publisher exits 0" || bad "absent interleaved rc" "$RC14: $OUT14"
+PIN14=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontier_path"])' "$SD14/snapshots/disk_snapshot.json")
+[[ "$PIN14" != "$H14/.disk_magician_state/frontier_last.json" && -n "$PIN14" ]] \
+  && ok "missing selection uses strict sentinel path" || bad "missing sentinel" "$PIN14"
+[[ -z "$(find "$SD14/evidence" -name 'frontier-*.json' -type f)" ]] \
+  && ok "new source is not retained by absent transaction" || bad "absent evidence" "unexpected evidence"
+
+echo "Test 15: frontier pin allocation failure leaves an error receipt"
+H15="$TMP_ROOT/h15"; mkdir -p "$H15"
+OUT15=$(env -i HOME="$H15" PATH="/usr/bin:/bin" TMPDIR="$H15/missing-tmp" \
+  DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
+  DISK_MAGICIAN_FRONTIER_JSON="$H15/absent.json" \
+  DISK_MAGICIAN_STATE_DIR="$H15/.disk_magician_state" /bin/bash "$SC" 2>&1); RC15=$?
+[[ $RC15 -ne 0 ]] && ok "pin allocation error exits nonzero" || bad "pin allocation rc" "$RC15"
+assert_receipt_field "$H15/.disk_magician_state/receipts/snapshot_commit.json" last_terminal.outcome error "pin allocation failure is recorded"
+[[ ! -d "$H15/.disk_magician_state/snapshot.lock" ]] && ok "pin failure releases lock" || bad "pin failure lock" "still present"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
