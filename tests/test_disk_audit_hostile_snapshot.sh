@@ -766,19 +766,26 @@ import sys
 lines = open(sys.argv[1]).readlines()
 header = None
 rows = []
+in_data = False
 for line in lines:
-    if line.startswith("Date"):
+    line_s = line.strip()
+    if line_s.startswith("Date"):
         header = line.split()
-    elif line.startswith("2026-10-"):
+    elif line_s.startswith("----"):
+        in_data = True
+    elif line_s.startswith("Legend:") or not line_s:
+        in_data = False
+    elif in_data:
         rows.append(line.split())
 
 assert header is not None, "header line missing in history table"
 assert len(rows) >= 2, f"expected at least 2 history rows, got {len(rows)}"
 
 cols = header[3:]
+assert len(cols) == len(set(cols)), f"duplicate header detected: {cols}"
 col_map = {name: idx + 3 for idx, name in enumerate(cols)}
 
-astral_hdr = r"\U000e0001"[:10]
+astral_hdr = r"\U000e0001"
 bmp_hdr = r"\ue0001"
 esc_hdr = r"\efoo"
 lit_hdr = r"\\efoo"
@@ -826,11 +833,38 @@ if [[ $RC_HIST_MALFORMED -ne 0 ]]; then
   exit 1
 fi
 
-if ! grep -qF "valid_dir" "$OUT_HIST_MALFORMED" || ! grep -qF "bad_neg" "$OUT_HIST_MALFORMED" || ! grep -qF "null" "$OUT_HIST_MALFORMED"; then
-  echo "FAIL: valid directory or negative null placeholder missing from malformed history output" >&2
-  cat "$OUT_HIST_MALFORMED" >&2
-  exit 1
-fi
+# Verify exact column binding in Case 7 table: bad_neg is null and valid_dir is 5.0G
+python3 - "$OUT_HIST_MALFORMED" <<'PY'
+import sys
+lines = open(sys.argv[1]).readlines()
+header = None
+rows = []
+in_data = False
+for line in lines:
+    line_s = line.strip()
+    if line_s.startswith("Date"):
+        header = line.split()
+    elif line_s.startswith("----"):
+        in_data = True
+    elif line_s.startswith("Legend:") or not line_s:
+        in_data = False
+    elif in_data:
+        rows.append(line.split())
+
+assert header is not None, "header line missing in Case 7 table"
+assert len(rows) >= 1, f"expected at least 1 history row in Case 7, got {len(rows)}"
+
+cols = header[3:]
+assert len(cols) == len(set(cols)), f"duplicate header in Case 7: {cols}"
+col_map = {name: idx + 3 for idx, name in enumerate(cols)}
+
+assert "bad_neg" in col_map, f"bad_neg column missing in Case 7: {cols}"
+assert "valid_dir" in col_map, f"valid_dir column missing in Case 7: {cols}"
+
+for r in rows:
+    assert r[col_map["bad_neg"]] == "null", f"expected null under bad_neg, got {r[col_map['bad_neg']]}"
+    assert r[col_map["valid_dir"]] == "5.0G", f"expected 5.0G under valid_dir, got {r[col_map['valid_dir']]}"
+PY
 
 # Case 7b: Hostile non-dict JSON root in disk_history.sh
 SNAP_LIST_ROOT="$TMP_DIR/snap_list_root.json"
