@@ -11,6 +11,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_claude_state.sh"
+# shellcheck source=tests/lib/sandbox_env.sh
+source "$SCRIPT_DIR/lib/sandbox_env.sh"
 
 TMP_ROOT=$(mktemp -d -t cleanup_claude_state.XXXXXX)
 BG_PIDS=()
@@ -22,6 +24,20 @@ cleanup() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+MOCK_LSOF="$TMP_ROOT/mock_lsof.sh"
+cat > "$MOCK_LSOF" <<'EOF'
+#!/usr/bin/env bash
+dir="${@: -1}"
+if [[ -n "${TEST_LSOF_ACTIVE_DIR:-}" && -n "${TEST_LSOF_ACTIVE_PID:-}" ]]; then
+  if [[ "$dir" == *"$TEST_LSOF_ACTIVE_DIR"* ]] && kill -0 "$TEST_LSOF_ACTIVE_PID" 2>/dev/null; then
+    echo "tail $TEST_LSOF_ACTIVE_PID $USER 3r REG $dir/README.md"
+    exit 0
+  fi
+fi
+exit 1
+EOF
+chmod +x "$MOCK_LSOF"
 
 PASS=0
 FAIL=0
@@ -158,10 +174,38 @@ LINKED_WT="$ROOTS_DIR/linked-wt-cdef"
 git -C "$PARENT_REPO" worktree add -q -b linked-wt-branch "$LINKED_WT"
 while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$LINKED_WT" -type f)
 
+# (9) UNPUSHED COMMIT ON NON-HEAD BRANCH -- HEAD is on main and matches remote,
+# but a local feature branch has unpushed commits -> NEEDS-REVIEW.
+UNPUSHED_BRANCH="$ROOTS_DIR/unpushed-branch-ghij"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$UNPUSHED_BRANCH"
+git -C "$UNPUSHED_BRANCH" config user.email jleechan2015@users.noreply.github.com
+git -C "$UNPUSHED_BRANCH" config user.name tester
+git -C "$UNPUSHED_BRANCH" checkout -q -b feat-side-branch
+echo "side branch work" > "$UNPUSHED_BRANCH/side.txt"
+git -C "$UNPUSHED_BRANCH" add side.txt
+git -C "$UNPUSHED_BRANCH" commit -q -m "side branch unpushed commit"
+git -C "$UNPUSHED_BRANCH" checkout -q main
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$UNPUSHED_BRANCH" -type f)
+
+# (10) DEEP NESTED REPO (>3 levels deep) -- .git is at depth 5, has uncommitted changes -> NEEDS-REVIEW.
+DEEP_NESTED="$ROOTS_DIR/deep-nested-klmn"
+mkdir -p "$DEEP_NESTED/level1/level2/level3/level4"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$DEEP_NESTED/level1/level2/level3/level4/nested_repo"
+git -C "$DEEP_NESTED/level1/level2/level3/level4/nested_repo" config user.email jleechan2015@users.noreply.github.com
+git -C "$DEEP_NESTED/level1/level2/level3/level4/nested_repo" config user.name tester
+echo "nested dirty" >> "$DEEP_NESTED/level1/level2/level3/level4/nested_repo/README.md"
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$DEEP_NESTED" -type f)
+
+# (11) PROBE FAILURE FAILS CLOSED -- broken git repo -> NEEDS-REVIEW (fail closed).
+PROBE_FAIL="$ROOTS_DIR/probe-fail-opqr"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$PROBE_FAIL"
+echo "corrupted" > "$PROBE_FAIL/.git/refs/heads/main" # causes git commands to fail with fatal: corrupt ref
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$PROBE_FAIL" -type f)
+
 echo
 echo "=== Test 1: dry-run classifies each fixture correctly ==="
 OUT1="$TMP_ROOT/out1.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT1" 2>&1
 OUT1_CONTENT=$(cat "$OUT1")
@@ -175,6 +219,9 @@ assert_contains "(5) stash present -> NEEDS-REVIEW" "NEEDS-REVIEW $STASHED  (sta
 assert_contains "(6) unmeasurable age -> PRESERVE" "PRESERVE $UNMEASURABLE" "$OUT1_CONTENT"
 assert_contains "(7) symlink escape -> REFUSED" "REFUSED  $ROOTS_DIR/escape-symlink-yzab" "$OUT1_CONTENT"
 assert_contains "(8) linked worktree with parent stash -> ELIGIBLE" "ELIGIBLE $LINKED_WT" "$OUT1_CONTENT"
+assert_contains "(9) unpushed non-HEAD branch -> NEEDS-REVIEW" "NEEDS-REVIEW $UNPUSHED_BRANCH  (unpushed-commits-on-branches" "$OUT1_CONTENT"
+assert_contains "(10) deep nested dirty repo (>3 levels) -> NEEDS-REVIEW" "NEEDS-REVIEW $DEEP_NESTED  (dirty" "$OUT1_CONTENT"
+assert_contains "(11) probe error fails closed -> NEEDS-REVIEW" "NEEDS-REVIEW $PROBE_FAIL" "$OUT1_CONTENT"
 
 if [[ -d "$OLD_CLEAN" && -d "$DIRTY" && -d "$UNPUSHED" ]]; then
   record_pass "dry-run deleted nothing"
@@ -197,6 +244,7 @@ sleep 0.3
 
 OUT2="$TMP_ROOT/out2.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  TEST_LSOF_ACTIVE_DIR="$LSOF_ACTIVE" TEST_LSOF_ACTIVE_PID="$TAIL_PID" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT2" 2>&1
 OUT2_CONTENT=$(cat "$OUT2")
@@ -217,7 +265,7 @@ EOF
 chmod +x "$FAKE_BIN/lsof"
 
 OUT3="$TMP_ROOT/out3.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$FAKE_BIN/lsof" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --dry-run \
   >"$OUT3" 2>&1
 OUT3_CONTENT=$(cat "$OUT3")
@@ -226,7 +274,7 @@ assert_contains "(lsof failure) old-clean now PRESERVE (fail closed)" "PRESERVE 
 echo
 echo "=== Test 4: --clean without CLAUDE_STATE_APPROVED=1 refuses, deletes nothing ==="
 OUT4="$TMP_ROOT/out4.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
   >"$OUT4" 2>&1
 OUT4_CONTENT=$(cat "$OUT4")
@@ -241,6 +289,9 @@ echo
 echo "=== Test 5: --clean WITH CLAUDE_STATE_APPROVED=1 deletes only ELIGIBLE ==="
 OUT5="$TMP_ROOT/out5.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
   bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
   >"$OUT5" 2>&1
 OUT5_CONTENT=$(cat "$OUT5")
@@ -251,7 +302,7 @@ if [[ ! -d "$OLD_CLEAN" ]]; then
 else
   record_fail "(clean+approved) eligible old-clean deleted" "still present: $OLD_CLEAN"
 fi
-if [[ -d "$YOUNG" && -d "$DIRTY" && -d "$UNPUSHED" && -d "$STASHED" && -d "$UNMEASURABLE" ]]; then
+if [[ -d "$YOUNG" && -d "$DIRTY" && -d "$UNPUSHED" && -d "$STASHED" && -d "$UNMEASURABLE" && -d "$UNPUSHED_BRANCH" && -d "$DEEP_NESTED" && -d "$PROBE_FAIL" ]]; then
   record_pass "(clean+approved) NEEDS-REVIEW / young / unmeasurable all preserved"
 else
   record_fail "(clean+approved) NEEDS-REVIEW / young / unmeasurable all preserved" "one of the protected fixtures vanished"
@@ -260,6 +311,12 @@ if [[ -L "$ROOTS_DIR/escape-symlink-yzab" && -f "$ESCAPE_TARGET/secret.txt" ]]; 
   record_pass "(clean+approved) symlink + its target untouched"
 else
   record_fail "(clean+approved) symlink + its target untouched" "symlink or its target vanished"
+fi
+
+if [[ -f "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log" ]] && grep -q "remove_dormant_state.*$OLD_CLEAN" "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log"; then
+  record_pass "(clean+approved) deletion audit log recorded remove_dormant_state"
+else
+  record_fail "(clean+approved) deletion audit log recorded remove_dormant_state" "audit record missing from deletion log"
 fi
 
 echo
@@ -293,6 +350,82 @@ if [[ $RC7 -ne 0 ]]; then
   record_pass "(codex guard) nonzero exit"
 else
   record_fail "(codex guard) nonzero exit" "expected nonzero exit, got $RC7"
+fi
+
+echo
+echo "=== Test 8: safety_gate refuses candidates protected by safety rules ==="
+FAKE_HOME8="$TMP_ROOT/home8"
+mkdir -p "$FAKE_HOME8/.config/disk-magician"
+cat > "$FAKE_HOME8/.config/disk-magician/safety.local.json" <<'JSON'
+{
+  "never_delete": ["*protected_by_safety*"]
+}
+JSON
+ROOTS_DIR8="$TMP_ROOT/state8"
+mkdir -p "$ROOTS_DIR8/protected_by_safety_candidate"
+echo "hello" > "$ROOTS_DIR8/protected_by_safety_candidate/file.txt"
+age_path_days_ago "$ROOTS_DIR8/protected_by_safety_candidate/file.txt" 30
+OUT8="$TMP_ROOT/out8.txt"
+env -i HOME="$FAKE_HOME8" PATH="$REAL_PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR8" --min-age 7 --dry-run \
+  >"$OUT8" 2>&1
+OUT8_CONTENT=$(cat "$OUT8")
+assert_contains "(safety_gate) candidate protected by safety rule is REFUSED" "REFUSED" "$OUT8_CONTENT"
+assert_contains "(safety_gate) safety reason reported in output" "never_delete:" "$OUT8_CONTENT"
+
+echo
+echo "=== Test 9: sandbox_guard_roots aborts if candidate is outside sandbox ==="
+OUT9="$TMP_ROOT/out9.txt"
+set +e
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT/unrelated_sandbox" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR" --min-age 7 --clean \
+  >"$OUT9" 2>&1
+RC9=$?
+set -e
+OUT9_CONTENT=$(cat "$OUT9")
+if [[ $RC9 -eq 90 ]]; then
+  record_pass "(sandbox guard) aborts with rc=90 when outside sandbox"
+else
+  record_fail "(sandbox guard) aborts with rc=90 when outside sandbox" "expected exit code 90, got $RC9"
+fi
+assert_contains "(sandbox guard) fatal sandbox message in output" "FATAL sandbox_guard_roots" "$OUT9_CONTENT"
+
+echo
+echo "=== Test 10: failed removal logs failed_remove to audit log ==="
+ROOTS_DIR10="$TMP_ROOT/state10"
+mkdir -p "$ROOTS_DIR10"
+UNREMOVABLE="$ROOTS_DIR10/unremovable-candidate"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$UNREMOVABLE"
+mkdir -p "$UNREMOVABLE/locked_subdir"
+echo "protected" > "$UNREMOVABLE/locked_subdir/file.txt"
+git -C "$UNREMOVABLE" config user.email test@test.com
+git -C "$UNREMOVABLE" config user.name test
+git -C "$UNREMOVABLE" add locked_subdir/file.txt
+git -C "$UNREMOVABLE" commit -qm "add locked file"
+git -C "$UNREMOVABLE" push -q origin main
+chmod 555 "$UNREMOVABLE/locked_subdir"
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$UNREMOVABLE" -type f)
+OUT10="$TMP_ROOT/out10.txt"
+set +e
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR10" --min-age 7 --clean \
+  >"$OUT10" 2>&1
+RC10=$?
+set -e
+chmod 755 "$UNREMOVABLE/locked_subdir" 2>/dev/null || true
+OUT10_CONTENT=$(cat "$OUT10")
+
+assert_contains "(failed removal) error message emitted" "Failed to completely remove" "$OUT10_CONTENT"
+if [[ -f "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log" ]] && grep -q "failed_remove.*$UNREMOVABLE" "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log"; then
+  record_pass "(failed removal) deletion audit log recorded failed_remove"
+else
+  record_fail "(failed removal) deletion audit log recorded failed_remove" "failed_remove audit record missing"
 fi
 
 echo

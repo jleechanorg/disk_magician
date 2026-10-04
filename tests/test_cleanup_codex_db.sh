@@ -33,6 +33,7 @@ fi
 
 TMP_DIR=$(mktemp -d -t test_cleanup_codex_db.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
+export CODEX_DIR="$TMP_DIR"
 
 PASS=0
 FAIL=0
@@ -131,17 +132,25 @@ DB3="$TMP_DIR/test3.sqlite"
 create_test_db "$DB3" 100 50 2
 
 # Hold exclusive lock for 4.0 seconds in python background process
+READY3="$TMP_DIR/test3_locked.ready"
+rm -f "$READY3"
 python3 -c '
 import sqlite3, time, sys
 conn = sqlite3.connect(sys.argv[1], isolation_level=None)
 conn.execute("BEGIN EXCLUSIVE")
 conn.execute("INSERT INTO t (id, payload) VALUES (99999, \"locked\")")
+with open(sys.argv[2], "w") as f:
+    f.write("ready\n")
 time.sleep(4.0)
 conn.execute("ROLLBACK")
 conn.close()
-' "$DB3" &
+' "$DB3" "$READY3" &
 LOCK_PID=$!
-sleep 0.2
+
+for _ in {1..100}; do
+  [[ -f "$READY3" ]] && break
+  sleep 0.05
+done
 
 START_TS=$(date +%s)
 set +e
@@ -212,6 +221,115 @@ else
   echo "  FAIL  database file was deleted!" >&2
   FAIL=$((FAIL + 1))
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 7: Symlink rejection & external DB escape prevention
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 7: Symlink rejection and external DB escape prevention"
+EXTERNAL_DIR="$TMP_DIR/external"
+mkdir -p "$EXTERNAL_DIR"
+EXT_DB="$EXTERNAL_DIR/sensitive.sqlite"
+create_test_db "$EXT_DB" 100 50 2 # Has 50 freelist pages
+EXT_FREELIST_BEFORE=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+
+# Symlink inside mock codex directory pointing outside
+ln -s "$EXT_DB" "$MOCK_CODEX/logs_symlink.sqlite"
+
+OUT7_DIR=$("$SCRIPT" --clean --codex-dir "$MOCK_CODEX" 2>&1)
+EXT_FREELIST_AFTER=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+expect_eq "external DB untouched by directory scan" "$EXT_FREELIST_BEFORE" "$EXT_FREELIST_AFTER"
+
+# Direct --db pointing to a symlink
+OUT7_DIRECT=$("$SCRIPT" --clean --codex-dir "$MOCK_CODEX" --db "$MOCK_CODEX/logs_symlink.sqlite" 2>&1)
+EXT_FREELIST_AFTER_DIRECT=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+expect "refused direct symlink target" "refusing symlink target for safety" "$OUT7_DIRECT"
+expect_eq "external DB untouched by direct symlink flag" "$EXT_FREELIST_BEFORE" "$EXT_FREELIST_AFTER_DIRECT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 8: Numeric parameter validation (SQL injection prevention)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 8: Numeric parameter validation refuses non-integer values"
+set +e
+OUT8_1=$("$SCRIPT" --busy-timeout "5000; DROP TABLE t" 2>&1)
+RC8_1=$?
+OUT8_2=$(CODEX_DB_BUSY_TIMEOUT_MS="5000; DROP TABLE t" "$SCRIPT" 2>&1)
+RC8_2=$?
+OUT8_3=$("$SCRIPT" --min-freelist "abc" 2>&1)
+RC8_3=$?
+OUT8_4=$("$SCRIPT" --chunk-size "0" 2>&1)
+RC8_4=$?
+set -e
+
+expect_eq "rejects non-numeric --busy-timeout (rc 2)" "2" "$RC8_1"
+expect "busy-timeout error message" "must be an unsigned integer" "$OUT8_1"
+expect_eq "rejects non-numeric CODEX_DB_BUSY_TIMEOUT_MS (rc 2)" "2" "$RC8_2"
+expect_eq "rejects non-numeric --min-freelist (rc 2)" "2" "$RC8_3"
+expect_eq "rejects non-positive --chunk-size (rc 2)" "2" "$RC8_4"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 9: External database containment rejection
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 9: External database containment rejects direct --db outside CODEX_DIR"
+EXT_UNTOUCHED_BEFORE=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+set +e
+OUT9=$("$SCRIPT" --clean --codex-dir "$MOCK_CODEX" --db "$EXT_DB" 2>&1)
+RC9=$?
+set -e
+EXT_UNTOUCHED_AFTER=$(sqlite3 "$EXT_DB" "PRAGMA freelist_count;")
+
+expect_eq "exit code 0 when skipping external db" "0" "$RC9"
+expect "logged directory resolves outside warning" "resolves outside" "$OUT9"
+expect_eq "external database freelist untouched" "$EXT_UNTOUCHED_BEFORE" "$EXT_UNTOUCHED_AFTER"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 10: Hard link rejection
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 10: Multiple hard links rejected for safety"
+create_test_db "$MOCK_CODEX/hardlink_orig.sqlite" 100 50 2
+ln "$MOCK_CODEX/hardlink_orig.sqlite" "$MOCK_CODEX/hardlink_alias.sqlite"
+HL_BEFORE=$(sqlite3 "$MOCK_CODEX/hardlink_orig.sqlite" "PRAGMA freelist_count;")
+
+OUT10=$("$SCRIPT" --clean --codex-dir "$MOCK_CODEX" --db "$MOCK_CODEX/hardlink_alias.sqlite" 2>&1)
+HL_AFTER=$(sqlite3 "$MOCK_CODEX/hardlink_orig.sqlite" "PRAGMA freelist_count;")
+
+expect "logged hard link rejection warning" "has multiple hard links" "$OUT10"
+expect_eq "hard-linked database untouched" "$HL_BEFORE" "$HL_AFTER"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: Leading-zero numeric options (e.g. 08, 0200) normalize to base-10
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 11: Leading-zero numeric options normalize correctly to base-10 without octal errors"
+DB11="$TMP_DIR/test11.sqlite"
+create_test_db "$DB11" 100 50 2
+OUT11=$("$SCRIPT" --dry-run --db "$DB11" --min-freelist 08 --busy-timeout 0200 --chunk-size 050 2>&1)
+RC11=$?
+expect_eq "leading zero parameters exit code 0" "0" "$RC11"
+expect "dry-run succeeded with leading zero parameters" "[dry-run]" "$OUT11"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: --dry-run does not mutate main database or flush WAL
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 12: --dry-run does not mutate database or flush WAL file"
+DB12="$TMP_DIR/test12.sqlite"
+create_test_db "$DB12" 100 50 2
+# Write uncheckpointed frame directly into WAL
+python3 -c "
+import sqlite3
+con = sqlite3.connect('$DB12')
+con.execute('PRAGMA wal_autocheckpoint=0;')
+con.execute('CREATE TABLE IF NOT EXISTS uncommitted_probe (x TEXT);')
+con.execute('INSERT INTO uncommitted_probe VALUES (\'wal_frame\');')
+con.commit()
+con.close()
+"
+db12_size_before=$(stat -f%z "$DB12" 2>/dev/null || stat -c%s "$DB12" 2>/dev/null || echo 0)
+wal12_size_before=$(stat -f%z "${DB12}-wal" 2>/dev/null || stat -c%s "${DB12}-wal" 2>/dev/null || echo 0)
+OUT12=$("$SCRIPT" --dry-run --db "$DB12" 2>&1)
+db12_size_after=$(stat -f%z "$DB12" 2>/dev/null || stat -c%s "$DB12" 2>/dev/null || echo 0)
+wal12_size_after=$(stat -f%z "${DB12}-wal" 2>/dev/null || stat -c%s "${DB12}-wal" 2>/dev/null || echo 0)
+
+expect_eq "main db size untouched by dry-run" "$db12_size_before" "$db12_size_after"
+expect_eq "wal file size untouched by dry-run" "$wal12_size_before" "$wal12_size_after"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # tmp_scratch_sweep.sh — hourly tmp-scratch job entry point (bead disk_magician-isw
-# scheduling gap). Wraps cleanup_tmp.sh (--large) then cleanup_claude_state.sh,
-# each with its own explicit *_APPROVED=1 gate, failure-continuing between steps
-# but propagating a nonzero exit if either step failed, so an unattended launchd
-# job doesn't silently look healthy when cleanup is broken (round-1 /advice
-# finding: Codex + Opus both flagged a hardcoded `exit 0` masking failures).
+# scheduling gap). Wraps cleanup_tmp.sh (--large, under LARGE_TMP_APPROVED=1
+# when cleaning) then cleanup_claude_state.sh (invoked report-only with
+# --dry-run; unattended deletions of ~/.claude/state remain strictly forbidden),
+# failure-continuing between steps but propagating a nonzero exit if either step
+# failed, so an unattended launchd job doesn't silently look healthy when a
+# step is broken.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clean_flag="${1:---dry-run}"

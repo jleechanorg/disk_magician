@@ -91,6 +91,24 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if ! [[ "$BUSY_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS must be an unsigned integer, got: $BUSY_TIMEOUT_MS" >&2
+  exit 2
+fi
+BUSY_TIMEOUT_MS=$(( 10#$BUSY_TIMEOUT_MS ))
+
+if ! [[ "$MIN_FREELIST" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --min-freelist / CODEX_DB_MIN_FREELIST must be an unsigned integer, got: $MIN_FREELIST" >&2
+  exit 2
+fi
+MIN_FREELIST=$(( 10#$MIN_FREELIST ))
+
+if ! [[ "$CHUNK_SIZE" =~ ^[0-9]+$ && "$(( 10#$CHUNK_SIZE ))" -gt 0 ]]; then
+  echo "ERROR: --chunk-size / CODEX_DB_CHUNK_SIZE must be a positive integer, got: $CHUNK_SIZE" >&2
+  exit 2
+fi
+CHUNK_SIZE=$(( 10#$CHUNK_SIZE ))
+
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
@@ -123,6 +141,10 @@ if [[ ${#TARGET_DBS[@]} -gt 0 ]]; then
       log "WARNING: Specified database does not exist: $db — skipping"
       continue
     fi
+    if [[ -L "$db" ]]; then
+      log "WARNING: Specified database is a symbolic link: $db — refusing symlink target for safety"
+      continue
+    fi
     CANDIDATES+=("$db")
   done
 else
@@ -145,8 +167,9 @@ else
   seen_dbs=()
   for db_pattern in "${primary_patterns[@]}"; do
     for db in $db_pattern; do
-      # Avoid duplicates and non-sqlite files
+      # Avoid duplicates, symlinks, and non-sqlite files
       [[ -f "$db" ]] || continue
+      [[ -L "$db" ]] && continue
       [[ "$db" == *-wal || "$db" == *-shm ]] && continue
       already_seen=false
       for s in "${seen_dbs[@]:-}"; do
@@ -169,6 +192,8 @@ if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
   exit 0
 fi
 
+CODEX_DIR_REAL="$(cd "$CODEX_DIR" 2>/dev/null && pwd -P || echo "")"
+
 total_checked=0
 total_vacuumed=0
 total_reclaimable=0
@@ -182,9 +207,39 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  # Fail-closed safety assertion: NEVER delete database files
+  # Fail-closed safety assertion: NEVER follow symlinks or mutate non-regular files
+  if [[ -L "$db" ]]; then
+    log "WARNING: $db is a symbolic link — refusing to mutate symlink target"
+    continue
+  fi
+
   if [[ ! -f "$db" ]]; then
     log "WARNING: $db is not a regular file — skipping"
+    continue
+  fi
+
+  # Check hard link count portably across BSD/macOS (stat -f %l) and GNU/Linux (stat -c %h)
+  link_count=""
+  if link_count=$(stat -c %h "$db" 2>/dev/null) && [[ "$link_count" =~ ^[0-9]+$ ]]; then
+    : # GNU/Linux stat succeeded
+  elif link_count=$(stat -f %l "$db" 2>/dev/null) && [[ "$link_count" =~ ^[0-9]+$ ]]; then
+    : # BSD/macOS stat succeeded
+  else
+    link_count=999 # Fail closed if stat dialect could not determine link count
+  fi
+
+  if [[ "$link_count" -gt 1 ]]; then
+    log "WARNING: $db has multiple hard links (link count $link_count) — refusing hard-linked database for safety"
+    continue
+  elif [[ "$link_count" -ne 1 ]]; then
+    log "WARNING: $db has unverified link count $link_count (!= 1) — refusing database for safety"
+    continue
+  fi
+
+  # Verify canonical path remains inside the intended directory (unconditionally for all candidates)
+  db_dir_real="$(cd "$(dirname "$db")" 2>/dev/null && pwd -P || echo "")"
+  if [[ -z "$CODEX_DIR_REAL" || "$db_dir_real" != "$CODEX_DIR_REAL" ]]; then
+    log "WARNING: $db directory ($db_dir_real) resolves outside $CODEX_DIR ($CODEX_DIR_REAL) — skipping"
     continue
   fi
 
@@ -195,15 +250,15 @@ for db in "${CANDIDATES[@]}"; do
   wal_size_before=$(file_size_bytes "$wal_file")
   total_size_before=$(( db_size_before + wal_size_before ))
 
-  # Query basic DB pragmas
+  # Query basic DB pragmas using -readonly to prevent SQLite from checkpointing WAL or mutating DB in dry-run
   set +e
-  pragma_out=$(sqlite3 "$db" "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
+  pragma_out=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
   pragma_rc=$?
   set -e
 
   if [[ $pragma_rc -ne 0 ]]; then
     if [[ "$pragma_out" == *"database is locked"* || $pragma_rc -eq 5 ]]; then
-      log "WARNING: Database locked (busy timeout reached): $db — skipping"
+      log "WARNING: Database is locked (busy timeout reached): $db — skipping"
       total_locked=$(( total_locked + 1 ))
     else
       log "WARNING: Failed to read pragmas from $db (code $pragma_rc): $pragma_out — skipping"
@@ -211,7 +266,7 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  read -r page_size page_count freelist_count auto_vacuum <<< "$(echo "$pragma_out" | tr '\n' ' ')"
+  read -r _busy_res page_size page_count freelist_count auto_vacuum <<< "$(echo "$pragma_out" | tr '\n' ' ')"
   page_size="${page_size:-0}"
   page_count="${page_count:-0}"
   freelist_count="${freelist_count:-0}"
@@ -276,7 +331,7 @@ for db in "${CANDIDATES[@]}"; do
         fi
         remaining=$(( remaining - chunk ))
         # Check current freelist count to avoid unnecessary iterations
-        cur_fl=$(sqlite3 "$db" "PRAGMA freelist_count;" 2>/dev/null || echo 0)
+        cur_fl=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA freelist_count;" 2>/dev/null | tail -n 1 || echo 0)
         if (( cur_fl == 0 )); then break; fi
       done
     else
