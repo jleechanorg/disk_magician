@@ -149,6 +149,8 @@ validate_numeric_param() {
 BUSY_TIMEOUT_MS=$(validate_numeric_param "$BUSY_TIMEOUT_MS" "--busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS" true "3600000")
 MIN_FREELIST=$(validate_numeric_param "$MIN_FREELIST" "--min-freelist / CODEX_DB_MIN_FREELIST" false "1000000000")
 CHUNK_SIZE=$(validate_numeric_param "$CHUNK_SIZE" "--chunk-size / CODEX_DB_CHUNK_SIZE" true "10000000")
+DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-60}"
+DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=$(validate_numeric_param "$DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS" "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS" true "3600")
 
 get_hardlink_count() {
   local f="$1"
@@ -173,8 +175,22 @@ fi
 
 file_size_bytes() {
   local f="$1"
-  if [[ ! -f "$f" ]]; then echo 0; return; fi
-  stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || echo 0
+  if [[ ! -e "$f" && ! -L "$f" ]]; then
+    echo 0
+    return 0
+  fi
+  if [[ -L "$f" || ! -f "$f" ]]; then
+    return 1
+  fi
+  local sz=""
+  if ! sz=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null); then
+    return 1
+  fi
+  if [[ -z "$sz" || ! "$sz" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  echo "$sz"
+  return 0
 }
 
 file_inode() {
@@ -641,9 +657,23 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  db_size_before=$(file_size_bytes "$db")
+  if ! db_size_before=$(file_size_bytes "$db") || [[ -z "$db_size_before" || ! "$db_size_before" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Could not determine size of $db — skipping" >&2
+    any_non_success=true
+    [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+    CURRENT_TARGET_DB=""
+    CURRENT_EXPECTED_DEV_INODE=""
+    continue
+  fi
   wal_file="${db}-wal"
-  wal_size_before=$(file_size_bytes "$wal_file")
+  if ! wal_size_before=$(file_size_bytes "$wal_file") || [[ -z "$wal_size_before" || ! "$wal_size_before" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Could not determine size of $wal_file — skipping" >&2
+    any_non_success=true
+    [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+    CURRENT_TARGET_DB=""
+    CURRENT_EXPECTED_DEV_INODE=""
+    continue
+  fi
   total_size_before=$(( db_size_before + wal_size_before ))
 
   # Query basic DB pragmas with busy timeout via URI mode
@@ -821,8 +851,17 @@ for db in "${CANDIDATES[@]}"; do
   fi
 
   # Poststate verification: freelist, WAL, database identity/existence
-  db_size_after=$(file_size_bytes "$db")
-  wal_size_after=$(file_size_bytes "$wal_file")
+  if ! db_size_after=$(file_size_bytes "$db") || [[ -z "$db_size_after" || ! "$db_size_after" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Could not determine poststate size of $db — fail closed" >&2
+    vacuum_failed=true
+    checkpoint_failed=true
+    db_size_after=0
+  fi
+  if ! wal_size_after=$(file_size_bytes "$wal_file") || [[ -z "$wal_size_after" || ! "$wal_size_after" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Could not determine poststate size of $wal_file — fail closed" >&2
+    checkpoint_failed=true
+    wal_size_after=0
+  fi
   total_size_after=$(( db_size_after + wal_size_after ))
 
   # Identity verification: DB file identity must never change
@@ -885,7 +924,7 @@ for db in "${CANDIDATES[@]}"; do
     if ! real_wal=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$wal_file" 2>/dev/null); then
       real_wal="$wal_file"
     fi
-    if [[ -e "$real_wal" ]]; then
+    if [[ -e "$real_wal" || -L "$real_wal" ]]; then
       wal_sz=""
       if ! wal_sz=$(file_size_bytes "$real_wal") || [[ -z "$wal_sz" || ! "$wal_sz" =~ ^[0-9]+$ ]]; then
         log "WARNING: Could not read WAL file size for $db — fail closed" >&2

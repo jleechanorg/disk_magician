@@ -44,6 +44,11 @@
 # 17. Pragma row count & constraints schema validation:
 #     - Initial pragma requires exact 4 rows and sensible bounds.
 #     - Poststate pragma requires exact 3 rows and sensible bounds.
+# 18. Strict file_size_bytes & unstatable retained WAL poststate fail-closed:
+#     - Absent WAL path outputs 0, rc 0.
+#     - Unstatable/failing stat returns non-zero, does not output 0.
+#     - Directory/symlink returns non-zero.
+#     - Retained WAL unstatable after checkpoint fails closed without [clean] or success summary.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,6 +86,7 @@ export DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state"
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 
 REAL_SQLITE3="$(command -v sqlite3)"
+REAL_STAT="$(command -v stat)"
 REAL_LSOF=""
 if command -v lsof >/dev/null 2>&1; then
   REAL_LSOF="$(command -v lsof)"
@@ -337,6 +343,16 @@ OUT7_ENV_OCTAL=$(CODEX_DB_CHUNK_SIZE=08 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
 RC7_ENV_OCTAL=$?
 OUT7_OVERFLOW=$(CODEX_DB_CHUNK_SIZE=18446744073709551617 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
 RC7_OVERFLOW=$?
+OUT7_LSOF_ZERO=$(DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=0 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_LSOF_ZERO=$?
+OUT7_LSOF_NEG=$(DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=-5 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_LSOF_NEG=$?
+OUT7_LSOF_ALPHA=$(DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=abc "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_LSOF_ALPHA=$?
+OUT7_LSOF_OVERFLOW=$(DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=18446744073709551617 "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_LSOF_OVERFLOW=$?
+OUT7_LSOF_OCTAL=$(DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=08 DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" "$SCRIPT" --dry-run --db "$DB1" 2>&1)
+RC7_LSOF_OCTAL=$?
 set -e
 
 expect_eq "--chunk-size 0 exits with error (2)" "2" "$RC7_ZERO"
@@ -348,6 +364,11 @@ expect_eq "rejects alphabetic --min-freelist (2)" "2" "$RC7_ALPHA_MIN_FL"
 expect_eq "CODEX_DB_CHUNK_SIZE=0 exits with error (2)" "2" "$RC7_ENV_ZERO"
 expect_eq "CODEX_DB_CHUNK_SIZE=08 accepted safely" "0" "$RC7_ENV_OCTAL"
 expect_eq "huge 18446744073709551617 rejected without arithmetic wrap (2)" "2" "$RC7_OVERFLOW"
+expect_eq "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=0 exits with error (2)" "2" "$RC7_LSOF_ZERO"
+expect_eq "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=-5 exits with error (2)" "2" "$RC7_LSOF_NEG"
+expect_eq "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=abc exits with error (2)" "2" "$RC7_LSOF_ALPHA"
+expect_eq "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=18446744073709551617 exits with error (2)" "2" "$RC7_LSOF_OVERFLOW"
+expect_eq "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=08 accepted safely" "0" "$RC7_LSOF_OCTAL"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 8: Per-database single-maintainer lease, aliases, and termination trap
@@ -364,8 +385,12 @@ mkdir -p "$M1_BIN"
 BARRIER_INSIDE="$TMP_DIR/m1_inside"
 BARRIER_RELEASE="$TMP_DIR/m1_release"
 
+M1_CAPTURE_LOG="$TMP_DIR/m1_captured.log"
 cat > "$M1_BIN/sqlite3" <<SHIM
 #!/bin/bash
+if [[ -f "$M1_CAPTURE_LOG" ]]; then
+  echo "\$*" >> "$M1_CAPTURE_LOG"
+fi
 if [[ "\$*" == *"PRAGMA"* && ! -f "$BARRIER_INSIDE" ]]; then
   touch "$BARRIER_INSIDE"
   cnt=0
@@ -443,12 +468,14 @@ rm -rf "$STALE_LEASE"
 # Verify SIGTERM returns 143/non-zero, halts maintenance without vacuum/checkpoint, and removes owned lease
 rm -f "$BARRIER_INSIDE" "$BARRIER_RELEASE"
 TERM_OUT="$TMP_DIR/term.out"
+> "$M1_CAPTURE_LOG"
 PATH="$M1_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE8" "$SCRIPT" --clean --db "$DB8" >"$TERM_OUT" 2>&1 &
 TERM_PID=$!
 TEST_PIDS+=("$TERM_PID")
 wait_for_barrier "$BARRIER_INSIDE" 5
 
 kill -TERM "$TERM_PID" 2>/dev/null || true
+touch "$BARRIER_RELEASE"
 set +e
 wait "$TERM_PID" 2>/dev/null
 TERM_RC=$?
@@ -458,6 +485,9 @@ expect_eq "termination returns 143" "143" "$TERM_RC"
 expect_eq "owned lease removed upon SIGTERM" "0" "$([[ -d "$STATE8/codex_db_leases/${DB8_ID}.lease" ]] && echo 1 || echo 0)"
 expect_not "no clean summary after SIGTERM" "[clean]" "$(cat "$TERM_OUT")"
 expect_not "no vacuum complete after SIGTERM" "Codex DB vacuum complete" "$(cat "$TERM_OUT")"
+expect_not "no vacuum in captured-args after SIGTERM" "incremental_vacuum" "$(cat "$M1_CAPTURE_LOG" 2>/dev/null || true)"
+expect_not "no checkpoint in captured-args after SIGTERM" "wal_checkpoint" "$(cat "$M1_CAPTURE_LOG" 2>/dev/null || true)"
+rm -f "$M1_CAPTURE_LOG"
 rm -rf "$M1_BIN"
 
 # Verify lease cleanup removes only own PID and rmdir; unexpected contents in lease dir are retained
@@ -1143,6 +1173,109 @@ set -e
 expect "rejected incomplete poststate pragma rows" "Expected exactly 3 poststate pragma rows" "$OUT17B"
 expect_eq "incomplete poststate pragma exits non-zero" "1" "$RC17B"
 rm -rf "$PRAGMA_TEST_BIN"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 18: Strict file_size_bytes & unstatable retained WAL poststate fail-closed
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 18: Strict file_size_bytes & unstatable retained WAL poststate fail-closed"
+
+# Case 18A: Direct helper assertions on file_size_bytes
+eval "$(awk '/^file_size_bytes\(\)[ ]*\{/,/^}/' "$SCRIPT")"
+
+# 1. Legitimate absent path returns 0, outputs "0"
+set +e
+absent_sz=$(file_size_bytes "$TMP_DIR/nonexistent_wal_file.sqlite-wal")
+absent_rc=$?
+set -e
+expect_eq "file_size_bytes on absent file exits 0" "0" "$absent_rc"
+expect_eq "file_size_bytes on absent file outputs 0" "0" "$absent_sz"
+
+# 2. Existing regular file with shadowed/failing stat returns non-zero, does not output 0
+set +e
+shadow_sz=$(
+  stat() { return 1; }
+  file_size_bytes "$SCRIPT"
+)
+shadow_rc=$?
+set -e
+expect_gt "file_size_bytes with failing stat exits non-zero" "$shadow_rc" 0
+expect_not "file_size_bytes with failing stat does not output 0" "0" "$shadow_sz"
+
+# 3. Non-regular paths (directories or symlinks) return non-zero
+set +e
+dir_sz=$(file_size_bytes "$TMP_DIR")
+dir_rc=$?
+set -e
+expect_gt "file_size_bytes on directory exits non-zero" "$dir_rc" 0
+
+TEST18_SYMLINK="$TMP_DIR/test18_symlink"
+ln -s "$SCRIPT" "$TEST18_SYMLINK"
+set +e
+symlink_sz=$(file_size_bytes "$TEST18_SYMLINK")
+symlink_rc=$?
+set -e
+expect_gt "file_size_bytes on symlink exits non-zero" "$symlink_rc" 0
+rm -f "$TEST18_SYMLINK"
+
+# Case 18B: Production workflow with stat shim failing only size query on retained WAL after checkpoint
+# while physical inode and linkcount queries still work.
+DB18="$TMP_DIR/test18.sqlite"
+create_test_db "$DB18" 100 50 2
+WAL18="${DB18}-wal"
+touch "$WAL18"
+
+DB18_INODE_BEFORE=$(stat -f '%i' "$DB18" 2>/dev/null || stat -c '%i' "$DB18")
+DB18_ROWS_BEFORE=$("$REAL_SQLITE3" "$DB18" "SELECT count(*) FROM t;")
+STATE18="$TMP_DIR/state18"
+mkdir -p "$STATE18/codex_db_leases"
+DB18_ID=$(python3 -c 'import os, sys; print(f"{os.stat(sys.argv[1]).st_dev}_{os.stat(sys.argv[1]).st_ino}")' "$DB18")
+
+STAT_SHIM_DIR="$TMP_DIR/stat_shim_bin"
+mkdir -p "$STAT_SHIM_DIR"
+CP_FLAG="$TMP_DIR/cp18_done"
+rm -f "$CP_FLAG"
+
+cat > "$STAT_SHIM_DIR/sqlite3" <<SHIM
+#!/bin/bash
+if [[ "\$*" == *"wal_checkpoint"* ]]; then
+  touch "$CP_FLAG"
+fi
+exec "$REAL_SQLITE3" "\$@"
+SHIM
+chmod +x "$STAT_SHIM_DIR/sqlite3"
+
+cat > "$STAT_SHIM_DIR/stat" <<SHIM
+#!/bin/bash
+if [[ -f "$CP_FLAG" && "\$*" == *"$WAL18"* && ( "\$*" == *"-f%z"* || "\$*" == *"-c%s"* ) ]]; then
+  exit 1
+fi
+exec "$REAL_STAT" "\$@"
+SHIM
+chmod +x "$STAT_SHIM_DIR/stat"
+
+set +e
+OUT18=$(PATH="$STAT_SHIM_DIR:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$STATE18" "$SCRIPT" --clean --db "$DB18" 2>&1)
+RC18=$?
+set -e
+
+expect_gt "unstatable retained WAL poststate exits non-zero" "$RC18" 0
+expect_not "no clean summary on unstatable WAL" "[clean]" "$OUT18"
+expect_not "no vacuum complete summary on unstatable WAL" "Codex DB vacuum complete" "$OUT18"
+expect "logged WAL read failure or incomplete maintenance" "Maintenance incomplete" "$OUT18"
+
+# Verify DB file, data, inode, integrity intact
+expect_eq "DB file still exists" "1" "$([[ -f "$DB18" ]] && echo 1 || echo 0)"
+DB18_INODE_AFTER=$(stat -f '%i' "$DB18" 2>/dev/null || stat -c '%i' "$DB18")
+expect_eq "DB inode preserved" "$DB18_INODE_BEFORE" "$DB18_INODE_AFTER"
+DB18_ROWS_AFTER=$("$REAL_SQLITE3" "$DB18" "SELECT count(*) FROM t;")
+expect_eq "DB row count preserved" "$DB18_ROWS_BEFORE" "$DB18_ROWS_AFTER"
+DB18_INTEG=$("$REAL_SQLITE3" "$DB18" "PRAGMA integrity_check;")
+expect_eq "DB integrity check ok" "ok" "$DB18_INTEG"
+
+# Verify lease was cleanly removed (not leaked)
+expect_eq "owned lease removed upon fail-closed unstatable WAL" "0" "$([[ -d "$STATE18/codex_db_leases/${DB18_ID}.lease" ]] && echo 1 || echo 0)"
+
+rm -rf "$STAT_SHIM_DIR"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
