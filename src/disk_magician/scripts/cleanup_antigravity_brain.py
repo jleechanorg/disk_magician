@@ -85,6 +85,7 @@ class BrainCompactor:
         clean_scratch: bool = True,
         compress_logs: bool = True,
         prune_empty: bool = True,
+        now: Optional[float] = None,
     ):
         self.brain_dir = Path(brain_dir)
         self.threshold_days = threshold_days
@@ -94,6 +95,7 @@ class BrainCompactor:
         self.clean_scratch = clean_scratch
         self.compress_logs = compress_logs
         self.prune_empty = prune_empty
+        self.now = float(now) if now is not None else time.time()
 
         self.stats = {
             "total_sessions": 0,
@@ -114,7 +116,7 @@ class BrainCompactor:
             return True, "explicitly marked active"
 
         # Check age relative to now
-        age_seconds = NOW - latest_mtime
+        age_seconds = self.now - latest_mtime
         if age_seconds < ACTIVE_PROTECT_SECONDS:
             return True, f"active in last 24h ({age_seconds / 3600:.1f}h ago)"
 
@@ -143,7 +145,7 @@ class BrainCompactor:
 
         # Check empty session
         if self.prune_empty and sess_size == 0:
-            age_seconds = NOW - latest_mtime
+            age_seconds = self.now - latest_mtime
             if age_seconds >= self.threshold_seconds:
                 self.actions.append(f"PRUNE_EMPTY: {sid} (0 bytes)")
                 self.stats["empty_pruned"] += 1

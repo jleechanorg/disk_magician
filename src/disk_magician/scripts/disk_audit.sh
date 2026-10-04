@@ -354,7 +354,7 @@ fi
 # Codex sessions check
 codex_sessions="$HOME/.codex/sessions"
 if [[ -d "$codex_sessions" ]]; then
-    size_kb=$(du -sk "$codex_sessions" 2>/dev/null | awk '{print $1+0}' || echo 0)
+    size_kb=$(timeout 3s du -sk "$codex_sessions" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if [[ $size_kb -gt $((1 * 1024 * 1024)) ]]; then
         printf "  %-50s %8s  %s\n" "Codex Sessions directory" "$(fmt_size "$size_kb")" "REVIEW: stale session folders"
     fi
@@ -383,7 +383,7 @@ aside_dir="$HOME/.aside"
 if [[ -d "$aside_dir/u" ]]; then
     size_kb=$(du -sk "$aside_dir/u" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if [[ $size_kb -gt $((500 * 1024)) ]]; then
-        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >14d and dedups)"
+        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >7d and dedups)"
     fi
 fi
 
@@ -518,7 +518,7 @@ if [[ "$MODE" == "clean-all" ]]; then
         echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
-    # Aside browser sessions (prune stale >14d and dedup static assets)
+    # Aside browser sessions (prune stale >7d and dedup static assets)
     if [[ -f "$SCRIPT_DIR/prune_aside_sessions.sh" ]]; then
         run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
     fi

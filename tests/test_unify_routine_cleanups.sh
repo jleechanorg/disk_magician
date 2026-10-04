@@ -24,6 +24,28 @@ CLI_SCRIPT="$REPO_ROOT/disk_magician.sh"
 TMP_DIR=$(mktemp -d -t test_routine_cleanups.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Isolate scratch/temp roots to clean fixtures so dry-run audit executes quickly
+# without scanning live multi-thousand-directory system temp stores.
+FIXTURE_TMP="$TMP_DIR/tmp"
+FIXTURE_PRIVATE_TMP="$TMP_DIR/private_tmp"
+FIXTURE_USER_TMP="$TMP_DIR/user_tmp"
+FIXTURE_BRAIN="$TMP_DIR/brain"
+FIXTURE_ASIDE="$TMP_DIR/aside"
+FIXTURE_CODEX="$TMP_DIR/codex"
+FIXTURE_WORKTREES="$TMP_DIR/worktrees"
+FIXTURE_CLAUDE_STATE="$TMP_DIR/claude_state"
+mkdir -p "$FIXTURE_TMP" "$FIXTURE_PRIVATE_TMP" "$FIXTURE_USER_TMP" "$FIXTURE_BRAIN" "$FIXTURE_ASIDE" "$FIXTURE_CODEX" "$FIXTURE_WORKTREES" "$FIXTURE_CLAUDE_STATE"
+export DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$FIXTURE_TMP"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$FIXTURE_PRIVATE_TMP"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$FIXTURE_USER_TMP"
+export DISK_MAGICIAN_BRAIN_DIR_OVERRIDE="$FIXTURE_BRAIN"
+export DISK_MAGICIAN_ASIDE_DIR_OVERRIDE="$FIXTURE_ASIDE"
+export DISK_MAGICIAN_CODEX_DIR_OVERRIDE="$FIXTURE_CODEX"
+export DISK_MAGICIAN_WORKTREE_ROOTS="$FIXTURE_WORKTREES"
+export DISK_MAGICIAN_TEST_CONTEXT=1
+export DISK_MAGICIAN_TEST_SANDBOX="$TMP_DIR"
+export CLAUDE_STATE_ROOT="$FIXTURE_CLAUDE_STATE"
+
 # Run disk_audit.sh --clean --dry-run
 OUT_AUDIT="$TMP_DIR/audit_clean.log"
 bash "$TARGET_SCRIPT" --clean --dry-run >"$OUT_AUDIT" 2>&1
@@ -56,6 +78,18 @@ for cat in "${EXPECTED_CATEGORIES[@]}"; do
   fi
 done
 
+if grep -qF "CATEGORY FAILED:" "$OUT_AUDIT"; then
+  echo "FAIL: one or more categories failed in disk_audit.sh --clean" >&2
+  cat "$OUT_AUDIT" >&2
+  exit 1
+fi
+
+if ! grep -qF "All attempted categories completed without error." "$OUT_AUDIT"; then
+  echo "FAIL: zero-failure summary not found in disk_audit.sh --clean" >&2
+  cat "$OUT_AUDIT" >&2
+  exit 1
+fi
+
 # Run CLI disk_magician.sh routine --dry-run
 OUT_CLI="$TMP_DIR/cli_routine.log"
 DISK_MAGICIAN_AUTO_CLEAN=1 bash "$CLI_SCRIPT" routine --dry-run >"$OUT_CLI" 2>&1
@@ -73,6 +107,18 @@ for cat in "${EXPECTED_CATEGORIES[@]}"; do
     exit 1
   fi
 done
+
+if grep -qF "CATEGORY FAILED:" "$OUT_CLI"; then
+  echo "FAIL: one or more categories failed in disk_magician.sh routine" >&2
+  cat "$OUT_CLI" >&2
+  exit 1
+fi
+
+if ! grep -qF "All attempted categories completed without error." "$OUT_CLI"; then
+  echo "FAIL: zero-failure summary not found in disk_magician.sh routine" >&2
+  cat "$OUT_CLI" >&2
+  exit 1
+fi
 
 echo "PASS: all 6-tier routine cleanup stack categories verified"
 exit 0
