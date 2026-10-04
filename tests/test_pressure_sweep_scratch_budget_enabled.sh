@@ -33,4 +33,4 @@ assert plist.get("ProgramArguments") == ["@HOME@/.local/bin/diskm", "pressure-sw
 )
 PY
 
-echo "PASS: pressure template enables exact 15 GiB scratch budget with unchanged schedule and dispatch"
+echo "All pressure_sweep_scratch_budget_enabled tests passed."
