@@ -49,7 +49,7 @@ TARGETS_MTIME_GATE_DAYS=(
   -1   # pip cache
    30  # antigravity-ide — idle since 2026-05-29, 2.5 GB
    30  # antigravity-browser-profile — idle since 2026-03-28, 1.5 GB
-   14  # ~/.dark-factory/runs — 14-day run retention floor
+   7   # ~/.dark-factory/runs — 7-day run retention floor
 )
 
 

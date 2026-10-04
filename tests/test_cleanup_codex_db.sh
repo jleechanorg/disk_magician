@@ -331,6 +331,18 @@ wal12_size_after=$(stat -f%z "${DB12}-wal" 2>/dev/null || stat -c%s "${DB12}-wal
 expect_eq "main db size untouched by dry-run" "$db12_size_before" "$db12_size_after"
 expect_eq "wal file size untouched by dry-run" "$wal12_size_before" "$wal12_size_after"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 13: Path with whitespace handling in --codex-dir
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 13: Directory discovery handles path with whitespace without word-splitting"
+MOCK_SPACES="$TMP_DIR/mock codex with spaces"
+mkdir -p "$MOCK_SPACES"
+create_test_db "$MOCK_SPACES/logs_space_1.sqlite" 100 50 2
+OUT13=$("$SCRIPT" --dry-run --codex-dir "$MOCK_SPACES" 2>&1)
+RC13=$?
+expect_eq "directory with spaces exit code 0" "0" "$RC13"
+expect "discovered db in directory with spaces" "logs_space_1.sqlite" "$OUT13"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]

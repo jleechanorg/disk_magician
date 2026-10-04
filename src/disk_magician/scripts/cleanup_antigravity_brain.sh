@@ -27,7 +27,7 @@ Safe compaction and retention tool for Antigravity brain:
 Options:
   --clean           Actually apply compaction (default: dry-run preview)
   --dry-run         Run in preview mode without modifying files (default)
-  --days N          Age threshold in days (default: 14)
+  --days N          Age threshold in days (default: 7)
   --brain-dir PATH  Override brain directory path
   -h, --help        Show this help message
 EOF

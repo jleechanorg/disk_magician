@@ -122,10 +122,6 @@ else
 fi
 [[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
 
-if [[ "$DRY_RUN" == false ]]; then
-  sandbox_guard_roots "$STATE_ROOT"
-fi
-
 # realpath_or_empty <path> -- portable realpath (python3 is always present
 # on this machine; avoids depending on GNU coreutils' realpath -f).
 realpath_or_empty() {
@@ -135,6 +131,21 @@ try:
 except Exception:
     pass' "$1" 2>/dev/null
 }
+
+# Enforce canonical root in production: --root overrides are strictly restricted
+# to sandboxed test fixtures (DISK_MAGICIAN_TEST_SANDBOX or DISK_MAGICIAN_TEST_CONTEXT).
+canonical_default_root="$(realpath_or_empty "$HOME/.claude/state")"
+canonical_state_root="$(realpath_or_empty "$STATE_ROOT")"
+if [[ -z "${DISK_MAGICIAN_TEST_SANDBOX:-}" && -z "${DISK_MAGICIAN_TEST_CONTEXT:-}" ]]; then
+  if [[ -n "$canonical_default_root" && "$canonical_state_root" != "$canonical_default_root" ]]; then
+    echo "ERROR: --root override is only permitted in sandboxed test contexts (canonical root is $HOME/.claude/state)" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$DRY_RUN" == false ]]; then
+  sandbox_guard_roots "$STATE_ROOT"
+fi
 
 size_kb() {
   local path="$1"
@@ -243,7 +254,7 @@ claude_state_git_check() {
 # both fail closed to "treat as open" (preserved). rc 1 = lsof confirmed
 # zero matches.
 claude_state_has_open_handles() {
-  local candidate="$1" out rc lsof_bin
+  local candidate="$1" out rc lsof_bin timeout_cmd
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
   elif command -v lsof >/dev/null 2>&1; then
@@ -253,8 +264,42 @@ claude_state_has_open_handles() {
   else
     return 0  # no lsof -> fail closed
   fi
-  out="$(timeout "$LSOF_TIMEOUT_SEC" "$lsof_bin" +D "$candidate" 2>&1)"
-  rc=$?
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout"
+  elif [[ -x /opt/homebrew/bin/gtimeout ]]; then
+    timeout_cmd="/opt/homebrew/bin/gtimeout"
+  elif [[ -x /opt/homebrew/bin/timeout ]]; then
+    timeout_cmd="/opt/homebrew/bin/timeout"
+  elif [[ -x /usr/local/bin/gtimeout ]]; then
+    timeout_cmd="/usr/local/bin/gtimeout"
+  elif [[ -x /usr/local/bin/timeout ]]; then
+    timeout_cmd="/usr/local/bin/timeout"
+  else
+    timeout_cmd=""
+  fi
+
+  if [[ -n "$timeout_cmd" ]]; then
+    out="$("$timeout_cmd" "$LSOF_TIMEOUT_SEC" "$lsof_bin" +D "$candidate" 2>&1)"
+    rc=$?
+  else
+    out="$(python3 -c '
+import subprocess, sys
+try:
+    p = subprocess.run([sys.argv[2], "+D", sys.argv[3]], timeout=float(sys.argv[1]), capture_output=True, text=True)
+    sys.stdout.write(p.stdout + p.stderr)
+    sys.exit(p.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+' "$LSOF_TIMEOUT_SEC" "$lsof_bin" "$candidate" 2>&1)"
+    rc=$?
+  fi
+
   if [[ -n "$out" ]]; then
     return 0
   fi

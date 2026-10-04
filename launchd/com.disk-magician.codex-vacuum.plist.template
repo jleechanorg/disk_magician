@@ -32,6 +32,8 @@
   <string>/tmp/disk-magician-codex-vacuum.log</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
     <!--
       sqlite3 lives at /opt/homebrew/bin on Apple Silicon; macOS system PATH
       may lack homebrew tools. Ensure PATH has brew and standard bin dirs.

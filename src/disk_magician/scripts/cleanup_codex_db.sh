@@ -155,18 +155,15 @@ else
 
   # Discover databases in CODEX_DIR, prioritizing primary telemetry and state files
   shopt -s nullglob
-  primary_patterns=(
-    "$CODEX_DIR"/logs_*.sqlite
-    "$CODEX_DIR"/state_*.sqlite
-    "$CODEX_DIR"/thread_history_*.sqlite
-    "$CODEX_DIR"/memories_*.sqlite
-    "$CODEX_DIR"/goals_*.sqlite
-    "$CODEX_DIR"/queue_*.sqlite
-    "$CODEX_DIR"/*.sqlite
-  )
   seen_dbs=()
-  for db_pattern in "${primary_patterns[@]}"; do
-    for db in $db_pattern; do
+  for db in \
+    "$CODEX_DIR"/logs_*.sqlite \
+    "$CODEX_DIR"/state_*.sqlite \
+    "$CODEX_DIR"/thread_history_*.sqlite \
+    "$CODEX_DIR"/memories_*.sqlite \
+    "$CODEX_DIR"/goals_*.sqlite \
+    "$CODEX_DIR"/queue_*.sqlite \
+    "$CODEX_DIR"/*.sqlite; do
       # Avoid duplicates, symlinks, and non-sqlite files
       [[ -f "$db" ]] || continue
       [[ -L "$db" ]] && continue
@@ -182,7 +179,6 @@ else
         seen_dbs+=("$db")
         CANDIDATES+=("$db")
       fi
-    done
   done
   shopt -u nullglob
 fi
@@ -331,8 +327,8 @@ for db in "${CANDIDATES[@]}"; do
         fi
         remaining=$(( remaining - chunk ))
         # Check current freelist count to avoid unnecessary iterations
-        cur_fl=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA freelist_count;" 2>/dev/null | tail -n 1 || echo 0)
-        if (( cur_fl == 0 )); then break; fi
+        cur_fl=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA freelist_count;" 2>/dev/null | tail -n 1 || echo "")
+        if [[ "$cur_fl" =~ ^[0-9]+$ ]] && (( cur_fl == 0 )); then break; fi
       done
     else
       set +e
