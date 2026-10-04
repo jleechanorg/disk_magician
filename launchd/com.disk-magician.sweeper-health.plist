@@ -4,7 +4,7 @@
   Daily watchdog: detect cleanup-* sweepers that are loaded but not actually running.
 
   Schedule:  Daily at 09:00 local time (Hour=9, Minute=0).
-  Action:    runs scripts/sweeper_health_check.sh in read-only mode. The script
+  Action:    runs the installed health checker with auto-repair. The script
              scans ~/Library/LaunchAgents/com.jleechan.cleanup-*.plist,
              resolves the log path from each plist's StandardOutPath, and
              checks whether the log was modified within --threshold-days
@@ -23,8 +23,8 @@
   <string>com.disk-magician.sweeper-health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/sweeper_health_check.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>sweeper-health</string>
     <string>--threshold-days</string>
     <string>7</string>
     <string>--auto-repair</string>
@@ -37,8 +37,8 @@
     <integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/tmp/disk-magician-sweeper-health.log</string>
+  <string>@HOME@/Library/Logs/disk-magician-sweeper-health.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/disk-magician-sweeper-health.log</string>
+  <string>@HOME@/Library/Logs/disk-magician-sweeper-health.log</string>
 </dict>
 </plist>
