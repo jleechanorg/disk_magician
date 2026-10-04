@@ -106,6 +106,17 @@ check() {
   fi
 }
 
+check_absent() {
+  local desc="$1" needle="$2" file="$3"
+  if grep -qF "$needle" "$file"; then
+    echo "  FAIL  $desc" >&2
+    FAIL=$(( FAIL + 1 ))
+  else
+    echo "  PASS  $desc"
+    PASS=$(( PASS + 1 ))
+  fi
+}
+
 echo "=== test_unify_routine_cleanups.sh (bounded disposable fixture) ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,6 +133,8 @@ RC1=$?
 set -e
 
 check "audit clean --dry-run exits 0" test "$RC1" -eq 0
+check_absent "audit dry-run has no failed categories" "CATEGORY FAILED:" "$OUT1"
+check "audit dry-run reports zero-failure summary" grep -qF "All attempted categories completed without error." "$OUT1"
 
 EXPECTED_DRY_SCRIPTS=(
   "cleanup_dev_caches.sh --dry-run"
@@ -213,6 +226,8 @@ RC4=$?
 set -e
 
 check "CLI routine --dry-run exits 0" test "$RC4" -eq 0
+check_absent "CLI routine has no failed categories" "CATEGORY FAILED:" "$OUT4"
+check "CLI routine reports zero-failure summary" grep -qF "All attempted categories completed without error." "$OUT4"
 check "CLI dispatched dev caches" grep -qF "cleanup_dev_caches.sh --dry-run" "$INVOCATIONS_LOG"
 check "CLI dispatched codex vacuum" grep -qF "cleanup_codex_db.sh --dry-run" "$INVOCATIONS_LOG"
 
