@@ -87,7 +87,16 @@ try:
 except Exception:
     cov = ""
 
-warn = str(s.get("snapshot_warning", "") or "").replace("\n", " ").replace("\r", " ").strip()
+def sanitize_str(val):
+    if not isinstance(val, str):
+        return ""
+    val = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', val)
+    val = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', val)
+    val = val.replace('\x1b', '')
+    val = ''.join(c for c in val if (32 <= ord(c) < 127) or ord(c) >= 160)
+    return val.strip()
+
+warn = sanitize_str(s.get("snapshot_warning", ""))
 ts   = str(s.get("timestamp", "") or "").strip()
 
 raw_swap = s.get("swap_used_gb", "")
@@ -108,7 +117,7 @@ meta_block = s.get("snapshot_metadata") or {}
 if not isinstance(meta_block, dict):
     meta_block = {}
 
-status = str(meta_block.get("measurement_status", "") or "").replace("\n", " ").replace("\r", " ").strip()
+status = sanitize_str(meta_block.get("measurement_status", ""))
 
 dirs = s.get("directories", {}) or {}
 if isinstance(dirs, dict):
@@ -117,7 +126,7 @@ if isinstance(dirs, dict):
             if v is None:
                 continue
             try:
-                clean_k = str(k).replace("\t", " ").replace("\n", " ").replace("\r", " ").strip()
+                clean_k = sanitize_str(str(k))
                 fh.write(f"{clean_k}\t{int(v)}\n")
             except Exception:
                 pass
@@ -125,10 +134,15 @@ if isinstance(dirs, dict):
 age_min = ""
 try:
     if ts and isinstance(ts, str):
-        t = datetime.datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+        ts_clean = ts.strip()
+        if ts_clean.endswith("Z"):
+            ts_clean = ts_clean[:-1] + "+00:00"
+        t = datetime.datetime.fromisoformat(ts_clean)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
         sec = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
-        if sec >= 0:
-            age_min = str(int(sec // 60))
+        if sec >= -120:
+            age_min = str(int(max(0.0, sec) // 60))
         else:
             age_min = "future"
     else:
@@ -171,10 +185,10 @@ PY
         SNAP_REASON="coverage invalid (${SNAP_COVERAGE})"; return 1
     fi
     if awk -v c="$SNAP_COVERAGE" -v f="$hard_floor" 'BEGIN{exit !(c+0 < f)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${hard_floor} — re-measuring live"; return 1
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${hard_floor}"; return 1
     fi
     if awk -v c="$SNAP_COVERAGE" -v m="$min_cov" 'BEGIN{exit !(c+0 < m)}'; then
-        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${min_cov} — re-measuring live"; return 1
+        SNAP_REASON="coverage ${SNAP_COVERAGE}% < ${min_cov}"; return 1
     fi
     if awk -v c="$SNAP_COVERAGE" 'BEGIN{exit !(c+0 < 70)}'; then
         SNAP_PARTIAL_WARN="partial coverage ${SNAP_COVERAGE}% (<70% — some paths timed out)"
@@ -321,7 +335,7 @@ elif [[ "$SNAP_USABLE" == true ]]; then
         printf "    %-34s %8s\n" "$key" "$(fmt_size "$kb")"
     done
 else
-    section "Directory Breakdown (Live du)"
+    section "Directory Breakdown (Snapshot Unavailable)"
     echo "  Snapshot not usable ($SNAP_REASON). Run snapshot task first."
     if [[ -n "$SNAP_STALE_WARN" ]]; then
         echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"

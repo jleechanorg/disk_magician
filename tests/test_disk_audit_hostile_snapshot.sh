@@ -9,9 +9,11 @@
 # 2. Sentinels are never created, proving zero code execution.
 # 3. Dedicated quote breakout tests verify that unbalanced single and double quotes
 #    do not cause syntax errors or break execution.
-# 4. Strict metric and timestamp gates: rejects non-finite (NaN, Infinity), boolean,
+# 4. Terminal control sequences (CSI, OSC, ESC, bell) are stripped from displayable
+#    strings (warning, status, directory names).
+# 5. Strict metric and timestamp gates: rejects non-finite (NaN, Infinity), boolean,
 #    and out-of-range coverage, sanitizes bad swap values on usable snapshots,
-#    and fails closed on missing, invalid, or future timestamps.
+#    allows graceful clock-skew tolerance, and fails closed on missing, invalid, or future timestamps.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -148,6 +150,58 @@ if ! grep -qF "Snapshot measurement_status: status with ' single and \" double q
   exit 1
 fi
 
+# Case 1c: Terminal escape stripping (CSI, OSC, bell characters stripped)
+HOSTILE_SNAP_ESC="$TMP_DIR/hostile_snap_esc.json"
+python3 - "$HOSTILE_SNAP_ESC" "$RECENT_TS" <<'PY'
+import json, sys
+out, ts = sys.argv[1:3]
+snap = {
+    "timestamp": ts,
+    "hostname": "test-host",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "warn \x1b[31;1mred alert\x1b[0m \x1b]0;hacked title\x07 clean",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {
+        "measurement_status": "status \x1b[2J \x1b]2;window title\x07 done",
+        "coverage_pct": 85.5
+    },
+    "directories": {
+        "dir \x1b[32mgreen\x1b[0m": 10485760
+    }
+}
+with open(out, "w") as f:
+    json.dump(snap, f, indent=2)
+PY
+
+OUT_ESC="$TMP_DIR/audit_esc.log"
+RC_ESC=0
+HOME="$FIXTURE_HOME" \
+DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" \
+DISK_SNAPSHOT_JSON="$HOSTILE_SNAP_ESC" \
+bash "$TARGET_SCRIPT" >"$OUT_ESC" 2>&1 || RC_ESC=$?
+
+if [[ $RC_ESC -ne 0 ]]; then
+  echo "FAIL: disk_audit.sh crashed on terminal escape snapshot with code $RC_ESC" >&2
+  cat "$OUT_ESC" >&2
+  exit 1
+fi
+
+# Verify no ESC or BEL bytes exist in the output for these fields
+if python3 -c "import sys; f=open('$OUT_ESC', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\x1b' in data or b'\x07' in data) else 1)"; then
+  echo "FAIL: terminal escape sequences (ESC or BEL) detected in audit output!" >&2
+  exit 1
+fi
+
+if ! grep -qF "Snapshot measurement_status: status   done" "$OUT_ESC"; then
+  echo "FAIL: sanitized status not found in output" >&2
+  cat "$OUT_ESC" >&2
+  exit 1
+fi
+
 # Case 2: Hostile command injection in snapshot_coverage_pct string
 HOSTILE_SNAP_2="$TMP_DIR/hostile_snap_2.json"
 python3 - "$HOSTILE_SNAP_2" "$RECENT_TS" "$COV_SENTINEL" "$SWAP_SENTINEL_2" <<'PY'
@@ -193,7 +247,7 @@ for s in "$COV_SENTINEL" "$SWAP_SENTINEL_2"; do
   fi
 done
 
-# Verify malformed coverage is safely rejected and falls back to live du
+# Verify malformed coverage is safely rejected and reports Snapshot not usable
 if ! grep -qF "Snapshot not usable (coverage" "$OUT_2"; then
   echo "FAIL: expected malformed coverage to be rejected in Case 2" >&2
   cat "$OUT_2" >&2
@@ -373,6 +427,7 @@ if ! grep -qF "Swap used: 15.0 GiB (>10 GiB)" "$OUT_VALID_SWAP"; then
 fi
 
 # Case 3d: Missing, invalid, and future timestamps must be rejected fail-closed
+# and report Directory Breakdown (Snapshot Unavailable) without ever displaying 'Age: ?'
 FUTURE_TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
 
 python3 - "$TMP_DIR" "$FUTURE_TS" <<'PY'
@@ -406,35 +461,68 @@ PY
 
 # Missing timestamp
 OUT_MISSING_TS="$TMP_DIR/audit_missing_ts.log"
+RC_MTS=0
 HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_missing_ts.json" \
-  bash "$TARGET_SCRIPT" >"$OUT_MISSING_TS" 2>&1 || true
+  bash "$TARGET_SCRIPT" >"$OUT_MISSING_TS" 2>&1 || RC_MTS=$?
+if [[ $RC_MTS -ne 0 ]]; then
+  echo "FAIL: audit crashed on missing timestamp with code $RC_MTS" >&2
+  cat "$OUT_MISSING_TS" >&2
+  exit 1
+fi
+if ! grep -qF "Directory Breakdown (Snapshot Unavailable)" "$OUT_MISSING_TS"; then
+  echo "FAIL: expected Snapshot Unavailable section header on missing timestamp" >&2
+  cat "$OUT_MISSING_TS" >&2
+  exit 1
+fi
 if ! grep -qF "Snapshot not usable (timestamp missing or invalid)" "$OUT_MISSING_TS"; then
-  echo "FAIL: missing timestamp was not rejected" >&2
+  echo "FAIL: missing timestamp was not rejected with expected reason" >&2
   cat "$OUT_MISSING_TS" >&2
   exit 1
 fi
 
 # Invalid timestamp
 OUT_INVALID_TS="$TMP_DIR/audit_invalid_ts.log"
+RC_ITS=0
 HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_invalid_ts.json" \
-  bash "$TARGET_SCRIPT" >"$OUT_INVALID_TS" 2>&1 || true
+  bash "$TARGET_SCRIPT" >"$OUT_INVALID_TS" 2>&1 || RC_ITS=$?
+if [[ $RC_ITS -ne 0 ]]; then
+  echo "FAIL: audit crashed on invalid timestamp with code $RC_ITS" >&2
+  cat "$OUT_INVALID_TS" >&2
+  exit 1
+fi
+if ! grep -qF "Directory Breakdown (Snapshot Unavailable)" "$OUT_INVALID_TS"; then
+  echo "FAIL: expected Snapshot Unavailable section header on invalid timestamp" >&2
+  cat "$OUT_INVALID_TS" >&2
+  exit 1
+fi
 if ! grep -qF "Snapshot not usable (timestamp missing or invalid)" "$OUT_INVALID_TS"; then
-  echo "FAIL: invalid timestamp string was not rejected" >&2
+  echo "FAIL: invalid timestamp string was not rejected with expected reason" >&2
   cat "$OUT_INVALID_TS" >&2
   exit 1
 fi
 
-# Future timestamp
+# Future timestamp (>120s in future)
 OUT_FUTURE_TS="$TMP_DIR/audit_future_ts.log"
+RC_FTS=0
 HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_future_ts.json" \
-  bash "$TARGET_SCRIPT" >"$OUT_FUTURE_TS" 2>&1 || true
+  bash "$TARGET_SCRIPT" >"$OUT_FUTURE_TS" 2>&1 || RC_FTS=$?
+if [[ $RC_FTS -ne 0 ]]; then
+  echo "FAIL: audit crashed on future timestamp with code $RC_FTS" >&2
+  cat "$OUT_FUTURE_TS" >&2
+  exit 1
+fi
+if ! grep -qF "Directory Breakdown (Snapshot Unavailable)" "$OUT_FUTURE_TS"; then
+  echo "FAIL: expected Snapshot Unavailable section header on future timestamp" >&2
+  cat "$OUT_FUTURE_TS" >&2
+  exit 1
+fi
 if ! grep -qF "Snapshot not usable (timestamp is in the future)" "$OUT_FUTURE_TS"; then
-  echo "FAIL: future timestamp was not rejected" >&2
+  echo "FAIL: future timestamp was not rejected with expected reason" >&2
   cat "$OUT_FUTURE_TS" >&2
   exit 1
 fi
 
-# Ensure Age: ? never appears
+# Ensure Age: ? never appears in any output
 for log in "$OUT_MISSING_TS" "$OUT_INVALID_TS" "$OUT_FUTURE_TS"; do
   if grep -qF "Age: ?" "$log"; then
     echo "FAIL: 'Age: ?' displayed in audit output for bad timestamp" >&2
@@ -443,5 +531,49 @@ for log in "$OUT_MISSING_TS" "$OUT_INVALID_TS" "$OUT_FUTURE_TS"; do
   fi
 done
 
-echo "PASS: hostile snapshot injection vectors, bad metrics, and timestamp gates safely neutralized"
+# Case 3e: Graceful clock skew tolerance (timestamp 30s in future accepted as 0 min age)
+SKEW_TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+SNAP_SKEW="$TMP_DIR/snap_skew.json"
+python3 - "$SNAP_SKEW" "$SKEW_TS" <<'PY'
+import json, sys
+out, ts = sys.argv[1:3]
+snap = {
+    "timestamp": ts,
+    "hostname": "test-host",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {
+        "measurement_status": "complete"
+    },
+    "directories": {
+        "projects": 10485760
+    }
+}
+with open(out, "w") as f:
+    json.dump(snap, f, indent=2)
+PY
+
+OUT_SKEW="$TMP_DIR/audit_skew.log"
+RC_SKEW=0
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_SKEW" \
+  bash "$TARGET_SCRIPT" >"$OUT_SKEW" 2>&1 || RC_SKEW=$?
+
+if [[ $RC_SKEW -ne 0 ]]; then
+  echo "FAIL: audit crashed on clock-skew snapshot with code $RC_SKEW" >&2
+  cat "$OUT_SKEW" >&2
+  exit 1
+fi
+
+if ! grep -qF "Coverage: 85.5%   Age: 0 min" "$OUT_SKEW"; then
+  echo "FAIL: snapshot within 120s clock skew tolerance was not accepted with Age: 0 min" >&2
+  cat "$OUT_SKEW" >&2
+  exit 1
+fi
+
+echo "PASS: hostile snapshot injection vectors, terminal escapes, and timestamp gates safely neutralized"
 exit 0

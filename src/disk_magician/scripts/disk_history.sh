@@ -12,6 +12,7 @@ import os
 import json
 import subprocess
 import argparse
+import re
 from datetime import datetime, timezone
 
 def run_cmd(cmd, cwd=None):
@@ -132,7 +133,14 @@ def main():
             except Exception:
                 continue
 
-        dirs = data.get("directories", {})
+        raw_dirs = data.get("directories", {})
+        dirs = {}
+        for k, v in raw_dirs.items():
+            clean_k = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(k))
+            clean_k = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean_k)
+            clean_k = clean_k.replace('\x1b', '')
+            clean_k = ''.join(c for c in clean_k if (32 <= ord(c) < 127) or ord(c) >= 160).strip()
+            dirs[clean_k] = v
         all_keys.update(dirs.keys())
         try:
             ts_obj = datetime.fromisoformat(ts.replace("Z", "+00:00"))
