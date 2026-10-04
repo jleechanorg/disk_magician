@@ -275,6 +275,7 @@ git -C "$T8_DIR/pr-git-uncommitted" add file.txt
 git -C "$T8_DIR/pr-git-uncommitted" commit -q -m "init"
 # Add uncommitted modification
 echo "dirty" >> "$T8_DIR/pr-git-uncommitted/file.txt"
+set_old_mtime "$T8_DIR/pr-git-uncommitted"
 
 T8_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T8_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T8_DIR" --min-age-hours 0 2>&1)
 assert_exists "T8: uncommitted worktree preserved" "$T8_DIR/pr-git-uncommitted"
