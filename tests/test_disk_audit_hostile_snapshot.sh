@@ -196,7 +196,7 @@ if python3 -c "import sys; f=open('$OUT_ESC', 'rb'); data=f.read(); f.close(); s
   exit 1
 fi
 
-if ! grep -qF "Snapshot measurement_status: status   done" "$OUT_ESC"; then
+if ! grep -qF "Snapshot measurement_status: status \\e[2J \\e]2;window title\\a done" "$OUT_ESC"; then
   echo "FAIL: sanitized status not found in output" >&2
   cat "$OUT_ESC" >&2
   exit 1
@@ -572,6 +572,126 @@ fi
 if ! grep -qF "Coverage: 85.5%   Age: 0 min" "$OUT_SKEW"; then
   echo "FAIL: snapshot within 120s clock skew tolerance was not accepted with Age: 0 min" >&2
   cat "$OUT_SKEW" >&2
+  exit 1
+fi
+
+# Case 3f: Tolerance boundary test (+180s in future is past 120s tolerance, rejected as future)
+BOUNDARY_TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=180)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+SNAP_BOUNDARY="$TMP_DIR/snap_boundary.json"
+python3 - "$SNAP_BOUNDARY" "$BOUNDARY_TS" <<'PY'
+import json, sys
+out, ts = sys.argv[1:3]
+snap = {
+    "timestamp": ts,
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {
+        "measurement_status": "complete"
+    },
+    "directories": {}
+}
+with open(out, "w") as f:
+    json.dump(snap, f)
+PY
+
+OUT_BOUNDARY="$TMP_DIR/audit_boundary.log"
+RC_BOUNDARY=0
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_BOUNDARY" \
+  bash "$TARGET_SCRIPT" >"$OUT_BOUNDARY" 2>&1 || RC_BOUNDARY=$?
+
+if [[ $RC_BOUNDARY -ne 0 ]]; then
+  echo "FAIL: audit crashed on boundary future timestamp with code $RC_BOUNDARY" >&2
+  cat "$OUT_BOUNDARY" >&2
+  exit 1
+fi
+
+if ! grep -qF "Snapshot not usable (timestamp is in the future)" "$OUT_BOUNDARY"; then
+  echo "FAIL: timestamp past tolerance window (+180s) was not rejected as future" >&2
+  cat "$OUT_BOUNDARY" >&2
+  exit 1
+fi
+
+# Case 4: Command injection resistance in disk_history.sh path handling
+HIST_SENTINEL_NAME="hist_path_marker"
+HIST_SENTINEL="$REPO_ROOT/$HIST_SENTINEL_NAME"
+rm -f "$HIST_SENTINEL"
+HOSTILE_HIST_PATH="$TMP_DIR/snap; touch $HIST_SENTINEL_NAME; .json"
+cp "$SNAP_SKEW" "$HOSTILE_HIST_PATH"
+
+OUT_HIST_INJ="$TMP_DIR/hist_inj.log"
+DISK_SNAPSHOT_JSON="$HOSTILE_HIST_PATH" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 5 >"$OUT_HIST_INJ" 2>&1 || true
+
+if [[ -e "$HIST_SENTINEL" ]]; then
+  rm -f "$HIST_SENTINEL"
+  echo "FAIL: Command injection in disk_history.sh! Sentinel created: $HIST_SENTINEL" >&2
+  exit 1
+fi
+
+# Case 5: Directory key collision safety across audit and history
+SNAP_COLLISION="$TMP_DIR/snap_collision.json"
+python3 - "$SNAP_COLLISION" "$RECENT_TS" <<'PY'
+import json, sys
+out, ts = sys.argv[1:3]
+snap = {
+    "timestamp": ts,
+    "hostname": "test-host",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": "176\x1b[32m",
+    "disk_pct": "81\x1b[31m\x07",
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {
+        "measurement_status": "complete"
+    },
+    "directories": {
+        "foo": 1048576,
+        "\x1b[31mfoo": 2097152
+    }
+}
+with open(out, "w") as f:
+    json.dump(snap, f, indent=2)
+PY
+
+OUT_COLLISION="$TMP_DIR/audit_collision.log"
+RC_COLLISION=0
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_COLLISION" \
+  bash "$TARGET_SCRIPT" >"$OUT_COLLISION" 2>&1 || RC_COLLISION=$?
+
+if [[ $RC_COLLISION -ne 0 ]]; then
+  echo "FAIL: audit crashed on collision snapshot with code $RC_COLLISION" >&2
+  cat "$OUT_COLLISION" >&2
+  exit 1
+fi
+
+# Assert both buckets are preserved in audit output without overwriting
+if ! grep -qF "foo" "$OUT_COLLISION" || ! grep -qF "\\e[31mfoo" "$OUT_COLLISION"; then
+  echo "FAIL: directory key collision resulted in lost bucket in audit output!" >&2
+  cat "$OUT_COLLISION" >&2
+  exit 1
+fi
+
+# Test disk_history.sh with the collision snapshot and hostile numeric fields
+OUT_HIST_COLLISION="$TMP_DIR/hist_collision.log"
+DISK_SNAPSHOT_JSON="$SNAP_COLLISION" python3 "$REPO_ROOT/scripts/disk_history.sh" --limit 1 >"$OUT_HIST_COLLISION" 2>&1 || true
+
+# Assert no raw ESC or BEL bytes reach history output
+if python3 -c "import sys; f=open('$OUT_HIST_COLLISION', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\x1b' in data or b'\x07' in data) else 1)"; then
+  echo "FAIL: raw ESC or BEL bytes detected in disk_history.sh output!" >&2
+  cat "$OUT_HIST_COLLISION" >&2
+  exit 1
+fi
+
+# Assert numeric fields were cleanly coerced
+if ! grep -qF "81%" "$OUT_HIST_COLLISION" || ! grep -qF "176G" "$OUT_HIST_COLLISION"; then
+  echo "FAIL: numeric free_gb or pct not cleanly coerced in history table" >&2
+  cat "$OUT_HIST_COLLISION" >&2
   exit 1
 fi
 

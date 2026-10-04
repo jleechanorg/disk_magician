@@ -13,14 +13,37 @@ import json
 import subprocess
 import argparse
 import re
+import math
 from datetime import datetime, timezone
 
 def run_cmd(cmd, cwd=None):
     try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True, cwd=cwd)
+        res = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=True, cwd=cwd)
         return res.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
+
+def sanitize_str(s):
+    if not isinstance(s, str):
+        return ""
+    out = []
+    for c in s:
+        code = ord(c)
+        if c == '\x1b':
+            out.append(r'\e')
+        elif c == '\x07':
+            out.append(r'\a')
+        elif c in ('\t', '\n', '\r'):
+            out.append(' ')
+        elif 32 <= code < 127:
+            out.append(c)
+        elif 160 <= code < 0x202a:
+            out.append(c)
+        elif code < 32:
+            out.append(f'\\x{code:02x}')
+        else:
+            out.append(f'\\u{code:04x}')
+    return ''.join(out).strip()
 
 def fmt_kb(kb):
     gb = kb / 1024 / 1024
@@ -51,9 +74,8 @@ def main():
     explicit_snapshot = os.environ.get("DISK_SNAPSHOT_JSON", "")
     if explicit_snapshot and os.path.exists(explicit_snapshot):
         best_path = os.path.realpath(explicit_snapshot)
-        repo_root = os.path.realpath(
-            run_cmd("git rev-parse --show-toplevel", cwd=os.path.dirname(best_path)) or script_repo_root
-        )
+        top_level = run_cmd(["git", "rev-parse", "--show-toplevel"], cwd=os.path.dirname(best_path))
+        repo_root = os.path.realpath(top_level or script_repo_root)
     else:
         repo_root = script_repo_root
 
@@ -95,8 +117,10 @@ def main():
 
     rel_path = os.path.relpath(best_path, repo_root)
 
-    since_arg = f"--since={args.days}.days.ago" if args.days else ""
-    log_cmd = f"git log --format='%H %aI' {since_arg} -n {args.limit} -- {rel_path}"
+    log_cmd = ["git", "log", "--format=%H %aI"]
+    if args.days:
+        log_cmd.append(f"--since={args.days}.days.ago")
+    log_cmd.extend(["-n", str(args.limit), "--", rel_path])
     log_output = run_cmd(log_cmd, cwd=repo_root)
 
     commits = []
@@ -126,7 +150,7 @@ def main():
             except Exception:
                 continue
         else:
-            show_cmd = f"git show {sha}:{rel_path}"
+            show_cmd = ["git", "show", f"{sha}:{rel_path}"]
             content = run_cmd(show_cmd, cwd=repo_root)
             try:
                 data = json.loads(content)
@@ -136,10 +160,12 @@ def main():
         raw_dirs = data.get("directories", {})
         dirs = {}
         for k, v in raw_dirs.items():
-            clean_k = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(k))
-            clean_k = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean_k)
-            clean_k = clean_k.replace('\x1b', '')
-            clean_k = ''.join(c for c in clean_k if (32 <= ord(c) < 127) or ord(c) >= 160).strip()
+            clean_k = sanitize_str(str(k))
+            if clean_k in dirs:
+                idx = 2
+                while f"{clean_k}#{idx}" in dirs:
+                    idx += 1
+                clean_k = f"{clean_k}#{idx}"
             dirs[clean_k] = v
         all_keys.update(dirs.keys())
         try:
@@ -158,11 +184,36 @@ def main():
             coverage = float(coverage)
         except (TypeError, ValueError):
             coverage = None
+
+        raw_free = data.get("disk_free_gb")
+        try:
+            if isinstance(raw_free, (int, float)) and not isinstance(raw_free, bool) and math.isfinite(raw_free):
+                free_gb = int(round(raw_free))
+            elif isinstance(raw_free, str):
+                m = re.match(r'^\s*([0-9]+)', raw_free)
+                free_gb = int(m.group(1)) if m else 0
+            else:
+                free_gb = 0
+        except Exception:
+            free_gb = 0
+
+        raw_pct = data.get("disk_pct")
+        try:
+            if isinstance(raw_pct, (int, float)) and not isinstance(raw_pct, bool) and math.isfinite(raw_pct):
+                pct_val = int(round(raw_pct))
+            elif isinstance(raw_pct, str):
+                m = re.match(r'^\s*([0-9]+)', raw_pct)
+                pct_val = int(m.group(1)) if m else 0
+            else:
+                pct_val = 0
+        except Exception:
+            pct_val = 0
+
         snapshots.append({
             "date": ts[:16],
             "date_obj": ts_obj,
-            "free": data.get("disk_free_gb", 0),
-            "pct": data.get("disk_pct", 0),
+            "free": free_gb,
+            "pct": pct_val,
             "dirs": dirs,
             "has_data": has_data,
             "used_gb": used_gb,

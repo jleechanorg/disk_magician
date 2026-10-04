@@ -87,14 +87,27 @@ try:
 except Exception:
     cov = ""
 
-def sanitize_str(val):
-    if not isinstance(val, str):
+def sanitize_str(s):
+    if not isinstance(s, str):
         return ""
-    val = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', val)
-    val = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', val)
-    val = val.replace('\x1b', '')
-    val = ''.join(c for c in val if (32 <= ord(c) < 127) or ord(c) >= 160)
-    return val.strip()
+    out = []
+    for c in s:
+        code = ord(c)
+        if c == '\x1b':
+            out.append(r'\e')
+        elif c == '\x07':
+            out.append(r'\a')
+        elif c in ('\t', '\n', '\r'):
+            out.append(' ')
+        elif 32 <= code < 127:
+            out.append(c)
+        elif 160 <= code < 0x202a:
+            out.append(c)
+        elif code < 32:
+            out.append(f'\\x{code:02x}')
+        else:
+            out.append(f'\\u{code:04x}')
+    return ''.join(out).strip()
 
 warn = sanitize_str(s.get("snapshot_warning", ""))
 ts   = str(s.get("timestamp", "") or "").strip()
@@ -121,12 +134,19 @@ status = sanitize_str(meta_block.get("measurement_status", ""))
 
 dirs = s.get("directories", {}) or {}
 if isinstance(dirs, dict):
+    seen_keys = set()
     with open(cache, "w") as fh:
         for k, v in dirs.items():
             if v is None:
                 continue
             try:
                 clean_k = sanitize_str(str(k))
+                if clean_k in seen_keys:
+                    idx = 2
+                    while f"{clean_k}#{idx}" in seen_keys:
+                        idx += 1
+                    clean_k = f"{clean_k}#{idx}"
+                seen_keys.add(clean_k)
                 fh.write(f"{clean_k}\t{int(v)}\n")
             except Exception:
                 pass
