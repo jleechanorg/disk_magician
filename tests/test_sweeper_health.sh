@@ -177,7 +177,7 @@ expect "empty log flagged MISS"        "[MISS] com.jleechan.cleanup-empty"
 expect "warn sweeper flagged WARN"     "[WARN] com.jleechan.cleanup-warn"
 expect "fresh sweeper reported OK"     "[OK]   com.jleechan.cleanup-fresh"
 expect "jleechanorg family matched"    "[OK]   com.jleechanorg.disk-magician-fresh"
-expect "summary line present"          "Summary: 2 OK, 1 WARN, 3 MISS"
+expect "summary line present"          "Summary: 2 OK, 2 WARN, 3 MISS"
 expect "FAIL message present"          "FAIL: 3 sweeper(s) appear silent"
 
 # Test the happy path: all sweepers healthy → exit 0.
