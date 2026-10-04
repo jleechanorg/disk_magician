@@ -28,14 +28,9 @@
 #                                   sweeper in scripts/cleanup_*.sh targets
 #                                   this path; cleanup_supervisor_logs.sh
 #                                   only covers $HOME/.claude/supervisor.
-#   $DARWIN_USER_TEMP_DIR          (21 GiB, 2026-09-22 measurement) — only
-#                                   cleanup_sessions.sh touches this root,
-#                                   and only the narrow
-#                                   "${TMP_DIR}ao-<session-id>" subpaths
-#                                   (scripts/cleanup_sessions.sh:56,117);
-#                                   the bulk of the tree (PR-review scratch,
-#                                   com.apple.fileproviderd cache, etc.) is
-#                                   untouched by any sweeper.
+#   $DARWIN_USER_TEMP_DIR: budget-covered by cleanup_tmp.sh / cleanup_pr_scratch.sh
+#                          via scratch_roots_get_unique (guarded 15 GiB ceiling;
+#                          preserves safety/age/open/repo guards).
 
 # cleanup_dev_caches.sh
 $HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
@@ -52,6 +47,7 @@ $HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
 # cleanup_tmp.sh / cleanup_pr_scratch.sh
 /private/tmp	cleanup_tmp.sh	ARCHIVE_ROOT + --large branch target
 /tmp	cleanup_pr_scratch.sh	TMP_DIRS array, line 181
+$DARWIN_USER_TEMP_DIR	cleanup_tmp.sh / cleanup_pr_scratch.sh	scratch_roots_get_unique budget-enabled invocation (guarded 15 GiB ceiling; preserves safety/age/open/repo guards)
 
 # cleanup_xcode.sh
 $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
