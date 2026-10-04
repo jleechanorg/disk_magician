@@ -4,7 +4,7 @@
 # Reads the latest committed snapshot JSON, checks how much of disk_used is
 # NOT explained by measured directories (the "residual"), and — only when
 # that residual crosses a threshold — proposes untracked candidates into
-# config.d/auto-candidates.json for human promotion into config.json.
+# ~/.disk_magician_state/config.d/auto-candidates.json for human promotion into config.json.
 #
 # Never writes to config.json / config.json.template directly (no silent
 # self-mutation, per roadmap/2026-07-11-total-coverage-snapshot-v2.md
@@ -27,7 +27,7 @@ STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 DISCOVER_LAST="${DISK_MAGICIAN_DISCOVER_LAST:-$STATE_DIR/discover_last.json}"
 ALERT_LOG="$STATE_DIR/residual_alerts.log"
 
-CANDIDATES_DIR="${DISK_MAGICIAN_CANDIDATES_DIR:-$REPO_ROOT/config.d}"
+CANDIDATES_DIR="${DISK_MAGICIAN_CANDIDATES_DIR:-$STATE_DIR/config.d}"
 CANDIDATES_FILE="$CANDIDATES_DIR/auto-candidates.json"
 
 THRESHOLD_GB="${DISK_MAGICIAN_RESIDUAL_THRESHOLD_GB:-10}"
@@ -42,7 +42,7 @@ Usage: $(basename "$0") [--threshold-gb N] [--snapshot-file PATH] [--dry-run]
 
 Reads the latest disk_snapshot.json, fast-exits if the residual (disk_used
 not explained by measured dirs) is below --threshold-gb (default: ${THRESHOLD_GB}).
-When triggered, proposes untracked candidates into config.d/auto-candidates.json
+When triggered, proposes untracked candidates into $STATE_DIR/config.d/auto-candidates.json
 (machine-local, gitignored, human-promoted — never auto-added to config).
 
 Options:

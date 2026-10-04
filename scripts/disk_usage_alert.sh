@@ -235,7 +235,7 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
     fi
     if [[ "$streak_alert" == true ]]; then
       echo "🚨 WARNING: Snapshot coverage degraded (effective_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}." >&2
-      echo "Run 'scripts/residual_drilldown.sh' or check config.d/auto-candidates.json for untracked-growth proposals." >&2
+      echo "Run 'scripts/residual_drilldown.sh' or check ~/.disk_magician_state/config.d/auto-candidates.json for untracked-growth proposals." >&2
     fi
     if [[ "$ledger_alert" == true ]]; then
       echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})." >&2

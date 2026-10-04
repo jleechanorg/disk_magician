@@ -4,7 +4,7 @@
   Residual drilldown: every 4h, check the latest snapshot's residual (disk
   used but not explained by measured directories) and — only when it
   crosses threshold — propose untracked candidates into
-  config.d/auto-candidates.json for human promotion into config.json.
+  ~/.disk_magician_state/config.d/auto-candidates.json for human promotion into config.json.
 
   Schedule:  Every 4 hours (StartInterval=14400s), no RunAtLoad (avoid
              firing immediately on every login/install).
