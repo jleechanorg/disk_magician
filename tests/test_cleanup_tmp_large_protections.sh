@@ -143,6 +143,7 @@ EOF
   else
     cat > "$bin_dir/timeout" <<'EOF'
 #!/usr/bin/env bash
+[[ "${1:-}" == --kill-after=* ]] && shift
 shift
 exec "$@"
 EOF

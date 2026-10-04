@@ -104,6 +104,7 @@ SHIM
 
   cat > "$bin_dir/timeout" <<'SHIM'
 #!/usr/bin/env bash
+[[ "${1:-}" == --kill-after=* ]] && shift
 shift
 exec "$@"
 SHIM
