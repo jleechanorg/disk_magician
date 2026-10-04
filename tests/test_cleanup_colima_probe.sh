@@ -317,6 +317,11 @@ env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECOND
   bash "$SCRIPT" --dry-run > "$OUT10" 2>&1 || RC10_HIGH=$?
 assert "rejects unreasonable deadline (>60s)" "true" "$([[ $RC10_HIGH -ne 0 ]] && echo true || echo false)"
 
+RC10_OVERFLOW=0
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECONDS=18446744073709551617 \
+  bash "$SCRIPT" --dry-run > "$OUT10" 2>&1 || RC10_OVERFLOW=$?
+assert "rejects deadline beyond shell integer range" "true" "$([[ $RC10_OVERFLOW -ne 0 ]] && echo true || echo false)"
+
 # ---------------------------------------------------------------------------
 # Test 11: TERM-ignoring probe child is killed by deadline + kill-after grace
 echo "--- Test 11: TERM-ignoring probe child killed by kill-after grace ---"

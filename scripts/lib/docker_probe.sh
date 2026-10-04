@@ -30,7 +30,7 @@ resolve_docker_probe_deadline() {
     return 1
   fi
 
-  if (( val > MAX_DOCKER_PROBE_DEADLINE )); then
+  if (( ${#val} > ${#MAX_DOCKER_PROBE_DEADLINE} )) || (( val > MAX_DOCKER_PROBE_DEADLINE )); then
     echo "ERROR: unreasonable Docker probe deadline: '$val' (exceeds maximum limit of $MAX_DOCKER_PROBE_DEADLINE seconds)" >&2
     return 1
   fi
