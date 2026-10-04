@@ -45,3 +45,15 @@ to change FDA settings or sudoers. Related CLI input work is recorded in
 
 - 2026-10-04 — preserved the first diagnostic summary and later preflight JSON;
   documented their differing root/FDA outcomes without a causal attribution.
+- 2026-10-04 — first scheduled LaunchDaemon run
+  (`system/com.jleechanorg.disk-magician-frontier-root`, 10:41:07Z–13:11:48Z,
+  9,040.5 s, run `689a9e3f7f0f4fc8b98a202ac14d1b06`, pre-update runner) wrote
+  `/var/db/disk-magician/frontier_last.json` with five of six FDA probes denied
+  (only `fseventsd` readable), 186 `permission_denied_or_tcc` frontier leaves
+  (including `~/Desktop`, `~/Documents`, `~/Downloads`), 9/17 roots measured,
+  and 176.5 GiB residual. The interactive `sudo` run at 09:34Z had all six
+  probes readable. This is direct evidence that the scheduled execution context
+  lacks FDA; root alone does not grant it. The 30-minute snapshot then embedded
+  this partial output (64.7% coverage). Complete scheduled coverage requires an
+  FDA grant for the daemon's responsible executable, which only the user can
+  make in System Settings.
