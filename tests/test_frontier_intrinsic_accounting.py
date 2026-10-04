@@ -16,6 +16,73 @@ GIB_KB = 1024 * 1024
 
 
 class TestIntrinsicGateAccounting(unittest.TestCase):
+    def test_cli_scan_user_home_binds_explicit_fda_catalog_without_mutating_env(self):
+        args = frontier.parse_args(
+            ["--root", "/fixture", "--scan-user-home", "/Users/explicit"]
+        )
+        with mock.patch.dict(
+            frontier.os.environ,
+            {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/from-env"},
+            clear=False,
+        ), mock.patch.object(
+            frontier, "fda_preflight", return_value={"status": "no_targets", "probes": {}}
+        ):
+            env_before = dict(frontier.os.environ)
+            scanner = frontier.FrontierScanner(args)
+            self.assertEqual(
+                frontier.os.environ["DISK_MAGICIAN_SCAN_USER_HOME"], "/Users/from-env"
+            )
+            self.assertEqual(dict(frontier.os.environ), env_before)
+
+        self.assertEqual(
+            scanner.fda_probe_catalog,
+            {
+                "mobile_sync": "/Users/explicit/Library/Application Support/MobileSync/Backup",
+                "mail": "/Users/explicit/Library/Mail",
+                "messages": "/Users/explicit/Library/Messages",
+            },
+        )
+
+    def test_cli_scan_user_home_invalid_explicit_value_fails_closed_without_env_fallback(self):
+        invalid_homes = (
+            "",
+            "relative/home",
+            "/Users/fixture/../other",
+            "/Users/fixture/",
+            "/Users/fixture/child",
+            "/var/root",
+        )
+        for home in invalid_homes:
+            with self.subTest(home=home):
+                with self.assertRaises(SystemExit) as raised:
+                    frontier.parse_args(
+                        ["--root", "/fixture", "--scan-user-home", home]
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                with mock.patch.dict(
+                    frontier.os.environ,
+                    {"DISK_MAGICIAN_SCAN_USER_HOME": "/Users/from-env"},
+                    clear=False,
+                ):
+                    self.assertEqual(frontier.fda_probe_paths("/fixture", home), {})
+
+        with mock.patch.object(
+            frontier.os.path, "realpath", return_value="/Users/real"
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                frontier.parse_args(
+                    ["--root", "/fixture", "--scan-user-home", "/Users/link"]
+                )
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIsNone(frontier.scan_user_home("/Users/link"))
+
+    def test_cli_scan_user_home_parser_preserves_omitted_default(self):
+        self.assertIsNone(frontier.parse_args([]).scan_user_home)
+        self.assertEqual(
+            frontier.parse_args(["--scan-user-home", "/Users/fixture"]).scan_user_home,
+            "/Users/fixture",
+        )
+
     def test_root_without_scan_home_cannot_grant_user_fda_evidence(self):
         invalid_homes = (
             None,
