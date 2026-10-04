@@ -19,12 +19,15 @@ OUT_DRY=$("$REPO_ROOT/scripts/install_root_frontier_runner.sh" --dry-run)
 echo "$OUT_DRY" | grep -q "/usr/local/libexec/disk-magician" && ok "dry-run names immutable libexec path" || bad "dry-run libexec" "$OUT_DRY"
 echo "$OUT_DRY" | grep -q "com.jleechanorg.disk-magician-frontier-root.plist" && ok "dry-run names daemon plist" || bad "dry-run plist" "$OUT_DRY"
 
+echo "$OUT_DRY" | grep -q "$REPO_ROOT/launchd/diskm_root_launcher.c" && ok "dry-run names FDA launcher source" || bad "dry-run launcher" "$OUT_DRY"
+
 echo "── 2. Plist template structural invariants ──"
 PLIST="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-frontier-root.plist.template"
 [[ -f "$PLIST" ]] && ok "plist template exists" || bad "plist missing" "$PLIST"
 
 grep -q '<string>root</string>' "$PLIST" && ok "plist runs as root" || bad "plist user" "not root"
-grep -q '/usr/local/libexec/disk-magician/disk_frontier_scan.py' "$PLIST" && ok "plist points to immutable binary" || bad "plist binary" "not libexec"
+grep -q '<string>/usr/local/libexec/disk-magician/diskm</string>' "$PLIST" && ok "plist runs immutable FDA launcher" || bad "plist binary" "not libexec launcher"
+! grep -q '/usr/bin/python3' "$PLIST" && ok "plist does not bypass launcher" || bad "plist python" "invokes python directly"
 grep -q 'DISK_MAGICIAN_SCAN_USER_HOME' "$PLIST" && ok "plist declares scan user home env var" || bad "plist env" "missing scan user home"
 ! grep -q '@REPO_ROOT@' "$PLIST" && ok "plist contains zero checkout repository references" || bad "plist checkout ref" "contains @REPO_ROOT@"
 ! grep -q '@HOME@' "$PLIST" && ok "plist contains zero user HOME references in binary path" || bad "plist home ref" "contains @HOME@"
@@ -40,6 +43,19 @@ else
   ok "skipping non-root check when running as root"
   ok "root execution mode active"
 fi
+
+echo "── 3b. Launcher compiles and refuses non-root ──"
+LTMP="$(mktemp -d)"
+if clang -Wall -Werror -o "$LTMP/diskm" "$REPO_ROOT/launchd/diskm_root_launcher.c" 2>"$LTMP/cc.log"; then
+  ok "launcher compiles warning-free"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    RC=0; "$LTMP/diskm" --help >/dev/null 2>&1 || RC=$?
+    [[ $RC -eq 77 ]] && ok "launcher refuses non-root (77)" || bad "launcher non-root" "rc=$RC"
+  fi
+else
+  bad "launcher compile" "$(cat "$LTMP/cc.log")"
+fi
+rm -rf "$LTMP"
 
 echo "── 4. Symlink-ancestor rejection (TOCTOU/privilege-escalation guard) ──"
 TMPD="$(mktemp -d)"
