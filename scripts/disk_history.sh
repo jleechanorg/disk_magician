@@ -182,14 +182,14 @@ def main():
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 try:
                     fval = float(v)
-                    if math.isfinite(fval):
+                    if math.isfinite(fval) and fval >= 0.0:
                         val_num = int(round(fval))
                 except Exception:
                     val_num = None
             elif isinstance(v, str):
                 try:
                     fval = float(v.strip())
-                    if math.isfinite(fval):
+                    if math.isfinite(fval) and fval >= 0.0:
                         val_num = int(round(fval))
                 except Exception:
                     val_num = None

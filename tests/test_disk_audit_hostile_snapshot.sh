@@ -760,9 +760,22 @@ if grep -qF "<-" "$OUT_SWAP_ORDER"; then
   exit 1
 fi
 
-# Assert no artificial #2 suffix exists
-if grep -qF "#2" "$OUT_SWAP_ORDER"; then
-  echo "FAIL: artificial #2 suffix detected in history table!" >&2
+# Assert both formerly-colliding labels and astral labels appear distinctly in the history table
+if ! grep -qF "\\U000e0001" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "\\ue0001" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "\\efoo" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "\\\\efoo" "$OUT_SWAP_ORDER"; then
+  echo "FAIL: expected distinct labels (\\U000e0001, \\ue0001, \\efoo, \\\\efoo) missing in history table!" >&2
+  cat "$OUT_SWAP_ORDER" >&2
+  exit 1
+fi
+
+# Assert values are properly separated and preserved across rows
+if ! grep -qF "20.0G" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "2.0G" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "10.0G" "$OUT_SWAP_ORDER" || \
+   ! grep -qF "1.0G" "$OUT_SWAP_ORDER"; then
+  echo "FAIL: expected separate directory sizes (20.0G, 2.0G, 10.0G, 1.0G) missing in history rows!" >&2
   cat "$OUT_SWAP_ORDER" >&2
   exit 1
 fi
@@ -816,6 +829,56 @@ if grep -q "AttributeError" "$OUT_HIST_LIST"; then
   cat "$OUT_HIST_LIST" >&2
   exit 1
 fi
+
+# Case 7c: Direct audit fixture for directory numeric string coercion and rejection
+SNAP_AUDIT_COERCION="$TMP_DIR/snap_audit_coercion.json"
+python3 - "$SNAP_AUDIT_COERCION" "$RECENT_TS" <<'PY'
+import json, sys
+data = {
+    "timestamp": sys.argv[2],
+    "hostname": "test-host",
+    "disk_total_gb": 926,
+    "disk_used_gb": 750,
+    "disk_free_gb": 176,
+    "disk_pct": 81,
+    "snapshot_coverage_pct": 85.5,
+    "snapshot_warning": "",
+    "swap_used_gb": 2.0,
+    "snapshot_metadata": {"measurement_status": "complete"},
+    "directories": {
+        "float_rounded": 1048576.6,
+        "valid_str": "2097152",
+        "bool_true": True,
+        "bool_false": False,
+        "nan_str": "nan",
+        "inf_str": "infinity",
+        "negative_num": -1024,
+        "bad_str": "12x"
+    }
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(data, f)
+PY
+
+OUT_AUDIT_COERCION="$TMP_DIR/audit_coercion.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$SNAP_AUDIT_COERCION" \
+  bash "$TARGET_SCRIPT" --no-history >"$OUT_AUDIT_COERCION" 2>&1
+
+# Assert float was rounded and numeric string was accepted
+if ! grep -qF "float_rounded" "$OUT_AUDIT_COERCION" || ! grep -qF "valid_str" "$OUT_AUDIT_COERCION"; then
+  echo "FAIL: valid rounded float or numeric string missing from audit output" >&2
+  cat "$OUT_AUDIT_COERCION" >&2
+  exit 1
+fi
+
+# Assert booleans, non-finite, negative, and invalid strings were rejected
+for bad_key in "bool_true" "bool_false" "nan_str" "inf_str" "negative_num" "bad_str"; do
+  if grep -qF "$bad_key" "$OUT_AUDIT_COERCION"; then
+    echo "FAIL: invalid directory value '$bad_key' was not rejected by audit coercion!" >&2
+    cat "$OUT_AUDIT_COERCION" >&2
+    exit 1
+  fi
+done
 
 # Case 8: Control-bearing DISK_SNAPSHOT_JSON filename sanitization
 HOSTILE_FILENAME_SNAP="$TMP_DIR/"$'snap_hostile_\x1b[31malert\x07.json'
