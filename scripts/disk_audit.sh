@@ -109,15 +109,6 @@ if not isinstance(meta_block, dict):
     meta_block = {}
 
 status = str(meta_block.get("measurement_status", "") or "").replace("\n", " ").replace("\r", " ").strip()
-raw_age_sec = meta_block.get("age_seconds", "")
-age_sec = ""
-try:
-    if isinstance(raw_age_sec, int) and not isinstance(raw_age_sec, bool) and raw_age_sec >= 0:
-        age_sec = str(raw_age_sec)
-    elif isinstance(raw_age_sec, str) and raw_age_sec.strip().isdigit():
-        age_sec = raw_age_sec.strip()
-except Exception:
-    age_sec = ""
 
 dirs = s.get("directories", {}) or {}
 if isinstance(dirs, dict):
@@ -133,12 +124,19 @@ if isinstance(dirs, dict):
 
 age_min = ""
 try:
-    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    age_min = str(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60))
+    if ts and isinstance(ts, str):
+        t = datetime.datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+        sec = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+        if sec >= 0:
+            age_min = str(int(sec // 60))
+        else:
+            age_min = "future"
+    else:
+        age_min = "invalid"
 except Exception:
-    pass
+    age_min = "invalid"
 
-for val in ["OK", cov, age_min, warn, age_sec, status, swap_used_gb]:
+for val in ["OK", cov, age_min, warn, status, swap_used_gb]:
     print(val)
 PY
 )
@@ -148,12 +146,17 @@ PY
         read -r SNAP_COVERAGE || true
         read -r SNAP_AGE_MIN || true
         read -r _warn || true
-        read -r _snap_age_sec || true
         read -r SNAP_STATUS || true
         read -r SNAP_SWAP_USED_GB || true
     } <<< "$meta"
     if [[ "$_status" != "OK" ]]; then
         SNAP_REASON="snapshot unreadable (${_status:-empty})"; return 1
+    fi
+    if [[ -z "$SNAP_AGE_MIN" || "$SNAP_AGE_MIN" == "invalid" ]]; then
+        SNAP_REASON="timestamp missing or invalid"; return 1
+    fi
+    if [[ "$SNAP_AGE_MIN" == "future" ]]; then
+        SNAP_REASON="timestamp is in the future"; return 1
     fi
     # Coverage gates (float-safe; avoid bash ${var%.*} truncating 69.8 → 69):
     #   < 50%  — hard reject (unusable snapshot)

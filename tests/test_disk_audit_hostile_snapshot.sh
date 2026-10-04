@@ -9,9 +9,9 @@
 # 2. Sentinels are never created, proving zero code execution.
 # 3. Dedicated quote breakout tests verify that unbalanced single and double quotes
 #    do not cause syntax errors or break execution.
-# 4. Typed parsing preserves valid metrics, sanitizes string fields, and
-#    rejects non-finite (NaN, Infinity), boolean, and out-of-range coverage,
-#    swap, and age_seconds values.
+# 4. Strict metric and timestamp gates: rejects non-finite (NaN, Infinity), boolean,
+#    and out-of-range coverage, sanitizes bad swap values on usable snapshots,
+#    and fails closed on missing, invalid, or future timestamps.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,13 +36,15 @@ FIXTURE_HOME="$TMP_DIR/home"
 FIXTURE_STATE="$TMP_DIR/state"
 mkdir -p "$FIXTURE_HOME" "$FIXTURE_STATE"
 
+RECENT_TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
 # Case 1: Pure command-substitution payloads (syntactically valid if evaluated by a shell)
 HOSTILE_SNAP_1="$TMP_DIR/hostile_snap_1.json"
-python3 - "$HOSTILE_SNAP_1" "$WARN_SENTINEL_1" "$WARN_SENTINEL_2" "$STATUS_SENTINEL" "$SWAP_SENTINEL_1" "$DIR_SENTINEL" <<'PY'
+python3 - "$HOSTILE_SNAP_1" "$RECENT_TS" "$WARN_SENTINEL_1" "$WARN_SENTINEL_2" "$STATUS_SENTINEL" "$SWAP_SENTINEL_1" "$DIR_SENTINEL" <<'PY'
 import json, sys
-out, w1, w2, st, sw, dr = sys.argv[1:7]
+out, ts, w1, w2, st, sw, dr = sys.argv[1:8]
 snap = {
-    "timestamp": "2026-10-04T00:00:00Z",
+    "timestamp": ts,
     "hostname": "test-host",
     "disk_total_gb": 926,
     "disk_used_gb": 750,
@@ -52,7 +54,6 @@ snap = {
     "snapshot_warning": f"low_coverage; $(touch {w1}); `touch {w2}`",
     "swap_used_gb": f"1.5; $(touch {sw})",
     "snapshot_metadata": {
-        "age_seconds": 300,
         "measurement_status": f"partial; $(touch {st})",
         "coverage_pct": 85.5
     },
@@ -103,11 +104,11 @@ fi
 
 # Case 1b: Dedicated quote breakout test (unbalanced single and double quotes, semicolons)
 HOSTILE_SNAP_QUOTES="$TMP_DIR/hostile_snap_quotes.json"
-python3 - "$HOSTILE_SNAP_QUOTES" <<'PY'
+python3 - "$HOSTILE_SNAP_QUOTES" "$RECENT_TS" <<'PY'
 import json, sys
-out = sys.argv[1]
+out, ts = sys.argv[1:3]
 snap = {
-    "timestamp": "2026-10-04T00:00:00Z",
+    "timestamp": ts,
     "hostname": "test-host",
     "disk_total_gb": 926,
     "disk_used_gb": 750,
@@ -117,7 +118,6 @@ snap = {
     "snapshot_warning": "warn with ' single and \" double quotes",
     "swap_used_gb": 2.0,
     "snapshot_metadata": {
-        "age_seconds": 300,
         "measurement_status": "status with ' single and \" double quotes",
         "coverage_pct": 85.5
     },
@@ -150,11 +150,11 @@ fi
 
 # Case 2: Hostile command injection in snapshot_coverage_pct string
 HOSTILE_SNAP_2="$TMP_DIR/hostile_snap_2.json"
-python3 - "$HOSTILE_SNAP_2" "$COV_SENTINEL" "$SWAP_SENTINEL_2" <<'PY'
+python3 - "$HOSTILE_SNAP_2" "$RECENT_TS" "$COV_SENTINEL" "$SWAP_SENTINEL_2" <<'PY'
 import json, sys
-out, cov_s, sw_s = sys.argv[1:4]
+out, ts, cov_s, sw_s = sys.argv[1:5]
 snap = {
-    "timestamp": "2026-10-04T00:00:00Z",
+    "timestamp": ts,
     "hostname": "test-host",
     "disk_total_gb": 926,
     "disk_used_gb": 750,
@@ -164,7 +164,6 @@ snap = {
     "snapshot_warning": "none",
     "swap_used_gb": f"1.5; $(touch {sw_s})",
     "snapshot_metadata": {
-        "age_seconds": 300,
         "measurement_status": "complete"
     },
     "directories": {}
@@ -201,64 +200,10 @@ if ! grep -qF "Snapshot not usable (coverage" "$OUT_2"; then
   exit 1
 fi
 
-# Case 3: Unit validation of python parsing logic for coverage, swap, and age_seconds
-python3 - <<'PY'
-import math, re
-
-def parse_cov(raw_cov):
-    if isinstance(raw_cov, (int, float)) and not isinstance(raw_cov, bool):
-        val = float(raw_cov)
-        if math.isfinite(val) and 0.0 <= val <= 100.0:
-            return str(raw_cov)
-    elif isinstance(raw_cov, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_cov.strip()):
-        val = float(raw_cov.strip())
-        if math.isfinite(val) and 0.0 <= val <= 100.0:
-            return str(val)
-    return ""
-
-def parse_swap(raw_swap):
-    if isinstance(raw_swap, (int, float)) and not isinstance(raw_swap, bool):
-        val = float(raw_swap)
-        if math.isfinite(val) and val >= 0.0:
-            return str(raw_swap)
-    elif isinstance(raw_swap, str) and re.match(r'^-?[0-9]+(\.[0-9]+)?$', raw_swap.strip()):
-        val = float(str(raw_swap).strip())
-        if math.isfinite(val) and val >= 0.0:
-            return str(val)
-    return ""
-
-def parse_age_sec(raw_age_sec):
-    if isinstance(raw_age_sec, int) and not isinstance(raw_age_sec, bool) and raw_age_sec >= 0:
-        return str(raw_age_sec)
-    elif isinstance(raw_age_sec, str) and raw_age_sec.strip().isdigit():
-        return raw_age_sec.strip()
-    return ""
-
-# Verify coverage rejection
-for bad in [float("nan"), float("inf"), float("-inf"), True, False, 150.0, -10.0, "nan", "inf", "True", "85.5; evil"]:
-    assert parse_cov(bad) == "", f"Coverage parser failed to reject {bad!r}"
-
-# Verify swap rejection
-for bad in [float("nan"), float("inf"), float("-inf"), True, False, -5.0, "nan", "inf", "True", "15.0; evil"]:
-    assert parse_swap(bad) == "", f"Swap parser failed to reject {bad!r}"
-
-# Verify age_seconds rejection
-for bad in [True, False, 1.5, float("nan"), float("inf"), -10, "True", "abc", "10; evil"]:
-    assert parse_age_sec(bad) == "", f"Age_seconds parser failed to reject {bad!r}"
-
-# Verify valid cases pass
-assert parse_cov(85.5) == "85.5"
-assert parse_cov("90.0") == "90.0"
-assert parse_swap(12.5) == "12.5"
-assert parse_swap("4.0") == "4.0"
-assert parse_age_sec(300) == "300"
-assert parse_age_sec("60") == "60"
-PY
-
-# Case 3b: End-to-end audit rejection of non-finite/boolean/out-of-bounds coverage
-python3 - "$TMP_DIR" <<'PY'
+# Case 3a: End-to-end audit rejection of non-finite/boolean/out-of-bounds coverage
+python3 - "$TMP_DIR" "$RECENT_TS" <<'PY'
 import json, sys
-tmp = sys.argv[1]
+tmp, ts = sys.argv[1:3]
 test_cases = [
     ("nan", float("nan")),
     ("inf", float("inf")),
@@ -270,29 +215,28 @@ test_cases = [
 ]
 for name, val in test_cases:
     snap = {
-        "timestamp": "2026-10-04T00:00:00Z",
+        "timestamp": ts,
         "disk_total_gb": 926,
         "disk_used_gb": 750,
         "disk_free_gb": 176,
         "disk_pct": 81,
         "snapshot_coverage_pct": val,
         "snapshot_warning": "",
-        "swap_used_gb": val,
+        "swap_used_gb": 2.0,
         "snapshot_metadata": {
-            "age_seconds": True,
             "measurement_status": "complete"
         },
         "directories": {
             "projects": 10485760
         }
     }
-    with open(f"{tmp}/snap_bad_{name}.json", "w") as f:
+    with open(f"{tmp}/snap_bad_cov_{name}.json", "w") as f:
         json.dump(snap, f)
 PY
 
 for bad_name in "nan" "inf" "neginf" "bool_true" "bool_false" "over_100" "neg_10"; do
-  SNAP_BAD="$TMP_DIR/snap_bad_${bad_name}.json"
-  OUT_BAD="$TMP_DIR/audit_bad_${bad_name}.log"
+  SNAP_BAD="$TMP_DIR/snap_bad_cov_${bad_name}.json"
+  OUT_BAD="$TMP_DIR/audit_bad_cov_${bad_name}.log"
   RC_BAD=0
   HOME="$FIXTURE_HOME" \
   DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" \
@@ -312,75 +256,84 @@ for bad_name in "nan" "inf" "neginf" "bool_true" "bool_false" "over_100" "neg_10
   fi
 done
 
-# Case 3c: End-to-end verification that non-finite/boolean swap and age_seconds
-# are sanitized and do NOT leak into output or trigger false warnings when snapshot is usable
-SNAP_BAD_FIELDS="$TMP_DIR/snap_bad_fields.json"
-python3 - "$SNAP_BAD_FIELDS" <<'PY'
+# Case 3b: Loop over non-finite / boolean / negative / injection values for swap_used_gb
+# on a USABLE snapshot (coverage 85.5%, valid recent timestamp).
+# Asserts snapshot remains usable, but invalid swap is sanitized and never triggers false alerts.
+SWAP_SENTINEL_3="$SENTINEL_DIR/hostile_swap_injected_3"
+python3 - "$TMP_DIR" "$RECENT_TS" "$SWAP_SENTINEL_3" <<'PY'
 import json, sys
-out = sys.argv[1]
-snap = {
-    "timestamp": "2026-10-04T00:00:00Z",
-    "hostname": "test-host",
-    "disk_total_gb": 926,
-    "disk_used_gb": 750,
-    "disk_free_gb": 176,
-    "disk_pct": 81,
-    "snapshot_coverage_pct": 85.5,
-    "snapshot_warning": "",
-    "swap_used_gb": float("inf"),
-    "snapshot_metadata": {
-        "age_seconds": True,
-        "measurement_status": "complete"
-    },
-    "directories": {
-        "projects": 10485760
+tmp, ts, sw_sentinel = sys.argv[1:4]
+test_cases = [
+    ("nan", float("nan")),
+    ("inf", float("inf")),
+    ("neginf", float("-inf")),
+    ("bool_true", True),
+    ("bool_false", False),
+    ("neg_5", -5.0),
+    ("cmd_inject", f"15.0; $(touch {sw_sentinel})"),
+]
+for name, val in test_cases:
+    snap = {
+        "timestamp": ts,
+        "hostname": "test-host",
+        "disk_total_gb": 926,
+        "disk_used_gb": 750,
+        "disk_free_gb": 176,
+        "disk_pct": 81,
+        "snapshot_coverage_pct": 85.5,
+        "snapshot_warning": "",
+        "swap_used_gb": val,
+        "snapshot_metadata": {
+            "measurement_status": "complete"
+        },
+        "directories": {
+            "projects": 10485760
+        }
     }
-}
-with open(out, "w") as f:
-    json.dump(snap, f, indent=2)
+    with open(f"{tmp}/snap_bad_swap_{name}.json", "w") as f:
+        json.dump(snap, f)
 PY
 
-OUT_BAD_FIELDS="$TMP_DIR/audit_bad_fields.log"
-RC_BF=0
-HOME="$FIXTURE_HOME" \
-DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" \
-DISK_SNAPSHOT_JSON="$SNAP_BAD_FIELDS" \
-bash "$TARGET_SCRIPT" >"$OUT_BAD_FIELDS" 2>&1 || RC_BF=$?
+for bad_swap_name in "nan" "inf" "neginf" "bool_true" "bool_false" "neg_5" "cmd_inject"; do
+  SNAP_BS="$TMP_DIR/snap_bad_swap_${bad_swap_name}.json"
+  OUT_BS="$TMP_DIR/audit_bad_swap_${bad_swap_name}.log"
+  RC_BS=0
+  HOME="$FIXTURE_HOME" \
+  DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" \
+  DISK_SNAPSHOT_JSON="$SNAP_BS" \
+  bash "$TARGET_SCRIPT" >"$OUT_BS" 2>&1 || RC_BS=$?
+  
+  if [[ $RC_BS -ne 0 ]]; then
+    echo "FAIL: disk_audit.sh crashed on bad swap '$bad_swap_name' with code $RC_BS" >&2
+    cat "$OUT_BS" >&2
+    exit 1
+  fi
+  
+  if ! grep -qF "Coverage: 85.5%" "$OUT_BS"; then
+    echo "FAIL: snapshot with valid coverage should remain usable for bad swap '$bad_swap_name'" >&2
+    cat "$OUT_BS" >&2
+    exit 1
+  fi
+  
+  if grep -qi "Swap used:" "$OUT_BS" || grep -qi "inf GiB" "$OUT_BS" || grep -qi "nan GiB" "$OUT_BS"; then
+    echo "FAIL: invalid swap '$bad_swap_name' triggered a false swap warning in audit output" >&2
+    cat "$OUT_BS" >&2
+    exit 1
+  fi
+done
 
-if [[ $RC_BF -ne 0 ]]; then
-  echo "FAIL: disk_audit.sh crashed on bad swap/age fields with code $RC_BF" >&2
-  cat "$OUT_BAD_FIELDS" >&2
+if [[ -e "$SWAP_SENTINEL_3" ]]; then
+  echo "FAIL: Command injection detected in swap test! Sentinel created: $SWAP_SENTINEL_3" >&2
   exit 1
 fi
 
-# Ensure snapshot was usable (coverage was valid)
-if ! grep -qF "Coverage: 85.5%" "$OUT_BAD_FIELDS"; then
-  echo "FAIL: expected snapshot with valid coverage to be usable" >&2
-  cat "$OUT_BAD_FIELDS" >&2
-  exit 1
-fi
-
-# Ensure invalid float("inf") swap did NOT trigger a false swap warning
-if grep -qi "Swap used:" "$OUT_BAD_FIELDS" || grep -qi "inf GiB" "$OUT_BAD_FIELDS"; then
-  echo "FAIL: invalid swap float('inf') leaked into output or triggered swap warning" >&2
-  cat "$OUT_BAD_FIELDS" >&2
-  exit 1
-fi
-
-# Ensure boolean age_seconds did NOT leak into output as True
-if grep -qi "Age: True" "$OUT_BAD_FIELDS" || grep -qi "True min" "$OUT_BAD_FIELDS"; then
-  echo "FAIL: boolean age_seconds leaked into output" >&2
-  cat "$OUT_BAD_FIELDS" >&2
-  exit 1
-fi
-
-# Verify that valid swap exceeding 10 GiB DOES trigger the swap warning
+# Case 3c: Verify that valid swap exceeding 10 GiB DOES trigger the swap warning
 SNAP_VALID_SWAP="$TMP_DIR/snap_valid_swap.json"
-python3 - "$SNAP_VALID_SWAP" <<'PY'
+python3 - "$SNAP_VALID_SWAP" "$RECENT_TS" <<'PY'
 import json, sys
-out = sys.argv[1]
+out, ts = sys.argv[1:3]
 snap = {
-    "timestamp": "2026-10-04T00:00:00Z",
+    "timestamp": ts,
     "hostname": "test-host",
     "disk_total_gb": 926,
     "disk_used_gb": 750,
@@ -390,7 +343,6 @@ snap = {
     "snapshot_warning": "",
     "swap_used_gb": 15.0,
     "snapshot_metadata": {
-        "age_seconds": 300,
         "measurement_status": "complete"
     },
     "directories": {
@@ -420,5 +372,76 @@ if ! grep -qF "Swap used: 15.0 GiB (>10 GiB)" "$OUT_VALID_SWAP"; then
   exit 1
 fi
 
-echo "PASS: hostile snapshot injection vectors and non-finite bypasses safely neutralized"
+# Case 3d: Missing, invalid, and future timestamps must be rejected fail-closed
+FUTURE_TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
+python3 - "$TMP_DIR" "$FUTURE_TS" <<'PY'
+import json, sys
+tmp, future_ts = sys.argv[1:3]
+cases = [
+    ("missing_ts", ""),
+    ("invalid_ts", "not-a-valid-timestamp"),
+    ("future_ts", future_ts),
+]
+for name, val in cases:
+    snap = {
+        "timestamp": val,
+        "disk_total_gb": 926,
+        "disk_used_gb": 750,
+        "disk_free_gb": 176,
+        "disk_pct": 81,
+        "snapshot_coverage_pct": 85.5,
+        "snapshot_warning": "",
+        "swap_used_gb": 2.0,
+        "snapshot_metadata": {
+            "measurement_status": "complete"
+        },
+        "directories": {
+            "projects": 10485760
+        }
+    }
+    with open(f"{tmp}/snap_ts_{name}.json", "w") as f:
+        json.dump(snap, f)
+PY
+
+# Missing timestamp
+OUT_MISSING_TS="$TMP_DIR/audit_missing_ts.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_missing_ts.json" \
+  bash "$TARGET_SCRIPT" >"$OUT_MISSING_TS" 2>&1 || true
+if ! grep -qF "Snapshot not usable (timestamp missing or invalid)" "$OUT_MISSING_TS"; then
+  echo "FAIL: missing timestamp was not rejected" >&2
+  cat "$OUT_MISSING_TS" >&2
+  exit 1
+fi
+
+# Invalid timestamp
+OUT_INVALID_TS="$TMP_DIR/audit_invalid_ts.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_invalid_ts.json" \
+  bash "$TARGET_SCRIPT" >"$OUT_INVALID_TS" 2>&1 || true
+if ! grep -qF "Snapshot not usable (timestamp missing or invalid)" "$OUT_INVALID_TS"; then
+  echo "FAIL: invalid timestamp string was not rejected" >&2
+  cat "$OUT_INVALID_TS" >&2
+  exit 1
+fi
+
+# Future timestamp
+OUT_FUTURE_TS="$TMP_DIR/audit_future_ts.log"
+HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON="$TMP_DIR/snap_ts_future_ts.json" \
+  bash "$TARGET_SCRIPT" >"$OUT_FUTURE_TS" 2>&1 || true
+if ! grep -qF "Snapshot not usable (timestamp is in the future)" "$OUT_FUTURE_TS"; then
+  echo "FAIL: future timestamp was not rejected" >&2
+  cat "$OUT_FUTURE_TS" >&2
+  exit 1
+fi
+
+# Ensure Age: ? never appears
+for log in "$OUT_MISSING_TS" "$OUT_INVALID_TS" "$OUT_FUTURE_TS"; do
+  if grep -qF "Age: ?" "$log"; then
+    echo "FAIL: 'Age: ?' displayed in audit output for bad timestamp" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+done
+
+echo "PASS: hostile snapshot injection vectors, bad metrics, and timestamp gates safely neutralized"
 exit 0
