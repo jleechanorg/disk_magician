@@ -79,6 +79,12 @@ FAKE_BIN="$TMP_DIR/bin"
 LAUNCH_AGENTS="$TMP_DIR/LaunchAgents"
 LAUNCHCTL_LOG="$TMP_DIR/launchctl.log"
 mkdir -p "$FAKE_BIN" "$LAUNCH_AGENTS"
+mkdir -p "$HOME/.local/bin"
+cat >"$HOME/.local/bin/diskm" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$HOME/.local/bin/diskm"
 export LAUNCHCTL_LOG
 cat >"$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
