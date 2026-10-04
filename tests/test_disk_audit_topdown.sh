@@ -6,6 +6,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d -t disk_audit_topdown.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
+# shellcheck source=tests/lib/sandbox_env.sh
+source "$REPO_ROOT/tests/lib/sandbox_env.sh"
+export DISK_MAGICIAN_TEST_SANDBOX="$WORK"
+export DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT"
+export AGENT_SCRATCH_ROOT="$WORK/agent-scratch"
+mkdir -p "$AGENT_SCRATCH_ROOT"
+
 PASS=0
 FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
@@ -177,10 +184,20 @@ fi
 echo
 echo "── 4. Normal diagnostic launches all three lanes concurrently ──"
 TREE="$WORK/tree"
-mkdir -p "$TREE/scripts" "$WORK/home"
+mkdir -p "$TREE/scripts/lib" "$WORK/home"
 if [[ -f "$REPO_ROOT/scripts/disk_diagnostic.sh" ]]; then
   cp "$REPO_ROOT/scripts/disk_diagnostic.sh" "$TREE/scripts/"
   chmod +x "$TREE/scripts/disk_diagnostic.sh"
+fi
+if [[ -f "$REPO_ROOT/scripts/lib/agent_scratch.sh" ]]; then
+  cp "$REPO_ROOT/scripts/lib/agent_scratch.sh" "$TREE/scripts/lib/"
+  chmod +x "$TREE/scripts/lib/agent_scratch.sh"
+fi
+if [[ -f "$REPO_ROOT/scripts/safety_lib.sh" ]]; then
+  cp "$REPO_ROOT/scripts/safety_lib.sh" "$TREE/scripts/"
+fi
+if [[ -f "$REPO_ROOT/safety.local.json.template" ]]; then
+  cp "$REPO_ROOT/safety.local.json.template" "$TREE/"
 fi
 
 cat > "$TREE/scripts/disk_frontier_scan.py" <<'PY'

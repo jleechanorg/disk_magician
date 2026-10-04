@@ -127,3 +127,6 @@ $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 # (via scripts/safety_check.sh, reused rather than duplicated here) and
 # reports these as PROTECTED (never-delete, no sweeper by policy) rather
 # than UNCOVERED or COVERED.
+
+# agent_scratch.sh (scripts/lib/agent_scratch.sh) — Task 7 managed scratch for disk_diagnostic
+/private/tmp/agent-scratch/disk_diagnostic	scripts/lib/agent_scratch.sh	agent_scratch_create / agent_scratch_trap_cleanup
