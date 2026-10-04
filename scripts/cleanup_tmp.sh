@@ -225,7 +225,7 @@ path_size_kb() {
   # stderr) so a `du` failure never makes this function's caller (e.g.
   # `kb=$(path_size_kb "$path")` under `set -eo pipefail`) abort the whole
   # script instead of falling back to 0.
-  { du -sk "$1" 2>/dev/null || true; } | awk '{f=$1} END{print f+0}'
+  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 remove_path() {
@@ -309,13 +309,34 @@ has_active_marker() {
 }
 
 
+# has_control_bytes <str> — true if string contains control characters (Bash 3.2-safe)
+has_control_bytes() {
+  local s="$1"
+  local nl=$'\n' cr=$'\r' tab=$'\t'
+  if [[ "$s" == *"$nl"* || "$s" == *"$cr"* || "$s" == *"$tab"* ]]; then
+    return 0
+  fi
+  if [[ "$s" =~ [[:cntrl:]] ]]; then
+    return 0
+  fi
+  return 1
+}
+
+
 # has_open_files <dir> — true when lsof finds an open file or cannot prove the
-# tree is closed. Uses bounded targetless machine-format lsof (-n -P -F n).
-# Fails closed (returns 0, unsafe/active) on canonicalization failure, missing
-# lsof, missing timeout, timeout, nonzero status, stderr output, or malformed
-# records. Returns 1 only when authoritatively proven that no open files match.
+# tree is closed. Uses bounded targetless machine-format lsof (-n -P -F n) with
+# escalation (--kill-after=2s).
+# Fails closed (returns 0, unsafe/active) on canonicalization failure, control
+# characters in candidate/canonical path, missing lsof, missing timeout, timeout,
+# nonzero status, stderr output, unknown path formats, or malformed records.
+# Returns 1 only when authoritatively proven that no open files match.
 has_open_files() {
   local dir="$1"
+  if has_control_bytes "$dir"; then
+    log "Open-file check input path contains control characters for $dir — fail-closed, treating as active."
+    return 0
+  fi
+
   local canon_dir
   canon_dir=$(cd "$dir" 2>/dev/null && pwd -P) || {
     log "Open-file check canonicalization failed for $dir — fail-closed, treating as active."
@@ -326,6 +347,11 @@ has_open_files() {
     return 0
   fi
   [[ "$canon_dir" != "/" ]] && canon_dir="${canon_dir%/}"
+
+  if has_control_bytes "$canon_dir"; then
+    log "Open-file check canonical path contains control characters for $dir — fail-closed, treating as active."
+    return 0
+  fi
 
   local lsof_bin=""
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
@@ -364,7 +390,7 @@ has_open_files() {
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
-  "$timeout_bin" "$timeout_sec" "$lsof_bin" -n -P -F n >"$hit_file" 2>"$err_file" || rc=$?
+  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F n >"$hit_file" 2>"$err_file" || rc=$?
 
   local diagnostic=""
   if [[ -s "$err_file" ]]; then
@@ -393,7 +419,12 @@ has_open_files() {
   local line tag val
   local has_open=1
   local seen_process=0
+  local current_process=0
+  local seen_named_path=0
   local malformed=0
+  local unknown_path=0
+  local unknown_path_val=""
+  local norm_val=""
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
@@ -403,12 +434,17 @@ has_open_files() {
         val="${line#p}"
         if [[ "$val" =~ ^[0-9]+$ ]]; then
           seen_process=1
+          current_process=1
         else
           malformed=1
           break
         fi
         ;;
       f)
+        if (( current_process == 0 )); then
+          malformed=1
+          break
+        fi
         val="${line#f}"
         if ! [[ "$val" =~ ^[a-zA-Z0-9]+$ ]]; then
           malformed=1
@@ -416,10 +452,45 @@ has_open_files() {
         fi
         ;;
       n)
+        if (( current_process == 0 )); then
+          malformed=1
+          break
+        fi
         val="${line#n}"
-        if [[ -n "$val" ]]; then
-          if [[ "$val" == "$canon_dir" || "$val" == "$canon_dir/"* ]]; then
-            has_open=0
+        if [[ -z "$val" ]]; then
+          # Empty n records are valid for unnamed descriptors
+          :
+        else
+          seen_named_path=1
+          if [[ "$val" == "/"* ]]; then
+            # Check for non-canonical relative traversal components inside path
+            if [[ "$val" == *"/../"* || "$val" == *"/.." ]]; then
+              unknown_path=1
+              unknown_path_val="$val"
+              break
+            fi
+            # Normalize known macOS top-level aliases with component boundaries
+            if [[ "$val" == "/var" || "$val" == "/var/"* ]]; then
+              norm_val="/private${val}"
+            elif [[ "$val" == "/tmp" || "$val" == "/tmp/"* ]]; then
+              norm_val="/private${val}"
+            elif [[ "$val" == "/etc" || "$val" == "/etc/"* ]]; then
+              norm_val="/private${val}"
+            else
+              norm_val="$val"
+            fi
+
+            # Exact or slash-delimited prefix compare against canonical dir
+            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* ]]; then
+              has_open=0
+              break
+            fi
+          elif [[ "$val" == "->"* || "$val" == "["* || "$val" == *":"* || "$val" == "count="* || "$val" == "(revoked)" || "$val" =~ ^[0-9A-Fa-f-]{36} ]]; then
+            # Recognized non-filesystem lsof descriptor (pipe, socket, kernel control, mach port)
+            :
+          else
+            unknown_path=1
+            unknown_path_val="$val"
             break
           fi
         fi
@@ -432,7 +503,12 @@ has_open_files() {
   done < "$hit_file"
   rm -f "$hit_file"
 
-  if (( malformed != 0 || seen_process == 0 )); then
+  if (( unknown_path != 0 )); then
+    log "Open-file check encountered unknown path format '$unknown_path_val' for $dir — fail-closed, treating as active."
+    return 0
+  fi
+
+  if (( malformed != 0 || seen_process == 0 || seen_named_path == 0 )); then
     log "Open-file check produced malformed output for $dir — fail-closed, treating as active."
     return 0
   fi
