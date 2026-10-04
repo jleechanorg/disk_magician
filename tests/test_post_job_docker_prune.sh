@@ -122,6 +122,55 @@ EOF
   chmod +x "$bin"
 }
 
+make_hanging_docker() {
+  local bin_dir="$1"
+  local invocation_log="$2"
+  local hang_target="$3" # "info", "builder", "both"
+  local bin="$bin_dir/docker"
+  cat > "$bin" <<EOF
+#!/usr/bin/env bash
+echo "docker \$*" >> "$invocation_log"
+case "\$1" in
+  info)
+    if [[ "$hang_target" == "info" ]]; then
+      sleep 10
+      exit 0
+    fi
+    exit 0
+    ;;
+  builder)
+    if [[ "\$2" == "du" && ("$hang_target" == "builder" || "$hang_target" == "both") ]]; then
+      sleep 10
+      exit 0
+    fi
+    shift; shift
+    exit 0
+    ;;
+  system)
+    if [[ "\$2" == "df" && "$hang_target" == "both" ]]; then
+      sleep 10
+      exit 0
+    fi
+    if [[ "\$2" == "df" ]]; then
+      cat <<'OUT'
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          10        5         2.5GB     1.2GB
+Containers      3         0         120MB     120MB
+Local Volumes   5         0         200MB     0B
+Build Cache     15        0         3.2GB     1.5GB
+OUT
+      exit 0
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+  chmod +x "$bin"
+}
+
 # Run the script under a custom PATH. Args after the path+log are passed
 # to the script. The script's own log is captured for substring assertions.
 # Usage: run_under_mock <custom_path> <log_path> [script args...]
@@ -237,8 +286,8 @@ fi
 rm -rf "$TMP4"
 
 # ---------------------------------------------------------------------------
-# Test 5: docker info fails (daemon unreachable) — script exits 0,
-# logs the no-op terminator, never calls prune.
+# Test 5: docker info fails (daemon unreachable) — script exits nonzero,
+# logs DEGRADED / SKIPPED context, never calls prune.
 echo "=== Test 5: docker daemon unreachable ==="
 TMP5=$(mktemp -d -t dj_prune_t5.XXXXXX)
 LOG5="$TMP5/post-job.log"
@@ -247,11 +296,13 @@ INV5="$TMP5/invocations.log"
 rm -f "$LOG5_STDOUT"
 mkdir -p "$TMP5/bin"
 make_unreachable_docker "$TMP5/bin" "$INV5"
-run_under_mock "$TMP5/bin:$PATH" "$LOG5"
-LOG5_CONTENT=$(cat "$LOG5")
-INV5_CONTENT=$(cat "$INV5")
-assert "logs daemon unreachable" "docker daemon not reachable" "$LOG5_CONTENT"
-assert "logs no-op terminator" "post-job prune end (no-op)" "$LOG5_CONTENT"
+RC5=0
+run_under_mock "$TMP5/bin:$PATH" "$LOG5" || RC5=$?
+LOG5_CONTENT=$(cat "$LOG5" 2>/dev/null || true)
+INV5_CONTENT=$(cat "$INV5" 2>/dev/null || true)
+assert "returns nonzero on daemon unreachable" "true" "$([[ $RC5 -ne 0 ]] && echo true || echo false)"
+assert "logs DEGRADED context" "DEGRADED" "$LOG5_CONTENT"
+assert "logs skipped prune" "skipping prune" "$LOG5_CONTENT"
 if [[ "$INV5_CONTENT" == *"prune"* ]]; then
   echo "  FAIL Test 5: prune should not be called when daemon is down"
   exit 1
@@ -275,6 +326,110 @@ assert "honors custom --log path" "builder cache: 100MB" "$LOG6_CONTENT"
 # 100MB cache == 100MB threshold; not strictly greater, so should skip.
 assert "treats equal-to-threshold as 'skip'" "skipping builder prune" "$LOG6_CONTENT"
 rm -rf "$TMP6"
+
+# ---------------------------------------------------------------------------
+# Test 7: docker info hangs — bounded by probe deadline, returns nonzero,
+# logs DEGRADED/SKIPPED, and invokes no destructive prune command.
+echo "=== Test 7: docker info hang is bounded and fail-closed ==="
+TMP7=$(mktemp -d -t dj_prune_t7.XXXXXX)
+LOG7="$TMP7/post-job.log"
+LOG7_STDOUT="$TMP7/post-job.stdout"
+INV7="$TMP7/invocations.log"
+rm -f "$LOG7_STDOUT"
+mkdir -p "$TMP7/bin"
+make_hanging_docker "$TMP7/bin" "$INV7" "info"
+RC7=0
+start7=$(date +%s)
+DOCKER_PROBE_DEADLINE_SECONDS=1 run_under_mock "$TMP7/bin:$PATH" "$LOG7" || RC7=$?
+dur7=$(( $(date +%s) - start7 ))
+LOG7_CONTENT=$(cat "$LOG7" 2>/dev/null || true)
+INV7_CONTENT=$(cat "$INV7" 2>/dev/null || true)
+assert "returns nonzero on info hang" "true" "$([[ $RC7 -ne 0 ]] && echo true || echo false)"
+assert "hang is bounded by probe deadline (<5s)" "true" "$([[ $dur7 -lt 5 ]] && echo true || echo false)"
+assert "logs DEGRADED on timeout" "DEGRADED" "$LOG7_CONTENT"
+assert "logs skipped prune" "skipping prune" "$LOG7_CONTENT"
+if [[ "$INV7_CONTENT" == *"prune"* ]]; then
+  echo "  FAIL Test 7: prune should not be called when info hangs"
+  exit 1
+fi
+rm -rf "$TMP7"
+
+# ---------------------------------------------------------------------------
+# Test 8: builder du hang falls back to system df within deadline.
+echo "=== Test 8: builder du hang falls back to system df ==="
+TMP8=$(mktemp -d -t dj_prune_t8.XXXXXX)
+LOG8="$TMP8/post-job.log"
+LOG8_STDOUT="$TMP8/post-job.stdout"
+INV8="$TMP8/invocations.log"
+rm -f "$LOG8_STDOUT"
+mkdir -p "$TMP8/bin"
+make_hanging_docker "$TMP8/bin" "$INV8" "builder"
+RC8=0
+start8=$(date +%s)
+DOCKER_PROBE_DEADLINE_SECONDS=1 run_under_mock "$TMP8/bin:$PATH" "$LOG8" --max-cache-mb 2048 || RC8=$?
+dur8=$(( $(date +%s) - start8 ))
+LOG8_CONTENT=$(cat "$LOG8" 2>/dev/null || true)
+INV8_CONTENT=$(cat "$INV8" 2>/dev/null || true)
+assert "exits 0 when fallback system df succeeds" "0" "$RC8"
+assert "builder du hang bounded by deadline (<5s)" "true" "$([[ $dur8 -lt 5 ]] && echo true || echo false)"
+assert "measured cache from fallback system df" "builder cache: 3277MB" "$LOG8_CONTENT"
+assert "ran builder prune after fallback measurement" "docker builder prune" "$INV8_CONTENT"
+rm -rf "$TMP8"
+
+# ---------------------------------------------------------------------------
+# Test 9: builder du hang AND system df hang — both bounded, no prune from
+# invented 0MB cache, returns nonzero for degraded measurement.
+echo "=== Test 9: builder du and system df hangs fail closed ==="
+TMP9=$(mktemp -d -t dj_prune_t9.XXXXXX)
+LOG9="$TMP9/post-job.log"
+LOG9_STDOUT="$TMP9/post-job.stdout"
+INV9="$TMP9/invocations.log"
+rm -f "$LOG9_STDOUT"
+mkdir -p "$TMP9/bin"
+make_hanging_docker "$TMP9/bin" "$INV9" "both"
+RC9=0
+start9=$(date +%s)
+DOCKER_PROBE_DEADLINE_SECONDS=1 run_under_mock "$TMP9/bin:$PATH" "$LOG9" --max-cache-mb 2048 || RC9=$?
+dur9=$(( $(date +%s) - start9 ))
+LOG9_CONTENT=$(cat "$LOG9" 2>/dev/null || true)
+INV9_CONTENT=$(cat "$INV9" 2>/dev/null || true)
+assert "returns nonzero on dual probe hang" "true" "$([[ $RC9 -ne 0 ]] && echo true || echo false)"
+assert "dual hang bounded (<6s)" "true" "$([[ $dur9 -lt 6 ]] && echo true || echo false)"
+assert "logs DEGRADED context" "DEGRADED" "$LOG9_CONTENT"
+assert "does not claim 0MB cache" "false" "$([[ "$LOG9_CONTENT" == *"builder cache: 0MB"* ]] && echo true || echo false)"
+if [[ "$INV9_CONTENT" == *"builder prune"* ]]; then
+  echo "  FAIL Test 9: builder prune should not run after failed measurement"
+  exit 1
+fi
+rm -rf "$TMP9"
+
+# ---------------------------------------------------------------------------
+# Test 10: deadline override validation rejects malformed / unreasonable input
+echo "=== Test 10: deadline override validation ==="
+TMP10=$(mktemp -d -t dj_prune_t10.XXXXXX)
+LOG10="$TMP10/post-job.log"
+LOG10_STDOUT="$TMP10/post-job.stdout"
+INV10="$TMP10/invocations.log"
+rm -f "$LOG10_STDOUT"
+mkdir -p "$TMP10/bin"
+make_mock_docker "$TMP10/bin" "$INV10" "500MB"
+
+RC10_ZERO=0
+DOCKER_PROBE_DEADLINE_SECONDS=0 run_under_mock "$TMP10/bin:$PATH" "$LOG10" || RC10_ZERO=$?
+assert "rejects zero deadline" "true" "$([[ $RC10_ZERO -ne 0 ]] && echo true || echo false)"
+
+RC10_NEG=0
+DOCKER_PROBE_DEADLINE_SECONDS=-5 run_under_mock "$TMP10/bin:$PATH" "$LOG10" || RC10_NEG=$?
+assert "rejects negative deadline" "true" "$([[ $RC10_NEG -ne 0 ]] && echo true || echo false)"
+
+RC10_STR=0
+DOCKER_PROBE_DEADLINE_SECONDS="abc" run_under_mock "$TMP10/bin:$PATH" "$LOG10" || RC10_STR=$?
+assert "rejects non-numeric deadline" "true" "$([[ $RC10_STR -ne 0 ]] && echo true || echo false)"
+
+RC10_HIGH=0
+DOCKER_PROBE_DEADLINE_SECONDS=999 run_under_mock "$TMP10/bin:$PATH" "$LOG10" || RC10_HIGH=$?
+assert "rejects unreasonable deadline (>60s)" "true" "$([[ $RC10_HIGH -ne 0 ]] && echo true || echo false)"
+rm -rf "$TMP10"
 
 # ---------------------------------------------------------------------------
 echo ""
