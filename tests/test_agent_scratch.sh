@@ -236,6 +236,8 @@ path_replace=$(agent_scratch_create "testruntime" "run_replace")
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$path_replace"
   # Attacker/process moves original leaf to .saved and creates a new directory at same path
   mv "$path_replace" "${path_replace}.saved"
@@ -489,6 +491,8 @@ prot_status=0
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$path_prot"
   exit 0
 ) || prot_status=$?
@@ -518,6 +522,8 @@ unreadable_status=0
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$FAKE_BAD_HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$path_unreadable"
   exit 7
 ) 2>/dev/null || unreadable_status=$?
@@ -614,6 +620,8 @@ touch "$victim_dir/important_file"
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$symlink_leaf"
   # Attacker swaps leaf for symlink pointing to victim_dir before exit
   rmdir "$symlink_leaf"
@@ -637,6 +645,8 @@ touch "$git_leaf/nested_repo/.git/config"
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$git_leaf"
   exit 0
 ) 2>/dev/null || true
@@ -656,6 +666,8 @@ leaf_b=$(agent_scratch_create "testruntime" "run_b")
   export DISK_MAGICIAN_TEST_SANDBOX="$FAKE_ROOT"
   export DISK_MAGICIAN_TEST_CONTEXT=1
   export HOME="$HOME"
+  # Isolate suite cleanup from helper EXIT trap in newer Bash
+  trap - EXIT
   agent_scratch_trap_cleanup "$leaf_a"
   exit 0
 )
