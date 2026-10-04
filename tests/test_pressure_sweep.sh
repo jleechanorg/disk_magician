@@ -33,7 +33,17 @@ echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
 exit 0
 MOCK
 
-chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh"
+cat > "$MOCK_BIN/cleanup_code_sign_clones.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "cleanup_code_sign_clones $* CODE_SIGN_CLONES_APPROVED=${CODE_SIGN_CLONES_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+case "${CODESIGN_MODE:-success}" in
+  fail) exit 7 ;;
+  timeout) exit 124 ;;
+esac
+exit 0
+MOCK
+
+chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh" "$MOCK_BIN/cleanup_code_sign_clones.sh"
 cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
@@ -53,6 +63,7 @@ run_pressure() {
     DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
     DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
+    CODESIGN_MODE="${CODESIGN_MODE:-success}" \
     INVOCATION_LOG="$INVOCATION_LOG" \
     /bin/bash "$SCRIPT" "$@"
 }
@@ -116,6 +127,7 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs triggered sweep" "sweep triggered (dry_run=false)" "$LOG_CONTENT"
 assert_contains "cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
+assert_contains "cleanup_code_sign_clones --clean" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
 assert_receipt_field "Test 2 receipt outcome success" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success"
 assert_receipt_field "Test 2 receipt freed_bytes null" "$STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "None"
 assert_receipt_field "Test 2 safety delegated" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
@@ -146,6 +158,7 @@ run_pressure 8 --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima dry-run" "cleanup_colima --dry-run" "$INVOCATIONS"
+assert_contains "cleanup_code_sign_clones dry-run" "cleanup_code_sign_clones --dry-run CODE_SIGN_CLONES_APPROVED=0" "$INVOCATIONS"
 assert_receipt_field "Test 3 receipt outcome success_noop" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success_noop"
 assert_receipt_field "Test 3 safety no_mutation" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "no_mutation"
 
@@ -167,9 +180,10 @@ env -i \
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs colima-only trigger" "Colima 40 GB >= ceiling 35 GB — colima-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-1 skip" "step 1/2 skipped (colima-only mode" "$LOG_CONTENT"
+assert_contains "logs step-1 skip" "step 1/3 skipped (colima-only mode" "$LOG_CONTENT"
 assert_not_contains "does not run cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
 assert_contains "runs cleanup_colima" "cleanup_colima --clean" "$INVOCATIONS"
+assert_contains "runs cleanup_code_sign_clones" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
 
 echo "Test 5: healthy free space + Colima under ceiling stays a no-op"
 : > "$INVOCATION_LOG"
@@ -227,9 +241,10 @@ env -i \
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs tmp-only trigger" "/private/tmp 35 GB >= ceiling 30 GB — tmp-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-2 skip" "step 2/2 skipped (tmp-only mode" "$LOG_CONTENT"
+assert_contains "logs step-2 skip" "step 2/3 skipped (tmp-only mode" "$LOG_CONTENT"
 assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_not_contains "does not run cleanup_colima" "cleanup_colima" "$INVOCATIONS"
+assert_contains "runs cleanup_code_sign_clones in tmp-only mode" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
 
 echo "Test 8: healthy free space + tmp under ceiling stays a no-op"
 : > "$INVOCATION_LOG"
@@ -362,6 +377,24 @@ env -i \
   /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
+echo "Test 13b: failed third stage cannot publish success"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+CODESIGN_MODE=fail run_pressure 8
+assert_receipt_field "Test 13b third-stage failure outcome is error" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+assert_receipt_field "Test 13b records STEP3_RC" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_RC=7' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 13b delegated safety records STEP3_RC" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_RC=7' in d.get('last_terminal', {}).get('safety', {}).get('reason', '')" "True"
+
+echo "Test 13c: timed-out third stage cannot publish success"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+CODESIGN_MODE=timeout run_pressure 8
+assert_receipt_field "Test 13c third-stage timeout outcome is timeout" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+assert_receipt_field "Test 13c records STEP3_TIMEOUT" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_TIMEOUT=true' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 13c delegated safety records STEP3_TIMEOUT" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_TIMEOUT=true' in d.get('last_terminal', {}).get('safety', {}).get('reason', '')" "True"
 
 echo "Test 14: lock contention records skipped_lock receipt"
 : > "$INVOCATION_LOG"
