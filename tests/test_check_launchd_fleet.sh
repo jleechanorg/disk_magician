@@ -67,6 +67,9 @@ EOF
 # All other known labels are intentionally left absent -> MISSING PLIST.
 
 # Stub launchctl: only ever reports com.disk-magician.sweeper-health loaded.
+# Compatibility note: the legacy no-argument checker intentionally excludes
+# the privileged APFS LaunchDaemon; template-derived JSON inventory includes it
+# separately as a system-domain record.
 cat > "$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "list" ]]; then
@@ -109,6 +112,11 @@ assert_contains "the one healthy label produces no failure line for itself" \
 
 if grep -qE "(INVALID|NOT LOADED|MISSING).*sweeper-health$" <<<"$OUTPUT"; then
   echo "FAIL: the loaded+valid sweeper-health label was incorrectly flagged" >&2
+  fail=1
+fi
+
+if grep -qF "apfs-snapshots" <<<"$OUTPUT"; then
+  echo "FAIL: legacy no-argument inventory unexpectedly included privileged APFS label" >&2
   fail=1
 fi
 
