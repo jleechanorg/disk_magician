@@ -32,6 +32,7 @@ Commands:
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
+  sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
@@ -281,6 +282,9 @@ case "$CMD" in
     ;;
   check_launchd_fleet|check-launchd-fleet)
     "$SCRIPT_DIR/scripts/check_launchd_fleet.sh" "$@"
+    ;;
+  sweeper_health|sweeper-health)
+    "$SCRIPT_DIR/scripts/sweeper_health_check.sh" "$@"
     ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
