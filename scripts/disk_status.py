@@ -676,6 +676,51 @@ class DiskStatusEvaluator:
                     source=str(partial_file),
                     paths=paths,
                 )
+            if data.get("canonical") is not False:
+                return make_result(
+                    status=STATUS_INVALID,
+                    reason=f"invalid_partial_canonical_flag: {data.get('canonical')}",
+                    owner="topdown_ledger",
+                    source=str(partial_file),
+                    paths=paths,
+                )
+            part_ts = data.get("captured_at")
+            part_dt = parse_utc_timestamp(part_ts)
+            if not part_dt:
+                return make_result(
+                    status=STATUS_INVALID,
+                    reason=f"partial_ledger_timestamp_missing_or_invalid: {part_ts}",
+                    owner="topdown_ledger",
+                    source=str(partial_file),
+                    paths=paths,
+                )
+            if part_dt > self.now + timedelta(minutes=5):
+                return make_result(
+                    status=STATUS_INVALID,
+                    reason=f"partial_ledger_timestamp_in_future: {part_ts}",
+                    owner="topdown_ledger",
+                    source=str(partial_file),
+                    paths=paths,
+                    time=part_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            if not history_diff:
+                return make_result(
+                    status=STATUS_INVALID,
+                    reason="history_diff_validator_unavailable",
+                    owner="topdown_ledger",
+                    source=str(partial_file),
+                    paths=paths,
+                )
+            try:
+                history_diff.validate_ledger(data, label=str(partial_file))
+            except Exception as exc:
+                return make_result(
+                    status=STATUS_INVALID,
+                    reason=f"partial_ledger_integrity_violation: {exc}",
+                    owner="topdown_ledger",
+                    source=str(partial_file),
+                    paths=paths,
+                )
             partial_data = data
 
         if not strict_data:
@@ -789,9 +834,10 @@ class DiskStatusEvaluator:
 
         if (sidecar_status in ("partial", "stale") or partial_data is not None) and partial_evidence_time:
             if partial_evidence_time > effective_strict:
+                reason = "newer_partial_ledger_published" if partial_data and (not sidecar_data or sidecar_status not in ("partial", "stale")) else "current_publication_partial_in_renderer_sidecar"
                 return make_result(
                     status=STATUS_DEGRADED,
-                    reason=f"current_publication_partial_in_renderer_sidecar (newer partial at {partial_evidence_time.strftime('%Y-%m-%dT%H:%M:%SZ')})",
+                    reason=f"{reason} (newer partial at {partial_evidence_time.strftime('%Y-%m-%dT%H:%M:%SZ')})",
                     owner="topdown_ledger",
                     source=str(strict_ledger_file),
                     paths=paths,
