@@ -47,7 +47,12 @@ def sanitize_str(s):
         else:
             cat = unicodedata.category(c)
             if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
-                out.append(f'\\x{code:02x}' if code < 256 else f'\\u{code:04x}')
+                if code < 256:
+                    out.append(f'\\x{code:02x}')
+                elif code < 0x10000:
+                    out.append(f'\\u{code:04x}')
+                else:
+                    out.append(f'\\U{code:08x}')
             else:
                 out.append(c)
     return ''.join(out)

@@ -114,7 +114,12 @@ def sanitize_str(s):
         else:
             cat = unicodedata.category(c)
             if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
-                out.append(f'\\x{code:02x}' if code < 256 else f'\\u{code:04x}')
+                if code < 256:
+                    out.append(f'\\x{code:02x}')
+                elif code < 0x10000:
+                    out.append(f'\\u{code:04x}')
+                else:
+                    out.append(f'\\U{code:08x}')
             else:
                 out.append(c)
     return ''.join(out)
@@ -148,11 +153,27 @@ if isinstance(dirs, dict):
         for k, v in dirs.items():
             if v is None:
                 continue
-            try:
-                clean_k = sanitize_str(str(k))
-                fh.write(f"{clean_k}\t{int(v)}\n")
-            except Exception:
-                pass
+            val_num = None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                try:
+                    fval = float(v)
+                    if math.isfinite(fval):
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            elif isinstance(v, str):
+                try:
+                    fval = float(v.strip())
+                    if math.isfinite(fval):
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            if val_num is not None:
+                try:
+                    clean_k = sanitize_str(str(k))
+                    fh.write(f"{clean_k}\t{val_num}\n")
+                except Exception:
+                    pass
 
 age_min = ""
 try:

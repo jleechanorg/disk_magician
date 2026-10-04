@@ -704,7 +704,7 @@ git -C "$HIST_GIT_DIR" config user.name "jleechan"
 
 SNAP_GIT_PATH="$HIST_GIT_DIR/backup/test-host/disk_snapshot.json"
 
-# Commit 1: \x1bfoo is 10 GiB, literal \efoo is 1 GiB
+# Commit 1: \x1bfoo is 10 GiB, literal \efoo is 1 GiB; U+E0001 is 20 GiB, U+E000+'1' is 2 GiB
 python3 -c "
 import json
 data = {
@@ -716,7 +716,9 @@ data = {
     'snapshot_coverage_pct': 85.0,
     'directories': {
         '\x1bfoo': 10485760,
-        r'\efoo': 1048576
+        r'\efoo': 1048576,
+        chr(0xE0001): 20971520,
+        chr(0xE000) + '1': 2097152
     }
 }
 with open('$SNAP_GIT_PATH', 'w') as f:
@@ -736,6 +738,8 @@ data = {
     'disk_pct': 81,
     'snapshot_coverage_pct': 85.0,
     'directories': {
+        chr(0xE000) + '1': 2097152,
+        chr(0xE0001): 20971520,
         r'\efoo': 1048576,
         '\x1bfoo': 10485760
     }
@@ -868,7 +872,8 @@ snap = {
     "directories": {
         "zwsp_\u200b_dir": 1048576,
         "linesep_\u2028_dir": 2097152,
-        "bidi_\u200e_dir": 3145728
+        "bidi_\u200e_dir": 3145728,
+        f"astral_{chr(0xE0001)}_dir": 4194304
     }
 }
 with open(sys.argv[1], "w") as f:
@@ -881,14 +886,15 @@ HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON
 
 if ! grep -qF "zwsp_\\u200b_dir" "$OUT_AUDIT_UNICODE" || \
    ! grep -qF "linesep_\\u2028_dir" "$OUT_AUDIT_UNICODE" || \
-   ! grep -qF "bidi_\\u200e_dir" "$OUT_AUDIT_UNICODE"; then
+   ! grep -qF "bidi_\\u200e_dir" "$OUT_AUDIT_UNICODE" || \
+   ! grep -qF "astral_\\U000e0001_dir" "$OUT_AUDIT_UNICODE"; then
   echo "FAIL: unicode format characters or line separators not safely escaped in audit output" >&2
   cat "$OUT_AUDIT_UNICODE" >&2
   exit 1
 fi
 
-# Assert no raw unescaped U+200B, U+2028, or U+200E bytes exist in audit output
-if python3 -c "import sys; f=open('$OUT_AUDIT_UNICODE', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\xe2\x80\x8b' in data or b'\xe2\x80\xa8' in data or b'\xe2\x80\x8e' in data) else 1)"; then
+# Assert no raw unescaped U+200B, U+2028, U+200E, or astral bytes exist in audit output
+if python3 -c "import sys; f=open('$OUT_AUDIT_UNICODE', 'rb'); data=f.read(); f.close(); sys.exit(0 if (b'\xe2\x80\x8b' in data or b'\xe2\x80\xa8' in data or b'\xe2\x80\x8e' in data or chr(0xE0001).encode('utf-8') in data) else 1)"; then
   echo "FAIL: raw unescaped unicode format/separator bytes found in audit output!" >&2
   exit 1
 fi
