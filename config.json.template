@@ -256,6 +256,31 @@
       "key": "library_mail",
       "path": "~/Library/Mail",
       "timeout": 120
+    },
+    {
+      "key": "project_worldaiclaw",
+      "path": "~/project_worldaiclaw",
+      "timeout": 180
+    },
+    {
+      "key": "dark_factory",
+      "path": "~/.dark-factory",
+      "timeout": 120
+    },
+    {
+      "key": "wc_wt",
+      "path": "~/wc-wt",
+      "timeout": 180
+    },
+    {
+      "key": "documents_codex",
+      "path": "~/Documents/Codex",
+      "timeout": 120
+    },
+    {
+      "key": "library_cloudstorage",
+      "path": "~/Library/CloudStorage",
+      "timeout": 180
     }
   ],
   "monitored_file_globs": [
