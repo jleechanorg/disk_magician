@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -107,8 +108,24 @@ def resolve_state_dir(override: Optional[str] = None) -> Path:
     return path
 
 
-def resolve_identity(revision: Optional[str] = None, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+def sha256_file(path: Path) -> str:
+    """Compute sha256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def resolve_identity(
+    revision: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+    helper_path_override: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Resolve executing provenance and identity without ungrounded assertions."""
+    helper_file = (helper_path_override or Path(__file__)).resolve()
+    actual_helper_root = helper_file.parent.parent
+
     # 1. Check if deployed.json exists in state_dir
     sd = state_dir or resolve_state_dir()
     deployed_file = sd / "deployed.json"
@@ -116,27 +133,99 @@ def resolve_identity(revision: Optional[str] = None, state_dir: Optional[Path] =
         try:
             with open(deployed_file, "r", encoding="utf-8") as f:
                 dep_data = json.load(f)
-            if isinstance(dep_data, dict) and "source_sha" in dep_data:
-                return {
-                    "kind": "installed_package",
-                    "source_sha": dep_data.get("source_sha"),
-                    "installed_version": dep_data.get("installed_version"),
-                    "package_root": dep_data.get("package_root"),
-                    "revision": dep_data.get("source_sha"),
-                }
+            if isinstance(dep_data, dict):
+                package_root_raw = dep_data.get("package_root")
+                source_sha = dep_data.get("source_sha")
+                package_hashes = dep_data.get("package_hashes")
+
+                if package_root_raw and source_sha:
+                    dep_package_root = Path(package_root_raw).resolve()
+                    if actual_helper_root == dep_package_root:
+                        # Same root. Check manifest.
+                        if not isinstance(package_hashes, dict) or len(package_hashes) == 0:
+                            return {
+                                "kind": "unknown",
+                                "source_sha": None,
+                                "revision": None,
+                                "reason": "empty_package_manifest",
+                            }
+
+                        # Check unsafe paths in manifest
+                        for p in package_hashes.keys():
+                            p_obj = Path(p)
+                            if p.startswith("/") or p_obj.is_absolute() or ".." in p_obj.parts:
+                                return {
+                                    "kind": "unknown",
+                                    "source_sha": None,
+                                    "revision": None,
+                                    "reason": "unsafe_manifest_path",
+                                }
+
+                        # Check helper itself against manifest
+                        try:
+                            rel_helper = helper_file.relative_to(actual_helper_root).as_posix()
+                        except ValueError:
+                            rel_helper = None
+
+                        if not rel_helper or rel_helper not in package_hashes:
+                            return {
+                                "kind": "unknown",
+                                "source_sha": None,
+                                "revision": None,
+                                "reason": "helper_not_in_manifest",
+                            }
+
+                        if sha256_file(helper_file) != package_hashes[rel_helper]:
+                            return {
+                                "kind": "unknown",
+                                "source_sha": None,
+                                "revision": None,
+                                "reason": "helper_hash_mismatch",
+                            }
+
+                        # Verify all other files listed in manifest
+                        mismatch = False
+                        for rel_p, exp_hash in package_hashes.items():
+                            f_path = actual_helper_root / rel_p
+                            if not f_path.is_file() or sha256_file(f_path) != exp_hash:
+                                mismatch = True
+                                break
+                        if mismatch:
+                            return {
+                                "kind": "unknown",
+                                "source_sha": None,
+                                "revision": None,
+                                "reason": "manifest_file_hash_mismatch",
+                            }
+
+                        # Verified installed package
+                        return {
+                            "kind": "installed_package",
+                            "source_sha": source_sha,
+                            "installed_version": dep_data.get("installed_version"),
+                            "package_root": str(actual_helper_root),
+                            "installed_revision": source_sha,
+                            "deployed_at": dep_data.get("deployed_at"),
+                            "override_state": dep_data.get("override_state"),
+                            "revision": source_sha,
+                        }
+                    else:
+                        # deployed.json points at a different root
+                        pass
         except Exception:
             pass
 
     # 2. Check if running from git source checkout
-    try:
-        cur_file = Path(__file__).resolve()
-        repo_dir = cur_file.parent.parent
-        if (repo_dir / ".git").exists():
+    repo_dir = actual_helper_root
+    if (repo_dir / ".git").exists():
+        try:
+            env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
             proc = subprocess.run(
                 ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env=env,
             )
             if proc.returncode == 0:
                 sha = proc.stdout.strip()
@@ -146,13 +235,15 @@ def resolve_identity(revision: Optional[str] = None, state_dir: Optional[Path] =
                     "source_root": str(repo_dir),
                     "revision": sha,
                 }
-    except Exception:
-        pass
+        except Exception:
+            pass
 
+    # 3. Provided revision
     if revision:
         return {
             "kind": "provided_revision",
-            "source_sha": revision,
+            "provided_revision": revision,
+            "source_sha": None,
             "revision": revision,
         }
 
@@ -288,7 +379,11 @@ class JobReceiptStore:
         run_id = str(uuid.uuid4())
         started_at = now_utc_iso()
         identity_info = resolve_identity(revision, self.state_dir)
-        eff_rev = revision or identity_info.get("source_sha")
+        installed_rev = (
+            identity_info.get("installed_revision")
+            if identity_info.get("kind") == "installed_package"
+            else None
+        )
 
         receipt_path, lock_path = self._get_paths(job, ensure_dir=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
@@ -307,7 +402,7 @@ class JobReceiptStore:
                         "ended_at": None,
                         "duration_seconds": None,
                     },
-                    "installed_revision": eff_rev,
+                    "installed_revision": installed_rev,
                     "identity": identity_info,
                     "trigger": trigger,
                     "outcome": "unknown",
@@ -406,10 +501,14 @@ class JobReceiptStore:
                     if matching_active and matching_active.get("identity")
                     else resolve_identity(revision, self.state_dir)
                 )
-                eff_rev = (
-                    revision
-                    or (matching_active.get("installed_revision") if matching_active else None)
-                    or identity_info.get("source_sha")
+                installed_rev = (
+                    matching_active.get("installed_revision")
+                    if matching_active and matching_active.get("installed_revision") is not None
+                    else (
+                        identity_info.get("installed_revision")
+                        if identity_info.get("kind") == "installed_package"
+                        else None
+                    )
                 )
 
                 rec_out: Dict[str, Any] = {
@@ -423,7 +522,7 @@ class JobReceiptStore:
                         "ended_at": ended_at,
                         "duration_seconds": duration_sec,
                     },
-                    "installed_revision": eff_rev,
+                    "installed_revision": installed_rev,
                     "identity": identity_info,
                     "trigger": trigger
                     or (matching_active.get("trigger") if matching_active else "scheduled"),
