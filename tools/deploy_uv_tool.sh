@@ -57,7 +57,7 @@ done
 while IFS= read -r -d '' source_file; do
   rel="${source_file#"$REPO_ROOT/src/disk_magician/"}"
   case "$rel" in
-    __pycache__/*|*/__pycache__/*|*.pyc|launchd/*.plist) continue ;;
+    __pycache__/*|*/__pycache__/*|*.pyc) continue ;;
   esac
   deployed_file="$deployed_root/$rel"
   if [[ ! -f "$deployed_file" ]] || ! cmp -s "$source_file" "$deployed_file"; then
@@ -69,7 +69,7 @@ done < <(find "$REPO_ROOT/src/disk_magician" -type f -print0)
 while IFS= read -r -d '' deployed_file; do
   rel="${deployed_file#"$deployed_root/"}"
   case "$rel" in
-    __pycache__/*|*/__pycache__/*|*.pyc|launchd/*.plist) continue ;;
+    __pycache__/*|*/__pycache__/*|*.pyc) continue ;;
   esac
   source_file="$REPO_ROOT/src/disk_magician/$rel"
   if [[ ! -f "$source_file" ]]; then
@@ -143,7 +143,6 @@ def ignored_package_file(relative_path):
     return (
         "__pycache__" in parts
         or relative_path.endswith(".pyc")
-        or (len(parts) >= 2 and parts[-2] == "launchd" and parts[-1].endswith(".plist"))
     )
 
 def package_hashes(root):

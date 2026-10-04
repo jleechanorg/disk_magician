@@ -125,7 +125,7 @@ else
 fi
 
 BASE_SHA="$(git -C "$TREE" rev-parse HEAD)"
-EXPECTED_FIXTURE_HASH="$(python3 - "$TREE/src/disk_magician/fixture.txt" "$TREE/src/disk_magician/nested/module.py" <<'PY'
+EXPECTED_FIXTURE_HASH="$(python3 - "$TREE/src/disk_magician/fixture.txt" "$TREE/src/disk_magician/nested/module.py" "$TREE/src/disk_magician/launchd/generated.plist" <<'PY'
 import hashlib
 import json
 import sys
