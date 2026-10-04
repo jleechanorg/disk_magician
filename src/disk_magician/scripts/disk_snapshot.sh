@@ -145,7 +145,7 @@ dua_size_kb() {
     rc=$?
     stderr_text=""
     [[ "$err_file" != "/dev/null" && -f "$err_file" ]] && stderr_text=$(head -c 256 "$err_file" 2>/dev/null || true)
-    if [[ "$rc" -eq 124 || "$rc" -eq 137 || "$rc" -eq 143 ]]; then
+    if [[ "$rc" -eq 124 ]]; then
       record_measure_diagnostic backend_timeout dua "$rc" "$stderr_text"
     else
       record_measure_diagnostic backend_error dua "$rc" "$stderr_text"
@@ -217,7 +217,7 @@ dir_size_kb() {
         fi
       else
         du_rc=$?
-        if [[ "$du_rc" -eq 124 || "$du_rc" -eq 137 || "$du_rc" -eq 143 ]]; then
+        if [[ "$du_rc" -eq 124 ]]; then
           record_measure_diagnostic backend_timeout du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
         else
           record_measure_diagnostic backend_error du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"

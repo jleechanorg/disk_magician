@@ -189,6 +189,30 @@ class SnapshotDiagnosticsCliTests(unittest.TestCase):
         self.assertEqual(worker["reason"], "backend_timeout")
         self.assertEqual(worker["backend_exit"], 124)
 
+    def test_signal_exit_codes_do_not_assert_timeout(self):
+        bindir = self.tmp / "bin-signals"
+        bindir.mkdir()
+        for code in (137, 143):
+            with self.subTest(exit_code=code):
+                for name in ("dua", "du"):
+                    executable = bindir / name
+                    executable.write_text(f"#!/bin/sh\nexit {code}\n")
+                    executable.chmod(0o755)
+                output = self.tmp / f"signal-{code}.json"
+                env = dict(os.environ, PATH=f"{bindir}:/opt/homebrew/bin:/usr/bin:/bin",
+                           HOME=str(self.tmp), DISK_MAGICIAN_LOAD_FACTOR_OVERRIDE="1",
+                           DISK_MAGICIAN_WORKER_DEADLINE_EPOCH=str(int(time.time() + 10)))
+                result = subprocess.run(
+                    ["bash", str(SNAP), "--measure-one", "projects", str(self.tmp / "projects"), "5", str(output)],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                worker = json.loads(output.read_text())
+                self.assertIsNone(worker["kb"])
+                self.assertEqual(worker["reason"], "backend_error")
+                self.assertFalse(worker["timed_out"])
+                self.assertEqual(worker["backend_exit"], code)
+
     def test_regression_full_snapshot_persists_orchestrator_failures(self):
         bindir = self.tmp / "bin-full"
         bindir.mkdir()
