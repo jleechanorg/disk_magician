@@ -22,16 +22,9 @@
 # budgeting). The two should be unified into one canonical roots source
 # after both land; see PR description "Known duplication" note.
 #
-# Known uncovered today (do NOT add without also fixing the sweeper that
-# should cover it — see PR description):
-#   $DARWIN_USER_TEMP_DIR          (21 GiB, 2026-09-22 measurement) — only
-#                                   cleanup_sessions.sh touches this root,
-#                                   and only the narrow
-#                                   "${TMP_DIR}ao-<session-id>" subpaths
-#                                   (scripts/cleanup_sessions.sh:56,117);
-#                                   the bulk of the tree (PR-review scratch,
-#                                   com.apple.fileproviderd cache, etc.) is
-#                                   untouched by any sweeper.
+# Coverage notes: registered ownership does not prove scheduled cleanup.
+# $DARWIN_USER_TEMP_DIR is budget-covered by cleanup_tmp.sh / cleanup_pr_scratch.sh
+# via scratch_roots_get_unique (guarded 15 GiB ceiling; safety/age/open/repo guards).
 
 # cleanup_dev_caches.sh
 $HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
@@ -48,6 +41,7 @@ $HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
 # cleanup_tmp.sh / cleanup_pr_scratch.sh
 /private/tmp	cleanup_tmp.sh	ARCHIVE_ROOT + --large branch target
 /tmp	cleanup_pr_scratch.sh	TMP_DIRS array, line 181
+$DARWIN_USER_TEMP_DIR	cleanup_tmp.sh / cleanup_pr_scratch.sh	scratch_roots_get_unique budget-enabled invocation (guarded 15 GiB ceiling; preserves safety/age/open/repo guards)
 
 # cleanup_xcode.sh
 $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
@@ -115,7 +109,7 @@ $HOME/.dark-factory/runs	cleanup_dark_factory.sh	canonical 30-day retention; per
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 
 # cleanup_claude_state.sh
-$HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs)
+$HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs); scheduled report-only, --clean needs approval
 
 # NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
 # and $HOME/.claude/projects are intentionally NOT registered here as

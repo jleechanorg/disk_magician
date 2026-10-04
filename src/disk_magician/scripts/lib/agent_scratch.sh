@@ -27,6 +27,12 @@ _agent_scratch_valid_component() {
   [[ "$c" != *".."* ]] || return 1
 }
 
+_agent_scratch_fs_id() {
+  local target="${1:-}"
+  [[ -e "$target" || -L "$target" ]] || return 1
+  stat -f '%d:%i' "$target" 2>/dev/null || python3 -c 'import os, sys; st = os.stat(sys.argv[1]); print(f"{st.st_dev}:{st.st_ino}")' "$target" 2>/dev/null
+}
+
 agent_scratch_create() {
   local runtime="${1:-}" run_id="${2:-}"
   if ! _agent_scratch_valid_component "$runtime"; then
@@ -45,15 +51,22 @@ agent_scratch_create() {
     return 1
   fi
 
+  # Explicit symlink rejection for root (preserves legitimate parent aliases)
+  if [[ -L "$root" ]]; then
+    echo "agent_scratch_create: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
+    return 1
+  fi
+
   if [[ ! -d "$root" ]]; then
-    if [[ -L "$root" ]]; then
-      echo "agent_scratch_create: AGENT_SCRATCH_ROOT is a broken symlink: $root" >&2
-      return 1
-    fi
     mkdir -p "$root" 2>/dev/null || {
       echo "agent_scratch_create: failed to create root $root" >&2
       return 1
     }
+  fi
+
+  if [[ -L "$root" ]]; then
+    echo "agent_scratch_create: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
+    return 1
   fi
 
   local canon_root
@@ -135,7 +148,7 @@ _agent_scratch_contains_git() {
 }
 
 _agent_scratch_cleanup_path() {
-  local target="$1"
+  local target="${1:-}" exp_root_id="${2:-}" exp_runtime_id="${3:-}" exp_leaf_id="${4:-}"
   [[ -n "$target" ]] || return 0
   [[ -e "$target" || -L "$target" ]] || return 0
 
@@ -149,18 +162,45 @@ _agent_scratch_cleanup_path() {
     return 1
   fi
 
+  # Filesystem identity revalidation (prevents deleting replaced leaves)
+  local curr_leaf_id
+  curr_leaf_id="$(_agent_scratch_fs_id "$target")"
+  if [[ -n "$exp_leaf_id" && "$curr_leaf_id" != "$exp_leaf_id" ]]; then
+    echo "agent_scratch_cleanup: leaf filesystem identity mismatch (leaf was replaced): $target" >&2
+    return 1
+  fi
+
   local root="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
+  if [[ -L "$root" ]]; then
+    echo "agent_scratch_cleanup: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
+    return 1
+  fi
+
   local canon_root
   canon_root="$(cd "$root" 2>/dev/null && pwd -P)" || {
     echo "agent_scratch_cleanup: cannot resolve AGENT_SCRATCH_ROOT: $root" >&2
     return 1
   }
 
+  local curr_root_id
+  curr_root_id="$(_agent_scratch_fs_id "$canon_root")"
+  if [[ -n "$exp_root_id" && "$curr_root_id" != "$exp_root_id" ]]; then
+    echo "agent_scratch_cleanup: root filesystem identity mismatch: $canon_root" >&2
+    return 1
+  fi
+
   local canon_target
   canon_target="$(cd "$target" 2>/dev/null && pwd -P)" || {
     echo "agent_scratch_cleanup: cannot resolve target path: $target" >&2
     return 1
   }
+
+  local curr_runtime_id
+  curr_runtime_id="$(_agent_scratch_fs_id "${canon_target%/*}")"
+  if [[ -n "$exp_runtime_id" && "$curr_runtime_id" != "$exp_runtime_id" ]]; then
+    echo "agent_scratch_cleanup: runtime filesystem identity mismatch: ${canon_target%/*}" >&2
+    return 1
+  fi
 
   case "$canon_target" in
     "$canon_root"/*/*) ;;
@@ -217,7 +257,7 @@ _agent_scratch_cleanup_path() {
   return 0
 }
 
-_AGENT_SCRATCH_REGISTERED_PATHS=()
+_AGENT_SCRATCH_REGISTERED_RECORDS=()
 _AGENT_SCRATCH_TRAPS_ARMED=0
 _AGENT_SCRATCH_PREV_EXIT=""
 _AGENT_SCRATCH_PREV_INT=""
@@ -237,18 +277,25 @@ _agent_scratch_get_trap() {
 }
 
 _agent_scratch_clean_registered() {
-  if [[ "${#_AGENT_SCRATCH_REGISTERED_PATHS[@]}" -eq 0 ]]; then
+  if [[ "${#_AGENT_SCRATCH_REGISTERED_RECORDS[@]}" -eq 0 ]]; then
     return 0
   fi
-  local p
-  for p in "${_AGENT_SCRATCH_REGISTERED_PATHS[@]}"; do
-    _agent_scratch_cleanup_path "$p"
+  local rec target root_id runtime_id leaf_id
+  for rec in "${_AGENT_SCRATCH_REGISTERED_RECORDS[@]}"; do
+    target="${rec%%|*}"
+    local rest="${rec#*|}"
+    root_id="${rest%%|*}"
+    rest="${rest#*|}"
+    runtime_id="${rest%%|*}"
+    leaf_id="${rest#*|}"
+    _agent_scratch_cleanup_path "$target" "$root_id" "$runtime_id" "$leaf_id"
   done
-  _AGENT_SCRATCH_REGISTERED_PATHS=()
+  _AGENT_SCRATCH_REGISTERED_RECORDS=()
 }
 
 _agent_scratch_on_exit() {
   local __status=$?
+  set +e
   if [[ "${_AGENT_SCRATCH_EXIT_RAN:-0}" -eq 1 ]]; then
     exit "$__status"
   fi
@@ -265,22 +312,41 @@ _agent_scratch_on_exit() {
 
 _agent_scratch_on_signal() {
   local sig="$1"
+  set +e
+  if [[ "${_AGENT_SCRATCH_EXIT_RAN:-0}" -eq 1 ]]; then
+    return 0
+  fi
   _AGENT_SCRATCH_EXIT_RAN=1
+
+  local sig_num=0
+  case "$sig" in
+    INT) sig_num=2 ;;
+    TERM) sig_num=15 ;;
+    *) sig_num="$(kill -l "$sig" 2>/dev/null || echo 0)" ;;
+  esac
+  local __sig_status=$(( 128 + sig_num ))
+
   _agent_scratch_clean_registered
 
-  local prev=""
+  local prev_sig=""
   case "$sig" in
-    INT) prev="$_AGENT_SCRATCH_PREV_INT" ;;
-    TERM) prev="$_AGENT_SCRATCH_PREV_TERM" ;;
+    INT) prev_sig="${_AGENT_SCRATCH_PREV_INT:-}" ;;
+    TERM) prev_sig="${_AGENT_SCRATCH_PREV_TERM:-}" ;;
   esac
-  if [[ -n "$prev" ]]; then
-    eval "$prev"
+  if [[ -n "$prev_sig" ]]; then
+    (exit "$__sig_status")
+    eval "$prev_sig"
+  fi
+
+  if [[ -n "${_AGENT_SCRATCH_PREV_EXIT:-}" ]]; then
+    (exit "$__sig_status")
+    eval "$_AGENT_SCRATCH_PREV_EXIT"
   fi
 
   trap - "$sig"
   local pid="${BASHPID:-$$}"
   kill -s "$sig" "$pid" 2>/dev/null || kill -s "$sig" $$ 2>/dev/null || true
-  exit "$(( 128 + $(kill -l "$sig" 2>/dev/null || echo 0) ))"
+  exit "$__sig_status"
 }
 
 agent_scratch_trap_cleanup() {
@@ -291,6 +357,11 @@ agent_scratch_trap_cleanup() {
   fi
 
   local root="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
+  if [[ -L "$root" ]]; then
+    echo "agent_scratch_trap_cleanup: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
+    return 1
+  fi
+
   local canon_root
   canon_root="$(cd "$root" 2>/dev/null && pwd -P)" || {
     echo "agent_scratch_trap_cleanup: AGENT_SCRATCH_ROOT does not exist, refusing: $root" >&2
@@ -329,17 +400,37 @@ agent_scratch_trap_cleanup() {
       ;;
   esac
 
+  local leaf_id
+  leaf_id="$(_agent_scratch_fs_id "$canon_path")" || {
+    echo "agent_scratch_trap_cleanup: cannot determine filesystem identity of leaf: $canon_path" >&2
+    return 1
+  }
+
+  local runtime_dir="${canon_path%/*}"
+  local runtime_id
+  runtime_id="$(_agent_scratch_fs_id "$runtime_dir")" || {
+    echo "agent_scratch_trap_cleanup: cannot determine filesystem identity of runtime: $runtime_dir" >&2
+    return 1
+  }
+
+  local root_id
+  root_id="$(_agent_scratch_fs_id "$canon_root")" || {
+    echo "agent_scratch_trap_cleanup: cannot determine filesystem identity of root: $canon_root" >&2
+    return 1
+  }
+
+  local record="${canon_path}|${root_id}|${runtime_id}|${leaf_id}"
   local existing already_present=0
-  if [[ "${#_AGENT_SCRATCH_REGISTERED_PATHS[@]}" -gt 0 ]]; then
-    for existing in "${_AGENT_SCRATCH_REGISTERED_PATHS[@]}"; do
-      if [[ "$existing" == "$canon_path" ]]; then
+  if [[ "${#_AGENT_SCRATCH_REGISTERED_RECORDS[@]}" -gt 0 ]]; then
+    for existing in "${_AGENT_SCRATCH_REGISTERED_RECORDS[@]}"; do
+      if [[ "$existing" == "$record" ]]; then
         already_present=1
         break
       fi
     done
   fi
   if [[ "$already_present" -eq 0 ]]; then
-    _AGENT_SCRATCH_REGISTERED_PATHS+=("$canon_path")
+    _AGENT_SCRATCH_REGISTERED_RECORDS+=("$record")
   fi
 
   if [[ "${_AGENT_SCRATCH_TRAPS_ARMED:-0}" -eq 0 ]]; then
