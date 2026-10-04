@@ -65,12 +65,13 @@ docker_probe() {
     return 125
   fi
 
-  local -a timeout_opts
-  if "$timeout_bin" -k 1s 1 true >/dev/null 2>&1; then
-    timeout_opts=("-k" "1s" "$deadline")
-  else
-    timeout_opts=("$deadline")
+  if ! "$timeout_bin" -k 1s 1 true >/dev/null 2>&1; then
+    echo "DEGRADED: timeout utility lacks GNU kill-after (-k) support; refusing unbounded docker probe: docker $*" >&2
+    return 125
   fi
+
+  local -a timeout_opts
+  timeout_opts=("-k" "1s" "$deadline")
 
   local rc=0
   "$timeout_bin" "${timeout_opts[@]}" docker "$@"

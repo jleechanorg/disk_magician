@@ -317,6 +317,140 @@ env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECOND
   bash "$SCRIPT" --dry-run > "$OUT10" 2>&1 || RC10_HIGH=$?
 assert "rejects unreasonable deadline (>60s)" "true" "$([[ $RC10_HIGH -ne 0 ]] && echo true || echo false)"
 
+# ---------------------------------------------------------------------------
+# Test 11: TERM-ignoring probe child is killed by deadline + kill-after grace
+echo "--- Test 11: TERM-ignoring probe child killed by kill-after grace ---"
+TERM_PID_FILE="$TMP_ROOT/term_ignoring.pid"
+rm -f "$TERM_PID_FILE"
+cat > "$COLIMA_BIN/docker" <<EOF
+#!/usr/bin/env bash
+echo "docker \$*" >> "$COLIMA_INVOCATIONS"
+if [[ "\$1" == "context" && "\$2" == "show" ]]; then
+  trap '' TERM
+  sleep 30 &
+  sleeper=\$!
+  echo "\$sleeper" > "$TERM_PID_FILE"
+  wait "\$sleeper"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$COLIMA_BIN/docker"
+
+OUT11="$TMP_ROOT/t11.out"
+RC11=0
+: > "$COLIMA_INVOCATIONS"
+start11=$(date +%s)
+# Outer cap of 10s prevents task hang if regression occurs
+timeout 10s env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_PROBE_DEADLINE_SECONDS=1 \
+  bash "$SCRIPT" --dry-run > "$OUT11" 2>&1 || RC11=$?
+dur11=$(( $(date +%s) - start11 ))
+CHILD_PID=$(cat "$TERM_PID_FILE" 2>/dev/null || echo "")
+assert "returns nonzero on timeout" "true" "$([[ $RC11 -ne 0 ]] && echo true || echo false)"
+assert "probe killed within deadline + grace (<6s)" "true" "$([[ $dur11 -lt 6 ]] && echo true || echo false)"
+assert "spawned sleeper child PID was recorded" "true" "$([[ -n "$CHILD_PID" ]] && echo true || echo false)"
+if [[ -n "$CHILD_PID" ]]; then
+  child_alive=0
+  kill -0 "$CHILD_PID" 2>/dev/null && child_alive=1 || child_alive=0
+  assert "leaves no lingering TERM-ignoring child behind" "0" "$child_alive"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 12: Timeout utility lacking -k fails closed and NEVER invokes docker
+echo "--- Test 12: Timeout lacking -k fails closed without invoking docker ---"
+FAKE_TIMEOUT_DIR="$TMP_ROOT/fake_timeout_bin"
+mkdir -p "$FAKE_TIMEOUT_DIR"
+cat > "$FAKE_TIMEOUT_DIR/timeout" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == "-k" || "$arg" == "--kill-after"* ]]; then
+    echo "timeout: unrecognized option: -k" >&2
+    exit 1
+  fi
+done
+shift
+"$@"
+EOF
+chmod +x "$FAKE_TIMEOUT_DIR/timeout"
+
+cat > "$COLIMA_BIN/docker" <<EOF
+#!/usr/bin/env bash
+echo "DOCKER INVOKED: \$*" >> "$COLIMA_INVOCATIONS"
+exit 0
+EOF
+chmod +x "$COLIMA_BIN/docker"
+
+OUT12="$TMP_ROOT/t12.out"
+RC12=0
+: > "$COLIMA_INVOCATIONS"
+env -i PATH="$FAKE_TIMEOUT_DIR:$COLIMA_BIN:/usr/bin:/bin" HOME="$COLIMA_HOME" \
+  bash "$SCRIPT" --dry-run > "$OUT12" 2>&1 || RC12=$?
+assert "returns nonzero when timeout lacks -k" "true" "$([[ $RC12 -ne 0 ]] && echo true || echo false)"
+assert "logs DEGRADED context" "DEGRADED" "$(cat "$OUT12")"
+assert "never invokes docker when timeout lacks -k" "false" "$([[ "$(cat "$COLIMA_INVOCATIONS")" == *"DOCKER INVOKED"* ]] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+# Test 13: Successful docker context show with empty output fails closed
+echo "--- Test 13: Empty context show fails closed ---"
+cat > "$COLIMA_BIN/docker" <<EOF
+#!/usr/bin/env bash
+echo "docker \$*" >> "$COLIMA_INVOCATIONS"
+if [[ "\$1" == "context" && "\$2" == "show" ]]; then
+  exit 0
+fi
+if [[ "\$1" == "info" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$COLIMA_BIN/docker"
+
+OUT13="$TMP_ROOT/t13.out"
+RC13=0
+: > "$COLIMA_INVOCATIONS"
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" \
+  bash "$SCRIPT" --dry-run > "$OUT13" 2>&1 || RC13=$?
+assert "returns nonzero on empty context show" "true" "$([[ $RC13 -ne 0 ]] && echo true || echo false)"
+assert "logs DEGRADED/SKIPPED on empty context show" "DEGRADED" "$(cat "$OUT13")"
+assert "never falls back to Colima socket on empty context" "false" "$([[ "$(cat "$OUT13")" == *"Selected proven Colima Docker socket"* ]] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+# Test 14: Successful docker context inspect with empty endpoint fails closed
+echo "--- Test 14: Empty context inspect endpoint fails closed ---"
+cat > "$COLIMA_BIN/docker" <<EOF
+#!/usr/bin/env bash
+echo "docker \$*" >> "$COLIMA_INVOCATIONS"
+if [[ "\$1" == "context" && "\$2" == "show" ]]; then
+  echo "colima"
+  exit 0
+fi
+if [[ "\$1" == "context" && "\$2" == "inspect" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$COLIMA_BIN/docker"
+
+OUT14="$TMP_ROOT/t14.out"
+RC14=0
+: > "$COLIMA_INVOCATIONS"
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" \
+  bash "$SCRIPT" --dry-run > "$OUT14" 2>&1 || RC14=$?
+assert "returns nonzero on empty context inspect" "true" "$([[ $RC14 -ne 0 ]] && echo true || echo false)"
+assert "logs DEGRADED/SKIPPED on empty endpoint" "DEGRADED" "$(cat "$OUT14")"
+assert "never falls back to Colima socket on empty endpoint" "false" "$([[ "$(cat "$OUT14")" == *"Selected proven Colima Docker socket"* ]] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+# Test 15: Explicit DOCKER_CONTEXT with empty endpoint fails closed
+echo "--- Test 15: Explicit DOCKER_CONTEXT with empty endpoint fails closed ---"
+OUT15="$TMP_ROOT/t15.out"
+RC15=0
+: > "$COLIMA_INVOCATIONS"
+env -i PATH="$COLIMA_BIN:$PATH" HOME="$COLIMA_HOME" DOCKER_CONTEXT="explicit-empty" \
+  bash "$SCRIPT" --dry-run > "$OUT15" 2>&1 || RC15=$?
+assert "returns nonzero on explicit DOCKER_CONTEXT empty endpoint" "true" "$([[ $RC15 -ne 0 ]] && echo true || echo false)"
+assert "logs DEGRADED/SKIPPED on explicit empty endpoint" "DEGRADED" "$(cat "$OUT15")"
+
 echo ""
 echo "PASSED: $TESTS_PASSED / $TESTS_RUN assertions"
 echo "All focused Colima probe tests complete."
