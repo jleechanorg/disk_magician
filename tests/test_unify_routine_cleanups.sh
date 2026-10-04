@@ -231,6 +231,37 @@ check "CLI routine reports zero-failure summary" grep -qF "All attempted categor
 check "CLI dispatched dev caches" grep -qF "cleanup_dev_caches.sh --dry-run" "$INVOCATIONS_LOG"
 check "CLI dispatched codex vacuum" grep -qF "cleanup_codex_db.sh --dry-run" "$INVOCATIONS_LOG"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 5: Category isolation/continuation when cleanup_colima fails/degrades
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 5: failed cleanup_colima reports CATEGORY FAILED and isolates to let later categories run"
+# Stub cleanup_colima to fail with exit 1
+cat > "$FIXTURE_DIR/scripts/cleanup_colima.sh" <<EOF
+#!/bin/bash
+echo "cleanup_colima.sh \$*" >> "$INVOCATIONS_LOG"
+echo "stub cleanup_colima degraded failure"
+exit 1
+EOF
+chmod +x "$FIXTURE_DIR/scripts/cleanup_colima.sh"
+
+: > "$INVOCATIONS_LOG"
+OUT5="$TMP_DIR/audit_clean_colima_failure.log"
+set +e
+PATH="$FIXTURE_DIR/bin:/usr/bin:/bin" \
+HOME="$FIXTURE_DIR/home" \
+/bin/bash "$FIXTURE_DIR/scripts/disk_audit.sh" clean --dry-run --live --no-history >"$OUT5" 2>&1
+RC5=$?
+set -e
+
+check "audit clean completes when a category fails" test "$RC5" -eq 0
+check "reports Colima CATEGORY FAILED" grep -q "CATEGORY FAILED: Colima VM disk (Docker prune + fstrim) (exit 1)" "$OUT5"
+check "invoked Colima before failure" grep -qF "cleanup_colima.sh --dry-run" "$INVOCATIONS_LOG"
+check "continues and executes later category prune_aside_sessions" grep -qF "prune_aside_sessions.sh --dry-run" "$INVOCATIONS_LOG"
+check "continues and executes later category cleanup_uv_cache" grep -qF "cleanup_uv_cache.sh --dry-run" "$INVOCATIONS_LOG"
+check "continues and executes later category post_job_docker_prune" grep -qF "post_job_docker_prune.sh --dry-run" "$INVOCATIONS_LOG"
+check "summary reports 1 category failed" grep -q "1 of 14 categories FAILED:" "$OUT5"
+check "summary lists Colima failed category" grep -q -- "- Colima VM disk (Docker prune + fstrim) (exit 1)" "$OUT5"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
