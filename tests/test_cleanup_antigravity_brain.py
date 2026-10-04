@@ -175,6 +175,16 @@ class TestCleanupAntigravityBrain(unittest.TestCase):
         self.assertEqual(stats["empty_pruned"], 1)
         self.assertFalse(empty_sdir.exists())
 
+    def test_default_threshold_is_seven_days(self):
+        """Default threshold is 7 days, compacting sessions older than 7d without explicit threshold_days."""
+        sid = "session-nine-days-old"
+        sdir = self._create_mock_session(sid, age_days=9.0)
+        compactor = BrainCompactor(brain_dir=self.brain_dir, dry_run=False)
+        self.assertEqual(compactor.threshold_days, 7)
+        stats = compactor.scan_and_compact()
+        self.assertEqual(stats["files_compressed"], 2)
+        self.assertEqual(stats["scratch_files_removed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

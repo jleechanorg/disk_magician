@@ -138,7 +138,7 @@ clear_dir_contents() {
   fi
   if [[ "$path" == *"runs"* ]]; then
     # Per-run recency check for run pools like ~/.dark-factory/runs
-    find "$path" -mindepth 1 -maxdepth 1 -mtime +"${gate_days:-14}" -exec rm -rf {} + 2>/dev/null || true
+    find "$path" -mindepth 1 -maxdepth 1 -mtime +"${gate_days:-7}" -exec rm -rf {} + 2>/dev/null || true
     return 0
   fi
   find "$path" -depth -mindepth 1 -delete 2>/dev/null || true
