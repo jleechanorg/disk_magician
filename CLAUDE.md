@@ -212,17 +212,21 @@ SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
 
 **Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 
-1. The 35-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
+1. The 30-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
    **uv-tool-packaged copy** at
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from
    `src/disk_magician/` — NOT the repo root files.
-2. The drilldown / frontier-nightly / pressure-sweep launchd jobs run
-   **repo-root scripts** directly (`@REPO_ROOT@` substitution).
+2. The snapshot, frontier-nightly, pressure-sweep, tmp-scratch, Claude-state,
+   and Codex-vacuum templates use the installed `diskm` entry point. Other
+   jobs still use **repo-root scripts** (`@REPO_ROOT@` substitution); inspect
+   `diskm status --json` for their actual installed paths.
 
 After changing root scripts: run `scripts/sync_package_tree.sh` (use
 `--check` in review), **bump the version in pyproject.toml** (uv caches
-wheels by version), then `uv tool install --force --reinstall <repo path>`.
-Verify the deployed tree, not the repo, before claiming production behavior
+wheels by version), then run `tools/deploy_uv_tool.sh` from a clean checkout
+exactly matching `origin/main`. The guard checks both CLI names and package
+hashes before atomically publishing `~/.disk_magician_state/deployed.json`.
+Verify the deployed tree and scheduled receipts before claiming production behavior
 (stale-deploy incident 2026-07-11: v2 code was committed for hours while
 production ran v1).
 
