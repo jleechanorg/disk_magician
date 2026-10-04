@@ -316,7 +316,7 @@ fi
 
 # macOS code_sign_clone caches (Aside, Chrome, Codex, etc.)
 if command -v getconf &>/dev/null; then
-    _user_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
+    _user_tmp="${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")}"
     if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
         _x_dir="$(cd "$(dirname "$_user_tmp")" && pwd -P)/X"
         _csc_kb=0

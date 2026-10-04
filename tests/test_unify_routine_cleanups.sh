@@ -79,6 +79,28 @@ exit 0
 EOF
 chmod +x "$FIXTURE_BIN/colima"
 
+cat > "$FIXTURE_BIN/uv" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"cache dir"* ]]; then
+  echo "$HOME/.cache/uv"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$FIXTURE_BIN/uv"
+
+cat > "$FIXTURE_BIN/getconf" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "DARWIN_USER_TEMP_DIR" ]]; then
+  echo "${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-$TMPDIR}"
+  exit 0
+fi
+/usr/bin/getconf "$@"
+EOF
+chmod +x "$FIXTURE_BIN/getconf"
+
+unset DISK_MAGICIAN_STATE_REPO DISK_MAGICIAN_CONFIG || true
+export UV_CACHE_DIR="$TMP_DIR/uv_cache"
 export PATH="$FIXTURE_BIN:$PATH"
 
 # Run disk_audit.sh --clean --dry-run
