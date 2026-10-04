@@ -382,8 +382,12 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
     echo "ELIGIBLE $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
   else
     echo "DELETING $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
-    rm -rf -- "$candidate"
-    deletion_log "cleanup_claude_state.sh" "remove_dormant_state" "$size_kb_val" "$candidate"
+    if rm -rf -- "$candidate" && [[ ! -e "$candidate" ]]; then
+      deletion_log "cleanup_claude_state.sh" "remove_dormant_state" "$size_kb_val" "$candidate"
+    else
+      echo "ERROR: Failed to completely remove dormant state directory: $candidate" >&2
+      deletion_log "cleanup_claude_state.sh" "failed_remove" "$size_kb_val" "$candidate"
+    fi
   fi
 done
 

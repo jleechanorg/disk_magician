@@ -95,14 +95,19 @@ if ! [[ "$BUSY_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
   echo "ERROR: --busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS must be an unsigned integer, got: $BUSY_TIMEOUT_MS" >&2
   exit 2
 fi
+BUSY_TIMEOUT_MS=$(( 10#$BUSY_TIMEOUT_MS ))
+
 if ! [[ "$MIN_FREELIST" =~ ^[0-9]+$ ]]; then
   echo "ERROR: --min-freelist / CODEX_DB_MIN_FREELIST must be an unsigned integer, got: $MIN_FREELIST" >&2
   exit 2
 fi
-if ! [[ "$CHUNK_SIZE" =~ ^[0-9]+$ && "$CHUNK_SIZE" -gt 0 ]]; then
+MIN_FREELIST=$(( 10#$MIN_FREELIST ))
+
+if ! [[ "$CHUNK_SIZE" =~ ^[0-9]+$ && "$(( 10#$CHUNK_SIZE ))" -gt 0 ]]; then
   echo "ERROR: --chunk-size / CODEX_DB_CHUNK_SIZE must be a positive integer, got: $CHUNK_SIZE" >&2
   exit 2
 fi
+CHUNK_SIZE=$(( 10#$CHUNK_SIZE ))
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -213,10 +218,21 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  # Hard link rejection: multiple hard links can link outside authorized directory
-  link_count="$(stat -f %l "$db" 2>/dev/null || stat -c %h "$db" 2>/dev/null || echo 1)"
+  # Check hard link count portably across BSD/macOS (stat -f %l) and GNU/Linux (stat -c %h)
+  link_count=""
+  if link_count=$(stat -c %h "$db" 2>/dev/null) && [[ "$link_count" =~ ^[0-9]+$ ]]; then
+    : # GNU/Linux stat succeeded
+  elif link_count=$(stat -f %l "$db" 2>/dev/null) && [[ "$link_count" =~ ^[0-9]+$ ]]; then
+    : # BSD/macOS stat succeeded
+  else
+    link_count=999 # Fail closed if stat dialect could not determine link count
+  fi
+
   if [[ "$link_count" -gt 1 ]]; then
     log "WARNING: $db has multiple hard links (link count $link_count) — refusing hard-linked database for safety"
+    continue
+  elif [[ "$link_count" -ne 1 ]]; then
+    log "WARNING: $db has unverified link count $link_count (!= 1) — refusing database for safety"
     continue
   fi
 
@@ -234,9 +250,9 @@ for db in "${CANDIDATES[@]}"; do
   wal_size_before=$(file_size_bytes "$wal_file")
   total_size_before=$(( db_size_before + wal_size_before ))
 
-  # Query basic DB pragmas
+  # Query basic DB pragmas using -readonly to prevent SQLite from checkpointing WAL or mutating DB in dry-run
   set +e
-  pragma_out=$(sqlite3 "$db" "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
+  pragma_out=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
   pragma_rc=$?
   set -e
 
@@ -250,7 +266,7 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
 
-  read -r page_size page_count freelist_count auto_vacuum <<< "$(echo "$pragma_out" | tr '\n' ' ')"
+  read -r _busy_res page_size page_count freelist_count auto_vacuum <<< "$(echo "$pragma_out" | tr '\n' ' ')"
   page_size="${page_size:-0}"
   page_count="${page_count:-0}"
   freelist_count="${freelist_count:-0}"
@@ -315,7 +331,7 @@ for db in "${CANDIDATES[@]}"; do
         fi
         remaining=$(( remaining - chunk ))
         # Check current freelist count to avoid unnecessary iterations
-        cur_fl=$(sqlite3 "$db" "PRAGMA freelist_count;" 2>/dev/null || echo 0)
+        cur_fl=$(sqlite3 -readonly "$db" "PRAGMA busy_timeout=$BUSY_TIMEOUT_MS; PRAGMA freelist_count;" 2>/dev/null | tail -n 1 || echo 0)
         if (( cur_fl == 0 )); then break; fi
       done
     else

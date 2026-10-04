@@ -313,6 +313,12 @@ else
   record_fail "(clean+approved) symlink + its target untouched" "symlink or its target vanished"
 fi
 
+if [[ -f "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log" ]] && grep -q "remove_dormant_state.*$OLD_CLEAN" "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log"; then
+  record_pass "(clean+approved) deletion audit log recorded remove_dormant_state"
+else
+  record_fail "(clean+approved) deletion audit log recorded remove_dormant_state" "audit record missing from deletion log"
+fi
+
 echo
 echo "=== Test 6: refuses to operate against ~/.claude/projects ==="
 FAKE_HOME="$TMP_ROOT/home2"
@@ -386,6 +392,41 @@ else
   record_fail "(sandbox guard) aborts with rc=90 when outside sandbox" "expected exit code 90, got $RC9"
 fi
 assert_contains "(sandbox guard) fatal sandbox message in output" "FATAL sandbox_guard_roots" "$OUT9_CONTENT"
+
+echo
+echo "=== Test 10: failed removal logs failed_remove to audit log ==="
+ROOTS_DIR10="$TMP_ROOT/state10"
+mkdir -p "$ROOTS_DIR10"
+UNREMOVABLE="$ROOTS_DIR10/unremovable-candidate"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$UNREMOVABLE"
+mkdir -p "$UNREMOVABLE/locked_subdir"
+echo "protected" > "$UNREMOVABLE/locked_subdir/file.txt"
+git -C "$UNREMOVABLE" config user.email test@test.com
+git -C "$UNREMOVABLE" config user.name test
+git -C "$UNREMOVABLE" add locked_subdir/file.txt
+git -C "$UNREMOVABLE" commit -qm "add locked file"
+git -C "$UNREMOVABLE" push -q origin main
+chmod 555 "$UNREMOVABLE/locked_subdir"
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$UNREMOVABLE" -type f)
+OUT10="$TMP_ROOT/out10.txt"
+set +e
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" CLAUDE_STATE_APPROVED=1 \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR10" --min-age 7 --clean \
+  >"$OUT10" 2>&1
+RC10=$?
+set -e
+chmod 755 "$UNREMOVABLE/locked_subdir" 2>/dev/null || true
+OUT10_CONTENT=$(cat "$OUT10")
+
+assert_contains "(failed removal) error message emitted" "Failed to completely remove" "$OUT10_CONTENT"
+if [[ -f "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log" ]] && grep -q "failed_remove.*$UNREMOVABLE" "$TMP_ROOT/home/Library/Logs/disk-magician-deletions.log"; then
+  record_pass "(failed removal) deletion audit log recorded failed_remove"
+else
+  record_fail "(failed removal) deletion audit log recorded failed_remove" "failed_remove audit record missing"
+fi
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

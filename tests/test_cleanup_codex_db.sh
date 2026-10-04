@@ -295,6 +295,42 @@ HL_AFTER=$(sqlite3 "$MOCK_CODEX/hardlink_orig.sqlite" "PRAGMA freelist_count;")
 expect "logged hard link rejection warning" "has multiple hard links" "$OUT10"
 expect_eq "hard-linked database untouched" "$HL_BEFORE" "$HL_AFTER"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: Leading-zero numeric options (e.g. 08, 0200) normalize to base-10
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 11: Leading-zero numeric options normalize correctly to base-10 without octal errors"
+DB11="$TMP_DIR/test11.sqlite"
+create_test_db "$DB11" 100 50 2
+OUT11=$("$SCRIPT" --dry-run --db "$DB11" --min-freelist 08 --busy-timeout 0200 --chunk-size 050 2>&1)
+RC11=$?
+expect_eq "leading zero parameters exit code 0" "0" "$RC11"
+expect "dry-run succeeded with leading zero parameters" "[dry-run]" "$OUT11"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: --dry-run does not mutate main database or flush WAL
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 12: --dry-run does not mutate database or flush WAL file"
+DB12="$TMP_DIR/test12.sqlite"
+create_test_db "$DB12" 100 50 2
+# Write uncheckpointed frame directly into WAL
+python3 -c "
+import sqlite3
+con = sqlite3.connect('$DB12')
+con.execute('PRAGMA wal_autocheckpoint=0;')
+con.execute('CREATE TABLE IF NOT EXISTS uncommitted_probe (x TEXT);')
+con.execute('INSERT INTO uncommitted_probe VALUES (\'wal_frame\');')
+con.commit()
+con.close()
+"
+db12_size_before=$(stat -f%z "$DB12" 2>/dev/null || stat -c%s "$DB12" 2>/dev/null || echo 0)
+wal12_size_before=$(stat -f%z "${DB12}-wal" 2>/dev/null || stat -c%s "${DB12}-wal" 2>/dev/null || echo 0)
+OUT12=$("$SCRIPT" --dry-run --db "$DB12" 2>&1)
+db12_size_after=$(stat -f%z "$DB12" 2>/dev/null || stat -c%s "$DB12" 2>/dev/null || echo 0)
+wal12_size_after=$(stat -f%z "${DB12}-wal" 2>/dev/null || stat -c%s "${DB12}-wal" 2>/dev/null || echo 0)
+
+expect_eq "main db size untouched by dry-run" "$db12_size_before" "$db12_size_after"
+expect_eq "wal file size untouched by dry-run" "$wal12_size_before" "$wal12_size_after"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
