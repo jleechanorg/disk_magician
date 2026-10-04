@@ -18,7 +18,7 @@
 #     immediately before every single deletion (bead dcz), independent of
 #     the upfront lsof snapshot used only to speed up enumeration
 #   - anything is_protected_root() / is_protected_tmp_path() reports true for
-#   - a git worktree younger than the 7-day floor (worktree_recency.sh)
+#   - a repository/worktree, including one nested inside a scratch container
 #   - anything safety_gate() (safety_lib.sh: never_delete /
 #     protected_live_paths / needs_decision, or an unreadable safety file)
 #     refuses, checked immediately before every deletion
@@ -32,9 +32,8 @@
 #   is_protected_tmp_path <path>  rc0 = path form is protected
 #   has_open_files <path>         rc0 = has an open handle (fails closed)
 #   DRY_RUN                       "true" or "false"
-# Sourced directly (not duck-typed): safety_gate (safety_lib.sh),
-# worktree_is_recently_active (scripts/lib/worktree_recency.sh) — both
-# scripts already source these ahead of this file.
+# Sourced directly (not duck-typed): safety_gate (safety_lib.sh).
+# Repository containers are preserved for the canonical worktree cleanup.
 #
 # Caller must declare (and reset per invocation) these globals; this file
 # accumulates into them rather than returning a value, matching the
@@ -107,6 +106,16 @@ scratch_budget_content_mtime() {
   echo "$epoch"
 }
 
+# Repository removal belongs to the canonical worktree cleanup, which also
+# checks unpushed work. A failed traversal cannot prove this is disposable.
+_scratch_budget_contains_git() {
+  local found
+  if ! found="$(find "$1" -name .git -prune -print -quit 2>/dev/null)"; then
+    return 0
+  fi
+  [[ -n "$found" ]]
+}
+
 # scratch_budget_evict_root <root> <budget_kb> <floor_minutes>
 scratch_budget_evict_root() {
   local root="$1" budget_kb="$2" floor_minutes="$3"
@@ -148,8 +157,8 @@ scratch_budget_evict_root() {
       log "scratch_budget: skipping protected root: $item"
       continue
     fi
-    if [[ -d "$item/.git" || -f "$item/.git" ]] && worktree_is_recently_active "$item" 7; then
-      log "scratch_budget: skipping worktree younger than 7d floor: $item"
+    if [[ -d "$item" && ! -L "$item" ]] && _scratch_budget_contains_git "$item"; then
+      log "scratch_budget: preserving repository container or uninspectable path: $item"
       continue
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
