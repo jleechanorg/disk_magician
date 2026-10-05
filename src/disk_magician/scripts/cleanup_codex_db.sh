@@ -317,8 +317,6 @@ run_sqlite() {
 
 check_active_open_clients() {
   local target="$1"
-  local wal="${target}-wal"
-  local shm="${target}-shm"
   local lsof_bin=""
   if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" ]]; then
     lsof_bin="$DISK_MAGICIAN_LSOF_BIN"
@@ -646,7 +644,6 @@ for db in "${CANDIDATES[@]}"; do
   fi
 
   mode="rw"
-  [[ "$DRY_RUN" == true ]] && mode="ro"
   target_uri=$(db_uri "$db" "$mode")
   if [[ -z "$target_uri" ]]; then
     log "WARNING: Could not construct valid URI for $db — skipping" >&2
@@ -676,7 +673,11 @@ for db in "${CANDIDATES[@]}"; do
 
   # Query basic DB pragmas with busy timeout via URI mode
   set +e
-  pragma_out=$(run_sqlite "$target_uri" "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
+  if [[ "$DRY_RUN" == true ]]; then
+    pragma_out=$(run_sqlite "$target_uri" "PRAGMA query_only = ON; PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
+  else
+    pragma_out=$(run_sqlite "$target_uri" "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum;" 2>&1)
+  fi
   pragma_rc=$?
   set -e
 
@@ -766,14 +767,14 @@ for db in "${CANDIDATES[@]}"; do
 
     if (( freelist_count > CHUNK_SIZE )); then
       log "  Running incremental_vacuum in batches of $CHUNK_SIZE pages..."
-      remaining=$freelist_count
-      while (( remaining > 0 )); do
+      fl_remaining=$freelist_count
+      while (( fl_remaining > 0 )); do
         if ! verify_db_identity "$db" "$db_physical_id"; then
           log "ERROR: Database identity changed or disappeared during vacuum: $db" >&2
           vacuum_failed=true
           break
         fi
-        chunk=$(( remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining ))
+        chunk=$(( fl_remaining > CHUNK_SIZE ? CHUNK_SIZE : fl_remaining ))
         set +e
         v_out=$(run_sqlite "$target_uri" "PRAGMA incremental_vacuum($chunk);" 2>&1)
         v_rc=$?
@@ -788,7 +789,7 @@ for db in "${CANDIDATES[@]}"; do
           vacuum_failed=true
           break
         fi
-        remaining=$(( remaining - chunk ))
+        fl_remaining=$(( fl_remaining - chunk ))
         set +e
         cur_fl_out=$(run_sqlite "$target_uri" "PRAGMA freelist_count;" 2>&1)
         cur_fl_rc=$?
