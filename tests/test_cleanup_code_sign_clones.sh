@@ -71,7 +71,7 @@ fi
 echo "  PASS  Test 1"
 
 echo "Test 2: --clean without CODE_SIGN_CLONES_APPROVED=1 refuses deletion"
-OUTPUT2=$(PATH="$MOCK_BIN:$PATH" DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+OUTPUT2=$(PATH="$MOCK_BIN:$PATH" CODE_SIGN_CLONES_APPROVED=0 DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
 if [[ ! -d "$CLONE_DIR" ]]; then
   echo "FAIL: --clean deleted candidate without approval" >&2
   exit 1
@@ -128,6 +128,15 @@ if ! grep -q "Dirs removed: 1" <<<"$OUTPUT5"; then
   exit 1
 fi
 echo "  PASS  Test 5"
+
+echo "Test 6: Fails closed when DISK_MAGICIAN_CODE_SIGN_X_DIR is a non-existent path"
+OUTPUT6=$(PATH="$MOCK_BIN:$PATH" DISK_MAGICIAN_CODE_SIGN_X_DIR="/nonexistent/test_x_dir_12345" "$SCRIPT" --dry-run 2>&1 || true)
+if ! grep -q "ERROR: DISK_MAGICIAN_CODE_SIGN_X_DIR is not a directory" <<<"$OUTPUT6"; then
+  echo "FAIL: expected error message for non-existent X dir" >&2
+  echo "$OUTPUT6" >&2
+  exit 1
+fi
+echo "  PASS  Test 6"
 
 echo "ALL CHECKS PASSED: test_cleanup_code_sign_clones.sh"
 exit 0
