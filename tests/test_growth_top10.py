@@ -25,7 +25,9 @@ USER_PROBE_PATHS = {
 }
 
 
-def make_valid_floor(captured_at="2026-10-01T12:00:00Z", buckets=None, disk_used_kb=10000000, scope=None):
+def make_valid_floor(captured_at=None, buckets=None, disk_used_kb=10000000, scope=None):
+    if captured_at is None:
+        captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if buckets is None:
         buckets = [{"path": "/Users/x/a", "measured_kb": 4000000}]
     if scope is None:
@@ -80,7 +82,9 @@ def make_valid_floor(captured_at="2026-10-01T12:00:00Z", buckets=None, disk_used
     }
 
 
-def make_valid_partial(captured_at="2026-10-03T10:00:00Z", buckets=None, disk_used_kb=10500000, scope=None):
+def make_valid_partial(captured_at=None, buckets=None, disk_used_kb=10500000, scope=None):
+    if captured_at is None:
+        captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if buckets is None:
         buckets = [{"path": "/Users/x/a", "measured_kb": 4500000}]
     if scope is None:
@@ -132,10 +136,12 @@ class TestGrowthTop10(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.state_dir), "init", "-q"], check=True)
         (self.state_dir / "ledger").mkdir()
 
-    def _commit_floor(self, floor_dict, commit_time="2026-10-01T12:00:00Z"):
+    def _commit_floor(self, floor_dict, commit_time=None):
         p = self.state_dir / "ledger" / "topdown-5g.json"
         p.write_text(json.dumps(floor_dict, indent=2))
         subprocess.run(["git", "-C", str(self.state_dir), "add", "ledger/topdown-5g.json"], check=True)
+        if commit_time is None:
+            commit_time = floor_dict.get("captured_at", (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         env = dict(os.environ, GIT_AUTHOR_DATE=commit_time, GIT_COMMITTER_DATE=commit_time)
         subprocess.run(
             ["git", "-C", str(self.state_dir), "-c", "user.email=t@test", "-c", "user.name=t", "commit", "-q", "-m", "commit floor"],

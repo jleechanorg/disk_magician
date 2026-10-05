@@ -1,6 +1,7 @@
 # disk_magician roadmap
 
 ## Recent activity (by day)
+- [2026-10-05](activity/2026-10-05.md) — Workstation disk recovery (used 876 → 844 GiB, available +23 GiB back to 3-day floor); 18/18 fleet verified; uncovered roots monitored (PR #102, #103); code-sign-clone CLI dispatch wired and periodic launchd sweeper gap filed (q6l.3).
 - [2026-10-03](activity/2026-10-03.md) — 90d floor disk attribution (+194 GiB over floor); +21 GiB net reclaimed live (dev caches/wiki-publish +11.5 GiB, Codex SQLite vacuum +4.89 GiB, Colima trim +3.1 GiB, Claude state +2.07 GiB); automated launchd sweepers built for Claude state and Codex SQLite compaction.
 - [2026-09-22](activity/2026-09-22.md)
 

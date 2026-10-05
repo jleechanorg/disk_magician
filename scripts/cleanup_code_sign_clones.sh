@@ -99,6 +99,14 @@ lsof_state() {
 }
 
 resolve_x_dir() {
+  if [[ -n "${DISK_MAGICIAN_CODE_SIGN_X_DIR:-}" ]]; then
+    if [[ -d "${DISK_MAGICIAN_CODE_SIGN_X_DIR}" ]]; then
+      printf '%s\n' "${DISK_MAGICIAN_CODE_SIGN_X_DIR}"
+      return 0
+    fi
+    echo "ERROR: DISK_MAGICIAN_CODE_SIGN_X_DIR is not a directory: ${DISK_MAGICIAN_CODE_SIGN_X_DIR}" >&2
+    return 1
+  fi
   local user_tmp
   user_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")
   [[ -n "$user_tmp" ]] || return 1
