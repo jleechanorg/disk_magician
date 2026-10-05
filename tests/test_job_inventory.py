@@ -32,6 +32,7 @@ class JobInventoryTests(unittest.TestCase):
         expected = {
             "com.disk-magician.apfs-snapshots",
             "com.disk-magician.claude-state",
+            "com.disk-magician.code-sign-clones",
             "com.disk-magician.codex-vacuum",
             "com.disk-magician.colima-prune",
             "com.disk-magician.cursor-logs-watchdog",
