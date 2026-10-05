@@ -402,7 +402,7 @@ check_active_open_clients() {
     [[ -z "$line" ]] && continue
     if [[ "$line" =~ ^p([0-9]+)$ ]]; then
       pids+=("${BASH_REMATCH[1]}")
-    elif [[ "$line" =~ ^f[a-zA-Z0-9]+$ ]]; then
+    elif [[ "$line" =~ ^f[a-zA-Z0-9.]+$ ]]; then
       # Valid file descriptor line in lsof -F output
       continue
     else

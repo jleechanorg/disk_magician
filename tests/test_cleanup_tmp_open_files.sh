@@ -824,6 +824,31 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
 assert_rc "Test 9d (out-of-order): exits 0" 0 $?
 assert_exists "Test 9d: candidate preserved on out-of-order stream" "$T9_ARCHIVE/20200101T000000Z"
 assert_contains "Test 9d: logs malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
+# 9e: macOS kernel file pointer descriptor (ffp.) is accepted and candidate is purged when closed
+reset_t9_archive
+cat > "$T9_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+echo "p907"
+echo "ffp."
+echo "tREG"
+echo "n/some/unrelated/path"
+exit 0
+EOF
+chmod +x "$T9_BIN/lsof"
+run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
+  PATH="$T9_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T9_BIN/lsof" \
+  DISK_MAGICIAN_TIMEOUT_BIN="$T9_BIN/timeout" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T9_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T9_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 9e (ffp. descriptor): exits 0" 0 $?
+assert_missing "Test 9e: candidate purged because ffp. descriptor parsed cleanly and candidate is closed" "$T9_ARCHIVE/20200101T000000Z"
+assert_not_contains "Test 9e: does not log malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 10: Candidate containing control characters/newlines fails closed before lsof
 # ─────────────────────────────────────────────────────────────────────────────
