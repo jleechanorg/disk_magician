@@ -76,6 +76,12 @@ discover_worktree_repos() {
         done
     fi
 
+    if [[ -d "$HOME/project_worldaiclaw/worldai_claw/.git" ]]; then
+        discovered_repos_str="${discovered_repos_str} $HOME/project_worldaiclaw/worldai_claw"
+    fi
+    _dwr_find_repos_from_worktrees "$HOME/project_worldaiclaw"
+    _dwr_find_repos_from_worktrees "$HOME/wc-wt"
+
     if [[ -n "$discovered_repos_str" ]]; then
         echo "$discovered_repos_str" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | sort -u
     fi
