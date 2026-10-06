@@ -555,6 +555,29 @@ else
     ok "case-sensitive filesystem: case-only rename not applicable"
 fi
 
+# ---------------------------------------------------------------------------
+echo "case 31: credential-named bytecode under __pycache__ is not a secret"
+R31="$(mk_repo r31)"
+printf '__pycache__/\n*.pyc\n.env\n' >"$R31/.gitignore"
+mkdir -p "$R31/pkg"; echo "x = 1" >"$R31/pkg/mod.py"
+g -C "$R31" add -A; g -C "$R31" commit -q -m ign
+W31="$(mk_wt "$R31" pyc31)"
+mkdir -p "$W31/pkg/__pycache__"
+echo "x" >"$W31/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
+echo "edit" >>"$W31/tracked.txt"
+backdate_tree "$W31" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --skip-push --execute --preserve-wip)"
+assert_not_contains "$OUT" "ignored-secret" "bytecode name does not block"
+assert_true "! [[ -d '$W31' ]]" "worktree preserved+removed"
+W31B="$(mk_wt "$R31" pyc31b)"
+echo "TOKEN=1" >"$W31B/pkg_credentials.pyc"
+echo "TOKEN=1" >"$W31B/pkg/.env"
+echo "edit" >>"$W31B/tracked.txt"
+backdate_tree "$W31B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
+assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
