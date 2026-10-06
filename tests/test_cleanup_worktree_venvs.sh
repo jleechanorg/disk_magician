@@ -340,6 +340,26 @@ else
   record_pass "no find traversal from a root or into node_modules"
 fi
 
+echo "=== Test 9 (9h3): discovery never broadens past the old find scope ==="
+R9="$TMP_ROOT/roots9"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$R9/repoA"
+  "$GIT8" -C "$R9/repoA" init -q
+  "$GIT8" -C "$R9/repoA" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/a/b/c/d/e/f/wtDeep" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/a/b/c/d/e/f/wtDeep"
+fi
+# a worktree passed directly as --roots: the old -mindepth 2 never stripped <root>/.venv
+mk_stale_wt_with_venv "$R9/rootwt"
+OUT9=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+OUT9R=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9/rootwt" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+if "$GIT8" --version >/dev/null 2>&1; then
+  assert_not_contains "registered worktree deeper than old scope NOT flagged" "wtDeep/.venv" "$OUT9"
+fi
+assert_not_contains "--roots <worktree> does not strip the root's own venv" "would strip $R9/rootwt/.venv" "$OUT9R"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

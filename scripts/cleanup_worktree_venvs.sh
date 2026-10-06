@@ -245,9 +245,10 @@ expand_roots_with_agent_worktrees() {
 
 # collect_candidate_worktrees <root...> — fills CANDIDATE_WTS with worktree
 # dirs (.git FILE) found without recursive traversal (bead disk_magician-9h3):
-#   - <root>, <root>/*, <root>/*/* (shell globs)
+#   - <root>/*, <root>/*/* (shell globs; never <root> itself)
 #   - `git worktree list --porcelain` of any repo at those paths, kept only
-#     when the listed worktree lies under the same root (scope unchanged)
+#     when the listed worktree lies under the same root at depth <=5 (the old
+#     find's venv scope was depth 2..6)
 # Deduped by physical path so /var and /private/var aliases count once.
 CANDIDATE_WTS=()
 _cand_keys=$'\n'
@@ -259,19 +260,28 @@ _add_candidate() {
   _cand_keys="${_cand_keys}${key}"$'\n'
   CANDIDATE_WTS+=("$wt")
 }
+# _within_old_depth <wt> <root> <root_p> — true when <wt> lies strictly under
+# root at depth <=5, so its venv sits within the old `find -mindepth 2
+# -maxdepth 6` scope: the new discovery may only narrow what is stripped.
+_within_old_depth() {
+  local wt="$1" rel slashes
+  case "$wt" in "$2"/*) rel="${wt#"$2"/}" ;; "$3"/*) rel="${wt#"$3"/}" ;; *) return 1 ;; esac
+  slashes="${rel//[^\/]/}"
+  [[ -n "$rel" && ${#slashes} -le 4 ]]
+}
 collect_candidate_worktrees() {
   local root root_p d line wt
   for root in "$@"; do
     [[ -d "$root" ]] || continue
     root_p="$(cd "$root" && pwd -P)"
-    for d in "$root" "$root"/* "$root"/*/*; do
+    for d in "$root"/* "$root"/*/*; do
       [[ -d "$d" ]] || continue
       _add_candidate "$d"
       [[ -d "$d/.git" ]] && command -v git >/dev/null 2>&1 || continue
       while IFS= read -r line; do
         [[ "$line" == "worktree "* ]] || continue
         wt="${line#worktree }"
-        case "$wt/" in "$root"/*|"$root_p"/*) _add_candidate "$wt" ;; esac
+        _within_old_depth "$wt" "$root" "$root_p" && _add_candidate "$wt"
       done < <(git -C "$d" worktree list --porcelain 2>/dev/null || true)
     done
   done
