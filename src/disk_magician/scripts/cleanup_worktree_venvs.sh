@@ -226,13 +226,20 @@ _expand_roots_already_seen() {
 }
 # _physically_under <path> <root> <root_p> — true when <path> is lexically
 # under <root> (or <root_p>) AND resolves to the same place under <root_p>, i.e.
-# no symlinked component between root and path. The old `find -P` never
-# followed symlinked dirs, so discovery must not either (no broadening).
+# no symlinked component between root and path, and every directory on the way
+# is readable. The old `find -P` never followed symlinked dirs nor listed
+# unreadable ones, so discovery must not either (no broadening).
 _physically_under() {
   local rel phys
   case "$1" in "$2"/*) rel="${1#"$2"/}" ;; "$3"/*) rel="${1#"$3"/}" ;; *) return 1 ;; esac
   phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
-  [[ -n "$rel" && "$phys" == "$3/$rel" ]]
+  [[ -n "$rel" && "$phys" == "$3/$rel" ]] || return 1
+  # find could not list an unreadable (e.g. exec-only) directory; neither may we
+  while [[ "$phys" == "$3"/* ]]; do
+    [[ -r "$phys" ]] || return 1
+    phys="${phys%/*}"
+  done
+  [[ -r "$3" ]]
 }
 expand_roots_with_agent_worktrees() {
   _expand_roots_seen=()
@@ -300,7 +307,7 @@ collect_candidate_worktrees() {
         wt="${line#worktree }"
         _within_old_depth "$wt" "$root" "$root_p" && _physically_under "$wt" "$root" "$root_p" \
           && _add_candidate "$wt"
-      done < <(git -C "$d" worktree list --porcelain 2>/dev/null || true)
+      done < <(git -c core.fsmonitor=false -C "$d" worktree list --porcelain 2>/dev/null || true)
     done
   done
 }

@@ -381,6 +381,16 @@ OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DI
 assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
 assert_not_contains "agent worktrees behind a symlinked repo NOT flagged" "brX/.venv" "$OUT9S"
 assert_not_contains "registered worktree via symlinked path NOT flagged" "wt6/.venv" "$OUT9S"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$R9/repoA/locked/sub"
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/locked/sub/wtlocked" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/locked/sub/wtlocked"
+  chmod 311 "$R9/repoA/locked"
+  OUT9X=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+    bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+  chmod 755 "$R9/repoA/locked"
+  assert_not_contains "registered worktree under an exec-only dir NOT flagged" "wtlocked/.venv" "$OUT9X"
+fi
 ln -s "$R9" "$TMP_ROOT/roots9link"
 OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   bash "$TARGET_SCRIPT" --roots "$TMP_ROOT/roots9link" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
