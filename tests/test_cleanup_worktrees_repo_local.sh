@@ -237,6 +237,42 @@ run_std "$TMP_ROOT/std-nolsof.out" "$FAKE_BIN:/usr/bin:/bin"
 STD_NOLSOF=$(cat "$TMP_ROOT/std-nolsof.out")
 assert_contains "lsof failure: old worktree preserved" ".worktrees/r/old | cwd-unknown" "$STD_NOLSOF"
 assert_not_contains "lsof failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOLSOF" || true)"
+
+# Regression: Zero-status lsof with unresolved cwd record (Linux readlink/stat permission error)
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "p999"
+echo "fcwd"
+echo "n/proc/999/cwd (readlink: Permission denied)"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-unresolved.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_UNRESOLVED=$(cat "$TMP_ROOT/std-unresolved.out")
+assert_contains "lsof unresolved cwd record preserved" ".worktrees/r/old | cwd-unknown" "$STD_UNRESOLVED"
+assert_not_contains "lsof unresolved: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_UNRESOLVED" || true)"
+
+# Regression: Zero-status lsof with empty output
+printf '#!/bin/sh\nexit 0\n' > "$FAKE_BIN/lsof"
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-empty.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_EMPTY=$(cat "$TMP_ROOT/std-empty.out")
+assert_contains "lsof empty output preserved" ".worktrees/r/old | cwd-unknown" "$STD_EMPTY"
+assert_not_contains "lsof empty: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_EMPTY" || true)"
+
+# Regression: Zero-status lsof with warning on stderr
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /proc/123/cwd: Permission denied" >&2
+echo "n/"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-warning.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_WARNING=$(cat "$TMP_ROOT/std-warning.out")
+assert_contains "lsof warning on stderr preserved" ".worktrees/r/old | cwd-unknown" "$STD_WARNING"
+assert_not_contains "lsof warning: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_WARNING" || true)"
+
 kill "$SLEEP_PID" 2>/dev/null || true
 
 SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT")

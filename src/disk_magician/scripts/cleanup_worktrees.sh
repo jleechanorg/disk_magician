@@ -221,15 +221,43 @@ list_has_child_of() {
     P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
 }
 
-# Machine-wide live process CWD snapshot (fail-closed): if lsof fails, cwd is unknown
-# and live-process protection preserves candidates across all worktree roots.
+# Machine-wide live process CWD snapshot (fail-closed): if lsof fails, or returns
+# an incomplete, unparseable, or unresolved observation (e.g. readlink/stat permission
+# errors in /proc), cwd is unknown and live-process protection preserves candidates
+# across all worktree roots.
 GLOBAL_LIVE_CWDS=""
 GLOBAL_CWD_BLOCKED=""
 _lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-if _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>/dev/null)"; then
-    GLOBAL_LIVE_CWDS="$(sed -n 's/^n//p' <<<"$_lsof_out")"
-else
+if [[ ! -x "$_lsof_bin" ]]; then
     GLOBAL_CWD_BLOCKED="cwd-unknown"
+else
+    _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
+    _lsof_rc=0
+    _lsof_err=""
+    if [[ -n "$_lsof_tmp" ]]; then
+        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
+        _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null || true)"
+        rm -f "$_lsof_tmp"
+    else
+        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>/dev/null)" || _lsof_rc=$?
+    fi
+
+    if [[ "$_lsof_rc" -ne 0 ]]; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    elif [[ -n "$_lsof_err" ]] && echo "$_lsof_err" | grep -qiE 'warning|permission denied|cannot|error'; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    elif [[ -z "$_lsof_out" ]]; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    elif echo "$_lsof_out" | grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd'; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    else
+        GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
+        if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
+            GLOBAL_CWD_BLOCKED="cwd-unknown"
+        fi
+    fi
 fi
 
 classify_repo_local_worktree() {
@@ -378,6 +406,16 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
             if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
                 age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
+            if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$GLOBAL_CWD_BLOCKED"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
+            if list_has_child_of "$abs_subdir" "$GLOBAL_LIVE_CWDS"; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "live-cwd"
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 continue
             fi
