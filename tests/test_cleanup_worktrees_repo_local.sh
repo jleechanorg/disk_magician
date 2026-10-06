@@ -524,7 +524,8 @@ git -C "$PROBE_REPO" init --quiet -b main
 git -C "$PROBE_REPO" config user.email "jleechan2015@users.noreply.github.com"
 git -C "$PROBE_REPO" config user.name "Tester"
 echo "hello main" > "$PROBE_REPO/file.txt"
-git -C "$PROBE_REPO" add file.txt
+echo "anchor content" > "$PROBE_REPO/anchor.txt"
+git -C "$PROBE_REPO" add file.txt anchor.txt
 git -C "$PROBE_REPO" commit -m "initial commit on main" --quiet
 
 # 1. Repo-local candidate where git status fails (e.g. index corrupted)
@@ -582,6 +583,48 @@ git -C "$AG_ELIGIBLE" add file.txt
 git -C "$AG_ELIGIBLE" commit -m "initial commit on main" --quiet
 age_worktree_days_ago "$AG_ELIGIBLE" 20
 
+# 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
+git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
+rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
+ln -s /dev/null "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
+age_worktree_days_ago "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" 20
+
+# 8. Repo-local candidate with staged type-change T (tracked file replaced by symlink and staged)
+git -C "$PROBE_REPO" worktree add -b wt-type-staged "$PROBE_REPO/.claude/worktrees/wt-type-staged" --quiet
+rm "$PROBE_REPO/.claude/worktrees/wt-type-staged/file.txt"
+ln -s /dev/null "$PROBE_REPO/.claude/worktrees/wt-type-staged/file.txt"
+git -C "$PROBE_REPO/.claude/worktrees/wt-type-staged" add file.txt
+age_worktree_days_ago "$PROBE_REPO/.claude/worktrees/wt-type-staged" 20
+
+# 9. Antigravity orphan with unstaged type-change T
+AG_TYPE_UNSTAGED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-type-unstaged"
+mkdir -p "$AG_TYPE_UNSTAGED"
+git -C "$AG_TYPE_UNSTAGED" init --quiet -b main
+git -C "$AG_TYPE_UNSTAGED" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$AG_TYPE_UNSTAGED" config user.name "Tester"
+echo "hello main" > "$AG_TYPE_UNSTAGED/file.txt"
+echo "anchor" > "$AG_TYPE_UNSTAGED/anchor.txt"
+git -C "$AG_TYPE_UNSTAGED" add file.txt anchor.txt
+git -C "$AG_TYPE_UNSTAGED" commit -m "initial commit on main" --quiet
+rm "$AG_TYPE_UNSTAGED/file.txt"
+ln -s /dev/null "$AG_TYPE_UNSTAGED/file.txt"
+age_worktree_days_ago "$AG_TYPE_UNSTAGED" 20
+
+# 10. Antigravity orphan with staged type-change T
+AG_TYPE_STAGED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-type-staged"
+mkdir -p "$AG_TYPE_STAGED"
+git -C "$AG_TYPE_STAGED" init --quiet -b main
+git -C "$AG_TYPE_STAGED" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$AG_TYPE_STAGED" config user.name "Tester"
+echo "hello main" > "$AG_TYPE_STAGED/file.txt"
+echo "anchor" > "$AG_TYPE_STAGED/anchor.txt"
+git -C "$AG_TYPE_STAGED" add file.txt anchor.txt
+git -C "$AG_TYPE_STAGED" commit -m "initial commit on main" --quiet
+rm "$AG_TYPE_STAGED/file.txt"
+ln -s /dev/null "$AG_TYPE_STAGED/file.txt"
+git -C "$AG_TYPE_STAGED" add file.txt
+age_worktree_days_ago "$AG_TYPE_STAGED" 20
+
 OUT_PROBE="$TMP_ROOT/probe-test.out"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
@@ -595,6 +638,12 @@ assert_not_contains "repo-local git status failure not eligible" "ELIGIBLE" "$(g
 assert_contains "repo-local missing main ref preserved" ".claude/worktrees/wt-dev | main-ref-missing" "$OUT_PROBE_CONTENT"
 assert_not_contains "repo-local missing main ref not eligible" "ELIGIBLE" "$(grep -F "wt-dev" <<<"$OUT_PROBE_CONTENT" || true)"
 
+assert_contains "repo-local unstaged typechange T preserved" "wt-type-unstaged | dirty" "$OUT_PROBE_CONTENT"
+assert_not_contains "repo-local unstaged typechange T not eligible" "ELIGIBLE" "$(grep -F "wt-type-unstaged" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "repo-local staged typechange T preserved" "wt-type-staged | dirty" "$OUT_PROBE_CONTENT"
+assert_not_contains "repo-local staged typechange T not eligible" "ELIGIBLE" "$(grep -F "wt-type-staged" <<<"$OUT_PROBE_CONTENT" || true)"
+
 assert_contains "antigravity git status failure preserved" "ag-fail-status | status-failed" "$OUT_PROBE_CONTENT"
 assert_not_contains "antigravity git status failure not eligible" "ELIGIBLE" "$(grep -F "ag-fail-status" <<<"$OUT_PROBE_CONTENT" || true)"
 
@@ -603,6 +652,12 @@ assert_not_contains "antigravity missing main ref not eligible" "ELIGIBLE" "$(gr
 
 assert_contains "antigravity dangling gitdir status failure preserved" "ag-dangling-repo | status-failed" "$OUT_PROBE_CONTENT"
 assert_not_contains "antigravity dangling gitdir not eligible" "ELIGIBLE" "$(grep -F "ag-dangling-repo" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity unstaged typechange T preserved" "ag-type-unstaged | dirty" "$OUT_PROBE_CONTENT"
+assert_not_contains "antigravity unstaged typechange T not eligible" "ELIGIBLE" "$(grep -F "ag-type-unstaged" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity staged typechange T preserved" "ag-type-staged | dirty" "$OUT_PROBE_CONTENT"
+assert_not_contains "antigravity staged typechange T not eligible" "ELIGIBLE" "$(grep -F "ag-type-staged" <<<"$OUT_PROBE_CONTENT" || true)"
 
 assert_contains "antigravity clean ancestor eligible" "ag-clean-ancestor" "$OUT_PROBE_CONTENT"
 assert_contains "antigravity clean ancestor has ELIGIBLE" "antigravity  ELIGIBLE" "$(grep -F "ag-clean-ancestor" <<<"$OUT_PROBE_CONTENT" || true)"

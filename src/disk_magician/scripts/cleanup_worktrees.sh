@@ -279,10 +279,8 @@ classify_repo_local_worktree() {
             echo "untracked"
             return 0
         fi
-        if grep -qE '^[ MADRCU?][ MADRCU?]' <<<"$status_porcelain"; then
-            echo "dirty"
-            return 0
-        fi
+        echo "dirty"
+        return 0
     fi
 
     if [[ -z "$head_sha" ]]; then
@@ -395,11 +393,9 @@ process_antigravity_orphan() {
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 return 0
             fi
-            if grep -qE '^[ MADRCU?][ MADRCU?]' <<<"$status_porcelain"; then
-                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
-                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                return 0
-            fi
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
         fi
 
         local ag_main_repo=""
