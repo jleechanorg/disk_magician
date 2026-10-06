@@ -70,16 +70,22 @@ def _segments(command):
 
 
 def _add_target(args):
-    """args after `worktree add`; returns the path word or None."""
+    """args after `worktree add`; returns (path word or None, -b/-B branch or None)."""
     it = iter(args)
+    branch = None
     for a in it:
         if a == "--":
-            return next(it, None)
+            return next(it, None), branch
         if a in VALUE_OPTS:
-            next(it, None)
+            val = next(it, None)
+            if a in ("-b", "-B"):
+                branch = val
         elif not a.startswith("-"):
-            return a
-    return None
+            for b in it:  # -b may follow the path
+                if b in ("-b", "-B"):
+                    branch = next(it, branch)
+            return a, branch
+    return None, branch
 
 
 def _targets(command, cwd, home):
@@ -112,10 +118,10 @@ def _targets(command, cwd, home):
                 j += 1
         if words[j:j + 2] != ["worktree", "add"]:
             continue
-        raw = _add_target(words[j + 2:])
+        raw, branch = _add_target(words[j + 2:])
         if raw is None:
             continue
-        yield _absolute(_expand(raw, home, variables), git_cwd), raw
+        yield _absolute(_expand(raw, home, variables), git_cwd), raw, git_cwd, branch
 
 
 def _log(home, raw, command):
@@ -141,8 +147,39 @@ def _command_text(cmd):
     return cmd if isinstance(cmd, str) else ""
 
 
+def _main_repo(cwd):
+    """Main checkout owning cwd (linked worktrees map to their main repo), or None."""
+    import subprocess
+    try:
+        common = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return None
+    if not common:
+        return None
+    return common if common.endswith(".git") and not common.endswith("/.git") else os.path.dirname(common)
+
+
+def deny_reason(target, git_cwd, branch, root):
+    """Name the concrete destination and command; generic if the repo is unknown."""
+    repo = _main_repo(git_cwd) if git_cwd else None
+    if not repo:
+        return DENY_REASON
+    name = re.sub(r"_?X{3,}$", "", os.path.basename(target.rstrip("/"))) or "wt"
+    repo_name = os.path.basename(repo)
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    dest = os.path.join(root, repo_name, name)
+    return ("Worktrees go under ~/.worktrees/<repo>/<name>. Put this one at %s:\n"
+            "  diskm worktree-new %s %s --name %s\n"
+            "or: git worktree add %s%s" % (
+                dest, repo, branch or "<branch>", name,
+                "-b %s " % branch if branch else "", dest))
+
+
 def decide(payload, home, root):
-    """Return 'deny' or None (allow)."""
+    """Return a deny reason string, or None (allow)."""
     if payload.get("tool_name") not in SHELL_TOOLS:
         return None
     ti = payload.get("tool_input") or {}
@@ -150,14 +187,14 @@ def decide(payload, home, root):
     if "worktree" not in command:
         return None
     cwd = ti.get("workdir") or payload.get("cwd") or os.getcwd()
-    root = _resolve(root)
-    denied = False
-    for target, raw in _targets(command, cwd, home):
+    shown_root, root = root, _resolve(root)
+    reason = None
+    for target, raw, git_cwd, branch in _targets(command, cwd, home):
         if target is None:
             _log(home, raw, command)
-        elif not _resolve(target).startswith(root + "/"):
-            denied = True
-    return "deny" if denied else None
+        elif not _resolve(target).startswith(root + "/") and reason is None:
+            reason = deny_reason(target, git_cwd, branch, shown_root)
+    return reason
 
 
 def main():
@@ -172,11 +209,11 @@ def main():
         verdict = decide(payload, home, root.rstrip("/"))
     except Exception:
         return 0
-    if verdict == "deny":
+    if verdict:
         sys.stdout.write(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": DENY_REASON}}) + "\n")
+            "permissionDecisionReason": verdict}}) + "\n")
     return 0
 
 
