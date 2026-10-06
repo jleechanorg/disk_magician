@@ -63,17 +63,31 @@ has "TRIM ran" "docker/desktop-reclaim-space" "$calls"
 
 echo "Antigravity: IDE brain, idle worktree, .backup pruned; conversations kept"
 H="$TMP/ag"; AG="$H/.gemini/antigravity"
-mkdir -p "$AG/brain/old" "$AG/brain/new" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/live" \
+mkdir -p "$AG/brain/old" "$AG/brain/old_with_recent_log" "$AG/brain/new" \
+         "$AG/worktrees/proj/idle" "$AG/worktrees/proj/live" \
          "$AG/brain.backup" "$AG/conversations/keep"
 echo x > "$AG/worktrees/proj/idle/f"; echo x > "$AG/worktrees/proj/live/f"; echo x > "$AG/conversations/keep/f"
-touch -t 202001010000 "$AG/brain/old" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/f" "$AG/brain.backup"
+echo x > "$AG/brain/old/old_file"
+echo x > "$AG/brain/old_with_recent_log/task.log"
+
+touch -t 202001010000 "$AG/brain/old" "$AG/brain/old/old_file" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/f" "$AG/brain.backup"
+touch -t 202001010000 "$AG/brain/old_with_recent_log"
+# task.log in old_with_recent_log is left with current mtime (descendant activity)
+
 out="$(HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" 2>&1)"
 has "dry-run reports old IDE brain" "would delete old" "$out"
 [[ -d "$AG/brain/old" ]] && ok "dry-run keeps old brain" || bad "dry-run deleted old brain"
+
+# Clean without WORKTREE_APPROVED prunes old brain, but preserves worktree and old brain with recent descendant
 HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
 [[ ! -e "$AG/brain/old" ]] && ok "old IDE brain pruned" || bad "old IDE brain kept"
-[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "idle worktree pruned" || bad "idle worktree kept"
+[[ -d "$AG/brain/old_with_recent_log" ]] && ok "old brain with recent descendant preserved" || bad "old brain with recent descendant deleted"
+[[ -d "$AG/worktrees/proj/idle" ]] && ok "worktree preserved without WORKTREE_APPROVED" || bad "worktree deleted without WORKTREE_APPROVED"
 [[ ! -e "$AG/brain.backup" ]] && ok ".backup leftover pruned" || bad ".backup kept"
+
+# Clean with WORKTREE_APPROVED=1 removes eligible idle worktree
+HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
+[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "idle worktree pruned with WORKTREE_APPROVED" || bad "idle worktree kept with WORKTREE_APPROVED"
 [[ -d "$AG/brain/new" && -d "$AG/worktrees/proj/live" && -d "$AG/conversations/keep" ]] && ok "recent state + conversations kept" || bad "protected state deleted"
 
 exit $FAIL

@@ -373,6 +373,79 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 continue
             fi
+            if [[ -e "$abs_subdir/.git" ]]; then
+                local status_porcelain
+                status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null || true)"
+                if [[ -n "$status_porcelain" ]]; then
+                    if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
+                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "untracked"
+                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                        continue
+                    fi
+                    if grep -qE '^[ MADRCU?][ MADRCU?]' <<<"$status_porcelain"; then
+                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
+                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                        continue
+                    fi
+                fi
+
+                local ag_main_repo=""
+                if [[ -f "$abs_subdir/.git" ]]; then
+                    local gitdir_line
+                    gitdir_line=$(grep '^gitdir: ' "$abs_subdir/.git" 2>/dev/null || true)
+                    local git_dir
+                    git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
+                    ag_main_repo="${git_dir%/.git/worktrees/*}"
+                elif [[ -d "$abs_subdir/.git" ]]; then
+                    ag_main_repo="$abs_subdir"
+                fi
+                if [[ -n "$ag_main_repo" && -d "$ag_main_repo" ]]; then
+                    local main_ref
+                    if main_ref="$(resolve_main_ref "$ag_main_repo" 2>/dev/null)"; then
+                        local head_sha
+                        head_sha="$(git -C "$abs_subdir" rev-parse HEAD 2>/dev/null || true)"
+                        if [[ -n "$head_sha" ]] && ! git -C "$ag_main_repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
+                            local ahead_count
+                            ahead_count="$(git -C "$ag_main_repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
+                            if [[ "$ahead_count" -gt 0 ]]; then
+                                local branch
+                                branch="$(git -C "$abs_subdir" symbolic-ref HEAD 2>/dev/null || echo "detached")"
+                                local branch_clean="${branch#refs/heads/}"
+                                local eligible_by_pr=false
+                                if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+                                    local origin_url owner_repo
+                                    origin_url="$(git -C "$ag_main_repo" remote get-url origin 2>/dev/null || true)"
+                                    if [[ -n "$origin_url" ]]; then
+                                        owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                                        if [[ -n "$owner_repo" ]]; then
+                                            local pr_heads gh_rc=0
+                                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                                            if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                                                if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                                                    eligible_by_pr=true
+                                                else
+                                                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "merged-differing-head"
+                                                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                                                    continue
+                                                fi
+                                            fi
+                                        fi
+                                    fi
+                                fi
+                                if [[ "$eligible_by_pr" == false ]]; then
+                                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ahead-of-main"
+                                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                                    continue
+                                fi
+                            else
+                                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "non-ancestor"
+                                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                                continue
+                            fi
+                        fi
+                    fi
+                fi
+            fi
             local_kb=$(size_kb "$abs_subdir")
             local_mb=$(( local_kb / 1024 ))
             if [[ "$DRY_RUN" == true ]]; then

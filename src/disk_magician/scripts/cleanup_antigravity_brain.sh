@@ -99,41 +99,29 @@ delete_entry() {
   DELETED_COUNT=$(( DELETED_COUNT + 1 ))
 }
 
-# Prune immediate child dirs older than N days under a pinned base.
-prune_old_children() {
-  local label="$1" base="$2" age_days="$3"
-  if [[ ! -d "$base" ]]; then
-    log "$label: $base not found, skipping"
-    return
-  fi
-  local before_kb; before_kb=$(size_kb "$base")
-  log "$label: scanning $base (before $(fmt_kb "$before_kb"), cutoff >${age_days}d)"
-  local entry
-  while IFS= read -r -d '' entry; do
-    delete_entry "$label" "$entry"
-  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -mtime +"$age_days" -print0 2>/dev/null)
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── Worktree recency helper (canonical fail-closed 14-day floor) ───────────────
-_WT_RECENCY_PRUNE_NAMES=(.git node_modules venv .venv __pycache__ .pytest_cache .ruff_cache)
-
-worktree_last_activity_epoch() {
-    local wt="${1:-}" now newest=0 candidate
+# ── Descendant recency helper (canonical fail-closed activity check) ───────────
+brain_dir_last_activity_epoch() {
+    local dir="${1:-}" now newest=0 candidate
     now="$(date +%s)"
-    [[ -n "$wt" && -d "$wt" ]] && [[ -r "$wt" ]] || { printf '%s\n' "$now"; return 0; }
+    [[ -n "$dir" && -d "$dir" && -r "$dir" ]] || { printf '%s\n' "$now"; return 0; }
 
-    local prune_expr=() name first=true
-    for name in "${_WT_RECENCY_PRUNE_NAMES[@]}"; do
-        if [[ "$first" == true ]]; then
-            prune_expr=(-name "$name")
-            first=false
-        else
-            prune_expr+=(-o -name "$name")
-        fi
-    done
-    candidate="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
-        -o -type f -exec stat -f '%m' {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')" || candidate=""
+    local stat_mtime=(stat -f '%m')
+    stat -f '%m' / >/dev/null 2>&1 || stat_mtime=(stat -c '%Y')
+
+    local dir_mtime
+    dir_mtime="$("${stat_mtime[@]}" "$dir" 2>/dev/null || echo 0)"
+    (( dir_mtime > newest )) && newest="$dir_mtime"
+
+    local mtimes
+    if ! mtimes="$(find "$dir" -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null)"; then
+        # Traversal failed or incomplete -> fail closed (treat as active right now)
+        printf '%s\n' "$now"
+        return 0
+    fi
+
+    candidate="$(awk '$1+0>m{m=$1+0} END{if (m>0) print m}' <<<"$mtimes")"
     [[ -n "$candidate" ]] && (( candidate > newest )) && newest="$candidate"
 
     if (( newest <= 0 )); then
@@ -144,17 +132,38 @@ worktree_last_activity_epoch() {
     printf '%s\n' "$newest"
 }
 
-worktree_age_days() {
+brain_dir_age_days() {
     local now last
     now="$(date +%s)"
-    last="$(worktree_last_activity_epoch "$1")"
+    last="$(brain_dir_last_activity_epoch "$1")"
     printf '%s\n' "$(( (now - last) / 86400 ))"
 }
 
-worktree_is_recently_active() {
-    local wt="${1:-}" min_days="${2:-14}" age
-    age="$(worktree_age_days "$wt")"
+brain_dir_is_recently_active() {
+    local dir="${1:-}" min_days="${2:-21}" age
+    age="$(brain_dir_age_days "$dir")"
     (( age < min_days ))
+}
+
+# Prune immediate child dirs whose newest descendant is older than N days.
+prune_old_children() {
+  local label="$1" base="$2" age_days="$3"
+  if [[ ! -d "$base" ]]; then
+    log "$label: $base not found, skipping"
+    return
+  fi
+  local before_kb; before_kb=$(size_kb "$base")
+  log "$label: scanning $base (before $(fmt_kb "$before_kb"), cutoff >${age_days}d)"
+  local entry
+  while IFS= read -r -d '' entry; do
+    if brain_dir_is_recently_active "$entry" "$age_days"; then
+      local age_lbl
+      age_lbl="$(brain_dir_age_days "$entry" 2>/dev/null || echo 0)"
+      log "$label: skipping $(basename "$entry") (${age_lbl}d < ${age_days}d, active/protected)"
+      continue
+    fi
+    delete_entry "$label" "$entry"
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
 }
 
 # ── Section 1: brain/<uuid> dirs older than 21 days ──────────────────────────
@@ -162,30 +171,30 @@ log "=== Section 1: Antigravity brain dirs (>${BRAIN_AGE_DAYS}d) ==="
 prune_old_children "IDE brain"  "$AG_BRAIN"    "$BRAIN_AGE_DAYS"
 prune_old_children "CLI brain"  "$AGCLI_BRAIN" "$BRAIN_AGE_DAYS"
 
-# ── Section 2: idle worktree branch checkouts older than 14 days ─────────────
-# Layout: worktrees/<project>/<branch>/  → prune the depth-2 <branch> checkouts.
-log "=== Section 2: Antigravity idle worktrees (>${WORKTREE_AGE_DAYS}d) ==="
-if [[ ! -d "$AG_WORKTREES" ]]; then
-  log "worktrees: $AG_WORKTREES not found, skipping"
-else
-  while IFS= read -r -d '' entry; do
-    if worktree_is_recently_active "$entry" "$WORKTREE_AGE_DAYS"; then
-      age_label="$(worktree_age_days "$entry" 2>/dev/null || echo 0)"
-      log "worktree: skipping $(basename "$entry") (${age_label}d < ${WORKTREE_AGE_DAYS}d, active/protected)"
-      continue
-    fi
-    delete_entry "worktree" "$entry"
-  done < <(find "$AG_WORKTREES" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null)
+# ── Section 2: Antigravity idle worktrees (canonical guarded cleanup) ─────────
+# Worktrees are strictly safety-gated: they must NEVER be deleted without
+# WORKTREE_APPROVED=1, recency checks (>=7d floor), dirty/untracked/unpushed
+# checks, live-process checks, and #110 squash-merge safeguards.
+# Route worktree cleanup through the canonical guarded cleanup script.
+log "=== Section 2: Antigravity worktrees (canonical cleanup_worktrees.sh) ==="
+if [[ -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
+  WT_ARGS=(--min-age "$WORKTREE_AGE_DAYS" --repos none)
+  if [[ "$DRY_RUN" == true ]]; then
+    WT_ARGS+=(--dry-run)
+  else
+    WT_ARGS+=(--clean)
+  fi
+  bash "$SCRIPT_DIR/cleanup_worktrees.sh" "${WT_ARGS[@]}"
 fi
 
 # ── Section 3: stale migration .backup leftovers older than 30 days ──────────
 log "=== Section 3: stale .backup migration leftovers (>${BACKUP_AGE_DAYS}d) ==="
 for bak in "${AG_BACKUPS[@]}"; do
   [[ -e "$bak" ]] || continue
-  if [[ -n "$(find "$bak" -maxdepth 0 -mtime +"$BACKUP_AGE_DAYS" 2>/dev/null)" ]]; then
-    delete_entry "backup leftover" "$bak"
-  else
+  if brain_dir_is_recently_active "$bak" "$BACKUP_AGE_DAYS"; then
     log "backup leftover: $(basename "$bak") newer than ${BACKUP_AGE_DAYS}d, keeping"
+  else
+    delete_entry "backup leftover" "$bak"
   fi
 done
 
