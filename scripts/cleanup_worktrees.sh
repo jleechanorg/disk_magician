@@ -95,6 +95,16 @@ else
 fi
 [[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
 
+# Bead plf: merged + clean worktrees use this floor instead; clamped to [3,7].
+MERGED_MIN_DAYS="${DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS:-3}"
+if [[ "$MERGED_MIN_DAYS" =~ ^[0-9]+$ ]]; then
+  MERGED_MIN_DAYS=$((10#$MERGED_MIN_DAYS))
+else
+  MERGED_MIN_DAYS=7
+fi
+[[ "$MERGED_MIN_DAYS" -lt 3 ]] && MERGED_MIN_DAYS=3
+[[ "$MERGED_MIN_DAYS" -gt 7 ]] && MERGED_MIN_DAYS=7
+
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"
 
@@ -107,6 +117,7 @@ else
         exit 0
     fi
 fi
+echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: ${MIN_AGE_DAYS}d)"
 
 TOTAL_RECLAIMED_KB=0
 ANTIGRAVITY_DELETED=0
@@ -264,12 +275,44 @@ classify_repo_local_worktree() {
     fi
 
     if (( age_days < min_age )); then
+        # Bead plf: a merged, fully clean, non-AO worktree may go at
+        # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
+        if (( min_age == 7 && age_days >= MERGED_MIN_DAYS )) \
+            && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
+            && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
+            && ! has_hidden_state "$wt_path"; then
+            return 0
+        fi
         echo "young"
         return 0
     fi
 
+    classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch"
+}
+
+# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
+# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
+# probe fails/times out (fail closed).
+has_hidden_state() {
+    local out flags t=""
+    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
+    grep -q '^[a-zS]' <<<"$flags" && return 0
+    # shellcheck disable=SC2086
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
+        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
+        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
+        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
+    [[ -n "$out" ]]
+}
+
+# classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
+# prints a PRESERVE reason, or nothing when the worktree is clean and merged.
+classify_content_and_merge() {
+    local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         echo "status-failed"
         return 0
@@ -381,7 +424,7 @@ process_antigravity_orphan() {
     fi
     if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
         local status_porcelain status_rc=0
-        status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null)" || status_rc=$?
+        status_porcelain="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
         if [[ "$status_rc" -ne 0 ]]; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "status-failed"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -686,19 +729,18 @@ ao_worktree_dirs() {
             }
         }' "$1"
 }
-if [[ -d "$STD_ROOT" ]]; then
-    ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
-    if [[ -e "$ao_cfg" ]]; then
-        if ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
-            while read -r kind d; do
-                [[ -n "$d" ]] || continue
-                d="$(expand_path "$d")"
-                d="$d"$'\n'"$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"$'\n'
-                if [[ "$kind" == C ]]; then STD_AO_PARENTS+="$d"; else STD_AO_DIRS+="$d"; fi
-            done <<<"$ao_lines"
-        else
-            STD_BLOCKED="ao-config-unreadable"
-        fi
+# Loaded even without STD_ROOT: the plf merged fast path also consults it.
+ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
+if [[ -e "$ao_cfg" ]]; then
+    if ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+        while read -r kind d; do
+            [[ -n "$d" ]] || continue
+            d="$(expand_path "$d")"
+            d="$d"$'\n'"$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"$'\n'
+            if [[ "$kind" == C ]]; then STD_AO_PARENTS+="$d"; else STD_AO_DIRS+="$d"; fi
+        done <<<"$ao_lines"
+    else
+        STD_BLOCKED="ao-config-unreadable"
     fi
 fi
 

@@ -178,6 +178,20 @@ sweeper, launchd job, or agent in this repo may delete, archive, strip
 PR, clean status, zero-ahead, or disk pressure. 7 days is a floor, not a
 target; `safety_min_stale_days` may raise it, never lower it.
 
+**Sole exception (bead `disk_magician-plf`, user-directed):** in
+`scripts/cleanup_worktrees.sh` only, and only while its own floor is the
+default 7 days, a worktree whose canonical `worktree_age_days` is >= 3 may be
+ELIGIBLE when ALL hold: `git status --porcelain --untracked-files=all
+--ignore-submodules=none` is empty (no tracked changes, no untracked files);
+no index entry is assume-unchanged or skip-worktree; no ignored secret-like
+file exists (case-insensitive `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
+`id_rsa*`, `.npmrc`, `.netrc`, `*credentials*`, `secrets*`); HEAD is an ancestor of
+main or matches a gh-verified MERGED PR head (bead `ueh`); no live process has
+a cwd inside it; it is not locked; and it is not under an AO worktreeDir
+(`*ao/data/worktrees/*` or the AO config, which must be readable). Any
+unknown keeps it protected. `DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS` may
+raise the 3, clamped to [3,7]; nothing else may lower the 7-day floor.
+
 **Measure recency, never proxy it.** The only sanctioned implementation is
 `worktree_age_days` / `worktree_is_recently_active` from
 `scripts/lib/worktree_recency.sh`. New code calls it; it does not re-derive
