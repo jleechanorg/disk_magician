@@ -101,6 +101,12 @@ the goal.
 
 ### D3. Creation-time guard (Claude Code + Codex PreToolUse)
 
+The guard is a **best-effort placement guard**: it prevents worktree creation at
+literal paths and at paths assigned earlier in the same command (the dominant
+Codex `mktemp` pattern); for anything else it is detective (logged, then
+reported by D5), not preventive. Hard containment, if ever needed, is
+Approach B (capped volume).
+
 `diskm guard-worktree-add` reads the PreToolUse JSON on stdin. For shell
 tools whose command contains `git … worktree add`, it resolves the target
 path (relative to `tool_input.workdir`/`cwd`, after `cd` prefixes it can
@@ -139,6 +145,17 @@ fetches, wraps `git worktree add` in a 30 s timeout, uses a unique branch
 `DISK_MAGICIAN_WORKTREE_HOOK=off` by falling back to
 `<repo>/.claude/worktrees/<name>`. It is registered only after a live canary
 (plan Lane D step 3) passes.
+
+### D3b. `WorktreeRemove` hook (`diskm worktree-remove-hook`)
+
+Without it Claude runs `git worktree remove --force` on hook-created
+worktrees, which can destroy uncommitted work or orphan unpushed commits. The
+hook reads `worktree_path`; if the worktree is clean (no tracked or untracked
+changes) and its branch has no commits absent from every remote-tracking ref,
+it runs `git worktree remove` (no `--force`) and deletes the
+`worktree-<name>` branch with `git branch -d`; otherwise it leaves everything
+in place, exits 0, and logs to `worktree_guard.log` — the 7-day sweepers
+handle it later under the normal gates.
 
 ### D4. Codex deletion guard alignment
 
@@ -207,7 +224,11 @@ Reuse `gs://wa-test-evidence` (exists, authenticated) under prefix
 untouched. Upload with `gcloud storage rsync -r <dir> gs://…/<repo>/<slug>/`
 and cite the `gs://` URI plus an authenticated console URL. A `diskm
 evidence-push <dir> --repo <repo> --slug <slug>` wrapper keeps this on the
-single CLI.
+single CLI. Before upload it refuses (exit 3) on secret-shaped filenames and
+on content matches: `gitleaks detect --no-git --source <dir>` when installed,
+else a stdlib scan for private-key headers, `AKIA[0-9A-Z]{16}`,
+`ghp_[A-Za-z0-9]{36}`, `xox[baprs]-`, `sk-[A-Za-z0-9]{20,}`, and
+`"private_key":` (service-account JSON).
 
 ## Assumptions and Recommended Defaults
 
@@ -253,6 +274,14 @@ single CLI.
 
 ## Risks
 
+- Two clones of the same repo share `~/.worktrees/<basename>/`; collisions are
+  limited to identical `<name>`, where `worktree-new` fails instead of reusing.
+- PreToolUse `deny` could be overridden by permission-allowlist precedence in
+  some Claude Code versions (raised by `/web-advice`); Lane D step 1 proves the
+  deny fires under the live settings before the guard is claimed working.
+- Evidence written to `/tmp` but never published is lost on reboot; follow-up
+  bead: `layout-check` flags `/tmp/*/evidence/*` older than 12 h with no GCS
+  object.
 - Codex CLI usage limit (resets 2026-10-10 23:31): Codex-side live checks
   (policy canary, `codex exec` deny test) wait until then; the Codex hook
   registration itself does not.

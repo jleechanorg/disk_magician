@@ -80,6 +80,17 @@ branch `feat/standard-worktree-root-evidence` (dogfoods the standard).
 - Implement `scripts/worktree_create_hook.sh` reusing A2's function; dispatch
   `worktree_create_hook|worktree-create-hook`.
 
+### A4b. `diskm worktree-remove-hook` (Claude `WorktreeRemove`)
+- Test `tests/test_worktree_remove_hook.sh`: stdin `{"worktree_path": P}`:
+  clean worktree whose branch is fully contained in a remote-tracking ref →
+  removed without `--force`, branch deleted; dirty (tracked or untracked) →
+  left in place, exit 0, log line; branch with an unpushed commit → left in
+  place; path outside `$STANDARD_WORKTREE_ROOT` → left in place; malformed
+  stdin → exit 0, nothing removed.
+- Implement `scripts/worktree_remove_hook.sh`; dispatch
+  `worktree_remove_hook|worktree-remove-hook`; register beside WorktreeCreate
+  in B1.
+
 ### A5. `diskm layout-check`
 - Test `tests/test_layout_check.py`: temp HOME with one repo having worktrees
   at `$HOME/.worktrees/r/a` (compliant), `$HOME/projects/worktree_b`,
@@ -120,7 +131,10 @@ branch `feat/standard-worktree-root-evidence` (dogfoods the standard).
   and prints the `gs://` URI and
   `https://console.cloud.google.com/storage/browser/wa-test-evidence/agent-evidence/r/s`;
   source outside `/tmp`/`/private/tmp` → exit 2 (no upload); missing gcloud →
-  exit 1; secret-shaped filenames (`.env`, `*.pem`, `id_rsa*`) → refuse.
+  exit 1; secret-shaped filenames (`.env`, `*.pem`, `id_rsa*`) → refuse;
+  a file containing `-----BEGIN OPENSSH PRIVATE KEY-----`, `AKIA` + 16, a
+  `ghp_` token, or `"private_key":` → refuse (exit 3) with gitleaks absent from
+  PATH; with a fake `gitleaks` on PATH returning 1 → refuse.
 - Implement `scripts/evidence_push.sh`; dispatch `evidence_push|evidence-push`.
 
 ### A8. Package, verify, PR, deploy
@@ -203,8 +217,10 @@ Edit in `~/.claude/skills/` (canonical; `user_scope` snapshots it):
 
 ## Lane D — live verification (after A–C)
 
-1. Claude Bash: `git worktree add /tmp/wt-guard-probe -b probe/x` in a scratch
-   repo → denied with the helper message.
+1. Claude Bash, under the real `~/.claude/settings.json` (whose permission
+   allowlist includes Bash): `git worktree add /tmp/wt-guard-probe -b probe/x`
+   in a scratch repo → denied with the helper message and no worktree created
+   (proves allowlist precedence does not swallow the deny).
 2. `diskm worktree-new <scratch repo> probe/y` → path under `~/.worktrees/`.
 3. Agent tool with `isolation: "worktree"` → `pwd` reports
    `~/.worktrees/<repo>/<name>`; worktree removed on finish.

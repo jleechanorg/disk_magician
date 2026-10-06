@@ -237,11 +237,279 @@ run_std "$TMP_ROOT/std-nolsof.out" "$FAKE_BIN:/usr/bin:/bin"
 STD_NOLSOF=$(cat "$TMP_ROOT/std-nolsof.out")
 assert_contains "lsof failure: old worktree preserved" ".worktrees/r/old | cwd-unknown" "$STD_NOLSOF"
 assert_not_contains "lsof failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOLSOF" || true)"
+
+# Regression: Zero-status lsof with unresolved cwd record (Linux readlink/stat permission error)
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "p999"
+echo "fcwd"
+echo "n/proc/999/cwd (readlink: Permission denied)"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-unresolved.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_UNRESOLVED=$(cat "$TMP_ROOT/std-unresolved.out")
+assert_contains "lsof unresolved cwd record preserved" ".worktrees/r/old | cwd-unknown" "$STD_UNRESOLVED"
+assert_not_contains "lsof unresolved: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_UNRESOLVED" || true)"
+
+# Regression: Zero-status lsof with empty output
+printf '#!/bin/sh\nexit 0\n' > "$FAKE_BIN/lsof"
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-empty.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_EMPTY=$(cat "$TMP_ROOT/std-empty.out")
+assert_contains "lsof empty output preserved" ".worktrees/r/old | cwd-unknown" "$STD_EMPTY"
+assert_not_contains "lsof empty: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_EMPTY" || true)"
+
+# Regression: Zero-status lsof with warning on stderr
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /proc/123/cwd: Permission denied" >&2
+echo "n/"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-warning.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_WARNING=$(cat "$TMP_ROOT/std-warning.out")
+assert_contains "lsof warning on stderr preserved" ".worktrees/r/old | cwd-unknown" "$STD_WARNING"
+assert_not_contains "lsof warning: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_WARNING" || true)"
+
+# Regression: Zero-status lsof with large output (>64KB pipe buffer) and unresolved record near start
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "p999"
+echo "fcwd"
+echo "n/proc/999/cwd (readlink: Permission denied)"
+for i in $(seq 1 1000); do
+  echo "p$i"
+  echo "fcwd"
+  echo "n/nonexistent/dummy/path/for/process/padding/number/$i"
+done
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-pipebuf.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_PIPEBUF=$(cat "$TMP_ROOT/std-pipebuf.out")
+assert_contains "lsof large output pipe buffer preserved" ".worktrees/r/old | cwd-unknown" "$STD_PIPEBUF"
+assert_not_contains "lsof large output: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_PIPEBUF" || true)"
+
+# Regression: mktemp failure (cannot allocate temp file for diagnostic capture under disk pressure)
+cat > "$FAKE_BIN/mktemp" <<'SH'
+#!/bin/sh
+exit 1
+SH
+chmod +x "$FAKE_BIN/mktemp"
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /proc/123/cwd: Permission denied" >&2
+echo "n/"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-nomktemp.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_NOMKTEMP=$(cat "$TMP_ROOT/std-nomktemp.out")
+assert_contains "mktemp failure preserved" ".worktrees/r/old | cwd-unknown" "$STD_NOMKTEMP"
+assert_not_contains "mktemp failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOMKTEMP" || true)"
+rm -f "$FAKE_BIN/mktemp"
+
 kill "$SLEEP_PID" 2>/dev/null || true
 
-SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT")
-assert_contains "wc-wt discovery line kept" 'find_repos_from_worktrees "$HOME/wc-wt"' "$SCRIPT_TEXT"
-assert_contains "project_worldaiclaw discovery line kept" 'find_repos_from_worktrees "$HOME/project_worldaiclaw"' "$SCRIPT_TEXT"
+echo "Test: custom configured STANDARD_WORKTREE_ROOT discovery and governance without --repos"
+CUSTOM_WT_ROOT="$TMP_ROOT/custom_wt_root"
+CUSTOM_REPO="$TMP_ROOT/custom_main_repo"
+mkdir -p "$CUSTOM_REPO"
+git -C "$CUSTOM_REPO" init -b main >/dev/null
+git -C "$CUSTOM_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$CUSTOM_REPO" config user.name "Fixture User"
+echo "init" > "$CUSTOM_REPO/README.md"
+git -C "$CUSTOM_REPO" add README.md
+git -C "$CUSTOM_REPO" commit -m "init" >/dev/null
+CUSTOM_BASE_SHA=$(git -C "$CUSTOM_REPO" rev-parse HEAD)
+
+mkdir -p "$CUSTOM_WT_ROOT/custom_main_repo"
+git -C "$CUSTOM_REPO" worktree add -B wt-custom-old "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" "$CUSTOM_BASE_SHA" >/dev/null
+age_worktree_days_ago "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" 10
+
+CUSTOM_HOME="$TMP_ROOT/custom_home"
+mkdir -p "$CUSTOM_HOME"
+CUSTOM_OUT="$TMP_ROOT/custom_std.out"
+env -i HOME="$CUSTOM_HOME" PATH="/usr/bin:/bin" \
+  STANDARD_WORKTREE_ROOT="$CUSTOM_WT_ROOT" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --dry-run >"$CUSTOM_OUT" 2>&1
+
+CUSTOM_TEXT=$(cat "$CUSTOM_OUT")
+if grep -F "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" <<<"$CUSTOM_TEXT" | grep -qF 'ELIGIBLE  '; then
+  record_pass "custom STANDARD_WORKTREE_ROOT discovered without --repos and eligible"
+else
+  record_fail "custom STANDARD_WORKTREE_ROOT discovered without --repos and eligible" "did not find ELIGIBLE for custom wt root"
+fi
+assert_contains "custom STANDARD_WORKTREE_ROOT summary eligible count" "Repo-local:  1 eligible, 0 preserved." "$CUSTOM_TEXT"
+
+DISCOVERY_LIB="$REPO_ROOT/scripts/lib/worktree_repo_discovery.sh"
+SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT" "$DISCOVERY_LIB" 2>/dev/null || cat "$CLEANUP_SCRIPT")
+if grep -Eq '(_dwr_find_repos_from_worktrees|find_repos_from_worktrees) "\$HOME/wc-wt"' <<<"$SCRIPT_TEXT"; then
+  record_pass "wc-wt discovery line kept"
+else
+  record_fail "wc-wt discovery line kept" "expected discovery to include \$HOME/wc-wt"
+fi
+if grep -Eq '(_dwr_find_repos_from_worktrees|find_repos_from_worktrees) "\$HOME/project_worldaiclaw"' <<<"$SCRIPT_TEXT"; then
+  record_pass "project_worldaiclaw discovery line kept"
+else
+  record_fail "project_worldaiclaw discovery line kept" "expected discovery to include \$HOME/project_worldaiclaw"
+fi
+
+echo "Test: squash-merged PR worktree eligibility governance (bead disk_magician-ueh)"
+SQUASH_REPO="$TMP_ROOT/squash-repo"
+mkdir -p "$SQUASH_REPO/.claude/worktrees"
+git init -q -b main "$SQUASH_REPO"
+git -C "$SQUASH_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$SQUASH_REPO" config user.name "Fixture User"
+git -C "$SQUASH_REPO" remote add origin "https://github.com/example-org/squash-repo.git"
+printf 'initial\n' > "$SQUASH_REPO/README.md"
+git -C "$SQUASH_REPO" add README.md
+git -C "$SQUASH_REPO" commit -q -m "initial commit"
+
+# Branch feat-a (Case A: matching headRefOid -> ELIGIBLE)
+git -C "$SQUASH_REPO" checkout -q -b feat-a
+printf 'feature A\n' > "$SQUASH_REPO/feature_a.txt"
+git -C "$SQUASH_REPO" add feature_a.txt
+git -C "$SQUASH_REPO" commit -q -m "feature A commit"
+SHA_A=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-b (Case B: differing headRefOid -> PRESERVE merged-differing-head)
+git -C "$SQUASH_REPO" checkout -q -b feat-b
+printf 'feature B\n' > "$SQUASH_REPO/feature_b.txt"
+git -C "$SQUASH_REPO" add feature_b.txt
+git -C "$SQUASH_REPO" commit -q -m "feature B commit"
+SHA_B=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-c (Case C: gh exits 1 -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-c
+printf 'feature C\n' > "$SQUASH_REPO/feature_c.txt"
+git -C "$SQUASH_REPO" add feature_c.txt
+git -C "$SQUASH_REPO" commit -q -m "feature C commit"
+SHA_C=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-d (Case D: gh returns empty headRefOid -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-d
+printf 'feature D\n' > "$SQUASH_REPO/feature_d.txt"
+git -C "$SQUASH_REPO" add feature_d.txt
+git -C "$SQUASH_REPO" commit -q -m "feature D commit"
+SHA_D=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-e (Case E: gh emits matching SHA but exits 124 timeout -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-e
+printf 'feature E\n' > "$SQUASH_REPO/feature_e.txt"
+git -C "$SQUASH_REPO" add feature_e.txt
+git -C "$SQUASH_REPO" commit -q -m "feature E commit"
+SHA_E=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-f (Case F: matching SHA, but live process has cwd inside worktree -> PRESERVE live-cwd)
+git -C "$SQUASH_REPO" checkout -q -b feat-f
+printf 'feature F\n' > "$SQUASH_REPO/feature_f.txt"
+git -C "$SQUASH_REPO" add feature_f.txt
+git -C "$SQUASH_REPO" commit -q -m "feature F commit"
+SHA_F=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Advance main so branches are ahead-of-main (not ancestors)
+printf 'squashed commit\n' >> "$SQUASH_REPO/README.md"
+git -C "$SQUASH_REPO" add README.md
+git -C "$SQUASH_REPO" commit -q -m "main squashed commit"
+
+# Add worktrees
+git -C "$SQUASH_REPO" worktree add -q -B feat-a "$SQUASH_REPO/.claude/worktrees/wt-squash-a" "$SHA_A"
+git -C "$SQUASH_REPO" worktree add -q -B feat-b "$SQUASH_REPO/.claude/worktrees/wt-squash-b" "$SHA_B"
+git -C "$SQUASH_REPO" worktree add -q -B feat-c "$SQUASH_REPO/.claude/worktrees/wt-squash-c" "$SHA_C"
+git -C "$SQUASH_REPO" worktree add -q -B feat-d "$SQUASH_REPO/.claude/worktrees/wt-squash-d" "$SHA_D"
+git -C "$SQUASH_REPO" worktree add -q -B feat-e "$SQUASH_REPO/.claude/worktrees/wt-squash-e" "$SHA_E"
+git -C "$SQUASH_REPO" worktree add -q -B feat-f "$SQUASH_REPO/.claude/worktrees/wt-squash-f" "$SHA_F"
+
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-a" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-b" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-c" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-d" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-e" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 30
+
+WT_F_REAL="$(cd "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 2>/dev/null && pwd -P || printf '%s' "$SQUASH_REPO/.claude/worktrees/wt-squash-f")"
+cat > "$FAKE_BIN/lsof" <<SH
+#!/bin/sh
+echo "n$WT_F_REAL"
+SH
+chmod +x "$FAKE_BIN/lsof"
+
+# Provide fake timeout and fake gh on PATH
+cat > "$FAKE_BIN/timeout" <<'SH'
+#!/bin/sh
+shift
+exec "$@"
+SH
+chmod +x "$FAKE_BIN/timeout"
+
+cat > "$FAKE_BIN/gh" <<SH
+#!/bin/sh
+case "\$*" in
+  *feat-a*)
+    echo "$SHA_A"
+    exit 0
+    ;;
+  *feat-b*)
+    echo "differing000000000000000000000000000000000"
+    exit 0
+    ;;
+  *feat-c*)
+    exit 1
+    ;;
+  *feat-d*)
+    echo ""
+    exit 0
+    ;;
+  *feat-e*)
+    echo "$SHA_E"
+    exit 124
+    ;;
+  *feat-f*)
+    echo "$SHA_F"
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$FAKE_BIN/gh"
+
+OUT_SQUASH="$TMP_ROOT/squash-test.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$SQUASH_REPO" --min-age 14 \
+  >"$OUT_SQUASH" 2>&1
+OUT_SQUASH_CONTENT=$(cat "$OUT_SQUASH")
+
+# Case A: Squash-merged clean 30d worktree with fake gh returning matching headRefOid -> ELIGIBLE
+assert_contains "Case A: squash-merged matching head is eligible" "repo-local   ELIGIBLE" "$OUT_SQUASH_CONTENT"
+assert_contains "Case A path fragment" ".claude/worktrees/wt-squash-a" "$OUT_SQUASH_CONTENT"
+
+# Case B: Squash-merged clean 30d worktree with fake gh returning differing headRefOid -> PRESERVE merged-differing-head
+assert_contains "Case B: differing headRefOid preserved" ".claude/worktrees/wt-squash-b | merged-differing-head" "$OUT_SQUASH_CONTENT"
+
+# Case C: Squash-merged clean 30d worktree with fake gh exiting 1 -> fail-closed PRESERVE ahead-of-main
+assert_contains "Case C: gh exit 1 preserved as ahead-of-main" ".claude/worktrees/wt-squash-c | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case D: Squash-merged clean 30d worktree with fake gh returning empty headRefOid -> fail-closed PRESERVE ahead-of-main
+assert_contains "Case D: empty headRefOid preserved as ahead-of-main" ".claude/worktrees/wt-squash-d | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case E: Squash-merged clean 30d worktree with fake gh emitting matching SHA but exiting 124 (timeout) -> PRESERVE ahead-of-main
+assert_contains "Case E: gh exit 124 timeout preserved as ahead-of-main" ".claude/worktrees/wt-squash-e | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case F: Squash-merged clean 30d worktree with matching SHA, but live process in cwd -> PRESERVE live-cwd
+assert_contains "Case F: repo-local live-cwd preserved" ".claude/worktrees/wt-squash-f | live-cwd" "$OUT_SQUASH_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

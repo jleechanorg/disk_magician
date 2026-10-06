@@ -46,6 +46,7 @@ class JobInventoryTests(unittest.TestCase):
             "com.jleechanorg.disk-magician-drilldown",
             "com.jleechanorg.disk-magician-frontier-nightly",
             "com.jleechanorg.disk-magician-frontier-root",
+            "com.jleechanorg.disk-magician-main-sweeper",
             "com.jleechanorg.disk-magician-observer",
             "com.jleechanorg.disk-magician-pressure-sweep",
             "com.jleechanorg.disk-magician-tmp-scratch",
@@ -63,9 +64,13 @@ class JobInventoryTests(unittest.TestCase):
         scratch = job_inventory._owners(
             "com.jleechanorg.disk-magician-tmp-scratch", ["/bin/bash", "tmp-scratch-sweep"]
         )
+        main_sw = job_inventory._owners(
+            "com.jleechanorg.disk-magician-main-sweeper", ["/bin/bash", "main-sweeper"]
+        )
         unowned = job_inventory._owners("com.example.unowned", ["/bin/bash", "pressure-sweepish"])
         self.assertEqual(pressure[0], "pressure_sweep.sh")
         self.assertEqual(scratch[0], "tmp_scratch_sweep.sh")
+        self.assertEqual(main_sw[0], "main_sweeper.sh")
         self.assertEqual(unowned[0], "unknown")
 
     def test_parser_rejects_top_level_array_and_wrong_label(self):
@@ -251,6 +256,115 @@ class JobInventoryTests(unittest.TestCase):
             self.assertNotEqual(frontier_root["status"], "healthy")
             self.assertEqual(frontier_root["status"], "unknown")
             self.assertIn("unrelated", frontier_root["reason"])
+
+    def test_fleet_consolidated_mode_healthy_when_covered_by_main_sweeper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            agents, daemons, fakebin = tmp / "agents", tmp / "daemons", tmp / "bin"
+            agents.mkdir(); daemons.mkdir(); fakebin.mkdir()
+            records, _ = job_inventory.catalog(ROOT)
+            for record in records:
+                if record["label"] in job_inventory.CONSOLIDATED_LABELS:
+                    continue
+                source = Path(record["source_path"])
+                if source.name == "disk_magician.sh":
+                    payload = {
+                        "Label": record["label"],
+                        "ProgramArguments": [str(Path(os.environ.get("HOME", "~")) / ".local/bin/diskm"), "snapshot"],
+                        "StartInterval": 1800,
+                    }
+                else:
+                    payload = plistlib.loads(job_inventory._strip_comments(source.read_bytes()))
+                    def render(value):
+                        if isinstance(value, str):
+                            return job_inventory._materialize_args([value], ROOT)[0]
+                        if isinstance(value, list):
+                            return [render(item) for item in value]
+                        if isinstance(value, dict):
+                            return {key: render(item) for key, item in value.items()}
+                        return value
+                    payload = render(payload)
+                destination = (daemons if record["domain"] == "system" else agents) / f"{record['label']}.plist"
+                destination.write_bytes(plistlib.dumps(payload))
+            (fakebin / "launchctl").write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = print ]; then printf '%s = {\\n' \"$2\"; exit 0; fi\n"
+                "exit 2\n"
+            )
+            (fakebin / "launchctl").chmod(stat.S_IRWXU)
+            env = os.environ.copy()
+            env.update(
+                OSTYPE="darwin24",
+                PATH=f"{fakebin}:{env['PATH']}",
+                DISK_MAGICIAN_LAUNCHCTL_UID="501",
+                DISK_MAGICIAN_LAUNCHAGENTS_DIR=str(agents),
+                DISK_MAGICIAN_LAUNCHDAEMONS_DIR=str(daemons),
+            )
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "job_inventory.py"), "--json"],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads(proc.stdout)
+            self.assertEqual(result["status"], "healthy")
+            for label in job_inventory.CONSOLIDATED_LABELS:
+                rec = next(r for r in result["records"] if r["label"] == label)
+                self.assertEqual(rec["status"], "healthy")
+                self.assertIn("consolidated", rec["reason"])
+
+    def test_fleet_legacy_mode_healthy_when_individual_sweepers_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            agents, daemons, fakebin = tmp / "agents", tmp / "daemons", tmp / "bin"
+            agents.mkdir(); daemons.mkdir(); fakebin.mkdir()
+            records, _ = job_inventory.catalog(ROOT)
+            for record in records:
+                if record["label"] == job_inventory.MAIN_SWEEPER_LABEL:
+                    continue
+                source = Path(record["source_path"])
+                if source.name == "disk_magician.sh":
+                    payload = {
+                        "Label": record["label"],
+                        "ProgramArguments": [str(Path(os.environ.get("HOME", "~")) / ".local/bin/diskm"), "snapshot"],
+                        "StartInterval": 1800,
+                    }
+                else:
+                    payload = plistlib.loads(job_inventory._strip_comments(source.read_bytes()))
+                    def render(value):
+                        if isinstance(value, str):
+                            return job_inventory._materialize_args([value], ROOT)[0]
+                        if isinstance(value, list):
+                            return [render(item) for item in value]
+                        if isinstance(value, dict):
+                            return {key: render(item) for key, item in value.items()}
+                        return value
+                    payload = render(payload)
+                destination = (daemons if record["domain"] == "system" else agents) / f"{record['label']}.plist"
+                destination.write_bytes(plistlib.dumps(payload))
+            (fakebin / "launchctl").write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = print ]; then printf '%s = {\\n' \"$2\"; exit 0; fi\n"
+                "exit 2\n"
+            )
+            (fakebin / "launchctl").chmod(stat.S_IRWXU)
+            env = os.environ.copy()
+            env.update(
+                OSTYPE="darwin24",
+                PATH=f"{fakebin}:{env['PATH']}",
+                DISK_MAGICIAN_LAUNCHCTL_UID="501",
+                DISK_MAGICIAN_LAUNCHAGENTS_DIR=str(agents),
+                DISK_MAGICIAN_LAUNCHDAEMONS_DIR=str(daemons),
+            )
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "job_inventory.py"), "--json"],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads(proc.stdout)
+            self.assertEqual(result["status"], "healthy")
+            main_rec = next(r for r in result["records"] if r["label"] == job_inventory.MAIN_SWEEPER_LABEL)
+            self.assertEqual(main_rec["status"], "healthy")
+            self.assertIn("unconsolidated", main_rec["reason"])
 
 
 if __name__ == "__main__":

@@ -241,5 +241,92 @@ if [[ $RC_DISKM -eq 0 ]] || [[ "$(cat "$LAUNCHAGENTS_DIR/com.disk-magician.needs
   exit 1
 fi
 
+# Test --consolidate flag:
+# 1. Tests that --consolidate successfully installs the 3 selected templates:
+#    - com.jleechanorg.disk-magician-main-sweeper.plist.template
+#    - com.disk-magician.claude-state.plist.template
+#    - com.disk-magician.worktree-venvs.plist
+# 2. Tests that redundant plists are archived to .consolidated/ ONLY after successful installation.
+CONSOLIDATE_SRC="$TMP_ROOT/launchd_consolidate"
+CONSOLIDATE_LAUNCHAGENTS="$TMP_ROOT/LaunchAgents_consolidate"
+CONSOLIDATE_HOME="$TMP_ROOT/home_consolidate"
+mkdir -p "$CONSOLIDATE_SRC" "$CONSOLIDATE_LAUNCHAGENTS" "$CONSOLIDATE_HOME/.local/bin"
+touch "$CONSOLIDATE_HOME/.local/bin/diskm"
+chmod +x "$CONSOLIDATE_HOME/.local/bin/diskm"
+
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template" "$CONSOLIDATE_SRC/"
+cp "$REPO_ROOT/launchd/com.disk-magician.claude-state.plist.template" "$CONSOLIDATE_SRC/"
+cp "$REPO_ROOT/launchd/com.disk-magician.worktree-venvs.plist" "$CONSOLIDATE_SRC/"
+
+printf '<plist><dict><key>Label</key><string>com.disk-magician.colima-prune</string></dict></plist>\n' > "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.colima-prune.plist"
+
+: > "$BOOTSTRAP_LOG"
+set +e
+PATH="$FAKE_BIN:$PATH" HOME="$CONSOLIDATE_HOME" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$CONSOLIDATE_LAUNCHAGENTS" \
+  DISK_MAGICIAN_LAUNCHD_SRC="$CONSOLIDATE_SRC" \
+  bash "$TARGET_SCRIPT" --consolidate \
+  >"$TMP_ROOT/out_consolidate.txt" 2>&1
+RC_CONSOLIDATE=$?
+set -e
+
+if [[ $RC_CONSOLIDATE -ne 0 ]]; then
+  echo "FAIL: install_launchd_sweepers.sh --consolidate failed (rc=$RC_CONSOLIDATE)" >&2
+  cat "$TMP_ROOT/out_consolidate.txt" >&2
+  exit 1
+fi
+
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-main-sweeper.plist" ]]; then
+  echo "FAIL: main-sweeper.plist not installed under --consolidate" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.claude-state.plist" ]]; then
+  echo "FAIL: claude-state.plist not installed under --consolidate" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.worktree-venvs.plist" ]]; then
+  echo "FAIL: worktree-venvs.plist not installed under --consolidate" >&2
+  exit 1
+fi
+if [[ -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.colima-prune.plist" ]]; then
+  echo "FAIL: redundant colima-prune.plist was not removed from LaunchAgents" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/.consolidated/com.disk-magician.colima-prune.plist" ]]; then
+  echo "FAIL: redundant colima-prune.plist was not archived to .consolidated/" >&2
+  exit 1
+fi
+
+# Failure case: if installation fails (e.g. corrupt template), redundant plists must NOT be archived
+CONSOLIDATE_FAIL_LAUNCHAGENTS="$TMP_ROOT/LaunchAgents_fail"
+mkdir -p "$CONSOLIDATE_FAIL_LAUNCHAGENTS"
+printf '<plist><dict><key>Label</key><string>com.disk-magician.colima-prune</string></dict></plist>\n' > "$CONSOLIDATE_FAIL_LAUNCHAGENTS/com.disk-magician.colima-prune.plist"
+
+cat > "$CONSOLIDATE_SRC/com.disk-magician.worktree-venvs.plist" <<'EOF'
+corrupt content
+EOF
+
+set +e
+PATH="$FAKE_BIN:$PATH" HOME="$CONSOLIDATE_HOME" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$CONSOLIDATE_FAIL_LAUNCHAGENTS" \
+  DISK_MAGICIAN_LAUNCHD_SRC="$CONSOLIDATE_SRC" \
+  bash "$TARGET_SCRIPT" --consolidate \
+  >"$TMP_ROOT/out_consolidate_fail.txt" 2>&1
+RC_CONSOLIDATE_FAIL=$?
+set -e
+
+if [[ $RC_CONSOLIDATE_FAIL -eq 0 ]]; then
+  echo "FAIL: install_launchd_sweepers.sh --consolidate unexpectedly succeeded with corrupt template" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_FAIL_LAUNCHAGENTS/com.disk-magician.colima-prune.plist" ]]; then
+  echo "FAIL: redundant colima-prune.plist was archived despite install failure" >&2
+  exit 1
+fi
+if [[ -d "$CONSOLIDATE_FAIL_LAUNCHAGENTS/.consolidated" ]]; then
+  echo "FAIL: .consolidated dir created despite install failure" >&2
+  exit 1
+fi
+
 echo "PASS: all install_launchd_sweepers preflight tests passed"
 exit 0

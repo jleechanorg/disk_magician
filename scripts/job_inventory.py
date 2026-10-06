@@ -21,6 +21,15 @@ from typing import Any
 
 from job_receipt import resolve_state_dir
 
+MAIN_SWEEPER_LABEL = "com.jleechanorg.disk-magician-main-sweeper"
+CONSOLIDATED_LABELS = {
+    "com.disk-magician.colima-prune",
+    "com.disk-magician.code-sign-clones",
+    "com.disk-magician.codex-vacuum",
+    "com.jleechanorg.disk-magician-pressure-sweep",
+    "com.jleechanorg.disk-magician-tmp-scratch",
+}
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -251,6 +260,8 @@ def _owners(label: str, args: list[Any]) -> tuple[str, str]:
     joined = " ".join(map(str, args))
     if label == "com.jleechanorg.disk-magician" or "snapshot_commit.sh" in joined:
         receipt = "snapshot_commit.sh"
+    elif label == "com.jleechanorg.disk-magician-main-sweeper" or "main_sweeper.sh" in joined or "main-sweeper" in args or "sweep" in args:
+        receipt = "main_sweeper.sh"
     elif label == "com.jleechanorg.disk-magician-pressure-sweep" or "pressure_sweep.sh" in joined or "pressure-sweep" in args:
         receipt = "pressure_sweep.sh"
     elif label == "com.jleechanorg.disk-magician-tmp-scratch" or "tmp_scratch_sweep.sh" in joined or "tmp-scratch-sweep" in args:
@@ -261,6 +272,8 @@ def _owners(label: str, args: list[Any]) -> tuple[str, str]:
         coverage = "disk_frontier_scan.py" if label.endswith("-root") else "disk_frontier_scan.sh"
     elif label == "com.jleechanorg.disk-magician" or "snapshot_commit.sh" in joined:
         coverage = "snapshot_commit.sh"
+    elif label == "com.jleechanorg.disk-magician-main-sweeper" or "main_sweeper.sh" in joined or "main-sweeper" in args or "sweep" in args:
+        coverage = "main_sweeper.sh"
     else:
         coverage = "unknown"
     return receipt, coverage
@@ -421,6 +434,36 @@ def fleet(repo_root: Path, expected_source_root: Path | None = None) -> dict[str
                 record.update(status="healthy", reason="installed plist matches expected routing and exact label is loaded")
             else:
                 record.update(status="degraded", reason="plist valid but exact label is not loaded")
+
+        # Reconcile consolidation / legacy support across the fleet
+        main_sweeper_record = next((r for r in records if r["label"] == MAIN_SWEEPER_LABEL), None)
+        main_sweeper_active = (
+            main_sweeper_record is not None
+            and main_sweeper_record.get("status") == "healthy"
+        )
+
+        if main_sweeper_active:
+            for record in records:
+                if record["label"] in CONSOLIDATED_LABELS:
+                    if record.get("status") == "degraded" and record.get("reason") in (
+                        "installed plist missing",
+                        "plist valid but exact label is not loaded",
+                    ):
+                        record.update(
+                            status="healthy",
+                            reason=f"consolidated: covered by {MAIN_SWEEPER_LABEL}",
+                        )
+        else:
+            legacy_jobs_present = any(
+                r["label"] in CONSOLIDATED_LABELS and r.get("status") == "healthy"
+                for r in records
+            )
+            if legacy_jobs_present and main_sweeper_record is not None:
+                if main_sweeper_record.get("status") == "degraded" and main_sweeper_record.get("reason") == "installed plist missing":
+                    main_sweeper_record.update(
+                        status="healthy",
+                        reason="unconsolidated: legacy individual sweepers active",
+                    )
     states = {record["status"] for record in records}
     if "invalid" in states:
         status = "invalid"

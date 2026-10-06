@@ -12,6 +12,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_repo_discovery.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
@@ -73,59 +75,9 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
         IFS=',' read -ra REPO_LOCAL_REPOS <<<"${CLAUDE_WORKTREE_REPOS// /,}"
     else
-        # Auto-discover main repositories that have registered worktrees
-        discovered_repos_str="$HOME/projects/worldarchitect.ai"
-        [[ -d "$HOME/project_worldaiclaw/worldai_claw" ]] && discovered_repos_str="${discovered_repos_str} $HOME/project_worldaiclaw/worldai_claw"
-        
-        find_repos_from_worktrees() {
-            local search_dir="$1" depth=("${@:2}")
-            [[ -d "$search_dir" ]] || return 0
-            while IFS= read -r git_file; do
-                local gitdir_line
-                gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
-                if [[ -n "$gitdir_line" ]]; then
-                    local git_dir main_repo
-                    git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-                    main_repo="${git_dir%/.git/worktrees/*}"
-                    if [[ -d "$main_repo" ]]; then
-                        discovered_repos_str="${discovered_repos_str} ${main_repo}"
-                    fi
-                fi
-            done < <(find "$search_dir" ${depth[@]+"${depth[@]}"} -type f -name ".git" 2>/dev/null)
-        }
-        
-        find_repos_from_worktrees "$HOME/.ao/data/worktrees"
-        find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees"
-        find_repos_from_worktrees "$HOME/wc-wt"
-        find_repos_from_worktrees "$HOME/project_worldaiclaw"
-        find_repos_from_worktrees "$STANDARD_WORKTREE_ROOT" -maxdepth 3
-        
-        # Also check all .claude/worktrees and projects
-        if [[ -d "$HOME/projects" ]]; then
-            for repo_dir in "$HOME/projects"/*; do
-                [[ -d "$repo_dir" ]] || continue
-                claude_wt_dir="$repo_dir/.claude/worktrees"
-                if [[ -d "$claude_wt_dir" ]]; then
-                    while IFS= read -r git_file; do
-                        gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
-                        if [[ -n "$gitdir_line" ]]; then
-                            git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-                            main_repo="${git_dir%/.git/worktrees/*}"
-                            if [[ -d "$main_repo" ]]; then
-                                discovered_repos_str="${discovered_repos_str} ${main_repo}"
-                            fi
-                        fi
-                    done < <(find "$claude_wt_dir" -type f -name ".git" 2>/dev/null)
-                fi
-            done
-        fi
-        
-        # Dedup the repository list using tr/sort/uniq
-        if [[ -n "$discovered_repos_str" ]]; then
-            while IFS= read -r repo; do
-                [[ -n "$repo" ]] && REPO_LOCAL_REPOS+=("$repo")
-            done < <(echo "$discovered_repos_str" | tr ' ' '\n' | sort -u)
-        fi
+        while IFS= read -r repo; do
+            [[ -n "$repo" ]] && REPO_LOCAL_REPOS+=("$repo")
+        done < <(discover_worktree_repos)
     fi
 fi
 
@@ -209,8 +161,75 @@ resolve_main_ref() {
     return 1
 }
 
+# list_has_parent_of <path> <list>: some list entry contains path.
+# list_has_child_of <path> <list>: some list entry is inside path.
+list_has_parent_of() {
+    P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_line() {
+    P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_child_of() {
+    P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+
+# Machine-wide live process CWD snapshot (fail-closed): if lsof fails, or returns
+# an incomplete, unparseable, or unresolved observation (e.g. readlink/stat permission
+# errors in /proc), or if stderr cannot be captured via temp file, cwd is unknown
+# and live-process protection preserves candidates across all worktree roots.
+GLOBAL_LIVE_CWDS=""
+GLOBAL_CWD_BLOCKED=""
+_lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+if [[ ! -x "$_lsof_bin" ]]; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+else
+    _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
+    if [[ -z "$_lsof_tmp" || ! -f "$_lsof_tmp" ]]; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    else
+        _lsof_rc=0
+        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
+        if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
+            rm -f "$_lsof_tmp"
+            GLOBAL_CWD_BLOCKED="cwd-unknown"
+        else
+            rm -f "$_lsof_tmp"
+            if [[ "$_lsof_rc" -ne 0 ]]; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif [[ -z "$_lsof_out" ]]; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd' <<<"$_lsof_out"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            else
+                GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
+                if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
+                    GLOBAL_CWD_BLOCKED="cwd-unknown"
+                fi
+            fi
+        fi
+    fi
+fi
+
 classify_repo_local_worktree() {
-    local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5"
+    local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
+
+    # Fail-closed live process protection: never touch a worktree whose path
+    # (or physical realpath) is currently the cwd of any running process,
+    # or if lsof failed.
+    local real_wt
+    real_wt="$(cd "$wt_path" 2>/dev/null && pwd -P || printf '%s' "$wt_path")"
+    if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        echo "$GLOBAL_CWD_BLOCKED"
+        return 0
+    fi
+    if list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt_path" "$GLOBAL_LIVE_CWDS"; then
+        echo "live-cwd"
+        return 0
+    fi
 
     local age_days
     if ! age_days="$(worktree_age_days "$wt_path")"; then
@@ -272,6 +291,26 @@ classify_repo_local_worktree() {
         local ahead_count
         ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
         if [[ "$ahead_count" -gt 0 ]]; then
+            local branch_clean="${branch#refs/heads/}"
+            if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+                local origin_url owner_repo
+                origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+                if [[ -n "$origin_url" ]]; then
+                    owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                    if [[ -n "$owner_repo" ]]; then
+                        local pr_heads gh_rc=0
+                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                        if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                            if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                                return 0
+                            else
+                                echo "merged-differing-head"
+                                return 0
+                            fi
+                        fi
+                    fi
+                fi
+            fi
             echo "ahead-of-main"
         else
             echo "non-ancestor"
@@ -321,6 +360,16 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
             if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
                 age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
+            if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$GLOBAL_CWD_BLOCKED"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
+            if list_has_child_of "$abs_subdir" "$GLOBAL_LIVE_CWDS"; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "live-cwd"
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 continue
             fi
@@ -415,7 +464,7 @@ process_repo_local_worktrees() {
         fi
 
         local reason size_kb_val size_fmt branch_label extra age_label
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable")"
+        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
         size_kb_val=$(size_kb "$abs_path")
         size_fmt=$(fmt_kb "$size_kb_val")
         branch_label="${branch:-detached}"
@@ -514,27 +563,7 @@ if [[ -d "$STD_ROOT" ]]; then
             STD_BLOCKED="ao-config-unreadable"
         fi
     fi
-    # User-scope lsof cannot see other users' cwds (e.g. root daemons); acceptable
-    # for a user-scope sweeper since such processes do not run in ~/.worktrees.
-    lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-    if lsof_out="$("$lsof_bin" -d cwd -Fn 2>/dev/null)"; then
-        STD_LIVE_CWDS="$(sed -n 's/^n//p' <<<"$lsof_out")"
-    else
-        STD_BLOCKED="cwd-unknown"
-    fi
 fi
-
-# list_has_parent_of <path> <list>: some list entry contains path.
-# list_has_child_of <path> <list>: some list entry is inside path.
-list_has_parent_of() {
-    P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
-}
-list_has_line() {
-    P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
-}
-list_has_child_of() {
-    P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
-}
 
 # std_root_skip_reason <abs> <real>: prints why a standard-root worktree is off-limits.
 std_root_skip_reason() {
@@ -543,7 +572,9 @@ std_root_skip_reason() {
     elif list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
         || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
         echo "ao-owned"
-    elif list_has_child_of "$2" "$STD_LIVE_CWDS" || list_has_child_of "$1" "$STD_LIVE_CWDS"; then
+    elif [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        echo "$GLOBAL_CWD_BLOCKED"
+    elif list_has_child_of "$2" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$1" "$GLOBAL_LIVE_CWDS"; then
         echo "live-cwd"
     fi
 }
