@@ -235,6 +235,9 @@ case "$CMD" in
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
     ;;
+  main-sweeper|sweep)
+    exec bash "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
+    ;;
   clean|routine)
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON

@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# main_sweeper.sh — Single unified maintenance, snapshot, and pressure-recovery runner.
+#
+# Consolidates fragmented launchd sweepers (pressure-sweep, tmp-scratch,
+# colima-prune, claude-state, codex-vacuum, code-sign-clones, worktree-venvs,
+# sweeper-health) into a single deterministic, prioritized execution pipeline.
+#
+# Pipeline phases:
+#   Phase 1: Acquire exclusive run lock (prevents overlapping/flapping runs).
+#   Phase 2: Snapshot & Ledger Recording (snapshot_commit.sh).
+#   Phase 3: Pressure Reclaim (if available GB < THRESHOLD_GB, default 40 GB):
+#            - cleanup_tmp.sh --clean --large (accelerated 4h scratch eviction)
+#            - cleanup_code_sign_clones.sh --clean (evict detached browser code_sign_clones)
+#            - colima in-VM fstrim (if active)
+#   Phase 4: Canonical 6-Tier Routine Maintenance Stack:
+#            - Tier 1: Developer Caches & Ephemeral Temp (cleanup_dev_caches.sh, cleanup_tmp.sh, cleanup_pr_scratch.sh, cleanup_llm_inspector.sh)
+#            - Tier 2: Xcode & Simulator Caches (cleanup_xcode.sh)
+#            - Tier 3: Container VM Reclaim (cleanup_colima.sh --clean + post_job_docker_prune.sh)
+#            - Tier 4: Browser Sessions & Dedup (prune_aside_sessions.sh --clean)
+#            - Tier 5: Agent State Compaction & Rotated Logs (cleanup_antigravity_brain.sh --clean, cleanup_codex_db.sh --clean, cleanup_supervisor_logs.sh --clean, cleanup_uv_cache.sh --clean)
+#            - Tier 6: Dormant Worktree Venvs >=7d (cleanup_worktree_venvs.sh --clean) & Claude State >=7d (cleanup_claude_state.sh --clean)
+#   Phase 5: Health & Ledger Freshness Verification (sweeper_health_check.sh).
+#
+# Defaults to live clean. Pass --dry-run for non-destructive preview.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=scripts/safety_lib.sh
+if [[ -f "$SCRIPT_DIR/safety_lib.sh" ]]; then
+  source "$SCRIPT_DIR/safety_lib.sh"
+fi
+
+DRY_RUN=false
+THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
+SKIP_SNAPSHOT=false
+SKIP_ROUTINE="${DISK_MAGICIAN_MAIN_SWEEPER_SKIP_ROUTINE:-false}"
+SKIP_HEALTH="${DISK_MAGICIAN_MAIN_SWEEPER_SKIP_HEALTH:-false}"
+FREE_GB_OVERRIDE="${DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE:-}"
+FORCE_ROUTINE=false
+STEP_TIMEOUT=600
+
+usage() {
+  cat <<'EOF'
+Usage: main_sweeper.sh [OPTIONS]
+
+Single unified disk maintenance, snapshot, and pressure runner.
+
+Options:
+  --clean           Execute maintenance cleanups (default).
+  --dry-run         Preview actions without deleting files.
+  --threshold-gb N  Pressure threshold in GB below which accelerated eviction triggers (default: 40).
+  --skip-snapshot   Skip Phase 2 snapshot & ledger recording.
+  --force           Force execution even if lock is held or under abnormal conditions.
+  -h, --help        Show this help message.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+    --clean) DRY_RUN=false ;;
+    --dry-run) DRY_RUN=true ;;
+    --threshold-gb)
+      [[ $# -ge 2 ]] || { echo "--threshold-gb requires a value" >&2; exit 2; }
+      THRESHOLD_GB="$2"
+      shift
+      ;;
+    --skip-snapshot) SKIP_SNAPSHOT=true ;;
+    --skip-routine) SKIP_ROUTINE=true ;;
+    --skip-health) SKIP_HEALTH=true ;;
+    --force) FORCE_ROUTINE=true ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+LOCK_DIR="$STATE_DIR/main_sweeper.lock"
+LOCK_TTL_SEC="${DISK_MAGICIAN_MAIN_SWEEPER_LOCK_TTL_SEC:-3600}"
+LOG_FILE="${DISK_MAGICIAN_MAIN_SWEEPER_LOG:-$HOME/Library/Logs/disk-magician-main-sweeper.log}"
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
+
+log() {
+  local line
+  line="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [main_sweeper] $*"
+  echo "$line"
+  echo "$line" >> "$LOG_FILE"
+}
+
+TIMEOUT_CMD=""
+if command -v timeout &>/dev/null; then TIMEOUT_CMD="timeout"
+elif command -v gtimeout &>/dev/null; then TIMEOUT_CMD="gtimeout"; fi
+
+run_step_timeout() {
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    "$TIMEOUT_CMD" "$STEP_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
+free_gb() {
+  if [[ -n "$FREE_GB_OVERRIDE" ]]; then
+    echo "$FREE_GB_OVERRIDE"
+    return 0
+  fi
+  local check_path="/"
+  if [[ "$OSTYPE" == "darwin"* ]] && df "/System/Volumes/Data" >/dev/null 2>&1; then
+    check_path="/System/Volumes/Data"
+  fi
+  ( df -kP "$check_path" 2>/dev/null || true ) | awk 'NR==2{print int($4/1024/1024)}'
+}
+
+acquire_lock() {
+  if [[ "$FORCE_ROUTINE" == true ]]; then
+    log "Warning: --force specified, bypassing lock check."
+    return 0
+  fi
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+    return 0
+  fi
+  local held_pid age
+  held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+  age=$(( $(date +%s) - $(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s) ))
+  if [[ "$age" -gt "$LOCK_TTL_SEC" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$LOCK_DIR/pid"
+      trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+      return 0
+    fi
+  fi
+  log "Already running (lock held by PID ${held_pid:-?}, age ${age}s) — exiting cleanly."
+  return 1
+}
+
+CLEAN_ARG="--clean"
+if [[ "$DRY_RUN" == true ]]; then
+  CLEAN_ARG="--dry-run"
+fi
+
+main() {
+  acquire_lock || exit 0
+
+  log "=== Starting Unified Main Sweeper ==="
+  local start_free_gb
+  start_free_gb="$(free_gb || echo "")"
+  log "Initial available space: ${start_free_gb:-unknown} GiB (mode: ${CLEAN_ARG})"
+
+  # Phase 1: Snapshot & Topdown Ledger
+  if [[ "$SKIP_SNAPSHOT" == false ]]; then
+    log "Phase 1: Recording disk snapshot & topdown ledger..."
+    if [[ -f "$REPO_ROOT/scripts/snapshot_commit.sh" ]]; then
+      run_step_timeout bash "$REPO_ROOT/scripts/snapshot_commit.sh" || log "WARN: snapshot_commit.sh exited with non-zero status"
+    fi
+  else
+    log "Phase 1: Snapshot skipped (--skip-snapshot)."
+  fi
+
+  # Phase 2: Pressure Reclaim (Critical Low-Disk Guard)
+  local current_free_gb
+  current_free_gb="$(free_gb || echo "")"
+  if [[ -n "$current_free_gb" && "$current_free_gb" -lt "$THRESHOLD_GB" ]]; then
+    log "Phase 2: Disk pressure detected (${current_free_gb} GiB < ${THRESHOLD_GB} GiB) — executing accelerated reclaim..."
+    if [[ "${DISK_MAGICIAN_SKIP_TMP_LARGE:-0}" != "1" && -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]]; then
+      log "Running cleanup_tmp.sh with --large and accelerated quarantine..."
+      LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
+        LARGE_TMP_ACTIVE_HOURS=4 LARGE_TMP_ARCHIVE_RETENTION_HOURS=4 \
+        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" --large || log "WARN: cleanup_tmp --large failed"
+    fi
+    if [[ "$DRY_RUN" == false ]] && command -v colima &>/dev/null; then
+      if colima status 2>/dev/null | grep -qi "running"; then
+        log "Trimming Colima VM datadisk..."
+        run_step_timeout colima ssh -- sudo fstrim -av 2>&1 || log "WARN: colima fstrim failed"
+      fi
+    elif [[ "$DRY_RUN" == true ]]; then
+      log "[dry-run] Would trim Colima VM datadisk via colima ssh -- sudo fstrim -av"
+    fi
+    if [[ "${DISK_MAGICIAN_SKIP_CLONES:-0}" != "1" && -f "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" ]]; then
+      log "Cleaning detached browser code_sign_clones..."
+      CODE_SIGN_CLONES_APPROVED=1 run_step_timeout bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || log "WARN: cleanup_code_sign_clones failed"
+    fi
+  else
+    log "Phase 2: Disk space healthy (${current_free_gb:-unknown} GiB >= ${THRESHOLD_GB} GiB)."
+  fi
+
+  # Phase 3: Canonical 6-Tier Routine Maintenance Stack
+  if [[ "$SKIP_ROUTINE" == true ]]; then
+    log "Phase 3: Routine maintenance skipped (--skip-routine)."
+  else
+    log "Phase 3: Executing canonical 6-tier routine maintenance stack..."
+
+    # Tier 1: Dev caches, temp, PR scratch, LLM inspector
+    [[ -f "$REPO_ROOT/scripts/cleanup_dev_caches.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
+
+    # Tier 2: Xcode DerivedData & simulator caches
+    [[ -f "$REPO_ROOT/scripts/cleanup_xcode.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$CLEAN_ARG" || true
+
+    # Tier 3: Colima VM & Docker reclaim
+    if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
+      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || true
+    fi
+    if [[ -f "$REPO_ROOT/scripts/post_job_docker_prune.sh" ]]; then
+      run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" || true
+    fi
+
+    # Tier 4: Browser Sessions & Assets
+    [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
+
+    # Tier 5: Agent State Compaction & Rotated Logs
+    [[ -f "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_codex_db.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_codex_db.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_uv_cache.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_uv_cache.sh" "$CLEAN_ARG" || true
+
+    # Routine code-sign clones maintenance
+    if [[ -f "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" ]]; then
+      CODE_SIGN_CLONES_APPROVED=1 run_step_timeout bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
+    fi
+
+    # Tier 6: Dormant Worktree Venvs (>=7d) & Claude State (>=7d)
+    if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" ]]; then
+      if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+        log "Tier 6: cleanup_worktree_venvs skipped (requires WORKTREE_APPROVED=1)"
+      else
+        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" "$CLEAN_ARG" || true
+      fi
+    fi
+    if [[ -f "$REPO_ROOT/scripts/cleanup_claude_state.sh" ]]; then
+      if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
+        log "Tier 6: cleanup_claude_state skipped (requires CLAUDE_STATE_APPROVED=1)"
+      else
+        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" "$CLEAN_ARG" || true
+      fi
+    fi
+    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/cleanup_worktrees.sh" ]]; then
+      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" "$CLEAN_ARG" || true
+    fi
+  fi
+
+  # Phase 4: Sweeper Health & Status Verification
+  if [[ "$SKIP_HEALTH" == true ]]; then
+    log "Phase 4: Sweeper health check skipped (--skip-health)."
+  else
+    log "Phase 4: Running sweeper health check..."
+    if [[ -f "$REPO_ROOT/scripts/sweeper_health_check.sh" ]]; then
+      run_step_timeout bash "$REPO_ROOT/scripts/sweeper_health_check.sh" || log "WARN: sweeper_health_check reported warnings"
+    fi
+  fi
+
+  local end_free_gb
+  end_free_gb="$(free_gb || echo "")"
+  log "=== Unified Main Sweeper Complete ==="
+  log "Final available space: ${end_free_gb:-unknown} GiB (initial: ${start_free_gb:-unknown} GiB)"
+}
+
+main "$@"

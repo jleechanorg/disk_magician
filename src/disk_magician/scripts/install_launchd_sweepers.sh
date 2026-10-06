@@ -12,11 +12,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCHD_SRC="${DISK_MAGICIAN_LAUNCHD_SRC:-$REPO_ROOT/launchd}"
 DEST="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+CONSOLIDATE=false
 UNLOAD_LEGACY=false
 SELECTED=()
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
+    --consolidate) CONSOLIDATE=true; shift ;;
     --unload-legacy) UNLOAD_LEGACY=true; shift ;;
     -h|--help) sed -n '1,12p' "$0"; exit 0 ;;
     *) SELECTED+=("$1"); shift ;;
@@ -103,6 +105,33 @@ if [[ "$UNLOAD_LEGACY" == true ]]; then
     rm -f "$DEST/${label}.plist"
     echo "unloaded legacy $label"
   done
+fi
+
+consolidated_redundant_labels=(
+  com.disk-magician.colima-prune
+  com.disk-magician.claude-state
+  com.disk-magician.code-sign-clones
+  com.disk-magician.codex-vacuum
+  com.disk-magician.worktree-venvs
+  com.disk-magician.sweeper-health
+  com.disk-magician.playwright-dedup
+  com.disk-magician.hermes-vacuum
+  com.disk-magician.cursor-logs-watchdog
+  com.jleechanorg.disk-magician-pressure-sweep
+  com.jleechanorg.disk-magician-tmp-scratch
+)
+
+if [[ "$CONSOLIDATE" == true ]]; then
+  echo "Consolidating fleet into single main sweeper..."
+  for label in "${consolidated_redundant_labels[@]}"; do
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    if [[ -f "$DEST/${label}.plist" ]]; then
+      mkdir -p "$DEST/.consolidated"
+      mv -f "$DEST/${label}.plist" "$DEST/.consolidated/${label}.plist"
+    fi
+    echo "consolidated redundant $label"
+  done
+  SELECTED=("com.jleechanorg.disk-magician-main-sweeper.plist.template")
 fi
 
 install_plist() {
