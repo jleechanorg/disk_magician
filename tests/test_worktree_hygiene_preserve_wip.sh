@@ -604,6 +604,29 @@ backdate_tree "$W32B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:.beads/my-notes.lock.txt" "other ignored beads content still blocks"
 assert_true "[[ -f '$W32B/.beads/my-notes.lock.txt' ]]" "content intact"
+W32C="$(mk_wt "$R32" gen32c)"
+mkdir -p "$W32C/vendor/node_modules" "$W32C/.husky/_"
+echo "keep" >"$W32C/vendor/node_modules/keep.js"
+g -C "$W32C" add vendor/node_modules/keep.js
+g -C "$W32C" commit -q -m vendored
+echo "my patch" >"$W32C/vendor/node_modules/local-patch.diff"
+printf 'vendor/node_modules/local-patch.diff\n' >>"$R32/.git/info/exclude"
+printf '*\n' >"$W32C/.husky/_/.gitignore"; echo "#!/bin/sh" >"$W32C/.husky/_/h"
+echo "edit" >>"$W32C/tracked.txt"
+backdate_tree "$W32C" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:vendor/node_modules/local-patch.diff" "ignored user file inside a tracked node_modules dir still blocks"
+assert_true "[[ -f '$W32C/vendor/node_modules/local-patch.diff' ]]" "patch intact"
+W32D="$(mk_wt "$R32" gen32d)"
+mkdir -p "$W32D/.husky/_" "$W32D/.beads/.br-db-write-x"
+printf '*\n' >"$W32D/.husky/_/.gitignore"; echo "#!/bin/sh" >"$W32D/.husky/_/h"
+echo "n" >"$W32D/.beads/.br-db-write-x/n.lock"
+printf '.beads/.br-db-write-x/n.lock\n' >>"$R32/.git/info/exclude"
+echo "edit" >>"$W32D/tracked.txt"
+backdate_tree "$W32D" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:.beads/.br-db-write-x/" "lock glob does not cross directories"
+assert_not_contains "$OUT" "ignored-file:.husky" "husky v9 self-ignored shim dir does not block"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

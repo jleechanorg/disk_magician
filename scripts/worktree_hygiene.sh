@@ -581,20 +581,21 @@ preserve_wip_blocker() {
         # regenerated on demand (husky hook shims, beads worktree redirect and
         # write locks).
         case "$ipath" in
-            .husky/_/|*/.husky/_/|.beads/redirect|.beads/.br-db-write-*.lock) continue ;;
+            .husky/_/*|*/.husky/_/*|.beads/redirect) continue ;;
+            .beads/.br-db-write-*.lock) [[ "${ipath#.beads/}" == */* ]] || continue ;;
         esac
-        # A cache dir that ships its own `.gitignore` (e.g. ruff writes `*`)
-        # is listed file by file, so accept any path under an allowlisted dir.
+        # Caches that write their own `*` .gitignore (ruff, pytest, mypy) are
+        # listed file by file; accept paths under them. Other allowlisted
+        # names only count when git lists the whole directory as ignored.
         igen=false
         IFS='/' read -ra icomp <<<"${ipath%/}"
         for ibase in "${icomp[@]}"; do
-            case "$ibase" in
-                node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle) igen=true; break ;;
-            esac
+            case "$ibase" in .ruff_cache|.pytest_cache|.mypy_cache) igen=true; break ;; esac
         done
         "$igen" && continue
+        ibase="${ipath%/}"; ibase="${ibase##*/}"
         case "$ibase" in
-            .DS_Store|*.pyc|*.pyo) ;;
+            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
             *) echo "ignored-file:$ipath"; return 0 ;;
         esac
     done <<<"$ign"
