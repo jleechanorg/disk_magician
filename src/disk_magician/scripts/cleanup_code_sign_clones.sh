@@ -75,7 +75,8 @@ lsof_state() {
   # rc=1 with empty stdout is the normal no-match result only when stderr is
   # also empty; a diagnostic means inspection was incomplete and must fail
   # closed. A bounded caller still owns the lsof invocation timeout.
-  if ps -Ao comm= 2>/dev/null | grep -qF "${candidate}/"; then
+  # Compare without the /private prefix: ps may report /var/folders/...
+  if ps -Ao comm= 2>/dev/null | sed 's#^/private/#/#' | grep -qF "${candidate#/private}/"; then
     LSOF_DETAIL="running executable inside clone"
     return 0
   fi
@@ -96,8 +97,9 @@ lsof_state() {
     # so a process holding a shared file is reported under every clone; lsof's
     # path for such a vnode is whichever link name is cached, so it cannot say
     # which clone was used. A shared inode survives unlinking one path, so it
-    # does not pin this clone. A single-link (or unstattable) open file does,
-    # as does a running process whose executable lives inside the clone.
+    # does not pin this clone by itself. A single-link (or unstattable) open
+    # file pins it, as does a running executable inside it; when only shared
+    # files are open, the newest clone of the parent is kept (see below).
     local line rec_pid="" rec_cmd="" path links
     while IFS= read -r line; do
       case "$line" in
@@ -113,6 +115,16 @@ lsof_state() {
           ;;
       esac
     done <<<"$output"
+    # Only hardlink-shared files are open, so a live app may be using this
+    # app's clones without any per-clone signal: keep the newest clone of the
+    # parent (fail closed if newest cannot be determined), judge older ones.
+    local parent newest
+    parent=$(dirname "$candidate")
+    newest=$(ls -1td "$parent"/code_sign_clone.* 2>/dev/null | head -1)
+    if [[ -z "$newest" || "$newest" == "$candidate" ]]; then
+      LSOF_DETAIL="newest clone of an app with a live shared-inode handle"
+      return 0
+    fi
     LSOF_DETAIL="only hardlink-shared open files"
     [[ -z "$diagnostics" ]] && return 1
     LSOF_DETAIL+=" diagnostics=${diagnostics}"

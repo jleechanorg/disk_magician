@@ -153,18 +153,16 @@ create_candidate "$SH_A"
 mkdir -p "$SH_B/Contents/MacOS"
 ln "$SH_A/Contents/MacOS/binary" "$SH_B/Contents/MacOS/binary"
 dd if=/dev/zero of="$SH_B/Contents/MacOS/framework" bs=1024 count=120 2>/dev/null
-touch -t 202610041200 "$CLONE_PARENT" "$SH_A" "$SH_B"
+touch -t 202610041100 "$SH_A"
+touch -t 202610041200 "$CLONE_PARENT" "$SH_B"
 OUTPUT7=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED=1 CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
-left=0
-[[ -d "$SH_A" ]] && left=$((left + 1))
-[[ -d "$SH_B" ]] && left=$((left + 1))
-if [[ "$left" -ne 1 ]]; then
-  echo "FAIL: expected exactly one of two hardlink-sharing clones removed; the last link of an open file stays (left=$left)" >&2
+if [[ -d "$SH_A" || ! -d "$SH_B" ]]; then
+  echo "FAIL: expected older shA removed and newest shB kept while a shared-inode handle is live" >&2
   echo "$OUTPUT7" >&2
   exit 1
 fi
 if ! grep -q "ACTIVE — preserving" <<<"$OUTPUT7"; then
-  echo "FAIL: the clone holding the last link of the open file must be reported ACTIVE" >&2
+  echo "FAIL: the newest clone must be reported ACTIVE" >&2
   echo "$OUTPUT7" >&2
   exit 1
 fi
@@ -184,6 +182,21 @@ if [[ ! -d "$EXE_CLONE" ]] || ! grep -q "running executable inside clone" <<<"$O
   exit 1
 fi
 echo "  PASS  Test 8"
+
+echo "Test 9: Sole clone whose only open file is hardlinked elsewhere is preserved"
+rm -rf "$CLONE_PARENT"
+SOLE="$CLONE_PARENT/code_sign_clone.sole"
+create_candidate "$SOLE"
+mkdir -p "$TMP_DIR/Applications/App.app/Contents/MacOS"
+ln "$SOLE/Contents/MacOS/binary" "$TMP_DIR/Applications/App.app/Contents/MacOS/binary"
+touch -t 202610041200 "$CLONE_PARENT" "$SOLE"
+OUTPUT9=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED=1 CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$SOLE" ]] || ! grep -q "newest clone of an app" <<<"$OUTPUT9"; then
+  echo "FAIL: live app's sole clone (only shared-inode files open) was not preserved" >&2
+  echo "$OUTPUT9" >&2
+  exit 1
+fi
+echo "  PASS  Test 9"
 
 echo "ALL CHECKS PASSED: test_cleanup_code_sign_clones.sh"
 exit 0
