@@ -47,6 +47,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/layout_standard.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -58,6 +60,7 @@ else
   ROOTS=("$HOME/projects")
   [[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
   [[ -d "$HOME/wc-wt" ]] && ROOTS+=("$HOME/wc-wt")
+  [[ -d "$STANDARD_WORKTREE_ROOT" ]] && ROOTS+=("$STANDARD_WORKTREE_ROOT")
 fi
 PURGE_BAK_DAYS=""
 
