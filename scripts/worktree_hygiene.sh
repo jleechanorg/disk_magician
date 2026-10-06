@@ -333,52 +333,47 @@ triage_candidate() {
                 safe_url="$(redact_url "$origin_url")"
                 owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                 if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
-                    local pr_json
+                    local pr_json gh_rc=0
                     # env -u: a stale GH_TOKEN/GITHUB_TOKEN override breaks gh
                     # even when the stored keychain credential is valid.
                     pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch" --state all \
-                        --json number,state,title,headRefOid 2>/dev/null || true)"
-                    if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
-                        if echo "$pr_json" | grep -qi '"state":"OPEN"'; then
-                            pr_state="open"
-                        elif echo "$pr_json" | grep -qi '"state":"MERGED"'; then
-                            local local_head
-                            local_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
-                            if command -v python3 >/dev/null 2>&1; then
-                                pr_state="$(python3 -c '
+                        --json number,state,title,headRefOid 2>/dev/null)" || gh_rc=$?
+                    if [[ "$gh_rc" -eq 0 && -n "$pr_json" && "$pr_json" != "[]" ]]; then
+                        local local_head
+                        local_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
+                        if command -v python3 >/dev/null 2>&1; then
+                            pr_state="$(python3 -c '
 import json, sys
 try:
     prs = json.loads(sys.argv[1])
     local_head = sys.argv[2].strip()
-    merged = [p for p in prs if p.get("state", "").upper() == "MERGED"]
-    if not merged:
-        print("none")
-    elif not local_head:
-        print("merged-differing-head")
-    else:
-        # Strict fail-closed: must explicitly match a non-empty headRefOid
-        matching = any(p.get("headRefOid") and p.get("headRefOid") == local_head for p in merged)
+    if not isinstance(prs, list) or not local_head:
+        print("unknown")
+        sys.exit(0)
+    has_open = any(isinstance(p, dict) and (p.get("state") or "").upper() == "OPEN" for p in prs)
+    merged_prs = [p for p in prs if isinstance(p, dict) and (p.get("state") or "").upper() == "MERGED"]
+    if has_open:
+        print("open")
+    elif merged_prs:
+        matching = any(p.get("headRefOid") and p.get("headRefOid") == local_head for p in merged_prs)
         if matching:
             print("merged")
         else:
             print("merged-differing-head")
+    elif any(isinstance(p, dict) and (p.get("state") or "").upper() == "CLOSED" for p in prs):
+        print("closed")
+    else:
+        print("none")
 except Exception:
-    print("merged-differing-head")
-' "$pr_json" "$local_head" 2>/dev/null || echo "merged-differing-head")"
-                            else
-                                if [[ -n "$local_head" ]] && echo "$pr_json" | grep -qE "\"headRefOid\"[[:space:]]*:[[:space:]]*\"${local_head}\""; then
-                                    pr_state="merged"
-                                else
-                                    pr_state="merged-differing-head"
-                                fi
-                            fi
-                        elif echo "$pr_json" | grep -qi '"state":"CLOSED"'; then
-                            pr_state="closed"
+    print("unknown")
+' "$pr_json" "$local_head" 2>/dev/null || echo "unknown")"
                         else
-                            pr_state="none"
+                            pr_state="unknown"
                         fi
-                    else
+                    elif [[ "$gh_rc" -eq 0 && "$pr_json" == "[]" ]]; then
                         pr_state="none"
+                    else
+                        pr_state="unknown"
                     fi
                 else
                     pr_state="unknown"

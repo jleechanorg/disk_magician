@@ -286,6 +286,22 @@ git -C "$SQUASH_REPO" commit -q -m "feature D commit"
 SHA_D=$(git -C "$SQUASH_REPO" rev-parse HEAD)
 git -C "$SQUASH_REPO" checkout -q main
 
+# Branch feat-e (Case E: gh emits matching SHA but exits 124 timeout -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-e
+printf 'feature E\n' > "$SQUASH_REPO/feature_e.txt"
+git -C "$SQUASH_REPO" add feature_e.txt
+git -C "$SQUASH_REPO" commit -q -m "feature E commit"
+SHA_E=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-f (Case F: matching SHA, but live process has cwd inside worktree -> PRESERVE live-cwd)
+git -C "$SQUASH_REPO" checkout -q -b feat-f
+printf 'feature F\n' > "$SQUASH_REPO/feature_f.txt"
+git -C "$SQUASH_REPO" add feature_f.txt
+git -C "$SQUASH_REPO" commit -q -m "feature F commit"
+SHA_F=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
 # Advance main so branches are ahead-of-main (not ancestors)
 printf 'squashed commit\n' >> "$SQUASH_REPO/README.md"
 git -C "$SQUASH_REPO" add README.md
@@ -296,13 +312,22 @@ git -C "$SQUASH_REPO" worktree add -q -B feat-a "$SQUASH_REPO/.claude/worktrees/
 git -C "$SQUASH_REPO" worktree add -q -B feat-b "$SQUASH_REPO/.claude/worktrees/wt-squash-b" "$SHA_B"
 git -C "$SQUASH_REPO" worktree add -q -B feat-c "$SQUASH_REPO/.claude/worktrees/wt-squash-c" "$SHA_C"
 git -C "$SQUASH_REPO" worktree add -q -B feat-d "$SQUASH_REPO/.claude/worktrees/wt-squash-d" "$SHA_D"
+git -C "$SQUASH_REPO" worktree add -q -B feat-e "$SQUASH_REPO/.claude/worktrees/wt-squash-e" "$SHA_E"
+git -C "$SQUASH_REPO" worktree add -q -B feat-f "$SQUASH_REPO/.claude/worktrees/wt-squash-f" "$SHA_F"
 
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-a" 30
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-b" 30
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-c" 30
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-d" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-e" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 30
 
-rm -f "$FAKE_BIN/lsof"
+WT_F_REAL="$(cd "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 2>/dev/null && pwd -P || printf '%s' "$SQUASH_REPO/.claude/worktrees/wt-squash-f")"
+cat > "$FAKE_BIN/lsof" <<SH
+#!/bin/sh
+echo "n$WT_F_REAL"
+SH
+chmod +x "$FAKE_BIN/lsof"
 
 # Provide fake timeout and fake gh on PATH
 cat > "$FAKE_BIN/timeout" <<'SH'
@@ -328,6 +353,14 @@ case "\$*" in
     ;;
   *feat-d*)
     echo ""
+    exit 0
+    ;;
+  *feat-e*)
+    echo "$SHA_E"
+    exit 124
+    ;;
+  *feat-f*)
+    echo "$SHA_F"
     exit 0
     ;;
   *)
@@ -356,6 +389,12 @@ assert_contains "Case C: gh exit 1 preserved as ahead-of-main" ".claude/worktree
 
 # Case D: Squash-merged clean 30d worktree with fake gh returning empty headRefOid -> fail-closed PRESERVE ahead-of-main
 assert_contains "Case D: empty headRefOid preserved as ahead-of-main" ".claude/worktrees/wt-squash-d | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case E: Squash-merged clean 30d worktree with fake gh emitting matching SHA but exiting 124 (timeout) -> PRESERVE ahead-of-main
+assert_contains "Case E: gh exit 124 timeout preserved as ahead-of-main" ".claude/worktrees/wt-squash-e | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case F: Squash-merged clean 30d worktree with matching SHA, but live process in cwd -> PRESERVE live-cwd
+assert_contains "Case F: repo-local live-cwd preserved" ".claude/worktrees/wt-squash-f | live-cwd" "$OUT_SQUASH_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

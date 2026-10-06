@@ -209,8 +209,45 @@ resolve_main_ref() {
     return 1
 }
 
+# list_has_parent_of <path> <list>: some list entry contains path.
+# list_has_child_of <path> <list>: some list entry is inside path.
+list_has_parent_of() {
+    P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_line() {
+    P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_child_of() {
+    P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+
+# Machine-wide live process CWD snapshot (fail-closed): if lsof fails, cwd is unknown
+# and live-process protection preserves candidates across all worktree roots.
+GLOBAL_LIVE_CWDS=""
+GLOBAL_CWD_BLOCKED=""
+_lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+if _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>/dev/null)"; then
+    GLOBAL_LIVE_CWDS="$(sed -n 's/^n//p' <<<"$_lsof_out")"
+else
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+fi
+
 classify_repo_local_worktree() {
     local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
+
+    # Fail-closed live process protection: never touch a worktree whose path
+    # (or physical realpath) is currently the cwd of any running process,
+    # or if lsof failed.
+    local real_wt
+    real_wt="$(cd "$wt_path" 2>/dev/null && pwd -P || printf '%s' "$wt_path")"
+    if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        echo "$GLOBAL_CWD_BLOCKED"
+        return 0
+    fi
+    if list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt_path" "$GLOBAL_LIVE_CWDS"; then
+        echo "live-cwd"
+        return 0
+    fi
 
     local age_days
     if ! age_days="$(worktree_age_days "$wt_path")"; then
@@ -279,9 +316,9 @@ classify_repo_local_worktree() {
                 if [[ -n "$origin_url" ]]; then
                     owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                     if [[ -n "$owner_repo" ]]; then
-                        local pr_heads
-                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null || true)"
-                        if [[ -n "$pr_heads" && -n "$head_sha" ]]; then
+                        local pr_heads gh_rc=0
+                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                        if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
                             if grep -qFx "$head_sha" <<<"$pr_heads"; then
                                 return 0
                             else
@@ -534,27 +571,7 @@ if [[ -d "$STD_ROOT" ]]; then
             STD_BLOCKED="ao-config-unreadable"
         fi
     fi
-    # User-scope lsof cannot see other users' cwds (e.g. root daemons); acceptable
-    # for a user-scope sweeper since such processes do not run in ~/.worktrees.
-    lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-    if lsof_out="$("$lsof_bin" -d cwd -Fn 2>/dev/null)"; then
-        STD_LIVE_CWDS="$(sed -n 's/^n//p' <<<"$lsof_out")"
-    else
-        STD_BLOCKED="cwd-unknown"
-    fi
 fi
-
-# list_has_parent_of <path> <list>: some list entry contains path.
-# list_has_child_of <path> <list>: some list entry is inside path.
-list_has_parent_of() {
-    P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
-}
-list_has_line() {
-    P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
-}
-list_has_child_of() {
-    P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
-}
 
 # std_root_skip_reason <abs> <real>: prints why a standard-root worktree is off-limits.
 std_root_skip_reason() {
@@ -563,7 +580,9 @@ std_root_skip_reason() {
     elif list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
         || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
         echo "ao-owned"
-    elif list_has_child_of "$2" "$STD_LIVE_CWDS" || list_has_child_of "$1" "$STD_LIVE_CWDS"; then
+    elif [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        echo "$GLOBAL_CWD_BLOCKED"
+    elif list_has_child_of "$2" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$1" "$GLOBAL_LIVE_CWDS"; then
         echo "live-cwd"
     fi
 }
