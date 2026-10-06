@@ -64,7 +64,8 @@ discover_worktree_repos() {
         local timeout_sec="${WORKTREE_DISCOVERY_TIMEOUT:-8}"
         local git_files=""
         if command -v python3 >/dev/null 2>&1; then
-            git_files=$(python3 -c '
+            local raw_files
+            raw_files=$(python3 -c '
 import sys, subprocess
 t = float(sys.argv[1])
 cmd = sys.argv[2:]
@@ -83,11 +84,29 @@ except subprocess.TimeoutExpired as exc:
     sys.stderr.flush()
 except Exception:
     pass
-' "$timeout_sec" "${find_cmd[@]}" || true)
+' "$timeout_sec" "${find_cmd[@]}"; printf '__DWR_RC__%d' "$?")
+            raw_files="${raw_files%__DWR_RC__*}"
+            git_files="$raw_files"
         elif command -v timeout >/dev/null 2>&1; then
-            git_files=$(timeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null || true)
+            local timeout_rc=0
+            local raw_files
+            raw_files=$(timeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null; printf '__DWR_RC__%d' "$?")
+            timeout_rc="${raw_files##*__DWR_RC__}"
+            raw_files="${raw_files%__DWR_RC__*}"
+            if [[ $timeout_rc -eq 124 || $timeout_rc -eq 137 || $timeout_rc -eq 143 ]]; then
+                echo "worktree_repo_discovery: timeout searching root $search_dir" >&2
+            fi
+            git_files="$raw_files"
         elif command -v gtimeout >/dev/null 2>&1; then
-            git_files=$(gtimeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null || true)
+            local timeout_rc=0
+            local raw_files
+            raw_files=$(gtimeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null; printf '__DWR_RC__%d' "$?")
+            timeout_rc="${raw_files##*__DWR_RC__}"
+            raw_files="${raw_files%__DWR_RC__*}"
+            if [[ $timeout_rc -eq 124 || $timeout_rc -eq 137 || $timeout_rc -eq 143 ]]; then
+                echo "worktree_repo_discovery: timeout searching root $search_dir" >&2
+            fi
+            git_files="$raw_files"
         else
             echo "worktree_repo_discovery: skipping root $search_dir (no timeout runner available)" >&2
             return 0
@@ -103,12 +122,16 @@ except Exception:
                 main_repo="${git_dir%/.git/worktrees/*}"
                 _dwr_add_main_repo "$main_repo"
             fi
-        done <<<"$git_files"
+        done < <(printf '%s' "$git_files")
     }
 
     _dwr_find_repos_from_worktrees "$HOME/.ao/data/worktrees" 3
     _dwr_find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees" 3
-    _dwr_find_repos_from_worktrees "$HOME/.worktrees" 3
+    local std_wt_root="${STANDARD_WORKTREE_ROOT:-$HOME/.worktrees}"
+    _dwr_find_repos_from_worktrees "$std_wt_root" 3
+    if [[ "$std_wt_root" != "$HOME/.worktrees" ]]; then
+        _dwr_find_repos_from_worktrees "$HOME/.worktrees" 3
+    fi
 
     if [[ -d "$HOME/projects" ]]; then
         for repo_dir in "$HOME/projects"/*; do

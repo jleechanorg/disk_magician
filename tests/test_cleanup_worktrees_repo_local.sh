@@ -239,6 +239,38 @@ assert_contains "lsof failure: old worktree preserved" ".worktrees/r/old | cwd-u
 assert_not_contains "lsof failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOLSOF" || true)"
 kill "$SLEEP_PID" 2>/dev/null || true
 
+echo "Test: custom configured STANDARD_WORKTREE_ROOT discovery and governance without --repos"
+CUSTOM_WT_ROOT="$TMP_ROOT/custom_wt_root"
+CUSTOM_REPO="$TMP_ROOT/custom_main_repo"
+mkdir -p "$CUSTOM_REPO"
+git -C "$CUSTOM_REPO" init -b main >/dev/null
+git -C "$CUSTOM_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$CUSTOM_REPO" config user.name "Fixture User"
+echo "init" > "$CUSTOM_REPO/README.md"
+git -C "$CUSTOM_REPO" add README.md
+git -C "$CUSTOM_REPO" commit -m "init" >/dev/null
+CUSTOM_BASE_SHA=$(git -C "$CUSTOM_REPO" rev-parse HEAD)
+
+mkdir -p "$CUSTOM_WT_ROOT/custom_main_repo"
+git -C "$CUSTOM_REPO" worktree add -B wt-custom-old "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" "$CUSTOM_BASE_SHA" >/dev/null
+age_worktree_days_ago "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" 10
+
+CUSTOM_HOME="$TMP_ROOT/custom_home"
+mkdir -p "$CUSTOM_HOME"
+CUSTOM_OUT="$TMP_ROOT/custom_std.out"
+env -i HOME="$CUSTOM_HOME" PATH="/usr/bin:/bin" \
+  STANDARD_WORKTREE_ROOT="$CUSTOM_WT_ROOT" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --dry-run >"$CUSTOM_OUT" 2>&1
+
+CUSTOM_TEXT=$(cat "$CUSTOM_OUT")
+if grep -F "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" <<<"$CUSTOM_TEXT" | grep -qF 'ELIGIBLE  '; then
+  record_pass "custom STANDARD_WORKTREE_ROOT discovered without --repos and eligible"
+else
+  record_fail "custom STANDARD_WORKTREE_ROOT discovered without --repos and eligible" "did not find ELIGIBLE for custom wt root"
+fi
+assert_contains "custom STANDARD_WORKTREE_ROOT summary eligible count" "Repo-local:  1 eligible, 0 preserved." "$CUSTOM_TEXT"
+
 DISCOVERY_LIB="$REPO_ROOT/scripts/lib/worktree_repo_discovery.sh"
 SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT" "$DISCOVERY_LIB" 2>/dev/null || cat "$CLEANUP_SCRIPT")
 if grep -Eq '(_dwr_find_repos_from_worktrees|find_repos_from_worktrees) "\$HOME/wc-wt"' <<<"$SCRIPT_TEXT"; then

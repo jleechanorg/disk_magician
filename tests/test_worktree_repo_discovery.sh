@@ -166,6 +166,65 @@ NO_RUNNER_STDERR="$TMP_DIR/norunner_stderr.log"
 OUT="$(PATH="$NO_RUNNER_BIN" discover_worktree_repos "" 2>"$NO_RUNNER_STDERR")"
 expect "skips root when no runner is found" "skipping root" "$(cat "$NO_RUNNER_STDERR")"
 
+echo "Test 15: timeout fallback preserves newline-complete records and drops truncated trailing record"
+TIMEOUT_FB_BIN="$TMP_DIR/timeout_fb_bin"
+mkdir -p "$TIMEOUT_FB_BIN"
+for cmd in sh bash grep sed cut tr sort ls rm mkdir cat; do
+  target="$(command -v "$cmd" 2>/dev/null || true)"
+  [[ -n "$target" ]] && ln -s "$target" "$TIMEOUT_FB_BIN/$cmd"
+done
+# Mock timeout that emits 1 complete line and 1 incomplete line, then exits 124
+cat > "$TIMEOUT_FB_BIN/timeout" << 'EOF'
+#!/bin/sh
+search_dir="$3"
+printf "%s/complete-wt/.git\n" "$search_dir"
+printf "%s/truncated-wt/.git" "$search_dir"
+exit 124
+EOF
+chmod +x "$TIMEOUT_FB_BIN/timeout"
+
+mkdir -p "$TMP_DIR/fb-complete-repo/.git/worktrees/wt"
+mkdir -p "$TMP_DIR/fb-truncated-repo/.git/worktrees/wt"
+mkdir -p "$TMP_DIR/wc-wt/complete-wt"
+mkdir -p "$TMP_DIR/wc-wt/truncated-wt"
+echo "gitdir: $TMP_DIR/fb-complete-repo/.git/worktrees/wt" > "$TMP_DIR/wc-wt/complete-wt/.git"
+echo "gitdir: $TMP_DIR/fb-truncated-repo/.git/worktrees/wt" > "$TMP_DIR/wc-wt/truncated-wt/.git"
+
+TIMEOUT_FB_STDERR="$TMP_DIR/timeout_fb_stderr.log"
+OUT="$(PATH="$TIMEOUT_FB_BIN" discover_worktree_repos "" 2>"$TIMEOUT_FB_STDERR")"
+expect "timeout fallback preserves complete record" "$TMP_DIR/fb-complete-repo" "$OUT"
+refute "timeout fallback drops truncated trailing record" "$TMP_DIR/fb-truncated-repo" "$OUT"
+expect "timeout fallback emits timeout warning to stderr" "worktree_repo_discovery: timeout searching root" "$(cat "$TIMEOUT_FB_STDERR")"
+
+echo "Test 16: gtimeout fallback preserves newline-complete records and drops truncated trailing record"
+GTIMEOUT_FB_BIN="$TMP_DIR/gtimeout_fb_bin"
+mkdir -p "$GTIMEOUT_FB_BIN"
+for cmd in sh bash grep sed cut tr sort ls rm mkdir cat; do
+  target="$(command -v "$cmd" 2>/dev/null || true)"
+  [[ -n "$target" ]] && ln -s "$target" "$GTIMEOUT_FB_BIN/$cmd"
+done
+cat > "$GTIMEOUT_FB_BIN/gtimeout" << 'EOF'
+#!/bin/sh
+search_dir="$3"
+printf "%s/complete-wt/.git\n" "$search_dir"
+printf "%s/truncated-wt/.git" "$search_dir"
+exit 124
+EOF
+chmod +x "$GTIMEOUT_FB_BIN/gtimeout"
+
+GTIMEOUT_FB_STDERR="$TMP_DIR/gtimeout_fb_stderr.log"
+OUT="$(PATH="$GTIMEOUT_FB_BIN" discover_worktree_repos "" 2>"$GTIMEOUT_FB_STDERR")"
+expect "gtimeout fallback preserves complete record" "$TMP_DIR/fb-complete-repo" "$OUT"
+refute "gtimeout fallback drops truncated trailing record" "$TMP_DIR/fb-truncated-repo" "$OUT"
+expect "gtimeout fallback emits timeout warning to stderr" "worktree_repo_discovery: timeout searching root" "$(cat "$GTIMEOUT_FB_STDERR")"
+
+echo "Test 17: discovers main repo from worktrees in custom STANDARD_WORKTREE_ROOT"
+mkdir -p "$TMP_DIR/custom-std-main/.git/worktrees/wt-std"
+mkdir -p "$TMP_DIR/custom_std_root/project/wt-std"
+echo "gitdir: $TMP_DIR/custom-std-main/.git/worktrees/wt-std" > "$TMP_DIR/custom_std_root/project/wt-std/.git"
+OUT="$(STANDARD_WORKTREE_ROOT="$TMP_DIR/custom_std_root" discover_worktree_repos "")"
+expect "discovers main repo from custom STANDARD_WORKTREE_ROOT" "$TMP_DIR/custom-std-main" "$OUT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
