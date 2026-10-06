@@ -58,7 +58,9 @@ $HOME/.colima/default/docker.sock	cleanup_colima.sh	COLIMA_DOCKER_SOCKET, line 6
 $HOME/.aside/u	prune_aside_sessions.sh	disk_audit.sh Aside browser sessions check
 
 # cleanup_antigravity_brain.sh
-$HOME/.gemini/antigravity-cli/brain	cleanup_antigravity_brain.sh	BRAIN_DIR default, line 15
+$HOME/.gemini/antigravity-cli/brain	cleanup_antigravity_brain.sh	AGCLI_BRAIN
+$HOME/.gemini/antigravity/brain	cleanup_antigravity_brain.sh	AG_BRAIN
+$HOME/.gemini/antigravity/worktrees	cleanup_antigravity_brain.sh	AG_WORKTREES
 
 # cleanup_supervisor_logs.sh
 $HOME/.claude/supervisor	cleanup_supervisor_logs.sh	SUPERVISOR_DIR, line 15

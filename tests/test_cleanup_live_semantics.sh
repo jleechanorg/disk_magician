@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Pins the APFS / Docker / Antigravity cleanup scripts to the live user-scope
+# semantics (Time Machine snapshot deletion, builder prune + TRIM, brain/
+# worktree/.backup pruning) with dm's dry-run-by-default / --clean contract.
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d -t cleanup_live_sem.XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+FAIL=0
+ok()  { echo "  PASS: $1"; }
+bad() { echo "  FAIL: $1"; FAIL=1; }
+has() { grep -qF -- "$2" <<<"$3" && ok "$1" || bad "$1 (missing: $2)"; }
+hasnt() { grep -qF -- "$2" <<<"$3" && bad "$1 (found: $2)" || ok "$1"; }
+
+BIN="$TMP/bin"; mkdir -p "$BIN"
+CALLS="$TMP/calls"; : > "$CALLS"
+OLD="com.apple.TimeMachine.2020-01-01-000000.local"
+NEW="com.apple.TimeMachine.$(date '+%Y-%m-%d-%H%M%S').local"
+cat > "$BIN/tmutil" <<EOS
+#!/usr/bin/env bash
+case "\$1" in
+  listlocalsnapshots) printf '%s\n%s\n' "$OLD" "$NEW" ;;
+  listlocalsnapshotdates) echo "Snapshot dates for all disks:" ;;
+  deletelocalsnapshots) echo "tmutil \$*" >> "$CALLS" ;;
+esac
+EOS
+cat > "$BIN/diskutil" <<'EOS'
+#!/usr/bin/env bash
+exit 1
+EOS
+cat > "$BIN/docker" <<EOS
+#!/usr/bin/env bash
+case "\$1" in
+  info|system) exit 0 ;;
+  *) echo "docker \$*" >> "$CALLS" ;;
+esac
+EOS
+chmod +x "$BIN"/*
+export PATH="$BIN:/usr/bin:/bin"
+
+echo "APFS: dry-run default does not delete"
+out="$(HOME="$TMP/home" bash "$REPO_ROOT/scripts/cleanup_apfs_snapshots.sh" 2>&1)"
+has "dry-run queues old TM snapshot" "[dry-run] would delete snapshot: 2020-01-01-000000" "$out"
+[[ ! -s "$CALLS" ]] && ok "no tmutil delete in dry-run" || bad "tmutil delete ran in dry-run"
+echo "APFS: --clean deletes only the old Time Machine snapshot"
+HOME="$TMP/home" bash "$REPO_ROOT/scripts/cleanup_apfs_snapshots.sh" --clean >/dev/null 2>&1
+[[ "$(cat "$CALLS")" == "tmutil deletelocalsnapshots 2020-01-01-000000" ]] && ok "deleted old TM only" || bad "unexpected calls: $(cat "$CALLS")"
+
+: > "$CALLS"
+echo "Docker: dry-run default prints builder prune + TRIM, runs neither"
+out="$(HOME="$TMP/home" bash "$REPO_ROOT/scripts/cleanup_docker.sh" 2>&1)"
+has "builder prune planned" "docker builder prune -af --keep-storage 5g" "$out"
+has "TRIM planned" "docker/desktop-reclaim-space" "$out"
+hasnt "no system prune" "system prune" "$out"
+[[ ! -s "$CALLS" ]] && ok "no docker mutation in dry-run" || bad "docker mutated in dry-run"
+echo "Docker: --clean runs builder prune, image prune, TRIM"
+HOME="$TMP/home" bash "$REPO_ROOT/scripts/cleanup_docker.sh" --clean >/dev/null 2>&1
+calls="$(cat "$CALLS")"
+has "builder prune ran" "docker builder prune -af --keep-storage 5g" "$calls"
+has "image prune ran" "docker image prune -af" "$calls"
+has "TRIM ran" "docker/desktop-reclaim-space" "$calls"
+
+echo "Antigravity: IDE brain, idle worktree, .backup pruned; conversations kept"
+H="$TMP/ag"; AG="$H/.gemini/antigravity"
+mkdir -p "$AG/brain/old" "$AG/brain/new" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/live" \
+         "$AG/brain.backup" "$AG/conversations/keep"
+echo x > "$AG/worktrees/proj/idle/f"; echo x > "$AG/worktrees/proj/live/f"; echo x > "$AG/conversations/keep/f"
+touch -t 202001010000 "$AG/brain/old" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/f" "$AG/brain.backup"
+out="$(HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" 2>&1)"
+has "dry-run reports old IDE brain" "would delete old" "$out"
+[[ -d "$AG/brain/old" ]] && ok "dry-run keeps old brain" || bad "dry-run deleted old brain"
+HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
+[[ ! -e "$AG/brain/old" ]] && ok "old IDE brain pruned" || bad "old IDE brain kept"
+[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "idle worktree pruned" || bad "idle worktree kept"
+[[ ! -e "$AG/brain.backup" ]] && ok ".backup leftover pruned" || bad ".backup kept"
+[[ -d "$AG/brain/new" && -d "$AG/worktrees/proj/live" && -d "$AG/conversations/keep" ]] && ok "recent state + conversations kept" || bad "protected state deleted"
+
+exit $FAIL
