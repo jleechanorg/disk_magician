@@ -90,4 +90,19 @@ HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain
 [[ ! -e "$AG/worktrees/proj/idle" ]] && ok "idle worktree pruned with WORKTREE_APPROVED" || bad "idle worktree kept with WORKTREE_APPROVED"
 [[ -d "$AG/brain/new" && -d "$AG/worktrees/proj/live" && -d "$AG/conversations/keep" ]] && ok "recent state + conversations kept" || bad "protected state deleted"
 
+# Verify symlinked candidates/parents are rejected and physical targets outside root are protected
+EXTERNAL_TARGET="$TMP/external_dir"; mkdir -p "$EXTERNAL_TARGET"
+echo "important external data" > "$EXTERNAL_TARGET/important.txt"
+touch -t 202001010000 "$EXTERNAL_TARGET" "$EXTERNAL_TARGET/important.txt"
+ln -s "$EXTERNAL_TARGET" "$AG/worktrees/proj/symlink_wt"
+
+EXTERNAL_BRAIN="$TMP/external_brain"; mkdir -p "$EXTERNAL_BRAIN"
+echo "important brain data" > "$EXTERNAL_BRAIN/data.txt"
+touch -t 202001010000 "$EXTERNAL_BRAIN" "$EXTERNAL_BRAIN/data.txt"
+ln -s "$EXTERNAL_BRAIN" "$AG/brain/symlink_brain"
+
+HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
+[[ -d "$EXTERNAL_TARGET" && -f "$EXTERNAL_TARGET/important.txt" ]] && ok "symlinked worktree external target protected" || bad "symlinked worktree external target deleted"
+[[ -d "$EXTERNAL_BRAIN" && -f "$EXTERNAL_BRAIN/data.txt" ]] && ok "symlinked brain external target protected" || bad "symlinked brain external target deleted"
+
 exit $FAIL

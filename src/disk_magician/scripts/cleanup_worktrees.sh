@@ -463,11 +463,29 @@ process_antigravity_orphan() {
 if [[ -d "$WORKTREE_ROOT" ]]; then
     echo ""
     echo "--- Antigravity orphans ($WORKTREE_ROOT) ---"
+    real_worktree_root="$(cd "$WORKTREE_ROOT" 2>/dev/null && pwd -P || true)"
     for parent_dir in "$WORKTREE_ROOT"/*; do
+        [[ -e "$parent_dir" ]] || continue
+        if [[ -L "$parent_dir" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$parent_dir" "symlink-parent"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            continue
+        fi
         [[ -d "$parent_dir" ]] || continue
         for subdir in "$parent_dir"/*; do
+            [[ -e "$subdir" ]] || continue
+            if [[ -L "$subdir" ]]; then
+                ledger_line "antigravity" "PRESERVE" "$subdir" "symlink-candidate"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
             [[ -d "$subdir" ]] || continue
-            abs_subdir=$(cd "$subdir" && pwd -P)
+            abs_subdir="$(cd "$subdir" 2>/dev/null && pwd -P || true)"
+            if [[ -z "$abs_subdir" || -z "$real_worktree_root" || "$abs_subdir" != "$real_worktree_root"/*/* ]]; then
+                ledger_line "antigravity" "PRESERVE" "$subdir" "outside-root"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                continue
+            fi
             process_antigravity_orphan "$abs_subdir"
         done
     done

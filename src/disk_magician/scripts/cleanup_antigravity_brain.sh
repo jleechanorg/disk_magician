@@ -152,10 +152,22 @@ prune_old_children() {
     log "$label: $base not found, skipping"
     return
   fi
+  local real_base
+  real_base="$(cd "$base" 2>/dev/null && pwd -P || true)"
   local before_kb; before_kb=$(size_kb "$base")
   log "$label: scanning $base (before $(fmt_kb "$before_kb"), cutoff >${age_days}d)"
   local entry
   while IFS= read -r -d '' entry; do
+    if [[ -L "$entry" ]]; then
+      log "$label: skipping symlink $(basename "$entry") (symlink-candidate)"
+      continue
+    fi
+    local real_entry
+    real_entry="$(cd "$entry" 2>/dev/null && pwd -P || true)"
+    if [[ -z "$real_entry" || -z "$real_base" || "$real_entry" != "$real_base"/* ]]; then
+      log "$label: skipping entry outside root $(basename "$entry")"
+      continue
+    fi
     if brain_dir_is_recently_active "$entry" "$age_days"; then
       local age_lbl
       age_lbl="$(brain_dir_age_days "$entry" 2>/dev/null || echo 0)"
