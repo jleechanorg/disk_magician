@@ -353,23 +353,23 @@ try:
     merged = [p for p in prs if p.get("state", "").upper() == "MERGED"]
     if not merged:
         print("none")
+    elif not local_head:
+        print("merged-differing-head")
     else:
-        matching = any(p.get("headRefOid") == local_head for p in merged)
-        has_oids = any(bool(p.get("headRefOid")) for p in merged)
-        if matching or not has_oids:
+        # Strict fail-closed: must explicitly match a non-empty headRefOid
+        matching = any(p.get("headRefOid") and p.get("headRefOid") == local_head for p in merged)
+        if matching:
             print("merged")
         else:
             print("merged-differing-head")
 except Exception:
-    print("merged")
-' "$pr_json" "$local_head" 2>/dev/null || echo "merged")"
+    print("merged-differing-head")
+' "$pr_json" "$local_head" 2>/dev/null || echo "merged-differing-head")"
                             else
                                 if [[ -n "$local_head" ]] && echo "$pr_json" | grep -qE "\"headRefOid\"[[:space:]]*:[[:space:]]*\"${local_head}\""; then
                                     pr_state="merged"
-                                elif echo "$pr_json" | grep -qE "\"headRefOid\"[[:space:]]*:[[:space:]]*\"[0-9a-fA-F]+\""; then
-                                    pr_state="merged-differing-head"
                                 else
-                                    pr_state="merged"
+                                    pr_state="merged-differing-head"
                                 fi
                             fi
                         elif echo "$pr_json" | grep -qi '"state":"CLOSED"'; then

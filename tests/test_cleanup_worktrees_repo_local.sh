@@ -278,6 +278,14 @@ git -C "$SQUASH_REPO" commit -q -m "feature C commit"
 SHA_C=$(git -C "$SQUASH_REPO" rev-parse HEAD)
 git -C "$SQUASH_REPO" checkout -q main
 
+# Branch feat-d (Case D: gh returns empty headRefOid -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-d
+printf 'feature D\n' > "$SQUASH_REPO/feature_d.txt"
+git -C "$SQUASH_REPO" add feature_d.txt
+git -C "$SQUASH_REPO" commit -q -m "feature D commit"
+SHA_D=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
 # Advance main so branches are ahead-of-main (not ancestors)
 printf 'squashed commit\n' >> "$SQUASH_REPO/README.md"
 git -C "$SQUASH_REPO" add README.md
@@ -287,10 +295,12 @@ git -C "$SQUASH_REPO" commit -q -m "main squashed commit"
 git -C "$SQUASH_REPO" worktree add -q -B feat-a "$SQUASH_REPO/.claude/worktrees/wt-squash-a" "$SHA_A"
 git -C "$SQUASH_REPO" worktree add -q -B feat-b "$SQUASH_REPO/.claude/worktrees/wt-squash-b" "$SHA_B"
 git -C "$SQUASH_REPO" worktree add -q -B feat-c "$SQUASH_REPO/.claude/worktrees/wt-squash-c" "$SHA_C"
+git -C "$SQUASH_REPO" worktree add -q -B feat-d "$SQUASH_REPO/.claude/worktrees/wt-squash-d" "$SHA_D"
 
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-a" 30
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-b" 30
 age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-c" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-d" 30
 
 rm -f "$FAKE_BIN/lsof"
 
@@ -316,6 +326,10 @@ case "\$*" in
   *feat-c*)
     exit 1
     ;;
+  *feat-d*)
+    echo ""
+    exit 0
+    ;;
   *)
     exit 1
     ;;
@@ -339,6 +353,9 @@ assert_contains "Case B: differing headRefOid preserved" ".claude/worktrees/wt-s
 
 # Case C: Squash-merged clean 30d worktree with fake gh exiting 1 -> fail-closed PRESERVE ahead-of-main
 assert_contains "Case C: gh exit 1 preserved as ahead-of-main" ".claude/worktrees/wt-squash-c | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
+# Case D: Squash-merged clean 30d worktree with fake gh returning empty headRefOid -> fail-closed PRESERVE ahead-of-main
+assert_contains "Case D: empty headRefOid preserved as ahead-of-main" ".claude/worktrees/wt-squash-d | ahead-of-main" "$OUT_SQUASH_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

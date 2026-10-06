@@ -281,7 +281,7 @@ classify_repo_local_worktree() {
                     if [[ -n "$owner_repo" ]]; then
                         local pr_heads
                         pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null || true)"
-                        if [[ -n "$pr_heads" ]]; then
+                        if [[ -n "$pr_heads" && -n "$head_sha" ]]; then
                             if grep -qFx "$head_sha" <<<"$pr_heads"; then
                                 return 0
                             else
