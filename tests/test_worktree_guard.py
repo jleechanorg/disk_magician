@@ -53,6 +53,51 @@ class TestWorktreeGuard(unittest.TestCase):
         self.assertIn("diskm worktree-new", hso["permissionDecisionReason"])
         self.assertIn("~/.worktrees/<repo>/<name>", hso["permissionDecisionReason"])
 
+    # --- deny reason names the concrete destination ----------------------------
+    def _git_repo(self, name):
+        repo = os.path.join(self.home, "src", name)
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        return os.path.realpath(repo)
+
+    def reason(self, res):
+        self.assertDeny(res)
+        return json.loads(res.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_reason_names_concrete_path_and_command(self):
+        repo = self._git_repo("myrepo")
+        r = self.reason(self.run_cmd("git worktree add -b feat/x /tmp/feat-x", cwd=repo))
+        dest = os.path.join(self.home, ".worktrees", "myrepo", "feat-x")
+        self.assertIn(dest, r)
+        self.assertIn("diskm worktree-new %s feat/x --name feat-x" % repo, r)
+        self.assertIn("git worktree add -b feat/x %s" % dest, r)
+
+    def test_reason_from_linked_worktree_cwd_uses_main_repo_name(self):
+        repo = self._git_repo("mainrepo")
+        subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "i"], check=True,
+                       env=dict(self.env, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+        linked = os.path.join(self.home, ".worktrees", "mainrepo", "l1")
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q", linked], check=True)
+        r = self.reason(self.run_cmd("git worktree add ../../../projects/wt2", cwd=linked))
+        self.assertIn(os.path.join(self.home, ".worktrees", "mainrepo", "wt2"), r)
+
+    def test_reason_strips_mktemp_suffix(self):
+        repo = self._git_repo("mk")
+        r = self.reason(self.run_cmd(
+            'WT=$(mktemp -d /tmp/worktree_fix_XXXXXXXX) && git worktree add "$WT" -b t/fix', cwd=repo))
+        self.assertIn(os.path.join(self.home, ".worktrees", "mk", "worktree_fix"), r)
+        self.assertIn("diskm worktree-new %s t/fix --name worktree_fix" % repo, r)
+
+    def test_reason_without_branch_uses_placeholder(self):
+        repo = self._git_repo("nb")
+        r = self.reason(self.run_cmd("git worktree add /tmp/nb-wt", cwd=repo))
+        self.assertIn("diskm worktree-new %s <branch> --name nb-wt" % repo, r)
+
+    def test_reason_generic_when_repo_unknown(self):
+        r = self.reason(self.run_cmd("git worktree add /tmp/zz", cwd=os.path.join(self.home, "nope")))
+        self.assertIn("~/.worktrees/<repo>/<name>", r)
+
     # --- fast paths / non-matching -------------------------------------------
     def test_non_bash_tool_allows(self):
         payload = {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/worktree"}}
