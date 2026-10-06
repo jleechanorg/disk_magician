@@ -279,5 +279,123 @@ OUT7_RAISED=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
 assert_contains "a raised floor (30) is preserved, not clamped down" "Min age:    30 days" "$OUT7_RAISED"
 
 echo
+echo "=== Test 8 (9h3): bounded discovery — same worktrees found, no deep/root find traversal ==="
+# Fake find on PATH logs every invocation's start dir, then defers to the real
+# find (worktree_recency.sh legitimately runs find INSIDE candidate worktrees).
+FAKEBIN="$TMP_ROOT/fakebin"; FIND_LOG="$TMP_ROOT/find_calls.log"
+mkdir -p "$FAKEBIN"; : > "$FIND_LOG"
+cat > "$FAKEBIN/find" <<SHIM
+#!/bin/bash
+printf '%s\n' "\$1" >> "$FIND_LOG"
+exec /usr/bin/find "\$@"
+SHIM
+chmod +x "$FAKEBIN/find"
+
+R8="$TMP_ROOT/roots8"
+mk_stale_wt_with_venv() {  # <wt-path> (creates the worktree if absent)
+  local wt="$1"
+  [[ -e "$wt/.git" ]] || mk_worktree "$wt"
+  : > "$wt/README.md"; mkdir -p "$wt/.venv/lib"; : > "$wt/.venv/lib/site.py"
+  for p in "$wt/README.md" "$wt/.git" "$wt/.venv/lib/site.py"; do age_path_days_ago "$p" 30; done
+}
+# (1) plain worktree at depth 1
+mk_stale_wt_with_venv "$R8/plain_wt"
+# (2) agent tree under a repo at depth 2: <root>/org/repoB/.claude/worktrees/agent1
+mk_stale_wt_with_venv "$R8/org/repoB/.claude/worktrees/agent1"
+# (3) git-registered worktree nested at depth 4 — only reachable via
+#     `git worktree list --porcelain` of the discovered repo
+GIT8="/usr/bin/git"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$R8/repoA"
+  "$GIT8" -C "$R8/repoA" init -q
+  "$GIT8" -C "$R8/repoA" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+  "$GIT8" -C "$R8/repoA" worktree add -q "$R8/repoA/nested/deep/wtA" >/dev/null 2>&1
+  find "$R8/repoA/nested/deep/wtA" -exec touch -t "$(date -v-30d +%Y%m%d%H%M)" {} + 2>/dev/null
+  mk_stale_wt_with_venv "$R8/repoA/nested/deep/wtA"
+fi
+# (4) deep tree (depth 5-6) under node_modules holding a worktree-shaped dir —
+#     must NOT be traversed or flagged
+DEEP_WT="$R8/node_modules/a/b/c/deepwt"
+mk_stale_wt_with_venv "$DEEP_WT"
+mkdir -p "$R8/node_modules/a/b/c/d/e/f"
+
+: > "$FIND_LOG"
+OUT8="$TMP_ROOT/out8.txt"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R8" --min-age 14 --purge-bak-days 5 --dry-run \
+  >"$OUT8" 2>&1
+OUT8_CONTENT=$(cat "$OUT8")
+assert_contains "depth-1 worktree venv found" "would strip $R8/plain_wt/.venv" "$OUT8_CONTENT"
+assert_contains "depth-2 repo .claude/worktrees agent venv found" \
+  "would strip $R8/org/repoB/.claude/worktrees/agent1/.venv" "$OUT8_CONTENT"
+if "$GIT8" --version >/dev/null 2>&1; then
+  assert_contains "git-registered nested worktree venv found" "deep/wtA/.venv (" "$OUT8_CONTENT"
+fi
+assert_not_contains "deep node_modules worktree NOT flagged" "would strip $DEEP_WT/.venv" "$OUT8_CONTENT"
+if grep -qxF "$R8" "$FIND_LOG" || grep -qF "$R8/node_modules" "$FIND_LOG" \
+   || grep -qxF "$R8/org/repoB/.claude/worktrees" "$FIND_LOG"; then
+  record_fail "no find traversal from a root or into node_modules" "$(sort -u "$FIND_LOG" | head -5)"
+else
+  record_pass "no find traversal from a root or into node_modules"
+fi
+
+echo "=== Test 9 (9h3): discovery never broadens past the old find scope ==="
+R9="$TMP_ROOT/roots9"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$R9/repoA"
+  "$GIT8" -C "$R9/repoA" init -q
+  "$GIT8" -C "$R9/repoA" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/a/b/c/d/e/f/wtDeep" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/a/b/c/d/e/f/wtDeep"
+fi
+# a worktree passed directly as --roots: the old -mindepth 2 never stripped <root>/.venv
+mk_stale_wt_with_venv "$R9/rootwt"
+OUT9=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+OUT9R=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9/rootwt" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+if "$GIT8" --version >/dev/null 2>&1; then
+  assert_not_contains "registered worktree deeper than old scope NOT flagged" "wtDeep/.venv" "$OUT9"
+fi
+assert_not_contains "--roots <worktree> does not strip the root's own venv" "would strip $R9/rootwt/.venv" "$OUT9R"
+
+# symlinked dirs under the root lead outside it; the old find -P never followed them
+OUTSIDE9="$TMP_ROOT/outside9"
+mk_stale_wt_with_venv "$OUTSIDE9/org/wtT"
+mk_stale_wt_with_venv "$OUTSIDE9/repoX/.claude/worktrees/brX"
+ln -s "$OUTSIDE9/org" "$R9/slink"
+ln -s "$OUTSIDE9/repoX" "$R9/slink2"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$OUTSIDE9/real"
+  ln -s "$OUTSIDE9/real" "$R9/repoA/linkreg"
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/linkreg/wt6" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/linkreg/wt6"
+  # git realpaths new registrations; record the symlinked path as older/other tools may
+  printf '%s\n' "$R9/repoA/linkreg/wt6/.git" > "$R9/repoA/.git/worktrees/wt6/gitdir"
+  "$GIT8" -C "$R9/repoA" worktree list --porcelain | grep -q "^worktree $R9/repoA/linkreg/wt6\$" \
+    || echo "  NOTE  git normalized the symlinked registration path; wt6 case is vacuous here"
+fi
+OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
+assert_not_contains "agent worktrees behind a symlinked repo NOT flagged" "brX/.venv" "$OUT9S"
+assert_not_contains "registered worktree via symlinked path NOT flagged" "wt6/.venv" "$OUT9S"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$R9/repoA/locked/sub"
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/locked/sub/wtlocked" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/locked/sub/wtlocked"
+  chmod 311 "$R9/repoA/locked"
+  OUT9X=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+    bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+  chmod 755 "$R9/repoA/locked"
+  assert_not_contains "registered worktree under an exec-only dir NOT flagged" "wtlocked/.venv" "$OUT9X"
+fi
+ln -s "$R9" "$TMP_ROOT/roots9link"
+OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$TMP_ROOT/roots9link" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+assert_not_contains "a --roots entry that is itself a symlink is not scanned" "would strip" "$OUT9L"
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
