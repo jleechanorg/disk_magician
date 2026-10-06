@@ -136,6 +136,12 @@ wtn_create() {
     fi
     if ! wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2; then
         echo "worktree-new: git worktree add failed: $path" >&2
+        if wtn_registered "$repo" "$path"; then
+            # The add got as far as registering (e.g. killed by the timeout
+            # mid-checkout): keep worktree and branch together for review.
+            echo "worktree-new: left registered worktree $path on $branch in place" >&2
+            return 1
+        fi
         wtn_unclaim "$path"
         if [[ "$created" == 1 ]] && ! wtn_checked_out_elsewhere "$repo" "$branch" "$path"; then
             git -C "$repo" update-ref -d "refs/heads/$branch" "$start" >&2 2>/dev/null

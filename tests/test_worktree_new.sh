@@ -118,7 +118,7 @@ assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$HOME/.worktrees/proj/feat-b" "named after the bare repo"
 assert_eq "$(git -C "$out" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/b" "branch"
 
-echo "== case 11: timed-out add leaves no branch or partial worktree; retry works =="
+echo "== case 11: add killed after registering -> worktree and branch kept together; same name then refused =="
 REAL_GIT="$(command -v git)"
 mkdir -p "$TMPROOT/hangbin"
 cat > "$TMPROOT/hangbin/git" <<EOF
@@ -131,11 +131,12 @@ chmod +x "$TMPROOT/hangbin/git"
 out="$(PATH="$TMPROOT/hangbin:$PATH" WTN_ADD_TIMEOUT=1 bash "$SCRIPT" "$REPO" feat/hang 2>/dev/null)"; rc=$?
 [[ "$rc" -ne 0 ]] && ok "timeout -> nonzero ($rc)" || bad "timeout returned 0"
 assert_eq "$out" "" "stdout empty"
-[[ ! -e "$WTROOT/feat-hang" ]] && ok "partial worktree removed" || bad "partial worktree left"
-if git -C "$REPO" show-ref -q --verify refs/heads/feat/hang; then bad "branch left behind"; else ok "branch removed"; fi
+git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $WTROOT/feat-hang" && ok "registered worktree kept" || bad "registered worktree removed"
+git -C "$REPO" show-ref -q --verify refs/heads/feat/hang && ok "its branch kept" || bad "its branch deleted (worktree orphaned)"
 touch "$TMPROOT/nohang"
-out="$(PATH="$TMPROOT/hangbin:$PATH" bash "$SCRIPT" "$REPO" feat/hang 2>/dev/null)"; rc=$?
-assert_eq "$rc" "0" "retry exit code"
+out="$(PATH="$TMPROOT/hangbin:$PATH" bash "$SCRIPT" "$REPO" feat/hang 2>"$TMPROOT/retry.err")"; rc=$?
+[[ "$rc" -ne 0 ]] && ok "retry at a registered path refused ($rc)" || bad "retry reused a registered path"
+grep -q "target registered" "$TMPROOT/retry.err" && ok "refusal names the registered target" || bad "unclear refusal: $(cat "$TMPROOT/retry.err")"
 
 echo "== case 12: perl fallback timeout kills the whole process group =="
 mkdir -p "$TMPROOT/minbin"
@@ -192,10 +193,8 @@ rm -rf "$TMPROOT/stale-wt"
 rm -f "$TMPROOT/nohang"
 PATH="$TMPROOT/hangbin:$PATH" WTN_ADD_TIMEOUT=1 bash "$SCRIPT" "$REPO" feat/hang2 >/dev/null 2>&1
 [[ -d "$REPO/.git/worktrees/stale-wt" ]] && ok "unrelated stale admin entry kept" || bad "unrelated admin entry pruned"
-[[ ! -e "$WTROOT/feat-hang2" ]] && ok "own partial worktree removed" || bad "own partial worktree left"
-n="$(grep -lx "$WTROOT/feat-hang2/.git" "$REPO"/.git/worktrees/*/gitdir 2>/dev/null | wc -l | tr -d ' ')"
-assert_eq "$n" "0" "own admin entry removed"
-if git -C "$REPO" show-ref -q --verify refs/heads/feat/hang2; then bad "own branch left"; else ok "own branch removed"; fi
+git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $WTROOT/feat-hang2" && ok "own registered worktree kept" || bad "own registered worktree removed"
+git -C "$REPO" show-ref -q --verify refs/heads/feat/hang2 && ok "own branch kept with it" || bad "own branch deleted (worktree orphaned)"
 
 echo "== case 16: CDPATH does not redirect the script's own cd =="
 mkdir -p "$TMPROOT/cdp/scripts"
