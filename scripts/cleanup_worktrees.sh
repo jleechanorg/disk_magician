@@ -12,6 +12,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_repo_discovery.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
@@ -73,59 +75,9 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
         IFS=',' read -ra REPO_LOCAL_REPOS <<<"${CLAUDE_WORKTREE_REPOS// /,}"
     else
-        # Auto-discover main repositories that have registered worktrees
-        discovered_repos_str="$HOME/projects/worldarchitect.ai"
-        [[ -d "$HOME/project_worldaiclaw/worldai_claw" ]] && discovered_repos_str="${discovered_repos_str} $HOME/project_worldaiclaw/worldai_claw"
-        
-        find_repos_from_worktrees() {
-            local search_dir="$1" depth=("${@:2}")
-            [[ -d "$search_dir" ]] || return 0
-            while IFS= read -r git_file; do
-                local gitdir_line
-                gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
-                if [[ -n "$gitdir_line" ]]; then
-                    local git_dir main_repo
-                    git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-                    main_repo="${git_dir%/.git/worktrees/*}"
-                    if [[ -d "$main_repo" ]]; then
-                        discovered_repos_str="${discovered_repos_str} ${main_repo}"
-                    fi
-                fi
-            done < <(find "$search_dir" ${depth[@]+"${depth[@]}"} -type f -name ".git" 2>/dev/null)
-        }
-        
-        find_repos_from_worktrees "$HOME/.ao/data/worktrees"
-        find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees"
-        find_repos_from_worktrees "$HOME/wc-wt"
-        find_repos_from_worktrees "$HOME/project_worldaiclaw"
-        find_repos_from_worktrees "$STANDARD_WORKTREE_ROOT" -maxdepth 3
-        
-        # Also check all .claude/worktrees and projects
-        if [[ -d "$HOME/projects" ]]; then
-            for repo_dir in "$HOME/projects"/*; do
-                [[ -d "$repo_dir" ]] || continue
-                claude_wt_dir="$repo_dir/.claude/worktrees"
-                if [[ -d "$claude_wt_dir" ]]; then
-                    while IFS= read -r git_file; do
-                        gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
-                        if [[ -n "$gitdir_line" ]]; then
-                            git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-                            main_repo="${git_dir%/.git/worktrees/*}"
-                            if [[ -d "$main_repo" ]]; then
-                                discovered_repos_str="${discovered_repos_str} ${main_repo}"
-                            fi
-                        fi
-                    done < <(find "$claude_wt_dir" -type f -name ".git" 2>/dev/null)
-                fi
-            done
-        fi
-        
-        # Dedup the repository list using tr/sort/uniq
-        if [[ -n "$discovered_repos_str" ]]; then
-            while IFS= read -r repo; do
-                [[ -n "$repo" ]] && REPO_LOCAL_REPOS+=("$repo")
-            done < <(echo "$discovered_repos_str" | tr ' ' '\n' | sort -u)
-        fi
+        while IFS= read -r repo; do
+            [[ -n "$repo" ]] && REPO_LOCAL_REPOS+=("$repo")
+        done < <(discover_worktree_repos)
     fi
 fi
 
