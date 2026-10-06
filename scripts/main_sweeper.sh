@@ -387,7 +387,7 @@ main() {
   local outcome="success"
   local exit_code=0
   if [[ "$ERRORS" -gt 0 ]]; then
-    outcome="failed"
+    outcome="error"
     exit_code=1
     log "WARN: Main sweeper finished with $ERRORS failure(s)."
   else

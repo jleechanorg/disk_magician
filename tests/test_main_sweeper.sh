@@ -145,6 +145,38 @@ else
   echo "  FAIL  successful heavy task failed to record debounce marker"
   FAIL=$(( FAIL + 1 ))
 fi
+
+# Test 12: Terminal receipt publishes valid outcome "error" on failure and "success" on clean run
+echo "Test 12: Terminal receipt publishes valid outcome error on failure and success on clean run"
+RECEIPT_HELPER="$SCRIPT_DIR/../scripts/job_receipt.py"
+MOCK_REPO_T12="$(mktemp -d -t mock_repo_t12.XXXXXX)"
+mkdir -p "$MOCK_REPO_T12/scripts"
+rm -rf "$TMP_STATE/main_sweeper.lock" "$TMP_STATE/receipts" "$TMP_STATE/last_xcode_clean"
+cat > "$MOCK_REPO_T12/scripts/cleanup_xcode.sh" << 'EOF'
+#!/bin/sh
+exit 17
+EOF
+chmod +x "$MOCK_REPO_T12/scripts/cleanup_xcode.sh"
+
+DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO_T12" DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" "$MAIN_SWEEPER" --clean --skip-snapshot --skip-health >/dev/null 2>&1 || true
+rc_fail=$(DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" read --job main_sweeper --last 2>/dev/null || echo "")
+assert_contains "receipt records error outcome on failure" '"outcome": "error"' "$rc_fail"
+assert_contains "receipt records non-zero error count" '"errors": 1' "$rc_fail"
+
+rm -rf "$TMP_STATE/main_sweeper.lock" "$TMP_STATE/receipts" "$TMP_STATE/last_xcode_clean"
+cat > "$MOCK_REPO_T12/scripts/cleanup_xcode.sh" << 'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$MOCK_REPO_T12/scripts/cleanup_xcode.sh"
+
+DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO_T12" DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" "$MAIN_SWEEPER" --clean --skip-snapshot --skip-health >/dev/null 2>&1 || true
+rc_succ=$(DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" read --job main_sweeper --last 2>/dev/null || echo "")
+assert_contains "receipt records success outcome on clean run" '"outcome": "success"' "$rc_succ"
+assert_contains "receipt records zero errors on clean run" '"errors": 0' "$rc_succ"
+
+rm -rf "$MOCK_REPO_T12"
+
 rm -rf "$MOCK_REPO"
 
 echo
