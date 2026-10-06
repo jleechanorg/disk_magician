@@ -369,6 +369,14 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         self.assertIn("$HOME/.colima/_lima", content)
         self.assertIn("$HOME/.colima/default/docker.sock", content)
 
+    def test_repo_registry_covers_standard_worktree_root(self):
+        registry_path = os.path.join(REPO_ROOT, "config", "sweeper_roots.txt")
+        with open(registry_path) as f:
+            rows = [line.split("\t") for line in f.read().splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        self.assertIn(["$HOME/.worktrees", "cleanup_worktrees.sh"],
+                      [r[:2] for r in rows])
+
     def test_drill_down_finds_uncovered_sibling_under_partially_covered_parent(self):
         parent = os.path.join(self.home, "parent")
         covered_child = os.path.join(parent, "covered_child")

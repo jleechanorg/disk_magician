@@ -52,6 +52,11 @@ Commands:
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
   sweep                  Run the single main disk sweeper (snapshot, pressure reclaim, 6-tier routine maintenance, health).
   main-sweeper           Alias for sweep.
+  worktree-new           Create new worktree under ~/.worktrees/<repo>/<name>.
+  guard-worktree-add     PreToolUse hook guarding worktree placement under ~/.worktrees/.
+  worktree-create-hook   Claude WorktreeCreate hook creating under ~/.worktrees/.
+  layout-check           Audit worktree and evidence placement against standard layout.
+  evidence-push          Sync local evidence dir to remote storage.
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -351,6 +356,21 @@ case "$CMD" in
     ;;
   sweep|main-sweeper|main_sweeper)
     "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
+    ;;
+  worktree_new|worktree-new)
+    "$SCRIPT_DIR/scripts/worktree_new.sh" "$@"
+    ;;
+  guard_worktree_add|guard-worktree-add)
+    python3 "$SCRIPT_DIR/scripts/worktree_guard.py" "$@"
+    ;;
+  worktree_create_hook|worktree-create-hook)
+    "$SCRIPT_DIR/scripts/worktree_create_hook.sh" "$@"
+    ;;
+  layout_check|layout-check)
+    python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
+    ;;
+  evidence_push|evidence-push)
+    "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
     ;;
   -h|--help)
     usage

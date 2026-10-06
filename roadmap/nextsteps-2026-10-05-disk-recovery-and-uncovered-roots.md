@@ -125,3 +125,96 @@ The primary operational entry point is diskm (/Users/jleechan/projects_other/dis
 
 - /Users/jleechan/projects_other/disk_magician/roadmap/activity/2026-10-05.md appended with session details.
 - /Users/jleechan/projects_other/disk_magician/roadmap/README.md prepended with 2026-10-05 date link in Recent activity (by day).
+
+---
+
+# Session block 2 — 2026-10-05 (retention-gate audit + worktree discovery blind spot)
+
+## Table of contents
+
+- [Block 2 executive summary](#block-2-executive-summary)
+- [Block 2 context](#block-2-context)
+- [Block 2 bead index](#block-2-bead-index)
+- [Block 2 work queue](#block-2-work-queue)
+- [Block 2 timeline and parallel lanes](#block-2-timeline-and-parallel-lanes)
+- [Block 2 PR / merge state](#block-2-pr--merge-state)
+- [Block 2 learnings pointer](#block-2-learnings-pointer)
+- [Block 2 roadmap pointer](#block-2-roadmap-pointer)
+
+## Block 2 executive summary
+
+- **Full safe-clean sweep reclaimed ~0 GiB, by design.** Ran worktrees, Claude state, tmp, PR scratch, dev caches, codex DB vacuum, hermes WAL, aside, brain, dark-factory, code-sign-clones, APFS snapshots. Every candidate was inside its retention window or blocked by a safety gate. The gates are working; there is no junk left to sweep.
+- **Root cause of regrowth: retention gates protect active work, but nothing caps active work.** The 7d worktree floor plus the clean+merged bar means a worktree holding any untracked content is *immortal* — it fails the gate forever. Confirms and extends `disk_magician-ueh` (2026-10-03: 136 worktrees / 47 GiB, 0 eligible).
+- **NEW finding — worktree discovery blind spot.** `cleanup_worktrees.sh` scanned only `~/projects`, `~/.ao/data/worktrees`, `~/.gemini/antigravity/worktrees`, and the nested `worldai_claw`. It never scanned `~/wc-wt` (24 GiB) or `~/project_worldaiclaw` (42 GiB) — **66 GiB never reached triage**. Fixed with a 2-line discovery registration; verified those worktrees now appear in triage output. Filed `disk_magician-663`.
+- **Pressure sweep is a no-op under pressure.** All three steps fail: `cleanup_tmp.sh` rc=124 (timeout), `cleanup_colima.sh` rc=1 (Docker daemon unreachable), only code-sign-clones runs. Tracked by `disk_magician-3ma` and `disk_magician-i56`.
+- **Colima is wedged.** 20.0 GiB `_lima`, `docker system df` times out at 5s, daemon unreachable, recovery gated behind `VACATE_CI_RUNNERS_APPROVED=1` (unset, operator decision). The VM burns ~166% CPU serving a dead daemon, which is *why* `cleanup_tmp` times out and pressure-sweep fails — the wedge and the sweep failure share one cause.
+- **Out of scope but adjacent:** `worldarchitect.ai` agent-instruction consolidation (AGENTS.md canonical, GEMINI.md reduced 26→13 lines, `.gemini/tmp/` routed to `/tmp/worldarchitect.ai/...`). Committed and pushed there by a Gemini session as branch `docs/consolidate-agent-md-tmp`; no PR yet. Per that repo's `AGENTS.md:85` it is **not** exempt from independent review.
+
+## Block 2 context
+
+A second cleanup pass on the same workstation after the first block's ~56.5 GiB reclaim. Goal was "cleanup some safe disk." The measurable outcome is negative and that is the finding: the safe surface is exhausted. Fleet check passed (19/19 loaded), so this is not a dead-collector incident. Disk oscillated 1.9 ↔ 33 GiB free during the session against a 926 GiB volume at 97–100% capacity, with load average peaking at 200 on 14 cores. Free-space swings are *not* reclaim and must not be reported as such — an intermediate reading of 33 GiB after a dry-run was initially misread as a win and corrected.
+
+Last *complete* ledger coverage scan was 2026-08-31 (35 days); every scan since is partial (11/17 roots), so current coverage 36.5% is below the hard 70% floor and cannot serve as a measurement floor.
+
+## Block 2 bead index
+
+| Bead | Title | Priority | Status | Link |
+|---|---|---|---|---|
+| disk_magician-663 | cleanup_worktrees.sh: discovery blind spot — `~/wc-wt` + `~/project_worldaiclaw` never scanned (66 GiB untriaged) | P1 | OPEN | `br show disk_magician-663` |
+| disk_magician-ueh | classify squash-merged PR worktrees as eligible instead of `ahead-of-main` PRESERVE | P2 | OPEN | `br show disk_magician-ueh` |
+| disk_magician-3ma | Bound Docker health probes so routine cleanup cannot stall | P2 | IN_PROGRESS | `br show disk_magician-3ma` |
+| disk_magician-i56 | IMPL: snapshot timeout reliability (parallel measure, honest timeouts, carry-forward) | P1 | OPEN | `br show disk_magician-i56` |
+| disk_magician-rpv | Attribute bidirectional df swings via APFS purgeable, snapshots, swap/VM volume, Colima diffdisk | P2 | OPEN | `br show disk_magician-rpv` |
+| disk_magician-0si | harness: coverage_streak resets on any good run; playbook never checks coverage mode | P2 | OPEN | `br show disk_magician-0si` |
+
+## Block 2 work queue
+
+1. **Land the worktree discovery fix** — tracks [disk_magician-663](br)
+   - **Goal:** make `~/wc-wt` and `~/project_worldaiclaw` visible to worktree triage.
+   - **State:** 2-line change already applied to `scripts/cleanup_worktrees.sh` (adds two `find_repos_from_worktrees` calls). `bash -n` clean. Verified those worktrees now appear in triage output.
+   - **Acceptance:** repo test suite passes; the 66 GiB roots appear in `cleanup-worktrees` triage; no new `Repo missing or not a git checkout` noise (an earlier revision registered both dirs as repo roots, which was a no-op because neither is itself a git checkout, and was removed).
+   - **Note:** registration alone does not reclaim — all newly-visible worktrees are `untracked`/`ahead-of-main` PRESERVE. This fix restores *visibility*; reclamation depends on item 2.
+
+2. **Resolve the immortal-dirty-worktree class** — tracks [disk_magician-ueh](br)
+   - **Goal:** stop worktrees with untracked/ahead content from being permanently unprunable.
+   - **Evidence:** 6 newly-visible `project_worldaiclaw` worktrees, 18–22d old, ~6 GiB, all PRESERVE on `untracked`/`ahead-of-main`. Earlier measurement (ueh): 136 worktrees / 47 GiB / 0 eligible.
+   - **Acceptance:** gh-verified merged-same-head rule in `classify_candidate`, keeping the 7d floor and all dirty/stash/cwd checks, failing closed on `gh` errors, with an unmeasurable-`gh` test case.
+
+3. **Un-wedge Colima (operator decision — needs `VACATE_CI_RUNNERS_APPROVED=1`)** — related [disk_magician-3ma](br)
+   - **Goal:** restore the Docker daemon so pressure-sweep step 2 can reclaim.
+   - **Acceptance:** `docker system df` returns without a 5s timeout; `colima _lima` drops below 20 GiB after prune + in-VM `fstrim -av`; `cleanup-colima --clean` exits 0.
+   - **Blocked on:** operator approval. Not agent-actionable unattended.
+
+4. **Restore complete ledger coverage** — tracks [disk_magician-i56](br), [disk_magician-0si](br)
+   - **Goal:** a complete (17/17 roots) snapshot so floor accounting and trend alerting are trustworthy again.
+   - **Acceptance:** one `topdown-5g.json` commit with `mode: complete` and `coverage_envelope.complete: true`; `diskm history diff --days N` usable without the 70% floor caveat.
+
+## Block 2 timeline and parallel lanes
+
+| Elapsed estimate | Lane / owner | Scope / dependencies | Deliverable / proof |
+|---|---|---|---|
+| ~5m | root session | fleet check, ledger floor, snapshot coverage gate | `check-launchd-fleet` 19/19; floor 843.55 GiB @ 2026-08-31 |
+| ~20m | root session (parallel) | 12 safe cleanup vectors | all exit 0, ~0 GiB reclaimed |
+| ~10m | root session | sweeper-health + pressure-sweep log triage | 7 WARN sweepers; rc=124 / rc=1 |
+| ~15m | root session | discovery gap + 2-line fix + verify | triage output shows new roots |
+
+- **Critical path and concurrency ceiling:** item 3 (Colima) unblocks the most reclaim, but needs operator approval. Items 1 and 2 are agent-actionable and independent.
+- **Measured resource bound:** load average 200 on 14 cores (~14×) at peak; CPU-bound, not memory-bound. Per the CPU tier, `/dot` delegation and local test suites were correctly skipped in favour of local minimal-cost work; `/dot` itself failed twice (`chrome_rc=124`) because Chrome could not load a page under that load.
+- **Milestones:** +20m, +40m, +60m (hourly rollup), then repeat while active.
+- **Execution start:** pending authorized resumption; this handoff does not start it.
+
+## Block 2 PR / merge state
+
+- https://github.com/jleechanorg/disk_magician/pull/104 — MERGED (`86047a3`, code-sign-clones launchd sweeper)
+- https://github.com/jleechanorg/disk_magician/pull/105 — MERGED (`6b0eddb`, query-only dry-run vacuum + lsof tag)
+- https://github.com/jleechanorg/disk_magician/pull/107 — MERGED (`f672bbd`, standard worktree root and evidence location; carries discovery fix for ~/wc-wt and ~/project_worldaiclaw)
+- Deployed: `disk-magician 0.2.133` via `tools/deploy_uv_tool.sh` (`~/.disk_magician_state/deployed.json`).
+- Lane B completed: PreToolUse hooks registered in `~/.claude/settings.json` and `~/.codex/hooks.json`; `path-deletion-guard.py` verified; `~/.codex/AGENTS.md` spec D7 policy added; bead `disk_magician-codex-agents-md-scratch-policy-2gp` closed; skills updated.
+
+## Block 2 learnings pointer
+
+- `~/roadmap/learnings-2026-10.md` — section `2026-10-05 — Retention gates are not a regrowth fix`.
+
+## Block 2 roadmap pointer
+
+- Appended `roadmap/activity/2026-10-05.md` (date file already existed; README not touched).

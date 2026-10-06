@@ -407,6 +407,12 @@ if [[ -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
     "$SCRIPT_DIR/check_uncovered_roots.sh" || true
 fi
 
+# ── 3c. Worktree/evidence layout (spec 2026-10-05 D5, report only) ──────────
+if [[ -f "$SCRIPT_DIR/layout_check.py" ]]; then
+    section "Worktree & Evidence Layout"
+    python3 "$SCRIPT_DIR/layout_check.py" || true
+fi
+
 # ── 4. Actionable Cleanup Candidates ─────────────────────────────────────────
 section "Actionable Findings"
 

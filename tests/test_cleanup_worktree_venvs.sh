@@ -227,6 +227,30 @@ assert_contains "agent-tree venv flagged for stripping" \
   "would strip $CLAUDE_WT/venv" "$OUT6_CONTENT"
 
 echo
+echo "=== Test 6b: default roots include \$HOME/.worktrees, 7-day rule still applies ==="
+STD_HOME="$TMP_ROOT/stdhome"
+STD_OLD="$STD_HOME/.worktrees/r/old"
+STD_YOUNG="$STD_HOME/.worktrees/r/young"
+for wt in "$STD_OLD" "$STD_YOUNG"; do
+  mk_worktree "$wt"
+  : > "$wt/README.md"
+  mkdir -p "$wt/.venv/lib"
+  : > "$wt/.venv/lib/site.py"
+done
+for p in "$STD_OLD/README.md" "$STD_OLD/.git" "$STD_OLD/.venv/lib/site.py"; do
+  age_path_days_ago "$p" 10
+done
+age_path_days_ago "$STD_YOUNG/README.md" 2
+OUT6B="$TMP_ROOT/out6b.txt"
+env -i HOME="$STD_HOME" PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --dry-run >"$OUT6B" 2>&1
+OUT6B_CONTENT=$(cat "$OUT6B")
+assert_contains "default roots list \$HOME/.worktrees" "$STD_HOME/.worktrees" "$OUT6B_CONTENT"
+assert_contains "10d std-root venv flagged" "would strip $STD_OLD/.venv" "$OUT6B_CONTENT"
+assert_not_contains "2d std-root venv protected" "would strip $STD_YOUNG/.venv" "$OUT6B_CONTENT"
+
+echo
 echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides ==="
 # bash's `-lt`/`(( ))` parse a leading-zero numeral like "08" as octal
 # (invalid digit -> arithmetic error) if compared without a base prefix;
