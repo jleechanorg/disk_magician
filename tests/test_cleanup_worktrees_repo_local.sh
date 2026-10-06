@@ -273,6 +273,44 @@ STD_WARNING=$(cat "$TMP_ROOT/std-warning.out")
 assert_contains "lsof warning on stderr preserved" ".worktrees/r/old | cwd-unknown" "$STD_WARNING"
 assert_not_contains "lsof warning: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_WARNING" || true)"
 
+# Regression: Zero-status lsof with large output (>64KB pipe buffer) and unresolved record near start
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "p999"
+echo "fcwd"
+echo "n/proc/999/cwd (readlink: Permission denied)"
+for i in $(seq 1 1000); do
+  echo "p$i"
+  echo "fcwd"
+  echo "n/nonexistent/dummy/path/for/process/padding/number/$i"
+done
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-pipebuf.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_PIPEBUF=$(cat "$TMP_ROOT/std-pipebuf.out")
+assert_contains "lsof large output pipe buffer preserved" ".worktrees/r/old | cwd-unknown" "$STD_PIPEBUF"
+assert_not_contains "lsof large output: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_PIPEBUF" || true)"
+
+# Regression: mktemp failure (cannot allocate temp file for diagnostic capture under disk pressure)
+cat > "$FAKE_BIN/mktemp" <<'SH'
+#!/bin/sh
+exit 1
+SH
+chmod +x "$FAKE_BIN/mktemp"
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /proc/123/cwd: Permission denied" >&2
+echo "n/"
+exit 0
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-nomktemp.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_NOMKTEMP=$(cat "$TMP_ROOT/std-nomktemp.out")
+assert_contains "mktemp failure preserved" ".worktrees/r/old | cwd-unknown" "$STD_NOMKTEMP"
+assert_not_contains "mktemp failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOMKTEMP" || true)"
+rm -f "$FAKE_BIN/mktemp"
+
 kill "$SLEEP_PID" 2>/dev/null || true
 
 SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT")

@@ -223,8 +223,8 @@ list_has_child_of() {
 
 # Machine-wide live process CWD snapshot (fail-closed): if lsof fails, or returns
 # an incomplete, unparseable, or unresolved observation (e.g. readlink/stat permission
-# errors in /proc), cwd is unknown and live-process protection preserves candidates
-# across all worktree roots.
+# errors in /proc), or if stderr cannot be captured via temp file, cwd is unknown
+# and live-process protection preserves candidates across all worktree roots.
 GLOBAL_LIVE_CWDS=""
 GLOBAL_CWD_BLOCKED=""
 _lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
@@ -232,30 +232,32 @@ if [[ ! -x "$_lsof_bin" ]]; then
     GLOBAL_CWD_BLOCKED="cwd-unknown"
 else
     _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
-    _lsof_rc=0
-    _lsof_err=""
-    if [[ -n "$_lsof_tmp" ]]; then
+    if [[ -z "$_lsof_tmp" || ! -f "$_lsof_tmp" ]]; then
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    else
+        _lsof_rc=0
         _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
-        _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null || true)"
-        rm -f "$_lsof_tmp"
-    else
-        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>/dev/null)" || _lsof_rc=$?
-    fi
-
-    if [[ "$_lsof_rc" -ne 0 ]]; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    elif [[ -n "$_lsof_err" ]] && echo "$_lsof_err" | grep -qiE 'warning|permission denied|cannot|error'; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    elif [[ -z "$_lsof_out" ]]; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    elif echo "$_lsof_out" | grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd'; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    else
-        GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
-        if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
+        if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
+            rm -f "$_lsof_tmp"
             GLOBAL_CWD_BLOCKED="cwd-unknown"
+        else
+            rm -f "$_lsof_tmp"
+            if [[ "$_lsof_rc" -ne 0 ]]; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif [[ -z "$_lsof_out" ]]; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd' <<<"$_lsof_out"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            else
+                GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
+                if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
+                    GLOBAL_CWD_BLOCKED="cwd-unknown"
+                fi
+            fi
         fi
     fi
 fi
