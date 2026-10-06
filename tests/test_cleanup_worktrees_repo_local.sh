@@ -160,6 +160,89 @@ else
   record_fail "ancestor worktree still on disk after refused clean" "worktree removed unexpectedly"
 fi
 
+assert_not_contains() {
+  local name="$1" needle="$2" haystack="$3"
+  if grep -qF "$needle" <<<"$haystack"; then
+    record_fail "$name" "unexpected: $needle"
+    sed 's/^/        | /' <<<"$haystack"
+  else
+    record_pass "$name"
+  fi
+}
+
+echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
+STD_HOME="$TMP_ROOT/home"
+STD_ROOT="$STD_HOME/.worktrees"
+STD_REPO="$TMP_ROOT/std-repo"
+git init -q -b main "$STD_REPO"
+git -C "$STD_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$STD_REPO" config user.name "Fixture User"
+printf 'base\n' > "$STD_REPO/README.md"
+git -C "$STD_REPO" add README.md
+git -C "$STD_REPO" commit -q -m base
+for wt in r/old r/young r/busy ao-proj/sess-1 lazy/sess-2 lazyrepo/sess-3 sess-4; do
+  mkdir -p "$(dirname "$STD_ROOT/$wt")"
+  git -C "$STD_REPO" worktree add -q -B "std-${wt//\//-}" "$STD_ROOT/$wt" main
+done
+for wt in r/old r/busy ao-proj/sess-1 lazy/sess-2 lazyrepo/sess-3 sess-4; do age_worktree_days_ago "$STD_ROOT/$wt" 10; done
+age_worktree_days_ago "$STD_ROOT/r/young" 2
+
+AO_CFG="$TMP_ROOT/agent-orchestrator.yaml"
+# Live-config shape: a top-level default worktreeDir equal to the standard root
+# must not swallow the whole root; projects without their own worktreeDir fall
+# back to it (as <root>/<projectId|repo basename>/... or <root>/<session>).
+cat > "$AO_CFG" <<'YAML'
+projects:
+  demo:
+    path: ~/src/demo
+    worktreeDir: "~/.worktrees/ao-proj"  # AO sessions
+  lazy:
+    path: /x/lazyrepo
+    repo: org/lazyrepo
+pruneWorktrees: false
+worktreeDir: ~/.worktrees
+YAML
+
+(cd "$STD_ROOT/r/busy" && exec sleep 300) &
+SLEEP_PID=$!
+trap 'kill "$SLEEP_PID" 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
+sleep 0.5
+
+run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
+  env -i HOME="$STD_HOME" PATH="$2" HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+    DISK_MAGICIAN_AO_CONFIG="$AO_CFG" \
+    bash "$CLEANUP_SCRIPT" --dry-run >"$1" 2>&1
+}
+
+run_std "$TMP_ROOT/std.out" "/usr/bin:/bin"
+STD_OUT=$(cat "$TMP_ROOT/std.out")
+if grep -F '.worktrees/r/old | age=' <<<"$STD_OUT" | grep -qF 'ELIGIBLE  '; then
+  record_pass "std root: 10d merged clean worktree eligible"
+else
+  record_fail "std root: 10d merged clean worktree eligible" "no ELIGIBLE ledger line for .worktrees/r/old"
+fi
+assert_contains "std root: old path listed" ".worktrees/r/old | age=" "$STD_OUT"
+assert_contains "std root: 2d worktree protected" ".worktrees/r/young | young" "$STD_OUT"
+assert_contains "std root: AO worktreeDir skipped" ".worktrees/ao-proj/sess-1 | ao-owned" "$STD_OUT"
+assert_contains "std root: live-cwd worktree skipped" ".worktrees/r/busy | live-cwd" "$STD_OUT"
+assert_contains "std root: project w/o worktreeDir (key) skipped" ".worktrees/lazy/sess-2 | ao-owned" "$STD_OUT"
+assert_contains "std root: project w/o worktreeDir (path basename) skipped" ".worktrees/lazyrepo/sess-3 | ao-owned" "$STD_OUT"
+assert_contains "std root: depth-1 session under default worktreeDir skipped" ".worktrees/sess-4 | ao-owned" "$STD_OUT"
+
+FAKE_BIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKE_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$FAKE_BIN/lsof"
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std-nolsof.out" "$FAKE_BIN:/usr/bin:/bin"
+STD_NOLSOF=$(cat "$TMP_ROOT/std-nolsof.out")
+assert_contains "lsof failure: old worktree preserved" ".worktrees/r/old | cwd-unknown" "$STD_NOLSOF"
+assert_not_contains "lsof failure: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_NOLSOF" || true)"
+kill "$SLEEP_PID" 2>/dev/null || true
+
+SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT")
+assert_contains "wc-wt discovery line kept" 'find_repos_from_worktrees "$HOME/wc-wt"' "$SCRIPT_TEXT"
+assert_contains "project_worldaiclaw discovery line kept" 'find_repos_from_worktrees "$HOME/project_worldaiclaw"' "$SCRIPT_TEXT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
