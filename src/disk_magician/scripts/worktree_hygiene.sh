@@ -36,6 +36,7 @@ MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
+PRESERVE_WIP=false
 MAX_CANDIDATES=0
 # A raw `git rev-list --count main..HEAD` ahead-count above this is not
 # trusted as a real commit count -- a history rewrite (rebase --onto,
@@ -51,7 +52,7 @@ WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--max-candidates N] [-h|--help]
+Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--preserve-wip] [--max-candidates N] [-h|--help]
 
 Repeatable worktree-hygiene sweep: IDENTIFY -> TRIAGE -> CLASSIFY -> (optionally) DELETE.
 
@@ -68,6 +69,17 @@ Options:
                 during triage (offline/test runs). push_status="skipped".
   --skip-gh     Skip the 'gh pr list' lookup during triage (offline/test
                 runs). pr_state="unknown".
+  --preserve-wip
+                Opt-in. NEEDS-REVIEW worktrees whose only reason is dirty,
+                untracked, or detached-unpushed are committed (git add -A,
+                ignored files excluded) onto a LOCAL branch
+                wip/worktree-hygiene/<YYYYMMDD>/<name> and then removed with
+                'git worktree remove' (no --force). Never pushes. Skipped
+                when a live process cwd is inside, the worktree is locked,
+                a merge/rebase/cherry-pick is in progress, or an ignored
+                secret-ish file (.env, *.pem, *.key, ...) would be lost.
+                Dry-run prints WOULD-PRESERVE-WIP only. Manifest:
+                \${DISK_MAGICIAN_STATE_DIR:-~/.disk_magician_state}/worktree_hygiene_wip_manifest.txt
   --max-candidates N
                 Cap the number of age-qualifying candidates triaged per
                 repo per run (0 = unlimited, default). On a registry with
@@ -229,6 +241,73 @@ resolve_main_ref() {
     return 1
 }
 
+# query_pr_state <repo_path> <wt_path> <branch> — echoes the gh PR state for
+# branch: open|merged|merged-differing-head|closed|none|unknown.
+query_pr_state() {
+    local repo_path="$1" wt_path="$2" branch="$3" pr_state
+    pr_state="unknown"
+    if [[ "${SKIP_GH:-false}" == true ]]; then
+        pr_state="unknown"
+    else
+        local origin_url owner_repo
+        origin_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+        if [[ -n "$origin_url" ]]; then
+            local safe_url
+            safe_url="$(redact_url "$origin_url")"
+            owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+            if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
+                local pr_json gh_rc=0
+                # env -u: a stale GH_TOKEN/GITHUB_TOKEN override breaks gh
+                # even when the stored keychain credential is valid.
+                pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch" --state all \
+                    --json number,state,title,headRefOid 2>/dev/null)" || gh_rc=$?
+                if [[ "$gh_rc" -eq 0 && -n "$pr_json" && "$pr_json" != "[]" ]]; then
+                    local local_head
+                    local_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
+                    if command -v python3 >/dev/null 2>&1; then
+                        pr_state="$(python3 -c '
+import json, sys
+try:
+    prs = json.loads(sys.argv[1])
+    local_head = sys.argv[2].strip()
+    if not isinstance(prs, list) or not local_head:
+        print("unknown")
+        sys.exit(0)
+    has_open = any(isinstance(p, dict) and (p.get("state") or "").upper() == "OPEN" for p in prs)
+    merged_prs = [p for p in prs if isinstance(p, dict) and (p.get("state") or "").upper() == "MERGED"]
+    if has_open:
+        print("open")
+    elif merged_prs:
+        matching = any(p.get("headRefOid") and p.get("headRefOid") == local_head for p in merged_prs)
+        if matching:
+            print("merged")
+        else:
+            print("merged-differing-head")
+    elif any(isinstance(p, dict) and (p.get("state") or "").upper() == "CLOSED" for p in prs):
+        print("closed")
+    else:
+        print("none")
+except Exception:
+    print("unknown")
+' "$pr_json" "$local_head" 2>/dev/null || echo "unknown")"
+                    else
+                        pr_state="unknown"
+                    fi
+                elif [[ "$gh_rc" -eq 0 && "$pr_json" == "[]" ]]; then
+                    pr_state="none"
+                else
+                    pr_state="unknown"
+                fi
+            else
+                pr_state="unknown"
+            fi
+        else
+            pr_state="unknown"
+        fi
+    fi
+    echo "$pr_state"
+}
+
 # triage_candidate <repo_path> <wt_path> <branch>
 # Echoes: <uncommitted_count>|<untracked_present>|<push_status>|<pr_state>|<ahead_count>|<has_merge_base>|<suspect_rewrite>
 triage_candidate() {
@@ -328,66 +407,7 @@ triage_candidate() {
             fi
         fi
 
-        pr_state="unknown"
-        if [[ "${SKIP_GH:-false}" == true ]]; then
-            pr_state="unknown"
-        else
-            local origin_url owner_repo
-            origin_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
-            if [[ -n "$origin_url" ]]; then
-                local safe_url
-                safe_url="$(redact_url "$origin_url")"
-                owner_repo="$(echo "$safe_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-                if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1; then
-                    local pr_json gh_rc=0
-                    # env -u: a stale GH_TOKEN/GITHUB_TOKEN override breaks gh
-                    # even when the stored keychain credential is valid.
-                    pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch" --state all \
-                        --json number,state,title,headRefOid 2>/dev/null)" || gh_rc=$?
-                    if [[ "$gh_rc" -eq 0 && -n "$pr_json" && "$pr_json" != "[]" ]]; then
-                        local local_head
-                        local_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
-                        if command -v python3 >/dev/null 2>&1; then
-                            pr_state="$(python3 -c '
-import json, sys
-try:
-    prs = json.loads(sys.argv[1])
-    local_head = sys.argv[2].strip()
-    if not isinstance(prs, list) or not local_head:
-        print("unknown")
-        sys.exit(0)
-    has_open = any(isinstance(p, dict) and (p.get("state") or "").upper() == "OPEN" for p in prs)
-    merged_prs = [p for p in prs if isinstance(p, dict) and (p.get("state") or "").upper() == "MERGED"]
-    if has_open:
-        print("open")
-    elif merged_prs:
-        matching = any(p.get("headRefOid") and p.get("headRefOid") == local_head for p in merged_prs)
-        if matching:
-            print("merged")
-        else:
-            print("merged-differing-head")
-    elif any(isinstance(p, dict) and (p.get("state") or "").upper() == "CLOSED" for p in prs):
-        print("closed")
-    else:
-        print("none")
-except Exception:
-    print("unknown")
-' "$pr_json" "$local_head" 2>/dev/null || echo "unknown")"
-                        else
-                            pr_state="unknown"
-                        fi
-                    elif [[ "$gh_rc" -eq 0 && "$pr_json" == "[]" ]]; then
-                        pr_state="none"
-                    else
-                        pr_state="unknown"
-                    fi
-                else
-                    pr_state="unknown"
-                fi
-            else
-                pr_state="unknown"
-            fi
-        fi
+        pr_state="$(query_pr_state "$repo_path" "$wt_path" "$branch")"
     fi
 
     echo "${uncommitted_count}|${untracked_present}|${push_status}|${pr_state}|${ahead_count}|${has_merge_base}|${suspect_rewrite}"
@@ -443,6 +463,179 @@ branch_for_worktree() {
 }
 
 # ---------------------------------------------------------------------------
+# --preserve-wip: lossless local-branch preservation, then non-forced remove
+# ---------------------------------------------------------------------------
+
+# preserve_wip_reason_eligible <reason> — only these NEEDS-REVIEW reasons are
+# fully captured by a local commit. open-pr, large-diff, suspect rewrites etc.
+# stay with a human.
+preserve_wip_reason_eligible() {
+    case "$1" in
+        dirty|untracked|detached-unpushed) return 0 ;;
+    esac
+    return 1
+}
+
+# worktree_has_live_cwd <wt_path> — true if any process's cwd is inside it.
+# Fails closed: no lsof means we cannot prove the worktree is idle.
+worktree_has_live_cwd() {
+    local wt="$1" wt_real cwd
+    command -v lsof >/dev/null 2>&1 || return 0
+    wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
+    while IFS= read -r cwd; do
+        cwd="${cwd#n}"
+        [[ "$cwd" == "$wt" || "$cwd" == "$wt"/* || "$cwd" == "$wt_real" || "$cwd" == "$wt_real"/* ]] && return 0
+    done < <(lsof -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
+    return 1
+}
+
+# preserve_wip_blocker <repo_abs> <wt_path> — echoes a skip reason and
+# returns 0 when the worktree must NOT be auto-preserved; returns 1 if clear.
+preserve_wip_blocker() {
+    local repo_abs="$1" wt="$2" gitdir f
+    gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || { echo "no-gitdir"; return 0; }
+    if [[ -e "$gitdir/locked" ]]; then
+        echo "locked"; return 0
+    fi
+    for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+        if [[ -e "$gitdir/$f" ]]; then
+            echo "in-progress-op:$f"; return 0
+        fi
+    done
+    if [[ -n "$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)" ]]; then
+        echo "in-progress-op:unmerged-paths"; return 0
+    fi
+    git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo "unborn-head"; return 0; }
+    if worktree_has_live_tmux_pane "$wt" || worktree_has_live_cwd "$wt"; then
+        echo "live-cwd"; return 0
+    fi
+    # Edits to skip-worktree (S) or assume-unchanged (lowercase tag) entries
+    # are invisible to both `git add -A` and `git status`, so they would be
+    # lost on removal: refuse. Fail closed if the listing fails.
+    local flagged frc=0
+    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^(S|[a-z]) /{print substr($0,3); exit}')" || frc=$?
+    if [[ "$frc" -ne 0 ]]; then
+        echo "index-flag-scan-failed"; return 0
+    fi
+    if [[ -n "$flagged" ]]; then
+        echo "index-flagged:$flagged"; return 0
+    fi
+    # Ignored files are not captured by `git add -A`; refuse to silently
+    # drop anything that looks like a credential. Nested git repos (ignored
+    # or not) are listed as `dir/` and never descended into, so their
+    # contents and local commits would be lost: refuse those too. Fail
+    # closed if the listing itself fails.
+    local listing rc=0 name base
+    listing="$(git -C "$wt" ls-files -z --others 2>/dev/null | tr '\0' '\n')" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "ignored-scan-failed"; return 0
+    fi
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        if [[ "$name" == */ ]]; then
+            echo "nested-repo:$name"; return 0
+        fi
+        base="${name##*/}"
+        case "$base" in
+            .env|.env.*|.envrc|*.pem|*.key|*.keystore|id_rsa*|id_ed25519*|*credentials*|secrets*|service-account*.json|.netrc|*.p12)
+                echo "ignored-secret:$name"; return 0 ;;
+        esac
+    done <<<"$listing"
+    return 1
+}
+
+# wip_branch_name <wt_path> — first free wip/worktree-hygiene/<date>/<name>[-N].
+wip_branch_name() {
+    local wt="$1" base candidate n=2
+    base="$(basename "$wt" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^[.-]+//; s/\.lock$//; s/[.]+$//')"
+    [[ -n "$base" ]] || base="worktree"
+    base="wip/worktree-hygiene/$(date +%Y%m%d)/$base"
+    git check-ref-format --branch "$base" >/dev/null 2>&1 || base="wip/worktree-hygiene/$(date +%Y%m%d)/worktree"
+    candidate="$base"
+    while git -C "$wt" show-ref --verify --quiet "refs/heads/$candidate"; do
+        candidate="${base}-${n}"
+        n=$(( n + 1 ))
+    done
+    echo "$candidate"
+}
+
+# wip_restore_head <wt> <branch> <orig_ref> <orig_sha> — after a failed
+# preservation, point HEAD back at the original branch (or detached SHA) and
+# reset only the index; the working tree is never touched. The wip branch is
+# dropped if no commit landed on it, else kept and logged.
+wip_restore_head() {
+    local wt="$1" branch="$2" orig_ref="$3" orig_sha="$4" wip_sha
+    if [[ -n "$orig_ref" ]]; then
+        git -C "$wt" symbolic-ref HEAD "$orig_ref" 2>/dev/null
+    else
+        git -C "$wt" update-ref --no-deref HEAD "$orig_sha" 2>/dev/null
+    fi || { ledger_line "WIP-FAILED" "$wt" "could not restore HEAD; left on $branch"; return 1; }
+    git -C "$wt" reset -q 2>/dev/null || ledger_line "WIP-FAILED" "$wt" "index reset failed after HEAD restore"
+    wip_sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch" 2>/dev/null || true)"
+    if [[ "$wip_sha" == "$orig_sha" ]]; then
+        git -C "$wt" branch -q -D "$branch" 2>/dev/null || true
+        ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset"
+    else
+        ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset; partial commit left on $branch"
+    fi
+}
+
+# preserve_wip_and_remove <repo_abs> <wt_path> — commit all non-ignored WIP to
+# a new local branch, record it, then `git worktree remove` (no --force).
+# Returns 0 if removed, 1 if preserved-but-kept or preservation failed.
+preserve_wip_and_remove() {
+    local repo_abs="$1" wt="$2" branch name email sha orig_ref orig_sha
+    branch="$(wip_branch_name "$wt")"
+    orig_ref="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || true)"
+    orig_sha="$(git -C "$wt" rev-parse --verify -q HEAD 2>/dev/null)" || {
+        ledger_line "WIP-FAILED" "$wt" "cannot resolve HEAD; kept"; return 1; }
+    name="$(git -C "$wt" config user.name 2>/dev/null || true)"
+    email="$(git -C "$wt" config user.email 2>/dev/null || true)"
+    [[ -n "$name" ]] || name="worktree-hygiene"
+    [[ -n "$email" ]] || email="worktree-hygiene@localhost"
+
+    if ! git -C "$wt" checkout -q -b "$branch" 2>/dev/null; then
+        ledger_line "WIP-FAILED" "$wt" "could not create $branch; kept"
+        return 1
+    fi
+    if ! git -C "$wt" add -A 2>/dev/null; then
+        ledger_line "WIP-FAILED" "$wt" "git add -A failed on $branch; kept"
+        wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
+        return 1
+    fi
+    if ! git -C "$wt" diff --cached --quiet 2>/dev/null; then
+        if ! GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
+             GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \
+             git -C "$wt" -c commit.gpgsign=false commit -q --no-verify \
+                 -m "wip: preserved by worktree-hygiene before removal ($wt)" >/dev/null 2>&1; then
+            ledger_line "WIP-FAILED" "$wt" "commit failed on $branch; kept"
+            wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
+            return 1
+        fi
+    fi
+    if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]] \
+       || ! sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch")"; then
+        ledger_line "WIP-FAILED" "$wt" "tree not clean after commit on $branch; kept"
+        wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
+        return 1
+    fi
+
+    ledger_line "PRESERVED-WIP" "$wt -> $branch $sha"
+    local state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    mkdir -p "$state_dir" 2>/dev/null || true
+    printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wt" "$branch" "$sha" \
+        >>"$state_dir/worktree_hygiene_wip_manifest.txt" \
+        || echo "WARN: could not append wip manifest in $state_dir"
+
+    if git -C "$repo_abs" worktree remove "$wt" 2>/dev/null; then
+        ledger_line "DELETE" "$wt" "preserved on $branch"
+        return 0
+    fi
+    ledger_line "REMOVE-REFUSED" "$wt" "git worktree remove refused; kept (branch $branch remains)"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -462,6 +655,7 @@ main() {
                 ;;
             --skip-push) SKIP_PUSH=true ;;
             --skip-gh) SKIP_GH=true ;;
+            --preserve-wip) PRESERVE_WIP=true ;;
             --max-candidates)
                 [[ $# -ge 2 ]] || { echo "--max-candidates requires a value" >&2; exit 2; }
                 MAX_CANDIDATES="$2"
@@ -511,7 +705,7 @@ main() {
         echo "=== WORKTREE HYGIENE (DRY-RUN) ==="
     fi
 
-    local safe_count=0 review_count=0 preserved_count=0
+    local safe_count=0 review_count=0 preserved_count=0 wip_count=0
 
     for repo in "${REPOS[@]}"; do
         [[ -d "$repo" ]] || continue
@@ -600,6 +794,34 @@ main() {
                     git -C "$repo_abs" worktree unlock "$wt_path" 2>/dev/null || true
                     git -C "$repo_abs" worktree remove --force --force "$wt_path" || echo "WARN: failed to remove $wt_path"
                 fi
+            elif [[ "$PRESERVE_WIP" == true ]] && preserve_wip_reason_eligible "$reason"; then
+                # classify_candidate reports only the first matching reason, so
+                # `untracked`/`detached-unpushed` can mask large-diff,
+                # no-merge-base, or an open PR (triage skips gh on dirty trees).
+                local blocker="" wip_pr_state="$pr_state"
+                if (( uncommitted_count > 50 )); then
+                    blocker="large-diff"
+                elif (( has_merge_base == 0 )); then
+                    blocker="no-merge-base"
+                elif [[ "$wip_pr_state" == "unknown" && "$SKIP_GH" != true && "$branch" != "detached" ]]; then
+                    wip_pr_state="$(query_pr_state "$repo_abs" "$wt_path" "$branch")"
+                fi
+                if [[ -z "$blocker" && "$wip_pr_state" == "open" ]]; then
+                    blocker="open-pr"
+                fi
+                if [[ -n "$blocker" ]] || blocker="$(preserve_wip_blocker "$repo_abs" "$wt_path")"; then
+                    ledger_line "NEEDS-REVIEW" "$wt_path" "$reason; preserve-wip skipped: $blocker"
+                    review_count=$(( review_count + 1 ))
+                elif [[ "$EXECUTE" == true ]]; then
+                    if preserve_wip_and_remove "$repo_abs" "$wt_path"; then
+                        wip_count=$(( wip_count + 1 ))
+                    else
+                        review_count=$(( review_count + 1 ))
+                    fi
+                else
+                    ledger_line "WOULD-PRESERVE-WIP" "$wt_path" "$reason"
+                    wip_count=$(( wip_count + 1 ))
+                fi
             else
                 ledger_line "NEEDS-REVIEW" "$wt_path" "$reason"
                 review_count=$(( review_count + 1 ))
@@ -609,6 +831,13 @@ main() {
 
     echo ""
     echo "Worktree-hygiene: ${safe_count} safe, ${review_count} needs-review, ${preserved_count} preserved (young)."
+    if [[ "$PRESERVE_WIP" == true ]]; then
+        if [[ "$EXECUTE" == true ]]; then
+            echo "Preserve-wip: ${wip_count} preserved to local wip/ branches and removed."
+        else
+            echo "Preserve-wip: ${wip_count} would be preserved to local wip/ branches and removed."
+        fi
+    fi
     echo "Note: NEEDS-REVIEW candidates are NOT auto-filed as beads by this script."
     echo "Route them to an agent (or manual triage) to judge bead-worthiness -- that's"
     echo "a judgment call, not a deterministic git-state check."
