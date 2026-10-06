@@ -344,6 +344,122 @@ is_worktree_active() {
     git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qF "^worktree ${wt_path}$"
 }
 
+process_antigravity_orphan() {
+    local abs_subdir="$1"
+    if is_worktree_active "$abs_subdir"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "active"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
+        local age_label
+        age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$GLOBAL_CWD_BLOCKED"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if list_has_child_of "$abs_subdir" "$GLOBAL_LIVE_CWDS"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "live-cwd"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if [[ -e "$abs_subdir/.git" ]]; then
+        local status_porcelain
+        status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null || true)"
+        if [[ -n "$status_porcelain" ]]; then
+            if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "untracked"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
+            fi
+            if grep -qE '^[ MADRCU?][ MADRCU?]' <<<"$status_porcelain"; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
+            fi
+        fi
+
+        local ag_main_repo=""
+        if [[ -f "$abs_subdir/.git" ]]; then
+            local gitdir_line
+            gitdir_line=$(grep '^gitdir: ' "$abs_subdir/.git" 2>/dev/null || true)
+            local git_dir
+            git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
+            ag_main_repo="${git_dir%/.git/worktrees/*}"
+        elif [[ -d "$abs_subdir/.git" ]]; then
+            ag_main_repo="$abs_subdir"
+        fi
+        if [[ -n "$ag_main_repo" && -d "$ag_main_repo" ]]; then
+            local main_ref
+            if main_ref="$(resolve_main_ref "$ag_main_repo" 2>/dev/null)"; then
+                local head_sha
+                head_sha="$(git -C "$abs_subdir" rev-parse HEAD 2>/dev/null || true)"
+                if [[ -n "$head_sha" ]] && ! git -C "$ag_main_repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
+                    local ahead_count
+                    ahead_count="$(git -C "$ag_main_repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
+                    if [[ "$ahead_count" -gt 0 ]]; then
+                        local branch
+                        branch="$(git -C "$abs_subdir" symbolic-ref HEAD 2>/dev/null || echo "detached")"
+                        local branch_clean="${branch#refs/heads/}"
+                        local eligible_by_pr=false
+                        if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+                            local origin_url owner_repo
+                            origin_url="$(git -C "$ag_main_repo" remote get-url origin 2>/dev/null || true)"
+                            if [[ -n "$origin_url" ]]; then
+                                owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                                if [[ -n "$owner_repo" ]]; then
+                                    local pr_heads gh_rc=0
+                                    pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                                    if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                                        if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                                            eligible_by_pr=true
+                                        else
+                                            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "merged-differing-head"
+                                            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                                            return 0
+                                        fi
+                                    fi
+                                fi
+                            fi
+                        fi
+                        if [[ "$eligible_by_pr" == false ]]; then
+                            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ahead-of-main"
+                            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                            return 0
+                        fi
+                    else
+                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "non-ancestor"
+                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+    fi
+    local local_kb local_mb _safety_reason
+    local_kb=$(size_kb "$abs_subdir")
+    local_mb=$(( local_kb / 1024 ))
+    if [[ "$DRY_RUN" == true ]]; then
+        ledger_line "antigravity" "ELIGIBLE" "$abs_subdir" "" " (~${local_mb}M, rm -rf orphan)"
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
+        ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
+    else
+        ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
+        if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
+            echo "SAFETY-SKIP $abs_subdir ($_safety_reason)"
+        else
+            rm -rf "$abs_subdir"
+        fi
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
+        ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
+    fi
+}
+
 if [[ -d "$WORKTREE_ROOT" ]]; then
     echo ""
     echo "--- Antigravity orphans ($WORKTREE_ROOT) ---"
@@ -352,116 +468,7 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
         for subdir in "$parent_dir"/*; do
             [[ -d "$subdir" ]] || continue
             abs_subdir=$(cd "$subdir" && pwd -P)
-            if is_worktree_active "$abs_subdir"; then
-                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "active"
-                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                continue
-            fi
-            if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
-                age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
-                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
-                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                continue
-            fi
-            if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
-                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$GLOBAL_CWD_BLOCKED"
-                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                continue
-            fi
-            if list_has_child_of "$abs_subdir" "$GLOBAL_LIVE_CWDS"; then
-                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "live-cwd"
-                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                continue
-            fi
-            if [[ -e "$abs_subdir/.git" ]]; then
-                local status_porcelain
-                status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null || true)"
-                if [[ -n "$status_porcelain" ]]; then
-                    if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
-                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "untracked"
-                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                        continue
-                    fi
-                    if grep -qE '^[ MADRCU?][ MADRCU?]' <<<"$status_porcelain"; then
-                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
-                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                        continue
-                    fi
-                fi
-
-                local ag_main_repo=""
-                if [[ -f "$abs_subdir/.git" ]]; then
-                    local gitdir_line
-                    gitdir_line=$(grep '^gitdir: ' "$abs_subdir/.git" 2>/dev/null || true)
-                    local git_dir
-                    git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-                    ag_main_repo="${git_dir%/.git/worktrees/*}"
-                elif [[ -d "$abs_subdir/.git" ]]; then
-                    ag_main_repo="$abs_subdir"
-                fi
-                if [[ -n "$ag_main_repo" && -d "$ag_main_repo" ]]; then
-                    local main_ref
-                    if main_ref="$(resolve_main_ref "$ag_main_repo" 2>/dev/null)"; then
-                        local head_sha
-                        head_sha="$(git -C "$abs_subdir" rev-parse HEAD 2>/dev/null || true)"
-                        if [[ -n "$head_sha" ]] && ! git -C "$ag_main_repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
-                            local ahead_count
-                            ahead_count="$(git -C "$ag_main_repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
-                            if [[ "$ahead_count" -gt 0 ]]; then
-                                local branch
-                                branch="$(git -C "$abs_subdir" symbolic-ref HEAD 2>/dev/null || echo "detached")"
-                                local branch_clean="${branch#refs/heads/}"
-                                local eligible_by_pr=false
-                                if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
-                                    local origin_url owner_repo
-                                    origin_url="$(git -C "$ag_main_repo" remote get-url origin 2>/dev/null || true)"
-                                    if [[ -n "$origin_url" ]]; then
-                                        owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-                                        if [[ -n "$owner_repo" ]]; then
-                                            local pr_heads gh_rc=0
-                                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
-                                            if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
-                                                if grep -qFx "$head_sha" <<<"$pr_heads"; then
-                                                    eligible_by_pr=true
-                                                else
-                                                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "merged-differing-head"
-                                                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                                                    continue
-                                                fi
-                                            fi
-                                        fi
-                                    fi
-                                fi
-                                if [[ "$eligible_by_pr" == false ]]; then
-                                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ahead-of-main"
-                                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                                    continue
-                                fi
-                            else
-                                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "non-ancestor"
-                                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                                continue
-                            fi
-                        fi
-                    fi
-                fi
-            fi
-            local_kb=$(size_kb "$abs_subdir")
-            local_mb=$(( local_kb / 1024 ))
-            if [[ "$DRY_RUN" == true ]]; then
-                ledger_line "antigravity" "ELIGIBLE" "$abs_subdir" "" " (~${local_mb}M, rm -rf orphan)"
-                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
-                ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
-            else
-                ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
-                if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
-                  echo "SAFETY-SKIP "$abs_subdir" ($_safety_reason)"
-                else
-                  rm -rf "$abs_subdir"
-                fi
-                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
-                ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
-            fi
+            process_antigravity_orphan "$abs_subdir"
         done
     done
 else
