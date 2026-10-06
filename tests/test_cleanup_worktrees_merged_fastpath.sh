@@ -89,13 +89,19 @@ add_wt m4npmrc "$WT/wt-m4npmrc" "$MERGED_SHA"
 printf 'x\n' > "$WT/wt-m4npmrc/.npmrc"
 add_wt m4p12 "$WT/wt-m4p12" "$MERGED_SHA"
 mkdir -p "$WT/wt-m4p12/certs" && printf 'x\n' > "$WT/wt-m4p12/certs/Client.P12"
+# Locked with a reason (`locked <reason>` porcelain line) and ed25519 key.
+add_wt m4lockr "$WT/wt-m4lockr" "$MERGED_SHA"
+git -C "$REPO" worktree lock --reason "agent busy" "$WT/wt-m4lockr"
+add_wt m4ed "$WT/wt-m4ed" "$MERGED_SHA"
+mkdir -p "$WT/wt-m4ed/config" && printf 'x\n' > "$WT/wt-m4ed/config/id_ed25519"
+printf 'config/id_ed25519\n' >> "$REPO/.git/info/exclude"
 # gh-verified squash-merged route (bead ueh) into the 3-day path.
 git -C "$REPO" remote add origin https://github.com/fixture/repo.git
 add_wt sqmatch "$WT/wt-sqmatch" "$AHEAD_SHA"
 add_wt sqdiff "$WT/wt-sqdiff" "$AHEAD_SHA"
 
 for w in wt-m4 wt-m4dirty wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
-    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqdiff; do age_days_ago "$WT/$w" 4; done
+    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqdiff wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
 age_days_ago "$REPO/.ao/data/worktrees/wt-m4ao" 4
 age_days_ago "$WT/wt-m2" 2
 age_days_ago "$TMP_ROOT/aodir/wt-m4cfg" 4
@@ -151,6 +157,8 @@ check "4d skip-worktree edit -> young" "wt-m4sw | young" "$OUT"
 check "4d ignored .ENV (uppercase) -> young" "wt-m4envcase | young" "$OUT"
 check "4d ignored .npmrc -> young" "wt-m4npmrc | young" "$OUT"
 check "4d ignored *.P12 -> young" "wt-m4p12 | young" "$OUT"
+check "4d merged locked with reason -> PRESERVE locked" "wt-m4lockr | locked" "$OUT"
+check "4d ignored id_ed25519 -> young" "wt-m4ed | young" "$OUT"
 check "4d gh squash-merged matching head -> ELIGIBLE" "ELIGIBLE  $WT/wt-sqmatch |" "$OUT"
 check "4d gh squash-merged differing head -> young" "wt-sqdiff | young" "$OUT"
 

@@ -185,10 +185,10 @@ ELIGIBLE when ALL hold: `git status --porcelain --untracked-files=all
 --ignore-submodules=none` is empty (no tracked changes, no untracked files);
 no index entry is assume-unchanged or skip-worktree; no ignored secret-like
 file exists (case-insensitive `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
-`id_rsa*`, `.npmrc`, `.netrc`, `*credentials*`, `secrets*`); HEAD is an ancestor of
+`id_rsa*`/`id_ed25519*`/`id_ecdsa*`/`id_dsa*`, `.npmrc`, `.netrc`, `*credentials*`, `secrets*`); HEAD is an ancestor of
 main or matches a gh-verified MERGED PR head (bead `ueh`); no live process has
 a cwd inside it; it is not locked; and it is not under an AO worktreeDir
-(`*ao/data/worktrees/*` or the AO config, which must be readable). Any
+(`*ao/data/worktrees/*` or the AO config, which, if present, must be readable). Any
 unknown keeps it protected. `DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS` may
 raise the 3, clamped to [3,7]; nothing else may lower the 7-day floor.
 

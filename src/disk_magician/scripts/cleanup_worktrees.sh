@@ -302,6 +302,8 @@ has_hidden_state() {
     out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
         ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
         ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
+        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
     [[ -n "$out" ]]
@@ -687,7 +689,7 @@ process_repo_local_worktrees() {
             detached)
                 branch="detached"
                 ;;
-            locked)
+            locked|locked\ *)
                 locked=1
                 ;;
             prunable*)
