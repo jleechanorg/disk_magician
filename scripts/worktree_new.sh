@@ -74,21 +74,21 @@ wtn_checked_out_elsewhere() {
         /^worktree / { wt = $0 } $0 == b && wt != p { f = 1 } END { exit !f }' <<<"$list"
 }
 
-# wtn_unclaim <repo> <path> — undo a failed add at <path>, a dir this call
-# created with mkdir: drop only the admin entries whose gitdir points at it
-# (never a repo-wide prune), then the dir itself.
+# wtn_unclaim <path> — undo this call's claim: rmdir only, so a dir that
+# holds anything (another call's checkout, or a partial one) is never deleted.
+# git rolls back its own admin entry when `worktree add` fails; this never
+# touches .git/worktrees.
 wtn_unclaim() {
-    local repo="$1" path="$2" common real g
-    common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-    real="$(CDPATH= cd -- "$path" >/dev/null 2>&1 && pwd -P)" || real="$path"
-    if [[ -n "$common" && -d "$common/worktrees" ]]; then
-        for g in "$common"/worktrees/*/gitdir; do
-            [[ -f "$g" && "$(cat "$g")" == "$real/.git" ]] || continue
-            g="${g%/gitdir}"
-            [[ -n "$g" && "$g" == "$common"/worktrees/?* ]] && rm -rf -- "$g"
-        done
-    fi
-    [[ -n "$path" && "$path" == /?*/?* ]] && rm -rf -- "$path"
+    rmdir -- "$1" 2>/dev/null || echo "worktree-new: left non-empty $1 in place" >&2
+}
+
+# wtn_registered <repo> <path> — rc 0 if <path> is a registered worktree,
+# including missing or locked ones (fail closed: unreadable list = taken).
+wtn_registered() {
+    local list real
+    list="$(git -C "$1" worktree list --porcelain)" || return 0
+    real="$(CDPATH= cd -- "$(dirname -- "$2")" >/dev/null 2>&1 && pwd -P)/$(basename -- "$2")" || real="$2"
+    grep -qxF "worktree $2" <<<"$list" || grep -qxF "worktree $real" <<<"$list"
 }
 
 # wtn_create <repo> <branch> <path> <base> [new] — worktree add, git output to
@@ -100,21 +100,26 @@ wtn_unclaim() {
 # <path> is claimed with an atomic mkdir first (rc 2 if it already exists),
 # and a new branch is created atomically by this call before the add (rc 3 if
 # someone else created it first), so a concurrent call never cleans up a
-# worktree or branch it did not create. On failure, removes this call's
-# path/admin entry, and its own new branch only if still at the start commit
-# and not checked out by another worktree.
+# worktree or branch it did not create. On failure, rmdirs this call's empty
+# path, and deletes its own new branch only if still at the start commit and
+# not checked out by another worktree.
 wtn_create() {
     local repo="$1" branch="$2" path="$3" base="$4" need_new="${5:-}" created=0 start=""
     mkdir -p "$(dirname "$path")" || return 1
+    if wtn_registered "$repo" "$path"; then
+        echo "worktree-new: target registered: $path" >&2
+        return 2
+    fi
     if ! mkdir "$path" 2>/dev/null; then
         echo "worktree-new: target exists: $path" >&2
-        [[ -e "$path" || -L "$path" ]] && return 2
+        # A writable parent means mkdir lost to an existing or racing entry.
+        [[ -w "$(dirname "$path")" ]] && return 2
         return 1
     fi
     if [[ "$need_new" == new ]] &&
         { wtn_branch_exists "$repo" "$branch" || wtn_remote_branch_exists "$repo" "$branch"; }; then
         echo "worktree-new: branch already exists: $branch" >&2
-        wtn_unclaim "$repo" "$path"
+        wtn_unclaim "$path"
         return 3
     fi
     if [[ "$need_new" == new ]] || ! wtn_branch_exists "$repo" "$branch"; then
@@ -124,14 +129,14 @@ wtn_create() {
             git -C "$repo" branch "$track" "$branch" "$from" >&2 && created=1
         if [[ "$created" != 1 ]]; then
             echo "worktree-new: could not create branch $branch" >&2
-            wtn_unclaim "$repo" "$path"
+            wtn_unclaim "$path"
             wtn_branch_exists "$repo" "$branch" && return 3
             return 1
         fi
     fi
     if ! wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2; then
         echo "worktree-new: git worktree add failed: $path" >&2
-        wtn_unclaim "$repo" "$path"
+        wtn_unclaim "$path"
         if [[ "$created" == 1 ]] && ! wtn_checked_out_elsewhere "$repo" "$branch" "$path"; then
             git -C "$repo" update-ref -d "refs/heads/$branch" "$start" >&2 2>/dev/null
         fi

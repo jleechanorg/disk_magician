@@ -150,6 +150,35 @@ assert_eq "$(printf '%s' "$HK_PATHS" | grep -c .)" "6" "6 non-empty paths"
 assert_eq "$(printf '%s' "$HK_PATHS" | sort -u | grep -c .)" "6" "6 distinct paths"
 assert_eq "$(printf '%s' "$HK_BRANCHES" | grep -E '^worktree-hk(-[0-9]+)?$' | sort -u | grep -c .)" "6" "6 distinct worktree-hk* branches"
 
+echo "== case 5f: 12 concurrent same-name calls, 3 rounds: all succeed =="
+for round in 1 2 3; do
+    nm="cc$round"
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        ( printf '%s' "{\"name\":\"$nm\",\"cwd\":\"$REPO\"}" | bash "$SCRIPT" >"$TMPROOT/$nm.$i.out" 2>"$TMPROOT/$nm.$i.err"; echo $? >"$TMPROOT/$nm.$i.rc" ) &
+    done
+    wait
+    RCS=""; PATHS=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        RCS="$RCS$(cat "$TMPROOT/$nm.$i.rc")"
+        PATHS="$PATHS$(last_line "$(cat "$TMPROOT/$nm.$i.out")")"$'\n'
+    done
+    assert_eq "$RCS" "000000000000" "round $round: all 12 exit 0"
+    assert_eq "$(printf '%s' "$PATHS" | sort -u | grep -c .)" "12" "round $round: 12 distinct paths"
+done
+
+echo "== case 5g: foreign locked+missing worktree at the target survives =="
+git -C "$REPO" branch foreignlocked >/dev/null 2>&1
+FL="$WTROOT/fl"
+git -C "$REPO" worktree add "$FL" foreignlocked >/dev/null 2>&1
+git -C "$REPO" worktree lock "$FL" >/dev/null 2>&1
+mv "$FL" "$TMPROOT/fl-unmounted"
+OUT="$(printf '%s' "{\"name\":\"fl\",\"cwd\":\"$REPO\"}" | bash "$SCRIPT" 2>"$TMPROOT/fl.err")"; RC=$?
+assert_eq "$RC" "0" "hook succeeds"
+assert_eq "$(last_line "$OUT")" "$WTROOT/fl-2" "picks fl-2"
+git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $FL" && ok "foreign registration kept" || bad "foreign registration removed"
+git -C "$REPO" worktree list --porcelain | grep -A4 -xF "worktree $FL" | grep -q '^locked' && ok "foreign lock kept" || bad "foreign lock removed"
+git -C "$REPO" show-ref -q --verify refs/heads/foreignlocked && ok "foreign branch kept" || bad "foreign branch deleted"
+
 echo "== case 6: never fetches =="
 [[ -s "$TMPROOT/git_calls.log" ]] && ok "fake git was used" || bad "fake git never invoked"
 [[ ! -e "$TMPROOT/fetch.marker" ]] && ok "no git fetch" || bad "git fetch was invoked"
