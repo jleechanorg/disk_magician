@@ -541,6 +541,22 @@ preserve_wip_blocker() {
                 echo "ignored-secret:$name"; return 0 ;;
         esac
     done <<<"$listing"
+    # Fail closed on ignored content: `git add -A` never captures ignored
+    # files, so any ignored path that is not a known rebuildable output would
+    # be lost on removal. Allowlist only regenerable dirs/files.
+    local ign irc=0 ipath ibase
+    ign="$(git -C "$wt" ls-files -z --others --ignored --exclude-standard --directory 2>/dev/null | tr '\0' '\n')" || irc=$?
+    if [[ "$irc" -ne 0 ]]; then
+        echo "ignored-scan-failed"; return 0
+    fi
+    while IFS= read -r ipath; do
+        [[ -n "$ipath" ]] || continue
+        ibase="${ipath%/}"; ibase="${ibase##*/}"
+        case "$ibase" in
+            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|dist|build|target|.next|.turbo|.parcel-cache|coverage|.coverage|htmlcov|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
+            *) echo "ignored-file:$ipath"; return 0 ;;
+        esac
+    done <<<"$ign"
     return 1
 }
 
@@ -571,13 +587,11 @@ wip_restore_head() {
         git -C "$wt" update-ref --no-deref HEAD "$orig_sha" 2>/dev/null
     fi || { ledger_line "WIP-FAILED" "$wt" "could not restore HEAD; left on $branch"; return 1; }
     git -C "$wt" reset -q 2>/dev/null || ledger_line "WIP-FAILED" "$wt" "index reset failed after HEAD restore"
+    # HEAD is back and the worktree still holds all content, so the (possibly
+    # partial) wip branch is redundant: drop it rather than leave a stale ref.
     wip_sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch" 2>/dev/null || true)"
-    if [[ "$wip_sha" == "$orig_sha" ]]; then
-        git -C "$wt" branch -q -D "$branch" 2>/dev/null || true
-        ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset"
-    else
-        ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset; partial commit left on $branch"
-    fi
+    [[ -n "$wip_sha" ]] && { git -C "$wt" branch -q -D "$branch" 2>/dev/null || true; }
+    ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset; wip branch dropped"
 }
 
 # preserve_wip_and_remove <repo_abs> <wt_path> — commit all non-ignored WIP to
@@ -612,6 +626,25 @@ preserve_wip_and_remove() {
             wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
             return 1
         fi
+    fi
+    # A clean/eol filter can alter content on commit while `git status` (which
+    # reads through the same filter) still reports clean. Compare raw bytes of
+    # every added/modified file with its committed blob; LFS pointers and
+    # symlinks are exempt (both round-trip losslessly).
+    local vpath vattr vbad=""
+    while IFS= read -r -d '' vpath; do
+        [[ -L "$wt/$vpath" || ! -f "$wt/$vpath" ]] && continue
+        vattr="$(git -C "$wt" check-attr filter -- "$vpath" 2>/dev/null)"
+        [[ "${vattr##*: }" == lfs ]] && continue
+        if [[ "$(git -C "$wt" hash-object --no-filters -- "$vpath" 2>/dev/null)" \
+              != "$(git -C "$wt" rev-parse -q --verify "HEAD:$vpath" 2>/dev/null)" ]]; then
+            vbad="$vpath"; break
+        fi
+    done < <(git -C "$wt" diff -z --name-only --diff-filter=AMRTC "$orig_sha" HEAD 2>/dev/null)
+    if [[ -n "$vbad" ]]; then
+        ledger_line "WIP-FAILED" "$wt" "committed bytes differ from disk for $vbad (filter/eol); kept"
+        wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
+        return 1
     fi
     if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]] \
        || ! sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch")"; then

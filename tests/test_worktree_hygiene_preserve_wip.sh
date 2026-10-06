@@ -393,6 +393,49 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R20" --skip-push --execute --preserve-w
 assert_contains "$OUT" "ignored-secret" "ignored .envrc blocks"
 assert_true "[[ -f '$W20/.envrc' ]]" ".envrc intact"
 
+# ---------------------------------------------------------------------------
+echo "case 21: ignored hand-written file (not rebuildable) -> skipped; rebuildable ignored ok"
+R21="$(mk_repo r21)"
+printf 'node_modules/\n.env\nnotes.local\n' >"$R21/.gitignore"
+g -C "$R21" add -A; g -C "$R21" commit -q -m ign21
+W21="$(mk_wt "$R21" notes21)"
+echo "my precious notes" >"$W21/notes.local"
+mkdir -p "$W21/node_modules/x"; echo junk >"$W21/node_modules/x/i.js"
+echo "edit" >>"$W21/tracked.txt"
+backdate_tree "$W21" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R21" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:notes.local" "non-allowlisted ignored file blocks"
+assert_not_contains "$OUT" "PRESERVED-WIP" "worktree with ignored notes not preserved"
+assert_true "[[ -f '$W21/notes.local' ]]" "ignored notes intact"
+
+# ---------------------------------------------------------------------------
+echo "case 22: lossy clean filter strips content on commit -> WIP-FAILED, kept, no stale branch"
+R22="$(mk_repo r22)"
+printf '*.nb filter=strip\n' >"$R22/.gitattributes"
+g -C "$R22" add -A; g -C "$R22" commit -q -m attrs
+W22="$(mk_wt "$R22" lossy22)"
+g -C "$W22" config filter.strip.clean "grep -v OUTPUT"
+g -C "$W22" config filter.strip.smudge cat
+printf 'cell\nOUTPUT: expensive 3h result 42\n' >"$W22/analysis.nb"
+backdate_tree "$W22" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R22" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "committed bytes differ" "lossy filter detected"
+assert_not_contains "$OUT" "PRESERVED-WIP" "lossy worktree not preserved"
+assert_true "grep -q 'OUTPUT: expensive' '$W22/analysis.nb'" "filtered content intact on disk"
+assert_true "[[ -z \"\$(git -C '$R22' branch --list 'wip/*')\" ]]" "no stale wip branch left"
+
+# ---------------------------------------------------------------------------
+echo "case 23: CRLF normalized by text=auto -> WIP-FAILED, kept"
+R23="$(mk_repo r23)"
+printf '* text=auto\n' >"$R23/.gitattributes"
+g -C "$R23" add -A; g -C "$R23" commit -q -m eol
+W23="$(mk_wt "$R23" crlf23)"
+printf 'line1\r\nline2\r\n' >"$W23/win.txt"
+backdate_tree "$W23" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R23" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "committed bytes differ" "eol conversion detected"
+assert_true "[[ -f '$W23/win.txt' ]] && grep -q $'\r' '$W23/win.txt'" "CRLF bytes intact on disk"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
