@@ -69,7 +69,7 @@ mkdir -p "$TMP_DIR/nested-repo/.git/worktrees/deep-branch"
 mkdir -p "$TMP_DIR/.worktrees/some-project/deep-branch"
 echo "gitdir: $TMP_DIR/nested-repo/.git/worktrees/deep-branch" > "$TMP_DIR/.worktrees/some-project/deep-branch/.git"
 OUT="$(discover_worktree_repos "")"
-expect "finds repos at any nesting depth under ~/.worktrees" "$TMP_DIR/nested-repo" "$OUT"
+expect "finds repos nested up to depth 3 under ~/.worktrees" "$TMP_DIR/nested-repo" "$OUT"
 
 echo "Test 5: a non-worktree-pointer .git directory (a real repo, not a worktree) under ~/.worktrees is ignored"
 rm -rf "$TMP_DIR/.worktrees" "$TMP_DIR/nested-repo"
@@ -109,12 +109,19 @@ echo "gitdir: $TMP_DIR/dead-claw-repo/.git/worktrees/stale-wt" > "$TMP_DIR/proje
 OUT="$(discover_worktree_repos "")"
 refute "does not surface dead main repo referenced by worktree in project_worldaiclaw" "dead-claw-repo" "$OUT"
 
-echo "Test 11: .git files inside node_modules are pruned and ignored"
-mkdir -p "$TMP_DIR/project_worldaiclaw/wt-ignored/node_modules/pkg"
+echo "Test 11: .git files inside node_modules at depth 3 are pruned and ignored"
+mkdir -p "$TMP_DIR/project_worldaiclaw/node_modules/fake-pkg"
 mkdir -p "$TMP_DIR/bogus-repo/.git/worktrees/pkg"
-echo "gitdir: $TMP_DIR/bogus-repo/.git/worktrees/pkg" > "$TMP_DIR/project_worldaiclaw/wt-ignored/node_modules/pkg/.git"
+echo "gitdir: $TMP_DIR/bogus-repo/.git/worktrees/pkg" > "$TMP_DIR/project_worldaiclaw/node_modules/fake-pkg/.git"
 OUT="$(discover_worktree_repos "")"
 refute "prunes node_modules subtrees during discovery" "bogus-repo" "$OUT"
+
+echo "Test 12: valid worktree nested at maximum depth 3 is discovered"
+mkdir -p "$TMP_DIR/deep-repo/.git/worktrees/nested-wt"
+mkdir -p "$TMP_DIR/wc-wt/group-a/nested-wt"
+echo "gitdir: $TMP_DIR/deep-repo/.git/worktrees/nested-wt" > "$TMP_DIR/wc-wt/group-a/nested-wt/.git"
+OUT="$(discover_worktree_repos "")"
+expect "discovers worktrees nested at depth 3" "$TMP_DIR/deep-repo" "$OUT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

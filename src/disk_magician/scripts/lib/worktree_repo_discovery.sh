@@ -69,6 +69,10 @@ cmd = sys.argv[1:]
 try:
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
     sys.stdout.write(p.stdout)
+except subprocess.TimeoutExpired as exc:
+    if exc.stdout:
+        sys.stdout.write(exc.stdout)
+    sys.stderr.write(f"worktree_repo_discovery: timeout searching root {cmd[1]}\n")
 except Exception:
     pass
 ' "${find_cmd[@]}" 2>/dev/null || true)
