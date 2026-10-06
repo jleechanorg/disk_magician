@@ -76,6 +76,8 @@ except subprocess.TimeoutExpired as exc:
 except Exception:
     pass
 ' "${find_cmd[@]}" 2>/dev/null || true)
+        elif command -v timeout >/dev/null 2>&1; then
+            git_files=$(timeout 8 "${find_cmd[@]}" 2>/dev/null || true)
         else
             git_files=$("${find_cmd[@]}" 2>/dev/null || true)
         fi
