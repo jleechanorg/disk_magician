@@ -4,7 +4,7 @@
 # on stderr; never fetches. Temp HOME + temp repos only.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/worktree_create_hook.sh"
 
 PASS=0
@@ -15,7 +15,7 @@ assert_eq() {
     if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi
 }
 
-TMPROOT="$(cd "$(mktemp -d)" && pwd -P)"
+TMPROOT="$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMPROOT"' EXIT
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
@@ -73,19 +73,82 @@ git -C "$REPO" branch worktree-red-fox-2
 run_hook "{\"name\":\"red-fox\",\"cwd\":\"$REPO\"}"
 assert_eq "$(git -C "$WTROOT/red-fox" rev-parse --abbrev-ref HEAD 2>/dev/null)" "worktree-red-fox-3" "suffixed branch"
 
+echo "== case 3b: branch only on origin also counts as a collision =="
+git -C "$REPO" update-ref refs/remotes/origin/worktree-gray-owl "$ORIGIN_SHA"
+run_hook "{\"name\":\"gray-owl\",\"cwd\":\"$REPO\"}"
+assert_eq "$(git -C "$WTROOT/gray-owl" rev-parse --abbrev-ref HEAD 2>/dev/null)" "worktree-gray-owl-2" "suffixed branch"
+
 echo "== case 4: rejects bad input =="
 mkdir -p "$TMPROOT/plain"
 run_hook "{\"name\":\"x1\",\"cwd\":\"$TMPROOT/plain\"}"; assert_eq "$RC" "1" "non-repo cwd"
 run_hook "{\"name\":\"a/b\",\"cwd\":\"$REPO\"}"; assert_eq "$RC" "1" "name with /"
 run_hook "{\"name\":\"..\",\"cwd\":\"$REPO\"}"; assert_eq "$RC" "1" "name .."
 run_hook "not json"; assert_eq "$RC" "1" "malformed stdin"
-[[ ! -e "$HOME/.worktrees/a" ]] && ok "nothing created for bad name" || bad "created path for bad name"
+run_hook "{\"name\":null,\"cwd\":\"$REPO\"}"; assert_eq "$RC" "1" "null name"
+run_hook "{\"name\":\"a..b\",\"cwd\":\"$REPO\"}"; assert_eq "$RC" "1" "name not a valid ref"
+[[ ! -e "$WTROOT/a" && ! -e "$WTROOT/None" && ! -e "$WTROOT/a..b" ]] && ok "nothing created for bad names" || bad "created path for bad name"
+if git -C "$REPO" show-ref -q --verify refs/heads/worktree-None; then bad "branch for null name"; else ok "no branch for null name"; fi
 
 echo "== case 5: DISK_MAGICIAN_WORKTREE_HOOK=off -> <repo>/.claude/worktrees/<name> =="
 OUT="$(printf '%s' "{\"name\":\"off-one\",\"cwd\":\"$REPO/sub\"}" | DISK_MAGICIAN_WORKTREE_HOOK=off bash "$SCRIPT" 2>/dev/null)"; RC=$?
 assert_eq "$RC" "0" "exit code"
 assert_eq "$(last_line "$OUT")" "$REPO/.claude/worktrees/off-one" "fallback path"
 [[ -d "$REPO/.claude/worktrees/off-one" ]] && ok "fallback worktree exists" || bad "fallback worktree missing"
+
+echo "== case 5b: existing target path -> -N suffixed path, original untouched =="
+mkdir -p "$WTROOT/busy-bee" "$WTROOT/busy-bee-2"
+run_hook "{\"name\":\"busy-bee\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "exit code"
+assert_eq "$(last_line "$OUT")" "$WTROOT/busy-bee-3" "suffixed path"
+assert_eq "$(git -C "$WTROOT/busy-bee-3" rev-parse --abbrev-ref HEAD 2>/dev/null)" "worktree-busy-bee" "branch"
+assert_eq "$(ls -A "$WTROOT/busy-bee")" "" "existing dir untouched"
+
+echo "== case 5c: dangling symlink at the target path -> -N suffixed path =="
+ln -s "$TMPROOT/nowhere" "$WTROOT/dangle"
+run_hook "{\"name\":\"dangle\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "exit code"
+assert_eq "$(last_line "$OUT")" "$WTROOT/dangle-2" "suffixed path"
+[[ -L "$WTROOT/dangle" ]] && ok "symlink untouched" || bad "symlink removed"
+
+echo "== case 5d: branch taken by a concurrent creator mid-create -> re-picks -N branch =="
+mkdir -p "$TMPROOT/stealbin"
+cat > "$TMPROOT/stealbin/git" <<EOF
+#!/usr/bin/env bash
+if [[ " \$* " == *" worktree-stolen "* && ( " \$* " == *" worktree add "* || " \$* " == *" branch "* ) && ! -e "$TMPROOT/steal.done" ]]; then
+    touch "$TMPROOT/steal.done"
+    "$REAL_GIT" -C "$REPO" branch --no-track worktree-stolen origin/HEAD
+fi
+exec "$TMPROOT/bin/git" "\$@"
+EOF
+chmod +x "$TMPROOT/stealbin/git"
+OUT="$(printf '%s' "{\"name\":\"stolen\",\"cwd\":\"$REPO\"}" | PATH="$TMPROOT/stealbin:$PATH" bash "$SCRIPT" 2>/dev/null)"; RC=$?
+[[ -e "$TMPROOT/steal.done" ]] && ok "interloper fired" || bad "interloper never fired"
+assert_eq "$RC" "0" "exit code"
+P="$(last_line "$OUT")"
+assert_eq "$(git -C "$P" rev-parse --abbrev-ref HEAD 2>/dev/null)" "worktree-stolen-2" "re-picked branch"
+if git -C "$REPO" show-ref -q --verify refs/heads/worktree-stolen; then ok "other's branch survives"; else bad "other's branch deleted"; fi
+
+echo "== case 5e: 6 concurrent same-name hook calls all succeed, distinct paths + branches =="
+for i in 1 2 3 4 5 6; do
+    ( printf '%s' "{\"name\":\"hk\",\"cwd\":\"$REPO\"}" | bash "$SCRIPT" >"$TMPROOT/hk.$i.out" 2>"$TMPROOT/hk.$i.err"; echo $? >"$TMPROOT/hk.$i.rc" ) &
+done
+wait
+HK_RCS="" HK_PATHS="" HK_BRANCHES=""
+for i in 1 2 3 4 5 6; do
+    HK_RCS="$HK_RCS$(cat "$TMPROOT/hk.$i.rc")"
+    P="$(last_line "$(cat "$TMPROOT/hk.$i.out")")"
+    HK_PATHS="$HK_PATHS$P"$'\n'
+    HK_BRANCHES="$HK_BRANCHES$(git -C "$P" rev-parse --abbrev-ref HEAD 2>/dev/null)"$'\n'
+    if [[ -n "$P" ]] && git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $P"; then
+        ok "call $i path registered ($P)"
+    else
+        bad "call $i path not a registered worktree: '$P' — $(tr "\n" "|" <"$TMPROOT/hk.$i.err")"
+    fi
+done
+assert_eq "$HK_RCS" "000000" "all 6 exit codes"
+assert_eq "$(printf '%s' "$HK_PATHS" | grep -c .)" "6" "6 non-empty paths"
+assert_eq "$(printf '%s' "$HK_PATHS" | sort -u | grep -c .)" "6" "6 distinct paths"
+assert_eq "$(printf '%s' "$HK_BRANCHES" | grep -E '^worktree-hk(-[0-9]+)?$' | sort -u | grep -c .)" "6" "6 distinct worktree-hk* branches"
 
 echo "== case 6: never fetches =="
 [[ -s "$TMPROOT/git_calls.log" ]] && ok "fake git was used" || bad "fake git never invoked"

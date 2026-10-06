@@ -4,7 +4,7 @@
 # temp repos; never touches the real ~/.worktrees.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/worktree_new.sh"
 
 PASS=0
@@ -15,7 +15,7 @@ assert_eq() {
     if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi
 }
 
-TMPROOT="$(cd "$(mktemp -d)" && pwd -P)"
+TMPROOT="$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMPROOT"' EXIT
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
@@ -41,6 +41,7 @@ assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-x" "stdout"
 assert_eq "$(git -C "$WTROOT/feat-x" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/x" "branch"
 assert_eq "$(git -C "$WTROOT/feat-x" rev-parse HEAD 2>/dev/null)" "$ORIGIN_SHA" "based on origin/HEAD"
+if git -C "$WTROOT/feat-x" rev-parse -q --verify 'feat/x@{upstream}' >/dev/null 2>&1; then bad "new branch tracks an upstream"; else ok "new branch has no upstream (--no-track)"; fi
 
 echo "== case 2: --base and --name honored =="
 out="$(bash "$SCRIPT" "$REPO" feat/y --base HEAD --name custom 2>/dev/null)"; rc=$?
@@ -75,6 +76,179 @@ echo "== case 6: non-repo path and missing args -> exit 1 =="
 mkdir -p "$TMPROOT/plain"
 bash "$SCRIPT" "$TMPROOT/plain" feat/q >/dev/null 2>&1; assert_eq "$?" "1" "non-repo"
 bash "$SCRIPT" "$REPO" >/dev/null 2>&1; assert_eq "$?" "1" "missing branch"
+
+echo "== case 7: branch only on origin -> tracking branch at the remote tip =="
+git -C "$TMPROOT/seed" checkout -q -b pr/feature
+git -C "$TMPROOT/seed" commit -q --allow-empty -m pr-commit
+git -C "$TMPROOT/seed" push -q origin pr/feature
+PR_SHA="$(git -C "$TMPROOT/seed" rev-parse HEAD)"
+git -C "$REPO" fetch -q origin   # test setup only; the script itself never fetches
+out="$(bash "$SCRIPT" "$REPO" pr/feature 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$(git -C "$WTROOT/pr-feature" rev-parse HEAD 2>/dev/null)" "$PR_SHA" "HEAD is the PR commit"
+assert_eq "$(git -C "$WTROOT/pr-feature" rev-parse --abbrev-ref 'pr/feature@{upstream}' 2>/dev/null)" "origin/pr/feature" "tracks origin/pr/feature"
+
+echo "== case 8: --base with an existing branch is rejected; --opt=value forms work =="
+git -C "$REPO" branch idle "$LOCAL_SHA"
+out="$(bash "$SCRIPT" "$REPO" idle --base HEAD --name ex2 2>/dev/null)"; rc=$?
+assert_eq "$rc" "1" "--base + existing branch"
+[[ ! -e "$WTROOT/ex2" ]] && ok "nothing created" || bad "created ex2"
+out="$(bash "$SCRIPT" "$REPO" feat/eq --base=HEAD --name=eqform 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/eqform" "--name= honored"
+assert_eq "$(git -C "$WTROOT/eqform" rev-parse HEAD 2>/dev/null)" "$LOCAL_SHA" "--base= honored"
+
+echo "== case 9: submodule path -> worktree of the submodule, named after it =="
+git init -q -b main "$TMPROOT/subsrc"
+git -C "$TMPROOT/subsrc" commit -q --allow-empty -m subcommit
+SUB_SHA="$(git -C "$TMPROOT/subsrc" rev-parse HEAD)"
+git init -q -b main "$TMPROOT/super"
+git -C "$TMPROOT/super" -c protocol.file.allow=always submodule -q add "$TMPROOT/subsrc" sm 2>/dev/null
+git -C "$TMPROOT/super" commit -q -m supercommit
+out="$(bash "$SCRIPT" "$TMPROOT/super/sm" feat/s 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$HOME/.worktrees/sm/feat-s" "named after the submodule"
+assert_eq "$(git -C "$out" rev-parse HEAD 2>/dev/null)" "$SUB_SHA" "submodule commit, not superproject"
+
+echo "== case 10: bare repo + linked worktree layout =="
+git clone -q --bare "$TMPROOT/origin.git" "$TMPROOT/proj.git"
+git -C "$TMPROOT/proj.git" worktree add -q "$TMPROOT/proj-main" main 2>/dev/null
+out="$(bash "$SCRIPT" "$TMPROOT/proj-main" feat/b 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$HOME/.worktrees/proj/feat-b" "named after the bare repo"
+assert_eq "$(git -C "$out" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/b" "branch"
+
+echo "== case 11: timed-out add leaves no branch or partial worktree; retry works =="
+REAL_GIT="$(command -v git)"
+mkdir -p "$TMPROOT/hangbin"
+cat > "$TMPROOT/hangbin/git" <<EOF
+#!/usr/bin/env bash
+"$REAL_GIT" "\$@"; rc=\$?
+[[ " \$* " == *" worktree add "* && ! -e "$TMPROOT/nohang" ]] && sleep 100
+exit \$rc
+EOF
+chmod +x "$TMPROOT/hangbin/git"
+out="$(PATH="$TMPROOT/hangbin:$PATH" WTN_ADD_TIMEOUT=1 bash "$SCRIPT" "$REPO" feat/hang 2>/dev/null)"; rc=$?
+[[ "$rc" -ne 0 ]] && ok "timeout -> nonzero ($rc)" || bad "timeout returned 0"
+assert_eq "$out" "" "stdout empty"
+[[ ! -e "$WTROOT/feat-hang" ]] && ok "partial worktree removed" || bad "partial worktree left"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/hang; then bad "branch left behind"; else ok "branch removed"; fi
+touch "$TMPROOT/nohang"
+out="$(PATH="$TMPROOT/hangbin:$PATH" bash "$SCRIPT" "$REPO" feat/hang 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "retry exit code"
+
+echo "== case 12: perl fallback timeout kills the whole process group =="
+mkdir -p "$TMPROOT/minbin"
+for t in bash perl sleep dirname; do ln -s "$(command -v "$t")" "$TMPROOT/minbin/$t"; done
+PATH="$TMPROOT/minbin" bash -c 'source "$1"; wtn_timeout 1 bash -c "sleep 100 & echo \$! > \"$2\"; wait"' _ "$SCRIPT" "$TMPROOT/child.pid" >/dev/null 2>&1; rc=$?
+[[ "$rc" -ne 0 ]] && ok "perl timeout -> nonzero ($rc)" || bad "perl timeout returned 0"
+sleep 1
+if kill -0 "$(cat "$TMPROOT/child.pid" 2>/dev/null)" 2>/dev/null; then bad "grandchild orphaned"; kill "$(cat "$TMPROOT/child.pid")"; else ok "grandchild killed"; fi
+
+echo "== case 13: concurrent same-branch creates -> one wins, winner intact =="
+mkdir -p "$TMPROOT/slowbin"
+cat > "$TMPROOT/slowbin/git" <<EOF
+#!/usr/bin/env bash
+[[ " \$* " == *" worktree add "* ]] && sleep 1
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$TMPROOT/slowbin/git"
+race() { # <tag> <branch> <name...>: two concurrent creates, sets WINS
+    local i
+    for i in 1 2; do
+        (PATH="$TMPROOT/slowbin:$PATH" bash "$SCRIPT" "$REPO" "$2" --name "$3" >"$TMPROOT/$1.$i.out" 2>/dev/null
+         echo $? >"$TMPROOT/$1.$i.rc") &
+    done
+    wait
+    WINS=0; WINNER=""
+    for i in 1 2; do
+        if [[ "$(cat "$TMPROOT/$1.$i.rc")" == 0 ]]; then WINS=$((WINS + 1)); WINNER="$(cat "$TMPROOT/$1.$i.out")"; fi
+    done
+}
+race same feat/race race
+assert_eq "$WINS" "1" "exactly one same-path create succeeds"
+assert_eq "$WINNER" "$WTROOT/race" "winner path"
+assert_eq "$(git -C "$WTROOT/race" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/race" "winner worktree checked out on its branch"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/race; then ok "winner branch survives"; else bad "winner branch deleted"; fi
+if git -C "$REPO" worktree list --porcelain | grep -qx "worktree $WTROOT/race"; then ok "winner still registered"; else bad "winner unregistered"; fi
+
+echo "== case 14: concurrent same-branch creates at different paths -> winner intact =="
+(PATH="$TMPROOT/slowbin:$PATH" bash "$SCRIPT" "$REPO" feat/race2 --name r2a >"$TMPROOT/r2.1.out" 2>/dev/null; echo $? >"$TMPROOT/r2.1.rc") &
+(PATH="$TMPROOT/slowbin:$PATH" bash "$SCRIPT" "$REPO" feat/race2 --name r2b >"$TMPROOT/r2.2.out" 2>/dev/null; echo $? >"$TMPROOT/r2.2.rc") &
+wait
+WINS=0; WINNER=""; LOSER=""
+for i in 1 2; do
+    if [[ "$(cat "$TMPROOT/r2.$i.rc")" == 0 ]]; then WINS=$((WINS + 1)); WINNER="$(cat "$TMPROOT/r2.$i.out")"; fi
+done
+[[ "$WINNER" == "$WTROOT/r2a" ]] && LOSER="$WTROOT/r2b" || LOSER="$WTROOT/r2a"
+assert_eq "$WINS" "1" "exactly one different-path create succeeds"
+assert_eq "$(git -C "$WINNER" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/race2" "winner worktree checked out on its branch"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/race2; then ok "winner branch survives"; else bad "winner branch deleted"; fi
+[[ ! -e "$LOSER" ]] && ok "loser path cleaned" || bad "loser path left: $LOSER"
+
+echo "== case 15: failed create leaves other worktrees' admin entries alone (no repo-wide prune) =="
+git -C "$REPO" worktree add -q "$TMPROOT/stale-wt" -b stale-br 2>/dev/null
+rm -rf "$TMPROOT/stale-wt"
+rm -f "$TMPROOT/nohang"
+PATH="$TMPROOT/hangbin:$PATH" WTN_ADD_TIMEOUT=1 bash "$SCRIPT" "$REPO" feat/hang2 >/dev/null 2>&1
+[[ -d "$REPO/.git/worktrees/stale-wt" ]] && ok "unrelated stale admin entry kept" || bad "unrelated admin entry pruned"
+[[ ! -e "$WTROOT/feat-hang2" ]] && ok "own partial worktree removed" || bad "own partial worktree left"
+n="$(grep -lx "$WTROOT/feat-hang2/.git" "$REPO"/.git/worktrees/*/gitdir 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "$n" "0" "own admin entry removed"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/hang2; then bad "own branch left"; else ok "own branch removed"; fi
+
+echo "== case 16: CDPATH does not redirect the script's own cd =="
+mkdir -p "$TMPROOT/cdp/scripts"
+out="$(cd "$REPO_ROOT" && CDPATH="$TMPROOT/cdp" bash scripts/worktree_new.sh "$REPO" feat/cdp 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code with CDPATH set"
+assert_eq "$out" "$WTROOT/feat-cdp" "stdout with CDPATH set"
+
+echo "== case 17: branch created by someone else mid-create is never deleted by the loser =="
+mkdir -p "$TMPROOT/stealbin"
+cat > "$TMPROOT/stealbin/git" <<EOF
+#!/usr/bin/env bash
+# Simulate a concurrent winner committing refs/heads/feat/steal just before this
+# call's own branch creation (inside 'worktree add -b' or 'branch').
+if [[ " \$* " == *" feat/steal "* && ( " \$* " == *" worktree add "* || " \$* " == *" branch "* ) && ! -e "$TMPROOT/steal.done" ]]; then
+    touch "$TMPROOT/steal.done"
+    "$REAL_GIT" -C "$REPO" branch --no-track feat/steal origin/HEAD
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$TMPROOT/stealbin/git"
+PATH="$TMPROOT/stealbin:$PATH" bash "$SCRIPT" "$REPO" feat/steal --name steal >/dev/null 2>&1; rc=$?
+[[ -e "$TMPROOT/steal.done" ]] && ok "interloper fired" || bad "interloper never fired"
+[[ "$rc" -ne 0 ]] && ok "loser fails ($rc)" || bad "loser reported success"
+assert_eq "$(git -C "$REPO" rev-parse -q --verify refs/heads/feat/steal 2>/dev/null)" "$ORIGIN_SHA" "other's branch survives"
+[[ ! -e "$WTROOT/steal" ]] && ok "loser path cleaned" || bad "loser path left"
+
+echo "== case 18: winner paused after its ref commit, before registration -> one wins, branch intact =="
+HOOK="$REPO/.git/hooks/reference-transaction"
+mkdir -p "$REPO/.git/hooks"
+cat > "$HOOK" <<'EOF'
+#!/bin/sh
+[ "$1" = committed ] && [ -n "${WTN_PAUSE:-}" ] || { cat >/dev/null; exit 0; }
+grep -q ' refs/heads/feat/pause$' || exit 0
+touch "$WTN_PAUSE.paused"
+i=0; while [ ! -e "$WTN_PAUSE.go" ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+EOF
+chmod +x "$HOOK"
+(WTN_PAUSE="$TMPROOT/p" bash "$SCRIPT" "$REPO" feat/pause --name pa >"$TMPROOT/pa.out" 2>/dev/null; echo $? >"$TMPROOT/pa.rc") &
+i=0; while [[ ! -e "$TMPROOT/p.paused" && $i -lt 100 ]]; do sleep 0.1; i=$((i + 1)); done
+[[ -e "$TMPROOT/p.paused" ]] && ok "first create paused after ref commit" || bad "first create never paused"
+bash "$SCRIPT" "$REPO" feat/pause --name pb >"$TMPROOT/pb.out" 2>/dev/null; echo $? >"$TMPROOT/pb.rc"
+touch "$TMPROOT/p.go"
+wait
+rm -f "$HOOK"
+WINS=0; WINNER=""
+for t in pa pb; do
+    if [[ "$(cat "$TMPROOT/$t.rc")" == 0 ]]; then WINS=$((WINS + 1)); WINNER="$(cat "$TMPROOT/$t.out")"; fi
+done
+assert_eq "$WINS" "1" "exactly one create succeeds"
+assert_eq "$(git -C "$WINNER" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/pause" "winner worktree on its branch"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/pause; then ok "winner branch survives"; else bad "winner branch deleted"; fi
+n="$(git -C "$REPO" worktree list --porcelain | grep -cx 'branch refs/heads/feat/pause')"
+assert_eq "$n" "1" "branch checked out exactly once"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
