@@ -85,6 +85,38 @@ echo "gitdir: $TMP_DIR/dead-repo/.git/worktrees/stale-branch" > "$TMP_DIR/.workt
 OUT="$(discover_worktree_repos "")"
 refute "does not surface a repo with no .git (would crash worktree_hygiene.sh under bash 3.2)" "dead-repo" "$OUT"
 
+echo "Test 7: worldai_claw candidate without .git is not surfaced"
+mkdir -p "$TMP_DIR/project_worldaiclaw/worldai_claw"  # no .git dir
+OUT="$(discover_worktree_repos "")"
+refute "does not surface worldai_claw when .git directory is missing" "$TMP_DIR/project_worldaiclaw/worldai_claw" "$OUT"
+
+echo "Test 8: worldai_claw candidate with .git is surfaced"
+mkdir -p "$TMP_DIR/project_worldaiclaw/worldai_claw/.git"
+OUT="$(discover_worktree_repos "")"
+expect "surfaces worldai_claw when valid .git exists" "$TMP_DIR/project_worldaiclaw/worldai_claw" "$OUT"
+
+echo "Test 9: worktrees in project_worldaiclaw and wc-wt with valid main repo are discovered"
+mkdir -p "$TMP_DIR/my-wc-repo/.git/worktrees/wt-1"
+mkdir -p "$TMP_DIR/wc-wt/wt-1"
+echo "gitdir: $TMP_DIR/my-wc-repo/.git/worktrees/wt-1" > "$TMP_DIR/wc-wt/wt-1/.git"
+OUT="$(discover_worktree_repos "")"
+expect "discovers main repo from wc-wt worktree" "$TMP_DIR/my-wc-repo" "$OUT"
+
+echo "Test 10: worktrees in project_worldaiclaw pointing to dead repo without .git are not surfaced"
+mkdir -p "$TMP_DIR/dead-claw-repo"  # no .git
+mkdir -p "$TMP_DIR/project_worldaiclaw/stale-wt"
+echo "gitdir: $TMP_DIR/dead-claw-repo/.git/worktrees/stale-wt" > "$TMP_DIR/project_worldaiclaw/stale-wt/.git"
+OUT="$(discover_worktree_repos "")"
+refute "does not surface dead main repo referenced by worktree in project_worldaiclaw" "dead-claw-repo" "$OUT"
+
+echo "Test 11: .git files inside node_modules are pruned and ignored"
+mkdir -p "$TMP_DIR/project_worldaiclaw/wt-ignored/node_modules/pkg"
+mkdir -p "$TMP_DIR/bogus-repo/.git/worktrees/pkg"
+echo "gitdir: $TMP_DIR/bogus-repo/.git/worktrees/pkg" > "$TMP_DIR/project_worldaiclaw/wt-ignored/node_modules/pkg/.git"
+OUT="$(discover_worktree_repos "")"
+refute "prunes node_modules subtrees during discovery" "bogus-repo" "$OUT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
+
