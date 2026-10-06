@@ -574,8 +574,25 @@ preserve_wip_blocker() {
     if [[ "$irc" -ne 0 ]]; then
         echo "ignored-scan-failed"; return 0
     fi
+    local icomp igen
     while IFS= read -r ipath; do
         [[ -n "$ipath" ]] || continue
+        # Tool-owned state that only points back at the main checkout or is
+        # regenerated on demand (husky hook shims, beads worktree redirect and
+        # write locks).
+        case "$ipath" in
+            .husky/_/*|*/.husky/_/*|.beads/redirect) continue ;;
+            .beads/.br-db-write-*.lock) [[ "${ipath#.beads/}" == */* ]] || continue ;;
+        esac
+        # Caches that write their own `*` .gitignore (ruff, pytest, mypy) are
+        # listed file by file; accept paths under them. Other allowlisted
+        # names only count when git lists the whole directory as ignored.
+        igen=false
+        IFS='/' read -ra icomp <<<"${ipath%/}"
+        for ibase in "${icomp[@]}"; do
+            case "$ibase" in .ruff_cache|.pytest_cache|.mypy_cache) igen=true; break ;; esac
+        done
+        "$igen" && continue
         ibase="${ipath%/}"; ibase="${ibase##*/}"
         case "$ibase" in
             node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
