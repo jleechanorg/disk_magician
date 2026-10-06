@@ -314,7 +314,7 @@ triage_candidate() {
     local repo_path="$1" wt_path="$2" branch="$3"
 
     local status_porcelain uncommitted_count untracked_present status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         uncommitted_count=999
         untracked_present=1
@@ -553,7 +553,7 @@ preserve_wip_blocker() {
         [[ -n "$ipath" ]] || continue
         ibase="${ipath%/}"; ibase="${ibase##*/}"
         case "$ibase" in
-            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|dist|build|target|.next|.turbo|.parcel-cache|coverage|.coverage|htmlcov|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
+            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
             *) echo "ignored-file:$ipath"; return 0 ;;
         esac
     done <<<"$ign"
@@ -627,26 +627,38 @@ preserve_wip_and_remove() {
             return 1
         fi
     fi
-    # A clean/eol filter can alter content on commit while `git status` (which
-    # reads through the same filter) still reports clean. Compare raw bytes of
-    # every added/modified file with its committed blob; LFS pointers and
-    # symlinks are exempt (both round-trip losslessly).
-    local vpath vattr vbad=""
-    while IFS= read -r -d '' vpath; do
-        [[ -L "$wt/$vpath" || ! -f "$wt/$vpath" ]] && continue
-        vattr="$(git -C "$wt" check-attr filter -- "$vpath" 2>/dev/null)"
-        [[ "${vattr##*: }" == lfs ]] && continue
-        if [[ "$(git -C "$wt" hash-object --no-filters -- "$vpath" 2>/dev/null)" \
-              != "$(git -C "$wt" rev-parse -q --verify "HEAD:$vpath" 2>/dev/null)" ]]; then
-            vbad="$vpath"; break
-        fi
-    done < <(git -C "$wt" diff -z --name-only --diff-filter=AMRTC "$orig_sha" HEAD 2>/dev/null)
+    # Clean/eol filters can make on-disk bytes differ from what git stores while
+    # `git status` (which reads through the same filters) reports clean -- for
+    # new files and for edits to tracked files alike. Byte-verify EVERY tracked
+    # regular file on disk against the committed blob (one batched pass);
+    # LFS-filtered paths and symlinks/gitlinks are exempt (they round-trip).
+    local vbad="" vlist vmodes vlfs
+    vlist="$(git -C "$wt" ls-files -s -z 2>/dev/null | tr '\0' '\n' \
+        | awk '$1=="100644"||$1=="100755"{sub(/^[^\t]*\t/,""); print}')"
+    if [[ -n "$vlist" ]]; then
+        vlfs="$(printf '%s\n' "$vlist" | git -C "$wt" check-attr --stdin filter 2>/dev/null \
+            | awk -F': filter: ' '$2=="lfs"{print $1}')"
+        vbad="$(printf '%s\n' "$vlist" | while IFS= read -r vp; do
+                    [[ -L "$wt/$vp" ]] && continue
+                    [[ -f "$wt/$vp" ]] || { echo "missing:$vp"; continue; }
+                    grep -qxF -- "$vp" <<<"$vlfs" && continue
+                    printf '%s\n' "$vp"
+                done | {
+                    paths="$(cat)"
+                    [[ -n "$paths" ]] || exit 0
+                    if grep -q '^missing:' <<<"$paths"; then grep -m1 '^missing:' <<<"$paths"; exit 0; fi
+                    disk="$(printf '%s\n' "$paths" | git -C "$wt" hash-object --no-filters --stdin-paths 2>/dev/null)" || { echo "hash-failed"; exit 0; }
+                    blobs="$(printf '%s\n' "$paths" | sed 's/^/HEAD:/' | git -C "$wt" cat-file --batch-check='%(objectname)' 2>/dev/null)" || { echo "blob-lookup-failed"; exit 0; }
+                    paste -d'\t' <(printf '%s\n' "$paths") <(printf '%s\n' "$disk") <(printf '%s\n' "$blobs") \
+                        | awk -F'\t' '$2!=$3{print $1; exit}'
+                })"
+    fi
     if [[ -n "$vbad" ]]; then
         ledger_line "WIP-FAILED" "$wt" "committed bytes differ from disk for $vbad (filter/eol); kept"
         wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
         return 1
     fi
-    if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]] \
+    if [[ -n "$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" ]] \
        || ! sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch")"; then
         ledger_line "WIP-FAILED" "$wt" "tree not clean after commit on $branch; kept"
         wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"

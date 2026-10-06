@@ -436,6 +436,65 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R23" --skip-push --execute --preserve-w
 assert_contains "$OUT" "committed bytes differ" "eol conversion detected"
 assert_true "[[ -f '$W23/win.txt' ]] && grep -q $'\r' '$W23/win.txt'" "CRLF bytes intact on disk"
 
+# ---------------------------------------------------------------------------
+echo "case 24: status.showUntrackedFiles=no must not hide untracked work"
+R24="$(mk_repo r24)"
+W24="$(mk_wt "$R24" hidden24)"
+g -C "$R24" config status.showUntrackedFiles no
+echo "precious untracked" >"$W24/new-work.txt"
+backdate_tree "$W24" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R24" --skip-push --execute)"
+assert_not_contains "$OUT" "SAFE" "hidden-untracked worktree not SAFE"
+assert_true "[[ -f '$W24/new-work.txt' ]]" "untracked work intact without --preserve-wip"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R24" --skip-push --execute --preserve-wip)"
+assert_true "! [[ -d '$W24' ]] || [[ -f '$W24/new-work.txt' ]]" "either preserved+removed or kept"
+assert_true "! [[ -d '$W24' ]] && git -C '$R24' show \"\$(git -C '$R24' for-each-ref --format='%(refname)' refs/heads/wip | head -1):new-work.txt\" | grep -q precious || [[ -f '$W24/new-work.txt' ]]" "untracked content on wip branch if removed"
+
+# ---------------------------------------------------------------------------
+echo "case 25: hidden edit to a tracked filtered file (filtered == HEAD) -> WIP-FAILED, kept"
+R25="$(mk_repo r25)"
+printf '*.nb filter=strip\n' >"$R25/.gitattributes"
+echo cell >"$R25/a.nb"
+g -C "$R25" add -A; g -C "$R25" commit -q -m nb
+W25="$(mk_wt "$R25" nb25)"
+g -C "$W25" config filter.strip.clean "grep -v OUTPUT"
+g -C "$W25" config filter.strip.smudge cat
+printf 'cell\nOUTPUT: 99\n' >"$W25/a.nb"
+echo "edit" >>"$W25/tracked.txt"
+backdate_tree "$W25" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R25" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "committed bytes differ" "hidden filtered edit detected"
+assert_true "[[ -d '$W25' ]] && grep -q 'OUTPUT: 99' '$W25/a.nb'" "filtered edit intact, worktree kept"
+
+# ---------------------------------------------------------------------------
+echo "case 26: CRLF-only change to a tracked file under text=auto -> WIP-FAILED, kept"
+R26="$(mk_repo r26)"
+printf '* text=auto\n' >"$R26/.gitattributes"
+printf 'l1\nl2\n' >"$R26/doc.txt"
+g -C "$R26" add -A; g -C "$R26" commit -q -m eol
+W26="$(mk_wt "$R26" crlf26)"
+printf 'l1\r\nl2\r\n' >"$W26/doc.txt"
+echo "edit" >>"$W26/tracked.txt"
+backdate_tree "$W26" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R26" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "committed bytes differ" "tracked CRLF change detected"
+assert_true "[[ -d '$W26' ]] && grep -q $'\r' '$W26/doc.txt'" "CRLF bytes intact, worktree kept"
+
+# ---------------------------------------------------------------------------
+echo "case 27: hand file under an ignored build/ dir below root -> blocked"
+R27="$(mk_repo r27)"
+printf 'node_modules/\n.env\nbuild/\ndist/\n' >"$R27/.gitignore"
+mkdir -p "$R27/src"; echo code >"$R27/src/main.c"
+g -C "$R27" add -A; g -C "$R27" commit -q -m src
+W27="$(mk_wt "$R27" build27)"
+mkdir -p "$W27/src/build"; echo "hand secret" >"$W27/src/build/secret.txt"
+mkdir -p "$W27/dist"; echo "//registry/:_authToken=x" >"$W27/dist/.npmrc"
+echo "edit" >>"$W27/tracked.txt"
+backdate_tree "$W27" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R27" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:" "ignored build/dist content blocks"
+assert_true "[[ -f '$W27/src/build/secret.txt' && -f '$W27/dist/.npmrc' ]]" "build/dist content intact"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
