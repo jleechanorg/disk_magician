@@ -210,7 +210,7 @@ resolve_main_ref() {
 }
 
 classify_repo_local_worktree() {
-    local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5"
+    local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
 
     local age_days
     if ! age_days="$(worktree_age_days "$wt_path")"; then
@@ -272,6 +272,26 @@ classify_repo_local_worktree() {
         local ahead_count
         ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
         if [[ "$ahead_count" -gt 0 ]]; then
+            local branch_clean="${branch#refs/heads/}"
+            if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+                local origin_url owner_repo
+                origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+                if [[ -n "$origin_url" ]]; then
+                    owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                    if [[ -n "$owner_repo" ]]; then
+                        local pr_heads
+                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null || true)"
+                        if [[ -n "$pr_heads" ]]; then
+                            if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                                return 0
+                            else
+                                echo "merged-differing-head"
+                                return 0
+                            fi
+                        fi
+                    fi
+                fi
+            fi
             echo "ahead-of-main"
         else
             echo "non-ancestor"
@@ -415,7 +435,7 @@ process_repo_local_worktrees() {
         fi
 
         local reason size_kb_val size_fmt branch_label extra age_label
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable")"
+        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
         size_kb_val=$(size_kb "$abs_path")
         size_fmt=$(fmt_kb "$size_kb_val")
         branch_label="${branch:-detached}"

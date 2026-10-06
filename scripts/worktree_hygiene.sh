@@ -183,6 +183,10 @@ classify_candidate() {
         echo "SAFE|merged-pr-clean"
         return 0
     fi
+    if [[ "$pr_state" == "merged-differing-head" ]]; then
+        echo "NEEDS-REVIEW|merged-pr-diff-head"
+        return 0
+    fi
     if [[ "$pr_state" == "open" ]]; then
         echo "NEEDS-REVIEW|open-pr"
         return 0
@@ -332,13 +336,42 @@ triage_candidate() {
                     local pr_json
                     # env -u: a stale GH_TOKEN/GITHUB_TOKEN override breaks gh
                     # even when the stored keychain credential is valid.
-                    pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --repo "$owner_repo" --head "$branch" --state all \
-                        --json number,state,title 2>/dev/null || true)"
+                    pr_json="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch" --state all \
+                        --json number,state,title,headRefOid 2>/dev/null || true)"
                     if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
                         if echo "$pr_json" | grep -qi '"state":"OPEN"'; then
                             pr_state="open"
                         elif echo "$pr_json" | grep -qi '"state":"MERGED"'; then
-                            pr_state="merged"
+                            local local_head
+                            local_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
+                            if command -v python3 >/dev/null 2>&1; then
+                                pr_state="$(python3 -c '
+import json, sys
+try:
+    prs = json.loads(sys.argv[1])
+    local_head = sys.argv[2].strip()
+    merged = [p for p in prs if p.get("state", "").upper() == "MERGED"]
+    if not merged:
+        print("none")
+    else:
+        matching = any(p.get("headRefOid") == local_head for p in merged)
+        has_oids = any(bool(p.get("headRefOid")) for p in merged)
+        if matching or not has_oids:
+            print("merged")
+        else:
+            print("merged-differing-head")
+except Exception:
+    print("merged")
+' "$pr_json" "$local_head" 2>/dev/null || echo "merged")"
+                            else
+                                if [[ -n "$local_head" ]] && echo "$pr_json" | grep -qE "\"headRefOid\"[[:space:]]*:[[:space:]]*\"${local_head}\""; then
+                                    pr_state="merged"
+                                elif echo "$pr_json" | grep -qE "\"headRefOid\"[[:space:]]*:[[:space:]]*\"[0-9a-fA-F]+\""; then
+                                    pr_state="merged-differing-head"
+                                else
+                                    pr_state="merged"
+                                fi
+                            fi
                         elif echo "$pr_json" | grep -qi '"state":"CLOSED"'; then
                             pr_state="closed"
                         else

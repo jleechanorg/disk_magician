@@ -243,6 +243,103 @@ SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT")
 assert_contains "wc-wt discovery line kept" 'find_repos_from_worktrees "$HOME/wc-wt"' "$SCRIPT_TEXT"
 assert_contains "project_worldaiclaw discovery line kept" 'find_repos_from_worktrees "$HOME/project_worldaiclaw"' "$SCRIPT_TEXT"
 
+echo "Test: squash-merged PR worktree eligibility governance (bead disk_magician-ueh)"
+SQUASH_REPO="$TMP_ROOT/squash-repo"
+mkdir -p "$SQUASH_REPO/.claude/worktrees"
+git init -q -b main "$SQUASH_REPO"
+git -C "$SQUASH_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$SQUASH_REPO" config user.name "Fixture User"
+git -C "$SQUASH_REPO" remote add origin "https://github.com/example-org/squash-repo.git"
+printf 'initial\n' > "$SQUASH_REPO/README.md"
+git -C "$SQUASH_REPO" add README.md
+git -C "$SQUASH_REPO" commit -q -m "initial commit"
+
+# Branch feat-a (Case A: matching headRefOid -> ELIGIBLE)
+git -C "$SQUASH_REPO" checkout -q -b feat-a
+printf 'feature A\n' > "$SQUASH_REPO/feature_a.txt"
+git -C "$SQUASH_REPO" add feature_a.txt
+git -C "$SQUASH_REPO" commit -q -m "feature A commit"
+SHA_A=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-b (Case B: differing headRefOid -> PRESERVE merged-differing-head)
+git -C "$SQUASH_REPO" checkout -q -b feat-b
+printf 'feature B\n' > "$SQUASH_REPO/feature_b.txt"
+git -C "$SQUASH_REPO" add feature_b.txt
+git -C "$SQUASH_REPO" commit -q -m "feature B commit"
+SHA_B=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Branch feat-c (Case C: gh exits 1 -> PRESERVE ahead-of-main)
+git -C "$SQUASH_REPO" checkout -q -b feat-c
+printf 'feature C\n' > "$SQUASH_REPO/feature_c.txt"
+git -C "$SQUASH_REPO" add feature_c.txt
+git -C "$SQUASH_REPO" commit -q -m "feature C commit"
+SHA_C=$(git -C "$SQUASH_REPO" rev-parse HEAD)
+git -C "$SQUASH_REPO" checkout -q main
+
+# Advance main so branches are ahead-of-main (not ancestors)
+printf 'squashed commit\n' >> "$SQUASH_REPO/README.md"
+git -C "$SQUASH_REPO" add README.md
+git -C "$SQUASH_REPO" commit -q -m "main squashed commit"
+
+# Add worktrees
+git -C "$SQUASH_REPO" worktree add -q -B feat-a "$SQUASH_REPO/.claude/worktrees/wt-squash-a" "$SHA_A"
+git -C "$SQUASH_REPO" worktree add -q -B feat-b "$SQUASH_REPO/.claude/worktrees/wt-squash-b" "$SHA_B"
+git -C "$SQUASH_REPO" worktree add -q -B feat-c "$SQUASH_REPO/.claude/worktrees/wt-squash-c" "$SHA_C"
+
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-a" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-b" 30
+age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-c" 30
+
+rm -f "$FAKE_BIN/lsof"
+
+# Provide fake timeout and fake gh on PATH
+cat > "$FAKE_BIN/timeout" <<'SH'
+#!/bin/sh
+shift
+exec "$@"
+SH
+chmod +x "$FAKE_BIN/timeout"
+
+cat > "$FAKE_BIN/gh" <<SH
+#!/bin/sh
+case "\$*" in
+  *feat-a*)
+    echo "$SHA_A"
+    exit 0
+    ;;
+  *feat-b*)
+    echo "differing000000000000000000000000000000000"
+    exit 0
+    ;;
+  *feat-c*)
+    exit 1
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$FAKE_BIN/gh"
+
+OUT_SQUASH="$TMP_ROOT/squash-test.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$SQUASH_REPO" --min-age 14 \
+  >"$OUT_SQUASH" 2>&1
+OUT_SQUASH_CONTENT=$(cat "$OUT_SQUASH")
+
+# Case A: Squash-merged clean 30d worktree with fake gh returning matching headRefOid -> ELIGIBLE
+assert_contains "Case A: squash-merged matching head is eligible" "repo-local   ELIGIBLE" "$OUT_SQUASH_CONTENT"
+assert_contains "Case A path fragment" ".claude/worktrees/wt-squash-a" "$OUT_SQUASH_CONTENT"
+
+# Case B: Squash-merged clean 30d worktree with fake gh returning differing headRefOid -> PRESERVE merged-differing-head
+assert_contains "Case B: differing headRefOid preserved" ".claude/worktrees/wt-squash-b | merged-differing-head" "$OUT_SQUASH_CONTENT"
+
+# Case C: Squash-merged clean 30d worktree with fake gh exiting 1 -> fail-closed PRESERVE ahead-of-main
+assert_contains "Case C: gh exit 1 preserved as ahead-of-main" ".claude/worktrees/wt-squash-c | ahead-of-main" "$OUT_SQUASH_CONTENT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

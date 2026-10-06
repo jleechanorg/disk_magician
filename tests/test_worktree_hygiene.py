@@ -244,6 +244,9 @@ class ClassifyCandidateTest(unittest.TestCase):
     def test_merged_pr_clean_is_safe_merged_pr_clean(self):
         self._assert((0, 0, "ok", "merged", 3, 1), "SAFE|merged-pr-clean")
 
+    def test_merged_pr_diff_head_is_needs_review(self):
+        self._assert((0, 0, "ok", "merged-differing-head", 3, 1), "NEEDS-REVIEW|merged-pr-diff-head")
+
     def test_open_pr_is_needs_review_open_pr(self):
         self._assert((0, 0, "ok", "open", 2, 1), "NEEDS-REVIEW|open-pr")
 
@@ -538,6 +541,29 @@ class TriageCandidateSanityCapTest(unittest.TestCase):
         # Fail-safe: even a merged-PR match must not become SAFE when the
         # ahead-count that got us here isn't trustworthy.
         self.assertEqual(verdict.stdout.strip(), "NEEDS-REVIEW|merged-pr-suspect-rewrite")
+
+    def test_merged_pr_differing_head_sets_pr_state_merged_differing_head(self):
+        self._write_fake_gh('[{"number":1,"state":"MERGED","title":"x","headRefOid":"0000000000000000000000000000000000000000"}]')
+        repo, wt = self._repo_with_ahead_commit("wt-differing-head")
+        result = self._triage_with_cap(repo, wt, "wt-differing-head", cap=500)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        self.assertEqual(fields[3], "merged-differing-head")
+        verdict = _call("classify_candidate", *fields, timeout=10)
+        self.assertEqual(verdict.returncode, 0, verdict.stderr)
+        self.assertEqual(verdict.stdout.strip(), "NEEDS-REVIEW|merged-pr-diff-head")
+
+    def test_merged_pr_matching_head_sets_pr_state_merged(self):
+        repo, wt = self._repo_with_ahead_commit("wt-matching-head")
+        head_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+        self._write_fake_gh(f'[{{"number":1,"state":"MERGED","title":"x","headRefOid":"{head_sha}"}}]')
+        result = self._triage_with_cap(repo, wt, "wt-matching-head", cap=500)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split("|")
+        self.assertEqual(fields[3], "merged")
+        verdict = _call("classify_candidate", *fields, timeout=10)
+        self.assertEqual(verdict.returncode, 0, verdict.stderr)
+        self.assertEqual(verdict.stdout.strip(), "SAFE|merged-pr-clean")
 
     def test_ahead_below_cap_is_unaffected(self):
         self._write_fake_gh("[]")
