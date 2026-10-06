@@ -446,6 +446,32 @@ exit 0
 MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh"
 
+echo "Test 17: healthy no-op path runs cleanup_colima --trim-only when a Colima datadisk exists (bead mux)"
+mkdir -p "$TMP_ROOT/home/.colima/_lima/_disks/colima"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+rc=0; run_pressure 50 || rc=$?
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "no-op path runs trim-only" "cleanup_colima --trim-only --clean" "$INVOCATIONS"
+assert_not_contains "no-op path never runs full colima clean" "cleanup_colima --clean" "$INVOCATIONS"
+assert_receipt_field "Test 17 receipt still skipped_threshold" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_threshold"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 17 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 17 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+
+echo "Test 18: trim-only failure is logged and the no-op sweep still exits 0"
+cat > "$MOCK_BIN/cleanup_colima.sh" <<'MOCK'
+#!/bin/bash
+echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
+exit 3
+MOCK
+chmod +x "$MOCK_BIN/cleanup_colima.sh"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rc=0; run_pressure 50 || rc=$?
+assert_contains "trim-only failure logged" "trim-only FAILED or timed out (rc=3)" "$(cat "$LOG_FILE")"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 18 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 18 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+rm -rf "$TMP_ROOT/home/.colima"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then
