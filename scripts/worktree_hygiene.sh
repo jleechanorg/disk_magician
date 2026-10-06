@@ -558,6 +558,9 @@ preserve_wip_blocker() {
             echo "nested-repo:$name"; return 0
         fi
         base="${name##*/}"
+        # Compiled bytecode (e.g. __pycache__/clock_skew_credentials.*.pyc) is
+        # regenerated from its source; its name is not a credential.
+        case "$name" in __pycache__/*.py[co]|*/__pycache__/*.py[co]) continue ;; esac
         case "$base" in
             .env|.env.*|.envrc|*.pem|*.key|*.keystore|id_rsa*|id_ed25519*|*credentials*|secrets*|service-account*.json|.netrc|*.p12)
                 echo "ignored-secret:$name"; return 0 ;;
