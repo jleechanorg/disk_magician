@@ -50,6 +50,8 @@ Commands:
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
+  sweep                  Run the single main disk sweeper (snapshot, pressure reclaim, 6-tier routine maintenance, health).
+  main-sweeper           Alias for sweep.
   worktree-new           Create new worktree under ~/.worktrees/<repo>/<name>.
   guard-worktree-add     PreToolUse hook guarding worktree placement under ~/.worktrees/.
   worktree-create-hook   Claude WorktreeCreate hook creating under ~/.worktrees/.
@@ -241,6 +243,9 @@ case "$CMD" in
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
     ;;
+  main-sweeper|sweep)
+    exec bash "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
+    ;;
   clean|routine)
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
@@ -349,6 +354,9 @@ case "$CMD" in
     ;;
   vacuum_hermes_state|vacuum-hermes-state)
     "$SCRIPT_DIR/scripts/vacuum_hermes_state.sh" "$@"
+    ;;
+  sweep|main-sweeper|main_sweeper)
+    "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
     ;;
   worktree_new|worktree-new)
     "$SCRIPT_DIR/scripts/worktree_new.sh" "$@"

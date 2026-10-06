@@ -36,6 +36,7 @@ KNOWN_LABELS=(
   com.jleechanorg.disk-magician-drilldown
   com.jleechanorg.disk-magician-frontier-nightly
   com.jleechanorg.disk-magician-frontier-root
+  com.jleechanorg.disk-magician-main-sweeper
   com.jleechanorg.disk-magician-observer
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
@@ -101,8 +102,52 @@ ok=0
 # and intermittent pipe drops on macOS Sequoia/Sonoma under heavy concurrency.
 LAUNCHCTL_LIST="$(launchctl list 2>/dev/null || true)"
 
+MAIN_SWEEPER_LABEL="com.jleechanorg.disk-magician-main-sweeper"
+MAIN_SWEEPER_ACTIVE=false
+main_plist="$PLIST_DIR/${MAIN_SWEEPER_LABEL}.plist"
+if [[ -f "$main_plist" ]] && plutil -lint "$main_plist" >/dev/null 2>&1 && plutil -extract Label raw -o - "$main_plist" >/dev/null 2>&1; then
+  if grep -qE "(^|[[:space:]])${MAIN_SWEEPER_LABEL}$" <<< "$LAUNCHCTL_LIST"; then
+    MAIN_SWEEPER_ACTIVE=true
+  fi
+fi
+
+is_consolidated_label() {
+  local candidate="$1"
+  case "$candidate" in
+    com.disk-magician.colima-prune|\
+    com.disk-magician.code-sign-clones|\
+    com.disk-magician.codex-vacuum|\
+    com.jleechanorg.disk-magician-pressure-sweep|\
+    com.jleechanorg.disk-magician-tmp-scratch)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
+
+  # If fleet is consolidated and main-sweeper is active, redundant sweepers are covered
+  if [[ "$MAIN_SWEEPER_ACTIVE" == true ]] && is_consolidated_label "$label"; then
+    if [[ ! -f "$plist" ]] || ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
+      echo "  CONSOLIDATED    $label  (covered by $MAIN_SWEEPER_LABEL)"
+      ok=$(( ok + 1 ))
+      continue
+    fi
+  fi
+
+  # If main-sweeper is not installed/active yet, but individual sweepers are running
+  if [[ "$label" == "$MAIN_SWEEPER_LABEL" && "$MAIN_SWEEPER_ACTIVE" == false ]]; then
+    if [[ ! -f "$plist" ]]; then
+      echo "  UNCONSOLIDATED  $label  (legacy individual sweepers active)"
+      ok=$(( ok + 1 ))
+      continue
+    fi
+  fi
+
   if [[ ! -f "$plist" ]]; then
     echo "  MISSING PLIST   $label  (expected $plist)"
     missing=$(( missing + 1 ))

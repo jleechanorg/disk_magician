@@ -12,11 +12,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCHD_SRC="${DISK_MAGICIAN_LAUNCHD_SRC:-$REPO_ROOT/launchd}"
 DEST="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+CONSOLIDATE=false
 UNLOAD_LEGACY=false
 SELECTED=()
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
+    --consolidate) CONSOLIDATE=true; shift ;;
     --unload-legacy) UNLOAD_LEGACY=true; shift ;;
     -h|--help) sed -n '1,12p' "$0"; exit 0 ;;
     *) SELECTED+=("$1"); shift ;;
@@ -105,6 +107,22 @@ if [[ "$UNLOAD_LEGACY" == true ]]; then
   done
 fi
 
+consolidated_redundant_labels=(
+  com.disk-magician.colima-prune
+  com.disk-magician.code-sign-clones
+  com.disk-magician.codex-vacuum
+  com.jleechanorg.disk-magician-pressure-sweep
+  com.jleechanorg.disk-magician-tmp-scratch
+)
+
+if [[ "$CONSOLIDATE" == true ]]; then
+  SELECTED=(
+    "com.jleechanorg.disk-magician-main-sweeper.plist.template"
+    "com.disk-magician.claude-state.plist.template"
+    "com.disk-magician.worktree-venvs.plist"
+  )
+fi
+
 install_plist() {
   local src="$1" label dst
   label="$(grep -A1 '<key>Label</key>' "$src" | tail -1 | sed -n 's/.*<string>\([^<]*\)<\/string>.*/\1/p')"
@@ -137,7 +155,10 @@ install_plist() {
     return 1
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$dst"
+  if ! launchctl bootstrap "gui/$(id -u)" "$dst"; then
+    echo "ABORT: launchctl bootstrap failed for $label ($dst)" >&2
+    return 1
+  fi
   echo "installed $label -> $dst"
 }
 
@@ -235,6 +256,18 @@ fi
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "Encountered $ERRORS error(s) during sweeper installation." >&2
   exit 1
+fi
+
+if [[ "$CONSOLIDATE" == true ]]; then
+  echo "Consolidating fleet into single main sweeper..."
+  for label in "${consolidated_redundant_labels[@]}"; do
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    if [[ -f "$DEST/${label}.plist" ]]; then
+      mkdir -p "$DEST/.consolidated"
+      mv -f "$DEST/${label}.plist" "$DEST/.consolidated/${label}.plist"
+    fi
+    echo "consolidated redundant $label"
+  done
 fi
 
 echo "Done. Logs under /tmp/disk-magician-*.log"
