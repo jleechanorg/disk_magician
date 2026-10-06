@@ -42,8 +42,8 @@ Commands:
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
-  cleanup-apfs-snapshots Clean stale APFS OS update snapshots older than retention.
-  cleanup-antigravity-brain Clean stale conversation task logs and media artifacts.
+  cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
+  cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.

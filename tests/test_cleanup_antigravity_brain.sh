@@ -28,7 +28,7 @@ find "$MOCK_BRAIN/$OLD_SID" -exec touch -t 202608020000 {} +
 
 # 2. Test Dry Run mode
 echo "Testing dry-run mode..."
-OUTPUT_DRY=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --dry-run --days 14 --brain-dir "$MOCK_BRAIN")
+OUTPUT_DRY=$(python3 "$REPO_ROOT/scripts/cleanup_antigravity_brain.py" --dry-run --days 14 --brain-dir "$MOCK_BRAIN")
 if ! echo "$OUTPUT_DRY" | grep -q "DRY-RUN"; then
   echo "FAIL: Expected DRY-RUN in output"
   exit 1
@@ -40,7 +40,7 @@ fi
 
 # 3. Test Clean mode
 echo "Testing clean mode..."
-OUTPUT_CLEAN=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean --days 14 --brain-dir "$MOCK_BRAIN")
+OUTPUT_CLEAN=$(python3 "$REPO_ROOT/scripts/cleanup_antigravity_brain.py" --clean --days 14 --brain-dir "$MOCK_BRAIN")
 if ! echo "$OUTPUT_CLEAN" | grep -q "CLEAN"; then
   echo "FAIL: Expected CLEAN in output"
   exit 1
@@ -78,7 +78,7 @@ NINE_DAYS_AGO="$(python3 -c 'import time; t = time.localtime(time.time() - 9*864
 touch -t "$NINE_DAYS_AGO" "$MOCK_BRAIN/$DEFAULT_SID"
 find "$MOCK_BRAIN/$DEFAULT_SID" -exec touch -t "$NINE_DAYS_AGO" {} +
 
-OUTPUT_DEF_DRY=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --dry-run --brain-dir "$MOCK_BRAIN")
+OUTPUT_DEF_DRY=$(python3 "$REPO_ROOT/scripts/cleanup_antigravity_brain.py" --dry-run --brain-dir "$MOCK_BRAIN")
 if ! echo "$OUTPUT_DEF_DRY" | grep -q "DRY-RUN"; then
   echo "FAIL: Expected DRY-RUN in default output"
   exit 1
@@ -88,7 +88,7 @@ if [[ ! -f "$MOCK_BRAIN/$DEFAULT_SID/scratch/dump.json" ]]; then
   exit 1
 fi
 
-OUTPUT_DEF_CLEAN=$("$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean --brain-dir "$MOCK_BRAIN")
+OUTPUT_DEF_CLEAN=$(python3 "$REPO_ROOT/scripts/cleanup_antigravity_brain.py" --clean --brain-dir "$MOCK_BRAIN")
 if ! echo "$OUTPUT_DEF_CLEAN" | grep -q "CLEAN"; then
   echo "FAIL: Expected CLEAN in default output"
   exit 1
