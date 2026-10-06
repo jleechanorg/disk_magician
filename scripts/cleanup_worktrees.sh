@@ -12,6 +12,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/layout_standard.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
@@ -76,7 +78,7 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
         [[ -d "$HOME/project_worldaiclaw/worldai_claw" ]] && discovered_repos_str="${discovered_repos_str} $HOME/project_worldaiclaw/worldai_claw"
         
         find_repos_from_worktrees() {
-            local search_dir="$1"
+            local search_dir="$1" depth=("${@:2}")
             [[ -d "$search_dir" ]] || return 0
             while IFS= read -r git_file; do
                 local gitdir_line
@@ -89,13 +91,14 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
                         discovered_repos_str="${discovered_repos_str} ${main_repo}"
                     fi
                 fi
-            done < <(find "$search_dir" -type f -name ".git" 2>/dev/null)
+            done < <(find "$search_dir" ${depth[@]+"${depth[@]}"} -type f -name ".git" 2>/dev/null)
         }
         
         find_repos_from_worktrees "$HOME/.ao/data/worktrees"
         find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees"
         find_repos_from_worktrees "$HOME/wc-wt"
         find_repos_from_worktrees "$HOME/project_worldaiclaw"
+        find_repos_from_worktrees "$STANDARD_WORKTREE_ROOT" -maxdepth 3
         
         # Also check all .claude/worktrees and projects
         if [[ -d "$HOME/projects" ]]; then
@@ -385,6 +388,11 @@ process_repo_local_worktrees() {
               "$base_name" == worktree-* ]]; then
             match=true
         fi
+        local std_real=""
+        if [[ "$abs_path" == "$STD_ROOT/"* || "$abs_path" == "$STD_ROOT_REAL/"* ]]; then
+            match=true
+            std_real="$(cd "$abs_path" 2>/dev/null && pwd -P || printf '%s' "$abs_path")"
+        fi
 
         if [[ "$match" == false ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
@@ -393,6 +401,17 @@ process_repo_local_worktrees() {
         if [[ "$abs_path" == "$main_wt_path" ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
             return 0
+        fi
+
+        if [[ -n "$std_real" ]]; then
+            local std_skip
+            std_skip="$(std_root_skip_reason "$abs_path" "$std_real")"
+            if [[ -n "$std_skip" ]]; then
+                ledger_line "repo-local" "PRESERVE" "$abs_path" "$std_skip"
+                REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                return 0
+            fi
         fi
 
         local reason size_kb_val size_fmt branch_label extra age_label
@@ -448,6 +467,85 @@ process_repo_local_worktrees() {
         esac
     done <<<"$porcelain"
     flush_block
+}
+
+# Standard root (spec D6): governed like other agent roots, except worktrees
+# under an AO worktreeDir (AO owns those sessions) or that a live process has
+# as cwd. One lsof snapshot per run; if it fails, the whole root is skipped.
+STD_ROOT="${STANDARD_WORKTREE_ROOT%/}"
+STD_ROOT_REAL="$(cd "$STD_ROOT" 2>/dev/null && pwd -P || printf '%s' "$STD_ROOT")"
+STD_AO_DIRS=""      # AO owns everything under these
+STD_AO_PARENTS=""   # AO owns direct children of these (<default>/<sessionId>)
+STD_BLOCKED=""
+STD_LIVE_CWDS=""
+# ao_worktree_dirs <yaml>: per-project worktreeDir -> "P <dir>". The top-level
+# default (column 0, the live config sets it to ~/.worktrees) is NOT owned
+# whole: projects lacking their own worktreeDir get "P <default>/<key>" and
+# "P <default>/<basename path>", and "C <default>" covers <default>/<session>.
+ao_worktree_dirs() {
+    awk '
+        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
+                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
+        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
+        /^worktreeDir:/ { def = val($0); next }
+        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
+        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
+        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
+        END {
+            if (def == "") exit
+            sub(/\/+$/, "", def); print "C " def
+            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
+                print "P " def "/" keys[i]
+                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
+            }
+        }' "$1"
+}
+if [[ -d "$STD_ROOT" ]]; then
+    ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
+    if [[ -e "$ao_cfg" ]]; then
+        if ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+            while read -r kind d; do
+                [[ -n "$d" ]] || continue
+                d="$(expand_path "$d")"
+                d="$d"$'\n'"$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"$'\n'
+                if [[ "$kind" == C ]]; then STD_AO_PARENTS+="$d"; else STD_AO_DIRS+="$d"; fi
+            done <<<"$ao_lines"
+        else
+            STD_BLOCKED="ao-config-unreadable"
+        fi
+    fi
+    # User-scope lsof cannot see other users' cwds (e.g. root daemons); acceptable
+    # for a user-scope sweeper since such processes do not run in ~/.worktrees.
+    lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+    if lsof_out="$("$lsof_bin" -d cwd -Fn 2>/dev/null)"; then
+        STD_LIVE_CWDS="$(sed -n 's/^n//p' <<<"$lsof_out")"
+    else
+        STD_BLOCKED="cwd-unknown"
+    fi
+fi
+
+# list_has_parent_of <path> <list>: some list entry contains path.
+# list_has_child_of <path> <list>: some list entry is inside path.
+list_has_parent_of() {
+    P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_line() {
+    P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_child_of() {
+    P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+
+# std_root_skip_reason <abs> <real>: prints why a standard-root worktree is off-limits.
+std_root_skip_reason() {
+    if [[ -n "$STD_BLOCKED" ]]; then
+        echo "$STD_BLOCKED"
+    elif list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
+        || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
+        echo "ao-owned"
+    elif list_has_child_of "$2" "$STD_LIVE_CWDS" || list_has_child_of "$1" "$STD_LIVE_CWDS"; then
+        echo "live-cwd"
+    fi
 }
 
 for repo in "${REPO_LOCAL_REPOS[@]}"; do

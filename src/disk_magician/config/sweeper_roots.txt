@@ -68,6 +68,7 @@ $HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
 $HOME/project_worldaiclaw	cleanup_worktree_venvs.sh	ROOTS, line 56
 $HOME/project_worldaiclaw/worldai_claw	cleanup_worktrees.sh	discovered_repos_str, line 76
 $HOME/wc-wt	cleanup_worktree_venvs.sh	ROOTS default, line 60
+$HOME/.worktrees	cleanup_worktrees.sh	standard worktree root (find_repos_from_worktrees + cleanup_worktree_venvs.sh ROOTS)
 $HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
 $HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
 $HOME/projects/*/.claude/worktrees	cleanup_worktree_venvs.sh	worktree_repo_discovery.sh:19,73

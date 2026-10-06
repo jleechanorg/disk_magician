@@ -149,6 +149,11 @@ print(f"{len(roots)}\t{top}")' 2>/dev/null)"; then
 }
 uncovered_alert || true
 
+# Worktree/evidence layout report (spec 2026-10-05 D5): report only, self-capped.
+if [[ -f "$SCRIPT_DIR/layout_check.py" ]]; then
+  python3 "$SCRIPT_DIR/layout_check.py" --max-seconds "${DISK_MAGICIAN_LAYOUT_CHECK_MAX_S:-60}" || true
+fi
+
 if [[ ! -f "$SNAPSHOT_FILE" ]]; then
   echo "residual_drilldown: no snapshot at $SNAPSHOT_FILE — nothing to drill down on, no-op."
   exit 0
