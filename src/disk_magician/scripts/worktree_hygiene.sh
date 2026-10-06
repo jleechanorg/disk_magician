@@ -234,16 +234,20 @@ resolve_main_ref() {
 triage_candidate() {
     local repo_path="$1" wt_path="$2" branch="$3"
 
-    local status_porcelain uncommitted_count untracked_present
-    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
-    if [[ -z "$status_porcelain" ]]; then
+    local status_porcelain uncommitted_count untracked_present status_rc=0
+    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || status_rc=$?
+    if [[ "$status_rc" -ne 0 ]]; then
+        uncommitted_count=999
+        untracked_present=1
+    elif [[ -z "$status_porcelain" ]]; then
         uncommitted_count=0
+        untracked_present=0
     else
         uncommitted_count=$(printf '%s\n' "$status_porcelain" | grep -c . || true)
-    fi
-    untracked_present=0
-    if printf '%s\n' "$status_porcelain" | grep -qE '^\?\?'; then
-        untracked_present=1
+        untracked_present=0
+        if printf '%s\n' "$status_porcelain" | grep -qE '^\?\?'; then
+            untracked_present=1
+        fi
     fi
 
     # Compute ahead-count / merge-base BEFORE any network call -- both are
@@ -264,10 +268,12 @@ triage_candidate() {
         else
             has_merge_base=0
             ahead_count="$(git -C "$wt_path" rev-list --count HEAD 2>/dev/null || echo 0)"
+            (( ahead_count == 0 )) && ahead_count=999
         fi
     else
         has_merge_base=0
         ahead_count="$(git -C "$wt_path" rev-list --count HEAD 2>/dev/null || echo 0)"
+        (( ahead_count == 0 )) && ahead_count=999
     fi
 
     local needs_network=1

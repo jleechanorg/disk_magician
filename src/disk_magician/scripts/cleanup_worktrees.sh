@@ -268,8 +268,12 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local status_porcelain
-    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
+    local status_porcelain status_rc=0
+    status_porcelain="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || status_rc=$?
+    if [[ "$status_rc" -ne 0 ]]; then
+        echo "status-failed"
+        return 0
+    fi
     if [[ -n "$status_porcelain" ]]; then
         if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
             echo "untracked"
@@ -281,6 +285,11 @@ classify_repo_local_worktree() {
         fi
     fi
 
+    if [[ -z "$head_sha" ]]; then
+        echo "head-missing"
+        return 0
+    fi
+
     local main_ref
     if ! main_ref="$(resolve_main_ref "$repo")"; then
         echo "main-ref-missing"
@@ -288,8 +297,12 @@ classify_repo_local_worktree() {
     fi
 
     if ! git -C "$repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
-        local ahead_count
-        ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
+        local ahead_count rev_rc=0
+        ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
+        if [[ "$rev_rc" -ne 0 ]]; then
+            echo "rev-list-failed"
+            return 0
+        fi
         if [[ "$ahead_count" -gt 0 ]]; then
             local branch_clean="${branch#refs/heads/}"
             if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
@@ -368,9 +381,14 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    if [[ -e "$abs_subdir/.git" ]]; then
-        local status_porcelain
-        status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null || true)"
+    if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
+        local status_porcelain status_rc=0
+        status_porcelain="$(git -C "$abs_subdir" status --porcelain 2>/dev/null)" || status_rc=$?
+        if [[ "$status_rc" -ne 0 ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "status-failed"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
         if [[ -n "$status_porcelain" ]]; then
             if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "untracked"
@@ -390,54 +408,79 @@ process_antigravity_orphan() {
             gitdir_line=$(grep '^gitdir: ' "$abs_subdir/.git" 2>/dev/null || true)
             local git_dir
             git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-            ag_main_repo="${git_dir%/.git/worktrees/*}"
+            if [[ "$git_dir" == *"/.git/worktrees/"* ]]; then
+                ag_main_repo="${git_dir%/.git/worktrees/*}"
+            elif [[ "$git_dir" == *"/.git" ]]; then
+                ag_main_repo="${git_dir%/.git}"
+            elif [[ -n "$git_dir" && -d "$git_dir" ]]; then
+                ag_main_repo="$(git -C "$git_dir" rev-parse --show-toplevel 2>/dev/null || echo "$git_dir")"
+            fi
         elif [[ -d "$abs_subdir/.git" ]]; then
             ag_main_repo="$abs_subdir"
         fi
-        if [[ -n "$ag_main_repo" && -d "$ag_main_repo" ]]; then
-            local main_ref
-            if main_ref="$(resolve_main_ref "$ag_main_repo" 2>/dev/null)"; then
-                local head_sha
-                head_sha="$(git -C "$abs_subdir" rev-parse HEAD 2>/dev/null || true)"
-                if [[ -n "$head_sha" ]] && ! git -C "$ag_main_repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
-                    local ahead_count
-                    ahead_count="$(git -C "$ag_main_repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null || echo 0)"
-                    if [[ "$ahead_count" -gt 0 ]]; then
-                        local branch
-                        branch="$(git -C "$abs_subdir" symbolic-ref HEAD 2>/dev/null || echo "detached")"
-                        local branch_clean="${branch#refs/heads/}"
-                        local eligible_by_pr=false
-                        if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
-                            local origin_url owner_repo
-                            origin_url="$(git -C "$ag_main_repo" remote get-url origin 2>/dev/null || true)"
-                            if [[ -n "$origin_url" ]]; then
-                                owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-                                if [[ -n "$owner_repo" ]]; then
-                                    local pr_heads gh_rc=0
-                                    pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
-                                    if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
-                                        if grep -qFx "$head_sha" <<<"$pr_heads"; then
-                                            eligible_by_pr=true
-                                        else
-                                            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "merged-differing-head"
-                                            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                                            return 0
-                                        fi
-                                    fi
+        if [[ -z "$ag_main_repo" || ! -d "$ag_main_repo" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "main-repo-missing"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        local main_ref
+        if ! main_ref="$(resolve_main_ref "$ag_main_repo" 2>/dev/null)"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "main-ref-missing"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        local head_sha
+        head_sha="$(git -C "$abs_subdir" rev-parse HEAD 2>/dev/null || true)"
+        if [[ -z "$head_sha" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "head-missing"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        if ! git -C "$ag_main_repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
+            local ahead_count rev_rc=0
+            ahead_count="$(git -C "$ag_main_repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
+            if [[ "$rev_rc" -ne 0 ]]; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "rev-list-failed"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
+            fi
+            if [[ "$ahead_count" -gt 0 ]]; then
+                local branch
+                branch="$(git -C "$abs_subdir" symbolic-ref HEAD 2>/dev/null || echo "detached")"
+                local branch_clean="${branch#refs/heads/}"
+                local eligible_by_pr=false
+                if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+                    local origin_url owner_repo
+                    origin_url="$(git -C "$ag_main_repo" remote get-url origin 2>/dev/null || true)"
+                    if [[ -n "$origin_url" ]]; then
+                        owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                        if [[ -n "$owner_repo" ]]; then
+                            local pr_heads gh_rc=0
+                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                            if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                                if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                                    eligible_by_pr=true
+                                else
+                                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "merged-differing-head"
+                                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                                    return 0
                                 fi
                             fi
                         fi
-                        if [[ "$eligible_by_pr" == false ]]; then
-                            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ahead-of-main"
-                            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                            return 0
-                        fi
-                    else
-                        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "non-ancestor"
-                        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-                        return 0
                     fi
                 fi
+                if [[ "$eligible_by_pr" == false ]]; then
+                    ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ahead-of-main"
+                    ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                    return 0
+                fi
+            else
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "non-ancestor"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
             fi
         fi
     fi

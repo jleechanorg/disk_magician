@@ -511,6 +511,102 @@ assert_contains "Case E: gh exit 124 timeout preserved as ahead-of-main" ".claud
 # Case F: Squash-merged clean 30d worktree with matching SHA, but live process in cwd -> PRESERVE live-cwd
 assert_contains "Case F: repo-local live-cwd preserved" ".claude/worktrees/wt-squash-f | live-cwd" "$OUT_SQUASH_CONTENT"
 
+# ---------------------------------------------------------------------------
+# Test: Required git probes fail-closed regressions (dot P1 review on PR #109)
+# ---------------------------------------------------------------------------
+echo "Test: Required git probes fail-closed regressions"
+
+export HERMES_SKIP_EXAMPLE_COM_GUARD=1
+
+PROBE_REPO="$TMP_ROOT/probe-repo"
+mkdir -p "$PROBE_REPO"
+git -C "$PROBE_REPO" init --quiet -b main
+git -C "$PROBE_REPO" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$PROBE_REPO" config user.name "Tester"
+echo "hello main" > "$PROBE_REPO/file.txt"
+git -C "$PROBE_REPO" add file.txt
+git -C "$PROBE_REPO" commit -m "initial commit on main" --quiet
+
+# 1. Repo-local candidate where git status fails (e.g. index corrupted)
+git -C "$PROBE_REPO" worktree add -b wt-fail-status "$PROBE_REPO/.claude/worktrees/wt-fail-status" --quiet
+echo "CORRUPTED" > "$PROBE_REPO/.git/worktrees/wt-fail-status/index"
+age_worktree_days_ago "$PROBE_REPO/.claude/worktrees/wt-fail-status" 20
+
+# 2. Repo-local candidate in a repo where main_ref is missing (branch is 'dev', no 'main' or 'origin/main')
+DEV_REPO="$TMP_ROOT/dev-repo"
+mkdir -p "$DEV_REPO"
+git -C "$DEV_REPO" init --quiet -b dev
+git -C "$DEV_REPO" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$DEV_REPO" config user.name "Tester"
+echo "hello dev" > "$DEV_REPO/file.txt"
+git -C "$DEV_REPO" add file.txt
+git -C "$DEV_REPO" commit -m "initial commit on dev" --quiet
+git -C "$DEV_REPO" worktree add -b wt-dev "$DEV_REPO/.claude/worktrees/wt-dev" --quiet
+age_worktree_days_ago "$DEV_REPO/.claude/worktrees/wt-dev" 20
+
+# 3. Antigravity orphan with failed git status (unregistered from main repo)
+AG_FAIL_STATUS="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-fail-status"
+mkdir -p "$AG_FAIL_STATUS"
+git -C "$PROBE_REPO" worktree add -b wt-ag-fail "$AG_FAIL_STATUS" --quiet
+echo "CORRUPTED" > "$PROBE_REPO/.git/worktrees/ag-fail-status/index"
+age_worktree_days_ago "$AG_FAIL_STATUS" 20
+rm -rf "$PROBE_REPO/.git/worktrees/ag-fail-status"
+
+# 4. Antigravity orphan where main_ref is missing (repo with only dev branch)
+AG_DEV="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-missing-main"
+mkdir -p "$AG_DEV"
+git -C "$AG_DEV" init --quiet -b dev
+git -C "$AG_DEV" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$AG_DEV" config user.name "Tester"
+echo "hello dev" > "$AG_DEV/file.txt"
+git -C "$AG_DEV" add file.txt
+git -C "$AG_DEV" commit -m "initial commit on dev" --quiet
+age_worktree_days_ago "$AG_DEV" 20
+
+# 5. Antigravity orphan where git status fails (dangling gitdir pointer)
+AG_DANGLING="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-dangling-repo"
+mkdir -p "$AG_DANGLING"
+echo "gitdir: /nonexistent/path/to/.git/worktrees/ag-dangling-repo" > "$AG_DANGLING/.git"
+echo "dangling content" > "$AG_DANGLING/file.txt"
+ts_old=$(date -v-20d +%Y%m%d%H%M)
+touch -t "$ts_old" "$AG_DANGLING" "$AG_DANGLING/.git" "$AG_DANGLING/file.txt"
+
+# 6. Antigravity orphan positively verified clean + ancestor of main -> ELIGIBLE
+AG_ELIGIBLE="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-clean-ancestor"
+mkdir -p "$AG_ELIGIBLE"
+git -C "$AG_ELIGIBLE" init --quiet -b main
+git -C "$AG_ELIGIBLE" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$AG_ELIGIBLE" config user.name "Tester"
+echo "hello main" > "$AG_ELIGIBLE/file.txt"
+git -C "$AG_ELIGIBLE" add file.txt
+git -C "$AG_ELIGIBLE" commit -m "initial commit on main" --quiet
+age_worktree_days_ago "$AG_ELIGIBLE" 20
+
+OUT_PROBE="$TMP_ROOT/probe-test.out"
+env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_PROBE" 2>&1
+OUT_PROBE_CONTENT=$(cat "$OUT_PROBE")
+
+assert_contains "repo-local git status failure preserved" ".claude/worktrees/wt-fail-status | status-failed" "$OUT_PROBE_CONTENT"
+assert_not_contains "repo-local git status failure not eligible" "ELIGIBLE" "$(grep -F "wt-fail-status" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "repo-local missing main ref preserved" ".claude/worktrees/wt-dev | main-ref-missing" "$OUT_PROBE_CONTENT"
+assert_not_contains "repo-local missing main ref not eligible" "ELIGIBLE" "$(grep -F "wt-dev" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity git status failure preserved" "ag-fail-status | status-failed" "$OUT_PROBE_CONTENT"
+assert_not_contains "antigravity git status failure not eligible" "ELIGIBLE" "$(grep -F "ag-fail-status" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity missing main ref preserved" "ag-missing-main | main-ref-missing" "$OUT_PROBE_CONTENT"
+assert_not_contains "antigravity missing main ref not eligible" "ELIGIBLE" "$(grep -F "ag-missing-main" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity dangling gitdir status failure preserved" "ag-dangling-repo | status-failed" "$OUT_PROBE_CONTENT"
+assert_not_contains "antigravity dangling gitdir not eligible" "ELIGIBLE" "$(grep -F "ag-dangling-repo" <<<"$OUT_PROBE_CONTENT" || true)"
+
+assert_contains "antigravity clean ancestor eligible" "ag-clean-ancestor" "$OUT_PROBE_CONTENT"
+assert_contains "antigravity clean ancestor has ELIGIBLE" "antigravity  ELIGIBLE" "$(grep -F "ag-clean-ancestor" <<<"$OUT_PROBE_CONTENT" || true)"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
