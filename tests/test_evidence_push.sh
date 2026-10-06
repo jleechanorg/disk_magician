@@ -115,6 +115,71 @@ else
     assert_eq "$RC" "2" "non-/tmp source rejected with default root"
 fi
 
+echo "== case 10: secret-shaped content (no gitleaks on PATH) -> exit 3, no upload, secret not echoed =="
+# Assembled from fragments so this test file itself carries no literal secret.
+i=0
+for secret in \
+    "-----BEGIN RSA ""PRIVATE KEY-----" \
+    "-----BEGIN ""PRIVATE KEY-----" \
+    "AKIA""ABCDEFGHIJKLMNOP" \
+    "ghp_""abcdefghijklmnopqrstuvwxyzABCDEFGHIJ" \
+    "github_pat_""11ABCDEFG0abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV" \
+    "xoxb-""1234567890-abcdef" \
+    "sk-""abcdefghijklmnopqrstuvwx" \
+    '{"private_''key" : "x"}'; do
+    i=$((i + 1))
+    D="$T/allowed/content_$i"
+    mkdir -p "$D/nested"
+    echo ok > "$D/ok.txt"
+    printf 'prefix %s suffix\n' "$secret" > "$D/nested/log.txt"
+    run "$D" --repo r --slug s
+    assert_eq "$RC" "3" "content pattern $i refused"
+    assert_eq "$(uploads)" "0" "no upload for content pattern $i"
+    assert_contains "$OUT" "nested/log.txt" "names offending file for pattern $i"
+    if [[ "$OUT" == *"$secret"* ]]; then bad "secret $i echoed in output"; else ok "secret $i not echoed"; fi
+done
+
+echo "== case 11: files > 20 MB are skipped (logged), clean otherwise -> uploads =="
+D="$T/allowed/big"
+mkdir -p "$D"
+echo ok > "$D/ok.txt"
+python3 -c 'import sys; f=open(sys.argv[1],"wb"); f.truncate(21*1024*1024)' "$D/blob.bin"
+run "$D" --repo r --slug s
+assert_eq "$RC" "0" "big clean dir uploads"
+assert_contains "$OUT" "blob.bin" "logs skipped big file"
+
+GLBIN="$T/glbin"
+mkdir -p "$GLBIN"
+GL_LOG="$T/gitleaks.log"
+fake_gitleaks() {
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit %s\n' "$GL_LOG" "$1" > "$GLBIN/gitleaks"
+    chmod +x "$GLBIN/gitleaks"
+}
+run_gl() {
+    : > "$GLOG"; : > "$GL_LOG"
+    OUT="$(PATH="$GLBIN:$FAKE_PATH" bash "$SCRIPT" "$@" 2>&1)"
+    RC=$?
+}
+
+echo "== case 12: gitleaks exit 1 (leaks) -> exit 3, no upload =="
+fake_gitleaks 1
+run_gl "$SRC" --repo r --slug s
+assert_eq "$RC" "3" "gitleaks leak exit code"
+assert_eq "$(uploads)" "0" "no upload when gitleaks finds leaks"
+assert_eq "$(cat "$GL_LOG")" "detect --no-git --source $REAL_SRC --no-banner --redact" "gitleaks argv"
+
+echo "== case 13: gitleaks other non-zero -> fail closed exit 3 =="
+fake_gitleaks 2
+run_gl "$SRC" --repo r --slug s
+assert_eq "$RC" "3" "gitleaks error exit code"
+assert_eq "$(uploads)" "0" "no upload when gitleaks errors"
+
+echo "== case 14: gitleaks exit 0 -> proceeds to gcloud (python scan not used) =="
+fake_gitleaks 0
+run_gl "$T/allowed/content_3" --repo r --slug s
+assert_eq "$RC" "0" "gitleaks clean exit code"
+assert_eq "$(uploads)" "1" "uploads when gitleaks is clean"
+
 echo
 echo "evidence_push: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))
