@@ -360,6 +360,28 @@ if "$GIT8" --version >/dev/null 2>&1; then
 fi
 assert_not_contains "--roots <worktree> does not strip the root's own venv" "would strip $R9/rootwt/.venv" "$OUT9R"
 
+# symlinked dirs under the root lead outside it; the old find -P never followed them
+OUTSIDE9="$TMP_ROOT/outside9"
+mk_stale_wt_with_venv "$OUTSIDE9/org/wtT"
+mk_stale_wt_with_venv "$OUTSIDE9/repoX/.claude/worktrees/brX"
+ln -s "$OUTSIDE9/org" "$R9/slink"
+ln -s "$OUTSIDE9/repoX" "$R9/slink2"
+if "$GIT8" --version >/dev/null 2>&1; then
+  mkdir -p "$OUTSIDE9/real"
+  ln -s "$OUTSIDE9/real" "$R9/repoA/linkreg"
+  "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/linkreg/wt6" >/dev/null 2>&1
+  mk_stale_wt_with_venv "$R9/repoA/linkreg/wt6"
+  # git realpaths new registrations; record the symlinked path as older/other tools may
+  printf '%s\n' "$R9/repoA/linkreg/wt6/.git" > "$R9/repoA/.git/worktrees/wt6/gitdir"
+  "$GIT8" -C "$R9/repoA" worktree list --porcelain | grep -q "^worktree $R9/repoA/linkreg/wt6\$" \
+    || echo "  NOTE  git normalized the symlinked registration path; wt6 case is vacuous here"
+fi
+OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
+assert_not_contains "agent worktrees behind a symlinked repo NOT flagged" "brX/.venv" "$OUT9S"
+assert_not_contains "registered worktree via symlinked path NOT flagged" "wt6/.venv" "$OUT9S"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

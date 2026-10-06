@@ -224,17 +224,29 @@ _expand_roots_already_seen() {
   fi
   return 1
 }
+# _physically_under <path> <root> <root_p> — true when <path> is lexically
+# under <root> (or <root_p>) AND resolves to the same place under <root_p>, i.e.
+# no symlinked component between root and path. The old `find -P` never
+# followed symlinked dirs, so discovery must not either (no broadening).
+_physically_under() {
+  local rel phys
+  case "$1" in "$2"/*) rel="${1#"$2"/}" ;; "$3"/*) rel="${1#"$3"/}" ;; *) return 1 ;; esac
+  phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$rel" && "$phys" == "$3/$rel" ]]
+}
 expand_roots_with_agent_worktrees() {
   _expand_roots_seen=()
-  local root wt_dir
+  local root root_p wt_dir
   for root in "$@"; do
     if ! _expand_roots_already_seen "$root"; then
       _expand_roots_seen+=("$root")
       printf '%s\n' "$root"
     fi
     [[ -d "$root" ]] || continue
+    root_p="$(cd "$root" && pwd -P)" || continue
     for wt_dir in "$root/.claude/worktrees" "$root"/*/.claude/worktrees "$root"/*/*/.claude/worktrees; do
       [[ -d "$wt_dir" ]] || continue
+      _physically_under "$wt_dir" "$root" "$root_p" || continue
       if ! _expand_roots_already_seen "$wt_dir"; then
         _expand_roots_seen+=("$wt_dir")
         printf '%s\n' "$wt_dir"
@@ -249,6 +261,7 @@ expand_roots_with_agent_worktrees() {
 #   - `git worktree list --porcelain` of any repo at those paths, kept only
 #     when the listed worktree lies under the same root at depth <=5 (the old
 #     find's venv scope was depth 2..6)
+#   - never through a symlinked directory (the old find -P did not follow them)
 # Deduped by physical path so /var and /private/var aliases count once.
 CANDIDATE_WTS=()
 _cand_keys=$'\n'
@@ -276,12 +289,14 @@ collect_candidate_worktrees() {
     root_p="$(cd "$root" && pwd -P)"
     for d in "$root"/* "$root"/*/*; do
       [[ -d "$d" ]] || continue
+      _physically_under "$d" "$root" "$root_p" || continue
       _add_candidate "$d"
       [[ -d "$d/.git" ]] && command -v git >/dev/null 2>&1 || continue
       while IFS= read -r line; do
         [[ "$line" == "worktree "* ]] || continue
         wt="${line#worktree }"
-        _within_old_depth "$wt" "$root" "$root_p" && _add_candidate "$wt"
+        _within_old_depth "$wt" "$root" "$root_p" && _physically_under "$wt" "$root" "$root_p" \
+          && _add_candidate "$wt"
       done < <(git -C "$d" worktree list --porcelain 2>/dev/null || true)
     done
   done
