@@ -115,10 +115,8 @@ is_consolidated_label() {
   local candidate="$1"
   case "$candidate" in
     com.disk-magician.colima-prune|\
-    com.disk-magician.claude-state|\
     com.disk-magician.code-sign-clones|\
     com.disk-magician.codex-vacuum|\
-    com.disk-magician.worktree-venvs|\
     com.jleechanorg.disk-magician-pressure-sweep|\
     com.jleechanorg.disk-magician-tmp-scratch)
       return 0

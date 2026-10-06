@@ -109,25 +109,18 @@ fi
 
 consolidated_redundant_labels=(
   com.disk-magician.colima-prune
-  com.disk-magician.claude-state
   com.disk-magician.code-sign-clones
   com.disk-magician.codex-vacuum
-  com.disk-magician.worktree-venvs
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
 )
 
 if [[ "$CONSOLIDATE" == true ]]; then
-  echo "Consolidating fleet into single main sweeper..."
-  for label in "${consolidated_redundant_labels[@]}"; do
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    if [[ -f "$DEST/${label}.plist" ]]; then
-      mkdir -p "$DEST/.consolidated"
-      mv -f "$DEST/${label}.plist" "$DEST/.consolidated/${label}.plist"
-    fi
-    echo "consolidated redundant $label"
-  done
-  SELECTED=("com.jleechanorg.disk-magician-main-sweeper.plist.template")
+  SELECTED=(
+    "com.jleechanorg.disk-magician-main-sweeper.plist.template"
+    "com.disk-magician.claude-state.plist.template"
+    "com.disk-magician.worktree-venvs.plist.template"
+  )
 fi
 
 install_plist() {
@@ -162,7 +155,10 @@ install_plist() {
     return 1
   fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$dst"
+  if ! launchctl bootstrap "gui/$(id -u)" "$dst"; then
+    echo "ABORT: launchctl bootstrap failed for $label ($dst)" >&2
+    return 1
+  fi
   echo "installed $label -> $dst"
 }
 
@@ -260,6 +256,18 @@ fi
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "Encountered $ERRORS error(s) during sweeper installation." >&2
   exit 1
+fi
+
+if [[ "$CONSOLIDATE" == true ]]; then
+  echo "Consolidating fleet into single main sweeper..."
+  for label in "${consolidated_redundant_labels[@]}"; do
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    if [[ -f "$DEST/${label}.plist" ]]; then
+      mkdir -p "$DEST/.consolidated"
+      mv -f "$DEST/${label}.plist" "$DEST/.consolidated/${label}.plist"
+    fi
+    echo "consolidated redundant $label"
+  done
 fi
 
 echo "Done. Logs under /tmp/disk-magician-*.log"
