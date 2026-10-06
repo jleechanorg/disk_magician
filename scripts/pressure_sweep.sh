@@ -174,6 +174,18 @@ tmp_gb() {
   du -skx "/private/tmp" 2>/dev/null | awk '{print int($1/1024/1024)}'
 }
 
+# Bead disk_magician-mux: when the full colima step will not run, still do a
+# cheap in-VM fstrim (cleanup_colima.sh --trim-only owns the datadisk-size
+# gate, timeout, and never-restart contract). Failure is logged, never fatal.
+colima_trim_only() {
+  [[ -d "$HOME/.colima/_lima/_disks/colima" ]] || return 0
+  local flag="--clean"
+  [[ "$DRY_RUN" == true ]] && flag="--dry-run"
+  local rc=0
+  run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" --trim-only "$flag" >> "$LOG_FILE" 2>&1 || rc=$?
+  [[ $rc -eq 0 ]] || log "pressure_sweep: colima trim-only FAILED or timed out (rc=${rc}) — continuing."
+}
+
 SWEEP_MODE="full"
 below_threshold=$(awk -v f="$current_free_gb" -v t="$THRESHOLD_GB" 'BEGIN{print (f < t) ? "1" : "0"}')
 if [[ "$below_threshold" != "1" ]]; then
@@ -191,6 +203,7 @@ if [[ "$below_threshold" != "1" ]]; then
 
   if [[ "$over_colima_ceiling" != "1" && "$over_tmp_ceiling" != "1" ]]; then
     log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
+    colima_trim_only
     if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
       --outcome skipped_threshold \
       --reason "free >= threshold and neither colima nor tmp ceiling exceeded" \
@@ -292,7 +305,8 @@ fi
 
 # ────────── STEP 2: cleanup_colima.sh ──────────
 if [[ "$SWEEP_MODE" == "tmp-only" ]]; then
-  log "pressure_sweep: step 2/3 skipped (tmp-only mode — Colima under ceiling)."
+  log "pressure_sweep: step 2/3 skipped (tmp-only mode — Colima under ceiling); running trim-only."
+  colima_trim_only
 else
 before_gb="$(free_gb)"
 log "pressure_sweep: step 2/3 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
