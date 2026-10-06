@@ -381,6 +381,10 @@ OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DI
 assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
 assert_not_contains "agent worktrees behind a symlinked repo NOT flagged" "brX/.venv" "$OUT9S"
 assert_not_contains "registered worktree via symlinked path NOT flagged" "wt6/.venv" "$OUT9S"
+ln -s "$R9" "$TMP_ROOT/roots9link"
+OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  bash "$TARGET_SCRIPT" --roots "$TMP_ROOT/roots9link" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
+assert_not_contains "a --roots entry that is itself a symlink is not scanned" "would strip" "$OUT9L"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

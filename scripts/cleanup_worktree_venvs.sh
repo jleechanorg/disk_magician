@@ -243,6 +243,8 @@ expand_roots_with_agent_worktrees() {
       printf '%s\n' "$root"
     fi
     [[ -d "$root" ]] || continue
+    # the old `find -P "$root"` never descended into a symlinked start point
+    [[ -L "$root" ]] && continue
     root_p="$(cd "$root" && pwd -P)" || continue
     for wt_dir in "$root/.claude/worktrees" "$root"/*/.claude/worktrees "$root"/*/*/.claude/worktrees; do
       [[ -d "$wt_dir" ]] || continue
@@ -286,6 +288,7 @@ collect_candidate_worktrees() {
   local root root_p d line wt
   for root in "$@"; do
     [[ -d "$root" ]] || continue
+    [[ -L "$root" ]] && continue
     root_p="$(cd "$root" && pwd -P)"
     for d in "$root"/* "$root"/*/*; do
       [[ -d "$d" ]] || continue
