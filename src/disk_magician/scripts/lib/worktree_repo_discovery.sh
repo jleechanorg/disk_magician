@@ -36,7 +36,7 @@ discover_worktree_repos() {
         return 0
     fi
 
-    local discovered_repos_str="$HOME/projects/worldarchitect.ai"
+    local discovered_repos_str=""
 
     _dwr_add_main_repo() {
         local repo="$1"
@@ -61,25 +61,36 @@ discover_worktree_repos() {
 
         local find_cmd=(find "$search_dir" -maxdepth "$max_depth" \( -name .git -type d -o -name node_modules \) -prune -o -type f -name ".git" -print)
 
+        local timeout_sec="${WORKTREE_DISCOVERY_TIMEOUT:-8}"
         local git_files=""
         if command -v python3 >/dev/null 2>&1; then
             git_files=$(python3 -c '
 import sys, subprocess
-cmd = sys.argv[1:]
+t = float(sys.argv[1])
+cmd = sys.argv[2:]
 try:
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8)
-    sys.stdout.write(p.stdout)
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=t)
+    sys.stdout.buffer.write(p.stdout or b"")
 except subprocess.TimeoutExpired as exc:
-    if exc.stdout:
-        sys.stdout.write(exc.stdout)
+    out = exc.stdout or b""
+    if isinstance(out, str):
+        out = out.encode("utf-8", errors="replace")
+    if out:
+        last_nl = out.rfind(b"\n")
+        if last_nl != -1:
+            sys.stdout.buffer.write(out[:last_nl + 1])
     sys.stderr.write(f"worktree_repo_discovery: timeout searching root {cmd[1]}\n")
+    sys.stderr.flush()
 except Exception:
     pass
-' "${find_cmd[@]}" 2>/dev/null || true)
+' "$timeout_sec" "${find_cmd[@]}" || true)
         elif command -v timeout >/dev/null 2>&1; then
-            git_files=$(timeout 8 "${find_cmd[@]}" 2>/dev/null || true)
+            git_files=$(timeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null || true)
+        elif command -v gtimeout >/dev/null 2>&1; then
+            git_files=$(gtimeout "$timeout_sec" "${find_cmd[@]}" 2>/dev/null || true)
         else
-            git_files=$("${find_cmd[@]}" 2>/dev/null || true)
+            echo "worktree_repo_discovery: skipping root $search_dir (no timeout runner available)" >&2
+            return 0
         fi
 
         while IFS= read -r git_file; do
@@ -108,7 +119,8 @@ except Exception:
         done
     fi
 
-    # Include worldai_claw if its main repo .git is present
+    # Include base repos if their main repo .git is present
+    _dwr_add_main_repo "$HOME/projects/worldarchitect.ai"
     _dwr_add_main_repo "$HOME/project_worldaiclaw/worldai_claw"
 
     # Auto-discover worktrees under sibling agent roots

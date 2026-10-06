@@ -59,10 +59,14 @@ echo "gitdir: $TMP_DIR/some-other-repo/.git/worktrees/branch-a" > "$TMP_DIR/.wor
 OUT="$(discover_worktree_repos "")"
 expect "discovers the main repo via ~/.worktrees" "$TMP_DIR/some-other-repo" "$OUT"
 
-echo "Test 3: worldarchitect.ai base repo is always included even with no worktrees anywhere"
+echo "Test 3: worldarchitect.ai candidate without .git is not surfaced; with .git is surfaced"
 rm -rf "$TMP_DIR/.worktrees" "$TMP_DIR/some-other-repo"
 OUT="$(discover_worktree_repos "")"
-expect "always includes the worldarchitect.ai base path" "$TMP_DIR/projects/worldarchitect.ai" "$OUT"
+refute "does not include worldarchitect.ai when .git does not exist" "$TMP_DIR/projects/worldarchitect.ai" "$OUT"
+mkdir -p "$TMP_DIR/projects/worldarchitect.ai/.git"
+OUT="$(discover_worktree_repos "")"
+expect "includes worldarchitect.ai when valid .git exists" "$TMP_DIR/projects/worldarchitect.ai" "$OUT"
+rm -rf "$TMP_DIR/projects/worldarchitect.ai"
 
 echo "Test 4: a nested container dir under ~/.worktrees (e.g. ~/.worktrees/<project>/<branch>) is still found"
 mkdir -p "$TMP_DIR/nested-repo/.git/worktrees/deep-branch"
@@ -122,6 +126,45 @@ mkdir -p "$TMP_DIR/wc-wt/group-a/nested-wt"
 echo "gitdir: $TMP_DIR/deep-repo/.git/worktrees/nested-wt" > "$TMP_DIR/wc-wt/group-a/nested-wt/.git"
 OUT="$(discover_worktree_repos "")"
 expect "discovers worktrees nested at depth 3" "$TMP_DIR/deep-repo" "$OUT"
+
+echo "Test 13: timeout recovery preserves valid records up to last newline and emits warning"
+mkdir -p "$TMP_DIR/timeout-repo/.git/worktrees/valid-wt"
+mkdir -p "$TMP_DIR/wc-wt/valid-wt"
+echo "gitdir: $TMP_DIR/timeout-repo/.git/worktrees/valid-wt" > "$TMP_DIR/wc-wt/valid-wt/.git"
+
+FAKE_BIN="$TMP_DIR/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/find" << 'EOF'
+#!/usr/bin/env bash
+# Emit one complete line, one incomplete line, then sleep to trigger timeout
+if [[ "$*" == *"/wc-wt"* ]]; then
+  printf "%s\n" "$HOME/wc-wt/valid-wt/.git"
+  printf "%s" "$HOME/wc-wt/incomplete-line"
+  sleep 2
+else
+  /usr/bin/find "$@"
+fi
+EOF
+chmod +x "$FAKE_BIN/find"
+
+STDERR_OUT="$TMP_DIR/stderr_timeout.log"
+OUT="$(PATH="$FAKE_BIN:$PATH" WORKTREE_DISCOVERY_TIMEOUT=0.5 discover_worktree_repos "" 2>"$STDERR_OUT")"
+expect "discovers repo emitted before timeout" "$TMP_DIR/timeout-repo" "$OUT"
+expect "emits timeout warning to stderr" "worktree_repo_discovery: timeout searching root" "$(cat "$STDERR_OUT")"
+refute "does not throw TypeError in stderr" "TypeError" "$(cat "$STDERR_OUT")"
+
+echo "Test 14: skips root when no timeout-capable runner is available"
+NO_RUNNER_BIN="$TMP_DIR/norunner_bin"
+mkdir -p "$NO_RUNNER_BIN"
+# Symlink basic POSIX utilities except python3, timeout, and gtimeout
+for cmd in sh bash find grep sed cut tr sort ls rm mkdir cat; do
+  target="$(command -v "$cmd" 2>/dev/null || true)"
+  [[ -n "$target" ]] && ln -s "$target" "$NO_RUNNER_BIN/$cmd"
+done
+
+NO_RUNNER_STDERR="$TMP_DIR/norunner_stderr.log"
+OUT="$(PATH="$NO_RUNNER_BIN" discover_worktree_repos "" 2>"$NO_RUNNER_STDERR")"
+expect "skips root when no runner is found" "skipping root" "$(cat "$NO_RUNNER_STDERR")"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
