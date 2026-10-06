@@ -94,6 +94,8 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
         
         find_repos_from_worktrees "$HOME/.ao/data/worktrees"
         find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees"
+        find_repos_from_worktrees "$HOME/wc-wt"
+        find_repos_from_worktrees "$HOME/project_worldaiclaw"
         
         # Also check all .claude/worktrees and projects
         if [[ -d "$HOME/projects" ]]; then
