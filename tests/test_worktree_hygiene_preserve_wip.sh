@@ -511,7 +511,7 @@ assert_true "[[ -d '$W28' ]] && git -C '$W28' show :tracked.txt | grep -q staged
 echo "case 29: repo hooks never run during preservation"
 R29="$(mk_repo r29)"
 W29="$(mk_wt "$R29" hook29)"
-for h in post-checkout post-commit reference-transaction; do
+for h in post-checkout post-commit reference-transaction post-index-change; do
     printf '#!/bin/sh\ntouch "%s/hook-%s-ran"\n' "$TMPROOT" "$h" >"$R29/.git/hooks/$h"
     chmod +x "$R29/.git/hooks/$h"
 done
@@ -520,6 +520,25 @@ backdate_tree "$W29" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29" --skip-push --execute --preserve-wip)"
 assert_true "! [[ -d '$W29' ]]" "worktree preserved+removed"
 assert_true "! ls '$TMPROOT'/hook-*-ran >/dev/null 2>&1" "no hook ran"
+
+# ---------------------------------------------------------------------------
+echo "case 29b: hooks never run on the failure/restore path either"
+R29B="$(mk_repo r29b)"
+printf '*.nb filter=lossy\n' >"$R29B/.gitattributes"
+g -C "$R29B" add -A; g -C "$R29B" commit -q -m attrs
+W29B="$(mk_wt "$R29B" hook29b)"
+g -C "$W29B" config filter.lossy.clean "grep -v OUTPUT"
+g -C "$W29B" config filter.lossy.smudge cat
+for h in post-checkout post-commit reference-transaction post-index-change; do
+    printf '#!/bin/sh\ntouch "%s/hookb-%s-ran"\n' "$TMPROOT" "$h" >"$R29B/.git/hooks/$h"
+    chmod +x "$R29B/.git/hooks/$h"
+done
+printf 'cell\nOUTPUT: 1\n' >"$W29B/new.nb"
+backdate_tree "$W29B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29B" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "WIP-RESTORED" "failure path restored"
+assert_true "[[ -d '$W29B' ]] && grep -q 'OUTPUT: 1' '$W29B/new.nb'" "content intact"
+assert_true "! ls '$TMPROOT'/hookb-*-ran >/dev/null 2>&1" "no hook ran on failure path"
 
 # ---------------------------------------------------------------------------
 echo "case 30: case-only rename -> blocked (APFS/ignorecase would drop it)"

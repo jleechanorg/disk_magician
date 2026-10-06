@@ -314,7 +314,7 @@ triage_candidate() {
     local repo_path="$1" wt_path="$2" branch="$3"
 
     local status_porcelain uncommitted_count untracked_present status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(git --no-optional-locks -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         uncommitted_count=999
         untracked_present=1
@@ -502,7 +502,7 @@ preserve_wip_blocker() {
             echo "in-progress-op:$f"; return 0
         fi
     done
-    if [[ -n "$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)" ]]; then
+    if [[ -n "$(git -C "$wt" ls-files --unmerged 2>/dev/null)" ]]; then
         echo "in-progress-op:unmerged-paths"; return 0
     fi
     git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo "unborn-head"; return 0; }
@@ -524,7 +524,7 @@ preserve_wip_blocker() {
     # matches neither HEAD nor disk; `git add -A` (and the failure-path index
     # reset) would drop that staged version: refuse. Fail closed on error.
     local partial prc=0
-    partial="$(git -C "$wt" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null \
+    partial="$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null \
         | awk 'substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); exit}')" || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         echo "partial-staging-scan-failed"; return 0
@@ -621,6 +621,10 @@ wip_restore_head() {
 # Returns 0 if removed, 1 if preserved-but-kept or preservation failed.
 preserve_wip_and_remove() {
     local repo_abs="$1" wt="$2" branch name email sha orig_ref orig_sha
+    # Never run the repo's hooks (post-checkout, post-commit, post-index-change,
+    # reference-transaction, ...) from an automated sweep: every git call here
+    # and in wip_restore_head inherits core.hooksPath=/dev/null via the env.
+    local -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
     branch="$(wip_branch_name "$wt")"
     orig_ref="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || true)"
     orig_sha="$(git -C "$wt" rev-parse --verify -q HEAD 2>/dev/null)" || {
@@ -630,7 +634,7 @@ preserve_wip_and_remove() {
     [[ -n "$name" ]] || name="worktree-hygiene"
     [[ -n "$email" ]] || email="worktree-hygiene@localhost"
 
-    if ! git -C "$wt" -c core.hooksPath=/dev/null checkout -q -b "$branch" 2>/dev/null; then
+    if ! git -C "$wt" checkout -q -b "$branch" 2>/dev/null; then
         ledger_line "WIP-FAILED" "$wt" "could not create $branch; kept"
         return 1
     fi
@@ -642,7 +646,7 @@ preserve_wip_and_remove() {
     if ! git -C "$wt" diff --cached --quiet 2>/dev/null; then
         if ! GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
              GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \
-             git -C "$wt" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --no-verify \
+             git -C "$wt" -c commit.gpgsign=false commit -q --no-verify \
                  -m "wip: preserved by worktree-hygiene before removal ($wt)" >/dev/null 2>&1; then
             ledger_line "WIP-FAILED" "$wt" "commit failed on $branch; kept"
             wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
@@ -654,7 +658,7 @@ preserve_wip_and_remove() {
     # new files and for edits to tracked files alike. Byte-verify EVERY tracked
     # regular file on disk against the committed blob (one batched pass);
     # LFS-filtered paths and symlinks/gitlinks are exempt (they round-trip).
-    local vbad="" vlist vmodes vlfs
+    local vbad="" vlist vlfs
     vlist="$(git -C "$wt" ls-files -s -z 2>/dev/null | tr '\0' '\n' \
         | awk '$1=="100644"||$1=="100755"{sub(/^[^\t]*\t/,""); print}')"
     if [[ -n "$vlist" ]]; then
