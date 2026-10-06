@@ -21,6 +21,17 @@ from typing import Any
 
 from job_receipt import resolve_state_dir
 
+MAIN_SWEEPER_LABEL = "com.jleechanorg.disk-magician-main-sweeper"
+CONSOLIDATED_LABELS = {
+    "com.disk-magician.colima-prune",
+    "com.disk-magician.claude-state",
+    "com.disk-magician.code-sign-clones",
+    "com.disk-magician.codex-vacuum",
+    "com.disk-magician.worktree-venvs",
+    "com.jleechanorg.disk-magician-pressure-sweep",
+    "com.jleechanorg.disk-magician-tmp-scratch",
+}
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -425,6 +436,36 @@ def fleet(repo_root: Path, expected_source_root: Path | None = None) -> dict[str
                 record.update(status="healthy", reason="installed plist matches expected routing and exact label is loaded")
             else:
                 record.update(status="degraded", reason="plist valid but exact label is not loaded")
+
+        # Reconcile consolidation / legacy support across the fleet
+        main_sweeper_record = next((r for r in records if r["label"] == MAIN_SWEEPER_LABEL), None)
+        main_sweeper_active = (
+            main_sweeper_record is not None
+            and main_sweeper_record.get("status") == "healthy"
+        )
+
+        if main_sweeper_active:
+            for record in records:
+                if record["label"] in CONSOLIDATED_LABELS:
+                    if record.get("status") == "degraded" and record.get("reason") in (
+                        "installed plist missing",
+                        "plist valid but exact label is not loaded",
+                    ):
+                        record.update(
+                            status="healthy",
+                            reason=f"consolidated: covered by {MAIN_SWEEPER_LABEL}",
+                        )
+        else:
+            legacy_jobs_present = any(
+                r["label"] in CONSOLIDATED_LABELS and r.get("status") == "healthy"
+                for r in records
+            )
+            if legacy_jobs_present and main_sweeper_record is not None:
+                if main_sweeper_record.get("status") == "degraded" and main_sweeper_record.get("reason") == "installed plist missing":
+                    main_sweeper_record.update(
+                        status="healthy",
+                        reason="unconsolidated: legacy individual sweepers active",
+                    )
     states = {record["status"] for record in records}
     if "invalid" in states:
         status = "invalid"

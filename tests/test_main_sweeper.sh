@@ -98,6 +98,55 @@ rm -rf "$TMP_STATE/main_sweeper.lock"
 out="$(DISK_MAGICIAN_SKIP_CLONES=1 DISK_MAGICIAN_SKIP_TMP_LARGE=1 DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=10 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMP_LOGS/sweeper.log" "$MAIN_SWEEPER" --dry-run --skip-snapshot --skip-routine --skip-health --threshold-gb 40 2>&1 || true)"
 assert_contains "disk pressure detected" "Disk pressure detected (10 GiB < 40 GiB)" "$out"
 
+# Test 10: Step failure aggregates errors, exits non-zero, and prevents debounce marker
+echo "Test 10: Step failure aggregates errors, exits non-zero, and prevents debounce marker"
+rm -rf "$TMP_STATE/main_sweeper.lock"
+MOCK_REPO="$(mktemp -d -t mock_repo.XXXXXX)"
+mkdir -p "$MOCK_REPO/scripts"
+cat > "$MOCK_REPO/scripts/cleanup_xcode.sh" << 'EOF'
+#!/bin/sh
+exit 17
+EOF
+chmod +x "$MOCK_REPO/scripts/cleanup_xcode.sh"
+
+set +e
+out="$(DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO" DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMP_LOGS/sweeper.log" "$MAIN_SWEEPER" --clean --skip-snapshot --skip-health 2>&1)"
+exit_code=$?
+set -e
+assert_eq "step failure causes non-zero sweeper exit" "1" "$exit_code"
+assert_contains "failure logged in output" "Main sweeper finished with 1 failure(s)" "$out"
+if [[ ! -f "$TMP_STATE/last_xcode_clean" ]]; then
+  echo "  PASS  failed heavy task does not record debounce marker"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  failed heavy task incorrectly recorded debounce marker"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Test 11: Successful heavy task marks debounce marker done and sweeper exits 0
+echo "Test 11: Successful heavy task marks debounce marker done and sweeper exits 0"
+rm -rf "$TMP_STATE/main_sweeper.lock"
+cat > "$MOCK_REPO/scripts/cleanup_xcode.sh" << 'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$MOCK_REPO/scripts/cleanup_xcode.sh"
+
+set +e
+out="$(DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO" DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMP_LOGS/sweeper.log" "$MAIN_SWEEPER" --clean --skip-snapshot --skip-health 2>&1)"
+exit_code=$?
+set -e
+assert_eq "successful run exits 0" "0" "$exit_code"
+assert_contains "completion logged in output" "Main sweeper completed successfully" "$out"
+if [[ -f "$TMP_STATE/last_xcode_clean" ]]; then
+  echo "  PASS  successful heavy task recorded debounce marker"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  successful heavy task failed to record debounce marker"
+  FAIL=$(( FAIL + 1 ))
+fi
+rm -rf "$MOCK_REPO"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]] || exit 1

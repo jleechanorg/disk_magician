@@ -25,7 +25,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${DISK_MAGICIAN_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # shellcheck source=scripts/safety_lib.sh
 if [[ -f "$SCRIPT_DIR/safety_lib.sh" ]]; then
@@ -228,12 +228,24 @@ main() {
   local start_free_gb
   start_free_gb="$(free_gb || echo "")"
   log "Initial available space: ${start_free_gb:-unknown} GiB (mode: ${CLEAN_ARG})"
+  local ERRORS=0
+
+  run_job_step() {
+    local desc="$1"
+    shift
+    if ! run_step_timeout "$@"; then
+      log "WARN: $desc failed"
+      ERRORS=$((ERRORS + 1))
+      return 1
+    fi
+    return 0
+  }
 
   # Phase 1: Snapshot & Topdown Ledger
   if [[ "$SKIP_SNAPSHOT" == false ]]; then
     log "Phase 1: Recording disk snapshot & topdown ledger..."
     if [[ -f "$REPO_ROOT/scripts/snapshot_commit.sh" ]]; then
-      run_step_timeout bash "$REPO_ROOT/scripts/snapshot_commit.sh" || log "WARN: snapshot_commit.sh exited with non-zero status"
+      run_job_step "Phase 1: snapshot_commit.sh" bash "$REPO_ROOT/scripts/snapshot_commit.sh" || true
     fi
   else
     log "Phase 1: Snapshot skipped (--skip-snapshot)."
@@ -248,23 +260,23 @@ main() {
       log "Running cleanup_tmp.sh with --large and accelerated quarantine..."
       LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
         LARGE_TMP_ACTIVE_HOURS=4 LARGE_TMP_ARCHIVE_RETENTION_HOURS=4 \
-        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" --large || log "WARN: cleanup_tmp --large failed"
+        run_job_step "Phase 2: cleanup_tmp --large" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" --large || true
     fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
       log "Pruning Colima Docker containers/images before trim..."
-      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || log "WARN: cleanup_colima failed"
+      run_job_step "Phase 2: cleanup_colima" bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || true
     fi
     if [[ "$DRY_RUN" == false ]] && command -v colima &>/dev/null; then
       if colima status 2>/dev/null | grep -qi "running"; then
         log "Trimming Colima VM datadisk..."
-        run_step_timeout colima ssh -- sudo fstrim -av 2>&1 || log "WARN: colima fstrim failed"
+        run_job_step "Phase 2: colima fstrim" colima ssh -- sudo fstrim -av || true
       fi
     elif [[ "$DRY_RUN" == true ]]; then
       log "[dry-run] Would trim Colima VM datadisk via colima ssh -- sudo fstrim -av"
     fi
     if [[ "${DISK_MAGICIAN_SKIP_CLONES:-0}" != "1" && -f "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" ]]; then
       log "Cleaning detached browser code_sign_clones..."
-      CODE_SIGN_CLONES_APPROVED=1 run_step_timeout bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || log "WARN: cleanup_code_sign_clones failed"
+      CODE_SIGN_CLONES_APPROVED=1 run_job_step "Phase 2: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
   else
     log "Phase 2: Disk space healthy (${current_free_gb:-unknown} GiB >= ${THRESHOLD_GB} GiB)."
@@ -277,53 +289,64 @@ main() {
     log "Phase 3: Executing canonical 6-tier routine maintenance stack..."
 
     # Tier 1: Dev caches, temp, PR scratch, LLM inspector
-    [[ -f "$REPO_ROOT/scripts/cleanup_dev_caches.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" "$CLEAN_ARG" || true
-    [[ -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" || true
-    [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
-    [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_dev_caches.sh" ]] && run_job_step "Tier 1: cleanup_dev_caches" bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]] && run_job_step "Tier 1: cleanup_tmp" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_job_step "Tier 1: cleanup_pr_scratch" bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_job_step "Tier 1: cleanup_llm_inspector" bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
 
     # Tier 2: Xcode DerivedData & simulator caches (debounced to 24h when healthy)
     if should_run_heavy_task "$STATE_DIR/last_xcode_clean" 86400; then
-      [[ -f "$REPO_ROOT/scripts/cleanup_xcode.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$CLEAN_ARG" || true
-      mark_heavy_task_done "$STATE_DIR/last_xcode_clean"
+      if [[ -f "$REPO_ROOT/scripts/cleanup_xcode.sh" ]]; then
+        if run_job_step "Tier 2: cleanup_xcode" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$CLEAN_ARG"; then
+          mark_heavy_task_done "$STATE_DIR/last_xcode_clean"
+        fi
+      fi
     else
       log "Tier 2: Xcode DerivedData clean skipped (debounced to 24h; disk space healthy)."
     fi
 
     # Tier 3: Colima VM & Docker reclaim (debounced to 24h when healthy)
     if should_run_heavy_task "$STATE_DIR/last_colima_routine_prune" 86400; then
+      local t3_ok=true
       if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
-        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || true
-      fi
-      if [[ -f "$REPO_ROOT/scripts/post_job_docker_prune.sh" ]]; then
-        if [[ "$DRY_RUN" == true ]]; then
-          run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" --dry-run || true
-        else
-          run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" || true
+        if ! run_job_step "Tier 3: cleanup_colima" bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG"; then
+          t3_ok=false
         fi
       fi
-      mark_heavy_task_done "$STATE_DIR/last_colima_routine_prune"
+      if [[ -f "$REPO_ROOT/scripts/post_job_docker_prune.sh" ]]; then
+        local docker_prune_cmd=(bash "$REPO_ROOT/scripts/post_job_docker_prune.sh")
+        [[ "$DRY_RUN" == true ]] && docker_prune_cmd+=(--dry-run)
+        if ! run_job_step "Tier 3: post_job_docker_prune" "${docker_prune_cmd[@]}"; then
+          t3_ok=false
+        fi
+      fi
+      if [[ "$t3_ok" == true ]]; then
+        mark_heavy_task_done "$STATE_DIR/last_colima_routine_prune"
+      fi
     else
       log "Tier 3: Colima VM & Docker prune skipped (debounced to 24h; disk space healthy)."
     fi
 
     # Tier 4: Browser Sessions & Assets
-    [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]] && run_job_step "Tier 4: prune_aside_sessions" bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
 
     # Tier 5: Agent State Compaction & Rotated Logs (Codex vacuum debounced to 24h when healthy)
-    [[ -f "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" ]] && run_job_step "Tier 5: cleanup_antigravity_brain" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" "$CLEAN_ARG" || true
     if should_run_heavy_task "$STATE_DIR/last_codex_vacuum" 86400; then
-      [[ -f "$REPO_ROOT/scripts/cleanup_codex_db.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_codex_db.sh" "$CLEAN_ARG" || true
-      mark_heavy_task_done "$STATE_DIR/last_codex_vacuum"
+      if [[ -f "$REPO_ROOT/scripts/cleanup_codex_db.sh" ]]; then
+        if run_job_step "Tier 5: cleanup_codex_db" bash "$REPO_ROOT/scripts/cleanup_codex_db.sh" "$CLEAN_ARG"; then
+          mark_heavy_task_done "$STATE_DIR/last_codex_vacuum"
+        fi
+      fi
     else
       log "Tier 5: Codex DB vacuum skipped (debounced to 24h; disk space healthy)."
     fi
-    [[ -f "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" "$CLEAN_ARG" || true
-    [[ -f "$REPO_ROOT/scripts/cleanup_uv_cache.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_uv_cache.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" ]] && run_job_step "Tier 5: cleanup_supervisor_logs" bash "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_uv_cache.sh" ]] && run_job_step "Tier 5: cleanup_uv_cache" bash "$REPO_ROOT/scripts/cleanup_uv_cache.sh" "$CLEAN_ARG" || true
 
     # Routine code-sign clones maintenance
     if [[ -f "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" ]]; then
-      CODE_SIGN_CLONES_APPROVED=1 run_step_timeout bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
+      CODE_SIGN_CLONES_APPROVED=1 run_job_step "Tier 5: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
 
     # Tier 6: Dormant Worktree Venvs (>=7d) & Claude State (>=7d)
@@ -331,18 +354,18 @@ main() {
       if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
         log "Tier 6: cleanup_worktree_venvs skipped (requires WORKTREE_APPROVED=1)"
       else
-        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" "$CLEAN_ARG" || true
+        run_job_step "Tier 6: cleanup_worktree_venvs" bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" "$CLEAN_ARG" || true
       fi
     fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_claude_state.sh" ]]; then
       if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
         log "Tier 6: cleanup_claude_state skipped (requires CLAUDE_STATE_APPROVED=1)"
       else
-        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" "$CLEAN_ARG" || true
+        run_job_step "Tier 6: cleanup_claude_state" bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" "$CLEAN_ARG" || true
       fi
     fi
     if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/cleanup_worktrees.sh" ]]; then
-      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" "$CLEAN_ARG" || true
+      run_job_step "Tier 6: cleanup_worktrees" bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" "$CLEAN_ARG" || true
     fi
   fi
 
@@ -352,7 +375,7 @@ main() {
   else
     log "Phase 4: Running sweeper health check..."
     if [[ -f "$REPO_ROOT/scripts/sweeper_health_check.sh" ]]; then
-      run_step_timeout bash "$REPO_ROOT/scripts/sweeper_health_check.sh" || log "WARN: sweeper_health_check reported warnings"
+      run_job_step "Phase 4: sweeper_health_check" bash "$REPO_ROOT/scripts/sweeper_health_check.sh" || true
     fi
   fi
 
@@ -361,13 +384,25 @@ main() {
   log "=== Unified Main Sweeper Complete ==="
   log "Final available space: ${end_free_gb:-unknown} GiB (initial: ${start_free_gb:-unknown} GiB)"
 
+  local outcome="success"
+  local exit_code=0
+  if [[ "$ERRORS" -gt 0 ]]; then
+    outcome="failed"
+    exit_code=1
+    log "WARN: Main sweeper finished with $ERRORS failure(s)."
+  else
+    log "Main sweeper completed successfully."
+  fi
+
   if [[ -n "$RECEIPT_RUN_ID" && -f "$RECEIPT_HELPER" ]]; then
     python3 "$RECEIPT_HELPER" finish --job main_sweeper \
       --run-id "$RECEIPT_RUN_ID" \
-      --outcome success \
+      --outcome "$outcome" \
       --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' \
-      --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}}" >/dev/null 2>&1 || true
+      --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}, \"errors\": $ERRORS}" >/dev/null 2>&1 || true
   fi
+
+  return "$exit_code"
 }
 
 main "$@"
