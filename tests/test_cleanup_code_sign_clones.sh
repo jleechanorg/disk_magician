@@ -29,6 +29,14 @@ mkdir -p "$MOCK_BIN" "$MOCK_X_DIR"
 # 1. Setup mock lsof that reports inactive (no matches) by default
 cat > "$MOCK_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${MOCK_LSOF_SHARED:-}" ]]; then
+  # A process holds the shared (hardlinked) binary; lsof +D reports it under
+  # every clone that links it, as macOS lsof resolves by inode.
+  echo "p23456"
+  echo "cThemeWidgetControlViewService"
+  echo "n${@: -1}/Contents/MacOS/binary"
+  exit 0
+fi
 if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
   # Simulate active process holding handle inside candidate
   echo "p12345"
@@ -137,6 +145,45 @@ if ! grep -q "ERROR: DISK_MAGICIAN_CODE_SIGN_X_DIR is not a directory" <<<"$OUTP
   exit 1
 fi
 echo "  PASS  Test 6"
+
+echo "Test 7: Open file shared by hardlink across clones does not pin every clone"
+SH_A="$CLONE_PARENT/code_sign_clone.shA"
+SH_B="$CLONE_PARENT/code_sign_clone.shB"
+create_candidate "$SH_A"
+mkdir -p "$SH_B/Contents/MacOS"
+ln "$SH_A/Contents/MacOS/binary" "$SH_B/Contents/MacOS/binary"
+dd if=/dev/zero of="$SH_B/Contents/MacOS/framework" bs=1024 count=120 2>/dev/null
+touch -t 202610041200 "$CLONE_PARENT" "$SH_A" "$SH_B"
+OUTPUT7=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED=1 CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+left=0
+[[ -d "$SH_A" ]] && left=$((left + 1))
+[[ -d "$SH_B" ]] && left=$((left + 1))
+if [[ "$left" -ne 1 ]]; then
+  echo "FAIL: expected exactly one of two hardlink-sharing clones removed; the last link of an open file stays (left=$left)" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if ! grep -q "ACTIVE — preserving" <<<"$OUTPUT7"; then
+  echo "FAIL: the clone holding the last link of the open file must be reported ACTIVE" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+echo "  PASS  Test 7"
+
+echo "Test 8: A clone a running process executes from is preserved"
+EXE_CLONE="$CLONE_PARENT/code_sign_clone.exe"
+create_candidate "$EXE_CLONE"
+touch -t 202610041200 "$CLONE_PARENT" "$EXE_CLONE"
+printf '#!/usr/bin/env bash\necho "%s/Contents/MacOS/binary"\n' "$EXE_CLONE" > "$MOCK_BIN/ps"
+chmod +x "$MOCK_BIN/ps"
+OUTPUT8=$(PATH="$MOCK_BIN:$PATH" CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+rm -f "$MOCK_BIN/ps"
+if [[ ! -d "$EXE_CLONE" ]] || ! grep -q "running executable inside clone" <<<"$OUTPUT8"; then
+  echo "FAIL: clone with a running executable was not preserved" >&2
+  echo "$OUTPUT8" >&2
+  exit 1
+fi
+echo "  PASS  Test 8"
 
 echo "ALL CHECKS PASSED: test_cleanup_code_sign_clones.sh"
 exit 0

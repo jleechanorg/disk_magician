@@ -75,6 +75,10 @@ lsof_state() {
   # rc=1 with empty stdout is the normal no-match result only when stderr is
   # also empty; a diagnostic means inspection was incomplete and must fail
   # closed. A bounded caller still owns the lsof invocation timeout.
+  if ps -Ao comm= 2>/dev/null | grep -qF "${candidate}/"; then
+    LSOF_DETAIL="running executable inside clone"
+    return 0
+  fi
   err_file=$(mktemp "${TMPDIR:-/tmp}/disk-magician-lsof.XXXXXX" 2>/dev/null) || {
     LSOF_DETAIL="unable to capture lsof diagnostics"
     return 2
@@ -87,10 +91,32 @@ lsof_state() {
   # process + file records are authoritative; rc=1 means inactive only when
   # the record stream and diagnostics are empty.
   if grep -q '^p' <<<"$output" && grep -q '^n' <<<"$output"; then
-    pid=$(awk '/^p/{sub(/^p/, ""); print; exit}' <<<"$output")
-    command=$(awk '/^c/{sub(/^c/, ""); print; exit}' <<<"$output")
-    LSOF_DETAIL="pid=${pid:-unknown} command=${command:-unknown}"
-    return 0
+    # Clones hardlink some files (the main executable is shared by every
+    # clone and the app in /Applications), and macOS lsof +D matches by inode,
+    # so a process holding a shared file is reported under every clone; lsof's
+    # path for such a vnode is whichever link name is cached, so it cannot say
+    # which clone was used. A shared inode survives unlinking one path, so it
+    # does not pin this clone. A single-link (or unstattable) open file does,
+    # as does a running process whose executable lives inside the clone.
+    local line rec_pid="" rec_cmd="" path links
+    while IFS= read -r line; do
+      case "$line" in
+        p*) rec_pid="${line#p}" ;;
+        c*) rec_cmd="${line#c}" ;;
+        n*)
+          path="${line#n}"
+          links=$(stat -f %l "$path" 2>/dev/null || echo 1)
+          if [[ ! -f "$path" || "$links" -le 1 ]]; then
+            LSOF_DETAIL="pid=${rec_pid:-unknown} command=${rec_cmd:-unknown}"
+            return 0
+          fi
+          ;;
+      esac
+    done <<<"$output"
+    LSOF_DETAIL="only hardlink-shared open files"
+    [[ -z "$diagnostics" ]] && return 1
+    LSOF_DETAIL+=" diagnostics=${diagnostics}"
+    return 2
   fi
   [[ "$rc" -eq 1 && -z "$output" && -z "$diagnostics" ]] && return 1
   LSOF_DETAIL="rc=$rc"
