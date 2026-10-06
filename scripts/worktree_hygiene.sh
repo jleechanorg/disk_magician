@@ -574,11 +574,27 @@ preserve_wip_blocker() {
     if [[ "$irc" -ne 0 ]]; then
         echo "ignored-scan-failed"; return 0
     fi
+    local icomp igen
     while IFS= read -r ipath; do
         [[ -n "$ipath" ]] || continue
-        ibase="${ipath%/}"; ibase="${ibase##*/}"
+        # Tool-owned state that only points back at the main checkout or is
+        # regenerated on demand (husky hook shims, beads worktree redirect and
+        # write locks).
+        case "$ipath" in
+            .husky/_/|*/.husky/_/|.beads/redirect|.beads/.br-db-write-*.lock) continue ;;
+        esac
+        # A cache dir that ships its own `.gitignore` (e.g. ruff writes `*`)
+        # is listed file by file, so accept any path under an allowlisted dir.
+        igen=false
+        IFS='/' read -ra icomp <<<"${ipath%/}"
+        for ibase in "${icomp[@]}"; do
+            case "$ibase" in
+                node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle) igen=true; break ;;
+            esac
+        done
+        "$igen" && continue
         case "$ibase" in
-            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
+            .DS_Store|*.pyc|*.pyo) ;;
             *) echo "ignored-file:$ipath"; return 0 ;;
         esac
     done <<<"$ign"

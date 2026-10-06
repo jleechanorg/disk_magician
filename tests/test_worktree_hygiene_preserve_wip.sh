@@ -578,6 +578,33 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --skip-push --execute --preserve-w
 assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
 assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
 
+# ---------------------------------------------------------------------------
+echo "case 32: generated tool state (ruff cache .gitignore, husky shims, beads redirect/locks) does not block"
+R32="$(mk_repo r32)"
+printf '.ruff_cache/\n.husky/_/\n.beads/redirect\n.beads/*.lock\n' >"$R32/.gitignore"
+mkdir -p "$R32/.beads" "$R32/.husky"; echo "{}" >"$R32/.beads/config.yaml"; echo "npm test" >"$R32/.husky/pre-commit"
+g -C "$R32" add -A; g -C "$R32" commit -q -m gen
+W32="$(mk_wt "$R32" gen32)"
+mkdir -p "$W32/.ruff_cache/0.6.0" "$W32/.husky/_" "$W32/.beads"
+printf '*\n' >"$W32/.ruff_cache/.gitignore"; echo x >"$W32/.ruff_cache/0.6.0/123"
+echo "#!/bin/sh" >"$W32/.husky/_/h"
+echo "../../main/.beads" >"$W32/.beads/redirect"
+: >"$W32/.beads/.br-db-write-abc123.lock"
+echo "edit" >>"$W32/tracked.txt"
+backdate_tree "$W32" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+assert_not_contains "$OUT" "ignored-file" "generated tool state does not block"
+assert_true "! [[ -d '$W32' ]]" "worktree preserved+removed"
+W32B="$(mk_wt "$R32" gen32b)"
+mkdir -p "$W32B/.beads" "$W32B/.husky"
+echo "notes" >"$W32B/.beads/my-notes.lock.txt"
+printf '.beads/my-notes.lock.txt\n' >>"$R32/.git/info/exclude"
+echo "edit" >>"$W32B/tracked.txt"
+backdate_tree "$W32B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:.beads/my-notes.lock.txt" "other ignored beads content still blocks"
+assert_true "[[ -f '$W32B/.beads/my-notes.lock.txt' ]]" "content intact"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
