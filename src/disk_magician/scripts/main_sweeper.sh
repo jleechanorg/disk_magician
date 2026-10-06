@@ -121,14 +121,37 @@ free_gb() {
   ( df -kP "$check_path" 2>/dev/null || true ) | awk 'NR==2{print int($4/1024/1024)}'
 }
 
+RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
+
+cleanup_lock() {
+  local sig="${1:-0}"
+  trap - EXIT HUP INT TERM
+  rm -rf "$LOCK_DIR"
+  if [[ "$sig" -ne 0 ]]; then
+    exit "$((128 + sig))"
+  fi
+}
+
+set_lock_traps() {
+  trap 'cleanup_lock 0' EXIT
+  trap 'cleanup_lock 1' HUP
+  trap 'cleanup_lock 2' INT
+  trap 'cleanup_lock 15' TERM
+}
+
 acquire_lock() {
   if [[ "$FORCE_ROUTINE" == true ]]; then
-    log "Warning: --force specified, bypassing lock check."
-    return 0
+    log "Warning: --force specified, overriding existing lock."
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$LOCK_DIR/pid"
+      set_lock_traps
+      return 0
+    fi
   fi
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     echo $$ > "$LOCK_DIR/pid"
-    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+    set_lock_traps
     return 0
   fi
   local held_pid age
@@ -138,12 +161,52 @@ acquire_lock() {
     rm -rf "$LOCK_DIR"
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "$LOCK_DIR/pid"
-      trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+      set_lock_traps
       return 0
     fi
   fi
   log "Already running (lock held by PID ${held_pid:-?}, age ${age}s) — exiting cleanly."
+  if [[ -f "$RECEIPT_HELPER" ]]; then
+    python3 "$RECEIPT_HELPER" finish --job main_sweeper \
+      --outcome skipped_lock \
+      --reason "lock held by another run" \
+      --lock '{"held": true, "reason": "contention"}' \
+      --safety '{"status": "not_applicable", "reason": "lock_contention_no_mutation", "delegated": false}' >/dev/null 2>&1 || true
+  fi
   return 1
+}
+
+should_run_heavy_task() {
+  local marker_file="$1"
+  local interval_sec="${2:-86400}"
+
+  if [[ "$FORCE_ROUTINE" == true ]]; then
+    return 0
+  fi
+  local curr_free
+  curr_free="$(free_gb || echo "")"
+  if [[ -n "$curr_free" && "$curr_free" -lt "$THRESHOLD_GB" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$marker_file" ]]; then
+    return 0
+  fi
+  local last_mtime now age
+  last_mtime=$(stat -f '%m' "$marker_file" 2>/dev/null || stat -c '%Y' "$marker_file" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  age=$(( now - last_mtime ))
+  if [[ "$age" -ge "$interval_sec" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+mark_heavy_task_done() {
+  local marker_file="$1"
+  if [[ "$DRY_RUN" == false ]]; then
+    mkdir -p "$(dirname "$marker_file")"
+    touch "$marker_file" 2>/dev/null || true
+  fi
 }
 
 CLEAN_ARG="--clean"
@@ -153,6 +216,13 @@ fi
 
 main() {
   acquire_lock || exit 0
+
+  RECEIPT_RUN_ID=""
+  if [[ -f "$RECEIPT_HELPER" ]]; then
+    RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job main_sweeper \
+      --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}" \
+      --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' 2>/dev/null || echo "")
+  fi
 
   log "=== Starting Unified Main Sweeper ==="
   local start_free_gb
@@ -179,6 +249,10 @@ main() {
       LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
         LARGE_TMP_ACTIVE_HOURS=4 LARGE_TMP_ARCHIVE_RETENTION_HOURS=4 \
         run_step_timeout bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" --large || log "WARN: cleanup_tmp --large failed"
+    fi
+    if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
+      log "Pruning Colima Docker containers/images before trim..."
+      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || log "WARN: cleanup_colima failed"
     fi
     if [[ "$DRY_RUN" == false ]] && command -v colima &>/dev/null; then
       if colima status 2>/dev/null | grep -qi "running"; then
@@ -208,23 +282,42 @@ main() {
     [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
 
-    # Tier 2: Xcode DerivedData & simulator caches
-    [[ -f "$REPO_ROOT/scripts/cleanup_xcode.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$CLEAN_ARG" || true
-
-    # Tier 3: Colima VM & Docker reclaim
-    if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
-      run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || true
+    # Tier 2: Xcode DerivedData & simulator caches (debounced to 24h when healthy)
+    if should_run_heavy_task "$STATE_DIR/last_xcode_clean" 86400; then
+      [[ -f "$REPO_ROOT/scripts/cleanup_xcode.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$CLEAN_ARG" || true
+      mark_heavy_task_done "$STATE_DIR/last_xcode_clean"
+    else
+      log "Tier 2: Xcode DerivedData clean skipped (debounced to 24h; disk space healthy)."
     fi
-    if [[ -f "$REPO_ROOT/scripts/post_job_docker_prune.sh" ]]; then
-      run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" || true
+
+    # Tier 3: Colima VM & Docker reclaim (debounced to 24h when healthy)
+    if should_run_heavy_task "$STATE_DIR/last_colima_routine_prune" 86400; then
+      if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
+        run_step_timeout bash "$REPO_ROOT/scripts/cleanup_colima.sh" "$CLEAN_ARG" || true
+      fi
+      if [[ -f "$REPO_ROOT/scripts/post_job_docker_prune.sh" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+          run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" --dry-run || true
+        else
+          run_step_timeout bash "$REPO_ROOT/scripts/post_job_docker_prune.sh" || true
+        fi
+      fi
+      mark_heavy_task_done "$STATE_DIR/last_colima_routine_prune"
+    else
+      log "Tier 3: Colima VM & Docker prune skipped (debounced to 24h; disk space healthy)."
     fi
 
     # Tier 4: Browser Sessions & Assets
     [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
 
-    # Tier 5: Agent State Compaction & Rotated Logs
+    # Tier 5: Agent State Compaction & Rotated Logs (Codex vacuum debounced to 24h when healthy)
     [[ -f "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" "$CLEAN_ARG" || true
-    [[ -f "$REPO_ROOT/scripts/cleanup_codex_db.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_codex_db.sh" "$CLEAN_ARG" || true
+    if should_run_heavy_task "$STATE_DIR/last_codex_vacuum" 86400; then
+      [[ -f "$REPO_ROOT/scripts/cleanup_codex_db.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_codex_db.sh" "$CLEAN_ARG" || true
+      mark_heavy_task_done "$STATE_DIR/last_codex_vacuum"
+    else
+      log "Tier 5: Codex DB vacuum skipped (debounced to 24h; disk space healthy)."
+    fi
     [[ -f "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_uv_cache.sh" ]] && run_step_timeout bash "$REPO_ROOT/scripts/cleanup_uv_cache.sh" "$CLEAN_ARG" || true
 
@@ -267,6 +360,14 @@ main() {
   end_free_gb="$(free_gb || echo "")"
   log "=== Unified Main Sweeper Complete ==="
   log "Final available space: ${end_free_gb:-unknown} GiB (initial: ${start_free_gb:-unknown} GiB)"
+
+  if [[ -n "$RECEIPT_RUN_ID" && -f "$RECEIPT_HELPER" ]]; then
+    python3 "$RECEIPT_HELPER" finish --job main_sweeper \
+      --run-id "$RECEIPT_RUN_ID" \
+      --outcome success \
+      --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' \
+      --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}}" >/dev/null 2>&1 || true
+  fi
 }
 
 main "$@"

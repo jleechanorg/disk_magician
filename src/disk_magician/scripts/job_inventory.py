@@ -251,6 +251,8 @@ def _owners(label: str, args: list[Any]) -> tuple[str, str]:
     joined = " ".join(map(str, args))
     if label == "com.jleechanorg.disk-magician" or "snapshot_commit.sh" in joined:
         receipt = "snapshot_commit.sh"
+    elif label == "com.jleechanorg.disk-magician-main-sweeper" or "main_sweeper.sh" in joined or "main-sweeper" in args or "sweep" in args:
+        receipt = "main_sweeper.sh"
     elif label == "com.jleechanorg.disk-magician-pressure-sweep" or "pressure_sweep.sh" in joined or "pressure-sweep" in args:
         receipt = "pressure_sweep.sh"
     elif label == "com.jleechanorg.disk-magician-tmp-scratch" or "tmp_scratch_sweep.sh" in joined or "tmp-scratch-sweep" in args:
@@ -261,6 +263,8 @@ def _owners(label: str, args: list[Any]) -> tuple[str, str]:
         coverage = "disk_frontier_scan.py" if label.endswith("-root") else "disk_frontier_scan.sh"
     elif label == "com.jleechanorg.disk-magician" or "snapshot_commit.sh" in joined:
         coverage = "snapshot_commit.sh"
+    elif label == "com.jleechanorg.disk-magician-main-sweeper" or "main_sweeper.sh" in joined or "main-sweeper" in args or "sweep" in args:
+        coverage = "main_sweeper.sh"
     else:
         coverage = "unknown"
     return receipt, coverage

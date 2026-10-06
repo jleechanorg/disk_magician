@@ -46,6 +46,7 @@ class JobInventoryTests(unittest.TestCase):
             "com.jleechanorg.disk-magician-drilldown",
             "com.jleechanorg.disk-magician-frontier-nightly",
             "com.jleechanorg.disk-magician-frontier-root",
+            "com.jleechanorg.disk-magician-main-sweeper",
             "com.jleechanorg.disk-magician-observer",
             "com.jleechanorg.disk-magician-pressure-sweep",
             "com.jleechanorg.disk-magician-tmp-scratch",
@@ -63,9 +64,13 @@ class JobInventoryTests(unittest.TestCase):
         scratch = job_inventory._owners(
             "com.jleechanorg.disk-magician-tmp-scratch", ["/bin/bash", "tmp-scratch-sweep"]
         )
+        main_sw = job_inventory._owners(
+            "com.jleechanorg.disk-magician-main-sweeper", ["/bin/bash", "main-sweeper"]
+        )
         unowned = job_inventory._owners("com.example.unowned", ["/bin/bash", "pressure-sweepish"])
         self.assertEqual(pressure[0], "pressure_sweep.sh")
         self.assertEqual(scratch[0], "tmp_scratch_sweep.sh")
+        self.assertEqual(main_sw[0], "main_sweeper.sh")
         self.assertEqual(unowned[0], "unknown")
 
     def test_parser_rejects_top_level_array_and_wrong_label(self):

@@ -66,6 +66,7 @@ assert_contains "force flag bypasses active lock" "Warning: --force specified" "
 
 # Test 5: Reclaim stale lock
 echo "Test 5: Reclaim stale lock"
+mkdir -p "$TMP_STATE/main_sweeper.lock"
 echo "999999" > "$TMP_STATE/main_sweeper.lock/pid" # Non-existent PID
 touch -t 202001010000 "$TMP_STATE/main_sweeper.lock" 2>/dev/null || true
 out="$(DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMP_LOGS/sweeper.log" "$MAIN_SWEEPER" --dry-run --skip-snapshot --skip-routine --skip-health 2>&1 || true)"

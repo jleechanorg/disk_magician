@@ -113,10 +113,6 @@ consolidated_redundant_labels=(
   com.disk-magician.code-sign-clones
   com.disk-magician.codex-vacuum
   com.disk-magician.worktree-venvs
-  com.disk-magician.sweeper-health
-  com.disk-magician.playwright-dedup
-  com.disk-magician.hermes-vacuum
-  com.disk-magician.cursor-logs-watchdog
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
 )

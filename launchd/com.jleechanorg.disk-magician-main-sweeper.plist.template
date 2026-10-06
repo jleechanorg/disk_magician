@@ -20,13 +20,15 @@
   <string>com.jleechanorg.disk-magician-main-sweeper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/main_sweeper.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>sweep</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>DISK_MAGICIAN_PRESSURE_THRESHOLD_GB</key>
     <string>40</string>
   </dict>
