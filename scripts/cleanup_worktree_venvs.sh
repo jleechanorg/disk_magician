@@ -196,8 +196,10 @@ is_likely_worktree() {
 }
 
 # expand_roots_with_agent_worktrees <root...>
-# Prints each input root, plus every <root>/**/.claude/worktrees dir found
-# beneath it (bounded to depth 4: root/org/repo/.claude/worktrees). Those are
+# Prints each input root, plus every <root>/.claude/worktrees,
+# <root>/*/.claude/worktrees and <root>/*/*/.claude/worktrees dir (shell globs,
+# no recursive find — bead disk_magician-9h3: the old depth-4 find stalled
+# ~16 min on ~/projects). Those are
 # AoE agent-tree working copies — genuine `.git`-pointer worktrees of their
 # parent repo, but not entries in that repo's own `git worktree list` output
 # in the sense worktree_hygiene.sh cares about (bead disk_magician-7v3: this
@@ -231,12 +233,47 @@ expand_roots_with_agent_worktrees() {
       printf '%s\n' "$root"
     fi
     [[ -d "$root" ]] || continue
-    while IFS= read -r -d '' wt_dir; do
+    for wt_dir in "$root/.claude/worktrees" "$root"/*/.claude/worktrees "$root"/*/*/.claude/worktrees; do
+      [[ -d "$wt_dir" ]] || continue
       if ! _expand_roots_already_seen "$wt_dir"; then
         _expand_roots_seen+=("$wt_dir")
         printf '%s\n' "$wt_dir"
       fi
-    done < <(find "$root" -mindepth 1 -maxdepth 4 -type d -path '*/.claude/worktrees' -print0 2>/dev/null || true)
+    done
+  done
+}
+
+# collect_candidate_worktrees <root...> — fills CANDIDATE_WTS with worktree
+# dirs (.git FILE) found without recursive traversal (bead disk_magician-9h3):
+#   - <root>, <root>/*, <root>/*/* (shell globs)
+#   - `git worktree list --porcelain` of any repo at those paths, kept only
+#     when the listed worktree lies under the same root (scope unchanged)
+# Deduped by physical path so /var and /private/var aliases count once.
+CANDIDATE_WTS=()
+_cand_keys=$'\n'
+_add_candidate() {
+  local wt="$1" key
+  is_likely_worktree "$wt" || return 0
+  key="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
+  case "$_cand_keys" in *$'\n'"$key"$'\n'*) return 0 ;; esac
+  _cand_keys="${_cand_keys}${key}"$'\n'
+  CANDIDATE_WTS+=("$wt")
+}
+collect_candidate_worktrees() {
+  local root root_p d line wt
+  for root in "$@"; do
+    [[ -d "$root" ]] || continue
+    root_p="$(cd "$root" && pwd -P)"
+    for d in "$root" "$root"/* "$root"/*/*; do
+      [[ -d "$d" ]] || continue
+      _add_candidate "$d"
+      [[ -d "$d/.git" ]] && command -v git >/dev/null 2>&1 || continue
+      while IFS= read -r line; do
+        [[ "$line" == "worktree "* ]] || continue
+        wt="${line#worktree }"
+        case "$wt/" in "$root"/*|"$root_p"/*) _add_candidate "$wt" ;; esac
+      done < <(git -C "$d" worktree list --porcelain 2>/dev/null || true)
+    done
   done
 }
 
@@ -336,6 +373,10 @@ else
 fi
 log "Min age:    ${MIN_AGE_DAYS} days"
 log "Roots:      ${ROOTS[*]}"
+if (( ${#ROOTS[@]} > 0 )); then
+  collect_candidate_worktrees "${ROOTS[@]}"
+fi
+log "Candidate worktrees: ${#CANDIDATE_WTS[@]}"
 log ""
 
 # Candidate venv dirnames. Covers both `venv` and `.venv` (the dominant
@@ -343,10 +384,8 @@ log ""
 VENV_NAMES=(venv .venv)
 
 # Per-venv safety: we only strip a venv whose *parent* is a worktree (not
-# a base repo) AND whose parent is older than MIN_AGE_DAYS. The find is
-# bounded to depth 6 to catch nested patterns like
-#   <root>/<repo>/.claude/worktrees/<branch>/.venv
-# without descending into the venv itself (which we are about to measure).
+# a base repo) AND whose parent is older than MIN_AGE_DAYS. Only direct
+# <worktree>/venv and <worktree>/.venv children of CANDIDATE_WTS are checked.
 TOTAL_FREED_KB=0
 STRIPPED_COUNT=0
 SKIPPED_NOT_WORKTREE=0
@@ -356,58 +395,58 @@ SKIPPED_NO_VENV=0
 INSPECTED=0
 
 for root in "${ROOTS[@]}"; do
-  [[ -d "$root" ]] || { log "Root missing, skipping: $root"; continue; }
-  log "Scanning $root ..."
+  [[ -d "$root" ]] || log "Root missing, skipping: $root"
+done
 
+for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
   for venv_name in "${VENV_NAMES[@]}"; do
-    # Find every venv dir directly; the parent is the worktree candidate.
-    while IFS= read -r -d '' venv_path; do
-      INSPECTED=$(( INSPECTED + 1 ))
-      parent="$(dirname "$venv_path")"
+    venv_path="$wt/$venv_name"
+    [[ -L "$venv_path" || -d "$venv_path" ]] || continue
+    INSPECTED=$(( INSPECTED + 1 ))
+    parent="$(dirname "$venv_path")"
 
-      # Defensive: refuse if parent is not a worktree (e.g. venv inside the
-      # base repo, where the user is actively working).
-      if ! is_likely_worktree "$parent"; then
-        SKIPPED_NOT_WORKTREE=$(( SKIPPED_NOT_WORKTREE + 1 ))
-        continue
-      fi
+    # Defensive: refuse if parent is not a worktree (e.g. venv inside the
+    # base repo, where the user is actively working).
+    if ! is_likely_worktree "$parent"; then
+      SKIPPED_NOT_WORKTREE=$(( SKIPPED_NOT_WORKTREE + 1 ))
+      continue
+    fi
 
-      # Skip symlinked / broken venvs.
-      if is_already_centralized_or_broken "$venv_path"; then
-        SKIPPED_ALREADY_CENTRALIZED=$(( SKIPPED_ALREADY_CENTRALIZED + 1 ))
-        continue
-      fi
+    # Skip symlinked / broken venvs.
+    if is_already_centralized_or_broken "$venv_path"; then
+      SKIPPED_ALREADY_CENTRALIZED=$(( SKIPPED_ALREADY_CENTRALIZED + 1 ))
+      continue
+    fi
 
-      # Age gate: parent worktree must be older than the threshold.
-      age_days="$(worktree_age_days "$parent")"
-      if [[ -z "$age_days" ]]; then
-        log "  skip (could not stat parent): $venv_path"
-        continue
-      fi
-      if (( age_days < MIN_AGE_DAYS )); then
-        SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
-        continue
-      fi
+    # Age gate: parent worktree must be older than the threshold.
+    age_days="$(worktree_age_days "$parent")"
+    if [[ -z "$age_days" ]]; then
+      log "  skip (could not stat parent): $venv_path"
+      continue
+    fi
+    if (( age_days < MIN_AGE_DAYS )); then
+      SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
+      continue
+    fi
 
-      venv_kb=$(size_kb "$venv_path")
-      venv_pretty=$(fmt_kb "$venv_kb")
+    venv_kb=$(size_kb "$venv_path")
+    venv_pretty=$(fmt_kb "$venv_kb")
 
-      if [[ "$DRY_RUN" == true ]]; then
-        log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
+    if [[ "$DRY_RUN" == true ]]; then
+      log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
+      TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
+      STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+    else
+      log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
+      if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
+        echo "SAFETY-SKIP $venv_path ($_safety_reason)"
+      elif rm -rf "$venv_path" 2>/dev/null; then
         TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
         STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
       else
-        log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
-        if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
-          echo "SAFETY-SKIP $venv_path ($_safety_reason)"
-        elif rm -rf "$venv_path" 2>/dev/null; then
-          TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
-          STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
-        else
-          log "    FAILED to remove $venv_path"
-        fi
+        log "    FAILED to remove $venv_path"
       fi
-    done < <(find "$root" -mindepth 2 -maxdepth 6 -type d -name "$venv_name" -print0 2>/dev/null || true)
+    fi
   done
 done
 
@@ -435,11 +474,11 @@ purge_bak_dirs() {
   log "=== PURGE STALE venv.bak.* DIRS (older than ${purge_days}d, parent worktree >= ${MIN_AGE_DAYS}d) ==="
 
   local bak_freed_kb=0 bak_count=0 skipped_young_wt=0 skipped_young_bak=0 skipped_not_wt=0
-  local root bak_path parent bak_age_days bak_kb bak_pretty _safety_reason
+  local wt bak_path parent bak_age_days bak_kb bak_pretty _safety_reason
 
-  for root in "${ROOTS[@]}"; do
-    [[ -d "$root" ]] || continue
-    while IFS= read -r -d '' bak_path; do
+  for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
+    for bak_path in "$wt/venv.bak" "$wt"/venv.bak.* "$wt/.venv.bak" "$wt"/.venv.bak.*; do
+      [[ -d "$bak_path" && ! -L "$bak_path" ]] || continue
       parent="$(dirname "$bak_path")"
 
       # Same base-repo defense as the venv strip: only ever touch a bak dir
@@ -483,7 +522,7 @@ purge_bak_dirs() {
           log "    FAILED to purge $bak_path"
         fi
       fi
-    done < <(find "$root" -mindepth 2 -maxdepth 6 -type d \( -name "venv.bak.*" -o -name ".venv.bak.*" -o -name "venv.bak" -o -name ".venv.bak" \) -print0 2>/dev/null || true)
+    done
   done
 
   log ""
