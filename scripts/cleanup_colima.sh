@@ -26,15 +26,21 @@ fi
 
 DRY_RUN=true
 PRUNE_VOLUMES=false
+TRIM_ONLY=false
+TRIM_GB="${DISK_MAGICIAN_COLIMA_TRIM_GB:-8}"
+TRIM_TIMEOUT_SEC="${DISK_MAGICIAN_COLIMA_TRIM_TIMEOUT:-300}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--prune-volumes] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--prune-volumes] [--trim-only] [-h|--help]
 
 Options:
   --clean           Apply prune (default: dry-run).
   --dry-run         Preview only.
   --prune-volumes   Also run docker volume prune -f (requires DOCKER_VOLUMES_APPROVED=1 when --clean).
+  --trim-only       Only in-VM fstrim, and only when the host datadisk exceeds
+                    DISK_MAGICIAN_COLIMA_TRIM_GB (default 8; 0 disables). No prune,
+                    no restart; unreachable VM is logged DEGRADED and exits 0.
   -h, --help        Show this help.
 EOF
 }
@@ -44,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --clean)         DRY_RUN=false ;;
     --dry-run)       DRY_RUN=true ;;
     --prune-volumes) PRUNE_VOLUMES=true ;;
+    --trim-only)     TRIM_ONLY=true ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -51,6 +58,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"; fi
+}
 
 size_kb() {
   local path="$1"
@@ -168,7 +182,7 @@ fstrim_via_active_lima_mux() {
   ssh -S "$mux_socket" -F "$ssh_config" -O check lima-colima >/dev/null 2>&1 || return 1
 
   log "+ fstrim via active Lima SSH control master (Colima CLI control plane unavailable)"
-  ssh -S "$mux_socket" -F "$ssh_config" lima-colima sudo fstrim -av
+  bounded "$TRIM_TIMEOUT_SEC" ssh -S "$mux_socket" -F "$ssh_config" lima-colima sudo fstrim -av
 }
 
 fstrim_colima_disk() {
@@ -178,7 +192,7 @@ fstrim_colima_disk() {
   fi
 
   log "+ colima ssh -- sudo fstrim -av (compact VM sparse disk)"
-  if colima ssh -- sudo fstrim -av 2>/dev/null; then
+  if bounded "$TRIM_TIMEOUT_SEC" colima ssh -- sudo fstrim -av 2>/dev/null; then
     return 0
   fi
   fstrim_via_active_lima_mux
@@ -217,6 +231,31 @@ recover_colima_wedge_once() {
   log "WARNING: Docker backend unhealthy after restart"
   return 1
 }
+
+if [[ "$TRIM_ONLY" == true ]]; then
+  # Bead disk_magician-mux: cheap scheduled trim so the sparse datadisk never
+  # balloons. Never prunes, never restarts, never fails the caller.
+  datadisk="$HOME/.colima/_lima/_disks/colima"
+  if [[ ! "$TRIM_GB" =~ ^[0-9]+$ || "$TRIM_GB" -eq 0 ]]; then
+    log "trim-only: disabled (DISK_MAGICIAN_COLIMA_TRIM_GB=$TRIM_GB)."
+    exit 0
+  fi
+  [[ -d "$datadisk" ]] || { log "trim-only: no Colima datadisk at $datadisk — skipping."; exit 0; }
+  disk_kb=$(bounded 60 du -sk "$datadisk" 2>/dev/null | awk '{print $1+0}') || disk_kb=""
+  if [[ ! "$disk_kb" =~ ^[0-9]+$ ]]; then
+    log "DEGRADED: trim-only could not measure $datadisk (du failed or timed out) — skipping trim."
+    exit 0
+  fi
+  if (( disk_kb <= TRIM_GB * 1048576 )); then
+    log "trim-only: datadisk $(fmt_kb "$disk_kb") <= ${TRIM_GB}G — no trim."
+    exit 0
+  fi
+  log "trim-only: datadisk $(fmt_kb "$disk_kb") > ${TRIM_GB}G — in-VM fstrim (timeout ${TRIM_TIMEOUT_SEC}s)."
+  if ! command -v colima >/dev/null 2>&1 || ! fstrim_colima_disk; then
+    log "DEGRADED: trim-only fstrim failed (Colima/ssh unreachable or timed out) — no restart from this path."
+  fi
+  exit 0
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   log "docker CLI not found — skipping Colima cleanup."
