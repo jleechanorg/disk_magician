@@ -37,6 +37,34 @@ secrets="$(find "$real_src" \( -name '.env' -o -name '.env.*' -o -name '*.pem' -
 [[ -z "$secrets" ]] || die 3 "refusing upload; secret-shaped files present:
 $secrets"
 
+# Content scan (D8): gitleaks when installed, else a stdlib regex scan. Any
+# finding or scanner error refuses the upload; only file paths are printed.
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks detect --no-git --source "$real_src" --no-banner --redact >&2 \
+        || die 3 "refusing upload; gitleaks reported leaks or failed (rc=$?)"
+else
+    hits="$(python3 - "$real_src" <<'PY'
+import os, re, sys
+pat = re.compile(rb'-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}'
+                 rb'|github_pat_[A-Za-z0-9_]{50,}|xox[baprs]-[A-Za-z0-9-]{10,}'
+                 rb'|sk-[A-Za-z0-9_-]{20,}|"private_key"\s*:')
+for d, _, files in os.walk(sys.argv[1]):
+    for n in files:
+        p = os.path.join(d, n)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        if os.path.getsize(p) > 20 * 1024 * 1024:
+            print("evidence-push: skipping content scan of >20MB file: " + p, file=sys.stderr)
+            continue
+        with open(p, "rb") as f:
+            if pat.search(f.read()):
+                print(p)
+PY
+)" || die 3 "refusing upload; content scan failed"
+    [[ -z "$hits" ]] || die 3 "refusing upload; secret-shaped content in:
+$hits"
+fi
+
 command -v gcloud >/dev/null 2>&1 || die 1 "gcloud not found on PATH"
 
 dest="${EVIDENCE_GCS_PREFIX%/}/$repo/$slug/"
