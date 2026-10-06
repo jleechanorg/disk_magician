@@ -18,7 +18,7 @@
 #     Default: 5s. Overridden by DOCKER_PROBE_DEADLINE_SECONDS.
 #     Rejects malformed, zero, negative, or unreasonable (>60s) input.
 
-DEFAULT_DOCKER_PROBE_DEADLINE=5
+DEFAULT_DOCKER_PROBE_DEADLINE=15
 MAX_DOCKER_PROBE_DEADLINE=60
 
 resolve_docker_probe_deadline() {

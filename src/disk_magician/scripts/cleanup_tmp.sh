@@ -448,7 +448,7 @@ has_open_files() {
           break
         fi
         val="${line#f}"
-        if ! [[ "$val" =~ ^[a-zA-Z0-9]+$ ]]; then
+        if ! [[ "$val" =~ ^[a-zA-Z0-9.]+$ ]]; then
           malformed=1
           break
         fi
