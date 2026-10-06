@@ -495,6 +495,47 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R27" --skip-push --execute --preserve-w
 assert_contains "$OUT" "ignored-file:" "ignored build/dist content blocks"
 assert_true "[[ -f '$W27/src/build/secret.txt' && -f '$W27/dist/.npmrc' ]]" "build/dist content intact"
 
+# ---------------------------------------------------------------------------
+echo "case 28: staged then edited again (MM) -> blocked, staged version intact"
+R28="$(mk_repo r28)"
+W28="$(mk_wt "$R28" mm28)"
+echo "staged-version" >>"$W28/tracked.txt"
+g -C "$W28" add tracked.txt
+echo "disk-version" >>"$W28/tracked.txt"
+backdate_tree "$W28" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R28" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "partially-staged:tracked.txt" "MM path blocks"
+assert_true "[[ -d '$W28' ]] && git -C '$W28' show :tracked.txt | grep -q staged-version" "staged version intact"
+
+# ---------------------------------------------------------------------------
+echo "case 29: repo hooks never run during preservation"
+R29="$(mk_repo r29)"
+W29="$(mk_wt "$R29" hook29)"
+for h in post-checkout post-commit reference-transaction; do
+    printf '#!/bin/sh\ntouch "%s/hook-%s-ran"\n' "$TMPROOT" "$h" >"$R29/.git/hooks/$h"
+    chmod +x "$R29/.git/hooks/$h"
+done
+echo "edit" >>"$W29/tracked.txt"
+backdate_tree "$W29" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29" --skip-push --execute --preserve-wip)"
+assert_true "! [[ -d '$W29' ]]" "worktree preserved+removed"
+assert_true "! ls '$TMPROOT'/hook-*-ran >/dev/null 2>&1" "no hook ran"
+
+# ---------------------------------------------------------------------------
+echo "case 30: case-only rename -> blocked (APFS/ignorecase would drop it)"
+R30="$(mk_repo r30)"
+W30="$(mk_wt "$R30" case30)"
+if [[ "$(g -C "$W30" config --bool core.ignorecase 2>/dev/null)" == "true" ]]; then
+    mv "$W30/tracked.txt" "$W30/TRACKED.txt"
+    echo "edit" >>"$W30/TRACKED.txt"
+    backdate_tree "$W30" 30
+    OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R30" --skip-push --execute --preserve-wip)"
+    assert_contains "$OUT" "case-only-rename" "case-only rename blocks"
+    assert_true "[[ -d '$W30' ]] && ls '$W30' | grep -qx TRACKED.txt" "renamed file intact, worktree kept"
+else
+    ok "case-sensitive filesystem: case-only rename not applicable"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

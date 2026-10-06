@@ -520,6 +520,28 @@ preserve_wip_blocker() {
     if [[ -n "$flagged" ]]; then
         echo "index-flagged:$flagged"; return 0
     fi
+    # A path staged and then edited again (MM/AM/...) holds index content that
+    # matches neither HEAD nor disk; `git add -A` (and the failure-path index
+    # reset) would drop that staged version: refuse. Fail closed on error.
+    local partial prc=0
+    partial="$(git -C "$wt" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null \
+        | awk 'substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); exit}')" || prc=$?
+    if [[ "$prc" -ne 0 ]]; then
+        echo "partial-staging-scan-failed"; return 0
+    fi
+    if [[ -n "$partial" ]]; then
+        echo "partially-staged:$partial"; return 0
+    fi
+    # On a case-insensitive filesystem a case-only rename is invisible to
+    # `git add -A` (core.ignorecase) and to the byte check, so the new name
+    # would be lost: refuse when a case-sensitive scan sees different
+    # untracked names than the configured one.
+    local ci_others cs_others
+    ci_others="$(git -C "$wt" ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n')" || { echo "case-scan-failed"; return 0; }
+    cs_others="$(git -C "$wt" -c core.ignorecase=false ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n')" || { echo "case-scan-failed"; return 0; }
+    if [[ "$ci_others" != "$cs_others" ]]; then
+        echo "case-only-rename"; return 0
+    fi
     # Ignored files are not captured by `git add -A`; refuse to silently
     # drop anything that looks like a credential. Nested git repos (ignored
     # or not) are listed as `dir/` and never descended into, so their
@@ -608,7 +630,7 @@ preserve_wip_and_remove() {
     [[ -n "$name" ]] || name="worktree-hygiene"
     [[ -n "$email" ]] || email="worktree-hygiene@localhost"
 
-    if ! git -C "$wt" checkout -q -b "$branch" 2>/dev/null; then
+    if ! git -C "$wt" -c core.hooksPath=/dev/null checkout -q -b "$branch" 2>/dev/null; then
         ledger_line "WIP-FAILED" "$wt" "could not create $branch; kept"
         return 1
     fi
@@ -620,7 +642,7 @@ preserve_wip_and_remove() {
     if ! git -C "$wt" diff --cached --quiet 2>/dev/null; then
         if ! GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
              GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \
-             git -C "$wt" -c commit.gpgsign=false commit -q --no-verify \
+             git -C "$wt" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --no-verify \
                  -m "wip: preserved by worktree-hygiene before removal ($wt)" >/dev/null 2>&1; then
             ledger_line "WIP-FAILED" "$wt" "commit failed on $branch; kept"
             wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
