@@ -628,6 +628,156 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-w
 assert_contains "$OUT" "ignored-file:.beads/.br-db-write-x/" "lock glob does not cross directories"
 assert_not_contains "$OUT" "ignored-file:.husky" "husky v9 self-ignored shim dir does not block"
 
+# ---------------------------------------------------------------------------
+echo "case 33: SAFE path byte-verifies -- hidden edit behind a lossy clean filter is not removed"
+R33="$(mk_repo r33)"
+printf '*.nb filter=strip\n' >"$R33/.gitattributes"
+g -C "$R33" config filter.strip.clean "grep -v OUTPUT"
+g -C "$R33" config filter.strip.smudge cat
+printf 'cell\n' >"$R33/analysis.nb"
+g -C "$R33" add -A; g -C "$R33" commit -q -m "attrs + notebook"
+W33="$(mk_wt "$R33" hidden33)"
+W33C="$(mk_wt "$R33" control33)"
+printf 'OUTPUT: unrecoverable 3h result\n' >>"$W33/analysis.nb"
+# A later `git add` refreshes the index stat, so status now reports clean.
+g -C "$W33" add analysis.nb
+backdate_tree "$W33" 30; backdate_tree "$W33C" 30
+assert_true "[[ -z \"\$(git -C '$W33' status --porcelain)\" ]]" "precondition: git status reports the hidden edit as clean"
+OUT="$(run_hygiene "$R33" --skip-push)"
+assert_contains "$OUT" "hidden-filtered-change:analysis.nb" "dry-run reports hidden filtered change"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R33" --skip-push --execute)"
+assert_contains "$OUT" "NEEDS-REVIEW   $W33 | hidden-filtered-change:analysis.nb" "SAFE downgraded to NEEDS-REVIEW"
+assert_not_contains "$OUT" "DELETE         $W33" "no DELETE ledger line for the hidden-edit worktree"
+assert_true "wt_registered '$R33' '$W33' && grep -q 'OUTPUT: unrecoverable' '$W33/analysis.nb'" "hidden-edit worktree kept, content intact"
+assert_true "[[ ! -d '$W33C' ]] && ! wt_registered '$R33' '$W33C'" "clean control worktree still SAFE-removed"
+
+# ---------------------------------------------------------------------------
+echo "case 34: remove refused after a successful preserve -> HEAD/index restored, wip branch kept"
+R34="$(mk_repo r34)"
+S34="$(mk_repo s34)"
+W34="$(mk_wt "$R34" sub34)"
+g -C "$W34" -c protocol.file.allow=always submodule add -q "$S34" sub >/dev/null 2>&1
+echo "my precious edit" >>"$W34/tracked.txt"
+backdate_tree "$W34" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R34" --skip-push --execute --preserve-wip)"
+B34="wip/worktree-hygiene/$TODAY/sub34"
+assert_contains "$OUT" "REMOVE-REFUSED" "removal refusal logged"
+assert_not_contains "$OUT" "DELETE         $W34" "ledger does not claim the worktree was retired"
+assert_true "[[ \"\$(git -C '$W34' symbolic-ref -q HEAD)\" == refs/heads/feat/sub34 ]]" "HEAD back on the original branch"
+assert_true "[[ \"\$(git -C '$W34' rev-parse HEAD)\" == \"\$(git -C '$R34' rev-parse main)\" ]]" "original branch SHA unchanged"
+assert_true "git -C '$W34' diff --cached --quiet" "index reset to original HEAD"
+assert_true "grep -q 'my precious edit' '$W34/tracked.txt'" "working tree untouched"
+assert_true "git -C '$R34' show '$B34:tracked.txt' | grep -q 'my precious edit'" "wip branch kept with the committed copy"
+assert_contains "$OUT" "wip branch $B34 kept" "kept wip branch logged"
+
+# ---------------------------------------------------------------------------
+echo "case 35: filter=lfs exemption only when filter.lfs.clean is really git-lfs"
+R35="$(mk_repo r35)"
+printf '*.bin filter=lfs\n' >"$R35/.gitattributes"
+g -C "$R35" add -A; g -C "$R35" commit -q -m attrs
+W35="$(mk_wt "$R35" fakelfs35)"
+g -C "$W35" config filter.lfs.clean "grep -v OUTPUT"
+g -C "$W35" config filter.lfs.smudge cat
+printf 'data\nOUTPUT: precious\n' >"$W35/blob.bin"
+backdate_tree "$W35" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R35" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "committed bytes differ from disk for blob.bin" "fake lfs filter byte-verified"
+assert_not_contains "$OUT" "PRESERVED-WIP" "fake-lfs worktree not preserved"
+assert_true "[[ -d '$W35' ]] && grep -q 'OUTPUT: precious' '$W35/blob.bin'" "content intact"
+mkdir -p "$TMPROOT/fakebin"
+printf '#!/bin/sh\ncat >/dev/null\necho "version https://git-lfs.github.com/spec/v1"\n' >"$TMPROOT/fakebin/git-lfs"
+chmod +x "$TMPROOT/fakebin/git-lfs"
+R35B="$(mk_repo r35b)"
+printf '*.bin filter=lfs\n' >"$R35B/.gitattributes"
+g -C "$R35B" add -A; g -C "$R35B" commit -q -m attrs
+W35B="$(mk_wt "$R35B" reallfs35)"
+g -C "$W35B" config filter.lfs.clean "git-lfs clean -- %f"
+g -C "$W35B" config filter.lfs.smudge "git-lfs smudge -- %f"
+printf 'big binary\n' >"$W35B/blob.bin"
+backdate_tree "$W35B" 30
+OUT="$(PATH="$TMPROOT/fakebin:$PATH" WORKTREE_APPROVED=1 run_hygiene "$R35B" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "PRESERVED-WIP" "genuine git-lfs filter still exempt"
+
+# ---------------------------------------------------------------------------
+echo "case 36: core.fsmonitor never runs in the preserve-wip path"
+R36="$(mk_repo r36)"
+W36="$(mk_wt "$R36" fsmon36)"
+printf '#!/bin/sh\ntouch "%s/fsmon-ran"\nexit 1\n' "$TMPROOT" >"$TMPROOT/fsmon.sh"
+chmod +x "$TMPROOT/fsmon.sh"
+g -C "$R36" config core.fsmonitor "$TMPROOT/fsmon.sh"
+echo "edit" >>"$W36/tracked.txt"
+backdate_tree "$W36" 30
+git -C "$W36" status --porcelain >/dev/null 2>&1
+assert_true "[[ -e '$TMPROOT/fsmon-ran' ]]" "precondition: fsmonitor hook fires on a plain git status"
+rm -f "$TMPROOT/fsmon-ran"
+OUT="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set +e
+    preserve_wip_blocker "$R36" "$W36"
+    echo "blocker-rc=$?"
+    preserve_wip_and_remove "$R36" "$W36"
+) 2>&1)"
+assert_contains "$OUT" "blocker-rc=1" "blocker clear"
+assert_contains "$OUT" "PRESERVED-WIP" "preserved"
+assert_true "! [[ -e '$TMPROOT/fsmon-ran' ]]" "fsmonitor hook never ran during preserve-wip"
+
+# ---------------------------------------------------------------------------
+echo "case 37: failure-path reset leaves a staged-new file untracked with content intact"
+R37="$(mk_repo r37)"
+printf '*.nb filter=lossy\n' >"$R37/.gitattributes"
+g -C "$R37" add -A; g -C "$R37" commit -q -m attrs
+W37="$(mk_wt "$R37" staged37)"
+g -C "$W37" config filter.lossy.clean "grep -v OUTPUT"
+g -C "$W37" config filter.lossy.smudge cat
+printf 'staged new file body\n' >"$W37/added.txt"
+g -C "$W37" add added.txt
+printf 'cell\nOUTPUT: 1\n' >"$W37/new.nb"
+backdate_tree "$W37" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R37" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "WIP-RESTORED" "failure path restored"
+assert_true "git -C '$W37' status --porcelain | grep -q '^?? added.txt'" "staged-new file now untracked"
+assert_true "[[ \"\$(cat '$W37/added.txt')\" == 'staged new file body' ]]" "staged-new file content intact"
+
+# ---------------------------------------------------------------------------
+echo "case 38: clean unpushed-ahead worktrees (detached and named) are preserved"
+R38="$(mk_repo r38)"
+W38D="$(mk_wt "$R38" det38 --detach)"
+echo "detached work" >>"$W38D/tracked.txt"
+g -C "$W38D" commit -q -am "detached local commit"
+C38D="$(git -C "$W38D" rev-parse HEAD)"
+W38N="$(mk_wt "$R38" named38)"
+echo "named work" >>"$W38N/tracked.txt"
+g -C "$W38N" commit -q -am "named local commit"
+C38N="$(git -C "$W38N" rev-parse HEAD)"
+backdate_tree "$W38D" 30; backdate_tree "$W38N" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R38" --skip-push --execute --preserve-wip)"
+assert_true "[[ ! -d '$W38D' ]] && ! wt_registered '$R38' '$W38D'" "detached ahead worktree removed"
+assert_true "[[ -n \"\$(git -C '$R38' branch --list 'wip/*' --contains '$C38D')\" ]]" "detached commit reachable from a wip branch"
+assert_true "[[ ! -d '$W38N' ]] && ! wt_registered '$R38' '$W38N'" "named ahead worktree removed"
+assert_true "[[ \"\$(git -C '$R38' rev-parse refs/heads/feat/named38)\" == '$C38N' ]]" "named branch still points at its commit"
+
+# ---------------------------------------------------------------------------
+echo "case 39: detached HEAD is never pushed to a remote branch named 'detached'"
+R39="$(mk_repo r39)"
+O39="$TMPROOT/origin39.git"
+git init -q --bare "$O39"
+g -C "$R39" remote set-url origin "$O39"
+g -C "$R39" push -q origin main
+# Someone else's unrelated branch that happens to be named "detached".
+g -C "$R39" push -q origin main:refs/heads/detached
+g -C "$R39" fetch -q origin
+M39="$(git -C "$R39" rev-parse main)"
+W39="$(mk_wt "$R39" det39 --detach)"
+echo "detached work" >>"$W39/tracked.txt"
+g -C "$W39" commit -q -am "detached local commit"
+backdate_tree "$W39" 30
+OUT="$(run_hygiene "$R39")"
+REFS39="$(git -C "$O39" for-each-ref --format='%(refname)')"
+assert_true "[[ \"\$(git -C '$O39' rev-parse refs/heads/detached)\" == '$M39' ]]" "origin 'detached' branch not moved by a detached-HEAD push"
+assert_not_contains "$REFS39" "refs/heads/backup/detached" "no backup/detached-* branch pushed"
+assert_contains "$OUT" "unpushed-ahead" "detached ahead worktree classified unpushed-ahead"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
