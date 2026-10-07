@@ -293,9 +293,19 @@ case_t7() {
   mixed_fixture t7
   run_cleanup baseline "$F/baseline.out"
   run_cleanup branch "$F/branch.out"
-  for tree in baseline branch; do
-    sed -E 's/ \| age=[^ ]+d size=[^ ]+//; s/ \(age=[^)]*\)//' "$F/$tree.out" > "$F/$tree.normalized"
-  done
+  python3 - "$F/baseline.out" "$F/branch.out" <<'PY_NORMALIZE'
+import re
+import sys
+from pathlib import Path
+
+for filename in sys.argv[1:]:
+    path = Path(filename)
+    with path.open() as source, path.with_suffix('.normalized').open('w') as target:
+        for line in source:
+            line = re.sub(r' [|] age=\S+d size=\S+', '', line)
+            line = re.sub(r' [(]age=[^)]*[)]', '', line)
+            target.write(line)
+PY_NORMALIZE
   require diff -u "$F/baseline.normalized" "$F/branch.normalized"
   require contains "$F/branch.out" 'Repo-local:  4 eligible, 7 preserved.'
   require contains "$F/branch.out" 'Antigravity: 1 eligible orphan(s), 1 active preserved.'
