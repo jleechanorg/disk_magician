@@ -20,6 +20,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPO_LOCAL_REPOS=()
+# Cache allocation is optional: disk-pressure failures retain the existing
+# per-row lookup and lsof fail-closed behavior rather than aborting the run.
+RUN_TMP="$(mktemp -d)" || RUN_TMP=""
+if [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]]; then
+    trap 'rm -rf "$RUN_TMP"' EXIT
+fi
 
 usage() {
   cat <<'EOF'
@@ -253,13 +259,11 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local age_days="$7"
-    if [[ ! "$age_days" =~ ^(0|[1-9][0-9]*)$ ]]; then
-        echo "age-unknown"
-        return 0
+    local min_age=$MIN_AGE_DAYS now recently_active=false
+    now="$(date +%s)"
+    if worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
+        recently_active=true
     fi
-
-    local min_age=$MIN_AGE_DAYS
 
     if [[ "$locked" == "1" ]]; then
         # Stale lock detection: only auto-unlock automated/orchestrator worktrees
@@ -270,7 +274,7 @@ classify_repo_local_worktree() {
             is_automated=true
         fi
 
-        if [[ "$is_automated" == "true" ]] && (( age_days >= min_age )); then
+        if [[ "$is_automated" == "true" && "$recently_active" == false ]]; then
             if [[ "$DRY_RUN" == false ]]; then
                 git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
             fi
@@ -285,10 +289,11 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    if (( age_days < min_age )); then
+    if [[ "$recently_active" == true ]]; then
         # Bead plf: a merged, fully clean, non-AO worktree may go at
         # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
-        if (( min_age == 7 && age_days >= MERGED_MIN_DAYS )) \
+        if (( min_age == 7 )) \
+            && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
             && ! has_hidden_state "$wt_path"; then
@@ -320,12 +325,94 @@ has_hidden_state() {
     [[ -n "$out" ]]
 }
 
+# Persist across the command substitutions used by classification. Cache names
+# are digests, but the stored repo and branch are also checked byte for byte:
+# a filename collision or an unreadable record must never approve a worktree.
+repo_local_cached_pr_heads() {
+    # Per-run cache files: repos.tsv maps owner_repo -> index; repo<index>/index.tsv
+    # holds "branch<TAB>oid oid ...". Git refnames cannot contain tab, newline,
+    # space or backslash, and keys reach awk through ENVIRON (no -v escapes).
+    local repo="$1" owner_repo="$2" branch_clean="$3" cache_dir idx
+    [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]] || return 1
+    [[ "$owner_repo" =~ ^[^/]+/[^/]+$ ]] || return 1
+    idx="$(DWR_KEY="$owner_repo" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { print $2; exit }' "$RUN_TMP/repos.tsv" 2>/dev/null)"
+    if [[ -z "$idx" ]]; then
+        idx="$(( $(awk 'END { print NR }' "$RUN_TMP/repos.tsv" 2>/dev/null || echo 0) + 1 ))"
+        cache_dir="$RUN_TMP/repo$idx"
+        mkdir "$cache_dir" || return 1
+        printf '%s\t%s\n' "$owner_repo" "$idx" >> "$RUN_TMP/repos.tsv"
+        populate_repo_pr_cache "$repo" "$owner_repo" "$cache_dir" || true
+    fi
+    cache_dir="$RUN_TMP/repo$idx"
+    # Prints the heads one per line (as the per-row gh call does); rc 1 on miss.
+    DWR_KEY="$branch_clean" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { n = split($2, h, " "); for (i = 1; i <= n; i++) print h[i]; found = 1; exit } END { exit !found }' "$cache_dir/index.tsv" 2>/dev/null
+}
+
+populate_repo_pr_cache() {
+    local repo="$1" owner_repo="$2" cache_dir="$3" worktrees line
+    worktrees="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || return 1
+    local branches=()
+    while IFS= read -r line; do
+        case "$line" in branch\ refs/heads/*) branches+=("${line#branch refs/heads/}");; esac
+    done <<<"$worktrees"
+    local start index end query fields response
+    for ((start=0; start<${#branches[@]}; start+=40)); do
+        end=$((start + 40))
+        (( end <= ${#branches[@]} )) || end=${#branches[@]}
+        query='query($owner: String!, $name: String!'
+        fields=''
+        local variables=(-f "owner=${owner_repo%%/*}" -f "name=${owner_repo#*/}")
+        for ((index=start; index<end; index++)); do
+            query+=", \$b${index}: String!"
+            fields+=" b${index}: pullRequests(headRefName: \$b${index}, states: MERGED, first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { headRefOid } }"
+            variables+=(-f "b${index}=${branches[index]}")
+        done
+        query+=") { repository(owner: \$owner, name: \$name) {${fields} } }"
+        response="$cache_dir/response.json"
+        if env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh api graphql -f "query=$query" "${variables[@]}" > "$response" 2>/dev/null; then
+            python3 - "$cache_dir" "$owner_repo" "$response" "$start" "${branches[@]:start:end-start}" <<'PY' || true
+import json, os, sys
+directory, owner_repo, response, start, *branches = sys.argv[1:]
+try:
+    with open(response) as source:
+        payload = json.load(source)
+    repository = payload['data']['repository']
+    if not isinstance(repository, dict):
+        sys.exit(1)
+    errors = payload.get('errors', [])
+    if not isinstance(errors, list):
+        sys.exit(1)
+    failed = set()
+    for error in errors:
+        path = error.get('path') if isinstance(error, dict) else None
+        # A request/repository-wide or malformed error cannot identify a safe
+        # subset. Alias-specific errors invalidate only the affected branches.
+        if not isinstance(path, list) or len(path) < 2 or path[0] != 'repository' or not isinstance(path[1], str):
+            sys.exit(1)
+        failed.add(path[1])
+    for index, branch in enumerate(branches, int(start)):
+        alias = 'b' + str(index)
+        value = repository.get(alias)
+        if alias in failed or not isinstance(value, dict):
+            continue
+        nodes = value.get('nodes')
+        if not isinstance(nodes, list) or any(not isinstance(node, dict) or not isinstance(node.get('headRefOid'), str) or not node['headRefOid'] for node in nodes):
+            continue
+        with open(os.path.join(directory, 'index.tsv'), 'a') as target:
+            target.write(branch + '\t' + ' '.join(node['headRefOid'] for node in nodes) + '\n')
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY
+        fi
+    done
+}
+
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
 # prints a PRESERVE reason, or nothing when the worktree is clean and merged.
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         echo "status-failed"
         return 0
@@ -350,38 +437,38 @@ classify_content_and_merge() {
         return 0
     fi
 
-    if ! git -C "$repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
-        local ahead_count rev_rc=0
-        ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
-        if [[ "$rev_rc" -ne 0 ]]; then
-            echo "rev-list-failed"
-            return 0
-        fi
-        if [[ "$ahead_count" -gt 0 ]]; then
-            local branch_clean="${branch#refs/heads/}"
-            if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
-                local origin_url owner_repo
-                origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
-                if [[ -n "$origin_url" ]]; then
-                    owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-                    if [[ -n "$owner_repo" ]]; then
-                        local pr_heads gh_rc=0
+    # rev-list --count main..head is 0 exactly when head is reachable from main
+    # (what merge-base --is-ancestor tests), so one call answers both questions.
+    local ahead_count rev_rc=0
+    ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
+    if [[ "$rev_rc" -ne 0 || ! "$ahead_count" =~ ^[0-9]+$ ]]; then
+        echo "rev-list-failed"
+        return 0
+    fi
+    if (( ahead_count > 0 )); then
+        local branch_clean="${branch#refs/heads/}"
+        if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+            local origin_url owner_repo
+            origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+            if [[ -n "$origin_url" ]]; then
+                owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                if [[ -n "$owner_repo" ]]; then
+                    local pr_heads gh_rc=0
+                    if ! pr_heads="$(repo_local_cached_pr_heads "$repo" "$owner_repo" "$branch_clean" 2>/dev/null)"; then
                         pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
-                        if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
-                            if grep -qFx "$head_sha" <<<"$pr_heads"; then
-                                return 0
-                            else
-                                echo "merged-differing-head"
-                                return 0
-                            fi
+                    fi
+                    if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                        if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                            return 0
+                        else
+                            echo "merged-differing-head"
+                            return 0
                         fi
                     fi
                 fi
             fi
-            echo "ahead-of-main"
-        else
-            echo "non-ancestor"
         fi
+        echo "ahead-of-main"
         return 0
     fi
 
@@ -418,12 +505,8 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    local age age_label
-    age="$(worktree_age_days "$abs_subdir")" || age='?'
-    age_label="$age"
-    [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
-    if [[ "$age_label" == '?' ]] || (( age < MIN_AGE_DAYS )); then
-        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
+    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< ${MIN_AGE_DAYS} days)"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
@@ -659,17 +742,18 @@ process_repo_local_worktrees() {
         fi
 
         local reason size_kb_val size_fmt branch_label extra age_label age_days
-        age_days="$(worktree_age_days "$abs_path")" || age_days='?'
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch" "$age_days")"
+        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
         size_fmt='-'
+        age_label='-'
         if [[ -z "$reason" ]]; then
+            age_days="$(worktree_age_days "$abs_path")" || age_days='?'
+            [[ "$age_days" =~ ^(0|[1-9][0-9]*)$ ]] || age_days='?'
+            age_label="${age_days}d"
             size_kb_val=$(size_kb "$abs_path")
             size_fmt=$(fmt_kb "$size_kb_val")
         fi
         branch_label="${branch:-detached}"
-        age_label="$age_days"
-        [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
-        extra=" | age=${age_label}d size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
+        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
 
         if [[ -n "$reason" ]]; then
             ledger_line "repo-local" "PRESERVE" "$abs_path" "$reason" "$extra"
