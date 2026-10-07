@@ -101,6 +101,16 @@ elif command -v gtimeout &>/dev/null; then
   TIMEOUT_CMD="gtimeout"
 fi
 
+# probe_timeout <secs> <cmd...>: bounded non-file-signal probe. TERM at <secs>,
+# KILL 2s later so a TERM-ignoring tool cannot hold the snapshot lock; rc 127
+# (read as a failed probe) when no timeout command exists.
+probe_timeout() {
+  local secs="$1"
+  shift
+  [[ -n "$TIMEOUT_CMD" ]] || return 127
+  "$TIMEOUT_CMD" -k 2 "$secs" "$@"
+}
+
 # --measure-one sets this to a per-attempt sidecar. Keeping it separate from
 # numeric stdout preserves the existing kb-or-empty contract for all callers.
 MEASURE_DIAGNOSTIC_FILE=""
@@ -326,7 +336,7 @@ get_apfs_volume_stats_json() {
     return
   fi
   local plist_json
-  plist_json=$(timeout 8 diskutil apfs list -plist 2>/dev/null | timeout 5 plutil -convert json -o - - 2>/dev/null)
+  plist_json=$(probe_timeout 8 diskutil apfs list -plist 2>/dev/null | probe_timeout 5 plutil -convert json -o - - 2>/dev/null)
   if [[ -z "$plist_json" ]]; then
     echo "{}"
     return
@@ -373,7 +383,7 @@ get_local_snapshots_line() {
     return
   fi
   local raw rc names count
-  raw=$(timeout 10 tmutil listlocalsnapshots / 2>/dev/null)
+  raw=$(probe_timeout 10 tmutil listlocalsnapshots / 2>/dev/null)
   rc=$?
   # Real tmutil success always emits at least the "Snapshots for disk /:"
   # header, so empty output plus a nonzero exit both mean the call itself
@@ -403,19 +413,26 @@ get_local_snapshots_line() {
 # recording 0 would read to the correlator as a fabricated multi-GiB swing).
 get_colima_diffdisk_stats() {
   local diffdisk="$HOME/.colima/_lima/colima/diffdisk"
-  if [[ ! -f "$diffdisk" ]]; then
-    printf '0\t0\n'
+  if [[ ! -e "$diffdisk" ]]; then
+    # Absent is a real 0 only when the parent is searchable (or absent);
+    # an unsearchable parent hides the file, so the size is unknown.
+    local parent="${diffdisk%/*}"
+    if [[ ! -e "$parent" || -x "$parent" ]]; then
+      printf '0\t0\n'
+    else
+      printf -- '-1\t-1\n'
+    fi
     return
   fi
   local stat_blocks stat_rc du_raw du_rc stat_bytes du_kb
-  stat_blocks=$(timeout 5 stat -f "%b" "$diffdisk" 2>/dev/null)
+  stat_blocks=$(probe_timeout 5 stat -f "%b" "$diffdisk" 2>/dev/null)
   stat_rc=$?
   if [[ $stat_rc -ne 0 || -z "$stat_blocks" ]]; then
     stat_bytes="-1"
   else
     stat_bytes=$(( stat_blocks * 512 ))
   fi
-  du_raw=$(timeout 10 du -k "$diffdisk" 2>/dev/null)
+  du_raw=$(probe_timeout 10 du -k "$diffdisk" 2>/dev/null)
   du_rc=$?
   if [[ $du_rc -ne 0 || -z "$du_raw" ]]; then
     du_kb="-1"

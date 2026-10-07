@@ -293,6 +293,61 @@ PY
   [[ "${FAIL_COLIMA:-0}" == "1" ]] && fail "colima stat/du failure-vs-zero assertions failed"
 fi
 
+# ────────── TERM-ignoring hang: diskutil/tmutil that ignore SIGTERM must be
+# killed (TERM then KILL) so the snapshot still finishes, with nulls.
+HANG_BIN="$TMP/hang_bin"
+mkdir -p "$HANG_BIN"
+for tool in diskutil tmutil; do
+  printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 120\n' > "$HANG_BIN/$tool"
+  chmod +x "$HANG_BIN/$tool"
+done
+HANG_OUT="$TMP/hang_out.json"
+hang_start=$(date +%s)
+PATH="$HANG_BIN:$FAKE_BIN:$PATH" HOME="$FAKE_HOME" \
+  DISK_MAGICIAN_CONFIG="$TMP/config.json" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=30 \
+  timeout 90 bash "$SNAPSHOT_SH" --output "$HANG_OUT" >"$TMP/hang_stderr.log" 2>&1
+hang_rc=$?
+hang_elapsed=$(( $(date +%s) - hang_start ))
+if [[ $hang_rc -ne 0 ]]; then
+  fail "disk_snapshot.sh exited $hang_rc with TERM-ignoring diskutil/tmutil after ${hang_elapsed}s"
+elif (( hang_elapsed > 60 )); then
+  fail "TERM-ignoring probes were not killed promptly (${hang_elapsed}s)"
+elif python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["apfs_container_free_gb"] is None and d["local_snapshots_count"] is None else 1)' "$HANG_OUT"; then
+  pass "TERM-ignoring diskutil/tmutil are killed and read null (${hang_elapsed}s)"
+else
+  fail "TERM-ignoring probes did not degrade to null"
+fi
+
+# ────────── gtimeout-only host: with no `timeout` on PATH the probes must use
+# the script's gtimeout fallback and still record values, not silent nulls.
+REAL_GTIMEOUT="$(command -v gtimeout || true)"
+if [[ -z "$REAL_GTIMEOUT" ]]; then
+  echo "SKIP: gtimeout not installed; gtimeout-only case not exercised"
+else
+  GT_BIN="$TMP/gt_bin"
+  mkdir -p "$GT_BIN"
+  ln -s "$REAL_GTIMEOUT" "$GT_BIN/gtimeout"
+  GT_PATH="$FAKE_BIN:$GT_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+  if PATH="$GT_PATH" command -v timeout >/dev/null 2>&1; then
+    echo "SKIP: system PATH provides timeout; gtimeout-only case not exercised"
+  else
+    GT_OUT="$TMP/gt_out.json"
+    PATH="$GT_PATH" HOME="$FAKE_HOME" \
+      DISK_MAGICIAN_CONFIG="$TMP/config.json" \
+      DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=30 \
+      "$REAL_GTIMEOUT" 60 bash "$SNAPSHOT_SH" --output "$GT_OUT" >"$TMP/gt_stderr.log" 2>&1
+    gt_rc=$?
+    if [[ $gt_rc -ne 0 ]]; then
+      fail "disk_snapshot.sh exited $gt_rc on a gtimeout-only PATH: $(tail -5 "$TMP/gt_stderr.log")"
+    elif python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["apfs_container_free_gb"] is not None and d["local_snapshots_count"] == 2 else 1)' "$GT_OUT"; then
+      pass "gtimeout-only PATH still records non-file signals"
+    else
+      fail "gtimeout-only PATH recorded nulls for non-file signals"
+    fi
+  fi
+fi
+
 if [[ $FAIL -eq 0 ]]; then
   echo "ALL PASS: disk_snapshot.sh non-file-signal tracking (disk_magician-rpv)"
   exit 0
