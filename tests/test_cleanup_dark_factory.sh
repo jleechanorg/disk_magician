@@ -162,8 +162,10 @@ check "\$HOME, \${HOME}, ~ shims protect their releases" '[[ -d "$H7c/.local/sha
 mkdir -p "$T/h7dreal"; ln -s "$T/h7dreal" "$T/h7d"; H7d="$T/h7d"; mk7 "$H7d"
 mkdir -p "$H7d/.dark-factory/runs/argv"; echo x >"$H7d/.dark-factory/runs/argv/f"; age "$H7d/.dark-factory/runs/argv" 60
 ( cd /; exec -a "df-worker $H7d/.dark-factory/runs/argv/f" sleep 120 ) & ARGVP=$!
-DARK_FACTORY_RELEASE="$H7d/.local/share/dark-factory/releases/r1" sleep 120 & ENVP=$!
-wait_exec "$ARGVP" "df-worker"; wait_exec "$ENVP" "sleep 120"
+# macOS `ps -E` hides the environment of Apple platform binaries (/bin/sleep), so the
+# env-holder must be a non-platform process; python3 exposes its environment everywhere.
+DARK_FACTORY_RELEASE="$H7d/.local/share/dark-factory/releases/r1" python3 -c 'import time; time.sleep(120)' & ENVP=$!
+wait_exec "$ARGVP" "df-worker"; wait_exec "$ENVP" "time.sleep(120)"
 run7 "$H7d" --clean >"$T/t7d.out" 2>&1 || true
 kill "$ARGVP" "$ENVP" 2>/dev/null || true
 check "run named by logical path in a live argv kept" '[[ -d "$T/h7dreal/.dark-factory/runs/argv" ]]'

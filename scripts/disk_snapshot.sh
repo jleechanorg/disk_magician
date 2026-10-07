@@ -1081,7 +1081,7 @@ except Exception:
     print('true')
 " "$CONFIG_FILE" 2>/dev/null || echo "true")
 
-TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$SNAPSHOT_STATE_DIR/frontier_last.json" "$SCRIPT_DIR" <<'PY' 2>/dev/null
+TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "${DISK_MAGICIAN_FRONTIER_ROOT_JSON:-/var/db/disk-magician/frontier_last.json}" "$SNAPSHOT_STATE_DIR/frontier_last.json" "$SCRIPT_DIR" <<'PY' 2>/dev/null
 import datetime, json, os, sys
 sys.path.insert(0, sys.argv[5])
 from frontier_selection import select_frontier

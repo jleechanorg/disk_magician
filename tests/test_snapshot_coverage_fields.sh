@@ -12,6 +12,8 @@ PASS=0; FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
+# Hermetic: never read the machine's root frontier report (/var/db/disk-magician).
+export DISK_MAGICIAN_FRONTIER_ROOT_JSON="$WORK/no-root-frontier.json"
 H="$WORK/home"; BIN="$WORK/bin"; STATE="$WORK/state"
 mkdir -p "$H/.claude/projects" "$H/projects" "$H/other" "$H/gone" "$BIN" "$STATE"
 
