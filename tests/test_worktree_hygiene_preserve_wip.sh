@@ -778,6 +778,77 @@ assert_true "[[ \"\$(git -C '$O39' rev-parse refs/heads/detached)\" == '$M39' ]]
 assert_not_contains "$REFS39" "refs/heads/backup/detached" "no backup/detached-* branch pushed"
 assert_contains "$OUT" "unpushed-ahead" "detached ahead worktree classified unpushed-ahead"
 
+# ---------------------------------------------------------------------------
+echo "case 40: large repo (3000 files) — early mismatch/flag must not SIGPIPE-abort the run"
+R40="$(mk_repo r40)"
+mkdir -p "$R40/many"
+python3 - "$R40/many" <<'PY'
+import sys,os
+for i in range(3000): open(os.path.join(sys.argv[1],f"f{i:05d}.nb"),"w").write("cell\n")
+PY
+printf '*.nb filter=lossy\n' >"$R40/.gitattributes"
+g -C "$R40" add -A; g -C "$R40" commit -q -m many
+W40="$(mk_wt "$R40" big40)"
+g -C "$W40" config filter.lossy.clean "grep -v OUTPUT"
+g -C "$W40" config filter.lossy.smudge cat
+printf 'cell\nOUTPUT: 1\n' >"$W40/many/f00000.nb"
+echo "edit" >>"$W40/tracked.txt"
+backdate_tree "$W40" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --skip-push --execute --preserve-wip; echo "rc=$?")"
+assert_contains "$OUT" "rc=0" "run completes (no SIGPIPE abort)"
+assert_contains "$OUT" "WIP-RESTORED" "failure path restored HEAD"
+assert_true "[[ \"\$(git -C '$W40' symbolic-ref -q --short HEAD)\" != wip/* ]] && grep -q 'OUTPUT: 1' '$W40/many/f00000.nb'" "not stranded on wip branch; content intact"
+W40B="$(mk_wt "$R40" big40b)"
+g -C "$W40B" update-index --skip-worktree many/f00000.nb
+echo "edit" >>"$W40B/tracked.txt"
+backdate_tree "$W40B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "index-flagged:many/f00000.nb" "early index flag reported, not scan-failed"
+W40C="$(mk_wt "$R40" big40c)"
+g -C "$W40C" config filter.lossy.clean "grep -v OUTPUT"
+g -C "$W40C" config filter.lossy.smudge cat
+printf 'cell\nOUTPUT: 2\n' >"$W40C/many/f00000.nb"
+OUT="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set -euo pipefail
+    hit="$(worktree_bytes_mismatch "$W40C")"
+    echo "survived mismatch=$hit"
+) 2>&1; echo "rc=$?")"
+assert_contains "$OUT" "survived mismatch=many/f00000.nb" "byte check under set -euo pipefail survives an early mismatch in a 3000-file tree"
+assert_true "grep -q 'OUTPUT: 2' '$W40C/many/f00000.nb'" "hidden edit intact"
+
+# ---------------------------------------------------------------------------
+echo "case 41: an 'lfs' driver that merely starts with git-lfs (git-lfs-evil) is byte-verified"
+R41="$(mk_repo r41)"
+printf '*.bin filter=lfs\n' >"$R41/.gitattributes"
+echo "data" >"$R41/a.bin"
+g -C "$R41" add -A; g -C "$R41" commit -q -m bin
+W41="$(mk_wt "$R41" lfs41)"
+mkdir -p "$TMPROOT/evilbin"; printf '#!/bin/sh\ngrep -v SECRET\n' >"$TMPROOT/evilbin/git-lfs-evil"; chmod +x "$TMPROOT/evilbin/git-lfs-evil"
+g -C "$W41" config filter.lfs.clean "$TMPROOT/evilbin/git-lfs-evil"
+g -C "$W41" config filter.lfs.clean "git-lfs-evil"
+printf 'data\nSECRET\n' >"$W41/a.bin"
+OUT="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set +e
+    PATH="$TMPROOT/evilbin:$PATH" worktree_bytes_mismatch "$W41"
+) 2>&1)"
+assert_contains "$OUT" "a.bin" "git-lfs-evil driver does not earn the LFS exemption"
+
+# ---------------------------------------------------------------------------
+echo "case 42: fsmonitor never runs during a full end-to-end preserve-wip sweep"
+R42="$(mk_repo r42)"
+W42="$(mk_wt "$R42" fsmon42)"
+printf '#!/bin/sh\ntouch "%s/fsmon42-ran"\nexit 1\n' "$TMPROOT" >"$TMPROOT/fsmon42.sh"; chmod +x "$TMPROOT/fsmon42.sh"
+g -C "$R42" config core.fsmonitor "$TMPROOT/fsmon42.sh"
+echo "edit" >>"$W42/tracked.txt"
+backdate_tree "$W42" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R42" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "PRESERVED-WIP" "preserved end-to-end"
+assert_true "! [[ -e '$TMPROOT/fsmon42-ran' ]]" "fsmonitor never ran anywhere in the sweep"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

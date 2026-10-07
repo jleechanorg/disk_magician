@@ -24,6 +24,9 @@
 # bead-worthiness judgment is a deliberate separate step (that's a judgment
 # call, not a deterministic git-state check, so it does not belong in bash).
 set -euo pipefail
+# Never let a repo-configured fsmonitor command run from this sweep (status,
+# ls-files, diff all invoke it). Functions that also disable hooks extend this.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/worktree_repo_discovery.sh
@@ -519,7 +522,7 @@ preserve_wip_blocker() {
     # are invisible to both `git add -A` and `git status`, so they would be
     # lost on removal: refuse. Fail closed if the listing fails.
     local flagged frc=0
-    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^(S|[a-z]) /{print substr($0,3); exit}')" || frc=$?
+    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '!f && /^(S|[a-z]) /{print substr($0,3); f=1}')" || frc=$?
     if [[ "$frc" -ne 0 ]]; then
         echo "index-flag-scan-failed"; return 0
     fi
@@ -531,7 +534,7 @@ preserve_wip_blocker() {
     # reset) would drop that staged version: refuse. Fail closed on error.
     local partial prc=0
     partial="$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null \
-        | awk 'substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); exit}')" || prc=$?
+        | awk '!f && substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); f=1}')" || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         echo "partial-staging-scan-failed"; return 0
     fi
@@ -664,14 +667,20 @@ worktree_bytes_mismatch() {
     # registered under the name "lfs" is byte-verified like every filter.
     lfs_clean="$(git -C "$wt" config --get filter.lfs.clean 2>/dev/null || true)"
     lfs_proc="$(git -C "$wt" config --get filter.lfs.process 2>/dev/null || true)"
-    if [[ "$lfs_clean" == git-lfs* && ( -z "$lfs_proc" || "$lfs_proc" == git-lfs* ) ]]; then
+    if [[ ( "$lfs_clean" == git-lfs || "$lfs_clean" == "git-lfs "* ) \
+          && ( -z "$lfs_proc" || "$lfs_proc" == git-lfs || "$lfs_proc" == "git-lfs "* ) ]]; then
         vlfs="$(printf '%s\n' "$vlist" | git -C "$wt" check-attr --stdin filter 2>/dev/null \
             | awk -F': filter: ' '$2=="lfs"{print $1}')"
+    fi
+    # Drop LFS paths in one pass (a per-file lookup is O(n) processes).
+    if [[ -n "$vlfs" ]]; then
+        vlist="$(printf '%s\n' "$vlist" | awk -v lfs="$vlfs" \
+            'BEGIN{n=split(lfs,a,"\n"); for(i=1;i<=n;i++) skip[a[i]]=1} !($0 in skip)')"
+        [[ -n "$vlist" ]] || return 0
     fi
     printf '%s\n' "$vlist" | while IFS= read -r vp; do
             [[ -L "$wt/$vp" ]] && continue
             [[ -f "$wt/$vp" ]] || { echo "missing:$vp"; continue; }
-            [[ -n "$vlfs" ]] && grep -qxF -- "$vp" <<<"$vlfs" && continue
             printf '%s\n' "$vp"
         done | {
             paths="$(cat)"
@@ -680,7 +689,7 @@ worktree_bytes_mismatch() {
             disk="$(printf '%s\n' "$paths" | git -C "$wt" hash-object --no-filters --stdin-paths 2>/dev/null)" || { echo "hash-failed"; exit 0; }
             blobs="$(printf '%s\n' "$paths" | sed 's/^/HEAD:/' | git -C "$wt" cat-file --batch-check='%(objectname)' 2>/dev/null)" || { echo "blob-lookup-failed"; exit 0; }
             paste -d'\t' <(printf '%s\n' "$paths") <(printf '%s\n' "$disk") <(printf '%s\n' "$blobs") \
-                | awk -F'\t' '$2!=$3{print $1; exit}'
+                | awk -F'\t' '!f && $2!=$3{print $1; f=1}'
         }
 }
 
