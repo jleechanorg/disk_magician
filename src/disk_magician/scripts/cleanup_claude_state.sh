@@ -112,15 +112,26 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Hard floor: 7 days, may only be raised, never lowered (CLAUDE.md
+# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
+# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
+# may only RAISE the floor, never lower it below 7.
+staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
+if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
+  staleness_floor=$((10#$staleness_floor))
+else
+  staleness_floor=7
+fi
+[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
+
+# Hard floor: staleness_floor days, may only be raised, never lowered (CLAUDE.md
 # invariant). Normalize via 10# BEFORE clamping -- bash arithmetic parses a
 # leading-zero numeral like "08" as invalid octal otherwise.
 if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
   MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
 else
-  MIN_AGE_DAYS=7
+  MIN_AGE_DAYS="$staleness_floor"
 fi
-[[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
+[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
 # realpath_or_empty <path> -- portable realpath (python3 is always present
 # on this machine; avoids depending on GNU coreutils' realpath -f).

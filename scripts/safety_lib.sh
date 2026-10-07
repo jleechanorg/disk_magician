@@ -24,6 +24,10 @@ _SAFETY_REPO_ROOT="$(cd "$_SAFETY_LIB_DIR/.." && pwd)"
 
 safety_file_in_use() {
   local candidate
+  if [[ -n "${DISK_MAGICIAN_SAFETY_FILE:-}" && -f "$DISK_MAGICIAN_SAFETY_FILE" ]]; then
+    echo "$DISK_MAGICIAN_SAFETY_FILE"
+    return 0
+  fi
   for candidate in \
     "$_SAFETY_REPO_ROOT/safety.local.json" \
     "$HOME/.config/disk-magician/safety.local.json" \
