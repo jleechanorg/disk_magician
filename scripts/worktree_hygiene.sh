@@ -24,6 +24,9 @@
 # bead-worthiness judgment is a deliberate separate step (that's a judgment
 # call, not a deterministic git-state check, so it does not belong in bash).
 set -euo pipefail
+# Never let a repo-configured fsmonitor command run from this sweep (status,
+# ls-files, diff all invoke it). Functions that also disable hooks extend this.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/worktree_repo_discovery.sh
@@ -221,7 +224,7 @@ classify_candidate() {
         echo "NEEDS-REVIEW|no-merge-base"
         return 0
     fi
-    if (( ahead_count > 0 )) && [[ "$push_status" == "no-remote" || "$push_status" == "skipped" ]]; then
+    if (( ahead_count > 0 )) && [[ "$push_status" == "no-remote" || "$push_status" == "skipped" || "$push_status" == "skipped-detached" ]]; then
         echo "NEEDS-REVIEW|unpushed-ahead"
         return 0
     fi
@@ -384,6 +387,10 @@ triage_candidate() {
         push_status="no-remote"
         if (( suspect_rewrite == 1 )); then
             push_status="skipped-suspect-rewrite"
+        elif ! git -C "$wt_path" symbolic-ref -q HEAD >/dev/null 2>&1; then
+            # A detached HEAD has no branch to push; pushing HEAD:detached
+            # would mint a bogus remote branch (then backup/detached-<date>).
+            push_status="skipped-detached"
         elif [[ "${SKIP_PUSH:-false}" == true ]]; then
             push_status="skipped"
         else
@@ -473,7 +480,7 @@ branch_for_worktree() {
 # stay with a human.
 preserve_wip_reason_eligible() {
     case "$1" in
-        dirty|untracked|detached-unpushed) return 0 ;;
+        dirty|untracked|detached-unpushed|unpushed-ahead) return 0 ;;
     esac
     return 1
 }
@@ -495,6 +502,8 @@ worktree_has_live_cwd() {
 # returns 0 when the worktree must NOT be auto-preserved; returns 1 if clear.
 preserve_wip_blocker() {
     local repo_abs="$1" wt="$2" gitdir f
+    local -x GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+             GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
     gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || { echo "no-gitdir"; return 0; }
     if [[ -e "$gitdir/locked" ]]; then
         echo "locked"; return 0
@@ -515,7 +524,7 @@ preserve_wip_blocker() {
     # are invisible to both `git add -A` and `git status`, so they would be
     # lost on removal: refuse. Fail closed if the listing fails.
     local flagged frc=0
-    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '/^(S|[a-z]) /{print substr($0,3); exit}')" || frc=$?
+    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '!f && /^(S|[a-z]) /{print substr($0,3); f=1}')" || frc=$?
     if [[ "$frc" -ne 0 ]]; then
         echo "index-flag-scan-failed"; return 0
     fi
@@ -527,7 +536,7 @@ preserve_wip_blocker() {
     # reset) would drop that staged version: refuse. Fail closed on error.
     local partial prc=0
     partial="$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null \
-        | awk 'substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); exit}')" || prc=$?
+        | awk '!f && substr($0,1,2)!="??" && substr($0,1,1)!=" " && substr($0,2,1)!=" "{print substr($0,4); f=1}')" || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         echo "partial-staging-scan-failed"; return 0
     fi
@@ -619,23 +628,71 @@ wip_branch_name() {
     echo "$candidate"
 }
 
-# wip_restore_head <wt> <branch> <orig_ref> <orig_sha> — after a failed
+# wip_restore_head <wt> <branch> <orig_ref> <orig_sha> [keep] — after a failed
 # preservation, point HEAD back at the original branch (or detached SHA) and
 # reset only the index; the working tree is never touched. The wip branch is
-# dropped if no commit landed on it, else kept and logged.
+# dropped (the worktree still holds all content) unless `keep` is passed.
 wip_restore_head() {
-    local wt="$1" branch="$2" orig_ref="$3" orig_sha="$4" wip_sha
+    local wt="$1" branch="$2" orig_ref="$3" orig_sha="$4" keep="${5:-}" wip_sha
     if [[ -n "$orig_ref" ]]; then
         git -C "$wt" symbolic-ref HEAD "$orig_ref" 2>/dev/null
     else
         git -C "$wt" update-ref --no-deref HEAD "$orig_sha" 2>/dev/null
     fi || { ledger_line "WIP-FAILED" "$wt" "could not restore HEAD; left on $branch"; return 1; }
     git -C "$wt" reset -q 2>/dev/null || ledger_line "WIP-FAILED" "$wt" "index reset failed after HEAD restore"
+    if [[ "$keep" == keep ]]; then
+        ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset; wip branch $branch kept"
+        return 0
+    fi
     # HEAD is back and the worktree still holds all content, so the (possibly
     # partial) wip branch is redundant: drop it rather than leave a stale ref.
     wip_sha="$(git -C "$wt" rev-parse --verify -q "refs/heads/$branch" 2>/dev/null || true)"
     [[ -n "$wip_sha" ]] && { git -C "$wt" branch -q -D "$branch" 2>/dev/null || true; }
     ledger_line "WIP-RESTORED" "$wt" "HEAD back on ${orig_ref:-$orig_sha}; staging reset; wip branch dropped"
+}
+
+# worktree_bytes_mismatch <wt> — clean/eol filters can make on-disk bytes
+# differ from what git stores while `git status` (which reads through the same
+# filters) reports clean -- for new files and for edits to tracked files alike.
+# Byte-verify EVERY tracked regular file on disk against its HEAD blob (one
+# batched pass); symlinks/gitlinks and paths under a genuine git-lfs filter are
+# exempt (they round-trip). Echoes the first mismatching path or a failure
+# reason; echoes nothing when every byte matches.
+worktree_bytes_mismatch() {
+    local wt="$1" vlist vlfs="" lfs_clean lfs_proc
+    local -x GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+             GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
+    vlist="$(git -C "$wt" ls-files -s -z 2>/dev/null | tr '\0' '\n' \
+        | awk '$1=="100644"||$1=="100755"{sub(/^[^\t]*\t/,""); print}')" || { echo "ls-files-failed"; return 0; }
+    [[ -n "$vlist" ]] || return 0
+    # Only a real git-lfs driver earns the exemption; any other command
+    # registered under the name "lfs" is byte-verified like every filter.
+    lfs_clean="$(git -C "$wt" config --get filter.lfs.clean 2>/dev/null || true)"
+    lfs_proc="$(git -C "$wt" config --get filter.lfs.process 2>/dev/null || true)"
+    if [[ ( "$lfs_clean" == git-lfs || "$lfs_clean" == "git-lfs "* ) \
+          && ( -z "$lfs_proc" || "$lfs_proc" == git-lfs || "$lfs_proc" == "git-lfs "* ) ]]; then
+        vlfs="$(printf '%s\n' "$vlist" | git -C "$wt" check-attr --stdin filter 2>/dev/null \
+            | awk -F': filter: ' '$2=="lfs"{print $1}')"
+    fi
+    # Drop LFS paths in one pass (a per-file lookup is O(n) processes).
+    if [[ -n "$vlfs" ]]; then
+        vlist="$(printf '%s\n' "$vlist" | awk -v lfs="$vlfs" \
+            'BEGIN{n=split(lfs,a,"\n"); for(i=1;i<=n;i++) skip[a[i]]=1} !($0 in skip)')"
+        [[ -n "$vlist" ]] || return 0
+    fi
+    printf '%s\n' "$vlist" | while IFS= read -r vp; do
+            [[ -L "$wt/$vp" ]] && continue
+            [[ -f "$wt/$vp" ]] || { echo "missing:$vp"; continue; }
+            printf '%s\n' "$vp"
+        done | {
+            paths="$(cat)"
+            [[ -n "$paths" ]] || exit 0
+            if grep -q '^missing:' <<<"$paths"; then grep -m1 '^missing:' <<<"$paths"; exit 0; fi
+            disk="$(printf '%s\n' "$paths" | git -C "$wt" hash-object --no-filters --stdin-paths 2>/dev/null)" || { echo "hash-failed"; exit 0; }
+            blobs="$(printf '%s\n' "$paths" | sed 's/^/HEAD:/' | git -C "$wt" cat-file --batch-check='%(objectname)' 2>/dev/null)" || { echo "blob-lookup-failed"; exit 0; }
+            paste -d'\t' <(printf '%s\n' "$paths") <(printf '%s\n' "$disk") <(printf '%s\n' "$blobs") \
+                | awk -F'\t' '!f && $2!=$3{print $1; f=1}'
+        }
 }
 
 # preserve_wip_and_remove <repo_abs> <wt_path> — commit all non-ignored WIP to
@@ -646,7 +703,10 @@ preserve_wip_and_remove() {
     # Never run the repo's hooks (post-checkout, post-commit, post-index-change,
     # reference-transaction, ...) from an automated sweep: every git call here
     # and in wip_restore_head inherits core.hooksPath=/dev/null via the env.
-    local -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+    # core.fsmonitor=false likewise keeps a repo-configured monitor command
+    # from running.
+    local -x GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+             GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
     branch="$(wip_branch_name "$wt")"
     orig_ref="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || true)"
     orig_sha="$(git -C "$wt" rev-parse --verify -q HEAD 2>/dev/null)" || {
@@ -675,32 +735,8 @@ preserve_wip_and_remove() {
             return 1
         fi
     fi
-    # Clean/eol filters can make on-disk bytes differ from what git stores while
-    # `git status` (which reads through the same filters) reports clean -- for
-    # new files and for edits to tracked files alike. Byte-verify EVERY tracked
-    # regular file on disk against the committed blob (one batched pass);
-    # LFS-filtered paths and symlinks/gitlinks are exempt (they round-trip).
-    local vbad="" vlist vlfs
-    vlist="$(git -C "$wt" ls-files -s -z 2>/dev/null | tr '\0' '\n' \
-        | awk '$1=="100644"||$1=="100755"{sub(/^[^\t]*\t/,""); print}')"
-    if [[ -n "$vlist" ]]; then
-        vlfs="$(printf '%s\n' "$vlist" | git -C "$wt" check-attr --stdin filter 2>/dev/null \
-            | awk -F': filter: ' '$2=="lfs"{print $1}')"
-        vbad="$(printf '%s\n' "$vlist" | while IFS= read -r vp; do
-                    [[ -L "$wt/$vp" ]] && continue
-                    [[ -f "$wt/$vp" ]] || { echo "missing:$vp"; continue; }
-                    grep -qxF -- "$vp" <<<"$vlfs" && continue
-                    printf '%s\n' "$vp"
-                done | {
-                    paths="$(cat)"
-                    [[ -n "$paths" ]] || exit 0
-                    if grep -q '^missing:' <<<"$paths"; then grep -m1 '^missing:' <<<"$paths"; exit 0; fi
-                    disk="$(printf '%s\n' "$paths" | git -C "$wt" hash-object --no-filters --stdin-paths 2>/dev/null)" || { echo "hash-failed"; exit 0; }
-                    blobs="$(printf '%s\n' "$paths" | sed 's/^/HEAD:/' | git -C "$wt" cat-file --batch-check='%(objectname)' 2>/dev/null)" || { echo "blob-lookup-failed"; exit 0; }
-                    paste -d'\t' <(printf '%s\n' "$paths") <(printf '%s\n' "$disk") <(printf '%s\n' "$blobs") \
-                        | awk -F'\t' '$2!=$3{print $1; exit}'
-                })"
-    fi
+    local vbad
+    vbad="$(worktree_bytes_mismatch "$wt")"
     if [[ -n "$vbad" ]]; then
         ledger_line "WIP-FAILED" "$wt" "committed bytes differ from disk for $vbad (filter/eol); kept"
         wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha"
@@ -724,7 +760,11 @@ preserve_wip_and_remove() {
         ledger_line "DELETE" "$wt" "preserved on $branch"
         return 0
     fi
+    # Removal refused (e.g. the worktree holds a submodule): put HEAD and the
+    # index back so the user is not left on the wip branch; the wip branch
+    # keeps the committed copy.
     ledger_line "REMOVE-REFUSED" "$wt" "git worktree remove refused; kept (branch $branch remains)"
+    wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha" keep
     return 1
 }
 
@@ -890,6 +930,17 @@ main() {
                 "$push_status" "$pr_state" "$ahead_count" "$has_merge_base" "$suspect_rewrite")"
 
             local class="${verdict%%|*}" reason="${verdict#*|}"
+
+            # A lossy clean filter can hide an edit from `git status`; never
+            # SAFE-remove a worktree whose on-disk bytes differ from HEAD.
+            if [[ "$class" == "SAFE" ]]; then
+                local hidden
+                hidden="$(worktree_bytes_mismatch "$wt_path")"
+                if [[ -n "$hidden" ]]; then
+                    class="NEEDS-REVIEW"
+                    reason="hidden-filtered-change:$hidden"
+                fi
+            fi
 
             if [[ "$class" == "SAFE" ]]; then
                 ledger_line "SAFE" "$wt_path" "$reason"
