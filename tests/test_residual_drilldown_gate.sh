@@ -6,10 +6,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/residual_drilldown.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+export DISK_MAGICIAN_TEST_CONTEXT=1
+export DISK_MAGICIAN_TEST_SANDBOX="$WORK"
 export DISK_MAGICIAN_STATE_DIR="$WORK/state"
-mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR" "$WORK/home"
 echo '{"entries":[]}' > "$WORK/discover_last.json"
 export DISK_MAGICIAN_DISCOVER_LAST="$WORK/discover_last.json"
+export DISK_MAGICIAN_UNCOVERED_ROOTS_CMD="true"
 
 PASS=0
 FAIL=0
@@ -28,7 +31,7 @@ cat > "$SNAP" <<'JSON'
 JSON
 
 # Threshold is logged before the slow --discover fallback; cap wall-clock.
-out="$(timeout 5 "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1 || true)"
+out="$(HOME="$WORK/home" timeout 5 "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1 || true)"
 if grep -q "residual 120.5 GB >= threshold" <<< "$out"; then
   ok "gates on absolute residual_gb not delta"
 else
@@ -45,11 +48,51 @@ cat > "$SNAP" <<'JSON'
   "residual_delta_gb": 0.4
 }
 JSON
-out="$("$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1)"
+out="$(HOME="$WORK/home" "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1)"
 if grep -qE "residual 2(\.0)? GB < threshold" <<< "$out"; then
   ok "no-op below threshold"
 else
   bad "expected no-op: $out"
+fi
+
+# An uncovered-roots checker that exceeds its cap must not abort or alter the
+# existing residual no-op behavior.
+SLEEPY_STUB="$WORK/sleepy_check_uncovered_roots.sh"
+cat > "$SLEEPY_STUB" <<'STUB'
+#!/usr/bin/env bash
+sleep 5
+echo '{"uncovered": []}'
+STUB
+chmod +x "$SLEEPY_STUB"
+out="$(HOME="$WORK/home" DISK_MAGICIAN_UNCOVERED_ROOTS_CMD="$SLEEPY_STUB" DISK_MAGICIAN_UNCOVERED_TIMEOUT_S=1 timeout 5 "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1)"
+if grep -q "uncovered-roots check timed out" <<< "$out"; then
+  ok "logs timeout and stays bounded"
+else
+  bad "expected timeout log: $out"
+fi
+if grep -qE "residual 2(\.0)? GB < threshold" <<< "$out"; then
+  ok "existing no-op output unaffected by timeout"
+else
+  bad "expected no-op output: $out"
+fi
+
+rc=0
+out="$(timeout 5 env HOME="$WORK/home" PATH=/usr/bin:/bin:/usr/sbin:/sbin DISK_MAGICIAN_UNCOVERED_ROOTS_CMD="$SLEEPY_STUB" DISK_MAGICIAN_UNCOVERED_TIMEOUT_S=1 "$SCRIPT" --snapshot-file "$SNAP" --dry-run 2>&1)" || rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "uncovered-roots check timed out" <<< "$out"; then
+  ok "timeout cap applies under launchd PATH"
+else
+  bad "expected bounded launchd-PATH run: rc=$rc output=$out"
+fi
+
+# Candidates are runtime state: a run from an installed package copy must not
+# write into the package tree (it trips deploy_uv_tool's unexpected-file guard).
+cp -R "$REPO_ROOT/scripts" "$WORK/pkg-scripts"
+mkdir -p "$WORK/pkg" && mv "$WORK/pkg-scripts" "$WORK/pkg/scripts"
+HOME="$WORK/home" "$WORK/pkg/scripts/residual_drilldown.sh" --snapshot-file "$SNAP" >/dev/null 2>&1 || true
+if [[ -d "$DISK_MAGICIAN_STATE_DIR/config.d" && ! -e "$WORK/pkg/config.d" ]]; then
+  ok "candidates dir defaults to state dir, not package root"
+else
+  bad "candidates dir leaked into package root or missing from state dir"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

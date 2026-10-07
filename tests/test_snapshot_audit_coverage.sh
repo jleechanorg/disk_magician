@@ -16,6 +16,8 @@ SNAP_SCRIPT="$REPO_ROOT/scripts/disk_snapshot.sh"
 
 WORK="$(mktemp -d -t disk_audit_cov.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+# Hermetic: never read the machine's root frontier report (/var/db/disk-magician).
+export DISK_MAGICIAN_FRONTIER_ROOT_JSON="$WORK/no-root-frontier.json"
 
 PASS=0
 FAIL=0
@@ -140,7 +142,7 @@ cat > "$DEDUP_CONFIG" <<JSON
 JSON
 
 DEDUP_OUT="$WORK/dedup_snap.json"
-DISK_MAGICIAN_CONFIG="$DEDUP_CONFIG" timeout 120 "$SNAP_SCRIPT" --output "$DEDUP_OUT" >/dev/null 2>&1
+DISK_MAGICIAN_STATE_DIR="$WORK/dedup_state" DISK_MAGICIAN_CONFIG="$DEDUP_CONFIG" timeout 120 "$SNAP_SCRIPT" --output "$DEDUP_OUT" >/dev/null 2>&1
 
 if [[ -f "$DEDUP_OUT" ]] && python3 -m json.tool < "$DEDUP_OUT" >/dev/null 2>&1; then
   ok "dedup snapshot produced valid JSON"
@@ -338,32 +340,25 @@ else
   bad "topdown_enabled:false did not suppress topdown_coverage"
 fi
 
-section "7. allowlist measurement is dua-first and bounded per path + in total"
+section "7. allowlist measurement is strict du and bounded per path + in total"
 BUDGET_HOME="$WORK/budget_home"
 BUDGET_BIN="$WORK/budget_bin"
 BUDGET_LOG="$WORK/budget_invocations.log"
 BUDGET_CLOCK_STATE="$WORK/budget_clock_state"
+# These scenarios pin the serial measurement path (fake timeout/date stubs and
+# per-path deadline semantics); the parallel orchestrator has its own tests.
+export DISK_MAGICIAN_MEASURE_WORKERS=0
 SYSTEM_DATE=$(command -v date)
 mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
 : > "$BUDGET_LOG"
 
-cat > "$BUDGET_BIN/dua" <<'SH'
-#!/usr/bin/env bash
-echo "dua $*" >> "${BUDGET_LOG:?}"
-case "${BUDGET_MODE:?}" in
-  parity)
-    printf '\033[32m%12s b payload\033[39m\n' "${DUA_BYTES:?}"
-    printf '\033[32m%12s b total\033[39m\n' "${DUA_BYTES:?}"
-    printf '\033[32m\n'
-    ;;
-  fail-fast) exit 1 ;;
-  slow) sleep 5 ;;
-esac
-SH
 cat > "$BUDGET_BIN/du" <<'SH'
 #!/usr/bin/env bash
 echo "du $*" >> "${BUDGET_LOG:?}"
-sleep 5
+case "${BUDGET_MODE:?}" in
+  parity) printf '%s\t%s\n' "${DU_KB:?}" "${@: -1}" ;;
+  fail-fast|slow) sleep 5 ;;
+esac
 SH
 cat > "$BUDGET_BIN/date" <<SH
 #!/usr/bin/env bash
@@ -382,7 +377,7 @@ if [[ "\${1:-}" == "+%s" ]]; then
 fi
 exec "$SYSTEM_DATE" "\$@"
 SH
-chmod +x "$BUDGET_BIN/dua" "$BUDGET_BIN/du" "$BUDGET_BIN/date"
+chmod +x "$BUDGET_BIN/du" "$BUDGET_BIN/date"
 
 PARITY_CONFIG="$WORK/budget_parity_config.json"
 cat > "$PARITY_CONFIG" <<JSON
@@ -391,32 +386,32 @@ JSON
 PARITY_OUT="$WORK/budget_parity.json"
 expected_kb=1234
 if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
-  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DUA_BYTES=$(( expected_kb * 1024 )) \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DU_KB="$expected_kb" \
   DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=2 timeout 10 "$SNAP_SCRIPT" --output "$PARITY_OUT" \
   >/dev/null 2>&1 && \
   python3 -c "import json; d=json.load(open('$PARITY_OUT')); assert d['directories']['parity'] == $expected_kb" && \
-  [[ "$(head -1 "$BUDGET_LOG")" == dua* ]] && ! grep -q '^du ' "$BUDGET_LOG"; then
-  ok "dua is primary and parses the last numeric row despite trailing ANSI output"
+  [[ "$(head -1 "$BUDGET_LOG")" == du* ]] && [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]]; then
+  ok "du is the sole scanner and preserves KiB values"
 else
-  bad "dua primary/parity parsing contract failed"
+  bad "single strict du measurement contract failed"
 fi
 
 DEFAULT_CAP_OUT="$WORK/budget_default_cap.json"
 if HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
-  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DUA_BYTES=$(( expected_kb * 1024 )) \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=parity DU_KB="$expected_kb" \
   DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=150 \
   timeout 10 "$SNAP_SCRIPT" --output "$DEFAULT_CAP_OUT" >/dev/null 2>&1 && \
   python3 - "$DEFAULT_CAP_OUT" <<'PY' 2>/dev/null
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["directories"]["parity"] == 1234
-assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 20
+assert d["snapshot_metadata"]["measurement_path_max_seconds"] == 0
 PY
 then
-  ok "default first-pass cap stays short for every serial path"
+  ok "default per-path clamp is 0 (unclamped; honors configured timeouts)"
 else
-  bad "default first-pass cap does not stay at 20s"
+  bad "default per-path clamp is not 0"
 fi
 
 RESERVE_BIN="$WORK/budget_reserve_bin"
@@ -430,27 +425,23 @@ shift
 printf '%s\t%s\n' "$(basename "$1")" "$limit" >> "${RESERVE_LOG:?}"
 RESERVE_TIMEOUT_SECONDS="$limit" "$@"
 SH
-cat > "$RESERVE_BIN/dua" <<'SH'
-#!/usr/bin/env bash
-exit 124
-SH
 cat > "$RESERVE_BIN/du" <<'SH'
 #!/usr/bin/env bash
 printf '4096\t%s\n' "${@: -1}"
 SH
-chmod +x "$RESERVE_BIN/timeout" "$RESERVE_BIN/dua" "$RESERVE_BIN/du"
+chmod +x "$RESERVE_BIN/timeout" "$RESERVE_BIN/du"
 
 RESERVE_OUT="$WORK/budget_reserve.json"
 if HOME="$BUDGET_HOME" PATH="$RESERVE_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   RESERVE_LOG="$RESERVE_LOG" DISK_MAGICIAN_CONFIG="$PARITY_CONFIG" \
-  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 timeout 10 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=20 DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 timeout 10 \
   "$SNAP_SCRIPT" --output "$RESERVE_OUT" >/dev/null 2>&1 && \
   python3 -c "import json; d=json.load(open('$RESERVE_OUT')); assert d['directories']['parity'] == 4096" 2>/dev/null && \
-  [[ "$(awk -F '\t' '$1 == "dua" {print $2; exit}' "$RESERVE_LOG")" == "14" ]] && \
-  [[ "$(awk -F '\t' '$1 == "du" {print $2; exit}' "$RESERVE_LOG")" -gt 0 ]]; then
-  ok "dua reserves 30% of the shared 20s path deadline for a real du fallback"
+  [[ "$(awk -F '\t' '$1 == "du" {print $2; exit}' "$RESERVE_LOG")" == "20" ]] && \
+  [[ "$(awk -F '\t' '$1 == "du" {n++} END{print n}' "$RESERVE_LOG")" == "1" ]]; then
+  ok "one strict du walk receives the full 20s path budget"
 else
-  bad "dua consumed the fallback reserve (calls=$(tr '\n' ';' < "$RESERVE_LOG"))"
+  bad "du budget or scan count wrong (calls=$(tr '\n' ';' < "$RESERVE_LOG"))"
 fi
 
 RETRY_HOME="$WORK/budget_retry_home"
@@ -467,7 +458,7 @@ limit="$1"
 shift
 FAKE_TIMEOUT_SECONDS="$limit" "$@"
 SH
-cat > "$RETRY_BIN/dua" <<'SH'
+cat > "$RETRY_BIN/du" <<'SH'
 #!/usr/bin/env bash
 path=""
 for arg in "$@"; do path="$arg"; done
@@ -481,17 +472,13 @@ case "$path" in
     count=$(( count + 1 ))
     printf '%s\n' "$count" > "$count_file"
     (( count > 1 && FAKE_TIMEOUT_SECONDS > 20 )) || exit 124
-    printf '%s b total\n' 2097152
+    printf '2048\t%s\n' "$path"
     ;;
-  */fast-sentinel) printf '%s b total\n' 1048576 ;;
+  */fast-sentinel) printf '1024\t%s\n' "$path" ;;
   *) exit 1 ;;
 esac
 SH
-cat > "$RETRY_BIN/du" <<'SH'
-#!/usr/bin/env bash
-exit 124
-SH
-chmod +x "$RETRY_BIN/timeout" "$RETRY_BIN/dua" "$RETRY_BIN/du"
+chmod +x "$RETRY_BIN/timeout" "$RETRY_BIN/du"
 
 RETRY_CONFIG="$WORK/budget_retry_config.json"
 cat > "$RETRY_CONFIG" <<JSON
@@ -506,6 +493,7 @@ RETRY_OUT="$WORK/budget_retry.json"
 if HOME="$RETRY_HOME" PATH="$RETRY_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   RETRY_LOG="$RETRY_LOG" RETRY_STATE="$RETRY_STATE" \
   DISK_MAGICIAN_CONFIG="$RETRY_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=1500 \
+  DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=20 \
   timeout 10 "$SNAP_SCRIPT" --output "$RETRY_OUT" >/dev/null 2>&1 && \
   python3 - "$RETRY_OUT" <<'PY' 2>/dev/null
 import json, sys
@@ -522,11 +510,11 @@ assert m["measurement_budget_exhausted"] is False
 PY
 then
   expected_retry_log=$(cat <<EOF
-14	$RETRY_HOME/slow-a
-14	$RETRY_HOME/slow-b
-14	$RETRY_HOME/retry-selected
-14	$RETRY_HOME/fast-sentinel
-63	$RETRY_HOME/retry-selected
+20	$RETRY_HOME/slow-a
+20	$RETRY_HOME/slow-b
+20	$RETRY_HOME/retry-selected
+20	$RETRY_HOME/fast-sentinel
+90	$RETRY_HOME/retry-selected
 EOF
 )
   if [[ "$(cat "$RETRY_LOG")" == "$expected_retry_log" ]]; then
@@ -553,10 +541,10 @@ HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
   >/dev/null 2>&1 || true
 per_path_elapsed=$(( $(date +%s) - start ))
 if [[ "$per_path_elapsed" -le 3 ]] && \
-  [[ "$(sed -n '1p' "$BUDGET_LOG")" == dua* ]] && \
-  [[ "$(sed -n '2p' "$BUDGET_LOG")" == du* ]] && \
+  [[ "$(sed -n '1p' "$BUDGET_LOG")" == du* ]] && \
+  [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
   python3 -c "import json; d=json.load(open('$PER_PATH_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
-  ok "dua failure falls back to du inside one shared 1s per-path deadline"
+  ok "one strict du scan stays within the 1s per-path deadline"
 else
   bad "per-path deadline failed (elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi
@@ -574,9 +562,9 @@ HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
 expired_elapsed=$(( $(date +%s) - start ))
 if [[ "$expired_elapsed" -le 3 ]] && \
   [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
-  [[ "$(head -1 "$BUDGET_LOG")" == dua* ]] && \
+  [[ "$(head -1 "$BUDGET_LOG")" == du* ]] && \
   python3 -c "import json; d=json.load(open('$EXPIRED_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
-  ok "expired shared deadline deterministically skips the du fallback"
+  ok "shared deadline never launches an additional scanner"
 else
   bad "expired deadline launched extra work (elapsed=${expired_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi

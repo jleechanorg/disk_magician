@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily sweeper: Online incremental vacuum & WAL checkpointing for ~/.codex/*.sqlite.
+
+  SAFETY (2026-10-03):
+  ~/.codex/ is on the hard never_delete list. Databases must NEVER be deleted.
+  This job runs online PRAGMA incremental_vacuum and PRAGMA wal_checkpoint(TRUNCATE)
+  to reclaim freelist pages from SQLite databases in auto_vacuum=2 mode (e.g. logs_2.sqlite
+  accumulating ~4.88 GiB of freelist bloat), without creating duplicate database files
+  or risking disk exhaustion.
+
+  Schedule: Daily (StartInterval 86400s) + RunAtLoad.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.disk-magician.codex-vacuum</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>codex-vacuum</string>
+    <string>--clean</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/disk-magician-codex-vacuum.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/disk-magician-codex-vacuum.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <!--
+      sqlite3 lives at /opt/homebrew/bin on Apple Silicon; macOS system PATH
+      may lack homebrew tools. Ensure PATH has brew and standard bin dirs.
+    -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

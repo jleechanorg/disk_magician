@@ -131,6 +131,24 @@ fi
 exec /usr/bin/getconf "$@"
 EOF
   chmod +x "$bin_dir/getconf"
+
+  if command -v timeout >/dev/null 2>&1; then
+    ln -sf "$(command -v timeout)" "$bin_dir/timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    ln -sf "$(command -v gtimeout)" "$bin_dir/timeout"
+  elif [[ -x /opt/homebrew/bin/timeout ]]; then
+    ln -sf /opt/homebrew/bin/timeout "$bin_dir/timeout"
+  elif [[ -x /usr/local/bin/timeout ]]; then
+    ln -sf /usr/local/bin/timeout "$bin_dir/timeout"
+  else
+    cat > "$bin_dir/timeout" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == --kill-after=* ]] && shift
+shift
+exec "$@"
+EOF
+    chmod +x "$bin_dir/timeout"
+  fi
 }
 
 make_du_probe() {

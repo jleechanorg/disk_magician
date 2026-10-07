@@ -89,8 +89,14 @@ GDU_FTS_ERROR_RE = re.compile(
 )
 
 
-def scan_user_home():
-    """Return the user home whose FDA-sensitive paths are in scanner scope."""
+def scan_user_home(explicit_home=None):
+    """Return the user home whose FDA-sensitive paths are in scanner scope.
+
+    An explicit value is validated independently of the environment so an
+    invalid CLI identity cannot fall back to a different configured home.
+    """
+    if explicit_home is not None:
+        return explicit_home if is_valid_scan_user_home(explicit_home) else None
     if os.geteuid() != 0:
         configured_home = os.path.expanduser("~")
         return configured_home if is_valid_scan_user_home(configured_home) else None
@@ -100,9 +106,9 @@ def scan_user_home():
     return configured_home
 
 
-def fda_probe_paths(root):
+def fda_probe_paths(root, explicit_home=None):
     """Return paths whose readability represents the scanner's actual scope."""
-    home = scan_user_home()
+    home = scan_user_home(explicit_home)
     paths = {}
     if home is not None:
         paths.update({
@@ -1072,7 +1078,9 @@ class FrontierScanner:
         self.warnings = []
         # Capture effective access from this scanner process before any
         # subprocess-backed inventory work begins. This is diagnostic only.
-        self.fda_probe_catalog = fda_probe_paths(self.root)
+        self.fda_probe_catalog = fda_probe_paths(
+            self.root, getattr(args, "scan_user_home", None)
+        )
         self.fda_preflight = fda_preflight(self.fda_probe_catalog)
         self.nodes_processed = 0
         self.nodes_lock = threading.Lock()
@@ -2100,6 +2108,12 @@ def build_report(
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", default=DEFAULT_ROOT)
+    p.add_argument(
+        "--scan-user-home",
+        default=None,
+        help="explicit canonical /Users/<name> home for FDA-sensitive probes; "
+             "invalid values fail closed without consulting the environment",
+    )
     p.add_argument("--resolve-root", action="store_true", default=False,
                     help="realpath() the --root before scanning (off by default: "
                          "the volume root itself is never a symlink in practice)")
@@ -2142,6 +2156,10 @@ def parse_args(argv):
     p.add_argument("--disk-used-kb-override", type=int, default=None,
                     help="test-only: force disk_used_kb to exercise residual clamping")
     args = p.parse_args(argv)
+    if args.scan_user_home is not None and not is_valid_scan_user_home(
+        args.scan_user_home
+    ):
+        p.error("--scan-user-home must be a canonical absolute /Users/<name> path")
     if args.shallow_enumeration_depth is None:
         args.shallow_enumeration_depth = (
             SHALLOW_ENUMERATION_MAX_DEPTH if args.root == DEFAULT_ROOT else 0

@@ -11,10 +11,12 @@
 # dropped below threshold, so idle fires are a single log line and never
 # touch the work lock below.
 #
-# Never runs anything beyond cleanup_tmp.sh (--clean [--large]) and
-# cleanup_colima.sh --clean — both scripts own their own safety semantics
-# (mtime thresholds, lsof gates, docker-prune semantics preserving in-use
-# containers/volumes). When triggered, passes --large to cleanup_tmp and sets
+# Never runs anything beyond cleanup_tmp.sh (--clean [--large]),
+# cleanup_colima.sh --clean, and cleanup_code_sign_clones.sh --clean — all
+# three scripts own their own safety semantics (mtime thresholds, lsof
+# gates, docker-prune semantics preserving in-use containers/volumes,
+# safety.local.json protected_live_paths). When triggered, passes --large
+# to cleanup_tmp and sets
 # LARGE_TMP_APPROVED=1 for the pressure path only (bead jleechan-nkzj), and
 # TMP_WORKTREES_APPROVED=1 for the same pressure-only path (roadmap
 # 2026-07-22-disk-regrowth-rootcause.md §3.2 — without it, every
@@ -28,6 +30,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
 # Size-budget scratch eviction (bead disk_magician-d45): passed through to
@@ -66,12 +69,14 @@ exit immediately (one log line, no work). Otherwise run, in order:
      LARGE_TMP_APPROVED=1; budget default ${SCRATCH_BUDGET_GB} GiB, env
      DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB, 0 disables)
   2. scripts/cleanup_colima.sh --clean (docker-prune semantics + fstrim)
+  3. scripts/cleanup_code_sign_clones.sh --clean (per-launch Chrome/Aside/
+     CodexBar code_sign_clone reclaim; CODE_SIGN_CLONES_APPROVED=1)
 each under a ${STEP_TIMEOUT}s timeout, logging free-GB before/after to
 ${LOG_FILE}.
 
 Options:
   --threshold-gb N  Free-space threshold in GB (default: ${THRESHOLD_GB})
-  --dry-run         Pass --dry-run (not --clean) to both sub-scripts instead —
+  --dry-run         Pass --dry-run (not --clean) to all 3 sub-scripts instead —
                      lets the triggered path be verified with zero deletions.
   -h, --help        Show this help
 EOF
@@ -104,7 +109,7 @@ free_gb() {
   if [[ "$OSTYPE" == "darwin"* ]] && df "/System/Volumes/Data" >/dev/null 2>&1; then
     check_path="/System/Volumes/Data"
   fi
-  df -kP "$check_path" 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}'
+  ( df -kP "$check_path" 2>/dev/null || true ) | awk 'NR==2{print int($4/1024/1024)}'
 }
 
 TIMEOUT_CMD=""
@@ -118,10 +123,17 @@ run_step_timeout() {
   fi
 }
 
-current_free_gb="$(free_gb)"
+current_free_gb="$(free_gb || echo "")"
 
 if [[ -z "$current_free_gb" ]]; then
   log "pressure_sweep: could not read free space — no-op (fail safe, no cleanup attempted)."
+  if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+    --outcome blocked_safety \
+    --reason "could not read free space" \
+    --safety '{"status": "blocked_safety", "reason": "could not read free space"}' \
+    --precondition '{"free_gb": null}'; then
+    log "ERROR: failed to record blocked_safety receipt"
+  fi
   exit 0
 fi
 
@@ -162,6 +174,18 @@ tmp_gb() {
   du -skx "/private/tmp" 2>/dev/null | awk '{print int($1/1024/1024)}'
 }
 
+# Bead disk_magician-mux: when the full colima step will not run, still do a
+# cheap in-VM fstrim (cleanup_colima.sh --trim-only owns the datadisk-size
+# gate, timeout, and never-restart contract). Failure is logged, never fatal.
+colima_trim_only() {
+  [[ -d "$HOME/.colima/_lima/_disks/colima" ]] || return 0
+  local flag="--clean"
+  [[ "$DRY_RUN" == true ]] && flag="--dry-run"
+  local rc=0
+  run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" --trim-only "$flag" >> "$LOG_FILE" 2>&1 || rc=$?
+  [[ $rc -eq 0 ]] || log "pressure_sweep: colima trim-only FAILED or timed out (rc=${rc}) — continuing."
+}
+
 SWEEP_MODE="full"
 below_threshold=$(awk -v f="$current_free_gb" -v t="$THRESHOLD_GB" 'BEGIN{print (f < t) ? "1" : "0"}')
 if [[ "$below_threshold" != "1" ]]; then
@@ -179,6 +203,14 @@ if [[ "$below_threshold" != "1" ]]; then
 
   if [[ "$over_colima_ceiling" != "1" && "$over_tmp_ceiling" != "1" ]]; then
     log "pressure_sweep: free ${current_free_gb} GB >= threshold ${THRESHOLD_GB} GB — no-op."
+    colima_trim_only
+    if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+      --outcome skipped_threshold \
+      --reason "free >= threshold and neither colima nor tmp ceiling exceeded" \
+      --safety '{"status": "not_applicable", "reason": "threshold_not_reached_no_mutation", "delegated": false}' \
+      --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}"; then
+      log "ERROR: failed to record skipped_threshold receipt"
+    fi
     exit 0
   fi
 
@@ -217,19 +249,37 @@ acquire_lock() {
 
 if ! acquire_lock; then
   log "pressure_sweep: lock held by another run (< ${LOCK_TTL_SEC}s old) — skipping this fire."
+  if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+    --outcome skipped_lock \
+    --reason "lock held by another run" \
+    --lock '{"held": true, "reason": "contention"}'; then
+    log "ERROR: failed to record skipped_lock receipt"
+  fi
   exit 0
 fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
+RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job pressure_sweep --trigger "$SWEEP_MODE" --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}") || {
+  log "ERROR: failed to record receipt begin"
+  exit 1
+}
+
 clean_flag="--clean"
 [[ "$DRY_RUN" == true ]] && clean_flag="--dry-run"
 
+STEP1_RC=0
+STEP2_RC=0
+STEP3_RC=0
+STEP1_TIMEOUT=false
+STEP2_TIMEOUT=false
+STEP3_TIMEOUT=false
+
 # ────────── STEP 1: cleanup_tmp.sh (--large when sweeping) ──────────
 if [[ "$SWEEP_MODE" == "colima-only" ]]; then
-  log "pressure_sweep: step 1/2 skipped (colima-only mode — host free space is healthy)."
+  log "pressure_sweep: step 1/3 skipped (colima-only mode — host free space is healthy)."
 else
 before_gb="$(free_gb)"
-log "pressure_sweep: step 1/2 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
+log "pressure_sweep: step 1/3 cleanup_tmp.sh ${clean_flag} --large — free before: ${before_gb} GB"
 pressure_active_hours="${LARGE_TMP_ACTIVE_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS:-4}}"
 pressure_archive_hours="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-${DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS:-4}}"
 tmp_step_extra_args=(--large)
@@ -243,26 +293,89 @@ else
 fi
 if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
-  log "pressure_sweep: step 1/2 cleanup_tmp.sh done — free after: ${after_gb} GB"
+  log "pressure_sweep: step 1/3 cleanup_tmp.sh done — free after: ${after_gb} GB"
 else
-  rc=$?
-  log "pressure_sweep: step 1/2 cleanup_tmp.sh FAILED or timed out (rc=${rc}) — continuing to step 2."
+  STEP1_RC=$?
+  if [[ $STEP1_RC -eq 124 || $STEP1_RC -eq 137 ]]; then
+    STEP1_TIMEOUT=true
+  fi
+  log "pressure_sweep: step 1/3 cleanup_tmp.sh FAILED or timed out (rc=${STEP1_RC}) — continuing to step 2."
 fi
 fi
 
 # ────────── STEP 2: cleanup_colima.sh ──────────
 if [[ "$SWEEP_MODE" == "tmp-only" ]]; then
-  log "pressure_sweep: step 2/2 skipped (tmp-only mode — Colima under ceiling)."
+  log "pressure_sweep: step 2/3 skipped (tmp-only mode — Colima under ceiling); running trim-only."
+  colima_trim_only
 else
 before_gb="$(free_gb)"
-log "pressure_sweep: step 2/2 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
+log "pressure_sweep: step 2/3 cleanup_colima.sh ${clean_flag} — free before: ${before_gb} GB"
 if run_step_timeout "$REPO_ROOT/scripts/cleanup_colima.sh" "$clean_flag" >> "$LOG_FILE" 2>&1; then
   after_gb="$(free_gb)"
-  log "pressure_sweep: step 2/2 cleanup_colima.sh done — free after: ${after_gb} GB"
+  log "pressure_sweep: step 2/3 cleanup_colima.sh done — free after: ${after_gb} GB"
 else
-  rc=$?
-  log "pressure_sweep: step 2/2 cleanup_colima.sh FAILED or timed out (rc=${rc})."
+  STEP2_RC=$?
+  if [[ $STEP2_RC -eq 124 || $STEP2_RC -eq 137 ]]; then
+    STEP2_TIMEOUT=true
+  fi
+  log "pressure_sweep: step 2/3 cleanup_colima.sh FAILED or timed out (rc=${STEP2_RC})."
 fi
+fi
+
+# ────────── STEP 3: cleanup_code_sign_clones.sh ──────────
+before_gb="$(free_gb)"
+log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh ${clean_flag} — free before: ${before_gb} GB"
+if [[ "$DRY_RUN" != true ]]; then
+  codesign_step=(env CODE_SIGN_CLONES_APPROVED=1 "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$clean_flag")
+else
+  codesign_step=("$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$clean_flag")
+fi
+if run_step_timeout "${codesign_step[@]}" >> "$LOG_FILE" 2>&1; then
+  after_gb="$(free_gb)"
+  log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh done — free after: ${after_gb} GB"
+else
+  STEP3_RC=$?
+  if [[ $STEP3_RC -eq 124 || $STEP3_RC -eq 137 ]]; then
+    STEP3_TIMEOUT=true
+  fi
+  log "pressure_sweep: step 3/3 cleanup_code_sign_clones.sh FAILED or timed out (rc=${STEP3_RC})."
+fi
+
+FINAL_FREE_GB="$(free_gb)"
+OUTCOME="success"
+REASON=""
+
+STEP_STATUS="STEP1_RC=${STEP1_RC}, STEP1_TIMEOUT=${STEP1_TIMEOUT}, STEP2_RC=${STEP2_RC}, STEP2_TIMEOUT=${STEP2_TIMEOUT}, STEP3_RC=${STEP3_RC}, STEP3_TIMEOUT=${STEP3_TIMEOUT}"
+
+if [[ "$STEP1_TIMEOUT" == true || "$STEP2_TIMEOUT" == true || "$STEP3_TIMEOUT" == true ]]; then
+  OUTCOME="timeout"
+  REASON="step execution timed out (${STEP_STATUS})"
+elif [[ $STEP1_RC -ne 0 || $STEP2_RC -ne 0 || $STEP3_RC -ne 0 ]]; then
+  OUTCOME="error"
+  REASON="step execution failed (${STEP_STATUS})"
+elif [[ "$DRY_RUN" == true ]]; then
+  OUTCOME="success_noop"
+  REASON="dry-run sweep completed without deletions (${STEP_STATUS})"
+else
+  OUTCOME="success"
+  REASON="sweep completed (${STEP_STATUS})"
+fi
+
+POSTCONDITION="{\"free_gb_before\": ${current_free_gb:-null}, \"free_gb_after\": ${FINAL_FREE_GB:-null}, \"freed_bytes\": null}"
+if [[ "$DRY_RUN" == true ]]; then
+  SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
+else
+  SAFETY="{\"status\": \"delegated\", \"reason\": \"delegated to cleanup_tmp, cleanup_colima, and cleanup_code_sign_clones (${STEP_STATUS})\", \"delegated\": true, \"steps\": {\"step1_rc\": ${STEP1_RC}, \"step1_timeout\": ${STEP1_TIMEOUT}, \"step2_rc\": ${STEP2_RC}, \"step2_timeout\": ${STEP2_TIMEOUT}, \"step3_rc\": ${STEP3_RC}, \"step3_timeout\": ${STEP3_TIMEOUT}}}"
+fi
+
+if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+  --run-id "$RECEIPT_RUN_ID" \
+  --outcome "$OUTCOME" \
+  --reason "$REASON" \
+  --safety "$SAFETY" \
+  --postcondition "$POSTCONDITION"; then
+  log "ERROR: failed to record receipt finish"
+  exit 1
 fi
 
 log "pressure_sweep: sweep complete."

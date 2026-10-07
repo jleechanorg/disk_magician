@@ -33,7 +33,19 @@ echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
 exit 0
 MOCK
 
-chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh"
+cat > "$MOCK_BIN/cleanup_code_sign_clones.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "cleanup_code_sign_clones $* CODE_SIGN_CLONES_APPROVED=${CODE_SIGN_CLONES_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+case "${CODESIGN_MODE:-success}" in
+  fail) exit 7 ;;
+  timeout) exit 124 ;;
+esac
+exit 0
+MOCK
+
+chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh" "$MOCK_BIN/cleanup_code_sign_clones.sh"
+cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
+chmod +x "$MOCK_BIN/job_receipt.py"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
@@ -51,8 +63,9 @@ run_pressure() {
     DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
     DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
+    CODESIGN_MODE="${CODESIGN_MODE:-success}" \
     INVOCATION_LOG="$INVOCATION_LOG" \
-    bash "$SCRIPT" "$@"
+    /bin/bash "$SCRIPT" "$@"
 }
 
 PASS=0
@@ -80,6 +93,19 @@ assert_not_contains() {
   fi
 }
 
+assert_receipt_field() {
+  local name="$1" json_file="$2" py_expr="$3" expected="$4"
+  local actual
+  actual=$(python3 -c "import json, sys; d=json.load(open('$json_file')); print($py_expr)" 2>/dev/null || echo "__ERR__")
+  if [[ "$actual" == "$expected" ]]; then
+    echo "  PASS  $name"
+    PASS=$(( PASS + 1 ))
+  else
+    echo "  FAIL  $name (expected: $expected, got: $actual)"
+    FAIL=$(( FAIL + 1 ))
+  fi
+}
+
 echo "Test 1: no-op when free >= threshold"
 : > "$INVOCATION_LOG"
 : > "$LOG_FILE"
@@ -88,6 +114,8 @@ LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs no-op line" "free 50 GB >= threshold" "$LOG_CONTENT"
 assert_not_contains "skips cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
+assert_receipt_field "Test 1 receipt skipped_threshold" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_threshold"
+assert_receipt_field "Test 1 last_skipped populated" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_skipped', {}).get('outcome')" "skipped_threshold"
 
 echo "Test 2: triggered clean path passes --large, LARGE_TMP_APPROVED=1, and 4h pressure retention"
 : > "$INVOCATION_LOG"
@@ -99,6 +127,10 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs triggered sweep" "sweep triggered (dry_run=false)" "$LOG_CONTENT"
 assert_contains "cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima --clean" "cleanup_colima --clean" "$INVOCATIONS"
+assert_contains "cleanup_code_sign_clones --clean" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
+assert_receipt_field "Test 2 receipt outcome success" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success"
+assert_receipt_field "Test 2 receipt freed_bytes null" "$STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "None"
+assert_receipt_field "Test 2 safety delegated" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
 
 echo "Test 2b: custom pressure retention overrides are passed to cleanup_tmp"
 : > "$INVOCATION_LOG"
@@ -114,7 +146,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_TMP_ACTIVE_HOURS=2 \
   DISK_MAGICIAN_PRESSURE_TMP_ARCHIVE_RETENTION_HOURS=6 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp overrides honored" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1 ACTIVE_HOURS=2 ARCHIVE_HOURS=6" "$INVOCATIONS"
 
@@ -126,6 +158,10 @@ run_pressure 8 --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run --large" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0 ACTIVE_HOURS=4 ARCHIVE_HOURS=4" "$INVOCATIONS"
 assert_contains "cleanup_colima dry-run" "cleanup_colima --dry-run" "$INVOCATIONS"
+assert_contains "cleanup_code_sign_clones dry-run" "cleanup_code_sign_clones --dry-run CODE_SIGN_CLONES_APPROVED=0" "$INVOCATIONS"
+assert_receipt_field "Test 3 receipt outcome success_noop" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success_noop"
+assert_receipt_field "Test 3 safety no_mutation" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "no_mutation"
+
 
 echo "Test 4: healthy free space + Colima over ceiling triggers colima-only sweep"
 : > "$INVOCATION_LOG"
@@ -140,13 +176,14 @@ env -i \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=40 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs colima-only trigger" "Colima 40 GB >= ceiling 35 GB — colima-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-1 skip" "step 1/2 skipped (colima-only mode" "$LOG_CONTENT"
+assert_contains "logs step-1 skip" "step 1/3 skipped (colima-only mode" "$LOG_CONTENT"
 assert_not_contains "does not run cleanup_tmp" "cleanup_tmp" "$INVOCATIONS"
 assert_contains "runs cleanup_colima" "cleanup_colima --clean" "$INVOCATIONS"
+assert_contains "runs cleanup_code_sign_clones" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
 
 echo "Test 5: healthy free space + Colima under ceiling stays a no-op"
 : > "$INVOCATION_LOG"
@@ -161,7 +198,7 @@ env -i \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=30 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
@@ -181,7 +218,7 @@ env -i \
   DISK_MAGICIAN_COLIMA_CEILING_GB=0 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "ceiling=0 logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
@@ -200,13 +237,14 @@ env -i \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=35 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs tmp-only trigger" "/private/tmp 35 GB >= ceiling 30 GB — tmp-only sweep triggered" "$LOG_CONTENT"
-assert_contains "logs step-2 skip" "step 2/2 skipped (tmp-only mode" "$LOG_CONTENT"
+assert_contains "logs step-2 skip" "step 2/3 skipped (tmp-only mode" "$LOG_CONTENT"
 assert_contains "runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_not_contains "does not run cleanup_colima" "cleanup_colima" "$INVOCATIONS"
+assert_contains "runs cleanup_code_sign_clones in tmp-only mode" "cleanup_code_sign_clones --clean CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
 
 echo "Test 8: healthy free space + tmp under ceiling stays a no-op"
 : > "$INVOCATION_LOG"
@@ -221,7 +259,7 @@ env -i \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=10 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
@@ -241,7 +279,7 @@ env -i \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=999 \
   DISK_MAGICIAN_TMP_CEILING_GB=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "tmp ceiling=0 logs plain no-op" "free 50 GB >= threshold" "$LOG_CONTENT"
@@ -260,7 +298,7 @@ env -i \
   DISK_MAGICIAN_COLIMA_GB_OVERRIDE=40 \
   DISK_MAGICIAN_TMP_GB_OVERRIDE=35 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 LOG_CONTENT="$(cat "$LOG_FILE")"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "logs full-sweep trigger" "full sweep triggered" "$LOG_CONTENT"
@@ -298,7 +336,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
   DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=0 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "budget-gb=0 still runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_not_contains "budget-gb=0 omits --budget-gb from the invocation" " --budget-gb" "$INVOCATIONS"
@@ -318,7 +356,7 @@ env -i \
   DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "unconfigured default still runs cleanup_tmp --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_not_contains "unconfigured default omits --budget-gb (opt-in only)" " --budget-gb" "$INVOCATIONS"
@@ -336,9 +374,103 @@ env -i \
   DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=5 \
   DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES=90 \
   INVOCATION_LOG="$INVOCATION_LOG" \
-  bash "$SCRIPT"
+  /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
+echo "Test 13b: failed third stage cannot publish success"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+CODESIGN_MODE=fail run_pressure 8
+assert_receipt_field "Test 13b third-stage failure outcome is error" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+assert_receipt_field "Test 13b records STEP3_RC" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_RC=7' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 13b delegated safety records STEP3_RC" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_RC=7' in d.get('last_terminal', {}).get('safety', {}).get('reason', '')" "True"
+
+echo "Test 13c: timed-out third stage cannot publish success"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+CODESIGN_MODE=timeout run_pressure 8
+assert_receipt_field "Test 13c third-stage timeout outcome is timeout" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+assert_receipt_field "Test 13c records STEP3_TIMEOUT" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_TIMEOUT=true' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 13c delegated safety records STEP3_TIMEOUT" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP3_TIMEOUT=true' in d.get('last_terminal', {}).get('safety', {}).get('reason', '')" "True"
+
+echo "Test 14: lock contention records skipped_lock receipt"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+mkdir -p "$STATE_DIR/pressure_sweep.lock"
+date -u +%s > "$STATE_DIR/pressure_sweep.lock/acquired_at"
+run_pressure 8
+assert_receipt_field "Test 14 skipped_lock receipt" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+
+echo "Test 15: unreadable free space records blocked_safety receipt"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+FAKE_BIN="$TMP_ROOT/fake_bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/df" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$FAKE_BIN/df"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="$FAKE_BIN:/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  /bin/bash "$SCRIPT"
+rm -rf "$FAKE_BIN"
+assert_receipt_field "Test 15 blocked_safety receipt" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
+assert_receipt_field "Test 15 safety reason" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('reason')" "could not read free space"
+
+echo "Test 16: step failure records outcome error even when shell exits 0"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
+#!/bin/bash
+exit 1
+MOCK
+chmod +x "$MOCK_BIN/cleanup_tmp.sh"
+run_pressure 8
+assert_receipt_field "Test 16 outcome error receipt" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
+#!/bin/bash
+echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
+exit 0
+MOCK
+chmod +x "$MOCK_BIN/cleanup_tmp.sh"
+
+echo "Test 17: healthy no-op path runs cleanup_colima --trim-only when a Colima datadisk exists (bead mux)"
+mkdir -p "$TMP_ROOT/home/.colima/_lima/_disks/colima"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+rc=0; run_pressure 50 || rc=$?
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "no-op path runs trim-only" "cleanup_colima --trim-only --clean" "$INVOCATIONS"
+assert_not_contains "no-op path never runs full colima clean" "cleanup_colima --clean" "$INVOCATIONS"
+assert_receipt_field "Test 17 receipt still skipped_threshold" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_threshold"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 17 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 17 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+
+echo "Test 18: trim-only failure is logged and the no-op sweep still exits 0"
+cat > "$MOCK_BIN/cleanup_colima.sh" <<'MOCK'
+#!/bin/bash
+echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
+exit 3
+MOCK
+chmod +x "$MOCK_BIN/cleanup_colima.sh"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rc=0; run_pressure 50 || rc=$?
+assert_contains "trim-only failure logged" "trim-only FAILED or timed out (rc=3)" "$(cat "$LOG_FILE")"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 18 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 18 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+rm -rf "$TMP_ROOT/home/.colima"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

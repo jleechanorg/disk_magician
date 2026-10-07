@@ -8,12 +8,16 @@ set -euo pipefail
 # A snapshot writer may never invoke another snapshot writer.  The launchd
 # orchestrator is the sole owner of this process tree; fail closed if its
 # environment re-enters this script before another expensive scan starts.
+# The orchestrator's internal `--measure-one` workers are the one sanctioned
+# re-entry: they measure a single path and never write a snapshot.
+MEASURE_ONE=false
+[[ "${1:-}" == "--measure-one" ]] && MEASURE_ONE=true
 SNAPSHOT_REENTRY_DEPTH="${DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH:-0}"
 if ! [[ "$SNAPSHOT_REENTRY_DEPTH" =~ ^[0-9]+$ ]]; then
   echo "Error: invalid DISK_MAGICIAN_SNAPSHOT_REENTRY_DEPTH." >&2
   exit 75
 fi
-if (( SNAPSHOT_REENTRY_DEPTH > 0 )); then
+if (( SNAPSHOT_REENTRY_DEPTH > 0 )) && [[ "$MEASURE_ONE" != true ]]; then
   echo "Error: nested snapshot invocation rejected." >&2
   exit 75
 fi
@@ -25,7 +29,7 @@ DISCOVER=false
 DISCOVER_JSON=false
 DU_TIMEOUT=30
 SNAPSHOT_BUDGET_SECONDS="${DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS:-1500}"
-MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-20}"
+MEASURE_PATH_MAX_SECONDS="${DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS:-}"
 LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS:-120}"
 # Track how many measured paths returned a real value (vs null/timeout)
 # so we can surface a measurement_status sentinel (complete | partial |
@@ -33,6 +37,11 @@ LIBRARY_FRONTIER_BUDGET_SECONDS="${DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS
 MEASURED_OK=0
 MEASURED_TOTAL=0
 
+if [[ "$MEASURE_ONE" == true ]]; then
+  [[ $# -eq 5 ]] || { echo "Usage: $0 --measure-one KEY PATH TIMEOUT OUTPUT_FILE" >&2; exit 2; }
+  M1_KEY="$2"; M1_PATH="$3"; M1_TIMEOUT="$4"; M1_OUT="$5"
+  set --
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output)   OUTPUT="$2"; shift 2 ;;
@@ -49,6 +58,17 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/snapshot_budget.sh
+source "$SCRIPT_DIR/lib/snapshot_budget.sh"
+# Per-path clamp: env > user config snapshot_measure.path_max_seconds > 0
+# (0 = unclamped: honor each path's configured timeout).
+if [[ -z "$MEASURE_PATH_MAX_SECONDS" ]]; then
+  MEASURE_PATH_MAX_SECONDS="$(snapshot_measure_setting path_max_seconds)"
+  MEASURE_PATH_MAX_SECONDS="${MEASURE_PATH_MAX_SECONDS:-0}"
+fi
+SNAPSHOT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+CARRY_STATE_FILE="$SNAPSHOT_STATE_DIR/last_good_measurements.json"
+export DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS"
 
 # Config resolution order:
 #   1. DISK_MAGICIAN_CONFIG env var (caller-supplied path, e.g. user_scope's
@@ -81,31 +101,24 @@ elif command -v gtimeout &>/dev/null; then
   TIMEOUT_CMD="gtimeout"
 fi
 
-DUA_CMD=""
-if command -v dua &>/dev/null; then
-  DUA_CMD="dua"
-fi
+# --measure-one sets this to a per-attempt sidecar. Keeping it separate from
+# numeric stdout preserves the existing kb-or-empty contract for all callers.
+MEASURE_DIAGNOSTIC_FILE=""
+record_measure_diagnostic() {
+  local reason="$1" backend="${2:-}" backend_exit="${3:-}" stderr_text="${4:-}"
+  [[ -n "${MEASURE_DIAGNOSTIC_FILE:-}" ]] || return 0
+  stderr_text=$(printf '%s' "$stderr_text" | tr '\r\n' '  ' | cut -c1-256)
+  {
+    printf 'reason=%s\n' "$reason"
+    printf 'backend=%s\n' "$backend"
+    printf 'backend_exit=%s\n' "$backend_exit"
+    printf 'stderr=%s\n' "$stderr_text"
+  } > "$MEASURE_DIAGNOSTIC_FILE"
+}
 
 remaining_measurement_seconds() {
   local remaining=$(( MEASUREMENT_DEADLINE_EPOCH - $(date +%s) ))
   (( remaining > 0 )) && echo "$remaining" || echo 0
-}
-
-# dua reports allocated bytes by default (the same quantity as du -sk) and is
-# parallel-by-default. Its ANSI reset can leave a trailing blank line, so take
-# the last numeric row rather than the last physical line.
-dua_size_kb() {
-  local path="$1"
-  local to="$2"
-  [[ -n "$DUA_CMD" && -n "$TIMEOUT_CMD" && "$to" -gt 0 ]] || { echo ""; return; }
-  local output bytes
-  if ! output=$("$TIMEOUT_CMD" "$to" "$DUA_CMD" aggregate --format bytes "$path" 2>/dev/null); then
-    echo ""
-    return
-  fi
-  bytes=$(printf '%s\n' "$output" | sed -E 's/\x1b\[[0-9;]*m//g' \
-    | awk '$1 ~ /^[0-9]+$/ { value=$1 } END { if (value != "") print value }')
-  [[ "$bytes" =~ ^[0-9]+$ ]] && echo $(( (bytes + 1023) / 1024 )) || echo ""
 }
 
 dir_size_kb() {
@@ -118,39 +131,54 @@ dir_size_kb() {
   path=$(eval echo "$path")
 
   if [[ ! -e "$path" ]]; then
+    record_measure_diagnostic success filesystem 0 ""
     echo 0
     return
   fi
 
-  local remaining path_budget path_deadline dua_budget result fallback_budget
+  local remaining path_budget result=""
   remaining=$(remaining_measurement_seconds)
-  (( remaining > 0 )) || { echo ""; return; }
+  if (( remaining <= 0 )); then
+    record_measure_diagnostic orchestrator_deadline "" "" "measurement deadline exhausted"
+    echo ""
+    return
+  fi
+  if [[ -z "$TIMEOUT_CMD" ]]; then
+    record_measure_diagnostic backend_unavailable du "" "timeout command unavailable"
+    echo ""
+    return
+  fi
   [[ "$to" =~ ^[0-9]+$ && "$to" -gt 0 ]] || to="$DU_TIMEOUT"
-  [[ "$max_seconds" =~ ^[0-9]+$ && "$max_seconds" -gt 0 ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
-  path_budget="$to"
-  (( path_budget > max_seconds )) && path_budget="$max_seconds"
+  [[ "$max_seconds" =~ ^[0-9]+$ ]] || max_seconds="$MEASURE_PATH_MAX_SECONDS"
+  : "${LOAD_FACTOR:=$(load_factor)}"
+  path_budget=$(scaled_path_budget "$to" "$LOAD_FACTOR")
+  (( max_seconds > 0 && path_budget > max_seconds )) && path_budget="$max_seconds"
   (( path_budget > remaining )) && path_budget="$remaining"
-  path_deadline=$(( $(date +%s) + path_budget ))
-
-  # Do not let the primary scanner consume the entire shared deadline.  A
-  # bounded du fallback is valuable when dua stalls on a busy filesystem.
-  dua_budget=$(( path_budget * 70 / 100 ))
-  (( dua_budget < 1 )) && dua_budget=1
-  (( dua_budget > path_budget )) && dua_budget="$path_budget"
-  result=$(dua_size_kb "$path" "$dua_budget")
-
-  if [[ -z "$result" ]]; then
-    fallback_budget=$(( path_deadline - $(date +%s) ))
-    remaining=$(remaining_measurement_seconds)
-    (( fallback_budget > remaining )) && fallback_budget="$remaining"
-    if [[ -n "$TIMEOUT_CMD" && "$fallback_budget" -gt 0 ]]; then
-      result=$("$TIMEOUT_CMD" "$fallback_budget" du -sk "$path" 2>/dev/null \
-        | awk '{print $1+0}' || true)
+  # A numeric dua result can omit unreadable children while exiting zero.
+  # Use one bounded du walk whose nonzero exit rejects partial totals.
+  local du_stdout du_stderr du_rc du_value
+  du_stdout=$(mktemp -t disk_magician_du.XXXXXX)
+  du_stderr=$(mktemp -t disk_magician_du_err.XXXXXX)
+  if "$TIMEOUT_CMD" "$path_budget" du -sk "$path" >"$du_stdout" 2>"$du_stderr"; then
+    du_value=$(awk 'BEGIN{n=0; ok=1} /^[0-9]+[[:space:]]/ {n++; v=$1; next} NF {ok=0} END{if(ok && n==1) print v}' "$du_stdout")
+    if [[ "$du_value" =~ ^[0-9]+$ ]]; then
+      result="$du_value"
+      record_measure_diagnostic success du 0 ""
+    else
+      record_measure_diagnostic backend_error du 0 "malformed du output"
+    fi
+  else
+    du_rc=$?
+    if [[ "$du_rc" -eq 124 ]]; then
+      record_measure_diagnostic backend_timeout du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
+    else
+      record_measure_diagnostic backend_error du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
     fi
   fi
+  rm -f "$du_stdout" "$du_stderr"
 
   if [[ -z "$result" ]]; then
-    # Both bounded attempts failed/timed out -> surface as null (empty string).
+    # An unsuccessful measurement is null (empty string), never zero.
     echo ""
     return
   fi
@@ -173,6 +201,55 @@ glob_size_kb() {
   done
   echo "$total"
 }
+
+# Shared serialization for standalone workers and serial snapshot attempts.
+write_measurement_result() {
+  python3 - "$@" <<'PY'
+import json, sys
+
+out, key, path, kb_text, elapsed, diagnostic_file, attempt = sys.argv[1:]
+diagnostic = {}
+try:
+    with open(diagnostic_file) as f:
+        for line in f:
+            name, _, value = line.rstrip("\n").partition("=")
+            diagnostic[name] = value
+except OSError:
+    pass
+kb = int(kb_text) if kb_text.isdigit() else None
+reason = "success" if kb is not None else (diagnostic.get("reason") or "missing_diagnostic")
+data = {"key": key, "kb": kb, "path": path, "elapsed_s": int(elapsed),
+        "timed_out": reason == "backend_timeout", "reason": reason, "attempt": int(attempt)}
+for name in ("backend", "stderr"):
+    if diagnostic.get(name):
+        data[name] = diagnostic[name][:256]
+if diagnostic.get("backend_exit", "").lstrip("-").isdigit():
+    data["backend_exit"] = int(diagnostic["backend_exit"])
+with open(out, "w") as f:
+    json.dump(data, f, separators=(",", ":"))
+PY
+}
+
+# Internal worker mode for snapshot_measure.py: one dir_size_kb call, one JSON file.
+if [[ "$MEASURE_ONE" == true ]]; then
+  # set -u safe: the orchestrator passes its deadline; standalone use gets the key's own timeout.
+  MEASUREMENT_DEADLINE_EPOCH="${DISK_MAGICIAN_WORKER_DEADLINE_EPOCH:-$(( $(date +%s) + M1_TIMEOUT ))}"
+  # GNU timeout otherwise moves its child into a new process group, which the
+  # orchestrator's tree-kill must not depend on.
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    TIMEOUT_REAL="$(command -v "$TIMEOUT_CMD")"
+    timeout_fg() { "$TIMEOUT_REAL" --foreground "$@"; }
+    TIMEOUT_CMD=timeout_fg
+  fi
+  m1_start=$(date +%s)
+  M1_DIAGNOSTIC_FILE="${M1_OUT}.diag"
+  export MEASURE_DIAGNOSTIC_FILE="$M1_DIAGNOSTIC_FILE"
+  m1_kb=$(dir_size_kb "$M1_PATH" "$M1_TIMEOUT")
+  m1_elapsed=$(( $(date +%s) - m1_start ))
+  write_measurement_result "$M1_OUT" "$M1_KEY" "$M1_PATH" "$m1_kb" "$m1_elapsed" "$M1_DIAGNOSTIC_FILE" 1
+  rm -f "$M1_DIAGNOSTIC_FILE"
+  exit 0
+fi
 
 get_disk_stats() {
   local target="/"
@@ -549,8 +626,8 @@ if [[ ! "$SNAPSHOT_BUDGET_SECONDS" =~ ^[0-9]+$ || "$SNAPSHOT_BUDGET_SECONDS" -le
   echo "Error: DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS must be a positive integer." >&2
   exit 2
 fi
-if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -le 0 ]]; then
-  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a positive integer." >&2
+if [[ ! "$MEASURE_PATH_MAX_SECONDS" =~ ^[0-9]+$ || "$MEASURE_PATH_MAX_SECONDS" -lt 0 ]]; then
+  echo "Error: DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS must be a non-negative integer (0 = unclamped)." >&2
   exit 2
 fi
 if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUDGET_SECONDS" -le 0 ]]; then
@@ -558,7 +635,12 @@ if [[ ! "$LIBRARY_FRONTIER_BUDGET_SECONDS" =~ ^[0-9]+$ || "$LIBRARY_FRONTIER_BUD
   exit 2
 fi
 MEASUREMENT_STARTED_EPOCH=$(date +%s)
-MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + SNAPSHOT_BUDGET_SECONDS ))
+# Hard measurement deadline (spec): start + min(budget, 860*scale). The outer
+# SNAPSHOT_BUDGET_SECONDS (1500) stays the reported budget and safety net.
+PHASE_SCALE="${DISK_MAGICIAN_PHASE_SCALE:-1}"
+MEASUREMENT_WINDOW=$(awk -v b="$SNAPSHOT_BUDGET_SECONDS" -v s="$PHASE_SCALE" 'BEGIN{ w = 860 * s; if (b < w) w = b; printf "%d", (w < 1 ? 1 : w) }')
+MEASUREMENT_DEADLINE_EPOCH=$(( MEASUREMENT_STARTED_EPOCH + MEASUREMENT_WINDOW ))
+ORCHESTRATOR_DEADLINE_EPOCH=$(awk -v st="$MEASUREMENT_STARTED_EPOCH" -v s="$PHASE_SCALE" -v md="$MEASUREMENT_DEADLINE_EPOCH" 'BEGIN{ d = st + 640 * s; if (md < d) d = md; printf "%d", d }')
 disk_total_gb=$(awk "BEGIN{printf \"%.0f\", $disk_total_kb / 1024 / 1024}")
 disk_used_gb=$(awk "BEGIN{printf \"%.0f\", $disk_used_kb / 1024 / 1024}")
 disk_free_gb=$(awk "BEGIN{printf \"%.0f\", $disk_free_kb / 1024 / 1024}")
@@ -584,8 +666,25 @@ timeout_keys=()
 DIRS_TEMP_FILE=$(mktemp -t disk_magician_dirs.XXXXXX)
 RETRY_TEMP_FILE=$(mktemp -t disk_magician_retries.XXXXXX)
 LIBRARY_FRONTIER_FILE=$(mktemp -t disk_magician_library_frontier.XXXXXX)
-_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE"; }
+CARRY_FRESH_FILE=$(mktemp -t disk_magician_carry_fresh.XXXXXX)
+SERIAL_ATTEMPTS_FILE=$(mktemp -t disk_magician_serial_attempts.XXXXXX)
+SERIAL_RESULT_FILE=$(mktemp -t disk_magician_serial_result.XXXXXX)
+_cleanup_dirs_temp() { rm -f "$DIRS_TEMP_FILE" "$RETRY_TEMP_FILE" "$LIBRARY_FRONTIER_FILE" "$CARRY_FRESH_FILE" "$SERIAL_ATTEMPTS_FILE" "$SERIAL_RESULT_FILE" "${SERIAL_RESULT_FILE}.diag"; }
 trap _cleanup_dirs_temp EXIT
+
+measure_serial() {
+  local key="$1" path="$2" timeout="$3" attempt="$4" max_seconds="${5:-$MEASURE_PATH_MAX_SECONDS}"
+  local started elapsed size
+  started=$(date +%s)
+  MEASURE_DIAGNOSTIC_FILE="${SERIAL_RESULT_FILE}.diag"
+  : > "$MEASURE_DIAGNOSTIC_FILE"
+  size=$(dir_size_kb "$path" "$timeout" "$max_seconds")
+  elapsed=$(( $(date +%s) - started ))
+  write_measurement_result "$SERIAL_RESULT_FILE" "$key" "$path" "$size" "$elapsed" "$MEASURE_DIAGNOSTIC_FILE" "$attempt"
+  cat "$SERIAL_RESULT_FILE" >> "$SERIAL_ATTEMPTS_FILE"
+  printf '\n' >> "$SERIAL_ATTEMPTS_FILE"
+  printf '%s' "$size"
+}
 
 # add_entry records a measured (or timed-out) path under `key`. `src_path` is
 # the literal config path/pattern that produced this measurement — carried
@@ -608,12 +707,45 @@ add_entry() {
   printf "%s\t%s\t%s\n" "$key" "$val" "$src_path" >> "$DIRS_TEMP_FILE"
 }
 
-# Run dir checks
+# Run dir checks: bounded parallel orchestrator by default, the original serial
+# loop when workers=0 or the orchestrator fails (measure_mode records which).
+MEASURE_MODE=serial
+MEASURE_WORKERS_USED=0
+MEASUREMENT_FAILURES_JSON='[]'
+MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
+if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
+  ORCH_SCRIPT="${DISK_MAGICIAN_MEASURE_ORCHESTRATOR:-$SCRIPT_DIR/snapshot_measure.py}"
+  ORCH_OUT=$(mktemp -t disk_magician_orch.XXXXXX)
+  ORCH_META=$(mktemp -t disk_magician_orch_meta.XXXXXX)
+  ORCH_DIR=$(mktemp -d -t disk_magician_orch_dir.XXXXXX)
+  if python3 "$ORCH_SCRIPT" --config "$CONFIG_FILE" --snapshot-script "$SCRIPT_DIR/disk_snapshot.sh" \
+       --workers "$MEASURE_WORKERS_SETTING" --deadline-epoch "$ORCHESTRATOR_DEADLINE_EPOCH" \
+       --tmpdir "$ORCH_DIR" --meta-out "$ORCH_META" --carry-state "$CARRY_STATE_FILE" > "$ORCH_OUT" 2>/dev/null; then
+    MEASURE_MODE=parallel
+    MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
+    MEASUREMENT_FAILURES_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('measurement_failures', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
+    while IFS= read -r orch_line; do
+      orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
+      orch_size="${orch_rest%%$'\t'*}"; orch_rest="${orch_rest#*$'\t'}"
+      orch_path="${orch_rest%%$'\t'*}"
+      add_entry "$orch_key" "$orch_size" "$orch_path"
+    done < "$ORCH_OUT"
+  else
+    MEASURE_MODE=serial_fallback
+    MEASUREMENT_FAILURES_JSON='[{"key":"__orchestrator__","status":"failed","attempts":[{"attempt":0,"reason":"orchestrator_launch_failure","elapsed_s":0.0}]}]'
+  fi
+  rm -rf "$ORCH_OUT" "$ORCH_META" "$ORCH_DIR"
+fi
+if [[ "$MEASURE_MODE" != "parallel" ]]; then
 while IFS=$'\t' read -r key path timeout retry_timeout; do
-  size=$(dir_size_kb "$path" "$timeout")
-  if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && \
-        "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ]]; then
+  size=$(measure_serial "$key" "$path" "$timeout" 1)
+  if [[ -z "$size" && "$retry_timeout" =~ ^[0-9]+$ && "$retry_timeout" -gt 0 && \
+        ( "$MEASURE_PATH_MAX_SECONDS" -eq 0 || "$retry_timeout" -gt "$MEASURE_PATH_MAX_SECONDS" ) ]]; then
     printf "%s\t%s\t%s\n" "$key" "$path" "$retry_timeout" >> "$RETRY_TEMP_FILE"
+  elif [[ -z "$size" && "$MEASURE_PATH_MAX_SECONDS" -eq 0 ]]; then
+    # Unclamped mode: every timed-out key gets one serial retry (own configured
+    # timeout) after all keys have had a first pass; the global deadline still wins.
+    printf "%s\t%s\t%s\n" "$key" "$path" "$timeout" >> "$RETRY_TEMP_FILE"
   else
     add_entry "$key" "$size" "$path"
   fi
@@ -624,38 +756,30 @@ for item in data.get("monitored_dirs", []):
     print(f"{item['key']}\t{item['path']}\t{item.get('timeout', 30)}\t{item.get('retry_timeout', 0)}")
 PY
 )
-
-# Run file glob checks
-while IFS=$'\t' read -r key pattern; do
-  size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size" "$pattern"
-done < <(python3 - "$CONFIG_FILE" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-for item in data.get("monitored_file_globs", []):
-    print(f"{item['key']}\t{item['pattern']}")
-PY
-)
-
-# Run glob checks
-while IFS=$'\t' read -r key pattern; do
-  size=$(glob_size_kb "$pattern")
-  add_entry "$key" "$size" "$pattern"
-done < <(python3 - "$CONFIG_FILE" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-for item in data.get("monitored_globs", []):
-    print(f"{item['key']}\t{item['pattern']}")
-PY
-)
+fi
 
 # Retry only explicitly selected slow directories after every configured entry
 # has received the short first pass. The existing global deadline remains the
 # final authority, so retries cannot extend the snapshot budget.
 while IFS=$'\t' read -r key path retry_timeout; do
-  size=$(dir_size_kb "$path" "$retry_timeout" "$retry_timeout")
+  size=$(measure_serial "$key" "$path" "$retry_timeout" 2 "$retry_timeout")
   add_entry "$key" "$size" "$path"
 done < "$RETRY_TEMP_FILE"
+
+if [[ "$MEASURE_MODE" != "parallel" ]]; then
+  MEASUREMENT_FAILURES_JSON=$(python3 - "$SCRIPT_DIR" "$SERIAL_ATTEMPTS_FILE" "$MEASUREMENT_FAILURES_JSON" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from snapshot_measure import summarize_attempts
+attempts = {}
+with open(sys.argv[2]) as source:
+    for line in source:
+        result = json.loads(line)
+        attempts.setdefault(result["key"], []).append(result)
+print(json.dumps(json.loads(sys.argv[3]) + summarize_attempts(attempts), separators=(",", ":")))
+PY
+)
+fi
 
 # ────────── TOP-20 LIBRARY/CONTAINERS SUBDIRS (additive) ──────────
 # Per Lane B Section C: the 50 GB Library/Containers blind spot. Track
@@ -668,7 +792,9 @@ if [[ -d "$containers_parent" ]]; then
   # Build a sorted list of (size_kb, name) inside the same remaining global
   # budget and per-path cap as the allowlist measurements.
   containers_budget=$(remaining_measurement_seconds)
-  (( containers_budget > MEASURE_PATH_MAX_SECONDS )) && containers_budget="$MEASURE_PATH_MAX_SECONDS"
+  containers_cap="$MEASURE_PATH_MAX_SECONDS"
+  (( containers_cap > 0 )) || containers_cap=20
+  (( containers_budget > containers_cap )) && containers_budget="$containers_cap"
   if [[ -n "$TIMEOUT_CMD" && "$containers_budget" -gt 0 ]]; then
     containers_listing=$("$TIMEOUT_CMD" "$containers_budget" du -sk "$containers_parent"/* 2>/dev/null \
       | sort -rn | head -20 || true)
@@ -754,11 +880,48 @@ PY
 )
   [[ -n "$LIBRARY_COVERAGE_JSON" ]] || LIBRARY_COVERAGE_JSON="null"
 fi
+# Globs run after lc_* and the library frontier so those are never starved by
+# slow per-directory globs; the shared measurement deadline still bounds them.
+# Run file glob checks
+while IFS=$'\t' read -r key pattern; do
+  size=$(glob_size_kb "$pattern")
+  add_entry "$key" "$size" "$pattern"
+done < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("monitored_file_globs", []):
+    print(f"{item['key']}\t{item['pattern']}")
+PY
+)
+
+# Run glob checks
+while IFS=$'\t' read -r key pattern; do
+  size=$(glob_size_kb "$pattern")
+  add_entry "$key" "$size" "$pattern"
+done < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("monitored_globs", []):
+    print(f"{item['key']}\t{item['pattern']}")
+PY
+)
+
 MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
 MEASUREMENT_BUDGET_EXHAUSTED=false
 if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
   MEASUREMENT_BUDGET_EXHAUSTED=true
 fi
+
+# ────────── CARRY-FORWARD (last-good values for timed-out keys) ──────────
+# A timed-out key is never a silent zero: it is carried from the last-good
+# store (with its age) or reported unmeasured. directories[] stays fresh-only.
+CARRY_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+CARRY_JSON=""
+if python3 "$SCRIPT_DIR/snapshot_carry.py" from-tsv --tsv "$DIRS_TEMP_FILE" > "$CARRY_FRESH_FILE" 2>/dev/null; then
+  CARRY_JSON=$(python3 "$SCRIPT_DIR/snapshot_carry.py" merge --state "$CARRY_STATE_FILE" \
+    --fresh "$CARRY_FRESH_FILE" --now "$CARRY_NOW" --max-age-hours 72 --config "$CONFIG_FILE" 2>/dev/null || true)
+fi
+[[ -n "$CARRY_JSON" ]] || CARRY_JSON='{"fresh":{},"carried":{},"unmeasured":[],"gap_estimate_kb":{}}'
 
 # ────────── DEDUP TRIE (schema_version 2 — fixes inflated coverage_pct) ──────────
 # `tracked_total_kb` above is a naive sum with no overlap awareness, and the
@@ -776,7 +939,7 @@ fi
 # trie entirely and always counted — resolving containment for an expanded
 # glob is out of scope for this pass; none of the confirmed overlaps today
 # are glob-based.
-DEDUP_JSON=$(python3 - "$DIRS_TEMP_FILE" "$HOME" <<'PY' 2>/dev/null
+DEDUP_JSON=$(SNAP_CARRY_JSON="$CARRY_JSON" python3 - "$DIRS_TEMP_FILE" "$HOME" <<'PY' 2>/dev/null
 import json, os, sys
 
 temp_file, home = sys.argv[1], sys.argv[2]
@@ -836,21 +999,59 @@ try:
         return None, None
 
     for depth, is_symlink_alias, real, key, val in resolvable:
+        # A timed-out (null) entry measured nothing: it must neither count nor
+        # shadow a fresh child (a null claude_root used to hide claude_projects).
+        if val is None:
+            continue
         owner, reason = covered_by(real)
         if owner is not None:
             excluded.append({"key": key, "covered_by": owner, "reason": reason})
             continue
         kept_real_paths.append((real, key))
-        if val is not None:
-            tracked_total_kb_deduped += val
+        tracked_total_kb_deduped += val
 
     for key, val, src_path in rows:
         if key in unresolvable_keys and val is not None:
             tracked_total_kb_deduped += val
 
+    # Carried and gap-estimate entries are admitted only when they overlap no
+    # fresh entry and no earlier (shallower) carried entry: fresh always wins,
+    # and overlapping carried entries count once. This undercounts, never double counts.
+    carry = json.loads(os.environ.get("SNAP_CARRY_JSON") or "{}")
+    src_of = {key: src for key, _val, src in rows}
+
+    def real_of(key):
+        src = src_of.get(key)
+        if not src or is_glob(src):
+            return None
+        return os.path.realpath(os.path.normpath(expand(src)))
+
+    def overlaps(a, b):
+        return a == b or a.startswith(b.rstrip(os.sep) + os.sep) or b.startswith(a.rstrip(os.sep) + os.sep)
+
+    taken = [r for r, _k in kept_real_paths]
+
+    def admit(cands):
+        total = 0
+        placed = []
+        for key, kb in cands:
+            r = real_of(key)
+            if r is not None:
+                placed.append((len(r.split(os.sep)), r, kb))
+        for _d, r, kb in sorted(placed):
+            if any(overlaps(r, t) for t in taken):
+                continue
+            taken.append(r)
+            total += kb
+        return total
+
+    carried_kb_deduped = admit([(k, v["kb"]) for k, v in (carry.get("carried") or {}).items()])
+    gap_kb = admit(list((carry.get("gap_estimate_kb") or {}).items()))
     print(json.dumps({
         "tracked_total_kb_deduped": tracked_total_kb_deduped,
         "dedup_excluded": excluded,
+        "carried_kb_deduped": carried_kb_deduped,
+        "gap_kb": gap_kb,
     }))
 except Exception:
     # Fail open to "no dedup applied" rather than crashing the snapshot —
@@ -862,6 +1063,8 @@ if [[ -z "$DEDUP_JSON" ]]; then
   DEDUP_JSON=$(printf '{"tracked_total_kb_deduped": null, "dedup_excluded": []}')
 fi
 tracked_total_kb_deduped=$(python3 -c "import json,sys; v=json.loads(sys.argv[1])['tracked_total_kb_deduped']; print(v if v is not None else '')" "$DEDUP_JSON")
+read -r carried_kb_deduped gap_kb < <(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('carried_kb_deduped') or 0, d.get('gap_kb') or 0)" "$DEDUP_JSON" 2>/dev/null || echo "0 0")
+carried_kb_deduped="${carried_kb_deduped:-0}"; gap_kb="${gap_kb:-0}"
 dedup_excluded_json=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['dedup_excluded']))" "$DEDUP_JSON")
 if [[ -z "$tracked_total_kb_deduped" ]]; then
   # Dedup pass failed open — fall back to the raw (undeduped) total so
@@ -879,9 +1082,16 @@ coverage_pct_raw_v1=$(awk "BEGIN{
   if (used <= 0) { print 0; exit }
   printf \"%.1f\", 100 * $tracked_total_kb / used
 }")
+# fresh + carried + gap + unconfigured partition the used space (see spec section 4).
+coverage_carried_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $carried_kb_deduped / $disk_used_kb }")
+coverage_effective_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * ($tracked_total_kb_deduped + $carried_kb_deduped) / $disk_used_kb }")
+coverage_gap_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $gap_kb / $disk_used_kb }")
+coverage_unconfigured_pct=$(awk "BEGIN{ v = 100 - $coverage_effective_pct - $coverage_gap_pct; if (v < 0) v = 0; printf \"%.1f\", v }")
 warning=""
-if (( $(awk "BEGIN{print ($coverage_pct < 70)}") )); then
+if (( $(awk "BEGIN{print ($coverage_effective_pct < 70)}") )); then
   warning="low_coverage"
+elif python3 -c "import json,sys; sys.exit(0 if any(v['age_hours'] > 24 for v in json.loads(sys.argv[1]).get('carried', {}).values()) else 1)" "$CARRY_JSON" 2>/dev/null; then
+  warning="degraded_carry"
 fi
 
 # ────────── SNAPSHOT METADATA + STALENESS ──────────
@@ -1000,82 +1210,39 @@ except Exception:
     print('true')
 " "$CONFIG_FILE" 2>/dev/null || echo "true")
 
-TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "/var/db/disk-magician/frontier_last.json" "$HOME/.disk_magician_state/frontier_last.json" <<'PY' 2>/dev/null
+TOPDOWN_JSON=$(python3 - "$TOPDOWN_ENABLED" "${DISK_MAGICIAN_FRONTIER_LAST:-}" "${DISK_MAGICIAN_FRONTIER_ROOT_JSON:-/var/db/disk-magician/frontier_last.json}" "$SNAPSHOT_STATE_DIR/frontier_last.json" "$SCRIPT_DIR" <<'PY' 2>/dev/null
 import datetime, json, os, sys
+sys.path.insert(0, sys.argv[5])
+from frontier_selection import select_frontier
 
-enabled = sys.argv[1]
-candidates = [p for p in sys.argv[2:] if p]
-if enabled != "true" or not candidates:
+if sys.argv[1] != "true":
     print("null")
     sys.exit(0)
-
-explicit_override = bool(sys.argv[2])
-loaded = []
-
-for idx, path in enumerate(candidates):
-    if not os.path.isfile(path) or not os.access(path, os.R_OK):
-        if explicit_override and idx == 0:
-            break
-        continue
-    try:
-        with open(path) as f:
-            d = json.load(f)
-        captured_at = d["captured_at"]
-        ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-        age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
-        # coverage_envelope.complete is authoritative when present (it is the
-        # scanner's own derived completeness verdict, factoring in FDA grant
-        # status and root-count parity — see disk_frontier_scan.py
-        # coverage_complete). Falling back to bare mode == "complete" only
-        # when the envelope is absent (legacy snapshots) avoids treating a
-        # fresh-but-unproven scan (mode complete, envelope incomplete) as
-        # equal to a genuinely complete one.
-        coverage_envelope = d.get("coverage_envelope")
-        if isinstance(coverage_envelope, dict) and "complete" in coverage_envelope:
-            is_complete = bool(coverage_envelope["complete"])
-        else:
-            is_complete = d.get("mode") == "complete"
-        is_fresh = age_hours <= 36.0
-        loaded.append({
-            "path": path,
-            "data": d,
-            "captured_at": captured_at,
-            "age_hours": age_hours,
-            "is_complete": is_complete,
-            "is_fresh": is_fresh,
-            "ts": ts,
-        })
-        if explicit_override and idx == 0:
-            break
-    except Exception:
-        # A corrupt explicit override must fail closed the same way a
-        # missing one does (see the idx == 0 branch above) — falling
-        # through to the root-daemon/user-state candidates here would
-        # silently ignore the caller's explicit request.
-        if explicit_override and idx == 0:
-            break
-        continue
-
-if not loaded:
+path = select_frontier(sys.argv[3], sys.argv[4],
+                       explicit_json=os.environ.get("DISK_MAGICIAN_FRONTIER_JSON"),
+                       explicit_last=sys.argv[2])
+if not path:
     print("null")
     sys.exit(0)
-
-def score(c):
-    return (
-        1 if c["is_fresh"] and c["is_complete"] else 0,
-        1 if c["is_fresh"] else 0,
-        c["ts"].timestamp(),
-    )
-
-best = max(loaded, key=score)
-if not best["is_fresh"]:
-    result = {"stale": True, "captured_at": best["captured_at"], "age_hours": round(best["age_hours"], 1)}
+try:
+    with open(path) as f:
+        d = json.load(f)
+    captured_at = d["captured_at"]
+    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+except (OSError, KeyError, TypeError, ValueError):
+    print("null")
+    sys.exit(0)
+if age_hours < 0:
+    print("null")
+    sys.exit(0)
+if age_hours > 36.0:
+    result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
 else:
-    d = best["data"]
     result = {
         "mode": d.get("mode"),
-        "captured_at": best["captured_at"],
-        "age_hours": round(best["age_hours"], 1),
+        "captured_at": captured_at,
+        "age_hours": round(age_hours, 1),
         "measured_total_kb": d.get("measured_total_kb"),
         "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
         "residual_kb": d.get("residual_kb"),
@@ -1108,6 +1275,12 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_COLIMA_DIFFDISK_DU_KB="$colima_diffdisk_du_kb" \
   SNAP_COVERAGE_PCT="$coverage_pct" \
   SNAP_COVERAGE_PCT_RAW_V1="$coverage_pct_raw_v1" \
+  SNAP_COVERAGE_CARRIED_PCT="$coverage_carried_pct" \
+  SNAP_COVERAGE_EFFECTIVE_PCT="$coverage_effective_pct" \
+  SNAP_COVERAGE_TIMEOUT_GAP_PCT="$coverage_gap_pct" \
+  SNAP_COVERAGE_UNCONFIGURED_PCT="$coverage_unconfigured_pct" \
+  SNAP_DISK_USED_KB="$disk_used_kb" \
+  SNAP_CARRY_JSON="$CARRY_JSON" \
   SNAP_TRACKED_TOTAL_KB_RAW="$tracked_total_kb" \
   SNAP_TRACKED_TOTAL_KB_DEDUPED="$tracked_total_kb_deduped" \
   SNAP_DEDUP_EXCLUDED="$dedup_excluded_json" \
@@ -1120,8 +1293,11 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_MEASURED_TOTAL="$MEASURED_TOTAL" \
   SNAP_MEASUREMENT_BUDGET_SECONDS="$SNAPSHOT_BUDGET_SECONDS" \
   SNAP_MEASUREMENT_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS" \
+  SNAP_MEASURE_MODE="$MEASURE_MODE" \
+  SNAP_MEASURE_WORKERS="$MEASURE_WORKERS_USED" \
   SNAP_MEASUREMENT_ELAPSED_SECONDS="$MEASUREMENT_ELAPSED_SECONDS" \
   SNAP_MEASUREMENT_BUDGET_EXHAUSTED="$MEASUREMENT_BUDGET_EXHAUSTED" \
+  SNAP_MEASUREMENT_FAILURES="$MEASUREMENT_FAILURES_JSON" \
   SNAP_PREV_TS="$prev_snapshot_ts" \
   SNAP_CONTAINERS_CAPTURED="$containers_captured" \
   SNAP_CONTAINERS_TOTAL="$containers_total_dirs" \
@@ -1170,6 +1346,8 @@ try:
             "measured_paths_total": int(os.environ.get("SNAP_MEASURED_TOTAL") or 0),
             "measurement_budget_seconds": int(os.environ.get("SNAP_MEASUREMENT_BUDGET_SECONDS") or 0),
             "measurement_path_max_seconds": int(os.environ.get("SNAP_MEASUREMENT_PATH_MAX_SECONDS") or 0),
+            "measure_mode": os.environ.get("SNAP_MEASURE_MODE") or "serial",
+            "measure_workers": int(os.environ.get("SNAP_MEASURE_WORKERS") or 0),
             "measurement_elapsed_seconds": int(os.environ.get("SNAP_MEASUREMENT_ELAPSED_SECONDS") or 0),
             "measurement_budget_exhausted": os.environ.get("SNAP_MEASUREMENT_BUDGET_EXHAUSTED") == "true",
         }
@@ -1242,6 +1420,12 @@ try:
         round(colima_du_kb_raw / 1024 / 1024, 3) if colima_du_kb_raw >= 0 else None
     )
 
+    try:
+        measurement_failures = json.loads(os.environ.get("SNAP_MEASUREMENT_FAILURES") or "[]")
+    except (TypeError, ValueError):
+        measurement_failures = []
+    if isinstance(measurement_failures, list) and measurement_failures:
+        data["snapshot_metadata"]["measurement_failures"] = measurement_failures
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
     if residual_delta:
         data["residual_delta_gb"] = float(residual_delta)
@@ -1295,6 +1479,32 @@ try:
                     except ValueError:
                         dirs[k] = None
     data["directories"] = dirs
+    # Additive fresh/carried/unmeasured accounting (schema_version stays 2).
+    # snapshot_coverage_pct keeps its fresh-only meaning.
+    try:
+        carry = json.loads(os.environ.get("SNAP_CARRY_JSON") or "{}")
+    except (TypeError, ValueError):
+        carry = {}
+    carried = carry.get("carried") or {}
+    unmeasured = list(carry.get("unmeasured") or [])
+    for k, v in dirs.items():  # G2: a null directory is always carried or unmeasured
+        if v is None and k not in carried and k not in unmeasured:
+            unmeasured.append(k)
+    data["coverage_fresh_pct"] = data["snapshot_coverage_pct"]
+    data["coverage_carried_pct"] = float(os.environ.get("SNAP_COVERAGE_CARRIED_PCT") or 0.0)
+    data["coverage_effective_pct"] = float(os.environ.get("SNAP_COVERAGE_EFFECTIVE_PCT") or 0.0)
+    data["coverage_timeout_gap_pct"] = float(os.environ.get("SNAP_COVERAGE_TIMEOUT_GAP_PCT") or 0.0)
+    data["coverage_unconfigured_pct"] = float(os.environ.get("SNAP_COVERAGE_UNCONFIGURED_PCT") or 0.0)
+    td = data.get("topdown_coverage")
+    used_kb = int(os.environ.get("SNAP_DISK_USED_KB") or 0)
+    if (isinstance(td, dict) and not td.get("stale") and used_kb > 0
+            and isinstance(td.get("measured_total_kb"), int)
+            and (td.get("age_hours") is None or td["age_hours"] <= 36)):
+        data["coverage_frontier_pct"] = round(100.0 * td["measured_total_kb"] / used_kb, 1)
+    data["carried_keys"] = [{"key": k, "kb": v["kb"], "age_hours": v["age_hours"]} for k, v in carried.items()]
+    data["unmeasured_keys"] = unmeasured
+    data["fresh_keys_count"] = sum(1 for v in dirs.values() if v is not None)
+    data["total_keys_count"] = len(dirs)
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)
@@ -1304,6 +1514,12 @@ PY
 if [[ -z "$pretty_json" ]]; then
   echo "ERROR: snapshot JSON failed validation — refusing to write" >&2
   exit 1
+fi
+
+# Persist fresh non-null values as the new last-good store (partial runs included).
+if [[ "$DRY_RUN" == false ]]; then
+  python3 "$SCRIPT_DIR/snapshot_carry.py" update --state "$CARRY_STATE_FILE" \
+    --fresh "$CARRY_FRESH_FILE" --now "$CARRY_NOW" 2>/dev/null || true
 fi
 
 if [[ -n "$OUTPUT" && "$DRY_RUN" == false ]]; then

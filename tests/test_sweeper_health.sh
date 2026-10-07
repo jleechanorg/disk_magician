@@ -35,7 +35,8 @@ mkdir -p "$LOG_DIR" "$PLIST_DIR"
 # Mock helper: write a plist pointing at a synthetic log path under LOG_DIR.
 write_plist() {
   local label="$1" log_path="$2"
-  cat > "$PLIST_DIR/${label}.plist" <<EOF
+  local target_dir="${3:-$PLIST_DIR}"
+  cat > "$target_dir/${label}.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -96,9 +97,55 @@ write_log_at "$LOG_DIR/cleanup-warn.log" "$ONE_HOUR_AGO" "[$(date)] ERROR: permi
 write_plist "com.jleechanorg.disk-magician-fresh" "$LOG_DIR/disk-magician-fresh.log"
 write_log_at "$LOG_DIR/disk-magician-fresh.log" "$ONE_HOUR_AGO" "[$(date)] Sweep complete."
 
+# Provide hermetic valid strict ledger for test 1
+mkdir -p "$TMP_DIR/state_repo/ledger"
+python3 -c '
+import sys, os, json
+from datetime import datetime, timezone
+sys.path.insert(0, "'"$REPO_ROOT"'/scripts")
+USER_PROBE_PATHS = {
+    "mobile_sync": os.path.join("/Users/testuser", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/testuser", "Library", "Mail"),
+    "messages": os.path.join("/Users/testuser", "Library", "Messages"),
+}
+l = {
+    "schema_version": 2,
+    "mode": "complete",
+    "coverage_envelope": {
+        "complete": True,
+        "fda_preflight_status": "granted",
+        "fda_user_preflight_status": "granted",
+        "reachable_top_level_roots": 1,
+        "measured_top_level_roots": 1,
+        "unfinished_top_level_roots": 0,
+    },
+    "frontier_unfinished": [],
+    "fda_probe_paths": USER_PROBE_PATHS,
+    "fda_preflight": {
+        "status": "granted",
+        "probes": {k: {"path": v, "status": "readable"} for k, v in USER_PROBE_PATHS.items()},
+    },
+    "accounting_equation": {
+        "displayed_balanced": True, "display_ledger_valid": True,
+        "data_used_kb": 100, "displayed_buckets_kb": 0,
+        "oversize_indivisible_files_kb": 0, "sub_granularity_tail_kb": 0,
+        "purgeable_kb": 0, "residual_kb": 100,
+        "clone_shared_adjustment_kb": 0,
+    },
+    "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "disk_used_kb": 100,
+    "residual_kb": 100,
+    "residual_label": "test-residual",
+    "buckets": [],
+    "opaque_intrinsic_gates": [],
+}
+with open("'"$TMP_DIR"'/state_repo/ledger/topdown-5g.json", "w") as f:
+    json.dump(l, f)
+'
+
 # Run the script. Threshold=7d so the 10-day-old log is stale.
 set +e
-OUT=$("$SCRIPT" --plist-dir "$PLIST_DIR" --threshold-days 7 --verbose 2>&1)
+OUT=$("$SCRIPT" --plist-dir "$PLIST_DIR" --state-repo "$TMP_DIR/state_repo" --threshold-days 7 --verbose --no-notify 2>&1)
 RC=$?
 set -e
 
@@ -130,19 +177,24 @@ expect "empty log flagged MISS"        "[MISS] com.jleechan.cleanup-empty"
 expect "warn sweeper flagged WARN"     "[WARN] com.jleechan.cleanup-warn"
 expect "fresh sweeper reported OK"     "[OK]   com.jleechan.cleanup-fresh"
 expect "jleechanorg family matched"    "[OK]   com.jleechanorg.disk-magician-fresh"
-expect "summary line present"          "Summary: 2 OK, 1 WARN, 3 MISS"
+expect "summary line present"          "Summary: 2 OK, 2 WARN, 3 MISS"
 expect "FAIL message present"          "FAIL: 3 sweeper(s) appear silent"
 
 # Test the happy path: all sweepers healthy → exit 0.
 ALL_FRESH_DIR=$(mktemp -d -t sweeper_health_happy.XXXXXX)
 mkdir -p "$ALL_FRESH_DIR/logs" "$ALL_FRESH_DIR/launchd"
-write_plist "com.jleechan.cleanup-healthy-a" "$ALL_FRESH_DIR/logs/a.log"
-write_plist "com.jleechan.cleanup-healthy-b" "$ALL_FRESH_DIR/logs/b.log"
+write_plist "com.jleechan.cleanup-healthy-a" "$ALL_FRESH_DIR/logs/a.log" "$ALL_FRESH_DIR/launchd"
+write_plist "com.jleechan.cleanup-healthy-b" "$ALL_FRESH_DIR/logs/b.log" "$ALL_FRESH_DIR/launchd"
 write_log_at "$ALL_FRESH_DIR/logs/a.log" "$ONE_HOUR_AGO" "ok"
 write_log_at "$ALL_FRESH_DIR/logs/b.log" "$ONE_HOUR_AGO" "ok"
 
+git init -q "$TMP_DIR/state_repo"
+git -C "$TMP_DIR/state_repo" add ledger/topdown-5g.json
+git -C "$TMP_DIR/state_repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+  -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q -m "healthy ledger fixture"
+
 set +e
-OUT_HAPPY=$("$SCRIPT" --plist-dir "$ALL_FRESH_DIR/launchd" --threshold-days 7 2>&1)
+OUT_HAPPY=$("$SCRIPT" --plist-dir "$ALL_FRESH_DIR/launchd" --state-repo "$TMP_DIR/state_repo" --threshold-days 7 --no-notify 2>&1)
 RC_HAPPY=$?
 set -e
 
@@ -151,6 +203,53 @@ if [[ $RC_HAPPY -eq 0 ]] && grep -q "All sweepers healthy." <<<"$OUT_HAPPY"; the
   PASS=$(( PASS + 1 ))
 else
   echo "  FAIL  healthy system: rc=$RC_HAPPY"
+  printf '%s\n' "$OUT_HAPPY"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Test zero inventory: 0 plists discovered → exit 1 (degraded/unknown).
+ZERO_DIR=$(mktemp -d -t sweeper_health_zero.XXXXXX)
+mkdir -p "$ZERO_DIR/launchd"
+
+set +e
+OUT_ZERO=$("$SCRIPT" --plist-dir "$ZERO_DIR/launchd" --no-notify 2>&1)
+RC_ZERO=$?
+set -e
+
+if [[ $RC_ZERO -eq 1 ]] && grep -q "No sweeper plists found" <<<"$OUT_ZERO"; then
+  echo "  PASS  zero inventory exits 1 (degraded/unknown)"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  zero inventory: rc=$RC_ZERO"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Test fresh log + partial ledger: disk-magician control sweeper has fresh log,
+# but publication only has topdown-5g.partial.json without strict topdown-5g.json → exit 1 (degraded).
+PARTIAL_DIR=$(mktemp -d -t sweeper_health_partial.XXXXXX)
+mkdir -p "$PARTIAL_DIR/logs" "$PARTIAL_DIR/launchd" "$PARTIAL_DIR/state_repo/ledger"
+write_plist "com.jleechanorg.disk-magician-snapshot" "$PARTIAL_DIR/logs/snapshot.log" "$PARTIAL_DIR/launchd"
+write_log_at "$PARTIAL_DIR/logs/snapshot.log" "$ONE_HOUR_AGO" "[$(date)] sweep complete"
+cat > "$PARTIAL_DIR/state_repo/ledger/topdown-5g.partial.json" <<EOF
+{
+  "schema_version": 2,
+  "publication_kind": "partial",
+  "canonical": false,
+  "captured_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+  "scope": "shallow"
+}
+EOF
+
+set +e
+OUT_PARTIAL=$("$SCRIPT" --plist-dir "$PARTIAL_DIR/launchd" --state-repo "$PARTIAL_DIR/state_repo" --threshold-days 7 --no-notify 2>&1)
+RC_PARTIAL=$?
+set -e
+
+if [[ $RC_PARTIAL -eq 1 ]] && grep -q "publication check failed" <<<"$OUT_PARTIAL"; then
+  echo "  PASS  fresh log with partial-only ledger exits 1 (publication degraded)"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  fresh log with partial-only ledger: rc=$RC_PARTIAL"
   FAIL=$(( FAIL + 1 ))
 fi
 
@@ -250,7 +349,7 @@ else
 fi
 
 # Cleanup
-rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR"
+rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR" "$ZERO_DIR" "$PARTIAL_DIR"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

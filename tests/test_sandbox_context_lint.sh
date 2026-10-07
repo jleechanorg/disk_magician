@@ -39,7 +39,7 @@ record_fail() { echo "  FAIL  $1"; FAIL=$(( FAIL + 1 )); }
 # variable with a destructive flag.
 invokes_destructive_script_sh() {
   local f="$1"
-  grep -Eq '=.*"?\$\{?REPO_ROOT\}?"?/scripts/(cleanup_tmp\.sh|cleanup_pr_scratch\.sh|pressure_sweep\.sh)"?$' "$f" || return 1
+  grep -Eq '=.*"?\$\{?REPO_ROOT\}?"?/scripts/(cleanup_tmp\.sh|cleanup_pr_scratch\.sh|pressure_sweep\.sh|cleanup_claude_state\.sh)"?$' "$f" || return 1
   grep -Eq 'bash "\$[A-Za-z_]+"[^#]*--(clean|apply|large|budget)' "$f"
 }
 
@@ -61,7 +61,7 @@ invokes_destructive_library_call() {
 # and (b) passes a destructive flag as a literal CLI argument.
 invokes_destructive_script_py() {
   local f="$1"
-  grep -Eq '"(cleanup_tmp|cleanup_pr_scratch|pressure_sweep)\.sh"' "$f" || return 1
+  grep -Eq '"(cleanup_tmp|cleanup_pr_scratch|pressure_sweep|cleanup_claude_state)\.sh"' "$f" || return 1
   grep -Eq '"--(clean|apply|large|budget[a-zA-Z_-]*)"' "$f"
 }
 

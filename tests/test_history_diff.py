@@ -665,5 +665,20 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("not readable JSON", r.stderr + r.stdout)
 
+    def test_non_dict_bucket_entry_fails_closed(self):
+        data = ledger(100, 100, [{"path": "/ok", "measured_kb": 0}])
+        data["granularity_buckets"] = ["a_bare_string"]
+        with self.assertRaises(hd.LedgerError) as ctx:
+            hd.validate_ledger(data, label="test")
+        self.assertIn("bucket entry must be an object", str(ctx.exception))
+
+    def test_non_dict_accounting_equation_fails_closed(self):
+        data = ledger(100, 100, [{"path": "/ok", "measured_kb": 0}])
+        data["accounting_equation"] = "not_a_dict"
+        with self.assertRaises(hd.LedgerError) as ctx:
+            hd.validate_ledger(data, label="test")
+        self.assertIn("accounting_equation must be an object", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

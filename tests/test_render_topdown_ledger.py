@@ -538,5 +538,261 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertFalse(os.path.isdir(self.out_dir))
 
+
+class TestPartialLedgerArtifact(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out_dir = os.path.join(self.tmp, "ledger")
+
+    def _fixture(self, age_hours, *, mode="complete", envelope_complete=True, root="/Users/x"):
+        captured = (datetime.datetime.utcnow() - datetime.timedelta(hours=age_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        data = {
+            "schema_version": 2,
+            "mode": mode,
+            "root": root,
+            "hostname": "testhost",
+            "coverage_envelope": {
+                "complete": envelope_complete,
+                "status": "complete" if envelope_complete else "partial",
+                "fda_preflight_status": "granted",
+                "fda_user_preflight_status": "granted",
+                "reachable_top_level_roots": 1,
+                "measured_top_level_roots": 1,
+                "unfinished_top_level_roots": 0,
+            },
+            "captured_at": captured,
+            "run_id": "run-partial-1",
+            "run_started_at": 100.0,
+            "run_finished_at": 102.0,
+            "fda_probe_paths": dict(USER_PROBE_PATHS),
+            "fda_preflight": {
+                "status": "granted",
+                "probes": {
+                    name: {"path": path, "status": "readable"}
+                    for name, path in USER_PROBE_PATHS.items()
+                },
+            },
+            "disk_used_kb": 500 * 1024 * 1024,
+            "residual_kb": 524288,
+            "purgeable_kb": 1024,
+            "granularity_buckets": [
+                {"path": "/Users/x/big", "measured_kb": 3145728},
+                {"path": "/Users/x/small", "measured_kb": 1048576},
+            ],
+            "oversize_indivisible_files": [],
+            "accounting_equation": {
+                "displayed_balanced": True,
+                "display_ledger_valid": True,
+                "data_used_kb": 500 * 1024 * 1024,
+                "displayed_buckets_kb": 4194304,
+                "oversize_indivisible_files_kb": 0,
+                "sub_granularity_tail_kb": 519568384,
+                "purgeable_kb": 1024,
+                "residual_kb": 524288,
+                "clone_shared_adjustment_kb": 0,
+            },
+            "frontier_unfinished": [],
+            "opaque_intrinsic_gates": [],
+        }
+        path = os.path.join(self.tmp, "frontier_last.json")
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def _partial_path(self):
+        return os.path.join(self.out_dir, "topdown-5g.partial.json")
+
+    def test_partial_cannot_change_canonical_bytes(self):
+        os.makedirs(self.out_dir)
+        canon_path = os.path.join(self.out_dir, "topdown-5g.json")
+        with open(canon_path, "w") as f:
+            f.write('{"canonical_bytes": "untouched"}\n')
+
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        rc, out, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(open(canon_path).read(), '{"canonical_bytes": "untouched"}\n')
+
+    def test_partial_ledger_written_on_incomplete_run(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        rc, out, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["schema_version"], 2)
+        self.assertEqual(partial["mode"], "partial")
+        self.assertEqual(partial["publication_kind"], "partial")
+        self.assertIs(partial["canonical"], False)
+        self.assertEqual(partial["scope"], {"hostname": "testhost", "root": "/Users/x"})
+        validated = subprocess.run(
+            ["python3", str(REPO / "scripts" / "history_diff.py"), "--validate", self._partial_path()],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertIn("valid structural partial/legacy ledger", validated.stdout)
+
+    def test_partial_and_canonical_on_complete_run(self):
+        frontier = self._fixture(age_hours=1)
+        rc, out, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        canonical = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(canonical["publication_kind"], "canonical")
+        self.assertIs(canonical["canonical"], True)
+        self.assertEqual(partial["publication_kind"], "partial")
+        self.assertIs(partial["canonical"], False)
+        self.assertEqual(canonical["scope"], {"hostname": "testhost", "root": "/Users/x"})
+        self.assertEqual(partial["scope"], {"hostname": "testhost", "root": "/Users/x"})
+
+    def test_failed_replacement_preserves_prior(self):
+        os.makedirs(self.out_dir)
+        prior_path = self._partial_path()
+        with open(prior_path, "w") as f:
+            f.write('{"prior": "valid_partial"}\n')
+
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with mock.patch("os.replace", side_effect=OSError("simulated rename failure")):
+            with open(frontier) as f:
+                report = json.load(f)
+            renderer.write_partial_ledger(self.out_dir, renderer.build_ledger_dict(report, report["captured_at"]), report, report["captured_at"], 1.0)
+        self.assertEqual(open(prior_path).read(), '{"prior": "valid_partial"}\n')
+
+    def test_malformed_and_stale_future_inputs_preserve_prior(self):
+        os.makedirs(self.out_dir)
+        prior_path = self._partial_path()
+        with open(prior_path, "w") as f:
+            f.write('{"prior": "still_intact"}\n')
+
+        # Stale (>36h)
+        frontier_stale = self._fixture(age_hours=40, mode="partial", envelope_complete=False)
+        rc, _, _ = run(frontier_stale, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(prior_path).read(), '{"prior": "still_intact"}\n')
+
+        # Future (< -0.1h)
+        frontier_future = self._fixture(age_hours=-5, mode="partial", envelope_complete=False)
+        rc, _, err = run(frontier_future, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(prior_path).read(), '{"prior": "still_intact"}\n')
+
+        # Malformed bucket entry (string instead of dict)
+        frontier_malformed = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier_malformed) as f:
+            d = json.load(f)
+        d["granularity_buckets"].append("not_a_dict")
+        with open(frontier_malformed, "w") as f:
+            json.dump(d, f)
+        rc, _, err = run(frontier_malformed, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(prior_path).read(), '{"prior": "still_intact"}\n')
+        self.assertIn("skipping partial artifact", err)
+
+    def test_empty_scan_preserves_prior(self):
+        os.makedirs(self.out_dir)
+        prior_path = self._partial_path()
+        with open(prior_path, "w") as f:
+            f.write('{"prior": "still_intact"}\n')
+
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["granularity_buckets"] = []
+        d["oversize_indivisible_files"] = []
+        d["accounting_equation"]["displayed_buckets_kb"] = 0
+        d["accounting_equation"]["sub_granularity_tail_kb"] += 4194304
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(prior_path).read(), '{"prior": "still_intact"}\n')
+        self.assertIn("empty scan", err)
+
+    def test_carried_and_unmeasured_preserved(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["fresh"] = {"/Users/x/big": 3145728}
+        d["carried"] = {"/Users/x/small": {"kb": 1048576, "age_hours": 12.0}}
+        d["unmeasured"] = ["/Users/x/lost"]
+        d["effective_coverage_pct"] = 85.0
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["fresh"], {"/Users/x/big": 3145728})
+        self.assertEqual(partial["carried"], {"/Users/x/small": {"kb": 1048576, "age_hours": 12.0}})
+        self.assertEqual(partial["unmeasured"], ["/Users/x/lost"])
+    def test_future_complete_frontier_rejects_both_canonical_and_partial(self):
+        os.makedirs(self.out_dir)
+        canon_path = os.path.join(self.out_dir, "topdown-5g.json")
+        partial_path = self._partial_path()
+        with open(canon_path, "w") as f:
+            f.write('{"prior": "canon"}\n')
+        with open(partial_path, "w") as f:
+            f.write('{"prior": "partial"}\n')
+
+        frontier_future = self._fixture(age_hours=-5, mode="complete", envelope_complete=True)
+        rc, _, err = run(frontier_future, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(canon_path).read(), '{"prior": "canon"}\n')
+        self.assertEqual(open(partial_path).read(), '{"prior": "partial"}\n')
+        self.assertIn("future timestamp", err)
+
+    def test_non_dict_report_handled_cleanly(self):
+        non_dict_file = os.path.join(self.out_dir, "list_report.json")
+        os.makedirs(self.out_dir, exist_ok=True)
+        with open(non_dict_file, "w") as f:
+            json.dump(["not", "an", "object"], f)
+        rc, out, err = run(non_dict_file, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(self._partial_path()))
+
+    def test_invalid_schema_preserves_schema_and_fails_validation(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["schema_version"] = 99
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(self._partial_path()))
+        self.assertIn("unsupported schema_version", err)
+
+    def test_all_metadata_fields_preserved(self):
+        frontier = self._fixture(age_hours=1, mode="partial", envelope_complete=False)
+        with open(frontier) as f:
+            d = json.load(f)
+        d["coverage_fresh_pct"] = 92.5
+        d["coverage_carried_pct"] = 5.0
+        d["coverage_effective_pct"] = 97.5
+        d["carried_keys"] = ["/Users/x/carried1"]
+        d["unmeasured_keys"] = ["/Users/x/lost1"]
+        d["measurement_window"] = {"hours": 24}
+        d["top_level_ledger"] = {"/Users": 1000}
+        d["accounting_version"] = 2
+        d["partition_proofs"] = [{"parent": "/Users/x/parent", "children": ["/Users/x/parent/c1"], "disjoint": True, "complete": True, "omitted_tail_kb": 0, "direct_allocation_kb": 0}]
+        with open(frontier, "w") as f:
+            json.dump(d, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+        partial = json.load(open(self._partial_path()))
+        self.assertEqual(partial["coverage_fresh_pct"], 92.5)
+        self.assertEqual(partial["coverage_carried_pct"], 5.0)
+        self.assertEqual(partial["coverage_effective_pct"], 97.5)
+        self.assertEqual(partial["carried_keys"], ["/Users/x/carried1"])
+        self.assertEqual(partial["unmeasured_keys"], ["/Users/x/lost1"])
+        self.assertEqual(partial["measurement_window"], {"hours": 24})
+        self.assertEqual(partial["top_level_ledger"], {"/Users": 1000})
+        self.assertEqual(partial["accounting_version"], 2)
+        self.assertEqual(len(partial["partition_proofs"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -292,3 +292,22 @@ The recurring cost of "context lost between sessions + fresh-data proxies that l
 ## History
 
 - 2026-08-25 — created this doc after the operator's "/history-style" question about repeated disk-debugging difficulty. Live audit at 16:33 PDT.
+
+## Correction — 2026-10-03
+
+The historical diagnosis above misinterprets the `git ls-files -v` marker.
+Uppercase `H` denotes a tracked cached file; with `-v`, an assume-unchanged
+entry uses a lowercase marker (`h` in the ordinary tracked-file case).
+Consequently the uppercase `H` output recorded above does not prove that
+assume-unchanged caused the stale ledger. Preserve that distinction when
+reusing this incident: file freshness and publication still require direct
+artifact/content evidence, and the hypothetical index-flag cause was not
+established by the quoted output.
+
+A new disposable Git fixture on October 3 independently returned `H ledger.txt`
+after `git add`, then `h ledger.txt` after explicitly setting assume-unchanged.
+The fixture did not alter the live backup repository or its index.
+Source: [Git ls-files documentation](https://git-scm.com/docs/git-ls-files),
+`-v` option. Tracking: `disk_magician-cjc`. This dated correction supersedes
+all recommendations above that treat uppercase `H` as a failure signal;
+the original record remains unchanged for provenance.

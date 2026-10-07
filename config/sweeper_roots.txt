@@ -22,20 +22,9 @@
 # budgeting). The two should be unified into one canonical roots source
 # after both land; see PR description "Known duplication" note.
 #
-# Known uncovered today (do NOT add without also fixing the sweeper that
-# should cover it — see PR description):
-#   $HOME/.claude/state            (34 GiB, 2026-09-22 measurement) — no
-#                                   sweeper in scripts/cleanup_*.sh targets
-#                                   this path; cleanup_supervisor_logs.sh
-#                                   only covers $HOME/.claude/supervisor.
-#   $DARWIN_USER_TEMP_DIR          (21 GiB, 2026-09-22 measurement) — only
-#                                   cleanup_sessions.sh touches this root,
-#                                   and only the narrow
-#                                   "${TMP_DIR}ao-<session-id>" subpaths
-#                                   (scripts/cleanup_sessions.sh:56,117);
-#                                   the bulk of the tree (PR-review scratch,
-#                                   com.apple.fileproviderd cache, etc.) is
-#                                   untouched by any sweeper.
+# Coverage notes: registered ownership does not prove scheduled cleanup.
+# $DARWIN_USER_TEMP_DIR is budget-covered by cleanup_tmp.sh / cleanup_pr_scratch.sh
+# via scratch_roots_get_unique (guarded 15 GiB ceiling; safety/age/open/repo guards).
 
 # cleanup_dev_caches.sh
 $HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
@@ -47,10 +36,12 @@ $HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
 $HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
+# wiki-publish cache retained: lifecycle unknown; no automatic deletion.
 
 # cleanup_tmp.sh / cleanup_pr_scratch.sh
 /private/tmp	cleanup_tmp.sh	ARCHIVE_ROOT + --large branch target
 /tmp	cleanup_pr_scratch.sh	TMP_DIRS array, line 181
+$DARWIN_USER_TEMP_DIR	cleanup_tmp.sh / cleanup_pr_scratch.sh	scratch_roots_get_unique budget-enabled invocation (guarded 15 GiB ceiling; preserves safety/age/open/repo guards)
 
 # cleanup_xcode.sh
 $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
@@ -67,13 +58,19 @@ $HOME/.colima/default/docker.sock	cleanup_colima.sh	COLIMA_DOCKER_SOCKET, line 6
 $HOME/.aside/u	prune_aside_sessions.sh	disk_audit.sh Aside browser sessions check
 
 # cleanup_antigravity_brain.sh
-$HOME/.gemini/antigravity-cli/brain	cleanup_antigravity_brain.sh	BRAIN_DIR default, line 15
+$HOME/.gemini/antigravity-cli/brain	cleanup_antigravity_brain.sh	AGCLI_BRAIN
+$HOME/.gemini/antigravity/brain	cleanup_antigravity_brain.sh	AG_BRAIN
+$HOME/.gemini/antigravity/worktrees	cleanup_antigravity_brain.sh	AG_WORKTREES
 
 # cleanup_supervisor_logs.sh
 $HOME/.claude/supervisor	cleanup_supervisor_logs.sh	SUPERVISOR_DIR, line 15
 
 # cleanup_worktrees.sh / cleanup_worktree_venvs.sh (Tier 6, WORKTREE_APPROVED-gated)
 $HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
+$HOME/project_worldaiclaw	cleanup_worktree_venvs.sh	ROOTS, line 56
+$HOME/project_worldaiclaw/worldai_claw	cleanup_worktrees.sh	discovered_repos_str, line 76
+$HOME/wc-wt	cleanup_worktree_venvs.sh	ROOTS default, line 60
+$HOME/.worktrees	cleanup_worktrees.sh	standard worktree root (find_repos_from_worktrees + cleanup_worktree_venvs.sh ROOTS)
 $HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
 $HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
 $HOME/projects/*/.claude/worktrees	cleanup_worktree_venvs.sh	worktree_repo_discovery.sh:19,73
@@ -110,9 +107,16 @@ $HOME/Library/Caches/ms-playwright-go	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/Library/Caches/pip	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
+$HOME/.dark-factory/runs	cleanup_dark_factory.sh	canonical 30-day retention; per-candidate recency/liveness/safety guards; routine opt-in AGENT_ARTIFACTS_APPROVED
+$HOME/.dark-factory	cleanup_dark_factory.sh	state root for dark-factory runs, controller-snapshots, logs
+$HOME/.local/state/fsevents-projects.log	watch_projects_fsevents.sh	log rotation
+$HOME/.local/state/fsevents-projects.state.json	watch_projects_fsevents.sh	state file
 
 # cleanup_ollama.sh
 $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
+
+# cleanup_claude_state.sh
+$HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs); scheduled report-only, --clean needs approval
 
 # NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
 # and $HOME/.claude/projects are intentionally NOT registered here as
@@ -123,3 +127,6 @@ $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 # (via scripts/safety_check.sh, reused rather than duplicated here) and
 # reports these as PROTECTED (never-delete, no sweeper by policy) rather
 # than UNCOVERED or COVERED.
+
+# agent_scratch.sh (scripts/lib/agent_scratch.sh) — Task 7 managed scratch for disk_diagnostic
+/private/tmp/agent-scratch/disk_diagnostic	scripts/lib/agent_scratch.sh	agent_scratch_create / agent_scratch_trap_cleanup

@@ -236,6 +236,8 @@ for target in "${TARGETS[@]}"; do
   if [[ -d "$expanded" ]]; then
     if [[ "$result" == "skipped-recent" ]]; then
       echo "  $(size_of "$expanded")  $target  (kept — gate-skipped)"
+    elif [[ "$result" == "safety-skip" ]]; then
+      echo "  $(size_of "$expanded")  $target  (kept — safety-skipped)"
     elif [[ "$DRY_RUN" == true ]]; then
       echo "  $(size_of "$expanded")  $target  (dry-run — would clear)"
     else

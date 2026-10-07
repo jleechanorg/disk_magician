@@ -91,8 +91,8 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-log "Running: uv cache prune"
-if ! uv cache prune; then
+log "Running: uv cache prune --force"
+if ! uv cache prune --force; then
   log "uv cache prune failed (non-fatal) — leaving cache untouched."
   exit 0
 fi

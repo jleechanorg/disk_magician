@@ -20,7 +20,7 @@ source "$SCRIPT_DIR/lib/resolve_snapshot_json.sh"
 SNAPSHOT_FILE="$(resolve_snapshot_json)"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 STREAK_FILE="$STATE_DIR/coverage_streak.json"
-STREAK_ESCALATE_AT=3
+STREAK_ESCALATE_AT=6
 LEDGER_STALE_HOURS="${DISK_MAGICIAN_LEDGER_STALE_HOURS:-48}"
 
 usage() {
@@ -38,52 +38,77 @@ is_silenced() { [[ -f "$SILENCE_FILE" ]]; }
 set_silenced() { date -u +%Y-%m-%dT%H:%M:%SZ > "$SILENCE_FILE"; echo "Alerts silenced."; }
 unset_silenced() { rm -f "$SILENCE_FILE"; echo "Alerts unsilenced."; }
 
-# Reads the latest snapshot, advances the coverage streak counter if this is
-# a snapshot we haven't scored yet, and prints "streak<TAB>coverage_pct" (or
-# "unknown<TAB>unknown" if the snapshot is missing/unreadable — tolerated,
-# not an error, since this script must keep doing its primary free-space
-# check regardless of snapshot availability).
+# Reads the latest snapshot and scores it once (keyed by snapshot timestamp)
+# into a ring of the last 12 runs in coverage_streak.json. Prints
+# "streak<TAB>coverage_pct<TAB>reasons"; reasons is "none" or a comma list of
+# low_effective | stale_carry:<key>@<hours>h | carry_expired:<key>. Escalation is
+# sustained-degradation only: 6 consecutive effective < 60, a key carried > 48 h,
+# or a previously carried key that is now unmeasured. Snapshots without
+# coverage_effective_pct fall back to snapshot_coverage_pct. A missing/unreadable
+# snapshot is tolerated ("unknown"), this script must keep doing its free-space check.
 update_coverage_streak() {
-  [[ -f "$SNAPSHOT_FILE" ]] || { echo "unknown	unknown"; return; }
+  [[ -f "$SNAPSHOT_FILE" ]] || { printf 'unknown\tunknown\tnone\n'; return; }
   mkdir -p "$STATE_DIR"
   python3 - "$SNAPSHOT_FILE" "$STREAK_FILE" "$STREAK_ESCALATE_AT" <<'PY'
 import json, sys
 
 snapshot_file, streak_file, escalate_at = sys.argv[1], sys.argv[2], int(sys.argv[3])
+RING = 12
+STALE_CARRY_HOURS = 48
+LOW_EFFECTIVE = 60
 
 try:
     snap = json.load(open(snapshot_file))
 except Exception:
-    print("unknown\tunknown")
+    print("unknown\tunknown\tnone")
     sys.exit(0)
 
-coverage_pct = snap.get("snapshot_coverage_pct")
-if coverage_pct is None:
-    coverage_pct = (snap.get("snapshot_metadata") or {}).get("coverage_pct")
-low_coverage = (snap.get("snapshot_warning") == "low_coverage") or (
-    coverage_pct is not None and float(coverage_pct) < 70
-)
+pct = snap.get("coverage_effective_pct")
+if pct is None:
+    pct = snap.get("snapshot_coverage_pct")
+if pct is None:
+    pct = (snap.get("snapshot_metadata") or {}).get("coverage_pct")
 snap_ts = snap.get("timestamp", "")
+carried = {c["key"]: c.get("age_hours", 0) for c in snap.get("carried_keys") or [] if "key" in c}
+unmeasured = list(snap.get("unmeasured_keys") or [])
 
 try:
     state = json.load(open(streak_file))
+    if not isinstance(state, dict) or "ring" not in state:
+        raise ValueError("old schema")
+except FileNotFoundError:
+    state = {"ring": []}
 except Exception:
-    state = {"streak": 0, "last_snapshot_timestamp": ""}
+    print("coverage_streak.json: old or unreadable schema, resetting", file=sys.stderr)
+    state = {"ring": []}
+ring = state["ring"]
 
-if snap_ts and snap_ts == state.get("last_snapshot_timestamp"):
-    # Already scored this exact snapshot (alert runs hourly, snapshots land
-    # every ~35min) — don't double-count, just report current streak.
-    print(f"{state.get('streak', 0)}\t{coverage_pct if coverage_pct is not None else 'unknown'}")
-    sys.exit(0)
+if snap_ts and not any(r.get("snapshot_ts") == snap_ts for r in ring):
+    ring.append({"snapshot_ts": snap_ts, "effective_pct": pct, "carried": carried, "unmeasured": unmeasured})
+    del ring[:-RING]
+    with open(streak_file, "w") as f:
+        json.dump(state, f, indent=2)
 
-state["streak"] = state.get("streak", 0) + 1 if low_coverage else 0
-state["last_snapshot_timestamp"] = snap_ts
-state["last_coverage_pct"] = coverage_pct
+streak = 0
+for r in reversed(ring):
+    v = r.get("effective_pct")
+    if v is not None and float(v) < LOW_EFFECTIVE:
+        streak += 1
+    else:
+        break
 
-with open(streak_file, "w") as f:
-    json.dump(state, f, indent=2)
-
-print(f"{state['streak']}\t{coverage_pct if coverage_pct is not None else 'unknown'}")
+reasons = []
+if streak >= escalate_at:
+    reasons.append("low_effective")
+for key, age in carried.items():
+    if float(age) > STALE_CARRY_HOURS:
+        reasons.append(f"stale_carry:{key}@{age}h")
+prev = ring[-2] if len(ring) >= 2 and ring[-1].get("snapshot_ts") == snap_ts else (ring[-1] if ring and ring[-1].get("snapshot_ts") != snap_ts else None)
+if prev:
+    for key in unmeasured:
+        if key in (prev.get("carried") or {}):
+            reasons.append(f"carry_expired:{key}")
+print(f"{streak}\t{pct if pct is not None else 'unknown'}\t{','.join(reasons) or 'none'}")
 PY
 }
 
@@ -147,8 +172,8 @@ if [[ $# -gt 0 ]]; then
       fi
       echo "Threshold: ${THRESHOLD_GB} GB"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
-      IFS=$'\t' read -r status_streak status_coverage_pct <<< "$(update_coverage_streak)"
-      echo "Coverage streak: ${status_streak} (coverage_pct=${status_coverage_pct}, escalate at ${STREAK_ESCALATE_AT})"
+      IFS=$'\t' read -r status_streak status_coverage_pct status_reasons <<< "$(update_coverage_streak)"
+      echo "Coverage streak: ${status_streak} (effective_pct=${status_coverage_pct}, escalate at ${STREAK_ESCALATE_AT}; reasons: ${status_reasons})"
       IFS=$'\t' read -r step_count step_dir step_gib <<< "$(get_recent_step_events)"
       echo "Recent step events (24h): ${step_count} (latest: ${step_dir} ${step_gib} GiB)"
       exit 0
@@ -169,12 +194,16 @@ avail_kb=$(echo "$df_line" | awk '{print $4}')
 free_gb=$(( avail_kb / 1024 / 1024 ))
 used_pct=$(( (total_kb - avail_kb) * 100 / total_kb ))
 
-IFS=$'\t' read -r coverage_streak coverage_pct <<< "$(update_coverage_streak)"
+IFS=$'\t' read -r coverage_streak coverage_pct coverage_reasons <<< "$(update_coverage_streak)"
 IFS=$'\t' read -r step_count step_dir step_gib <<< "$(get_recent_step_events)"
 
 streak_alert=false
-if [[ "$coverage_streak" != "unknown" && "$coverage_streak" -ge "$STREAK_ESCALATE_AT" ]]; then
+if [[ "${coverage_reasons:-none}" != "none" ]]; then
   streak_alert=true
+else
+  # Isolated low-coverage runs are normal under host load: INFO, never an alert.
+  [[ "$coverage_streak" != "unknown" && "$coverage_streak" -gt 0 ]] && \
+    echo "INFO: low coverage run ${coverage_streak}/${STREAK_ESCALATE_AT} (effective_pct=${coverage_pct}); not escalating." >&2
 fi
 
 ledger_alert=false
@@ -205,8 +234,8 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
       fi
     fi
     if [[ "$streak_alert" == true ]]; then
-      echo "🚨 WARNING: Snapshot coverage has been low for ${coverage_streak} consecutive checks (coverage_pct=${coverage_pct})." >&2
-      echo "Run 'scripts/residual_drilldown.sh' or check config.d/auto-candidates.json for untracked-growth proposals." >&2
+      echo "🚨 WARNING: Snapshot coverage degraded (effective_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}." >&2
+      echo "Run 'scripts/residual_drilldown.sh' or check ~/.disk_magician_state/config.d/auto-candidates.json for untracked-growth proposals." >&2
     fi
     if [[ "$ledger_alert" == true ]]; then
       echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})." >&2

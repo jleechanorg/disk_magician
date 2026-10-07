@@ -13,8 +13,14 @@ Usage: $(basename "$0") <command> [options]
 Commands:
   setup         Configure local backup repository, create GitHub remote, and schedule jobs.
   snapshot      Perform disk usage breakdown and write to backup JSON.
+  status        Report fleet, accounting, job outcomes, and deployed identity (--json).
+  growth-top10  Report attributable growth with explicit partial/unknown values (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   frontier      Run the full-disk frontier scanner and optionally persist its state.
+  frontier-nightly Run the existing scheduled frontier wrapper.
+  residual-drilldown Run the scheduled residual and uncovered-root checks.
+  pressure-sweep Run the existing free-space-gated maintenance job.
+  tmp-scratch-sweep Run the existing scheduled scratch maintenance wrapper.
   clean         Clean safe targets across 6-tier routine stack (caches, temp, Docker, Xcode, worktrees).
   routine       Alias for clean --routine (runs unified 6-tier routine stack).
   clean-all     Clean all targets interactively (Docker VMs, old sessions).
@@ -26,6 +32,7 @@ Commands:
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
+  sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
@@ -35,10 +42,22 @@ Commands:
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
-  cleanup-apfs-snapshots Clean stale APFS OS update snapshots older than retention.
-  cleanup-antigravity-brain Clean stale conversation task logs and media artifacts.
+  cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
+  cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
+  cleanup-claude-state   Run the guarded Claude state maintenance helper.
+  cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
+  cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
+  cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
+  sweep                  Run the single main disk sweeper (snapshot, pressure reclaim, 6-tier routine maintenance, health).
+  main-sweeper           Alias for sweep.
+  worktree-new           Create new worktree under ~/.worktrees/<repo>/<name>.
+  guard-worktree-add     PreToolUse hook guarding worktree placement under ~/.worktrees/.
+  worktree-create-hook   Claude WorktreeCreate hook creating under ~/.worktrees/.
+  worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
+  layout-check           Audit worktree and evidence placement against standard layout.
+  evidence-push          Sync local evidence dir to remote storage.
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -96,6 +115,12 @@ run_setup() {
     return 0
   fi
 
+  local installed_cli="${HOME}/.local/bin/diskm"
+  if [[ ! -x "$installed_cli" ]]; then
+    echo "Install the packaged diskm command before scheduling snapshot jobs: $installed_cli" >&2
+    return 1
+  fi
+
   # 1. Create local backup directory
   mkdir -p "$BACKUP_DIR/backup/$(hostname -s 2>/dev/null || hostname)"
   if [[ ! -d "$BACKUP_DIR/.git" ]]; then
@@ -136,7 +161,7 @@ run_setup() {
     <string>com.jleechanorg.disk-magician</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${SCRIPT_DIR}/disk_magician.sh</string>
+        <string>${HOME}/.local/bin/diskm</string>
         <string>snapshot</string>
     </array>
     <key>StartInterval</key>
@@ -155,12 +180,17 @@ XML
     echo "launchd agent successfully loaded."
   else
     # Linux cron fallback
-    local cron_job="*/30 * * * * ${SCRIPT_DIR}/disk_magician.sh snapshot >> /tmp/disk-magician.log 2>&1"
-    (crontab -l 2>/dev/null | grep -Fv "disk_magician.sh"; echo "$cron_job") | crontab -
+    local cron_job="*/30 * * * * \"$installed_cli\" snapshot >> /tmp/disk-magician.log 2>&1"
+    local prior_cron
+    prior_cron="$(crontab -l 2>/dev/null || true)"
+    {
+      printf '%s\n' "$prior_cron" | grep -Fv -e "disk_magician.sh snapshot" -e "$installed_cli" || true
+      printf '%s\n' "$cron_job"
+    } | crontab -
     echo "Cron job added to crontab."
   fi
 
-  echo "Setup complete! Run './disk_magician.sh snapshot' to capture your first snapshot."
+  echo "Setup complete! Run 'diskm snapshot' to capture your first snapshot."
 }
 
 # NOTE: the legacy inline snapshot lock, gitleaks secret-scan guard,
@@ -179,7 +209,19 @@ case "$CMD" in
   snapshot)
     exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh"
     ;;
+  status)
+    exec python3 "$SCRIPT_DIR/scripts/disk_status.py" "$@"
+    ;;
+  growth-top10)
+    exec python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
+    ;;
   audit)
+    for audit_arg in "$@"; do
+      if [[ "$audit_arg" == "-h" || "$audit_arg" == "--help" ]]; then
+        usage
+        exit 0
+      fi
+    done
     # Default diagnosis: top-down accounting, snapshot deltas, and safe
     # quick-win analysis run concurrently and render as one ordered report.
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
@@ -188,6 +230,21 @@ case "$CMD" in
     ;;
   frontier)
     exec python3 "$SCRIPT_DIR/scripts/disk_frontier_scan.py" "$@"
+    ;;
+  frontier-nightly)
+    exec bash "$SCRIPT_DIR/scripts/disk_frontier_scan.sh" "$@"
+    ;;
+  residual-drilldown)
+    exec bash "$SCRIPT_DIR/scripts/residual_drilldown.sh" "$@"
+    ;;
+  pressure-sweep)
+    exec bash "$SCRIPT_DIR/scripts/pressure_sweep.sh" "$@"
+    ;;
+  tmp-scratch-sweep)
+    exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
+    ;;
+  main-sweeper|sweep)
+    exec bash "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
     ;;
   clean|routine)
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
@@ -244,6 +301,9 @@ case "$CMD" in
   check_launchd_fleet|check-launchd-fleet)
     "$SCRIPT_DIR/scripts/check_launchd_fleet.sh" "$@"
     ;;
+  sweeper_health|sweeper-health)
+    "$SCRIPT_DIR/scripts/sweeper_health_check.sh" "$@"
+    ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
     ;;
@@ -277,11 +337,44 @@ case "$CMD" in
   cleanup_antigravity_brain|cleanup-antigravity-brain)
     "$SCRIPT_DIR/scripts/cleanup_antigravity_brain.sh" "$@"
     ;;
+  cleanup-claude-state)
+    exec bash "$SCRIPT_DIR/scripts/cleanup_claude_state.sh" "$@"
+    ;;
+  cleanup_codex_db|cleanup-codex-db|vacuum_codex_db|vacuum-codex-db|codex-vacuum)
+    "$SCRIPT_DIR/scripts/cleanup_codex_db.sh" "$@"
+    ;;
   cleanup_uv_cache|cleanup-uv-cache)
     "$SCRIPT_DIR/scripts/cleanup_uv_cache.sh" "$@"
     ;;
+  cleanup_dark_factory|cleanup-dark-factory)
+    "$SCRIPT_DIR/scripts/cleanup_dark_factory.sh" "$@"
+    ;;
+  cleanup_code_sign_clones|cleanup-code-sign-clones)
+    "$SCRIPT_DIR/scripts/cleanup_code_sign_clones.sh" "$@"
+    ;;
   vacuum_hermes_state|vacuum-hermes-state)
     "$SCRIPT_DIR/scripts/vacuum_hermes_state.sh" "$@"
+    ;;
+  sweep|main-sweeper|main_sweeper)
+    "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
+    ;;
+  worktree_new|worktree-new)
+    "$SCRIPT_DIR/scripts/worktree_new.sh" "$@"
+    ;;
+  guard_worktree_add|guard-worktree-add)
+    python3 "$SCRIPT_DIR/scripts/worktree_guard.py" "$@"
+    ;;
+  worktree_create_hook|worktree-create-hook)
+    "$SCRIPT_DIR/scripts/worktree_create_hook.sh" "$@"
+    ;;
+  layout_check|layout-check)
+    python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
+    ;;
+  evidence_push|evidence-push)
+    "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
+    ;;
+  worktree_remove_hook|worktree-remove-hook)
+    "$SCRIPT_DIR/scripts/worktree_remove_hook.sh" "$@"
     ;;
   -h|--help)
     usage
