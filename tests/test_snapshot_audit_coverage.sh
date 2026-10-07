@@ -16,6 +16,8 @@ SNAP_SCRIPT="$REPO_ROOT/scripts/disk_snapshot.sh"
 
 WORK="$(mktemp -d -t disk_audit_cov.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+# Hermetic: never read the machine's root frontier report (/var/db/disk-magician).
+export DISK_MAGICIAN_FRONTIER_ROOT_JSON="$WORK/no-root-frontier.json"
 
 PASS=0
 FAIL=0
