@@ -329,35 +329,23 @@ has_hidden_state() {
 # are digests, but the stored repo and branch are also checked byte for byte:
 # a filename collision or an unreadable record must never approve a worktree.
 repo_local_cached_pr_heads() {
-    local repo="$1" owner_repo="$2" branch_clean="$3" cache_dir
+    # Per-run cache files: repos.tsv maps owner_repo -> index; repo<index>/index.tsv
+    # holds "branch<TAB>oid oid ...". Git refnames cannot contain tab, newline,
+    # space or backslash, and keys reach awk through ENVIRON (no -v escapes).
+    local repo="$1" owner_repo="$2" branch_clean="$3" cache_dir idx
     [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]] || return 1
     [[ "$owner_repo" =~ ^[^/]+/[^/]+$ ]] || return 1
-    command -v python3 >/dev/null 2>&1 || return 1
-    cache_dir="$(python3 - "$RUN_TMP" "$owner_repo" <<'PY'
-import hashlib, os, sys
-print(os.path.join(sys.argv[1], hashlib.sha256(os.fsencode(sys.argv[2])).hexdigest()))
-PY
-    )" || return 1
-    if [[ ! -d "$cache_dir" ]]; then
+    idx="$(DWR_KEY="$owner_repo" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { print $2; exit }' "$RUN_TMP/repos.tsv" 2>/dev/null)"
+    if [[ -z "$idx" ]]; then
+        idx="$(( $(awk 'END { print NR }' "$RUN_TMP/repos.tsv" 2>/dev/null || echo 0) + 1 ))"
+        cache_dir="$RUN_TMP/repo$idx"
         mkdir "$cache_dir" || return 1
+        printf '%s\t%s\n' "$owner_repo" "$idx" >> "$RUN_TMP/repos.tsv"
         populate_repo_pr_cache "$repo" "$owner_repo" "$cache_dir" || true
     fi
-    python3 - "$cache_dir" "$owner_repo" "$branch_clean" <<'PY'
-import hashlib, json, os, sys
-directory, owner_repo, branch = sys.argv[1:]
-try:
-    path = os.path.join(directory, hashlib.sha256(os.fsencode(branch)).hexdigest() + '.json')
-    with open(path) as source:
-        record = json.load(source)
-    if record['owner_repo'] != owner_repo or record['branch'] != branch:
-        sys.exit(1)
-    heads = record['heads']
-    if not isinstance(heads, list) or any(not isinstance(oid, str) or not oid for oid in heads):
-        sys.exit(1)
-    print('\n'.join(heads))
-except (OSError, ValueError, KeyError, TypeError):
-    sys.exit(1)
-PY
+    cache_dir="$RUN_TMP/repo$idx"
+    # Prints the heads one per line (as the per-row gh call does); rc 1 on miss.
+    DWR_KEY="$branch_clean" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { n = split($2, h, " "); for (i = 1; i <= n; i++) print h[i]; found = 1; exit } END { exit !found }' "$cache_dir/index.tsv" 2>/dev/null
 }
 
 populate_repo_pr_cache() {
@@ -383,7 +371,7 @@ populate_repo_pr_cache() {
         response="$cache_dir/response.json"
         if env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh api graphql -f "query=$query" "${variables[@]}" > "$response" 2>/dev/null; then
             python3 - "$cache_dir" "$owner_repo" "$response" "$start" "${branches[@]:start:end-start}" <<'PY' || true
-import hashlib, json, os, sys
+import json, os, sys
 directory, owner_repo, response, start, *branches = sys.argv[1:]
 try:
     with open(response) as source:
@@ -410,10 +398,8 @@ try:
         nodes = value.get('nodes')
         if not isinstance(nodes, list) or any(not isinstance(node, dict) or not isinstance(node.get('headRefOid'), str) or not node['headRefOid'] for node in nodes):
             continue
-        record = {'owner_repo': owner_repo, 'branch': branch, 'heads': [node['headRefOid'] for node in nodes]}
-        path = os.path.join(directory, hashlib.sha256(os.fsencode(branch)).hexdigest() + '.json')
-        with open(path, 'w') as target:
-            json.dump(record, target)
+        with open(os.path.join(directory, 'index.tsv'), 'a') as target:
+            target.write(branch + '\t' + ' '.join(node['headRefOid'] for node in nodes) + '\n')
 except (OSError, ValueError, KeyError, TypeError):
     sys.exit(1)
 PY
@@ -426,7 +412,7 @@ PY
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         echo "status-failed"
         return 0
@@ -451,40 +437,38 @@ classify_content_and_merge() {
         return 0
     fi
 
-    if ! git -C "$repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null; then
-        local ahead_count rev_rc=0
-        ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
-        if [[ "$rev_rc" -ne 0 ]]; then
-            echo "rev-list-failed"
-            return 0
-        fi
-        if [[ "$ahead_count" -gt 0 ]]; then
-            local branch_clean="${branch#refs/heads/}"
-            if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
-                local origin_url owner_repo
-                origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
-                if [[ -n "$origin_url" ]]; then
-                    owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-                    if [[ -n "$owner_repo" ]]; then
-                        local pr_heads gh_rc=0
-                        if ! pr_heads="$(repo_local_cached_pr_heads "$repo" "$owner_repo" "$branch_clean" 2>/dev/null)"; then
-                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
-                        fi
-                        if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
-                            if grep -qFx "$head_sha" <<<"$pr_heads"; then
-                                return 0
-                            else
-                                echo "merged-differing-head"
-                                return 0
-                            fi
+    # rev-list --count main..head is 0 exactly when head is reachable from main
+    # (what merge-base --is-ancestor tests), so one call answers both questions.
+    local ahead_count rev_rc=0
+    ahead_count="$(git -C "$repo" rev-list --count "$main_ref..$head_sha" 2>/dev/null)" || rev_rc=$?
+    if [[ "$rev_rc" -ne 0 || ! "$ahead_count" =~ ^[0-9]+$ ]]; then
+        echo "rev-list-failed"
+        return 0
+    fi
+    if (( ahead_count > 0 )); then
+        local branch_clean="${branch#refs/heads/}"
+        if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
+            local origin_url owner_repo
+            origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+            if [[ -n "$origin_url" ]]; then
+                owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
+                if [[ -n "$owner_repo" ]]; then
+                    local pr_heads gh_rc=0
+                    if ! pr_heads="$(repo_local_cached_pr_heads "$repo" "$owner_repo" "$branch_clean" 2>/dev/null)"; then
+                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                    fi
+                    if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
+                        if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                            return 0
+                        else
+                            echo "merged-differing-head"
+                            return 0
                         fi
                     fi
                 fi
             fi
-            echo "ahead-of-main"
-        else
-            echo "non-ancestor"
         fi
+        echo "ahead-of-main"
         return 0
     fi
 

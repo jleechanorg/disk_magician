@@ -180,9 +180,11 @@ target; `safety_min_stale_days` may raise it, never lower it.
 
 **Sole exception (bead `disk_magician-plf`, user-directed):** in
 `scripts/cleanup_worktrees.sh` only, and only while its own floor is the
-default 7 days, a worktree whose canonical `worktree_age_days` is >= 3 may be
-ELIGIBLE when ALL hold: `git status --porcelain --untracked-files=all
---ignore-submodules=none` is empty (no tracked changes, no untracked files);
+default 7 days, a worktree that canonical `worktree_is_recently_active` reports
+as not active within 3 days may be ELIGIBLE when ALL hold: `git status
+--porcelain --untracked-files=normal --ignore-submodules=none` is empty (no
+tracked changes, no untracked files; `normal` reports an untracked directory as
+one `??` entry, which gives the same empty/non-empty answer as `all`);
 no index entry is assume-unchanged or skip-worktree; no ignored secret-like
 file exists (case-insensitive `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
 `id_rsa*`/`id_ed25519*`/`id_ecdsa*`/`id_dsa*`, `.npmrc`, `.netrc`, `*credentials*`, `secrets*`); HEAD is an ancestor of

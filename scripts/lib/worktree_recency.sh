@@ -124,6 +124,24 @@ _worktree_recency_legacy_active() {
     (( age < min_days ))
 }
 
+# Date flavour for the fast path, detected once per sourcing process.
+# Tests that stub `date` call _worktree_recency_reset_date_flavor afterwards.
+_worktree_recency_detect_date_flavor() {
+    local probe
+    if probe="$(date -r 0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
+        _WT_RECENCY_DATE_FLAVOR=bsd
+    elif probe="$(date -d @0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
+        _WT_RECENCY_DATE_FLAVOR=gnu
+    else
+        _WT_RECENCY_DATE_FLAVOR=none
+    fi
+}
+_worktree_recency_reset_date_flavor() {
+    _WT_RECENCY_DATE_FLAVOR=""
+    _worktree_recency_detect_date_flavor
+}
+_worktree_recency_detect_date_flavor
+
 # worktree_is_recently_active <worktree_path> <min_days> [now]
 # rc 0 = the worktree was touched inside the last <min_days> days; it is
 #        PROTECTED and must not be deleted, stripped, or archived.
@@ -171,12 +189,11 @@ worktree_is_recently_active() {
         _worktree_recency_legacy_active "$wt" "$min_days" "$now"
         return $?
     fi
-    # Detect once; the two reference stamps use only the selected flavour.
-    if probe="$(date -r 0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
-        flavor=bsd
-    elif probe="$(date -d @0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
-        flavor=gnu
-    else
+    # Flavour is detected once when the library is sourced (see below); the
+    # two reference stamps use only that flavour.
+    [[ -n "${_WT_RECENCY_DATE_FLAVOR:-}" ]] || _worktree_recency_detect_date_flavor
+    flavor="$_WT_RECENCY_DATE_FLAVOR"
+    if [[ "$flavor" != bsd && "$flavor" != gnu ]]; then
         _worktree_recency_legacy_active "$wt" "$min_days" "$now"
         return $?
     fi
@@ -228,19 +245,15 @@ worktree_is_recently_active() {
         [[ "$readback" == 1 ]] || break
 
         # Never normalize the find root: its bytes must match the legacy call.
-        rc=0
-        hit="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
-            -o -type f -newer "$cutoff_ref" -print -quit 2>/dev/null)" || rc=$?
-        if (( rc != 0 )) || [[ -n "$hit" ]]; then result=0; break; fi
+        # Any counted file first (cheap: stops at the first one), then one final
+        # traversal that answers both "newer than the cutoff" and "path longer
+        # than PATH_MAX"; the verdict rests on that last traversal. Every prune
+        # name is ASCII, so LC_ALL=C (bytes for -path) leaves -name unchanged.
         rc=0
         any_hit="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
             -o -type f -newer "$epoch_ref" -print -quit 2>/dev/null)" || rc=$?
         if (( rc != 0 )) || [[ -z "$any_hit" ]]; then result=0; break; fi
         if [[ "$any_hit" -ef "$cutoff_ref" || "$any_hit" -ef "$epoch_ref" ]]; then break; fi
-        rc=0
-        hit="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
-            -o -type f -newer "$cutoff_ref" -print -quit 2>/dev/null)" || rc=$?
-        if (( rc != 0 )) || [[ -n "$hit" ]]; then result=0; break; fi
 
         path_max="$(getconf PATH_MAX "$wt" 2>/dev/null)" || path_max=""
         [[ "$path_max" =~ ^[0-9]+$ ]] || path_max=1024
@@ -248,7 +261,7 @@ worktree_is_recently_active() {
         long_pattern="${long_pattern// /?}*"
         rc=0
         hit="$(LC_ALL=C find "$wt" \( "${prune_expr[@]}" \) -prune \
-            -o -path "$long_pattern" -print -quit 2>/dev/null)" || rc=$?
+            -o \( -type f -newer "$cutoff_ref" -o -path "$long_pattern" \) -print -quit 2>/dev/null)" || rc=$?
         if (( rc != 0 )) || [[ -n "$hit" ]]; then result=0; break; fi
         result=1
         break

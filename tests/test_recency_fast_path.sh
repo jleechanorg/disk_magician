@@ -96,22 +96,26 @@ if [[ "${PATH_MAX_SET:-}" == 1 || -n "${PATH_MAX_OVERRIDE:-}" ]] && [[ "${1:-}" 
 exec "$REAL_GETCONF" "$@"
 STUB
 write_stub find <<'STUB'
-kind=legacy ref='' prev=''
+kind=legacy ref='' prev='' has_newer=0 has_path=0
 for arg in "$@"; do
     [[ "$prev" == -newer ]] && ref="$arg"
-    [[ "$arg" == -newer ]] && kind=-newer
-    [[ "$arg" == -path ]] && kind=-path
+    [[ "$arg" == -newer ]] && has_newer=1
+    [[ "$arg" == -path ]] && has_path=1
     prev="$arg"
 done
+# The final traversal combines -newer and -path; record it as -newer (it is a
+# fast-path probe) and keep both flags for the failure/mutation switches below.
+(( has_path )) && kind=-path
+(( has_newer )) && kind=-newer
 printf '%s\t%s\t%s\n' "$kind" "$1" "${LC_ALL:-}" >> "$RECENCY_FIND_MARKER"
 if [[ "$kind" == legacy ]]; then
     while IFS= read -r dir; do
         [[ -d "$dir" ]] && printf '%s\n' "$dir" >> "$RECENCY_LEAK_MARKER"
     done < "$RECENCY_REF_MARKER"
 fi
-if [[ "${FAIL_TOOL:-}" == find && "$kind" == -newer ]]; then exit 1; fi
-if [[ "${FAIL_TOOL:-}" == find-path && "$kind" == -path ]]; then exit 1; fi
-if [[ "$kind" == -newer && ( "${MUTATE_PROBES:-}" == 1 || "${FAIL_TOOL:-}" == find-any ||
+if [[ "${FAIL_TOOL:-}" == find ]] && (( has_newer )); then exit 1; fi
+if [[ "${FAIL_TOOL:-}" == find-path ]] && (( has_path )); then exit 1; fi
+if (( has_newer )) && [[ ( "${MUTATE_PROBES:-}" == 1 || "${FAIL_TOOL:-}" == find-any ||
     "${FAIL_TOOL:-}" == find-final || "${FAIL_TOOL:-}" == reference-collision ) ]]; then
     # Identify cutoff probes by mtime; the epoch-1 probe is independent.
     epoch="$("$REAL_STAT" -f %m "$ref" 2>/dev/null)" || epoch="$("$REAL_STAT" -c %Y "$ref")"
@@ -123,11 +127,11 @@ if [[ "$kind" == -newer && ( "${MUTATE_PROBES:-}" == 1 || "${FAIL_TOOL:-}" == fi
         [[ -s "$RECENCY_PROBE_MARKER" ]] && read -r count < "$RECENCY_PROBE_MARKER"
         count=$((count + 1)); printf '%s\n' "$count" > "$RECENCY_PROBE_MARKER"
         if [[ "${MUTATE_PROBES:-}" == 1 ]]; then
-            [[ "$count" == 1 ]] && exit 0
-            printf '%s\n' "$1/changed-after-first-probe.txt"
+            # A file changed after the any-file probe: the final traversal sees it.
+            printf '%s\n' "$1/changed-after-any-file-probe.txt"
             exit 0
         fi
-        [[ "${FAIL_TOOL:-}" == find-final && "$count" == 2 ]] && exit 1
+        [[ "${FAIL_TOOL:-}" == find-final && "$count" == 1 ]] && exit 1
     fi
 fi
 exec "$REAL_FIND" "$@"
@@ -358,13 +362,22 @@ printf '  NOTE: A4 legacy age=%s; legacy counts epoch 1 as positive\n' "$(PATH="
 
 echo "== A5': reference containment, symlink ancestors, and dot-dot paths =="
 WT="$TMPROOT/contained"; mkdir -p "$WT/.git/tmp"; : > "$WT/.git/content"
+# macOS mktemp -d ignores TMPDIR, so there the references never land inside
+# the tree and the fast path legitimately runs; only safety is asserted then.
+probe_dir="$(TMPDIR="$WT/.git/tmp" mktemp -d 2>/dev/null)" || probe_dir=""
+mktemp_honours_tmpdir=0
+[[ "$probe_dir" == "$WT/.git/tmp/"* ]] && mktemp_honours_tmpdir=1
+[[ -n "$probe_dir" ]] && rm -rf -- "$probe_dir"
+(( mktemp_honours_tmpdir )) || printf '  NOTE: mktemp ignores TMPDIR on this platform; A6 route checks skipped for inside/symlink\n'
 for mode in inside symlink dotdot; do
     path="$WT"; refdir="$WT/.git/tmp"
     if [[ "$mode" == symlink ]]; then ln -s "$refdir" "$TMPROOT/reference-link"; refdir="$TMPROOT/reference-link"; fi
     [[ "$mode" == dotdot ]] && path="$WT/.git/.."
     reset_logs; TMPDIR="$refdir" get_predicate_rc "$path" 7
     assert_eq "$ACTUAL" 0 "A5': $mode only-pruned tree is active"
-    assert_route "A5' $mode" legacy "$path"
+    if [[ "$mode" == dotdot ]] || (( mktemp_honours_tmpdir )); then
+        assert_route "A5' $mode" legacy "$path"
+    fi
     assert_clean_refs "A5': $mode"
 done
 ln -s "$TMPROOT" "$TMPROOT/ancestor-link"
@@ -474,11 +487,13 @@ done
 reset_logs; FAIL_TOOL=getconf get_predicate_rc "$WT" 7
 assert_eq "$ACTUAL" 0 "A9': failed getconf falls back to 1024 bytes"
 
-echo "== A10': mutation between the first and final cutoff probes =="
+echo "== A10': mutation after the any-file probe, before the final traversal =="
 WT="$TMPROOT/mutation"; mkdir -p "$WT"; : > "$WT/old.txt"; touch_at "$OLD" "$WT/old.txt"
 reset_logs; MUTATE_PROBES=1 get_predicate_rc "$WT" 7
-assert_eq "$ACTUAL" 0 "A10': changed file before final cutoff probe protects tree"
-assert_eq "$(cat "$RECENCY_PROBE_MARKER")" 2 "A10': cutoff probe is repeated after the any-file probe"
+assert_eq "$ACTUAL" 0 "A10': file changed before the final traversal protects tree"
+assert_eq "$(cat "$RECENCY_PROBE_MARKER")" 1 "A10': exactly one cutoff traversal, after the any-file probe"
+fast_calls="$(awk -F '\t' '$1 != "legacy" { printf "%s;", $1 }' "$RECENCY_FIND_MARKER")"
+assert_eq "$fast_calls" "-newer;-newer;" "A10': any-file probe then one combined final traversal"
 assert_clean_refs "A10': mutation"
 
 echo
