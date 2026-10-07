@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regression contract: one age walk per classified row, du only for eligible rows.
+# Regression contract: exact ages only for eligible repo-local rows, du only for
+# eligible rows. Antigravity classification uses predicates without exact ages.
 # All cleanup, including --clean, is confined to this test's temporary fixtures.
 set -euo pipefail
 
@@ -36,6 +37,19 @@ worktree_age_days() {
 }
 SH
 done
+cat >> "$TMP_ROOT/branch/scripts/lib/worktree_recency.sh" <<'SH'
+
+# Predicate fixture uses the same age map without invoking the display-age
+# function: only eligible repo-local rows are allowed to request that age.
+worktree_is_recently_active() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "$PREDICATE_COUNTER"
+    local value rc
+    value="$(awk -F '\t' -v p="$1" '$1 == p { print $2; found=1; exit } END { if (!found) exit 1 }' "$AGE_MAP")" || return 0
+    rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
+    [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
+    (( value < $2 ))
+}
+SH
 
 require() { "$@" || { printf '    assertion failed: %s\n' "$*" >&2; return 1; }; }
 contains() { grep -qF -- "$2" "$1"; }
@@ -143,7 +157,7 @@ expect_eligible() { printf '%s\n' "$1" >> "$F/eligible.expected"; }
 
 run_cleanup() {
   local tree="$1" out="$2" mode="${3:-constant}" action="${4:---dry-run}"
-  : > "$F/age.calls"; : > "$F/du.calls"
+  : > "$F/age.calls"; : > "$F/du.calls"; : > "$F/predicate.calls"
   local approval=''
   if [[ "$action" == --clean ]]; then
     # Guard before granting deletion authority: both HOME and repo are fixtures.
@@ -153,6 +167,7 @@ run_cleanup() {
   env -i HOME="$HOME_FIX" PATH="$BIN:/usr/bin:/bin" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 FIXTURE="$F" REAL_GIT="$REAL_GIT" REAL_DU="$REAL_DU" REAL_MKTEMP="$REAL_MKTEMP" \
     AHEAD_SHA="$AHEAD_SHA" AGE_MAP="$F/ages.tsv" AGE_COUNTER="$F/age.calls" \
+    PREDICATE_COUNTER="$F/predicate.calls" \
     DU_COUNTER="$F/du.calls" DU_MODE="$mode" ${approval:+"$approval"} \
     bash "$TMP_ROOT/$tree/scripts/cleanup_worktrees.sh" "$action" --repos "$REPO" > "$out" 2>&1
 }
@@ -209,16 +224,34 @@ case_t1() {
   require contains "$F/out" "$AG/symlink-candidate | symlink-candidate"
   require contains "$F/out" "${AG%/*}/symlink-parent | symlink-parent"
   require contains "$F/out" "$AG/outside-root | outside-root"
-  python3 - "$F/calls.expected" "$F/age.calls" <<'PY'
+  python3 - "$F/calls.expected" "$F/age.calls" "$F/eligible.expected" "$AG" "$F/predicate.calls" <<'PY'
 import collections, sys
 expected = {}
+expected_default_probes = {}
+eligible = set(line.rstrip('\n') for line in open(sys.argv[3]))
 for line in open(sys.argv[1]):
     path, count = line.rstrip('\n').split('\t')
     assert path not in expected, path
-    expected[path] = int(count)
+    expected[path] = int(path in eligible and not path.startswith(sys.argv[4] + '/'))
+    # Live repo-local rows now short circuit before the threshold probe.
+    expected_default_probes[path] = 0 if path.endswith('/wt-live') else int(count)
 actual = collections.Counter(line.rstrip('\n') for line in open(sys.argv[2]))
 assert not (set(actual) - set(expected)), (actual, expected)
 assert {p: actual[p] for p in expected} == expected, (actual, expected)
+assert not any(p.startswith(sys.argv[4] + '/') for p in actual), actual
+probes = collections.defaultdict(list)
+for line in open(sys.argv[5]):
+    path, floor, now = line.rstrip('\n').split('\t')
+    probes[path].append((floor, now))
+assert not (set(probes) - set(expected_default_probes)), probes
+assert {path: sum(floor == '7' for floor, _ in probes.get(path, [])) for path in expected_default_probes} == expected_default_probes, (probes, expected_default_probes)
+for path, calls in probes.items():
+    if path.startswith(sys.argv[4] + '/'):
+        assert calls == [('7', '')], (path, calls)
+    else:
+        assert sum(floor == '7' for floor, _ in calls) == 1, (path, calls)
+        assert len({now for _, now in calls}) == 1, (path, calls)
+        assert all(now.isdecimal() and int(now) > 0 for _, now in calls), (path, calls)
 PY
 }
 
@@ -229,7 +262,7 @@ case_t2() {
   LC_ALL=C sort "$F/du.calls" > "$F/actual.sorted"
   require diff -u "$F/expected.sorted" "$F/actual.sorted"
   # Standard-root early skips intentionally have no age/size suffix.
-  require awk '/LEDGER repo-local +PRESERVE/ && / \| age=/ { n++; if ($0 !~ / size=- /) exit 1 } END { if (!n) exit 1 }' "$F/out"
+  require awk '/LEDGER repo-local +PRESERVE/ && / \| age=/ { n++; if ($0 !~ / age=- size=- /) exit 1 } END { if (!n) exit 1 }' "$F/out"
   require awk '/LEDGER repo-local +ELIGIBLE/ { n++; if ($0 !~ / size=1M /) exit 1 } END { if (!n) exit 1 }' "$F/out"
 }
 
@@ -268,8 +301,8 @@ case_t4() {
   done
   run_cleanup branch "$F/out"
   for name in question dash empty leading-zero failed; do
-    require ledger_has "$F/out" PRESERVE "$WT/wt-$name | age-unknown | age=?d size=- "
-    require ledger_has "$F/out" PRESERVE "$AG/$name | young (age=?d < 7d)"
+    require ledger_has "$F/out" PRESERVE "$WT/wt-$name | young | age=- size=- "
+    require ledger_has "$F/out" PRESERVE "$AG/$name | young (< 7 days)"
   done
   require excludes "$F/out" ELIGIBLE
   require test ! -s "$F/du.calls"
@@ -279,7 +312,7 @@ case_t5() {
   init_fixture t5
   mkdir -p "$AG/empty"
   run_cleanup unstubbed "$F/out"
-  require ledger_has "$F/out" PRESERVE "$AG/empty | young (age=0d < 7d)"
+  require ledger_has "$F/out" PRESERVE "$AG/empty | young (< 7 days)"
   require excludes "$F/out" ELIGIBLE
 }
 
@@ -289,7 +322,8 @@ case_t6() {
   run_cleanup branch "$F/out"
   require ledger_has "$F/out" ELIGIBLE "$AG/exact-floor "
   require excludes "$F/out" "$AG/exact-floor | young"
-  require test "$(cat "$F/age.calls")" = "$AG/exact-floor"
+  require test ! -s "$F/age.calls"
+  require test "$(cut -f 1 "$F/predicate.calls")" = "$AG/exact-floor"
 }
 
 case_t7() {
@@ -305,8 +339,8 @@ for filename in sys.argv[1:]:
     path = Path(filename)
     with path.open() as source, path.with_suffix('.normalized').open('w') as target:
         for line in source:
-            line = re.sub(r' [|] age=\S+d size=\S+', '', line)
-            line = re.sub(r' [(]age=[^)]*[)]', '', line)
+            line = re.sub(r' [|] age=\S+ size=\S+', '', line)
+            line = re.sub(r' [(](?:age=[^)]*|< [0-9]+ days)[)]', '', line)
             target.write(line)
 PY_NORMALIZE
   require diff -u "$F/baseline.normalized" "$F/branch.normalized"
@@ -478,7 +512,11 @@ batch_equivalent() {
   run_cleanup batch_baseline "$F/baseline.out"
   mv "$F/batch.calls" "$F/baseline.calls"
   run_cleanup branch "$F/branch.out"
-  require diff -u "$F/baseline.out" "$F/branch.out"
+  # The amendment intentionally removes exact age labels from PRESERVE rows.
+  # Keep every other byte in the batch baseline comparison unchanged.
+  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/baseline.out" > "$F/baseline.batch-normalized"
+  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/branch.out" > "$F/branch.batch-normalized"
+  require diff -u "$F/baseline.batch-normalized" "$F/branch.batch-normalized"
 }
 
 case_b1() {
@@ -604,7 +642,7 @@ PY
 }
 
 echo '=== cleanup_worktrees single-age-walk fixture tests ==='
-run_case T1 'exact age-call map, including zero-call early skips' case_t1
+run_case T1 'exact age once per eligible repo-local row, never preserved or Antigravity' case_t1
 run_case T2 'du only on eligible rows and preserve size=-' case_t2
 run_case T3 'known-size worktree and exact reclaimable total' case_t3
 run_case T4 'invalid and failed ages fail closed in both scopes' case_t4

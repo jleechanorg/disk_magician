@@ -259,13 +259,11 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local age_days="$7"
-    if [[ ! "$age_days" =~ ^(0|[1-9][0-9]*)$ ]]; then
-        echo "age-unknown"
-        return 0
+    local min_age=$MIN_AGE_DAYS now recently_active=false
+    now="$(date +%s)"
+    if worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
+        recently_active=true
     fi
-
-    local min_age=$MIN_AGE_DAYS
 
     if [[ "$locked" == "1" ]]; then
         # Stale lock detection: only auto-unlock automated/orchestrator worktrees
@@ -276,7 +274,7 @@ classify_repo_local_worktree() {
             is_automated=true
         fi
 
-        if [[ "$is_automated" == "true" ]] && (( age_days >= min_age )); then
+        if [[ "$is_automated" == "true" && "$recently_active" == false ]]; then
             if [[ "$DRY_RUN" == false ]]; then
                 git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
             fi
@@ -291,10 +289,11 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    if (( age_days < min_age )); then
+    if [[ "$recently_active" == true ]]; then
         # Bead plf: a merged, fully clean, non-AO worktree may go at
         # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
-        if (( min_age == 7 && age_days >= MERGED_MIN_DAYS )) \
+        if (( min_age == 7 )) \
+            && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
             && ! has_hidden_state "$wt_path"; then
@@ -522,12 +521,8 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    local age age_label
-    age="$(worktree_age_days "$abs_subdir")" || age='?'
-    age_label="$age"
-    [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
-    if [[ "$age_label" == '?' ]] || (( age < MIN_AGE_DAYS )); then
-        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
+    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< ${MIN_AGE_DAYS} days)"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
@@ -763,17 +758,18 @@ process_repo_local_worktrees() {
         fi
 
         local reason size_kb_val size_fmt branch_label extra age_label age_days
-        age_days="$(worktree_age_days "$abs_path")" || age_days='?'
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch" "$age_days")"
+        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
         size_fmt='-'
+        age_label='-'
         if [[ -z "$reason" ]]; then
+            age_days="$(worktree_age_days "$abs_path")" || age_days='?'
+            [[ "$age_days" =~ ^(0|[1-9][0-9]*)$ ]] || age_days='?'
+            age_label="${age_days}d"
             size_kb_val=$(size_kb "$abs_path")
             size_fmt=$(fmt_kb "$size_kb_val")
         fi
         branch_label="${branch:-detached}"
-        age_label="$age_days"
-        [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
-        extra=" | age=${age_label}d size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
+        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
 
         if [[ -n "$reason" ]]; then
             ledger_line "repo-local" "PRESERVE" "$abs_path" "$reason" "$extra"
