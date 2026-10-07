@@ -23,14 +23,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_DIR="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+DAEMON_PLIST_DIR="${DISK_MAGICIAN_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 
 # Legacy compatibility assertion for the template-derived inventory.  JSON mode
 # reads committed launchd sources through job_inventory.py and never treats this
 # list as a second catalog.
 KNOWN_LABELS=(
-  # Compatibility inventory intentionally excludes the privileged APFS label:
-  # the no-argument checker queries user LaunchAgents only. JSON inventory
-  # derives that system LaunchDaemon separately from its committed plist.
+  # Labels whose plist lives in /Library/LaunchDaemons are checked via
+  # `launchctl print system/<label>`.
+  com.disk-magician.apfs-snapshots
   com.jleechanorg.disk-magician
   com.jleechanorg.disk-magician-downloads-evidence
   com.jleechanorg.disk-magician-drilldown
@@ -58,7 +59,8 @@ usage() {
 Usage: $(basename "$0") [--fleet-only] [--json] [-h|--help]
 
 Checks every known disk-magician launchd label for two independent failure
-modes: (1) not currently loaded (\`launchctl list\`), (2) installed plist is
+modes: (1) not currently loaded (\`launchctl list\`, or \`launchctl print
+system/<label>\` for a LaunchDaemon), (2) installed plist is
 structurally invalid (\`plutil -lint\`). Read-only. Exit 0 = all healthy.
 EOF
 }
@@ -94,6 +96,7 @@ fi
 
 missing=0
 not_loaded=0
+unknown=0
 invalid=0
 ok=0
 
@@ -129,6 +132,17 @@ is_consolidated_label() {
 
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
+  is_system_daemon=false
+  if [[ -f "$DAEMON_PLIST_DIR/${label}.plist" ]]; then
+    if [[ -f "$plist" ]]; then
+      # A same-label LaunchAgent would otherwise mask the daemon's state.
+      echo "  UNKNOWN STATE   $label  (plist in both $PLIST_DIR and $DAEMON_PLIST_DIR; load domain ambiguous)"
+      unknown=$(( unknown + 1 ))
+      continue
+    fi
+    plist="$DAEMON_PLIST_DIR/${label}.plist"
+    is_system_daemon=true
+  fi
 
   # If fleet is consolidated and main-sweeper is active, redundant sweepers are covered
   if [[ "$MAIN_SWEEPER_ACTIVE" == true ]] && is_consolidated_label "$label"; then
@@ -177,9 +191,23 @@ for label in "${KNOWN_LABELS[@]}"; do
     invalid=$(( invalid + 1 ))
     continue
   fi
+  if [[ "$is_system_daemon" == true ]]; then
+    print_rc=0
+    launchctl print "system/$label" >/dev/null 2>&1 || print_rc=$?
+    # 113 is launchctl's "could not find service"; any other failure leaves
+    # the load state unknown and must not be reported as "no record".
+    if [[ "$print_rc" -eq 113 ]]; then
+      echo "  NOT LOADED      $label  (plist valid but system launchctl has no record)"
+      not_loaded=$(( not_loaded + 1 ))
+      continue
+    elif [[ "$print_rc" -ne 0 ]]; then
+      echo "  UNKNOWN STATE   $label  (launchctl print system/$label exited $print_rc; load state not determined)"
+      unknown=$(( unknown + 1 ))
+      continue
+    fi
   # Match the launchctl label column exactly; a similarly-prefixed label must
   # not make this job appear loaded.
-  if ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
+  elif ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
     echo "  NOT LOADED      $label  (plist valid but launchctl has no record — try: launchctl load \"$plist\")"
     not_loaded=$(( not_loaded + 1 ))
     continue
@@ -191,8 +219,8 @@ total=${#KNOWN_LABELS[@]}
 echo "  Fleet: $ok/$total loaded and valid."
 
 fleet_unhealthy=0
-if [[ $((missing + not_loaded + invalid)) -gt 0 ]]; then
-  echo "  ⚠️  $((missing + not_loaded + invalid)) job(s) unhealthy — floor/history data below may be stale or absent."
+if [[ $((missing + not_loaded + invalid + unknown)) -gt 0 ]]; then
+  echo "  ⚠️  $((missing + not_loaded + invalid + unknown)) job(s) unhealthy — floor/history data below may be stale or absent."
   echo "  Repair: bash scripts/install_launchd_sweepers.sh   (rewrites every plist from its template and reloads it)"
   fleet_unhealthy=1
 fi
