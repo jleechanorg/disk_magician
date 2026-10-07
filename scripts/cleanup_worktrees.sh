@@ -242,8 +242,8 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local age_days
-    if ! age_days="$(worktree_age_days "$wt_path")"; then
+    local age_days="$7"
+    if [[ ! "$age_days" =~ ^(0|[1-9][0-9]*)$ ]]; then
         echo "age-unknown"
         return 0
     fi
@@ -407,9 +407,11 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
-        local age_label
-        age_label=$(worktree_age_days "$abs_subdir" 2>/dev/null || echo '?')
+    local age age_label
+    age="$(worktree_age_days "$abs_subdir")" || age='?'
+    age_label="$age"
+    [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
+    if [[ "$age_label" == '?' ]] || (( age < MIN_AGE_DAYS )); then
         ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (age=${age_label}d < ${MIN_AGE_DAYS}d)"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
@@ -645,12 +647,17 @@ process_repo_local_worktrees() {
             fi
         fi
 
-        local reason size_kb_val size_fmt branch_label extra age_label
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
-        size_kb_val=$(size_kb "$abs_path")
-        size_fmt=$(fmt_kb "$size_kb_val")
+        local reason size_kb_val size_fmt branch_label extra age_label age_days
+        age_days="$(worktree_age_days "$abs_path")" || age_days='?'
+        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch" "$age_days")"
+        size_fmt='-'
+        if [[ -z "$reason" ]]; then
+            size_kb_val=$(size_kb "$abs_path")
+            size_fmt=$(fmt_kb "$size_kb_val")
+        fi
         branch_label="${branch:-detached}"
-        age_label=$(worktree_age_days "$abs_path" 2>/dev/null || echo '?')
+        age_label="$age_days"
+        [[ "$age_label" =~ ^(0|[1-9][0-9]*)$ ]] || age_label='?'
         extra=" | age=${age_label}d size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
 
         if [[ -n "$reason" ]]; then
