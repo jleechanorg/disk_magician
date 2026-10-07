@@ -23,6 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_DIR="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+DAEMON_PLIST_DIR="${DISK_MAGICIAN_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 
 # Legacy compatibility assertion for the template-derived inventory.  JSON mode
 # reads committed launchd sources through job_inventory.py and never treats this
@@ -129,6 +130,11 @@ is_consolidated_label() {
 
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
+  is_system_daemon=false
+  if [[ ! -f "$plist" && -f "$DAEMON_PLIST_DIR/${label}.plist" ]]; then
+    plist="$DAEMON_PLIST_DIR/${label}.plist"
+    is_system_daemon=true
+  fi
 
   # If fleet is consolidated and main-sweeper is active, redundant sweepers are covered
   if [[ "$MAIN_SWEEPER_ACTIVE" == true ]] && is_consolidated_label "$label"; then
@@ -179,7 +185,13 @@ for label in "${KNOWN_LABELS[@]}"; do
   fi
   # Match the launchctl label column exactly; a similarly-prefixed label must
   # not make this job appear loaded.
-  if ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
+  if [[ "$is_system_daemon" == true ]]; then
+    if ! launchctl print "system/$label" >/dev/null 2>&1; then
+      echo "  NOT LOADED      $label  (plist valid but system launchctl has no record)"
+      not_loaded=$(( not_loaded + 1 ))
+      continue
+    fi
+  elif ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
     echo "  NOT LOADED      $label  (plist valid but launchctl has no record — try: launchctl load \"$plist\")"
     not_loaded=$(( not_loaded + 1 ))
     continue

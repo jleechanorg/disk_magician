@@ -120,6 +120,72 @@ if grep -qF "apfs-snapshots" <<<"$OUTPUT"; then
   fail=1
 fi
 
+if [[ "$fail" -ne 0 ]]; then
+  echo "FAIL: initial fleet checks failed" >&2
+  exit 1
+fi
+
+# Test LaunchDaemon path: com.jleechanorg.disk-magician-frontier-root
+DAEMON_DIR="$TMP_DIR/daemons"
+mkdir -p "$DAEMON_DIR"
+cat > "$DAEMON_DIR/com.jleechanorg.disk-magician-frontier-root.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-frontier-root</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/echo</string>
+  </array>
+</dict>
+</plist>
+EOF
+
+# Update stub launchctl to support 'print system/<label>'
+cat > "$FAKE_BIN/launchctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list" ]]; then
+  echo "12345	0	com.disk-magician.sweeper-health"
+  exit 0
+elif [[ "${1:-}" == "print" && "${2:-}" == "system/com.jleechanorg.disk-magician-frontier-root" ]]; then
+  if [[ "${MOCK_SYSTEM_DAEMON_LOADED:-1}" == "1" ]]; then
+    exit 0
+  else
+    exit 1
+  fi
+fi
+exit 0
+EOF
+chmod +x "$FAKE_BIN/launchctl"
+
+# Sub-test 1: System daemon plist present and system launchctl returns 0 -> healthy (no failure line)
+OUTPUT_DAEMON_OK=$(PATH="$FAKE_BIN:$PATH" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" \
+  MOCK_SYSTEM_DAEMON_LOADED=1 \
+  "$SCRIPT" 2>&1) || true
+
+if grep -qF "com.jleechanorg.disk-magician-frontier-root" <<<"$OUTPUT_DAEMON_OK"; then
+  echo "FAIL: loaded system daemon was unexpectedly flagged as failure" >&2
+  echo "$OUTPUT_DAEMON_OK" >&2
+  fail=1
+fi
+
+# Sub-test 2: System daemon plist present but system launchctl returns 1 -> NOT LOADED
+OUTPUT_DAEMON_UNLOADED=$(PATH="$FAKE_BIN:$PATH" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" \
+  MOCK_SYSTEM_DAEMON_LOADED=0 \
+  "$SCRIPT" 2>&1) || true
+
+if ! grep -qF "NOT LOADED      com.jleechanorg.disk-magician-frontier-root  (plist valid but system launchctl has no record)" <<<"$OUTPUT_DAEMON_UNLOADED"; then
+  echo "FAIL: unloaded system daemon was not correctly reported as NOT LOADED" >&2
+  echo "$OUTPUT_DAEMON_UNLOADED" >&2
+  fail=1
+fi
+
 if [[ "$fail" -eq 0 ]]; then
   echo "ALL CHECKS PASSED"
   exit 0
