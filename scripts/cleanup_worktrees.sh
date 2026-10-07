@@ -81,7 +81,18 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Hard floor: 7 days, may only be raised (env, CLI, or config), never
+# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
+# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
+# may only RAISE the floor, never lower it below 7.
+staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
+if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
+  staleness_floor=$((10#$staleness_floor))
+else
+  staleness_floor=7
+fi
+[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
+
+# Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
 # lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
 # or --min-age 0 would delete every dormant worktree regardless of age.
 # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
@@ -91,9 +102,9 @@ fi
 if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
   MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
 else
-  MIN_AGE_DAYS=7
+  MIN_AGE_DAYS="$staleness_floor"
 fi
-[[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
+[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
 # Bead plf: merged + clean worktrees use this floor instead; clamped to [3,7].
 MERGED_MIN_DAYS="${DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS:-3}"
