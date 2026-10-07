@@ -150,11 +150,11 @@ if [[ "${1:-}" == "list" ]]; then
   echo "12345	0	com.disk-magician.sweeper-health"
   exit 0
 elif [[ "${1:-}" == "print" && "${2:-}" == "system/com.jleechanorg.disk-magician-frontier-root" ]]; then
-  if [[ "${MOCK_SYSTEM_DAEMON_LOADED:-1}" == "1" ]]; then
-    exit 0
-  else
-    exit 1
-  fi
+  case "${MOCK_SYSTEM_DAEMON_LOADED:-1}" in
+    1) exit 0 ;;
+    0) exit 113 ;;
+    *) echo "Unhandled error 5: Input/output error" >&2; exit 5 ;;
+  esac
 fi
 exit 0
 EOF
@@ -167,6 +167,10 @@ OUTPUT_DAEMON_OK=$(PATH="$FAKE_BIN:$PATH" \
   MOCK_SYSTEM_DAEMON_LOADED=1 \
   "$SCRIPT" 2>&1) || true
 
+if ! grep -qF "Fleet:" <<<"$OUTPUT_DAEMON_OK"; then
+  echo "FAIL: loaded system daemon run produced no fleet summary" >&2
+  fail=1
+fi
 if grep -qF "com.jleechanorg.disk-magician-frontier-root" <<<"$OUTPUT_DAEMON_OK"; then
   echo "FAIL: loaded system daemon was unexpectedly flagged as failure" >&2
   echo "$OUTPUT_DAEMON_OK" >&2
@@ -183,6 +187,20 @@ OUTPUT_DAEMON_UNLOADED=$(PATH="$FAKE_BIN:$PATH" \
 if ! grep -qF "NOT LOADED      com.jleechanorg.disk-magician-frontier-root  (plist valid but system launchctl has no record)" <<<"$OUTPUT_DAEMON_UNLOADED"; then
   echo "FAIL: unloaded system daemon was not correctly reported as NOT LOADED" >&2
   echo "$OUTPUT_DAEMON_UNLOADED" >&2
+  fail=1
+fi
+
+# Sub-test 3: launchctl print fails for a reason other than "not found" -> UNKNOWN STATE, not NOT LOADED
+OUTPUT_DAEMON_ERR=$(PATH="$FAKE_BIN:$PATH" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" \
+  MOCK_SYSTEM_DAEMON_LOADED=err \
+  "$SCRIPT" 2>&1) || true
+
+if ! grep -qF "UNKNOWN STATE   com.jleechanorg.disk-magician-frontier-root  (launchctl print system/com.jleechanorg.disk-magician-frontier-root exited 5" <<<"$OUTPUT_DAEMON_ERR" \
+  || grep -qE "NOT LOADED +com.jleechanorg.disk-magician-frontier-root" <<<"$OUTPUT_DAEMON_ERR"; then
+  echo "FAIL: launchctl print error was not reported as UNKNOWN STATE" >&2
+  echo "$OUTPUT_DAEMON_ERR" >&2
   fail=1
 fi
 

@@ -30,8 +30,8 @@ DAEMON_PLIST_DIR="${DISK_MAGICIAN_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 # list as a second catalog.
 KNOWN_LABELS=(
   # Compatibility inventory intentionally excludes the privileged APFS label:
-  # the no-argument checker queries user LaunchAgents only. JSON inventory
-  # derives that system LaunchDaemon separately from its committed plist.
+  # it is not repo-owned in this list. Listed labels whose plist lives in
+  # /Library/LaunchDaemons are checked via `launchctl print system/<label>`.
   com.jleechanorg.disk-magician
   com.jleechanorg.disk-magician-downloads-evidence
   com.jleechanorg.disk-magician-drilldown
@@ -59,7 +59,8 @@ usage() {
 Usage: $(basename "$0") [--fleet-only] [--json] [-h|--help]
 
 Checks every known disk-magician launchd label for two independent failure
-modes: (1) not currently loaded (\`launchctl list\`), (2) installed plist is
+modes: (1) not currently loaded (\`launchctl list\`, or \`launchctl print
+system/<label>\` for a LaunchDaemon), (2) installed plist is
 structurally invalid (\`plutil -lint\`). Read-only. Exit 0 = all healthy.
 EOF
 }
@@ -95,6 +96,7 @@ fi
 
 missing=0
 not_loaded=0
+unknown=0
 invalid=0
 ok=0
 
@@ -186,9 +188,17 @@ for label in "${KNOWN_LABELS[@]}"; do
   # Match the launchctl label column exactly; a similarly-prefixed label must
   # not make this job appear loaded.
   if [[ "$is_system_daemon" == true ]]; then
-    if ! launchctl print "system/$label" >/dev/null 2>&1; then
+    print_rc=0
+    launchctl print "system/$label" >/dev/null 2>&1 || print_rc=$?
+    # 113 is launchctl's "could not find service"; any other failure leaves
+    # the load state unknown and must not be reported as "no record".
+    if [[ "$print_rc" -eq 113 ]]; then
       echo "  NOT LOADED      $label  (plist valid but system launchctl has no record)"
       not_loaded=$(( not_loaded + 1 ))
+      continue
+    elif [[ "$print_rc" -ne 0 ]]; then
+      echo "  UNKNOWN STATE   $label  (launchctl print system/$label exited $print_rc; load state not determined)"
+      unknown=$(( unknown + 1 ))
       continue
     fi
   elif ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
@@ -203,8 +213,8 @@ total=${#KNOWN_LABELS[@]}
 echo "  Fleet: $ok/$total loaded and valid."
 
 fleet_unhealthy=0
-if [[ $((missing + not_loaded + invalid)) -gt 0 ]]; then
-  echo "  ⚠️  $((missing + not_loaded + invalid)) job(s) unhealthy — floor/history data below may be stale or absent."
+if [[ $((missing + not_loaded + invalid + unknown)) -gt 0 ]]; then
+  echo "  ⚠️  $((missing + not_loaded + invalid + unknown)) job(s) unhealthy — floor/history data below may be stale or absent."
   echo "  Repair: bash scripts/install_launchd_sweepers.sh   (rewrites every plist from its template and reloads it)"
   fleet_unhealthy=1
 fi
