@@ -28,7 +28,7 @@
     <key>HOME</key>
     <string>@HOME@</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>DISK_MAGICIAN_PRESSURE_THRESHOLD_GB</key>
     <string>40</string>
   </dict>
