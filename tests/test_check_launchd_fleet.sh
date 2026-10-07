@@ -80,7 +80,8 @@ exit 0
 EOF
 chmod +x "$FAKE_BIN/launchctl"
 
-OUTPUT=$(PATH="$FAKE_BIN:$PATH" DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" "$SCRIPT" 2>&1) && RC=0 || RC=$?
+OUTPUT=$(PATH="$FAKE_BIN:$PATH" DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$TMP_DIR/no-daemons" "$SCRIPT" 2>&1) && RC=0 || RC=$?
 
 fail=0
 assert_contains() {
@@ -115,10 +116,8 @@ if grep -qE "(INVALID|NOT LOADED|MISSING).*sweeper-health$" <<<"$OUTPUT"; then
   fail=1
 fi
 
-if grep -qF "apfs-snapshots" <<<"$OUTPUT"; then
-  echo "FAIL: legacy no-argument inventory unexpectedly included privileged APFS label" >&2
-  fail=1
-fi
+assert_contains "the system APFS daemon label is checked and flagged MISSING when absent" \
+  "MISSING PLIST   com.disk-magician.apfs-snapshots"
 
 if [[ "$fail" -ne 0 ]]; then
   echo "FAIL: initial fleet checks failed" >&2
@@ -142,6 +141,10 @@ cat > "$DAEMON_DIR/com.jleechanorg.disk-magician-frontier-root.plist" <<'EOF'
 </dict>
 </plist>
 EOF
+
+sed 's/com.jleechanorg.disk-magician-frontier-root/com.disk-magician.apfs-snapshots/' \
+  "$DAEMON_DIR/com.jleechanorg.disk-magician-frontier-root.plist" > "$DAEMON_DIR/com.disk-magician.apfs-snapshots.plist"
+unhealthy_count() { sed -n 's/.*⚠️  \([0-9][0-9]*\) job(s) unhealthy.*/\1/p' <<<"$1"; }
 
 # Update stub launchctl to support 'print system/<label>'
 cat > "$FAKE_BIN/launchctl" <<'EOF'
@@ -177,12 +180,22 @@ if grep -qF "com.jleechanorg.disk-magician-frontier-root" <<<"$OUTPUT_DAEMON_OK"
   fail=1
 fi
 
-# Sub-test 2: System daemon plist present but system launchctl returns 1 -> NOT LOADED
+BASE_UNHEALTHY="$(unhealthy_count "$OUTPUT_DAEMON_OK")"
+if grep -qF "com.disk-magician.apfs-snapshots" <<<"$OUTPUT_DAEMON_OK"; then
+  echo "FAIL: loaded APFS system daemon was unexpectedly flagged" >&2
+  fail=1
+fi
+
+# Sub-test 2: System daemon plist present but system launchctl returns 113 -> NOT LOADED
 OUTPUT_DAEMON_UNLOADED=$(PATH="$FAKE_BIN:$PATH" \
   DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
   DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" \
   MOCK_SYSTEM_DAEMON_LOADED=0 \
   "$SCRIPT" 2>&1) || true
+if [[ "$(unhealthy_count "$OUTPUT_DAEMON_UNLOADED")" != "$((BASE_UNHEALTHY + 1))" ]]; then
+  echo "FAIL: NOT LOADED daemon did not add exactly one unhealthy job" >&2
+  fail=1
+fi
 
 if ! grep -qF "NOT LOADED      com.jleechanorg.disk-magician-frontier-root  (plist valid but system launchctl has no record)" <<<"$OUTPUT_DAEMON_UNLOADED"; then
   echo "FAIL: unloaded system daemon was not correctly reported as NOT LOADED" >&2
@@ -201,6 +214,46 @@ if ! grep -qF "UNKNOWN STATE   com.jleechanorg.disk-magician-frontier-root  (lau
   || grep -qE "NOT LOADED +com.jleechanorg.disk-magician-frontier-root" <<<"$OUTPUT_DAEMON_ERR"; then
   echo "FAIL: launchctl print error was not reported as UNKNOWN STATE" >&2
   echo "$OUTPUT_DAEMON_ERR" >&2
+  fail=1
+fi
+if [[ "$(unhealthy_count "$OUTPUT_DAEMON_ERR")" != "$((BASE_UNHEALTHY + 1))" ]]; then
+  echo "FAIL: UNKNOWN STATE daemon did not add exactly one unhealthy job" >&2
+  fail=1
+fi
+
+# Sub-test 4: same label in LaunchAgents and LaunchDaemons -> UNKNOWN STATE (agent must not mask daemon)
+cp "$DAEMON_DIR/com.jleechanorg.disk-magician-frontier-root.plist" "$PLIST_DIR/"
+OUTPUT_DUP=$(PATH="$FAKE_BIN:$PATH" \
+  DISK_MAGICIAN_LAUNCHAGENTS_DIR="$PLIST_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" \
+  MOCK_SYSTEM_DAEMON_LOADED=0 \
+  "$SCRIPT" 2>&1) || true
+rm -f "$PLIST_DIR/com.jleechanorg.disk-magician-frontier-root.plist"
+if ! grep -qF "UNKNOWN STATE   com.jleechanorg.disk-magician-frontier-root  (plist in both" <<<"$OUTPUT_DUP"; then
+  echo "FAIL: same-label LaunchAgent masked the system daemon" >&2
+  echo "$OUTPUT_DUP" >&2
+  fail=1
+fi
+
+# Sub-test 5: a fully healthy fleet (every label loaded, daemons via system domain) exits 0
+HEALTHY_DIR="$TMP_DIR/healthy"
+mkdir -p "$HEALTHY_DIR"
+LIST_FILE="$TMP_DIR/healthy_list.txt"
+: > "$LIST_FILE"
+LABELS="$(sed -n '/^KNOWN_LABELS=(/,/^)/p' "$SCRIPT" | grep -oE '^  com\.[A-Za-z0-9.-]+' | tr -d ' ')"
+for l in $LABELS; do
+  [[ -f "$DAEMON_DIR/$l.plist" ]] && continue
+  sed "s/com.disk-magician.sweeper-health/$l/" "$PLIST_DIR/com.disk-magician.sweeper-health.plist" > "$HEALTHY_DIR/$l.plist"
+  printf '1\t0\t%s\n' "$l" >> "$LIST_FILE"
+done
+printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "list" ]]; then cat "%s"; fi\nexit 0\n' "$LIST_FILE" > "$FAKE_BIN/launchctl"
+chmod +x "$FAKE_BIN/launchctl"
+OUTPUT_HEALTHY=$(PATH="$FAKE_BIN:$PATH" DISK_MAGICIAN_LAUNCHAGENTS_DIR="$HEALTHY_DIR" \
+  DISK_MAGICIAN_LAUNCHDAEMONS_DIR="$DAEMON_DIR" "$SCRIPT" --fleet-only 2>&1) && HRC=0 || HRC=$?
+TOTAL="$(wc -w <<<"$LABELS" | tr -d ' ')"
+if [[ "$HRC" -ne 0 ]] || ! grep -qF "Fleet: $TOTAL/$TOTAL loaded and valid." <<<"$OUTPUT_HEALTHY"; then
+  echo "FAIL: fully healthy fleet did not exit 0 with $TOTAL/$TOTAL (rc=$HRC)" >&2
+  echo "$OUTPUT_HEALTHY" >&2
   fail=1
 fi
 

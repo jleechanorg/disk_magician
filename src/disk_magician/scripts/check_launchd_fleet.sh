@@ -29,9 +29,9 @@ DAEMON_PLIST_DIR="${DISK_MAGICIAN_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 # reads committed launchd sources through job_inventory.py and never treats this
 # list as a second catalog.
 KNOWN_LABELS=(
-  # Compatibility inventory intentionally excludes the privileged APFS label:
-  # it is not repo-owned in this list. Listed labels whose plist lives in
-  # /Library/LaunchDaemons are checked via `launchctl print system/<label>`.
+  # Labels whose plist lives in /Library/LaunchDaemons are checked via
+  # `launchctl print system/<label>`.
+  com.disk-magician.apfs-snapshots
   com.jleechanorg.disk-magician
   com.jleechanorg.disk-magician-downloads-evidence
   com.jleechanorg.disk-magician-drilldown
@@ -133,7 +133,13 @@ is_consolidated_label() {
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
   is_system_daemon=false
-  if [[ ! -f "$plist" && -f "$DAEMON_PLIST_DIR/${label}.plist" ]]; then
+  if [[ -f "$DAEMON_PLIST_DIR/${label}.plist" ]]; then
+    if [[ -f "$plist" ]]; then
+      # A same-label LaunchAgent would otherwise mask the daemon's state.
+      echo "  UNKNOWN STATE   $label  (plist in both $PLIST_DIR and $DAEMON_PLIST_DIR; load domain ambiguous)"
+      unknown=$(( unknown + 1 ))
+      continue
+    fi
     plist="$DAEMON_PLIST_DIR/${label}.plist"
     is_system_daemon=true
   fi
@@ -185,8 +191,6 @@ for label in "${KNOWN_LABELS[@]}"; do
     invalid=$(( invalid + 1 ))
     continue
   fi
-  # Match the launchctl label column exactly; a similarly-prefixed label must
-  # not make this job appear loaded.
   if [[ "$is_system_daemon" == true ]]; then
     print_rc=0
     launchctl print "system/$label" >/dev/null 2>&1 || print_rc=$?
@@ -201,6 +205,8 @@ for label in "${KNOWN_LABELS[@]}"; do
       unknown=$(( unknown + 1 ))
       continue
     fi
+  # Match the launchctl label column exactly; a similarly-prefixed label must
+  # not make this job appear loaded.
   elif ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
     echo "  NOT LOADED      $label  (plist valid but launchctl has no record — try: launchctl load \"$plist\")"
     not_loaded=$(( not_loaded + 1 ))
