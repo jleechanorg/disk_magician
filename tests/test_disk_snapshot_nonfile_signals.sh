@@ -293,6 +293,38 @@ PY
   [[ "${FAIL_COLIMA:-0}" == "1" ]] && fail "colima stat/du failure-vs-zero assertions failed"
 fi
 
+# ────────── Non-searchable ancestor: with ~/.colima unsearchable the diffdisk
+# cannot be observed, so both allocation fields must read null, not 0.
+ANC_HOME="$TMP/anc_home"
+mkdir -p "$ANC_HOME/.colima/_lima/colima"
+chmod 000 "$ANC_HOME/.colima"
+ANC_OUT="$TMP/anc_out.json"
+PATH="$FAKE_BIN:$PATH" HOME="$ANC_HOME" \
+  DISK_MAGICIAN_CONFIG="$TMP/config.json" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=30 \
+  timeout 30 bash "$SNAPSHOT_SH" --output "$ANC_OUT" >"$TMP/anc_stderr.log" 2>&1
+anc_rc=$?
+chmod 755 "$ANC_HOME/.colima"
+if [[ $anc_rc -ne 0 ]]; then
+  fail "disk_snapshot.sh exited $anc_rc with a non-searchable ~/.colima: $(tail -5 "$TMP/anc_stderr.log")"
+elif python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["colima_diffdisk_stat_allocated_gb"] is None and d["colima_diffdisk_du_allocated_gb"] is None else 1)' "$ANC_OUT"; then
+  pass "non-searchable ~/.colima reads null, not a fabricated 0"
+else
+  fail "non-searchable ~/.colima recorded a numeric diffdisk size"
+fi
+ABSENT_HOME="$TMP/absent_home"
+mkdir -p "$ABSENT_HOME"
+ABSENT_OUT="$TMP/absent_out.json"
+PATH="$FAKE_BIN:$PATH" HOME="$ABSENT_HOME" \
+  DISK_MAGICIAN_CONFIG="$TMP/config.json" \
+  DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=30 \
+  timeout 30 bash "$SNAPSHOT_SH" --output "$ABSENT_OUT" >"$TMP/absent_stderr.log" 2>&1
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["colima_diffdisk_stat_allocated_gb"] == 0 and d["colima_diffdisk_du_allocated_gb"] == 0 else 1)' "$ABSENT_OUT"; then
+  pass "no Colima install reads a real 0"
+else
+  fail "no Colima install did not read 0"
+fi
+
 # ────────── TERM-ignoring hang: diskutil/tmutil that ignore SIGTERM must be
 # killed (TERM then KILL) so the snapshot still finishes, with nulls.
 HANG_BIN="$TMP/hang_bin"

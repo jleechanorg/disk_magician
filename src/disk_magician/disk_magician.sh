@@ -15,6 +15,7 @@ Commands:
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
+  correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
@@ -214,6 +215,9 @@ case "$CMD" in
     ;;
   growth-top10)
     exec python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
+    ;;
+  correlate-swings)
+    exec python3 "$SCRIPT_DIR/scripts/correlate_disk_swings.py" "$@"
     ;;
   audit)
     for audit_arg in "$@"; do

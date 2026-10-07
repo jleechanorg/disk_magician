@@ -336,7 +336,7 @@ get_apfs_volume_stats_json() {
     return
   fi
   local plist_json
-  plist_json=$(probe_timeout 8 diskutil apfs list -plist 2>/dev/null | probe_timeout 5 plutil -convert json -o - - 2>/dev/null)
+  plist_json=$(probe_timeout 8 diskutil apfs list -plist 2>/dev/null | probe_timeout 10 plutil -convert json -o - - 2>/dev/null)
   if [[ -z "$plist_json" ]]; then
     echo "{}"
     return
@@ -414,10 +414,13 @@ get_local_snapshots_line() {
 get_colima_diffdisk_stats() {
   local diffdisk="$HOME/.colima/_lima/colima/diffdisk"
   if [[ ! -e "$diffdisk" ]]; then
-    # Absent is a real 0 only when the parent is searchable (or absent);
-    # an unsearchable parent hides the file, so the size is unknown.
-    local parent="${diffdisk%/*}"
-    if [[ ! -e "$parent" || -x "$parent" ]]; then
+    # Absent is a real 0 only when the nearest existing ancestor is
+    # searchable; a non-searchable ancestor hides the file (size unknown).
+    local ancestor="${diffdisk%/*}"
+    while [[ "$ancestor" == "$HOME"/* && ! -e "$ancestor" ]]; do
+      ancestor="${ancestor%/*}"
+    done
+    if [[ -x "$ancestor" ]]; then
       printf '0\t0\n'
     else
       printf -- '-1\t-1\n'
@@ -425,7 +428,10 @@ get_colima_diffdisk_stats() {
     return
   fi
   local stat_blocks stat_rc du_raw du_rc stat_bytes du_kb
-  stat_blocks=$(probe_timeout 5 stat -f "%b" "$diffdisk" 2>/dev/null)
+  # BSD stat -f %b is the file's 512-byte blocks; GNU spells it -c %b.
+  local stat_fmt=(-f "%b")
+  [[ "$OSTYPE" == darwin* ]] || stat_fmt=(-c "%b")
+  stat_blocks=$(probe_timeout 5 stat "${stat_fmt[@]}" "$diffdisk" 2>/dev/null)
   stat_rc=$?
   if [[ $stat_rc -ne 0 || -z "$stat_blocks" ]]; then
     stat_bytes="-1"
@@ -1408,10 +1414,11 @@ try:
     # so the gap between the two is used as an estimate. Not clamped at 0 —
     # a small negative value is sampling skew between the two probes and is
     # useful to the correlator as a noise-floor signal, not an error.
-    disk_free_kb_precise = int(os.environ.get("SNAP_DISK_FREE_KB") or 0)
-    if container_free_bytes is not None:
+    # A failed df must read null here, not -container_free.
+    disk_free_kb_raw = os.environ.get("SNAP_DISK_FREE_KB") or ""
+    if container_free_bytes is not None and disk_free_kb_raw.isdigit():
         data["apfs_purgeable_estimate_gb"] = round(
-            disk_free_kb_precise / 1024 / 1024 - _bytes_to_gb(container_free_bytes), 3
+            int(disk_free_kb_raw) / 1024 / 1024 - _bytes_to_gb(container_free_bytes), 3
         )
     else:
         data["apfs_purgeable_estimate_gb"] = None
