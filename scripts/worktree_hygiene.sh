@@ -30,6 +30,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 # shellcheck source=lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 
 EXECUTE=false
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
@@ -765,7 +767,19 @@ main() {
         shift
     done
 
-    # Hard floor: 7 days, may only be raised (env, CLI, or config), never
+    # Staleness floor: read from safety.local.json (safety_min_stale_days), with a
+    # hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
+    # may only RAISE the floor, never lower it below 7.
+    local staleness_floor
+    staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
+    if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
+        staleness_floor=$((10#$staleness_floor))
+    else
+        staleness_floor=7
+    fi
+    [[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
+
+    # Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
     # lowered (CLAUDE.md invariant). Without this clamp, --min-age 0 would
     # let every dormant worktree qualify for deletion regardless of age.
     # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a
@@ -776,9 +790,9 @@ main() {
     if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
         MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
     else
-        MIN_AGE_DAYS=7
+        MIN_AGE_DAYS="$staleness_floor"
     fi
-    [[ "$MIN_AGE_DAYS" -lt 7 ]] && MIN_AGE_DAYS=7
+    [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
     if [[ ${#REPOS[@]} -eq 0 ]]; then
         while IFS= read -r repo; do
