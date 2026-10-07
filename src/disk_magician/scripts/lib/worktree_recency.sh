@@ -63,6 +63,63 @@ worktree_last_activity_epoch() {
     now="$(date +%s)"
     [[ -n "$wt" && -d "$wt" ]] && [[ -r "$wt" ]] || { printf '%s\n' "$now"; return 0; }
 
+    # The fast path is deliberately narrow: relative/symlink/pruned roots
+    # keep find's existing platform-specific interpretation.
+    local legacy=true root="$wt" root_name name out rc=0 pruned_root=false
+    while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
+    root_name="${root##*/}"
+    for name in "${_WT_RECENCY_PRUNE_NAMES[@]}"; do
+        [[ "$root_name" == "$name" ]] && pruned_root=true
+    done
+    if [[ "$wt" == /* && -d "$wt" && ! -L "$wt" && "$pruned_root" == false ]] && \
+        command -v python3 >/dev/null 2>&1; then
+        out="$(python3 - "$wt" "${_WT_RECENCY_PRUNE_NAMES[@]}" 2>/dev/null <<'PY'
+import os
+import stat
+import sys
+
+prune_names = set(sys.argv[2:])
+newest = None
+
+def scan(path):
+    global newest
+    with os.scandir(path) as entries:
+        for entry in entries:
+            # lstat even excluded names: an inaccessible child must fail
+            # closed, regardless of any cached directory-entry type.
+            metadata = os.lstat(entry.path)
+            if entry.name in prune_names:
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                scan(entry.path)
+            elif stat.S_ISREG(metadata.st_mode):
+                epoch = metadata.st_mtime_ns // 1000000000
+                if newest is None or epoch > newest:
+                    newest = epoch
+
+try:
+    scan(sys.argv[1])
+except OSError:
+    sys.exit(11)
+except RecursionError:
+    sys.exit(12)
+if newest is None:
+    sys.exit(10)
+print(newest)
+PY
+        )" || rc=$?
+        case "$rc" in
+            0)
+                if [[ "$out" =~ ^[1-9][0-9]*$ ]]; then
+                    candidate="$out"
+                    legacy=false
+                fi
+                ;;
+            10|11) candidate=""; legacy=false ;;
+        esac
+    fi
+
+    if [[ "$legacy" == true ]]; then
     # awk computes the max in a single pass instead of `sort -rn | head -1`:
     # head closing the pipe early raises SIGPIPE in sort, which under
     # `set -o pipefail` turns a healthy scan into an empty result. awk consumes
@@ -88,6 +145,7 @@ worktree_last_activity_epoch() {
         candidate="$(awk '$1+0>m{m=$1+0} END{if (m>0) print m}' <<<"$mtimes")"
     else
         candidate=""
+    fi
     fi
     [[ -n "$candidate" ]] && (( candidate > newest )) && newest="$candidate"
 

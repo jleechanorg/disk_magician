@@ -20,6 +20,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 REPO_LOCAL_REPOS=()
+# Cache allocation is optional: disk-pressure failures retain the existing
+# per-row lookup and lsof fail-closed behavior rather than aborting the run.
+RUN_TMP="$(mktemp -d)" || RUN_TMP=""
+if [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]]; then
+    trap 'rm -rf "$RUN_TMP"' EXIT
+fi
 
 usage() {
   cat <<'EOF'
@@ -320,6 +326,102 @@ has_hidden_state() {
     [[ -n "$out" ]]
 }
 
+# Persist across the command substitutions used by classification. Cache names
+# are digests, but the stored repo and branch are also checked byte for byte:
+# a filename collision or an unreadable record must never approve a worktree.
+repo_local_cached_pr_heads() {
+    local repo="$1" owner_repo="$2" branch_clean="$3" cache_dir
+    [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]] || return 1
+    [[ "$owner_repo" =~ ^[^/]+/[^/]+$ ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    cache_dir="$(python3 - "$RUN_TMP" "$owner_repo" <<'PY'
+import hashlib, os, sys
+print(os.path.join(sys.argv[1], hashlib.sha256(os.fsencode(sys.argv[2])).hexdigest()))
+PY
+    )" || return 1
+    if [[ ! -d "$cache_dir" ]]; then
+        mkdir "$cache_dir" || return 1
+        populate_repo_pr_cache "$repo" "$owner_repo" "$cache_dir" || true
+    fi
+    python3 - "$cache_dir" "$owner_repo" "$branch_clean" <<'PY'
+import hashlib, json, os, sys
+directory, owner_repo, branch = sys.argv[1:]
+try:
+    path = os.path.join(directory, hashlib.sha256(os.fsencode(branch)).hexdigest() + '.json')
+    with open(path) as source:
+        record = json.load(source)
+    if record['owner_repo'] != owner_repo or record['branch'] != branch:
+        sys.exit(1)
+    heads = record['heads']
+    if not isinstance(heads, list) or any(not isinstance(oid, str) or not oid for oid in heads):
+        sys.exit(1)
+    print('\n'.join(heads))
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY
+}
+
+populate_repo_pr_cache() {
+    local repo="$1" owner_repo="$2" cache_dir="$3" worktrees line
+    worktrees="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || return 1
+    local branches=()
+    while IFS= read -r line; do
+        case "$line" in branch\ refs/heads/*) branches+=("${line#branch refs/heads/}");; esac
+    done <<<"$worktrees"
+    local start index end query fields response
+    for ((start=0; start<${#branches[@]}; start+=40)); do
+        end=$((start + 40))
+        (( end <= ${#branches[@]} )) || end=${#branches[@]}
+        query='query($owner: String!, $name: String!'
+        fields=''
+        local variables=(-f "owner=${owner_repo%%/*}" -f "name=${owner_repo#*/}")
+        for ((index=start; index<end; index++)); do
+            query+=", \$b${index}: String!"
+            fields+=" b${index}: pullRequests(headRefName: \$b${index}, states: MERGED, first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { headRefOid } }"
+            variables+=(-f "b${index}=${branches[index]}")
+        done
+        query+=") { repository(owner: \$owner, name: \$name) {${fields} } }"
+        response="$cache_dir/response.json"
+        if env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh api graphql -f "query=$query" "${variables[@]}" > "$response" 2>/dev/null; then
+            python3 - "$cache_dir" "$owner_repo" "$response" "$start" "${branches[@]:start:end-start}" <<'PY' || true
+import hashlib, json, os, sys
+directory, owner_repo, response, start, *branches = sys.argv[1:]
+try:
+    with open(response) as source:
+        payload = json.load(source)
+    repository = payload['data']['repository']
+    if not isinstance(repository, dict):
+        sys.exit(1)
+    errors = payload.get('errors', [])
+    if not isinstance(errors, list):
+        sys.exit(1)
+    failed = set()
+    for error in errors:
+        path = error.get('path') if isinstance(error, dict) else None
+        # A request/repository-wide or malformed error cannot identify a safe
+        # subset. Alias-specific errors invalidate only the affected branches.
+        if not isinstance(path, list) or len(path) < 2 or path[0] != 'repository' or not isinstance(path[1], str):
+            sys.exit(1)
+        failed.add(path[1])
+    for index, branch in enumerate(branches, int(start)):
+        alias = 'b' + str(index)
+        value = repository.get(alias)
+        if alias in failed or not isinstance(value, dict):
+            continue
+        nodes = value.get('nodes')
+        if not isinstance(nodes, list) or any(not isinstance(node, dict) or not isinstance(node.get('headRefOid'), str) or not node['headRefOid'] for node in nodes):
+            continue
+        record = {'owner_repo': owner_repo, 'branch': branch, 'heads': [node['headRefOid'] for node in nodes]}
+        path = os.path.join(directory, hashlib.sha256(os.fsencode(branch)).hexdigest() + '.json')
+        with open(path, 'w') as target:
+            json.dump(record, target)
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY
+        fi
+    done
+}
+
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
 # prints a PRESERVE reason, or nothing when the worktree is clean and merged.
 classify_content_and_merge() {
@@ -366,7 +468,9 @@ classify_content_and_merge() {
                     owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                     if [[ -n "$owner_repo" ]]; then
                         local pr_heads gh_rc=0
-                        pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                        if ! pr_heads="$(repo_local_cached_pr_heads "$repo" "$owner_repo" "$branch_clean" 2>/dev/null)"; then
+                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                        fi
                         if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
                             if grep -qFx "$head_sha" <<<"$pr_heads"; then
                                 return 0
