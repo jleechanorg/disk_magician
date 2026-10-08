@@ -378,6 +378,24 @@ env -i \
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
 
+echo "Test 12: triggered clean path invokes cleanup_code_sign_clones.sh with CODE_SIGN_CLONES_APPROVED=1"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+run_pressure 10
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "step 3 invoked" "cleanup_code_sign_clones" "$INVOCATIONS"
+assert_contains "step 3 sets CODE_SIGN_CLONES_APPROVED=1" "CODE_SIGN_CLONES_APPROVED=1" "$INVOCATIONS"
+
+echo "Test 13: dry-run path invokes cleanup_code_sign_clones.sh WITHOUT the approval env var"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+run_pressure 10 --dry-run
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "step 3 invoked in dry-run" "cleanup_code_sign_clones" "$INVOCATIONS"
+assert_contains "step 3 does not set approval in dry-run" "CODE_SIGN_CLONES_APPROVED=0" "$INVOCATIONS"
+
 echo "Test 13b: failed third stage cannot publish success"
 : > "$INVOCATION_LOG"
 : > "$LOG_FILE"
