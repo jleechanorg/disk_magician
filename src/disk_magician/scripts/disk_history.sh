@@ -12,14 +12,50 @@ import os
 import json
 import subprocess
 import argparse
+import re
+import math
+import unicodedata
 from datetime import datetime, timezone
 
 def run_cmd(cmd, cwd=None):
     try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True, cwd=cwd)
+        res = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=True, cwd=cwd)
         return res.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
+
+def sanitize_str(s):
+    if not isinstance(s, str):
+        return ""
+    out = []
+    for c in s:
+        code = ord(c)
+        if c == '\\':
+            out.append(r'\\')
+        elif c == '\x1b':
+            out.append(r'\e')
+        elif c == '\x07':
+            out.append(r'\a')
+        elif c == '\t':
+            out.append(r'\t')
+        elif c == '\n':
+            out.append(r'\n')
+        elif c == '\r':
+            out.append(r'\r')
+        elif c == ' ':
+            out.append(' ')
+        else:
+            cat = unicodedata.category(c)
+            if cat.startswith('C') or cat in ('Zl', 'Zp') or (cat == 'Zs' and code != 32):
+                if code < 256:
+                    out.append(f'\\x{code:02x}')
+                elif code < 0x10000:
+                    out.append(f'\\u{code:04x}')
+                else:
+                    out.append(f'\\U{code:08x}')
+            else:
+                out.append(c)
+    return ''.join(out)
 
 def fmt_kb(kb):
     gb = kb / 1024 / 1024
@@ -50,9 +86,8 @@ def main():
     explicit_snapshot = os.environ.get("DISK_SNAPSHOT_JSON", "")
     if explicit_snapshot and os.path.exists(explicit_snapshot):
         best_path = os.path.realpath(explicit_snapshot)
-        repo_root = os.path.realpath(
-            run_cmd("git rev-parse --show-toplevel", cwd=os.path.dirname(best_path)) or script_repo_root
-        )
+        top_level = run_cmd(["git", "rev-parse", "--show-toplevel"], cwd=os.path.dirname(best_path))
+        repo_root = os.path.realpath(top_level or script_repo_root)
     else:
         repo_root = script_repo_root
 
@@ -94,8 +129,10 @@ def main():
 
     rel_path = os.path.relpath(best_path, repo_root)
 
-    since_arg = f"--since={args.days}.days.ago" if args.days else ""
-    log_cmd = f"git log --format='%H %aI' {since_arg} -n {args.limit} -- {rel_path}"
+    log_cmd = ["git", "log", "--format=%H %aI"]
+    if args.days:
+        log_cmd.append(f"--since={args.days}.days.ago")
+    log_cmd.extend(["-n", str(args.limit), "--", rel_path])
     log_output = run_cmd(log_cmd, cwd=repo_root)
 
     commits = []
@@ -110,7 +147,7 @@ def main():
         commits.insert(0, ("WORKING", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")))
 
     if not commits:
-        print(f"No snapshots found in git history for {rel_path}", file=sys.stderr)
+        print(f"No snapshots found in git history for {sanitize_str(rel_path)}", file=sys.stderr)
         sys.exit(1)
 
     # We need to process commits from oldest to newest to track changes
@@ -125,14 +162,38 @@ def main():
             except Exception:
                 continue
         else:
-            show_cmd = f"git show {sha}:{rel_path}"
+            show_cmd = ["git", "show", f"{sha}:{rel_path}"]
             content = run_cmd(show_cmd, cwd=repo_root)
             try:
                 data = json.loads(content)
             except Exception:
                 continue
 
-        dirs = data.get("directories", {})
+        if not isinstance(data, dict):
+            continue
+
+        raw_dirs = data.get("directories")
+        if not isinstance(raw_dirs, dict):
+            raw_dirs = {}
+        dirs = {}
+        for k, v in raw_dirs.items():
+            clean_k = sanitize_str(str(k))
+            val_num = None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                try:
+                    fval = float(v)
+                    if math.isfinite(fval) and fval >= 0.0:
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            elif isinstance(v, str):
+                try:
+                    fval = float(v.strip())
+                    if math.isfinite(fval) and fval >= 0.0:
+                        val_num = int(round(fval))
+                except Exception:
+                    val_num = None
+            dirs[clean_k] = val_num
         all_keys.update(dirs.keys())
         try:
             ts_obj = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -150,11 +211,36 @@ def main():
             coverage = float(coverage)
         except (TypeError, ValueError):
             coverage = None
+
+        raw_free = data.get("disk_free_gb")
+        try:
+            if isinstance(raw_free, (int, float)) and not isinstance(raw_free, bool) and math.isfinite(raw_free):
+                free_gb = int(round(raw_free))
+            elif isinstance(raw_free, str):
+                m = re.match(r'^\s*([0-9]+)', raw_free)
+                free_gb = int(m.group(1)) if m else 0
+            else:
+                free_gb = 0
+        except Exception:
+            free_gb = 0
+
+        raw_pct = data.get("disk_pct")
+        try:
+            if isinstance(raw_pct, (int, float)) and not isinstance(raw_pct, bool) and math.isfinite(raw_pct):
+                pct_val = int(round(raw_pct))
+            elif isinstance(raw_pct, str):
+                m = re.match(r'^\s*([0-9]+)', raw_pct)
+                pct_val = int(m.group(1)) if m else 0
+            else:
+                pct_val = 0
+        except Exception:
+            pct_val = 0
+
         snapshots.append({
             "date": ts[:16],
             "date_obj": ts_obj,
-            "free": data.get("disk_free_gb", 0),
-            "pct": data.get("disk_pct", 0),
+            "free": free_gb,
+            "pct": pct_val,
             "dirs": dirs,
             "has_data": has_data,
             "used_gb": used_gb,
@@ -251,7 +337,7 @@ def main():
                 print(f"  (skipped {len(no_data)} dirs with <3 numeric samples: {', '.join(no_data[:5])}{'...' if len(no_data) > 5 else ''})",
                       file=sys.stderr)
         # growth_rate mode prints its own table; do not also print the row table.
-        print(f"\nSource: git log -- {rel_path} ({len(commits)} snapshots shown)")
+        print(f"\nSource: git log -- {sanitize_str(rel_path)} ({len(commits)} snapshots shown)")
         return
 
     # Select top keys based on current size
@@ -327,7 +413,7 @@ def main():
         prev_coverage = snap["coverage"]
 
     print(f"\nLegend: sizes in KB. Regression = grew >1GB or >50% vs previous snapshot.")
-    print(f"Source: git log -- {rel_path} ({len(commits)} snapshots shown)")
+    print(f"Source: git log -- {sanitize_str(rel_path)} ({len(commits)} snapshots shown)")
 
 if __name__ == "__main__":
     main()

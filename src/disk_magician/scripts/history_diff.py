@@ -10,6 +10,7 @@ No shell pipelines: all comparison/sort logic is Python (the grep-shim
 pipeline-corruption class documented in this repo's operator memory).
 """
 import argparse
+import datetime
 import json
 import math
 import os
@@ -330,6 +331,8 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         raise LedgerError(f"{label}: 'buckets' must be a list")
     total = 0
     for item in buckets:
+        if not isinstance(item, dict):
+            raise LedgerError(f"{label}: bucket entry must be an object: {item!r}")
         path = item.get("path")
         size = item.get("measured_kb")
         kind = item.get("kind", "dir")
@@ -366,7 +369,10 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
     if type(purgeable) is not int or purgeable < 0:
         raise LedgerError(f"{label}: invalid purgeable_kb")
     total += purgeable
-    accounting = ledger.get("accounting_equation") or {}
+    accounting = ledger.get("accounting_equation")
+    if accounting is not None and not isinstance(accounting, dict):
+        raise LedgerError(f"{label}: accounting_equation must be an object")
+    accounting = accounting or {}
     sub_granularity_tail = accounting.get("sub_granularity_tail_kb", 0)
     if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
         raise LedgerError(f"{label}: invalid sub-granularity tail")
@@ -501,7 +507,13 @@ def load_ledger_from_git(state_dir: pathlib.Path, ref: str) -> dict:
         raise LedgerError(f"{ref}:{LEDGER_REL_PATH}: not readable JSON — {exc}")
 
 
-def select_floor_ref(state_dir: pathlib.Path, days: int) -> "tuple[str, dict]":
+def select_floor_ref(
+    state_dir: pathlib.Path,
+    days: int,
+    *,
+    filter_capture_window: bool = False,
+    now: datetime.datetime = None,
+) -> "tuple[str, dict]":
     """Return the lowest-used valid ledger committed within the requested window."""
     result = subprocess.run(
         ["git", "-C", str(state_dir), "log", f"--since={days}.days.ago", "--format=%H",
@@ -510,12 +522,29 @@ def select_floor_ref(state_dir: pathlib.Path, days: int) -> "tuple[str, dict]":
     )
     if result.returncode != 0:
         raise LedgerError(f"cannot read ledger history — {result.stderr.strip()}")
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
     candidates = []
     for ref in result.stdout.splitlines():
         try:
             ledger = load_ledger_from_git(state_dir, ref)
             validate_ledger(ledger, label=ref)
             validate_full_attribution_ledger(ledger, label=ref)
+            if filter_capture_window:
+                captured_at = ledger.get("captured_at")
+                if not isinstance(captured_at, str):
+                    continue
+                try:
+                    ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if ts > now:
+                    continue
+                age_days = (now - ts).total_seconds() / 86400.0
+                if age_days > days:
+                    continue
         except LedgerError:
             continue
         candidates.append((ledger["disk_used_kb"], ref, ledger))

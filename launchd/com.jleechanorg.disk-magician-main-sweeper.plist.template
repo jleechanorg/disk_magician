@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Single main disk sweeper: consolidated routine maintenance, disk snapshot,
+  and critical pressure recovery runner.
+
+  Consolidates 10+ fragmented LaunchAgents into one orderly sequential job:
+    1. Disk snapshot and topdown ledger commit
+    2. Critical pressure triage (< 40 GB)
+    3. Canonical 6-tier routine maintenance (dev caches, xcode, colima/docker,
+       aside sessions, agent state, dormant venvs)
+    4. Sweeper health check and verification
+
+  Schedule:  Every 30 minutes (StartInterval=1800s, RunAtLoad=true).
+  Action:    runs scripts/main_sweeper.sh
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-main-sweeper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>sweep</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DISK_MAGICIAN_PRESSURE_THRESHOLD_GB</key>
+    <string>40</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-main-sweeper.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-main-sweeper.log</string>
+</dict>
+</plist>

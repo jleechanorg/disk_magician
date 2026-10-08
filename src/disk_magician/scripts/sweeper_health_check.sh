@@ -32,6 +32,7 @@ AUTO_REPAIR=false
 NOTIFY=true
 THRESHOLD_DAYS=7
 PLIST_DIR="$HOME/Library/LaunchAgents"
+STATE_REPO="${DISK_MAGICIAN_STATE_REPO:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --threshold-days) THRESHOLD_DAYS="$2"; shift 2 ;;
     --threshold)      THRESHOLD_DAYS="$2"; shift 2 ;;
     --plist-dir)      PLIST_DIR="$2"; shift 2 ;;
+    --state-repo)     STATE_REPO="$2"; shift 2 ;;
     --auto-repair)    AUTO_REPAIR=true; shift ;;
     --notify)         NOTIFY=true; shift ;;
     --no-notify)      NOTIFY=false; shift ;;
@@ -50,13 +52,14 @@ while [[ $# -gt 0 ]]; do
     --no-dry-run)     DRY_RUN=false; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--threshold-days N] [--plist-dir DIR] [--auto-repair] [--notify|--no-notify] [--verbose] [--dry-run]
+Usage: $(basename "$0") [--threshold-days N] [--plist-dir DIR] [--state-repo DIR] [--auto-repair] [--notify|--no-notify] [--verbose] [--dry-run]
 
 Options:
   --threshold-days N   Maximum log age in days before a sweeper is flagged MISS
                        (default: 7)
   --plist-dir DIR      Directory to scan for cleanup / disk-magician plists
                        (default: ~/Library/LaunchAgents)
+  --state-repo DIR     Directory of the disk-magician state repo (default: auto)
   --auto-repair        Automatically re-install corrupted or missing plists from
                        repository templates via install_launchd_sweepers.sh
   --notify / --no-notify
@@ -146,19 +149,46 @@ find "$PLIST_DIR" -maxdepth 1 \( \
 
 PLIST_COUNT=$(wc -l < "$PLIST_TMP" | tr -d ' ')
 
-log "Sweeper health check — threshold ${THRESHOLD_DAYS}d, plist dir $PLIST_DIR"
+log "Sweeper health check (liveness diagnostics) — threshold ${THRESHOLD_DAYS}d, plist dir $PLIST_DIR"
 log "Found $PLIST_COUNT plist(s)"
 echo
+
+if [[ $PLIST_COUNT -eq 0 ]]; then
+  log "FAIL: No sweeper plists found in $PLIST_DIR (liveness diagnostics degraded/unknown)."
+  exit 1
+fi
 
 MISS_COUNT=0
 WARN_COUNT=0
 OK_COUNT=0
 CORRUPT_COUNT=0
 REPAIR_LABELS=()
+HAS_DISK_MAGICIAN_PLISTS=false
+
+if [[ -n "$STATE_REPO" ]]; then
+  LEDGER_STATUS_LINE="$(DISK_MAGICIAN_STATE_REPO="$STATE_REPO" "$SCRIPT_DIR/check_ledger_freshness.sh" 2>/dev/null || true)"
+else
+  LEDGER_STATUS_LINE="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>/dev/null || true)"
+fi
+LEDGER_STATUS_TOKEN="${LEDGER_STATUS_LINE%%$'\t'*}"
+LEDGER_WARN=false
+if [[ "$LEDGER_STATUS_TOKEN" != "OK" ]]; then
+  WARN_COUNT=$(( WARN_COUNT + 1 ))
+  LEDGER_WARN=true
+  printf "  [WARN] %-44s (%s)\n" \
+    "ledger/topdown-5g.json ${LEDGER_STATUS_TOKEN:-UNKNOWN} — stale mega-table risk" \
+    "${LEDGER_STATUS_LINE//$'\t'/ }"
+fi
 
 while IFS= read -r plist; do
   [[ -z "$plist" ]] && continue
   label=$(basename "$plist" .plist)
+
+  case "$label" in
+    com.jleechanorg.disk-magician*|com.jleechan.disk-magician*|com.disk-magician.*)
+      HAS_DISK_MAGICIAN_PLISTS=true
+      ;;
+  esac
 
   # Structural XML and plist validation (disk_magician-zwb):
   # Detect malformed XML or truncated plists missing the root <dict> / Label key.
@@ -228,6 +258,24 @@ while IFS= read -r plist; do
   fi
 done < "$PLIST_TMP"
 
+PUBLICATION_DEGRADED=false
+if [[ "$HAS_DISK_MAGICIAN_PLISTS" == true ]]; then
+  vlog "Checking publication integrity via disk_status.py..."
+  PUB_CMD=(python3 "$SCRIPT_DIR/disk_status.py" --publication-only --json)
+  if [[ -n "$STATE_REPO" ]]; then
+    PUB_CMD+=(--state-repo "$STATE_REPO")
+  fi
+  set +e
+  PUB_JSON=$("${PUB_CMD[@]}" 2>&1)
+  PUB_RC=$?
+  set -e
+  if [[ $PUB_RC -ne 0 ]]; then
+    PUBLICATION_DEGRADED=true
+    log "DEGRADED: disk-magician publication check failed (rc=$PUB_RC)."
+    vlog "Publication output: $PUB_JSON"
+  fi
+fi
+
 echo
 log "Summary: $OK_COUNT OK, $WARN_COUNT WARN, $MISS_COUNT MISS (of $PLIST_COUNT)"
 
@@ -236,11 +284,12 @@ if [[ $CORRUPT_COUNT -gt 0 ]]; then
 fi
 
 # Operator notification trigger (disk_magician-sweeper-health-auto-repair-dzm)
-if [[ "$NOTIFY" == true && ($MISS_COUNT -gt 0 || $WARN_COUNT -gt 0 || $CORRUPT_COUNT -gt 0) ]]; then
+if [[ "$NOTIFY" == true && ($MISS_COUNT -gt 0 || $WARN_COUNT -gt 0 || $CORRUPT_COUNT -gt 0 || "$PUBLICATION_DEGRADED" == true) ]]; then
   if command -v cmux >/dev/null 2>&1; then
     notify_body="Sweeper health degraded: ${MISS_COUNT} silent/corrupt"
     [[ $CORRUPT_COUNT -gt 0 ]] && notify_body="${notify_body} (${CORRUPT_COUNT} corrupt)"
     [[ $WARN_COUNT -gt 0 ]] && notify_body="${notify_body}, ${WARN_COUNT} warnings"
+    [[ "$PUBLICATION_DEGRADED" == true ]] && notify_body="${notify_body}, publication degraded"
     cmux notify --title "disk-magician" --body "$notify_body" >/dev/null 2>&1 || true
   fi
 fi
@@ -262,9 +311,18 @@ if [[ $MISS_COUNT -gt 0 ]]; then
 fi
 
 if [[ $WARN_COUNT -gt 0 ]]; then
-  log "WARN: $WARN_COUNT sweeper(s) logged errors in last 50 lines."
+  if [[ "$LEDGER_WARN" == true ]]; then
+    log "WARN: $WARN_COUNT check(s) degraded (includes a stale/unreadable ledger — see [WARN] lines above)."
+  else
+    log "WARN: $WARN_COUNT sweeper(s) logged errors in last 50 lines."
+  fi
   exit 1
 fi
 
-log "All sweepers healthy."
+if [[ "$PUBLICATION_DEGRADED" == true ]]; then
+  log "FAIL: disk-magician publication is degraded, partial, or missing canonical."
+  exit 1
+fi
+
+log "All sweepers healthy. Liveness diagnostics verified."
 exit 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # find_stale_large_dirs.sh — large dirs not modified in N days (excludes convos)
 set -euo pipefail
-DAYS=14; MIN_MB=500
+DAYS=7; MIN_MB=500
 while [[ $# -gt 0 ]]; do case "$1" in --days) DAYS="$2"; shift 2;; --min-mb) MIN_MB="$2"; shift 2;; -h|--help) sed -n '1,8p' "$0"; exit 0;; *) shift;; esac; done
 export DAYS MIN_MB
 python3 - <<'PY'

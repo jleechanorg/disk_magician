@@ -5,6 +5,7 @@
   /usr/local/libexec/disk-magician/disk_frontier_scan.py with full privilege,
   binding DISK_MAGICIAN_SCAN_USER_HOME to provide complete 17/17 volume
   root attribution without user-writable script execution (bead disk_magician-4y6).
+  Runs via the compiled diskm launcher, which holds the Full Disk Access grant.
 -->
 <plist version="1.0">
 <dict>
@@ -14,8 +15,7 @@
   <string>root</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>/usr/local/libexec/disk-magician/disk_frontier_scan.py</string>
+    <string>/usr/local/libexec/disk-magician/diskm</string>
     <string>--granularity-gib</string>
     <string>5</string>
     <string>--wall-clock-cap</string>

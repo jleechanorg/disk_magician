@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""test_growth_top10.py — CLI-integration tests for scripts/growth_top10.py
-(bead disk_magician-zyn Component G): sandboxed tempfile git repos, no real
-$HOME. Mirrors tests/test_history_diff.py's fixture style."""
+"""tests/test_growth_top10.py — unit and integration tests for growth_top10.py."""
+import datetime
 import json
 import os
 import pathlib
@@ -9,11 +8,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "growth_top10.py"
+sys.path.insert(0, str(REPO / "scripts"))
+import growth_top10 as gt  # noqa: E402
+import history_diff as hd  # noqa: E402
 
+SCRIPT = REPO / "scripts" / "growth_top10.py"
 GIB_KB = 1024 * 1024
+
 USER_PROBE_PATHS = {
     "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
     "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
@@ -21,23 +25,34 @@ USER_PROBE_PATHS = {
 }
 
 
-def full_attribution_ledger(disk_used_kb, residual_kb, buckets, captured_at="2026-09-01T00:00:00Z"):
-    """A ledger that passes both validate_ledger AND
-    validate_full_attribution_ledger — eligible as a floor candidate."""
-    bucket_total = sum(item.get("measured_kb", 0) for item in buckets)
-    tail = disk_used_kb - bucket_total - residual_kb
+def make_valid_floor(captured_at=None, buckets=None, disk_used_kb=10000000, scope=None):
+    if captured_at is None:
+        captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if buckets is None:
+        buckets = [{"path": "/Users/x/a", "measured_kb": 4000000}]
+    if scope is None:
+        scope = {"hostname": "testhost", "root": "/Users/x"}
+    bucket_total = sum(b.get("measured_kb", 0) for b in buckets)
+    tail = disk_used_kb - bucket_total - 1000000
     return {
         "schema_version": 2,
         "mode": "complete",
+        "scope": scope,
+        "hostname": scope.get("hostname", "testhost"),
+        "root": scope.get("root", "/Users/x"),
+        "captured_at": captured_at,
+        "run_id": "run-f1",
+        "run_started_at": 100.0,
+        "run_finished_at": 102.0,
         "coverage_envelope": {
             "complete": True,
+            "status": "complete",
             "fda_preflight_status": "granted",
             "fda_user_preflight_status": "granted",
             "reachable_top_level_roots": 1,
             "measured_top_level_roots": 1,
             "unfinished_top_level_roots": 0,
         },
-        "frontier_unfinished": [],
         "fda_probe_paths": dict(USER_PROBE_PATHS),
         "fda_preflight": {
             "status": "granted",
@@ -46,242 +61,254 @@ def full_attribution_ledger(disk_used_kb, residual_kb, buckets, captured_at="202
                 for name, path in USER_PROBE_PATHS.items()
             },
         },
+        "disk_used_kb": disk_used_kb,
+        "residual_kb": 1000000,
+        "purgeable_kb": 0,
+        "granularity_buckets": buckets,
+        "oversize_indivisible_files": [],
+        "frontier_unfinished": [],
+        "opaque_intrinsic_gates": [],
         "accounting_equation": {
-            "displayed_balanced": tail >= 0, "display_ledger_valid": tail >= 0,
-            "data_used_kb": disk_used_kb, "displayed_buckets_kb": bucket_total,
-            "oversize_indivisible_files_kb": 0, "sub_granularity_tail_kb": tail,
-            "purgeable_kb": 0, "residual_kb": residual_kb,
+            "displayed_balanced": True,
+            "display_ledger_valid": True,
+            "data_used_kb": disk_used_kb,
+            "displayed_buckets_kb": bucket_total,
+            "oversize_indivisible_files_kb": 0,
+            "sub_granularity_tail_kb": tail,
+            "purgeable_kb": 0,
+            "residual_kb": 1000000,
             "clone_shared_adjustment_kb": 0,
         },
-        "captured_at": captured_at,
-        "hostname": "sandbox-host",
-        "disk_used_kb": disk_used_kb,
-        "residual_kb": residual_kb,
-        "granularity_buckets": buckets,
-        "oversize_indivisible_files": [],
-        "opaque_intrinsic_gates": [],
     }
 
 
-def structural_ledger(disk_used_kb, residual_kb, buckets, mode="partial", captured_at="2026-09-10T00:00:00Z",
-                       measured=3, reachable=7):
-    """A structurally-valid but NOT full-attribution ledger — the shape
-    topdown-5g.partial.json takes on an incomplete scan."""
+def make_valid_partial(captured_at=None, buckets=None, disk_used_kb=10500000, scope=None):
+    if captured_at is None:
+        captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if buckets is None:
+        buckets = [{"path": "/Users/x/a", "measured_kb": 4500000}]
+    if scope is None:
+        scope = {"hostname": "testhost", "root": "/Users/x"}
+    bucket_total = sum(b.get("measured_kb", 0) for b in buckets)
+    tail = disk_used_kb - bucket_total - 1000000
     return {
         "schema_version": 2,
-        "mode": mode,
-        "coverage_envelope": {
-            "measured_top_level_roots": measured,
-            "reachable_top_level_roots": reachable,
-        },
+        "mode": "partial",
+        "publication_kind": "partial",
+        "canonical": False,
+        "scope": scope,
+        "hostname": scope.get("hostname", "testhost"),
+        "root": scope.get("root", "/Users/x"),
         "captured_at": captured_at,
-        "hostname": "sandbox-host",
+        "run_id": "run-p1",
+        "coverage_envelope": {
+            "complete": False,
+            "status": "partial",
+            "measured_top_level_roots": 1,
+            "reachable_top_level_roots": 2,
+        },
         "disk_used_kb": disk_used_kb,
-        "residual_kb": residual_kb,
+        "residual_kb": 1000000,
+        "purgeable_kb": 0,
         "granularity_buckets": buckets,
         "oversize_indivisible_files": [],
+        "frontier_unfinished": [],
         "opaque_intrinsic_gates": [],
+        "accounting_equation": {
+            "displayed_balanced": True,
+            "display_ledger_valid": True,
+            "data_used_kb": disk_used_kb,
+            "displayed_buckets_kb": bucket_total,
+            "oversize_indivisible_files_kb": 0,
+            "sub_granularity_tail_kb": tail,
+            "purgeable_kb": 0,
+            "residual_kb": 1000000,
+            "clone_shared_adjustment_kb": 0,
+        },
     }
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=True,
-    )
-
-
-def _commit_ledger(repo, ledger_obj, msg):
-    ledger_dir = repo / "ledger"
-    ledger_dir.mkdir(exist_ok=True)
-    (ledger_dir / "topdown-5g.json").write_text(json.dumps(ledger_obj))
-    _git(repo, "add", "ledger/topdown-5g.json")
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg],
-        capture_output=True, text=True, check=True,
-    )
-
-
-def _write_working_tree(repo, rel, obj):
-    path = repo / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj))
 
 
 class TestGrowthTop10(unittest.TestCase):
     def setUp(self):
-        self.tmp = pathlib.Path(tempfile.mkdtemp())
-        self.repo = self.tmp / "state"
-        self.repo.mkdir()
-        try:
-            _git(self.repo, "init", "-q", "-b", "main")
-        except subprocess.CalledProcessError:
-            _git(self.repo, "init", "-q")
-            _git(self.repo, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.tmp = tempfile.mkdtemp()
+        self.state_dir = pathlib.Path(self.tmp) / "state"
+        self.state_dir.mkdir()
+        subprocess.run(["git", "-C", str(self.state_dir), "init", "-q"], check=True)
+        (self.state_dir / "ledger").mkdir()
 
-    def _run_cli(self, *args):
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--state-dir", str(self.repo), *args],
-            capture_output=True, text=True,
+    def _commit_floor(self, floor_dict, commit_time=None):
+        p = self.state_dir / "ledger" / "topdown-5g.json"
+        p.write_text(json.dumps(floor_dict, indent=2))
+        subprocess.run(["git", "-C", str(self.state_dir), "add", "ledger/topdown-5g.json"], check=True)
+        if commit_time is None:
+            commit_time = floor_dict.get("captured_at", (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        env = dict(os.environ, GIT_AUTHOR_DATE=commit_time, GIT_COMMITTER_DATE=commit_time)
+        subprocess.run(
+            ["git", "-C", str(self.state_dir), "-c", "user.email=t@test", "-c", "user.name=t", "commit", "-q", "-m", "commit floor"],
+            env=env,
+            check=True,
         )
 
-    def test_prefers_working_tree_partial_over_committed_canonical(self):
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, floor, "floor")
-        # Canonical HEAD still shows the floor's numbers (no new complete scan).
-        canonical_stale = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        # Partial working-tree file is the freshest scan, showing real growth.
-        partial = structural_ledger(9 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/fixture_growth", "measured_kb": 5 * GIB_KB},
-        ])
-        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", partial)
+    def test_json_output_with_valid_floor_and_partial(self):
+        floor = make_valid_floor()
+        self._commit_floor(floor)
 
-        result = self._run_cli()
+        partial = make_valid_partial()
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("current (partial)", result.stdout)
-        self.assertIn("+5.00 GiB  /fixture_growth", result.stdout)
-        self.assertIn("gap: +5.00 GiB", result.stdout)
-        self.assertIn("(partial: 3/7 roots measured)", result.stdout)
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
-    def test_falls_back_to_canonical_when_no_partial_present(self):
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, floor, "floor")
-        target = full_attribution_ledger(6 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/growth", "measured_kb": 2 * GIB_KB},
-        ])
-        _commit_ledger(self.repo, target, "target")
+        data = json.loads(res.stdout)
+        self.assertIn(data["comparison_kind"], ("exact_path", "partial"))
+        self.assertEqual(data["reason"], "ok")
+        self.assertEqual(data["current_source"], "partial")
+        self.assertIn("floor_ref", data)
+        self.assertIn("deltas", data)
+        self.assertIn("unknown", data)
+        self.assertIn("measured_interval", data)
+        self.assertEqual(len(data["deltas"]), 1)
+        self.assertEqual(data["deltas"][0]["path"], "/Users/x/a")
+        self.assertEqual(data["deltas"][0]["delta_kb"], 500000)
 
-        result = self._run_cli()
+    def test_no_floor_exits_2_and_emits_honest_json(self):
+        # Empty repo with no floor commit
+        partial = make_valid_partial()
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("current (canonical)", result.stdout)
-        self.assertIn("+2.00 GiB  /growth", result.stdout)
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
 
-    def test_falls_back_to_canonical_when_partial_is_structurally_invalid(self):
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, floor, "floor")
-        target = full_attribution_ledger(6 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/growth", "measured_kb": 2 * GIB_KB},
-        ])
-        _commit_ledger(self.repo, target, "target")
-        # Missing required keys (disk_used_kb/residual_kb) -> LedgerError.
-        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", {"schema_version": 2})
+        data = json.loads(res.stdout)
+        self.assertEqual(data["comparison_kind"], "no_floor")
+        self.assertEqual(data["deltas"], [])
 
-        result = self._run_cli()
+    def test_floor_recently_committed_but_old_capture_is_refused(self):
+        # Commit right now, but capture timestamp is 20 days old (outside 14d)
+        old_captured = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        floor = make_valid_floor(captured_at=old_captured)
+        self._commit_floor(floor)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("current (canonical)", result.stdout)
+        partial = make_valid_partial(captured_at=(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-    def test_exit_2_when_no_full_attribution_floor_in_window(self):
-        # Only a structural (partial) ledger is committed — never qualifies
-        # as a floor candidate (select_floor_ref requires full attribution).
-        partial = structural_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, partial, "only partial ever committed")
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["comparison_kind"], "no_floor")
+        self.assertTrue("no valid ledger snapshots" in data["reason"] or "floor capture timestamp outside window" in data["reason"])
 
-        result = self._run_cli()
+    def test_freshest_current_selection_picks_newest_capture(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cap_canonical = (now - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cap_partial = (now - datetime.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("disk_magician-4y6", result.stderr)
+        # Canonical is 2h old, partial is 5h old -> should pick canonical!
+        floor = make_valid_floor(captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self._commit_floor(floor)
 
-    def test_exit_1_when_no_valid_current_ledger(self):
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        # A repo with a real floor commit, but whose HEAD working-tree
-        # canonical file is corrupted and has no partial to fall back to —
-        # exercises the CLI's exit-1 "no valid current" path specifically
-        # (distinct from exit-2 "no floor", which fires first if both are
-        # missing).
-        floor_repo = self.tmp / "floor-only"
-        floor_repo.mkdir()
-        _git(floor_repo, "init", "-q")
-        _git(floor_repo, "symbolic-ref", "HEAD", "refs/heads/main")
-        _commit_ledger(floor_repo, floor, "floor")
-        # Corrupt HEAD's canonical file content on disk (working tree) so the
-        # working-tree read (not git show) fails validation, with no partial
-        # file to fall back to either.
-        (floor_repo / "ledger" / "topdown-5g.json").write_text("not json")
+        # Write canonical to working tree (fresher than partial)
+        canonical_tree = make_valid_floor(captured_at=cap_canonical)
+        (self.state_dir / "ledger" / "topdown-5g.json").write_text(json.dumps(canonical_tree))
 
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--state-dir", str(floor_repo)],
-            capture_output=True, text=True,
+        # Write partial (older than canonical)
+        partial = make_valid_partial(captured_at=cap_partial)
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
+
+        ledger, source = gt.load_freshest_current(self.state_dir, now)
+        self.assertEqual(source, "canonical")
+        self.assertEqual(ledger["captured_at"], cap_canonical)
+
+    def test_text_output_never_claims_no_growth_when_unknown_exists(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        floor = make_valid_floor(captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self._commit_floor(floor)
+
+        # Current has missing path and carried path -> positive growth is empty, but unknown exists!
+        partial = make_valid_partial(
+            captured_at=(now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            buckets=[{"path": "/Users/x/other", "measured_kb": 1000}],
         )
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no valid ledger snapshot found", result.stderr)
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir)]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("(no growth — nothing exceeded the floor)", res.stdout)
+        self.assertIn("unmeasured/unknown components prevent confirming zero growth", res.stdout)
 
-    def test_limits_and_sorts_growth_to_positive_deltas_only(self):
-        # Bucket sizes stay well under the 5 GiB per-bucket ceiling
-        # validate_ledger enforces (100 MiB base + up to 900 MiB growth).
-        unit_kb = 100 * 1024
-        floor = full_attribution_ledger(10 * unit_kb, 0, [
-            {"path": f"/p{i}", "measured_kb": unit_kb} for i in range(10)
-        ])
-        _commit_ledger(self.repo, floor, "floor")
-        buckets = [{"path": f"/p{i}", "measured_kb": (1 + i) * unit_kb} for i in range(10)]  # p0..p9 grow by i units
-        buckets.append({"path": "/shrunk", "measured_kb": 0})
-        target = full_attribution_ledger(sum(b["measured_kb"] for b in buckets), 0, buckets)
-        _commit_ledger(self.repo, target, "target")
+    def test_regression_guard_compute_deltas_never_called(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        floor = make_valid_floor(captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self._commit_floor(floor)
 
-        result = self._run_cli("--limit", "3")
+        partial = make_valid_partial(captured_at=(now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        lines = [ln for ln in result.stdout.splitlines() if "GiB  /" in ln]
-        self.assertEqual(len(lines), 3)
-        self.assertIn("/p9", lines[0])  # largest delta (+9 GiB) first
-        self.assertIn("/p8", lines[1])
-        self.assertIn("/p7", lines[2])
-        self.assertNotIn("/shrunk", result.stdout)  # negative delta excluded
+        with mock.patch("history_diff.compute_deltas") as mock_cd:
+            gt.main(["--state-dir", str(self.state_dir), "--json"])
+            self.assertEqual(mock_cd.call_count, 0)
 
-    def test_falls_back_to_canonical_when_partial_has_non_dict_bucket_item(self):
-        # /advice round 2 (Codex): validate_ledger assumes each bucket item
-        # is a dict and calls .get() on it directly, so a bare string bucket
-        # entry raises AttributeError, not LedgerError. load_current must
-        # catch that broadly and fall back to canonical rather than crash
-        # the whole CLI.
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, floor, "floor")
-        target = full_attribution_ledger(6 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/growth", "measured_kb": 2 * GIB_KB},
-        ])
-        _commit_ledger(self.repo, target, "target")
-        malformed = structural_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        malformed["granularity_buckets"].append("not-a-dict-bucket-entry")
-        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", malformed)
+    def test_json_gap_kb_null_on_nonnumeric(self):
+        floor = make_valid_floor(scope={"hostname": "box1", "root": "/Users/x"})
+        self._commit_floor(floor)
 
-        result = self._run_cli()
+        # Current has different hostname -> scope_mismatch nonnumeric
+        partial = make_valid_partial(scope={"hostname": "box2", "root": "/Users/x"})
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("current (canonical)", result.stdout)
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 1)
 
-    def test_coverage_suffix_does_not_crash_on_non_dict_coverage_envelope(self):
-        # /advice round 2 (Codex): coverage_suffix crashes on a list
-        # coverage_envelope (`envelope.get(...)` on a list). validate_ledger
-        # does not constrain this field's type, so a malformed-but-otherwise-
-        # valid partial must degrade gracefully instead of crashing the CLI.
-        floor = full_attribution_ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
-        _commit_ledger(self.repo, floor, "floor")
-        partial = structural_ledger(5 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/growth", "measured_kb": 1 * GIB_KB},
-        ])
-        partial["coverage_envelope"] = ["not", "a", "dict"]
-        _write_working_tree(self.repo, "ledger/topdown-5g.partial.json", partial)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["comparison_kind"], "nonnumeric")
+        self.assertIsNone(data["gap_kb"])
 
-        result = self._run_cli()
+    def test_json_limit_applied(self):
+        floor = make_valid_floor(
+            buckets=[
+                {"path": "/Users/x/a", "measured_kb": 1000},
+                {"path": "/Users/x/b", "measured_kb": 1000},
+            ]
+        )
+        self._commit_floor(floor)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("current (partial)", result.stdout)
-        self.assertIn("(partial)", result.stdout)
+        partial = make_valid_partial(
+            buckets=[
+                {"path": "/Users/x/a", "measured_kb": 2000},
+                {"path": "/Users/x/b", "measured_kb": 3000},
+            ]
+        )
+        (self.state_dir / "ledger" / "topdown-5g.partial.json").write_text(json.dumps(partial))
 
-    def test_days_and_limit_must_be_positive(self):
-        result_days = self._run_cli("--days", "0")
-        self.assertNotEqual(result_days.returncode, 0)
-        result_limit = self._run_cli("--limit", "-1")
-        self.assertNotEqual(result_limit.returncode, 0)
+        cmd = [sys.executable, str(SCRIPT), "--state-dir", str(self.state_dir), "--json", "--limit", "1"]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+        data = json.loads(res.stdout)
+        self.assertEqual(len(data["deltas"]), 1)
+        self.assertEqual(len(data["top_growth"]), 1)
+
+    def test_select_floor_ref_chooses_valid_captured_candidate_over_recent_commit_ancient_capture(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Commit 1: 3 days ago, valid capture 3 days ago, used=5000000
+        valid_cap = (now - datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c1 = make_valid_floor(captured_at=valid_cap, disk_used_kb=5000000)
+        self._commit_floor(c1, commit_time=valid_cap)
+
+        # Commit 2: committed 1 hour ago, but captured 60 days ago (outside 14d), used=1000000 (lower!)
+        ancient_cap = (now - datetime.timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c2 = make_valid_floor(captured_at=ancient_cap, disk_used_kb=1000000)
+        self._commit_floor(c2, commit_time=(now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+        # select_floor_ref with filter_capture_window=True must choose c1!
+        ref, chosen = hd.select_floor_ref(self.state_dir, days=14, filter_capture_window=True, now=now)
+        self.assertEqual(chosen["captured_at"], valid_cap)
+        self.assertEqual(chosen["disk_used_kb"], 5000000)
 
 
 if __name__ == "__main__":

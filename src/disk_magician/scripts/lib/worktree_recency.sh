@@ -4,7 +4,7 @@
 # Source this file, then call:
 #   worktree_last_activity_epoch <path>   prints unix epoch of newest activity
 #   worktree_age_days <path>              prints whole days since that activity
-#   worktree_is_recently_active <path> <min_days>
+#   worktree_is_recently_active <path> <min_days> [now]
 #                                         rc 0 = TOO YOUNG, do not delete
 #
 # WHY THIS EXISTS
@@ -41,6 +41,20 @@
 # stat calls.
 _WT_RECENCY_PRUNE_NAMES=(.git node_modules venv .venv __pycache__ .pytest_cache .ruff_cache)
 
+# Fill the caller's local prune_expr array (also supported by macOS Bash 3.2).
+_worktree_recency_build_prune_expr() {
+    local name first=true
+    prune_expr=()
+    for name in "${_WT_RECENCY_PRUNE_NAMES[@]}"; do
+        if [[ "$first" == true ]]; then
+            prune_expr=(-name "$name")
+            first=false
+        else
+            prune_expr+=(-o -name "$name")
+        fi
+    done
+}
+
 # NOT counted as activity: anything inside the git admin dir.
 #
 # Tempting, and wrong. `git status --porcelain` rewrites the index to refresh
@@ -67,18 +81,21 @@ worktree_last_activity_epoch() {
     # head closing the pipe early raises SIGPIPE in sort, which under
     # `set -o pipefail` turns a healthy scan into an empty result. awk consumes
     # all of stdin, so the pipe is never closed early.
-    local prune_expr=() name first=true
-    for name in "${_WT_RECENCY_PRUNE_NAMES[@]}"; do
-        if [[ "$first" == true ]]; then
-            prune_expr=(-name "$name")
-            first=false
-        else
-            prune_expr+=(-o -name "$name")
-        fi
-    done
-    candidate="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
-        -o -type f -exec stat -f '%m' {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')" || candidate=""
+    local prune_expr=()
+    _worktree_recency_build_prune_expr
+    # BSD stat (-f '%m') vs GNU stat (-c '%Y'); GNU rejects the BSD form, which
+    # previously left every Linux worktree unmeasured and therefore "young".
+    local stat_mtime=(stat -f '%m')
+    stat -f '%m' / >/dev/null 2>&1 || stat_mtime=(stat -c '%Y')
+    # find's own exit status is checked (not left to the caller's pipefail): a
+    # partly unreadable tree has unknown recency and must read as active.
+    local mtimes
+    if mtimes="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
+        -o -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null)"; then
+        candidate="$(awk '$1+0>m{m=$1+0} END{if (m>0) print m}' <<<"$mtimes")"
+    else
+        candidate=""
+    fi
     [[ -n "$candidate" ]] && (( candidate > newest )) && newest="$candidate"
 
     # Fail closed: no evidence at all -> treat as active right now.
@@ -99,12 +116,162 @@ worktree_age_days() {
     printf '%s\n' "$(( (now - last) / 86400 ))"
 }
 
-# worktree_is_recently_active <worktree_path> <min_days>
+# Keep every fallback on the same validated row clock as the threshold probe.
+_worktree_recency_legacy_active() {
+    local wt="$1" min_days="$2" now="$3" last age
+    last="$(worktree_last_activity_epoch "$wt")"
+    age="$(( (now - last) / 86400 ))"
+    (( age < min_days ))
+}
+
+# Date flavour for the fast path, detected once per sourcing process.
+# Tests that stub `date` call _worktree_recency_reset_date_flavor afterwards.
+_worktree_recency_detect_date_flavor() {
+    local probe
+    if probe="$(date -r 0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
+        _WT_RECENCY_DATE_FLAVOR=bsd
+    elif probe="$(date -d @0 +%s 2>/dev/null)" && [[ "$probe" == 0 ]]; then
+        _WT_RECENCY_DATE_FLAVOR=gnu
+    else
+        _WT_RECENCY_DATE_FLAVOR=none
+    fi
+}
+_worktree_recency_reset_date_flavor() {
+    _WT_RECENCY_DATE_FLAVOR=""
+    _worktree_recency_detect_date_flavor
+}
+_worktree_recency_detect_date_flavor
+
+# worktree_is_recently_active <worktree_path> <min_days> [now]
 # rc 0 = the worktree was touched inside the last <min_days> days; it is
 #        PROTECTED and must not be deleted, stripped, or archived.
 # rc 1 = older than the floor; eligible for whatever the caller does next.
+# An optional row clock is accepted only within the preceding 300 seconds.
+#
+# Legacy find -exec stat cannot stat a regular file whose path exceeds PATH_MAX,
+# so it reads that tree as active. The final byte-length guard preserves this
+# intentional protection even though -newer itself can inspect longer paths.
+# One accepted residual: a file deleted, modified, or created during the check
+# after the final traversal has passed it can be missed here while legacy's
+# slightly later batched stat would see it. Both are point-in-time measurements.
 worktree_is_recently_active() {
-    local wt="${1:-}" min_days="${2:-7}" age
-    age="$(worktree_age_days "$wt")"
-    (( age < min_days ))
+    local wt="${1:-}" min_days="${2:-7}" raw_min_days="${2-7}" supplied_now="${3:-}" now
+    now="$(date +%s)" || now=""
+    # Bound the supplied decimal's length before Bash arithmetic: arbitrarily
+    # long digit strings must not wrap into the accepted 300-second window.
+    if [[ "$supplied_now" =~ ^[1-9][0-9]*$ && "$now" =~ ^[1-9][0-9]*$ ]] &&
+        (( ${#supplied_now} <= ${#now} )) &&
+        (( supplied_now <= now && now - supplied_now <= 300 )); then
+        now="$supplied_now"
+    fi
+
+    local root="$wt" root_name name wt_physical="" eligible=true
+    while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
+    root_name="${root##*/}"
+    for name in "${_WT_RECENCY_PRUNE_NAMES[@]}"; do
+        [[ "$root_name" == "$name" ]] && eligible=false
+    done
+    if [[ ! "$raw_min_days" =~ ^(0|[1-9][0-9]{0,4})$ ]] ||
+        (( min_days > 36500 )) ||
+        [[ "$wt" != /* || ! -d "$wt" || ! -r "$wt" || -L "$root" || "$eligible" == false ]]; then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+    wt_physical="$(cd -P -- "$wt" 2>/dev/null && pwd -P)" || wt_physical=""
+    while [[ "$wt_physical" == */ && "$wt_physical" != / ]]; do wt_physical="${wt_physical%/}"; done
+    if [[ -z "$wt_physical" || "$wt_physical" != "$root" || ! "$now" =~ ^[1-9][0-9]*$ ]]; then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+
+    local cutoff=$(( now - min_days * 86400 )) flavor="" probe
+    if (( cutoff <= 1 )); then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+    # Flavour is detected once when the library is sourced (see below); the
+    # two reference stamps use only that flavour.
+    [[ -n "${_WT_RECENCY_DATE_FLAVOR:-}" ]] || _worktree_recency_detect_date_flavor
+    flavor="$_WT_RECENCY_DATE_FLAVOR"
+    if [[ "$flavor" != bsd && "$flavor" != gnu ]]; then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+
+    local ref_dir
+    if ! ref_dir="$(mktemp -d 2>/dev/null)" || [[ -z "$ref_dir" ]]; then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+    # Expected conservative difference: legacy counts mtime exactly 1 as
+    # positive (old), but this epoch-1 reference deliberately excludes it from
+    # the -newer probe, so an epoch-0/1-only tree stays active/protected here.
+    local cutoff_ref="$ref_dir/cutoff" epoch_ref="$ref_dir/epoch-one"
+    local ref_physical="" stamp readback result=2 rc hit any_hit path_max long_pattern
+    local prune_expr=()
+    _worktree_recency_build_prune_expr
+    # result 2 means legacy fallback, always after deleting both references.
+    while :; do
+        ref_physical="$(cd -P -- "$ref_dir" 2>/dev/null && pwd -P)" || break
+        while [[ "$ref_physical" == */ && "$ref_physical" != / ]]; do ref_physical="${ref_physical%/}"; done
+        [[ -n "$ref_physical" ]] || break
+        if [[ "$wt_physical" == / || "$ref_physical" == "$wt_physical" ||
+            "$ref_physical" == "$wt_physical/"* ]]; then
+            break
+        fi
+        if [[ "$flavor" == bsd ]]; then
+            stamp="$(TZ=UTC0 date -r "$cutoff" +%Y%m%d%H%M.%S 2>/dev/null)" || break
+        else
+            stamp="$(TZ=UTC0 date -d "@$cutoff" +%Y%m%d%H%M.%S 2>/dev/null)" || break
+        fi
+        TZ=UTC0 touch -t "$stamp" "$cutoff_ref" 2>/dev/null || break
+        if [[ "$flavor" == bsd ]]; then
+            readback="$(stat -f %m "$cutoff_ref" 2>/dev/null)" || break
+        else
+            readback="$(stat -c %Y "$cutoff_ref" 2>/dev/null)" || break
+        fi
+        [[ "$readback" == "$cutoff" ]] || break
+        if [[ "$flavor" == bsd ]]; then
+            stamp="$(TZ=UTC0 date -r 1 +%Y%m%d%H%M.%S 2>/dev/null)" || break
+        else
+            stamp="$(TZ=UTC0 date -d @1 +%Y%m%d%H%M.%S 2>/dev/null)" || break
+        fi
+        TZ=UTC0 touch -t "$stamp" "$epoch_ref" 2>/dev/null || break
+        if [[ "$flavor" == bsd ]]; then
+            readback="$(stat -f %m "$epoch_ref" 2>/dev/null)" || break
+        else
+            readback="$(stat -c %Y "$epoch_ref" 2>/dev/null)" || break
+        fi
+        [[ "$readback" == 1 ]] || break
+
+        # Never normalize the find root: its bytes must match the legacy call.
+        # Any counted file first (cheap: stops at the first one), then one final
+        # traversal that answers both "newer than the cutoff" and "path longer
+        # than PATH_MAX"; the verdict rests on that last traversal. Every prune
+        # name is ASCII, so LC_ALL=C (bytes for -path) leaves -name unchanged.
+        rc=0
+        any_hit="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
+            -o -type f -newer "$epoch_ref" -print -quit 2>/dev/null)" || rc=$?
+        if (( rc != 0 )) || [[ -z "$any_hit" ]]; then result=0; break; fi
+        if [[ "$any_hit" -ef "$cutoff_ref" || "$any_hit" -ef "$epoch_ref" ]]; then break; fi
+
+        path_max="$(getconf PATH_MAX "$wt" 2>/dev/null)" || path_max=""
+        [[ "$path_max" =~ ^[0-9]+$ ]] || path_max=1024
+        printf -v long_pattern '%*s' "$(( path_max - 1 ))" ''
+        long_pattern="${long_pattern// /?}*"
+        rc=0
+        hit="$(LC_ALL=C find "$wt" \( "${prune_expr[@]}" \) -prune \
+            -o \( -type f -newer "$cutoff_ref" -o -path "$long_pattern" \) -print -quit 2>/dev/null)" || rc=$?
+        if (( rc != 0 )) || [[ -n "$hit" ]]; then result=0; break; fi
+        result=1
+        break
+    done
+    # Reference cleanup must precede legacy, especially with TMPDIR in the tree.
+    # An unexpected cleanup failure cannot establish that the worktree is old.
+    rm -rf -- "$ref_dir" 2>/dev/null || return 0
+    if (( result == 2 )); then
+        _worktree_recency_legacy_active "$wt" "$min_days" "$now"
+        return $?
+    fi
+    return "$result"
 }

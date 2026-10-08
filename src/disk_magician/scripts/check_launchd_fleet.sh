@@ -18,24 +18,33 @@
 #
 # Exit code: 0 if every known label is loaded and its plist lints clean,
 # 1 if any are missing/unloaded/invalid. Read-only; never modifies anything.
+# ``--fleet-only --json`` is the machine-readable, inventory-derived API.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_DIR="${DISK_MAGICIAN_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+DAEMON_PLIST_DIR="${DISK_MAGICIAN_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 
-# Canonical fleet — keep in sync with scripts/install_launchd_sweepers.sh's
-# two template families (com.jleechanorg.disk-magician-*, com.disk-magician.*)
-# plus the primary snapshot job and the root frontier LaunchDaemon.
+# Legacy compatibility assertion for the template-derived inventory.  JSON mode
+# reads committed launchd sources through job_inventory.py and never treats this
+# list as a second catalog.
 KNOWN_LABELS=(
+  # Labels whose plist lives in /Library/LaunchDaemons are checked via
+  # `launchctl print system/<label>`.
+  com.disk-magician.apfs-snapshots
   com.jleechanorg.disk-magician
   com.jleechanorg.disk-magician-downloads-evidence
   com.jleechanorg.disk-magician-drilldown
   com.jleechanorg.disk-magician-frontier-nightly
   com.jleechanorg.disk-magician-frontier-root
+  com.jleechanorg.disk-magician-main-sweeper
   com.jleechanorg.disk-magician-observer
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
   com.jleechanorg.disk-magician-worktree-hygiene
+  com.disk-magician.claude-state
+  com.disk-magician.code-sign-clones
+  com.disk-magician.codex-vacuum
   com.disk-magician.colima-prune
   com.disk-magician.cursor-logs-watchdog
   com.disk-magician.fsevents-projects
@@ -47,22 +56,47 @@ KNOWN_LABELS=(
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [-h|--help]
+Usage: $(basename "$0") [--fleet-only] [--json] [-h|--help]
 
 Checks every known disk-magician launchd label for two independent failure
-modes: (1) not currently loaded (\`launchctl list\`), (2) installed plist is
+modes: (1) not currently loaded (\`launchctl list\`, or \`launchctl print
+system/<label>\` for a LaunchDaemon), (2) installed plist is
 structurally invalid (\`plutil -lint\`). Read-only. Exit 0 = all healthy.
 EOF
 }
+
+JSON_MODE=false
+FLEET_ONLY=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=true; shift ;;
+    --fleet-only) FLEET_ONLY=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "check_launchd_fleet: invalid option: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$JSON_MODE" == true ]]; then
+  if [[ "$FLEET_ONLY" != true ]]; then
+    echo "check_launchd_fleet: --json requires --fleet-only" >&2
+    exit 2
+  fi
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  exec python3 "$SCRIPT_DIR/job_inventory.py" \
+    --repo-root "$repo_root" \
+    --json
+fi
+
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
 
-if [[ "$OSTYPE" != darwin* ]]; then
+if [[ "${DISK_MAGICIAN_OSTYPE:-$OSTYPE}" != darwin* ]]; then
   echo "check_launchd_fleet: not macOS — launchd fleet check skipped (n/a on this OS)."
   exit 0
 fi
 
 missing=0
 not_loaded=0
+unknown=0
 invalid=0
 ok=0
 
@@ -71,8 +105,63 @@ ok=0
 # and intermittent pipe drops on macOS Sequoia/Sonoma under heavy concurrency.
 LAUNCHCTL_LIST="$(launchctl list 2>/dev/null || true)"
 
+MAIN_SWEEPER_LABEL="com.jleechanorg.disk-magician-main-sweeper"
+MAIN_SWEEPER_ACTIVE=false
+main_plist="$PLIST_DIR/${MAIN_SWEEPER_LABEL}.plist"
+if [[ -f "$main_plist" ]] && plutil -lint "$main_plist" >/dev/null 2>&1 && plutil -extract Label raw -o - "$main_plist" >/dev/null 2>&1; then
+  if grep -qE "(^|[[:space:]])${MAIN_SWEEPER_LABEL}$" <<< "$LAUNCHCTL_LIST"; then
+    MAIN_SWEEPER_ACTIVE=true
+  fi
+fi
+
+is_consolidated_label() {
+  local candidate="$1"
+  case "$candidate" in
+    com.disk-magician.colima-prune|\
+    com.disk-magician.code-sign-clones|\
+    com.disk-magician.codex-vacuum|\
+    com.jleechanorg.disk-magician-pressure-sweep|\
+    com.jleechanorg.disk-magician-tmp-scratch)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 for label in "${KNOWN_LABELS[@]}"; do
   plist="$PLIST_DIR/${label}.plist"
+  is_system_daemon=false
+  if [[ -f "$DAEMON_PLIST_DIR/${label}.plist" ]]; then
+    if [[ -f "$plist" ]]; then
+      # A same-label LaunchAgent would otherwise mask the daemon's state.
+      echo "  UNKNOWN STATE   $label  (plist in both $PLIST_DIR and $DAEMON_PLIST_DIR; load domain ambiguous)"
+      unknown=$(( unknown + 1 ))
+      continue
+    fi
+    plist="$DAEMON_PLIST_DIR/${label}.plist"
+    is_system_daemon=true
+  fi
+
+  # If fleet is consolidated and main-sweeper is active, redundant sweepers are covered
+  if [[ "$MAIN_SWEEPER_ACTIVE" == true ]] && is_consolidated_label "$label"; then
+    if [[ ! -f "$plist" ]] || ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
+      echo "  CONSOLIDATED    $label  (covered by $MAIN_SWEEPER_LABEL)"
+      ok=$(( ok + 1 ))
+      continue
+    fi
+  fi
+
+  # If main-sweeper is not installed/active yet, but individual sweepers are running
+  if [[ "$label" == "$MAIN_SWEEPER_LABEL" && "$MAIN_SWEEPER_ACTIVE" == false ]]; then
+    if [[ ! -f "$plist" ]]; then
+      echo "  UNCONSOLIDATED  $label  (legacy individual sweepers active)"
+      ok=$(( ok + 1 ))
+      continue
+    fi
+  fi
+
   if [[ ! -f "$plist" ]]; then
     echo "  MISSING PLIST   $label  (expected $plist)"
     missing=$(( missing + 1 ))
@@ -102,7 +191,23 @@ for label in "${KNOWN_LABELS[@]}"; do
     invalid=$(( invalid + 1 ))
     continue
   fi
-  if ! grep -qF "$label" <<< "$LAUNCHCTL_LIST"; then
+  if [[ "$is_system_daemon" == true ]]; then
+    print_rc=0
+    launchctl print "system/$label" >/dev/null 2>&1 || print_rc=$?
+    # 113 is launchctl's "could not find service"; any other failure leaves
+    # the load state unknown and must not be reported as "no record".
+    if [[ "$print_rc" -eq 113 ]]; then
+      echo "  NOT LOADED      $label  (plist valid but system launchctl has no record)"
+      not_loaded=$(( not_loaded + 1 ))
+      continue
+    elif [[ "$print_rc" -ne 0 ]]; then
+      echo "  UNKNOWN STATE   $label  (launchctl print system/$label exited $print_rc; load state not determined)"
+      unknown=$(( unknown + 1 ))
+      continue
+    fi
+  # Match the launchctl label column exactly; a similarly-prefixed label must
+  # not make this job appear loaded.
+  elif ! grep -qE "(^|[[:space:]])${label}$" <<< "$LAUNCHCTL_LIST"; then
     echo "  NOT LOADED      $label  (plist valid but launchctl has no record — try: launchctl load \"$plist\")"
     not_loaded=$(( not_loaded + 1 ))
     continue
@@ -114,13 +219,13 @@ total=${#KNOWN_LABELS[@]}
 echo "  Fleet: $ok/$total loaded and valid."
 
 fleet_unhealthy=0
-if [[ $((missing + not_loaded + invalid)) -gt 0 ]]; then
-  echo "  ⚠️  $((missing + not_loaded + invalid)) job(s) unhealthy — floor/history data below may be stale or absent."
+if [[ $((missing + not_loaded + invalid + unknown)) -gt 0 ]]; then
+  echo "  ⚠️  $((missing + not_loaded + invalid + unknown)) job(s) unhealthy — floor/history data below may be stale or absent."
   echo "  Repair: bash scripts/install_launchd_sweepers.sh   (rewrites every plist from its template and reloads it)"
   fleet_unhealthy=1
 fi
 
-if [[ -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
+if [[ "$FLEET_ONLY" == false && -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
   ledger_line="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1)" || ledger_rc=$?
   ledger_rc="${ledger_rc:-0}"
   if [[ "$ledger_line" == STALE* ]]; then

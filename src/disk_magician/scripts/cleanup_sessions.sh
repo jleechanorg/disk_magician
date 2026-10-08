@@ -158,14 +158,14 @@ total_reclaimable_gb=$(awk "BEGIN {printf \"%.1f\", $total_reclaimable_kb / 1048
 # session files are a different domain, owned by the Hermes daemon (not by
 # the user), and Hermes regenerates them on every restart. The cron output
 # dir is debug noise only (stderr/stdout captures from cron-scheduled jobs);
-# it has high churn and is safe to rotate aggressively (14 days).
+# it has high churn and is safe to rotate aggressively (7 days).
 #
 # Pattern: walk top-level entries of ~/.hermes/cron/output/ and delete any
-# whose mtime is older than 14 days. Both files and subdirectories are
+# whose mtime is older than 7 days. Both files and subdirectories are
 # in scope (cron output mixes one-shot captures with per-job subdirs).
 # ────────────────────────────────────────────────────────────────────────────
 HERMES_CRON_OUTPUT_DIR="$HOME/.hermes/cron/output"
-HERMES_CRON_OUTPUT_DAYS=14
+HERMES_CRON_OUTPUT_DAYS=7
 
 if [[ ! -d "$HERMES_CRON_OUTPUT_DIR" ]]; then
   log "No ~/.hermes/cron/output directory — nothing to do."

@@ -420,6 +420,38 @@ exit 0
         self.assertFalse(s_8d.exists())
         self.assertTrue(s_5d.exists())
 
+    def test_exact_boundary_retention(self):
+        """Exactly seven days is pruned while a one-second-younger session remains."""
+        mtime_exact = self.ref_time - (7.0 * self.day_secs)
+        s_exact = self._create_mock_session(
+            self.u0_sessions,
+            "session_exact_7d",
+            {"state.json": "exact"},
+            mtime_epoch=mtime_exact,
+        )
+        mtime_young = self.ref_time - (7.0 * self.day_secs) + 1.0
+        s_young = self._create_mock_session(
+            self.u0_sessions,
+            "session_sub_7d",
+            {"state.json": "young"},
+            mtime_epoch=mtime_young,
+        )
+
+        mock_lsof = self._create_mock_lsof_script()
+        pruner = AsideSessionPruner(
+            aside_dir=self.aside_dir,
+            dry_run=False,
+            lsof_bin=str(mock_lsof),
+            ref_time=self.ref_time,
+        )
+        stats = pruner.run()
+
+        self.assertEqual(stats["sessions_scanned"], 2)
+        self.assertEqual(stats["sessions_pruned"], 1)
+        self.assertEqual(stats["sessions_retained_recent"], 1)
+        self.assertFalse(s_exact.exists())
+        self.assertTrue(s_young.exists())
+
     def test_cli_parse_args(self):
         """Test parse_args with various flag combinations."""
         from scripts.prune_aside_sessions import parse_args
@@ -450,4 +482,3 @@ exit 0
 
 if __name__ == "__main__":
     unittest.main()
-

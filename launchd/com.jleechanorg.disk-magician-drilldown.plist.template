@@ -4,7 +4,7 @@
   Residual drilldown: every 4h, check the latest snapshot's residual (disk
   used but not explained by measured directories) and — only when it
   crosses threshold — propose untracked candidates into
-  config.d/auto-candidates.json for human promotion into config.json.
+  ~/.disk_magician_state/config.d/auto-candidates.json for human promotion into config.json.
 
   Schedule:  Every 4 hours (StartInterval=14400s), no RunAtLoad (avoid
              firing immediately on every login/install).
@@ -23,8 +23,8 @@
   <string>com.jleechanorg.disk-magician-drilldown</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@REPO_ROOT@/scripts/residual_drilldown.sh</string>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>residual-drilldown</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

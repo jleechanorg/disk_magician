@@ -28,7 +28,9 @@ PATTERNS=(
   "scripts/*.sh"
   "scripts/*.py"
   "scripts/lib/*.sh"
+  "launchd/*.plist"
   "launchd/*.plist.template"
+  "launchd/*.c"
 )
 
 drift=()

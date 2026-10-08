@@ -38,7 +38,15 @@ SH
 chmod +x "$BIN_DIR/hostname"
 
 write_snapshot_stub() {
-    local payload="$1"
+    local payload
+    payload="$(python3 - "$1" <<'PYJSON'
+import json
+import sys
+data = json.loads(sys.argv[1])
+data["disk_free_gb"] = 100
+print(json.dumps(data))
+PYJSON
+)"
     cat > "$APP/scripts/disk_snapshot.sh" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
@@ -118,7 +126,13 @@ grep -q "gitleaks is unavailable" "$missing_output"
 secret_value="outgoing-secret-marker"
 private_key_begin="$(printf '%s%s' '-----BEGIN PRIVATE' ' KEY-----')"
 private_key_end="$(printf '%s%s' '-----END PRIVATE' ' KEY-----')"
-secret_payload="$(printf '%s\n' '{"snapshot":"outgoing-secret-marker"}' "$private_key_begin" 'not-a-real-key' "$private_key_end")"
+secret_payload="$(python3 - "$private_key_begin" "$private_key_end" <<'PYJSON'
+import json
+import sys
+print(json.dumps({"snapshot": "outgoing-secret-marker", "fixture_key":
+                  "\n".join((sys.argv[1], "not-a-real-key", sys.argv[2]))}))
+PYJSON
+)"
 write_snapshot_stub "$secret_payload"
 secret_output="$WORK/secret.out"
 rejecting_gitleaks="$WORK/rejecting-gitleaks"

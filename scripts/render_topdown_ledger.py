@@ -12,7 +12,7 @@ declares a complete coverage envelope may replace the last published table.
 Partial reports leave both table files untouched and record their status in a
 sidecar (``topdown-5g.status.json``).
 """
-import argparse, datetime, json, math, os, sys
+import argparse, datetime, json, math, os, sys, tempfile
 
 STALE_HOURS = 36
 GIB_KB = 1024 * 1024
@@ -20,11 +20,6 @@ GRANULARITY_CEILING_KB = 5 * GIB_KB
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
-# Freshest scan of ANY completeness level (bead disk_magician-zyn Component
-# F) — written on every fresh, reconciling, non-empty run regardless of
-# whether it also qualifies for the strict canonical publish below. Consumers
-# needing the full-attribution guarantee keep reading LEDGER_JSON exactly as
-# before; check_ledger_freshness.sh / growth_top10.py read this one first.
 PARTIAL_LEDGER_JSON = "topdown-5g.partial.json"
 SCHEMA_VERSION = 2
 BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
@@ -53,22 +48,38 @@ def gib(kb):
     return (kb or 0) / 1024.0 / 1024.0
 
 
-def write_status(out_dir, status, reason, captured_at, age_hours, report=None):
+def atomic_write_json(out_dir, filename, data):
+    dest_path = os.path.join(out_dir, filename)
+    fd, tmp_path = tempfile.mkstemp(dir=out_dir, prefix=f"{filename}.tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, dest_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def write_status(out_dir, status, reason, captured_at, age_hours, report=None, partial_available=None):
     report = report or {}
-    with open(os.path.join(out_dir, STATUS_JSON), "w") as f:
-        json.dump(
-            {
-                "status": status,
-                "reason": reason,
-                "captured_at": captured_at,
-                "age_hours": round(age_hours, 3),
-                "mode": report.get("mode"),
-                "coverage_envelope": report.get("coverage_envelope"),
-            },
-            f,
-            indent=2,
-        )
-        f.write("\n")
+    status_data = {
+        "status": status,
+        "reason": reason,
+        "captured_at": captured_at,
+        "age_hours": round(age_hours, 3),
+        "mode": report.get("mode"),
+        "coverage_envelope": report.get("coverage_envelope"),
+    }
+    if partial_available is not None:
+        status_data["partial_available"] = bool(partial_available)
+    atomic_write_json(out_dir, STATUS_JSON, status_data)
 
 
 def is_normalized_absolute_path(path):
@@ -406,16 +417,57 @@ def complete_coverage_envelope(report):
     )
 
 
+def build_scope(report):
+    """Build scope from explicit scanner root and hostname; do not invent
+    scope for old ledgers that lack it."""
+    if not isinstance(report, dict):
+        return None
+    scope = report.get("scope")
+    hostname = report.get("hostname")
+    root = report.get("root")
+
+    if root is not None:
+        if not (isinstance(root, str) and is_normalized_absolute_path(root)):
+            return None
+    if hostname is not None:
+        if not (isinstance(hostname, str) and hostname):
+            return None
+
+    if isinstance(scope, dict):
+        s_host = scope.get("hostname")
+        s_root = scope.get("root")
+        if not (isinstance(s_host, str) and s_host):
+            return None
+        if not (isinstance(s_root, str) and is_normalized_absolute_path(s_root)):
+            return None
+        if root is not None and root != s_root:
+            return None
+        if hostname is not None and hostname != s_host:
+            return None
+        res = dict(scope)
+        res["hostname"] = s_host
+        res["root"] = s_root
+        return res
+
+    if root is not None and hostname is not None:
+        return {"hostname": hostname, "root": root}
+
+    return None
+
+
 def build_ledger_dict(report, captured_at):
-    """Build the ledger dict written to both LEDGER_JSON and
-    PARTIAL_LEDGER_JSON. Pure — same field set the canonical write always
-    used, extracted so the two write paths share one source of truth instead
-    of a second copy drifting out of sync."""
-    buckets = report.get("granularity_buckets") or []
-    oversize = report.get("oversize_indivisible_files") or []
-    equation = report.get("accounting_equation") or {}
-    return {
-        "schema_version": SCHEMA_VERSION,
+    """Build the base ledger dict for topdown-5g.json and
+    topdown-5g.partial.json, preserving run_id, timestamps, root, scope, and
+    coverage/carried/unmeasured fields when supplied."""
+    schema_version = report.get("schema_version", SCHEMA_VERSION)
+    buckets = report.get("granularity_buckets")
+    if buckets is None and "buckets" in report:
+        buckets = report.get("buckets")
+    oversize = report.get("oversize_indivisible_files")
+    equation = report.get("accounting_equation")
+
+    ledger = {
+        "schema_version": schema_version,
         "mode": report.get("mode"),
         "coverage_envelope": report.get("coverage_envelope"),
         "frontier_unfinished": report.get("frontier_unfinished"),
@@ -436,6 +488,35 @@ def build_ledger_dict(report, captured_at):
         "accounting_equation": equation,
     }
 
+    if "root" in report and report["root"] is not None:
+        ledger["root"] = report["root"]
+
+    scope = build_scope(report)
+    if scope is not None:
+        ledger["scope"] = scope
+
+    for opt_key in (
+        "coverage_fresh_pct",
+        "coverage_carried_pct",
+        "coverage_effective_pct",
+        "carried_keys",
+        "unmeasured_keys",
+        "measurement_window",
+        "top_level_ledger",
+        "accounting_version",
+        "partition_proofs",
+        "fresh",
+        "carried",
+        "effective_coverage",
+        "effective_coverage_pct",
+        "unmeasured",
+        "gap_estimate_kb",
+    ):
+        if opt_key in report and report[opt_key] is not None:
+            ledger[opt_key] = report[opt_key]
+
+    return ledger
+
 
 def unfinished_top_level_roots(report):
     return [
@@ -445,39 +526,66 @@ def unfinished_top_level_roots(report):
     ]
 
 
-def write_partial_ledger(out_dir, ledger, report):
-    """Self-validate and write PARTIAL_LEDGER_JSON — the freshest scan of any
-    completeness level. Fail-closed: on any validation error, skip the write,
-    leave a prior partial.json (if any) untouched, and print one line to
-    stderr. This must never crash a snapshot over a sibling tool's file."""
+def write_partial_ledger(out_dir, ledger, report, captured_at, age_hours):
+    """Self-validate and atomically write PARTIAL_LEDGER_JSON — the freshest
+    scan of any completeness level. Fail-closed: on any validation error,
+    skip the write, leave a prior partial.json (if any) untouched, and print
+    one line to stderr. Never crash."""
+    if age_hours > STALE_HOURS:
+        print(
+            f"render_topdown_ledger: skipping partial artifact — report is stale ({age_hours:.1f}h)",
+            file=sys.stderr,
+        )
+        return False
+    if age_hours < 0:
+        print(
+            f"render_topdown_ledger: skipping partial artifact — future timestamp ({captured_at})",
+            file=sys.stderr,
+        )
+        return False
+
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import history_diff
     except ImportError as exc:
-        print(f"render_topdown_ledger: skipping partial artifact — history_diff import failed: {exc}",
-              file=sys.stderr)
-        return
+        print(
+            f"render_topdown_ledger: skipping partial artifact — history_diff import failed: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
     partial = dict(ledger)
+    partial["publication_kind"] = "partial"
+    partial["canonical"] = False
     partial["unfinished_top_level_roots"] = unfinished_top_level_roots(report)
+
     try:
         history_diff.validate_ledger(partial, label="partial-candidate")
     except history_diff.LedgerError as exc:
         print(f"render_topdown_ledger: skipping partial artifact — {exc}", file=sys.stderr)
-        return
-    # A structurally-valid ledger can still be functionally empty: zero
-    # buckets and zero oversize files means nothing was measured (its
-    # residual absorbs the whole disk) — the "non-empty run" this function's
-    # docstring already promises, now enforced. An empty partial published
-    # as "fresh" would let a scan that keeps failing early (e.g. an FDA gap)
-    # silence check_ledger_freshness.sh's stale-ledger alert indefinitely
-    # (found in /advice review round 2 of this PR).
-    if not partial.get("granularity_buckets") and not partial.get("oversize_indivisible_files"):
-        print("render_topdown_ledger: skipping partial artifact — empty scan (no buckets or oversize files)",
-              file=sys.stderr)
-        return
-    with open(os.path.join(out_dir, PARTIAL_LEDGER_JSON), "w") as f:
-        json.dump(partial, f, indent=2)
-        f.write("\n")
+        return False
+    except Exception as exc:
+        print(f"render_topdown_ledger: skipping partial artifact — validation crash avoided: {exc}", file=sys.stderr)
+        return False
+
+    buckets = partial.get("granularity_buckets")
+    if buckets is None:
+        buckets = partial.get("buckets")
+    buckets = buckets or []
+    oversize = partial.get("oversize_indivisible_files") or []
+    if not buckets and not oversize:
+        print(
+            "render_topdown_ledger: skipping partial artifact — empty scan (no buckets or oversize files)",
+            file=sys.stderr,
+        )
+        return False
+
+    try:
+        atomic_write_json(out_dir, PARTIAL_LEDGER_JSON, partial)
+        return True
+    except Exception as exc:
+        print(f"render_topdown_ledger: skipping partial artifact — write failed: {exc}", file=sys.stderr)
+        return False
 
 
 def main():
@@ -492,14 +600,26 @@ def main():
     except (OSError, ValueError):
         return 0  # no frontier data yet — leave ledger untouched
 
+    if not isinstance(report, dict):
+        return 0
+
     captured_at = report.get("captured_at")
+    if not isinstance(captured_at, str):
+        return 0
     try:
         ts = datetime.datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc
         )
     except (TypeError, ValueError):
         return 0
-    age_hours = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 3600.0
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if ts > now_utc:
+        print(
+            f"render_topdown_ledger: skipping publication — future timestamp ({captured_at})",
+            file=sys.stderr,
+        )
+        return 0
+    age_hours = (now_utc - ts).total_seconds() / 3600.0
     if age_hours > STALE_HOURS:
         if os.path.isdir(args.out_dir):
             write_status(args.out_dir, "stale", "frontier_report_stale", captured_at, age_hours, report)
@@ -508,15 +628,14 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     ledger = build_ledger_dict(report, captured_at)
-    buckets = ledger["granularity_buckets"]
-    oversize = ledger["oversize_indivisible_files"]
-    equation = ledger["accounting_equation"]
+    buckets = ledger.get("granularity_buckets")
+    if buckets is None:
+        buckets = ledger.get("buckets")
+    buckets = buckets or []
+    oversize = ledger.get("oversize_indivisible_files") or []
+    equation = ledger.get("accounting_equation") or {}
 
-    # Freshest scan of any completeness level — written before the strict
-    # gate below, regardless of whether this run also qualifies for the
-    # canonical publish (spec Q1: "on every fresh, reconciling, non-empty
-    # run"). Self-validated and fail-closed inside write_partial_ledger.
-    write_partial_ledger(args.out_dir, ledger, report)
+    partial_written = write_partial_ledger(args.out_dir, ledger, report, captured_at, age_hours)
 
     if not complete_coverage_envelope(report):
         # A partial scan is useful evidence, but it is not a replacement for
@@ -529,12 +648,14 @@ def main():
             captured_at,
             age_hours,
             report,
+            partial_available=partial_written,
         )
         return 0
 
-    with open(os.path.join(args.out_dir, LEDGER_JSON), "w") as f:
-        json.dump(ledger, f, indent=2)
-        f.write("\n")
+    canonical_ledger = dict(ledger)
+    canonical_ledger["canonical"] = True
+    canonical_ledger["publication_kind"] = "canonical"
+    atomic_write_json(args.out_dir, LEDGER_JSON, canonical_ledger)
 
     lines = [
         f"# Top-down 5 GiB ledger — {report.get('hostname', 'unknown')}",
@@ -561,6 +682,7 @@ def main():
         captured_at,
         age_hours,
         report,
+        partial_available=partial_written,
     )
     return 0
 

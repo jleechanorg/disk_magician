@@ -175,6 +175,58 @@ class TestCleanupAntigravityBrain(unittest.TestCase):
         self.assertEqual(stats["empty_pruned"], 1)
         self.assertFalse(empty_sdir.exists())
 
+    def test_default_threshold_is_seven_days(self):
+        """Default threshold is 7 days, compacting sessions older than 7d without explicit threshold_days."""
+        sid = "session-nine-days-old"
+        sdir = self._create_mock_session(sid, age_days=9.0)
+        compactor = BrainCompactor(brain_dir=self.brain_dir, dry_run=False)
+        self.assertEqual(compactor.threshold_days, 7)
+        stats = compactor.scan_and_compact()
+        self.assertEqual(stats["files_compressed"], 2)
+        self.assertEqual(stats["scratch_files_removed"], 1)
+
+    def test_exact_boundary_coverage(self):
+        """Exactly seven days is eligible; one second younger remains protected."""
+        sid_exact = "session-exact-7d"
+        sdir_exact = self._create_mock_session(sid_exact, age_days=7.0)
+
+        empty_exact_sdir = self.brain_dir / "empty-exact-7d"
+        empty_exact_sdir.mkdir()
+        target_mtime_exact = self.now - (7.0 * self.day)
+        os.utime(empty_exact_sdir, (target_mtime_exact, target_mtime_exact))
+
+        sub_boundary_days = (7.0 * self.day - 1.0) / self.day
+        sdir_recent = self._create_mock_session(
+            "session-sub-boundary-7d", age_days=sub_boundary_days
+        )
+        empty_recent_sdir = self.brain_dir / "empty-sub-boundary-7d"
+        empty_recent_sdir.mkdir()
+        target_mtime_recent = self.now - (7.0 * self.day) + 1.0
+        os.utime(empty_recent_sdir, (target_mtime_recent, target_mtime_recent))
+
+        compactor = BrainCompactor(
+            brain_dir=self.brain_dir,
+            threshold_days=7,
+            dry_run=False,
+            now=self.now,
+        )
+        stats = compactor.scan_and_compact()
+
+        self.assertFalse(empty_exact_sdir.exists())
+        self.assertTrue(
+            (sdir_exact / ".system_generated" / "tasks" / "task-1.log.gz").exists()
+        )
+        self.assertFalse((sdir_exact / "scratch" / "raw_payloads.json").exists())
+        self.assertTrue(empty_recent_sdir.exists())
+        self.assertTrue(
+            (sdir_recent / ".system_generated" / "tasks" / "task-1.log").exists()
+        )
+        self.assertTrue((sdir_recent / "scratch" / "raw_payloads.json").exists())
+        self.assertEqual(stats["empty_pruned"], 1)
+        self.assertEqual(stats["files_compressed"], 2)
+        self.assertEqual(stats["scratch_files_removed"], 1)
+        self.assertEqual(stats["too_recent_skipped"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
