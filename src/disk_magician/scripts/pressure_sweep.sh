@@ -321,7 +321,6 @@ else
   log "pressure_sweep: step 2/3 cleanup_colima.sh FAILED or timed out (rc=${STEP2_RC})."
 fi
 fi
-fi
 
 # ────────── STEP 3: cleanup_code_sign_clones.sh ──────────
 before_gb="$(free_gb)"
