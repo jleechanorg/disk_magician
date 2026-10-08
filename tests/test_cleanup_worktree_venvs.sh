@@ -10,6 +10,9 @@
 #
 # Run: bash tests/test_cleanup_worktree_venvs.sh
 set -uo pipefail
+PYTHON_BIN="$(dirname "$(command -v python3 2>/dev/null || echo "/usr/bin/python3")")"
+GIT_BIN="$(dirname "$(command -v git 2>/dev/null || echo "/usr/bin/git")")"
+TEST_PATH="$PYTHON_BIN:$GIT_BIN:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -107,7 +110,7 @@ age_path_days_ago "$UNMEASURABLE_WT/venv.bak.20250101" 60
 echo
 echo "=== Test 1: dry-run --purge-bak-days flags only the stale worktree's bak dir ==="
 OUT1="$TMP_ROOT/out1.txt"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --dry-run \
@@ -137,7 +140,7 @@ echo
 echo "=== Test 2 (c): --clean --purge-bak-days without WORKTREE_APPROVED=1 refuses, deletes nothing ==="
 OUT2="$TMP_ROOT/out2.txt"
 set +e
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
@@ -156,7 +159,7 @@ fi
 echo
 echo "=== Test 3: --clean --purge-bak-days WITH WORKTREE_APPROVED=1 actually purges only the stale one ==="
 OUT3="$TMP_ROOT/out3.txt"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   WORKTREE_APPROVED=1 \
@@ -183,7 +186,7 @@ echo "=== Test 4 (w7m): concurrent invocation skips instead of running alongside
 mkdir -p "$STATE_DIR/cleanup_worktree_venvs.lock"
 echo 999999 > "$STATE_DIR/cleanup_worktree_venvs.lock/pid"   # pid unlikely to exist -> but lock is fresh (age 0), so TTL steal must NOT kick in
 OUT4="$TMP_ROOT/out4.txt"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
@@ -198,7 +201,7 @@ rm -rf "$STATE_DIR/cleanup_worktree_venvs.lock"
 echo
 echo "=== Test 5 (w7m): lock is released after a normal run, so a second run proceeds ==="
 OUT5="$TMP_ROOT/out5.txt"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
@@ -221,7 +224,7 @@ mkdir -p "$CLAUDE_WT/venv/lib"
 : > "$CLAUDE_WT/venv/lib/site.py"
 age_path_days_ago "$CLAUDE_WT/venv/lib/site.py" 30
 OUT6="$TMP_ROOT/out6.txt"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
@@ -248,7 +251,7 @@ for p in "$STD_OLD/README.md" "$STD_OLD/.git" "$STD_OLD/.venv/lib/site.py"; do
 done
 age_path_days_ago "$STD_YOUNG/README.md" 2
 OUT6B="$TMP_ROOT/out6b.txt"
-env -i HOME="$STD_HOME" PATH="/usr/bin:/bin" \
+env -i HOME="$STD_HOME" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run >"$OUT6B" 2>&1
@@ -267,13 +270,13 @@ echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides
 # every other invocation in this file -- a bare env-var call would share
 # this host's real lock file and could flake under concurrent contention
 # (found live by /advice round 4).
-OUT7_ZERO=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT7_ZERO=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=0 \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
 assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 7-day floor" "Min age:    7 days" "$OUT7_ZERO"
 
-OUT7_OCTAL=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT7_OCTAL=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=08 \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
@@ -282,7 +285,7 @@ assert_contains "WORKTREE_MIN_AGE_DAYS=08 normalizes without an octal error" "Mi
   && record_pass "no arithmetic error on leading-zero input" \
   || record_fail "no arithmetic error on leading-zero input" "$OUT7_OCTAL"
 
-OUT7_RAISED=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT7_RAISED=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=30 \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
@@ -332,7 +335,7 @@ mkdir -p "$R8/node_modules/a/b/c/d/e/f"
 
 : > "$FIND_LOG"
 OUT8="$TMP_ROOT/out8.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R8" --min-age 14 --purge-bak-days 5 --dry-run \
@@ -363,10 +366,10 @@ if "$GIT8" --version >/dev/null 2>&1; then
 fi
 # a worktree passed directly as --roots: the old -mindepth 2 never stripped <root>/.venv
 mk_stale_wt_with_venv "$R9/rootwt"
-OUT9=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+OUT9=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
-OUT9R=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+OUT9R=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9/rootwt" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 if "$GIT8" --version >/dev/null 2>&1; then
@@ -390,7 +393,7 @@ if "$GIT8" --version >/dev/null 2>&1; then
   "$GIT8" -C "$R9/repoA" worktree list --porcelain | grep -q "^worktree $R9/repoA/linkreg/wt6\$" \
     || echo "  NOTE  git normalized the symlinked registration path; wt6 case is vacuous here"
 fi
-OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
@@ -401,21 +404,21 @@ if "$GIT8" --version >/dev/null 2>&1; then
   "$GIT8" -C "$R9/repoA" worktree add -q "$R9/repoA/locked/sub/wtlocked" >/dev/null 2>&1
   mk_stale_wt_with_venv "$R9/repoA/locked/sub/wtlocked"
   chmod 311 "$R9/repoA/locked"
-  OUT9X=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  OUT9X=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
     DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
     bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
   chmod 755 "$R9/repoA/locked"
   assert_not_contains "registered worktree under an exec-only dir NOT flagged" "wtlocked/.venv" "$OUT9X"
 fi
 ln -s "$R9" "$TMP_ROOT/roots9link"
-OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$TMP_ROOT/roots9link" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 assert_not_contains "a --roots entry that is itself a symlink is not scanned" "would strip" "$OUT9L"
 
 echo
 echo "=== Test 10 (ez5pho): 5-min load per core deferral gate ==="
-OUT10=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT10=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="5.5000" \
   DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
@@ -423,7 +426,7 @@ OUT10=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
 assert_contains "high load per core defers execution" "exceeds max 4.0" "$OUT10"
 assert_not_contains "high load per core does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10"
 
-OUT10_INVALID=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT10_INVALID=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="invalid_load_string" \
   DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
@@ -431,7 +434,7 @@ OUT10_INVALID=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
 assert_contains "invalid load reading defers execution (fail-closed)" "unmeasurable" "$OUT10_INVALID"
 assert_not_contains "invalid load reading does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10_INVALID"
 
-OUT10_NORMAL=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+OUT10_NORMAL=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="1.5000" \
   DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
