@@ -109,6 +109,7 @@ echo "=== Test 1: dry-run --purge-bak-days flags only the stale worktree's bak d
 OUT1="$TMP_ROOT/out1.txt"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --dry-run \
   >"$OUT1" 2>&1
 OUT1_CONTENT=$(cat "$OUT1")
@@ -138,6 +139,7 @@ OUT2="$TMP_ROOT/out2.txt"
 set +e
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
   >"$OUT2" 2>&1
 RC2=$?
@@ -156,6 +158,7 @@ echo "=== Test 3: --clean --purge-bak-days WITH WORKTREE_APPROVED=1 actually pur
 OUT3="$TMP_ROOT/out3.txt"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   WORKTREE_APPROVED=1 \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
   >"$OUT3" 2>&1
@@ -182,6 +185,7 @@ echo 999999 > "$STATE_DIR/cleanup_worktree_venvs.lock/pid"   # pid unlikely to e
 OUT4="$TMP_ROOT/out4.txt"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
   >"$OUT4" 2>&1
 RC4=$?
@@ -196,6 +200,7 @@ echo "=== Test 5 (w7m): lock is released after a normal run, so a second run pro
 OUT5="$TMP_ROOT/out5.txt"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
   >"$OUT5" 2>&1
 assert_contains "post-release run proceeds normally" "=== STRIP DORMANT WORKTREE VENVS ===" "$(cat "$OUT5")"
@@ -218,6 +223,7 @@ age_path_days_ago "$CLAUDE_WT/venv/lib/site.py" 30
 OUT6="$TMP_ROOT/out6.txt"
 env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
   >"$OUT6" 2>&1
 OUT6_CONTENT=$(cat "$OUT6")
@@ -244,6 +250,7 @@ age_path_days_ago "$STD_YOUNG/README.md" 2
 OUT6B="$TMP_ROOT/out6b.txt"
 env -i HOME="$STD_HOME" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run >"$OUT6B" 2>&1
 OUT6B_CONTENT=$(cat "$OUT6B")
 assert_contains "default roots list \$HOME/.worktrees" "$STD_HOME/.worktrees" "$OUT6B_CONTENT"
@@ -262,11 +269,13 @@ echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides
 # (found live by /advice round 4).
 OUT7_ZERO=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=0 \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
 assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 7-day floor" "Min age:    7 days" "$OUT7_ZERO"
 
 OUT7_OCTAL=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=08 \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
 assert_contains "WORKTREE_MIN_AGE_DAYS=08 normalizes without an octal error" "Min age:    8 days" "$OUT7_OCTAL"
 [[ "$OUT7_OCTAL" != *"value too great for base"* ]] \
@@ -275,6 +284,7 @@ assert_contains "WORKTREE_MIN_AGE_DAYS=08 normalizes without an octal error" "Mi
 
 OUT7_RAISED=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=30 \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
 assert_contains "a raised floor (30) is preserved, not clamped down" "Min age:    30 days" "$OUT7_RAISED"
 
@@ -324,6 +334,7 @@ mkdir -p "$R8/node_modules/a/b/c/d/e/f"
 OUT8="$TMP_ROOT/out8.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:/usr/bin:/bin" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R8" --min-age 14 --purge-bak-days 5 --dry-run \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
@@ -353,8 +364,10 @@ fi
 # a worktree passed directly as --roots: the old -mindepth 2 never stripped <root>/.venv
 mk_stale_wt_with_venv "$R9/rootwt"
 OUT9=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 OUT9R=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9/rootwt" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 if "$GIT8" --version >/dev/null 2>&1; then
   assert_not_contains "registered worktree deeper than old scope NOT flagged" "wtDeep/.venv" "$OUT9"
@@ -378,6 +391,7 @@ if "$GIT8" --version >/dev/null 2>&1; then
     || echo "  NOTE  git normalized the symlinked registration path; wt6 case is vacuous here"
 fi
 OUT9S=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 assert_not_contains "worktree behind a symlinked dir NOT flagged" "wtT/.venv" "$OUT9S"
 assert_not_contains "agent worktrees behind a symlinked repo NOT flagged" "brX/.venv" "$OUT9S"
@@ -388,12 +402,14 @@ if "$GIT8" --version >/dev/null 2>&1; then
   mk_stale_wt_with_venv "$R9/repoA/locked/sub/wtlocked"
   chmod 311 "$R9/repoA/locked"
   OUT9X=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+    DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
     bash "$TARGET_SCRIPT" --roots "$R9" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
   chmod 755 "$R9/repoA/locked"
   assert_not_contains "registered worktree under an exec-only dir NOT flagged" "wtlocked/.venv" "$OUT9X"
 fi
 ln -s "$R9" "$TMP_ROOT/roots9link"
 OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$TMP_ROOT/roots9link" --min-age 14 --purge-bak-days 5 --dry-run 2>&1)
 assert_not_contains "a --roots entry that is itself a symlink is not scanned" "would strip" "$OUT9L"
 
