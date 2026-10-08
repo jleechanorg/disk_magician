@@ -397,5 +397,30 @@ OUT9L=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" DISK_MAGICIAN_STATE_DI
 assert_not_contains "a --roots entry that is itself a symlink is not scanned" "would strip" "$OUT9L"
 
 echo
+echo "=== Test 10 (ez5pho): 5-min load per core deferral gate ==="
+OUT10=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="5.5000" \
+  DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
+  bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run 2>&1)
+assert_contains "high load per core defers execution" "exceeds max 4.0" "$OUT10"
+assert_not_contains "high load per core does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10"
+
+OUT10_INVALID=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="invalid_load_string" \
+  DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
+  bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run 2>&1)
+assert_contains "invalid load reading defers execution (fail-closed)" "unmeasurable" "$OUT10_INVALID"
+assert_not_contains "invalid load reading does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10_INVALID"
+
+OUT10_NORMAL=$(env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="1.5000" \
+  DISK_MAGICIAN_MAX_LOAD5_PER_CORE="4.0" \
+  bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run 2>&1)
+assert_contains "normal load per core proceeds to scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10_NORMAL"
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

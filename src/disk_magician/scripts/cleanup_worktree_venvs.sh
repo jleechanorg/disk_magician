@@ -396,6 +396,34 @@ if [[ "$DRY_RUN" == false ]]; then
   fi
 fi
 
+# Load deferral check (bead rev-ez5pho):
+# Defer execution when 5-min load per core > 4.0 (configurable via DISK_MAGICIAN_MAX_LOAD5_PER_CORE).
+get_5min_load_per_core() {
+  local raw="${DISK_MAGICIAN_LOAD5_OVERRIDE:-}"
+  if [[ -z "$raw" ]]; then
+    local load5 cores sysctl_bin=sysctl
+    [[ -x /usr/sbin/sysctl ]] && sysctl_bin=/usr/sbin/sysctl
+    load5=$("$sysctl_bin" -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $2}')
+    [[ -n "$load5" ]] || load5=$(uptime 2>/dev/null | sed -E 's/.*load averages?: *//' | awk -F'[ ,]+' '{print $2}')
+    cores=$("$sysctl_bin" -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1)
+    if [[ -z "$load5" || ! "$load5" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      raw="unmeasurable"
+    else
+      raw=$(awk -v l="$load5" -v c="${cores:-1}" 'BEGIN{ if (c < 1) c = 1; printf "%.4f", l / c }' 2>/dev/null || echo "unmeasurable")
+    fi
+  elif [[ "$raw" != "unmeasurable" && ! "$raw" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    raw="unmeasurable"
+  fi
+  printf '%s\n' "$raw"
+}
+
+MAX_5MIN_LOAD_PER_CORE="${DISK_MAGICIAN_MAX_LOAD5_PER_CORE:-4.0}"
+current_load5_per_core=$(get_5min_load_per_core)
+if [[ "$current_load5_per_core" == "unmeasurable" ]] || awk -v cur="$current_load5_per_core" -v max="$MAX_5MIN_LOAD_PER_CORE" 'BEGIN{ exit (cur > max ? 0 : 1) }' 2>/dev/null; then
+  log "cleanup_worktree_venvs: skipped, 5-min load per core is ${current_load5_per_core} (exceeds max ${MAX_5MIN_LOAD_PER_CORE} or unmeasurable) — deferring execution (fail-closed)"
+  exit 0
+fi
+
 acquire_cleanup_venvs_lock || exit 0
 
 # Expand configured roots to also cover each repo's <repo>/.claude/worktrees/*
