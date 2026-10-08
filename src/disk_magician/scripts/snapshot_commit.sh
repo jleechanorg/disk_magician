@@ -146,6 +146,7 @@ fi
 # 5. Commit.
 git_id update-index --no-assume-unchanged \
   ledger/topdown-5g.json ledger/topdown-5g.md ledger/topdown-5g.status.json \
+  ledger/topdown-5g.partial.json \
   2>/dev/null || true
 
 if ! git_id add -A; then
