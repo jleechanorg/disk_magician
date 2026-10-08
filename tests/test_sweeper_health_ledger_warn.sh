@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 # test_sweeper_health_ledger_warn.sh — ledger freshness WARN coverage
 set -euo pipefail
 

@@ -27,10 +27,26 @@ if [[ ! -x "$SCRIPT" ]]; then
   exit 2
 fi
 
+FAKE_LEDGER_BIN=$(mktemp -d -t sweeper_health_ledger_stub.XXXXXX)
+cat > "$FAKE_LEDGER_BIN/check_ledger_freshness.sh" <<'MOCK'
+#!/usr/bin/env bash
+printf 'OK\ttest-isolated\n'
+exit 0
+MOCK
+chmod +x "$FAKE_LEDGER_BIN/check_ledger_freshness.sh"
+cp "$SCRIPT" "$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+chmod +x "$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+cp "$REPO_ROOT/scripts/"*.py "$FAKE_LEDGER_BIN/"
+SCRIPT="$FAKE_LEDGER_BIN/sweeper_health_check.sh"
+
 TMP_DIR=$(mktemp -d -t sweeper_health_test.XXXXXX)
 LOG_DIR="$TMP_DIR/logs"
 PLIST_DIR="$TMP_DIR/launchd"
-mkdir -p "$LOG_DIR" "$PLIST_DIR"
+mkdir -p "$LOG_DIR" "$PLIST_DIR" "$TMP_DIR/state_repo/ledger"
+git -C "$TMP_DIR/state_repo" init -q
+printf '{"schema_version": 2, "mode": "complete", "coverage_envelope": {"complete": true}, "accounting_equation": {"balanced": true, "display_ledger_valid": true, "displayed_balanced": true}}\n' > "$TMP_DIR/state_repo/ledger/topdown-5g.json"
+git -C "$TMP_DIR/state_repo" add ledger/topdown-5g.json
+git -C "$TMP_DIR/state_repo" -c user.name=t -c user.email=t@t commit -q -m "initial ledger"
 
 # Mock helper: write a plist pointing at a synthetic log path under LOG_DIR.
 write_plist() {
@@ -177,7 +193,7 @@ expect "empty log flagged MISS"        "[MISS] com.jleechan.cleanup-empty"
 expect "warn sweeper flagged WARN"     "[WARN] com.jleechan.cleanup-warn"
 expect "fresh sweeper reported OK"     "[OK]   com.jleechan.cleanup-fresh"
 expect "jleechanorg family matched"    "[OK]   com.jleechanorg.disk-magician-fresh"
-expect "summary line present"          "Summary: 2 OK, 2 WARN, 3 MISS"
+expect "summary line present"          "Summary: 2 OK, 1 WARN, 3 MISS"
 expect "FAIL message present"          "FAIL: 3 sweeper(s) appear silent"
 
 # Test the happy path: all sweepers healthy → exit 0.
@@ -349,7 +365,7 @@ else
 fi
 
 # Cleanup
-rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR" "$ZERO_DIR" "$PARTIAL_DIR"
+rm -rf "$TMP_DIR" "$ALL_FRESH_DIR" "$CORRUPT_TEST_DIR" "$MOCK_CMUX_DIR" "$ZERO_DIR" "$PARTIAL_DIR" "$FAKE_LEDGER_BIN"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
