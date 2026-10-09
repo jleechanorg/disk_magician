@@ -345,6 +345,29 @@ has_hidden_state() {
     [[ -n "$out" ]]
 }
 
+# has_ignored_user_data <wt>: rc 0 when the worktree holds gitignored files that
+# are not known-rebuildable (local DBs, data dirs, scratch notes, evidence), or
+# the probe fails/times out (fail closed). Removal uses --force --force, so these
+# would be lost; used by the pushed-branch path where the worktree is the only
+# place such files can live.
+has_ignored_user_data() {
+    local out entry base t=""
+    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    # shellcheck disable=SC2086
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        base="${entry%/}"; base="${base##*/}"
+        case "$base" in
+            node_modules|venv|.venv|env|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
+            target|dist|build|.next|.turbo|.cache|.gradle|.tox|.eggs|*.egg-info|coverage|\
+            htmlcov|*.pyc|.DS_Store|venv.bak.*) ;;
+            *) return 0 ;;
+        esac
+    done <<<"$out"
+    return 1
+}
+
 # Persist across the command substitutions used by classification. Cache names
 # are digests, but the stored repo and branch are also checked byte for byte:
 # a filename collision or an unreadable record must never approve a worktree.
@@ -497,6 +520,10 @@ classify_content_and_merge() {
             # shellcheck disable=SC2086
             remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
             if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
+                if has_ignored_user_data "$wt_path"; then
+                    echo "ignored-data"
+                    return 0
+                fi
                 return 0
             fi
         fi
