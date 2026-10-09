@@ -599,6 +599,15 @@ if [[ "$MODE" == "clean" ]]; then
         fi
     fi
 
+    # Worktree dependency dirs (node_modules/target/.mypy_cache, >=3d dormant)
+    if [[ -f "$SCRIPT_DIR/cleanup_worktree_deps.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+            echo "  Worktree deps: skipped (requires WORKTREE_APPROVED=1)"
+        else
+            run_category "Worktree deps (>=3d dormant)" "$SCRIPT_DIR/cleanup_worktree_deps.sh" $clean_arg
+        fi
+    fi
+
     # ~/.claude/state per-task work dirs (Tier 6: Claude state, bead disk_magician-isw)
     if [[ -f "$SCRIPT_DIR/cleanup_claude_state.sh" ]]; then
         if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
