@@ -212,6 +212,9 @@ raise their floor; set `worktree_min_stale_days` to do that. For
 (secret files, assume-unchanged) and AO/live-cwd gates. `cleanup_worktree_deps.sh`
 only strips rebuildable dependency dirs and does not run the hidden-state check;
 it relies on fail-closed recency, live-cwd, AO and `safety_gate` checks.
+`cleanup_worktrees.sh` also treats a clean worktree as removable when its branch tip is
+already on `origin` (live `git ls-remote` equals HEAD; any failure keeps it preserved), since
+the branch ref and the remote copy both survive.
 
 **A git worktree touched within the last 7 days is PROTECTED.** No script,
 sweeper, launchd job, or agent in this repo may delete, archive, strip

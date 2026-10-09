@@ -488,6 +488,18 @@ classify_content_and_merge() {
                 fi
             fi
         fi
+        # A clean worktree whose branch tip is already on origin loses nothing
+        # when removed (the branch ref and the remote copy both survive). The
+        # remote is queried live; any failure keeps it "ahead-of-main".
+        if [[ -n "$branch_clean" && "$branch_clean" != "detached" && -n "$head_sha" ]]; then
+            local remote_oid="" t=""
+            command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+            # shellcheck disable=SC2086
+            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
+            if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
+                return 0
+            fi
+        fi
         echo "ahead-of-main"
         return 0
     fi
