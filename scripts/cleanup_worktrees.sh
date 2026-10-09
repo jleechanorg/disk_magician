@@ -351,19 +351,28 @@ has_hidden_state() {
 # would be lost; used by the pushed-branch path where the worktree is the only
 # place such files can live.
 has_ignored_user_data() {
-    local out entry base t=""
+    local out entry comp rest ok t=""
     command -v timeout >/dev/null 2>&1 && t="timeout 60s"
     # shellcheck disable=SC2086
     out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
-        base="${entry%/}"; base="${base##*/}"
-        case "$base" in
-            node_modules|venv|.venv|env|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-            target|dist|build|.next|.turbo|.cache|.gradle|.tox|.eggs|*.egg-info|coverage|\
-            htmlcov|*.pyc|.DS_Store|venv.bak.*) ;;
-            *) return 0 ;;
-        esac
+        ok=false
+        rest="${entry%/}"
+        # Allowed when ANY path component is a known rebuildable dir/file, so
+        # nested cache contents (.ruff_cache/0.16.1, venv/.../CACHEDIR.TAG) pass.
+        while [[ -n "$rest" ]]; do
+            comp="${rest##*/}"
+            case "$comp" in
+                node_modules|venv|.venv|env|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
+                target|dist|build|.next|.turbo|.cache|.gradle|.tox|.eggs|*.egg-info|coverage|\
+                htmlcov|*.pyc|.DS_Store|venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                    ok=true; break ;;
+            esac
+            [[ "$rest" == */* ]] || break
+            rest="${rest%/*}"
+        done
+        [[ "$ok" == true ]] || return 0
     done <<<"$out"
     return 1
 }
