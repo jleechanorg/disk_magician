@@ -100,7 +100,7 @@ assert_contains "cleanup_worktrees.sh: min_stale_days=14 respects higher --min-a
 # Case 4: min_stale_days=3, --min-age 0 -> hard floor 7d enforced
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_3" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=3 clamps up to hard floor 7d" "(others: 7d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=3 clamps up to hard floor 3d" "(others: 3d)" "$out"
 
 
 echo "=== Suite 2: cleanup_worktree_venvs.sh ==="

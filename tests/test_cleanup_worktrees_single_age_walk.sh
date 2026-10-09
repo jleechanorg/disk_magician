@@ -3,6 +3,8 @@
 # eligible rows. Antigravity classification uses predicates without exact ages.
 # All cleanup, including --clean, is confined to this test's temporary fixtures.
 set -euo pipefail
+# These cases pin the 7-day non-merged path; the production default is now 3.
+export WORKTREE_MIN_AGE_DAYS=7
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_SHA=b0b5b9e4c713a5e9b9674cae9d81f563c37a69b1
@@ -164,7 +166,7 @@ run_cleanup() {
     [[ "$F" == "$TMP_ROOT/"* && "$REPO" == "$F/repo" && "$HOME_FIX" == "$F/home" ]]
     approval='WORKTREE_APPROVED=1'
   fi
-  env -i HOME="$HOME_FIX" PATH="$BIN:/usr/bin:/bin" \
+  env -i HOME="$HOME_FIX" PATH="$BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 FIXTURE="$F" REAL_GIT="$REAL_GIT" REAL_DU="$REAL_DU" REAL_MKTEMP="$REAL_MKTEMP" \
     AHEAD_SHA="$AHEAD_SHA" AGE_MAP="$F/ages.tsv" AGE_COUNTER="$F/age.calls" \
     PREDICATE_COUNTER="$F/predicate.calls" \

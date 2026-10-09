@@ -54,7 +54,7 @@ DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_
 DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
 DUA_TIMEOUT_CAP_SECONDS = 1
 DEFAULT_WORKERS = 8
-DEFAULT_MAX_DEPTH = 6
+DEFAULT_MAX_DEPTH = 14
 DEFAULT_MAX_NODES = 100_000_000
 DEFAULT_WALL_CLOCK_CAP = 900
 SHALLOW_ENUMERATION_MAX_DEPTH = 2
@@ -72,6 +72,26 @@ FDA_SYSTEM_PROBE_PATHS = {
     "document_revisions": "/System/Volumes/Data/.DocumentRevisions-V100",
 }
 SYSTEM_BOUNDARY_ATTESTATION_PATHS = frozenset(FDA_SYSTEM_PROBE_PATHS.values())
+SYSTEM_ATTESTATION_ROOT = "/System/Volumes/Data/"
+PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
+
+
+def is_attestable_system_path(path):
+    """Catalog paths, or canonical paths denied to the root scanner itself."""
+    if path in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+        return True
+    return (
+        isinstance(path, str)
+        and path.startswith(SYSTEM_ATTESTATION_ROOT)
+        and os.path.normpath(path) == path
+    )
+
+
+def is_permission_frontier_item(item):
+    reason = item.get("reason")
+    return reason in ("inventory_permission_denied", "permission_denied_or_tcc") or (
+        reason == "lstat_failed" and item.get("errno") in PERMISSION_ERRNOS
+    )
 
 HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
@@ -330,7 +350,7 @@ def verify_system_boundary_attestation(
         return False
     if attestation.get("run_id") != run_id or attestation.get("path") != path:
         return False
-    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+    if not is_attestable_system_path(path):
         return False
     if attestation.get("path_is_symlink") is not False:
         return False
@@ -407,12 +427,26 @@ def capture_system_boundary_attestation(
             "fda": fda_user_probe_evidence(fda_preflight),
         },
     }
-    if path not in SYSTEM_BOUNDARY_ATTESTATION_PATHS:
+    if not is_attestable_system_path(path):
         return attestation
     try:
-        if os.path.realpath(path) != path or os.path.islink(path):
+        if os.path.realpath(os.path.dirname(path)) != os.path.dirname(path):
             return attestation
-        before = os.lstat(path)
+        try:
+            before = os.lstat(path)
+        except PermissionError as exc:
+            # lstat itself is denied: bind the denial to the parent directory.
+            parent = os.lstat(os.path.dirname(path))
+            identity = {"st_dev": parent.st_dev, "st_ino": parent.st_ino}
+            attestation.update(
+                status="permission_denied",
+                errno=exc.errno,
+                identity_before=identity,
+                identity_after=dict(identity),
+            )
+            return attestation
+        if os.path.islink(path):
+            return attestation
         if stat.S_ISLNK(before.st_mode):
             return attestation
         attestation["identity_before"] = {
@@ -1106,14 +1140,16 @@ class FrontierScanner:
         self.exclude_prefix_patterns = list(default_excludes) + list(extra)
 
     def _capture_system_boundary_attestations(self):
-        """Capture only exact catalog paths denied during this run."""
+        """Capture denials during this run; privileged runs may attest any
+        canonical system path, user runs only the catalog."""
         paths = {
             item.get("path")
             for item in self.frontier_unfinished
-            if item.get("reason") in (
-                "inventory_permission_denied", "permission_denied_or_tcc"
+            if is_permission_frontier_item(item)
+            and (
+                item.get("path") in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+                or (self.effective_uid == 0 and is_attestable_system_path(item.get("path")))
             )
-            and item.get("path") in SYSTEM_BOUNDARY_ATTESTATION_PATHS
         }
         self.system_boundary_attestations = [
             capture_system_boundary_attestation(
@@ -1754,8 +1790,8 @@ def build_report(
         reason = item.get("reason") or "unknown"
         intrinsic = None
         if (
-            reason in ("inventory_permission_denied", "permission_denied_or_tcc")
-            and path in SYSTEM_BOUNDARY_ATTESTATION_PATHS
+            is_permission_frontier_item(item)
+            and is_attestable_system_path(path)
             and verify_system_boundary_attestation(
                 attestations.get(path),
                 run_id=run_id,

@@ -776,5 +776,60 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             self.assertLessEqual(measure.call_args.args[1], 1)
 
 
+    def test_root_denied_non_catalog_path_is_attested_and_lstat_denial_binds_parent(self):
+        fda = self.valid_attestation()["verifier"]["fda"]
+        db_path = "/System/Volumes/Data/private/var/db/oah"
+        lstat_path = "/System/Volumes/Data/private/var/db/rmd/secure"
+        dir_stat = SimpleNamespace(st_dev=7, st_ino=8, st_mode=stat.S_IFDIR)
+
+        def fake_lstat(candidate):
+            if candidate == lstat_path:
+                raise PermissionError(errno.EPERM, "denied", candidate)
+            return dir_stat
+
+        with mock.patch.object(frontier.os.path, "realpath", side_effect=lambda c: c), \
+             mock.patch.object(frontier.os.path, "islink", return_value=False), \
+             mock.patch.object(frontier.os, "lstat", side_effect=fake_lstat), \
+             mock.patch.object(
+                 frontier.os, "scandir",
+                 side_effect=PermissionError(errno.EPERM, "denied", db_path),
+             ):
+            attested = [
+                frontier.capture_system_boundary_attestation(
+                    path, run_id="run-1", effective_uid=0, fda_preflight=fda,
+                    run_started_at=100.0, now=101.0,
+                )
+                for path in (db_path, lstat_path)
+            ]
+        for path, attestation in zip((db_path, lstat_path), attested):
+            with self.subTest(path=path):
+                self.assertEqual(attestation["status"], "permission_denied")
+                self.assertTrue(frontier.verify_system_boundary_attestation(
+                    attestation, run_id="run-1", path=path, effective_uid=0,
+                    fda_preflight=fda, run_started_at=100.0,
+                    run_finished_at=102.0, now=102.0,
+                ))
+                # the same evidence is worthless without a privileged scanner
+                self.assertFalse(frontier.verify_system_boundary_attestation(
+                    attestation, run_id="run-1", path=path, effective_uid=501,
+                    fda_preflight=fda, run_started_at=100.0,
+                    run_finished_at=102.0, now=102.0,
+                ))
+
+    def test_attestable_path_rejects_user_data_and_traversal(self):
+        for path in (
+            "/Users/jleechan/private",
+            "/System/Volumes/Data/Users/../etc",
+            "/System/Volumes/Data/private//var",
+            "relative/path",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(frontier.is_attestable_system_path(path))
+        self.assertTrue(frontier.is_permission_frontier_item(
+            {"reason": "lstat_failed", "errno": errno.EPERM}))
+        self.assertFalse(frontier.is_permission_frontier_item(
+            {"reason": "lstat_failed", "errno": errno.ENOENT}))
+
+
 if __name__ == "__main__":
     unittest.main()

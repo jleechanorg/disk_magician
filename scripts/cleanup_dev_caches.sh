@@ -108,6 +108,19 @@ clean_dir_contents "uv cache" "$HOME/.cache/uv" false
 log "=== Section 3: ~/.cache/pre-commit/ ==="
 clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false
 
+# 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches"). Apps that
+# are running (cmux, Aside, Chrome, Cursor) are left to their needs_decision gates.
+log "=== Section 3b: rebuildable user caches ==="
+for approved_cache in \
+  "worldai:$HOME/.cache/worldai" \
+  "swiftpm:$HOME/Library/Caches/org.swift.swiftpm" \
+  "ms-playwright:$HOME/Library/Caches/ms-playwright" \
+  "CocoaPods:$HOME/Library/Caches/CocoaPods" \
+  "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
+  "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
+  clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false
+done
+
 # 4. opencode safe subdirs
 log "=== Section 4: ~/.local/share/opencode/ (safe cache subdirs only) ==="
 OPENCODE_DIR="$HOME/.local/share/opencode"

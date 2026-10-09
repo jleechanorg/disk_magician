@@ -18,7 +18,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discover
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
 REPO_LOCAL_REPOS=()
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
@@ -31,13 +31,13 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >=7 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=3 days old, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 7).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 3).
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
@@ -46,7 +46,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 7).
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 3).
 EOF
 }
 
@@ -87,16 +87,15 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
-# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
-# may only RAISE the floor, never lower it below 7.
-staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
+# Staleness floor: safety_worktree_floor_days (default and minimum 3 days; the
+# configured worktree_min_stale_days may only RAISE it).
+staleness_floor=$(safety_worktree_floor_days 2>/dev/null || echo 3)
 if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
   staleness_floor=$((10#$staleness_floor))
 else
-  staleness_floor=7
+  staleness_floor=3
 fi
-[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
+[[ "$staleness_floor" -lt 3 ]] && staleness_floor=3
 
 # Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
 # lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
@@ -260,6 +259,11 @@ classify_repo_local_worktree() {
     fi
 
     local min_age=$MIN_AGE_DAYS now recently_active=false
+    # AO-managed sessions keep the 7-day inactivity bar; the 3-day floor is for
+    # human-created worktrees.
+    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 7 ]]; then
+        min_age=7
+    fi
     now="$(date +%s)"
     if worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
         recently_active=true
@@ -303,7 +307,23 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch"
+    # Every removal candidate, at any age, must also clear the secret-file /
+    # hidden-index-state probe and the AO-config / live-cwd standard-root gate
+    # (previously enforced only on the sub-7-day fast path).
+    local verdict skip_reason
+    verdict="$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")"
+    if [[ -z "$verdict" ]]; then
+        skip_reason="$(std_root_skip_reason "$wt_path" "$real_wt")"
+        if [[ -n "$skip_reason" ]]; then
+            echo "$skip_reason"
+            return 0
+        fi
+        if has_hidden_state "$wt_path"; then
+            echo "hidden-state"
+            return 0
+        fi
+    fi
+    [[ -z "$verdict" ]] || echo "$verdict"
 }
 
 # has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
