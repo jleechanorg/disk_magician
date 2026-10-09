@@ -4,6 +4,8 @@
 #
 # Run: bash tests/test_cleanup_worktrees_merged_fastpath.sh
 set -euo pipefail
+# These cases pin the 7-day non-merged path; the production default is now 3.
+export WORKTREE_MIN_AGE_DAYS=7
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktrees.sh"
@@ -131,7 +133,7 @@ printf '#!/bin/sh\nshift\nexec "$@"\n' > "$FAKE_BIN/timeout"
 chmod +x "$FAKE_BIN/lsof" "$FAKE_BIN/gh" "$FAKE_BIN/timeout"
 
 run() {
-  env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" \
     bash "$CLEANUP_SCRIPT" --dry-run --repos "$REPO" 2>&1
 }
@@ -176,6 +178,11 @@ echo "Test: env 5 raises floor"
 OUT="$(run DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS=5)"
 check "env 5 -> 4d merged clean young" "wt-m4 | young" "$OUT"
 check "env 5 -> 6d merged clean ELIGIBLE" "ELIGIBLE  $WT/wt-m6 |" "$OUT"
+
+echo "Test: production default floor is 3 days for all worktrees"
+OUT="$(run WORKTREE_MIN_AGE_DAYS=3)"
+check "default -> header others 3d" "(others: 3d)" "$OUT"
+check "default -> 4d unmerged clean is not young" "wt-u4 | ahead-of-main" "$OUT"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

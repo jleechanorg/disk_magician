@@ -198,6 +198,14 @@ Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scri
 
 ## Worktree 7-day rule (hard) — recency is measured, never proxied
 
+**Amended 2026-10-08 (user decision):** `scripts/cleanup_worktrees.sh` now uses a
+3-day floor for ALL worktrees (`safety_worktree_floor_days`; the
+`worktree_min_stale_days` config key may only raise it). Every other condition
+below is unchanged (clean, no unpushed commits, not live-cwd, not locked, not
+AO-owned, merged or gh-verified). The venv strip, Claude-state and hygiene
+scripts keep the 7-day floor. Read "7 days" below as 7 for those scripts and 3
+for `cleanup_worktrees.sh`.
+
 **A git worktree touched within the last 7 days is PROTECTED.** No script,
 sweeper, launchd job, or agent in this repo may delete, archive, strip
 (including its `venv/`), or `git worktree remove` it — regardless of merged

@@ -18,7 +18,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discover
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
 REPO_LOCAL_REPOS=()
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
@@ -31,13 +31,13 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >=7 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=3 days old, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 7).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 3).
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
@@ -46,7 +46,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 7).
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 3).
 EOF
 }
 
@@ -87,16 +87,15 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
-# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
-# may only RAISE the floor, never lower it below 7.
-staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
+# Staleness floor: safety_worktree_floor_days (default and minimum 3 days; the
+# configured worktree_min_stale_days may only RAISE it).
+staleness_floor=$(safety_worktree_floor_days 2>/dev/null || echo 3)
 if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
   staleness_floor=$((10#$staleness_floor))
 else
-  staleness_floor=7
+  staleness_floor=3
 fi
-[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
+[[ "$staleness_floor" -lt 3 ]] && staleness_floor=3
 
 # Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
 # lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0

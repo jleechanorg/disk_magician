@@ -223,3 +223,26 @@ value = cfg.get("min_stale_days", 7)
 print(max(7, int(value)) if isinstance(value, (int, float)) else 7)
 PY
 }
+
+# safety_worktree_floor_days — worktree-removal staleness floor in days.
+# Default and hard minimum is 3 (user decision 2026-10-08, all worktrees);
+# `worktree_min_stale_days` in safety.local.json may only RAISE it.
+safety_worktree_floor_days() {
+  local safety_file
+  if ! safety_file="$(safety_file_in_use)"; then
+    echo 3
+    return 0
+  fi
+  python3 - "$safety_file" <<'PY' || echo 3
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(1)
+value = cfg.get("worktree_min_stale_days", 3)
+print(max(3, int(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else 3)
+PY
+}
