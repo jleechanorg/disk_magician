@@ -207,8 +207,11 @@ scripts keep the 7-day floor. Read "7 days" below as 7 for those scripts and 3
 for `cleanup_worktrees.sh` and `cleanup_worktree_deps.sh` (dependency dirs only:
 `node_modules`, `target`, `.mypy_cache`). Those two read `worktree_min_stale_days`
 (default 3), not `min_stale_days`, so a machine-local `min_stale_days: 7` does not
-raise their floor; set `worktree_min_stale_days` to do that. The sub-7-day paths
-still run the hidden-state (secret files, assume-unchanged) and AO/live-cwd gates.
+raise their floor; set `worktree_min_stale_days` to do that. For
+`cleanup_worktrees.sh`, every removal candidate at any age runs the hidden-state
+(secret files, assume-unchanged) and AO/live-cwd gates. `cleanup_worktree_deps.sh`
+only strips rebuildable dependency dirs and does not run the hidden-state check;
+it relies on fail-closed recency, live-cwd, AO and `safety_gate` checks.
 
 **A git worktree touched within the last 7 days is PROTECTED.** No script,
 sweeper, launchd job, or agent in this repo may delete, archive, strip
