@@ -112,6 +112,32 @@ The canonical read of this rule lives at
 wins). The floor-and-buckets requirement above is the **specific
 pre-analysis order** for this repo's investigations, on top of that.
 
+## Proactive floor deltas — unprompted on every disk turn (hard)
+
+Whenever the disk is the subject (status, "how's the disk", cleanup, a
+free-space alert, an investigation), do this **without being asked**, then act:
+
+1. Compute the **7d and 30d floors** (lowest used) and report `current − floor`
+   for each, plus per-path deltas where buckets exist.
+2. Act on the actionable deltas through `diskm` scripts within the safety
+   guidelines, and report what was reclaimed (measured by `df`, not `du`).
+   Ask only before a delete that falls outside the guidelines.
+3. **Never stop at "no valid floor".** If `diskm history diff --days N` reports no
+   valid ledger, fall back, label the source, and keep going:
+   - used-space floor: daily minimum of `host_disk.used_kb` in
+     `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}` (df-only; report the
+     earliest date it covers if that is shorter than N days);
+   - bucket deltas: committed snapshots in
+     `git -C ~/.disk_magician_backup log -- snapshots/disk_snapshot.json`, only
+     where `snapshot_coverage_pct >= 70`.
+   A missing or invalid ledger is itself a finding: say so first and name the
+   fix (the root frontier run must reach `mode=complete`).
+4. A daily minimum can be a transient dip (a purge in flight); report the
+   minimum and the typical daily minimum, not the minimum alone.
+5. Check the producer rate before grinding reclaim: if free space falls faster
+   than you reclaim (Colima datadisk allocation is the usual one), stop the
+   producer first (ask before pausing CI runners) rather than loop.
+
 ## 6-tier routine cleanup stack — unified safe maintenance
 
 When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`). Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
