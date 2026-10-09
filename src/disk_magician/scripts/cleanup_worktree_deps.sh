@@ -71,7 +71,12 @@ if [[ "$lsof_rc" -ne 0 || -z "$LIVE_CWDS_RAW" ]] \
     || grep -qiE 'warning|permission denied|cannot|error' <<<"$lsof_msg"; then
   echo "lsof output incomplete: cwd unknown, refusing."; exit 0
 fi
+if grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied' <<<"$LIVE_CWDS_RAW" \
+    || grep -qE '^n[^/]' <<<"$LIVE_CWDS_RAW"; then
+  echo "lsof output unparseable: cwd unknown, refusing."; exit 0
+fi
 LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$LIVE_CWDS_RAW")"
+[[ -n "$LIVE_CWDS" ]] || { echo "lsof reported no cwd paths: cwd unknown, refusing."; exit 0; }
 
 # AO-owned worktrees: any directory named by worktreeDir in the AO config.
 AO_DIRS=()

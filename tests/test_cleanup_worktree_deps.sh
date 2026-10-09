@@ -47,4 +47,13 @@ mkdir -p "$T/cfg"; printf '{"never_delete": ["%s/roots/old/node_modules"]}' "$T"
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_SAFETY_FILE="$T/cfg/safety.local.json" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "never_delete rule blocks the strip" "SAFETY-SKIP" "$OUT"
 
+# Fail closed when lsof output is unparseable: nothing may be stripped.
+mkdir -p "$T/fakebin"; printf '#!/bin/sh\necho "nrelative/path"\n' > "$T/fakebin/lsof"; chmod +x "$T/fakebin/lsof"
+OUT="$(env -i HOME="$T/home" PATH="$T/fakebin:/usr/bin:/bin:/usr/sbin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+check "unparseable lsof output refuses" "cwd unknown, refusing" "$OUT"
+[[ "$OUT" != *"STRIPPED"* ]] && ok "unparseable lsof strips nothing" || bad "stripped despite bad lsof"
+printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/lsof"
+OUT="$(env -i HOME="$T/home" PATH="$T/fakebin:/usr/bin:/bin:/usr/sbin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+check "failing lsof refuses" "cwd unknown, refusing" "$OUT"
+
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]
