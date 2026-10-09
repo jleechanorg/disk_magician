@@ -23,7 +23,7 @@ git init -q --bare -b main "$TMP_ROOT/origin.git"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email f@users.noreply.github.com
 git -C "$REPO" config user.name F
-printf '.env*\ndata/\nnode_modules/\n.ruff_cache/\ntest-results/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/README.md"
+printf '.env*\ndata/\nnode_modules/\n.ruff_cache/\ntest-results/\nbuild/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/README.md"
 git -C "$REPO" add .gitignore README.md; git -C "$REPO" commit -q -m base
 BASE_SHA=$(git -C "$REPO" rev-parse HEAD)
 git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
@@ -39,8 +39,9 @@ add_wt psecret "$WT/wt-psecret" "$AHEAD_SHA"; git -C "$REPO" push -q origin psec
 add_wt pdata "$WT/wt-pdata" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdata; mkdir -p "$WT/wt-pdata/data"; printf 'only copy\n' > "$WT/wt-pdata/data/notes.db"
 add_wt pdeps "$WT/wt-pdeps" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdeps; mkdir -p "$WT/wt-pdeps/node_modules/x"; printf 'x\n' > "$WT/wt-pdeps/node_modules/x/i.js"
 add_wt pcache "$WT/wt-pcache" "$AHEAD_SHA";   git -C "$REPO" push -q origin pcache; mkdir -p "$WT/wt-pcache/.ruff_cache/0.16.1" "$WT/wt-pcache/test-results"; printf 'c\n' > "$WT/wt-pcache/.ruff_cache/0.16.1/x"; printf 'r\n' > "$WT/wt-pcache/test-results/r.xml"
+add_wt pbuild "$WT/wt-pbuild" "$AHEAD_SHA";   git -C "$REPO" push -q origin pbuild; mkdir -p "$WT/wt-pbuild/build"; printf 'hand-made\n' > "$WT/wt-pbuild/build/manual-evidence.db"
 add_wt pyoung "$WT/wt-pyoung" "$AHEAD_SHA";   git -C "$REPO" push -q origin pyoung
-for n in pushed unpushed diverged pdirty psecret pdata pdeps pcache; do age_days_ago "$WT/wt-$n" 4; done
+for n in pushed unpushed diverged pdirty psecret pdata pdeps pcache pbuild; do age_days_ago "$WT/wt-$n" 4; done
 mkdir -p "$TMP_ROOT/home"
 run() { env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=3 HERMES_SKIP_EXAMPLE_COM_GUARD=1 bash "$CLEANUP_SCRIPT" --dry-run --repos "$REPO" 2>&1; }
 OUT="$(run)"
@@ -52,6 +53,7 @@ check "pushed worktree with ignored .env is preserved" "PRESERVE  $WT/wt-psecret
 check "pushed worktree with ignored non-rebuildable data is preserved" "wt-pdata | ignored-data" "$OUT"
 check "pushed worktree with only rebuildable ignored deps is ELIGIBLE" "ELIGIBLE  $WT/wt-pdeps |" "$OUT"
 check "pushed worktree with only nested cache/test-results ignored is ELIGIBLE" "ELIGIBLE  $WT/wt-pcache |" "$OUT"
+check "user data under an ambiguous build/ dir is preserved" "wt-pbuild | ignored-data" "$OUT"
 check "young pushed worktree is preserved" "wt-pyoung | young" "$OUT"
 git -C "$REPO" remote set-url origin "$TMP_ROOT/missing.git"
 OUT="$(run)"

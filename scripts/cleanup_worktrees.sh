@@ -364,9 +364,12 @@ has_ignored_user_data() {
         while [[ -n "$rest" ]]; do
             comp="${rest##*/}"
             case "$comp" in
-                node_modules|venv|.venv|env|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                target|dist|build|.next|.turbo|.cache|.gradle|.tox|.eggs|*.egg-info|coverage|\
-                htmlcov|*.pyc|.DS_Store|venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                # Unambiguous tool-generated names only; generic names such as
+                # build, dist, env, target, coverage and .cache can hold hand-made
+                # files, so they count as user data and preserve the worktree.
+                node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
+                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
+                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
                     ok=true; break ;;
             esac
             [[ "$rest" == */* ]] || break
