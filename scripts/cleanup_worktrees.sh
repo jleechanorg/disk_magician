@@ -259,6 +259,11 @@ classify_repo_local_worktree() {
     fi
 
     local min_age=$MIN_AGE_DAYS now recently_active=false
+    # AO-managed sessions keep the 7-day inactivity bar; the 3-day floor is for
+    # human-created worktrees.
+    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 7 ]]; then
+        min_age=7
+    fi
     now="$(date +%s)"
     if worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
         recently_active=true
@@ -302,7 +307,23 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch"
+    # Every removal candidate, at any age, must also clear the secret-file /
+    # hidden-index-state probe and the AO-config / live-cwd standard-root gate
+    # (previously enforced only on the sub-7-day fast path).
+    local verdict skip_reason
+    verdict="$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")"
+    if [[ -z "$verdict" ]]; then
+        skip_reason="$(std_root_skip_reason "$wt_path" "$real_wt")"
+        if [[ -n "$skip_reason" ]]; then
+            echo "$skip_reason"
+            return 0
+        fi
+        if has_hidden_state "$wt_path"; then
+            echo "hidden-state"
+            return 0
+        fi
+    fi
+    [[ -z "$verdict" ]] || echo "$verdict"
 }
 
 # has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
