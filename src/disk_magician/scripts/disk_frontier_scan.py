@@ -1830,7 +1830,7 @@ def build_report(
         elif (
             reason == "lstat_failed"
             and item.get("errno") == errno.ENOENT
-            and item.get("depth", 0) > 0
+            and item.get("depth", 0) > 1
         ):
             intrinsic = {
                 "path": path,
