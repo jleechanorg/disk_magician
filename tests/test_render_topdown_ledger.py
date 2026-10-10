@@ -4,6 +4,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "render_topdown_ledger.py"
 sys.path.insert(0, str(REPO / "scripts"))
 import render_topdown_ledger as renderer  # noqa: E402
+import disk_status  # noqa: E402
 SYSTEM_BOUNDARY_PATHS = (
     "/System/Volumes/Data/.Spotlight-V100",
     "/System/Volumes/Data/.fseventsd",
@@ -369,6 +370,87 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertIn("0.5", md)
         status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
         self.assertEqual(status["status"], "published")
+
+    def test_published_complete_ledger_is_healthy_in_status_cli(self):
+        frontier = self._fixture(age_hours=1)
+        with open(frontier, encoding="utf-8") as f:
+            report = json.load(f)
+        scan_home = "/Users/ledger-test"
+        probe_paths = {
+            name: os.path.join(scan_home, rel_path)
+            for name, rel_path in renderer.USER_PROBE_RELATIVE_PATHS.items()
+        }
+        report["fda_probe_paths"] = probe_paths
+        for name, probe_path in probe_paths.items():
+            report["fda_preflight"]["probes"][name]["path"] = probe_path
+        with open(frontier, "w", encoding="utf-8") as f:
+            json.dump(report, f)
+
+        rc, _, err = run(frontier, self.out_dir)
+        self.assertEqual(rc, 0, err)
+
+        sidecar_path = os.path.join(self.out_dir, "topdown-5g.status.json")
+        with open(sidecar_path, encoding="utf-8") as f:
+            sidecar = json.load(f)
+        self.assertEqual(sidecar["status"], "published")
+        self.assertEqual(sidecar["reason"], "complete_coverage")
+
+        env = {
+            **os.environ,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_AUTHOR_NAME": "Test User",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test User",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        subprocess.run(
+            ["git", "-C", self.tmp, "init"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", self.tmp, "add", "ledger/topdown-5g.json", "ledger/topdown-5g.status.json"],
+            check=True,
+            env=env,
+        )
+        subprocess.run(
+            ["git", "-C", self.tmp, "-c", "core.hooksPath=/dev/null", "commit", "-m", "publish complete ledger"],
+            check=True,
+            env=env,
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        consumer = subprocess.run(
+            [
+                sys.executable,
+                str(REPO / "scripts" / "disk_status.py"),
+                "--json",
+                "--publication-only",
+                "--state-repo",
+                self.tmp,
+                "--now",
+                now,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(consumer.stdout)
+        self.assertEqual(consumer.returncode, disk_status.EXIT_HEALTHY, consumer.stdout + consumer.stderr)
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["dimensions"]["publication"]["status"], "healthy")
+        self.assertEqual(result["dimensions"]["publication"]["details"]["sidecar_status"], "published")
+
+        sidecar["status"] = "unknown"
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(sidecar, f)
+        invalid_consumer = subprocess.run(consumer.args, capture_output=True, text=True)
+        invalid_result = json.loads(invalid_consumer.stdout)
+        self.assertEqual(invalid_consumer.returncode, disk_status.EXIT_INVALID)
+        self.assertEqual(
+            invalid_result["dimensions"]["publication"]["reason"],
+            "sidecar_invalid_status: unknown",
+        )
 
     def test_exact_5g_bucket_publishes_and_history_accepts_it(self):
         frontier = self._fixture(age_hours=1)
