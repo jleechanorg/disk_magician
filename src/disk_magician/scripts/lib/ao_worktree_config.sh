@@ -68,9 +68,10 @@ PY
                 fail_parse unless key_node.is_a?(Psych::Nodes::Scalar)
                 fail_parse if keys.include?(key_node.value)
                 keys << key_node.value
+                reject_duplicate_keys(key_node)
                 reject_duplicate_keys(value_node)
               end
-            elsif node.is_a?(Psych::Nodes::Sequence)
+            else
               node.children.each { |child| reject_duplicate_keys(child) }
             end
           end
