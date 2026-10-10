@@ -105,6 +105,10 @@ wrh_live_cwd_reason() {
             [[ -z $pid || $path_seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
             pid=${line#p}; [[ $pid =~ ^[0-9]+$ ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
             path_seen=0 ;;
+        f*)
+            # Standard lsof -F descriptor record (e.g. fcwd). Valid only after a pid.
+            [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            ;;
         n*)
             [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
             path=${line#n}; [[ $path == /* ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
