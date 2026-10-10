@@ -90,8 +90,11 @@ def run(caller: str, script: str, args: list[str]) -> int:
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
     os.environ[ENV_PID] = str(os.getpid())
-    os.execvpe(script, [script, *args], os.environ)
-    return 127
+    try:
+        os.execvpe("bash", ["bash", script, *args], os.environ)
+    except OSError as exc:
+        print(f"[{caller}] failed to execute {script} with bash: {exc}", file=sys.stderr)
+        return 127
 
 
 def main() -> int:

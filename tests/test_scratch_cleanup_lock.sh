@@ -54,6 +54,12 @@ export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$ROOT"
 export DISK_MAGICIAN_PR_SCRATCH_ROOTS="$ROOT"
 export DISK_MAGICIAN_TEST_CONTEXT=1
 export CLEANUP_PR_BIN
+cat > "$ROOT/true.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$ROOT/true.sh"
+TRUE_SCRIPT="$ROOT/true.sh"
 
 echo "=== scratch cleanup kernel-lock integration tests ==="
 
@@ -62,16 +68,16 @@ echo "=== scratch cleanup kernel-lock integration tests ==="
 DEFAULT="$ROOT/default"; mkdir -m 0700 -p "$DEFAULT/home" "$DEFAULT/alternate-state"
 for state in unset alternate; do
   if [[ "$state" == unset ]]; then
-    (umask 0002; HOME="$DEFAULT/home" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args --)
+    (umask 0002; HOME="$DEFAULT/home" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script "$TRUE_SCRIPT" --args --)
   else
-    (umask 0002; HOME="$DEFAULT/home" DISK_MAGICIAN_STATE_DIR="$DEFAULT/alternate-state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args --)
+    (umask 0002; HOME="$DEFAULT/home" DISK_MAGICIAN_STATE_DIR="$DEFAULT/alternate-state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script "$TRUE_SCRIPT" --args --)
   fi
   [[ -f "$DEFAULT/home/.disk_magician_locks/scratch_cleanup.lock" && ! -e "$DEFAULT/alternate-state/.disk_magician_locks/scratch_cleanup.lock" ]] && record pass "$state state root still uses per-user lock" || record fail "$state state root still uses per-user lock"
 done
 [[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks")" == 0o700 ]] && record pass "umask 0002 creates root mode 0700" || record fail "umask 0002 creates root mode 0700"
 [[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks/scratch_cleanup.lock")" == 0o600 ]] && record pass "default lock file mode 0600" || record fail "default lock file mode 0600"
 chmod 0755 "$DEFAULT/home/.disk_magician_locks"
-if HOME="$DEFAULT/home" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args -- >/dev/null 2>&1; then
+if HOME="$DEFAULT/home" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script "$TRUE_SCRIPT" --args -- >/dev/null 2>&1; then
   record fail "existing public lock root fails closed"
 else
   [[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks")" == 0o755 ]] && record pass "existing public lock root fails closed without chmod" || record fail "existing public lock root fails closed without chmod"
@@ -154,7 +160,7 @@ rm -f "$ROOT/pause"
 wait "$HOLDER_PID" || true
 HOLDER_PID=""
 HOME="$CHILD/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
-  --caller probe --script /usr/bin/true --args -- && record pass "real caller succeeds after scanner exits" || record fail "real caller succeeds after scanner exits"
+  --caller probe --script "$TRUE_SCRIPT" --args -- && record pass "real caller succeeds after scanner exits" || record fail "real caller succeeds after scanner exits"
 
 # Unsafe lock objects and directories fail before either cleaner can scan.
 for kind in symlink mode parent parent_symlink; do
@@ -223,7 +229,7 @@ if [[ -n "$CHILD_PID" ]]; then
 fi
 for _ in {1..200}; do
   if HOME="$ORPHAN/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
-      --caller probe --script /usr/bin/true --args -- >/dev/null 2>&1; then break; fi
+      --caller probe --script "$TRUE_SCRIPT" --args -- >/dev/null 2>&1; then break; fi
   sleep 0.025
 done
 HOME="$ORPHAN/state" DISK_MAGICIAN_TMP_DIR="$ORPHAN/tmp" \
@@ -246,6 +252,38 @@ SCRATCH_LOCK_LIB="$REPO_ROOT/scripts/lib/scratch_lock.sh" HOME="$STATUS/state" \
 rc=$?
 set -e
 [[ $rc -eq 37 ]] && record pass "exec wrapper propagates child exit status" || record fail "exec wrapper propagates child exit status (rc=$rc)"
+
+# Relative callers need not be on PATH or executable: the wrapper resolves the
+# caller before handing it to the runner, which invokes it explicitly via Bash.
+RELATIVE="$ROOT/relative"; mkdir -m 0700 -p "$RELATIVE/state"
+cat > "$RELATIVE/relative-caller.sh" <<'EOF'
+#!/usr/bin/env bash
+source "$SCRATCH_LOCK_LIB"
+scratch_lock_acquire relative-test
+exit 41
+EOF
+chmod 0600 "$RELATIVE/relative-caller.sh"
+set +e
+(cd "$RELATIVE" && SCRATCH_LOCK_LIB="$REPO_ROOT/scripts/lib/scratch_lock.sh" \
+  HOME="$RELATIVE/state" bash relative-caller.sh >/dev/null 2>&1)
+rc=$?
+set -e
+[[ $rc -eq 41 ]] && record pass "relative non-executable caller re-execs through Bash" || record fail "relative non-executable caller re-execs through Bash (rc=$rc)"
+
+# If Bash itself cannot be started, report a caller-scoped failure without a
+# Python traceback and preserve the conventional command-not-found status.
+NO_BASH="$ROOT/no-bash"; mkdir -m 0700 -p "$NO_BASH/state" "$NO_BASH/bin"
+PYTHON_BIN=$(command -v python3)
+set +e
+HOME="$NO_BASH/state" PATH="$NO_BASH/bin" "$PYTHON_BIN" "$REPO_ROOT/scripts/scratch_lock.py" run \
+  --caller no-bash-test --script "$STATUS/exit.sh" --args -- >"$NO_BASH/out" 2>&1
+rc=$?
+set -e
+if [[ $rc -eq 127 ]] && grep -Fq "[no-bash-test] failed to execute" "$NO_BASH/out" && ! grep -Fq "Traceback" "$NO_BASH/out"; then
+  record pass "Bash exec failure returns 127 without traceback"
+else
+  record fail "Bash exec failure is caller-scoped (rc=$rc)"
+fi
 
 echo "=== Results: $PASS pass, $FAIL fail ==="
 (( FAIL == 0 ))
