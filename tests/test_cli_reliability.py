@@ -23,6 +23,33 @@ DISPATCH = {
 
 
 class ReliabilityDispatchTests(unittest.TestCase):
+    def test_root_frontier_install_command_dispatches_help_and_isolated_dry_run(self):
+        for tree in (ROOT, ROOT / "src" / "disk_magician"):
+            with self.subTest(tree=tree.name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                libexec = root / "libexec"
+                state = root / "state"
+                env = dict(os.environ, HOME=str(root), SUDO_USER="fixture",
+                           DISK_MAGICIAN_LIBEXEC_DIR=str(libexec),
+                           DISK_MAGICIAN_STATE_DIR=str(state))
+                cli = tree / "disk_magician.sh"
+                runner = ["python3", str(tree / "cli.py")] if (tree / "cli.py").is_file() else ["/bin/bash", str(cli)]
+                help_result = subprocess.run(
+                    [*runner, "install-root-frontier-runner", "--help"],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(help_result.returncode, 0, help_result.stderr)
+                self.assertIn("Usage:", help_result.stdout)
+                dry_run = subprocess.run(
+                    [*runner, "install-root-frontier-runner", "--user", "fixture", "--dry-run"],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+                self.assertIn("for user fixture (home: /Users/fixture)", dry_run.stdout)
+                self.assertIn("[dry-run] Would install LaunchDaemon", dry_run.stdout)
+                self.assertFalse(libexec.exists())
+                self.assertFalse(state.exists())
+
     def test_dispatch_preserves_arguments_environment_and_exit_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
