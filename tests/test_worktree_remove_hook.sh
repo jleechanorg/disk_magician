@@ -155,6 +155,44 @@ assert_eq "$rc" "0" "exit code"
 [[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
 tail -n 1 "$LOG" | grep -q "malformed stdin" && ok "log says malformed stdin" || bad "log missing malformed stdin"
 
+echo "== case 14: rebuildable ignored files (node_modules, .mypy_cache) → removed, branch deleted =="
+printf 'node_modules/\n.mypy_cache/\n' >>"$REPO/.gitignore"
+git -C "$REPO" add .gitignore
+git -C "$REPO" commit -q -m "ignore rebuildable dirs"
+git -C "$REPO" push -q origin HEAD:main
+add_wt k worktree-k
+mkdir -p "$WTROOT/k/node_modules/pkg"
+echo "console.log(1)" >"$WTROOT/k/node_modules/pkg/index.js"
+mkdir -p "$WTROOT/k/.mypy_cache/3.13"
+echo "cache" >"$WTROOT/k/.mypy_cache/3.13/cache.json"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/k")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/k" ]] && ok "rebuildable-ignored worktree removed" || bad "rebuildable-ignored worktree kept"
+git -C "$REPO" worktree list --porcelain | grep -q "$WTROOT/k" && bad "still registered" || ok "unregistered"
+branch_exists worktree-k && bad "branch worktree-k kept" || ok "branch worktree-k deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
+grep -q "removed $WTROOT/k" "$LOG" && ok "log says removed" || bad "log does not mention removed"
+grep -q "deleted branch worktree-k" "$LOG" && ok "log says branch deleted" || bad "log does not mention branch deleted"
+
+echo "== case 15: non-rebuildable ignored data (data/db.sqlite, scratch/notes.txt) → preserved =="
+add_wt l worktree-l
+printf 'data/\nscratch/\n' >"$WTROOT/l/.gitignore"
+git -C "$WTROOT/l" add .gitignore
+git -C "$WTROOT/l" commit -q -m ignore
+git -C "$WTROOT/l" push -q origin HEAD:refs/heads/l 2>/dev/null
+mkdir -p "$WTROOT/l/data" "$WTROOT/l/scratch"
+echo "sqlite format 3" >"$WTROOT/l/data/db.sqlite"
+echo "important notes" >"$WTROOT/l/scratch/notes.txt"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/l")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/l/data/db.sqlite" ]] && ok "non-rebuildable data preserved" || bad "non-rebuildable data deleted"
+[[ -f "$WTROOT/l/scratch/notes.txt" ]] && ok "non-rebuildable scratch preserved" || bad "non-rebuildable scratch deleted"
+branch_exists worktree-l && ok "branch worktree-l kept" || bad "branch worktree-l deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
+tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored data" || bad "log does not mention ignored data"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
