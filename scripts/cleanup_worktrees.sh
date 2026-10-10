@@ -777,11 +777,13 @@ process_antigravity_orphan() {
             return 0
         fi
         local final_status final_status_rc=0
-        final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
-        if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
-            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
-            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-            return 0
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
+            final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+            if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
+            fi
         fi
         if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"

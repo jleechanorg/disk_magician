@@ -218,7 +218,7 @@ assert_contains "size-probe ignored data preserved" ".claude/worktrees/wt-ancest
 assert_contains "size-probe tracked edit preserved" ".claude/worktrees/wt-race-tracked | changed-after-size" "$RACE_TEXT"
 assert_contains "size-probe untracked data preserved" ".claude/worktrees/wt spaced path | changed-after-size" "$RACE_TEXT"
 [[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]] && record_pass "size-probe ignored data remains on disk" || record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
-[[ -f "$RACE_TRACKED"/README.md ]] && grep -qF 'late tracked edit' "$RACE_TRACKED/README.md" && record_pass "size-probe tracked edit remains on disk" || record_fail "size-probe tracked edit remains on disk" "late tracked edit disappeared"
+[[ -f "$RACE_TRACKED/README.md" ]] && grep -qF 'late tracked edit' "$RACE_TRACKED/README.md" && record_pass "size-probe tracked edit remains on disk" || record_fail "size-probe tracked edit remains on disk" "late tracked edit disappeared"
 [[ -f "$MAIN_REPO/.claude/worktrees/wt spaced path/late.txt" ]] && record_pass "size-probe untracked data remains on disk" || record_fail "size-probe untracked data remains on disk" "late untracked data disappeared"
 
 echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
