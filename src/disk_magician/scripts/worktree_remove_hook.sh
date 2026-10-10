@@ -13,6 +13,7 @@ _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
 source "$_WRH_DIR/lib/worktree_recency.sh"
+source "$_WRH_DIR/lib/ao_worktree_config.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -125,24 +126,8 @@ wrh_expand_path() {
 wrh_ao_skip_reason() {
     local target=$1 config=${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml} lines kind dir root candidate
     [[ -e $config ]] || { [[ -n ${DISK_MAGICIAN_AO_CONFIG+x} ]] && echo ao-config-unreadable; return; }
-    [[ -r $config ]] || { echo ao-config-unreadable; return; }
-    lines=$(awk '
-        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
-                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
-        /^worktreeDir:/ { def = val($0); next }
-        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
-        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
-        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
-        END {
-            if (def == "") exit
-            sub(/\/+$/, "", def); print "C " def
-            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
-                print "P " def "/" keys[i]
-                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
-            }
-        }' "$config" 2>/dev/null) || { echo ao-config-unreadable; return; }
-    [[ -n $lines ]] || { echo ao-config-unreadable; return; }
+    lines=$(ao_worktree_dirs "$config") || { echo ao-config-unreadable; return; }
+    [[ -n $lines ]] || return 0
     candidate=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null) || { echo ao-config-unreadable; return; }
     while read -r kind dir; do
         [[ -n $kind && -n $dir ]] || continue
