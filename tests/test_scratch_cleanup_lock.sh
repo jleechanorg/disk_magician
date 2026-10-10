@@ -30,14 +30,14 @@ wait_for_file() {
 
 # A scanner child pauses while retaining the inherited lock descriptor.
 mkdir -p "$ROOT/bin"
-REAL_FIND=$(command -v find)
-cat > "$ROOT/bin/find" <<EOF
+export REAL_FIND=$(command -v find)
+cat > "$ROOT/bin/find" <<'EOF'
 #!/usr/bin/env bash
-if [[ -n "\${TEST_PAUSE_FILE:-}" && -f "\$TEST_PAUSE_FILE" ]]; then
-  touch "\$TEST_PAUSED_FILE"
-  while [[ -f "\$TEST_PAUSE_FILE" ]]; do sleep 0.025; done
+if [[ -n "${TEST_PAUSE_FILE:-}" && -f "$TEST_PAUSE_FILE" ]]; then
+  touch "$TEST_PAUSED_FILE"
+  while [[ -f "$TEST_PAUSE_FILE" ]]; do sleep 0.025; done
 fi
-exec "$REAL_FIND" "\$@"
+exec "$REAL_FIND" "$@"
 EOF
 chmod +x "$ROOT/bin/find"
 export PATH="$ROOT/bin:$PATH"
@@ -66,7 +66,7 @@ for holder in tmp pr; do
     set -e
   else
     DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_TMP_DIR="$TMP" DISK_MAGICIAN_PR_SCRATCH_PATTERNS='*' DISK_MAGICIAN_FIND_BIN="$ROOT/bin/find" TEST_PAUSE_FILE="$ROOT/pause" TEST_PAUSED_FILE="$CASE/paused" \
-      bash "$CLEANUP_PR_BIN" --clean --min-age-hours 0 >"$CASE/holder.out" 2>&1 &
+      bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$TMP" --min-age-hours 0 >"$CASE/holder.out" 2>&1 &
     HOLDER_PID=$!
     wait_for_file "$CASE/paused" || record fail "$holder reached paused scanner"
     set +e
@@ -79,6 +79,14 @@ for holder in tmp pr; do
   rm -f "$ROOT/pause"
   wait "$HOLDER_PID" || true
   HOLDER_PID=""
+  if grep -q "cleanup_.*sh starting" "$CASE/holder.out" && ! grep -q "DRY RUN:" "$CASE/holder.out"; then
+    record pass "$holder preserves --clean across lock re-exec"
+  else
+    record fail "$holder preserves --clean across lock re-exec"
+  fi
+  if [[ "$holder" == pr ]]; then
+    grep -Fq "starting (roots: $TMP," "$CASE/holder.out" && record pass "pr preserves --tmp-dir across lock re-exec" || record fail "pr preserves --tmp-dir across lock re-exec"
+  fi
 done
 
 # Dry-run ignores a lock file (including a directory at that pathname).
@@ -115,10 +123,10 @@ HOLDER_PID=""
 set +e
 DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" DISK_MAGICIAN_TMP_DIR="$ORPHAN/tmp" \
   DISK_MAGICIAN_PR_SCRATCH_PATTERNS='*' DISK_MAGICIAN_FIND_BIN="$ROOT/bin/find" \
-  bash "$CLEANUP_PR_BIN" --clean --min-age-hours 0 >"$ORPHAN/contender.out" 2>&1
+  bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$ORPHAN/tmp" --min-age-hours 0 >"$ORPHAN/contender.out" 2>&1
 rc=$?
 set -e
-[[ $rc -eq 1 ]] && record pass "SIGKILLed shell leaves child-held lock active" || record fail "SIGKILLed shell leaves child-held lock active (rc=$rc)"
+[[ $rc -eq 1 ]] && grep -q "scratch lock held" "$ORPHAN/contender.out" && record pass "SIGKILLed shell leaves child-held lock active" || record fail "SIGKILLed shell leaves child-held lock active (rc=$rc)"
 rm -f "$ROOT/pause"
 if [[ -n "$CHILD_PID" ]]; then
   for _ in {1..200}; do
@@ -136,7 +144,7 @@ for _ in {1..200}; do
 done
 DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" DISK_MAGICIAN_TMP_DIR="$ORPHAN/tmp" \
   DISK_MAGICIAN_PR_SCRATCH_PATTERNS='*' DISK_MAGICIAN_FIND_BIN="$ROOT/bin/find" \
-  bash "$CLEANUP_PR_BIN" --clean --min-age-hours 0 >"$ORPHAN/retry.out" 2>&1
+  bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$ORPHAN/tmp" --min-age-hours 0 >"$ORPHAN/retry.out" 2>&1
 record pass "contender acquires after orphan scanner exits"
 
 # The exec wrapper must preserve the original script's exit status.

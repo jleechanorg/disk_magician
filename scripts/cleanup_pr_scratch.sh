@@ -77,6 +77,7 @@ if [[ ${#PATTERNS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
+SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
@@ -221,7 +222,7 @@ fi
 
 # Shared lock invariant: serialize destructive sweep against cleanup_tmp.
 # Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" "$@" || exit 1; }
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" "${SCRATCH_LOCK_ORIGINAL_ARGS[@]}" || exit 1; }
 
 TMP_DIRS=()
 if [[ ${#CLI_TMP_DIRS[@]} -gt 0 ]]; then
