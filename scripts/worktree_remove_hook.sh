@@ -125,16 +125,18 @@ wrh_expand_path() {
 
 wrh_ao_skip_reason() {
     local target=$1 config=${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml} lines kind dir root candidate
+    case "$target" in */.ao/data/worktrees/*|*/ao/data/worktrees/*) echo ao-owned; return;; esac
     [[ -e $config ]] || { [[ -n ${DISK_MAGICIAN_AO_CONFIG+x} ]] && echo ao-config-unreadable; return; }
     lines=$(ao_worktree_dirs "$config") || { echo ao-config-unreadable; return; }
     [[ -n $lines ]] || return 0
     candidate=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null) || { echo ao-config-unreadable; return; }
     while IFS= read -r line; do
-        case $line in P\ *|C\ *) dir=${line#? };; *) echo ao-config-unreadable; return;; esac
+        case $line in P\ *|C\ *) kind=${line%% *}; dir=${line#? };; *) echo ao-config-unreadable; return;; esac
         [[ -n $dir ]] || { echo ao-config-unreadable; return; }
         root=$(wrh_expand_path "$dir") || { echo ao-config-unreadable; return; }
         root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null) || { echo ao-config-unreadable; return; }
-        [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; }
+        if [[ $kind == P && ( $candidate == "$root" || $candidate == "$root/"* ) ]] ||
+           [[ $kind == C && ${candidate%/*} == "$root" ]]; then echo ao-owned; return; fi
     done <<<"$lines"
 }
 
