@@ -761,12 +761,6 @@ process_antigravity_orphan() {
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     else
-        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_ignored_user_data "$abs_subdir"; then
-            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
-            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
-            return 0
-        fi
-        ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
         if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_hidden_state "$abs_subdir"; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -778,10 +772,16 @@ process_antigravity_orphan() {
             return 0
         fi
         if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
-            echo "SAFETY-SKIP $abs_subdir ($_safety_reason)"
-        else
-            rm -rf "$abs_subdir"
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$_safety_reason"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
         fi
+        if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+        ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     fi
@@ -908,12 +908,30 @@ process_repo_local_worktrees() {
         else
             if [[ "$DRY_RUN" == true ]]; then
                 ledger_line "repo-local" "ELIGIBLE" "$abs_path" "" "$extra"
+                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
             else
-                ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
-                git -C "$repo_abs" worktree remove --force --force "$abs_path"
+                if has_hidden_state "$abs_path"; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "hidden-state" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                if has_ignored_user_data "$abs_path"; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "ignored-data" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                if git -C "$repo_abs" worktree remove --force --force "$abs_path" && [[ ! -e "$abs_path" ]]; then
+                    ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
+                    TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                    REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                else
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "remove-failed" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                fi
             fi
-            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
-            REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
         fi
 
         wt_path=""; head_sha=""; branch=""; locked=0; prunable=0

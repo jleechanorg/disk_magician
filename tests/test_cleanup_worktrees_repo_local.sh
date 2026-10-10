@@ -192,6 +192,30 @@ assert_not_contains() {
   fi
 }
 
+echo "Test: ignored user data added by size probe blocks final removal"
+printf '\n*.db\n' >> "$MAIN_REPO/.git/info/exclude"
+cat > "$FAKE_BIN/du" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */.claude/worktrees/wt-ancestor) printf 'late user data\n' > "$arg/race.db" ;;
+  esac
+done
+exec /usr/bin/du "$@"
+SH
+chmod +x "$FAKE_BIN/du"
+RACE_OUT="$TMP_ROOT/race-clean.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  WORKTREE_APPROVED=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --clean --repos "$MAIN_REPO" --min-age 14 >"$RACE_OUT" 2>&1
+RACE_TEXT=$(cat "$RACE_OUT")
+assert_contains "size-probe ignored data preserved" ".claude/worktrees/wt-ancestor | ignored-data" "$RACE_TEXT"
+if [[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]]; then
+  record_pass "size-probe ignored data remains on disk"
+else
+  record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
+fi
+
 echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
 STD_HOME="$TMP_ROOT/home"
 STD_ROOT="$STD_HOME/.worktrees"
@@ -238,9 +262,10 @@ run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
 
 cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
+cwd=$(cd "$STD_ROOT/r/busy" 2>/dev/null && pwd -P)
 echo "p1"
 echo "fcwd"
-echo "n$STD_ROOT/r/busy"
+echo "n\$cwd"
 SH
 chmod +x "$FAKE_BIN/lsof"
 run_std "$TMP_ROOT/std.out" "$FAKE_BIN:/usr/bin:/bin"
