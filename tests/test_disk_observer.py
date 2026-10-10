@@ -166,15 +166,24 @@ class DiskObserverTest(unittest.TestCase):
     def test_colima_datadisk_scan_includes_lima_sparse_datadisk(self):
         observer = load_module()
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / ".colima"
+            home = Path(tmp)
+            root = home / ".colima"
             datadisk = root / "_lima" / "_disks" / "colima" / "datadisk"
             datadisk.parent.mkdir(parents=True)
             datadisk.write_bytes(b"x")
 
-            paths, complete = observer._colima_datadisk_paths(root)
+            colima = observer.collect_colima(
+                home,
+                lambda argv, timeout=5: observer.CommandResult(
+                    0, f"10\t{argv[-1]}\n", "", False
+                ),
+            )
 
-        self.assertTrue(complete)
-        self.assertIn(datadisk, paths)
+        self.assertTrue(colima["datadisk_scan_complete"])
+        self.assertEqual(
+            [item["path"] for item in colima["datadisks"]], [str(datadisk)]
+        )
+        self.assertEqual(colima["datadisks"][0]["allocated_kb"], 10)
 
     def test_step_event_not_triggered_below_threshold(self):
         observer = load_module()
