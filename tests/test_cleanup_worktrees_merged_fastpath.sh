@@ -101,6 +101,15 @@ git -C "$REPO" worktree lock --reason "agent busy" "$WT/wt-m4lockr"
 add_wt m4ed "$WT/wt-m4ed" "$MERGED_SHA"
 mkdir -p "$WT/wt-m4ed/config" && printf 'x\n' > "$WT/wt-m4ed/config/id_ed25519"
 printf 'config/id_ed25519\n' >> "$REPO/.git/info/exclude"
+# Rebuildable bytecode/deps whose names contain "credentials" are not secrets;
+# a real ignored credentials file next to them still is.
+printf '__pycache__/\nconfig/credentials.json\n' >> "$REPO/.git/info/exclude"
+add_wt m4pyc "$WT/wt-m4pyc" "$MERGED_SHA"
+mkdir -p "$WT/wt-m4pyc/__pycache__" && printf 'x\n' > "$WT/wt-m4pyc/__pycache__/openrouter_credentials.cpython-312.pyc"
+add_wt m4credjson "$WT/wt-m4credjson" "$MERGED_SHA"
+mkdir -p "$WT/wt-m4credjson/__pycache__" "$WT/wt-m4credjson/config"
+printf 'x\n' > "$WT/wt-m4credjson/__pycache__/clock_skew_credentials.cpython-312.pyc"
+printf '{}\n' > "$WT/wt-m4credjson/config/credentials.json"
 # gh-verified squash-merged route (bead ueh) into the 3-day path.
 git -C "$REPO" remote add origin https://github.com/fixture/repo.git
 add_wt sqmatch "$WT/wt-sqmatch" "$AHEAD_SHA"
@@ -109,7 +118,7 @@ mkdir -p "$WT/wt-sqmatchignoreddata/data.pyc" && printf 'data\n' > "$WT/wt-sqmat
 add_wt sqdiff "$WT/wt-sqdiff" "$AHEAD_SHA"
 
 for w in wt-m4 wt-m4dirty wt-m4ignoreddata wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
-    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqmatchignoreddata wt-sqdiff wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
+    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqmatchignoreddata wt-sqdiff wt-m4lockr wt-m4ed wt-m4pyc wt-m4credjson; do age_days_ago "$WT/$w" 4; done
 age_days_ago "$REPO/.ao/data/worktrees/wt-m4ao" 4
 age_days_ago "$WT/wt-m2" 2
 age_days_ago "$TMP_ROOT/aodir/wt-m4cfg" 4
@@ -193,6 +202,8 @@ check "default -> header others 3d" "(others: 3d)" "$OUT"
 check "default -> 4d unmerged clean is not young" "wt-u4 | ahead-of-main" "$OUT"
 check "default -> 4d merged with ignored .env is preserved" "wt-m4secret | hidden-state" "$OUT"
 check "default -> 4d assume-unchanged edit is preserved" "wt-m4au | hidden-state" "$OUT"
+check "default -> 4d merged with only __pycache__ *credentials*.pyc ELIGIBLE" "ELIGIBLE  $WT/wt-m4pyc |" "$OUT"
+check "default -> 4d merged with ignored credentials.json is preserved" "wt-m4credjson | hidden-state" "$OUT"
 check "default -> 4d merged under AO worktreeDir stays young (AO keeps 7d)" "wt-m4ao | young" "$OUT"
 check "default -> 4d merged clean still ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
 check "3d merged path catches ignored data" "wt-m4ignoreddata | ignored-data" "$OUT"

@@ -158,18 +158,27 @@ fi
 COLIMA_CEILING_GB="${DISK_MAGICIAN_COLIMA_CEILING_GB:-35}"
 COLIMA_GB_OVERRIDE="${DISK_MAGICIAN_COLIMA_GB_OVERRIDE:-}"
 du_size_gb() {
-  local path="$1" output rc kb
+  local path="$1" output rc kb errf
   if [[ -z "$TIMEOUT_CMD" ]]; then
     log "pressure_sweep: bounded timeout unavailable; size measurement blocked for $path."
     return 1
   fi
-  if output="$(run_step_timeout du -skx "$path" 2>/dev/null)"; then
+  errf="$(mktemp "${TMPDIR:-/tmp}/pressure-du-err.XXXXXX")" || return 1
+  if output="$(run_step_timeout du -skx "$path" 2>"$errf")"; then
     :
   else
     rc=$?
-    log "pressure_sweep: size measurement failed or timed out for $path (du rc=$rc)."
-    return 1
+    # du exits 1 when root-owned subdirs (tmp-mount-*, RustDesk-service) are
+    # unreadable. If every stderr line is EACCES, the total is a lower bound,
+    # which can only suppress a ceiling-triggered sweep — safe to use.
+    if [[ $rc -ne 1 || ! -s "$errf" ]] || grep -qv 'Permission denied$' "$errf"; then
+      rm -f "$errf"
+      log "pressure_sweep: size measurement failed or timed out for $path (du rc=$rc)."
+      return 1
+    fi
+    log "pressure_sweep: du skipped $(wc -l < "$errf" | tr -d ' ') unreadable entries under $path; using lower-bound size." >&2
   fi
+  rm -f "$errf"
   if [[ "$output" == *$'\n'* || ! "$output" =~ ^[0-9]+[[:space:]]+.+$ ]]; then
     log "pressure_sweep: size measurement returned invalid output for $path."
     return 1
