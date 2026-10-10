@@ -7,8 +7,8 @@ scratch_lock_acquire() {
   local caller="$1" script_path="${BASH_SOURCE[1]}"
   local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
 
-  # A caller may continue only when the inherited descriptor proves ownership
-  # of this state root's canonical lock file. Environment alone is not proof.
+  # This PID guard prevents accidental descendant reuse; same-user code can
+  # forge its environment, so the lock coordinates cooperating cleanup callers.
   if [[ "$SCRATCH_LOCK_FD" =~ ^[0-9]+$ && "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "${BASHPID:-$$}" ]] && \
       python3 "$helper" verify --fd "$SCRATCH_LOCK_FD" >/dev/null 2>&1; then
     return 0
