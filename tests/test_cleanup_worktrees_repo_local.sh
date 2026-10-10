@@ -9,6 +9,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLEANUP_SCRIPT="$REPO_ROOT/scripts/cleanup_worktrees.sh"
 
 TMP_ROOT=$(mktemp -d -t cleanup_wt_repo_local.XXXXXX)
+FAKE_BIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/lsof" <<SH
+#!/bin/sh
+echo "p1"
+echo "fcwd"
+echo "n$TMP_ROOT/unrelated-cwd"
+SH
+chmod +x "$FAKE_BIN/lsof"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -29,7 +38,7 @@ assert_contains() {
 
 run_dry_run() {
   local out_file="$1" repo_path="$2" min_age="${3:-0}"
-  env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+  env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
     bash "$CLEANUP_SCRIPT" --dry-run --repos "$repo_path" --min-age "$min_age" \
     >"$out_file" 2>&1
@@ -43,19 +52,27 @@ run_dry_run() {
 age_worktree_days_ago() {
   local wt_path="$1" days="$2"
   local ts gitdir
-  ts=$(date -v-"${days}"d +%Y%m%d%H%M)
+  if ts=$(date -v-"${days}"d +%Y%m%d%H%M 2>/dev/null); then :; else
+    ts=$(date -d "${days} days ago" +%Y%m%d%H%M)
+  fi
 
   # Content + the worktree root. -print0/xargs -0 so paths with spaces (the
   # "wt spaced path" fixture) survive.
   find "$wt_path" -name .git -prune -o -print0 2>/dev/null \
     | xargs -0 touch -t "$ts" 2>/dev/null || true
-  touch -t "$ts" "$wt_path/.git" "$wt_path"
+  touch -t "$ts" "$wt_path"
 
-  # Git admin dir behind the pointer.
-  gitdir=$(sed -n 's/^gitdir: *//p' "$wt_path/.git" 2>/dev/null | head -1)
-  if [[ -n "$gitdir" ]]; then
-    [[ "$gitdir" == /* ]] || gitdir="$wt_path/$gitdir"
-    find "$gitdir" -print0 2>/dev/null | xargs -0 touch -t "$ts" 2>/dev/null || true
+  # Backdate either a linked-worktree pointer and its git admin dir, or a
+  # standalone checkout's .git directory.
+  if [[ -f "$wt_path/.git" ]]; then
+    touch -t "$ts" "$wt_path/.git"
+    gitdir=$(sed -n 's/^gitdir: *//p' "$wt_path/.git" 2>/dev/null | head -1)
+    if [[ -n "$gitdir" ]]; then
+      [[ "$gitdir" == /* ]] || gitdir="$wt_path/$gitdir"
+      find "$gitdir" -print0 2>/dev/null | xargs -0 touch -t "$ts" 2>/dev/null || true
+    fi
+  elif [[ -d "$wt_path/.git" ]]; then
+    find "$wt_path/.git" -print0 2>/dev/null | xargs -0 touch -t "$ts" 2>/dev/null || true
   fi
 }
 
@@ -214,7 +231,14 @@ run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
     bash "$CLEANUP_SCRIPT" --dry-run >"$1" 2>&1
 }
 
-run_std "$TMP_ROOT/std.out" "/usr/bin:/bin"
+cat > "$FAKE_BIN/lsof" <<SH
+#!/bin/sh
+echo "p1"
+echo "fcwd"
+echo "n$STD_ROOT/r/busy"
+SH
+chmod +x "$FAKE_BIN/lsof"
+run_std "$TMP_ROOT/std.out" "$FAKE_BIN:/usr/bin:/bin"
 STD_OUT=$(cat "$TMP_ROOT/std.out")
 if grep -F '.worktrees/r/old | age=' <<<"$STD_OUT" | grep -qF 'ELIGIBLE  '; then
   record_pass "std root: 10d merged clean worktree eligible"
@@ -332,7 +356,14 @@ age_worktree_days_ago "$CUSTOM_WT_ROOT/custom_main_repo/wt-custom-old" 10
 CUSTOM_HOME="$TMP_ROOT/custom_home"
 mkdir -p "$CUSTOM_HOME"
 CUSTOM_OUT="$TMP_ROOT/custom_std.out"
-env -i HOME="$CUSTOM_HOME" PATH="/usr/bin:/bin" \
+cat > "$FAKE_BIN/lsof" <<'SH'
+#!/bin/sh
+echo 'p1'
+echo 'fcwd'
+echo 'n/var/empty'
+SH
+chmod +x "$FAKE_BIN/lsof"
+env -i HOME="$CUSTOM_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
   STANDARD_WORKTREE_ROOT="$CUSTOM_WT_ROOT" \
   HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
   bash "$CLEANUP_SCRIPT" --dry-run >"$CUSTOM_OUT" 2>&1
@@ -569,7 +600,9 @@ AG_DANGLING="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-dangling-re
 mkdir -p "$AG_DANGLING"
 echo "gitdir: /nonexistent/path/to/.git/worktrees/ag-dangling-repo" > "$AG_DANGLING/.git"
 echo "dangling content" > "$AG_DANGLING/file.txt"
-ts_old=$(date -v-20d +%Y%m%d%H%M)
+if ts_old=$(date -v-20d +%Y%m%d%H%M 2>/dev/null); then :; else
+  ts_old=$(date -d "20 days ago" +%Y%m%d%H%M)
+fi
 touch -t "$ts_old" "$AG_DANGLING" "$AG_DANGLING/.git" "$AG_DANGLING/file.txt"
 
 # 6. Antigravity orphan positively verified clean + ancestor of main -> ELIGIBLE
@@ -582,6 +615,25 @@ echo "hello main" > "$AG_ELIGIBLE/file.txt"
 git -C "$AG_ELIGIBLE" add file.txt
 git -C "$AG_ELIGIBLE" commit -m "initial commit on main" --quiet
 age_worktree_days_ago "$AG_ELIGIBLE" 20
+
+# 11. Registered Antigravity worktree must be recognized from porcelain paths.
+AG_REGISTERED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-registered"
+git -C "$PROBE_REPO" worktree add -b wt-ag-registered "$AG_REGISTERED" --quiet
+age_worktree_days_ago "$AG_REGISTERED" 20
+
+# 12. An ignored file-like directory with user data must not be treated as a cache.
+AG_IGNORED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-ignored-data"
+mkdir -p "$AG_IGNORED"
+git -C "$AG_IGNORED" init --quiet -b main
+git -C "$AG_IGNORED" config user.email "jleechan2015@users.noreply.github.com"
+git -C "$AG_IGNORED" config user.name "Tester"
+printf 'data.pyc\n' > "$AG_IGNORED/.gitignore"
+printf 'clean\n' > "$AG_IGNORED/file.txt"
+git -C "$AG_IGNORED" add .gitignore file.txt
+git -C "$AG_IGNORED" commit -m "initial commit" --quiet
+mkdir -p "$AG_IGNORED/data.pyc"
+printf 'keep this\n' > "$AG_IGNORED/data.pyc/notes.txt"
+age_worktree_days_ago "$AG_IGNORED" 20
 
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
@@ -626,7 +678,7 @@ git -C "$AG_TYPE_STAGED" add file.txt
 age_worktree_days_ago "$AG_TYPE_STAGED" 20
 
 OUT_PROBE="$TMP_ROOT/probe-test.out"
-env -i HOME="$TMP_ROOT/home" PATH="/usr/bin:/bin" \
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
   HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
   bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
   >"$OUT_PROBE" 2>&1
@@ -661,6 +713,9 @@ assert_not_contains "antigravity staged typechange T not eligible" "ELIGIBLE" "$
 
 assert_contains "antigravity clean ancestor eligible" "ag-clean-ancestor" "$OUT_PROBE_CONTENT"
 assert_contains "antigravity clean ancestor has ELIGIBLE" "antigravity  ELIGIBLE" "$(grep -F "ag-clean-ancestor" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "registered Antigravity worktree preserved active" "ag-registered | active" "$OUT_PROBE_CONTENT"
+assert_contains "ignored file-like directory preserved" "ag-ignored-data | ignored-data" "$OUT_PROBE_CONTENT"
+assert_not_contains "ignored file-like directory not eligible" "ELIGIBLE" "$(grep -F "ag-ignored-data" <<<"$OUT_PROBE_CONTENT" || true)"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

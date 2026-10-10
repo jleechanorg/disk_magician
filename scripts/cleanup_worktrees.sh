@@ -571,11 +571,21 @@ is_worktree_active() {
     local gitdir_line
     gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
     [[ -n "$gitdir_line" ]] || return 1
-    local git_dir main_repo
+    local git_dir main_repo worktrees listed_path listed_real line
     git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
     main_repo="${git_dir%/.git/worktrees/*}"
     [[ -d "$main_repo" ]] || return 1
-    git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qF "^worktree ${wt_path}$"
+    worktrees="$(git -C "$main_repo" worktree list --porcelain 2>/dev/null)" || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            worktree\ *)
+                listed_path="${line#worktree }"
+                listed_real="$(cd "$listed_path" 2>/dev/null && pwd -P || true)"
+                [[ -n "$listed_real" && "$listed_real" == "$wt_path" ]] && return 0
+                ;;
+        esac
+    done <<<"$worktrees"
+    return 1
 }
 
 process_antigravity_orphan() {
@@ -615,6 +625,12 @@ process_antigravity_orphan() {
                 return 0
             fi
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        if has_ignored_user_data "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
@@ -709,6 +725,11 @@ process_antigravity_orphan() {
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     else
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_ignored_user_data "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
         ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
         if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
             echo "SAFETY-SKIP $abs_subdir ($_safety_reason)"
