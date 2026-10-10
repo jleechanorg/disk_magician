@@ -76,6 +76,49 @@ has_ignored_user_data() {
     return 1
 }
 
+
+wrh_live_cwd_reason() {
+    local target=$1 out err rc=0 line pid= seen=0 live=0 path
+    command -v lsof >/dev/null 2>&1 || { echo cwd-unknown; return; }
+    err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { echo cwd-unknown; return; }
+    out=$(cd / && WRH_LIFECYCLE_CALLER_PID=$PPID lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
+    [[ -s $err ]] && rc=1
+    [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
+    [[ $rc == 0 && -n $out ]] || { echo cwd-unknown; return; }
+    while IFS= read -r line; do case $line in
+        p*) pid=${line#p}; [[ $pid =~ ^[0-9]+$ ]] || { echo cwd-unknown; return; } ;;
+        n*) [[ -n $pid ]] || { echo cwd-unknown; return; }; seen=1; path=${line#n}
+            [[ $pid == $$ || $pid == $PPID || ( $path != "$target" && $path != "$target"/* ) ]] || live=1 ;;
+        *) [[ -z $line ]] || { echo cwd-unknown; return; } ;;
+    esac; done <<<"$out"
+    [[ $seen == 1 ]] || echo cwd-unknown
+    [[ $live == 1 ]] && echo live-cwd
+}
+wrh_expand_path() {
+    case $1 in "~") echo "$HOME";; "~/"*) echo "$HOME/${1#~/}";; /*) echo "$1";; *) return 1;; esac
+}
+wrh_ao_skip_reason() {
+    local target=$1 config=${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml} lines kind dir root candidate
+    [[ -e $config ]] || { [[ -n ${DISK_MAGICIAN_AO_CONFIG+x} ]] && echo ao-config-unreadable; return; }
+    [[ -r $config ]] || { echo ao-config-unreadable; return; }
+    lines=$(awk '
+        function val(l,s) { sub(/^[^:]*:[[:space:]]*/,"",l); sub(/[[:space:]]+#.*$/,"",l); gsub(/["]/,"",l); s=sprintf("%c",39); gsub(s,"",l); sub(/[[:space:]]+$/,"",l); return l }
+        function trim(p) { sub(/\/+$/,"",p); return p }
+        /^[^[:space:]#]/ { proj=($0~/^projects:/); key="" }
+        /^worktreeDir:/ { def=trim(val($0)); next }
+        proj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key=$1; sub(/:$/,"",key); keys[++n]=key; next }
+        /^[[:space:]]+worktreeDir:/ { d=trim(val($0)); if(d!="") print "P " d; if(key!="") own[key]=1; next }
+        key!="" && /^    path:/ { p=val($0); split(p,a,"/"); base[key]=a[length(a)] }
+        END { if(def!="") { print "C " def; for(i=1;i<=n;i++) if(!own[keys[i]]) { print "P " def "/" keys[i]; if(base[keys[i]]!="") print "P " def "/" base[keys[i]] } } }
+    ' "$config" 2>/dev/null) || { echo ao-config-unreadable; return; }
+    candidate=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null) || { echo ao-config-unreadable; return; }
+    while read -r kind dir; do
+        [[ -n $kind && -n $dir ]] || continue
+        root=$(wrh_expand_path "$dir") || { echo ao-config-unreadable; return; }
+        root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null) || { echo ao-config-unreadable; return; }
+        case $kind in P) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; C) [[ ${candidate%/*} == "$root" ]] && { echo ao-owned; return; };; *) echo ao-config-unreadable; return;; esac
+    done <<<"$lines"
+}
 wrh_main() {
     local p main real branch
     p="$(python3 -c '
@@ -99,6 +142,11 @@ print(v)
         wrh_log "kept $p: not a registered linked worktree"
         return 0
     fi
+    local guard_reason
+    guard_reason="$(wrh_live_cwd_reason "$real")"
+    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
+    guard_reason="$(wrh_ao_skip_reason "$real")"
+    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
     local status
     status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
         { wrh_log "kept $p: git status failed"; return 0; }

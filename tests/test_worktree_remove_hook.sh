@@ -23,6 +23,22 @@ mkdir -p "$HOME"
 unset STANDARD_WORKTREE_ROOT
 export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 LOG="$HOME/.disk_magician_state/worktree_guard.log"
+MOCK_BIN="$TMPROOT/mock-bin"
+mkdir -p "$MOCK_BIN"
+cat >"$MOCK_BIN/lsof" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${FAKE_LSOF_FAIL:-0}" == 1 ]] && exit 1
+if [[ "${FAKE_LSOF_MODE:-}" == caller ]]; then
+  printf 'p%s\nn%s\n' "$WRH_LIFECYCLE_CALLER_PID" "$FAKE_LSOF_CWD"
+else
+  cat "${FAKE_LSOF_FIXTURE:?}"
+fi
+MOCK
+chmod +x "$MOCK_BIN/lsof"
+export PATH="$MOCK_BIN:$PATH"
+FAKE_LSOF_FIXTURE="$TMPROOT/lsof.out"
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_FIXTURE
 
 git init -q --bare -b main "$TMPROOT/origin.git"
 git clone -q "$TMPROOT/origin.git" "$TMPROOT/myrepo" 2>/dev/null
@@ -204,6 +220,72 @@ mkdir -p "$WTROOT/m/data.pyc"; echo y >"$WTROOT/m/data.pyc/keep.db"
 run_hook "$(json "$WTROOT/m")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 [[ -f "$WTROOT/m/data.pyc/keep.db" ]] && ok "data.pyc directory preserved" || bad "data.pyc directory removed"
+
+echo "== case 17: other process cwd in clean pushed worktree - preserved =="
+add_wt n worktree-n
+printf 'p999999\nn%s/subdir\n' "$WTROOT/n" >"$FAKE_LSOF_FIXTURE"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/n")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -d "$WTROOT/n" ]] && ok "active-cwd worktree kept" || bad "active-cwd worktree removed"
+branch_exists worktree-n && ok "active-cwd branch kept" || bad "active-cwd branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "active-cwd log line appended" || bad "active-cwd no log line"
+tail -n 1 "$LOG" | grep -q "live-cwd" && ok "active-cwd reason logged" || bad "active-cwd reason missing"
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+echo "== case 18: AO-configured worktreeDir - preserved =="
+mkdir -p "$HOME/.worktrees/ao-proj"
+cat >"$HOME/agent-orchestrator.yaml" <<YAML
+worktreeDir: "$HOME/.worktrees"
+projects:
+  ao-project:
+    path: /tmp/ao-project
+    worktreeDir: "$HOME/.worktrees/ao-proj"
+YAML
+export DISK_MAGICIAN_AO_CONFIG="$HOME/agent-orchestrator.yaml"
+add_wt ao worktree-ao "$HOME/.worktrees/ao-proj/ao"
+before="$(log_lines)"
+run_hook "$(json "$HOME/.worktrees/ao-proj/ao")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -d "$HOME/.worktrees/ao-proj/ao" ]] && ok "AO-owned worktree kept" || bad "AO-owned worktree removed"
+branch_exists worktree-ao && ok "AO-owned branch kept" || bad "AO-owned branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "AO-owned log line appended" || bad "AO-owned no log line"
+tail -n 1 "$LOG" | grep -q "ao-owned" && ok "AO-owned reason logged" || bad "AO-owned reason missing"
+
+echo "== case 19: lsof failure makes cwd unknown - preserves candidate =="
+add_wt p worktree-p
+export FAKE_LSOF_FAIL=1
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/p")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -d "$WTROOT/p" ]] && ok "unknown-cwd worktree kept" || bad "unknown-cwd worktree removed"
+branch_exists worktree-p && ok "unknown-cwd branch kept" || bad "unknown-cwd branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "unknown-cwd log line appended" || bad "unknown-cwd no log line"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unknown-cwd reason logged" || bad "unknown-cwd reason missing"
+unset FAKE_LSOF_FAIL
+
+echo "== case 20: explicit missing AO config makes ownership unknown - preserves candidate =="
+add_wt q worktree-q
+export DISK_MAGICIAN_AO_CONFIG="$HOME/missing-agent-orchestrator.yaml"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/q")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -d "$WTROOT/q" ]] && ok "unknown-AO worktree kept" || bad "unknown-AO worktree removed"
+branch_exists worktree-q && ok "unknown-AO branch kept" || bad "unknown-AO branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "unknown-AO log line appended" || bad "unknown-AO no log line"
+tail -n 1 "$LOG" | grep -q "ao-config-unreadable" && ok "unknown-AO reason logged" || bad "unknown-AO reason missing"
+unset DISK_MAGICIAN_AO_CONFIG
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+
+echo "== case 21: lifecycle caller cwd in target is exempted =="
+add_wt r worktree-r
+export FAKE_LSOF_MODE=caller FAKE_LSOF_CWD="$WTROOT/r/subdir"
+run_hook "$(json "$WTROOT/r")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/r" ]] && ok "caller-cwd worktree removed" || bad "caller-cwd worktree kept"
+branch_exists worktree-r && bad "caller-cwd branch kept" || ok "caller-cwd branch deleted"
+unset FAKE_LSOF_MODE FAKE_LSOF_CWD
 echo "PASS=$PASS FAIL=$FAIL"
 echo
 echo "PASS=$PASS FAIL=$FAIL"
