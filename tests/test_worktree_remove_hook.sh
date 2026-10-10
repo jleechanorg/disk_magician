@@ -220,21 +220,38 @@ mkdir -p "$WTROOT/m/data.pyc"; echo y >"$WTROOT/m/data.pyc/keep.db"
 run_hook "$(json "$WTROOT/m")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 [[ -f "$WTROOT/m/data.pyc/keep.db" ]] && ok "data.pyc directory preserved" || bad "data.pyc directory removed"
-
-
-echo "== case 17: other process cwd in clean pushed worktree - preserved =="
+echo "== case 17: ignored .testmondata database directory -> preserved =="
 add_wt n worktree-n
-printf 'p999999\nn%s/subdir\n' "$WTROOT/n" >"$FAKE_LSOF_FIXTURE"
-before="$(log_lines)"
+printf '.testmondata/\n' >"$WTROOT/n/.gitignore"
+git -C "$WTROOT/n" add .gitignore
+git -C "$WTROOT/n" commit -q -m ignore
+mkdir -p "$WTROOT/n/.testmondata"; echo db >"$WTROOT/n/.testmondata/notes.db"
 run_hook "$(json "$WTROOT/n")"; rc=$?
 assert_eq "$rc" "0" "exit code"
-[[ -d "$WTROOT/n" ]] && ok "active-cwd worktree kept" || bad "active-cwd worktree removed"
-branch_exists worktree-n && ok "active-cwd branch kept" || bad "active-cwd branch deleted"
+[[ -f "$WTROOT/n/.testmondata/notes.db" ]] && ok ".testmondata directory preserved" || bad ".testmondata directory removed"
+
+echo "== case 18: ignored *.egg-info directory -> preserved =="
+add_wt o worktree-o
+printf '*.egg-info\n' >"$WTROOT/o/.gitignore"
+git -C "$WTROOT/o" add .gitignore
+git -C "$WTROOT/o" commit -q -m ignore
+mkdir -p "$WTROOT/o/package.egg-info"; echo user >"$WTROOT/o/package.egg-info/notes.db"
+run_hook "$(json "$WTROOT/o")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/o/package.egg-info/notes.db" ]] && ok "egg-info directory preserved" || bad "egg-info directory removed"
+echo "== case 19: other process cwd in clean pushed worktree - preserved =="
+add_wt u worktree-u
+printf 'p999999\nn%s/subdir\n' "$WTROOT/u" >"$FAKE_LSOF_FIXTURE"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/u")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -d "$WTROOT/u" ]] && ok "active-cwd worktree kept" || bad "active-cwd worktree removed"
+branch_exists worktree-u && ok "active-cwd branch kept" || bad "active-cwd branch deleted"
 [[ "$(log_lines)" -gt "$before" ]] && ok "active-cwd log line appended" || bad "active-cwd no log line"
 tail -n 1 "$LOG" | grep -q "live-cwd" && ok "active-cwd reason logged" || bad "active-cwd reason missing"
 printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
-echo "== case 18: AO-configured worktreeDir - preserved =="
+echo "== case 20: AO-configured worktreeDir - preserved =="
 mkdir -p "$HOME/.worktrees/ao-proj"
 cat >"$HOME/agent-orchestrator.yaml" <<YAML
 worktreeDir: "$HOME/.worktrees"
@@ -253,7 +270,7 @@ branch_exists worktree-ao && ok "AO-owned branch kept" || bad "AO-owned branch d
 [[ "$(log_lines)" -gt "$before" ]] && ok "AO-owned log line appended" || bad "AO-owned no log line"
 tail -n 1 "$LOG" | grep -q "ao-owned" && ok "AO-owned reason logged" || bad "AO-owned reason missing"
 
-echo "== case 19: lsof failure makes cwd unknown - preserves candidate =="
+echo "== case 21: lsof failure makes cwd unknown - preserves candidate =="
 add_wt p worktree-p
 export FAKE_LSOF_FAIL=1
 before="$(log_lines)"
@@ -265,7 +282,7 @@ branch_exists worktree-p && ok "unknown-cwd branch kept" || bad "unknown-cwd bra
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unknown-cwd reason logged" || bad "unknown-cwd reason missing"
 unset FAKE_LSOF_FAIL
 
-echo "== case 20: explicit missing AO config makes ownership unknown - preserves candidate =="
+echo "== case 22: explicit missing AO config makes ownership unknown - preserves candidate =="
 add_wt q worktree-q
 export DISK_MAGICIAN_AO_CONFIG="$HOME/missing-agent-orchestrator.yaml"
 before="$(log_lines)"
@@ -279,7 +296,7 @@ unset DISK_MAGICIAN_AO_CONFIG
 printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 
-echo "== case 21: lifecycle caller cwd in target is exempted =="
+echo "== case 23: lifecycle caller cwd in target is exempted =="
 add_wt r worktree-r
 export FAKE_LSOF_MODE=caller FAKE_LSOF_CWD="$WTROOT/r/subdir"
 run_hook "$(json "$WTROOT/r")"; rc=$?
@@ -287,26 +304,5 @@ assert_eq "$rc" "0" "exit code"
 [[ ! -e "$WTROOT/r" ]] && ok "caller-cwd worktree removed" || bad "caller-cwd worktree kept"
 branch_exists worktree-r && bad "caller-cwd branch kept" || ok "caller-cwd branch deleted"
 unset FAKE_LSOF_MODE FAKE_LSOF_CWD
-
-echo "== case 22: ignored .testmondata database directory -> preserved =="
-add_wt s worktree-s
-printf '.testmondata/\n' >"$WTROOT/s/.gitignore"
-git -C "$WTROOT/s" add .gitignore
-git -C "$WTROOT/s" commit -q -m ignore
-mkdir -p "$WTROOT/s/.testmondata"; echo db >"$WTROOT/s/.testmondata/notes.db"
-run_hook "$(json "$WTROOT/s")"; rc=$?
-assert_eq "$rc" "0" "exit code"
-[[ -f "$WTROOT/s/.testmondata/notes.db" ]] && ok ".testmondata directory preserved" || bad ".testmondata directory removed"
-
-echo "== case 23: ignored *.egg-info directory -> preserved =="
-add_wt t worktree-t
-printf '*.egg-info\n' >"$WTROOT/t/.gitignore"
-git -C "$WTROOT/t" add .gitignore
-git -C "$WTROOT/t" commit -q -m ignore
-mkdir -p "$WTROOT/t/package.egg-info"; echo user >"$WTROOT/t/package.egg-info/notes.db"
-run_hook "$(json "$WTROOT/t")"; rc=$?
-assert_eq "$rc" "0" "exit code"
-[[ -f "$WTROOT/t/package.egg-info/notes.db" ]] && ok "egg-info directory preserved" || bad "egg-info directory removed"
-
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
