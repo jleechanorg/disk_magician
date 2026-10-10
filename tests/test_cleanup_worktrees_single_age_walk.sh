@@ -128,11 +128,11 @@ esac
 SH
   cat > "$BIN/git" <<'SH'
 #!/usr/bin/env bash
-# Exercise the existing active-orphan short circuit verbatim: it currently
-# uses grep -F with literal ^/$ delimiters. Only this dedicated probe gets
-# that response; repo-local discovery and every other git operation are real.
+# Exercise the active-orphan short circuit with valid porcelain output. Only
+# this dedicated probe gets that response; repo-local discovery and every
+# other git operation are real.
 if [[ "$*" == "-C $FIXTURE/active-main worktree list --porcelain" ]]; then
-  printf '^worktree %s$\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
+  printf 'worktree %s\n\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
   exit 0
 fi
 exec "$REAL_GIT" "$@"
@@ -152,6 +152,11 @@ add_wt() {
 add_orphan() {
   mkdir -p "$AG/$1"
   printf 'orphan content\n' > "$AG/$1/content"
+  "$REAL_GIT" -C "$AG/$1" init -q -b main
+  "$REAL_GIT" -C "$AG/$1" config user.name 'Fixture User'
+  "$REAL_GIT" -C "$AG/$1" config user.email fixture@users.noreply.github.com
+  "$REAL_GIT" -C "$AG/$1" add content
+  "$REAL_GIT" -C "$AG/$1" commit -q -m base
   map_age "$AG/$1" "$2"
   expect_calls "$AG/$1" 1
 }
