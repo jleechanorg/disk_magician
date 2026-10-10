@@ -42,6 +42,8 @@ elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
 else
   cat "${FAKE_LSOF_FIXTURE:?}"
 fi
+[[ -n "${FAKE_LSOF_STDERR:-}" ]] && printf '%s\n' "$FAKE_LSOF_STDERR" >&2
+true
 MOCK
 chmod +x "$MOCK_BIN/lsof"
 export PATH="$MOCK_BIN:$PATH"
@@ -402,16 +404,19 @@ run_hook "$(json "$WTROOT/x")"; rc=$?
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "relative-path record unknown reason logged" || bad "relative-path record unknown reason missing"
 
 printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
-echo "== case 31: nested worktree under default AO root is preserved =="
+echo "== case 31: default AO root owns direct children, not nested repo worktrees =="
 cat >"$HOME/default-ao.yaml" <<YAML
 worktreeDir: "$HOME/.worktrees"
 YAML
 export DISK_MAGICIAN_AO_CONFIG="$HOME/default-ao.yaml"
+add_wt default-direct worktree-default-direct "$HOME/.worktrees/session-direct"
+run_hook "$(json "$HOME/.worktrees/session-direct")"; rc=$?
+[[ -d "$HOME/.worktrees/session-direct" ]] && ok "direct child of default AO root kept" || bad "direct child of default AO root removed"
+tail -n 1 "$LOG" | grep -q "ao-owned" && ok "direct-child AO reason logged" || bad "direct-child AO reason missing"
 mkdir -p "$HOME/.worktrees/deep/repo"
 add_wt default-deep worktree-default-deep "$HOME/.worktrees/deep/repo/session"
 run_hook "$(json "$HOME/.worktrees/deep/repo/session")"; rc=$?
-[[ -d "$HOME/.worktrees/deep/repo/session" ]] && ok "nested default AO worktree kept" || bad "nested default AO worktree removed"
-tail -n 1 "$LOG" | grep -q "ao-owned" && ok "nested default AO reason logged" || bad "nested default AO reason missing"
+[[ ! -e "$HOME/.worktrees/deep/repo/session" ]] && ok "nested repo worktree remains eligible" || bad "nested repo worktree incorrectly protected"
 echo "== case 32: AO path with trailing space is preserved exactly =="
 mkdir -p "$HOME/.worktrees/space-root "
 cat >"$HOME/space-ao.yaml" <<YAML
@@ -425,10 +430,6 @@ tail -n 1 "$LOG" | grep -Eq "ao-owned|ao-config-unreadable" && ok "trailing-spac
 result="$(TEST_AO_ROOT="$HOME/.worktrees/space-root " bash -c '''source "$1"; ao_worktree_dirs() { printf "P %s\n" "$TEST_AO_ROOT"; }; wrh_ao_skip_reason "$2"''' _ "$SCRIPT" "$HOME/.worktrees/space-root /session")"
 [[ "$result" == "ao-owned" ]] && ok "consumer preserves exact trailing-space record" || bad "consumer altered trailing-space record"
 unset DISK_MAGICIAN_AO_CONFIG
-
-echo "PASS=$PASS FAIL=$FAIL"
-[[ "$FAIL" -eq 0 ]]
-
 
 printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
 echo "== case 29: recently touched worktree is protected by 7-day floor =="
@@ -448,3 +449,31 @@ chmod +x "$MOCK_BIN/find"
 run_hook "$(json "$WTROOT/unknown")"; rc=$?
 [[ -d "$WTROOT/unknown" ]] && ok "unmeasurable worktree kept" || bad "unmeasurable worktree removed"
 rm -f "$MOCK_BIN/find"
+
+echo "== case 33: implicit AO data worktree roots stay protected without config =="
+unset DISK_MAGICIAN_AO_CONFIG
+for suffix in ao .ao; do
+    target="$HOME/.worktrees/$suffix/data/worktrees/repo/session"
+    mkdir -p "$(dirname "$target")"
+    add_wt "implicit-$suffix" "worktree-implicit-$suffix" "$target"
+    run_hook "$(json "$target")"; rc=$?
+    [[ -d "$target" ]] && ok "implicit $suffix AO worktree kept" || bad "implicit $suffix AO worktree removed"
+    tail -n 1 "$LOG" | grep -q "ao-owned" && ok "implicit $suffix AO reason logged" || bad "implicit $suffix AO reason missing"
+done
+
+echo "== case 34: lsof warning with valid cwd rows fails closed =="
+add_wt lsof-warning worktree-lsof-warning
+printf 'p999999\nn%s/subdir\n' "$WTROOT/lsof-warning" >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR='lsof warning: output may be incomplete'
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/lsof-warning")"; rc=$?
+assert_eq "$rc" "0" "warning lsof exit code"
+[[ -d "$WTROOT/lsof-warning" ]] && ok "warning lsof worktree kept" || bad "warning lsof worktree removed"
+branch_exists worktree-lsof-warning && ok "warning lsof branch kept" || bad "warning lsof branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "warning lsof log appended" || bad "warning lsof no log line"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "warning lsof visibility remains unknown" || bad "warning lsof visibility was trusted"
+unset FAKE_LSOF_STDERR
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+echo "PASS=$PASS FAIL=$FAIL"
+[[ "$FAIL" -eq 0 ]]
