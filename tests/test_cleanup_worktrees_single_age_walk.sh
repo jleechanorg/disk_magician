@@ -128,11 +128,11 @@ esac
 SH
   cat > "$BIN/git" <<'SH'
 #!/usr/bin/env bash
-# Exercise the existing active-orphan short circuit verbatim: it currently
-# uses grep -F with literal ^/$ delimiters. Only this dedicated probe gets
-# that response; repo-local discovery and every other git operation are real.
+# Exercise the active-orphan short circuit with valid porcelain output. Only
+# this dedicated probe gets that response; repo-local discovery and every
+# other git operation are real.
 if [[ "$*" == "-C $FIXTURE/active-main worktree list --porcelain" ]]; then
-  printf 'worktree %s\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
+  printf 'worktree %s\n\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
   exit 0
 fi
 exec "$REAL_GIT" "$@"
@@ -152,6 +152,11 @@ add_wt() {
 add_orphan() {
   mkdir -p "$AG/$1"
   printf 'orphan content\n' > "$AG/$1/content"
+  "$REAL_GIT" -C "$AG/$1" init -q -b main
+  "$REAL_GIT" -C "$AG/$1" config user.name 'Fixture User'
+  "$REAL_GIT" -C "$AG/$1" config user.email fixture@users.noreply.github.com
+  "$REAL_GIT" -C "$AG/$1" add content
+  "$REAL_GIT" -C "$AG/$1" commit -q -m base
   map_age "$AG/$1" "$2"
   expect_calls "$AG/$1" 1
 }
@@ -203,6 +208,7 @@ mixed_fixture() {
   printf 'projects:\n  fixture:\n    worktreeDir: %s\n' "${STD_SKIP%/*}" > "$HOME_FIX/.hermes/agent-orchestrator.yaml"
   add_orphan young 2
   add_orphan old 10
+  expect_eligible "$AG/old"
 }
 
 case_t1() {
@@ -321,7 +327,7 @@ case_t6() {
   init_fixture t6
   add_orphan exact-floor 7
   run_cleanup branch "$F/out"
-  require ledger_has "$F/out" PRESERVE "$AG/exact-floor | not-git"
+  require ledger_has "$F/out" ELIGIBLE "$AG/exact-floor "
   require excludes "$F/out" "$AG/exact-floor | young"
   require test ! -s "$F/age.calls"
   require test "$(cut -f 1 "$F/predicate.calls")" = "$AG/exact-floor"
@@ -341,15 +347,13 @@ for filename in sys.argv[1:]:
     with path.open() as source, path.with_suffix('.normalized').open('w') as target:
         for line in source:
             line = re.sub(r' [|] age=\S+ size=\S+', '', line)
-            if '/antigravity/worktrees/project/old ' in line: continue
-            if line.startswith(('Antigravity:', 'Reclaimable:')): continue
             line = re.sub(r' [(](?:age=[^)]*|< [0-9]+ days)[)]', '', line)
             target.write(line)
 PY_NORMALIZE
   require diff -u "$F/baseline.normalized" "$F/branch.normalized"
   require contains "$F/branch.out" 'Repo-local:  4 eligible, 7 preserved.'
-  require contains "$F/branch.out" 'Antigravity: 0 eligible orphan(s), 2 active preserved.'
-  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (4096 KB)'
+  require contains "$F/branch.out" 'Antigravity: 1 eligible orphan(s), 1 active preserved.'
+  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (5120 KB)'
   require contains "$F/gh.calls" '--head wt-ahead'
   require contains "$F/gh.calls" '--head wt-squash'
   require contains "$F/branch.out" 'wt-prunable | prunable-unknown'
@@ -387,6 +391,7 @@ case_t9() {
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
   expect_eligible "$AUTO"
   add_orphan old 10
+  expect_eligible "$AG/old"
   add_wt wt-young "$WT/wt-young" 2
   add_wt wt-dirty "$WT/wt-dirty" 10
   printf 'dirty\n' >> "$WT/wt-dirty/README.md"
@@ -420,7 +425,7 @@ case_t9() {
     fi
   done < "$F/before.paths"
   require contains "$F/out" 'Repo-local:  3 eligible, 10 preserved.'
-  require contains "$F/out" 'Antigravity: 0 eligible orphan(s), 7 active preserved.'
+  require contains "$F/out" 'Antigravity: 1 eligible orphan(s), 6 active preserved.'
 }
 
 # GraphQL is stubbed only at the external gh boundary. Repositories, worktree
