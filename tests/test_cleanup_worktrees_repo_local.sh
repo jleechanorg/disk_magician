@@ -621,18 +621,18 @@ AG_REGISTERED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-registere
 git -C "$PROBE_REPO" worktree add -b wt-ag-registered "$AG_REGISTERED" --quiet
 age_worktree_days_ago "$AG_REGISTERED" 20
 
-# 12. An ignored file-like directory with user data must not be treated as a cache.
+# 12. An ignored .testmondata directory with user data must not be treated as a cache.
 AG_IGNORED="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-ignored-data"
 mkdir -p "$AG_IGNORED"
 git -C "$AG_IGNORED" init --quiet -b main
 git -C "$AG_IGNORED" config user.email "jleechan2015@users.noreply.github.com"
 git -C "$AG_IGNORED" config user.name "Tester"
-printf 'data.pyc\n' > "$AG_IGNORED/.gitignore"
+printf '.testmondata/\n' > "$AG_IGNORED/.gitignore"
 printf 'clean\n' > "$AG_IGNORED/file.txt"
 git -C "$AG_IGNORED" add .gitignore file.txt
 git -C "$AG_IGNORED" commit -m "initial commit" --quiet
-mkdir -p "$AG_IGNORED/data.pyc"
-printf 'keep this\n' > "$AG_IGNORED/data.pyc/notes.txt"
+mkdir -p "$AG_IGNORED/.testmondata"
+printf 'keep this\n' > "$AG_IGNORED/.testmondata/notes.db"
 age_worktree_days_ago "$AG_IGNORED" 20
 
 # Antigravity candidates must remain protected when hidden state exists.

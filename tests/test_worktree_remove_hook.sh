@@ -221,6 +221,7 @@ run_hook "$(json "$WTROOT/m")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 [[ -f "$WTROOT/m/data.pyc/keep.db" ]] && ok "data.pyc directory preserved" || bad "data.pyc directory removed"
 
+
 echo "== case 17: other process cwd in clean pushed worktree - preserved =="
 add_wt n worktree-n
 printf 'p999999\nn%s/subdir\n' "$WTROOT/n" >"$FAKE_LSOF_FIXTURE"
@@ -286,7 +287,26 @@ assert_eq "$rc" "0" "exit code"
 [[ ! -e "$WTROOT/r" ]] && ok "caller-cwd worktree removed" || bad "caller-cwd worktree kept"
 branch_exists worktree-r && bad "caller-cwd branch kept" || ok "caller-cwd branch deleted"
 unset FAKE_LSOF_MODE FAKE_LSOF_CWD
-echo "PASS=$PASS FAIL=$FAIL"
-echo
+
+echo "== case 22: ignored .testmondata database directory -> preserved =="
+add_wt s worktree-s
+printf '.testmondata/\n' >"$WTROOT/s/.gitignore"
+git -C "$WTROOT/s" add .gitignore
+git -C "$WTROOT/s" commit -q -m ignore
+mkdir -p "$WTROOT/s/.testmondata"; echo db >"$WTROOT/s/.testmondata/notes.db"
+run_hook "$(json "$WTROOT/s")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/s/.testmondata/notes.db" ]] && ok ".testmondata directory preserved" || bad ".testmondata directory removed"
+
+echo "== case 23: ignored *.egg-info directory -> preserved =="
+add_wt t worktree-t
+printf '*.egg-info\n' >"$WTROOT/t/.gitignore"
+git -C "$WTROOT/t" add .gitignore
+git -C "$WTROOT/t" commit -q -m ignore
+mkdir -p "$WTROOT/t/package.egg-info"; echo user >"$WTROOT/t/package.egg-info/notes.db"
+run_hook "$(json "$WTROOT/t")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/t/package.egg-info/notes.db" ]] && ok "egg-info directory preserved" || bad "egg-info directory removed"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
