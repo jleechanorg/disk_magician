@@ -1,11 +1,6 @@
 # shellcheck shell=bash
 # ao_worktree_config.sh — parse and project AO ownership using a YAML parser.
 # Call ao_worktree_dirs <yaml>; prints P <dir> / C <dir> records on success.
-_ao_worktree_config_valid_string() {
-    local value="$1"
-    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]]
-}
-
 ao_worktree_dirs() {
     local config="$1"
     [[ -f "$config" && -r "$config" ]] || return 1
@@ -37,7 +32,7 @@ try:
     for key, project in projects.items():
         if not isinstance(key, str) or "\n" in key or "\r" in key or not isinstance(project, dict):
             fail()
-        if "path" in project and not isinstance(project["path"], str):
+        if "path" in project and (not isinstance(project["path"], str) or "\n" in project["path"] or "\r" in project["path"]):
             fail()
         if "worktreeDir" in project:
             directory = path_value(project["worktreeDir"])
@@ -56,7 +51,7 @@ PY
         ruby -ryaml -e '
           def fail_parse; exit 1; end
           def path_value(value)
-            fail_parse unless value.is_a?(String) && !value.include?("\\n") && !value.include?("\\r")
+            fail_parse unless value.is_a?(String) && !value.include?("\n") && !value.include?("\r")
             normalized = value.sub(%r{/+$}, "")
             normalized.empty? && value.start_with?("/") ? "/" : normalized
           end
@@ -68,8 +63,8 @@ PY
             fail_parse unless projects.is_a?(Hash)
             puts "C #{default}" unless default.empty?
             projects.each do |key, project|
-              fail_parse unless key.is_a?(String) && !key.include?("\\n") && !key.include?("\\r") && project.is_a?(Hash)
-              fail_parse if project.key?("path") && !project["path"].is_a?(String)
+              fail_parse unless key.is_a?(String) && !key.include?("\n") && !key.include?("\r") && project.is_a?(Hash)
+              fail_parse if project.key?("path") && (!project["path"].is_a?(String) || project["path"].include?("\n") || project["path"].include?("\r"))
               if project.key?("worktreeDir")
                 directory = path_value(project["worktreeDir"])
                 puts "P #{directory}" unless directory.empty?
