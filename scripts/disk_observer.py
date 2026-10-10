@@ -143,7 +143,7 @@ def _colima_datadisk_paths(root: Path, max_depth: int = 6, max_entries: int = 40
             path = base / name
             if path.is_symlink() or not path.is_file():
                 continue
-            if name in {"disk", "diffdisk"} or base.name == "disks":
+            if name in {"disk", "diffdisk", "datadisk"} or base.name == "disks":
                 paths.append(path)
     return sorted(set(paths)), True
 

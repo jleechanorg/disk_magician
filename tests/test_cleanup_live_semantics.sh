@@ -17,6 +17,7 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 CALLS="$TMP/calls"; : > "$CALLS"
 OLD="com.apple.TimeMachine.2020-01-01-000000.local"
 NEW="com.apple.TimeMachine.$(date '+%Y-%m-%d-%H%M%S').local"
+NOW_EPOCH="$(date '+%s')"
 cat > "$BIN/tmutil" <<EOS
 #!/usr/bin/env bash
 case "\$1" in
@@ -28,6 +29,21 @@ EOS
 cat > "$BIN/diskutil" <<'EOS'
 #!/usr/bin/env bash
 exit 1
+EOS
+# cleanup_apfs_snapshots.sh intentionally uses macOS date(1). Keep this
+# fixture deterministic on non-macOS development hosts while preserving its
+# old-versus-recent snapshot assertions.
+cat > "$BIN/date" <<EOS
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-j" ]]; then
+  if [[ "\${4:-}" == "2020-01-01 00:00:00" ]]; then
+    printf '%s\n' 1577836800
+  else
+    printf '%s\n' "$NOW_EPOCH"
+  fi
+else
+  /bin/date "\$@"
+fi
 EOS
 cat > "$BIN/docker" <<EOS
 #!/usr/bin/env bash
