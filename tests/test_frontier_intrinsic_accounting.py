@@ -11,6 +11,7 @@ from unittest import mock
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 import disk_frontier_scan as frontier  # noqa: E402
+import render_topdown_ledger as renderer  # noqa: E402
 
 GIB_KB = 1024 * 1024
 
@@ -437,7 +438,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                     "reason": "inventory_permission_denied",
                 },
                 {"path": "/fixture/data/gone", "reason": "inventory_path_disappeared"},
-                {"path": "/fixture/data/gone2.db-wal", "reason": "lstat_failed", "errno": errno.ENOENT},
+                {"path": "/fixture/data/nested/gone2.db-wal", "depth": 2, "reason": "lstat_failed", "errno": errno.ENOENT},
                 {"path": "/fixture/home", "reason": "cross_device_boundary"},
             ],
             deduped=[], warnings=[], nodes_processed=3,
@@ -491,6 +492,26 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                 self.args(),
             )
 
+    def report_after_reappearance(self, scanner, item):
+        def reappeared(path):
+            if path == item["path"]:
+                return SimpleNamespace(st_dev=1)
+            return self.fake_lstat(path)
+
+        with mock.patch.object(frontier.os, "lstat", side_effect=reappeared), \
+             mock.patch.object(frontier.os.path, "realpath", side_effect=lambda path: path), \
+             mock.patch.object(frontier.os, "scandir", side_effect=self.fake_scandir):
+            self.assertEqual(frontier.os.lstat(item["path"]).st_dev, 1)
+            return frontier.build_report(
+                scanner,
+                {"total_kb": 20 * GIB_KB, "used_kb": 10 * GIB_KB, "free_kb": 10 * GIB_KB},
+                [],
+                {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+                 "local_snapshots": [], "local_snapshots_count": 0},
+                1.0,
+                self.args(),
+            )
+
     def test_privileged_persistent_gates_complete_with_signed_adjustment(self):
         report = self.report(self.scanner())
 
@@ -505,6 +526,123 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertTrue(report["coverage_envelope"]["complete"])
         self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
         self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 1)
+
+    def test_nested_lstat_enoent_is_opaque_with_accepted_root_measurement(self):
+        scanner = self.scanner()
+        scanner.measured = {"/fixture/data/nested/known.db": 12 * GIB_KB}
+        scanner.inventory_buckets = None
+        item = next(item for item in scanner.frontier_unfinished
+                    if item.get("path", "").endswith("gone2.db-wal"))
+        report = self.report_after_reappearance(scanner, item)
+
+        gate = next(gate for gate in report["opaque_intrinsic_gates"]
+                    if gate["path"] == item["path"])
+        root = report["top_level_ledger"][0]
+        self.assertEqual(report["mode"], "complete")
+        self.assertEqual(gate["verification"], "scan_lstat_enoent")
+        self.assertFalse(gate["reclaimable"])
+        self.assertEqual(root["status"], "measured_with_opaque_gates")
+        self.assertEqual(root["measured_kb"], 12 * GIB_KB)
+        self.assertTrue(renderer.complete_coverage_envelope(report))
+
+    def test_nested_lstat_enoent_without_root_measurement_stays_partial(self):
+        scanner = self.scanner()
+        scanner.measured = {}
+        scanner.inventory_buckets = None
+        scanner.level1_paths = ["/fixture/data"]
+        item = {
+            "path": "/fixture/data/nested/gone2.db-wal",
+            "depth": 2,
+            "reason": "lstat_failed",
+            "errno": errno.ENOENT,
+        }
+        scanner.frontier_unfinished = [item]
+        report = self.report_after_reappearance(scanner, item)
+
+        root = report["top_level_ledger"][0]
+        self.assertEqual(report["mode"], "partial")
+        self.assertIn(item, report["frontier_unfinished"])
+        self.assertNotIn(item["path"], [gate["path"] for gate in report["opaque_intrinsic_gates"]])
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(root["status"], "unfinished")
+        self.assertIsNone(root["measured_kb"])
+        self.assertFalse(renderer.complete_coverage_envelope(report))
+
+    def test_nested_enoent_preserves_accepted_zero_measurement(self):
+        scanner = self.scanner()
+        scanner.measured = {"/fixture/data/nested/known-empty": 0}
+        scanner.inventory_buckets = None
+        item = next(item for item in scanner.frontier_unfinished
+                    if item.get("path", "").endswith("gone2.db-wal"))
+        report = self.report_after_reappearance(scanner, item)
+
+        root = report["top_level_ledger"][0]
+        self.assertEqual(report["mode"], "complete")
+        self.assertEqual(root["status"], "measured_with_opaque_gates")
+        self.assertEqual(root["measured_kb"], 0)
+        self.assertTrue(renderer.complete_coverage_envelope(report))
+
+    def test_top_level_lstat_enoent_stays_partial_if_path_reappears(self):
+        scanner = self.scanner()
+        item = {
+            "path": "/fixture/data",
+            "depth": 1,
+            "reason": "lstat_failed",
+            "errno": errno.ENOENT,
+        }
+        scanner.measured = {}
+        scanner.inventory_buckets = []
+        scanner.level1_paths = [item["path"]]
+        scanner.frontier_unfinished = [item]
+
+        def reappeared(path):
+            if path == item["path"]:
+                return SimpleNamespace(st_dev=1)
+            return self.fake_lstat(path)
+
+        with mock.patch.object(frontier.os, "lstat", side_effect=reappeared), \
+             mock.patch.object(frontier.os.path, "realpath", side_effect=lambda path: path), \
+             mock.patch.object(frontier.os, "scandir", side_effect=self.fake_scandir):
+            # The scan recorded ENOENT earlier; the root is live at report time.
+            self.assertEqual(frontier.os.lstat(item["path"]).st_dev, 1)
+            report = frontier.build_report(
+                scanner,
+                {"total_kb": 20 * GIB_KB, "used_kb": 10 * GIB_KB, "free_kb": 10 * GIB_KB},
+                [],
+                {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+                 "local_snapshots": [], "local_snapshots_count": 0},
+                1.0,
+                self.args(),
+            )
+
+        root = next(row for row in report["top_level_ledger"]
+                    if row["path"] == item["path"])
+        self.assertEqual(report["mode"], "partial")
+        self.assertIn(item, report["frontier_unfinished"])
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(root["status"], "unfinished")
+        self.assertIsNone(root["measured_kb"])
+        self.assertFalse(renderer.complete_coverage_envelope(report))
+
+    def test_root_lstat_enoent_remains_operational_partial(self):
+        scanner = self.scanner()
+        item = {"path": "/fixture/data/root-gone", "depth": 0,
+                "reason": "lstat_failed", "errno": errno.ENOENT}
+        scanner.frontier_unfinished.append(item)
+        report = self.report(scanner)
+        self.assertEqual(report["mode"], "partial")
+        self.assertIn(item, report["frontier_unfinished"])
+
+    def test_non_enoent_lstat_failures_remain_operational_partial(self):
+        for error_number in (errno.EACCES, errno.EIO, errno.EPERM):
+            with self.subTest(errno=error_number):
+                scanner = self.scanner()
+                item = {"path": "/fixture/data/inaccessible", "depth": 1,
+                        "reason": "lstat_failed", "errno": error_number}
+                scanner.frontier_unfinished.append(item)
+                report = self.report(scanner)
+                self.assertEqual(report["mode"], "partial")
+                self.assertIn(item, report["frontier_unfinished"])
 
     def test_report_serializes_scanner_run_binding(self):
         report = self.report(self.scanner())
