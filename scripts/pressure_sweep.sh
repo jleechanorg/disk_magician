@@ -113,8 +113,19 @@ free_gb() {
 }
 
 TIMEOUT_CMD=""
-if command -v timeout &>/dev/null; then TIMEOUT_CMD="timeout"
-elif command -v gtimeout &>/dev/null; then TIMEOUT_CMD="gtimeout"; fi
+if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+  if [[ "${DISK_MAGICIAN_TIMEOUT_BIN}" == */* ]]; then
+    [[ -x "$DISK_MAGICIAN_TIMEOUT_BIN" ]] && TIMEOUT_CMD="$DISK_MAGICIAN_TIMEOUT_BIN"
+  else
+    TIMEOUT_CMD="$(command -v "$DISK_MAGICIAN_TIMEOUT_BIN" 2>/dev/null || true)"
+  fi
+elif command -v timeout &>/dev/null; then TIMEOUT_CMD="$(command -v timeout)"
+elif command -v gtimeout &>/dev/null; then TIMEOUT_CMD="$(command -v gtimeout)"
+elif [[ -x /opt/homebrew/bin/gtimeout ]]; then TIMEOUT_CMD=/opt/homebrew/bin/gtimeout
+elif [[ -x /opt/homebrew/bin/timeout ]]; then TIMEOUT_CMD=/opt/homebrew/bin/timeout
+elif [[ -x /usr/local/bin/gtimeout ]]; then TIMEOUT_CMD=/usr/local/bin/gtimeout
+elif [[ -x /usr/local/bin/timeout ]]; then TIMEOUT_CMD=/usr/local/bin/timeout
+fi
 run_step_timeout() {
   if [[ -n "$TIMEOUT_CMD" ]]; then
     "$TIMEOUT_CMD" "$STEP_TIMEOUT" "$@"
@@ -148,6 +159,10 @@ COLIMA_CEILING_GB="${DISK_MAGICIAN_COLIMA_CEILING_GB:-35}"
 COLIMA_GB_OVERRIDE="${DISK_MAGICIAN_COLIMA_GB_OVERRIDE:-}"
 du_size_gb() {
   local path="$1" output rc kb
+  if [[ -z "$TIMEOUT_CMD" ]]; then
+    log "pressure_sweep: bounded timeout unavailable; size measurement blocked for $path."
+    return 1
+  fi
   if output="$(run_step_timeout du -skx "$path" 2>/dev/null)"; then
     :
   else
