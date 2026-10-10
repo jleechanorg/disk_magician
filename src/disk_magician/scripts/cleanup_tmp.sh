@@ -192,7 +192,7 @@ fi
 
 # Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
 # Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" || exit 1; }
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" "$@" || exit 1; }
 
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh

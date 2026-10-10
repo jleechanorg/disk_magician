@@ -5,7 +5,7 @@ SCRATCH_LOCK_FD="${DISK_MAGICIAN_SCRATCH_LOCK_FD:-}"
 
 scratch_lock_acquire() {
   local caller="$1" script_path="${BASH_SOURCE[1]}"
-  local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scratch_lock.py"
+  local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
 
   # A caller may continue only when the inherited descriptor proves ownership
   # of this state root's canonical lock file. Environment alone is not proof.

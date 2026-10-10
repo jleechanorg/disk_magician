@@ -221,7 +221,7 @@ fi
 
 # Shared lock invariant: serialize destructive sweep against cleanup_tmp.
 # Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" || exit 1; }
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" "$@" || exit 1; }
 
 TMP_DIRS=()
 if [[ ${#CLI_TMP_DIRS[@]} -gt 0 ]]; then

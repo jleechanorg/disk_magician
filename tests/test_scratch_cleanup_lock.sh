@@ -130,7 +130,7 @@ if [[ -n "$CHILD_PID" ]]; then
   done
 fi
 for _ in {1..200}; do
-  if DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" python3 "$REPO_ROOT/scripts/lib/scratch_lock.py" run \
+  if DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
       --caller probe --script /bin/true --args -- >/dev/null 2>&1; then break; fi
   sleep 0.025
 done
