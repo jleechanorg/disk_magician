@@ -125,6 +125,16 @@ setup_fixture_repo() {
   mkdir -p "$(dirname "$ao_wt_dir")"
   git -C "$main_repo" worktree add -B wt-ao-young "$ao_wt_dir" "$BASE_SHA" >/dev/null
   age_worktree_days_ago "$ao_wt_dir" 3
+  local ao_locked="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-locked"
+  git -C "$main_repo" worktree add -B wt-ao-locked "$ao_locked" "$BASE_SHA" >/dev/null
+  git -C "$main_repo" worktree lock "$ao_locked" >/dev/null
+  age_worktree_days_ago "$ao_locked" 30
+  # Current Go AO runtime defaults to ~/.ao/data/worktrees when AO_DATA_DIR
+  # is unset; protect this registered clean worktree even with no AO YAML.
+  local ao_default="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-default"
+  mkdir -p "$(dirname "$ao_default")"
+  git -C "$main_repo" worktree add -B wt-ao-default "$ao_default" "$BASE_SHA" >/dev/null
+  age_worktree_days_ago "$ao_default" 30
 
   # Antigravity orphan worktree (unregistered in git, but modified 2 days ago)
   local ag_orphan_dir="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/orphan-recent"
@@ -157,10 +167,17 @@ assert_contains "ahead reason" ".claude/worktrees/wt-ahead | ahead-of-main" "$OU
 assert_contains "locked reason" ".claude/worktrees/wt-locked | locked" "$OUT_CONTENT"
 assert_contains "young reason" ".claude/worktrees/wt-young | young" "$OUT_CONTENT"
 assert_contains "ao young worktree preserved by 14d floor" ".ao/data/worktrees/main-repo/wt-ao-young | young" "$OUT_CONTENT"
+assert_contains "stale AO locked worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-locked | locked" "$OUT_CONTENT"
+assert_contains "stale clean AO default-root worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-default | ao-owned" "$OUT_CONTENT"
+if grep -F ".ao/data/worktrees/main-repo/wt-ao-default |" <<<"$OUT_CONTENT" | grep -qF ELIGIBLE; then
+  record_fail "stale clean AO default-root worktree not eligible" "candidate was eligible"
+else
+  record_pass "stale clean AO default-root worktree not eligible"
+fi
 assert_contains "antigravity recent orphan preserved by 14d floor" "antigravity  PRESERVE" "$OUT_CONTENT"
 assert_contains "spaced path eligible" ".claude/worktrees/wt spaced path" "$OUT_CONTENT"
 assert_contains "summary eligible count" "Repo-local:  2 eligible" "$OUT_CONTENT"
-assert_contains "summary preserved count" "Repo-local:  2 eligible, 6 preserved." "$OUT_CONTENT"
+assert_contains "summary preserved count" "Repo-local:  2 eligible, 8 preserved." "$OUT_CONTENT"
 
 echo "Test: --clean without WORKTREE_APPROVED refuses before deletion"
 OUT_REFUSE="$TMP_ROOT/refuse.out"
@@ -187,7 +204,7 @@ assert_not_contains() {
   fi
 }
 
-echo "Test: ignored user data added by size probe blocks final removal"
+echo "Test: ignored, untracked, and tracked data added by size probe block final removal"
 printf '\n*.db\n' >> "$MAIN_REPO/.git/info/exclude"
 RACE_TRACKED="$MAIN_REPO/.claude/worktrees/wt-race-tracked"
 git -C "$MAIN_REPO" worktree add -B wt-race-tracked "$RACE_TRACKED" "$(git -C "$MAIN_REPO" rev-parse main)" >/dev/null
@@ -696,6 +713,30 @@ mkdir -p "$AG_NON_GIT"
 printf 'keep user data\n' > "$AG_NON_GIT/notes.txt"
 age_worktree_days_ago "$AG_NON_GIT" 20
 
+# Antigravity path configured as an AO worktreeDir must be preserved.
+AG_AO="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ao-managed"
+mkdir -p "$AG_AO"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    worktreeDir: %s\n' "$TMP_ROOT/home/.worktrees" "$AG_AO" > "$TMP_ROOT/ao.yml"
+git -C "$AG_AO" init --quiet -b main
+git -C "$AG_AO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_AO" config user.name "Fixture User"
+printf 'clean\n' > "$AG_AO/file.txt"
+git -C "$AG_AO" add file.txt
+git -C "$AG_AO" commit -m "clean ao checkout" --quiet
+age_worktree_days_ago "$AG_AO" 20
+
+# A configured path with a trailing space must never be trimmed by the shell
+# record reader into a different, unowned path.
+AG_TRAILING_SPACE="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ao-managed-space "
+mkdir -p "$AG_TRAILING_SPACE"
+git -C "$AG_TRAILING_SPACE" init --quiet -b main
+git -C "$AG_TRAILING_SPACE" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_TRAILING_SPACE" config user.name "Fixture User"
+printf 'clean\n' > "$AG_TRAILING_SPACE/file.txt"
+git -C "$AG_TRAILING_SPACE" add file.txt
+git -C "$AG_TRAILING_SPACE" commit -m "clean whitespace AO checkout" --quiet
+age_worktree_days_ago "$AG_TRAILING_SPACE" 20
+
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
 rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
@@ -740,7 +781,7 @@ age_worktree_days_ago "$AG_TYPE_STAGED" 20
 
 OUT_PROBE="$TMP_ROOT/probe-test.out"
 env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
-  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
   bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
   >"$OUT_PROBE" 2>&1
 OUT_PROBE_CONTENT=$(cat "$OUT_PROBE")
@@ -783,6 +824,159 @@ assert_contains "assume-unchanged tracked edit preserved" "ag-hidden-index | hid
 assert_not_contains "assume-unchanged worktree not eligible" "ELIGIBLE" "$(grep -F "ag-hidden-index" <<<"$OUT_PROBE_CONTENT" || true)"
 assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$OUT_PROBE_CONTENT"
 assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
+assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed |" <<<"$OUT_PROBE_CONTENT" || true)"
+
+echo "Test: Antigravity untracked data added by size probe blocks removal"
+AG_CLEAN_REPO="$TMP_ROOT/ag-clean-main"
+mkdir -p "$AG_CLEAN_REPO"
+git -C "$AG_CLEAN_REPO" init -q -b main
+git -C "$AG_CLEAN_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_CLEAN_REPO" config user.name "Fixture User"
+printf 'anchor\n' > "$AG_CLEAN_REPO/README.md"
+git -C "$AG_CLEAN_REPO" add README.md
+git -C "$AG_CLEAN_REPO" commit -q -m anchor
+cat > "$FAKE_BIN/du" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */ag-clean-ancestor) printf 'late Antigravity data\n' > "$arg/late.txt" ;;
+  esac
+done
+exec /usr/bin/du "$@"
+SH
+chmod +x "$FAKE_BIN/du"
+AG_RACE_OUT="$TMP_ROOT/ag-race-clean.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  WORKTREE_APPROVED=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
+  bash "$CLEANUP_SCRIPT" --clean --repos "$AG_CLEAN_REPO" --min-age 14 >"$AG_RACE_OUT" 2>&1
+AG_RACE_TEXT=$(cat "$AG_RACE_OUT")
+assert_contains "Antigravity size-probe untracked data preserved" "ag-clean-ancestor | changed-after-size" "$AG_RACE_TEXT"
+if [[ -f "$AG_ELIGIBLE/late.txt" ]]; then
+  record_pass "Antigravity size-probe data remains on disk"
+else
+  record_fail "Antigravity size-probe data remains on disk" "late data disappeared"
+fi
+
+# Valid YAML flow style and alternate indentation must preserve configured owners.
+AO_FLOW="$TMP_ROOT/ao-flow.yml"
+printf 'projects: {flow-demo: {path: /x/flow-demo, worktreeDir: "%s"}}\n' "$AG_AO" > "$AO_FLOW"
+OUT_FLOW="$TMP_ROOT/probe-flow-aO.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_FLOW" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_FLOW" 2>&1
+assert_contains "flow-style AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_FLOW")"
+
+AO_ALT_INDENT="$TMP_ROOT/ao-alt-indent.yml"
+printf 'projects:\n  alt-demo:\n      path: /x/alt-demo\n      worktreeDir: "%s"\n' "$AG_AO" > "$AO_ALT_INDENT"
+OUT_ALT_INDENT="$TMP_ROOT/probe-alt-indent.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_ALT_INDENT" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_ALT_INDENT" 2>&1
+assert_contains "alternate-indent AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_ALT_INDENT")"
+
+# Invalid AO YAML must preserve candidates even when the root default is valid.
+AO_MALFORMED="$TMP_ROOT/ao-malformed.yml"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    path: [unterminated\n' "$TMP_ROOT/home/.worktrees" > "$AO_MALFORMED"
+OUT_BAD_AO="$TMP_ROOT/probe-bad-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_MALFORMED" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_BAD_AO" 2>&1
+assert_contains "malformed AO projects config preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_BAD_AO")"
+assert_not_contains "malformed AO config does not make Antigravity path eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_BAD_AO" || true)"
+
+# Duplicate projects keys are ambiguous and must fail closed rather than discard the first owner.
+AO_DUPLICATE="$TMP_ROOT/ao-duplicate.yml"
+printf 'worktreeDir: %s\nprojects:\n  duplicate-demo:\n    path: /x/first\n    worktreeDir: %s\n  duplicate-demo:\n    path: /x/second\n    worktreeDir: /tmp/unowned\n' "$TMP_ROOT/home/.worktrees" "$AG_AO" > "$AO_DUPLICATE"
+OUT_DUP_AO="$TMP_ROOT/probe-duplicate-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_DUPLICATE" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_DUP_AO" 2>&1
+assert_contains "duplicate AO project key preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_DUP_AO")"
+assert_not_contains "duplicate AO project key path is not eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_DUP_AO" || true)"
+
+AO_EMPTY="$TMP_ROOT/ao-empty.yml"
+: > "$AO_EMPTY"
+AO_CONFIG_DIR="$TMP_ROOT/ao-config-directory"
+mkdir -p "$AO_CONFIG_DIR"
+source "$REPO_ROOT/scripts/lib/ao_worktree_config.sh"
+if ao_worktree_dirs "$AO_EMPTY" >/dev/null 2>&1; then
+  record_fail "empty AO config rejected" "projection unexpectedly succeeded"
+else
+  record_pass "empty AO config rejected"
+fi
+if ao_worktree_dirs "$AO_CONFIG_DIR" >/dev/null 2>&1; then
+  record_fail "unreadable AO config rejected" "projection unexpectedly succeeded for a directory path"
+else
+  record_pass "unreadable AO config rejected"
+fi
+if ao_worktree_dirs "$AO_DUPLICATE" >/dev/null 2>&1; then
+  record_fail "duplicate AO project keys rejected" "projection unexpectedly succeeded"
+else
+  record_pass "duplicate AO project keys rejected"
+fi
+
+# Path records must survive shell transport exactly; reject ambiguous values
+# before printing any C/P line, including generated key/basename paths.
+AO_TRAILING_SPACE="$TMP_ROOT/ao-trailing-space.yml"
+printf 'projects:\n  demo:\n    worktreeDir: "%s"\n' "$AG_TRAILING_SPACE" > "$AO_TRAILING_SPACE"
+AO_TRAILING_SLASH_SPACE="$TMP_ROOT/ao-trailing-slash-space.yml"
+printf 'projects: {demo: {worktreeDir: "/owned /"}}\n' > "$AO_TRAILING_SLASH_SPACE"
+AO_RELATIVE="$TMP_ROOT/ao-relative.yml"
+printf 'projects: {demo: {worktreeDir: relative/path}}\n' > "$AO_RELATIVE"
+AO_KEY_SPACE="$TMP_ROOT/ao-key-space.yml"
+printf 'worktreeDir: /owned\nprojects: {"bad ": {path: /x/repo}}\n' > "$AO_KEY_SPACE"
+AO_BASENAME_SPACE="$TMP_ROOT/ao-basename-space.yml"
+printf 'worktreeDir: /owned\nprojects: {demo: {path: "/x/repo "}}\n' > "$AO_BASENAME_SPACE"
+AO_NUL_PATH="$TMP_ROOT/ao-nul-path.yml"
+printf 'projects: {demo: {worktreeDir: "/owned\\0path"}}\n' > "$AO_NUL_PATH"
+for ao_bad in "$AO_TRAILING_SPACE" "$AO_TRAILING_SLASH_SPACE" "$AO_RELATIVE" "$AO_KEY_SPACE" "$AO_BASENAME_SPACE" "$AO_NUL_PATH"; do
+  if ao_worktree_dirs "$ao_bad" >/dev/null 2>&1; then
+    record_fail "ambiguous AO path records rejected ($(basename "$ao_bad"))" "projection unexpectedly succeeded"
+  else
+    record_pass "ambiguous AO path records rejected ($(basename "$ao_bad"))"
+  fi
+done
+
+OUT_TRAILING_AO="$TMP_ROOT/probe-trailing-space-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_TRAILING_SPACE" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_TRAILING_AO" 2>&1
+assert_contains "trailing-space AO owner config fails closed" "ao-managed | ao-config-unreadable" "$(cat "$OUT_TRAILING_AO")"
+
+AO_REAL_RUBY="$(command -v ruby || true)"
+if [[ -n "$AO_REAL_RUBY" ]]; then
+  AO_RUBY_BIN="$TMP_ROOT/ao-ruby-only-bin"
+  mkdir -p "$AO_RUBY_BIN"
+  ln -s "$AO_REAL_RUBY" "$AO_RUBY_BIN/ruby"
+  cat > "$AO_RUBY_BIN/python3" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  chmod +x "$AO_RUBY_BIN/python3"
+  if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$AO_DUPLICATE" >/dev/null 2>&1; then
+    record_fail "Ruby fallback duplicate AO keys rejected" "projection unexpectedly succeeded"
+  else
+    record_pass "Ruby fallback duplicate AO keys rejected"
+  fi
+  if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$AO_FLOW" 2>/dev/null | grep -F "P $AG_AO" >/dev/null; then
+    record_pass "Ruby fallback valid flow-style AO config preserved"
+  else
+    record_fail "Ruby fallback valid flow-style AO config preserved" "projection failed or omitted configured path"
+  fi
+  for ao_bad in "$AO_TRAILING_SPACE" "$AO_TRAILING_SLASH_SPACE" "$AO_RELATIVE" "$AO_KEY_SPACE" "$AO_BASENAME_SPACE" "$AO_NUL_PATH"; do
+    if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$ao_bad" >/dev/null 2>&1; then
+      record_fail "Ruby fallback rejects ambiguous path ($(basename "$ao_bad"))" "projection unexpectedly succeeded"
+    else
+      record_pass "Ruby fallback rejects ambiguous path ($(basename "$ao_bad"))"
+    fi
+  done
+else
+  echo "NOTE: Ruby fallback tests not run because ruby is unavailable"
+fi
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

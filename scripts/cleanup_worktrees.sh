@@ -14,6 +14,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
@@ -270,22 +271,8 @@ classify_repo_local_worktree() {
     fi
 
     if [[ "$locked" == "1" ]]; then
-        # Stale lock detection: only auto-unlock automated/orchestrator worktrees
-        local is_automated=false
-        if [[ "$wt_path" == *"/.ao/data/worktrees/"* || \
-              "$wt_path" == *"/ao/data/worktrees/"* || \
-              "$wt_path" == *"/antigravity/worktrees/"* ]]; then
-            is_automated=true
-        fi
-
-        if [[ "$is_automated" == "true" && "$recently_active" == false ]]; then
-            if [[ "$DRY_RUN" == false ]]; then
-                git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
-            fi
-        else
-            echo "locked"
-            return 0
-        fi
+        echo "locked"
+        return 0
     fi
 
     if [[ "$prunable" == "1" ]]; then
@@ -588,6 +575,34 @@ is_worktree_active() {
     return 1
 }
 
+# Parse the AO config once. Invalid, unreadable, or unprojectable config blocks
+# cleanup because ownership cannot be determined with confidence.
+AO_CONFIG_PATH="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
+AO_CONFIG_STATE="missing"
+AO_CONFIG_LINES=""
+if [[ -e "$AO_CONFIG_PATH" || -L "$AO_CONFIG_PATH" ]]; then
+    if [[ -f "$AO_CONFIG_PATH" && -r "$AO_CONFIG_PATH" ]] \
+        && AO_CONFIG_LINES="$(ao_worktree_dirs "$AO_CONFIG_PATH" 2>/dev/null)"; then
+        AO_CONFIG_STATE="valid"
+    else
+        AO_CONFIG_STATE="invalid"
+    fi
+fi
+
+antigravity_ao_owned() {
+    local candidate="$1" kind dir real
+    case "$candidate" in */.ao/data/worktrees/*|*/ao/data/worktrees/*) return 0 ;; esac
+    [[ "$AO_CONFIG_STATE" == "invalid" ]] && return 0
+    [[ "$AO_CONFIG_STATE" == "valid" ]] || return 1
+    while read -r kind dir; do
+        [[ -n "$dir" ]] || continue
+        dir="$(expand_path "$dir")"
+        real="$(cd "$dir" 2>/dev/null && pwd -P || printf '%s' "$dir")"
+        [[ "$candidate" == "$dir" || "$candidate" == "$dir"/* || "$candidate" == "$real" || "$candidate" == "$real"/* ]] && return 0
+    done <<<"$AO_CONFIG_LINES"
+    return 1
+}
+
 process_antigravity_orphan() {
     local abs_subdir="$1"
     if is_worktree_active "$abs_subdir"; then
@@ -612,6 +627,16 @@ process_antigravity_orphan() {
     fi
     if [[ ! -e "$abs_subdir/.git" && ! -L "$abs_subdir/.git" ]]; then
         ledger_line "antigravity" "PRESERVE" "$abs_subdir" "not-git"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ao-config-unreadable"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if antigravity_ao_owned "$abs_subdir"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ao-owned"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
@@ -968,48 +993,26 @@ STD_AO_DIRS=""      # AO owns everything under these
 STD_AO_PARENTS=""   # AO owns direct children of these (<default>/<sessionId>)
 STD_BLOCKED=""
 STD_LIVE_CWDS=""
-# ao_worktree_dirs <yaml>: per-project worktreeDir -> "P <dir>". The top-level
-# default (column 0, the live config sets it to ~/.worktrees) is NOT owned
-# whole: projects lacking their own worktreeDir get "P <default>/<key>" and
-# "P <default>/<basename path>", and "C <default>" covers <default>/<session>.
-ao_worktree_dirs() {
-    awk '
-        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
-                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
-        /^worktreeDir:/ { def = val($0); next }
-        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
-        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
-        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
-        END {
-            if (def == "") exit
-            sub(/\/+$/, "", def); print "C " def
-            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
-                print "P " def "/" keys[i]
-                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
-            }
-        }' "$1"
-}
 # Loaded even without STD_ROOT: the plf merged fast path also consults it.
-ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
-if [[ -e "$ao_cfg" ]]; then
-    if ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then
+    STD_BLOCKED="ao-config-unreadable"
+elif [[ "$AO_CONFIG_STATE" == "valid" ]]; then
+        ao_lines="$AO_CONFIG_LINES"
         while read -r kind d; do
             [[ -n "$d" ]] || continue
             d="$(expand_path "$d")"
             d="$d"$'\n'"$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"$'\n'
             if [[ "$kind" == C ]]; then STD_AO_PARENTS+="$d"; else STD_AO_DIRS+="$d"; fi
         done <<<"$ao_lines"
-    else
-        STD_BLOCKED="ao-config-unreadable"
-    fi
 fi
 
 # std_root_skip_reason <abs> <real>: prints why a standard-root worktree is off-limits.
 std_root_skip_reason() {
     if [[ -n "$STD_BLOCKED" ]]; then
         echo "$STD_BLOCKED"
-    elif list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
+    elif [[ "$1" == *"/.ao/data/worktrees/"* || "$1" == *"/ao/data/worktrees/"* \
+        || "$2" == *"/.ao/data/worktrees/"* || "$2" == *"/ao/data/worktrees/"* ]] \
+        || list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
         || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
         echo "ao-owned"
     elif [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
