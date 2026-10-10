@@ -412,6 +412,18 @@ add_wt default-deep worktree-default-deep "$HOME/.worktrees/deep/repo/session"
 run_hook "$(json "$HOME/.worktrees/deep/repo/session")"; rc=$?
 [[ -d "$HOME/.worktrees/deep/repo/session" ]] && ok "nested default AO worktree kept" || bad "nested default AO worktree removed"
 tail -n 1 "$LOG" | grep -q "ao-owned" && ok "nested default AO reason logged" || bad "nested default AO reason missing"
+echo "== case 32: AO path with trailing space is preserved exactly =="
+mkdir -p "$HOME/.worktrees/space-root "
+cat >"$HOME/space-ao.yaml" <<YAML
+worktreeDir: "$HOME/.worktrees/space-root "
+YAML
+export DISK_MAGICIAN_AO_CONFIG="$HOME/space-ao.yaml"
+add_wt space worktree-space "$HOME/.worktrees/space-root /session"
+run_hook "$(json "$HOME/.worktrees/space-root /session")"; rc=$?
+[[ -d "$HOME/.worktrees/space-root /session" ]] && ok "trailing-space AO worktree kept" || bad "trailing-space AO worktree removed"
+tail -n 1 "$LOG" | grep -Eq "ao-owned|ao-config-unreadable" && ok "trailing-space AO result fails closed" || bad "trailing-space AO result not logged"
+result="$(TEST_AO_ROOT="$HOME/.worktrees/space-root " bash -c '''source "$1"; ao_worktree_dirs() { printf "P %s\n" "$TEST_AO_ROOT"; }; wrh_ao_skip_reason "$2"''' _ "$SCRIPT" "$HOME/.worktrees/space-root /session")"
+[[ "$result" == "ao-owned" ]] && ok "consumer preserves exact trailing-space record" || bad "consumer altered trailing-space record"
 unset DISK_MAGICIAN_AO_CONFIG
 
 echo "PASS=$PASS FAIL=$FAIL"

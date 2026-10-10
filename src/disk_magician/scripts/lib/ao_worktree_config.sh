@@ -24,9 +24,17 @@ def fail():
     raise SystemExit(1)
 
 def path_value(value):
-    if not isinstance(value, str) or "\n" in value or "\r" in value:
+    if not isinstance(value, str) or any(char in value for char in ("\0", "\n", "\r")):
         fail()
-    return value.rstrip("/") or ("/" if value.startswith("/") else "")
+    normalized = value.rstrip("/") or ("/" if value.startswith("/") else "")
+    if normalized and (normalized != normalized.strip(" \t") or not (normalized.startswith("/") or normalized == "~" or normalized.startswith("~/"))):
+        fail()
+    return normalized
+
+def emit_path(kind, value):
+    normalized = path_value(value)
+    if normalized:
+        print(kind + " " + normalized)
 
 try:
     with open(sys.argv[1], encoding="utf-8") as stream:
@@ -38,7 +46,7 @@ try:
     if not isinstance(projects, dict):
         fail()
     if default:
-        print("C " + default)
+        emit_path("C", default)
     for key, project in projects.items():
         if not isinstance(key, str) or "\n" in key or "\r" in key or not isinstance(project, dict):
             fail()
@@ -47,13 +55,13 @@ try:
         if "worktreeDir" in project:
             directory = path_value(project["worktreeDir"])
             if directory:
-                print("P " + directory)
+                emit_path("P", directory)
         elif default:
-            print("P " + default + "/" + key)
+            emit_path("P", default + "/" + key)
             project_path = project.get("path", "")
             basename = os.path.basename(project_path.rstrip("/")) if project_path else ""
             if basename and basename != key:
-                print("P " + default + "/" + basename)
+                emit_path("P", default + "/" + basename)
 except Exception:
     fail()
 PY
@@ -76,9 +84,15 @@ PY
             end
           end
           def path_value(value)
-            fail_parse unless value.is_a?(String) && !value.include?("\n") && !value.include?("\r")
+            fail_parse unless value.is_a?(String) && !value.match?(/[\0\n\r]/)
             normalized = value.sub(%r{/+$}, "")
-            normalized.empty? && value.start_with?("/") ? "/" : normalized
+            normalized = "/" if normalized.empty? && value.start_with?("/")
+            fail_parse if !normalized.empty? && (normalized.match?(/\A[ \t]|[ \t]\z/) || !(normalized.start_with?("/") || normalized == "~" || normalized.start_with?("~/")))
+            normalized
+          end
+          def emit_path(kind, value)
+            normalized = path_value(value)
+            puts "#{kind} #{normalized}" unless normalized.empty?
           end
           begin
             ast = YAML.parse_file(ARGV[0])
@@ -88,18 +102,18 @@ PY
             default = document.key?("worktreeDir") ? path_value(document["worktreeDir"]) : ""
             projects = document.fetch("projects", {})
             fail_parse unless projects.is_a?(Hash)
-            puts "C #{default}" unless default.empty?
+            emit_path("C", default)
             projects.each do |key, project|
               fail_parse unless key.is_a?(String) && !key.include?("\n") && !key.include?("\r") && project.is_a?(Hash)
               fail_parse if project.key?("path") && (!project["path"].is_a?(String) || project["path"].include?("\n") || project["path"].include?("\r"))
               if project.key?("worktreeDir")
                 directory = path_value(project["worktreeDir"])
-                puts "P #{directory}" unless directory.empty?
+                emit_path("P", directory)
               elsif !default.empty?
-                puts "P #{default}/#{key}"
+                emit_path("P", "#{default}/#{key}")
                 project_path = project.fetch("path", "")
                 basename = File.basename(project_path.sub(%r{/+$}, "")) unless project_path.empty?
-                puts "P #{default}/#{basename}" if basename && !basename.empty? && basename != key
+                emit_path("P", "#{default}/#{basename}") if basename && !basename.empty? && basename != key
               end
             end
           rescue StandardError

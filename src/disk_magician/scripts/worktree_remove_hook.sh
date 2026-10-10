@@ -129,11 +129,12 @@ wrh_ao_skip_reason() {
     lines=$(ao_worktree_dirs "$config") || { echo ao-config-unreadable; return; }
     [[ -n $lines ]] || return 0
     candidate=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null) || { echo ao-config-unreadable; return; }
-    while read -r kind dir; do
-        [[ -n $kind && -n $dir ]] || continue
+    while IFS= read -r line; do
+        case $line in P\ *|C\ *) dir=${line#? };; *) echo ao-config-unreadable; return;; esac
+        [[ -n $dir ]] || { echo ao-config-unreadable; return; }
         root=$(wrh_expand_path "$dir") || { echo ao-config-unreadable; return; }
         root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null) || { echo ao-config-unreadable; return; }
-        case $kind in P) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; C) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; *) echo ao-config-unreadable; return;; esac
+        [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; }
     done <<<"$lines"
 }
 
