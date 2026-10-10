@@ -10,6 +10,16 @@ import os
 import sys
 import yaml
 
+class UniqueKeyLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError("while constructing a mapping", node.start_mark, f"duplicate key {key!r}", key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
 def fail():
     raise SystemExit(1)
 
@@ -20,7 +30,7 @@ def path_value(value):
 
 try:
     with open(sys.argv[1], encoding="utf-8") as stream:
-        document = yaml.safe_load(stream)
+        document = yaml.load(stream, Loader=UniqueKeyLoader)
     if not isinstance(document, dict):
         fail()
     default = path_value(document["worktreeDir"]) if "worktreeDir" in document else ""
@@ -50,12 +60,29 @@ PY
     elif command -v ruby >/dev/null 2>&1; then
         ruby -ryaml -e '
           def fail_parse; exit 1; end
+          def reject_duplicate_keys(node)
+            return unless node.respond_to?(:children) && node.children
+            if node.is_a?(Psych::Nodes::Mapping)
+              keys = []
+              node.children.each_slice(2) do |key_node, value_node|
+                fail_parse unless key_node.is_a?(Psych::Nodes::Scalar)
+                fail_parse if keys.include?(key_node.value)
+                keys << key_node.value
+                reject_duplicate_keys(key_node)
+                reject_duplicate_keys(value_node)
+              end
+            else
+              node.children.each { |child| reject_duplicate_keys(child) }
+            end
+          end
           def path_value(value)
             fail_parse unless value.is_a?(String) && !value.include?("\n") && !value.include?("\r")
             normalized = value.sub(%r{/+$}, "")
             normalized.empty? && value.start_with?("/") ? "/" : normalized
           end
           begin
+            ast = YAML.parse_file(ARGV[0])
+            reject_duplicate_keys(ast)
             document = YAML.safe_load(File.read(ARGV[0]), aliases: true)
             fail_parse unless document.is_a?(Hash)
             default = document.key?("worktreeDir") ? path_value(document["worktreeDir"]) : ""

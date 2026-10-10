@@ -862,6 +862,17 @@ env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
 assert_contains "malformed AO projects config preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_BAD_AO")"
 assert_not_contains "malformed AO config does not make Antigravity path eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_BAD_AO" || true)"
 
+# Duplicate projects keys are ambiguous and must fail closed rather than discard the first owner.
+AO_DUPLICATE="$TMP_ROOT/ao-duplicate.yml"
+printf 'worktreeDir: %s\nprojects:\n  duplicate-demo:\n    path: /x/first\n    worktreeDir: %s\n  duplicate-demo:\n    path: /x/second\n    worktreeDir: /tmp/unowned\n' "$TMP_ROOT/home/.worktrees" "$AG_AO" > "$AO_DUPLICATE"
+OUT_DUP_AO="$TMP_ROOT/probe-duplicate-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_DUPLICATE" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_DUP_AO" 2>&1
+assert_contains "duplicate AO project key preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_DUP_AO")"
+assert_not_contains "duplicate AO project key path is not eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_DUP_AO" || true)"
+
 AO_EMPTY="$TMP_ROOT/ao-empty.yml"
 : > "$AO_EMPTY"
 AO_CONFIG_DIR="$TMP_ROOT/ao-config-directory"
@@ -876,6 +887,35 @@ if ao_worktree_dirs "$AO_CONFIG_DIR" >/dev/null 2>&1; then
   record_fail "unreadable AO config rejected" "projection unexpectedly succeeded for a directory path"
 else
   record_pass "unreadable AO config rejected"
+fi
+if ao_worktree_dirs "$AO_DUPLICATE" >/dev/null 2>&1; then
+  record_fail "duplicate AO project keys rejected" "projection unexpectedly succeeded"
+else
+  record_pass "duplicate AO project keys rejected"
+fi
+
+AO_REAL_RUBY="$(command -v ruby || true)"
+if [[ -n "$AO_REAL_RUBY" ]]; then
+  AO_RUBY_BIN="$TMP_ROOT/ao-ruby-only-bin"
+  mkdir -p "$AO_RUBY_BIN"
+  ln -s "$AO_REAL_RUBY" "$AO_RUBY_BIN/ruby"
+  cat > "$AO_RUBY_BIN/python3" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  chmod +x "$AO_RUBY_BIN/python3"
+  if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$AO_DUPLICATE" >/dev/null 2>&1; then
+    record_fail "Ruby fallback duplicate AO keys rejected" "projection unexpectedly succeeded"
+  else
+    record_pass "Ruby fallback duplicate AO keys rejected"
+  fi
+  if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$AO_FLOW" 2>/dev/null | grep -F "P $AG_AO" >/dev/null; then
+    record_pass "Ruby fallback valid flow-style AO config preserved"
+  else
+    record_fail "Ruby fallback valid flow-style AO config preserved" "projection failed or omitted configured path"
+  fi
+else
+  echo "NOTE: Ruby fallback tests not run because ruby is unavailable"
 fi
 
 echo
