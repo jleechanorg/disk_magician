@@ -193,6 +193,18 @@ branch_exists worktree-l && ok "branch worktree-l kept" || bad "branch worktree-
 [[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
 tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored data" || bad "log does not mention ignored data"
 
+
+echo "== case 16: ignored directory with file-like cache suffix → preserved =="
+add_wt m worktree-m
+printf 'data.pyc/\n' >"$WTROOT/m/.gitignore"
+git -C "$WTROOT/m" add .gitignore
+git -C "$WTROOT/m" commit -q -m ignore
+git -C "$WTROOT/m" push -q origin HEAD:refs/heads/m 2>/dev/null
+mkdir -p "$WTROOT/m/data.pyc"; echo y >"$WTROOT/m/data.pyc/keep.db"
+run_hook "$(json "$WTROOT/m")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/m/data.pyc/keep.db" ]] && ok "data.pyc directory preserved" || bad "data.pyc directory removed"
+echo "PASS=$PASS FAIL=$FAIL"
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

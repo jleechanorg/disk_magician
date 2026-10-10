@@ -300,7 +300,8 @@ classify_repo_local_worktree() {
             && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
-            && ! has_hidden_state "$wt_path"; then
+            && ! has_hidden_state "$wt_path" \
+            && ! has_ignored_user_data "$wt_path"; then
             return 0
         fi
         echo "young"
@@ -320,6 +321,10 @@ classify_repo_local_worktree() {
         fi
         if has_hidden_state "$wt_path"; then
             echo "hidden-state"
+            return 0
+        fi
+        if has_ignored_user_data "$wt_path"; then
+            echo "ignored-data"
             return 0
         fi
     fi
@@ -368,9 +373,13 @@ has_ignored_user_data() {
                 # build, dist, env, target, coverage and .cache can hold hand-made
                 # files, so they count as user data and preserve the worktree.
                 node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
-                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|venv.bak.*|test-results|.testmondata)
                     ok=true; break ;;
+                # File-oriented patterns are rebuildable only when the matched
+                # path is not a directory containing user data.
+                *.pyc|.DS_Store|.coverage|*.tsbuildinfo)
+                    [[ ! -d "$1/$rest" ]] && { ok=true; break; }
+                    ;;
             esac
             [[ "$rest" == */* ]] || break
             rest="${rest%/*}"

@@ -26,7 +26,9 @@ check() {
 
 age_days_ago() {
   local wt="$1" days="$2" ts gitdir
-  ts=$(date -v-"${days}"d +%Y%m%d%H%M)
+  if ! ts=$(date -v-"${days}"d +%Y%m%d%H%M 2>/dev/null); then
+    ts=$(date -d "${days} days ago" +%Y%m%d%H%M)
+  fi
   find "$wt" -name .git -prune -o -print0 | xargs -0 touch -h -t "$ts"
   touch -t "$ts" "$wt/.git"
   gitdir=$(sed -n 's/^gitdir: *//p' "$wt/.git" | head -1)
@@ -40,7 +42,7 @@ mkdir -p "$WT"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email "fixture@users.noreply.github.com"
 git -C "$REPO" config user.name "Fixture"
-printf '.env*\nnode_modules/\n.npmrc\n*.p12\n' > "$REPO/.gitignore"
+printf '.env*\nnode_modules/\n.npmrc\n*.p12\ndata.pyc/\n' > "$REPO/.gitignore"
 printf 'base\n' > "$REPO/README.md"
 git -C "$REPO" add .gitignore README.md
 git -C "$REPO" commit -q -m base
@@ -55,6 +57,8 @@ add_wt() { git -C "$REPO" worktree add -q -B "$1" "$2" "$3"; }
 add_wt m4 "$WT/wt-m4" "$MERGED_SHA"
 add_wt m4dirty "$WT/wt-m4dirty" "$MERGED_SHA"
 printf 'dirty\n' >> "$WT/wt-m4dirty/README.md"
+add_wt m4ignoreddata "$WT/wt-m4ignoreddata" "$MERGED_SHA"
+mkdir -p "$WT/wt-m4ignoreddata/data.pyc" && printf 'data\n' > "$WT/wt-m4ignoreddata/data.pyc/keep.db"
 add_wt u4 "$WT/wt-u4" "$AHEAD_SHA"
 add_wt m2 "$WT/wt-m2" "$MERGED_SHA"
 add_wt m4live "$WT/wt-m4live" "$MERGED_SHA"
@@ -100,10 +104,12 @@ printf 'config/id_ed25519\n' >> "$REPO/.git/info/exclude"
 # gh-verified squash-merged route (bead ueh) into the 3-day path.
 git -C "$REPO" remote add origin https://github.com/fixture/repo.git
 add_wt sqmatch "$WT/wt-sqmatch" "$AHEAD_SHA"
+add_wt sqmatchignoreddata "$WT/wt-sqmatchignoreddata" "$AHEAD_SHA"
+mkdir -p "$WT/wt-sqmatchignoreddata/data.pyc" && printf 'data\n' > "$WT/wt-sqmatchignoreddata/data.pyc/keep.db"
 add_wt sqdiff "$WT/wt-sqdiff" "$AHEAD_SHA"
 
-for w in wt-m4 wt-m4dirty wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
-    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqdiff wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
+for w in wt-m4 wt-m4dirty wt-m4ignoreddata wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
+    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqmatchignoreddata wt-sqdiff wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
 age_days_ago "$REPO/.ao/data/worktrees/wt-m4ao" 4
 age_days_ago "$WT/wt-m2" 2
 age_days_ago "$TMP_ROOT/aodir/wt-m4cfg" 4
@@ -143,6 +149,8 @@ OUT="$(run)"
 check "header shows 3d merged floor" "Merged clean worktree floor: 3d" "$OUT"
 check "4d merged clean -> ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
 check "4d merged dirty -> PRESERVE young" "wt-m4dirty | young" "$OUT"
+check "4d merged ignored data directory -> PRESERVE young" "wt-m4ignoreddata | young" "$OUT"
+check "4d GH-verified ignored data directory -> PRESERVE young" "wt-sqmatchignoreddata | young" "$OUT"
 check "4d unmerged clean -> PRESERVE young" "wt-u4 | young" "$OUT"
 check "2d merged clean -> PRESERVE young" "wt-m2 | young" "$OUT"
 check "4d merged clean live cwd -> PRESERVE live-cwd" "wt-m4live | live-cwd" "$OUT"
@@ -187,6 +195,8 @@ check "default -> 4d merged with ignored .env is preserved" "wt-m4secret | hidde
 check "default -> 4d assume-unchanged edit is preserved" "wt-m4au | hidden-state" "$OUT"
 check "default -> 4d merged under AO worktreeDir stays young (AO keeps 7d)" "wt-m4ao | young" "$OUT"
 check "default -> 4d merged clean still ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
+check "3d merged path catches ignored data" "wt-m4ignoreddata | ignored-data" "$OUT"
+check "3d GH-verified path catches ignored data" "wt-sqmatchignoreddata | ignored-data" "$OUT"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
