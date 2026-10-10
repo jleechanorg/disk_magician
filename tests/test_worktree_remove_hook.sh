@@ -189,6 +189,16 @@ branch_exists worktree-i && ok "branch kept" || bad "branch deleted"
 tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored files" || bad "log does not mention ignored files"
 grep -q -e SECRET_VALUE_XYZ -e '\.env' "$LOG" && bad "log leaks ignored file name/contents" || ok "log has no ignored file name/contents"
 
+echo "== case 11b: only ignored __pycache__ *credentials*.pyc → removed =="
+add_wt i2 worktree-i2
+printf '__pycache__/\n' >"$WTROOT/i2/.gitignore"; git -C "$WTROOT/i2" add .gitignore; git -C "$WTROOT/i2" commit -q -m ignore
+git -C "$WTROOT/i2" push -q origin HEAD:refs/heads/i2 2>/dev/null
+mkdir -p "$WTROOT/i2/__pycache__"; printf 'x' >"$WTROOT/i2/__pycache__/openrouter_credentials.cpython-312.pyc"
+age_wt "$WTROOT/i2"
+run_hook "$(json "$WTROOT/i2")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/i2" ]] && ok "bytecode-only worktree removed" || bad "bytecode-only worktree kept"
+
 echo "== case 12: locked but otherwise removable → left, exit 0 (no --force) =="
 add_wt j worktree-j
 git -C "$REPO" worktree lock "$WTROOT/j"
