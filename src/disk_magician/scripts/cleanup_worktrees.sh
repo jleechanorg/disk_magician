@@ -14,6 +14,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
@@ -270,22 +271,8 @@ classify_repo_local_worktree() {
     fi
 
     if [[ "$locked" == "1" ]]; then
-        # Stale lock detection: only auto-unlock automated/orchestrator worktrees
-        local is_automated=false
-        if [[ "$wt_path" == *"/.ao/data/worktrees/"* || \
-              "$wt_path" == *"/ao/data/worktrees/"* || \
-              "$wt_path" == *"/antigravity/worktrees/"* ]]; then
-            is_automated=true
-        fi
-
-        if [[ "$is_automated" == "true" && "$recently_active" == false ]]; then
-            if [[ "$DRY_RUN" == false ]]; then
-                git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
-            fi
-        else
-            echo "locked"
-            return 0
-        fi
+        echo "locked"
+        return 0
     fi
 
     if [[ "$prunable" == "1" ]]; then
@@ -300,7 +287,8 @@ classify_repo_local_worktree() {
             && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
-            && ! has_hidden_state "$wt_path"; then
+            && ! has_hidden_state "$wt_path" \
+            && ! has_ignored_user_data "$wt_path"; then
             return 0
         fi
         echo "young"
@@ -320,6 +308,10 @@ classify_repo_local_worktree() {
         fi
         if has_hidden_state "$wt_path"; then
             echo "hidden-state"
+            return 0
+        fi
+        if has_ignored_user_data "$wt_path"; then
+            echo "ignored-data"
             return 0
         fi
     fi
@@ -368,9 +360,13 @@ has_ignored_user_data() {
                 # build, dist, env, target, coverage and .cache can hold hand-made
                 # files, so they count as user data and preserve the worktree.
                 node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
-                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                .next|.turbo|.gradle|.tox|.eggs|htmlcov|venv.bak.*|test-results)
                     ok=true; break ;;
+                # File-oriented patterns are rebuildable only when the matched
+                # path is not a directory containing user data.
+                *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+                    [[ ! -d "$1/$rest" ]] && { ok=true; break; }
+                    ;;
             esac
             [[ "$rest" == */* ]] || break
             rest="${rest%/*}"
@@ -562,11 +558,49 @@ is_worktree_active() {
     local gitdir_line
     gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
     [[ -n "$gitdir_line" ]] || return 1
-    local git_dir main_repo
+    local git_dir main_repo worktrees listed_path listed_real line
     git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
     main_repo="${git_dir%/.git/worktrees/*}"
     [[ -d "$main_repo" ]] || return 1
-    git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qF "^worktree ${wt_path}$"
+    worktrees="$(git -C "$main_repo" worktree list --porcelain 2>/dev/null)" || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            worktree\ *)
+                listed_path="${line#worktree }"
+                listed_real="$(cd "$listed_path" 2>/dev/null && pwd -P || true)"
+                [[ -n "$listed_real" && "$listed_real" == "$wt_path" ]] && return 0
+                ;;
+        esac
+    done <<<"$worktrees"
+    return 1
+}
+
+# Parse the AO config once. Invalid, unreadable, or unprojectable config blocks
+# cleanup because ownership cannot be determined with confidence.
+AO_CONFIG_PATH="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
+AO_CONFIG_STATE="missing"
+AO_CONFIG_LINES=""
+if [[ -e "$AO_CONFIG_PATH" || -L "$AO_CONFIG_PATH" ]]; then
+    if [[ -f "$AO_CONFIG_PATH" && -r "$AO_CONFIG_PATH" ]] \
+        && AO_CONFIG_LINES="$(ao_worktree_dirs "$AO_CONFIG_PATH" 2>/dev/null)"; then
+        AO_CONFIG_STATE="valid"
+    else
+        AO_CONFIG_STATE="invalid"
+    fi
+fi
+
+antigravity_ao_owned() {
+    local candidate="$1" kind dir real
+    case "$candidate" in */.ao/data/worktrees/*|*/ao/data/worktrees/*) return 0 ;; esac
+    [[ "$AO_CONFIG_STATE" == "invalid" ]] && return 0
+    [[ "$AO_CONFIG_STATE" == "valid" ]] || return 1
+    while read -r kind dir; do
+        [[ -n "$dir" ]] || continue
+        dir="$(expand_path "$dir")"
+        real="$(cd "$dir" 2>/dev/null && pwd -P || printf '%s' "$dir")"
+        [[ "$candidate" == "$dir" || "$candidate" == "$dir"/* || "$candidate" == "$real" || "$candidate" == "$real"/* ]] && return 0
+    done <<<"$AO_CONFIG_LINES"
+    return 1
 }
 
 process_antigravity_orphan() {
@@ -591,6 +625,21 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
+    if [[ ! -e "$abs_subdir/.git" && ! -L "$abs_subdir/.git" ]]; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "not-git"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ao-config-unreadable"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if antigravity_ao_owned "$abs_subdir"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ao-owned"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
     if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
         local status_porcelain status_rc=0
         status_porcelain="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
@@ -606,6 +655,18 @@ process_antigravity_orphan() {
                 return 0
             fi
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "dirty"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        if has_ignored_user_data "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        if has_hidden_state "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
@@ -700,12 +761,36 @@ process_antigravity_orphan() {
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     else
-        ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
-        if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
-            echo "SAFETY-SKIP $abs_subdir ($_safety_reason)"
-        else
-            rm -rf "$abs_subdir"
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_hidden_state "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
         fi
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_ignored_user_data "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+        if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "$_safety_reason"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+        local final_status final_status_rc=0
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
+            final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+            if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+                ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
+                ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+                return 0
+            fi
+        fi
+        if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+        ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     fi
@@ -832,12 +917,38 @@ process_repo_local_worktrees() {
         else
             if [[ "$DRY_RUN" == true ]]; then
                 ledger_line "repo-local" "ELIGIBLE" "$abs_path" "" "$extra"
+                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
             else
-                ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
-                git -C "$repo_abs" worktree remove --force --force "$abs_path"
+                if has_hidden_state "$abs_path"; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "hidden-state" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                if has_ignored_user_data "$abs_path"; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "ignored-data" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                local final_status final_status_rc=0
+                final_status="$(git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+                if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                if git -C "$repo_abs" worktree remove --force --force "$abs_path" && [[ ! -e "$abs_path" ]]; then
+                    ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
+                    TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                    REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                else
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "remove-failed" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                fi
             fi
-            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
-            REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
         fi
 
         wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
@@ -882,41 +993,17 @@ STD_AO_DIRS=""      # AO owns everything under these
 STD_AO_PARENTS=""   # AO owns direct children of these (<default>/<sessionId>)
 STD_BLOCKED=""
 STD_LIVE_CWDS=""
-# ao_worktree_dirs <yaml>: per-project worktreeDir -> "P <dir>". The top-level
-# default (column 0, the live config sets it to ~/.worktrees) is NOT owned
-# whole: projects lacking their own worktreeDir get "P <default>/<key>" and
-# "P <default>/<basename path>", and "C <default>" covers <default>/<session>.
-ao_worktree_dirs() {
-    awk '
-        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
-                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
-        /^worktreeDir:/ { def = val($0); next }
-        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
-        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
-        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
-        END {
-            if (def == "") exit
-            sub(/\/+$/, "", def); print "C " def
-            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
-                print "P " def "/" keys[i]
-                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
-            }
-        }' "$1"
-}
 # Loaded even without STD_ROOT: the plf merged fast path also consults it.
-ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
-if [[ -e "$ao_cfg" ]]; then
-    if ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then
+    STD_BLOCKED="ao-config-unreadable"
+elif [[ "$AO_CONFIG_STATE" == "valid" ]]; then
+        ao_lines="$AO_CONFIG_LINES"
         while read -r kind d; do
             [[ -n "$d" ]] || continue
             d="$(expand_path "$d")"
             d="$d"$'\n'"$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"$'\n'
             if [[ "$kind" == C ]]; then STD_AO_PARENTS+="$d"; else STD_AO_DIRS+="$d"; fi
         done <<<"$ao_lines"
-    else
-        STD_BLOCKED="ao-config-unreadable"
-    fi
 fi
 
 # std_root_skip_reason <abs> <real>: prints why a standard-root worktree is off-limits.
