@@ -46,7 +46,7 @@ MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh" "$MOCK_BIN/cleanup_code_sign_clones.sh"
 cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
-cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
+sed "s|\"/private/tmp\"|\"$TMP_ROOT/private/tmp\"|g" "$SOURCE_SCRIPT" > "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
 
@@ -491,6 +491,87 @@ assert_contains "trim-only failure logged" "trim-only FAILED or timed out (rc=3)
 rm -rf "$TMP_ROOT/home/.colima"
 
 echo ""
+cat > "$MOCK_BIN/cleanup_colima.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "cleanup_colima $*" >> "${INVOCATION_LOG:?}"
+exit 0
+MOCK
+chmod +x "$MOCK_BIN/cleanup_colima.sh"
+
+echo "Test 19: partial numeric du output + exit 1 for tmp blocks size decision and pruning"
+DU_BIN="$TMP_ROOT/fake_du_bin"
+mkdir -p "$DU_BIN" "$TMP_ROOT/private/tmp" "$TMP_ROOT/home/.colima/_lima/_disks/colima"
+cat > "$DU_BIN/du" <<'MOCK'
+#!/bin/bash
+printf '17000000\tpartial-size\n' >> "${DU_LOG:?}"
+exit 1
+MOCK
+chmod +x "$DU_BIN/du"
+DU_LOG="$TMP_ROOT/du-tmp.log"
+: > "$DU_LOG"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-tmp-du-fail"
+rc=0
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="$DU_BIN:/usr/bin:/bin" \
+  DU_LOG="$DU_LOG" \
+  DISK_MAGICIAN_STATE_DIR="$FAIL_STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_PRESSURE_THRESHOLD_GB=0 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE=0 \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE="" \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  /bin/bash "$SCRIPT" --threshold-gb 0 || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "Test 19 numeric partial du row emitted" "17000000" "$(cat "$DU_LOG")"
+assert_contains "Test 19 failed tmp measurement logged" "size measurement failed or timed out for $TMP_ROOT/private/tmp (du rc=1)" "$LOG_CONTENT"
+assert_contains "Test 19 no prune or scratch eviction claimed" "no pruning or scratch eviction attempted; independent guarded trim-only may still run" "$LOG_CONTENT"
+assert_contains "Test 19 only guarded trim-only invoked" "cleanup_colima --trim-only --clean" "$INVOCATIONS"
+assert_not_contains "Test 19 no scratch cleanup invoked" "cleanup_tmp" "$INVOCATIONS"
+assert_not_contains "Test 19 no full Colima cleanup invoked" "cleanup_colima --clean" "$INVOCATIONS"
+assert_not_contains "Test 19 no code-sign cleanup invoked" "cleanup_code_sign_clones" "$INVOCATIONS"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 19 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 19 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+assert_receipt_field "Test 19 blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
+assert_receipt_field "Test 19 receipt nulls failed tmp metric" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('precondition', {}).get('tmp_gb'))" "None"
+assert_receipt_field "Test 19 receipt does not claim delegated false" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('safety', {}).get('delegated'))" "None"
+
+
+echo "Test 20: partial numeric du output + exit 1 for Colima blocks size decision and pruning"
+DU_LOG="$TMP_ROOT/du-colima.log"
+: > "$DU_LOG"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-colima-du-fail"
+rc=0
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="$DU_BIN:/usr/bin:/bin" \
+  DU_LOG="$DU_LOG" \
+  DISK_MAGICIAN_STATE_DIR="$FAIL_STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=50 \
+  DISK_MAGICIAN_PRESSURE_THRESHOLD_GB=0 \
+  DISK_MAGICIAN_COLIMA_GB_OVERRIDE="" \
+  DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  /bin/bash "$SCRIPT" --threshold-gb 0 || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "Test 20 numeric partial du row emitted" "17000000" "$(cat "$DU_LOG")"
+assert_contains "Test 20 failed Colima measurement logged" "size measurement failed or timed out for $TMP_ROOT/home/.colima (du rc=1)" "$LOG_CONTENT"
+assert_contains "Test 20 only guarded trim-only invoked" "cleanup_colima --trim-only --clean" "$INVOCATIONS"
+assert_not_contains "Test 20 no scratch cleanup invoked" "cleanup_tmp" "$INVOCATIONS"
+assert_not_contains "Test 20 no full Colima cleanup invoked" "cleanup_colima --clean" "$INVOCATIONS"
+assert_not_contains "Test 20 no code-sign cleanup invoked" "cleanup_code_sign_clones" "$INVOCATIONS"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 20 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 20 rc=$rc"; FAIL=$(( FAIL + 1 )); }
+assert_receipt_field "Test 20 blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
+assert_receipt_field "Test 20 receipt nulls failed Colima metric" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('precondition', {}).get('colima_gb'))" "None"
+assert_receipt_field "Test 20 receipt does not claim delegated false" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('safety', {}).get('delegated'))" "None"
+
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then
   exit 1

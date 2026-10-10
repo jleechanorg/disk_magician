@@ -146,13 +146,30 @@ fi
 # deterministic test hook (like FREE_GB_OVERRIDE above).
 COLIMA_CEILING_GB="${DISK_MAGICIAN_COLIMA_CEILING_GB:-35}"
 COLIMA_GB_OVERRIDE="${DISK_MAGICIAN_COLIMA_GB_OVERRIDE:-}"
+du_size_gb() {
+  local path="$1" output rc kb
+  if output="$(run_step_timeout du -skx "$path" 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    log "pressure_sweep: size measurement failed or timed out for $path (du rc=$rc)."
+    return 1
+  fi
+  if [[ "$output" == *$'\n'* || ! "$output" =~ ^[0-9]+[[:space:]]+.+$ ]]; then
+    log "pressure_sweep: size measurement returned invalid output for $path."
+    return 1
+  fi
+  kb="${output%%[[:space:]]*}"
+  awk -v kb="$kb" 'BEGIN{if(kb !~ /^[0-9]+$/) exit 1; print int(kb/1024/1024)}'
+}
+
 colima_gb() {
   if [[ -n "$COLIMA_GB_OVERRIDE" ]]; then
     echo "$COLIMA_GB_OVERRIDE"
     return
   fi
   [[ -d "$HOME/.colima" ]] || { echo 0; return; }
-  du -skx "$HOME/.colima" 2>/dev/null | awk '{print int($1/1024/1024)}'
+  du_size_gb "$HOME/.colima"
 }
 
 # /private/tmp size ceiling (2026-07-20 gap analysis, bead jleechan-zx7g): AO
@@ -171,7 +188,7 @@ tmp_gb() {
     return
   fi
   [[ -d "/private/tmp" ]] || { echo 0; return; }
-  du -skx "/private/tmp" 2>/dev/null | awk '{print int($1/1024/1024)}'
+  du_size_gb "/private/tmp"
 }
 
 # Bead disk_magician-mux: when the full colima step will not run, still do a
@@ -189,13 +206,41 @@ colima_trim_only() {
 SWEEP_MODE="full"
 below_threshold=$(awk -v f="$current_free_gb" -v t="$THRESHOLD_GB" 'BEGIN{print (f < t) ? "1" : "0"}')
 if [[ "$below_threshold" != "1" ]]; then
-  current_colima_gb="$(colima_gb)"
+  measurement_error=""
+  if current_colima_gb="$(colima_gb)"; then
+    :
+  else
+    current_colima_gb=""
+    measurement_error="colima"
+  fi
   over_colima_ceiling=0
   if [[ "$COLIMA_CEILING_GB" != "0" && -n "$current_colima_gb" ]]; then
     over_colima_ceiling=$(awk -v c="$current_colima_gb" -v t="$COLIMA_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
   fi
 
-  current_tmp_gb="$(tmp_gb)"
+  if current_tmp_gb="$(tmp_gb)"; then
+    :
+  else
+    current_tmp_gb=""
+    if [[ -n "$measurement_error" ]]; then measurement_error+=" and "; fi
+    measurement_error+="/private/tmp"
+  fi
+  if [[ -n "$measurement_error" ]]; then
+    log "pressure_sweep: cannot safely evaluate size ceilings because measurement failed for $measurement_error — no pruning or scratch eviction attempted; independent guarded trim-only may still run."
+    colima_trim_only
+    colima_precondition="$current_colima_gb"
+    tmp_precondition="$current_tmp_gb"
+    [[ -n "$colima_precondition" ]] || colima_precondition=null
+    [[ -n "$tmp_precondition" ]] || tmp_precondition=null
+    if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+      --outcome blocked_safety \
+      --reason "disk size measurement failed: $measurement_error; pruning and scratch eviction blocked; trim-only may have been attempted under its own guards" \
+      --safety "{\"status\": \"blocked_safety\", \"reason\": \"size measurement failed; pruning and scratch eviction blocked; independent trim-only may run under its own safety guards\"}" \
+      --precondition "{\"free_gb\": $current_free_gb, \"threshold_gb\": $THRESHOLD_GB, \"colima_gb\": $colima_precondition, \"tmp_gb\": $tmp_precondition}"; then
+      log "ERROR: failed to record blocked_safety receipt"
+    fi
+    exit 0
+  fi
   over_tmp_ceiling=0
   if [[ "$TMP_CEILING_GB" != "0" && -n "$current_tmp_gb" ]]; then
     over_tmp_ceiling=$(awk -v c="$current_tmp_gb" -v t="$TMP_CEILING_GB" 'BEGIN{print (c >= t) ? "1" : "0"}')
