@@ -1010,7 +1010,9 @@ fi
 std_root_skip_reason() {
     if [[ -n "$STD_BLOCKED" ]]; then
         echo "$STD_BLOCKED"
-    elif list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
+    elif [[ "$1" == *"/.ao/data/worktrees/"* || "$1" == *"/ao/data/worktrees/"* \
+        || "$2" == *"/.ao/data/worktrees/"* || "$2" == *"/ao/data/worktrees/"* ]] \
+        || list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
         || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
         echo "ao-owned"
     elif [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
