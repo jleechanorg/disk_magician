@@ -14,6 +14,7 @@ Validates:
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -561,6 +562,143 @@ class TestDiskStatus(unittest.TestCase):
         corrupt_receipt.write_text("{bad json", encoding="utf-8")
         res = evaluator.evaluate_action_outcome()
         self.assertEqual(res["status"], "invalid")
+
+    def test_superseded_interrupted_records_serialized_jobs(self):
+        evaluator = self.get_evaluator()
+        for job in ("snapshot_commit", "pressure_sweep"):
+            with self.subTest(job=job):
+                store = JobReceiptStore(state_dir=str(self.state_dir))
+                old_run = store.begin(job, trigger="scheduled")
+                time_old = (self.now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                receipt_file = self.state_dir / "receipts" / f"{job}.json"
+                data = json.loads(receipt_file.read_text(encoding="utf-8"))
+                for act in data["active"]:
+                    if act["id"] == old_run:
+                        act["times"]["started_at"] = time_old
+                receipt_file.write_text(json.dumps(data), encoding="utf-8")
+
+                terminal_run = store.begin(job, trigger="scheduled")
+                store.finish(
+                    job,
+                    run_id=terminal_run,
+                    outcome="success" if job == "snapshot_commit" else "success_noop",
+                    safety={"status": "safe", "reason": "serialized lock held"},
+                )
+                before_bytes = receipt_file.read_bytes()
+
+                res_action = evaluator.evaluate_action_outcome()
+                action_detail = res_action["details"][job]
+                self.assertEqual(action_detail["status"], "healthy")
+                self.assertEqual(action_detail["latest_attempt"]["id"], terminal_run)
+                self.assertEqual(action_detail["active_records"], [])
+                self.assertEqual(len(action_detail["superseded_interrupted"]), 1)
+                self.assertEqual(action_detail["superseded_interrupted"][0]["id"], old_run)
+
+                res_safety = evaluator.evaluate_safety()
+                safety_detail = res_safety["details"][job]
+                self.assertEqual(safety_detail["status"], "healthy")
+                self.assertEqual(len(safety_detail["superseded_interrupted"]), 1)
+                self.assertEqual(safety_detail["superseded_interrupted"][0]["id"], old_run)
+
+                self.assertEqual(receipt_file.read_bytes(), before_bytes)
+
+    def test_unlocked_job_active_run_not_superseded(self):
+        evaluator = self.get_evaluator()
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        old_run = store.begin("tmp_scratch_sweep", trigger="scheduled")
+        time_old = (self.now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        receipt_file = self.state_dir / "receipts" / "tmp_scratch_sweep.json"
+        data = json.loads(receipt_file.read_text(encoding="utf-8"))
+        for act in data["active"]:
+            if act["id"] == old_run:
+                act["times"]["started_at"] = time_old
+        receipt_file.write_text(json.dumps(data), encoding="utf-8")
+
+        terminal_run = store.begin("tmp_scratch_sweep", trigger="scheduled")
+        store.finish(
+            "tmp_scratch_sweep",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "unlocked sweep completed"},
+        )
+
+        res_action = evaluator.evaluate_action_outcome()
+        action_detail = res_action["details"]["tmp_scratch_sweep"]
+        self.assertEqual(action_detail["status"], "unknown")
+        self.assertEqual(action_detail["superseded_interrupted"], [])
+
+        res_safety = evaluator.evaluate_safety()
+        safety_detail = res_safety["details"]["tmp_scratch_sweep"]
+        self.assertEqual(safety_detail["status"], "unknown")
+        self.assertEqual(safety_detail["superseded_interrupted"], [])
+
+    def test_genuinely_active_run_after_terminal_stays_unknown(self):
+        evaluator = self.get_evaluator()
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        terminal_run = store.begin("snapshot_commit", trigger="scheduled")
+        store.finish(
+            "snapshot_commit",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "lock held"},
+        )
+        active_run = store.begin("snapshot_commit", trigger="scheduled")
+
+        res_action = evaluator.evaluate_action_outcome()
+        action_detail = res_action["details"]["snapshot_commit"]
+        self.assertEqual(action_detail["status"], "unknown")
+        self.assertEqual(action_detail["active_records"][-1]["id"], active_run)
+        self.assertEqual(action_detail["latest_attempt"]["id"], active_run)
+
+        res_safety = evaluator.evaluate_safety()
+        safety_detail = res_safety["details"]["snapshot_commit"]
+        self.assertEqual(safety_detail["status"], "unknown")
+
+    def test_malformed_run_identity_or_missing_lock_proof_stays_unknown(self):
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        old_run = store.begin("snapshot_commit", trigger="scheduled")
+        terminal_run = store.begin("snapshot_commit", trigger="scheduled")
+        store.finish(
+            "snapshot_commit",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "serialized job lock"},
+        )
+        receipt_file = self.state_dir / "receipts" / "snapshot_commit.json"
+        base = json.loads(receipt_file.read_text(encoding="utf-8"))
+        base["active"][0]["times"]["started_at"] = (
+            self.now - timedelta(hours=5)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def mutate_terminal_missing_lock(data):
+            data["last_terminal"]["lock"] = {"held": False, "acquired": False}
+
+        def mutate_active_alias(data):
+            data["active"][0]["run_id"] = terminal_run
+
+        def mutate_terminal_alias(data):
+            data["last_terminal"]["run"] = old_run
+
+        def mutate_terminal_schema(data):
+            data["last_terminal"]["schema_version"] = 999
+
+        malformed_cases = (
+            ("terminal missing lock proof", mutate_terminal_missing_lock),
+            ("active ID aliases disagree", mutate_active_alias),
+            ("terminal ID aliases disagree", mutate_terminal_alias),
+            ("terminal schema version invalid", mutate_terminal_schema),
+        )
+
+        for label, mutate_fn in malformed_cases:
+            with self.subTest(label=label):
+                data = copy.deepcopy(base)
+                mutate_fn(data)
+                receipt_file.write_text(json.dumps(data), encoding="utf-8")
+                evaluator = self.get_evaluator()
+                action_res = evaluator.evaluate_action_outcome()
+                action_detail = action_res["details"]["snapshot_commit"]
+                self.assertEqual(action_detail["status"], "unknown")
+                self.assertEqual(action_detail["superseded_interrupted"], [])
 
     def test_safety_evaluation(self):
         evaluator = self.get_evaluator()

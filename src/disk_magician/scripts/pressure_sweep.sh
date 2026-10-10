@@ -158,18 +158,27 @@ fi
 COLIMA_CEILING_GB="${DISK_MAGICIAN_COLIMA_CEILING_GB:-35}"
 COLIMA_GB_OVERRIDE="${DISK_MAGICIAN_COLIMA_GB_OVERRIDE:-}"
 du_size_gb() {
-  local path="$1" output rc kb
+  local path="$1" output rc kb errf
   if [[ -z "$TIMEOUT_CMD" ]]; then
     log "pressure_sweep: bounded timeout unavailable; size measurement blocked for $path."
     return 1
   fi
-  if output="$(run_step_timeout du -skx "$path" 2>/dev/null)"; then
+  errf="$(mktemp "${TMPDIR:-/tmp}/pressure-du-err.XXXXXX")" || return 1
+  if output="$(run_step_timeout du -skx "$path" 2>"$errf")"; then
     :
   else
     rc=$?
-    log "pressure_sweep: size measurement failed or timed out for $path (du rc=$rc)."
-    return 1
+    # du exits 1 when root-owned subdirs (tmp-mount-*, RustDesk-service) are
+    # unreadable. If every stderr line is EACCES, the total is a lower bound,
+    # which can only suppress a ceiling-triggered sweep — safe to use.
+    if [[ $rc -ne 1 || ! -s "$errf" ]] || grep -qv 'Permission denied$' "$errf"; then
+      rm -f "$errf"
+      log "pressure_sweep: size measurement failed or timed out for $path (du rc=$rc)."
+      return 1
+    fi
+    log "pressure_sweep: du skipped $(wc -l < "$errf" | tr -d ' ') unreadable entries under $path; using lower-bound size."
   fi
+  rm -f "$errf"
   if [[ "$output" == *$'\n'* || ! "$output" =~ ^[0-9]+[[:space:]]+.+$ ]]; then
     log "pressure_sweep: size measurement returned invalid output for $path."
     return 1
@@ -290,19 +299,45 @@ fi
 
 # ────────── LOCK (mkdir-based, TTL 60min) — overlapping fires skip ──────────
 acquire_lock() {
+  mkdir -p "$(dirname "$LOCK_DIR")"
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     date -u +%s > "$LOCK_DIR/acquired_at"
+    echo $$ > "$LOCK_DIR/pid"
     return 0
   fi
-  local lock_ts now age
-  lock_ts="$(cat "$LOCK_DIR/acquired_at" 2>/dev/null || echo 0)"
+  local lock_ts now age held_pid is_alive=0
+  held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+  lock_ts="$(cat "$LOCK_DIR/acquired_at" 2>/dev/null || stat -f%m "$LOCK_DIR" 2>/dev/null || stat -c%Y "$LOCK_DIR" 2>/dev/null || echo 0)"
   now="$(date -u +%s)"
   age=$(( now - lock_ts ))
-  if (( age > LOCK_TTL_SEC )); then
-    log "pressure_sweep: stale lock (${age}s old, TTL ${LOCK_TTL_SEC}s) — reclaiming."
-    rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null && date -u +%s > "$LOCK_DIR/acquired_at" && return 0
-    return 1
+  if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
+    if ps -p "$held_pid" -o pid= >/dev/null 2>&1; then
+      is_alive=1
+    fi
+  fi
+  if (( age > LOCK_TTL_SEC )) && [[ "$is_alive" -eq 0 ]]; then
+    local reclaim_gate="${LOCK_DIR}.reclaim_gate"
+    if mkdir "$reclaim_gate" 2>/dev/null; then
+      local recheck_pid recheck_ts recheck_alive=0
+      recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+      recheck_ts="$(cat "$LOCK_DIR/acquired_at" 2>/dev/null || stat -f%m "$LOCK_DIR" 2>/dev/null || stat -c%Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+      if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
+        if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
+          recheck_alive=1
+        fi
+      fi
+      if (( (now - recheck_ts) > LOCK_TTL_SEC )) && [[ "$recheck_alive" -eq 0 ]]; then
+        log "pressure_sweep: stale lock (${age}s old, dead pid ${held_pid:-none}, TTL ${LOCK_TTL_SEC}s) — reclaiming."
+        rm -rf "$LOCK_DIR"
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+          date -u +%s > "$LOCK_DIR/acquired_at"
+          echo $$ > "$LOCK_DIR/pid"
+          rmdir "$reclaim_gate" 2>/dev/null || true
+          return 0
+        fi
+      fi
+      rmdir "$reclaim_gate" 2>/dev/null || true
+    fi
   fi
   return 1
 }
