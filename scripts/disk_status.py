@@ -1525,9 +1525,57 @@ class DiskStatusEvaluator:
                 time=deployed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
 
-        # Fleet consumer join validation
+        # Verify the separately installed privileged root scanner against the
+        # scanner shipped in the deployed package. Only installed-plist system
+        # provenance makes this consumer applicable (not Linux/no-root hosts).
         if fleet_info and isinstance(fleet_info, dict):
             records = fleet_info.get("records") or []
+            for rec in records:
+                if not isinstance(rec, dict) or rec.get("label") != "com.jleechanorg.disk-magician-frontier-root":
+                    continue
+                if rec.get("identity_source") != "installed_plist" or rec.get("execution_kind") != "system":
+                    continue
+                args = rec.get("program_arguments") or rec.get("observed_program_arguments")
+                expected_scanner_hash = package_hashes.get("scripts/disk_frontier_scan.py")
+                if not isinstance(args, list) or not args or not isinstance(args[0], str) or not Path(args[0]).is_absolute():
+                    return make_result(
+                        status=STATUS_DEGRADED,
+                        reason="root_frontier_scanner_program_arguments_missing",
+                        owner="deployed_identity",
+                        source=str(deployed_file),
+                        time=deployed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                if not isinstance(expected_scanner_hash, str):
+                    return make_result(
+                        status=STATUS_DEGRADED,
+                        reason="root_frontier_scanner_missing_from_deploy_manifest",
+                        owner="deployed_identity",
+                        source=str(deployed_file),
+                        time=deployed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                root_scanner = Path(args[0]).parent / "disk_frontier_scan.py"
+                try:
+                    observed_hash = sha256_file(root_scanner)
+                except OSError:
+                    observed_hash = None
+                if observed_hash is None:
+                    return make_result(
+                        status=STATUS_DEGRADED,
+                        reason=f"root_frontier_scanner_missing_or_unreadable: {root_scanner}",
+                        owner="deployed_identity",
+                        source=str(deployed_file),
+                        time=deployed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                if observed_hash != expected_scanner_hash:
+                    return make_result(
+                        status=STATUS_DEGRADED,
+                        reason=f"root_frontier_scanner_hash_mismatch: {root_scanner}",
+                        owner="deployed_identity",
+                        source=str(deployed_file),
+                        time=deployed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        details={"root_scanner": str(root_scanner), "expected_sha256": expected_scanner_hash, "observed_sha256": observed_hash},
+                    )
+
             for rec in records:
                 if not isinstance(rec, dict):
                     continue
