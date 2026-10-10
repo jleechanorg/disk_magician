@@ -394,7 +394,7 @@ case "$CMD" in
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
     ;;
   worktree_remove_hook|worktree-remove-hook)
-    "$SCRIPT_DIR/scripts/worktree_remove_hook.sh" "$@"
+    DISK_MAGICIAN_LIFECYCLE_PARENT_PID="$PPID" "$SCRIPT_DIR/scripts/worktree_remove_hook.sh" "$@"
     ;;
   -h|--help)
     usage

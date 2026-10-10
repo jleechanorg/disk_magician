@@ -12,6 +12,8 @@
 _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
+source "$_WRH_DIR/lib/worktree_recency.sh"
+source "$_WRH_DIR/lib/ao_worktree_config.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -60,9 +62,13 @@ has_ignored_user_data() {
                 # build, dist, env, target, coverage and .cache can hold hand-made
                 # files, so they count as user data and preserve the worktree.
                 node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
-                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                .next|.turbo|.gradle|.tox|.eggs|htmlcov|venv.bak.*|test-results)
                     ok=true; break ;;
+                # File-oriented patterns are rebuildable only when the matched
+                # path is not a directory containing user data.
+                *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+                    [[ ! -d "$1/$rest" ]] && { ok=true; break; }
+                    ;;
             esac
             [[ "$rest" == */* ]] || break
             rest="${rest%/*}"
@@ -70,6 +76,68 @@ has_ignored_user_data() {
         [[ "$ok" == true ]] || return 0
     done <<<"$out"
     return 1
+}
+
+
+wrh_live_cwd_reason() {
+    local target=$1 out err rc=0 line pid= seen=0 live=0 path path_seen=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
+    WRH_LIVE_CWD_REASON=
+    command -v lsof >/dev/null 2>&1 || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    if [[ ${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-} =~ ^[0-9]+$ ]]; then
+        ancestry=$(ps -Ao pid=,ppid= 2>/dev/null | awk -v start="$$" -v wanted="$DISK_MAGICIAN_LIFECYCLE_PARENT_PID" '
+            { parent[$1] = $2 }
+            END { p = start; out = ""; for (i = 0; i < 8; i++) {
+                p = parent[p]; if (p == "" || p == "0") exit 1
+                out = out " " p
+                if (p == wanted) { print out; exit 0 }
+            } exit 1 }')
+        if [[ -n $ancestry ]]; then caller_chain=" $$ $ancestry "; caller_pid=$DISK_MAGICIAN_LIFECYCLE_PARENT_PID
+        else caller_chain=" $$ $PPID "; fi
+    fi
+    err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
+    out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
+    [[ ! -s $err ]] || rc=1
+    [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
+    [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    while IFS= read -r line; do case $line in
+        p*)
+            [[ -z $pid || $path_seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            pid=${line#p}; [[ $pid =~ ^[0-9]+$ ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            path_seen=0 ;;
+        n*)
+            [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            path=${line#n}; [[ $path == /* ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            path_seen=1; seen=1
+            case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
+        *) [[ -z $line ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; } ;;
+    esac; done <<<"$out"
+    [[ $seen == 1 && $path_seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    [[ $live == 1 ]] && WRH_LIVE_CWD_REASON=live-cwd
+}
+wrh_expand_path() {
+    local p=$1
+    if [[ $p == "~/"* ]]; then printf '%s\n' "${HOME}/${p:2}"
+    elif [[ $p == "~" ]]; then printf '%s\n' "$HOME"
+    elif [[ $p == /* ]]; then printf '%s\n' "$p"
+    else return 1; fi
+}
+
+wrh_ao_skip_reason() {
+    local target=$1 config=${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml} lines kind dir root candidate
+    case "$target" in */.ao/data/worktrees/*|*/ao/data/worktrees/*) echo ao-owned; return;; esac
+    [[ -e $config ]] || { [[ -n ${DISK_MAGICIAN_AO_CONFIG+x} ]] && echo ao-config-unreadable; return; }
+    lines=$(ao_worktree_dirs "$config") || { echo ao-config-unreadable; return; }
+    [[ -n $lines ]] || return 0
+    candidate=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null) || { echo ao-config-unreadable; return; }
+    while IFS= read -r line; do
+        case $line in P\ *|C\ *) kind=${line%% *}; dir=${line#? };; *) echo ao-config-unreadable; return;; esac
+        [[ -n $dir ]] || { echo ao-config-unreadable; return; }
+        root=$(wrh_expand_path "$dir") || { echo ao-config-unreadable; return; }
+        root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null) || { echo ao-config-unreadable; return; }
+        if [[ $kind == P && ( $candidate == "$root" || $candidate == "$root/"* ) ]] ||
+           [[ $kind == C && ${candidate%/*} == "$root" ]]; then echo ao-owned; return; fi
+    done <<<"$lines"
 }
 
 wrh_main() {
@@ -93,6 +161,16 @@ print(v)
     if ! git -C "$main" worktree list --porcelain 2>/dev/null |
         awk -v want="worktree $real" 'NR > 1 && $0 == want { f = 1 } END { exit !f }'; then
         wrh_log "kept $p: not a registered linked worktree"
+        return 0
+    fi
+    local guard_reason
+    wrh_live_cwd_reason "$real"
+    guard_reason=$WRH_LIVE_CWD_REASON
+    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
+    guard_reason="$(wrh_ao_skip_reason "$real")"
+    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
+    if worktree_is_recently_active "$real" 7; then
+        wrh_log "kept $p: recent-activity"
         return 0
     fi
     local status

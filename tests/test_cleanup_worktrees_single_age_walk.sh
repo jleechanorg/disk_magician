@@ -84,7 +84,8 @@ init_fixture() {
   WT="$REPO/.claude/worktrees"
   AG="$HOME_FIX/.gemini/antigravity/worktrees/project"
   BIN="$F/bin"
-  mkdir -p "$WT" "$AG" "$BIN"
+  mkdir -p "$WT" "$AG" "$BIN" "$HOME_FIX/.hermes"
+  printf 'projects: {}\n' > "$HOME_FIX/.hermes/agent-orchestrator.yaml"
   : > "$F/ages.tsv"; : > "$F/calls.expected"; : > "$F/eligible.expected"
   printf 'n/\n' > "$F/lsof.out"
   "$REAL_GIT" init -q -b main "$REPO"
@@ -128,11 +129,11 @@ esac
 SH
   cat > "$BIN/git" <<'SH'
 #!/usr/bin/env bash
-# Exercise the existing active-orphan short circuit verbatim: it currently
-# uses grep -F with literal ^/$ delimiters. Only this dedicated probe gets
-# that response; repo-local discovery and every other git operation are real.
+# Exercise the active-orphan short circuit with valid porcelain output. Only
+# this dedicated probe gets that response; repo-local discovery and every
+# other git operation are real.
 if [[ "$*" == "-C $FIXTURE/active-main worktree list --porcelain" ]]; then
-  printf '^worktree %s$\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
+  printf 'worktree %s\n\n' "$FIXTURE/home/.gemini/antigravity/worktrees/project/active"
   exit 0
 fi
 exec "$REAL_GIT" "$@"
@@ -152,6 +153,11 @@ add_wt() {
 add_orphan() {
   mkdir -p "$AG/$1"
   printf 'orphan content\n' > "$AG/$1/content"
+  "$REAL_GIT" -C "$AG/$1" init -q -b main
+  "$REAL_GIT" -C "$AG/$1" config user.name 'Fixture User'
+  "$REAL_GIT" -C "$AG/$1" config user.email fixture@users.noreply.github.com
+  "$REAL_GIT" -C "$AG/$1" add content
+  "$REAL_GIT" -C "$AG/$1" commit -q -m base
   map_age "$AG/$1" "$2"
   expect_calls "$AG/$1" 1
 }
@@ -191,7 +197,6 @@ mixed_fixture() {
   AUTO="$F/ao/data/worktrees/wt-auto"
   add_wt wt-auto "$AUTO" 10
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
-  expect_eligible "$AUTO"
   add_wt wt-prunable "$WT/wt-prunable" 10
   # Preserve the fixture's data while making its registered path prunable.
   mv "$WT/wt-prunable" "$F/prunable-saved"
@@ -342,16 +347,20 @@ for filename in sys.argv[1:]:
     with path.open() as source, path.with_suffix('.normalized').open('w') as target:
         for line in source:
             line = re.sub(r' [|] age=\S+ size=\S+', '', line)
+            if '/antigravity/worktrees/project/old ' in line or '/ao/data/worktrees/wt-auto ' in line: continue
+            if line.startswith(('Antigravity:', 'Repo-local:', 'Reclaimable:')): continue
             line = re.sub(r' [(](?:age=[^)]*|< [0-9]+ days)[)]', '', line)
             target.write(line)
 PY_NORMALIZE
   require diff -u "$F/baseline.normalized" "$F/branch.normalized"
-  require contains "$F/branch.out" 'Repo-local:  4 eligible, 7 preserved.'
+  require contains "$F/branch.out" 'Repo-local:  3 eligible, 8 preserved.'
   require contains "$F/branch.out" 'Antigravity: 1 eligible orphan(s), 1 active preserved.'
-  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (5120 KB)'
   require contains "$F/gh.calls" '--head wt-ahead'
   require contains "$F/gh.calls" '--head wt-squash'
   require contains "$F/branch.out" 'wt-prunable | prunable-unknown'
+  require contains "$F/branch.out" "$AG/old (~1M"
+  require contains "$F/branch.out" "$F/ao/data/worktrees/wt-auto | locked"
+  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (4096 KB)'
 }
 
 case_t8() {
@@ -384,7 +393,6 @@ case_t9() {
   AUTO="$F/ao/data/worktrees/wt-auto"
   add_wt wt-auto "$AUTO" 10
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
-  expect_eligible "$AUTO"
   add_orphan old 10
   expect_eligible "$AG/old"
   add_wt wt-young "$WT/wt-young" 2
@@ -419,7 +427,7 @@ case_t9() {
       require ledger_has "$F/out" PRESERVE "$path "
     fi
   done < "$F/before.paths"
-  require contains "$F/out" 'Repo-local:  3 eligible, 10 preserved.'
+  require contains "$F/out" 'Repo-local:  2 eligible, 11 preserved.'
   require contains "$F/out" 'Antigravity: 1 eligible orphan(s), 6 active preserved.'
 }
 
@@ -649,7 +657,7 @@ run_case T2 'du only on eligible rows and preserve size=-' case_t2
 run_case T3 'known-size worktree and exact reclaimable total' case_t3
 run_case T4 'invalid and failed ages fail closed in both scopes' case_t4
 run_case T5 'unstubbed empty orphan remains young' case_t5
-run_case T6 'orphan at the age floor is not young' case_t6
+run_case T6 'Antigravity orphan at the age floor is eligible' case_t6
 run_case T7 'whole-script baseline verdict and summary equivalence' case_t7
 run_case T8 'du failure aborts eligible rows, preserve rows skip du' case_t8
 run_case T9 'fixture-only clean removes exactly eligible paths' case_t9

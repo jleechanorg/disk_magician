@@ -15,6 +15,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 # shellcheck source=scripts/lib/scratch_budget.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+# shellcheck source=scripts/lib/scratch_lock.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
+dylib_candidate_file=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -105,6 +108,7 @@ if [[ ${#PROTECTED_TMP_ROOTS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
+SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 INCLUDE_LARGE=false
 INCLUDE_OPENCODE_DYLIBS=false
 LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
@@ -186,6 +190,10 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DY
   echo "Refusing OpenCode dylib cleanup: set OPENCODE_DYLIBS_APPROVED=1 after reviewing dry-run output." >&2
   exit 0
 fi
+
+# Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
+# Dry-run (--dry-run) is read-only and skips the lock.
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" "${SCRATCH_LOCK_ORIGINAL_ARGS[@]}" || exit 1; }
 
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
@@ -783,7 +791,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
     log "Skipping OpenCode dylibs: lsof is unavailable, cannot prove files are closed"
   else
     dylib_candidate_file=$(mktemp -t disk-magician-opencode-dylibs.XXXXXX)
-    trap 'rm -f "${dylib_candidate_file:-}"' EXIT
+    scratch_lock_set_traps
     find "$USER_TMP" -mindepth 1 -maxdepth 1 -type f \
       -name '.*.dylib' -print0 2>/dev/null > "$dylib_candidate_file" || true
 
