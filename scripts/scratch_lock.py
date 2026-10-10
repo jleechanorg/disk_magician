@@ -18,17 +18,27 @@ ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
 def lock_path() -> Path:
     state_dir = os.environ.get("DISK_MAGICIAN_STATE_DIR", "").strip()
     if not state_dir:
-        state_dir = str(Path.home() / ".disk_magician_state")
+        home = os.environ.get("HOME", "")
+        if not home or not Path(home).is_absolute():
+            raise PermissionError("unsafe HOME for scratch lock")
+        home_stat = os.lstat(home)
+        if not stat.S_ISDIR(home_stat.st_mode) or home_stat.st_uid != os.geteuid() or home_stat.st_mode & 0o022:
+            raise PermissionError("unsafe HOME for scratch lock")
+        state_dir = str(Path(home) / ".disk_magician_locks")
     return Path(state_dir).expanduser() / "scratch_cleanup.lock"
 
 
 def open_lock(path: Path, create: bool) -> int:
     if create:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        old_umask = os.umask(0)
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        finally:
+            os.umask(old_umask)
     dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         parent = os.fstat(dir_fd)
-        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
             raise PermissionError("unsafe scratch lock directory")
         flags = os.O_RDWR | os.O_NOFOLLOW
         if create:

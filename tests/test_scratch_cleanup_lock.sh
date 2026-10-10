@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLEANUP_TMP_BIN="$REPO_ROOT/scripts/cleanup_tmp.sh"
 CLEANUP_PR_BIN="$REPO_ROOT/scripts/cleanup_pr_scratch.sh"
 ROOT=$(mktemp -d -t test_scratch_lock.XXXXXX)
+ROOT=$(cd "$ROOT" && pwd -P)
 cleanup() {
   rm -f "$ROOT/pause"
   if [[ -n "${HOLDER_PID:-}" ]]; then
@@ -49,11 +50,31 @@ chmod +x "$ROOT/bin/find"
 export PATH="$ROOT/bin:$PATH"
 export DISK_MAGICIAN_FIND_BIN="$ROOT/bin/find"
 export DISK_MAGICIAN_TEST_SANDBOX="$ROOT"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$ROOT"
 export DISK_MAGICIAN_PR_SCRATCH_ROOTS="$ROOT"
 export DISK_MAGICIAN_TEST_CONTEXT=1
 export CLEANUP_PR_BIN
 
 echo "=== scratch cleanup kernel-lock integration tests ==="
+
+# An unset or blank override uses a private lock root under a verified HOME.
+DEFAULT="$ROOT/default"; mkdir -m 0700 -p "$DEFAULT/home"
+for override in unset blank; do
+  if [[ "$override" == unset ]]; then
+    (unset DISK_MAGICIAN_STATE_DIR; umask 0002; HOME="$DEFAULT/home" python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args --)
+  else
+    (umask 0002; HOME="$DEFAULT/home" DISK_MAGICIAN_STATE_DIR='  ' python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args --)
+  fi
+  [[ -f "$DEFAULT/home/.disk_magician_locks/scratch_cleanup.lock" && ! -e "$DEFAULT/home/.disk_magician_state" ]] && record pass "$override override selects dedicated root" || record fail "$override override selects dedicated root"
+done
+[[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks")" == 0o700 ]] && record pass "umask 0002 creates root mode 0700" || record fail "umask 0002 creates root mode 0700"
+[[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks/scratch_cleanup.lock")" == 0o600 ]] && record pass "default lock file mode 0600" || record fail "default lock file mode 0600"
+chmod 0755 "$DEFAULT/home/.disk_magician_locks"
+if HOME="$DEFAULT/home" DISK_MAGICIAN_STATE_DIR='' python3 "$REPO_ROOT/scripts/scratch_lock.py" run --caller probe --script /usr/bin/true --args -- >/dev/null 2>&1; then
+  record fail "existing public lock root fails closed"
+else
+  [[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$DEFAULT/home/.disk_magician_locks")" == 0o755 ]] && record pass "existing public lock root fails closed without chmod" || record fail "existing public lock root fails closed without chmod"
+fi
 
 # Both real entrypoints reject the other while its find child is paused.
 for holder in tmp pr; do
@@ -131,7 +152,7 @@ rm -f "$ROOT/pause"
 wait "$HOLDER_PID" || true
 HOLDER_PID=""
 DISK_MAGICIAN_STATE_DIR="$CHILD/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
-  --caller probe --script /bin/true --args -- && record pass "real caller succeeds after scanner exits" || record fail "real caller succeeds after scanner exits"
+  --caller probe --script /usr/bin/true --args -- && record pass "real caller succeeds after scanner exits" || record fail "real caller succeeds after scanner exits"
 
 # Unsafe lock objects and directories fail before either cleaner can scan.
 for kind in symlink mode parent parent_symlink; do
@@ -200,7 +221,7 @@ if [[ -n "$CHILD_PID" ]]; then
 fi
 for _ in {1..200}; do
   if DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
-      --caller probe --script /bin/true --args -- >/dev/null 2>&1; then break; fi
+      --caller probe --script /usr/bin/true --args -- >/dev/null 2>&1; then break; fi
   sleep 0.025
 done
 DISK_MAGICIAN_STATE_DIR="$ORPHAN/state" DISK_MAGICIAN_TMP_DIR="$ORPHAN/tmp" \
