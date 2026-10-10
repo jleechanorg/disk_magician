@@ -437,6 +437,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                     "reason": "inventory_permission_denied",
                 },
                 {"path": "/fixture/data/gone", "reason": "inventory_path_disappeared"},
+                {"path": "/fixture/data/gone2.db-wal", "reason": "lstat_failed", "errno": errno.ENOENT},
                 {"path": "/fixture/home", "reason": "cross_device_boundary"},
             ],
             deduped=[], warnings=[], nodes_processed=3,
@@ -466,7 +467,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
     @staticmethod
     def fake_lstat(path):
-        if path.endswith("/gone"):
+        if path.endswith(("/gone", "/gone2.db-wal")):
             raise FileNotFoundError(errno.ENOENT, "gone", path)
         return SimpleNamespace(st_dev=2 if path.endswith("/home") else 1)
 
@@ -815,6 +816,43 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                     fda_preflight=fda, run_started_at=100.0,
                     run_finished_at=102.0, now=102.0,
                 ))
+
+    def test_symlink_only_top_level_root_is_measured_zero(self):
+        scanner = self.scanner()
+        scanner.level1_paths = ["/fixture/data", "/fixture/home", "/fixture/Volumes"]
+        entry = SimpleNamespace(is_symlink=lambda: True)
+
+        class Entries:
+            def __enter__(self_inner):
+                return iter([entry])
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        def scandir(path):
+            if path == "/fixture/Volumes":
+                return Entries()
+            return self.fake_scandir(path)
+
+        with mock.patch.object(frontier.os, "lstat", side_effect=self.fake_lstat), \
+             mock.patch.object(frontier.os.path, "realpath", side_effect=lambda p: p), \
+             mock.patch.object(frontier.os, "scandir", side_effect=scandir):
+            report = frontier.build_report(
+                scanner,
+                {"total_kb": 20 * GIB_KB, "used_kb": 10 * GIB_KB, "free_kb": 10 * GIB_KB},
+                [],
+                {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+                 "local_snapshots": [], "local_snapshots_count": 0},
+                1.0,
+                self.args(),
+            )
+        volumes = [t for t in report["top_level_ledger"] if t["path"] == "/fixture/Volumes"]
+        self.assertEqual(volumes[0]["status"], "measured")
+        self.assertEqual(volumes[0]["measured_kb"], 0)
+
+    def test_is_symlink_only_dir_fails_closed_on_error(self):
+        with mock.patch.object(frontier.os, "scandir", side_effect=PermissionError(errno.EPERM, "x")):
+            self.assertFalse(frontier.is_symlink_only_dir("/anything"))
 
     def test_attestable_path_rejects_user_data_and_traversal(self):
         for path in (
