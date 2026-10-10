@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = 1
@@ -103,7 +104,7 @@ def superseded_interrupted_records(
     if job not in {"snapshot_commit", "pressure_sweep"} or not active or not isinstance(terminal, dict):
         return [], active
     lock = terminal.get("lock")
-    terminal_id = terminal.get("id") or terminal.get("run_id")
+    terminal_id = consistent_run_id(terminal)
     terminal_times = terminal.get("times")
     terminal_start = parse_utc_timestamp(
         terminal_times.get("started_at") if isinstance(terminal_times, dict) else None
@@ -112,7 +113,8 @@ def superseded_interrupted_records(
         terminal_times.get("ended_at") if isinstance(terminal_times, dict) else None
     )
     if (
-        not isinstance(lock, dict)
+        terminal.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(lock, dict)
         or lock.get("held") is not True
         or lock.get("acquired") is not True
         or not terminal_id
@@ -131,13 +133,18 @@ def superseded_interrupted_records(
     current: List[Dict[str, Any]] = []
     for record in active:
         if isinstance(record, dict):
-            run_id = record.get("id") or record.get("run_id")
+            run_id = consistent_run_id(record)
             record_times = record.get("times")
             started_at = parse_utc_timestamp(
                 record_times.get("started_at") if isinstance(record_times, dict) else None
             )
             if (
-                record.get("job") == job
+                record.get("schema_version") == SCHEMA_VERSION
+                and record.get("job") == job
+                and record.get("outcome") == "unknown"
+                and isinstance(record_times, dict)
+                and "ended_at" in record_times
+                and record_times["ended_at"] is None
                 and run_id
                 and run_id != terminal_id
                 and started_at is not None
@@ -147,6 +154,21 @@ def superseded_interrupted_records(
                 continue
         current.append(record)
     return superseded, current
+
+
+def consistent_run_id(record: Dict[str, Any]) -> Optional[str]:
+    """Return a canonical UUID only when all persisted run ID aliases agree."""
+    run_ids = (record.get("id"), record.get("run"), record.get("run_id"))
+    if not all(isinstance(value, str) and value for value in run_ids):
+        return None
+    if run_ids[0] != run_ids[1] or run_ids[0] != run_ids[2]:
+        return None
+    try:
+        parsed = uuid.UUID(run_ids[0])
+    except (AttributeError, ValueError):
+        return None
+    return run_ids[0] if str(parsed) == run_ids[0] else None
+
 
 def sha256_file(path: Path) -> str:
     """Compute sha256 digest of a file."""

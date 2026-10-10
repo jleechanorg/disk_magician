@@ -14,6 +14,7 @@ Validates:
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -733,6 +734,85 @@ class TestDiskStatus(unittest.TestCase):
         tmp_action = evaluator.evaluate_action_outcome()["details"]["tmp_scratch_sweep"]
         self.assertEqual(tmp_action["status"], "unknown")
         self.assertEqual(tmp_action["superseded_interrupted"], [])
+
+    def test_malformed_run_identity_or_finished_active_stays_unknown(self):
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        old_run = store.begin("snapshot_commit", trigger="scheduled")
+        terminal_run = store.begin("snapshot_commit", trigger="scheduled")
+        store.finish(
+            "snapshot_commit",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "serialized job lock"},
+        )
+        receipt = self.state_dir / "receipts" / "snapshot_commit.json"
+        base = json.loads(receipt.read_text())
+        base["active"][0]["times"]["started_at"] = (
+            self.now - timedelta(hours=5)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(base["active"][0]["id"], old_run)
+        self.assertEqual(base["last_terminal"]["id"], terminal_run)
+
+        def mutate_active_outcome(data):
+            data["active"][0]["outcome"] = "success"
+
+        def mutate_active_ended_at(data):
+            data["active"][0]["times"]["ended_at"] = self.now_str
+
+        def mutate_active_alias(data):
+            data["active"][0]["run_id"] = terminal_run
+
+        def mutate_active_id_type(data):
+            data["active"][0]["id"] = {"run_id": old_run}
+
+        def mutate_terminal_id_type(data):
+            data["last_terminal"]["id"] = {"run_id": terminal_run}
+
+        def mutate_terminal_alias(data):
+            data["last_terminal"]["run"] = old_run
+
+        def mutate_terminal_schema(data):
+            data["last_terminal"].pop("schema_version")
+
+        malformed_cases = (
+            ("active non-unknown outcome", mutate_active_outcome),
+            ("active already ended", mutate_active_ended_at),
+            ("active ID aliases disagree", mutate_active_alias),
+            ("active object ID", mutate_active_id_type),
+            ("terminal object ID", mutate_terminal_id_type),
+            ("terminal ID aliases disagree", mutate_terminal_alias),
+            ("terminal schema missing", mutate_terminal_schema),
+        )
+        env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(self.state_dir)}
+        status_cli = REPO_ROOT / "disk_magician.sh"
+
+        def read_status():
+            result = subprocess.run(
+                [
+                    str(status_cli), "status", "--json",
+                    "--state-dir", str(self.state_dir),
+                    "--state-repo", str(self.state_dir / "empty-state-repo"),
+                    "--fleet-json", str(self.state_dir / "fleet.json"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return json.loads(result.stdout)
+
+        for label, mutate in malformed_cases:
+            with self.subTest(label=label):
+                data = copy.deepcopy(base)
+                mutate(data)
+                receipt.write_text(json.dumps(data), encoding="utf-8")
+                status = read_status()
+                action = status["dimensions"]["action_outcome"]["details"]["snapshot_commit"]
+                safety = status["dimensions"]["safety"]["details"]["snapshot_commit"]
+                self.assertEqual(action["status"], "unknown", action)
+                self.assertEqual(action["superseded_interrupted"], [])
+                self.assertEqual(safety["status"], "unknown", safety)
+                self.assertEqual(safety["superseded_interrupted"], [])
 
     def test_receipt_cli_reports_superseded_and_current_runs_without_mutation(self):
         with tempfile.TemporaryDirectory() as state_dir_str:
