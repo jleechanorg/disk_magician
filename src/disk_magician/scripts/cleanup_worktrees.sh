@@ -610,6 +610,11 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
+    if [[ ! -e "$abs_subdir/.git" && ! -L "$abs_subdir/.git" ]]; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "not-git"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
     if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
         local status_porcelain status_rc=0
         status_porcelain="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
@@ -631,6 +636,12 @@ process_antigravity_orphan() {
 
         if has_ignored_user_data "$abs_subdir"; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+
+        if has_hidden_state "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
@@ -731,6 +742,16 @@ process_antigravity_orphan() {
             return 0
         fi
         ledger_line "antigravity" "DELETE" "$abs_subdir" "" " (~${local_mb}M)"
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_hidden_state "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
+        if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_ignored_user_data "$abs_subdir"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ignored-data"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
         if ! _safety_reason="$(safety_gate "$abs_subdir" 2>/dev/null)"; then
             echo "SAFETY-SKIP $abs_subdir ($_safety_reason)"
         else
