@@ -219,25 +219,9 @@ if [[ ${#CLI_PATTERNS[@]} -gt 0 ]]; then
   PATTERNS=("${CLI_PATTERNS[@]}")
 fi
 
-# Shared lock invariant:
-# Both cleanup_pr_scratch.sh and cleanup_tmp.sh inspect overlapping scratch
-# roots (/private/tmp, /tmp, and Darwin user temp dirs). To prevent TOCTOU
-# deletion races, both destructive paths acquire this shared lock before
-# enumerating roots or candidates and hold it until all operations finish.
-# Dry-run (--dry-run) is strictly read-only and skips the lock.
-if [[ "$DRY_RUN" == false ]]; then
-  scratch_lock_acquire "cleanup_pr_scratch" || {
-    _lock_rc=$?
-    if [[ "$_lock_rc" -eq 1 ]]; then
-      if [[ "${DISK_MAGICIAN_SCRATCH_LOCK_CONTENTION_NONZERO:-0}" == "1" ]]; then
-        exit 1
-      fi
-      exit 0
-    else
-      exit 1
-    fi
-  }
-fi
+# Shared lock invariant: serialize destructive sweep against cleanup_tmp.
+# Dry-run (--dry-run) is read-only and skips the lock.
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" || exit 1; }
 
 TMP_DIRS=()
 if [[ ${#CLI_TMP_DIRS[@]} -gt 0 ]]; then

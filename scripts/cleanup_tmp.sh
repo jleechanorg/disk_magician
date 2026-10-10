@@ -17,9 +17,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
-
 dylib_candidate_file=""
-scratch_lock_register_exit_hook '[[ -n "${dylib_candidate_file:-}" && -f "$dylib_candidate_file" ]] && rm -f "$dylib_candidate_file"'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -192,25 +190,9 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DY
   exit 0
 fi
 
-# Shared lock invariant:
-# Both cleanup_tmp.sh and cleanup_pr_scratch.sh inspect overlapping scratch
-# roots (/private/tmp, /tmp, and Darwin user temp dirs). To prevent TOCTOU
-# deletion/archival races, both destructive paths acquire this shared lock
-# before enumerating roots or candidates and hold it until all operations finish.
-# Dry-run (--dry-run) is strictly read-only and skips the lock.
-if [[ "$DRY_RUN" == false ]]; then
-  scratch_lock_acquire "cleanup_tmp" || {
-    _lock_rc=$?
-    if [[ "$_lock_rc" -eq 1 ]]; then
-      if [[ "${DISK_MAGICIAN_SCRATCH_LOCK_CONTENTION_NONZERO:-0}" == "1" ]]; then
-        exit 1
-      fi
-      exit 0
-    else
-      exit 1
-    fi
-  }
-fi
+# Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
+# Dry-run (--dry-run) is read-only and skips the lock.
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" || exit 1; }
 
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
@@ -808,7 +790,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
     log "Skipping OpenCode dylibs: lsof is unavailable, cannot prove files are closed"
   else
     dylib_candidate_file=$(mktemp -t disk-magician-opencode-dylibs.XXXXXX)
-    # EXIT/signal cleanup for dylib_candidate_file is registered via scratch_lock exit hook
+    scratch_lock_set_traps
     find "$USER_TMP" -mindepth 1 -maxdepth 1 -type f \
       -name '.*.dylib' -print0 2>/dev/null > "$dylib_candidate_file" || true
 
