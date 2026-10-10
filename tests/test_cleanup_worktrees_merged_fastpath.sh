@@ -40,7 +40,7 @@ mkdir -p "$WT"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email "fixture@users.noreply.github.com"
 git -C "$REPO" config user.name "Fixture"
-printf '.env*\nnode_modules/\n.npmrc\n*.p12\n' > "$REPO/.gitignore"
+printf '.env*\nnode_modules/\n.npmrc\n*.p12\ndata.pyc/\n' > "$REPO/.gitignore"
 printf 'base\n' > "$REPO/README.md"
 git -C "$REPO" add .gitignore README.md
 git -C "$REPO" commit -q -m base
@@ -101,9 +101,16 @@ printf 'config/id_ed25519\n' >> "$REPO/.git/info/exclude"
 git -C "$REPO" remote add origin https://github.com/fixture/repo.git
 add_wt sqmatch "$WT/wt-sqmatch" "$AHEAD_SHA"
 add_wt sqdiff "$WT/wt-sqdiff" "$AHEAD_SHA"
+# Ignored sole-local data on the two merged routes that used to skip the guard:
+# the gh-verified squash-merge match, and the merged fast path.
+add_wt sqmatchign "$WT/wt-sqmatchign" "$AHEAD_SHA"
+mkdir -p "$WT/wt-sqmatchign/data.pyc" && printf 'y\n' > "$WT/wt-sqmatchign/data.pyc/keep.db"
+add_wt m4ignoredata "$WT/wt-m4ignoredata" "$MERGED_SHA"
+mkdir -p "$WT/wt-m4ignoredata/data.pyc" && printf 'y\n' > "$WT/wt-m4ignoredata/data.pyc/keep.db"
 
 for w in wt-m4 wt-m4dirty wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
-    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqdiff wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
+    wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqdiff wt-sqmatchign \
+    wt-m4ignoredata wt-m4lockr wt-m4ed; do age_days_ago "$WT/$w" 4; done
 age_days_ago "$REPO/.ao/data/worktrees/wt-m4ao" 4
 age_days_ago "$WT/wt-m2" 2
 age_days_ago "$TMP_ROOT/aodir/wt-m4cfg" 4
@@ -125,6 +132,7 @@ cat > "$FAKE_BIN/gh" <<SH
 #!/bin/sh
 case "\$*" in
   *sqmatch*) echo "$AHEAD_SHA"; exit 0 ;;
+  *ignoredata*) echo "$AHEAD_SHA"; exit 0 ;;
   *sqdiff*) echo "differing000000000000000000000000000000000"; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -187,7 +195,13 @@ check "default -> 4d merged with ignored .env is preserved" "wt-m4secret | hidde
 check "default -> 4d assume-unchanged edit is preserved" "wt-m4au | hidden-state" "$OUT"
 check "default -> 4d merged under AO worktreeDir stays young (AO keeps 7d)" "wt-m4ao | young" "$OUT"
 check "default -> 4d merged clean still ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
+check "merged fast path -> 4d ignored data.pyc/ dir is preserved" "wt-m4ignoredata | ignored-data" "$OUT"
+
+echo "Test: gh-verified squash-merged route preserves ignored local data"
+OUT="$(run WORKTREE_MIN_AGE_DAYS=3)"
+check "gh-merged match -> ignored data.pyc/ dir is preserved" "wt-sqmatchign | ignored-data" "$OUT"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
+

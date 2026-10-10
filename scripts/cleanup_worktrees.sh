@@ -302,7 +302,8 @@ classify_repo_local_worktree() {
             && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
-            && ! has_hidden_state "$wt_path"; then
+            && ! has_hidden_state "$wt_path" \
+            && ! has_ignored_user_data "$wt_path"; then
             return 0
         fi
         echo "young"
@@ -322,6 +323,13 @@ classify_repo_local_worktree() {
         fi
         if has_hidden_state "$wt_path"; then
             echo "hidden-state"
+            return 0
+        fi
+        # Removal uses --force --force, so an ignored file that is not
+        # rebuildable is the only copy of that data. Covers the merged-into-main
+        # route as well as every branch that classify_content_and_merge clears.
+        if has_ignored_user_data "$wt_path"; then
+            echo "ignored-data"
             return 0
         fi
     fi
@@ -481,6 +489,10 @@ classify_content_and_merge() {
                     fi
                     if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
                         if grep -qFx "$head_sha" <<<"$pr_heads"; then
+                            if has_ignored_user_data "$wt_path"; then
+                                echo "ignored-data"
+                                return 0
+                            fi
                             return 0
                         else
                             echo "merged-differing-head"
