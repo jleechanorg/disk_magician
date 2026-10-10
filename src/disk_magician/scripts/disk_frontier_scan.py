@@ -2020,7 +2020,12 @@ def build_report(
     if fda_probe_catalog is None:
         fda_probe_catalog = fda_probe_paths(scanner.root)
     user_fda = fda_user_probe_evidence(fda_status)
-    granted_user_fda = valid_granted_user_fda_contract(fda_status, fda_probe_catalog)
+    # A full-disk scan's catalog also carries the three system probes; the user
+    # contract is validated on the user probes only (a missing key fails closed).
+    user_probe_catalog = {
+        name: fda_probe_catalog.get(name) for name in FDA_PROBE_RELATIVE_PATHS
+    }
+    granted_user_fda = valid_granted_user_fda_contract(fda_status, user_probe_catalog)
     system_fda_ready = fda_status["status"] == "granted"
     if fda_status["status"] == "partial":
         probes = fda_status.get("probes")
