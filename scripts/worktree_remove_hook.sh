@@ -60,9 +60,13 @@ has_ignored_user_data() {
                 # build, dist, env, target, coverage and .cache can hold hand-made
                 # files, so they count as user data and preserve the worktree.
                 node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
-                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                .next|.turbo|.gradle|.tox|.eggs|htmlcov|venv.bak.*|test-results)
                     ok=true; break ;;
+                # File-oriented patterns are rebuildable only when the matched
+                # path is not a directory containing user data.
+                *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+                    [[ ! -d "$1/$rest" ]] && { ok=true; break; }
+                    ;;
             esac
             [[ "$rest" == */* ]] || break
             rest="${rest%/*}"
