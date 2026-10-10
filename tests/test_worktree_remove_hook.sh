@@ -209,6 +209,7 @@ add_wt n worktree-n
 printf '.testmondata/\n' >"$WTROOT/n/.gitignore"
 git -C "$WTROOT/n" add .gitignore
 git -C "$WTROOT/n" commit -q -m ignore
+git -C "$WTROOT/n" push -q origin HEAD:refs/heads/n 2>/dev/null
 mkdir -p "$WTROOT/n/.testmondata"; echo db >"$WTROOT/n/.testmondata/notes.db"
 run_hook "$(json "$WTROOT/n")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -219,6 +220,7 @@ add_wt o worktree-o
 printf '*.egg-info\n' >"$WTROOT/o/.gitignore"
 git -C "$WTROOT/o" add .gitignore
 git -C "$WTROOT/o" commit -q -m ignore
+git -C "$WTROOT/o" push -q origin HEAD:refs/heads/o 2>/dev/null
 mkdir -p "$WTROOT/o/package.egg-info"; echo user >"$WTROOT/o/package.egg-info/notes.db"
 run_hook "$(json "$WTROOT/o")"; rc=$?
 assert_eq "$rc" "0" "exit code"
