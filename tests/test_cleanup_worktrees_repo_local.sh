@@ -773,6 +773,33 @@ assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep
 assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
 assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed" <<<"$OUT_PROBE_CONTENT" || true)"
 
+# Invalid AO YAML must preserve candidates even when the root default is valid.
+AO_MALFORMED="$TMP_ROOT/ao-malformed.yml"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    path: [unterminated\n' "$TMP_ROOT/home/.worktrees" > "$AO_MALFORMED"
+OUT_BAD_AO="$TMP_ROOT/probe-bad-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_MALFORMED" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_BAD_AO" 2>&1
+assert_contains "malformed AO projects config preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_BAD_AO")"
+assert_not_contains "malformed AO config does not make Antigravity path eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_BAD_AO" || true)"
+
+AO_EMPTY="$TMP_ROOT/ao-empty.yml"
+: > "$AO_EMPTY"
+AO_CONFIG_DIR="$TMP_ROOT/ao-config-directory"
+mkdir -p "$AO_CONFIG_DIR"
+source "$REPO_ROOT/scripts/lib/ao_worktree_config.sh"
+if ao_worktree_dirs "$AO_EMPTY" >/dev/null 2>&1; then
+  record_fail "empty AO config rejected" "projection unexpectedly succeeded"
+else
+  record_pass "empty AO config rejected"
+fi
+if ao_worktree_dirs "$AO_CONFIG_DIR" >/dev/null 2>&1; then
+  record_fail "unreadable AO config rejected" "projection unexpectedly succeeded for a directory path"
+else
+  record_pass "unreadable AO config rejected"
+fi
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
