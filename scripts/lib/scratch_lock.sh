@@ -11,14 +11,37 @@ scratch_lock_acquire() {
   [[ -d "$state_dir" && -w "$state_dir" ]] || { echo "[$caller] state dir unwritable: $state_dir" >&2; return 2; }
 
   local lock_dir="$state_dir/scratch_cleanup.lock"
+  local ttl="${DISK_MAGICIAN_SCRATCH_LOCK_TTL_SEC:-3600}"
+  local acquired=0
+
   if mkdir "$lock_dir" 2>/dev/null; then
-    echo $$ > "$lock_dir/pid"
+    acquired=1
+  else
+    local held_pid age mtime
+    held_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+    mtime=$(stat -c '%Y' "$lock_dir" 2>/dev/null || stat -f '%m' "$lock_dir" 2>/dev/null || date +%s)
+    [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=$(date +%s)
+    age=$(( $(date +%s) - mtime ))
+    if [[ "$age" -gt "$ttl" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
+      rm -f "$lock_dir/pid"
+      rmdir "$lock_dir" 2>/dev/null || true
+      mkdir "$lock_dir" 2>/dev/null && acquired=1
+    fi
+  fi
+
+  if [[ "$acquired" -eq 1 ]]; then
+    if ! { echo $$ > "$lock_dir/pid"; } 2>/dev/null; then
+      echo "[$caller] failed to write lock owner marker: $lock_dir/pid" >&2
+      rm -f "$lock_dir/pid" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
+      return 1
+    fi
     SCRATCH_LOCK_DIR="$lock_dir"
     SCRATCH_LOCK_PID="$$"
     scratch_lock_set_traps
     return 0
   fi
-  local held_pid; held_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+
   echo "[$caller] skipped, scratch lock held by PID ${held_pid:-unknown} — not queuing" >&2
   return 1
 }
@@ -35,13 +58,14 @@ scratch_lock_release() {
 }
 
 scratch_lock_trap_handler() {
-  local sig="${1:-0}"
+  local rc=$? sig="${1:-0}"
   trap - EXIT HUP INT TERM
   [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
   scratch_lock_release
   if [[ "$sig" -ne 0 ]]; then
     kill -"$sig" "$$" 2>/dev/null || exit "$((128 + sig))"
   fi
+  return "$rc"
 }
 
 scratch_lock_set_traps() {
