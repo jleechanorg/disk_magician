@@ -37,6 +37,13 @@ case "\$1" in
 esac
 EOS
 chmod +x "$BIN"/*
+# lsof is not installed on some Linux runners; return a complete harmless cwd
+# snapshot so fail-closed live-process checks can exercise stale fixtures.
+cat > "$BIN/lsof" <<'EOS'
+#!/usr/bin/env bash
+printf "p1\nn/\n"
+EOS
+chmod +x "$BIN/lsof"
 export PATH="$BIN:/usr/bin:/bin"
 
 echo "APFS: dry-run default does not delete"
@@ -61,21 +68,33 @@ has "builder prune ran" "docker builder prune -af --keep-storage 5g" "$calls"
 has "image prune ran" "docker image prune -af" "$calls"
 has "TRIM ran" "docker/desktop-reclaim-space" "$calls"
 
-echo "Antigravity: IDE brain, idle worktree, .backup pruned; conversations kept"
+echo "Antigravity: IDE brain, eligible Git worktree, non-Git orphan, .backup semantics"
 H="$TMP/ag"; AG="$H/.gemini/antigravity"
 mkdir -p "$AG/brain/old" "$AG/brain/old_with_recent_log" "$AG/brain/new" \
          "$AG/worktrees/proj/idle" "$AG/worktrees/proj/live" \
-         "$AG/brain.backup" "$AG/conversations/keep"
-echo x > "$AG/worktrees/proj/idle/f"; echo x > "$AG/worktrees/proj/live/f"; echo x > "$AG/conversations/keep/f"
+         "$AG/worktrees/proj/non_git" "$AG/brain.backup" "$AG/conversations/keep"
+echo x > "$AG/worktrees/proj/live/f"; echo x > "$AG/worktrees/proj/non_git/f"; echo x > "$AG/conversations/keep/f"
 echo x > "$AG/brain/old/old_file"
 echo x > "$AG/brain/old_with_recent_log/task.log"
+# A real clean Git checkout on main is eligible when old; unlike a plain
+# non-Git orphan, it satisfies the production cleanup contract.
+git -C "$AG/worktrees/proj/idle" init -q -b main
+git -C "$AG/worktrees/proj/idle" config user.name "Cleanup Fixture"
+git -C "$AG/worktrees/proj/idle" config user.email "cleanup-fixture@example.invalid"
+echo tracked > "$AG/worktrees/proj/idle/tracked.txt"
+git -C "$AG/worktrees/proj/idle" add tracked.txt
+git -C "$AG/worktrees/proj/idle" commit -qm "fixture main commit"
 
-touch -t 202001010000 "$AG/brain/old" "$AG/brain/old/old_file" "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/f" "$AG/brain.backup"
+touch -t 202001010000 "$AG/brain/old" "$AG/brain/old/old_file" \
+  "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/tracked.txt" \
+  "$AG/worktrees/proj/live" "$AG/worktrees/proj/live/f" \
+  "$AG/worktrees/proj/non_git" "$AG/worktrees/proj/non_git/f" "$AG/brain.backup"
 touch -t 202001010000 "$AG/brain/old_with_recent_log"
 # task.log in old_with_recent_log is left with current mtime (descendant activity)
 
 out="$(HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" 2>&1)"
 has "dry-run reports old IDE brain" "would delete old" "$out"
+has "dry-run identifies a clean eligible Git worktree" "ELIGIBLE" "$out"
 [[ -d "$AG/brain/old" ]] && ok "dry-run keeps old brain" || bad "dry-run deleted old brain"
 
 # Clean without WORKTREE_APPROVED prunes old brain, but preserves worktree and old brain with recent descendant
@@ -83,11 +102,13 @@ HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/n
 [[ ! -e "$AG/brain/old" ]] && ok "old IDE brain pruned" || bad "old IDE brain kept"
 [[ -d "$AG/brain/old_with_recent_log" ]] && ok "old brain with recent descendant preserved" || bad "old brain with recent descendant deleted"
 [[ -d "$AG/worktrees/proj/idle" ]] && ok "worktree preserved without WORKTREE_APPROVED" || bad "worktree deleted without WORKTREE_APPROVED"
+[[ -d "$AG/worktrees/proj/non_git" ]] && ok "non-Git orphan preserved without WORKTREE_APPROVED" || bad "non-Git orphan deleted without WORKTREE_APPROVED"
 [[ ! -e "$AG/brain.backup" ]] && ok ".backup leftover pruned" || bad ".backup kept"
 
-# Clean with WORKTREE_APPROVED=1 removes eligible idle worktree
+# Clean with WORKTREE_APPROVED=1 removes eligible clean Git worktree only
 HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
-[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "idle worktree pruned with WORKTREE_APPROVED" || bad "idle worktree kept with WORKTREE_APPROVED"
+[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "eligible Git worktree pruned with WORKTREE_APPROVED" || bad "eligible Git worktree kept with WORKTREE_APPROVED"
+[[ -d "$AG/worktrees/proj/non_git" ]] && ok "non-Git orphan preserved with WORKTREE_APPROVED" || bad "non-Git orphan deleted with WORKTREE_APPROVED"
 [[ -d "$AG/brain/new" && -d "$AG/worktrees/proj/live" && -d "$AG/conversations/keep" ]] && ok "recent state + conversations kept" || bad "protected state deleted"
 
 # Verify symlinked candidates/parents are rejected and physical targets outside root are protected

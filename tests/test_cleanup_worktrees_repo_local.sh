@@ -125,6 +125,10 @@ setup_fixture_repo() {
   mkdir -p "$(dirname "$ao_wt_dir")"
   git -C "$main_repo" worktree add -B wt-ao-young "$ao_wt_dir" "$BASE_SHA" >/dev/null
   age_worktree_days_ago "$ao_wt_dir" 3
+  local ao_locked="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-locked"
+  git -C "$main_repo" worktree add -B wt-ao-locked "$ao_locked" "$BASE_SHA" >/dev/null
+  git -C "$main_repo" worktree lock "$ao_locked" >/dev/null
+  age_worktree_days_ago "$ao_locked" 30
 
   # Antigravity orphan worktree (unregistered in git, but modified 2 days ago)
   local ag_orphan_dir="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/orphan-recent"
@@ -157,10 +161,11 @@ assert_contains "ahead reason" ".claude/worktrees/wt-ahead | ahead-of-main" "$OU
 assert_contains "locked reason" ".claude/worktrees/wt-locked | locked" "$OUT_CONTENT"
 assert_contains "young reason" ".claude/worktrees/wt-young | young" "$OUT_CONTENT"
 assert_contains "ao young worktree preserved by 14d floor" ".ao/data/worktrees/main-repo/wt-ao-young | young" "$OUT_CONTENT"
+assert_contains "stale AO locked worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-locked | locked" "$OUT_CONTENT"
 assert_contains "antigravity recent orphan preserved by 14d floor" "antigravity  PRESERVE" "$OUT_CONTENT"
 assert_contains "spaced path eligible" ".claude/worktrees/wt spaced path" "$OUT_CONTENT"
 assert_contains "summary eligible count" "Repo-local:  2 eligible" "$OUT_CONTENT"
-assert_contains "summary preserved count" "Repo-local:  2 eligible, 6 preserved." "$OUT_CONTENT"
+assert_contains "summary preserved count" "Repo-local:  2 eligible, 7 preserved." "$OUT_CONTENT"
 
 echo "Test: --clean without WORKTREE_APPROVED refuses before deletion"
 OUT_REFUSE="$TMP_ROOT/refuse.out"
@@ -186,6 +191,35 @@ assert_not_contains() {
     record_pass "$name"
   fi
 }
+
+echo "Test: ignored, untracked, and tracked data added by size probe block final removal"
+printf '\n*.db\n' >> "$MAIN_REPO/.git/info/exclude"
+RACE_TRACKED="$MAIN_REPO/.claude/worktrees/wt-race-tracked"
+git -C "$MAIN_REPO" worktree add -B wt-race-tracked "$RACE_TRACKED" "$(git -C "$MAIN_REPO" rev-parse main)" >/dev/null
+age_worktree_days_ago "$RACE_TRACKED" 30
+cat > "$FAKE_BIN/du" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */.claude/worktrees/wt-ancestor) printf 'late ignored data\n' > "$arg/race.db" ;;
+    */.claude/worktrees/wt-race-tracked) printf 'late tracked edit\n' > "$arg/README.md" ;;
+    */.claude/worktrees/wt\ spaced\ path) printf 'late untracked data\n' > "$arg/late.txt" ;;
+  esac
+done
+exec /usr/bin/du "$@"
+SH
+chmod +x "$FAKE_BIN/du"
+RACE_OUT="$TMP_ROOT/race-clean.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  WORKTREE_APPROVED=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  bash "$CLEANUP_SCRIPT" --clean --repos "$MAIN_REPO" --min-age 14 >"$RACE_OUT" 2>&1
+RACE_TEXT=$(cat "$RACE_OUT")
+assert_contains "size-probe ignored data preserved" ".claude/worktrees/wt-ancestor | ignored-data" "$RACE_TEXT"
+assert_contains "size-probe tracked edit preserved" ".claude/worktrees/wt-race-tracked | changed-after-size" "$RACE_TEXT"
+assert_contains "size-probe untracked data preserved" ".claude/worktrees/wt spaced path | changed-after-size" "$RACE_TEXT"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]] && record_pass "size-probe ignored data remains on disk" || record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
+[[ -f "$RACE_TRACKED/README.md" ]] && grep -qF 'late tracked edit' "$RACE_TRACKED/README.md" && record_pass "size-probe tracked edit remains on disk" || record_fail "size-probe tracked edit remains on disk" "late tracked edit disappeared"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt spaced path/late.txt" ]] && record_pass "size-probe untracked data remains on disk" || record_fail "size-probe untracked data remains on disk" "late untracked data disappeared"
 
 echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
 STD_HOME="$TMP_ROOT/home"
@@ -233,9 +267,10 @@ run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
 
 cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
+cwd=$(cd "$STD_ROOT/r/busy" 2>/dev/null && pwd -P)
 echo "p1"
 echo "fcwd"
-echo "n$STD_ROOT/r/busy"
+echo "n\$cwd"
 SH
 chmod +x "$FAKE_BIN/lsof"
 run_std "$TMP_ROOT/std.out" "$FAKE_BIN:/usr/bin:/bin"
@@ -666,6 +701,18 @@ mkdir -p "$AG_NON_GIT"
 printf 'keep user data\n' > "$AG_NON_GIT/notes.txt"
 age_worktree_days_ago "$AG_NON_GIT" 20
 
+# Antigravity path configured as an AO worktreeDir must be preserved.
+AG_AO="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ao-managed"
+mkdir -p "$AG_AO"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    worktreeDir: %s\n' "$TMP_ROOT/home/.worktrees" "$AG_AO" > "$TMP_ROOT/ao.yml"
+git -C "$AG_AO" init --quiet -b main
+git -C "$AG_AO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_AO" config user.name "Fixture User"
+printf 'clean\n' > "$AG_AO/file.txt"
+git -C "$AG_AO" add file.txt
+git -C "$AG_AO" commit -m "clean ao checkout" --quiet
+age_worktree_days_ago "$AG_AO" 20
+
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
 rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
@@ -710,7 +757,7 @@ age_worktree_days_ago "$AG_TYPE_STAGED" 20
 
 OUT_PROBE="$TMP_ROOT/probe-test.out"
 env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
-  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
   bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
   >"$OUT_PROBE" 2>&1
 OUT_PROBE_CONTENT=$(cat "$OUT_PROBE")
@@ -753,6 +800,83 @@ assert_contains "assume-unchanged tracked edit preserved" "ag-hidden-index | hid
 assert_not_contains "assume-unchanged worktree not eligible" "ELIGIBLE" "$(grep -F "ag-hidden-index" <<<"$OUT_PROBE_CONTENT" || true)"
 assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$OUT_PROBE_CONTENT"
 assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
+assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed" <<<"$OUT_PROBE_CONTENT" || true)"
+
+echo "Test: Antigravity untracked data added by size probe blocks removal"
+AG_CLEAN_REPO="$TMP_ROOT/ag-clean-main"
+mkdir -p "$AG_CLEAN_REPO"
+git -C "$AG_CLEAN_REPO" init -q -b main
+git -C "$AG_CLEAN_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_CLEAN_REPO" config user.name "Fixture User"
+printf 'anchor\n' > "$AG_CLEAN_REPO/README.md"
+git -C "$AG_CLEAN_REPO" add README.md
+git -C "$AG_CLEAN_REPO" commit -q -m anchor
+cat > "$FAKE_BIN/du" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */ag-clean-ancestor) printf 'late Antigravity data\n' > "$arg/late.txt" ;;
+  esac
+done
+exec /usr/bin/du "$@"
+SH
+chmod +x "$FAKE_BIN/du"
+AG_RACE_OUT="$TMP_ROOT/ag-race-clean.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  WORKTREE_APPROVED=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
+  bash "$CLEANUP_SCRIPT" --clean --repos "$AG_CLEAN_REPO" --min-age 14 >"$AG_RACE_OUT" 2>&1
+AG_RACE_TEXT=$(cat "$AG_RACE_OUT")
+assert_contains "Antigravity size-probe untracked data preserved" "ag-clean-ancestor | changed-after-size" "$AG_RACE_TEXT"
+if [[ -f "$AG_ELIGIBLE/late.txt" ]]; then
+  record_pass "Antigravity size-probe data remains on disk"
+else
+  record_fail "Antigravity size-probe data remains on disk" "late data disappeared"
+fi
+
+# Valid YAML flow style and alternate indentation must preserve configured owners.
+AO_FLOW="$TMP_ROOT/ao-flow.yml"
+printf 'projects: {flow-demo: {path: /x/flow-demo, worktreeDir: "%s"}}\n' "$AG_AO" > "$AO_FLOW"
+OUT_FLOW="$TMP_ROOT/probe-flow-aO.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_FLOW" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_FLOW" 2>&1
+assert_contains "flow-style AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_FLOW")"
+
+AO_ALT_INDENT="$TMP_ROOT/ao-alt-indent.yml"
+printf 'projects:\n  alt-demo:\n      path: /x/alt-demo\n      worktreeDir: "%s"\n' "$AG_AO" > "$AO_ALT_INDENT"
+OUT_ALT_INDENT="$TMP_ROOT/probe-alt-indent.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_ALT_INDENT" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_ALT_INDENT" 2>&1
+assert_contains "alternate-indent AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_ALT_INDENT")"
+
+# Invalid AO YAML must preserve candidates even when the root default is valid.
+AO_MALFORMED="$TMP_ROOT/ao-malformed.yml"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    path: [unterminated\n' "$TMP_ROOT/home/.worktrees" > "$AO_MALFORMED"
+OUT_BAD_AO="$TMP_ROOT/probe-bad-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_MALFORMED" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_BAD_AO" 2>&1
+assert_contains "malformed AO projects config preserves Antigravity path" "ao-managed | ao-config-unreadable" "$(cat "$OUT_BAD_AO")"
+assert_not_contains "malformed AO config does not make Antigravity path eligible" "ELIGIBLE" "$(grep -F "ao-managed" "$OUT_BAD_AO" || true)"
+
+AO_EMPTY="$TMP_ROOT/ao-empty.yml"
+: > "$AO_EMPTY"
+AO_CONFIG_DIR="$TMP_ROOT/ao-config-directory"
+mkdir -p "$AO_CONFIG_DIR"
+source "$REPO_ROOT/scripts/lib/ao_worktree_config.sh"
+if ao_worktree_dirs "$AO_EMPTY" >/dev/null 2>&1; then
+  record_fail "empty AO config rejected" "projection unexpectedly succeeded"
+else
+  record_pass "empty AO config rejected"
+fi
+if ao_worktree_dirs "$AO_CONFIG_DIR" >/dev/null 2>&1; then
+  record_fail "unreadable AO config rejected" "projection unexpectedly succeeded for a directory path"
+else
+  record_pass "unreadable AO config rejected"
+fi
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
