@@ -14,6 +14,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 # shellcheck source=scripts/lib/scratch_budget.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+# shellcheck source=scripts/lib/scratch_lock.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -75,6 +77,7 @@ if [[ ${#PATTERNS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
+SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
@@ -216,6 +219,10 @@ fi
 if [[ ${#CLI_PATTERNS[@]} -gt 0 ]]; then
   PATTERNS=("${CLI_PATTERNS[@]}")
 fi
+
+# Shared lock invariant: serialize destructive sweep against cleanup_tmp.
+# Dry-run (--dry-run) is read-only and skips the lock.
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" "${SCRATCH_LOCK_ORIGINAL_ARGS[@]}" || exit 1; }
 
 TMP_DIRS=()
 if [[ ${#CLI_TMP_DIRS[@]} -gt 0 ]]; then
