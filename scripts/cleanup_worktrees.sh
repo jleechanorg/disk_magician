@@ -345,6 +345,41 @@ has_hidden_state() {
     [[ -n "$out" ]]
 }
 
+# has_ignored_user_data <wt>: rc 0 when the worktree holds gitignored files that
+# are not known-rebuildable (local DBs, data dirs, scratch notes, evidence), or
+# the probe fails/times out (fail closed). Removal uses --force --force, so these
+# would be lost; used by the pushed-branch path where the worktree is the only
+# place such files can live.
+has_ignored_user_data() {
+    local out entry comp rest ok t=""
+    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    # shellcheck disable=SC2086
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        ok=false
+        rest="${entry%/}"
+        # Allowed when ANY path component is a known rebuildable dir/file, so
+        # nested cache contents (.ruff_cache/0.16.1, venv/.../CACHEDIR.TAG) pass.
+        while [[ -n "$rest" ]]; do
+            comp="${rest##*/}"
+            case "$comp" in
+                # Unambiguous tool-generated names only; generic names such as
+                # build, dist, env, target, coverage and .cache can hold hand-made
+                # files, so they count as user data and preserve the worktree.
+                node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
+                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|*.pyc|.DS_Store|\
+                venv.bak.*|test-results|.testmondata|.coverage|*.tsbuildinfo)
+                    ok=true; break ;;
+            esac
+            [[ "$rest" == */* ]] || break
+            rest="${rest%/*}"
+        done
+        [[ "$ok" == true ]] || return 0
+    done <<<"$out"
+    return 1
+}
+
 # Persist across the command substitutions used by classification. Cache names
 # are digests, but the stored repo and branch are also checked byte for byte:
 # a filename collision or an unreadable record must never approve a worktree.
@@ -486,6 +521,22 @@ classify_content_and_merge() {
                         fi
                     fi
                 fi
+            fi
+        fi
+        # A clean worktree whose branch tip is already on origin loses nothing
+        # when removed (the branch ref and the remote copy both survive). The
+        # remote is queried live; any failure keeps it "ahead-of-main".
+        if [[ -n "$branch_clean" && "$branch_clean" != "detached" && -n "$head_sha" ]]; then
+            local remote_oid="" t=""
+            command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+            # shellcheck disable=SC2086
+            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
+            if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
+                if has_ignored_user_data "$wt_path"; then
+                    echo "ignored-data"
+                    return 0
+                fi
+                return 0
             fi
         fi
         echo "ahead-of-main"
