@@ -9,8 +9,3 @@ frontier_root_runner_after_bootstrap() {
   [[ "${1:-false}" == true ]] || return 0
   frontier_root_runner_kickstart
 }
-
-frontier_root_runner_after_bootstrap() {
-  [[ "${1:-false}" == true ]] || return 0
-  frontier_root_runner_kickstart
-}
