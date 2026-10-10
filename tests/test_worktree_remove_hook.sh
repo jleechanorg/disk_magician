@@ -42,6 +42,8 @@ elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
 else
   cat "${FAKE_LSOF_FIXTURE:?}"
 fi
+[[ -n "${FAKE_LSOF_STDERR:-}" ]] && printf '%s\n' "$FAKE_LSOF_STDERR" >&2
+true
 MOCK
 chmod +x "$MOCK_BIN/lsof"
 export PATH="$MOCK_BIN:$PATH"
@@ -458,6 +460,20 @@ for suffix in ao .ao; do
     [[ -d "$target" ]] && ok "implicit $suffix AO worktree kept" || bad "implicit $suffix AO worktree removed"
     tail -n 1 "$LOG" | grep -q "ao-owned" && ok "implicit $suffix AO reason logged" || bad "implicit $suffix AO reason missing"
 done
+
+echo "== case 34: lsof warning with valid cwd rows fails closed =="
+add_wt lsof-warning worktree-lsof-warning
+printf 'p999999\nn%s/subdir\n' "$WTROOT/lsof-warning" >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR='lsof warning: output may be incomplete'
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/lsof-warning")"; rc=$?
+assert_eq "$rc" "0" "warning lsof exit code"
+[[ -d "$WTROOT/lsof-warning" ]] && ok "warning lsof worktree kept" || bad "warning lsof worktree removed"
+branch_exists worktree-lsof-warning && ok "warning lsof branch kept" || bad "warning lsof branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "warning lsof log appended" || bad "warning lsof no log line"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "warning lsof visibility remains unknown" || bad "warning lsof visibility was trusted"
+unset FAKE_LSOF_STDERR
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
