@@ -84,7 +84,8 @@ init_fixture() {
   WT="$REPO/.claude/worktrees"
   AG="$HOME_FIX/.gemini/antigravity/worktrees/project"
   BIN="$F/bin"
-  mkdir -p "$WT" "$AG" "$BIN"
+  mkdir -p "$WT" "$AG" "$BIN" "$HOME_FIX/.hermes"
+  printf 'projects: {}\n' > "$HOME_FIX/.hermes/agent-orchestrator.yaml"
   : > "$F/ages.tsv"; : > "$F/calls.expected"; : > "$F/eligible.expected"
   printf 'n/\n' > "$F/lsof.out"
   "$REAL_GIT" init -q -b main "$REPO"
@@ -207,6 +208,7 @@ mixed_fixture() {
   printf 'projects:\n  fixture:\n    worktreeDir: %s\n' "${STD_SKIP%/*}" > "$HOME_FIX/.hermes/agent-orchestrator.yaml"
   add_orphan young 2
   add_orphan old 10
+  expect_eligible "$AG/old"
 }
 
 case_t1() {
@@ -325,7 +327,7 @@ case_t6() {
   init_fixture t6
   add_orphan exact-floor 7
   run_cleanup branch "$F/out"
-  require ledger_has "$F/out" PRESERVE "$AG/exact-floor | not-git"
+  require ledger_has "$F/out" ELIGIBLE "$AG/exact-floor "
   require excludes "$F/out" "$AG/exact-floor | young"
   require test ! -s "$F/age.calls"
   require test "$(cut -f 1 "$F/predicate.calls")" = "$AG/exact-floor"
@@ -352,13 +354,13 @@ for filename in sys.argv[1:]:
 PY_NORMALIZE
   require diff -u "$F/baseline.normalized" "$F/branch.normalized"
   require contains "$F/branch.out" 'Repo-local:  3 eligible, 8 preserved.'
-  require contains "$F/branch.out" 'Antigravity: 0 eligible orphan(s), 2 active preserved.'
+  require contains "$F/branch.out" 'Antigravity: 1 eligible orphan(s), 1 active preserved.'
   require contains "$F/gh.calls" '--head wt-ahead'
   require contains "$F/gh.calls" '--head wt-squash'
   require contains "$F/branch.out" 'wt-prunable | prunable-unknown'
-  require contains "$F/branch.out" "$AG/old | not-git"
+  require contains "$F/branch.out" "$AG/old (~1M"
   require contains "$F/branch.out" "$F/ao/data/worktrees/wt-auto | locked"
-  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (3072 KB)'
+  require contains "$F/branch.out" 'Reclaimable: ~0.00 GB (4096 KB)'
 }
 
 case_t8() {
@@ -392,6 +394,7 @@ case_t9() {
   add_wt wt-auto "$AUTO" 10
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
   add_orphan old 10
+  expect_eligible "$AG/old"
   add_wt wt-young "$WT/wt-young" 2
   add_wt wt-dirty "$WT/wt-dirty" 10
   printf 'dirty\n' >> "$WT/wt-dirty/README.md"
@@ -425,7 +428,7 @@ case_t9() {
     fi
   done < "$F/before.paths"
   require contains "$F/out" 'Repo-local:  2 eligible, 11 preserved.'
-  require contains "$F/out" 'Antigravity: 0 eligible orphan(s), 7 active preserved.'
+  require contains "$F/out" 'Antigravity: 1 eligible orphan(s), 6 active preserved.'
 }
 
 # GraphQL is stubbed only at the external gh boundary. Repositories, worktree
@@ -654,7 +657,7 @@ run_case T2 'du only on eligible rows and preserve size=-' case_t2
 run_case T3 'known-size worktree and exact reclaimable total' case_t3
 run_case T4 'invalid and failed ages fail closed in both scopes' case_t4
 run_case T5 'unstubbed empty orphan remains young' case_t5
-run_case T6 'orphan at the age floor is not young' case_t6
+run_case T6 'Antigravity orphan at the age floor is eligible' case_t6
 run_case T7 'whole-script baseline verdict and summary equivalence' case_t7
 run_case T8 'du failure aborts eligible rows, preserve rows skip du' case_t8
 run_case T9 'fixture-only clean removes exactly eligible paths' case_t9
