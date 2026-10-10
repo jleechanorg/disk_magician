@@ -713,6 +713,18 @@ git -C "$AG_AO" add file.txt
 git -C "$AG_AO" commit -m "clean ao checkout" --quiet
 age_worktree_days_ago "$AG_AO" 20
 
+# A configured path with a trailing space must never be trimmed by the shell
+# record reader into a different, unowned path.
+AG_TRAILING_SPACE="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ao-managed-space "
+mkdir -p "$AG_TRAILING_SPACE"
+git -C "$AG_TRAILING_SPACE" init --quiet -b main
+git -C "$AG_TRAILING_SPACE" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_TRAILING_SPACE" config user.name "Fixture User"
+printf 'clean\n' > "$AG_TRAILING_SPACE/file.txt"
+git -C "$AG_TRAILING_SPACE" add file.txt
+git -C "$AG_TRAILING_SPACE" commit -m "clean whitespace AO checkout" --quiet
+age_worktree_days_ago "$AG_TRAILING_SPACE" 20
+
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
 rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
@@ -801,7 +813,7 @@ assert_not_contains "assume-unchanged worktree not eligible" "ELIGIBLE" "$(grep 
 assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$OUT_PROBE_CONTENT"
 assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
 assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
-assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed |" <<<"$OUT_PROBE_CONTENT" || true)"
 
 echo "Test: Antigravity untracked data added by size probe blocks removal"
 AG_CLEAN_REPO="$TMP_ROOT/ag-clean-main"
@@ -894,6 +906,35 @@ else
   record_pass "duplicate AO project keys rejected"
 fi
 
+# Path records must survive shell transport exactly; reject ambiguous values
+# before printing any C/P line, including generated key/basename paths.
+AO_TRAILING_SPACE="$TMP_ROOT/ao-trailing-space.yml"
+printf 'projects:\n  demo:\n    worktreeDir: "%s"\n' "$AG_TRAILING_SPACE" > "$AO_TRAILING_SPACE"
+AO_TRAILING_SLASH_SPACE="$TMP_ROOT/ao-trailing-slash-space.yml"
+printf 'projects: {demo: {worktreeDir: "/owned /"}}\n' > "$AO_TRAILING_SLASH_SPACE"
+AO_RELATIVE="$TMP_ROOT/ao-relative.yml"
+printf 'projects: {demo: {worktreeDir: relative/path}}\n' > "$AO_RELATIVE"
+AO_KEY_SPACE="$TMP_ROOT/ao-key-space.yml"
+printf 'worktreeDir: /owned\nprojects: {"bad ": {path: /x/repo}}\n' > "$AO_KEY_SPACE"
+AO_BASENAME_SPACE="$TMP_ROOT/ao-basename-space.yml"
+printf 'worktreeDir: /owned\nprojects: {demo: {path: "/x/repo "}}\n' > "$AO_BASENAME_SPACE"
+AO_NUL_PATH="$TMP_ROOT/ao-nul-path.yml"
+printf 'projects: {demo: {worktreeDir: "/owned\\0path"}}\n' > "$AO_NUL_PATH"
+for ao_bad in "$AO_TRAILING_SPACE" "$AO_TRAILING_SLASH_SPACE" "$AO_RELATIVE" "$AO_KEY_SPACE" "$AO_BASENAME_SPACE" "$AO_NUL_PATH"; do
+  if ao_worktree_dirs "$ao_bad" >/dev/null 2>&1; then
+    record_fail "ambiguous AO path records rejected ($(basename "$ao_bad"))" "projection unexpectedly succeeded"
+  else
+    record_pass "ambiguous AO path records rejected ($(basename "$ao_bad"))"
+  fi
+done
+
+OUT_TRAILING_AO="$TMP_ROOT/probe-trailing-space-ao.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_TRAILING_SPACE" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
+  >"$OUT_TRAILING_AO" 2>&1
+assert_contains "trailing-space AO owner config fails closed" "ao-managed | ao-config-unreadable" "$(cat "$OUT_TRAILING_AO")"
+
 AO_REAL_RUBY="$(command -v ruby || true)"
 if [[ -n "$AO_REAL_RUBY" ]]; then
   AO_RUBY_BIN="$TMP_ROOT/ao-ruby-only-bin"
@@ -914,6 +955,13 @@ SH
   else
     record_fail "Ruby fallback valid flow-style AO config preserved" "projection failed or omitted configured path"
   fi
+  for ao_bad in "$AO_TRAILING_SPACE" "$AO_TRAILING_SLASH_SPACE" "$AO_RELATIVE" "$AO_KEY_SPACE" "$AO_BASENAME_SPACE" "$AO_NUL_PATH"; do
+    if PATH="$AO_RUBY_BIN:$PATH" ao_worktree_dirs "$ao_bad" >/dev/null 2>&1; then
+      record_fail "Ruby fallback rejects ambiguous path ($(basename "$ao_bad"))" "projection unexpectedly succeeded"
+    else
+      record_pass "Ruby fallback rejects ambiguous path ($(basename "$ao_bad"))"
+    fi
+  done
 else
   echo "NOTE: Ruby fallback tests not run because ruby is unavailable"
 fi
