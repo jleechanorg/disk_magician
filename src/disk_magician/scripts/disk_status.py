@@ -96,6 +96,58 @@ def parse_utc_timestamp(ts: Any) -> Optional[datetime]:
     return None
 
 
+def superseded_interrupted_records(
+    job: str, active: List[Dict[str, Any]], terminal: Optional[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Classify old active records only after a newer serialized run proves lock acquisition."""
+    if job not in {"snapshot_commit", "pressure_sweep"} or not active or not isinstance(terminal, dict):
+        return [], active
+    lock = terminal.get("lock")
+    terminal_id = terminal.get("id") or terminal.get("run_id")
+    terminal_times = terminal.get("times")
+    terminal_start = parse_utc_timestamp(
+        terminal_times.get("started_at") if isinstance(terminal_times, dict) else None
+    )
+    terminal_end = parse_utc_timestamp(
+        terminal_times.get("ended_at") if isinstance(terminal_times, dict) else None
+    )
+    if (
+        not isinstance(lock, dict)
+        or lock.get("held") is not True
+        or lock.get("acquired") is not True
+        or not terminal_id
+        or terminal_start is None
+        or terminal_end is None
+        or terminal_end < terminal_start
+        or terminal.get("outcome") not in {
+            "skipped_threshold", "blocked_safety", "error",
+            "timeout", "success_noop", "success",
+        }
+        or terminal.get("job") != job
+    ):
+        return [], active
+
+    superseded: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+    for record in active:
+        if isinstance(record, dict):
+            run_id = record.get("id") or record.get("run_id")
+            record_times = record.get("times")
+            started_at = parse_utc_timestamp(
+                record_times.get("started_at") if isinstance(record_times, dict) else None
+            )
+            if (
+                record.get("job") == job
+                and run_id
+                and run_id != terminal_id
+                and started_at is not None
+                and started_at < terminal_start
+            ):
+                superseded.append({**record, "classification": "superseded_interrupted"})
+                continue
+        current.append(record)
+    return superseded, current
+
 def sha256_file(path: Path) -> str:
     """Compute sha256 digest of a file."""
     h = hashlib.sha256()
@@ -880,6 +932,7 @@ class DiskStatusEvaluator:
         receipt_paths: List[str] = []
         overall_status = STATUS_HEALTHY
         degraded_reasons: List[str] = []
+        superseded_by_job: Dict[str, List[Dict[str, Any]]] = {}
 
         for job, max_age in required_jobs.items():
             receipt_file = self.state_dir / "receipts" / f"{job}.json"
@@ -906,6 +959,8 @@ class DiskStatusEvaluator:
 
             last_term = data.get("last_terminal")
             active = data.get("active") or []
+            superseded, active = superseded_interrupted_records(job, active, last_term)
+            superseded_by_job[job] = superseded
             last_succ = data.get("last_success")
             last_skip = data.get("last_skipped")
 
@@ -913,7 +968,10 @@ class DiskStatusEvaluator:
             if len(active) > 0:
                 interrupted = False
                 for act in active:
-                    act_start = parse_utc_timestamp(act.get("times", {}).get("started_at"))
+                    act_times = act.get("times") if isinstance(act, dict) else None
+                    act_start = parse_utc_timestamp(
+                        act_times.get("started_at") if isinstance(act_times, dict) else None
+                    )
                     if act_start and (self.now - act_start > timedelta(hours=4)):
                         interrupted = True
                         break
@@ -954,7 +1012,8 @@ class DiskStatusEvaluator:
                 continue
 
             term_outcome = last_term.get("outcome")
-            ended_at_str = last_term.get("times", {}).get("ended_at")
+            term_times = last_term.get("times") if isinstance(last_term, dict) else None
+            ended_at_str = term_times.get("ended_at") if isinstance(term_times, dict) else None
             ended_dt = parse_utc_timestamp(ended_at_str)
 
             if not ended_dt:
@@ -1042,7 +1101,8 @@ class DiskStatusEvaluator:
                         overall_status = STATUS_DEGRADED
                     degraded_reasons.append(f"{job}: skip without prior success")
                 else:
-                    succ_ended_str = last_succ.get("times", {}).get("ended_at")
+                    succ_times = last_succ.get("times") if isinstance(last_succ, dict) else None
+                    succ_ended_str = succ_times.get("ended_at") if isinstance(succ_times, dict) else None
                     succ_ended_dt = parse_utc_timestamp(succ_ended_str)
                     succ_max_age = max(max_age, timedelta(hours=48))
                     if not succ_ended_dt or (self.now - succ_ended_dt > succ_max_age):
@@ -1119,6 +1179,9 @@ class DiskStatusEvaluator:
                 overall_status = STATUS_UNKNOWN
             degraded_reasons.append(f"{job}: unhandled outcome {term_outcome}")
 
+        for job, detail in job_statuses.items():
+            detail["superseded_interrupted"] = superseded_by_job.get(job, [])
+
         return make_result(
             status=overall_status,
             reason="; ".join(degraded_reasons) if degraded_reasons else "all_required_jobs_healthy",
@@ -1152,6 +1215,7 @@ class DiskStatusEvaluator:
         all_paths = list(policy_paths)
         overall_status = STATUS_HEALTHY
         status_reasons: List[str] = []
+        superseded_by_job: Dict[str, List[Dict[str, Any]]] = {}
 
         for job in jobs:
             receipt_file = self.state_dir / "receipts" / f"{job}.json"
@@ -1169,7 +1233,10 @@ class DiskStatusEvaluator:
                 status_reasons.append(f"{job}: corrupt receipt")
                 continue
 
+            term = data.get("last_terminal")
             active = data.get("active") or []
+            superseded, active = superseded_interrupted_records(job, active, term)
+            superseded_by_job[job] = superseded
             if len(active) > 0:
                 safety_details[job] = {
                     "status": STATUS_UNKNOWN,
@@ -1180,7 +1247,6 @@ class DiskStatusEvaluator:
                 status_reasons.append(f"{job}: active run in progress")
                 continue
 
-            term = data.get("last_terminal")
             if not term:
                 safety_details[job] = {
                     "status": STATUS_UNKNOWN,
@@ -1230,6 +1296,9 @@ class DiskStatusEvaluator:
             if overall_status not in (STATUS_INVALID, STATUS_DEGRADED):
                 overall_status = STATUS_UNKNOWN
             status_reasons.append(f"{job}: safety {s_status or 'missing'}")
+
+        for job, detail in safety_details.items():
+            detail["superseded_interrupted"] = superseded_by_job.get(job, [])
 
         return make_result(
             status=overall_status,

@@ -1054,8 +1054,8 @@ else
   RC8=$?
 fi
 OUT_A8_CONTENT=$(cat "$OUT_A8")
-# The audit as a whole must keep running (rc=0) so other categories still execute...
-assert_rc "disk_audit clean --dry-run still completes when one category fails" 0 "$RC8"
+# The audit continues through all categories before reporting aggregate failure...
+assert_rc "disk_audit clean returns failure after all categories when one fails" 1 "$RC8"
 # ...but the failure must no longer be silently swallowed by `|| true`.
 assert_contains "disk_audit surfaces the failing category by name" "CATEGORY FAILED: LLM inspector (exit 2)" "$OUT_A8_CONTENT"
 assert_contains "disk_audit summary counts the failure" "1 of" "$OUT_A8_CONTENT"
