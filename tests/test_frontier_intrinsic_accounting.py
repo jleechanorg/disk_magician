@@ -854,6 +854,25 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         with mock.patch.object(frontier.os, "scandir", side_effect=PermissionError(errno.EPERM, "x")):
             self.assertFalse(frontier.is_symlink_only_dir("/anything"))
 
+    def test_full_disk_catalog_with_system_probes_still_reaches_complete(self):
+        scanner = self.scanner()
+        scanner.fda_probe_catalog = {
+            **scanner.fda_probe_catalog,
+            **frontier.FDA_SYSTEM_PROBE_PATHS,
+        }
+        self.assertEqual(len(scanner.fda_probe_catalog), 6)
+        report = self.report(scanner)
+        self.assertEqual(report["mode"], "complete")
+        self.assertTrue(report["coverage_envelope"]["complete"])
+
+    def test_missing_user_probe_in_catalog_fails_closed(self):
+        scanner = self.scanner()
+        scanner.fda_probe_catalog = {
+            name: path for name, path in scanner.fda_probe_catalog.items() if name != "mail"
+        }
+        report = self.report(scanner)
+        self.assertFalse(report["coverage_envelope"]["complete"])
+
     def test_attestable_path_rejects_user_data_and_traversal(self):
         for path in (
             "/Users/jleechan/private",
