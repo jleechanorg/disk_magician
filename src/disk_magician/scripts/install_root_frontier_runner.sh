@@ -9,17 +9,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/frontier_runner_launchd.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 DRY_RUN=false
+RUN_NOW=false
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --user) TARGET_USER="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --run-now) RUN_NOW=true; shift ;;
     -h|--help)
-      echo "Usage: sudo $0 [--user <username>] [--dry-run]"
+      echo "Usage: sudo $0 [--user <username>] [--dry-run] [--run-now]"
       exit 0
       ;;
     *)
@@ -123,6 +126,9 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "[dry-run] Would build FDA launcher $LAUNCHER_SRC -> $LIBEXEC_DIR/diskm (mode: 0755, rebuilt only when source changes)"
   echo "[dry-run] Would create directory: $STATE_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would install LaunchDaemon: $PLIST_DST"
+  if [[ "$RUN_NOW" == true ]]; then
+    echo "[dry-run] Would kickstart system/com.jleechanorg.disk-magician-frontier-root after bootstrap."
+  fi
   exit 0
 fi
 
@@ -190,4 +196,8 @@ launchctl bootout system "$PLIST_DST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST_DST"
 
 echo "Installed and bootstrapped com.jleechanorg.disk-magician-frontier-root."
+frontier_root_runner_after_bootstrap "$RUN_NOW"
+if [[ "$RUN_NOW" == true ]]; then
+  echo "Started immediate root frontier scan."
+fi
 launchctl print system/com.jleechanorg.disk-magician-frontier-root | head -n 15 || true

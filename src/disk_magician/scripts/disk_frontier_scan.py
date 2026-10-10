@@ -1785,6 +1785,27 @@ def build_report(
         ),
     }
 
+    measured_by_top = collections.defaultdict(int)
+    exact_measured = {}
+
+    def top_child(path):
+        try:
+            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(scanner.root))
+        except (OSError, ValueError):
+            return None, None
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            return None, None
+        first = rel.split(os.sep, 1)[0]
+        return os.path.join(os.path.realpath(scanner.root), first), rel
+
+    for path, kb in scanner.measured.items():
+        top, rel = top_child(path)
+        if top is None:
+            continue
+        measured_by_top[top] += kb
+        if os.sep not in rel:
+            exact_measured[top] = kb
+
     operational_unfinished = []
     opaque_intrinsic_gates = []
     fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
@@ -1827,9 +1848,20 @@ def build_report(
             }
             if intrinsic["root_device"] is None:
                 del intrinsic["root_device"]
-        elif reason in ("path_disappeared", "inventory_path_disappeared") or (
-            reason == "lstat_failed" and item.get("errno") == errno.ENOENT
+        elif (
+            reason == "lstat_failed"
+            and item.get("errno") == errno.ENOENT
+            and item.get("depth", 0) > 0
+            and top_child(path)[0] in measured_by_top
         ):
+            intrinsic = {
+                "path": path,
+                "reason": "vanished_during_scan",
+                "errno": errno.ENOENT,
+                "verification": "scan_lstat_enoent",
+                "reclaimable": False,
+            }
+        elif reason in ("path_disappeared", "inventory_path_disappeared"):
             try:
                 os.lstat(path)
             except OSError as exc:
@@ -1862,29 +1894,10 @@ def build_report(
 
     mode = "complete" if not operational_unfinished else "partial"
 
-    measured_by_top = collections.defaultdict(int)
-    exact_measured = {}
     unfinished_by_top = collections.defaultdict(list)
     intrinsic_by_top = collections.defaultdict(list)
     deduped_top = set()
 
-    def top_child(path):
-        try:
-            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(scanner.root))
-        except (OSError, ValueError):
-            return None, None
-        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
-            return None, None
-        first = rel.split(os.sep, 1)[0]
-        return os.path.join(os.path.realpath(scanner.root), first), rel
-
-    for path, kb in scanner.measured.items():
-        top, rel = top_child(path)
-        if top is None:
-            continue
-        measured_by_top[top] += kb
-        if os.sep not in rel:
-            exact_measured[top] = kb
     for item in operational_unfinished:
         top, _ = top_child(item.get("path", ""))
         if top is not None:
@@ -1907,7 +1920,7 @@ def build_report(
             intrinsic_reasons == ["cross_device_boundary"]
             and not reasons
             and path not in exact_measured
-            and not measured_by_top[path]
+            and path not in measured_by_top
             and path not in deduped_top
         )
         if cross_device_only:
@@ -1915,7 +1928,7 @@ def build_report(
         if path in exact_measured and not reasons:
             status = "measured_with_opaque_gates" if intrinsic_reasons else "measured"
             size_kb = exact_measured[path]
-        elif measured_by_top[path]:
+        elif path in measured_by_top:
             if reasons:
                 status = "partial"
             elif intrinsic_reasons:

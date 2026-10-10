@@ -253,7 +253,7 @@ HOME="$FIXTURE_DIR/home" \
 RC5=$?
 set -e
 
-check "audit clean completes when a category fails" test "$RC5" -eq 0
+check "audit clean returns failure after continuing all categories when a category fails" test "$RC5" -eq 1
 check "reports Colima CATEGORY FAILED" grep -q "CATEGORY FAILED: Colima VM disk (Docker prune + fstrim) (exit 1)" "$OUT5"
 check "invoked Colima before failure" grep -qF "cleanup_colima.sh --dry-run" "$INVOCATIONS_LOG"
 check "continues and executes later category prune_aside_sessions" grep -qF "prune_aside_sessions.sh --dry-run" "$INVOCATIONS_LOG"

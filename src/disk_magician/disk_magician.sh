@@ -19,6 +19,7 @@ Commands:
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
+  install-root-frontier-runner Install the immutable root-owned frontier runner.
   residual-drilldown Run the scheduled residual and uncovered-root checks.
   pressure-sweep Run the existing free-space-gated maintenance job.
   tmp-scratch-sweep Run the existing scheduled scratch maintenance wrapper.
@@ -242,6 +243,9 @@ case "$CMD" in
     ;;
   frontier-nightly)
     exec bash "$SCRIPT_DIR/scripts/disk_frontier_scan.sh" "$@"
+    ;;
+  install-root-frontier-runner|install_root_frontier_runner)
+    exec bash "$SCRIPT_DIR/scripts/install_root_frontier_runner.sh" "$@"
     ;;
   residual-drilldown)
     exec bash "$SCRIPT_DIR/scripts/residual_drilldown.sh" "$@"
