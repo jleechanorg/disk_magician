@@ -101,7 +101,7 @@ def superseded_interrupted_records(
     job: str, active: List[Dict[str, Any]], terminal: Optional[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Classify old active records only after a newer serialized run proves lock acquisition."""
-    if job not in {"snapshot_commit", "pressure_sweep"} or not active or not isinstance(terminal, dict):
+    if job != "snapshot_commit" or not active or not isinstance(terminal, dict):
         return [], active
     lock = terminal.get("lock")
     terminal_id = consistent_run_id(terminal)
@@ -113,7 +113,8 @@ def superseded_interrupted_records(
         terminal_times.get("ended_at") if isinstance(terminal_times, dict) else None
     )
     if (
-        terminal.get("schema_version") != SCHEMA_VERSION
+        type(terminal.get("schema_version")) is not int
+        or terminal.get("schema_version") != SCHEMA_VERSION
         or not isinstance(lock, dict)
         or lock.get("held") is not True
         or lock.get("acquired") is not True
@@ -139,7 +140,8 @@ def superseded_interrupted_records(
                 record_times.get("started_at") if isinstance(record_times, dict) else None
             )
             if (
-                record.get("schema_version") == SCHEMA_VERSION
+                type(record.get("schema_version")) is int
+                and record.get("schema_version") == SCHEMA_VERSION
                 and record.get("job") == job
                 and record.get("outcome") == "unknown"
                 and isinstance(record_times, dict)

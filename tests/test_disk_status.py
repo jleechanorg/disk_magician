@@ -608,20 +608,16 @@ class TestDiskStatus(unittest.TestCase):
         self.assertEqual(safety["superseded_interrupted"][0]["id"], old_record["id"])
         self.assertEqual(receipt.read_bytes(), before)
 
-        pressure_receipt, pressure_old, pressure_terminal = set_receipt(
+        pressure_receipt, pressure_old, _ = set_receipt(
             "pressure_sweep", old_start, terminal_start
         )
         pressure_action = evaluator.evaluate_action_outcome()["details"]["pressure_sweep"]
         pressure_safety = evaluator.evaluate_safety()["details"]["pressure_sweep"]
-        self.assertEqual(pressure_action["status"], "healthy")
-        self.assertEqual(pressure_action["latest_attempt"]["id"], pressure_terminal["id"])
-        self.assertEqual(
-            pressure_action["superseded_interrupted"][0]["id"], pressure_old["id"]
-        )
-        self.assertEqual(pressure_safety["status"], "healthy")
-        self.assertEqual(
-            pressure_safety["superseded_interrupted"][0]["id"], pressure_old["id"]
-        )
+        self.assertEqual(pressure_action["status"], "unknown")
+        self.assertEqual(pressure_action["active_records"][0]["id"], pressure_old["id"])
+        self.assertEqual(pressure_action["superseded_interrupted"], [])
+        self.assertEqual(pressure_safety["status"], "unknown")
+        self.assertEqual(pressure_safety["superseded_interrupted"], [])
 
         cases = [
             ("newer active", terminal_start, terminal_start),
@@ -774,6 +770,12 @@ class TestDiskStatus(unittest.TestCase):
         def mutate_terminal_schema(data):
             data["last_terminal"].pop("schema_version")
 
+        def mutate_active_schema_bool(data):
+            data["active"][0]["schema_version"] = True
+
+        def mutate_terminal_schema_bool(data):
+            data["last_terminal"]["schema_version"] = True
+
         malformed_cases = (
             ("active non-unknown outcome", mutate_active_outcome),
             ("active already ended", mutate_active_ended_at),
@@ -782,6 +784,8 @@ class TestDiskStatus(unittest.TestCase):
             ("terminal object ID", mutate_terminal_id_type),
             ("terminal ID aliases disagree", mutate_terminal_alias),
             ("terminal schema missing", mutate_terminal_schema),
+            ("active boolean schema", mutate_active_schema_bool),
+            ("terminal boolean schema", mutate_terminal_schema_bool),
         )
         env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(self.state_dir)}
         status_cli = REPO_ROOT / "disk_magician.sh"
