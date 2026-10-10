@@ -21,6 +21,25 @@ echo "$OUT_DRY" | grep -q "com.jleechanorg.disk-magician-frontier-root.plist" &&
 
 echo "$OUT_DRY" | grep -q "$REPO_ROOT/launchd/diskm_root_launcher.c" && ok "dry-run names FDA launcher source" || bad "dry-run launcher" "$OUT_DRY"
 
+OUT_DRY_NOW=$("$REPO_ROOT/scripts/install_root_frontier_runner.sh" --dry-run --run-now)
+! echo "$OUT_DRY" | grep -q "Would kickstart" && ok "default dry-run does not request immediate start" || bad "default run-now" "$OUT_DRY"
+echo "$OUT_DRY_NOW" | grep -q "Would kickstart system/com.jleechanorg.disk-magician-frontier-root after bootstrap" \
+  && ok "run-now dry-run names exact system service" || bad "run-now dry-run label" "$OUT_DRY_NOW"
+KICKSTART_CALLS=
+KICKSTART_RC=0
+launchctl() { KICKSTART_CALLS="$*"; return "$KICKSTART_RC"; }
+source "$REPO_ROOT/scripts/lib/frontier_runner_launchd.sh"
+frontier_root_runner_after_bootstrap false
+[[ -z "$KICKSTART_CALLS" ]] && ok "default post-bootstrap path does not kickstart" || bad "default kickstart" "$KICKSTART_CALLS"
+frontier_root_runner_after_bootstrap true
+[[ "$KICKSTART_CALLS" == "kickstart system/com.jleechanorg.disk-magician-frontier-root" ]] \
+  && ok "run-now targets exact service without restart flag" \
+  || bad "kickstart target" "$KICKSTART_CALLS"
+KICKSTART_RC=23
+RC=0
+( frontier_root_runner_after_bootstrap true ) || RC=$?
+[[ "$RC" -eq 23 ]] && ok "kickstart failure propagates" || bad "kickstart failure status" "rc=$RC"
+
 echo "── 2. Plist template structural invariants ──"
 PLIST="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-frontier-root.plist.template"
 [[ -f "$PLIST" ]] && ok "plist template exists" || bad "plist missing" "$PLIST"
