@@ -233,9 +233,10 @@ run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
 
 cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
+cwd=$(cd "$STD_ROOT/r/busy" 2>/dev/null && pwd -P)
 echo "p1"
 echo "fcwd"
-echo "n$STD_ROOT/r/busy"
+echo "n\$cwd"
 SH
 chmod +x "$FAKE_BIN/lsof"
 run_std "$TMP_ROOT/std.out" "$FAKE_BIN:/usr/bin:/bin"
