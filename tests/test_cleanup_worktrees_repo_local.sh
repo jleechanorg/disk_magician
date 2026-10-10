@@ -189,11 +189,16 @@ assert_not_contains() {
 
 echo "Test: ignored user data added by size probe blocks final removal"
 printf '\n*.db\n' >> "$MAIN_REPO/.git/info/exclude"
+RACE_TRACKED="$MAIN_REPO/.claude/worktrees/wt-race-tracked"
+git -C "$MAIN_REPO" worktree add -B wt-race-tracked "$RACE_TRACKED" "$(git -C "$MAIN_REPO" rev-parse main)" >/dev/null
+age_worktree_days_ago "$RACE_TRACKED" 30
 cat > "$FAKE_BIN/du" <<'SH'
 #!/bin/sh
 for arg in "$@"; do
   case "$arg" in
-    */.claude/worktrees/wt-ancestor) printf 'late user data\n' > "$arg/race.db" ;;
+    */.claude/worktrees/wt-ancestor) printf 'late ignored data\n' > "$arg/race.db" ;;
+    */.claude/worktrees/wt-race-tracked) printf 'late tracked edit\n' > "$arg/README.md" ;;
+    */.claude/worktrees/wt\ spaced\ path) printf 'late untracked data\n' > "$arg/late.txt" ;;
   esac
 done
 exec /usr/bin/du "$@"
@@ -205,11 +210,11 @@ env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
   bash "$CLEANUP_SCRIPT" --clean --repos "$MAIN_REPO" --min-age 14 >"$RACE_OUT" 2>&1
 RACE_TEXT=$(cat "$RACE_OUT")
 assert_contains "size-probe ignored data preserved" ".claude/worktrees/wt-ancestor | ignored-data" "$RACE_TEXT"
-if [[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]]; then
-  record_pass "size-probe ignored data remains on disk"
-else
-  record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
-fi
+assert_contains "size-probe tracked edit preserved" ".claude/worktrees/wt-race-tracked | changed-after-size" "$RACE_TEXT"
+assert_contains "size-probe untracked data preserved" ".claude/worktrees/wt spaced path | changed-after-size" "$RACE_TEXT"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]] && record_pass "size-probe ignored data remains on disk" || record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
+[[ -f "$RACE_TRACKED/README.md" ]] && grep -qF 'late tracked edit' "$RACE_TRACKED/README.md" && record_pass "size-probe tracked edit remains on disk" || record_fail "size-probe tracked edit remains on disk" "late tracked edit disappeared"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt spaced path/late.txt" ]] && record_pass "size-probe untracked data remains on disk" || record_fail "size-probe untracked data remains on disk" "late untracked data disappeared"
 
 echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
 STD_HOME="$TMP_ROOT/home"
