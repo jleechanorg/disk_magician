@@ -270,22 +270,8 @@ classify_repo_local_worktree() {
     fi
 
     if [[ "$locked" == "1" ]]; then
-        # Stale lock detection: only auto-unlock automated/orchestrator worktrees
-        local is_automated=false
-        if [[ "$wt_path" == *"/.ao/data/worktrees/"* || \
-              "$wt_path" == *"/ao/data/worktrees/"* || \
-              "$wt_path" == *"/antigravity/worktrees/"* ]]; then
-            is_automated=true
-        fi
-
-        if [[ "$is_automated" == "true" && "$recently_active" == false ]]; then
-            if [[ "$DRY_RUN" == false ]]; then
-                git -C "$repo" worktree unlock "$wt_path" 2>/dev/null || true
-            fi
-        else
-            echo "locked"
-            return 0
-        fi
+        echo "locked"
+        return 0
     fi
 
     if [[ "$prunable" == "1" ]]; then
@@ -588,6 +574,43 @@ is_worktree_active() {
     return 1
 }
 
+# ao_worktree_dirs <yaml>: per-project worktreeDir -> "P <dir>". The top-level
+# default (column 0, the live config sets it to ~/.worktrees) is NOT owned
+# whole: projects lacking their own worktreeDir get "P <default>/<key>" and
+# "P <default>/<basename path>", and "C <default>" covers <default>/<session>.
+ao_worktree_dirs() {
+    awk '
+        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
+                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
+        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
+        /^worktreeDir:/ { def = val($0); next }
+        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
+        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
+        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
+        END {
+            if (def == "") exit
+            sub(/\/+$/, "", def); print "C " def
+            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
+                print "P " def "/" keys[i]
+                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
+            }
+        }' "$1"
+}
+antigravity_ao_owned() {
+    local candidate="$1" cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}" lines kind dir real
+    case "$candidate" in */.ao/data/worktrees/*|*/ao/data/worktrees/*) return 0 ;; esac
+    [[ -e "$cfg" ]] || return 1
+    [[ -r "$cfg" ]] || return 0
+    lines="$(ao_worktree_dirs "$cfg")" || return 0
+    while read -r kind dir; do
+        [[ -n "$dir" ]] || continue
+        dir="$(expand_path "$dir")"
+        real="$(cd "$dir" 2>/dev/null && pwd -P || printf '%s' "$dir")"
+        [[ "$candidate" == "$dir" || "$candidate" == "$dir"/* || "$candidate" == "$real" || "$candidate" == "$real"/* ]] && return 0
+    done <<<"$lines"
+    return 1
+}
+
 process_antigravity_orphan() {
     local abs_subdir="$1"
     if is_worktree_active "$abs_subdir"; then
@@ -612,6 +635,11 @@ process_antigravity_orphan() {
     fi
     if [[ ! -e "$abs_subdir/.git" && ! -L "$abs_subdir/.git" ]]; then
         ledger_line "antigravity" "PRESERVE" "$abs_subdir" "not-git"
+        ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+        return 0
+    fi
+    if antigravity_ao_owned "$abs_subdir"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "ao-owned"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
@@ -933,28 +961,6 @@ STD_AO_DIRS=""      # AO owns everything under these
 STD_AO_PARENTS=""   # AO owns direct children of these (<default>/<sessionId>)
 STD_BLOCKED=""
 STD_LIVE_CWDS=""
-# ao_worktree_dirs <yaml>: per-project worktreeDir -> "P <dir>". The top-level
-# default (column 0, the live config sets it to ~/.worktrees) is NOT owned
-# whole: projects lacking their own worktreeDir get "P <default>/<key>" and
-# "P <default>/<basename path>", and "C <default>" covers <default>/<session>.
-ao_worktree_dirs() {
-    awk '
-        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
-                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
-        /^worktreeDir:/ { def = val($0); next }
-        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
-        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
-        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
-        END {
-            if (def == "") exit
-            sub(/\/+$/, "", def); print "C " def
-            for (i = 1; i <= n; i++) if (!own[keys[i]]) {
-                print "P " def "/" keys[i]
-                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
-            }
-        }' "$1"
-}
 # Loaded even without STD_ROOT: the plf merged fast path also consults it.
 ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
 if [[ -e "$ao_cfg" ]]; then

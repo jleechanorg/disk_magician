@@ -125,6 +125,10 @@ setup_fixture_repo() {
   mkdir -p "$(dirname "$ao_wt_dir")"
   git -C "$main_repo" worktree add -B wt-ao-young "$ao_wt_dir" "$BASE_SHA" >/dev/null
   age_worktree_days_ago "$ao_wt_dir" 3
+  local ao_locked="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-locked"
+  git -C "$main_repo" worktree add -B wt-ao-locked "$ao_locked" "$BASE_SHA" >/dev/null
+  git -C "$main_repo" worktree lock "$ao_locked" >/dev/null
+  age_worktree_days_ago "$ao_locked" 30
 
   # Antigravity orphan worktree (unregistered in git, but modified 2 days ago)
   local ag_orphan_dir="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/orphan-recent"
@@ -157,10 +161,11 @@ assert_contains "ahead reason" ".claude/worktrees/wt-ahead | ahead-of-main" "$OU
 assert_contains "locked reason" ".claude/worktrees/wt-locked | locked" "$OUT_CONTENT"
 assert_contains "young reason" ".claude/worktrees/wt-young | young" "$OUT_CONTENT"
 assert_contains "ao young worktree preserved by 14d floor" ".ao/data/worktrees/main-repo/wt-ao-young | young" "$OUT_CONTENT"
+assert_contains "stale AO locked worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-locked | locked" "$OUT_CONTENT"
 assert_contains "antigravity recent orphan preserved by 14d floor" "antigravity  PRESERVE" "$OUT_CONTENT"
 assert_contains "spaced path eligible" ".claude/worktrees/wt spaced path" "$OUT_CONTENT"
 assert_contains "summary eligible count" "Repo-local:  2 eligible" "$OUT_CONTENT"
-assert_contains "summary preserved count" "Repo-local:  2 eligible, 6 preserved." "$OUT_CONTENT"
+assert_contains "summary preserved count" "Repo-local:  2 eligible, 7 preserved." "$OUT_CONTENT"
 
 echo "Test: --clean without WORKTREE_APPROVED refuses before deletion"
 OUT_REFUSE="$TMP_ROOT/refuse.out"
@@ -666,6 +671,18 @@ mkdir -p "$AG_NON_GIT"
 printf 'keep user data\n' > "$AG_NON_GIT/notes.txt"
 age_worktree_days_ago "$AG_NON_GIT" 20
 
+# Antigravity path configured as an AO worktreeDir must be preserved.
+AG_AO="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ao-managed"
+mkdir -p "$AG_AO"
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    worktreeDir: %s\n' "$TMP_ROOT/home/.worktrees" "$AG_AO" > "$TMP_ROOT/ao.yml"
+git -C "$AG_AO" init --quiet -b main
+git -C "$AG_AO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_AO" config user.name "Fixture User"
+printf 'clean\n' > "$AG_AO/file.txt"
+git -C "$AG_AO" add file.txt
+git -C "$AG_AO" commit -m "clean ao checkout" --quiet
+age_worktree_days_ago "$AG_AO" 20
+
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
 rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
@@ -710,7 +727,7 @@ age_worktree_days_ago "$AG_TYPE_STAGED" 20
 
 OUT_PROBE="$TMP_ROOT/probe-test.out"
 env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
-  HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
   bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 \
   >"$OUT_PROBE" 2>&1
 OUT_PROBE_CONTENT=$(cat "$OUT_PROBE")
@@ -753,6 +770,8 @@ assert_contains "assume-unchanged tracked edit preserved" "ag-hidden-index | hid
 assert_not_contains "assume-unchanged worktree not eligible" "ELIGIBLE" "$(grep -F "ag-hidden-index" <<<"$OUT_PROBE_CONTENT" || true)"
 assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$OUT_PROBE_CONTENT"
 assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
+assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed" <<<"$OUT_PROBE_CONTENT" || true)"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
