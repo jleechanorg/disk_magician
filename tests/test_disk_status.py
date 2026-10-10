@@ -140,9 +140,14 @@ class TestDiskStatus(unittest.TestCase):
         plist_file.write_bytes(plist_content)
         self.plist_hash = sha256_bytes(plist_content)
 
+        packaged_scanner = self.pkg_root / "scripts" / "disk_frontier_scan.py"
+        packaged_scanner.parent.mkdir(parents=True, exist_ok=True)
+        packaged_scanner.write_bytes(b"deployed root scanner\n")
+        self.scanner_hash = sha256_bytes(packaged_scanner.read_bytes())
         self.package_hashes = {
             "__init__.py": self.init_hash,
             "launchd/com.jleechanorg.disk-magician-snapshot.plist": self.plist_hash,
+            "scripts/disk_frontier_scan.py": self.scanner_hash,
         }
 
         dist_info = self.site_packages / "disk_magician-0.2.0.dist-info"
@@ -654,6 +659,55 @@ class TestDiskStatus(unittest.TestCase):
         res = evaluator.evaluate_deployed_identity(fleet_info=mismatched_fleet)
         self.assertEqual(res["status"], "degraded")
         self.assertIn("observed_repo_helper_root_mismatch", res["reason"])
+
+    def test_root_frontier_scanner_identity(self):
+        evaluator = self.get_evaluator()
+        root = self.root / "libexec"
+        root.mkdir()
+        scanner = root / "disk_frontier_scan.py"
+        scanner.write_bytes(b"deployed root scanner\n")
+        record = {
+            "label": "com.jleechanorg.disk-magician-frontier-root",
+            "execution_kind": "system",
+            "identity_source": "installed_plist",
+            "program_arguments": [str(root / "diskm"), "frontier"],
+        }
+        fleet = {"records": [record]}
+
+        res = evaluator.evaluate_deployed_identity(fleet_info=fleet)
+        self.assertEqual(res["status"], "healthy", res)
+
+        scanner.write_bytes(b"stale root scanner\n")
+        res = evaluator.evaluate_deployed_identity(fleet_info=fleet)
+        self.assertEqual(res["status"], "degraded")
+        self.assertIn("root_frontier_scanner_hash_mismatch", res["reason"])
+
+        missing_root = self.root / "missing-libexec"
+        missing_record = {**record, "program_arguments": [str(missing_root / "diskm"), "frontier"]}
+        res = evaluator.evaluate_deployed_identity(fleet_info={"records": [missing_record]})
+        self.assertEqual(res["status"], "degraded")
+        self.assertIn("root_frontier_scanner_missing_or_unreadable", res["reason"])
+
+        scanner.write_bytes(b"deployed root scanner\n")
+        original_hash = disk_status.sha256_file
+        def unreadable(path):
+            if Path(path) == scanner:
+                raise PermissionError("test unreadable")
+            return original_hash(path)
+        with mock.patch.object(disk_status, "sha256_file", side_effect=unreadable):
+            res = evaluator.evaluate_deployed_identity(fleet_info=fleet)
+        self.assertEqual(res["status"], "degraded")
+        self.assertIn("root_frontier_scanner_missing_or_unreadable", res["reason"])
+
+    def test_root_frontier_scanner_check_skips_unrelated_and_absent_service(self):
+        evaluator = self.get_evaluator()
+        res = evaluator.evaluate_deployed_identity(fleet_info={"records": []})
+        self.assertEqual(res["status"], "healthy", res)
+        res = evaluator.evaluate_deployed_identity(fleet_info={"records": [
+            {"label": "unrelated-system-job",
+             "execution_kind": "system", "identity_source": "installed_plist"}
+        ]})
+        self.assertEqual(res["status"], "healthy", res)
 
     def test_fleet_evaluation(self):
         evaluator = self.get_evaluator()
