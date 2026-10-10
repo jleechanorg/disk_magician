@@ -204,7 +204,24 @@ mkdir -p "$WTROOT/m/data.pyc"; echo y >"$WTROOT/m/data.pyc/keep.db"
 run_hook "$(json "$WTROOT/m")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 [[ -f "$WTROOT/m/data.pyc/keep.db" ]] && ok "data.pyc directory preserved" || bad "data.pyc directory removed"
-echo "PASS=$PASS FAIL=$FAIL"
-echo
+echo "== case 17: ignored .testmondata database directory -> preserved =="
+add_wt n worktree-n
+printf '.testmondata/\n' >"$WTROOT/n/.gitignore"
+git -C "$WTROOT/n" add .gitignore
+git -C "$WTROOT/n" commit -q -m ignore
+mkdir -p "$WTROOT/n/.testmondata"; echo db >"$WTROOT/n/.testmondata/notes.db"
+run_hook "$(json "$WTROOT/n")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/n/.testmondata/notes.db" ]] && ok ".testmondata directory preserved" || bad ".testmondata directory removed"
+
+echo "== case 18: ignored *.egg-info directory -> preserved =="
+add_wt o worktree-o
+printf '*.egg-info\n' >"$WTROOT/o/.gitignore"
+git -C "$WTROOT/o" add .gitignore
+git -C "$WTROOT/o" commit -q -m ignore
+mkdir -p "$WTROOT/o/package.egg-info"; echo user >"$WTROOT/o/package.egg-info/notes.db"
+run_hook "$(json "$WTROOT/o")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/o/package.egg-info/notes.db" ]] && ok "egg-info directory preserved" || bad "egg-info directory removed"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

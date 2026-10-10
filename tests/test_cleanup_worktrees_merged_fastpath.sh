@@ -42,7 +42,7 @@ mkdir -p "$WT"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email "fixture@users.noreply.github.com"
 git -C "$REPO" config user.name "Fixture"
-printf '.env*\nnode_modules/\n.npmrc\n*.p12\ndata.pyc/\n' > "$REPO/.gitignore"
+printf '.env*\nnode_modules/\n.npmrc\n*.p12\ndata.pyc/\n.testmondata/\n' > "$REPO/.gitignore"
 printf 'base\n' > "$REPO/README.md"
 git -C "$REPO" add .gitignore README.md
 git -C "$REPO" commit -q -m base
@@ -58,7 +58,7 @@ add_wt m4 "$WT/wt-m4" "$MERGED_SHA"
 add_wt m4dirty "$WT/wt-m4dirty" "$MERGED_SHA"
 printf 'dirty\n' >> "$WT/wt-m4dirty/README.md"
 add_wt m4ignoreddata "$WT/wt-m4ignoreddata" "$MERGED_SHA"
-mkdir -p "$WT/wt-m4ignoreddata/data.pyc" && printf 'data\n' > "$WT/wt-m4ignoreddata/data.pyc/keep.db"
+mkdir -p "$WT/wt-m4ignoreddata/.testmondata" && printf 'data\n' > "$WT/wt-m4ignoreddata/.testmondata/notes.db"
 add_wt u4 "$WT/wt-u4" "$AHEAD_SHA"
 add_wt m2 "$WT/wt-m2" "$MERGED_SHA"
 add_wt m4live "$WT/wt-m4live" "$MERGED_SHA"

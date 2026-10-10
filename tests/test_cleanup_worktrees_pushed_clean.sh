@@ -25,7 +25,7 @@ git init -q --bare -b main "$TMP_ROOT/origin.git"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email f@users.noreply.github.com
 git -C "$REPO" config user.name F
-printf '.env*\ndata/\ndata.pyc/\nnode_modules/\n.ruff_cache/\ntest-results/\nbuild/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/README.md"
+printf '.env*\ndata/\ndata.pyc/\n.testmondata/\nnode_modules/\n.ruff_cache/\ntest-results/\nbuild/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/README.md"
 git -C "$REPO" add .gitignore README.md; git -C "$REPO" commit -q -m base
 BASE_SHA=$(git -C "$REPO" rev-parse HEAD)
 git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
@@ -38,7 +38,7 @@ add_wt unpushed "$WT/wt-unpushed" "$AHEAD_SHA"
 add_wt diverged "$WT/wt-diverged" "$AHEAD_SHA"; git -C "$REPO" push -q origin "$BASE_SHA:refs/heads/diverged"
 add_wt pdirty "$WT/wt-pdirty" "$AHEAD_SHA";   git -C "$REPO" push -q origin pdirty; printf 'x\n' >> "$WT/wt-pdirty/README.md"
 add_wt psecret "$WT/wt-psecret" "$AHEAD_SHA"; git -C "$REPO" push -q origin psecret; printf 'T=1\n' > "$WT/wt-psecret/.env.local"
-add_wt pdata "$WT/wt-pdata" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdata; mkdir -p "$WT/wt-pdata/data"; printf 'only copy\n' > "$WT/wt-pdata/data/notes.db"
+add_wt pdata "$WT/wt-pdata" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdata; mkdir -p "$WT/wt-pdata/.testmondata"; printf 'only copy\n' > "$WT/wt-pdata/.testmondata/notes.db"
 add_wt pdeps "$WT/wt-pdeps" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdeps; mkdir -p "$WT/wt-pdeps/node_modules/x"; printf 'x\n' > "$WT/wt-pdeps/node_modules/x/i.js"
 add_wt pcache "$WT/wt-pcache" "$AHEAD_SHA";   git -C "$REPO" push -q origin pcache; mkdir -p "$WT/wt-pcache/.ruff_cache/0.16.1" "$WT/wt-pcache/test-results"; printf 'c\n' > "$WT/wt-pcache/.ruff_cache/0.16.1/x"; printf 'r\n' > "$WT/wt-pcache/test-results/r.xml"
 add_wt pbuild "$WT/wt-pbuild" "$AHEAD_SHA";   git -C "$REPO" push -q origin pbuild; mkdir -p "$WT/wt-pbuild/build"; printf 'hand-made\n' > "$WT/wt-pbuild/build/manual-evidence.db"
