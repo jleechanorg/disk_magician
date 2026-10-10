@@ -399,6 +399,19 @@ run_hook "$(json "$WTROOT/x")"; rc=$?
 [[ -d "$WTROOT/x" ]] && ok "relative-path record worktree kept" || bad "relative-path record worktree removed"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "relative-path record unknown reason logged" || bad "relative-path record unknown reason missing"
 
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+echo "== case 31: nested worktree under default AO root is preserved =="
+cat >"$HOME/default-ao.yaml" <<YAML
+worktreeDir: "$HOME/.worktrees"
+YAML
+export DISK_MAGICIAN_AO_CONFIG="$HOME/default-ao.yaml"
+mkdir -p "$HOME/.worktrees/deep/repo"
+add_wt default-deep worktree-default-deep "$HOME/.worktrees/deep/repo/session"
+run_hook "$(json "$HOME/.worktrees/deep/repo/session")"; rc=$?
+[[ -d "$HOME/.worktrees/deep/repo/session" ]] && ok "nested default AO worktree kept" || bad "nested default AO worktree removed"
+tail -n 1 "$LOG" | grep -q "ao-owned" && ok "nested default AO reason logged" || bad "nested default AO reason missing"
+unset DISK_MAGICIAN_AO_CONFIG
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
 

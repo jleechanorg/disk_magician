@@ -133,7 +133,7 @@ wrh_ao_skip_reason() {
         [[ -n $kind && -n $dir ]] || continue
         root=$(wrh_expand_path "$dir") || { echo ao-config-unreadable; return; }
         root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root" 2>/dev/null) || { echo ao-config-unreadable; return; }
-        case $kind in P) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; C) [[ ${candidate%/*} == "$root" ]] && { echo ao-owned; return; };; *) echo ao-config-unreadable; return;; esac
+        case $kind in P) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; C) [[ $candidate == "$root" || $candidate == "$root/"* ]] && { echo ao-owned; return; };; *) echo ao-config-unreadable; return;; esac
     done <<<"$lines"
 }
 
