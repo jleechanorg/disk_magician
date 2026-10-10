@@ -776,6 +776,13 @@ process_antigravity_orphan() {
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
+        local final_status final_status_rc=0
+        final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+        if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
         if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -919,6 +926,14 @@ process_repo_local_worktrees() {
                 fi
                 if has_ignored_user_data "$abs_path"; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "ignored-data" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
+                local final_status final_status_rc=0
+                final_status="$(git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+                if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0

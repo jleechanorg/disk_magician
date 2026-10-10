@@ -192,13 +192,18 @@ assert_not_contains() {
   fi
 }
 
-echo "Test: ignored user data added by size probe blocks final removal"
+echo "Test: ignored, untracked, and tracked data added by size probe block final removal"
 printf '\n*.db\n' >> "$MAIN_REPO/.git/info/exclude"
+RACE_TRACKED="$MAIN_REPO/.claude/worktrees/wt-race-tracked"
+git -C "$MAIN_REPO" worktree add -B wt-race-tracked "$RACE_TRACKED" "$(git -C "$MAIN_REPO" rev-parse main)" >/dev/null
+age_worktree_days_ago "$RACE_TRACKED" 30
 cat > "$FAKE_BIN/du" <<'SH'
 #!/bin/sh
 for arg in "$@"; do
   case "$arg" in
-    */.claude/worktrees/wt-ancestor) printf 'late user data\n' > "$arg/race.db" ;;
+    */.claude/worktrees/wt-ancestor) printf 'late ignored data\n' > "$arg/race.db" ;;
+    */.claude/worktrees/wt-race-tracked) printf 'late tracked edit\n' > "$arg/README.md" ;;
+    */.claude/worktrees/wt\ spaced\ path) printf 'late untracked data\n' > "$arg/late.txt" ;;
   esac
 done
 exec /usr/bin/du "$@"
@@ -210,11 +215,11 @@ env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
   bash "$CLEANUP_SCRIPT" --clean --repos "$MAIN_REPO" --min-age 14 >"$RACE_OUT" 2>&1
 RACE_TEXT=$(cat "$RACE_OUT")
 assert_contains "size-probe ignored data preserved" ".claude/worktrees/wt-ancestor | ignored-data" "$RACE_TEXT"
-if [[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]]; then
-  record_pass "size-probe ignored data remains on disk"
-else
-  record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
-fi
+assert_contains "size-probe tracked edit preserved" ".claude/worktrees/wt-race-tracked | changed-after-size" "$RACE_TEXT"
+assert_contains "size-probe untracked data preserved" ".claude/worktrees/wt spaced path | changed-after-size" "$RACE_TEXT"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt-ancestor/race.db" ]] && record_pass "size-probe ignored data remains on disk" || record_fail "size-probe ignored data remains on disk" "late ignored data disappeared"
+[[ -f "$RACE_TRACKED"/README.md ]] && grep -qF 'late tracked edit' "$RACE_TRACKED/README.md" && record_pass "size-probe tracked edit remains on disk" || record_fail "size-probe tracked edit remains on disk" "late tracked edit disappeared"
+[[ -f "$MAIN_REPO/.claude/worktrees/wt spaced path/late.txt" ]] && record_pass "size-probe untracked data remains on disk" || record_fail "size-probe untracked data remains on disk" "late untracked data disappeared"
 
 echo "Test: standard root \$HOME/.worktrees is discovered and governed (spec D6)"
 STD_HOME="$TMP_ROOT/home"
@@ -797,6 +802,54 @@ assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$
 assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
 assert_contains "AO-configured Antigravity path preserved" "ao-managed | ao-owned" "$OUT_PROBE_CONTENT"
 assert_not_contains "AO-configured Antigravity path not eligible" "ELIGIBLE" "$(grep -F "ao-managed" <<<"$OUT_PROBE_CONTENT" || true)"
+
+echo "Test: Antigravity untracked data added by size probe blocks removal"
+AG_CLEAN_REPO="$TMP_ROOT/ag-clean-main"
+mkdir -p "$AG_CLEAN_REPO"
+git -C "$AG_CLEAN_REPO" init -q -b main
+git -C "$AG_CLEAN_REPO" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_CLEAN_REPO" config user.name "Fixture User"
+printf 'anchor\n' > "$AG_CLEAN_REPO/README.md"
+git -C "$AG_CLEAN_REPO" add README.md
+git -C "$AG_CLEAN_REPO" commit -q -m anchor
+cat > "$FAKE_BIN/du" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */ag-clean-ancestor) printf 'late Antigravity data\n' > "$arg/late.txt" ;;
+  esac
+done
+exec /usr/bin/du "$@"
+SH
+chmod +x "$FAKE_BIN/du"
+AG_RACE_OUT="$TMP_ROOT/ag-race-clean.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  WORKTREE_APPROVED=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$TMP_ROOT/ao.yml" \
+  bash "$CLEANUP_SCRIPT" --clean --repos "$AG_CLEAN_REPO" --min-age 14 >"$AG_RACE_OUT" 2>&1
+AG_RACE_TEXT=$(cat "$AG_RACE_OUT")
+assert_contains "Antigravity size-probe untracked data preserved" "ag-clean-ancestor | changed-after-size" "$AG_RACE_TEXT"
+if [[ -f "$AG_ELIGIBLE/late.txt" ]]; then
+  record_pass "Antigravity size-probe data remains on disk"
+else
+  record_fail "Antigravity size-probe data remains on disk" "late data disappeared"
+fi
+
+# Valid YAML flow style and alternate indentation must preserve configured owners.
+AO_FLOW="$TMP_ROOT/ao-flow.yml"
+printf 'projects: {flow-demo: {path: /x/flow-demo, worktreeDir: "%s"}}\n' "$AG_AO" > "$AO_FLOW"
+OUT_FLOW="$TMP_ROOT/probe-flow-aO.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_FLOW" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_FLOW" 2>&1
+assert_contains "flow-style AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_FLOW")"
+
+AO_ALT_INDENT="$TMP_ROOT/ao-alt-indent.yml"
+printf 'projects:\n  alt-demo:\n      path: /x/alt-demo\n      worktreeDir: "%s"\n' "$AG_AO" > "$AO_ALT_INDENT"
+OUT_ALT_INDENT="$TMP_ROOT/probe-alt-indent.out"
+env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_AO_CONFIG="$AO_ALT_INDENT" \
+  bash "$CLEANUP_SCRIPT" --dry-run --repos "$PROBE_REPO,$DEV_REPO" --min-age 14 >"$OUT_ALT_INDENT" 2>&1
+assert_contains "alternate-indent AO project protects configured path" "ao-managed | ao-owned" "$(cat "$OUT_ALT_INDENT")"
 
 # Invalid AO YAML must preserve candidates even when the root default is valid.
 AO_MALFORMED="$TMP_ROOT/ao-malformed.yml"

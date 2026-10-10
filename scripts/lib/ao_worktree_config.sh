@@ -1,56 +1,90 @@
 # shellcheck shell=bash
-# ao_worktree_config.sh — validate the live AO YAML before projecting owners.
+# ao_worktree_config.sh — parse and project AO ownership using a YAML parser.
 # Call ao_worktree_dirs <yaml>; prints P <dir> / C <dir> records on success.
-_ao_worktree_config_valid() {
+_ao_worktree_config_valid_string() {
+    local value="$1"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]]
+}
+
+ao_worktree_dirs() {
     local config="$1"
+    [[ -f "$config" && -r "$config" ]] || return 1
     if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-        python3 - "$config" >/dev/null 2>&1 <<'PY'
+        python3 - "$config" <<'PY'
+import os
 import sys
 import yaml
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = yaml.safe_load(stream)
-if not isinstance(document, dict):
+
+def fail():
     raise SystemExit(1)
-if "worktreeDir" in document and not isinstance(document["worktreeDir"], str):
-    raise SystemExit(1)
-projects = document.get("projects", {})
-if not isinstance(projects, dict):
-    raise SystemExit(1)
-for project in projects.values():
-    if not isinstance(project, dict):
-        raise SystemExit(1)
-    for key in ("path", "worktreeDir"):
-        if key in project and not isinstance(project[key], str):
-            raise SystemExit(1)
+
+def path_value(value):
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        fail()
+    return value.rstrip("/") or ("/" if value.startswith("/") else "")
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        document = yaml.safe_load(stream)
+    if not isinstance(document, dict):
+        fail()
+    default = path_value(document["worktreeDir"]) if "worktreeDir" in document else ""
+    projects = document.get("projects", {})
+    if not isinstance(projects, dict):
+        fail()
+    if default:
+        print("C " + default)
+    for key, project in projects.items():
+        if not isinstance(key, str) or "\n" in key or "\r" in key or not isinstance(project, dict):
+            fail()
+        if "path" in project and not isinstance(project["path"], str):
+            fail()
+        if "worktreeDir" in project:
+            directory = path_value(project["worktreeDir"])
+            if directory:
+                print("P " + directory)
+        elif default:
+            print("P " + default + "/" + key)
+            project_path = project.get("path", "")
+            basename = os.path.basename(project_path.rstrip("/")) if project_path else ""
+            if basename and basename != key:
+                print("P " + default + "/" + basename)
+except Exception:
+    fail()
 PY
     elif command -v ruby >/dev/null 2>&1; then
-        ruby -ryaml -e 'd = YAML.safe_load(File.read(ARGV[0]), aliases: true); exit 1 unless d.is_a?(Hash); exit 1 if d.key?("worktreeDir") && !d["worktreeDir"].is_a?(String); p = d.fetch("projects", {}); exit 1 unless p.is_a?(Hash); p.each_value { |v| exit 1 unless v.is_a?(Hash); %w[path worktreeDir].each { |k| exit 1 if v.key?(k) && !v[k].is_a?(String) } }' "$config" >/dev/null 2>&1
+        ruby -ryaml -e '
+          def fail_parse; exit 1; end
+          def path_value(value)
+            fail_parse unless value.is_a?(String) && !value.include?("\\n") && !value.include?("\\r")
+            normalized = value.sub(%r{/+$}, "")
+            normalized.empty? && value.start_with?("/") ? "/" : normalized
+          end
+          begin
+            document = YAML.safe_load(File.read(ARGV[0]), aliases: true)
+            fail_parse unless document.is_a?(Hash)
+            default = document.key?("worktreeDir") ? path_value(document["worktreeDir"]) : ""
+            projects = document.fetch("projects", {})
+            fail_parse unless projects.is_a?(Hash)
+            puts "C #{default}" unless default.empty?
+            projects.each do |key, project|
+              fail_parse unless key.is_a?(String) && !key.include?("\\n") && !key.include?("\\r") && project.is_a?(Hash)
+              fail_parse if project.key?("path") && !project["path"].is_a?(String)
+              if project.key?("worktreeDir")
+                directory = path_value(project["worktreeDir"])
+                puts "P #{directory}" unless directory.empty?
+              elsif !default.empty?
+                puts "P #{default}/#{key}"
+                project_path = project.fetch("path", "")
+                basename = File.basename(project_path.sub(%r{/+$}, "")) unless project_path.empty?
+                puts "P #{default}/#{basename}" if basename && !basename.empty? && basename != key
+              end
+            end
+          rescue StandardError
+            exit 1
+          end
+        ' "$config"
     else
         return 1
     fi
-}
-
-# ao_worktree_dirs <yaml>: project worktreeDir -> P <dir>; root default -> C <dir>.
-# Projects without a project directory inherit <default>/<key> and optionally
-# <default>/<basename of path>, matching the prior cleanup projection.
-ao_worktree_dirs() {
-    local config="$1" projection
-    [[ -f "$config" && -r "$config" ]] || return 1
-    _ao_worktree_config_valid "$config" || return 1
-    projection="$(awk '
-        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); sub(/[[:space:]]+#.*$/, "", l)
-                          gsub(/["\047]/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-        /^[^[:space:]#]/ { inproj = ($0 ~ /^projects:/); key = "" }
-        /^worktreeDir:/ { def = val($0); next }
-        inproj && /^  [^[:space:]#][^:]*:[[:space:]]*$/ { key = $1; sub(/:$/, "", key); keys[++n] = key; next }
-        /^[[:space:]]+worktreeDir:/ { d = val($0); if (d != "") print "P " d; if (key != "") own[key] = 1; next }
-        key != "" && /^    path:/ { p = val($0); sub(/\/+$/, "", p); sub(/.*\//, "", p); base[key] = p }
-        END {
-            if (def != "") { sub(/\/+$/, "", def); print "C " def }
-            for (i = 1; i <= n; i++) if (!own[keys[i]] && def != "") {
-                print "P " def "/" keys[i]
-                if (base[keys[i]] != "") print "P " def "/" base[keys[i]]
-            }
-        }' "$config")" || return 1
-    printf '%s\n' "$projection"
 }
