@@ -12,6 +12,7 @@
 _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
+source "$_WRH_DIR/lib/worktree_recency.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -180,6 +181,10 @@ print(v)
     [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
     guard_reason="$(wrh_ao_skip_reason "$real")"
     [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
+    if worktree_is_recently_active "$real" 7; then
+        wrh_log "kept $p: recent-activity"
+        return 0
+    fi
     local status
     status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
         { wrh_log "kept $p: git status failed"; return 0; }

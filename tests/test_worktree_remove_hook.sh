@@ -52,13 +52,35 @@ export FAKE_LSOF_FIXTURE
 git init -q --bare -b main "$TMPROOT/origin.git"
 git clone -q "$TMPROOT/origin.git" "$TMPROOT/myrepo" 2>/dev/null
 REPO="$TMPROOT/myrepo"
-git -C "$REPO" commit -q --allow-empty -m base
+printf "base\n" >"$REPO/README.md"
+git -C "$REPO" add README.md
+git -C "$REPO" commit -q -m base
 git -C "$REPO" push -q origin HEAD:main
 WTROOT="$HOME/.worktrees/myrepo"
 
 # add_wt <name> <branch> [dir] — linked worktree on <branch> from origin/main.
 add_wt() {
     git -C "$REPO" worktree add -q -b "$2" "${3:-$WTROOT/$1}" origin/main 2>/dev/null
+    python3 - "${3:-$WTROOT/$1}" <<'AGEWT'
+import os, sys, time
+root = sys.argv[1]
+old = time.time() - 8 * 86400
+for base, dirs, files in os.walk(root):
+    for name in files:
+        path = os.path.join(base, name)
+        try: os.utime(path, (old, old))
+        except OSError: pass
+AGEWT
+}
+age_wt() { python3 - "$1" <<'AGEWT2'
+import os, sys, time
+old = time.time() - 8 * 86400
+for base, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        path = os.path.join(base, name)
+        try: os.utime(path, (old, old))
+        except OSError: pass
+AGEWT2
 }
 run_hook() { printf '%s' "$1" | bash "$SCRIPT" >/dev/null 2>&1; }
 json() { python3 -c 'import json,sys; print(json.dumps({"worktree_path": sys.argv[1]}))' "$1"; }
@@ -152,8 +174,10 @@ branch_exists worktree-h && ok "branch kept while checked out in h2" || bad "bra
 echo "== case 11: only change is a gitignored .env → left, branch kept, log names ignored =="
 add_wt i worktree-i
 echo .env >"$WTROOT/i/.gitignore"; git -C "$WTROOT/i" add .gitignore; git -C "$WTROOT/i" commit -q -m ignore
+age_wt "$WTROOT/i"
 git -C "$WTROOT/i" push -q origin HEAD:refs/heads/i 2>/dev/null
 echo 'SECRET_VALUE_XYZ=1' >"$WTROOT/i/.env"
+age_wt "$WTROOT/i"
 before="$(log_lines)"
 run_hook "$(json "$WTROOT/i")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -190,6 +214,7 @@ mkdir -p "$WTROOT/k/node_modules/pkg"
 echo "console.log(1)" >"$WTROOT/k/node_modules/pkg/index.js"
 mkdir -p "$WTROOT/k/.mypy_cache/3.13"
 echo "cache" >"$WTROOT/k/.mypy_cache/3.13/cache.json"
+age_wt "$WTROOT/k"
 before="$(log_lines)"
 run_hook "$(json "$WTROOT/k")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -205,10 +230,12 @@ add_wt l worktree-l
 printf 'data/\nscratch/\n' >"$WTROOT/l/.gitignore"
 git -C "$WTROOT/l" add .gitignore
 git -C "$WTROOT/l" commit -q -m ignore
+age_wt "$WTROOT/l"
 git -C "$WTROOT/l" push -q origin HEAD:refs/heads/l 2>/dev/null
 mkdir -p "$WTROOT/l/data" "$WTROOT/l/scratch"
 echo "sqlite format 3" >"$WTROOT/l/data/db.sqlite"
 echo "important notes" >"$WTROOT/l/scratch/notes.txt"
+age_wt "$WTROOT/l"
 before="$(log_lines)"
 run_hook "$(json "$WTROOT/l")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -224,6 +251,7 @@ add_wt m worktree-m
 printf 'data.pyc/\n' >"$WTROOT/m/.gitignore"
 git -C "$WTROOT/m" add .gitignore
 git -C "$WTROOT/m" commit -q -m ignore
+age_wt "$WTROOT/m"
 git -C "$WTROOT/m" push -q origin HEAD:refs/heads/m 2>/dev/null
 mkdir -p "$WTROOT/m/data.pyc"; echo y >"$WTROOT/m/data.pyc/keep.db"
 run_hook "$(json "$WTROOT/m")"; rc=$?
@@ -234,6 +262,7 @@ add_wt n worktree-n
 printf '.testmondata/\n' >"$WTROOT/n/.gitignore"
 git -C "$WTROOT/n" add .gitignore
 git -C "$WTROOT/n" commit -q -m ignore
+age_wt "$WTROOT/n"
 mkdir -p "$WTROOT/n/.testmondata"; echo db >"$WTROOT/n/.testmondata/notes.db"
 run_hook "$(json "$WTROOT/n")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -244,6 +273,7 @@ add_wt o worktree-o
 printf '*.egg-info\n' >"$WTROOT/o/.gitignore"
 git -C "$WTROOT/o" add .gitignore
 git -C "$WTROOT/o" commit -q -m ignore
+age_wt "$WTROOT/o"
 mkdir -p "$WTROOT/o/package.egg-info"; echo user >"$WTROOT/o/package.egg-info/notes.db"
 run_hook "$(json "$WTROOT/o")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -371,3 +401,23 @@ tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "relative-path record unknown rea
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
+
+
+printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+echo "== case 29: recently touched worktree is protected by 7-day floor =="
+add_wt recent worktree-recent
+touch "$WTROOT/recent/README.md"
+run_hook "$(json "$WTROOT/recent")"; rc=$?
+[[ -d "$WTROOT/recent" ]] && ok "recent worktree kept" || bad "recent worktree removed"
+tail -n 1 "$LOG" | grep -q "recent-activity" && ok "recent reason logged" || bad "recent reason missing"
+
+echo "== case 30: unmeasurable recency fails closed =="
+add_wt unknown worktree-unknown
+cat >"$MOCK_BIN/find" <<'FINDFAIL'
+#!/usr/bin/env bash
+exit 1
+FINDFAIL
+chmod +x "$MOCK_BIN/find"
+run_hook "$(json "$WTROOT/unknown")"; rc=$?
+[[ -d "$WTROOT/unknown" ]] && ok "unmeasurable worktree kept" || bad "unmeasurable worktree removed"
+rm -f "$MOCK_BIN/find"
