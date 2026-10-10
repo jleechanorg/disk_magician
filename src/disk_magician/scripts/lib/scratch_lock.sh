@@ -9,12 +9,12 @@ scratch_lock_acquire() {
 
   # A caller may continue only when the inherited descriptor proves ownership
   # of this state root's canonical lock file. Environment alone is not proof.
-  if [[ "$SCRATCH_LOCK_FD" =~ ^[0-9]+$ ]] && \
+  if [[ "$SCRATCH_LOCK_FD" =~ ^[0-9]+$ && "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "$BASHPID" ]] && \
       python3 "$helper" verify --fd "$SCRATCH_LOCK_FD" >/dev/null 2>&1; then
     return 0
   fi
 
-  unset DISK_MAGICIAN_SCRATCH_LOCK_FD
+  unset DISK_MAGICIAN_SCRATCH_LOCK_FD DISK_MAGICIAN_SCRATCH_LOCK_PID
   shift
   exec python3 "$helper" run --caller "$caller" --script "$script_path" --args -- "$@"
 }

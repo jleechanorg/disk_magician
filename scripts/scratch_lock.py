@@ -7,10 +7,12 @@ import argparse
 import fcntl
 import os
 from pathlib import Path
+import stat
 import sys
 
 
 ENV_FD = "DISK_MAGICIAN_SCRATCH_LOCK_FD"
+ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
 
 
 def lock_path() -> Path:
@@ -20,10 +22,38 @@ def lock_path() -> Path:
     return Path(state_dir).expanduser() / "scratch_cleanup.lock"
 
 
+def open_lock(path: Path, create: bool) -> int:
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parent = os.fstat(dir_fd)
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            raise PermissionError("unsafe scratch lock directory")
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        if create:
+            flags |= os.O_CREAT
+        fd = os.open(path.name, flags, 0o600, dir_fd=dir_fd)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid() or opened.st_mode & 0o077:
+                raise PermissionError("unsafe scratch lock file")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(dir_fd)
+
+
 def verify_fd(fd: int) -> bool:
     try:
-        opened = os.fstat(fd)
-        canonical = os.stat(lock_path())
+        canonical_fd = open_lock(lock_path(), create=False)
+        try:
+            opened = os.fstat(fd)
+            canonical = os.fstat(canonical_fd)
+        finally:
+            os.close(canonical_fd)
         if (opened.st_dev, opened.st_ino) != (canonical.st_dev, canonical.st_ino):
             return False
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -35,8 +65,7 @@ def verify_fd(fd: int) -> bool:
 def run(caller: str, script: str, args: list[str]) -> int:
     path = lock_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        fd = open_lock(path, create=True)
     except OSError as exc:
         print(f"[{caller}] failed to open scratch lock {path}: {exc}", file=sys.stderr)
         return 1
@@ -53,6 +82,7 @@ def run(caller: str, script: str, args: list[str]) -> int:
 
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
+    os.environ[ENV_PID] = str(os.getpid())
     os.execvpe(script, [script, *args], os.environ)
     return 127
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Focused integration tests for kernel flock serialization of scratch cleanup.
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -33,6 +34,11 @@ mkdir -p "$ROOT/bin"
 export REAL_FIND=$(command -v find)
 cat > "$ROOT/bin/find" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${TEST_INHERITED_CONTENDER:-}" ]]; then
+  unset TEST_INHERITED_CONTENDER
+  bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$TEST_CHILD_TMP" >"$TEST_CHILD_OUT" 2>&1
+  echo "$?" >"$TEST_CHILD_RC"
+fi
 if [[ -n "${TEST_PAUSE_FILE:-}" && -f "$TEST_PAUSE_FILE" ]]; then
   touch "$TEST_PAUSED_FILE"
   while [[ -f "$TEST_PAUSE_FILE" ]]; do sleep 0.025; done
@@ -45,6 +51,7 @@ export DISK_MAGICIAN_FIND_BIN="$ROOT/bin/find"
 export DISK_MAGICIAN_TEST_SANDBOX="$ROOT"
 export DISK_MAGICIAN_PR_SCRATCH_ROOTS="$ROOT"
 export DISK_MAGICIAN_TEST_CONTEXT=1
+export CLEANUP_PR_BIN
 
 echo "=== scratch cleanup kernel-lock integration tests ==="
 
@@ -87,6 +94,60 @@ for holder in tmp pr; do
   if [[ "$holder" == pr ]]; then
     grep -Fq "starting (roots: $TMP," "$CASE/holder.out" && record pass "pr preserves --tmp-dir across lock re-exec" || record fail "pr preserves --tmp-dir across lock re-exec"
   fi
+done
+
+if [[ $EUID -eq 0 ]]; then
+  OWNER="$ROOT/unsafe_owner"; mkdir -p "$OWNER/state" "$OWNER/tmp/candidate"
+  touch "$OWNER/state/scratch_cleanup.lock"
+  chown 1 "$OWNER/state/scratch_cleanup.lock"
+  set +e
+  DISK_MAGICIAN_STATE_DIR="$OWNER/state" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$OWNER/tmp" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$OWNER/tmp" bash "$CLEANUP_TMP_BIN" --clean >"$OWNER/out" 2>&1
+  rc=$?
+  set -e
+  [[ $rc -eq 1 && -d "$OWNER/tmp/candidate" ]] && record pass "wrong-owner lock stops before scan" || record fail "wrong-owner lock stops before scan (rc=$rc)"
+else
+  echo "  SKIP  wrong-owner lock fixture requires root"
+fi
+
+# A scanner descendant inherits the FD but must not reuse its parent's identity.
+CHILD="$ROOT/inherited"; mkdir -p "$CHILD/state" "$CHILD/tmp/candidate"
+touch "$ROOT/pause"
+DISK_MAGICIAN_STATE_DIR="$CHILD/state" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$CHILD/tmp" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$CHILD/tmp" TEST_PAUSE_FILE="$ROOT/pause" \
+  TEST_PAUSED_FILE="$CHILD/paused" TEST_INHERITED_CONTENDER=1 TEST_CHILD_TMP="$CHILD/tmp" \
+  TEST_CHILD_OUT="$CHILD/child.out" TEST_CHILD_RC="$CHILD/child.rc" \
+  bash "$CLEANUP_TMP_BIN" --clean >"$CHILD/holder.out" 2>&1 &
+HOLDER_PID=$!
+wait_for_file "$CHILD/child.rc" && wait_for_file "$CHILD/paused" || record fail "inherited contender reached paused scanner"
+[[ "$(cat "$CHILD/child.rc")" == 1 ]] && grep -q "scratch lock held" "$CHILD/child.out" && \
+  [[ -d "$CHILD/tmp/candidate" ]] && record pass "descendant cannot reuse inherited lock" || record fail "descendant cannot reuse inherited lock"
+set +e
+DISK_MAGICIAN_STATE_DIR="$CHILD/state" bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$CHILD/tmp" >"$CHILD/independent.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 1 ]] && grep -q "scratch lock held" "$CHILD/independent.out" && record pass "scanner child retains lock after descendant exits" || record fail "scanner child retains lock after descendant exits (rc=$rc)"
+rm -f "$ROOT/pause"
+wait "$HOLDER_PID" || true
+HOLDER_PID=""
+DISK_MAGICIAN_STATE_DIR="$CHILD/state" python3 "$REPO_ROOT/scripts/scratch_lock.py" run \
+  --caller probe --script /bin/true --args -- && record pass "real caller succeeds after scanner exits" || record fail "real caller succeeds after scanner exits"
+
+# Unsafe lock objects and directories fail before either cleaner can scan.
+for kind in symlink mode parent parent_symlink; do
+  CASE="$ROOT/unsafe_$kind"; mkdir -p "$CASE/state" "$CASE/tmp/candidate"
+  case "$kind" in
+    symlink) touch "$CASE/target"; ln -s "$CASE/target" "$CASE/state/scratch_cleanup.lock" ;;
+    mode) touch "$CASE/state/scratch_cleanup.lock"; chmod 0666 "$CASE/state/scratch_cleanup.lock" ;;
+    parent) chmod 0777 "$CASE/state" ;;
+    parent_symlink) mv "$CASE/state" "$CASE/real_state"; ln -s "$CASE/real_state" "$CASE/state" ;;
+  esac
+  set +e
+  DISK_MAGICIAN_STATE_DIR="$CASE/state" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$CASE/tmp" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$CASE/tmp" bash "$CLEANUP_TMP_BIN" --clean >"$CASE/out" 2>&1
+  rc=$?
+  set -e
+  [[ $rc -eq 1 && -d "$CASE/tmp/candidate" ]] && record pass "$kind lock state stops before scan" || record fail "$kind lock state stops before scan (rc=$rc)"
 done
 
 # Dry-run ignores a lock file (including a directory at that pathname).
