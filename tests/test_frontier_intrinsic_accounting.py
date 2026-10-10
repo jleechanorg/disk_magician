@@ -437,7 +437,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                     "reason": "inventory_permission_denied",
                 },
                 {"path": "/fixture/data/gone", "reason": "inventory_path_disappeared"},
-                {"path": "/fixture/data/gone2.db-wal", "reason": "lstat_failed", "errno": errno.ENOENT},
+                {"path": "/fixture/data/gone2.db-wal", "depth": 1, "reason": "lstat_failed", "errno": errno.ENOENT},
                 {"path": "/fixture/home", "reason": "cross_device_boundary"},
             ],
             deduped=[], warnings=[], nodes_processed=3,
@@ -505,6 +505,50 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertTrue(report["coverage_envelope"]["complete"])
         self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
         self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 1)
+
+    def test_descendant_lstat_enoent_is_opaque_even_if_path_reappears(self):
+        scanner = self.scanner()
+        original = self.fake_lstat
+        def reappeared(path):
+            if path.endswith("gone2.db-wal"):
+                return SimpleNamespace(st_dev=1)
+            return original(path)
+        with mock.patch.object(frontier.os, "lstat", side_effect=reappeared), \
+             mock.patch.object(frontier.os.path, "realpath", side_effect=lambda path: path), \
+             mock.patch.object(frontier.os, "scandir", side_effect=self.fake_scandir):
+            report = frontier.build_report(
+                scanner,
+                {"total_kb": 20 * GIB_KB, "used_kb": 10 * GIB_KB, "free_kb": 10 * GIB_KB},
+                [],
+                {"purgeable_kb": 0, "purgeable_estimate_method": "fixture",
+                 "local_snapshots": [], "local_snapshots_count": 0},
+                1.0,
+                self.args(),
+            )
+        gate = next(item for item in report["opaque_intrinsic_gates"] if item["path"].endswith("gone2.db-wal"))
+        self.assertEqual(report["mode"], "complete")
+        self.assertEqual(gate["verification"], "scan_lstat_enoent")
+        self.assertFalse(gate["reclaimable"])
+
+    def test_root_lstat_enoent_remains_operational_partial(self):
+        scanner = self.scanner()
+        item = {"path": "/fixture/data/root-gone", "depth": 0,
+                "reason": "lstat_failed", "errno": errno.ENOENT}
+        scanner.frontier_unfinished.append(item)
+        report = self.report(scanner)
+        self.assertEqual(report["mode"], "partial")
+        self.assertIn(item, report["frontier_unfinished"])
+
+    def test_non_enoent_lstat_failures_remain_operational_partial(self):
+        for error_number in (errno.EACCES, errno.EIO, errno.EPERM):
+            with self.subTest(errno=error_number):
+                scanner = self.scanner()
+                item = {"path": "/fixture/data/inaccessible", "depth": 1,
+                        "reason": "lstat_failed", "errno": error_number}
+                scanner.frontier_unfinished.append(item)
+                report = self.report(scanner)
+                self.assertEqual(report["mode"], "partial")
+                self.assertIn(item, report["frontier_unfinished"])
 
     def test_report_serializes_scanner_run_binding(self):
         report = self.report(self.scanner())

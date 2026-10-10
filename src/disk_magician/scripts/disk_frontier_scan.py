@@ -1827,9 +1827,19 @@ def build_report(
             }
             if intrinsic["root_device"] is None:
                 del intrinsic["root_device"]
-        elif reason in ("path_disappeared", "inventory_path_disappeared") or (
-            reason == "lstat_failed" and item.get("errno") == errno.ENOENT
+        elif (
+            reason == "lstat_failed"
+            and item.get("errno") == errno.ENOENT
+            and item.get("depth", 0) > 0
         ):
+            intrinsic = {
+                "path": path,
+                "reason": "vanished_during_scan",
+                "errno": errno.ENOENT,
+                "verification": "scan_lstat_enoent",
+                "reclaimable": False,
+            }
+        elif reason in ("path_disappeared", "inventory_path_disappeared"):
             try:
                 os.lstat(path)
             except OSError as exc:
