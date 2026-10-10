@@ -634,7 +634,7 @@ class DiskStatusEvaluator:
                     paths=paths,
                 )
             sc_status = data.get("status")
-            if sc_status is not None and (not isinstance(sc_status, str) or sc_status not in ("complete", "partial", "stale")):
+            if sc_status is not None and (not isinstance(sc_status, str) or sc_status not in ("published", "complete", "partial", "stale")):
                 return make_result(
                     status=STATUS_INVALID,
                     reason=f"sidecar_invalid_status: {sc_status}",
