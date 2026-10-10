@@ -54,7 +54,7 @@ DEFAULT_OUTPUT_STATE_FILE = os.path.expanduser("~/.disk_magician_state/frontier_
 DEFAULT_TIMEOUT_TIERS = [10, 30, 90, 180]
 DUA_TIMEOUT_CAP_SECONDS = 1
 DEFAULT_WORKERS = 8
-DEFAULT_MAX_DEPTH = 14
+DEFAULT_MAX_DEPTH = 24
 DEFAULT_MAX_NODES = 100_000_000
 DEFAULT_WALL_CLOCK_CAP = 900
 SHALLOW_ENUMERATION_MAX_DEPTH = 2
@@ -407,6 +407,18 @@ def verify_system_boundary_attestation(
     ):
         return False
     return all(before[key] == after[key] for key in identity_keys)
+
+
+def is_symlink_only_dir(path):
+    """True for a directory that is empty or holds only symlinks (0 bytes of data).
+
+    Any error keeps the root unfinished (fail closed).
+    """
+    try:
+        with os.scandir(path) as entries:
+            return all(entry.is_symlink() for entry in entries)
+    except OSError:
+        return False
 
 
 def capture_system_boundary_attestation(
@@ -1815,7 +1827,9 @@ def build_report(
             }
             if intrinsic["root_device"] is None:
                 del intrinsic["root_device"]
-        elif reason in ("path_disappeared", "inventory_path_disappeared"):
+        elif reason in ("path_disappeared", "inventory_path_disappeared") or (
+            reason == "lstat_failed" and item.get("errno") == errno.ENOENT
+        ):
             try:
                 os.lstat(path)
             except OSError as exc:
@@ -1913,6 +1927,8 @@ def build_report(
             status, size_kb = "deduped", None
         elif intrinsic_reasons and not reasons:
             status, size_kb = "measured_with_opaque_gates", None
+        elif not reasons and not intrinsic_reasons and is_symlink_only_dir(path):
+            status, size_kb = "measured", 0
         else:
             status, size_kb = "unfinished", None
             if not reasons:
