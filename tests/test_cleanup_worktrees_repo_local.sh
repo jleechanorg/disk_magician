@@ -129,6 +129,12 @@ setup_fixture_repo() {
   git -C "$main_repo" worktree add -B wt-ao-locked "$ao_locked" "$BASE_SHA" >/dev/null
   git -C "$main_repo" worktree lock "$ao_locked" >/dev/null
   age_worktree_days_ago "$ao_locked" 30
+  # Current Go AO runtime defaults to ~/.ao/data/worktrees when AO_DATA_DIR
+  # is unset; protect this registered clean worktree even with no AO YAML.
+  local ao_default="$TMP_ROOT/home/.ao/data/worktrees/main-repo/wt-ao-default"
+  mkdir -p "$(dirname "$ao_default")"
+  git -C "$main_repo" worktree add -B wt-ao-default "$ao_default" "$BASE_SHA" >/dev/null
+  age_worktree_days_ago "$ao_default" 30
 
   # Antigravity orphan worktree (unregistered in git, but modified 2 days ago)
   local ag_orphan_dir="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/orphan-recent"
@@ -162,10 +168,16 @@ assert_contains "locked reason" ".claude/worktrees/wt-locked | locked" "$OUT_CON
 assert_contains "young reason" ".claude/worktrees/wt-young | young" "$OUT_CONTENT"
 assert_contains "ao young worktree preserved by 14d floor" ".ao/data/worktrees/main-repo/wt-ao-young | young" "$OUT_CONTENT"
 assert_contains "stale AO locked worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-locked | locked" "$OUT_CONTENT"
+assert_contains "stale clean AO default-root worktree preserved" ".ao/data/worktrees/main-repo/wt-ao-default | ao-owned" "$OUT_CONTENT"
+if grep -F ".ao/data/worktrees/main-repo/wt-ao-default |" <<<"$OUT_CONTENT" | grep -qF ELIGIBLE; then
+  record_fail "stale clean AO default-root worktree not eligible" "candidate was eligible"
+else
+  record_pass "stale clean AO default-root worktree not eligible"
+fi
 assert_contains "antigravity recent orphan preserved by 14d floor" "antigravity  PRESERVE" "$OUT_CONTENT"
 assert_contains "spaced path eligible" ".claude/worktrees/wt spaced path" "$OUT_CONTENT"
 assert_contains "summary eligible count" "Repo-local:  2 eligible" "$OUT_CONTENT"
-assert_contains "summary preserved count" "Repo-local:  2 eligible, 7 preserved." "$OUT_CONTENT"
+assert_contains "summary preserved count" "Repo-local:  2 eligible, 8 preserved." "$OUT_CONTENT"
 
 echo "Test: --clean without WORKTREE_APPROVED refuses before deletion"
 OUT_REFUSE="$TMP_ROOT/refuse.out"
