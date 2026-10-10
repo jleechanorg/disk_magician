@@ -635,6 +635,37 @@ mkdir -p "$AG_IGNORED/data.pyc"
 printf 'keep this\n' > "$AG_IGNORED/data.pyc/notes.txt"
 age_worktree_days_ago "$AG_IGNORED" 20
 
+# Antigravity candidates must remain protected when hidden state exists.
+AG_HIDDEN_ENV="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-hidden-env"
+mkdir -p "$AG_HIDDEN_ENV"
+git -C "$AG_HIDDEN_ENV" init --quiet -b main
+git -C "$AG_HIDDEN_ENV" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_HIDDEN_ENV" config user.name "Fixture User"
+printf 'node_modules/\n' > "$AG_HIDDEN_ENV/.gitignore"
+printf 'tracked\n' > "$AG_HIDDEN_ENV/file.txt"
+git -C "$AG_HIDDEN_ENV" add .gitignore file.txt
+git -C "$AG_HIDDEN_ENV" commit -m "ignore node modules" --quiet
+mkdir -p "$AG_HIDDEN_ENV/node_modules"
+printf 'SECRET=1\n' > "$AG_HIDDEN_ENV/node_modules/.env"
+age_worktree_days_ago "$AG_HIDDEN_ENV" 20
+
+AG_HIDDEN_INDEX="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-hidden-index"
+mkdir -p "$AG_HIDDEN_INDEX"
+git -C "$AG_HIDDEN_INDEX" init --quiet -b main
+git -C "$AG_HIDDEN_INDEX" config user.email "fixture@users.noreply.github.com"
+git -C "$AG_HIDDEN_INDEX" config user.name "Fixture User"
+printf 'tracked\n' > "$AG_HIDDEN_INDEX/tracked.txt"
+git -C "$AG_HIDDEN_INDEX" add tracked.txt
+git -C "$AG_HIDDEN_INDEX" commit -m "tracked file" --quiet
+git -C "$AG_HIDDEN_INDEX" update-index --assume-unchanged tracked.txt
+printf 'hidden edit\n' > "$AG_HIDDEN_INDEX/tracked.txt"
+age_worktree_days_ago "$AG_HIDDEN_INDEX" 20
+
+AG_NON_GIT="$TMP_ROOT/home/.gemini/antigravity/worktrees/project/ag-non-git"
+mkdir -p "$AG_NON_GIT"
+printf 'keep user data\n' > "$AG_NON_GIT/notes.txt"
+age_worktree_days_ago "$AG_NON_GIT" 20
+
 # 7. Repo-local candidate with unstaged type-change T (tracked file replaced by symlink)
 git -C "$PROBE_REPO" worktree add -b wt-type-unstaged "$PROBE_REPO/.claude/worktrees/wt-type-unstaged" --quiet
 rm "$PROBE_REPO/.claude/worktrees/wt-type-unstaged/file.txt"
@@ -716,6 +747,12 @@ assert_contains "antigravity clean ancestor has ELIGIBLE" "antigravity  ELIGIBLE
 assert_contains "registered Antigravity worktree preserved active" "ag-registered | active" "$OUT_PROBE_CONTENT"
 assert_contains "ignored file-like directory preserved" "ag-ignored-data | ignored-data" "$OUT_PROBE_CONTENT"
 assert_not_contains "ignored file-like directory not eligible" "ELIGIBLE" "$(grep -F "ag-ignored-data" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "ignored .env under allowed node_modules preserved" "ag-hidden-env | hidden-state" "$OUT_PROBE_CONTENT"
+assert_not_contains "hidden ignored .env not eligible" "ELIGIBLE" "$(grep -F "ag-hidden-env" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "assume-unchanged tracked edit preserved" "ag-hidden-index | hidden-state" "$OUT_PROBE_CONTENT"
+assert_not_contains "assume-unchanged worktree not eligible" "ELIGIBLE" "$(grep -F "ag-hidden-index" <<<"$OUT_PROBE_CONTENT" || true)"
+assert_contains "non-Git Antigravity orphan preserved" "ag-non-git | not-git" "$OUT_PROBE_CONTENT"
+assert_not_contains "non-Git Antigravity orphan not eligible" "ELIGIBLE" "$(grep -F "ag-non-git" <<<"$OUT_PROBE_CONTENT" || true)"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
