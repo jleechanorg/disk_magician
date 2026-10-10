@@ -30,6 +30,15 @@ cat >"$MOCK_BIN/lsof" <<'MOCK'
 [[ "${FAKE_LSOF_FAIL:-0}" == 1 ]] && exit 1
 if [[ "${FAKE_LSOF_MODE:-}" == caller ]]; then
   printf 'p%s\nn%s\n' "$WRH_LIFECYCLE_CALLER_PID" "$FAKE_LSOF_CWD"
+elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
+  command_sub=$PPID
+  helper=$(ps -o ppid= -p "$command_sub" | tr -d '[:space:]')
+  hook=$(ps -o ppid= -p "$helper" | tr -d '[:space:]')
+  shell=$(ps -o ppid= -p "$hook" | tr -d '[:space:]')
+  cli=$(ps -o ppid= -p "$shell" | tr -d '[:space:]')
+  printf 'p%s\nn/\n' "$command_sub"
+  printf 'p%s\nn/\n' "$helper"
+  for pid in "$hook" "$shell"; do printf 'p%s\nn%s\n' "$pid" "$FAKE_LSOF_CWD"; done
 else
   cat "${FAKE_LSOF_FIXTURE:?}"
 fi
@@ -304,5 +313,61 @@ assert_eq "$rc" "0" "exit code"
 [[ ! -e "$WTROOT/r" ]] && ok "caller-cwd worktree removed" || bad "caller-cwd worktree kept"
 branch_exists worktree-r && bad "caller-cwd branch kept" || ok "caller-cwd branch deleted"
 unset FAKE_LSOF_MODE FAKE_LSOF_CWD
+echo "== case 24: AO tilde worktreeDir is expanded and preserved =="
+mkdir -p "$HOME/.worktrees/ao-tilde"
+cat >"$HOME/agent-orchestrator.yaml" <<YAML
+projects:
+  p:
+    path: /tmp/p
+    worktreeDir: ~/.worktrees/ao-tilde
+YAML
+export DISK_MAGICIAN_AO_CONFIG="$HOME/agent-orchestrator.yaml"
+add_wt ao-tilde worktree-ao-tilde "$HOME/.worktrees/ao-tilde/session"
+run_hook "$(json "$HOME/.worktrees/ao-tilde/session")"; rc=$?
+[[ -d "$HOME/.worktrees/ao-tilde/session" ]] && ok "tilde AO worktree kept" || bad "tilde AO worktree removed"
+tail -n 1 "$LOG" | grep -q "ao-owned" && ok "tilde AO reason logged" || bad "tilde AO reason missing"
+unset DISK_MAGICIAN_AO_CONFIG
+
+echo "== case 25: trailing-slash repo path basename fallback is preserved =="
+mkdir -p "$HOME/.worktrees/repo-base"
+cat >"$HOME/agent-orchestrator.yaml" <<YAML
+worktreeDir: ~/.worktrees
+projects:
+  alias:
+    path: /tmp/repo-base/
+YAML
+export DISK_MAGICIAN_AO_CONFIG="$HOME/agent-orchestrator.yaml"
+add_wt ao-base worktree-ao-base "$HOME/.worktrees/repo-base/session"
+run_hook "$(json "$HOME/.worktrees/repo-base/session")"; rc=$?
+[[ -d "$HOME/.worktrees/repo-base/session" ]] && ok "basename fallback AO worktree kept" || bad "basename fallback AO worktree removed"
+tail -n 1 "$LOG" | grep -q "ao-owned" && ok "basename fallback AO reason logged" || bad "basename fallback AO reason missing"
+unset DISK_MAGICIAN_AO_CONFIG
+
+echo "== case 26: real Python -> shell -> hook caller chain is exempted =="
+add_wt t worktree-t
+export FAKE_LSOF_MODE=dispatcher FAKE_LSOF_CWD="$WTROOT/t/subdir"
+python3 - "$REPO_ROOT/src/disk_magician/cli.py" "$WTROOT/t" <<'DISPATCHERPY'
+import json, os, subprocess, sys
+cli, target = sys.argv[1:]
+result = subprocess.run([sys.executable, cli, "worktree-remove-hook"], input=json.dumps({"worktree_path": target}), text=True, cwd=target, env=os.environ.copy(), capture_output=True)
+sys.exit(result.returncode)
+DISPATCHERPY
+[[ ! -e "$WTROOT/t" ]] && ok "dispatcher caller chain worktree removed" || bad "dispatcher caller chain worktree kept"
+unset FAKE_LSOF_MODE FAKE_LSOF_CWD
+
+echo "== case 27: malformed lsof PID without path stays unknown =="
+add_wt v worktree-v
+printf 'p999999\nn/\np888888\n' >"$FAKE_LSOF_FIXTURE"
+run_hook "$(json "$WTROOT/v")"; rc=$?
+[[ -d "$WTROOT/v" ]] && ok "missing-path record worktree kept" || bad "missing-path record worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "missing-path record unknown reason logged" || bad "missing-path record unknown reason missing"
+
+echo "== case 28: nonabsolute lsof cwd stays unknown =="
+add_wt x worktree-x
+printf 'p999999\nnrelative\np888888\nn/\n' >"$FAKE_LSOF_FIXTURE"
+run_hook "$(json "$WTROOT/x")"; rc=$?
+[[ -d "$WTROOT/x" ]] && ok "relative-path record worktree kept" || bad "relative-path record worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "relative-path record unknown reason logged" || bad "relative-path record unknown reason missing"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
