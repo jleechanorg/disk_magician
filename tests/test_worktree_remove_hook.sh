@@ -155,6 +155,32 @@ assert_eq "$rc" "0" "exit code"
 [[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
 tail -n 1 "$LOG" | grep -q "malformed stdin" && ok "log says malformed stdin" || bad "log missing malformed stdin"
 
+echo "== case 14: only rebuildable ignored files (node_modules) → removed =="
+add_wt k worktree-k
+printf 'node_modules/\ndata/\n' >"$WTROOT/k/.gitignore"; git -C "$WTROOT/k" add .gitignore; git -C "$WTROOT/k" commit -q -m ignore
+git -C "$WTROOT/k" push -q origin HEAD:refs/heads/k 2>/dev/null
+mkdir -p "$WTROOT/k/node_modules/pkg"; echo x >"$WTROOT/k/node_modules/pkg/index.js"
+run_hook "$(json "$WTROOT/k")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/k" ]] && ok "rebuildable-only worktree removed" || bad "rebuildable-only worktree kept"
+
+echo "== case 15: node_modules plus ignored data/ → kept =="
+add_wt l worktree-l
+printf 'node_modules/\ndata/\n' >"$WTROOT/l/.gitignore"; git -C "$WTROOT/l" add .gitignore; git -C "$WTROOT/l" commit -q -m ignore
+git -C "$WTROOT/l" push -q origin HEAD:refs/heads/l 2>/dev/null
+mkdir -p "$WTROOT/l/node_modules/pkg" "$WTROOT/l/data"; echo x >"$WTROOT/l/node_modules/pkg/index.js"; echo y >"$WTROOT/l/data/keep.db"
+run_hook "$(json "$WTROOT/l")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/l/data/keep.db" ]] && ok "worktree with ignored data kept" || bad "worktree with ignored data removed"
+
+echo "== case 16: rebuildable ignored plus an untracked file → kept (dirty) =="
+add_wt m worktree-m
+printf 'node_modules/\n' >"$WTROOT/m/.gitignore"; git -C "$WTROOT/m" add .gitignore; git -C "$WTROOT/m" commit -q -m ignore
+git -C "$WTROOT/m" push -q origin HEAD:refs/heads/m 2>/dev/null
+mkdir -p "$WTROOT/m/node_modules"; echo x >"$WTROOT/m/node_modules/a"; echo u >"$WTROOT/m/untracked.txt"
+run_hook "$(json "$WTROOT/m")"; rc=$?
+[[ -f "$WTROOT/m/untracked.txt" ]] && ok "dirty worktree kept" || bad "dirty worktree removed"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

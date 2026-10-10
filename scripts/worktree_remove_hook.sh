@@ -11,6 +11,8 @@
 _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
+# shellcheck source=scripts/lib/worktree_ignored.sh
+source "$_WRH_DIR/lib/worktree_ignored.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -45,10 +47,14 @@ print(v)
     local status
     status="$(git -C "$real" status --porcelain --untracked-files=all --ignored 2>/dev/null)" ||
         { wrh_log "kept $p: git status failed"; return 0; }
-    local ignored
-    ignored="$(printf '%s\n' "$status" | grep -c '^!! ')"
-    [[ "$ignored" -eq 0 ]] || { wrh_log "kept $p: $ignored ignored file(s) present"; return 0; }
-    [[ -z "$status" ]] || { wrh_log "kept $p: dirty"; return 0; }
+    # Tracked/untracked changes block removal. Ignored files block it only when
+    # they are not known-rebuildable (caches, venvs, node_modules): the rest could
+    # be the only copy of local data.
+    [[ -z "$(printf '%s\n' "$status" | grep -v '^!! ')" ]] || { wrh_log "kept $p: dirty"; return 0; }
+    if has_ignored_user_data "$real"; then
+        wrh_log "kept $p: ignored non-rebuildable file(s) present"
+        return 0
+    fi
     [[ -n "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] ||
         { wrh_log "kept $p: HEAD not contained in any remote-tracking ref"; return 0; }
 
