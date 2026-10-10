@@ -4,9 +4,10 @@
 #
 # stdin: {"worktree_path": ...}. Removes the worktree (never --force) only if
 # it is a registered linked worktree under $STANDARD_WORKTREE_ROOT, clean
-# (tracked, untracked, and gitignored), and its HEAD is contained in some refs/remotes/*.
-# Then deletes its worktree-* branch with `git branch -d` unless checked out
-# elsewhere. Anything else: leave in place, log, exit 0 (fail closed).
+# (tracked, untracked, no hidden state or non-rebuildable ignored data), and its
+# HEAD is contained in some refs/remotes/*. Then deletes its worktree-* branch
+# with `git branch -d` unless checked out elsewhere. Anything else: leave in place,
+# log, exit 0 (fail closed).
 
 _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
@@ -19,6 +20,25 @@ wrh_log() {
     mkdir -p "$dir" 2>/dev/null &&
         printf '%s worktree-remove-hook: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$dir/worktree_guard.log"
     return 0
+}
+
+# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
+# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
+# probe fails/times out (fail closed).
+has_hidden_state() {
+    local out flags t=""
+    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
+    grep -q '^[a-zS]' <<<"$flags" && return 0
+    # shellcheck disable=SC2086
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
+        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
+        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
+        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
+        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
+        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
+    [[ -n "$out" ]]
 }
 
 wrh_main() {
@@ -45,14 +65,15 @@ print(v)
         return 0
     fi
     local status
-    status="$(git -C "$real" status --porcelain --untracked-files=all --ignored 2>/dev/null)" ||
+    status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
         { wrh_log "kept $p: git status failed"; return 0; }
-    # Tracked/untracked changes block removal. Ignored files block it only when
-    # they are not known-rebuildable (caches, venvs, node_modules): the rest could
-    # be the only copy of local data.
-    [[ -z "$(printf '%s\n' "$status" | grep -v '^!! ')" ]] || { wrh_log "kept $p: dirty"; return 0; }
+    [[ -z "$status" ]] || { wrh_log "kept $p: dirty"; return 0; }
+    if has_hidden_state "$real"; then
+        wrh_log "kept $p: hidden state or ignored secret-like file(s) present"
+        return 0
+    fi
     if has_ignored_user_data "$real"; then
-        wrh_log "kept $p: ignored non-rebuildable file(s) present"
+        wrh_log "kept $p: non-rebuildable ignored user data present"
         return 0
     fi
     [[ -n "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] ||

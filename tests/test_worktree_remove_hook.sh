@@ -155,49 +155,88 @@ assert_eq "$rc" "0" "exit code"
 [[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
 tail -n 1 "$LOG" | grep -q "malformed stdin" && ok "log says malformed stdin" || bad "log missing malformed stdin"
 
-echo "== case 14: only rebuildable ignored files (node_modules) → removed =="
+echo "== case 16: rebuildable ignored files (node_modules, .mypy_cache) → removed, branch deleted =="
+printf 'node_modules/\n.mypy_cache/\n' >>"$REPO/.gitignore"
+git -C "$REPO" add .gitignore
+git -C "$REPO" commit -q -m "ignore rebuildable dirs"
+git -C "$REPO" push -q origin HEAD:main
 add_wt k worktree-k
-printf 'node_modules/\ndata/\n' >"$WTROOT/k/.gitignore"; git -C "$WTROOT/k" add .gitignore; git -C "$WTROOT/k" commit -q -m ignore
-git -C "$WTROOT/k" push -q origin HEAD:refs/heads/k 2>/dev/null
-mkdir -p "$WTROOT/k/node_modules/pkg"; echo x >"$WTROOT/k/node_modules/pkg/index.js"
+mkdir -p "$WTROOT/k/node_modules/pkg"
+echo "console.log(1)" >"$WTROOT/k/node_modules/pkg/index.js"
+mkdir -p "$WTROOT/k/.mypy_cache/3.13"
+echo "cache" >"$WTROOT/k/.mypy_cache/3.13/cache.json"
+before="$(log_lines)"
 run_hook "$(json "$WTROOT/k")"; rc=$?
 assert_eq "$rc" "0" "exit code"
-[[ ! -e "$WTROOT/k" ]] && ok "rebuildable-only worktree removed" || bad "rebuildable-only worktree kept"
+[[ ! -e "$WTROOT/k" ]] && ok "rebuildable-ignored worktree removed" || bad "rebuildable-ignored worktree kept"
+git -C "$REPO" worktree list --porcelain | grep -q "$WTROOT/k" && bad "still registered" || ok "unregistered"
+branch_exists worktree-k && bad "branch worktree-k kept" || ok "branch worktree-k deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
+grep -q "removed $WTROOT/k" "$LOG" && ok "log says removed" || bad "log does not mention removed"
+grep -q "deleted branch worktree-k" "$LOG" && ok "log says branch deleted" || bad "log does not mention branch deleted"
 
-echo "== case 15: node_modules plus ignored data/ → kept =="
+echo "== case 17: non-rebuildable ignored data (data/db.sqlite, scratch/notes.txt) → preserved =="
 add_wt l worktree-l
-printf 'node_modules/\ndata/\n' >"$WTROOT/l/.gitignore"; git -C "$WTROOT/l" add .gitignore; git -C "$WTROOT/l" commit -q -m ignore
+printf 'data/\nscratch/\n' >"$WTROOT/l/.gitignore"
+git -C "$WTROOT/l" add .gitignore
+git -C "$WTROOT/l" commit -q -m ignore
 git -C "$WTROOT/l" push -q origin HEAD:refs/heads/l 2>/dev/null
-mkdir -p "$WTROOT/l/node_modules/pkg" "$WTROOT/l/data"; echo x >"$WTROOT/l/node_modules/pkg/index.js"; echo y >"$WTROOT/l/data/keep.db"
+mkdir -p "$WTROOT/l/data" "$WTROOT/l/scratch"
+echo "sqlite format 3" >"$WTROOT/l/data/db.sqlite"
+echo "important notes" >"$WTROOT/l/scratch/notes.txt"
+before="$(log_lines)"
 run_hook "$(json "$WTROOT/l")"; rc=$?
 assert_eq "$rc" "0" "exit code"
-[[ -f "$WTROOT/l/data/keep.db" ]] && ok "worktree with ignored data kept" || bad "worktree with ignored data removed"
+[[ -f "$WTROOT/l/data/db.sqlite" ]] && ok "non-rebuildable data preserved" || bad "non-rebuildable data deleted"
+[[ -f "$WTROOT/l/scratch/notes.txt" ]] && ok "non-rebuildable scratch preserved" || bad "non-rebuildable scratch deleted"
+branch_exists worktree-l && ok "branch worktree-l kept" || bad "branch worktree-l deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "log line appended" || bad "no log line"
+tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored data" || bad "log does not mention ignored data"
 
-echo "== case 16: rebuildable ignored plus an untracked file → kept (dirty) =="
-add_wt m worktree-m
-printf 'node_modules/\n' >"$WTROOT/m/.gitignore"; git -C "$WTROOT/m" add .gitignore; git -C "$WTROOT/m" commit -q -m ignore
-git -C "$WTROOT/m" push -q origin HEAD:refs/heads/m 2>/dev/null
-mkdir -p "$WTROOT/m/node_modules"; echo x >"$WTROOT/m/node_modules/a"; echo u >"$WTROOT/m/untracked.txt"
-run_hook "$(json "$WTROOT/m")"; rc=$?
-[[ -f "$WTROOT/m/untracked.txt" ]] && ok "dirty worktree kept" || bad "dirty worktree removed"
-
-echo "== case 17: ignored DIRECTORY named like a rebuildable file pattern → kept =="
-add_wt n worktree-n
-printf 'data.pyc/\n' >"$WTROOT/n/.gitignore"; git -C "$WTROOT/n" add .gitignore; git -C "$WTROOT/n" commit -q -m ignore
-git -C "$WTROOT/n" push -q origin HEAD:refs/heads/n 2>/dev/null
-mkdir -p "$WTROOT/n/data.pyc"; echo y >"$WTROOT/n/data.pyc/keep.db"
-run_hook "$(json "$WTROOT/n")"; rc=$?
+echo "== case 18: only rebuildable ignored files (node_modules) → removed =="
+add_wt p worktree-p
+printf 'node_modules/\ndata/\n' >"$WTROOT/p/.gitignore"; git -C "$WTROOT/p" add .gitignore; git -C "$WTROOT/p" commit -q -m ignore
+git -C "$WTROOT/p" push -q origin HEAD:refs/heads/p 2>/dev/null
+mkdir -p "$WTROOT/p/node_modules/pkg"; echo x >"$WTROOT/p/node_modules/pkg/index.js"
+run_hook "$(json "$WTROOT/p")"; rc=$?
 assert_eq "$rc" "0" "exit code"
-[[ -f "$WTROOT/n/data.pyc/keep.db" ]] && ok "dir named *.pyc kept" || bad "dir named *.pyc removed"
+[[ ! -e "$WTROOT/p" ]] && ok "rebuildable-only worktree removed" || bad "rebuildable-only worktree kept"
 
-echo "== case 18: ignored *.pyc FILE next to node_modules → removed =="
-add_wt o worktree-o
-printf 'node_modules/\n*.pyc\n' >"$WTROOT/o/.gitignore"; git -C "$WTROOT/o" add .gitignore; git -C "$WTROOT/o" commit -q -m ignore
-git -C "$WTROOT/o" push -q origin HEAD:refs/heads/o 2>/dev/null
-mkdir -p "$WTROOT/o/node_modules"; echo z >"$WTROOT/o/mod.pyc"
-run_hook "$(json "$WTROOT/o")"; rc=$?
+echo "== case 19: node_modules plus ignored data/ → kept =="
+add_wt q worktree-q
+printf 'node_modules/\ndata/\n' >"$WTROOT/q/.gitignore"; git -C "$WTROOT/q" add .gitignore; git -C "$WTROOT/q" commit -q -m ignore
+git -C "$WTROOT/q" push -q origin HEAD:refs/heads/q 2>/dev/null
+mkdir -p "$WTROOT/q/node_modules/pkg" "$WTROOT/q/data"; echo x >"$WTROOT/q/node_modules/pkg/index.js"; echo y >"$WTROOT/q/data/keep.db"
+run_hook "$(json "$WTROOT/q")"; rc=$?
 assert_eq "$rc" "0" "exit code"
-[[ ! -e "$WTROOT/o" ]] && ok "*.pyc file worktree removed" || bad "*.pyc file worktree kept"
+[[ -f "$WTROOT/q/data/keep.db" ]] && ok "worktree with ignored data kept" || bad "worktree with ignored data removed"
+
+echo "== case 20: rebuildable ignored plus an untracked file → kept (dirty) =="
+add_wt r worktree-r
+printf 'node_modules/\n' >"$WTROOT/r/.gitignore"; git -C "$WTROOT/r" add .gitignore; git -C "$WTROOT/r" commit -q -m ignore
+git -C "$WTROOT/r" push -q origin HEAD:refs/heads/r 2>/dev/null
+mkdir -p "$WTROOT/r/node_modules"; echo x >"$WTROOT/r/node_modules/a"; echo u >"$WTROOT/r/untracked.txt"
+run_hook "$(json "$WTROOT/r")"; rc=$?
+[[ -f "$WTROOT/r/untracked.txt" ]] && ok "dirty worktree kept" || bad "dirty worktree removed"
+
+echo "== case 21: ignored DIRECTORY named like a rebuildable file pattern → kept =="
+add_wt s worktree-s
+printf 'data.pyc/\n' >"$WTROOT/s/.gitignore"; git -C "$WTROOT/s" add .gitignore; git -C "$WTROOT/s" commit -q -m ignore
+git -C "$WTROOT/s" push -q origin HEAD:refs/heads/s 2>/dev/null
+mkdir -p "$WTROOT/s/data.pyc"; echo y >"$WTROOT/s/data.pyc/keep.db"
+run_hook "$(json "$WTROOT/s")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/s/data.pyc/keep.db" ]] && ok "dir named *.pyc kept" || bad "dir named *.pyc removed"
+
+echo "== case 22: ignored *.pyc FILE next to node_modules → removed =="
+add_wt t worktree-t
+printf 'node_modules/\n*.pyc\n' >"$WTROOT/t/.gitignore"; git -C "$WTROOT/t" add .gitignore; git -C "$WTROOT/t" commit -q -m ignore
+git -C "$WTROOT/t" push -q origin HEAD:refs/heads/t 2>/dev/null
+mkdir -p "$WTROOT/t/node_modules"; echo z >"$WTROOT/t/mod.pyc"
+run_hook "$(json "$WTROOT/t")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/t" ]] && ok "*.pyc file worktree removed" || bad "*.pyc file worktree kept"
+
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
