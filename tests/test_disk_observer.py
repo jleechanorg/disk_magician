@@ -163,6 +163,19 @@ class DiskObserverTest(unittest.TestCase):
         self.assertEqual(sample["swap"]["used_bytes"], 512 * 1024 * 1024)
         self.assertTrue(any(call[:2] == ("docker", "events") for call in calls))
 
+    def test_colima_datadisk_scan_includes_lima_sparse_datadisk(self):
+        observer = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".colima"
+            datadisk = root / "_lima" / "_disks" / "colima" / "datadisk"
+            datadisk.parent.mkdir(parents=True)
+            datadisk.write_bytes(b"x")
+
+            paths, complete = observer._colima_datadisk_paths(root)
+
+        self.assertTrue(complete)
+        self.assertIn(datadisk, paths)
+
     def test_step_event_not_triggered_below_threshold(self):
         observer = load_module()
         threshold_kb = 10 * 1024 * 1024  # 10 GiB
