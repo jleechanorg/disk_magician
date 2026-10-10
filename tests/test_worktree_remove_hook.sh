@@ -181,6 +181,24 @@ mkdir -p "$WTROOT/m/node_modules"; echo x >"$WTROOT/m/node_modules/a"; echo u >"
 run_hook "$(json "$WTROOT/m")"; rc=$?
 [[ -f "$WTROOT/m/untracked.txt" ]] && ok "dirty worktree kept" || bad "dirty worktree removed"
 
+echo "== case 17: ignored DIRECTORY named like a rebuildable file pattern → kept =="
+add_wt n worktree-n
+printf 'data.pyc/\n' >"$WTROOT/n/.gitignore"; git -C "$WTROOT/n" add .gitignore; git -C "$WTROOT/n" commit -q -m ignore
+git -C "$WTROOT/n" push -q origin HEAD:refs/heads/n 2>/dev/null
+mkdir -p "$WTROOT/n/data.pyc"; echo y >"$WTROOT/n/data.pyc/keep.db"
+run_hook "$(json "$WTROOT/n")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -f "$WTROOT/n/data.pyc/keep.db" ]] && ok "dir named *.pyc kept" || bad "dir named *.pyc removed"
+
+echo "== case 18: ignored *.pyc FILE next to node_modules → removed =="
+add_wt o worktree-o
+printf 'node_modules/\n*.pyc\n' >"$WTROOT/o/.gitignore"; git -C "$WTROOT/o" add .gitignore; git -C "$WTROOT/o" commit -q -m ignore
+git -C "$WTROOT/o" push -q origin HEAD:refs/heads/o 2>/dev/null
+mkdir -p "$WTROOT/o/node_modules"; echo z >"$WTROOT/o/mod.pyc"
+run_hook "$(json "$WTROOT/o")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/o" ]] && ok "*.pyc file worktree removed" || bad "*.pyc file worktree kept"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
