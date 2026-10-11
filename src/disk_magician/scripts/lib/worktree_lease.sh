@@ -1,0 +1,395 @@
+# shellcheck shell=bash
+# worktree_lease.sh — owner leases for standard-root worktrees.
+#
+# Part of the worktree lease teardown design
+# (docs/superpowers/specs/2026-10-10-worktree-lease-teardown-design.md).
+# Writes JSON lease files under $(lease_dir), one per worktree, keyed by
+# sha256(realpath)[:16]. The reaper (worktree_reap.sh) is the only consumer
+# allowed to remove anything; this library only records and reports.
+#
+# SAFETY POSTURE
+# ---------------
+# Every unknown fails toward "owner alive / keep". A lease with no resolvable
+# runtime owner (owner: null) is never owner-reaped. pid liveness is checked
+# by pid PLUS lstart epoch so a reused pid reads dead, not alive. A comm
+# mismatch with matching epochs reads unknown (keep), never dead.
+#
+# Test hook: DISK_MAGICIAN_PS_BIN overrides the ps binary; fake ps
+# implementations honour -p <pid> -o ppid=,comm= / lstart= / args=.
+# State dir override: DISK_MAGICIAN_STATE_DIR (as everywhere in disk_magician).
+
+# Owner runtimes, matched by comm basename (exact).
+_LEASE_RUNTIME_COMMS="claude codex agy cursor-agent hermes"
+
+_lease_ps() { "${DISK_MAGICIAN_PS_BIN:-ps}" "$@"; }
+
+lease_dir() {
+    printf '%s/worktree_leases\n' "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+}
+
+# lease_path_for <path> — canonical lease file for a worktree path. The path
+# may not exist yet (pending guard leases); realpath is computed logically.
+lease_path_for() {
+    local path="${1:-}" real hash
+    real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null)" || real="$path"
+    if command -v shasum >/dev/null 2>&1; then
+        hash="$(printf '%s' "$real" | shasum -a 256 | cut -c1-16)"
+    else
+        hash="$(printf '%s' "$real" | sha256sum | cut -c1-16)"
+    fi
+    printf '%s/%s.json\n' "$(lease_dir)" "$hash"
+}
+
+# _lease_lstart_to_epoch <lstart string> — parse "Thu Oct  9 12:00:00 2026"
+# (LC_ALL=C TZ=UTC rendering) to a UTC epoch. bash 3.2-safe: python3 stdlib.
+_lease_lstart_to_epoch() {
+    python3 - "$1" <<'PY'
+import sys
+from datetime import datetime, timezone
+try:
+    dt = datetime.strptime(sys.argv[1].strip(), "%a %b %d %H:%M:%S %Y")
+    print(int(dt.replace(tzinfo=timezone.utc).timestamp()))
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# _lease_ps_lstart_epoch <pid> — UTC epoch of the process start time, or rc 1.
+_lease_ps_lstart_epoch() {
+    local pid="$1" out
+    out="$(LC_ALL=C TZ=UTC _lease_ps -p "$pid" -o lstart= 2>/dev/null)" || return 1
+    [[ -n "${out//[[:space:]]/}" ]] || return 1
+    _lease_lstart_to_epoch "$out"
+}
+
+# _lease_full_comm <pid> — full executable basename, preferring the first
+# token of args= (macOS comm= is truncated near 16 chars; args is not).
+# Prints empty on failure.
+_lease_full_comm() {
+    local pid="$1" args first comm
+    args="$(_lease_ps -p "$pid" -o args= 2>/dev/null)" || args=""
+    if [[ -z "${args//[[:space:]]/}" ]]; then
+        args="$(_lease_ps -p "$pid" -o comm= 2>/dev/null)" || args=""
+    fi
+    [[ -z "${args//[[:space:]]/}" ]] && return 0
+    read -r first _ <<<"$args"
+    [[ -n "$first" ]] || return 0
+    comm="${first##*/}"
+    printf '%s\n' "$comm"
+}
+
+_lease_comm_is_runtime() {
+    local c="${1##*/}" r
+    for r in $_LEASE_RUNTIME_COMMS; do
+        [[ "$c" == "$r" ]] && return 0
+    done
+    return 1
+}
+
+# Hermes detection: a python* process whose script argument's basename starts
+# with "hermes" (the gateway only shows up as python in comm).
+_lease_args_mention_hermes() {
+    local args="$1" tok base
+    for tok in $args; do
+        base="${tok##*/}"
+        case "$base" in hermes*) return 0 ;; esac
+    done
+    return 1
+}
+
+# lease_resolve_owner [start_pid] — walk parent links from start_pid (default
+# $$) up to 32 hops, guarding against pid cycles. Prints
+# "pid<TAB>start_epoch<TAB>comm" of the nearest runtime ancestor, or
+# "-<TAB>-<TAB>-" when there is none (lease then written with owner: null).
+lease_resolve_owner() {
+    local pid="${1:-$$}" hops=0 rest ppid hop_comm i
+    local visited="" ep comm
+    while (( hops < 32 )); do
+        hops=$((hops + 1))
+        case ",$visited," in *",$pid,"*)
+            printf -- '-\t-\t-\n'; return 0 ;;
+        esac
+        visited="$visited,$pid"
+        rest="$(_lease_ps -p "$pid" -o ppid=,comm= 2>/dev/null)" || { printf -- '-\t-\t-\n'; return 0; }
+        [[ -n "${rest//[[:space:]]/}" ]] || { printf -- '-\t-\t-\n'; return 0; }
+        read -r ppid hop_comm <<<"$rest"
+        if _lease_comm_is_runtime "$hop_comm"; then
+            ep="$(_lease_ps_lstart_epoch "$pid")" || ep="-"
+            comm="$(_lease_full_comm "$pid")"
+            [[ -n "$comm" ]] || comm="${hop_comm##*/}"
+            printf '%s\t%s\t%s\n' "$pid" "$ep" "$comm"
+            return 0
+        fi
+        if [[ "${hop_comm##*/}" == python* ]]; then
+            rest="$(_lease_ps -p "$pid" -o args= 2>/dev/null)" || rest=""
+            if _lease_args_mention_hermes "$rest"; then
+                ep="$(_lease_ps_lstart_epoch "$pid")" || ep="-"
+                printf '%s\t%s\thermes\n' "$pid" "$ep"
+                return 0
+            fi
+        fi
+        [[ "$ppid" =~ ^[1-9][0-9]*$ ]] || { printf -- '-\t-\t-\n'; return 0; }
+        pid="$ppid"
+    done
+    printf -- '-\t-\t-\n'
+}
+
+# _lease_admin_info <worktree_path> — "admin_id<TAB>birth_epoch" from the
+# .git pointer's admin dir, or "-<TAB>-" when unresolvable.
+_lease_admin_info() {
+    local path="$1" line gitdir birth
+    [[ -n "$path" && -f "$path/.git" ]] || { printf -- '-\t-\n'; return 0; }
+    line="$(head -n 1 "$path/.git" 2>/dev/null)" || { printf -- '-\t-\n'; return 0; }
+    [[ "$line" == gitdir:* ]] || { printf -- '-\t-\n'; return 0; }
+    gitdir="${line#gitdir:}"
+    gitdir="${gitdir# }"
+    [[ -n "$gitdir" && -d "$gitdir" ]] || { printf -- '-\t-\n'; return 0; }
+    birth="$(stat -f %B "$gitdir" 2>/dev/null || stat -c %W "$gitdir" 2>/dev/null || echo 0)"
+    printf '%s\t%s\n' "${gitdir##*/}" "$birth"
+}
+
+# _lease_get <lease_file> <key> — one JSON field, empty on any failure.
+_lease_get() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    v = d.get(sys.argv[2])
+    print("" if v is None else v)
+except Exception:
+    print("")
+PY
+}
+
+# _lease_write_json <lease_file> <pydict-args...> is not used; writes go
+# through inline python below for atomicity (mktemp sibling + os.replace).
+
+# lease_write <worktree_path> <repo> <branch> <creator> — atomic lease write
+# with the owner resolved from $$.
+lease_write() {
+    local wt="$1" repo="${2:-}" branch="${3:-}" creator="${4:-}"
+    local tsv pid ep comm admin_id admin_birth lease ttl
+    tsv="$(lease_resolve_owner)"
+    pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
+    IFS=$'\t' read -r admin_id admin_birth < <(_lease_admin_info "$wt")
+    lease="$(lease_path_for "$wt")"
+    mkdir -p "$(lease_dir)" 2>/dev/null || return 1
+    ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
+    _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl"
+}
+
+# lease_write_pending <target_path> <owner_tsv> — pre-creation lease written
+# by the guard. rc 1 (nothing written) if the target path already exists, or
+# if a lease already exists for a worktree that still exists on disk.
+# Replaces a lease whose recorded path no longer exists.
+lease_write_pending() {
+    local target="$1" tsv="$2"
+    local pid ep comm lease existing_path
+    [[ -e "$target" ]] && return 1
+    lease="$(lease_path_for "$target")"
+    if [[ -f "$lease" ]]; then
+        existing_path="$(_lease_get "$lease" path)"
+        if [[ -n "$existing_path" && -e "$existing_path" ]]; then
+            return 1
+        fi
+    fi
+    pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
+    mkdir -p "$(lease_dir)" 2>/dev/null || return 1
+    _lease_emit_json "$(lease_path_for "$target")" "$target" "" "" "guard" "True" \
+        "$pid" "$ep" "$comm" "-" "-" "${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
+}
+
+# _lease_emit_json <lease_file> ... — shared writer. owner fields "-" produce
+# owner: null. Atomic: temp file in the same dir, then os.replace.
+_lease_emit_json() {
+    local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
+    local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
+    python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" <<'PY'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+(lease, wt, repo, branch, creator, pending, pid, ep, comm,
+ admin_id, admin_birth, ttl) = sys.argv[1:13]
+owner = None
+if pid not in ("-", ""):
+    try:
+        owner = {"pid": int(pid), "start_epoch": int(ep), "comm": comm}
+    except ValueError:
+        owner = None
+now = datetime.now(timezone.utc)
+d = {
+    "schema_version": 1,
+    "path": wt,
+    "repo": repo or None,
+    "branch": branch or None,
+    "creator": creator,
+    "pending": pending == "True",
+    "created_at": now.isoformat(),
+    "created_epoch": int(now.timestamp()),
+    "ttl_hours": int(ttl),
+    "owner": owner,
+    "admin_id": None if admin_id in ("", "-") else admin_id,
+    "admin_birth_epoch": None if admin_birth in ("", "-") else int(admin_birth),
+    "released_at": None,
+    "last_verdict": None,
+    "last_checked_at": None,
+}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".lease-", suffix=".json")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, lease)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.exit(1)
+PY
+}
+
+# lease_owner_state <lease_file> [now_epoch] — prints exactly one of:
+#   none | released | dead | alive | alive-expired | unknown | unreadable
+# Precedence: none (owner null) > released > ps check. Fail-closed: every
+# unmeasurable case keeps the worktree (alive/unknown/unreadable/none).
+# The liveness probe is LC_ALL=C TZ=UTC pinned so ambient LANG/TZ cannot
+# localize the lstart rendering (fr_FR renders "Sam 10 oct ..." and breaks
+# the parse, which would silently turn alive owners into unknown).
+lease_owner_state() {
+    local lease="$1" now="${2:-}" inspect
+    inspect="$(python3 - "$lease" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    print("unreadable"); sys.exit(0)
+o = d.get("owner")
+if o is None:
+    print("none"); sys.exit(0)
+if not isinstance(o, dict) or not isinstance(o.get("pid"), int) or isinstance(o.get("pid"), bool):
+    print("unreadable"); sys.exit(0)
+if d.get("released_at"):
+    print("released"); sys.exit(0)
+print("check\t%d\t%s\t%s\t%s\t%s" % (o["pid"], o.get("start_epoch", ""),
+      o.get("comm", ""), d.get("created_epoch", ""),
+      d.get("ttl_hours", 24)))
+PY
+)"
+    case "$inspect" in
+        unreadable|none|released)
+            printf '%s\n' "$inspect"; return 0 ;;
+    esac
+    local _tag pid start comm created ttl
+    IFS=$'\t' read -r _tag pid start comm created ttl <<<"$inspect"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { printf 'unreadable\n'; return 0; }
+    [[ "$now" =~ ^[1-9][0-9]*$ ]] || now="$(date +%s)"
+    local out err rc err_file cur_ep cur_comm stored_base cur_base diff
+    err_file="$(mktemp)"
+    out="$(LC_ALL=C TZ=UTC _lease_ps -p "$pid" -o lstart= 2>"$err_file")"; rc=$?
+    err="$(<"$err_file")"; rm -f "$err_file"
+    if (( rc == 1 )) && [[ -z "$out" && -z "$err" ]]; then
+        printf 'dead\n'; return 0
+    fi
+    if (( rc != 0 )); then
+        printf 'unknown\n'; return 0
+    fi
+    [[ -n "${out//[[:space:]]/}" ]] || { printf 'unknown\n'; return 0; }
+    cur_ep="$(_lease_lstart_to_epoch "$out")" || { printf 'unknown\n'; return 0; }
+    [[ "$cur_ep" =~ ^-?[0-9]+$ && "$start" =~ ^-?[0-9]+$ ]] || { printf 'unknown\n'; return 0; }
+    if (( cur_ep > start )); then diff=$(( cur_ep - start )); else diff=$(( start - cur_ep )); fi
+    (( diff > 2 )) && { printf 'dead\n'; return 0; }
+    cur_comm="$(_lease_full_comm "$pid")"
+    stored_base="${comm##*/}"
+    cur_base="${cur_comm##*/}"
+    if [[ -n "$cur_base" && "$cur_base" != "$stored_base" ]] &&
+       [[ "$stored_base" != "$cur_base"* && "$cur_base" != "$stored_base"* ]]; then
+        printf 'unknown\n'; return 0
+    fi
+    if [[ "$created" =~ ^[0-9]+$ && "$ttl" =~ ^[0-9]+$ ]] && (( now >= created + ttl * 3600 )); then
+        printf 'alive-expired\n'; return 0
+    fi
+    printf 'alive\n'
+}
+
+# lease_release <worktree_path> — mark the caller's own lease released.
+# rc 1 "no lease" when unleased; rc 1 "not lease owner" when the caller's
+# resolved owner does not match the lease owner (pid plus start epoch), when
+# the lease has no owner, or when the caller has no resolvable owner.
+lease_release() {
+    local wt="$1" lease tsv pid ep
+    lease="$(lease_path_for "$wt")"
+    [[ -f "$lease" ]] || { echo "no lease" >&2; return 1; }
+    tsv="$(lease_resolve_owner)"
+    pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "not lease owner" >&2; return 1; }
+    [[ "$ep" =~ ^-?[0-9]+$ ]] || { echo "not lease owner" >&2; return 1; }
+    if python3 - "$lease" "$pid" "$ep" <<'PY'
+import json, os, sys
+from datetime import datetime, timezone
+lease, pid, ep = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    with open(lease) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+o = d.get("owner")
+if not isinstance(o, dict) or not isinstance(o.get("pid"), int) or o["pid"] != pid:
+    sys.exit(1)
+try:
+    if str(int(o.get("start_epoch"))) != ep:
+        sys.exit(1)
+except (TypeError, ValueError):
+    sys.exit(1)
+d["released_at"] = datetime.now(timezone.utc).isoformat()
+tmp = lease + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, lease)
+PY
+    then
+        return 0
+    fi
+    echo "not lease owner" >&2
+    return 1
+}
+
+# lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.
+lease_set_verdict() {
+    local lease="$1" verdict="$2"
+    python3 - "$lease" "$verdict" <<'PY'
+import json, os, sys
+from datetime import datetime, timezone
+lease, verdict = sys.argv[1], sys.argv[2]
+try:
+    with open(lease) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+d["last_verdict"] = verdict
+d["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+tmp = lease + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, lease)
+PY
+}
+
+# lease_matches_incarnation <lease_file> — rc 0 when the lease's admin_id and
+# admin_birth_epoch still match the live admin dir for its path. Any
+# unresolvable side is a mismatch (the reaper then re-adopts with owner:
+# null, which can never be owner-reaped — the safe direction).
+lease_matches_incarnation() {
+    local lease="$1" path aid birth live_aid live_birth
+    path="$(_lease_get "$lease" path)"
+    aid="$(_lease_get "$lease" admin_id)"
+    birth="$(_lease_get "$lease" admin_birth_epoch)"
+    [[ -n "$path" && -n "$aid" ]] || return 1
+    IFS=$'\t' read -r live_aid live_birth < <(_lease_admin_info "$path")
+    [[ "$live_aid" == "$aid" ]] || return 1
+    [[ "$live_birth" == "$birth" ]] || return 1
+    return 0
+}

@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# test_worktree_lease.sh — the worktree lease library (plan Task 2).
+#
+# Covers: lease write/read, owner resolution (runtime ancestors, hermes
+# detection, pid cycles), liveness by pid + lstart epoch (pid reuse, comm
+# mismatch, 16-char comm truncation, TZ/LANG pinning), release by owner,
+# pending leases, incarnation match, and the unreadable/unknown fail-closed
+# states.
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/worktree_lease.sh
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+
+PASS=0
+FAIL=0
+ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+assert_eq() {
+    local actual="$1" expected="$2" what="$3"
+    if [[ "$actual" == "$expected" ]]; then ok "$what (= $expected)"; else bad "$what — expected '$expected', got '$actual'"; fi
+}
+
+TMPROOT="$(mktemp -d)"
+trap 'rm -rf "$TMPROOT"' EXIT
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+
+# ---------------------------------------------------------------- fake ps ---
+FAKE_PS_DIR="$TMPROOT/psdata"
+FAKE_PS="$TMPROOT/fake_ps"
+mkdir -p "$FAKE_PS_DIR"
+export FAKE_PS_DIR
+cat > "$FAKE_PS" <<'EOS'
+#!/usr/bin/env bash
+# fake ps — table-driven stand-in. Honors -A (always fails, like an empty
+# process listing) and per-pid tables under $FAKE_PS_DIR:
+#   comm/<pid>    "<ppid>\t<comm>"
+#   lstart/<pid>  "<lstart string>"
+#   args/<pid>    "<full command line>"
+#   fail/<pid>    "<rc> [stderr message]"
+pid="" spec="" saw_a=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p) pid="$2"; shift 2 ;;
+        -o) spec="$2"; shift 2 ;;
+        -A) saw_a=1; shift ;;
+        *) shift ;;
+    esac
+done
+base="${FAKE_PS_DIR:?}"
+if [[ "$saw_a" == 1 ]]; then exit 2; fi
+if [[ -n "$pid" && -f "$base/fail/$pid" ]]; then
+    read -r rcode rest < "$base/fail/$pid" || true
+    [[ -n "${rest:-}" ]] && printf '%s\n' "$rest" >&2
+    exit "$rcode"
+fi
+case "$spec" in
+    ppid=,comm=)
+        [[ -f "$base/comm/$pid" ]] && cat "$base/comm/$pid" || exit 1 ;;
+    comm=)
+        [[ -f "$base/comm/$pid" ]] && awk '{print $2}' "$base/comm/$pid" || exit 1 ;;
+    lstart=)
+        [[ -f "$base/lstart/$pid" ]] && cat "$base/lstart/$pid" || exit 1 ;;
+    args=)
+        [[ -f "$base/args/$pid" ]] && cat "$base/args/$pid" || exit 1 ;;
+    *) exit 2 ;;
+esac
+EOS
+chmod +x "$FAKE_PS"
+
+seed_comm()    { mkdir -p "$FAKE_PS_DIR/comm";    printf '%s\t%s\n' "$2" "$3" > "$FAKE_PS_DIR/comm/$1"; }
+seed_lstart()  { mkdir -p "$FAKE_PS_DIR/lstart";  printf '%s\n' "$2" > "$FAKE_PS_DIR/lstart/$1"; }
+seed_args()    { mkdir -p "$FAKE_PS_DIR/args";    printf '%s\n' "$2" > "$FAKE_PS_DIR/args/$1"; }
+seed_fail()    { mkdir -p "$FAKE_PS_DIR/fail";    printf '%s\n' "$2" > "$FAKE_PS_DIR/fail/$1"; }
+clear_pid()    { rm -f "$FAKE_PS_DIR/comm/$1" "$FAKE_PS_DIR/lstart/$1" "$FAKE_PS_DIR/args/$1" "$FAKE_PS_DIR/fail/$1"; }
+
+# A fixed owner epoch and its ps lstart rendering (day >= 10, no padding
+# ambiguity). Both the fake and the real parser must agree on it.
+OWNER_EPOCH=1760000000
+OWNER_LSTART="$(python3 -c '
+from datetime import datetime, timezone
+print(datetime.fromtimestamp(1760000000, tz=timezone.utc).strftime("%a %b %d %H:%M:%S %Y"))')"
+
+TESTPID="$$"   # the running test shell's pid
+
+# ------------------------------------------------------------- fixtures ---
+mk_wt() { # mk_wt <name> — linked-worktree shape with a real admin dir
+    local wt="$TMPROOT/wt/$1"
+    mkdir -p "$wt/src" "$TMPROOT/.gitadmin/$1"
+    echo "gitdir: $TMPROOT/.gitadmin/$1" > "$wt/.git"
+    : > "$TMPROOT/.gitadmin/$1/HEAD"
+    echo "$wt"
+}
+
+craft_lease() { # craft_lease <wt-path> <owner-pid> <start-epoch> <comm> [created-epoch]
+    local l
+    l="$(lease_path_for "$1")"
+    python3 - "$l" "$1" "${2:-}" "${3:-}" "${4:-}" "${5:-$(date +%s)}" <<'PY'
+import json, sys, os
+lease, path, pid, ep, comm, created = sys.argv[1:7]
+try:
+    owner = {"pid": int(pid), "start_epoch": int(ep), "comm": comm} if pid.isdigit() and ep.lstrip("-").isdigit() else {"pid": pid, "start_epoch": ep, "comm": comm}
+except ValueError:
+    owner = {"pid": pid, "start_epoch": ep, "comm": comm}
+if not pid:
+    owner = None
+d = {"schema_version": 1, "path": path, "repo": "r", "branch": "b", "creator": "test",
+     "pending": False, "created_at": "2026-10-09T12:00:00+00:00",
+     "created_epoch": int(created), "ttl_hours": 24, "owner": owner,
+     "admin_id": None, "admin_birth_epoch": None, "released_at": None,
+     "last_verdict": None, "last_checked_at": None}
+os.makedirs(os.path.dirname(lease), exist_ok=True)
+tmp = lease + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, lease)
+PY
+}
+
+lease_field() { # lease_field <lease-file> <pyexpr over d>
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(eval(sys.argv[2], {"d": d}))
+except Exception:
+    print("ERR")
+PY
+}
+
+echo "== lease_write produces a valid lease =="
+seed_comm "$TESTPID" 400 bash
+seed_comm 400 1 claude
+seed_lstart 400 "$OWNER_LSTART"
+export DISK_MAGICIAN_PS_BIN="$FAKE_PS"
+WT1="$(mk_wt wt_one)"
+if lease_write "$WT1" "myrepo" "fix/x" "worktree-new"; then ok "lease_write rc 0"; else bad "lease_write failed"; fi
+L1="$(lease_path_for "$WT1")"
+assert_eq "$(lease_field "$L1" 'd["schema_version"]')" "1" "schema_version"
+assert_eq "$(lease_field "$L1" 'd["path"]')" "$WT1" "recorded path"
+assert_eq "$(lease_field "$L1" 'd["branch"]')" "fix/x" "recorded branch"
+assert_eq "$(lease_field "$L1" 'd["creator"]')" "worktree-new" "recorded creator"
+assert_eq "$(lease_field "$L1" 'd["owner"]["pid"]')" "400" "owner pid resolved from ancestry"
+assert_eq "$(lease_field "$L1" 'd["owner"]["start_epoch"]')" "$OWNER_EPOCH" "owner start_epoch"
+assert_eq "$(lease_field "$L1" 'type(d["created_epoch"]) is int')" "True" "integer created_epoch"
+
+echo "== lease_resolve_owner walks to the nearest runtime ancestor =="
+seed_comm 500 400 sh
+R="$(lease_resolve_owner 500 | cut -f1,3)"
+assert_eq "$R" "$(printf '400\tclaude')" "resolve 500 -> 400/claude"
+seed_comm 700 1 bash
+assert_eq "$(lease_resolve_owner 700 | cut -f1,2,3)" "$(printf -- '-\t-\t-')" "no runtime in chain -> none"
+seed_comm 5 6 x
+seed_comm 6 5 y
+assert_eq "$(lease_resolve_owner 5 | cut -f1,2,3)" "$(printf -- '-\t-\t-')" "pid cycle terminates -> none"
+seed_comm 600 1 python3.13
+seed_lstart 600 "$OWNER_LSTART"
+seed_args 600 "/usr/bin/python3.13 /opt/hermes/hermes_gateway.py --serve"
+assert_eq "$(lease_resolve_owner 600 | cut -f1,3)" "$(printf '600\thermes')" "hermes python script detected as owner"
+
+echo "== no runtime ancestor stores owner null =="
+seed_comm "$TESTPID" 1 bash
+WT2="$(mk_wt wt_nullowner)"
+lease_write "$WT2" "myrepo" "fix/y" "worktree-new"
+L2="$(lease_path_for "$WT2")"
+assert_eq "$(lease_field "$L2" 'd["owner"]')" "None" "owner null when no runtime ancestor"
+assert_eq "$(lease_owner_state "$L2")" "none" "owner_state none for null owner"
+
+echo "== owner liveness =="
+# restore a claude ancestor for the test shell
+seed_comm "$TESTPID" 400 bash
+assert_eq "$(lease_owner_state "$L1")" "alive" "same lstart -> alive"
+seed_fail 400 "1"
+assert_eq "$(lease_owner_state "$L1")" "dead" "ps rc 1 empty stderr -> dead"
+rm -f "$FAKE_PS_DIR/fail/400"
+seed_lstart 400 "$(python3 -c '
+from datetime import datetime, timezone
+print(datetime.fromtimestamp(1760000000 + 10, tz=timezone.utc).strftime("%a %b %d %H:%M:%S %Y"))')"
+assert_eq "$(lease_owner_state "$L1")" "dead" "start epoch 10s off -> dead (pid reuse)"
+seed_lstart 400 "$OWNER_LSTART"
+seed_args 400 "/bin/someotherthing -x"
+assert_eq "$(lease_owner_state "$L1")" "unknown" "epoch matches but comm differs -> unknown"
+rm -f "$FAKE_PS_DIR/args/400"
+
+echo "== TTL expiry while owner alive =="
+E25H=$(( $(date +%s) - 25*3600 ))
+WT3="$(mk_wt wt_expired)"
+craft_lease "$WT3" 400 "$OWNER_EPOCH" claude "$E25H"
+L3="$(lease_path_for "$WT3")"
+assert_eq "$(lease_owner_state "$L3")" "alive-expired" "alive owner past 24h TTL -> alive-expired"
+
+echo "== release by owner =="
+if lease_release "$WT1"; then ok "lease_release by owner rc 0"; else bad "lease_release by owner failed"; fi
+assert_eq "$(lease_owner_state "$L1")" "released" "released state overrides live owner"
+assert_eq "$(lease_field "$L1" 'd["released_at"] is not None')" "True" "released_at recorded"
+
+echo "== release by non-owner fails =="
+WT4="$(mk_wt wt_other)"
+craft_lease "$WT4" 401 "$OWNER_EPOCH" claude
+L4="$(lease_path_for "$WT4")"
+SUM_BEFORE="$(shasum -a 256 "$L4" | cut -d' ' -f1)"
+if lease_release "$WT4" 2> "$TMPROOT/rel_err"; then bad "non-owner release succeeded"; else ok "non-owner release rc 1"; fi
+grep -q "not lease owner" "$TMPROOT/rel_err" && ok "stderr says not lease owner" || bad "stderr missing 'not lease owner'"
+assert_eq "$(shasum -a 256 "$L4" | cut -d' ' -f1)" "$SUM_BEFORE" "lease byte-identical after refused release"
+WT5="$(mk_wt wt_nullease)"
+craft_lease "$WT5" "" "" ""
+if lease_release "$WT5" 2>/dev/null; then bad "null-owner lease released"; else ok "null-owner lease -> rc 1"; fi
+seed_comm "$TESTPID" 1 bash
+if lease_release "$WT1" 2>/dev/null; then bad "caller with no resolvable owner released"; else ok "unresolvable caller -> rc 1"; fi
+seed_comm "$TESTPID" 400 bash
+if lease_release "$TMPROOT/never_leased_wt" 2> "$TMPROOT/nl_err"; then bad "unleased release succeeded"; else ok "unleased path -> rc 1"; fi
+grep -q "no lease" "$TMPROOT/nl_err" && ok "stderr says no lease" || bad "stderr missing 'no lease'"
+
+echo "== unreadable and oversized pids =="
+WT6="$(mk_wt wt_badpids)"
+craft_lease "$WT6" 99999999999 "$OWNER_EPOCH" claude
+seed_fail 99999999999 "1 ps: process id too large"
+assert_eq "$(lease_owner_state "$(lease_path_for "$WT6")")" "unknown" "ps 'id too large' rc1-with-stderr -> unknown, not dead"
+WT7="$(mk_wt wt_pidabc)"
+craft_lease "$WT7" abc "$OWNER_EPOCH" claude
+assert_eq "$(lease_owner_state "$(lease_path_for "$WT7")")" "unreadable" "non-integer pid -> unreadable"
+
+echo "== -A listing empty but -p hops resolve =="
+# (fake ps exits 2 on -A; resolution must go through -p per hop)
+assert_eq "$(lease_resolve_owner 500 | cut -f1,3)" "$(printf '400\tclaude')" "resolve works when ps -A is useless"
+
+echo "== real ps: TZ/LANG pinning and >16-char comm =="
+unset DISK_MAGICIAN_PS_BIN
+LONGNAME="$TMPROOT/a-very-long-executable-name-xyz"
+# /bin/* are dyld shared-cache stubs on modern macOS; a copy cannot exec
+# (SIGKILL). Build a real binary instead so comm really is over 16 chars.
+if printf '#include <unistd.h>\nint main(void){for(;;)pause();}' | clang -x c - -o "$LONGNAME" 2>/dev/null; then
+    "$LONGNAME" &
+    SLEEP_PID=$!
+    REAL_EPOCH="$(python3 - "$SLEEP_PID" <<'PY'
+import subprocess, sys
+from datetime import datetime, timezone
+out = subprocess.run(["ps", "-p", sys.argv[1], "-o", "lstart="],
+                     capture_output=True, text=True,
+                     env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+print(int(datetime.strptime(out, "%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc).timestamp()))
+PY
+)"
+    WT8="$(mk_wt wt_realps)"
+    craft_lease "$WT8" "$SLEEP_PID" "$REAL_EPOCH" "a-very-long-executable-name-xyz"
+    L8="$(lease_path_for "$WT8")"
+    A="$(TZ=America/Los_Angeles LANG=fr_FR.UTF-8 lease_owner_state "$L8")"
+    B="$(TZ=UTC LANG=C lease_owner_state "$L8")"
+    assert_eq "$A" "alive" "owner alive under TZ=America/Los_Angeles LANG=fr_FR.UTF-8"
+    assert_eq "$B" "alive" "owner alive under TZ=UTC LANG=C"
+    kill "$SLEEP_PID" 2>/dev/null
+else
+    echo "  SKIP: clang unavailable; >16-char comm case not exercisable"
+fi
+export DISK_MAGICIAN_PS_BIN="$FAKE_PS"
+
+echo "== lease_write records admin incarnation =="
+WT9="$(mk_wt wt_admin)"
+seed_comm "$TESTPID" 400 bash
+lease_write "$WT9" "myrepo" "fix/z" "worktree-new"
+L9="$(lease_path_for "$WT9")"
+ADMIN_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"
+assert_eq "$(lease_field "$L9" 'd["admin_id"]')" "wt_admin" "admin_id from admin dir name"
+assert_eq "$(lease_field "$L9" 'd["admin_birth_epoch"]')" "$ADMIN_BIRTH" "admin_birth_epoch from stat -f %B"
+if lease_matches_incarnation "$L9"; then ok "incarnation matches -> rc 0"; else bad "incarnation should match"; fi
+# recreate the admin dir -> new birth time -> stale lease
+rm -rf "$TMPROOT/.gitadmin/wt_admin"
+mkdir -p "$TMPROOT/.gitadmin/wt_admin"
+: > "$TMPROOT/.gitadmin/wt_admin/HEAD"
+sleep 1
+rm -rf "$TMPROOT/.gitadmin/wt_admin"      # ensure creation time moves
+mkdir -p "$TMPROOT/.gitadmin/wt_admin"
+: > "$TMPROOT/.gitadmin/wt_admin/HEAD"
+NEW_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"
+if lease_matches_incarnation "$L9"; then bad "recreated admin dir still matches (stale lease undetected)"; else ok "recreated admin dir -> no match (rc 1)"; fi
+
+echo "== lease_write_pending =="
+PENDING_TARGET="$TMPROOT/wt/future_wt"
+PTSV="$(printf '400\t%s\tclaude' "$OWNER_EPOCH")"
+if lease_write_pending "$PENDING_TARGET" "$PTSV"; then ok "pending lease written"; else bad "pending lease write failed"; fi
+LP="$(lease_path_for "$PENDING_TARGET")"
+assert_eq "$(lease_field "$LP" 'd["creator"]')" "guard" "pending lease creator guard"
+assert_eq "$(lease_field "$LP" 'd["pending"]')" "True" "pending flag set"
+if lease_write_pending "$PENDING_TARGET" "$PTSV"; then
+    ok "replacement of pending lease whose path still absent is allowed"
+else
+    bad "second pending write on a still-absent path must be allowed (replacement)"
+fi
+mkdir -p "$PENDING_TARGET"
+if lease_write_pending "$PENDING_TARGET" "$PTSV" 2>/dev/null; then bad "existing target path must refuse"; else ok "existing path -> rc 1"; fi
+# a lease for an EXISTING worktree must never be overwritten by pending
+if lease_write_pending "$WT9" "$PTSV" 2>/dev/null; then bad "pending write over live lease+worktree succeeded"; else ok "existing lease for existing worktree -> rc 1"; fi
+assert_eq "$(lease_field "$L9" 'd["creator"]')" "worktree-new" "live lease untouched by refused pending write"
+
+echo "== lease_set_verdict =="
+lease_set_verdict "$L9" "kept:dirty"
+assert_eq "$(lease_field "$L9" 'd["last_verdict"]')" "kept:dirty" "last_verdict updated"
+assert_eq "$(lease_field "$L9" 'd["last_checked_at"] is not None')" "True" "last_checked_at set"
+
+echo
+echo "=== $PASS passed, $FAIL failed ==="
+[[ "$FAIL" -eq 0 ]]
