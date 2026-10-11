@@ -198,6 +198,56 @@ fstrim_colima_disk() {
   fstrim_via_active_lima_mux
 }
 
+# True only when the status probe itself succeeds and reports the profile Stopped.
+# A Stopped VM has zero running containers; any probe failure stays not-proven.
+colima_vm_is_stopped() {
+  local out
+  command -v colima >/dev/null 2>&1 || return 1
+  out=$(bounded 15 colima list 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk -v p="${COLIMA_PROFILE:-default}" '$1==p && $2=="Stopped" {f=1} END {exit !f}'
+}
+
+# Stale lima disk lock: disk "colima" IN-USE-BY the colima instance while no
+# hostagent/VZ process or live pid file exists (unclean stop). Live -> not stale.
+colima_disk_lock_is_stale() {
+  local lima_home="$COLIMA_LIMA" listing pidf pid
+  command -v limactl >/dev/null 2>&1 || return 1
+  listing=$(LIMA_HOME="$lima_home" bounded 15 limactl disk list colima 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | awk '$1=="colima" && $0 ~ /\/colima[[:space:]]*$/ {f=1} END {exit !f}' || return 1
+  for pidf in "$lima_home"/colima/*.pid; do
+    [[ -f "$pidf" ]] || continue
+    pid=$(tr -dc '0-9' < "$pidf" 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+  done
+  if ps -axo command 2>/dev/null | grep -E 'limactl.*hostagent|lima.*hostagent|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+colima_start_with_stale_lock_retry() {
+  if colima start >/dev/null 2>&1; then
+    return 0
+  fi
+  log "WARNING: colima start failed"
+  if ! colima_disk_lock_is_stale; then
+    log "WARNING: no provably stale Lima disk lock (live hostagent/pid, lock absent, or probe failed) — failing closed, not unlocking."
+    return 1
+  fi
+  log "Stale Lima disk lock on 'colima' (in-use-by self, no live hostagent/limactl/VZ process) — unlocking and retrying start once."
+  if ! LIMA_HOME="$COLIMA_LIMA" bounded 30 limactl disk unlock colima >/dev/null 2>&1; then
+    log "WARNING: limactl disk unlock colima failed — failing closed."
+    return 1
+  fi
+  if colima start >/dev/null 2>&1; then
+    return 0
+  fi
+  log "WARNING: colima start failed again after disk unlock"
+  return 1
+}
+
 recover_colima_wedge_once() {
   local running_containers
 
@@ -206,21 +256,26 @@ recover_colima_wedge_once() {
     return 1
   fi
 
-  if ! running_containers=$(docker_probe ps -q 2>/dev/null); then
-    log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
-    return 1
-  fi
-  if [[ -n "$running_containers" ]]; then
-    log "WARNING: refusing Colima restart because running containers remain."
-    return 1
+  local vm_stopped=false
+  if colima_vm_is_stopped; then
+    vm_stopped=true
+    log "Colima VM reports Stopped — zero running containers by definition; restart guard satisfied."
+  else
+    if ! running_containers=$(docker_probe ps -q 2>/dev/null); then
+      log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
+      return 1
+    fi
+    if [[ -n "$running_containers" ]]; then
+      log "WARNING: refusing Colima restart because running containers remain."
+      return 1
+    fi
   fi
 
   log "WARNING: trim failed; attempting approved Colima restart recovery"
-  if ! colima stop >/dev/null 2>&1; then
+  if [[ "$vm_stopped" != true ]] && ! colima stop >/dev/null 2>&1; then
     log "WARNING: colima stop failed"
   fi
-  if ! colima start >/dev/null 2>&1; then
-    log "WARNING: colima start failed"
+  if ! colima_start_with_stale_lock_retry; then
     return 1
   fi
   sleep 2
@@ -248,6 +303,10 @@ if [[ "$TRIM_ONLY" == true ]]; then
   fi
   if (( disk_kb <= TRIM_GB * 1048576 )); then
     log "trim-only: datadisk $(fmt_kb "$disk_kb") <= ${TRIM_GB}G — no trim."
+    exit 0
+  fi
+  if colima_vm_is_stopped; then
+    log "trim-only: Colima VM is Stopped — nothing to trim until it is started (guarded recovery: VACATE_CI_RUNNERS_APPROVED=1 cleanup_colima.sh --clean)."
     exit 0
   fi
   log "trim-only: datadisk $(fmt_kb "$disk_kb") > ${TRIM_GB}G — in-VM fstrim (timeout ${TRIM_TIMEOUT_SEC}s)."
