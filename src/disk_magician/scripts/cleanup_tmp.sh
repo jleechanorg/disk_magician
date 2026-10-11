@@ -438,8 +438,22 @@ has_open_files() {
     return 0
   fi
 
-  local timeout_bin
-  timeout_bin="$(resolve_timeout_bin "${DISK_MAGICIAN_TIMEOUT_BIN:-}")"
+  local timeout_bin=""
+  if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+    timeout_bin="$DISK_MAGICIAN_TIMEOUT_BIN"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout_bin="$(command -v timeout)"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_bin="$(command -v gtimeout)"
+  else
+    local candidate
+    for candidate in /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+      if [[ -x "$candidate" ]]; then
+        timeout_bin="$candidate"
+        break
+      fi
+    done
+  fi
   if [[ -z "$timeout_bin" || ! -x "$timeout_bin" ]]; then
     log "Open-file check unavailable for $dir (timeout executable not found or not executable) — fail-closed, treating as active."
     return 0
