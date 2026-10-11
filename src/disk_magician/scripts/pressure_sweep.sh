@@ -366,6 +366,7 @@ STEP1_RC=0
 STEP2_RC=0
 STEP3_RC=0
 STEP1_TIMEOUT=false
+STEP1_SKIPPED=false
 STEP2_TIMEOUT=false
 STEP3_TIMEOUT=false
 
@@ -391,10 +392,17 @@ if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
   log "pressure_sweep: step 1/3 cleanup_tmp.sh done — free after: ${after_gb} GB"
 else
   STEP1_RC=$?
-  if [[ $STEP1_RC -eq 124 || $STEP1_RC -eq 137 ]]; then
-    STEP1_TIMEOUT=true
+  if [[ $STEP1_RC -eq 75 ]]; then
+    # EX_TEMPFAIL from scratch_lock.py: another scratch cleanup owns the lock.
+    STEP1_RC=0
+    STEP1_SKIPPED=true
+    log "pressure_sweep: step 1/3 cleanup_tmp.sh skipped (scratch lock held) — continuing to step 2."
+  else
+    if [[ $STEP1_RC -eq 124 || $STEP1_RC -eq 137 ]]; then
+      STEP1_TIMEOUT=true
+    fi
+    log "pressure_sweep: step 1/3 cleanup_tmp.sh FAILED or timed out (rc=${STEP1_RC}) — continuing to step 2."
   fi
-  log "pressure_sweep: step 1/3 cleanup_tmp.sh FAILED or timed out (rc=${STEP1_RC}) — continuing to step 2."
 fi
 fi
 
@@ -441,6 +449,7 @@ OUTCOME="success"
 REASON=""
 
 STEP_STATUS="STEP1_RC=${STEP1_RC}, STEP1_TIMEOUT=${STEP1_TIMEOUT}, STEP2_RC=${STEP2_RC}, STEP2_TIMEOUT=${STEP2_TIMEOUT}, STEP3_RC=${STEP3_RC}, STEP3_TIMEOUT=${STEP3_TIMEOUT}"
+[[ "$STEP1_SKIPPED" == true ]] && STEP_STATUS="${STEP_STATUS}, STEP1_SKIPPED=scratch_lock_held"
 
 if [[ "$STEP1_TIMEOUT" == true || "$STEP2_TIMEOUT" == true || "$STEP3_TIMEOUT" == true ]]; then
   OUTCOME="timeout"
@@ -448,6 +457,9 @@ if [[ "$STEP1_TIMEOUT" == true || "$STEP2_TIMEOUT" == true || "$STEP3_TIMEOUT" =
 elif [[ $STEP1_RC -ne 0 || $STEP2_RC -ne 0 || $STEP3_RC -ne 0 ]]; then
   OUTCOME="error"
   REASON="step execution failed (${STEP_STATUS})"
+elif [[ "$STEP1_SKIPPED" == true && "$SWEEP_MODE" == "tmp-only" ]]; then
+  OUTCOME="skipped_lock"
+  REASON="tmp-only sweep skipped: scratch lock held (${STEP_STATUS})"
 elif [[ "$DRY_RUN" == true ]]; then
   OUTCOME="success_noop"
   REASON="dry-run sweep completed without deletions (${STEP_STATUS})"

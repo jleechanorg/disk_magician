@@ -62,6 +62,13 @@ _scratch_budget_lsof_snapshot() {
   else
     return 1
   fi
+  local tbin=""
+  declare -F resolve_timeout_bin >/dev/null && tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    # Bounded: a timeout is a failed snapshot -> caller proceeds without prefilter.
+    { "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC:-30}s" "$lsof_bin" -n -P -F n 2>/dev/null || return 1; } | sed -n 's/^n//p'
+    return "${PIPESTATUS[0]}"
+  fi
   "$lsof_bin" -n -P -F n 2>/dev/null | sed -n 's/^n//p'
 }
 
@@ -163,6 +170,10 @@ scratch_budget_evict_root() {
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
     kb=$(path_size_kb "$item")
+    if (( kb < 0 )); then
+      log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."
+      continue
+    fi
     total_kb=$(( total_kb + kb ))
     # "cannot measure -> preserve" (bead disk_magician-lsl follow-up): a
     # non-numeric mtime (stat/find failure, unreadable subtree) is excluded

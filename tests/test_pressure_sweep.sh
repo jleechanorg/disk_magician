@@ -24,7 +24,7 @@ mkdir -p "$MOCK_BIN" "$STATE_DIR"
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/usr/bin/env bash
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
-exit 0
+exit "${TMP_MODE_RC:-0}"
 MOCK
 
 cat > "$MOCK_BIN/cleanup_colima.sh" <<'MOCK'
@@ -64,6 +64,7 @@ run_pressure() {
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
     DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
     CODESIGN_MODE="${CODESIGN_MODE:-success}" \
+    TMP_MODE_RC="${TMP_MODE_RC:-0}" \
     INVOCATION_LOG="$INVOCATION_LOG" \
     /bin/bash "$SCRIPT" "$@"
 }
@@ -460,7 +461,7 @@ assert_receipt_field "Test 16 outcome error receipt" "$STATE_DIR/receipts/pressu
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/bin/bash
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
-exit 0
+exit "${TMP_MODE_RC:-0}"
 MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh"
 
@@ -731,6 +732,17 @@ assert_not_contains "Test 25 no scratch cleanup invoked" "cleanup_tmp" "$INVOCAT
 [[ $rc -eq 0 ]] && { echo "  PASS  Test 25 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 25 rc=$rc"; FAIL=$(( FAIL + 1 )); }
 assert_receipt_field "Test 25 blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
 assert_receipt_field "Test 25 receipt nulls timed-out tmp metric" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('precondition', {}).get('tmp_gb'))" "None"
+
+echo "Test 26: scratch lock held (rc 75) is a skip, not a FAILED step"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+TMP_MODE_RC=75 run_pressure 8
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "logs the skip" "step 1/3 cleanup_tmp.sh skipped (scratch lock held)" "$LOG_CONTENT"
+assert_not_contains "does not log FAILED for step 1" "cleanup_tmp.sh FAILED" "$LOG_CONTENT"
+assert_receipt_field "Test 26 records STEP1 skip" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP1_SKIPPED=scratch_lock_held' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 26 outcome is not error" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome') != 'error'" "True"
 
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

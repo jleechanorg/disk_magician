@@ -222,6 +222,37 @@ sandbox_guard_roots "${TMP_DIRS[@]:-}" "$ARCHIVE_ROOT" "${USER_TMP:-}" "${PRIVAT
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
+# Per-probe bound (seconds) for du / recency find / lsof snapshot on a single
+# entry. Exceeding it fails closed for that entry only.
+PROBE_TIMEOUT_SEC="${DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS:-30}"
+if ! [[ "$PROBE_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]]; then
+  log "invalid DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS='${PROBE_TIMEOUT_SEC}', using 30"
+  PROBE_TIMEOUT_SEC=30
+fi
+UNBOUNDED_WARNED=false
+warn_unbounded_probes_once() {
+  [[ "$UNBOUNDED_WARNED" == true ]] && return 0
+  UNBOUNDED_WARNED=true
+  log "WARNING: no timeout binary found; du/find probes are unbounded."
+}
+
+# resolve_timeout_bin [override] — print a GNU-style timeout executable, or
+# nothing. A non-empty override must be executable or nothing is printed.
+resolve_timeout_bin() {
+  local candidate
+  if [[ -n "${1:-}" ]]; then
+    [[ -x "$1" ]] && echo "$1"
+    return 0
+  fi
+  for candidate in "$(command -v timeout 2>/dev/null || true)" "$(command -v gtimeout 2>/dev/null || true)" \
+      /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+}
+
 path_size_kb() {
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
@@ -233,13 +264,47 @@ path_size_kb() {
   # stderr) so a `du` failure never makes this function's caller (e.g.
   # `kb=$(path_size_kb "$path")` under `set -eo pipefail`) abort the whole
   # script instead of falling back to 0.
-  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+  # Bounded (pressure sweeps share one step budget): a du that exceeds the probe
+  # timeout prints -1 (size unknown, distinct from an empty 0 KB entry). Every
+  # caller must preserve a negative result; only that entry is affected.
+  # Any non-success du with no numeric total is unknown (-1), never 0. rc 1 WITH
+  # a numeric total (EACCES/ENOENT partial) stays a lower bound.
+  local tbin out rc=0 total
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk "$1" 2>/dev/null)" || rc=$?
+    if (( rc == 124 || rc == 137 )); then
+      log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
+      echo -1
+      return 0
+    fi
+    if (( rc >= 125 && rc <= 127 )); then
+      log "du wrapper failed rc=${rc}, size unknown (preserving): $1"
+      echo -1
+      return 0
+    fi
+  else
+    warn_unbounded_probes_once
+    out="$(du -sk "$1" 2>/dev/null)" || rc=$?
+  fi
+  total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
+  if [[ -z "$total" ]] && (( rc != 0 )); then
+    log "du failed rc=${rc}, size unknown (preserving): $1"
+    echo -1
+    return 0
+  fi
+  echo "${total:-0}"
 }
 
 remove_path() {
   local path="$1"
   local kb
   kb=$(path_size_kb "$path")
+  if (( kb < 0 )); then
+    log "Preserving (size unknown, not removing): $path"
+    echo 0
+    return 0
+  fi
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would remove: $path  (${kb} KB)"
@@ -287,7 +352,14 @@ has_recent_activity() {
   local dir="$1" hours="$2" mins hit_file rc=0
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  local tbin
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  else
+    warn_unbounded_probes_once
+    /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  fi
   if (( rc != 0 )); then
     rm -f "$hit_file"
     log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
@@ -586,6 +658,8 @@ purge_aged_archives() {
     # Size first because du can be slow. All safety probes follow it, with the
     # open-file check last immediately before the destructive operation.
     kb=$(path_size_kb "$d")
+    size_unknown=false
+    (( kb < 0 )) && { size_unknown=true; kb=0; }
     # Hard cap (bead jleechan-mtow): past LARGE_TMP_ARCHIVE_MAX_HOURS the
     # entry is purged even if activity probes would keep it — otherwise a
     # process holding fds into the archive keeps it alive unboundedly. If
@@ -603,6 +677,10 @@ purge_aged_archives() {
       fi
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+      continue
+    fi
+    if [[ "$size_unknown" == true ]]; then
+      log "Skipping aged archive (size unknown): $d"
       continue
     fi
     if has_active_marker "$d"; then
@@ -666,6 +744,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   # 2. agent_prompt_*.txt files older than AGENT_PROMPT_MIN
   while IFS= read -r -d '' f; do
     local_kb=$(path_size_kb "$f")
+    if (( local_kb < 0 )); then
+      log "Skipping (size unknown): $f"
+      continue
+    fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would remove: $f  (${local_kb} KB)"
     else
@@ -769,6 +851,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
     # Size filter
     kb=$(path_size_kb "$subdir")
+    if (( kb < 0 )); then
+      log "Skipping (size unknown): $subdir"
+      continue
+    fi
     if [[ "$kb" -lt "$WORKTREE_POINTER_MIN_KB" ]]; then
       log "Skipping (under min size ${WORKTREE_POINTER_MIN_KB} KB): $subdir  (${kb} KB)"
       continue
@@ -887,18 +973,24 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    kb=$(path_size_kb "$d")
-    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
-      continue
-    fi
-
+    # Cheap recency/marker verdicts first: an entry that is too recent to touch
+    # never pays for du or lsof (bead dcz: pressure step budget).
     if [[ -e "$d/.in-use" ]]; then
-      log "Skipping active-use marker (.in-use present): $d  (${kb} KB)"
+      log "Skipping active-use marker (.in-use present): $d"
       continue
     fi
 
     if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d  (${kb} KB)"
+      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+      continue
+    fi
+
+    kb=$(path_size_kb "$d")
+    if [[ "$kb" -lt 0 ]]; then
+      log "Skipping large-dir candidate (size unknown): $d"
+      continue
+    fi
+    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
       continue
     fi
 
