@@ -618,9 +618,9 @@ has_open_files() {
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
-  local path="$1" kb="$2" ts dest
+  local path="$1" kb="$2" sub="${3:-}" ts dest
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  dest="$ARCHIVE_ROOT/$ts"
+  dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
@@ -928,6 +928,104 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
   fi
 fi
 
+# is_scratch_container <dir> — non-git dir that holds child directories.
+# A git repo/worktree is never a container (its children are tracked content).
+is_scratch_container() {
+  local d="$1" hit
+  [[ -e "$d/.git" || -L "$d/.git" ]] && return 1
+  hit="$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
+  [[ -n "$hit" ]]
+}
+
+# large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
+# is a top-level tmp entry, depth 1 a child of a descended container.
+large_consider_entry() {
+  local d="$1" depth="$2" base kb
+  base="$(basename "$d")"
+
+  case "$base" in
+    com.apple.*|system-*|PowerlogHelperd*) return 0 ;;
+    # Our own quarantine root — never re-archive/delete it here;
+    # purge_aged_archives() below is the only thing that touches it.
+    _disk_magician_archive) return 0 ;;
+  esac
+  case "$base" in
+    wt_*|worktree_*)
+      # Misleading-log defect (found live 2026-07-22 during the tmp-scratch
+      # incident diagnosis): this used to log "Skipping ..." unconditionally
+      # BEFORE the approval check, so even when TMP_WORKTREES_APPROVED=1 was
+      # set and the dir was about to be evaluated normally, the log said
+      # "Skipping" -- misread as the gate being broken. Only log "Skipping"
+      # on the actual skip path now; the approved fall-through gets its own
+      # distinct line.
+      if [[ "${TMP_WORKTREES_APPROVED:-0}" != "1" ]]; then
+        log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
+        return 0
+      fi
+      # Even when approved, NEVER archive a worktree with unsaved work —
+      # archiving then purging it would permanently lose uncommitted or
+      # unpushed commits. cleanup_tmp is not git-recovery-aware. (codex review)
+      if worktree_has_unsaved_work "$d"; then
+        log "Skipping approved worktree with unsaved work (uncommitted/unpushed/no-upstream): $d"
+        return 0
+      fi
+      log "Worktree dir approved + clean, evaluating: $d"
+      ;;
+  esac
+
+  if is_protected_root "$base" || { (( depth > 0 )) && is_protected_tmp_path "$d"; }; then
+    log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+    return 0
+  fi
+
+  # Child of a descended container: a repo/worktree is only archived when
+  # provably clean and pushed (same guard the approved wt_*/worktree_* path uses).
+  if (( depth > 0 )) && [[ -e "$d/.git" || -L "$d/.git" ]] && worktree_has_unsaved_work "$d"; then
+    log "Skipping container child with unsaved work (uncommitted/unpushed/no-upstream): $d"
+    return 0
+  fi
+
+  # Cheap recency/marker verdicts first: an entry that is too recent to touch
+  # never pays for du or lsof (bead dcz: pressure step budget).
+  if [[ -e "$d/.in-use" ]]; then
+    log "Skipping active-use marker (.in-use present): $d"
+    return 0
+  fi
+
+  if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+    # Long-lived agent container (non-git dir of per-task dirs): its newest
+    # mtime is refreshed by whichever child is live, so judge each immediate
+    # child on its own. One level only; the container is never removed here.
+    if (( depth == 0 )) && is_scratch_container "$d"; then
+      log "Descending into active container (children evaluated individually): $d"
+      while IFS= read -r -d '' child; do
+        large_consider_entry "$child" 1
+      done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+      return 0
+    fi
+    log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+    return 0
+  fi
+
+  kb=$(path_size_kb "$d")
+  if [[ "$kb" -lt 0 ]]; then
+    log "Skipping large-dir candidate (size unknown): $d"
+    return 0
+  fi
+  if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
+    log "Skipping in-use large tmp dir: $d  (${kb} KB)"
+    return 0
+  fi
+
+  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" >/dev/null
+  ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+  DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+}
+
 if [[ "$INCLUDE_LARGE" == true && -z "$PRIVATE_TMP_ROOT" ]]; then
   # Fail closed (bead disk_magician-ka4): an unresolvable private-tmp root
   # (e.g. DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE pointing at a dir that
@@ -936,72 +1034,7 @@ if [[ "$INCLUDE_LARGE" == true && -z "$PRIVATE_TMP_ROOT" ]]; then
 elif [[ "$INCLUDE_LARGE" == true ]]; then
   log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
   while IFS= read -r -d '' d; do
-    base="$(basename "$d")"
-
-    case "$base" in
-      com.apple.*|system-*|PowerlogHelperd*) continue ;;
-      # Our own quarantine root — never re-archive/delete it here;
-      # purge_aged_archives() below is the only thing that touches it.
-      _disk_magician_archive) continue ;;
-    esac
-    case "$base" in
-      wt_*|worktree_*)
-        # Misleading-log defect (found live 2026-07-22 during the tmp-scratch
-        # incident diagnosis): this used to log "Skipping ..." unconditionally
-        # BEFORE the approval check, so even when TMP_WORKTREES_APPROVED=1 was
-        # set and the dir was about to be evaluated normally, the log said
-        # "Skipping" -- misread as the gate being broken. Only log "Skipping"
-        # on the actual skip path now; the approved fall-through gets its own
-        # distinct line.
-        if [[ "${TMP_WORKTREES_APPROVED:-0}" != "1" ]]; then
-          log "Skipping temp worktree dir (requires TMP_WORKTREES_APPROVED=1): $d"
-          continue
-        fi
-        # Even when approved, NEVER archive a worktree with unsaved work —
-        # archiving then purging it would permanently lose uncommitted or
-        # unpushed commits. cleanup_tmp is not git-recovery-aware. (codex review)
-        if worktree_has_unsaved_work "$d"; then
-          log "Skipping approved worktree with unsaved work (uncommitted/unpushed/no-upstream): $d"
-          continue
-        fi
-        log "Worktree dir approved + clean, evaluating: $d"
-        ;;
-    esac
-
-    if is_protected_root "$base"; then
-      log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
-      continue
-    fi
-
-    # Cheap recency/marker verdicts first: an entry that is too recent to touch
-    # never pays for du or lsof (bead dcz: pressure step budget).
-    if [[ -e "$d/.in-use" ]]; then
-      log "Skipping active-use marker (.in-use present): $d"
-      continue
-    fi
-
-    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
-      continue
-    fi
-
-    kb=$(path_size_kb "$d")
-    if [[ "$kb" -lt 0 ]]; then
-      log "Skipping large-dir candidate (size unknown): $d"
-      continue
-    fi
-    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
-      continue
-    fi
-
-    if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
-      log "Skipping in-use large tmp dir: $d  (${kb} KB)"
-      continue
-    fi
-
-    archive_path "$d" "$kb" >/dev/null
-    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
-    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+    large_consider_entry "$d" 0
   done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 
