@@ -17,10 +17,14 @@
 
 - Lease dir: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, `schema_version` 1, written via temp file plus `mv`.
 - Owner runtimes (basename match): `claude`, `codex`, `agy`, `cursor-agent`, `hermes`. With no runtime ancestor, `owner` is null and the lease is never owner-reaped.
-- Lease TTL: `ttl_hours` default 24. Released or expired leases need `REAP_EXPIRED_QUIET_MINUTES` default 360.
-- Owner alive ⇔ `ps -p <pid> -o lstart=` equals the recorded `lstart` exactly. If `ps` fails, the state is unknown, which means keep.
+- Lease TTL: `ttl_hours` default 24, report-only (`kept:owner-alive-expired`). Removal candidates are only `dead` (quiet `REAP_QUIET_MINUTES` 30) or `released` (quiet `REAP_RELEASED_QUIET_MINUTES` 30). An alive owner is never removed.
+- Pushed proof for the reaper: HEAD contained in `refs/remotes/origin/*` after `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin`, or HEAD equal to a gh-verified MERGED PR head (reuse the `cleanup_worktrees.sh` bead-`ueh` helper).
+- Reason tokens (fixed set): `not-registered`, `live-cwd`, `ao-owned`, `recent-activity`, `dirty`, `hidden-state`, `ignored-data`, `not-pushed`, `remote-unverified`, `locked`, `safety-local`, `owner-alive-expired`, `lease-unreadable`, `remove-failed`.
+- Base: `main` at or after `b776e56`; the remove hook there has the live-cwd, AO, recency, hidden-state and ignored-data checks.
+- Owner start time: `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` parsed with `%a %b %d %H:%M:%S %Y` to a UTC epoch, stored as `start_epoch`. Alive ⇔ the epochs differ by ≤2 s. Never compare raw `lstart` strings. If `ps` fails, the state is unknown, which means keep.
+- Hermes owner match: a `python*` process whose script argument's basename starts with `hermes`.
 - Reaper quiet period for a dead owner: `REAP_QUIET_MINUTES` default 30. One bounded `git fetch --quiet --prune origin` (60 s) per repo per run; a failed fetch means `kept:remote-unverified`. `scripts/safety_check.sh <path>` must pass. Interval 1800 s. `DISK_MAGICIAN_REAP_MODE` ∈ {`nominate` (default), `remove`}.
-- Admission: `WORKTREE_ADMIT_REAP_GB` default 25, `WORKTREE_ADMIT_MIN_GB` default 10 (0 disables), refusal exit code 75.
+- Admission: `WORKTREE_ADMIT_WARN_GB` default 25 (warn only), `WORKTREE_ADMIT_MIN_GB` default 10 (0 disables), refusal exit code 75. The gate never calls the reaper.
 - Status degraded when the root is >60 GiB, or when owner-dead `kept:*` leases number >100.
 - Never `git worktree remove --force`. Only delete `worktree-*` branches, and only when they are not checked out elsewhere.
 - All entry points go through `disk_magician.sh` / `diskm`. No new standalone runner.
@@ -86,9 +90,13 @@
 - Produces:
   - `lease_dir` prints the lease directory (honors `DISK_MAGICIAN_STATE_DIR`).
   - `lease_path_for <worktree_path>` prints the lease file path.
-  - `lease_resolve_owner [start_pid]` prints `pid<TAB>lstart<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
+  - `lease_resolve_owner [start_pid]` prints `pid<TAB>start_epoch<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
+  - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`.
   - `lease_write <worktree_path> <repo> <branch> <creator>`: atomic write with the owner resolved from `$$`. rc 0 on success.
-  - `lease_owner_state <lease_file> [now_epoch]` prints `alive|dead|released|expired|unknown|none`. Precedence: `none` (owner null) > `released` (`released_at` set) > `expired` (`created_at + ttl_hours` passed) > a `ps` check giving `alive`, `dead` or `unknown`.
+  - `lease_owner_state <lease_file> [now_epoch]` prints `none|released|dead|alive|alive-expired|unknown`.
+    - Precedence: `none` (owner null) > `released` > a `ps` check.
+    - The `ps` check gives `dead`, or `unknown` when `ps` fails other than "no such process".
+    - Otherwise it gives `alive-expired` when `created_at + ttl_hours` has passed, else `alive`.
   - `lease_release <worktree_path>` sets `released_at`. rc 1 if there is no lease.
   - `lease_set_verdict <lease_file> <verdict>` updates `last_verdict` and `last_checked_at`.
 - Test hook: `DISK_MAGICIAN_PS_BIN` overrides `ps` for the tests.
@@ -96,13 +104,15 @@
 - [ ] **Step 1: Write failing tests.**
   - `lease_write` creates valid JSON with `schema_version==1` and the given `path`, `branch` and `creator`.
   - `lease_owner_state` returns:
-    - `alive` when a fake `ps` echoes the same `lstart`
+    - `alive` when a fake `ps` echoes the same start time
+    - `alive` when the lease is written under `TZ=America/Los_Angeles LANG=fr_FR.UTF-8` and checked under `TZ=UTC LANG=C` (the real `ps` with `$$`)
     - `dead` when the fake `ps` exits 1
-    - `dead` when the fake `ps` returns a different `lstart` (pid reuse, Review Focus 1)
+    - `dead` when the fake `ps` returns a start time 10 s different (pid reuse, Review Focus 1)
     - `unknown` when the fake `ps` exits 2 with no output (treat any non-1 failure as unknown)
     - `none` for an `owner: null` lease
   - `lease_resolve_owner`, given a fake ps tree `500 sh → 400 claude → 1 launchd`, returns pid 400 / comm `claude`. With no runtime in the chain it returns `-`, and `lease_write` stores `owner: null`.
-  - A lease created 25 h ago with an alive owner returns `expired`. After `lease_release`, the state is `released`.
+  - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release`, the state is `released`.
+  - A fake ps tree `600 Python /opt/hermes/hermes_gateway.py → 1` resolves the owner to pid 600.
 - [ ] **Step 2: Run** `bash tests/test_worktree_lease.sh`. Expected: FAIL (file missing).
 - [ ] **Step 3: Implement.** Use python3 for JSON reads and writes. Write to `mktemp` in the lease dir, then `mv`.
 - [ ] **Step 4: Run** the test. Expected: PASS.
@@ -116,20 +126,26 @@
 
 **Interfaces:**
 - Produces:
-  - `wrh_removal_verdict <real_path> <recency_spec>`, where `recency_spec` is `days:N` or `minutes:N`. It prints `remove` or `kept:<reason>` using exactly the current `wrh_main` reason strings, and always returns rc 0.
+  - `wrh_removal_verdict <real_path> <recency_spec> [pushed_scope]`, where `recency_spec` is `days:N` or `minutes:N` and `pushed_scope` is `all-remotes` (the hook's default) or `origin`. It prints `remove` or `kept:<token>` from the Global Constraints token set, and always returns rc 0.
+  - `wrh_main` maps each token to its existing prose log line, so the hook's log output is unchanged.
   - `wrh_remove_now <real_path>` runs the existing `git worktree remove` plus `worktree-*` branch deletion. rc 0 if removed.
 - `wrh_main` becomes: parse stdin → standard-root check → `wrh_removal_verdict "$real" days:7` → log → `wrh_remove_now`.
 
-- [ ] **Step 1: Write the failing test.** Case 30 sources the script, calls `wrh_removal_verdict` on a clean pushed fixture aged 10 days with `days:7`, and expects `remove`. With `minutes:30` on a fixture last touched 5 min ago it expects `kept:recent-activity`.
-- [ ] **Step 2: Run** `bash tests/test_worktree_remove_hook.sh`. Expected: case 30 FAILS, and the other 128 still pass.
+- [ ] **Step 0:** Confirm the base is `main` ≥ `b776e56`: `git merge-base --is-ancestor b776e56 HEAD`.
+- [ ] **Step 1: Write the failing test.** A new case sources the script and calls `wrh_removal_verdict`:
+  - a clean pushed fixture aged 10 days with `days:7` → `remove`
+  - a fixture last touched 5 min ago with `minutes:30` → `kept:recent-activity`
+  - a fixture whose HEAD is only on a `fork` remote, with `origin` scope → `kept:not-pushed`
+- [ ] **Step 2: Run** `bash tests/test_worktree_remove_hook.sh`. Expected: the new case FAILS and every existing assertion still passes.
 - [ ] **Step 3: Implement** the extraction. Keep the check order and log text unchanged.
-- [ ] **Step 4: Run** the test. Expected: all PASS (129).
+- [ ] **Step 4: Run** the test. Expected: all PASS, and the existing log-line assertions are unchanged.
 - [ ] **Step 5: Commit** `refactor: extract wrh_removal_verdict from remove hook`.
 
 ### Task 4: Write leases at creation
 
 **Files:**
-- Modify: `scripts/worktree_new.sh` (after a successful `wtn_create` in `wtn_main`) and `scripts/worktree_create_hook.sh` (in `wth_main`, after the path is created)
+- Modify: `scripts/worktree_new.sh` (after a successful `wtn_create` in `wtn_main`), `scripts/worktree_create_hook.sh` (in `wth_main`, after the path is created), and `scripts/worktree_guard.py` (on an allowed, statically resolved `git worktree add`, write a pending lease by calling `bash -c 'source scripts/lib/worktree_lease.sh; lease_write_pending ...'`; fail open)
+- Test: `tests/test_worktree_guard.py`
 - Test: `tests/test_worktree_new.sh`, `tests/test_worktree_create_hook.sh`
 
 **Interfaces:**
@@ -140,6 +156,7 @@
   - After `worktree_new.sh <repo> feat/x`, `lease_path_for <printed path>` exists with `creator=="worktree-new"`.
   - After the create hook, `creator=="worktree-create-hook"`.
   - A failing lease write (read-only lease dir) still prints the path and exits 0, logging `lease write failed`.
+  - The guard, given `git worktree add ~/.worktrees/r/x -b x` under a fake ps tree with `claude`, writes a pending lease with `creator=="guard"` and the claude pid. An unresolvable target writes nothing. The guard's allow/deny output is unchanged.
 - [ ] **Step 2: Run** both tests. Expected: the new assertions FAIL.
 - [ ] **Step 3: Implement.** Call `lease_write ... || log`. Stdout must stay exactly the path.
 - [ ] **Step 4: Run** both tests. Expected: PASS.
@@ -152,9 +169,15 @@
 - Test: `tests/test_worktree_reap.sh`
 
 **Interfaces:**
-- Consumes: `lease_*` (Task 2), `wrh_removal_verdict` and `wrh_remove_now` (Task 3), `worktree_is_recently_active_minutes` (Task 1), `scripts/job_receipt.py` (existing; the same `begin`/`finish` calls as `pressure_sweep.sh`).
+- Consumes:
+  - `lease_*` (Task 2)
+  - `wrh_removal_verdict ... origin` and `wrh_remove_now` (Task 3)
+  - `worktree_is_recently_active_minutes` (Task 1)
+  - `scripts/job_receipt.py` (existing; the same `begin`/`finish` calls as `pressure_sweep.sh`)
+  - The pressure sweep's stale-lock aging pattern
+  - The `cleanup_worktrees.sh` gh-verified merged-PR-head helper
 - Produces:
-  - CLI `worktree_reap.sh [--mode nominate|remove]`. The flag overrides `DISK_MAGICIAN_REAP_MODE`.
+  - CLI `worktree_reap.sh [--mode nominate|remove] [--deadline-seconds N]` (default 1500). The `--mode` flag overrides `DISK_MAGICIAN_REAP_MODE`.
   - Receipt job `worktree_reap`, whose `candidates` hold counts per verdict and `postcondition.freed_bytes` from the `df` delta.
   - Lock dir `$STATE/worktree_reap.lock`.
 
@@ -166,7 +189,14 @@
     - remove mode → the worktree is gone and the lease is deleted
   - Owner dead, dirty → `kept:dirty`, present in both modes.
   - Owner dead, quiet 5 min → `kept:recent-activity` (Review Focus 2).
-  - Lease expired with the owner alive, quiet 2 h → `kept:recent-activity`. Quiet 7 h → `remove` verdict.
+  - Lease expired with the owner alive, quiet 7 h → `kept:owner-alive-expired` in both modes.
+  - Released lease with the owner alive, quiet 40 min → `remove` verdict. Quiet 5 min → `kept:recent-activity`.
+  - `owner: null` lease, clean and pushed, in **remove** mode → still present, not reaped.
+  - HEAD only on a `fork/*` ref → `kept:not-pushed`. HEAD equal to a mocked gh MERGED PR head with the branch deleted → `remove` verdict.
+  - A pending guard lease plus a registered worktree at that path → promoted, `creator` stays `guard`, owner kept. A pending lease 2 h old with no worktree → deleted.
+  - A stale lock dir with a dead pid, older than the TTL → reclaimed, the run proceeds.
+  - A run sent TERM mid-loop → lock released, and the next run is not `skipped_lock`.
+  - `--deadline-seconds 1` with 3 candidates → stops between candidates, receipt `outcome="partial"`, lock released.
   - Fake `git fetch` failing for the repo → `kept:remote-unverified`.
   - Path listed in a temp `safety.local.json` `never_delete` → `kept:safety-local`.
   - Owner dead, a live process cwd inside the worktree (spawn `sleep` with that cwd) → kept, live-cwd reason.
@@ -211,17 +241,17 @@
 - Test: `tests/test_worktree_new.sh`
 
 **Interfaces:**
-- Consumes: `worktree_reap.sh` (Task 5).
+- Consumes: nothing from earlier tasks.
 - Test hook: `DISK_MAGICIAN_FREE_GB_OVERRIDE` (same name as the pressure sweep).
 
 - [ ] **Step 1: Write failing tests.**
-  - Free 50 → creates, no reap invoked.
-  - Free 20 → invokes the reaper once (a mock on PATH logs it), then creates.
+  - Free 50 → creates, no warning.
+  - Free 20 → creates; stderr has `low disk (20 GiB free)` and stdout is still exactly the path.
   - Free 5 → exit 75. Stderr contains `disk low (5 GiB free): reuse an existing worktree`, and no worktree dir is created.
   - `WORKTREE_ADMIT_MIN_GB=0` with free 5 → creates.
   - Free measurement fails (override `x`) → creates and logs `free-space unmeasurable` (Review Focus 5).
 - [ ] **Step 2: Run.** Expected: FAIL.
-- [ ] **Step 3: Implement.** Use `df -kP` on `$STANDARD_WORKTREE_ROOT` (or `/System/Volumes/Data`). Run the reaper via `wtn_timeout 60`.
+- [ ] **Step 3: Implement.** Use `df -kP` on `$STANDARD_WORKTREE_ROOT` (or `/System/Volumes/Data`). Warnings and the refusal go to stderr only.
 - [ ] **Step 4: Run** `bash tests/test_worktree_new.sh`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat: free-space admission gate for worktree-new`.
 
@@ -235,6 +265,7 @@
 - Produces: a `status --json` key `worktrees`, holding:
   - `leases` (counts by `owner_state`)
   - `verdicts` (counts by `last_verdict`)
+  - `coverage` (share of leases with a non-null owner, by creator)
   - `created_per_day_7d` (float)
   - `root_gb` (from the latest observer/snapshot bucket for `~/.worktrees`, or null)
   - `degraded_reasons` (list)
