@@ -267,21 +267,33 @@ path_size_kb() {
   # Bounded (pressure sweeps share one step budget): a du that exceeds the probe
   # timeout prints -1 (size unknown, distinct from an empty 0 KB entry). Every
   # caller must preserve a negative result; only that entry is affected.
-  local tbin
+  # Any non-success du with no numeric total is unknown (-1), never 0. rc 1 WITH
+  # a numeric total (EACCES/ENOENT partial) stays a lower bound.
+  local tbin out rc=0 total
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    local out rc=0
     out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk "$1" 2>/dev/null)" || rc=$?
     if (( rc == 124 || rc == 137 )); then
       log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
       echo -1
       return 0
     fi
-    awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}' <<<"$out"
+    if (( rc >= 125 && rc <= 127 )); then
+      log "du wrapper failed rc=${rc}, size unknown (preserving): $1"
+      echo -1
+      return 0
+    fi
+  else
+    warn_unbounded_probes_once
+    out="$(du -sk "$1" 2>/dev/null)" || rc=$?
+  fi
+  total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
+  if [[ -z "$total" ]] && (( rc != 0 )); then
+    log "du failed rc=${rc}, size unknown (preserving): $1"
+    echo -1
     return 0
   fi
-  warn_unbounded_probes_once
-  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+  echo "${total:-0}"
 }
 
 remove_path() {
@@ -718,7 +730,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   # 2. agent_prompt_*.txt files older than AGENT_PROMPT_MIN
   while IFS= read -r -d '' f; do
     local_kb=$(path_size_kb "$f")
-    (( local_kb < 0 )) && local_kb=0
+    if (( local_kb < 0 )); then
+      log "Skipping (size unknown): $f"
+      continue
+    fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would remove: $f  (${local_kb} KB)"
     else

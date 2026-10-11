@@ -30,7 +30,7 @@ mkdir -p "$BIN" "$TMP_ROOT/emptytmp"
 cat > "$BIN/du" <<EOF
 #!/usr/bin/env bash
 echo "\${@: -1}" >> "$TMP_ROOT/du.log"
-case "\${@: -1}" in *slow*) exec sleep 30 ;; *big_[123]) printf "1258291\\t%s\\n" "\${@: -1}"; exit 0 ;; esac
+case "\${@: -1}" in *slow*) exec sleep 30 ;; *fail_*|*agent_prompt_fail*) exit 1 ;; *perm_1) echo "du: Permission denied" >&2; printf "1258291\\t%s\\n" "\${@: -1}"; exit 1 ;; *big_[123]) printf "1258291\\t%s\\n" "\${@: -1}"; exit 0 ;; esac
 exec /usr/bin/du "\$@"
 EOF
 cat > "$BIN/lsof" <<EOF
@@ -193,6 +193,55 @@ import scratch_lock as s
 assert s.parse_wait(\"inf\")==20.0 and s.parse_wait(\"nan\")==20.0 and s.parse_wait(\"x\")==20.0
 assert s.parse_wait(\"-5\")==0.0 and s.parse_wait(\"3\")==3.0 and s.parse_wait(None)==20.0"'
 check "message reports the wait" 'grep -q "after waiting" <<<"$(cat "$TMP_ROOT/wait4.out")"'
+
+budget_run() {  # <root> [VAR=val ...] — budget run over <root>; sets RC and OUT
+  local root="$1"; shift
+  set +e
+  OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
+    DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" \
+    DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
+    DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/p5" \
+    DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$root" DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/emptytmp" \
+    "$@" bash "$SOURCE_SCRIPT" --clean --budget-gb 2 2>&1)"
+  RC=$?
+  set -e
+}
+mk_budget_root() {  # <root> <oldest_extra...>
+  local root="$1" d y=2019
+  rm -rf "$root"; mkdir -p "$root"
+  for d in "${@:2}" big_1 big_2 big_3; do
+    mkdir -p "$root/$d"; head -c 100 /dev/zero > "$root/$d/f"
+    /usr/bin/find "$root/$d" -exec touch -t ${y}01010000 {} +; y=$((y + 1))
+  done
+}
+
+echo "Test 11: du fails (rc 1, no output) -> unknown, entry kept under budget"
+R11="$TMP_ROOT/r11"; mk_budget_root "$R11" fail_a
+budget_run "$R11"
+check "failing-du entry kept" '[[ -e "$R11/fail_a" ]]' "$OUT"
+check "logged du failed" 'grep -q "du failed rc=1, size unknown" <<<"$OUT"'
+
+echo "Test 12: broken timeout wrapper (rc 125) -> unknown, nothing evicted"
+printf '#!/usr/bin/env bash\nexit 125\n' > "$BIN/timeout125"; chmod +x "$BIN/timeout125"
+R12="$TMP_ROOT/r12"; mk_budget_root "$R12"
+budget_run "$R12" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/timeout125"
+check "all entries kept" '[[ -e "$R12/big_1" && -e "$R12/big_2" && -e "$R12/big_3" ]]' "$OUT"
+check "logged wrapper failure" 'grep -q "du wrapper failed rc=125" <<<"$OUT"'
+
+echo "Test 13: du rc 1 WITH numeric total (Permission denied) -> lower bound used"
+R13="$TMP_ROOT/r13"; mk_budget_root "$R13" perm_1
+rm -rf "$R13/big_1"
+budget_run "$R13"
+check "partial-size entry evicted as 1258291 KB" '[[ ! -e "$R13/perm_1" ]]' "$OUT"
+check "second-oldest evicted, newest kept" '[[ ! -e "$R13/big_2" && -e "$R13/big_3" ]]'
+
+echo "Test 14: agent_prompt file with unknown size is skipped, not deleted"
+printf x > "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"; touch -t 202001010000 "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"
+printf x > "$TMP_ROOT/emptytmp/agent_prompt_ok.txt"; touch -t 202001010000 "$TMP_ROOT/emptytmp/agent_prompt_ok.txt"
+P14="$TMP_ROOT/p14"; mk_fixture "$P14"
+run_tmp "$P14" TMP_ARGS=
+check "unknown-size prompt kept" '[[ -e "$TMP_ROOT/emptytmp/agent_prompt_fail.txt" ]]' "$OUT"
+check "measurable stale prompt still removed" '[[ ! -e "$TMP_ROOT/emptytmp/agent_prompt_ok.txt" ]]'
 
 echo "Results: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))
