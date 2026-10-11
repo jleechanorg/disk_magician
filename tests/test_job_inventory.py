@@ -51,6 +51,7 @@ class JobInventoryTests(unittest.TestCase):
             "com.jleechanorg.disk-magician-pressure-sweep",
             "com.jleechanorg.disk-magician-tmp-scratch",
             "com.jleechanorg.disk-magician-worktree-hygiene",
+            "com.jleechanorg.disk-magician-worktree-reap",
         }
         self.assertEqual(labels, expected)
         for record in records:
