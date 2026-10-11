@@ -45,6 +45,7 @@ Commands:
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
+  cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
   cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
@@ -332,6 +333,9 @@ case "$CMD" in
     ;;
   cleanup_pr_scratch|cleanup-pr-scratch)
     "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
+    ;;
+  cleanup_codex_documents|cleanup-codex-documents)
+    "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"
     ;;
   prune_aside_sessions|prune-aside-sessions)
     "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
