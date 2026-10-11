@@ -1,18 +1,20 @@
 # Disk-fill durable control: diskm budget governor with owner-lifecycle leases
 
-- **Date:** 2026-10-11
-- **Status:** Design, auto-approved under `/superpowers-quick`. `/advice` and `/web-advice` are run by the parent workflow.
-- **Base:** origin/main `688fff6` (v0.2.197 deployed 2026-10-11T20:43Z)
-- **Related:** worktree lease teardown design `docs/superpowers/specs/2026-10-10-worktree-lease-teardown-design.md` (on branch `docs/worktree-lease-design`, implemented by PR #148). Open PRs #150 (Colima stale lock) and #151 (Codex Documents cleanup). Beads `7u9t`, `oyt4`, `67xj`, `d45`, `i2o`, `4y6`.
+- **Date:** 2026-10-11 (revision 2, after the Opus `/advice` review and `/secondo`)
+- **Status:** Design, auto-approved under `/superpowers-quick`. Budget numbers are **pilot values** until the pilot week (§7.4) validates them.
+- **Base:** origin/main `688fff6` (v0.2.197, deployed 2026-10-11T20:43Z per `~/.disk_magician_state/deployed.json`)
+- **Related code on main (PR #148, merged 2026-10-11T13:01Z):** `scripts/lib/worktree_lease.sh`, `scripts/worktree_reap.sh` (nominate/remove, `adopt`, `verdict_for`), `scripts/worktree_new.sh` (`wtn_admit`), `scripts/worktree_remove_hook.sh` (`wrh_removal_verdict` / `wrh_remove_now`), `scripts/lib/worktree_merged_pr.sh`, `launchd/com.jleechanorg.disk-magician-worktree-reap.plist.template`. The 10-10 lease design doc was never pushed (branch `docs/worktree-lease-design` is absent on origin); the owner-exit rule text lives in bead `7u9t`'s first comment.
+- **Open PRs this depends on:** #150 (Colima stopped-VM guard, stale lima lock), #151 (`diskm cleanup-codex-documents`), #152 (`cleanup_tmp.sh` descends into active tmp containers under `--large`), #153 (`worktree_hygiene.sh` shared rebuildable-ignored allowlist).
+- **Beads:** `7u9t`, `oyt4`, `67xj`, `d45`, `i2o`, `4y6`.
 - **Plan:** `docs/superpowers/plans/2026-10-11-disk-fill-durable-control.md`
 
 ## 1. Why
 
-At the time of writing, `df` shows **7.2 GiB free of 926 GiB (100%)**. The user has asked "stop the disk constantly filling" on 09-23, 10-03, 10-04, 10-05, 10-06, 10-08, 10-09, 10-10 and 10-11, and twice within 22 hours (10-10 23:01 and 10-11 21:10). In 30 days the repo produced five designs (09-11, 09-23, 10-03, 10-05, 10-10) and about 80 merged PRs (#67–#149). None of this lowered the used-space trough.
+At the time of writing, `df` shows **7.2 GiB free** (21:10Z) and 33.4 GiB free (22:10Z). The data volume's usable capacity is **about 895 GiB** (`df` used + available; the 926 GiB container size includes about 31 GiB held by other APFS volumes). The user has asked "stop the disk constantly filling" on 09-23, 10-03, 10-04, 10-05, 10-06, 10-08, 10-09, 10-10 and 10-11. In 30 days the repo produced five designs and about 80 merged PRs (#67–#149). None lowered the used-space trough.
 
 ### 1.1 30-day retrospective: what the data shows
 
-All figures are from `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}`: 12,878 df-only samples covering 10-02 to 10-11. Snapshot-ledger figures are used only where snapshot coverage is at least 70%.
+All figures are from `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}`: 12,878 df-only samples covering 10-02 to 10-11.
 
 | Day | Min used (GiB) | Max used (GiB) |
 |---|---|---|
@@ -28,211 +30,228 @@ All figures are from `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}`: 12,87
 
 - Free space was below 8 GiB in **605 of 12,878 samples**, on 8 of the 10 days.
 - The daily trough rose from 754 to 839 GiB in a week. Intraday swings were 54–131 GiB.
-- Four reclaim events gave back +56.5 GiB (10-05), +63 (10-06), about +40–60 (10-10) and about +55 (10-11). Each refilled within hours to about 2 days. The median refill half-life was about 1 hour, and about 2 hours for drops of 38 GiB or more.
+- Four reclaim events gave back about 40–63 GiB each and refilled within hours to about 2 days (median refill half-life about 1 hour; about 2 hours for drops of 38 GiB or more).
 
 ### 1.2 Verified root causes (survived adversarial refutation)
 
 **RC1: open loop. Nothing limits creation, so standing stock = creation rate × retention.**
 
-- **Births.** Counted by birth time under `~/.worktrees`: 40, 49, 41, 61 and 35 per day for 10-07 to 10-11. All three verifiers confirmed these counts.
-- **Surviving stock.** A du of surviving worktrees by birth day gives about 17–38 GiB/day still on disk.
-- **Producer-side PRs.** Only two PRs touched the producer side: #107 (standard root, 10-06, with no teardown) and #148 (lease plus admission gate, merged 10-11, live in nominate mode only). Every other PR improved a sweeper.
-- **Retention.** Retention is set by the 3-day merged floor and the 7-day general floor. One verifier noted that retention is a co-equal lever: admission alone is not enough while the floors stay as they are.
-- **Unverified.** The /private/tmp rate (about 21 GiB/day) and the 45–50 GiB/day producer total are not verified. They are used here as model inputs only.
+- **Births** under `~/.worktrees`: 40, 49, 41, 61 and 35 per day for 10-07 to 10-11 (confirmed by three verifiers).
+- **Surviving stock:** about 17–38 GiB/day of worktrees born that day are still on disk.
+- **Producer-side PRs:** only #107 (standard root, no teardown) and #148 (lease + admission gate, live in nominate mode). Every other PR improved a sweeper.
+- **Retention** is set by the 3-day `cleanup_worktrees.sh` floor and the 7-day general floor, and `cleanup_worktrees.sh` itself only runs with `WORKTREE_APPROVED=1`, which no plist sets (`main_sweeper.sh:389`).
+- **Unverified model inputs:** the /private/tmp rate (about 21 GiB/day) and the 45–50 GiB/day producer total.
 
 **RC8: symptom and metric. The volume runs 91–97% full, so swings are as large as the headroom.**
 
-- Headroom is about 30–45 GiB. Bursts are 15–25 GiB/h and the sustained drain is 2–8 GiB/h.
-- `pressure_sweep.sh` acts only below 40 GiB free and runs a fixed step list, so it holds the disk near 40 GiB instead of creating margin.
-- A stopped Colima VM (stale lima lock since 10-08, bead `67xj`) cannot fstrim, and nothing raised an alert.
-- One verifier argued RC8 is a symptom, not a cause. This design accepts that and adopts its actionable parts: alert on a rising trough, alert on a dead actuator, and measure success as the df trough, never as "GiB reclaimed".
+- `pressure_sweep.sh` acts only below 40 GiB free with a fixed three-step list, so it holds the disk near 40 GiB instead of creating margin.
+- A stopped Colima VM (stale lima lock since 10-08, bead `67xj`) could not fstrim, and nothing alerted.
+- Adopted actions: alert on a rising trough and on a dead actuator; measure success by the df trough and minimum, never by "GiB reclaimed".
 
-### 1.3 Refuted or demoted claims (kept as constraints, not as causes)
+### 1.3 Refuted or demoted claims (kept as constraints)
 
-| Claim | Verdict | What survives into this design |
+| Claim | Verdict | What survives |
 |---|---|---|
-| RC2: age floors alone set the equilibrium (70–160 GiB protected) | Refuted. About 53 GiB was measured inside the floors, the troughs swung 754–839, and refill happens in hours, not days | Age floors are a contributor. Owner-lifecycle release (C8/C9) replaces blanket age floors only for provably safe items |
-| RC3: agents cannot tear down | Refuted as stated. The remove hook does run, and it keeps items for dirty, unpushed, ignored-file or under-7-day reasons. No skill tears down `/private/tmp/<repo>/` scratch | Session-exit release (C8). `protect-worktrees.sh` is **not** loosened |
-| RC4: receipts report success from exit code | Refuted. Receipts record error, timeout and blocked_safety honestly. The real gap is that `freed_bytes`/`df_delta` are null on main_sweeper, pressure_sweep and tmp_scratch_sweep, and nothing alerts on them | Receipts must carry `df_delta_bytes` (C10). Liveness alerts (C12) |
-| RC5: no plist sets any approval | Refuted. `worktree-venvs`, `code-sign-clones`, `colima-prune` and `playwright-dedup` do bake in approvals. Worktree removal (hygiene, `cleanup_worktrees` under main_sweeper) and claude-state remain permanent dry-runs | Standing-decision record (C11) for exactly the gates that are never satisfied |
-| RC6: measurement work crowded out producer work | Refuted. Measurement was about 25% of PRs, and the code_sign_clone phantom PRs were under 1% of lines | Rule: count df_delta only, never du (anti-goal) |
-| RC7: about 7-day deploy lag | Refuted. Receipts show 19 installed versions between 10-07 and 10-11, redeployed every 1–4 hours | None. The fix-of-a-fix churn (#136→#145→#146→#149) is noted as a smell |
-| RC9: process with no closure criterion | Refuted as a byte cause | Bead closure requires two consecutive weekly trough checks (section 9) |
+| RC2: age floors alone set the equilibrium | Refuted (about 53 GiB inside the floors; refill in hours) | Owner-exit release (T1) for provably safe items only |
+| RC3: agents cannot tear down | Refuted as stated; the remove hook keeps dirty/unpushed/ignored/<7 d items | Session-exit release (C8). `protect-worktrees.sh` is **not** loosened |
+| RC4: receipts report success from exit code | Refuted; the gap is null `df_delta` on main_sweeper, pressure_sweep, tmp_scratch_sweep | `df_delta_bytes` on governor receipts (C10); liveness alerts (C12) |
+| RC5: no plist sets any approval | Refuted; four plists do. Worktree removal and claude-state remain permanent dry-runs | Standing-decision record (C11) for exactly those gates |
+| RC6: measurement crowded out producer work | Refuted (~25% of PRs) | Count df_delta only, never du |
+| RC7: about 7-day deploy lag | Refuted (19 installed versions 10-07..10-11) | None |
+| RC9: no closure criterion | Refuted as a byte cause | Bead closes on two consecutive weekly checks (§9) |
 
 ### 1.4 What failed in the 30-day record
 
-- **About 78 PRs added or fixed sweepers or measurement.** The trough still rose. A sweeper reclaim lasts hours.
-- **Approval environment variables that no plist sets.** `WORKTREE_APPROVED` and `CLAUDE_STATE_APPROVED` are never set by a scheduled job, so hygiene and claude-state became permanent dry-runs.
-- **Control cadence of 30–60 minutes against a refill half-life of 1–2 hours,** with a single-threshold sweep. One 600-second step timeout blocked every later step.
-- **"Installed" was trusted as "running".** Examples: fleet flapping, plutil corruption, Colima down for 3 days, main_sweeper erroring on 64 of 64 runs.
-- **du was counted as reclaim.** `code_sign_clone` reported 104 GiB, and deleting it freed about 0 (APFS copy-on-write).
+- About 78 PRs added or fixed sweepers; each reclaim lasted hours.
+- Approval env vars (`WORKTREE_APPROVED`, `CLAUDE_STATE_APPROVED`) that no scheduled job sets.
+- 30–60 minute control cadence against a 1–2 hour refill half-life; one 600 s step timeout blocked every later step.
+- "Installed" trusted as "running" (fleet flapping, plutil corruption, Colima down 3 days, main_sweeper erroring 64/64).
+- du counted as reclaim (`code_sign_clone` reported 104 GiB; deleting it freed about 0 on APFS).
 
 ## 2. Goals
 
-1. Close the loop. Every governed producer class has a byte budget, and creation is admitted against a free-space setpoint.
-2. Shorten retention where it is provably safe. An artifact whose owner has exited and that is clean and pushed is reclaimable without waiting 3–7 days.
-3. Make the controller observe itself. A dead actuator, a blind admission, or a rising trough is the first line of `diskm status`.
-4. Measure success by the df trough and by samples with less than 15 GiB free, not by GiB reclaimed.
+1. Close the loop. Creation is admitted against a free-space zone computed from df on every call, plus per-class byte budgets where a class can be measured reliably.
+2. Shorten retention where it is provably safe and already sanctioned: owner-exit release (D1) and activation of the existing 3-day `cleanup_worktrees.sh` rule.
+3. Make the controller observe itself. A dead actuator, a blind admission, a stale tick or a rising trough is the first line of `diskm status`.
+4. Measure success by df: the 7-day minimum free, samples under 15 GiB free, and the daily used trough.
 
 ## 3. Non-goals
 
-- Replacing existing actuators (`cleanup_tmp.sh`, `cleanup_colima.sh`, `worktree_reap.sh`, and others). The governor schedules them; it does not rewrite them.
-- Fixing the full-attribution ledger (bead `4y6`). The governor works from df plus per-class du with stale labels.
-- Reducing `~/.codex/sessions*` or `~/.claude/projects`. These are on the never-delete list.
-- Linux portability beyond what the existing scripts already support.
+- Replacing existing actuators or schedules. `main_sweeper` (including `snapshot_commit.sh`, every tier, and the health phase) and `pressure-sweep` **stay installed and unchanged**. The governor adds overage-driven triggering on top. Retiring either job is out of scope; revisit after 14 days of governor receipts.
+- Moving `/advice` reviewer copies to linked worktrees (dropped, §6).
+- Fixing full attribution (bead `4y6`).
+- Reducing `~/.codex/sessions*` or `~/.claude/projects` (never-delete).
+- Linux portability beyond what scripts already support.
 
 ## 4. Anti-goals (must not happen)
 
-- Another sweeper tier, or a report of "GiB reclaimed" without `df_delta_bytes`.
-- Approval gates that no scheduled job can satisfy.
-- Expiring standing decisions. Decaying back into nominate mode would silently refill the disk.
-- Loosening `~/.claude/hooks/protect-worktrees.sh` or giving agents removal authority.
-- Recency proxies (`stat .git`, `stat <wt>`), ad-hoc cleanup scripts, or touching never-delete paths.
-- Keyword or heuristic classification of artifacts. Class assignment is by **governed root path** (a fixed table), and the hook does a literal command-syntax match. Neither is a semantic judgment.
-- Auto-pausing CI runners without decision D4.
+- Another sweeper tier, or a "GiB reclaimed" report without `df_delta_bytes`.
+- Approval gates no scheduled job can satisfy; expiring standing decisions.
+- Any new deletion rule that is not named in a recorded decision and in `CLAUDE.md`.
+- Admission that goes blind because du is slow.
+- Loosening `~/.claude/hooks/protect-worktrees.sh`, or giving agents removal authority.
+- Recency proxies, ad-hoc cleanup scripts, never-delete paths, keyword/heuristic classification (classes come from a fixed governed-root path table; the hook does literal syntax matching).
+- Auto-pausing CI runners without D4.
 
 ## 5. Constraints
 
-- **One operational entry point.** Everything is added as `diskm` subcommands in `src/disk_magician/disk_magician.sh` plus `disk_magician.sh`, kept in sync by `scripts/sync_package_tree.sh`.
-- **One removal path.** All removal goes through `wrh_removal_verdict` / `wrh_remove_now` (`scripts/worktree_remove_hook.sh`) with byte-verified removal (#120). Non-worktree scratch goes through `scratch_budget_evict_root` (`scripts/lib/scratch_budget.sh`), which rechecks lsof before each delete.
-- **Recency.** Recency is measured only through `scripts/lib/worktree_recency.sh` and fails closed.
-- **Leases.** Lease semantics come from `scripts/lib/worktree_lease.sh`. Unknown means owner alive, which means keep.
-- **Deploy.** Version bump, `tools/deploy_uv_tool.sh` from a clean checkout of origin/main, and verify `deployed.json` plus a scheduled receipt.
-- **PR size.** Each PR is at most 150 production lines, or it goes through the size-tiered gate.
-- **Disk-full operation.** The governor must run when the disk is full. State writes are atomic and small (under 64 KiB). The admission hot path does no du.
+- **One entry point.** New `diskm` subcommands in `src/disk_magician/disk_magician.sh` and `disk_magician.sh`, synced by `scripts/sync_package_tree.sh`.
+- **One removal path.** Worktrees via `wrh_removal_verdict` / `wrh_remove_now` with byte-verified removal (#120); other scratch via `scratch_budget_evict_root` (`scripts/lib/scratch_budget.sh`, lsof recheck per delete).
+- **Recency** only through `scripts/lib/worktree_recency.sh`, fail closed. **Leases** from `scripts/lib/worktree_lease.sh`; unknown owner = alive = keep.
+- **Locks.** The governor takes each actuator's existing lock (`scratch_lock_acquire` in `cleanup_tmp.sh`, etc.). A held lock yields a `skipped_lock` receipt, never a wait, so it coexists with main_sweeper and pressure-sweep.
+- **Deploy.** Version bump, `tools/deploy_uv_tool.sh` from clean origin/main, verify `deployed.json` plus a scheduled receipt.
+- **PR size.** At most 150 production lines per PR, or the size-tiered gate.
+- **Disk-full operation.** The tick and admission must work at about 5 GiB free: state writes are atomic, small (under 64 KiB), and a failed write keeps the previous file. Admission never runs du.
 
 ## 6. Approaches considered
 
-The swarm produced three designs. A judge panel ranked them (the brief records the ranking but not the numeric scores):
-
 | Rank | Design | Core idea | Strength | Weakness |
 |---|---|---|---|---|
-| 1 (winner) | **Budget governor** | Per-class byte budgets, a free-space setpoint, `diskm admit`, a 10-minute `govern` tick, df-verified receipts | Closes the loop. One controller. Measurable | Does not on its own shorten retention, or fix clones at the producer |
-| 2 | **Lifecycle-first** (design 1) | Leases on every artifact kind, detached shared-object worktrees instead of clones, session-exit release, push on exit | Largest per-item cut (about 0.3 vs 2.3 GiB). Removable on exit | No budget or setpoint, so a spawn burst still fills the disk |
-| 3 | **Policy and decisions** (design 3) | Standing-decision record, park-never-delete set, trough-rise alerts, 90-day decision expiry | Fixes "approval nobody can give". Makes the trough visible | Expiry rebuilds the babysitting. Changes no byte rates |
+| 1 (winner) | **Budget governor** | Free-space zone + per-class budgets, `diskm admit`, 10-minute `govern` tick, df-verified receipts | Closes the loop; one controller; measurable | Does not on its own shorten retention |
+| 2 | **Lifecycle-first** | Leases on every kind, detached worktrees instead of clones, session-exit release | Smaller per-item footprint for producers whose clones survive | No setpoint; burst still fills the disk |
+| 3 | **Policy and decisions** | Decision record, parked set, trough alerts, 90-day expiry | Fixes "approval nobody can give" | Expiry rebuilds the babysitting |
 
-**Chosen:** design 1 as the base. It takes these grafts:
+**Chosen:** design 1, with grafts: from design 2, leases on every kind (C3), session-exit release (C8), and detached scratch for producers that need no isolation (C4, narrowed); from design 3, the decision record (C11), the parked set and trough alerts. The 90-day expiry is dropped.
 
-- From design 2: detached worktrees (C3/C4), session-exit release, and push on exit (C8).
-- From design 3: the decision record (C11), the parked set (in C9), and trough alerts (in C12). The **90-day expiry is dropped**.
+**Dropped after review:** converting `/advice` (`run_primary_pair.py`) to linked worktrees. It deliberately uses `git clone --no-local` with `origin` removed so full-permission reviewers cannot touch the user's refs, config, hooks or stash, and it `shutil.rmtree`s each clone when the run ends. A linked worktree would share all of that and, because each copy gets an untracked `.advice-review-documents/`, the reaper would keep it as `kept:dirty`. Advice is governed by admission instead (C2, C7).
 
 ## 7. Chosen design
 
 ### 7.1 Control model
 
 ```
-error = target_free - df_free
-zone  = GREEN (>=100) | ORANGE (60..100) | RED (30..60) | BLACK (<30) ; hard floor 15
+zone = from df free, recomputed on every tick AND on every admit call:
+       GREEN (>=100) | ORANGE (60..100) | RED (30..60) | BLACK (<30) ; hard floor 15
+class overage = class used_gb - budget_gb   (only for classes with a fresh measurement)
 ```
 
-On each 10-minute tick, `diskm govern` does the following:
+Each 10-minute `diskm govern` tick:
 
-1. Measures df, plus a per-class du of each governed root. The du is time-bounded, and its age is recorded.
-2. Writes `budget.json` atomically.
-3. Runs actuators for the classes over budget, largest overage first.
-4. Writes one receipt per actuator, with a df delta.
+1. Reads df and writes the zone to `budget.json` **before** any class measurement.
+2. Measures **one** du-measured class (round-robin, so each class is re-measured about hourly) with `timeout 60 du -skx`. On timeout the class keeps its prior value and its `stale_s` grows.
+3. Reads cheap sources for the other classes: Colima from the observer's `colima.root_allocated_kb` (already collected each observer run).
+4. Runs the birth audit (C7).
+5. Runs actuators for classes in act mode: over-budget classes by overage, plus every class whose `trigger` is `zone` when the zone is RED or BLACK. In BLACK, the actuators with the best df-delta history in the last 7 days run first.
+6. Writes one receipt per actuator with `free_bytes_before`, `free_bytes_after` and `df_delta_bytes`.
 
-Admission reads `budget.json` in O(1) at creation time.
+**Admission never goes blind on du.** `diskm admit` runs one `df` itself (milliseconds) to get the zone, and reads only class overage from `budget.json`. A class measurement older than 3 hours drops that class's overage term (the ORANGE over-budget rule weakens to the plain ORANGE rule); the zone rules still apply. Admission is blind, and fails open with an `admission_blind` receipt and alert, only when `df` itself fails.
+
+**APFS copy-on-write.** A class whose du is unreliable is configured `measure: df_delta_only`. It has no overage term, its actuator runs on `trigger: zone`, and its effect is judged only by receipt `df_delta_bytes`. Pilot default: `codex_documents` and `tmpdir_scratch` are df-delta-only; the pilot week (§7.4) moves any class whose du-reported reduction disagrees with the df delta by more than 50% on 3 or more runs.
 
 ### 7.2 Components
 
 | # | Component | Reuses | Closes |
 |---|---|---|---|
-| C1 | **Budget config and `diskm budget status`.** A `budgets` block in `config.json.template` and `safety.local.json`. Shell reader in `scripts/lib/disk_budget.sh`; Python twin in `scripts/disk_budget.py`. Writes `~/.disk_magician_state/budget.json` holding the zone, per-class `used_gb`/`budget_gb`/`measured_at`, the 24h/7d birth rate, the time to the next zone, and the `parked` list. A stale measurement shows its age and is never reported as 0 | `resolve_config.py`, `scripts/lib/scratch_roots.sh` | RC8, RC1 |
-| C2 | **`diskm admit --class C --est-gb N`.** Exit codes: 0 admit, 10 warn, 75 refuse, 76 queue (prints `retry_after_s`). The policy table is fixed. If the measurement is unavailable or stale (over 30 min), it fails **open** with an `admission_blind` receipt and an alert. `wtn_admit` in `scripts/worktree_new.sh` delegates to it and keeps rc 75 | `wtn_free_gb` | RC1 (rate) |
-| C3 | **Lease every artifact kind.** Add a `kind` field (worktree, clone, scratch, evidence) to `lease_write`. New `diskm scratch-new <repo> <purpose> [--kind K] [--detach <sha>]`. `--detach` runs `git worktree add --detach` under `~/.worktrees/<repo>/scratch-<purpose>-<ts>`, sharing the object store. `evidence-push` sets `published=true` on evidence leases | `scripts/lib/worktree_lease.sh`, `scripts/worktree_new.sh`, `scripts/evidence_push.sh` | RC1 (rate and retention) |
-| C4 | **Source conversions.** `/advice` `run_primary_pair.py`, the advice-src-*, split-gates and gate-prep producers move from full clones to `diskm scratch-new --detach` | the 09-23 finding `findings_wiki/2026-09-23-verifier-lanes-should-use-worktrees-not-clones.md` | RC1 (largest per-item cut) |
-| C5 | **Reuse first in `worktree-new`.** Recycle a worktree when all hold: same repo, owner dead, clean, HEAD on origin, idle at least 2 h, no live cwd, not locked. Recycling is `git switch --detach` then `-c <branch>`, and the lease is transferred. Nothing is deleted | lease library, `worktree_recency.sh`, `wrh_live_cwd_reason` | RC1 (rate) |
-| C6 | **Admission hook.** `hooks/disk-admission.sh` (template tracked here) matches the literal syntax `git worktree add`, `git clone` and `cp -R` into governed roots. It calls `diskm admit` and denies on 75/76 with a reuse message. `~/.codex/AGENTS.md` gets one sentence | `diskm admit` | RC1 (rate) |
-| C7 | **Birth audit.** On each tick, any new unleased top-level entry under the governed roots is adopted as owner-resolved and charged to its class, and `bypass{root}` is incremented. Governed roots: `/private/tmp/<repo>/*`, `~/Documents/Codex/<date>/*`, `~/.worktrees/*/*`. SLO: bypass under 10% of births | `lease_resolve_owner`, the `adopt` step in `worktree_reap.sh` | RC1 (coverage) |
-| C8 | **Owner-lifecycle release.** A SessionEnd/SubagentStop hook runs `diskm lease-release --owner-session $ID`, which marks leases `owner_exited`. The skill contract is: create through diskm, normal `git push -u origin HEAD` before exit (never a force-push), publish evidence. Agents gain no removal authority | `lease_release`, `lease_set_verdict` | RC1 (retention) |
-| C9 | **Ownership-ordered reclaim.** T1, T2 and T3 below, all through `wrh_removal_verdict` / `wrh_remove_now`. Anything else goes to `parked` in `budget.json`: listed daily with sizes, never deleted | `worktree_reap.sh` `verdict_for`, `cleanup_worktrees.sh` | RC1 (retention) |
-| C10 | **`diskm govern`.** A 10-minute launchd tick that replaces the pressure-sweep and main-sweeper triggers. Each actuator gets its own deadline and lock. Each receipt carries `start_free_bytes`, `end_free_bytes`, `df_delta_bytes` and `outcome`; a null `df_delta` is an error. An actuator with zero df delta on 3 runs while its class is over budget is demoted | `job_receipt.py`, `pressure_sweep.sh` steps, `main_sweeper.sh` tiers | RC8 |
-| C11 | **Standing-decision record.** `diskm policy approve <id> --phrase '<literal user text>'` writes `~/.config/disk-magician/standing_decisions.json`. Decisions are revocable with `diskm policy revoke <id>` and **never expire**. Plists stop relying on unset `WORKTREE_APPROVED` / `CLAUDE_STATE_APPROVED` and read the record through `decision_approved <id>` | `safety_lib.sh` | the reason deleting steps never ran |
-| C12 | **Liveness and trough alerts** in `sweeper_health_check.sh` and at the top of `diskm status`: govern tick older than 30 min; `admission_blind`; 3 non-reclaiming runs while over budget; Colima stopped more than 1 h; main_sweeper erroring twice in a row; 7-day trough more than 15 GiB above the 30-day trough; parked set over 20 GiB | `check_launchd_fleet.sh`, `disk_observer.py` | RC8 |
-| C13 | **CI backpressure.** In RED/BLACK the ezgha pre-job hook calls `diskm admit --class ci --est-gb 20`, and the governor prints a ready-to-run pause command. Auto-pause requires D4 | `diskm admit` | RC8 (bursts) |
+| C1 | **Budget config and `diskm budget status`.** `budgets` block in `config.json.template` / `safety.local.json`: per class `budget_gb`, `measure` (`du`, `observer`, `df_delta_only`), `trigger` (`overage`, `zone`), `act` (`always` or a decision id). Shell reader `scripts/lib/disk_budget.sh`, Python twin `scripts/disk_budget.py`. Writes `budget.json`: zone, `zone_at`, per-class `used_gb`/`budget_gb`/`measured_at`/`stale_s`, birth rate, `bypass`, `parked`. A stale value shows its age and is never shown as 0 | `resolve_config.py`, `scripts/lib/scratch_roots.sh` | RC8, RC1 |
+| C2 | **`diskm admit --class C --est-gb N`.** Exit 0 admit, 10 warn, 75 refuse, 76 queue (`retry_after_s`). Zone from live df; overage from `budget.json` if fresh. `wtn_admit` delegates to it and keeps rc 75. The `/advice` runner calls it once per run (class `tmpdir_scratch`, `--est-gb` = 2 × source checkout size) before creating clones, and stops with a clear message on 75 or after one 76 retry | `wtn_free_gb` | RC1 (rate) |
+| C3 | **Lease every artifact kind.** Optional `kind` (worktree, clone, scratch, evidence) on leases. New `diskm scratch-new <repo> <purpose> [--kind K] [--detach <sha>]` creating `~/.worktrees/<repo>/scratch-<purpose>-<ts>`. `evidence-push` marks evidence leases published | `worktree_lease.sh`, `worktree_new.sh`, `evidence_push.sh` | RC1 |
+| C4 | **Narrow producer conversion.** Only producers that run no full-permission agent in the checkout and whose clones survive the run (shown by C7 adoption counts) move to `scratch-new --detach`, and only if they write outputs outside the checkout so it stays clean at release. Candidates: gate-prep, split-gates. Excluded: `/advice` (`run_primary_pair.py`, advice-src-*) | `findings_wiki/2026-09-23-verifier-lanes-should-use-worktrees-not-clones.md` | RC1 |
+| C5 | **Reuse first in `worktree-new`.** Recycle only when: same repo, owner dead or released, clean including untracked, no assume-unchanged/skip-worktree, **no ignored secret-like file and no non-rebuildable ignored data** (same checks as `wrh_removal_verdict`), HEAD on origin, idle ≥ 2 h measured, no live cwd, not locked, not AO. Recycle = `git switch --detach` then `-c <branch>`; lease transferred; nothing deleted | lease lib, `worktree_recency.sh`, `scripts/lib/worktree_ignored.sh` | RC1 |
+| C6 | **Admission hook (best effort).** `hooks/disk-admission.sh` (PreToolUse Bash). Splits the command on `&&`, `;`, `\|\|`, `\|`; strips leading `VAR=value` assignments; tracks a preceding `cd <dir>` segment; recognises `git [-C <dir>] worktree add <path>`, `git [-C <dir>] clone … <dest>` and `cp -R … <dest>` with a destination under a governed root. Calls `diskm admit`; denies on 75/76 with a reuse message. It is **not** the completeness mechanism: the birth audit (C7) is | `diskm admit` | RC1 |
+| C7 | **Birth audit (authoritative coverage).** Each tick, every new unleased top-level entry under a governed root is adopted with an owner-resolved lease and charged to its class; `bypass{root}` increments. Governed roots: `/private/tmp/<repo>/*`, **`$TMPDIR/*`** (where `/advice` clones live; resolved via `getconf DARWIN_USER_TEMP_DIR`), `~/Documents/Codex/<date>/*`, `~/.worktrees/*/*`. SLO: bypass under 10% of births | `lease_resolve_owner`, `adopt` in `worktree_reap.sh` | RC1 |
+| C8 | **Owner-lifecycle release.** SessionEnd/SubagentStop hook runs `diskm lease-release --owner-session $ID`. Skill contract: create through diskm, `git push -u origin HEAD` before exit (never force), publish evidence. Agents gain no removal authority | `lease_release` | RC1 |
+| C9 | **Ownership-ordered reclaim.** T1 and T3 (§7.3), all through `wrh_removal_verdict` / `wrh_remove_now`. Everything else goes to `parked`, listed daily with sizes, never deleted | `worktree_reap.sh`, `cleanup_worktrees.sh` | RC1 |
+| C10 | **`diskm govern`.** 10-minute launchd tick. Act mode is **per class** (`act` in C1). Each actuator has a 300 s deadline and its own existing lock. Governor receipts (job `govern_<class>`) carry `free_bytes_before`, `free_bytes_after`, `df_delta_bytes` (the keys `worktree_reap.sh` already writes); a null delta is an error. Zero or negative delta on 3 runs while over budget raises `actuator_dead` | `job_receipt.py`, existing actuators | RC8 |
+| C11 | **Standing-decision record.** `diskm policy approve <id> --phrase '<literal user text>'` writes `~/.config/disk-magician/standing_decisions.json`; revocable, **never expires**. `decision_approved <id>` replaces unset env approvals | `safety_lib.sh` | RC5 |
+| C12 | **Liveness and trough alerts** first in `diskm status` and `sweeper_health_check.sh`: govern tick older than 30 min; `admission_blind`; class stale > 3 h; `actuator_dead`; Colima stopped > 1 h; main_sweeper erroring twice running; 7-day trough > 15 GiB above the 30-day trough; parked > 20 GiB | `check_launchd_fleet.sh`, `disk_observer.py` | RC8 |
+| C13 | **CI backpressure.** In RED/BLACK the ezgha pre-job hook calls `diskm admit --class ci --est-gb 20`; the governor prints a ready pause command. Auto-pause needs D4 | `diskm admit` | RC8 |
+
+Class table (pilot defaults; actuators unchanged):
+
+| Class | Root(s) | Measure | Trigger | Actuator | Act |
+|---|---|---|---|---|---|
+| worktrees | `~/.worktrees/*/*` | du (round-robin) | overage | `worktree_reap.sh` (T1); `cleanup_worktrees.sh --clean` (T3) | nominate until D1; T3 until D1b |
+| tmp_containers | `/private/tmp/<repo>/*` | du | overage | `cleanup_tmp.sh --clean` (as changed by #152) | always (runs unattended today) |
+| tmpdir_scratch | `$TMPDIR` | df_delta_only | zone | `tmp_scratch_sweep.sh` | always |
+| codex_documents | `~/Documents/Codex` | df_delta_only | zone | `diskm cleanup-codex-documents --clean` (#151) | always, once #151 is deployed |
+| claude_codex_state | `~/.claude/state`, `~/.codex` minus never-delete | du | overage | `cleanup_codex_db.sh` (always); `cleanup_claude_state.sh` (decision `claude_state_cleanup`) | split as shown |
+| colima | `~/.colima/_lima` | observer | overage | `cleanup_colima.sh` (fstrim; #150 guard) | always |
 
 ### 7.3 Reclaim tiers (C9)
 
-Every tier requires **all** of the following:
-
-- Clean, including untracked files.
-- No assume-unchanged or skip-worktree entries.
-- No secret-like ignored file.
-- No live cwd inside it.
-- Not locked.
-- Not under an AO worktree dir.
-- Byte-verified removal.
+Every tier requires **all** of: clean including untracked files; no assume-unchanged or skip-worktree entries; no secret-like ignored file; **no non-rebuildable ignored data** (anything outside the rebuildable allowlist in `scripts/lib/worktree_ignored.sh`, which #153 makes `worktree_hygiene.sh` share); no live cwd inside; not locked; not under an AO worktree dir; byte-verified removal.
 
 | Tier | Additional condition | Needs |
 |---|---|---|
-| T1 | Lease `owner_exited` or expired, owner dead, and HEAD on origin (live `git ls-remote` equal) or merged | D1 |
-| T2 | Owner null, and 24 h of measured inactivity (`worktree_is_recently_active`, fail-closed), and HEAD on origin or merged | D1 |
-| T3 | The existing 3-day merged/origin rule in `cleanup_worktrees.sh` | already live |
-| parked | Anything else: dirty, ahead of origin, or unmeasurable | listed only (D7) |
+| T1 | Lease owner ended per bead `7u9t`: dead pid+lstart with 30 min quiet, or released / 24 h TTL expired with 6 h quiet; HEAD on origin (live `git ls-remote` equal) or merged | D1 |
+| T3 | The existing 3-day rule in `cleanup_worktrees.sh` (merged or HEAD-on-origin, hidden-state, AO and live-cwd gates), run under the governor | D1b |
+| parked | Anything else, including owner-null worktrees younger than 3 days | listed only (D7) |
 
-T1 and T2 are the owner-exit exception to the 7-day floor that bead `7u9t` asks for. Without D1 they run in nominate mode.
+**Owner-null 24 h tier (T2) is dropped.** It would delete human-created worktrees that never had a lease after one idle day, which is a new exception to the 7-day floor and contradicts "unknown owner = keep". The safer choice is T3: owner-null worktrees become removable only under the 3-day rule `CLAUDE.md` already sanctions for `cleanup_worktrees.sh`. T3 needs no policy change, only a recorded decision (D1b) because no plist sets `WORKTREE_APPROVED`.
 
-### 7.4 Budget model (assumption to validate)
+**T1 is a policy change.** `CLAUDE.md` names `cleanup_worktrees.sh` as the sole exception to the 7-day floor. The PR that lets `worktree_reap.sh` run in remove mode from a standing decision must also amend `CLAUDE.md` with the T1 wording above, quoting D1.
 
-- **Base.** About 715 GiB outside the governed classes.
-- **Governed stock.** Rate × TTL: about 41 GiB typical, 66 GiB at the caps.
-- **Prediction.** Typical free space of about 170 GiB, with a floor of about 120 GiB at the caps.
+### 7.4 Budget model and pilot week
 
-The per-worktree size (0.33–0.83 GiB), the removable fraction, and the 7× clone saving are unmeasured. The first 7 days of C10 receipts confirm or revise them.
+Arithmetic (all GiB): usable `U = 895`; base outside governed classes `B ≈ 715` (assumption); pilot class budgets sum `S = 108` (35 + 15 + 10 + 3 + 15 + 30); minimum-free target `F = 30` (the RED/BLACK boundary).
+
+- Admission must hold `B + S + W ≤ U − F`, where `W` is the intraday swing not covered by governed classes. With the pilot values, `W ≤ 895 − 715 − 108 − 30 = 42`.
+- At the caps with no ungoverned swing, used is 823 and free is 72 (ORANGE). With typical governed stock (about 41), used is about 756 and free about 139 (GREEN).
+- The observed 54–131 GiB swing is mostly governed-class bursts today; admission bounds the governed part at `S − typical ≈ 67`. Whether the remainder fits in `W ≤ 42` is the pilot's main question.
+
+The previous revision's "free ≥ 80 GiB" target was inconsistent (715 + 121 left 59 free at the caps) and is withdrawn.
+
+**Pilot week (secondo condition 2).** Govern runs 7 days in observe mode with alerts on. It records per-class used, `B = used − Σ class used` per sample, `W` = daily max − min of `B`, du-versus-df agreement per class, and births per day. D3 is recorded with numbers that satisfy the inequality using the measured 95th-percentile `W`; if they cannot, D3 lowers class budgets first. Enforcement may not pass `warn` before D3.
 
 ## 8. Assumptions and recommended defaults (auto-picked)
 
 | Question | Auto-picked default | Rationale |
 |---|---|---|
-| Setpoints | target 100, warn 60, refuse 30, floor 15 GiB free | Today's free space is below refuse, so enforcement is phased (D2) |
-| Class budgets (GiB) | worktrees 40, tmp_containers 15, tmpdir_scratch 8, codex_documents 3, claude_codex_state 20, colima 35 | Roughly 1–2 days of measured production per class |
-| Tick cadence | 10 min, with a per-actuator deadline of 300 s | Under the 1–2 h refill half-life. Avoids the 600 s step blocking all others |
-| Admission when blind | Fail open, with a receipt and an alert | Never block all agent work on a measurement bug |
-| Staleness bound for `budget.json` | 30 min | Three missed ticks |
-| Class assignment | Fixed governed-root path table | Zero Framework Cognition: no semantic classification |
-| `scratch-new --detach` location | `~/.worktrees/<repo>/scratch-<purpose>-<ts>` | Reuses the standard root and lease adoption |
-| T2 inactivity | 24 h measured | Same as the lease TTL in the 10-10 lease design |
-| Reuse idle threshold | 2 h | Short enough to cut births. Recycling deletes nothing |
-| Decision expiry | none (revocable) | Expiry silently returns to nominate mode |
+| Setpoints | GREEN ≥ 100, ORANGE 60–100, RED 30–60, BLACK < 30, floor 15 GiB free | Matches `F = 30`; floor gives last-resort margin |
+| Class budgets (GiB, pilot) | worktrees 35, tmp_containers 15, tmpdir_scratch 10, codex_documents 3, claude_codex_state 15, colima 30 (sum 108) | Satisfies §7.4 with `W ≤ 42`; validated in the pilot week |
+| Zone source | Live df on every tick and every admit | Admission cannot go blind on du |
+| Class measurement | One du class per tick (≈ hourly each), `timeout 60`; Colima from observer; df-delta-only for CoW-prone classes | du stalls past 60 s on this host |
+| Class staleness | 3 h drops the class's overage term only | Weakens ORANGE rule, never the zone rules |
+| Admission when df fails | Fail open + `admission_blind` receipt + alert | Never block all work on a measurement bug |
+| Tick cadence | 10 min; 300 s per actuator | Under the 1–2 h refill half-life |
+| Act mode | Per class; only worktree removal is decision-gated | Today's unattended actuators keep running |
+| main_sweeper / pressure-sweep | Unchanged and installed | Snapshot ledger and all tiers keep running |
+| `/advice` | Keep isolated `clone --no-local` + `rmtree`; admit once per run; `$TMPDIR` governed | Isolation is deliberate |
+| Owner-null worktrees | T3 3-day rule only (no T2) | Safer; no new policy exception |
+| Reuse idle threshold | 2 h, plus ignored-data checks | Recycling deletes nothing but must not leak secrets |
+| Hook coverage | Best effort; birth audit is authoritative | Shell syntax cannot be matched completely |
+| Decision expiry | None (revocable) | Expiry silently returns to nominate mode |
 | Parked items | List daily, never delete | Unpushed or dirty work is user data |
-| Receipt metric | `df_delta_bytes` required, `freed_bytes` optional | APFS clones make du unreliable |
-| Rollout of refusal | observe 3 d, then warn, then refuse in RED/BLACK, then ORANGE for over-budget classes after 7 d | Refusing on day one would block all work at 7 GiB free |
+| Receipt metric | `df_delta_bytes` required for `govern_*` jobs | APFS clones make du unreliable |
+| Enforcement rollout | observe 7 d (pilot) → warn → `refuse_red` after D3 → `refuse_orange` 7 d later | Day-one refusal at 7 GiB free would block all work |
 
 ## 9. Success metrics
 
-Measured from `disk_observer.jsonl` (df only). The snapshot ledger is used only at coverage of 70% or more.
+Measured from `disk_observer.jsonl` (df only); the snapshot ledger only at coverage ≥ 70%.
 
-| Metric | Today | Target after 7 days of remove mode |
+| Metric | Today | Target after 7 days of T1 + T3 remove mode |
 |---|---|---|
-| 7-day minimum of df free | about 0.3 GiB | ≥ 80 GiB |
+| 7-day minimum of df free | about 0.3 GiB | ≥ 30 GiB |
 | Samples with free < 15 GiB per week | 605+ | 0 |
-| Daily used trough | 839 GiB and rising | ≤ 790 GiB, flat or falling |
-| worktrees class | about 101 GiB | ≤ 40 GiB |
-| Receipts with non-null `df_delta_bytes` | 0% (sweepers) | 100% |
+| Daily used trough (7-day max of daily minimums) | 839 GiB and rising | ≤ 790 GiB (free ≥ 105), not rising |
+| Receipts for `govern_*` with non-null `df_delta_bytes` | n/a | 100% |
 | Bypass births | unmeasured | < 10% |
 | Govern ticks older than 30 min | n/a | 0 alerts per week |
 
-The workstream bead closes only after **two consecutive weekly checks** pass. The check is `diskm budget status --weekly-check`.
+`diskm budget status --weekly-check` evaluates exactly these six rows and exits 0 only if all pass. The workstream bead closes after **two consecutive** passing weekly checks. Stretch target, not a closure criterion: 7-day minimum free ≥ 60 GiB after D3 is re-tuned with two weeks of data.
 
 ## 10. Implementation preconditions (user decisions)
 
 | ID | Decision | Recommended default | Blocks |
 |---|---|---|---|
-| D1 | Remove mode plus the owner-exit exception to the 7-day floor, for T1/T2 only (bead `7u9t`) | **Approve** | Stage 0 removal, C9 T1/T2 |
-| D2 | Admission enforcement through the PreToolUse hook | **Phased:** observe, then warn, then refuse in RED/BLACK; ORANGE after 7 days | C6 refuse mode |
-| D3 | Budget numbers | As in section 8 | C1 enforcement values |
-| D4 | CI backpressure in RED/BLACK | **Alert with a pause command.** No auto-pause | C13 auto-pause |
-| D5 | Push on exit (normal push, never a force-push) | **Approve** | C8 skill contract |
-| D6 | Edits outside this repo: advice runner, gate producers, skill teardown text, AGENTS.md, SessionEnd hook in settings.json | **Approve** | C4, C6, C8 |
-| D7 | Parked set (182 ahead, 44 dirty as of 10-08) | **List daily, never delete** | none (default is safe) |
-| D8 | Colima self-heal: clear a stale lima lock and restart when stopped more than 30 min with no lima process | **Approve** | C12 auto-heal (alert ships regardless) |
+| D1 | Owner-exit removal (T1) exception to the 7-day floor, wording as in §7.3 / bead `7u9t`, with the `CLAUDE.md` amendment in the same PR | **Approve** | Stage 0 reap, T1 remove mode |
+| D1b | Run the existing 3-day `cleanup_worktrees.sh --clean` unattended (T3) | **Approve** | T3 under govern and main_sweeper |
+| D2 | Admission enforcement via `wtn_admit` and the hook | **Phased** per §8 | C2/C6 refuse modes |
+| D3 | Budget numbers from the pilot week, satisfying §7.4 | Record after pilot | enforcement beyond `warn` |
+| D4 | CI backpressure | **Alert + pause command, no auto-pause** | C13 auto-pause |
+| D5 | Push on exit (normal push only) | **Approve** | C8 skill contract |
+| D6 | Edits outside this repo: `/advice` admit call, gate producers, skill text, AGENTS.md, SessionEnd hook | **Approve** | C2 (advice), C4, C6, C8 |
+| D7 | Parked set | **List daily, never delete** | none |
+| D8 | Colima self-heal (clear stale lima lock, restart when stopped > 30 min with no lima process) | **Approve** | C12 auto-heal (alert ships regardless) |
+| — | `claude_state_cleanup` decision for `cleanup_claude_state.sh` | Ask separately | claude-state actuator only |
 
-A decision counts only when it is recorded through `diskm policy approve` with the literal user phrase. A bead comment or an agent report is not a decision.
+A decision counts only when recorded through `diskm policy approve` with the user's literal phrase, written after the user said it. A bead comment or an agent report is not a decision.
 
 ## 11. Risks
 
-- **Fail-open admission hides a broken governor.** Mitigation: an `admission_blind` alert on the first occurrence.
-- **Reuse recycles a worktree an idle agent still expected to own.** Mitigation: requires owner dead plus clean plus pushed, and transfers the lease. No content is lost because HEAD is on origin.
-- **Detached worktrees share the object store, so `git gc` in the main repo could prune objects a detached scratch needs.** Mitigation: `git worktree add` registers HEAD as a reachability root. `scripts/set_gc_worktree_prune.sh` already governs prune expiry.
-- **The disk is too full to run the govern tick.** Mitigation: state writes are under 64 KiB; actuators that free space run first in BLACK.
+- **A bug makes df fail and admission fails open.** Mitigation: `admission_blind` alert on the first occurrence.
+- **The base `B` is larger than assumed.** Mitigation: the pilot measures it; D3 lowers budgets first.
+- **Governor and existing jobs run the same actuator.** Mitigation: the actuator's own lock; the loser records `skipped_lock`.
+- **Reuse hands an idle agent's worktree to a new owner.** Mitigation: owner dead or released, clean, pushed, no ignored secret or non-rebuildable data; lease transferred.
+- **Detached scratch shares the object store with the main repo.** Mitigation: C4 is limited to producers that run no agent in the checkout; `git worktree add` registers HEAD as a reachability root; `scripts/set_gc_worktree_prune.sh` governs prune expiry.
+- **The disk is too full to write state.** Mitigation: writes under 64 KiB, atomic replace keeps the previous file on ENOSPC, and the plan's stress test runs a tick at about 5 GiB free and on a full image.
