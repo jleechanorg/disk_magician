@@ -79,13 +79,51 @@ abs_dir() { (cd "$1" 2>/dev/null && pwd -P); }
 # git_dir_of <repo> <rev-parse flag>: physical path of a repo's (common) git dir.
 git_dir_of() { (cd "$1" 2>/dev/null && cd "$(git rev-parse "$2" 2>/dev/null)" 2>/dev/null && pwd -P); }
 
+# eligible_remote_args <repo> <task>: prints one `--remotes=<name>` per remote
+# whose URL does not resolve to a local path under $ROOT. A remote living inside
+# the Codex scratch tree dies with it, so pushes to it are not backups. A local
+# path that cannot be resolved is ineligible (fail closed).
+eligible_remote_args() {
+  local repo="$1" name url p
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    local ok=true
+    while IFS= read -r url; do
+      case "$url" in
+        file://*) p="${url#file://}" ;;
+        /*|./*|../*|~*) p="$url" ;;
+        *://*|*@*:*) continue ;;
+        *:*) continue ;;
+        *) p="$url" ;;
+      esac
+      p="$(cd "$repo" 2>/dev/null && cd "$p" 2>/dev/null && pwd -P)" || { ok=false; break; }
+      case "$p" in "$ROOT"|"$ROOT"/*) ok=false; break ;; esac
+    done < <(git -C "$repo" remote get-url --all "$name" 2>/dev/null || echo "?unreadable")
+    if [[ "$ok" == true ]]; then echo "--remotes=$name"; fi
+  done < <(git -C "$repo" remote 2>/dev/null)
+}
+
+# find_bare_repo <task>: prints the first bare/separate git dir (HEAD + refs/ +
+# objects/ outside any .git) so the task is kept; rc 1 when none.
+find_bare_repo() {
+  local task_for_bare="$1" o p
+  while IFS= read -r -d '' o; do
+    p="$(dirname "$o")"
+    case "$p/" in */.git/*) continue ;; esac
+    if [[ -f "$p/HEAD" && -d "$p/refs" ]]; then echo "$p"; return 0; fi
+  done < <(/usr/bin/find "$task_for_bare" -type d -name objects -print0 2>/dev/null)
+  return 1
+}
+
 # check_repos <task>: sets REPO_REASON (empty = all nested repos safe) and
 # WT_REMOVALS ("main<TAB>worktree" lines to `git worktree remove` first).
 REPO_REASON=""
 WT_REMOVALS=""
 check_repos() {
-  local task="$1" g repo gd common wts self blk gl
+  local task="$1" g repo gd common wts self blk line gl
   REPO_REASON=""; WT_REMOVALS=""
+  local bare
+  if bare="$(find_bare_repo "$task")"; then REPO_REASON="bare-repo:$bare"; return; fi
   local gits=() gl
   gl="$(mktemp -t dm-codexdocs.XXXXXX)" || { REPO_REASON="mktemp-failed"; return; }
   /usr/bin/find "$task" -name .git -prune -print0 >"$gl" 2>/dev/null || { rm -f "$gl"; REPO_REASON="find-failed"; return; }
@@ -100,8 +138,9 @@ check_repos() {
     [[ -z "$st" ]] || { REPO_REASON="dirty:$repo"; return; }
     if has_hidden_state "$repo"; then REPO_REASON="hidden-state:$repo"; return; fi
     if has_ignored_user_data "$repo"; then REPO_REASON="ignored-user-data:$repo"; return; fi
-    local unpushed
-    unpushed="$(git -C "$repo" rev-list -n1 HEAD --not --remotes 2>/dev/null)" \
+    local unpushed rargs=()
+    while IFS= read -r line; do rargs+=("$line"); done < <(eligible_remote_args "$repo")
+    unpushed="$(git -C "$repo" rev-list -n1 HEAD --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
       || { REPO_REASON="head-unreadable:$repo"; return; }
     [[ -z "$unpushed" ]] || { REPO_REASON="unpushed-head:$repo"; return; }
     gd="$(git_dir_of "$repo" --git-dir)" || { REPO_REASON="git-dir-unreadable:$repo"; return; }
@@ -116,15 +155,14 @@ check_repos() {
       blk="$(awk -v p="$self" 'BEGIN{RS="";FS="\n"} {for(i=1;i<=NF;i++) if($i=="worktree " p){print; exit}}' <<<"$wts")"
       [[ -n "$blk" ]] || { REPO_REASON="worktree-unregistered:$repo"; return; }
       if grep -q '^locked' <<<"$blk"; then REPO_REASON="worktree-locked:$repo"; return; fi
+      [[ -w "$common/worktrees" ]] || { REPO_REASON="worktree-admin-unwritable:$repo"; return; }
       WT_REMOVALS="${WT_REMOVALS}${common}"$'\t'"$self"$'\n'
     else
       # Standalone repo (deleted whole): no local-only branch, stash, or outside worktree.
-      local lb stash ext
-      lb="$(git -C "$repo" rev-list -n1 --branches --not --remotes 2>/dev/null)" \
-        || { REPO_REASON="branches-unreadable:$repo"; return; }
-      [[ -z "$lb" ]] || { REPO_REASON="unpushed-branch:$repo"; return; }
-      stash="$(git -C "$repo" stash list 2>/dev/null)" || { REPO_REASON="stash-unreadable:$repo"; return; }
-      [[ -z "$stash" ]] || { REPO_REASON="stash:$repo"; return; }
+      local lb ext
+      lb="$(git -C "$repo" rev-list -n1 --all --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
+        || { REPO_REASON="refs-unreadable:$repo"; return; }
+      [[ -z "$lb" ]] || { REPO_REASON="unpushed-refs:$repo"; return; }
       if [[ -d "$g" ]]; then
         wts="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || { REPO_REASON="worktree-list-failed:$repo"; return; }
         ext="$(sed -n 's/^worktree //p' <<<"$wts" | tail -n +2 | R="$task" awk 'index($0, ENVIRON["R"] "/") != 1')"
@@ -156,6 +194,9 @@ process_task() {
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would remove $task (${kb} KB, age $(worktree_age_days "$task")d)"
   else
+    snapshot_live_paths
+    if [[ -n "$LIVE_BLOCKED" ]]; then keep "$LIVE_BLOCKED" "$task"; return; fi
+    if path_is_live "$task"; then keep live-process-recheck "$task"; return; fi
     while IFS=$'\t' read -r main wt; do
       [[ -n "$main" ]] || continue
       if ! git --git-dir="$main" worktree remove --force "$wt" 2>/dev/null; then

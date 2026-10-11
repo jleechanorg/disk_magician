@@ -93,6 +93,38 @@ age "$CODEX/$D_OLD/t-wt-clean"
 mktask $D_OLD t-wt-unpushed
 git -C "$MAIN" worktree add -q -b wt-unpushed "$CODEX/$D_OLD/t-wt-unpushed/wt" origin/main
 git -C "$CODEX/$D_OLD/t-wt-unpushed/wt" commit -q --allow-empty -m wt-local; age "$CODEX/$D_OLD/t-wt-unpushed"
+# --- round-2 fixtures (data-loss paths) ---
+C="$CODEX/$D_OLD"
+mktask $D_OLD t-bare; git clone -q --bare "$ORIGIN" "$C/t-bare/b.git"
+git clone -q "$ORIGIN" "$TMP_ROOT/pushbare" && git -C "$TMP_ROOT/pushbare" checkout -q -b uniq && git -C "$TMP_ROOT/pushbare" commit -q --allow-empty -m uniq && git -C "$TMP_ROOT/pushbare" push -q "$C/t-bare/b.git" uniq
+age "$C/t-bare"
+mktask $D_OLD t-inremote; git clone -q "$ORIGIN" "$C/t-inremote/local"
+git clone -q "$C/t-inremote/local" "$C/t-inremote/w"; git -C "$C/t-inremote/w" commit -q --allow-empty -m only-in-task
+git -C "$C/t-inremote/w" push -q origin HEAD:refs/heads/feat; age "$C/t-inremote"
+mktask $D_OLD t-tag; clone_into $D_OLD t-tag
+git -C "$C/t-tag/repo" checkout -q --detach && git -C "$C/t-tag/repo" commit -q --allow-empty -m tagonly && git -C "$C/t-tag/repo" tag keepme && git -C "$C/t-tag/repo" checkout -q main; age "$C/t-tag"
+mktask $D_OLD t-detached-ok; clone_into $D_OLD t-detached-ok; git -C "$C/t-detached-ok/repo" checkout -q --detach; age "$C/t-detached-ok"
+mktask $D_OLD t-detached-bad; clone_into $D_OLD t-detached-bad
+git -C "$C/t-detached-bad/repo" checkout -q --detach && git -C "$C/t-detached-bad/repo" commit -q --allow-empty -m det; age "$C/t-detached-bad"
+mktask $D_OLD t-localbranch; clone_into $D_OLD t-localbranch
+git -C "$C/t-localbranch/repo" branch side && git -C "$C/t-localbranch/repo" checkout -q side && git -C "$C/t-localbranch/repo" commit -q --allow-empty -m side && git -C "$C/t-localbranch/repo" checkout -q main; age "$C/t-localbranch"
+mktask $D_OLD t-stash; clone_into $D_OLD t-stash
+echo s >>"$C/t-stash/repo/a.txt"; git -C "$C/t-stash/repo" stash -q; age "$C/t-stash"
+ORIGIN2="$TMP_ROOT/origin2.git"; SEED2="$TMP_ROOT/seed2"; git init -q --bare -b main "$ORIGIN2"
+git clone -q "$ORIGIN2" "$SEED2" 2>/dev/null; git -C "$SEED2" checkout -q -b main 2>/dev/null || true
+git -C "$SEED2" -c protocol.file.allow=always submodule add -q "$ORIGIN" sub 2>/dev/null
+git -C "$SEED2" commit -qm sub && git -C "$SEED2" push -q origin main
+mktask $D_OLD t-submod; git -c protocol.file.allow=always clone -q --recurse-submodules "$ORIGIN2" "$C/t-submod/repo"
+echo u >"$C/t-submod/repo/sub/untracked.txt"; age "$C/t-submod"
+mktask $D_OLD t-extwt; clone_into $D_OLD t-extwt; git -C "$C/t-extwt/repo" worktree add -q "$TMP_ROOT/ext-wt" -b extb origin/main; age "$C/t-extwt"
+mktask $D_OLD t-locked
+git -C "$MAIN" worktree add -q --detach "$C/t-locked/wt" origin/main && git -C "$MAIN" worktree lock "$C/t-locked/wt"; age "$C/t-locked"
+mktask $D_OLD t-multiwt
+git -C "$MAIN" worktree add -q --detach "$C/t-multiwt/w1" origin/main; git -C "$MAIN" worktree add -q --detach "$C/t-multiwt/w2" origin/main; age "$C/t-multiwt"
+mkdir -p "$TMP_ROOT/symtarget"; echo keep >"$TMP_ROOT/symtarget/f"; ln -s "$TMP_ROOT/symtarget" "$C/t-symlink"
+mktask $D_OLD t-fileopen; echo o >"$C/t-fileopen/open.log"; age "$C/t-fileopen"
+( cd / && exec 3<"$C/t-fileopen/open.log" && exec sleep 300 ) & SLEEPERS+=("$!")
+sleep 1
 echo "{\"never_delete\": [\"$CODEX/$D_OLD/t-protected\"]}" >"$DISK_MAGICIAN_SAFETY_FILE"
 
 echo "=== cleanup_codex_documents.sh tests ==="
@@ -122,6 +154,21 @@ if git -C "$MAIN" worktree list --porcelain | grep -q "t-wt-clean"; then
   record_fail "main repo no longer lists removed worktree" "$(git -C "$MAIN" worktree list)"
 else record_pass "main repo no longer lists removed worktree"; fi
 assert_exists  "linked worktree with unpushed commit kept" "$CODEX/$D_OLD/t-wt-unpushed"
+assert_exists  "bare repo with unique branch kept" "$C/t-bare"
+assert_exists  "work pushed only to in-task remote kept" "$C/t-inremote"
+assert_exists  "tag-only commit kept" "$C/t-tag"
+assert_missing "detached HEAD on pushed commit removed" "$C/t-detached-ok"
+assert_exists  "detached HEAD on unpushed commit kept" "$C/t-detached-bad"
+assert_exists  "local-only branch kept" "$C/t-localbranch"
+assert_exists  "stash kept" "$C/t-stash"
+assert_exists  "dirty submodule kept" "$C/t-submod"
+assert_exists  "repo with external worktree kept" "$C/t-extwt"
+assert_exists  "locked linked worktree kept" "$C/t-locked"
+assert_missing "multi linked-worktree task removed" "$C/t-multiwt"
+if git -C "$MAIN" worktree list --porcelain | grep -q "t-multiwt"; then record_fail "multi worktrees all unregistered" "still listed"; else record_pass "multi worktrees all unregistered"; fi
+assert_exists  "symlink task kept" "$C/t-symlink"
+assert_exists  "symlink target untouched" "$TMP_ROOT/symtarget/f"
+assert_exists  "file open by process kept" "$C/t-fileopen"
 assert_missing "emptied date dir removed" "$CODEX/2026-09-02"
 assert_exists  "date dir with kept tasks stays" "$CODEX/$D_OLD"
 assert_contains "deletion log written" "cleanup_codex_documents.sh" "$(cat "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || true)"
