@@ -140,6 +140,7 @@ consolidated_redundant_labels=(
 if [[ "$CONSOLIDATE" == true ]]; then
   SELECTED=(
     "com.jleechanorg.disk-magician-main-sweeper.plist.template"
+    "com.jleechanorg.disk-magician-worktree-reap.plist.template"
     "com.disk-magician.claude-state.plist.template"
     "com.disk-magician.worktree-venvs.plist"
   )
