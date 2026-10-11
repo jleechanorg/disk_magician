@@ -621,6 +621,41 @@ assert_receipt_field "Test 21 ordinary skipped receipt" "$FAIL_STATE_DIR/receipt
 
 cat > "$DU_BIN/du" <<'MOCK'
 #!/bin/bash
+printf 'du: %s/tmp-mount-x: Permission denied\n' "$2" >&2
+printf 'du: %s/RustDesk-service: Permission denied\n' "$2" >&2
+printf '1048576\t%s\n' "$2"
+exit 1
+MOCK
+chmod +x "$DU_BIN/du"
+echo "Test 21b: du exit 1 with only Permission denied stderr is a usable lower bound"
+: > "$INVOCATION_LOG"; : > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-du-eacces"
+rc=0; run_raw_du_probe "$FAIL_STATE_DIR" "$DU_BIN:/usr/bin:/bin" || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "Test 21b lower bound logged" "du skipped 2 unreadable entries" "$LOG_CONTENT"
+assert_contains "Test 21b reaches ordinary no-op" "free 50 GB >= threshold 0 GB" "$LOG_CONTENT"
+assert_not_contains "Test 21b does not report measurement failure" "size measurement failed" "$LOG_CONTENT"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 21b rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 21b rc=$rc"; FAIL=$(( FAIL + 1 )); }
+assert_receipt_field "Test 21b ordinary skipped receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_threshold"
+
+cat > "$DU_BIN/du" <<'MOCK'
+#!/bin/bash
+printf 'du: %s/a: Permission denied\n' "$2" >&2
+printf 'du: %s/b: Input/output error\n' "$2" >&2
+printf '1048576\t%s\n' "$2"
+exit 1
+MOCK
+chmod +x "$DU_BIN/du"
+echo "Test 21c: du exit 1 with any non-EACCES error still blocks"
+: > "$INVOCATION_LOG"; : > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-du-mixed"
+rc=0; run_raw_du_probe "$FAIL_STATE_DIR" "$DU_BIN:/usr/bin:/bin" || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "Test 21c measurement failure logged" "size measurement failed or timed out" "$LOG_CONTENT"
+assert_receipt_field "Test 21c blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
+
+cat > "$DU_BIN/du" <<'MOCK'
+#!/bin/bash
 printf 'not-a-size\tpartial\n'
 printf 'not-a-size\tpartial\n' >> "${DU_LOG:?}"
 MOCK

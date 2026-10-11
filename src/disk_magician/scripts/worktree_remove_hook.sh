@@ -38,6 +38,9 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
+    # is rebuildable, not a secret; dependency dirs stay covered.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }
 
