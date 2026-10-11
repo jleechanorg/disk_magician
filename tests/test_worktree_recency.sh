@@ -122,6 +122,33 @@ else
     assert_eq "$age7" "0" "unreadable subtree treated as active (age 0)"
 fi
 
+echo "== case 8: minute-granularity window (lease quiet periods) =="
+WT="$(mk_worktree minutes_window)"
+NOWM="$(date +%s)"
+touch_at "$(( NOWM - 45*60 ))" "$WT/README.md" "$WT/src/deep/nested/code.py"
+if worktree_is_recently_active_minutes "$WT" 30 "$NOWM"; then
+    bad "45-min-old tree must be OLD for a 30-minute floor (expected rc 1)"
+else
+    ok "45-min-old tree is old enough for a 30-minute floor (rc 1)"
+fi
+if worktree_is_recently_active_minutes "$WT" 60 "$NOWM"; then
+    ok "45-min-old tree stays protected under a 60-minute floor (rc 0)"
+else
+    bad "45-min-old tree wrongly eligible under a 60-minute floor"
+fi
+
+echo "== case 9: unmeasurable path fails closed under minutes (Task 1 case 7) =="
+if worktree_is_recently_active_minutes "$TMPROOT/does-not-exist" 30; then
+    ok "nonexistent path is PROTECTED in the minutes flavour (rc 0)"
+else
+    bad "nonexistent path was treated as old in the minutes flavour — fails open"
+fi
+if worktree_is_recently_active_minutes "$WT" notanumber; then
+    ok "invalid floor fails closed to PROTECTED (rc 0)"
+else
+    bad "invalid floor read as eligible — fails open"
+fi
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
