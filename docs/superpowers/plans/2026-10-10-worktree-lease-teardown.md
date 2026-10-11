@@ -93,7 +93,7 @@
 - Produces:
   - `lease_dir` prints the lease directory (honors `DISK_MAGICIAN_STATE_DIR`).
   - `lease_path_for <worktree_path>` prints the lease file path.
-  - `lease_resolve_owner [start_pid]` prints `pid<TAB>start_epoch<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
+  - `lease_resolve_owner [start_pid]` walks hop by hop (`ps -p <pid> -o ppid=,comm=`) and prints `pid<TAB>start_epoch<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
   - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`. rc 1 and nothing written if the path exists, or if a lease exists for an existing worktree. It replaces a lease whose path no longer exists.
   - `lease_matches_incarnation <lease_file>` returns rc 0 when `admin_id` and `admin_birth_epoch` match the live admin dir; rc 1 otherwise.
   - `lease_write <worktree_path> <repo> <branch> <creator>`: atomic write with the owner resolved from `$$`. rc 0 on success.
@@ -101,7 +101,7 @@
     - Precedence: `none` (owner null) > `released` > a `ps` check.
     - The `ps` check gives `dead`, or `unknown` when `ps` fails other than "no such process".
     - Otherwise it gives `alive-expired` when `created_at + ttl_hours` has passed, else `alive`.
-  - `lease_release <worktree_path>` sets `released_at`. rc 1 if there is no lease.
+  - `lease_release <worktree_path>` sets `released_at` only when `lease_resolve_owner` for the caller matches the lease owner (pid plus start epoch). rc 1 with `not lease owner` otherwise, and rc 1 if there is no lease.
   - `lease_set_verdict <lease_file> <verdict>` updates `last_verdict` and `last_checked_at`.
 - Test hook: `DISK_MAGICIAN_PS_BIN` overrides `ps` for the tests.
 
@@ -112,10 +112,13 @@
     - `alive` when the lease is written under `TZ=America/Los_Angeles LANG=fr_FR.UTF-8` and checked under `TZ=UTC LANG=C` (the real `ps` with `$$`)
     - `dead` when the fake `ps` exits 1
     - `dead` when the fake `ps` returns a start time 10 s different (pid reuse, Review Focus 1)
+    - `dead` when the start time matches but `comm` differs (pid reuse)
+  - `lease_resolve_owner` succeeds when a fake `ps -A` lists no ancestors but `ps -p` resolves each hop.
     - `unknown` when the fake `ps` exits 2 with no output (treat any non-1 failure as unknown)
     - `none` for an `owner: null` lease
   - `lease_resolve_owner`, given a fake ps tree `500 sh → 400 claude → 1 launchd`, returns pid 400 / comm `claude`. With no runtime in the chain it returns `-`, and `lease_write` stores `owner: null`.
-  - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release`, the state is `released`.
+  - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release` by the owner, the state is `released`.
+  - `lease_release` from a caller whose resolved owner differs → rc 1 `not lease owner`, lease byte-identical.
   - A fake ps tree `600 Python /opt/hermes/hermes_gateway.py → 1` resolves the owner to pid 600.
   - `lease_owner_state` with pid field `99999999999` and a fake `ps` printing `ps: process id too large` (rc 1) → `unknown`, not `dead`. A pid field `abc` → `unreadable`.
   - `lease_write` records `admin_id` and `admin_birth_epoch` matching `stat -f %B` of the fixture's admin dir, plus integer `created_epoch`.
@@ -159,6 +162,7 @@
 - Produces:
   - `worktree_pr_cache_populate <main_repo>` (the same gh query and cache file as today)
   - `worktree_head_is_merged_pr <main_repo> <branch> <head_sha>`: looks up PRs by `headRefName` (as `populate_repo_pr_cache` does today). rc 0 only when a gh-verified MERGED PR for that branch has exactly that head; rc 1 otherwise, including on gh failure or an empty branch (detached HEAD), so it fails closed.
+  - Cache writes are atomic (temp file plus `mv`).
   - The library owns its cache dir (`${DISK_MAGICIAN_STATE_DIR:-~/.disk_magician_state}/pr_cache/`, files named by owner_repo, TTL 1 h) instead of the caller's `RUN_TMP`.
 
 - [ ] **Step 1: Write failing tests.** With a mocked `gh` on PATH returning one MERGED PR with head `abc123` and one OPEN PR:
@@ -215,19 +219,23 @@
   - Owner alive → kept, `last_verdict` unchanged, worktree present.
   - Owner dead, clean, pushed, quiet 40 min:
     - nominate mode → `last_verdict=="remove"` and the worktree is present
-    - remove mode → the worktree is gone and the lease is deleted
+    - remove mode with the approval marker present → the worktree is gone and the lease is deleted
+    - remove mode without the marker → logs `remove mode not approved`, the worktree is present, `last_verdict=="remove"`
   - Owner dead, dirty → `kept:dirty`, present in both modes.
   - Owner dead, quiet 5 min → `kept:recent-activity` (Review Focus 2).
   - Lease expired with the owner alive, quiet 7 h → `kept:owner-alive-expired` in both modes.
   - Released lease with the owner alive, quiet 40 min → `remove` verdict. Quiet 5 min → `kept:recent-activity`.
   - `owner: null` lease, clean and pushed, in **remove** mode → still present, not reaped.
   - HEAD only on a `fork/*` ref → `kept:not-pushed`. HEAD equal to a mocked gh MERGED PR head with the branch deleted → `remove` verdict.
-  - A pending guard lease plus a registered worktree whose admin-dir birth time is ≥ the lease's `created_epoch` → promoted, `creator` stays `guard`, owner kept. Include a same-second case: birth equal to `created_epoch` → promoted.
+  - A pending guard lease plus a registered worktree whose admin-dir birth time is ≥ the lease's `created_epoch` → promoted, `creator` stays `guard`, owner kept. Include a same-second case (birth equal to `created_epoch` → promoted) and a stale case (birth 120 s after `created_epoch` → adopted with `owner: null`).
   - A pending lease whose `created_epoch` is greater than the admin-dir birth time fails promotion (the worktree predates it); the worktree is adopted with `owner: null`.
   - Path reuse: a lease with a dead owner exists for path P; P is removed and recreated with a new admin dir → the lease is detected stale and re-adopted with `owner: null`, never nominated.
   - Removal in remove mode deletes the lease file.
+  - An ignored `.env` written after the first verdict, before removal (inject via a hook point between candidates) → the final re-check yields `kept:hidden-state`, worktree present.
+  - Owner state `unknown` (fake `ps` rc 2) in remove mode → kept.
   - A worktree locked via `git worktree lock` → `kept:locked` (a new check, stricter than the current hook).
   - Receipt `candidates` include `fetch_ok`, `fetch_failed`, `gh_ok` and `gh_failed` counters.
+  - With `gh` absent from PATH, the log contains `missing tool: gh` and the receipt counts it.
   - A pending lease 2 h old with no worktree → deleted.
   - A stale lock dir with a dead pid, older than the TTL → reclaimed, the run proceeds.
   - A run sent TERM mid-loop → lock released, and the next run is not `skipped_lock`.
@@ -324,7 +332,7 @@
 
 - [ ] **Step 1:** Flip the template assertion to expect `DISK_MAGICIAN_REAP_MODE` = `remove`.
 - [ ] **Step 2: Run.** Expected: FAIL.
-- [ ] **Step 3:** Edit the template and CLAUDE.md, then run `scripts/sync_package_tree.sh`.
+- [ ] **Step 3:** Edit the template and CLAUDE.md (both the 7-day rule and the "Strict ban on ad-hoc cleanup scripts" paragraph, naming `diskm worktree-reap`). Create the approval marker `~/.disk_magician_state/worktree_reap.remove_approved` with the P1 date during deploy (Task 10). Run `scripts/sync_package_tree.sh`.
 - [ ] **Step 4: Run** the test. Expected: PASS.
 - [ ] **Step 5: Commit** `feat: enable owner-exit worktree removal (user-approved <date>)`.
 

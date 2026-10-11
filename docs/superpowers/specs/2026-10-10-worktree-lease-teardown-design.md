@@ -34,7 +34,7 @@ Every other prevention layer (pressure sweep, Colima trim, tmp sweeps) reacts af
 
 **Goals**
 - G1. Every worktree created under `$STANDARD_WORKTREE_ROOT` has a recorded owner and lifetime: a lease.
-- G2. When the owning agent process has exited and the worktree is safe to remove, it is removed within one reaper interval (≤30 min) without waiting for the 3- or 7-day floor. Safe means:
+- G2. When the owning agent process has exited, or has released the worktree, and the worktree is safe to remove, it is removed within about one hour without waiting for the 3- or 7-day floor. That hour is a 30 min quiet period, measured from the later of the last content change and the exit or release time, plus at most one 30 min reaper interval. Safe means:
   - clean (no tracked changes or untracked files)
   - no hidden state
   - no non-rebuildable ignored data
@@ -45,6 +45,7 @@ Every other prevention layer (pressure sweep, Colima trim, tmp sweeps) reacts af
 - G5. Every keep/remove decision is visible in `diskm status --json` with counts per reason.
 
 **Non-goals**
+- Making `cleanup_worktrees.sh` (the 3-day sweeper) consult leases. That is a follow-up on bead `disk_magician-oyt4`: it should keep worktrees whose lease shows an alive owner.
 - Changing the Colima/ezgha CI producer (beads `disk_magician-1u29`, `4dar`; pressure-sweep trim already exists).
 - Ledger freshness and the root frontier runner (PR #127, separate precondition).
 - Sharing `node_modules` or venvs across worktrees (`cleanup_worktree_deps.sh` already strips dormant ones).
@@ -88,16 +89,16 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
  "last_verdict": null, "last_checked_at": null}
 ```
 
-- **Owner** is the nearest ancestor of the creating process whose executable basename is in a fixed list of agent runtimes (`claude`, `codex`, `agy`, `cursor-agent`, `hermes`). This is a process-identity lookup, not a semantic judgment.
+- **Owner** is the nearest ancestor of the creating process whose executable basename is in a fixed list of agent runtimes (`claude`, `codex`, `agy`, `cursor-agent`, `hermes`). The walk goes hop by hop with `ps -p <pid> -o ppid=,comm=`, never via the full `ps -A` table, which hides ancestors inside sandboxes. This is a process-identity lookup, not a semantic judgment.
 - If no ancestor matches (launchd or cron creators), `owner` is `null`. The lease is then never owner-reaped and falls back to the sweeper floor. A short-lived launching shell must never count as the owner, because it would look dead immediately.
-- `start_epoch` guards against pid reuse. Both writer and reader run `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` and parse the result (`%a %b %d %H:%M:%S %Y`) to a UTC epoch. The owner counts as alive only when the two epochs differ by ≤2 s. Raw `lstart` strings are never compared, because they vary with the caller's timezone and locale and launchd's environment differs from the agent's.
+- `start_epoch` guards against pid reuse. Both writer and reader run `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` and parse the result (`%a %b %d %H:%M:%S %Y`) to a UTC epoch. The owner counts as alive only when the two epochs differ by ≤2 s and the `comm` basename matches the recorded one. Raw `lstart` strings are never compared, because they vary with the caller's timezone and locale and launchd's environment differs from the agent's.
 - **Hermes** runs as `Python`. The owner match therefore also accepts a `python*` process whose script argument's basename starts with `hermes`. This matches process identity, not task semantics.
 - **Writers:**
   - `worktree_new.sh` after a successful `wtn_create`.
   - `worktree_create_hook.sh`.
   - `diskm guard-worktree-add` (`worktree_guard.py`, a PreToolUse hook that runs inside the agent's process tree) writes a **pending lease** for the statically resolved target path, owner resolved from its own ancestry, `creator: "guard"`.
     - The write is exclusive: nothing is written if the target path already exists, or if a lease exists for an existing worktree. A lease whose path no longer exists is stale, and the guard replaces it.
-    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` has a **birth time** (`stat -f %B`, never mtime, which changes on every index rewrite) **≥** the pending lease's `created_epoch` (both whole seconds; the guard runs only ~100–300 ms before `git worktree add`, so they often land in the same second). This is safe because the exclusive write already proved the path did not exist when the lease was written. Otherwise the worktree is adopted with `owner: null`.
+    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` has a **birth time** (`stat -f %B`, never mtime, which changes on every index rewrite) within `[created_epoch, created_epoch + 60]` of the pending lease (both whole seconds; the guard runs only ~100–300 ms before `git worktree add`, so they often land in the same second). This is safe because the exclusive write already proved the path did not exist when the lease was written. Otherwise the worktree is adopted with `owner: null`.
 - **Incarnation binding.** Every lease records the worktree's `admin_id` and `admin_birth_epoch` when it is written or promoted. Before using a lease, the reaper compares them with the live admin dir. On any mismatch (the path was removed and recreated) the lease is stale: it is replaced with an `owner: null` adopt lease, never reused.
 - **Lease deletion on removal.** The reaper and the remove hook delete the lease after a successful `git worktree remove`. For `cleanup_worktrees.sh` removals, the reaper's prune step plus the incarnation check retire the lease.
     - Pending leases older than 1 h with no worktree are deleted.
@@ -122,10 +123,11 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 3. **Quiet period.** Require no content change for `REAP_QUIET_MINUTES` (default 30) via `worktree_is_recently_active` with minute granularity. Section 9 notes the helper extension this needs. This covers a sibling agent that adopted the worktree after the owner died.
 4. **Remote freshness.** Before any verdict, run `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin` once per owning repo, bounded to 60 s. If the fetch fails, every candidate in that repo gets `kept:remote-unverified`.
    - The reaper's pushed proof is either HEAD contained in `refs/remotes/origin/*` only (stale `fork/*` or `upstream/*` refs don't count), or HEAD equal to the head of a gh-verified MERGED PR. The second form covers squash-merged PRs whose branch was deleted.
-   - The merged-PR check is today inline in `cleanup_worktrees.sh` (`classify_content_and_merge` plus `populate_repo_pr_cache`), and sourcing that script runs the sweeper. It moves into `scripts/lib/worktree_merged_pr.sh` with a behavior-preserving test.
+   - At startup the reaper logs `missing tool: <name>` for any of `gh`, `timeout` or `git` not found on PATH, and counts it in the receipt.
+   - The merged-PR check is today inline in `cleanup_worktrees.sh` (`classify_content_and_merge` plus `populate_repo_pr_cache`), and sourcing that script runs the sweeper. It moves into `scripts/lib/worktree_merged_pr.sh` with a behavior-preserving test. The shared 1 h cache is written atomically (temp file plus `mv`) because the reaper and the sweeper can write it concurrently.
    - Both proofs live inside `wrh_removal_verdict`'s `pushed_scope=origin-or-merged-pr`, so "safe to remove" stays defined in one place.
    - The fetch runs as `git -c gc.auto=0 -c maintenance.auto=false fetch ...`, so it never triggers auto-gc in busy repos.
-5. **Safety.** Run `scripts/safety_check.sh <path>`; a non-zero result means `kept:safety-local`, so the `safety.local.json` `never_delete`, `protected_live_paths` and `needs_decision` rules gate the reaper too. Then call a new `wrh_removal_verdict <real>` extracted from `wrh_main`. It runs the same checks in the same order but with a caller-supplied recency floor, and prints `remove` or `kept:<reason>`:
+5. **Safety.** Immediately before `git worktree remove`, re-run `has_hidden_state` and the live-cwd check, which narrows the ignored-file race in §9. Run `scripts/safety_check.sh <path>`; a non-zero result means `kept:safety-local`, so the `safety.local.json` `never_delete`, `protected_live_paths` and `needs_decision` rules gate the reaper too. Then call a new `wrh_removal_verdict <real>` extracted from `wrh_main`. It runs the same checks in the same order but with a caller-supplied recency floor, and prints `remove` or `kept:<reason>`:
    - registered linked worktree
    - live cwd
    - AO
@@ -137,13 +139,13 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 6. **Mode.** `DISK_MAGICIAN_REAP_MODE`:
    - `nominate` (default): record `last_verdict` and remove nothing.
    - `remove`: on a `remove` verdict, run `git worktree remove` (never `--force`) and delete a `worktree-*` branch only when it is not checked out elsewhere (the same code as `wrh_main`), then delete the lease.
-   `remove` is enabled only after the §8 precondition is met.
+   `remove` takes effect only when the approval marker `~/.disk_magician_state/worktree_reap.remove_approved` exists, containing the approval date. Without it, `--mode remove` logs `remove mode not approved` and runs as nominate. Task 9 creates the marker after P1, so no flag or env alone can enable deletion early.
 7. **Prune.** Delete leases whose path no longer exists.
 8. Write a typed receipt (`receipts/worktree_reap.json`) through the existing receipt helper, with counts per verdict and the bytes freed (measured by `df` before and after).
 
 `wrh_removal_verdict` is a pure extraction. Its `has_ignored_user_data` already allows the known-rebuildable dirs (`node_modules`, `venv`, `.venv`, `__pycache__`, caches) and keeps everything else. Its `wrh_live_cwd_reason` already treats an `lsof` failure as keep.
 
-**`diskm worktree-release <path>`** sets `released_at` on the lease. Callers that know their work is done (review and evidence flows, `/advice` lanes) call it so the worktree is reaped after the 30 min released quiet period. It never deletes anything itself.
+**`diskm worktree-release <path>`** sets `released_at` on the lease, but only when the caller's resolved owner (same ancestry walk, same pid plus start epoch) matches the lease owner. Otherwise it exits 1 with `not lease owner` and changes nothing, so one agent can never release another's worktree. Callers that know their work is done (review and evidence flows, `/advice` lanes) call it so the worktree is reaped after the 30 min released quiet period. It never deletes anything itself.
 
 **Lock, deadline and signals.** The reaper takes `$STATE/worktree_reap.lock` with the same pid-plus-age stale-lock reclamation as `pressure_sweep.sh`. It installs a TERM/INT trap that releases the lock, and it checks an internal deadline (`--deadline-seconds`, default 1500) between candidates, never during a `git worktree remove`. A timeout therefore never strands the lock or interrupts a removal.
 
@@ -237,7 +239,7 @@ Before `wtn_create`:
 ## 9. Risks
 
 - **Owner misattribution.** A creator with no matching runtime ancestor gets `owner: null` and is never owner-reaped. That is safe, but it reduces coverage, so `diskm status` reports lease coverage per owner state.
-- **TOCTOU.** Ignored files written between the checks and `git worktree remove` would be lost. This is bounded by the quiet period and live-cwd check, and it is the same window the existing hook and sweeper accept.
+- **TOCTOU.** Ignored files written between the final re-check and `git worktree remove` would be lost. This is a narrow residual window, not zero. This is bounded by the quiet period and live-cwd check, and it is the same window the existing hook and sweeper accept.
 - **Live-cwd coverage.** Agent CLIs run each command in a short-lived shell, so an idle session rarely has its cwd inside a worktree. The quiet period, not the live-cwd check, is the main guard against reaping a checkout in active use.
 - **Nested sessions.** Nearest-ancestor ownership can attribute a worktree to a short-lived nested `claude -p` instead of its long-lived parent. The data-safety checks still apply, so the cost is that the parent may have to recreate the worktree.
 - **Absolute-path readers.** `lsof -d cwd` doesn't see a reader using absolute paths, such as a parent session reading a lane's worktree. The cost is convenience: the worktree is clean and pushed, so it can be recreated.
