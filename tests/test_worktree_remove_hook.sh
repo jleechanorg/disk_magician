@@ -506,5 +506,30 @@ tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "descriptor before pid unknown re
 
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
+echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
+add_wt verdict-clean worktree-verdict-clean
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7' _ "$SCRIPT" "$WTROOT/verdict-clean")"
+assert_eq "$V" "remove" "clean pushed aged fixture, days:7 -> remove"
+[[ -d "$WTROOT/verdict-clean" ]] && ok "verdict is read-only (worktree untouched)" || bad "verdict removed the worktree"
+
+add_wt verdict-recent worktree-verdict-recent
+touch "$WTROOT/verdict-recent/README.md"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" minutes:30' _ "$SCRIPT" "$WTROOT/verdict-recent")"
+assert_eq "$V" "kept:recent-activity" "fixture touched 5 min ago, minutes:30 -> kept:recent-activity"
+[[ -d "$WTROOT/verdict-recent" ]] && ok "recent worktree untouched" || bad "recent worktree removed by verdict"
+
+git init -q --bare "$TMPROOT/fork.git"
+git -C "$REPO" remote add fork "$TMPROOT/fork.git"
+add_wt verdict-fork worktree-verdict-fork
+printf 'forked\n' >"$WTROOT/verdict-fork/fork.txt"
+git -C "$WTROOT/verdict-fork" add fork.txt
+git -C "$WTROOT/verdict-fork" commit -q -m forked
+git -C "$WTROOT/verdict-fork" push -q fork HEAD:worktree-verdict-fork
+age_wt "$WTROOT/verdict-fork"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7 origin' _ "$SCRIPT" "$WTROOT/verdict-fork")"
+assert_eq "$V" "kept:not-pushed" "HEAD only on fork remote, origin scope -> kept:not-pushed"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7 all-remotes' _ "$SCRIPT" "$WTROOT/verdict-fork")"
+assert_eq "$V" "remove" "HEAD on fork remote, all-remotes scope -> remove"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

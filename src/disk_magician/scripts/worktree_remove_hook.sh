@@ -14,6 +14,10 @@ _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_WRH_DIR/worktree_new.sh"
 source "$_WRH_DIR/lib/worktree_recency.sh"
 source "$_WRH_DIR/lib/ao_worktree_config.sh"
+# Lease bookkeeping is optional: the hook still works without the lease lib,
+# it just cannot delete the lease after removing the worktree.
+# shellcheck source=scripts/lib/worktree_lease.sh
+[[ -f "$_WRH_DIR/lib/worktree_lease.sh" ]] && source "$_WRH_DIR/lib/worktree_lease.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -147,8 +151,95 @@ wrh_ao_skip_reason() {
     done <<<"$lines"
 }
 
+# wrh_removal_verdict <real_path> <recency_spec> [pushed_scope]
+# Pure verdict: prints "remove" or "kept:<token>" and always returns rc 0.
+# It NEVER deletes anything — the caller (wrh_main or the reaper) acts on the
+# token. recency_spec is days:N or minutes:N. pushed_scope is all-remotes
+# (the hook's historical default), origin, or origin-or-merged-pr (origin
+# containment OR a gh-verified merged PR head via worktree_merged_pr.sh;
+# fails closed when that library is not loaded). Check order matches the
+# historical hook exactly; do not reorder without updating the tests.
+wrh_removal_verdict() {
+    local real="$1" spec="$2" scope="${3:-all-remotes}"
+    local main status branch unit amount
+    real="$(cd "$real" 2>/dev/null && pwd -P)" || { printf 'kept:not-a-directory\n'; return 0; }
+    main="$(wtn_main_repo "$real")" || { printf 'kept:not-registered\n'; return 0; }
+    # Registered linked worktree: listed by the main repo, and not the main
+    # checkout (first entry).
+    if ! git -C "$main" worktree list --porcelain 2>/dev/null |
+        awk -v want="worktree $real" 'NR > 1 && $0 == want { f = 1 } END { exit !f }'; then
+        printf 'kept:not-registered\n'
+        return 0
+    fi
+    wrh_live_cwd_reason "$real"
+    [[ -z "$WRH_LIVE_CWD_REASON" ]] || { printf 'kept:%s\n' "$WRH_LIVE_CWD_REASON"; return 0; }
+    local guard_reason
+    guard_reason="$(wrh_ao_skip_reason "$real")"
+    [[ -z "$guard_reason" ]] || { printf 'kept:%s\n' "$guard_reason"; return 0; }
+    unit="${spec%%:*}"
+    amount="${spec#*:}"
+    case "$unit" in
+        days)
+            worktree_is_recently_active "$real" "$amount" && { printf 'kept:recent-activity\n'; return 0; } ;;
+        minutes)
+            worktree_is_recently_active_minutes "$real" "$amount" && { printf 'kept:recent-activity\n'; return 0; } ;;
+        *) printf 'kept:recent-activity\n'; return 0 ;;  # invalid spec fails closed
+    esac
+    status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
+        { printf 'kept:git-status-failed\n'; return 0; }
+    [[ -z "$status" ]] || { printf 'kept:dirty\n'; return 0; }
+    has_hidden_state "$real" && { printf 'kept:hidden-state\n'; return 0; }
+    has_ignored_user_data "$real" && { printf 'kept:ignored-data\n'; return 0; }
+    case "$scope" in
+        all-remotes)
+            [[ -n "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] ||
+                { printf 'kept:not-pushed\n'; return 0; } ;;
+        origin)
+            [[ -n "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes/origin 2>/dev/null)" ]] ||
+                { printf 'kept:not-pushed\n'; return 0; } ;;
+        origin-or-merged-pr)
+            if [[ -z "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes/origin 2>/dev/null)" ]]; then
+                if ! declare -F worktree_head_is_merged_pr >/dev/null 2>&1; then
+                    printf 'kept:not-pushed\n'; return 0
+                fi
+                branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
+                worktree_head_is_merged_pr "$main" "$branch" "$(git -C "$real" rev-parse HEAD 2>/dev/null)" ||
+                    { printf 'kept:not-pushed\n'; return 0; }
+            fi ;;
+        *) printf 'kept:not-pushed\n'; return 0 ;;
+    esac
+    printf 'remove\n'
+    return 0
+}
+
+# wrh_remove_now <real_path> <display_path> — run the actual removal: plain
+# `git worktree remove` (never --force), worktree-* branch deletion when not
+# checked out elsewhere, and lease-file cleanup when the lease lib is loaded.
+# rc 0 only when the worktree was removed.
+wrh_remove_now() {
+    local real="$1" display="$2" main branch
+    real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
+    main="$(wtn_main_repo "$real")" || return 1
+    branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
+    git -C "$main" worktree remove "$real" >&2 || return 1
+    wrh_log "removed $display"
+    if [[ "$branch" == worktree-* ]]; then
+        if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
+            wrh_log "kept branch $branch: checked out elsewhere"
+        elif git -C "$main" branch -d "$branch" >&2; then
+            wrh_log "deleted branch $branch"
+        else
+            wrh_log "kept branch $branch: git branch -d refused"
+        fi
+    fi
+    if declare -F lease_path_for >/dev/null 2>&1; then
+        rm -f -- "$(lease_path_for "$real")" 2>/dev/null
+    fi
+    return 0
+}
+
 wrh_main() {
-    local p main real branch
+    local p main real verdict
     p="$(python3 -c '
 import json, sys
 try:
@@ -163,49 +254,27 @@ print(v)
     path_is_under_standard_root "$p" || { wrh_log "kept $p: outside $STANDARD_WORKTREE_ROOT"; return 0; }
     real="$(cd "$p" 2>/dev/null && pwd -P)" || { wrh_log "kept $p: not a directory"; return 0; }
     main="$(wtn_main_repo "$real")" || { wrh_log "kept $p: not a git repo"; return 0; }
-    # Registered linked worktree: listed by the main repo, and not the main
-    # checkout (first entry).
-    if ! git -C "$main" worktree list --porcelain 2>/dev/null |
-        awk -v want="worktree $real" 'NR > 1 && $0 == want { f = 1 } END { exit !f }'; then
-        wrh_log "kept $p: not a registered linked worktree"
-        return 0
-    fi
-    local guard_reason
-    wrh_live_cwd_reason "$real"
-    guard_reason=$WRH_LIVE_CWD_REASON
-    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
-    guard_reason="$(wrh_ao_skip_reason "$real")"
-    [[ -z "$guard_reason" ]] || { wrh_log "kept $p: $guard_reason"; return 0; }
-    if worktree_is_recently_active "$real" 7; then
-        wrh_log "kept $p: recent-activity"
-        return 0
-    fi
-    local status
-    status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
-        { wrh_log "kept $p: git status failed"; return 0; }
-    [[ -z "$status" ]] || { wrh_log "kept $p: dirty"; return 0; }
-    if has_hidden_state "$real"; then
-        wrh_log "kept $p: hidden state or ignored secret-like file(s) present"
-        return 0
-    fi
-    if has_ignored_user_data "$real"; then
-        wrh_log "kept $p: non-rebuildable ignored user data present"
-        return 0
-    fi
-    [[ -n "$(git -C "$real" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] ||
-        { wrh_log "kept $p: HEAD not contained in any remote-tracking ref"; return 0; }
 
-    branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
-    git -C "$main" worktree remove "$real" >&2 || { wrh_log "kept $p: git worktree remove failed"; return 0; }
-    wrh_log "removed $p"
-    if [[ "$branch" == worktree-* ]]; then
-        if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
-            wrh_log "kept branch $branch: checked out elsewhere"
-        elif git -C "$main" branch -d "$branch" >&2; then
-            wrh_log "deleted branch $branch"
-        else
-            wrh_log "kept branch $branch: git branch -d refused"
-        fi
+    verdict="$(wrh_removal_verdict "$real" days:7)"
+    case "$verdict" in
+        remove) ;;
+        kept:not-registered)         wrh_log "kept $p: not a registered linked worktree"; return 0 ;;
+        kept:live-cwd)                wrh_log "kept $p: live-cwd"; return 0 ;;
+        kept:cwd-unknown)             wrh_log "kept $p: cwd-unknown"; return 0 ;;
+        kept:ao-owned)                wrh_log "kept $p: ao-owned"; return 0 ;;
+        kept:ao-config-unreadable)    wrh_log "kept $p: ao-config-unreadable"; return 0 ;;
+        kept:recent-activity)         wrh_log "kept $p: recent-activity"; return 0 ;;
+        kept:git-status-failed)       wrh_log "kept $p: git status failed"; return 0 ;;
+        kept:dirty)                   wrh_log "kept $p: dirty"; return 0 ;;
+        kept:hidden-state)           wrh_log "kept $p: hidden state or ignored secret-like file(s) present"; return 0 ;;
+        kept:ignored-data)            wrh_log "kept $p: non-rebuildable ignored user data present"; return 0 ;;
+        kept:not-pushed)              wrh_log "kept $p: HEAD not contained in any remote-tracking ref"; return 0 ;;
+        *)                            wrh_log "kept $p: ${verdict#kept:}"; return 0 ;;
+    esac
+
+    if ! wrh_remove_now "$real" "$p"; then
+        wrh_log "kept $p: git worktree remove failed"
+        return 0
     fi
     return 0
 }

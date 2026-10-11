@@ -15,6 +15,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
+# shellcheck source=scripts/lib/worktree_merged_pr.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_merged_pr.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 
@@ -379,88 +381,6 @@ has_ignored_user_data() {
     return 1
 }
 
-# Persist across the command substitutions used by classification. Cache names
-# are digests, but the stored repo and branch are also checked byte for byte:
-# a filename collision or an unreadable record must never approve a worktree.
-repo_local_cached_pr_heads() {
-    # Per-run cache files: repos.tsv maps owner_repo -> index; repo<index>/index.tsv
-    # holds "branch<TAB>oid oid ...". Git refnames cannot contain tab, newline,
-    # space or backslash, and keys reach awk through ENVIRON (no -v escapes).
-    local repo="$1" owner_repo="$2" branch_clean="$3" cache_dir idx
-    [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]] || return 1
-    [[ "$owner_repo" =~ ^[^/]+/[^/]+$ ]] || return 1
-    idx="$(DWR_KEY="$owner_repo" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { print $2; exit }' "$RUN_TMP/repos.tsv" 2>/dev/null)"
-    if [[ -z "$idx" ]]; then
-        idx="$(( $(awk 'END { print NR }' "$RUN_TMP/repos.tsv" 2>/dev/null || echo 0) + 1 ))"
-        cache_dir="$RUN_TMP/repo$idx"
-        mkdir "$cache_dir" || return 1
-        printf '%s\t%s\n' "$owner_repo" "$idx" >> "$RUN_TMP/repos.tsv"
-        populate_repo_pr_cache "$repo" "$owner_repo" "$cache_dir" || true
-    fi
-    cache_dir="$RUN_TMP/repo$idx"
-    # Prints the heads one per line (as the per-row gh call does); rc 1 on miss.
-    DWR_KEY="$branch_clean" awk -F '\t' '$1 == ENVIRON["DWR_KEY"] { n = split($2, h, " "); for (i = 1; i <= n; i++) print h[i]; found = 1; exit } END { exit !found }' "$cache_dir/index.tsv" 2>/dev/null
-}
-
-populate_repo_pr_cache() {
-    local repo="$1" owner_repo="$2" cache_dir="$3" worktrees line
-    worktrees="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || return 1
-    local branches=()
-    while IFS= read -r line; do
-        case "$line" in branch\ refs/heads/*) branches+=("${line#branch refs/heads/}");; esac
-    done <<<"$worktrees"
-    local start index end query fields response
-    for ((start=0; start<${#branches[@]}; start+=40)); do
-        end=$((start + 40))
-        (( end <= ${#branches[@]} )) || end=${#branches[@]}
-        query='query($owner: String!, $name: String!'
-        fields=''
-        local variables=(-f "owner=${owner_repo%%/*}" -f "name=${owner_repo#*/}")
-        for ((index=start; index<end; index++)); do
-            query+=", \$b${index}: String!"
-            fields+=" b${index}: pullRequests(headRefName: \$b${index}, states: MERGED, first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { headRefOid } }"
-            variables+=(-f "b${index}=${branches[index]}")
-        done
-        query+=") { repository(owner: \$owner, name: \$name) {${fields} } }"
-        response="$cache_dir/response.json"
-        if env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh api graphql -f "query=$query" "${variables[@]}" > "$response" 2>/dev/null; then
-            python3 - "$cache_dir" "$owner_repo" "$response" "$start" "${branches[@]:start:end-start}" <<'PY' || true
-import json, os, sys
-directory, owner_repo, response, start, *branches = sys.argv[1:]
-try:
-    with open(response) as source:
-        payload = json.load(source)
-    repository = payload['data']['repository']
-    if not isinstance(repository, dict):
-        sys.exit(1)
-    errors = payload.get('errors', [])
-    if not isinstance(errors, list):
-        sys.exit(1)
-    failed = set()
-    for error in errors:
-        path = error.get('path') if isinstance(error, dict) else None
-        # A request/repository-wide or malformed error cannot identify a safe
-        # subset. Alias-specific errors invalidate only the affected branches.
-        if not isinstance(path, list) or len(path) < 2 or path[0] != 'repository' or not isinstance(path[1], str):
-            sys.exit(1)
-        failed.add(path[1])
-    for index, branch in enumerate(branches, int(start)):
-        alias = 'b' + str(index)
-        value = repository.get(alias)
-        if alias in failed or not isinstance(value, dict):
-            continue
-        nodes = value.get('nodes')
-        if not isinstance(nodes, list) or any(not isinstance(node, dict) or not isinstance(node.get('headRefOid'), str) or not node['headRefOid'] for node in nodes):
-            continue
-        with open(os.path.join(directory, 'index.tsv'), 'a') as target:
-            target.write(branch + '\t' + ' '.join(node['headRefOid'] for node in nodes) + '\n')
-except (OSError, ValueError, KeyError, TypeError):
-    sys.exit(1)
-PY
-        fi
-    done
-}
-
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
 # prints a PRESERVE reason, or nothing when the worktree is clean and merged.
 classify_content_and_merge() {
@@ -508,7 +428,7 @@ classify_content_and_merge() {
                 owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                 if [[ -n "$owner_repo" ]]; then
                     local pr_heads gh_rc=0
-                    if ! pr_heads="$(repo_local_cached_pr_heads "$repo" "$owner_repo" "$branch_clean" 2>/dev/null)"; then
+                    if ! pr_heads="$(worktree_cached_pr_heads "$repo" "$branch_clean" 2>/dev/null)"; then
                         pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
                     fi
                     if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
@@ -731,7 +651,9 @@ process_antigravity_orphan() {
                         owner_repo="$(echo "$origin_url" | sed -E 's#^(https?://)[^/@]+@#\1#; s#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
                         if [[ -n "$owner_repo" ]]; then
                             local pr_heads gh_rc=0
-                            pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                            if ! pr_heads="$(worktree_cached_pr_heads "$ag_main_repo" "$branch_clean" 2>/dev/null)"; then
+                                pr_heads="$(env -u GH_TOKEN -u GITHUB_TOKEN timeout 10s gh pr list --repo "$owner_repo" --head "$branch_clean" --state MERGED --json headRefOid -q '.[].headRefOid' 2>/dev/null)" || gh_rc=$?
+                            fi
                             if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
                                 if grep -qFx "$head_sha" <<<"$pr_heads"; then
                                     eligible_by_pr=true

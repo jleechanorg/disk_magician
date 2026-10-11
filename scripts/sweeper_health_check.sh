@@ -153,6 +153,25 @@ log "Sweeper health check (liveness diagnostics) — threshold ${THRESHOLD_DAYS}
 log "Found $PLIST_COUNT plist(s)"
 echo
 
+# Read typed receipts through the shared validator, including bounded partial runs.
+python3 - "$SCRIPT_DIR" <<'PY_RECEIPTS'
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    from job_receipt import JobReceiptStore
+except ImportError:
+    print("  [RECEIPT] unavailable: job_receipt module missing")
+    sys.exit(0)
+store = JobReceiptStore()
+for job in ("snapshot_commit", "pressure_sweep", "tmp_scratch_sweep", "worktree_reap"):
+    try:
+        data = store.read(job)
+        terminal = data.get("last_terminal") or {}
+        print("  [RECEIPT] {}: {}".format(job, terminal.get("outcome", "unknown")))
+    except Exception as exc:
+        print("  [RECEIPT] {}: invalid ({})".format(job, exc))
+PY_RECEIPTS
+
 if [[ $PLIST_COUNT -eq 0 ]]; then
   log "FAIL: No sweeper plists found in $PLIST_DIR (liveness diagnostics degraded/unknown)."
   exit 1

@@ -116,6 +116,28 @@ worktree_age_days() {
     printf '%s\n' "$(( (now - last) / 86400 ))"
 }
 
+# worktree_is_recently_active_minutes <worktree_path> <min_minutes> [now]
+# rc 0 = activity within the last <min_minutes> whole minutes; PROTECTED.
+# rc 1 = quiet for at least <min_minutes> whole minutes; eligible.
+# Same fail-closed contract as the days flavour: an unmeasurable epoch or an
+# invalid floor protects (rc 0). Used by the worktree lease reaper's quiet
+# periods, where windows are 30 minutes, not the 7-day human floor.
+worktree_is_recently_active_minutes() {
+    local wt="${1:-}" min_minutes="${2:-}" supplied_now="${3:-}" now last
+    [[ "$min_minutes" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 0
+    now="$(date +%s 2>/dev/null)" || return 0
+    [[ "$now" =~ ^[1-9][0-9]*$ ]] || return 0
+    # A test-supplied row clock must be a positive integer no later than now.
+    if [[ "$supplied_now" =~ ^[1-9][0-9]*$ ]] && (( supplied_now <= now )); then
+        now="$supplied_now"
+    fi
+    last="$(worktree_last_activity_epoch "$wt")"
+    # Fail closed: no measurable activity epoch -> treat as active right now.
+    [[ "$last" =~ ^[1-9][0-9]*$ ]] || return 0
+    # rc 0 (protected/too young) when the quiet time is still inside the window.
+    (( now - last < min_minutes * 60 ))
+}
+
 # Keep every fallback on the same validated row clock as the threshold probe.
 _worktree_recency_legacy_active() {
     local wt="$1" min_days="$2" now="$3" last age

@@ -176,6 +176,74 @@ class TestWorktreeGuard(unittest.TestCase):
     def test_lowercase_bash_tool_denied(self):
         self.assertDeny(self.run_cmd("git worktree add /tmp/z", tool="bash"))
 
+    # --- pending leases on allowed adds (plan Task 4) -----------------------
+    def _lease_path(self, target):
+        import hashlib
+        key = hashlib.sha256(os.path.realpath(target).encode()).hexdigest()[:16]
+        return os.path.join(self.home, ".disk_magician_state",
+                            "worktree_leases", key + ".json")
+
+    def _fake_ps_env(self):
+        """Env with a fake ps whose unknown pids walk up to pid 900 = claude."""
+        psdir = os.path.join(self.home, "fake_ps")
+        os.makedirs(psdir, exist_ok=True)
+        lstart = os.path.join(psdir, "lstart")
+        with open(lstart, "w") as f:
+            f.write("Sat Oct 10 12:00:00 2026\n")
+        fake = os.path.join(psdir, "ps")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\n"
+                    "pid=''; spec=''\n"
+                    "while [[ $# -gt 0 ]]; do case \"$1\" in\n"
+                    "  -p) pid=\"$2\"; shift 2 ;;\n"
+                    "  -o) spec=\"$2\"; shift 2 ;;\n"
+                    "  *) shift ;;\n"
+                    "esac; done\n"
+                    "case \"$spec\" in\n"
+                    "  ppid=,comm=)\n"
+                    "    if [[ \"$pid\" == 900 ]]; then printf '1\\tclaude\\n'\n"
+                    "    else printf '900\\tbash\\n'\n"
+                    "    fi ;;\n"
+                    "  lstart=) cat \"%s\" ;;\n"
+                    "  args=)\n"
+                    "    if [[ \"$pid\" == 900 ]]; then printf '/usr/local/bin/claude --session\n'\n"
+                    "    else printf '/bin/bash\n'\n"
+                    "    fi ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n" % lstart)
+        os.chmod(fake, 0o755)
+        env = dict(self.env)
+        env["DISK_MAGICIAN_PS_BIN"] = fake
+        return env
+
+    def test_allowed_add_writes_pending_lease(self):
+        target = os.path.join(self.home, ".worktrees", "r", "x")
+        res = self.run_cmd("git worktree add %s -b x" % target,
+                           env=self._fake_ps_env())
+        self.assertAllow(res)
+        lease = self._lease_path(target)
+        self.assertTrue(os.path.isfile(lease), lease)
+        with open(lease) as f:
+            d = json.load(f)
+        self.assertEqual(d["creator"], "guard")
+        self.assertTrue(d["pending"])
+        self.assertEqual(d["owner"]["pid"], 900)
+        self.assertEqual(d["owner"]["comm"], "claude")
+
+    def test_unresolvable_add_writes_no_lease(self):
+        env = self._fake_ps_env()
+        self.assertAllow(self.run_cmd('git worktree add "$WT"', env=env))
+        leases = os.path.join(self.home, ".disk_magician_state", "worktree_leases")
+        self.assertFalse(os.path.isdir(leases), leases)
+        # unresolvable targets are logged (existing behavior), never leased
+        self.assertTrue(os.path.isfile(self.log))
+
+    def test_denied_add_writes_no_lease(self):
+        env = self._fake_ps_env()
+        self.assertDeny(self.run_cmd("git worktree add /tmp/z -b b", env=env))
+        self.assertFalse(os.path.isdir(os.path.join(self.home, ".disk_magician_state",
+                                                   "worktree_leases")))
+
 
 if __name__ == "__main__":
     unittest.main()
