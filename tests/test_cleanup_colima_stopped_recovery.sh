@@ -27,16 +27,20 @@ case "\$1" in
           stopped) printf 'PROFILE STATUS ARCH\ndefault Stopped aarch64\n';;
           fail) exit 1;;
           *) printf 'PROFILE STATUS ARCH\ndefault Running aarch64\n';; esac ;;
-  start) if [[ -e "$ST/lock" ]]; then echo 'failed to run attach disk "colima", in use by instance "colima"' >&2; exit 1; fi
+  start) if [[ -e "$ST/startfail" ]]; then exit 1; fi
+         if [[ -e "$ST/lock" ]]; then echo 'failed to run attach disk "colima", in use by instance "colima"' >&2; exit 1; fi
          touch "$ST/started" ;;
 esac
 exit 0
 EOF
+# Fixtures copied from real `limactl disk list colima` (lima 2.0.3).
+printf 'NAME      SIZE      FORMAT    DIR                                              IN-USE-BY\ncolima    100GiB    raw       /Users/jleechan/.colima/_lima/_disks/colima      colima\n' > "$ST/dlist_locked"
+printf 'NAME      SIZE      FORMAT    DIR\ncolima    100GiB    raw       /Users/jleechan/.colima/_lima/_disks/colima\n' > "$ST/dlist_unlocked"
 cat > "$BIN/limactl" <<EOF
 #!/bin/bash
 echo "limactl \$*" >> "$INV"
 case "\$1 \$2" in
-  "disk list") printf 'NAME SIZE FORMAT DIR IN-USE-BY\ncolima 100GiB raw /x/_disks/colima /x/colima\n'; [[ -e "$ST/lock" ]] || exit 0 ;;
+  "disk list") cat "$ST/dlist_\$([[ -e "$ST/lock" ]] && echo locked || echo unlocked)" ;;
   "disk unlock") rm -f "$ST/lock" ;;
 esac
 exit 0
@@ -54,7 +58,8 @@ exit 0
 EOF
 cat > "$BIN/ps" <<EOF
 #!/bin/bash
-cat "$ST/ps_out" 2>/dev/null
+[[ -e "$ST/ps_fail" ]] && exit 1
+cat "$ST/ps_out" 2>/dev/null || echo /sbin/launchd
 exit 0
 EOF
 cat > "$BIN/ssh" <<'EOF'
@@ -72,12 +77,12 @@ cnt() { grep -c "$1" "$INV" || true; }
 # $1 list_mode  $2 lock(0/1)  $3 approval(0/1)  rest: extra args
 run() {
   local mode="$1" lock="$2" appr="$3"; shift 3
-  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out"
+  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail"
   echo "$mode" > "$ST/list_mode"
   [[ "$lock" == 1 ]] && touch "$ST/lock"
   RC=0
   env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 \
-    ${appr:+VACATE_CI_RUNNERS_APPROVED=$appr} /bin/bash "$SCRIPT" "${@:---clean}" > "$TMP/out" 2>&1 || RC=$?
+    ${appr:+VACATE_CI_RUNNERS_APPROVED=$appr} ${PROFILE:+COLIMA_PROFILE=$PROFILE} /bin/bash "$SCRIPT" "${@:---clean}" > "$TMP/out" 2>&1 || RC=$?
 }
 
 # 1. Stopped + approval -> restart allowed
@@ -125,6 +130,26 @@ run stopped 0 "" --trim-only --clean
 if grep -q 'trim-only: Colima VM is Stopped' "$TMP/out" && ! grep -q DEGRADED "$TMP/out" && [[ $RC -eq 0 ]]; then
   ok "trim-only Stopped: clear log line, no DEGRADED"
 else bad "trim-only"; fi
+
+# 7. unlocked listing (4 fields) + start failure -> never unlock
+run stopped 0 1; : > "$INV"; rm -f "$ST/started"; touch "$ST/startfail"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]]; then ok "unlocked disk: never unlocks"; else bad "unlocked"; fi
+
+# 8. ps failure -> not proven stale
+run stopped 1 1; : > "$INV"; rm -f "$ST/started"; touch "$ST/ps_fail"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock') -eq 0 ]]; then ok "ps failure: fail closed"; else bad "ps failure"; fi
+
+# 9. empty pid file -> not proven stale
+: > "$HOME_D/.colima/_lima/colima/ha.pid"
+run stopped 1 1
+if [[ $(cnt '^limactl disk unlock') -eq 0 ]]; then ok "empty pid file: fail closed"; else bad "empty pid"; fi
+rm -f "$HOME_D/.colima/_lima/colima/ha.pid"
+
+# 10. non-default profile never acts on the default instance
+PROFILE=other run stopped 1 1
+if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 0 ]]; then ok "non-default profile: no action on default instance"; else bad "profile"; fi
 
 echo "passed=$PASS failed=$FAIL"
 [[ $FAIL -eq 0 ]]

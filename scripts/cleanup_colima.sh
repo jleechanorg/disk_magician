@@ -203,25 +203,31 @@ fstrim_colima_disk() {
 colima_vm_is_stopped() {
   local out
   command -v colima >/dev/null 2>&1 || return 1
+  # Lock paths/instance name/socket are pinned to the default profile.
+  [[ "${COLIMA_PROFILE:-default}" == "default" ]] || return 1
   out=$(bounded 15 colima list 2>/dev/null) || return 1
-  printf '%s\n' "$out" | awk -v p="${COLIMA_PROFILE:-default}" '$1==p && $2=="Stopped" {f=1} END {exit !f}'
+  printf '%s\n' "$out" | awk '$1=="default" && $2=="Stopped" {f=1} END {exit !f}'
 }
 
 # Stale lima disk lock: disk "colima" IN-USE-BY the colima instance while no
 # hostagent/VZ process or live pid file exists (unclean stop). Live -> not stale.
 colima_disk_lock_is_stale() {
-  local lima_home="$COLIMA_LIMA" listing pidf pid
+  local lima_home="$COLIMA_LIMA" listing pidf pid psout
+  [[ "${COLIMA_PROFILE:-default}" == "default" ]] || return 1
   command -v limactl >/dev/null 2>&1 || return 1
   listing=$(LIMA_HOME="$lima_home" bounded 15 limactl disk list colima 2>/dev/null) || return 1
-  printf '%s\n' "$listing" | awk '$1=="colima" && $0 ~ /\/colima[[:space:]]*$/ {f=1} END {exit !f}' || return 1
+  printf '%s\n' "$listing" | awk '$1=="colima" && NF==5 && $NF=="colima" {f=1} END {exit !f}' || return 1
   for pidf in "$lima_home"/colima/*.pid; do
     [[ -f "$pidf" ]] || continue
-    pid=$(tr -dc '0-9' < "$pidf" 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    pid=$(tr -dc '0-9' < "$pidf" 2>/dev/null) || return 1
+    [[ -n "$pid" ]] || return 1   # unreadable/empty pid file: not proven stale
+    if kill -0 "$pid" 2>/dev/null; then
       return 1
     fi
   done
-  if ps -axo command 2>/dev/null | grep -E 'limactl.*hostagent|lima.*hostagent|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
+  psout=$(ps -axo command 2>/dev/null) || return 1
+  [[ -n "$psout" ]] || return 1
+  if printf '%s\n' "$psout" | grep -E 'limactl.*hostagent|lima.*hostagent|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
     return 1
   fi
   return 0
