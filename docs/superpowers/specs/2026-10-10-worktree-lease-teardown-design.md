@@ -80,7 +80,7 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 
 ```json
 {"schema_version": 1, "path": "/Users/.../.worktrees/repo/name", "repo": "/Users/.../repo",
- "branch": "feat/x", "created_at": "2026-10-10T23:00:00Z",
+ "branch": "feat/x", "created_at": "2026-10-10T23:00:00Z", "created_epoch": 1791676800,
  "owner": {"pid": 12345, "start_epoch": 1791676799, "comm": "claude"},
  "creator": "worktree-new|worktree-create-hook|adopt", "state": "active",
  "ttl_hours": 24, "released_at": null,
@@ -97,9 +97,9 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
   - `worktree_create_hook.sh`.
   - `diskm guard-worktree-add` (`worktree_guard.py`, a PreToolUse hook that runs inside the agent's process tree) writes a **pending lease** for the statically resolved target path, owner resolved from its own ancestry, `creator: "guard"`.
     - The write is exclusive: nothing is written if the target path already exists, or if a lease exists for an existing worktree. A lease whose path no longer exists is stale, and the guard replaces it.
-    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` has a **birth time** (`stat -f %B`, never mtime, which changes on every index rewrite) later than the pending lease's `created_at`. Otherwise the worktree is adopted with `owner: null`.
+    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` has a **birth time** (`stat -f %B`, never mtime, which changes on every index rewrite) **≥** the pending lease's `created_epoch` (both whole seconds; the guard runs only ~100–300 ms before `git worktree add`, so they often land in the same second). This is safe because the exclusive write already proved the path did not exist when the lease was written. Otherwise the worktree is adopted with `owner: null`.
 - **Incarnation binding.** Every lease records the worktree's `admin_id` and `admin_birth_epoch` when it is written or promoted. Before using a lease, the reaper compares them with the live admin dir. On any mismatch (the path was removed and recreated) the lease is stale: it is replaced with an `owner: null` adopt lease, never reused.
-- **Lease deletion on removal.** Every diskm removal path deletes the lease after a successful `git worktree remove`: the reaper, the remove hook and `cleanup_worktrees.sh`.
+- **Lease deletion on removal.** The reaper and the remove hook delete the lease after a successful `git worktree remove`. For `cleanup_worktrees.sh` removals, the reaper's prune step plus the incarnation check retire the lease.
     - Pending leases older than 1 h with no worktree are deleted.
     - The guard sources the lease library relative to its own file (`__file__`), not the caller's cwd.
   - Unresolvable targets (the guard already logs these) get no pending lease; adopt records them with `owner: null`.
@@ -107,6 +107,9 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 ### D2. Reaper: `diskm worktree-reap`
 
 `scripts/worktree_reap.sh`, dispatched by `disk_magician.sh` and the package CLI. Launchd job `com.jleechanorg.disk-magician-worktree-reap`, `StartInterval` 1800, from a repo template.
+- The template sets `EnvironmentVariables.PATH` to `@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, because launchd's default PATH lacks `gh` and `timeout`.
+- It also sets `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND=ssh -o BatchMode=yes`.
+- The receipt counts `fetch_ok`/`fetch_failed` and `gh_ok`/`gh_failed`, so a missing tool shows up as failures instead of silently keeping everything.
 
 1. **Adopt.**
    - Promote pending guard leases whose path is now a registered worktree.
@@ -157,7 +160,7 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 | `ignored-data` | non-rebuildable ignored user data |
 | `not-pushed` | no pushed proof |
 | `remote-unverified` | fetch failed or was skipped |
-| `locked` | worktree is locked (checked from `git worktree list --porcelain` before removal) |
+| `locked` | worktree is locked (checked from `git worktree list --porcelain` before removal; a new check, stricter than today's `wrh_main`) |
 | `cwd-unknown` | live-cwd probe could not decide |
 | `ao-config-unreadable` | AO config present but unreadable |
 | `not-a-directory` | path missing or not a directory |
