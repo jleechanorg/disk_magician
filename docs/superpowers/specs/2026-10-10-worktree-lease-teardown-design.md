@@ -84,6 +84,7 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
  "owner": {"pid": 12345, "start_epoch": 1791676799, "comm": "claude"},
  "creator": "worktree-new|worktree-create-hook|adopt", "state": "active",
  "ttl_hours": 24, "released_at": null,
+ "admin_id": "name-3", "admin_birth_epoch": 1791676810,
  "last_verdict": null, "last_checked_at": null}
 ```
 
@@ -95,8 +96,10 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
   - `worktree_new.sh` after a successful `wtn_create`.
   - `worktree_create_hook.sh`.
   - `diskm guard-worktree-add` (`worktree_guard.py`, a PreToolUse hook that runs inside the agent's process tree) writes a **pending lease** for the statically resolved target path, owner resolved from its own ancestry, `creator: "guard"`.
-    - The write is exclusive: nothing is written if the target path already exists or any lease for it exists, so a guard can never overwrite a live owner's lease.
-    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` was created after the pending lease's `created_at`. Otherwise the worktree is adopted with `owner: null`.
+    - The write is exclusive: nothing is written if the target path already exists, or if a lease exists for an existing worktree. A lease whose path no longer exists is stale, and the guard replaces it.
+    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` has a **birth time** (`stat -f %B`, never mtime, which changes on every index rewrite) later than the pending lease's `created_at`. Otherwise the worktree is adopted with `owner: null`.
+- **Incarnation binding.** Every lease records the worktree's `admin_id` and `admin_birth_epoch` when it is written or promoted. Before using a lease, the reaper compares them with the live admin dir. On any mismatch (the path was removed and recreated) the lease is stale: it is replaced with an `owner: null` adopt lease, never reused.
+- **Lease deletion on removal.** Every diskm removal path deletes the lease after a successful `git worktree remove`: the reaper, the remove hook and `cleanup_worktrees.sh`.
     - Pending leases older than 1 h with no worktree are deleted.
     - The guard sources the lease library relative to its own file (`__file__`), not the caller's cwd.
   - Unresolvable targets (the guard already logs these) get no pending lease; adopt records them with `owner: null`.
@@ -112,7 +115,7 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 2. **Owner check.** For each lease with a non-null owner, the worktree is a removal candidate only in two cases:
    - **dead:** pid absent, or start epoch mismatch. Quiet period `REAP_QUIET_MINUTES`, default 30.
    - **released:** `released_at` is set by `diskm worktree-release <path>`. Quiet period `REAP_RELEASED_QUIET_MINUTES`, default 30.
-   The owner counts as dead only when the pid field is a valid integer and `ps` returns rc 1 with empty stderr. Anything else, such as `ps: process id too large`, is `kept:lease-unreadable`. An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status` and can be targeted with `worktree-release`. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
+   The owner counts as dead only when the pid field is a valid integer and `ps` returns rc 1 with empty stderr. A non-integer pid field is `kept:lease-unreadable`. Any other `ps` outcome, including `ps: process id too large`, is `unknown` (keep). An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status` and can be targeted with `worktree-release`. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
 3. **Quiet period.** Require no content change for `REAP_QUIET_MINUTES` (default 30) via `worktree_is_recently_active` with minute granularity. Section 9 notes the helper extension this needs. This covers a sibling agent that adopted the worktree after the owner died.
 4. **Remote freshness.** Before any verdict, run `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin` once per owning repo, bounded to 60 s. If the fetch fails, every candidate in that repo gets `kept:remote-unverified`.
    - The reaper's pushed proof is either HEAD contained in `refs/remotes/origin/*` only (stale `fork/*` or `upstream/*` refs don't count), or HEAD equal to the head of a gh-verified MERGED PR. The second form covers squash-merged PRs whose branch was deleted.
@@ -154,7 +157,11 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 | `ignored-data` | non-rebuildable ignored user data |
 | `not-pushed` | no pushed proof |
 | `remote-unverified` | fetch failed or was skipped |
-| `locked` | worktree is locked |
+| `locked` | worktree is locked (checked from `git worktree list --porcelain` before removal) |
+| `cwd-unknown` | live-cwd probe could not decide |
+| `ao-config-unreadable` | AO config present but unreadable |
+| `not-a-directory` | path missing or not a directory |
+| `git-status-failed` | `git status` failed |
 | `safety-local` | blocked by `safety_check.sh` |
 | `owner-alive-expired` | owner alive past its TTL |
 | `lease-unreadable` | lease file unreadable |
@@ -228,6 +235,8 @@ Before `wtn_create`:
 
 - **Owner misattribution.** A creator with no matching runtime ancestor gets `owner: null` and is never owner-reaped. That is safe, but it reduces coverage, so `diskm status` reports lease coverage per owner state.
 - **TOCTOU.** Ignored files written between the checks and `git worktree remove` would be lost. This is bounded by the quiet period and live-cwd check, and it is the same window the existing hook and sweeper accept.
+- **Live-cwd coverage.** Agent CLIs run each command in a short-lived shell, so an idle session rarely has its cwd inside a worktree. The quiet period, not the live-cwd check, is the main guard against reaping a checkout in active use.
+- **Nested sessions.** Nearest-ancestor ownership can attribute a worktree to a short-lived nested `claude -p` instead of its long-lived parent. The data-safety checks still apply, so the cost is that the parent may have to recreate the worktree.
 - **Absolute-path readers.** `lsof -d cwd` doesn't see a reader using absolute paths, such as a parent session reading a lane's worktree. The cost is convenience: the worktree is clean and pushed, so it can be recreated.
 - **Ref-lock contention.** A fetch every 30 min can briefly contend with agents in the same repo. Fetch failures are keeps, not errors.
 - **Minute-granularity recency.** `worktree_is_recently_active` takes days today. The builder adds a minutes variant in the same helper, with the fail-closed unmeasurable-case test (pattern: `tests/test_worktree_recency.sh` case 5).

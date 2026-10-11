@@ -19,7 +19,8 @@
 - Owner runtimes (basename match): `claude`, `codex`, `agy`, `cursor-agent`, `hermes`. With no runtime ancestor, `owner` is null and the lease is never owner-reaped.
 - Lease TTL: `ttl_hours` default 24, report-only (`kept:owner-alive-expired`). Removal candidates are only `dead` (quiet `REAP_QUIET_MINUTES` 30) or `released` (quiet `REAP_RELEASED_QUIET_MINUTES` 30). An alive owner is never removed.
 - Pushed proof for the reaper: `wrh_removal_verdict ... origin-or-merged-pr`, meaning either HEAD is contained in `refs/remotes/origin/*` after `GIT_TERMINAL_PROMPT=0 git -c gc.auto=0 -c maintenance.auto=false fetch --quiet --prune origin`, or HEAD equals a gh-verified MERGED PR head via `scripts/lib/worktree_merged_pr.sh` (Task 3b).
-- Reason tokens (fixed set): `not-registered`, `live-cwd`, `ao-owned`, `recent-activity`, `dirty`, `hidden-state`, `ignored-data`, `not-pushed`, `remote-unverified`, `locked`, `safety-local`, `owner-alive-expired`, `lease-unreadable`, `remove-failed`.
+- Reason tokens (fixed set): `not-registered`, `live-cwd`, `cwd-unknown`, `ao-owned`, `ao-config-unreadable`, `not-a-directory`, `git-status-failed`, `recent-activity`, `dirty`, `hidden-state`, `ignored-data`, `not-pushed`, `remote-unverified`, `locked`, `safety-local`, `owner-alive-expired`, `lease-unreadable`, `remove-failed`.
+- Leases carry `admin_id` and `admin_birth_epoch` (`stat -f %B` of `<main>/.git/worktrees/<id>`). A mismatch with the live admin dir marks the lease stale, and it is re-adopted with `owner: null`. Every diskm removal path deletes the lease after a successful removal.
 - Base: `main` at or after `b776e56`; the remove hook there has the live-cwd, AO, recency, hidden-state and ignored-data checks.
 - Dead ⇔ the pid field is a valid integer and `ps` returns rc 1 with empty stderr. Anything else is `unknown` (keep), or `lease-unreadable` for an invalid pid.
 - Owner start time: `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` parsed with `%a %b %d %H:%M:%S %Y` to a UTC epoch, stored as `start_epoch`. Alive ⇔ the epochs differ by ≤2 s. Never compare raw `lstart` strings. If `ps` fails, the state is unknown, which means keep.
@@ -93,7 +94,8 @@
   - `lease_dir` prints the lease directory (honors `DISK_MAGICIAN_STATE_DIR`).
   - `lease_path_for <worktree_path>` prints the lease file path.
   - `lease_resolve_owner [start_pid]` prints `pid<TAB>start_epoch<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
-  - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`, exclusive create. rc 1 and nothing written if the path exists or any lease for it exists.
+  - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`. rc 1 and nothing written if the path exists, or if a lease exists for an existing worktree. It replaces a lease whose path no longer exists.
+  - `lease_matches_incarnation <lease_file>` returns rc 0 when `admin_id` and `admin_birth_epoch` match the live admin dir; rc 1 otherwise.
   - `lease_write <worktree_path> <repo> <branch> <creator>`: atomic write with the owner resolved from `$$`. rc 0 on success.
   - `lease_owner_state <lease_file> [now_epoch]` prints `none|released|dead|alive|alive-expired|unknown`.
     - Precedence: `none` (owner null) > `released` > a `ps` check.
@@ -115,7 +117,8 @@
   - `lease_resolve_owner`, given a fake ps tree `500 sh → 400 claude → 1 launchd`, returns pid 400 / comm `claude`. With no runtime in the chain it returns `-`, and `lease_write` stores `owner: null`.
   - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release`, the state is `released`.
   - A fake ps tree `600 Python /opt/hermes/hermes_gateway.py → 1` resolves the owner to pid 600.
-  - `lease_owner_state` with pid field `99999999999` and a fake `ps` printing `ps: process id too large` (rc 1) → `unknown`, not `dead`.
+  - `lease_owner_state` with pid field `99999999999` and a fake `ps` printing `ps: process id too large` (rc 1) → `unknown`, not `dead`. A pid field `abc` → `unreadable`.
+  - `lease_write` records `admin_id` and `admin_birth_epoch` matching `stat -f %B` of the fixture's admin dir.
   - `lease_write_pending` on an existing path, or when a lease already exists → rc 1 and the existing lease is byte-identical afterwards.
 - [ ] **Step 2: Run** `bash tests/test_worktree_lease.sh`. Expected: FAIL (file missing).
 - [ ] **Step 3: Implement.** Use python3 for JSON reads and writes. Write to `mktemp` in the lease dir, then `mv`.
@@ -125,7 +128,7 @@
 ### Task 3: Extract `wrh_removal_verdict`
 
 **Files:**
-- Modify: `scripts/worktree_remove_hook.sh`
+- Modify: `scripts/worktree_remove_hook.sh` (also delete the lease after a successful removal when `scripts/lib/worktree_lease.sh` is present)
 - Test: `tests/test_worktree_remove_hook.sh`
 
 **Interfaces:**
@@ -155,14 +158,16 @@
 **Interfaces:**
 - Produces:
   - `worktree_pr_cache_populate <main_repo>` (the same gh query and cache file as today)
-  - `worktree_head_is_merged_pr <main_repo> <head_sha>`: rc 0 only when a gh-verified MERGED PR has exactly that head; rc 1 otherwise, including on gh failure (fail closed).
+  - `worktree_head_is_merged_pr <main_repo> <branch> <head_sha>`: looks up PRs by `headRefName` (as `populate_repo_pr_cache` does today). rc 0 only when a gh-verified MERGED PR for that branch has exactly that head; rc 1 otherwise, including on gh failure or an empty branch (detached HEAD), so it fails closed.
+  - The library owns its cache dir (`${DISK_MAGICIAN_STATE_DIR:-~/.disk_magician_state}/pr_cache/`, files named by owner_repo, TTL 1 h) instead of the caller's `RUN_TMP`.
 
 - [ ] **Step 1: Write failing tests.** With a mocked `gh` on PATH returning one MERGED PR with head `abc123` and one OPEN PR:
   - `abc123` → rc 0
   - the OPEN PR's head → rc 1
   - `gh` exiting 1 → rc 1
+  - an empty branch (detached HEAD) → rc 1 without calling `gh`
 - [ ] **Step 2: Run** `bash tests/test_worktree_merged_pr.sh`. Expected: FAIL (file missing).
-- [ ] **Step 3: Implement** by moving the existing logic verbatim into the library; `cleanup_worktrees.sh` sources it. Sourcing the library must run no top-level code.
+- [ ] **Step 3: Implement** by moving the existing lookup logic into the library under the new signature; `cleanup_worktrees.sh` sources it and passes the branch it already has. Sourcing the library must run no top-level code.
 - [ ] **Step 4: Run** the new test plus `test_cleanup_worktrees_merged_fastpath.sh`, `test_cleanup_worktrees_repo_local.sh` and `test_cleanup_worktrees_single_age_walk.sh`. Expected: all PASS, with unchanged verdicts for the sqmatch/sqdiff fixtures.
 - [ ] **Step 5: Commit** `refactor: extract merged-PR-head proof into scripts/lib`.
 
@@ -218,7 +223,9 @@
   - `owner: null` lease, clean and pushed, in **remove** mode → still present, not reaped.
   - HEAD only on a `fork/*` ref → `kept:not-pushed`. HEAD equal to a mocked gh MERGED PR head with the branch deleted → `remove` verdict.
   - A pending guard lease plus a registered worktree whose admin dir is newer than the lease → promoted, `creator` stays `guard`, owner kept.
-  - A pending lease older than the worktree's admin-dir creation fails promotion; the worktree is adopted with `owner: null`.
+  - A pending lease created **after** the worktree's admin-dir birth time fails promotion (the worktree predates it); the worktree is adopted with `owner: null`.
+  - Path reuse: a lease with a dead owner exists for path P; P is removed and recreated with a new admin dir → the lease is detected stale and re-adopted with `owner: null`, never nominated.
+  - Removal in remove mode deletes the lease file.
   - A pending lease 2 h old with no worktree → deleted.
   - A stale lock dir with a dead pid, older than the TTL → reclaimed, the run proceeds.
   - A run sent TERM mid-loop → lock released, and the next run is not `skipped_lock`.
