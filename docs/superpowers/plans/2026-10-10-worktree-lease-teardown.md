@@ -18,9 +18,10 @@
 - Lease dir: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, `schema_version` 1, written via temp file plus `mv`.
 - Owner runtimes (basename match): `claude`, `codex`, `agy`, `cursor-agent`, `hermes`. With no runtime ancestor, `owner` is null and the lease is never owner-reaped.
 - Lease TTL: `ttl_hours` default 24, report-only (`kept:owner-alive-expired`). Removal candidates are only `dead` (quiet `REAP_QUIET_MINUTES` 30) or `released` (quiet `REAP_RELEASED_QUIET_MINUTES` 30). An alive owner is never removed.
-- Pushed proof for the reaper: HEAD contained in `refs/remotes/origin/*` after `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin`, or HEAD equal to a gh-verified MERGED PR head (reuse the `cleanup_worktrees.sh` bead-`ueh` helper).
+- Pushed proof for the reaper: `wrh_removal_verdict ... origin-or-merged-pr`, meaning either HEAD is contained in `refs/remotes/origin/*` after `GIT_TERMINAL_PROMPT=0 git -c gc.auto=0 -c maintenance.auto=false fetch --quiet --prune origin`, or HEAD equals a gh-verified MERGED PR head via `scripts/lib/worktree_merged_pr.sh` (Task 3b).
 - Reason tokens (fixed set): `not-registered`, `live-cwd`, `ao-owned`, `recent-activity`, `dirty`, `hidden-state`, `ignored-data`, `not-pushed`, `remote-unverified`, `locked`, `safety-local`, `owner-alive-expired`, `lease-unreadable`, `remove-failed`.
 - Base: `main` at or after `b776e56`; the remove hook there has the live-cwd, AO, recency, hidden-state and ignored-data checks.
+- Dead ⇔ the pid field is a valid integer and `ps` returns rc 1 with empty stderr. Anything else is `unknown` (keep), or `lease-unreadable` for an invalid pid.
 - Owner start time: `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` parsed with `%a %b %d %H:%M:%S %Y` to a UTC epoch, stored as `start_epoch`. Alive ⇔ the epochs differ by ≤2 s. Never compare raw `lstart` strings. If `ps` fails, the state is unknown, which means keep.
 - Hermes owner match: a `python*` process whose script argument's basename starts with `hermes`.
 - Reaper quiet period for a dead owner: `REAP_QUIET_MINUTES` default 30. One bounded `git fetch --quiet --prune origin` (60 s) per repo per run; a failed fetch means `kept:remote-unverified`. `scripts/safety_check.sh <path>` must pass. Interval 1800 s. `DISK_MAGICIAN_REAP_MODE` ∈ {`nominate` (default), `remove`}.
@@ -45,7 +46,8 @@
 |---|---|
 | 1 | RED `test_worktree_recency.sh` cases 6–7 → impl → GREEN plus the existing cases |
 | 2 | RED `test_worktree_lease.sh` → impl → GREEN |
-| 3 | Behavior-preserving refactor: new direct-call case RED (function missing) → extract → GREEN, with all 128 existing remove-hook cases still passing |
+| 3 | Behavior-preserving refactor: new direct-call case RED (function missing) → extract → GREEN, with all existing remove-hook assertions still passing |
+| 3b | RED `test_worktree_merged_pr.sh` → move the logic into the library → GREEN, with existing `cleanup_worktrees` suites unchanged |
 | 4 | RED lease-written assertions in `test_worktree_new.sh` / `test_worktree_create_hook.sh` → impl → GREEN |
 | 5 | RED `test_worktree_reap.sh` → impl → GREEN |
 | 6 | RED dispatch and template assertions → impl → GREEN |
@@ -91,7 +93,7 @@
   - `lease_dir` prints the lease directory (honors `DISK_MAGICIAN_STATE_DIR`).
   - `lease_path_for <worktree_path>` prints the lease file path.
   - `lease_resolve_owner [start_pid]` prints `pid<TAB>start_epoch<TAB>comm` of the nearest runtime ancestor, or `-<TAB>-<TAB>-` when none (the lease is then written with `owner: null`).
-  - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`.
+  - `lease_write_pending <target_path> <owner_tsv>` writes a pending lease with `creator: "guard"`, exclusive create. rc 1 and nothing written if the path exists or any lease for it exists.
   - `lease_write <worktree_path> <repo> <branch> <creator>`: atomic write with the owner resolved from `$$`. rc 0 on success.
   - `lease_owner_state <lease_file> [now_epoch]` prints `none|released|dead|alive|alive-expired|unknown`.
     - Precedence: `none` (owner null) > `released` > a `ps` check.
@@ -113,6 +115,8 @@
   - `lease_resolve_owner`, given a fake ps tree `500 sh → 400 claude → 1 launchd`, returns pid 400 / comm `claude`. With no runtime in the chain it returns `-`, and `lease_write` stores `owner: null`.
   - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release`, the state is `released`.
   - A fake ps tree `600 Python /opt/hermes/hermes_gateway.py → 1` resolves the owner to pid 600.
+  - `lease_owner_state` with pid field `99999999999` and a fake `ps` printing `ps: process id too large` (rc 1) → `unknown`, not `dead`.
+  - `lease_write_pending` on an existing path, or when a lease already exists → rc 1 and the existing lease is byte-identical afterwards.
 - [ ] **Step 2: Run** `bash tests/test_worktree_lease.sh`. Expected: FAIL (file missing).
 - [ ] **Step 3: Implement.** Use python3 for JSON reads and writes. Write to `mktemp` in the lease dir, then `mv`.
 - [ ] **Step 4: Run** the test. Expected: PASS.
@@ -126,7 +130,7 @@
 
 **Interfaces:**
 - Produces:
-  - `wrh_removal_verdict <real_path> <recency_spec> [pushed_scope]`, where `recency_spec` is `days:N` or `minutes:N` and `pushed_scope` is `all-remotes` (the hook's default) or `origin`. It prints `remove` or `kept:<token>` from the Global Constraints token set, and always returns rc 0.
+  - `wrh_removal_verdict <real_path> <recency_spec> [pushed_scope]`, where `recency_spec` is `days:N` or `minutes:N` and `pushed_scope` is `all-remotes` (the hook's default), `origin`, or `origin-or-merged-pr`. `origin-or-merged-pr` calls `worktree_head_is_merged_pr` from Task 3b. It prints `remove` or `kept:<token>` from the Global Constraints token set, and always returns rc 0.
   - `wrh_main` maps each token to its existing prose log line, so the hook's log output is unchanged.
   - `wrh_remove_now <real_path>` runs the existing `git worktree remove` plus `worktree-*` branch deletion. rc 0 if removed.
 - `wrh_main` becomes: parse stdin → standard-root check → `wrh_removal_verdict "$real" days:7` → log → `wrh_remove_now`.
@@ -141,10 +145,31 @@
 - [ ] **Step 4: Run** the test. Expected: all PASS, and the existing log-line assertions are unchanged.
 - [ ] **Step 5: Commit** `refactor: extract wrh_removal_verdict from remove hook`.
 
+### Task 3b: Extract the merged-PR-head proof
+
+**Files:**
+- Create: `scripts/lib/worktree_merged_pr.sh`
+- Modify: `scripts/cleanup_worktrees.sh` (replace the inline merged-PR logic in `classify_content_and_merge` and the `populate_repo_pr_cache` body with calls into the library)
+- Test: `tests/test_worktree_merged_pr.sh` (new), plus the existing `tests/test_cleanup_worktrees_merged_fastpath.sh` and `tests/test_cleanup_worktrees_repo_local.sh`
+
+**Interfaces:**
+- Produces:
+  - `worktree_pr_cache_populate <main_repo>` (the same gh query and cache file as today)
+  - `worktree_head_is_merged_pr <main_repo> <head_sha>`: rc 0 only when a gh-verified MERGED PR has exactly that head; rc 1 otherwise, including on gh failure (fail closed).
+
+- [ ] **Step 1: Write failing tests.** With a mocked `gh` on PATH returning one MERGED PR with head `abc123` and one OPEN PR:
+  - `abc123` → rc 0
+  - the OPEN PR's head → rc 1
+  - `gh` exiting 1 → rc 1
+- [ ] **Step 2: Run** `bash tests/test_worktree_merged_pr.sh`. Expected: FAIL (file missing).
+- [ ] **Step 3: Implement** by moving the existing logic verbatim into the library; `cleanup_worktrees.sh` sources it. Sourcing the library must run no top-level code.
+- [ ] **Step 4: Run** the new test plus `test_cleanup_worktrees_merged_fastpath.sh`, `test_cleanup_worktrees_repo_local.sh` and `test_cleanup_worktrees_single_age_walk.sh`. Expected: all PASS, with unchanged verdicts for the sqmatch/sqdiff fixtures.
+- [ ] **Step 5: Commit** `refactor: extract merged-PR-head proof into scripts/lib`.
+
 ### Task 4: Write leases at creation
 
 **Files:**
-- Modify: `scripts/worktree_new.sh` (after a successful `wtn_create` in `wtn_main`), `scripts/worktree_create_hook.sh` (in `wth_main`, after the path is created), and `scripts/worktree_guard.py` (on an allowed, statically resolved `git worktree add`, write a pending lease by calling `bash -c 'source scripts/lib/worktree_lease.sh; lease_write_pending ...'`; fail open)
+- Modify: `scripts/worktree_new.sh` (after a successful `wtn_create` in `wtn_main`), `scripts/worktree_create_hook.sh` (in `wth_main`, after the path is created), and `scripts/worktree_guard.py` (on an allowed, statically resolved `git worktree add`, write a pending lease through the lease library resolved from `os.path.dirname(__file__)`, not the cwd; fail open)
 - Test: `tests/test_worktree_guard.py`
 - Test: `tests/test_worktree_new.sh`, `tests/test_worktree_create_hook.sh`
 
@@ -171,11 +196,10 @@
 **Interfaces:**
 - Consumes:
   - `lease_*` (Task 2)
-  - `wrh_removal_verdict ... origin` and `wrh_remove_now` (Task 3)
+  - `wrh_removal_verdict ... origin-or-merged-pr` and `wrh_remove_now` (Task 3, Task 3b)
   - `worktree_is_recently_active_minutes` (Task 1)
   - `scripts/job_receipt.py` (existing; the same `begin`/`finish` calls as `pressure_sweep.sh`)
   - The pressure sweep's stale-lock aging pattern
-  - The `cleanup_worktrees.sh` gh-verified merged-PR-head helper
 - Produces:
   - CLI `worktree_reap.sh [--mode nominate|remove] [--deadline-seconds N]` (default 1500). The `--mode` flag overrides `DISK_MAGICIAN_REAP_MODE`.
   - Receipt job `worktree_reap`, whose `candidates` hold counts per verdict and `postcondition.freed_bytes` from the `df` delta.
@@ -193,7 +217,9 @@
   - Released lease with the owner alive, quiet 40 min → `remove` verdict. Quiet 5 min → `kept:recent-activity`.
   - `owner: null` lease, clean and pushed, in **remove** mode → still present, not reaped.
   - HEAD only on a `fork/*` ref → `kept:not-pushed`. HEAD equal to a mocked gh MERGED PR head with the branch deleted → `remove` verdict.
-  - A pending guard lease plus a registered worktree at that path → promoted, `creator` stays `guard`, owner kept. A pending lease 2 h old with no worktree → deleted.
+  - A pending guard lease plus a registered worktree whose admin dir is newer than the lease → promoted, `creator` stays `guard`, owner kept.
+  - A pending lease older than the worktree's admin-dir creation fails promotion; the worktree is adopted with `owner: null`.
+  - A pending lease 2 h old with no worktree → deleted.
   - A stale lock dir with a dead pid, older than the TTL → reclaimed, the run proceeds.
   - A run sent TERM mid-loop → lock released, and the next run is not `skipped_lock`.
   - `--deadline-seconds 1` with 3 candidates → stops between candidates, receipt `outcome="partial"`, lock released.

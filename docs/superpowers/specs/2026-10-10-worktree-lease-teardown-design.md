@@ -94,7 +94,11 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 - **Writers:**
   - `worktree_new.sh` after a successful `wtn_create`.
   - `worktree_create_hook.sh`.
-  - `diskm guard-worktree-add` (`worktree_guard.py`, a PreToolUse hook that runs inside the agent's process tree) writes a **pending lease** for the statically resolved target path, owner resolved from its own ancestry, `creator: "guard"`. The worktree doesn't exist yet. The adopt step (D2.1) promotes a pending lease once a registered worktree exists at that path, and deletes pending leases older than 1 h with no worktree.
+  - `diskm guard-worktree-add` (`worktree_guard.py`, a PreToolUse hook that runs inside the agent's process tree) writes a **pending lease** for the statically resolved target path, owner resolved from its own ancestry, `creator: "guard"`.
+    - The write is exclusive: nothing is written if the target path already exists or any lease for it exists, so a guard can never overwrite a live owner's lease.
+    - The adopt step (D2.1) promotes a pending lease only when the worktree's admin dir `<main>/.git/worktrees/<id>` was created after the pending lease's `created_at`. Otherwise the worktree is adopted with `owner: null`.
+    - Pending leases older than 1 h with no worktree are deleted.
+    - The guard sources the lease library relative to its own file (`__file__`), not the caller's cwd.
   - Unresolvable targets (the guard already logs these) get no pending lease; adopt records them with `owner: null`.
 
 ### D2. Reaper: `diskm worktree-reap`
@@ -108,10 +112,13 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 2. **Owner check.** For each lease with a non-null owner, the worktree is a removal candidate only in two cases:
    - **dead:** pid absent, or start epoch mismatch. Quiet period `REAP_QUIET_MINUTES`, default 30.
    - **released:** `released_at` is set by `diskm worktree-release <path>`. Quiet period `REAP_RELEASED_QUIET_MINUTES`, default 30.
-   An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status` and can be targeted with `worktree-release`. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
+   The owner counts as dead only when the pid field is a valid integer and `ps` returns rc 1 with empty stderr. Anything else, such as `ps: process id too large`, is `kept:lease-unreadable`. An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status` and can be targeted with `worktree-release`. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
 3. **Quiet period.** Require no content change for `REAP_QUIET_MINUTES` (default 30) via `worktree_is_recently_active` with minute granularity. Section 9 notes the helper extension this needs. This covers a sibling agent that adopted the worktree after the owner died.
 4. **Remote freshness.** Before any verdict, run `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin` once per owning repo, bounded to 60 s. If the fetch fails, every candidate in that repo gets `kept:remote-unverified`.
-   - The reaper's pushed proof is either HEAD contained in `refs/remotes/origin/*` only (stale `fork/*` or `upstream/*` refs don't count), or HEAD equal to the head of a gh-verified MERGED PR. The second form is the existing `cleanup_worktrees.sh` proof (bead `ueh`); it covers squash-merged PRs whose branch was deleted.
+   - The reaper's pushed proof is either HEAD contained in `refs/remotes/origin/*` only (stale `fork/*` or `upstream/*` refs don't count), or HEAD equal to the head of a gh-verified MERGED PR. The second form covers squash-merged PRs whose branch was deleted.
+   - The merged-PR check is today inline in `cleanup_worktrees.sh` (`classify_content_and_merge` plus `populate_repo_pr_cache`), and sourcing that script runs the sweeper. It moves into `scripts/lib/worktree_merged_pr.sh` with a behavior-preserving test.
+   - Both proofs live inside `wrh_removal_verdict`'s `pushed_scope=origin-or-merged-pr`, so "safe to remove" stays defined in one place.
+   - The fetch runs as `git -c gc.auto=0 -c maintenance.auto=false fetch ...`, so it never triggers auto-gc in busy repos.
 5. **Safety.** Run `scripts/safety_check.sh <path>`; a non-zero result means `kept:safety-local`, so the `safety.local.json` `never_delete`, `protected_live_paths` and `needs_decision` rules gate the reaper too. Then call a new `wrh_removal_verdict <real>` extracted from `wrh_main`. It runs the same checks in the same order but with a caller-supplied recency floor, and prints `remove` or `kept:<reason>`:
    - registered linked worktree
    - live cwd
@@ -232,4 +239,6 @@ Before `wtn_create`:
   - Before P1, nominate mode must report lease coverage (share of creations with a non-null owner) and verdict shares.
   - Dirty, untracked and ignored-data worktrees were ~24% of the 591 classified on 10-10, about 4 GiB/day the reaper can never remove.
   - If nominate data projects a steady state above 40 GiB, the LRU budget backstop (approach C) gets its own design. G3 is not claimed until then.
+  - The never-reapable ~4 GiB/day (dirty, untracked, ignored-data) and long-lived owners (Hermes gateway, multi-day cmux sessions) mean this design alone does not reach a 40 GiB steady state. The reaper removes the large clean, pushed share; the backstop and `worktree-release` adoption cover the rest.
+  - Wiring `worktree-release` into `/advice`, review and evidence flows is a follow-up in the skills repo (`jleechan-skills`), tracked on bead `disk_magician-oyt4`. This repo only provides the command.
 - In nominate mode (the delivered scope unless P1 is granted): `diskm status --json .worktrees.verdicts.remove` gives projected reclaim in GiB. The ≤40 GiB target applies only after P1 enables `remove`.
