@@ -230,7 +230,7 @@ class SnapshotDiagnosticsCliTests(unittest.TestCase):
         self.assertFalse(worker["timed_out"])
 
     @unittest.skipIf(os.geteuid() == 0, "root can read chmod-000 children")
-    def test_measure_one_real_unreadable_child_is_not_a_complete_measurement(self):
+    def test_measure_one_real_unreadable_child_is_a_lower_bound(self):
         child = self.tmp / "projects" / "unreadable"
         child.mkdir()
         (child / "payload").write_bytes(b"x" * 4096)
@@ -246,10 +246,10 @@ class SnapshotDiagnosticsCliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         worker = json.loads(output.read_text())
-        self.assertIsNone(worker["kb"])
-        self.assertEqual(worker["reason"], "backend_error")
-        self.assertEqual(worker["backend"], "du")
-        self.assertNotEqual(worker["backend_exit"], 0)
+        # du exits 1 with only "Permission denied": a valid lower bound, flagged.
+        self.assertIsInstance(worker["kb"], int)
+        self.assertEqual(worker["reason"], "success")
+        self.assertTrue(worker["lower_bound"])
 
     def test_measure_one_without_bounded_backend_or_remaining_time_is_not_backend_timeout(self):
         for mode in ("no-timeout", "deadline"):
