@@ -242,8 +242,9 @@ if [[ $RC_DISKM -eq 0 ]] || [[ "$(cat "$LAUNCHAGENTS_DIR/com.disk-magician.needs
 fi
 
 # Test --consolidate flag:
-# 1. Tests that --consolidate successfully installs the 3 selected templates:
+# 1. Tests that --consolidate successfully installs the 4 selected templates:
 #    - com.jleechanorg.disk-magician-main-sweeper.plist.template
+#    - com.jleechanorg.disk-magician-worktree-reap.plist.template
 #    - com.disk-magician.claude-state.plist.template
 #    - com.disk-magician.worktree-venvs.plist
 # 2. Tests that redundant plists are archived to .consolidated/ ONLY after successful installation.
@@ -255,6 +256,7 @@ touch "$CONSOLIDATE_HOME/.local/bin/diskm"
 chmod +x "$CONSOLIDATE_HOME/.local/bin/diskm"
 
 cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template" "$CONSOLIDATE_SRC/"
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-worktree-reap.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.claude-state.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.worktree-venvs.plist" "$CONSOLIDATE_SRC/"
 
@@ -278,6 +280,10 @@ fi
 
 if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-main-sweeper.plist" ]]; then
   echo "FAIL: main-sweeper.plist not installed under --consolidate" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-worktree-reap.plist" ]]; then
+  echo "FAIL: worktree-reap.plist not installed under --consolidate" >&2
   exit 1
 fi
 if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.claude-state.plist" ]]; then

@@ -29,16 +29,16 @@ cat >"$MOCK_BIN/lsof" <<'MOCK'
 #!/usr/bin/env bash
 [[ "${FAKE_LSOF_FAIL:-0}" == 1 ]] && exit 1
 if [[ "${FAKE_LSOF_MODE:-}" == caller ]]; then
-  printf 'p%s\nn%s\n' "$WRH_LIFECYCLE_CALLER_PID" "$FAKE_LSOF_CWD"
+  printf 'p%s\nfcwd\nn%s\n' "$WRH_LIFECYCLE_CALLER_PID" "$FAKE_LSOF_CWD"
 elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
   command_sub=$PPID
   helper=$(ps -o ppid= -p "$command_sub" | tr -d '[:space:]')
   hook=$(ps -o ppid= -p "$helper" | tr -d '[:space:]')
   shell=$(ps -o ppid= -p "$hook" | tr -d '[:space:]')
   cli=$(ps -o ppid= -p "$shell" | tr -d '[:space:]')
-  printf 'p%s\nn/\n' "$command_sub"
-  printf 'p%s\nn/\n' "$helper"
-  for pid in "$hook" "$shell"; do printf 'p%s\nn%s\n' "$pid" "$FAKE_LSOF_CWD"; done
+  printf 'p%s\nfcwd\nn/\n' "$command_sub"
+  printf 'p%s\nfcwd\nn/\n' "$helper"
+  for pid in "$hook" "$shell"; do printf 'p%s\nfcwd\nn%s\n' "$pid" "$FAKE_LSOF_CWD"; done
 else
   cat "${FAKE_LSOF_FIXTURE:?}"
 fi
@@ -48,7 +48,7 @@ MOCK
 chmod +x "$MOCK_BIN/lsof"
 export PATH="$MOCK_BIN:$PATH"
 FAKE_LSOF_FIXTURE="$TMPROOT/lsof.out"
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 export FAKE_LSOF_FIXTURE
 
 git init -q --bare -b main "$TMPROOT/origin.git"
@@ -189,6 +189,16 @@ branch_exists worktree-i && ok "branch kept" || bad "branch deleted"
 tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored files" || bad "log does not mention ignored files"
 grep -q -e SECRET_VALUE_XYZ -e '\.env' "$LOG" && bad "log leaks ignored file name/contents" || ok "log has no ignored file name/contents"
 
+echo "== case 11b: only ignored __pycache__ *credentials*.pyc → removed =="
+add_wt i2 worktree-i2
+printf '__pycache__/\n' >"$WTROOT/i2/.gitignore"; git -C "$WTROOT/i2" add .gitignore; git -C "$WTROOT/i2" commit -q -m ignore
+git -C "$WTROOT/i2" push -q origin HEAD:refs/heads/i2 2>/dev/null
+mkdir -p "$WTROOT/i2/__pycache__"; printf 'x' >"$WTROOT/i2/__pycache__/openrouter_credentials.cpython-312.pyc"
+age_wt "$WTROOT/i2"
+run_hook "$(json "$WTROOT/i2")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ ! -e "$WTROOT/i2" ]] && ok "bytecode-only worktree removed" || bad "bytecode-only worktree kept"
+
 echo "== case 12: locked but otherwise removable → left, exit 0 (no --force) =="
 add_wt j worktree-j
 git -C "$REPO" worktree lock "$WTROOT/j"
@@ -284,7 +294,7 @@ assert_eq "$rc" "0" "exit code"
 [[ -f "$WTROOT/o/package.egg-info/notes.db" ]] && ok "egg-info directory preserved" || bad "egg-info directory removed"
 echo "== case 19: other process cwd in clean pushed worktree - preserved =="
 add_wt u worktree-u
-printf 'p999999\nn%s/subdir\n' "$WTROOT/u" >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn%s/subdir\n' "$WTROOT/u" >"$FAKE_LSOF_FIXTURE"
 before="$(log_lines)"
 run_hook "$(json "$WTROOT/u")"; rc=$?
 assert_eq "$rc" "0" "exit code"
@@ -292,7 +302,7 @@ assert_eq "$rc" "0" "exit code"
 branch_exists worktree-u && ok "active-cwd branch kept" || bad "active-cwd branch deleted"
 [[ "$(log_lines)" -gt "$before" ]] && ok "active-cwd log line appended" || bad "active-cwd no log line"
 tail -n 1 "$LOG" | grep -q "live-cwd" && ok "active-cwd reason logged" || bad "active-cwd reason missing"
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 echo "== case 20: AO-configured worktreeDir - preserved =="
 mkdir -p "$HOME/.worktrees/ao-proj"
@@ -336,7 +346,7 @@ branch_exists worktree-q && ok "unknown-AO branch kept" || bad "unknown-AO branc
 [[ "$(log_lines)" -gt "$before" ]] && ok "unknown-AO log line appended" || bad "unknown-AO no log line"
 tail -n 1 "$LOG" | grep -q "ao-config-unreadable" && ok "unknown-AO reason logged" || bad "unknown-AO reason missing"
 unset DISK_MAGICIAN_AO_CONFIG
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 
 echo "== case 23: lifecycle caller cwd in target is exempted =="
@@ -391,19 +401,19 @@ unset FAKE_LSOF_MODE FAKE_LSOF_CWD
 
 echo "== case 27: malformed lsof PID without path stays unknown =="
 add_wt v worktree-v
-printf 'p999999\nn/\np888888\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\np888888\n' >"$FAKE_LSOF_FIXTURE"
 run_hook "$(json "$WTROOT/v")"; rc=$?
 [[ -d "$WTROOT/v" ]] && ok "missing-path record worktree kept" || bad "missing-path record worktree removed"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "missing-path record unknown reason logged" || bad "missing-path record unknown reason missing"
 
 echo "== case 28: nonabsolute lsof cwd stays unknown =="
 add_wt x worktree-x
-printf 'p999999\nnrelative\np888888\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nnrelative\np888888\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 run_hook "$(json "$WTROOT/x")"; rc=$?
 [[ -d "$WTROOT/x" ]] && ok "relative-path record worktree kept" || bad "relative-path record worktree removed"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "relative-path record unknown reason logged" || bad "relative-path record unknown reason missing"
 
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 echo "== case 31: default AO root owns direct children, not nested repo worktrees =="
 cat >"$HOME/default-ao.yaml" <<YAML
 worktreeDir: "$HOME/.worktrees"
@@ -431,7 +441,7 @@ result="$(TEST_AO_ROOT="$HOME/.worktrees/space-root " bash -c '''source "$1"; ao
 [[ "$result" == "ao-owned" ]] && ok "consumer preserves exact trailing-space record" || bad "consumer altered trailing-space record"
 unset DISK_MAGICIAN_AO_CONFIG
 
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 echo "== case 29: recently touched worktree is protected by 7-day floor =="
 add_wt recent worktree-recent
 touch "$WTROOT/recent/README.md"
@@ -463,7 +473,7 @@ done
 
 echo "== case 34: lsof warning with valid cwd rows fails closed =="
 add_wt lsof-warning worktree-lsof-warning
-printf 'p999999\nn%s/subdir\n' "$WTROOT/lsof-warning" >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn%s/subdir\n' "$WTROOT/lsof-warning" >"$FAKE_LSOF_FIXTURE"
 export FAKE_LSOF_STDERR='lsof warning: output may be incomplete'
 before="$(log_lines)"
 run_hook "$(json "$WTROOT/lsof-warning")"; rc=$?
@@ -473,7 +483,53 @@ branch_exists worktree-lsof-warning && ok "warning lsof branch kept" || bad "war
 [[ "$(log_lines)" -gt "$before" ]] && ok "warning lsof log appended" || bad "warning lsof no log line"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "warning lsof visibility remains unknown" || bad "warning lsof visibility was trusted"
 unset FAKE_LSOF_STDERR
-printf 'p999999\nn/\n' >"$FAKE_LSOF_FIXTURE"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+echo "== case 35: realistic lsof output with fcwd descriptor tags resolves without cwd-unknown =="
+add_wt realistic-lsof worktree-realistic-lsof
+printf 'p100\nfcwd\nn/\np200\nfcwd\nn/private/tmp\np300\nfcwd\nn/Users/jleechan\n' >"$FAKE_LSOF_FIXTURE"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/realistic-lsof")"; rc=$?
+assert_eq "$rc" "0" "realistic lsof exit code"
+[[ ! -e "$WTROOT/realistic-lsof" ]] && ok "realistic lsof worktree removed" || bad "realistic lsof worktree kept"
+branch_exists worktree-realistic-lsof && bad "realistic lsof branch kept" || ok "realistic lsof branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "realistic lsof log appended" || bad "realistic lsof no log line"
+grep -q "removed $WTROOT/realistic-lsof" "$LOG" && ok "realistic lsof removed logged" || bad "realistic lsof removed not logged"
+tail -n 2 "$LOG" | grep -q "cwd-unknown" && bad "realistic lsof incorrectly logged cwd-unknown" || ok "realistic lsof did not log cwd-unknown"
+
+echo "== case 36: malformed descriptor record before pid stays unknown =="
+add_wt malformed-fcwd worktree-malformed-fcwd
+printf 'fcwd\np999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+run_hook "$(json "$WTROOT/malformed-fcwd")"; rc=$?
+[[ -d "$WTROOT/malformed-fcwd" ]] && ok "descriptor before pid worktree kept" || bad "descriptor before pid worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "descriptor before pid unknown reason logged" || bad "descriptor before pid unknown reason missing"
+
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
+add_wt verdict-clean worktree-verdict-clean
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7' _ "$SCRIPT" "$WTROOT/verdict-clean")"
+assert_eq "$V" "remove" "clean pushed aged fixture, days:7 -> remove"
+[[ -d "$WTROOT/verdict-clean" ]] && ok "verdict is read-only (worktree untouched)" || bad "verdict removed the worktree"
+
+add_wt verdict-recent worktree-verdict-recent
+touch "$WTROOT/verdict-recent/README.md"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" minutes:30' _ "$SCRIPT" "$WTROOT/verdict-recent")"
+assert_eq "$V" "kept:recent-activity" "fixture touched 5 min ago, minutes:30 -> kept:recent-activity"
+[[ -d "$WTROOT/verdict-recent" ]] && ok "recent worktree untouched" || bad "recent worktree removed by verdict"
+
+git init -q --bare "$TMPROOT/fork.git"
+git -C "$REPO" remote add fork "$TMPROOT/fork.git"
+add_wt verdict-fork worktree-verdict-fork
+printf 'forked\n' >"$WTROOT/verdict-fork/fork.txt"
+git -C "$WTROOT/verdict-fork" add fork.txt
+git -C "$WTROOT/verdict-fork" commit -q -m forked
+git -C "$WTROOT/verdict-fork" push -q fork HEAD:worktree-verdict-fork
+age_wt "$WTROOT/verdict-fork"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7 origin' _ "$SCRIPT" "$WTROOT/verdict-fork")"
+assert_eq "$V" "kept:not-pushed" "HEAD only on fork remote, origin scope -> kept:not-pushed"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7 all-remotes' _ "$SCRIPT" "$WTROOT/verdict-fork")"
+assert_eq "$V" "remove" "HEAD on fork remote, all-remotes scope -> remove"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

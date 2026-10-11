@@ -27,6 +27,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 SCHEMA_VERSION = 1
 
@@ -94,6 +95,81 @@ def parse_utc_timestamp(ts: Any) -> Optional[datetime]:
         except Exception:
             return None
     return None
+
+
+def consistent_run_id(record: Dict[str, Any]) -> Optional[str]:
+    """Return a canonical UUID only when all persisted run ID aliases agree."""
+    run_ids = (record.get("id"), record.get("run"), record.get("run_id"))
+    if not all(isinstance(value, str) and value for value in run_ids):
+        return None
+    if run_ids[0] != run_ids[1] or run_ids[0] != run_ids[2]:
+        return None
+    try:
+        parsed = uuid.UUID(run_ids[0])
+    except (AttributeError, ValueError):
+        return None
+    return run_ids[0] if str(parsed) == run_ids[0] else None
+
+
+def superseded_interrupted_records(
+    job: str, active: List[Dict[str, Any]], terminal: Optional[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Classify old active records only after a newer serialized run proves lock acquisition."""
+    if job not in ("snapshot_commit", "pressure_sweep") or not active or not isinstance(terminal, dict):
+        return [], active
+    lock = terminal.get("lock")
+    terminal_id = consistent_run_id(terminal)
+    terminal_times = terminal.get("times")
+    terminal_start = parse_utc_timestamp(
+        terminal_times.get("started_at") if isinstance(terminal_times, dict) else None
+    )
+    terminal_end = parse_utc_timestamp(
+        terminal_times.get("ended_at") if isinstance(terminal_times, dict) else None
+    )
+    if (
+        type(terminal.get("schema_version")) is not int
+        or terminal.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(lock, dict)
+        or lock.get("held") is not True
+        or lock.get("acquired") is not True
+        or not terminal_id
+        or terminal_start is None
+        or terminal_end is None
+        or terminal_end < terminal_start
+        or terminal.get("outcome") not in {
+            "skipped_threshold", "blocked_safety", "error",
+            "timeout", "success_noop", "success",
+        }
+        or terminal.get("job") != job
+    ):
+        return [], active
+
+    superseded: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+    for record in active:
+        if isinstance(record, dict):
+            run_id = consistent_run_id(record)
+            record_times = record.get("times")
+            started_at = parse_utc_timestamp(
+                record_times.get("started_at") if isinstance(record_times, dict) else None
+            )
+            if (
+                type(record.get("schema_version")) is int
+                and record.get("schema_version") == SCHEMA_VERSION
+                and record.get("job") == job
+                and record.get("outcome") == "unknown"
+                and isinstance(record_times, dict)
+                and "ended_at" in record_times
+                and record_times["ended_at"] is None
+                and run_id
+                and run_id != terminal_id
+                and started_at is not None
+                and started_at < terminal_start
+            ):
+                superseded.append({**record, "classification": "superseded_interrupted"})
+                continue
+        current.append(record)
+    return superseded, current
 
 
 def sha256_file(path: Path) -> str:
@@ -634,7 +710,7 @@ class DiskStatusEvaluator:
                     paths=paths,
                 )
             sc_status = data.get("status")
-            if sc_status is not None and (not isinstance(sc_status, str) or sc_status not in ("complete", "partial", "stale")):
+            if sc_status is not None and (not isinstance(sc_status, str) or sc_status not in ("published", "complete", "partial", "stale")):
                 return make_result(
                     status=STATUS_INVALID,
                     reason=f"sidecar_invalid_status: {sc_status}",
@@ -880,6 +956,7 @@ class DiskStatusEvaluator:
         receipt_paths: List[str] = []
         overall_status = STATUS_HEALTHY
         degraded_reasons: List[str] = []
+        superseded_by_job: Dict[str, List[Dict[str, Any]]] = {}
 
         for job, max_age in required_jobs.items():
             receipt_file = self.state_dir / "receipts" / f"{job}.json"
@@ -906,6 +983,8 @@ class DiskStatusEvaluator:
 
             last_term = data.get("last_terminal")
             active = data.get("active") or []
+            superseded, active = superseded_interrupted_records(job, active, last_term)
+            superseded_by_job[job] = superseded
             last_succ = data.get("last_success")
             last_skip = data.get("last_skipped")
 
@@ -913,7 +992,10 @@ class DiskStatusEvaluator:
             if len(active) > 0:
                 interrupted = False
                 for act in active:
-                    act_start = parse_utc_timestamp(act.get("times", {}).get("started_at"))
+                    act_times = act.get("times") if isinstance(act, dict) else None
+                    act_start = parse_utc_timestamp(
+                        act_times.get("started_at") if isinstance(act_times, dict) else None
+                    )
                     if act_start and (self.now - act_start > timedelta(hours=4)):
                         interrupted = True
                         break
@@ -1119,6 +1201,9 @@ class DiskStatusEvaluator:
                 overall_status = STATUS_UNKNOWN
             degraded_reasons.append(f"{job}: unhandled outcome {term_outcome}")
 
+        for job, detail in job_statuses.items():
+            detail["superseded_interrupted"] = superseded_by_job.get(job, [])
+
         return make_result(
             status=overall_status,
             reason="; ".join(degraded_reasons) if degraded_reasons else "all_required_jobs_healthy",
@@ -1152,6 +1237,7 @@ class DiskStatusEvaluator:
         all_paths = list(policy_paths)
         overall_status = STATUS_HEALTHY
         status_reasons: List[str] = []
+        superseded_by_job: Dict[str, List[Dict[str, Any]]] = {}
 
         for job in jobs:
             receipt_file = self.state_dir / "receipts" / f"{job}.json"
@@ -1169,7 +1255,10 @@ class DiskStatusEvaluator:
                 status_reasons.append(f"{job}: corrupt receipt")
                 continue
 
+            term = data.get("last_terminal")
             active = data.get("active") or []
+            superseded, active = superseded_interrupted_records(job, active, term)
+            superseded_by_job[job] = superseded
             if len(active) > 0:
                 safety_details[job] = {
                     "status": STATUS_UNKNOWN,
@@ -1180,7 +1269,6 @@ class DiskStatusEvaluator:
                 status_reasons.append(f"{job}: active run in progress")
                 continue
 
-            term = data.get("last_terminal")
             if not term:
                 safety_details[job] = {
                     "status": STATUS_UNKNOWN,
@@ -1230,6 +1318,9 @@ class DiskStatusEvaluator:
             if overall_status not in (STATUS_INVALID, STATUS_DEGRADED):
                 overall_status = STATUS_UNKNOWN
             status_reasons.append(f"{job}: safety {s_status or 'missing'}")
+
+        for job, detail in safety_details.items():
+            detail["superseded_interrupted"] = superseded_by_job.get(job, [])
 
         return make_result(
             status=overall_status,
@@ -1657,6 +1748,108 @@ class DiskStatusEvaluator:
             details=details,
         )
 
+    def worktree_root_gb(self) -> Optional[float]:
+        """Reuse persisted snapshot and observer measurements; never scan the root."""
+        root = Path(os.environ.get("STANDARD_WORKTREE_ROOT", "~/.worktrees")).expanduser().resolve()
+        samples = []
+
+        def record(raw_time, buckets):
+            captured = parse_utc_timestamp(raw_time)
+            if not captured or not isinstance(buckets, dict):
+                return
+            for path, kb in buckets.items():
+                if not isinstance(path, str):
+                    continue
+                if path == "worktrees_dot":
+                    path = "~/.worktrees"
+                elif not path.startswith(("/", "~")):
+                    path = str(Path.home() / path)
+                if Path(path).expanduser().resolve() != root:
+                    continue
+                if isinstance(kb, (int, float)) and not isinstance(kb, bool) and 0 <= kb < float("inf"):
+                    samples.append((captured, kb / 1048576))
+
+        snapshot, _ = read_json_file(self.state_repo / "snapshots" / "disk_snapshot.json")
+        if isinstance(snapshot, dict):
+            meta = snapshot.get("snapshot_metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            record(meta.get("captured_at") or snapshot.get("timestamp"), snapshot.get("directories"))
+        for name in ("disk_observer.jsonl", "step_events.jsonl"):
+            try:
+                with (self.state_dir / name).open(encoding="utf-8") as stream:
+                    for line in stream:
+                        try:
+                            observation = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(observation, dict):
+                            record(observation.get("timestamp"), observation.get("hot_dirs_kb"))
+            except (OSError, UnicodeError):
+                continue
+        return max(samples, key=lambda sample: sample[0])[1] if samples else None
+
+    def evaluate_worktrees(self) -> Dict[str, Any]:
+        states = dict.fromkeys(("none", "released", "dead", "alive", "alive-expired", "unknown", "unreadable"), 0)
+        verdicts = {}
+        creators = {}
+        recent = dead_kept = 0
+        now = int(self.now.timestamp())
+        library = Path(__file__).resolve().parent / "lib" / "worktree_lease.sh"
+        try:
+            files = list((self.state_dir / "worktree_leases").glob("*.json"))
+        except OSError:
+            files = []
+        for path in files:
+            lease, error = read_json_file(path)
+            if error or not isinstance(lease, dict):
+                states["unreadable"] += 1
+                continue
+            try:
+                probe = subprocess.run(
+                    ["bash", "-c", 'source "$1"; lease_owner_state "$2" "$3"',
+                     "disk-status", str(library), str(path), str(now)],
+                    capture_output=True, text=True, timeout=5,
+                    env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(self.state_dir)},
+                )
+                state = probe.stdout.strip() if probe.returncode == 0 else "unknown"
+            except (OSError, subprocess.TimeoutExpired, UnicodeError):
+                state = "unknown"
+            state = state if state in states else "unknown"
+            states[state] += 1
+            if state == "unreadable":
+                continue
+            verdict = lease.get("last_verdict")
+            if isinstance(verdict, str):
+                verdicts[verdict] = verdicts.get(verdict, 0) + 1
+                if state == "dead" and verdict.startswith("kept:"):
+                    dead_kept += 1
+            creator = lease.get("creator")
+            if isinstance(creator, str):
+                counts = creators.setdefault(creator, [0, 0])
+                counts[0] += lease.get("owner") is not None
+                counts[1] += 1
+            created = lease.get("created_epoch")
+            if isinstance(created, (int, float)) and not isinstance(created, bool) and now - 7 * 86400 <= created <= now:
+                recent += 1
+        root_gb = self.worktree_root_gb()
+        reasons = []
+        if root_gb is not None and root_gb > 60:
+            reasons.append("worktree_root_over_60gb")
+        if dead_kept > 100:
+            reasons.append("owner_dead_kept_over_100")
+        return {
+            "leases": states,
+            "verdicts": verdicts,
+            "coverage": {creator: owned / total for creator, (owned, total) in creators.items()},
+            "remove_requested_not_approved": (
+                os.environ.get("DISK_MAGICIAN_REAP_MODE") == "remove"
+                and not (self.state_dir / "worktree_reap.remove_approved").is_file()
+            ),
+            "created_per_day_7d": recent / 7,
+            "root_gb": root_gb,
+            "degraded_reasons": reasons,
+        }
+
     def evaluate(self, publication_only: bool = False) -> Dict[str, Any]:
         """Run full evaluation and roll up overall status."""
         checked_at = self.now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1688,6 +1881,14 @@ class DiskStatusEvaluator:
             "deployed_identity": deployed,
         }
 
+        worktrees = self.evaluate_worktrees()
+        dimensions["worktrees"] = make_result(
+            status=STATUS_DEGRADED if worktrees["degraded_reasons"] else STATUS_HEALTHY,
+            reason=", ".join(worktrees["degraded_reasons"]) or "no_worktree_degradation",
+            owner="worktree_leases",
+            source=str(self.state_dir / "worktree_leases"),
+        )
+
         # Overall rollup:
         # Any invalid -> invalid
         # Else any degraded -> degraded
@@ -1708,6 +1909,7 @@ class DiskStatusEvaluator:
             "checked_at": checked_at,
             "status": overall,
             "dimensions": dimensions,
+            "worktrees": worktrees,
         }
 
 

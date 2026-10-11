@@ -57,15 +57,37 @@ acquire_install_lock() {
     trap 'rm -rf "$LOCK_DIR"' EXIT
     return 0
   fi
-  local held_pid age
+  local held_pid age now lock_mtime is_alive=0
   held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-  age=$(( $(date +%s) - $(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s) ))
-  if [[ "$age" -gt "$LOCK_TTL_SEC" ]] && { [[ -z "$held_pid" ]] || ! kill -0 "$held_pid" 2>/dev/null; }; then
-    rm -rf "$LOCK_DIR"
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-      echo $$ > "$LOCK_DIR/pid"
-      trap 'rm -rf "$LOCK_DIR"' EXIT
-      return 0
+  lock_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s)
+  now=$(date +%s)
+  age=$(( now - lock_mtime ))
+  if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
+    if ps -p "$held_pid" -o pid= >/dev/null 2>&1; then
+      is_alive=1
+    fi
+  fi
+  if [[ "$age" -gt "$LOCK_TTL_SEC" && "$is_alive" -eq 0 ]]; then
+    local reclaim_gate="${LOCK_DIR}.reclaim_gate"
+    if mkdir "$reclaim_gate" 2>/dev/null; then
+      local recheck_pid recheck_mtime recheck_alive=0
+      recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+      recheck_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0)
+      if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
+        if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
+          recheck_alive=1
+        fi
+      fi
+      if [[ "$(( now - recheck_mtime ))" -gt "$LOCK_TTL_SEC" && "$recheck_alive" -eq 0 ]]; then
+        rm -rf "$LOCK_DIR"
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+          echo $$ > "$LOCK_DIR/pid"
+          rmdir "$reclaim_gate" 2>/dev/null || true
+          trap 'rm -rf "$LOCK_DIR"' EXIT
+          return 0
+        fi
+      fi
+      rmdir "$reclaim_gate" 2>/dev/null || true
     fi
   fi
   echo "install_launchd_sweepers: already running (lock held by pid ${held_pid:-?}, age ${age}s) -- not queuing" >&2
@@ -118,6 +140,7 @@ consolidated_redundant_labels=(
 if [[ "$CONSOLIDATE" == true ]]; then
   SELECTED=(
     "com.jleechanorg.disk-magician-main-sweeper.plist.template"
+    "com.jleechanorg.disk-magician-worktree-reap.plist.template"
     "com.disk-magician.claude-state.plist.template"
     "com.disk-magician.worktree-venvs.plist"
   )

@@ -14,6 +14,7 @@ Validates:
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -562,6 +563,143 @@ class TestDiskStatus(unittest.TestCase):
         res = evaluator.evaluate_action_outcome()
         self.assertEqual(res["status"], "invalid")
 
+    def test_superseded_interrupted_records_serialized_jobs(self):
+        evaluator = self.get_evaluator()
+        for job in ("snapshot_commit", "pressure_sweep"):
+            with self.subTest(job=job):
+                store = JobReceiptStore(state_dir=str(self.state_dir))
+                old_run = store.begin(job, trigger="scheduled")
+                time_old = (self.now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                receipt_file = self.state_dir / "receipts" / f"{job}.json"
+                data = json.loads(receipt_file.read_text(encoding="utf-8"))
+                for act in data["active"]:
+                    if act["id"] == old_run:
+                        act["times"]["started_at"] = time_old
+                receipt_file.write_text(json.dumps(data), encoding="utf-8")
+
+                terminal_run = store.begin(job, trigger="scheduled")
+                store.finish(
+                    job,
+                    run_id=terminal_run,
+                    outcome="success" if job == "snapshot_commit" else "success_noop",
+                    safety={"status": "safe", "reason": "serialized lock held"},
+                )
+                before_bytes = receipt_file.read_bytes()
+
+                res_action = evaluator.evaluate_action_outcome()
+                action_detail = res_action["details"][job]
+                self.assertEqual(action_detail["status"], "healthy")
+                self.assertEqual(action_detail["latest_attempt"]["id"], terminal_run)
+                self.assertEqual(action_detail["active_records"], [])
+                self.assertEqual(len(action_detail["superseded_interrupted"]), 1)
+                self.assertEqual(action_detail["superseded_interrupted"][0]["id"], old_run)
+
+                res_safety = evaluator.evaluate_safety()
+                safety_detail = res_safety["details"][job]
+                self.assertEqual(safety_detail["status"], "healthy")
+                self.assertEqual(len(safety_detail["superseded_interrupted"]), 1)
+                self.assertEqual(safety_detail["superseded_interrupted"][0]["id"], old_run)
+
+                self.assertEqual(receipt_file.read_bytes(), before_bytes)
+
+    def test_unlocked_job_active_run_not_superseded(self):
+        evaluator = self.get_evaluator()
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        old_run = store.begin("tmp_scratch_sweep", trigger="scheduled")
+        time_old = (self.now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        receipt_file = self.state_dir / "receipts" / "tmp_scratch_sweep.json"
+        data = json.loads(receipt_file.read_text(encoding="utf-8"))
+        for act in data["active"]:
+            if act["id"] == old_run:
+                act["times"]["started_at"] = time_old
+        receipt_file.write_text(json.dumps(data), encoding="utf-8")
+
+        terminal_run = store.begin("tmp_scratch_sweep", trigger="scheduled")
+        store.finish(
+            "tmp_scratch_sweep",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "unlocked sweep completed"},
+        )
+
+        res_action = evaluator.evaluate_action_outcome()
+        action_detail = res_action["details"]["tmp_scratch_sweep"]
+        self.assertEqual(action_detail["status"], "unknown")
+        self.assertEqual(action_detail["superseded_interrupted"], [])
+
+        res_safety = evaluator.evaluate_safety()
+        safety_detail = res_safety["details"]["tmp_scratch_sweep"]
+        self.assertEqual(safety_detail["status"], "unknown")
+        self.assertEqual(safety_detail["superseded_interrupted"], [])
+
+    def test_genuinely_active_run_after_terminal_stays_unknown(self):
+        evaluator = self.get_evaluator()
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        terminal_run = store.begin("snapshot_commit", trigger="scheduled")
+        store.finish(
+            "snapshot_commit",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "lock held"},
+        )
+        active_run = store.begin("snapshot_commit", trigger="scheduled")
+
+        res_action = evaluator.evaluate_action_outcome()
+        action_detail = res_action["details"]["snapshot_commit"]
+        self.assertEqual(action_detail["status"], "unknown")
+        self.assertEqual(action_detail["active_records"][-1]["id"], active_run)
+        self.assertEqual(action_detail["latest_attempt"]["id"], active_run)
+
+        res_safety = evaluator.evaluate_safety()
+        safety_detail = res_safety["details"]["snapshot_commit"]
+        self.assertEqual(safety_detail["status"], "unknown")
+
+    def test_malformed_run_identity_or_missing_lock_proof_stays_unknown(self):
+        store = JobReceiptStore(state_dir=str(self.state_dir))
+        old_run = store.begin("snapshot_commit", trigger="scheduled")
+        terminal_run = store.begin("snapshot_commit", trigger="scheduled")
+        store.finish(
+            "snapshot_commit",
+            run_id=terminal_run,
+            outcome="success",
+            safety={"status": "safe", "reason": "serialized job lock"},
+        )
+        receipt_file = self.state_dir / "receipts" / "snapshot_commit.json"
+        base = json.loads(receipt_file.read_text(encoding="utf-8"))
+        base["active"][0]["times"]["started_at"] = (
+            self.now - timedelta(hours=5)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def mutate_terminal_missing_lock(data):
+            data["last_terminal"]["lock"] = {"held": False, "acquired": False}
+
+        def mutate_active_alias(data):
+            data["active"][0]["run_id"] = terminal_run
+
+        def mutate_terminal_alias(data):
+            data["last_terminal"]["run"] = old_run
+
+        def mutate_terminal_schema(data):
+            data["last_terminal"]["schema_version"] = 999
+
+        malformed_cases = (
+            ("terminal missing lock proof", mutate_terminal_missing_lock),
+            ("active ID aliases disagree", mutate_active_alias),
+            ("terminal ID aliases disagree", mutate_terminal_alias),
+            ("terminal schema version invalid", mutate_terminal_schema),
+        )
+
+        for label, mutate_fn in malformed_cases:
+            with self.subTest(label=label):
+                data = copy.deepcopy(base)
+                mutate_fn(data)
+                receipt_file.write_text(json.dumps(data), encoding="utf-8")
+                evaluator = self.get_evaluator()
+                action_res = evaluator.evaluate_action_outcome()
+                action_detail = action_res["details"]["snapshot_commit"]
+                self.assertEqual(action_detail["status"], "unknown")
+                self.assertEqual(action_detail["superseded_interrupted"], [])
+
     def test_safety_evaluation(self):
         evaluator = self.get_evaluator()
         res = evaluator.evaluate_safety()
@@ -733,6 +871,74 @@ class TestDiskStatus(unittest.TestCase):
             res = eval_no_fleet.evaluate_fleet()
             self.assertEqual(res["status"], "healthy")
             self.assertEqual(res["reason"], "launchd_not_applicable_on_platform")
+
+    def test_worktrees_degraded(self):
+        leases = self.state_dir / "worktree_leases"
+        leases.mkdir()
+        ps = self.root / "fake-ps"
+        ps.write_text("#!/bin/sh\n[ \"$2\" -gt 3 ] && exit 1\ncase \"$4\" in lstart=) echo 'Sat Oct 10 12:00:00 2026';; *) echo codex;; esac\n")
+        ps.chmod(0o755)
+        start = int(datetime(2026, 10, 10, 12, tzinfo=timezone.utc).timestamp())
+        for i in range(123):
+            (leases / f"{i}.json").write_text(json.dumps({
+                "owner": {"pid": i + 1, "start_epoch": start, "comm": "codex"},
+                "created_epoch": int(self.now.timestamp()), "creator": "guard",
+                "last_verdict": "kept:dirty" if i >= 3 else None,
+            }))
+        self.snapshot_data["directories"] = {"worktrees_dot": 70 * 1024 * 1024}
+        (self.state_repo / "snapshots/disk_snapshot.json").write_text(json.dumps(self.snapshot_data))
+        with mock.patch.dict(os.environ, {"DISK_MAGICIAN_PS_BIN": str(ps)}):
+            result = self.get_evaluator().evaluate()
+        worktrees = result["worktrees"]
+        self.assertEqual(worktrees["leases"]["alive"], 3)
+        self.assertEqual(worktrees["leases"]["dead"], 120)
+        self.assertEqual(worktrees["verdicts"], {"kept:dirty": 120})
+        self.assertEqual(worktrees["coverage"], {"guard": 1.0})
+        self.assertEqual(worktrees["created_per_day_7d"], 123 / 7)
+        self.assertEqual(worktrees["root_gb"], 70)
+        self.assertEqual(set(worktrees["degraded_reasons"]), {
+            "worktree_root_over_60gb", "owner_dead_kept_over_100"})
+        self.assertEqual(result["status"], "degraded")
+
+    def test_worktrees_unreadable_coverage_approval_and_observer(self):
+        leases = self.state_dir / "worktree_leases"
+        leases.mkdir()
+        for name, data in {
+            "none": {"owner": None, "creator": "adopt", "created_epoch": 0},
+            "released": {"owner": {"pid": 1}, "released_at": "today", "creator": "guard"},
+            "invalid": {"owner": {"pid": "bad"}, "creator": "guard"},
+        }.items():
+            (leases / f"{name}.json").write_text(json.dumps(data))
+        (leases / "broken.json").write_text("{bad")
+        (leases / "array.json").write_text("[]")
+        root = self.root / "custom-worktrees"
+        (self.state_dir / "step_events.jsonl").write_text(json.dumps({
+            "timestamp": self.now_str, "hot_dirs_kb": {str(root): 60 * 1024 * 1024}
+        }) + "\n{bad\n")
+        with mock.patch.dict(os.environ, {
+            "DISK_MAGICIAN_STATE_DIR": str(self.state_dir),
+            "STANDARD_WORKTREE_ROOT": str(root), "DISK_MAGICIAN_REAP_MODE": "remove",
+        }):
+            evaluator = self.get_evaluator(state_dir=None)
+            result = evaluator.evaluate()["worktrees"]
+            self.assertEqual(evaluator.state_dir, self.state_dir.resolve())
+            self.assertEqual(result["leases"]["unreadable"], 3)
+            self.assertEqual(result["leases"]["none"], 1)
+            self.assertEqual(result["leases"]["released"], 1)
+            self.assertEqual(result["coverage"], {"adopt": 0.0, "guard": 1.0})
+            self.assertEqual(result["created_per_day_7d"], 0.0)
+            self.assertEqual(result["root_gb"], 60)
+            self.assertEqual(result["degraded_reasons"], [])
+            self.assertTrue(result["remove_requested_not_approved"])
+            (self.state_dir / "worktree_reap.remove_approved").touch()
+            self.assertFalse(evaluator.evaluate()["worktrees"]["remove_requested_not_approved"])
+
+    def test_worktrees_empty(self):
+        result = self.get_evaluator().evaluate()
+        self.assertEqual(result["worktrees"]["degraded_reasons"], [])
+        self.assertIsNone(result["worktrees"]["root_gb"])
+        self.assertEqual(sum(result["worktrees"]["leases"].values()), 0)
+        self.assertEqual(result["status"], "healthy")
 
     def test_cli_exit_codes(self):
         # 1. Healthy -> exit 0

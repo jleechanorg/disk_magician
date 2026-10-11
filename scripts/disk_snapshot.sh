@@ -115,7 +115,7 @@ probe_timeout() {
 # numeric stdout preserves the existing kb-or-empty contract for all callers.
 MEASURE_DIAGNOSTIC_FILE=""
 record_measure_diagnostic() {
-  local reason="$1" backend="${2:-}" backend_exit="${3:-}" stderr_text="${4:-}"
+  local reason="$1" backend="${2:-}" backend_exit="${3:-}" stderr_text="${4:-}" lower_bound="${5:-}"
   [[ -n "${MEASURE_DIAGNOSTIC_FILE:-}" ]] || return 0
   stderr_text=$(printf '%s' "$stderr_text" | tr '\r\n' '  ' | cut -c1-256)
   {
@@ -123,6 +123,7 @@ record_measure_diagnostic() {
     printf 'backend=%s\n' "$backend"
     printf 'backend_exit=%s\n' "$backend_exit"
     printf 'stderr=%s\n' "$stderr_text"
+    printf 'lower_bound=%s\n' "$lower_bound"
   } > "$MEASURE_DIAGNOSTIC_FILE"
 }
 
@@ -165,20 +166,29 @@ dir_size_kb() {
   (( max_seconds > 0 && path_budget > max_seconds )) && path_budget="$max_seconds"
   (( path_budget > remaining )) && path_budget="$remaining"
   # A numeric dua result can omit unreadable children while exiting zero.
-  # Use one bounded du walk whose nonzero exit rejects partial totals.
-  local du_stdout du_stderr du_rc du_value
+  # Use one bounded du walk whose nonzero exit rejects partial totals, except
+  # that exit 1 with ONLY Permission denied / No such file or directory stderr
+  # (root-owned or vanishing entries) is a valid lower bound (flagged).
+  local du_stdout du_stderr du_rc du_value lower_bound=""
   du_stdout=$(mktemp -t disk_magician_du.XXXXXX)
   du_stderr=$(mktemp -t disk_magician_du_err.XXXXXX)
   if "$TIMEOUT_CMD" "$path_budget" du -sk "$path" >"$du_stdout" 2>"$du_stderr"; then
+    du_rc=0
+  else
+    du_rc=$?
+  fi
+  if [[ "$du_rc" -eq 1 && -s "$du_stderr" ]] && ! grep -qvE 'Permission denied$|No such file or directory$' "$du_stderr"; then
+    lower_bound=1
+  fi
+  if [[ "$du_rc" -eq 0 || -n "$lower_bound" ]]; then
     du_value=$(awk 'BEGIN{n=0; ok=1} /^[0-9]+[[:space:]]/ {n++; v=$1; next} NF {ok=0} END{if(ok && n==1) print v}' "$du_stdout")
     if [[ "$du_value" =~ ^[0-9]+$ ]]; then
       result="$du_value"
-      record_measure_diagnostic success du 0 ""
+      record_measure_diagnostic success du "$du_rc" "" "$lower_bound"
     else
-      record_measure_diagnostic backend_error du 0 "malformed du output"
+      record_measure_diagnostic backend_error du "$du_rc" "malformed du output"
     fi
   else
-    du_rc=$?
     if [[ "$du_rc" -eq 124 ]]; then
       record_measure_diagnostic backend_timeout du "$du_rc" "$(head -c 256 "$du_stderr" 2>/dev/null || true)"
     else
@@ -230,6 +240,8 @@ kb = int(kb_text) if kb_text.isdigit() else None
 reason = "success" if kb is not None else (diagnostic.get("reason") or "missing_diagnostic")
 data = {"key": key, "kb": kb, "path": path, "elapsed_s": int(elapsed),
         "timed_out": reason == "backend_timeout", "reason": reason, "attempt": int(attempt)}
+if kb is not None and diagnostic.get("lower_bound") == "1":
+    data["lower_bound"] = True
 for name in ("backend", "stderr"):
     if diagnostic.get(name):
         data[name] = diagnostic[name][:256]
@@ -735,6 +747,7 @@ add_entry() {
 MEASURE_MODE=serial
 MEASURE_WORKERS_USED=0
 MEASUREMENT_FAILURES_JSON='[]'
+LOWER_BOUND_KEYS_JSON='[]'
 MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
 if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
   ORCH_SCRIPT="${DISK_MAGICIAN_MEASURE_ORCHESTRATOR:-$SCRIPT_DIR/snapshot_measure.py}"
@@ -747,6 +760,7 @@ if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
     MEASURE_MODE=parallel
     MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
     MEASUREMENT_FAILURES_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('measurement_failures', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
+    LOWER_BOUND_KEYS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('lower_bound_keys', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
     while IFS= read -r orch_line; do
       orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
       orch_size="${orch_rest%%$'\t'*}"; orch_rest="${orch_rest#*$'\t'}"
@@ -802,6 +816,18 @@ with open(sys.argv[2]) as source:
 print(json.dumps(json.loads(sys.argv[3]) + summarize_attempts(attempts), separators=(",", ":")))
 PY
 )
+  LOWER_BOUND_KEYS_JSON=$(python3 - "$SCRIPT_DIR" "$SERIAL_ATTEMPTS_FILE" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from snapshot_measure import lower_bound_keys
+attempts = {}
+with open(sys.argv[2]) as source:
+    for line in source:
+        result = json.loads(line)
+        attempts.setdefault(result["key"], []).append(result)
+print(json.dumps(lower_bound_keys(attempts), separators=(",", ":")))
+PY
+)
 fi
 
 # ────────── TOP-20 LIBRARY/CONTAINERS SUBDIRS (additive) ──────────
@@ -812,6 +838,9 @@ fi
 containers_parent="$HOME/Library/Containers"
 containers_listing=""
 if [[ -d "$containers_parent" ]]; then
+  # The up-to-20 lc_* entries are added to measured_paths_total only when this
+  # du produced output inside its (<=20 s) budget, so total is 60 (configured
+  # keys) on loaded runs and 80 when the listing completes; lc_* is never carried.
   # Build a sorted list of (size_kb, name) inside the same remaining global
   # budget and per-path cap as the allowlist measurements.
   containers_budget=$(remaining_measurement_seconds)
@@ -1170,7 +1199,12 @@ PY
 fi
 
 # ────────── RESIDUAL (disk_used − deduped-measured, always attributable) ──────────
-residual_kb=$(( disk_used_kb - tracked_total_kb_deduped ))
+# residual is what neither fresh nor carried-forward measurements explain; the
+# fresh-only figure stays as residual_fresh_gb. A timed-out path must not
+# inflate residual by its whole size.
+residual_fresh_kb=$(( disk_used_kb - tracked_total_kb_deduped ))
+residual_fresh_gb=$(awk "BEGIN{printf \"%.1f\", $residual_fresh_kb / 1024 / 1024}")
+residual_kb=$(( residual_fresh_kb - carried_kb_deduped ))
 residual_gb=$(awk "BEGIN{printf \"%.1f\", $residual_kb / 1024 / 1024}")
 residual_delta_gb=""
 if [[ -n "$prev_residual_gb" && "$prev_residual_gb" != "None" ]]; then
@@ -1309,6 +1343,8 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_DEDUP_EXCLUDED="$dedup_excluded_json" \
   SNAP_RESIDUAL_KB="$residual_kb" \
   SNAP_RESIDUAL_GB="$residual_gb" \
+  SNAP_RESIDUAL_FRESH_GB="$residual_fresh_gb" \
+  SNAP_LOWER_BOUND_KEYS="$LOWER_BOUND_KEYS_JSON" \
   SNAP_RESIDUAL_DELTA_GB="$residual_delta_gb" \
   SNAP_AGE_SECONDS="$age_seconds" \
   SNAP_STATUS="$measurement_status" \
@@ -1450,6 +1486,13 @@ try:
         measurement_failures = []
     if isinstance(measurement_failures, list) and measurement_failures:
         data["snapshot_metadata"]["measurement_failures"] = measurement_failures
+    data["residual_fresh_gb"] = float(os.environ.get("SNAP_RESIDUAL_FRESH_GB") or 0.0)
+    try:
+        lower_bound = json.loads(os.environ.get("SNAP_LOWER_BOUND_KEYS") or "[]")
+    except (TypeError, ValueError):
+        lower_bound = []
+    if lower_bound:
+        data["snapshot_metadata"]["lower_bound_keys"] = lower_bound
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
     if residual_delta:
         data["residual_delta_gb"] = float(residual_delta)
@@ -1529,6 +1572,11 @@ try:
     data["unmeasured_keys"] = unmeasured
     data["fresh_keys_count"] = sum(1 for v in dirs.values() if v is not None)
     data["total_keys_count"] = len(dirs)
+    # Same convention as the frontier ledger's partial artifact: a snapshot whose
+    # fresh+carried coverage is below 70% is non-canonical and says so.
+    partial = os.environ.get("SNAP_WARNING") == "low_coverage"
+    data["publication_kind"] = "partial" if partial else "complete"
+    data["canonical"] = not partial
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)

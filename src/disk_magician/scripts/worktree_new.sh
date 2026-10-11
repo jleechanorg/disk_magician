@@ -10,6 +10,10 @@
 _WTN_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$_WTN_DIR/lib/layout_standard.sh"
+# Lease bookkeeping (plan Task 4): optional on purpose — creation must never
+# fail because the lease lib is missing or unreadable.
+# shellcheck source=scripts/lib/worktree_lease.sh
+[[ -f "$_WTN_DIR/lib/worktree_lease.sh" ]] && source "$_WTN_DIR/lib/worktree_lease.sh"
 
 # wtn_main_repo <path> — the repo that owns <path>'s worktrees: the main
 # checkout for a linked worktree, the submodule checkout for a submodule
@@ -151,6 +155,51 @@ wtn_create() {
     printf '%s\n' "$path"
 }
 
+# wtn_free_gb — free GiB on the volume holding the worktree root, or rc 1 when
+# it cannot be measured. DISK_MAGICIAN_FREE_GB_OVERRIDE is the deterministic
+# test hook (unparseable value exercises the unmeasurable path).
+wtn_free_gb() {
+    local raw avail p
+    if [[ -n "${DISK_MAGICIAN_FREE_GB_OVERRIDE:-}" ]]; then
+        raw="$DISK_MAGICIAN_FREE_GB_OVERRIDE"
+        [[ "$raw" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+        printf '%s\n' "${raw%%.*}"
+        return 0
+    fi
+    for p in "${STANDARD_WORKTREE_ROOT:-}" /System/Volumes/Data /; do
+        [[ -n "$p" && -d "$p" ]] || continue
+        avail="$(df -kP "$p" 2>/dev/null | awk 'NR==2{print $4}')"
+        [[ "$avail" =~ ^[0-9]+$ ]] || continue
+        printf '%s\n' "$((avail / 1024 / 1024))"
+        return 0
+    done
+    return 1
+}
+
+# wtn_admit <path> — free-space admission gate, run before wtn_create so a
+# refusal never creates a directory or a branch. Warn below
+# WORKTREE_ADMIT_WARN_GB (default 25), refuse with rc 75 below
+# WORKTREE_ADMIT_MIN_GB (default 10; 0 disables the refusal). Unmeasurable
+# free space fails OPEN — the gate must not block work because it cannot read
+# df. All output goes to stderr; stdout stays exactly the path.
+wtn_admit() {
+    local warn="${WORKTREE_ADMIT_WARN_GB:-25}" min="${WORKTREE_ADMIT_MIN_GB:-10}" free
+    [[ "$warn" =~ ^[0-9]+$ ]] || warn=25
+    [[ "$min" =~ ^[0-9]+$ ]] || min=10
+    if ! free="$(wtn_free_gb)"; then
+        echo "worktree-new: free-space unmeasurable; proceeding" >&2
+        return 0
+    fi
+    if [[ "$min" != 0 ]] && (( free < min )); then
+        echo "worktree-new: disk low ($free GiB free): reuse an existing worktree" >&2
+        return 75
+    fi
+    if (( free < warn )); then
+        echo "worktree-new: low disk ($free GiB free)" >&2
+    fi
+    return 0
+}
+
 wtn_main() {
     local repo_arg="" branch="" base="" name=""
     while [[ $# -gt 0 ]]; do
@@ -183,7 +232,14 @@ wtn_main() {
     fi
     path="$(standard_worktree_path "$(wtn_repo_name "$repo")" "$name")" || { echo "worktree-new: bad name: $name" >&2; return 1; }
     [[ -n "$base" ]] || base="$(wtn_default_base "$repo")"
+    wtn_admit "$path" || return $?
     wtn_create "$repo" "$branch" "$path" "$base" || return 1
+    # Record the owner lease; a failure is logged but never blocks creation
+    # (stdout must stay exactly the path).
+    if declare -F lease_write >/dev/null 2>&1; then
+        lease_write "$path" "$repo" "$branch" "worktree-new" >/dev/null 2>&1 ||
+            echo "worktree-new: lease write failed: $path" >&2
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

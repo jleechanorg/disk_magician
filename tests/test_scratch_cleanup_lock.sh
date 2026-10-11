@@ -54,6 +54,8 @@ export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$ROOT"
 export DISK_MAGICIAN_PR_SCRATCH_ROOTS="$ROOT"
 export DISK_MAGICIAN_TEST_CONTEXT=1
 export CLEANUP_PR_BIN
+# Contention cases assert the immediate skip; the bounded wait has its own test.
+export DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0
 
 echo "=== scratch cleanup kernel-lock integration tests ==="
 
@@ -104,7 +106,7 @@ for holder in tmp pr; do
     rc=$?
     set -e
   fi
-  [[ $rc -eq 1 ]] && grep -q "scratch lock held" "$CASE/contender.out" && record pass "$holder blocks the other entrypoint" || record fail "$holder blocks the other entrypoint (rc=$rc)"
+  [[ $rc -eq 75 ]] && grep -q "scratch lock held" "$CASE/contender.out" && record pass "$holder blocks the other entrypoint" || record fail "$holder blocks the other entrypoint (rc=$rc)"
   rm -f "$ROOT/pause"
   wait "$HOLDER_PID" || true
   HOLDER_PID=""
@@ -143,13 +145,13 @@ HOME="$CHILD/state" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$CHILD/tmp" \
   bash "$CLEANUP_TMP_BIN" --clean >"$CHILD/holder.out" 2>&1 &
 HOLDER_PID=$!
 wait_for_file "$CHILD/child.rc" && wait_for_file "$CHILD/paused" || record fail "inherited contender reached paused scanner"
-[[ "$(cat "$CHILD/child.rc")" == 1 ]] && grep -q "scratch lock held" "$CHILD/child.out" && \
+[[ "$(cat "$CHILD/child.rc")" == 75 ]] && grep -q "scratch lock held" "$CHILD/child.out" && \
   [[ -d "$CHILD/tmp/candidate" ]] && record pass "descendant cannot reuse inherited lock" || record fail "descendant cannot reuse inherited lock"
 set +e
 HOME="$CHILD/state" bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$CHILD/tmp" >"$CHILD/independent.out" 2>&1
 rc=$?
 set -e
-[[ $rc -eq 1 ]] && grep -q "scratch lock held" "$CHILD/independent.out" && record pass "scanner child retains lock after descendant exits" || record fail "scanner child retains lock after descendant exits (rc=$rc)"
+[[ $rc -eq 75 ]] && grep -q "scratch lock held" "$CHILD/independent.out" && record pass "scanner child retains lock after descendant exits" || record fail "scanner child retains lock after descendant exits (rc=$rc)"
 rm -f "$ROOT/pause"
 wait "$HOLDER_PID" || true
 HOLDER_PID=""
@@ -210,7 +212,7 @@ HOME="$ORPHAN/state" DISK_MAGICIAN_TMP_DIR="$ORPHAN/tmp" \
   bash "$CLEANUP_PR_BIN" --clean --tmp-dir "$ORPHAN/tmp" --min-age-hours 0 >"$ORPHAN/contender.out" 2>&1
 rc=$?
 set -e
-[[ $rc -eq 1 ]] && grep -q "scratch lock held" "$ORPHAN/contender.out" && record pass "SIGKILLed shell leaves child-held lock active" || record fail "SIGKILLed shell leaves child-held lock active (rc=$rc)"
+[[ $rc -eq 75 ]] && grep -q "scratch lock held" "$ORPHAN/contender.out" && record pass "SIGKILLed shell leaves child-held lock active" || record fail "SIGKILLed shell leaves child-held lock active (rc=$rc)"
 rm -f "$ROOT/pause"
 if [[ -n "$CHILD_PID" ]]; then
   for _ in {1..200}; do

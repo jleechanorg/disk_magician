@@ -8,9 +8,14 @@ malformed input or a target that cannot be resolved statically is allowed
 (unresolvable targets are logged to ~/.disk_magician_state/worktree_guard.log).
 """
 
+import json
 import os
 import re
+import subprocess
 import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LEASE_LIB = os.path.join(SCRIPT_DIR, "lib", "worktree_lease.sh")
 
 DENY_REASON = ("Worktrees go under ~/.worktrees/<repo>/<name>. "
                "Use: diskm worktree-new <repo> <branch>")
@@ -178,6 +183,25 @@ def deny_reason(target, git_cwd, branch, root):
                 "-b %s " % branch if branch else "", dest))
 
 
+def _write_pending_lease(target):
+    """Record a pending guard lease for an allowed, statically resolved
+    `git worktree add` (plan Task 4). Resolved from the script's own dir,
+    never the cwd. Fails open: any problem is ignored."""
+    try:
+        if not os.path.isfile(LEASE_LIB):
+            return
+        env = dict(os.environ)
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+        subprocess.run(
+            ["bash", "-c",
+             'source "$1" >/dev/null 2>&1 || exit 0; '
+             'lease_write_pending "$2" "$(lease_resolve_owner)"',
+             "_", LEASE_LIB, target],
+            env=env, timeout=30, capture_output=True)
+    except Exception:
+        pass
+
+
 def decide(payload, home, root):
     """Return a deny reason string, or None (allow)."""
     if payload.get("tool_name") not in SHELL_TOOLS:
@@ -194,6 +218,8 @@ def decide(payload, home, root):
             _log(home, raw, command)
         elif not _resolve(target).startswith(root + "/") and reason is None:
             reason = deny_reason(target, git_cwd, branch, shown_root)
+        else:
+            _write_pending_lease(target)
     return reason
 
 

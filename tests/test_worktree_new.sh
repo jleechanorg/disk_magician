@@ -249,6 +249,73 @@ if git -C "$REPO" show-ref -q --verify refs/heads/feat/pause; then ok "winner br
 n="$(git -C "$REPO" worktree list --porcelain | grep -cx 'branch refs/heads/feat/pause')"
 assert_eq "$n" "1" "branch checked out exactly once"
 
+echo "== case L1: lease written at creation (plan Task 4) =="
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+lease_field() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get(sys.argv[2]))
+except Exception:
+    print("ERR")
+PY
+}
+out="$(bash "$SCRIPT" "$REPO" feat/lease 2>/dev/null)"; rc=$?
+assert_eq "$out" "$WTROOT/feat-lease" "stdout is still exactly the path"
+L="$(lease_path_for "$WTROOT/feat-lease")"
+[[ -f "$L" ]] && ok "lease file exists" || bad "lease file missing"
+assert_eq "$(lease_field "$L" creator)" "worktree-new" "lease creator"
+assert_eq "$(lease_field "$L" branch)" "feat/lease" "lease branch"
+[[ "$(lease_field "$L" path)" == "$WTROOT/feat-lease" ]] && ok "lease path" || bad "lease path wrong"
+
+echo "== case L2: failing lease write still prints the path, exit 0 =="
+mkdir -p "$HOME/.disk_magician_state/worktree_leases"
+chmod 500 "$HOME/.disk_magician_state/worktree_leases"
+out="$(bash "$SCRIPT" "$REPO" feat/leasefail 2>"$TMPROOT/lease_err")"; rc=$?
+chmod 700 "$HOME/.disk_magician_state/worktree_leases"
+assert_eq "$rc" "0" "exit code stays 0"
+assert_eq "$out" "$WTROOT/feat-leasefail" "stdout is still exactly the path"
+grep -q "lease write failed" "$TMPROOT/lease_err" && ok "stderr logs lease write failed" || bad "stderr missing lease write failed"
+[[ -d "$WTROOT/feat-leasefail" ]] && ok "worktree itself still created" || bad "worktree not created"
+
+echo "== case A0: unset override -> real measurement, no gate interference =="
+out="$(env -u DISK_MAGICIAN_FREE_GB_OVERRIDE bash "$SCRIPT" "$REPO" feat/nogate 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/feat-nogate" "stdout is exactly the path"
+
+echo "== case A1: free 50 GiB -> creates, no warning =="
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a1 2>"$TMPROOT/a1.err")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/feat-a1" "stdout is exactly the path"
+grep -q "low disk" "$TMPROOT/a1.err" && bad "warned above the warn threshold: $(cat "$TMPROOT/a1.err")" || ok "no warning"
+
+echo "== case A2: free 20 GiB -> creates with a warning; stdout unchanged =="
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=20 bash "$SCRIPT" "$REPO" feat/a2 2>"$TMPROOT/a2.err")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/feat-a2" "stdout is exactly the path"
+grep -q "low disk (20 GiB free)" "$TMPROOT/a2.err" && ok "stderr warns low disk (20 GiB free)" || bad "stderr missing warning: $(cat "$TMPROOT/a2.err")"
+
+echo "== case A3: free 5 GiB -> exit 75, nothing created =="
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a3 2>"$TMPROOT/a3.err")"; rc=$?
+assert_eq "$rc" "75" "exit code 75"
+assert_eq "$out" "" "stdout empty"
+grep -q "disk low (5 GiB free): reuse an existing worktree" "$TMPROOT/a3.err" && ok "stderr names the floor and the remedy" || bad "stderr message: $(cat "$TMPROOT/a3.err")"
+[[ ! -e "$WTROOT/feat-a3" ]] && ok "no worktree dir created" || bad "worktree created despite refusal"
+if git -C "$REPO" show-ref -q --verify refs/heads/feat/a3; then bad "branch created"; else ok "no branch created"; fi
+
+echo "== case A4: WORKTREE_ADMIT_MIN_GB=0 disables the refusal =="
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=5 WORKTREE_ADMIT_MIN_GB=0 bash "$SCRIPT" "$REPO" feat/a4 2>"$TMPROOT/a4.err")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/feat-a4" "stdout is exactly the path"
+[[ -d "$WTROOT/feat-a4" ]] && ok "worktree created" || bad "worktree not created"
+
+echo "== case A5: unmeasurable free space fails open =="
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=x bash "$SCRIPT" "$REPO" feat/a5 2>"$TMPROOT/a5.err")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+assert_eq "$out" "$WTROOT/feat-a5" "stdout is exactly the path"
+grep -q "free-space unmeasurable" "$TMPROOT/a5.err" && ok "stderr logs free-space unmeasurable" || bad "stderr missing free-space unmeasurable: $(cat "$TMPROOT/a5.err")"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

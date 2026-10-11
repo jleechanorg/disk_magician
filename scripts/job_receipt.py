@@ -3,7 +3,7 @@
 
 Implements standard-library typed atomic receipt helper:
 - Fixed terminal outcomes: skipped_lock, skipped_threshold, blocked_safety, error,
-  timeout, success_noop, success.
+  timeout, partial, success_noop, success.
 - Started without terminal => outcome 'unknown', freed_bytes unknown/null never fake zero.
 - Retains <=64 completed summaries and <=2 active/started per job.
 - Preserves independent active, last_success, and last_skipped identities so contenders
@@ -38,6 +38,7 @@ TERMINAL_OUTCOMES = {
     "blocked_safety",
     "error",
     "timeout",
+    "partial",
     "success_noop",
     "success",
 }

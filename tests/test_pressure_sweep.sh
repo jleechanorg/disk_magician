@@ -24,7 +24,7 @@ mkdir -p "$MOCK_BIN" "$STATE_DIR"
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/usr/bin/env bash
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
-exit 0
+exit "${TMP_MODE_RC:-0}"
 MOCK
 
 cat > "$MOCK_BIN/cleanup_colima.sh" <<'MOCK'
@@ -64,6 +64,7 @@ run_pressure() {
     DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE="$free_gb" \
     DISK_MAGICIAN_TMP_GB_OVERRIDE=0 \
     CODESIGN_MODE="${CODESIGN_MODE:-success}" \
+    TMP_MODE_RC="${TMP_MODE_RC:-0}" \
     INVOCATION_LOG="$INVOCATION_LOG" \
     /bin/bash "$SCRIPT" "$@"
 }
@@ -460,7 +461,7 @@ assert_receipt_field "Test 16 outcome error receipt" "$STATE_DIR/receipts/pressu
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/bin/bash
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0} ACTIVE_HOURS=${LARGE_TMP_ACTIVE_HOURS:-0} ARCHIVE_HOURS=${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-0}" >> "${INVOCATION_LOG:?}"
-exit 0
+exit "${TMP_MODE_RC:-0}"
 MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh"
 
@@ -621,6 +622,41 @@ assert_receipt_field "Test 21 ordinary skipped receipt" "$FAIL_STATE_DIR/receipt
 
 cat > "$DU_BIN/du" <<'MOCK'
 #!/bin/bash
+printf 'du: %s/tmp-mount-x: Permission denied\n' "$2" >&2
+printf 'du: %s/RustDesk-service: Permission denied\n' "$2" >&2
+printf '1048576\t%s\n' "$2"
+exit 1
+MOCK
+chmod +x "$DU_BIN/du"
+echo "Test 21b: du exit 1 with only Permission denied stderr is a usable lower bound"
+: > "$INVOCATION_LOG"; : > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-du-eacces"
+rc=0; run_raw_du_probe "$FAIL_STATE_DIR" "$DU_BIN:/usr/bin:/bin" || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "Test 21b lower bound logged" "du skipped 2 unreadable entries" "$LOG_CONTENT"
+assert_contains "Test 21b reaches ordinary no-op" "free 50 GB >= threshold 0 GB" "$LOG_CONTENT"
+assert_not_contains "Test 21b does not report measurement failure" "size measurement failed" "$LOG_CONTENT"
+[[ $rc -eq 0 ]] && { echo "  PASS  Test 21b rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 21b rc=$rc"; FAIL=$(( FAIL + 1 )); }
+assert_receipt_field "Test 21b ordinary skipped receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_threshold"
+
+cat > "$DU_BIN/du" <<'MOCK'
+#!/bin/bash
+printf 'du: %s/a: Permission denied\n' "$2" >&2
+printf 'du: %s/b: Input/output error\n' "$2" >&2
+printf '1048576\t%s\n' "$2"
+exit 1
+MOCK
+chmod +x "$DU_BIN/du"
+echo "Test 21c: du exit 1 with any non-EACCES error still blocks"
+: > "$INVOCATION_LOG"; : > "$LOG_FILE"
+FAIL_STATE_DIR="$TMP_ROOT/state-du-mixed"
+rc=0; run_raw_du_probe "$FAIL_STATE_DIR" "$DU_BIN:/usr/bin:/bin" || rc=$?
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "Test 21c measurement failure logged" "size measurement failed or timed out" "$LOG_CONTENT"
+assert_receipt_field "Test 21c blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
+
+cat > "$DU_BIN/du" <<'MOCK'
+#!/bin/bash
 printf 'not-a-size\tpartial\n'
 printf 'not-a-size\tpartial\n' >> "${DU_LOG:?}"
 MOCK
@@ -696,6 +732,17 @@ assert_not_contains "Test 25 no scratch cleanup invoked" "cleanup_tmp" "$INVOCAT
 [[ $rc -eq 0 ]] && { echo "  PASS  Test 25 rc 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  Test 25 rc=$rc"; FAIL=$(( FAIL + 1 )); }
 assert_receipt_field "Test 25 blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
 assert_receipt_field "Test 25 receipt nulls timed-out tmp metric" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('precondition', {}).get('tmp_gb'))" "None"
+
+echo "Test 26: scratch lock held (rc 75) is a skip, not a FAILED step"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+TMP_MODE_RC=75 run_pressure 8
+LOG_CONTENT="$(cat "$LOG_FILE")"
+assert_contains "logs the skip" "step 1/3 cleanup_tmp.sh skipped (scratch lock held)" "$LOG_CONTENT"
+assert_not_contains "does not log FAILED for step 1" "cleanup_tmp.sh FAILED" "$LOG_CONTENT"
+assert_receipt_field "Test 26 records STEP1 skip" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP1_SKIPPED=scratch_lock_held' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 26 outcome is not error" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome') != 'error'" "True"
 
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

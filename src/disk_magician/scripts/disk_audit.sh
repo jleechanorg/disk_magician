@@ -731,3 +731,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 else
     df -h / 2>/dev/null | tail -1 | awk '{printf "  Free space: %s\n", $4}'
 fi
+
+if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 )); then
+    exit 1
+fi

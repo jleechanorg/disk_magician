@@ -179,6 +179,17 @@ git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $FL" && ok "forei
 git -C "$REPO" worktree list --porcelain | grep -A4 -xF "worktree $FL" | grep -q '^locked' && ok "foreign lock kept" || bad "foreign lock removed"
 git -C "$REPO" show-ref -q --verify refs/heads/foreignlocked && ok "foreign branch kept" || bad "foreign branch deleted"
 
+echo "== case L1: create hook writes a lease (plan Task 4) =="
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+json_in="$(printf '{"name": "leased", "cwd": "%s"}' "$REPO")"
+run_hook "$json_in"
+assert_eq "$RC" "0" "exit code"
+L="$(lease_path_for "$WTROOT/leased")"
+[[ -f "$L" ]] && ok "lease file exists" || bad "lease file missing"
+creator="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("creator"))' "$L" 2>/dev/null)"
+assert_eq "$creator" "worktree-create-hook" "lease creator"
+
+
 echo "== case 6: never fetches =="
 [[ -s "$TMPROOT/git_calls.log" ]] && ok "fake git was used" || bad "fake git never invoked"
 [[ ! -e "$TMPROOT/fetch.marker" ]] && ok "no git fetch" || bad "git fetch was invoked"
