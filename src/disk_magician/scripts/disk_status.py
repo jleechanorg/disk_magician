@@ -1748,6 +1748,108 @@ class DiskStatusEvaluator:
             details=details,
         )
 
+    def worktree_root_gb(self) -> Optional[float]:
+        """Reuse persisted snapshot and observer measurements; never scan the root."""
+        root = Path(os.environ.get("STANDARD_WORKTREE_ROOT", "~/.worktrees")).expanduser().resolve()
+        samples = []
+
+        def record(raw_time, buckets):
+            captured = parse_utc_timestamp(raw_time)
+            if not captured or not isinstance(buckets, dict):
+                return
+            for path, kb in buckets.items():
+                if not isinstance(path, str):
+                    continue
+                if path == "worktrees_dot":
+                    path = "~/.worktrees"
+                elif not path.startswith(("/", "~")):
+                    path = str(Path.home() / path)
+                if Path(path).expanduser().resolve() != root:
+                    continue
+                if isinstance(kb, (int, float)) and not isinstance(kb, bool) and 0 <= kb < float("inf"):
+                    samples.append((captured, kb / 1048576))
+
+        snapshot, _ = read_json_file(self.state_repo / "snapshots" / "disk_snapshot.json")
+        if isinstance(snapshot, dict):
+            meta = snapshot.get("snapshot_metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            record(meta.get("captured_at") or snapshot.get("timestamp"), snapshot.get("directories"))
+        for name in ("disk_observer.jsonl", "step_events.jsonl"):
+            try:
+                with (self.state_dir / name).open(encoding="utf-8") as stream:
+                    for line in stream:
+                        try:
+                            observation = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(observation, dict):
+                            record(observation.get("timestamp"), observation.get("hot_dirs_kb"))
+            except (OSError, UnicodeError):
+                continue
+        return max(samples, key=lambda sample: sample[0])[1] if samples else None
+
+    def evaluate_worktrees(self) -> Dict[str, Any]:
+        states = dict.fromkeys(("none", "released", "dead", "alive", "alive-expired", "unknown", "unreadable"), 0)
+        verdicts = {}
+        creators = {}
+        recent = dead_kept = 0
+        now = int(self.now.timestamp())
+        library = Path(__file__).resolve().parent / "lib" / "worktree_lease.sh"
+        try:
+            files = list((self.state_dir / "worktree_leases").glob("*.json"))
+        except OSError:
+            files = []
+        for path in files:
+            lease, error = read_json_file(path)
+            if error or not isinstance(lease, dict):
+                states["unreadable"] += 1
+                continue
+            try:
+                probe = subprocess.run(
+                    ["bash", "-c", 'source "$1"; lease_owner_state "$2" "$3"',
+                     "disk-status", str(library), str(path), str(now)],
+                    capture_output=True, text=True, timeout=5,
+                    env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(self.state_dir)},
+                )
+                state = probe.stdout.strip() if probe.returncode == 0 else "unknown"
+            except (OSError, subprocess.TimeoutExpired, UnicodeError):
+                state = "unknown"
+            state = state if state in states else "unknown"
+            states[state] += 1
+            if state == "unreadable":
+                continue
+            verdict = lease.get("last_verdict")
+            if isinstance(verdict, str):
+                verdicts[verdict] = verdicts.get(verdict, 0) + 1
+                if state == "dead" and verdict.startswith("kept:"):
+                    dead_kept += 1
+            creator = lease.get("creator")
+            if isinstance(creator, str):
+                counts = creators.setdefault(creator, [0, 0])
+                counts[0] += lease.get("owner") is not None
+                counts[1] += 1
+            created = lease.get("created_epoch")
+            if isinstance(created, (int, float)) and not isinstance(created, bool) and now - 7 * 86400 <= created <= now:
+                recent += 1
+        root_gb = self.worktree_root_gb()
+        reasons = []
+        if root_gb is not None and root_gb > 60:
+            reasons.append("worktree_root_over_60gb")
+        if dead_kept > 100:
+            reasons.append("owner_dead_kept_over_100")
+        return {
+            "leases": states,
+            "verdicts": verdicts,
+            "coverage": {creator: owned / total for creator, (owned, total) in creators.items()},
+            "remove_requested_not_approved": (
+                os.environ.get("DISK_MAGICIAN_REAP_MODE") == "remove"
+                and not (self.state_dir / "worktree_reap.remove_approved").is_file()
+            ),
+            "created_per_day_7d": recent / 7,
+            "root_gb": root_gb,
+            "degraded_reasons": reasons,
+        }
+
     def evaluate(self, publication_only: bool = False) -> Dict[str, Any]:
         """Run full evaluation and roll up overall status."""
         checked_at = self.now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1779,6 +1881,14 @@ class DiskStatusEvaluator:
             "deployed_identity": deployed,
         }
 
+        worktrees = self.evaluate_worktrees()
+        dimensions["worktrees"] = make_result(
+            status=STATUS_DEGRADED if worktrees["degraded_reasons"] else STATUS_HEALTHY,
+            reason=", ".join(worktrees["degraded_reasons"]) or "no_worktree_degradation",
+            owner="worktree_leases",
+            source=str(self.state_dir / "worktree_leases"),
+        )
+
         # Overall rollup:
         # Any invalid -> invalid
         # Else any degraded -> degraded
@@ -1799,6 +1909,7 @@ class DiskStatusEvaluator:
             "checked_at": checked_at,
             "status": overall,
             "dimensions": dimensions,
+            "worktrees": worktrees,
         }
 
 

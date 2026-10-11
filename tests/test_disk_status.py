@@ -872,6 +872,74 @@ class TestDiskStatus(unittest.TestCase):
             self.assertEqual(res["status"], "healthy")
             self.assertEqual(res["reason"], "launchd_not_applicable_on_platform")
 
+    def test_worktrees_degraded(self):
+        leases = self.state_dir / "worktree_leases"
+        leases.mkdir()
+        ps = self.root / "fake-ps"
+        ps.write_text("#!/bin/sh\n[ \"$2\" -gt 3 ] && exit 1\ncase \"$4\" in lstart=) echo 'Sat Oct 10 12:00:00 2026';; *) echo codex;; esac\n")
+        ps.chmod(0o755)
+        start = int(datetime(2026, 10, 10, 12, tzinfo=timezone.utc).timestamp())
+        for i in range(123):
+            (leases / f"{i}.json").write_text(json.dumps({
+                "owner": {"pid": i + 1, "start_epoch": start, "comm": "codex"},
+                "created_epoch": int(self.now.timestamp()), "creator": "guard",
+                "last_verdict": "kept:dirty" if i >= 3 else None,
+            }))
+        self.snapshot_data["directories"] = {"worktrees_dot": 70 * 1024 * 1024}
+        (self.state_repo / "snapshots/disk_snapshot.json").write_text(json.dumps(self.snapshot_data))
+        with mock.patch.dict(os.environ, {"DISK_MAGICIAN_PS_BIN": str(ps)}):
+            result = self.get_evaluator().evaluate()
+        worktrees = result["worktrees"]
+        self.assertEqual(worktrees["leases"]["alive"], 3)
+        self.assertEqual(worktrees["leases"]["dead"], 120)
+        self.assertEqual(worktrees["verdicts"], {"kept:dirty": 120})
+        self.assertEqual(worktrees["coverage"], {"guard": 1.0})
+        self.assertEqual(worktrees["created_per_day_7d"], 123 / 7)
+        self.assertEqual(worktrees["root_gb"], 70)
+        self.assertEqual(set(worktrees["degraded_reasons"]), {
+            "worktree_root_over_60gb", "owner_dead_kept_over_100"})
+        self.assertEqual(result["status"], "degraded")
+
+    def test_worktrees_unreadable_coverage_approval_and_observer(self):
+        leases = self.state_dir / "worktree_leases"
+        leases.mkdir()
+        for name, data in {
+            "none": {"owner": None, "creator": "adopt", "created_epoch": 0},
+            "released": {"owner": {"pid": 1}, "released_at": "today", "creator": "guard"},
+            "invalid": {"owner": {"pid": "bad"}, "creator": "guard"},
+        }.items():
+            (leases / f"{name}.json").write_text(json.dumps(data))
+        (leases / "broken.json").write_text("{bad")
+        (leases / "array.json").write_text("[]")
+        root = self.root / "custom-worktrees"
+        (self.state_dir / "step_events.jsonl").write_text(json.dumps({
+            "timestamp": self.now_str, "hot_dirs_kb": {str(root): 60 * 1024 * 1024}
+        }) + "\n{bad\n")
+        with mock.patch.dict(os.environ, {
+            "DISK_MAGICIAN_STATE_DIR": str(self.state_dir),
+            "STANDARD_WORKTREE_ROOT": str(root), "DISK_MAGICIAN_REAP_MODE": "remove",
+        }):
+            evaluator = self.get_evaluator(state_dir=None)
+            result = evaluator.evaluate()["worktrees"]
+            self.assertEqual(evaluator.state_dir, self.state_dir.resolve())
+            self.assertEqual(result["leases"]["unreadable"], 3)
+            self.assertEqual(result["leases"]["none"], 1)
+            self.assertEqual(result["leases"]["released"], 1)
+            self.assertEqual(result["coverage"], {"adopt": 0.0, "guard": 1.0})
+            self.assertEqual(result["created_per_day_7d"], 0.0)
+            self.assertEqual(result["root_gb"], 60)
+            self.assertEqual(result["degraded_reasons"], [])
+            self.assertTrue(result["remove_requested_not_approved"])
+            (self.state_dir / "worktree_reap.remove_approved").touch()
+            self.assertFalse(evaluator.evaluate()["worktrees"]["remove_requested_not_approved"])
+
+    def test_worktrees_empty(self):
+        result = self.get_evaluator().evaluate()
+        self.assertEqual(result["worktrees"]["degraded_reasons"], [])
+        self.assertIsNone(result["worktrees"]["root_gb"])
+        self.assertEqual(sum(result["worktrees"]["leases"].values()), 0)
+        self.assertEqual(result["status"], "healthy")
+
     def test_cli_exit_codes(self):
         # 1. Healthy -> exit 0
         rc = disk_status.main([
