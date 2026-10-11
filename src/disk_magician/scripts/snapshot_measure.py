@@ -126,7 +126,7 @@ def _attempt_diagnostic(key, path, attempt, reason, started, **details):
         "reason": _bounded_text(reason),
         "elapsed_s": round(max(0.0, time.monotonic() - started), 3),
     }
-    for name in ("backend", "backend_exit", "stderr", "kb"):
+    for name in ("backend", "backend_exit", "stderr", "kb", "lower_bound"):
         if name in details and details[name] is not None:
             value = details[name]
             if name == "stderr":
@@ -178,7 +178,7 @@ def measure(entry, budget, snapshot_script, tmpdir, deadline, attempt, env_extra
                                           backend_exit=proc.returncode)
     worker_elapsed = worker.get("elapsed_s")
     elapsed = worker_elapsed if isinstance(worker_elapsed, (int, float)) and not isinstance(worker_elapsed, bool) else None
-    details = {name: worker.get(name) for name in ("backend", "backend_exit", "stderr") if worker.get(name) is not None}
+    details = {name: worker.get(name) for name in ("backend", "backend_exit", "stderr", "lower_bound") if worker.get(name) is not None}
     if proc.returncode not in (0, None):
         details.pop("backend_exit", None)
         return None, _attempt_diagnostic(entry["key"], entry["path"], attempt, "worker_exit_nonzero", started,
@@ -207,6 +207,11 @@ def summarize_attempts(attempts):
         status = "recovered" if key_attempts[-1].get("reason") == "success" else "failed"
         failures.append({"key": key, "path": key_attempts[0]["path"], "status": status, "attempts": key_attempts})
     return failures
+
+
+def lower_bound_keys(attempts):
+    """Keys whose final successful measurement was a du lower bound (EACCES/ENOENT only)."""
+    return [k for k, a in attempts.items() if a and a[-1].get("reason") == "success" and a[-1].get("lower_bound")]
 
 
 def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes=None, env_extra=None, diagnostics_out=None):
@@ -251,6 +256,7 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda eb: job(eb[0], eb[1], 2), jobs))
     if diagnostics_out is not None:
+        diagnostics_out["lower_bound_keys"] = lower_bound_keys(attempts)
         diagnostics_out["measurement_failures"] = summarize_attempts(
             {entry["key"]: attempts.get(entry["key"], []) for entry in entries}
         )
