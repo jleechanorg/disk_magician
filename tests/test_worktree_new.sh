@@ -249,6 +249,36 @@ if git -C "$REPO" show-ref -q --verify refs/heads/feat/pause; then ok "winner br
 n="$(git -C "$REPO" worktree list --porcelain | grep -cx 'branch refs/heads/feat/pause')"
 assert_eq "$n" "1" "branch checked out exactly once"
 
+echo "== case L1: lease written at creation (plan Task 4) =="
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+lease_field() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get(sys.argv[2]))
+except Exception:
+    print("ERR")
+PY
+}
+out="$(bash "$SCRIPT" "$REPO" feat/lease 2>/dev/null)"; rc=$?
+assert_eq "$out" "$WTROOT/feat-lease" "stdout is still exactly the path"
+L="$(lease_path_for "$WTROOT/feat-lease")"
+[[ -f "$L" ]] && ok "lease file exists" || bad "lease file missing"
+assert_eq "$(lease_field "$L" creator)" "worktree-new" "lease creator"
+assert_eq "$(lease_field "$L" branch)" "feat/lease" "lease branch"
+[[ "$(lease_field "$L" path)" == "$WTROOT/feat-lease" ]] && ok "lease path" || bad "lease path wrong"
+
+echo "== case L2: failing lease write still prints the path, exit 0 =="
+mkdir -p "$HOME/.disk_magician_state/worktree_leases"
+chmod 500 "$HOME/.disk_magician_state/worktree_leases"
+out="$(bash "$SCRIPT" "$REPO" feat/leasefail 2>"$TMPROOT/lease_err")"; rc=$?
+chmod 700 "$HOME/.disk_magician_state/worktree_leases"
+assert_eq "$rc" "0" "exit code stays 0"
+assert_eq "$out" "$WTROOT/feat-leasefail" "stdout is still exactly the path"
+grep -q "lease write failed" "$TMPROOT/lease_err" && ok "stderr logs lease write failed" || bad "stderr missing lease write failed"
+[[ -d "$WTROOT/feat-leasefail" ]] && ok "worktree itself still created" || bad "worktree not created"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

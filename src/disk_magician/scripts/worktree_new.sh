@@ -10,6 +10,10 @@
 _WTN_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$_WTN_DIR/lib/layout_standard.sh"
+# Lease bookkeeping (plan Task 4): optional on purpose — creation must never
+# fail because the lease lib is missing or unreadable.
+# shellcheck source=scripts/lib/worktree_lease.sh
+[[ -f "$_WTN_DIR/lib/worktree_lease.sh" ]] && source "$_WTN_DIR/lib/worktree_lease.sh"
 
 # wtn_main_repo <path> — the repo that owns <path>'s worktrees: the main
 # checkout for a linked worktree, the submodule checkout for a submodule
@@ -184,6 +188,12 @@ wtn_main() {
     path="$(standard_worktree_path "$(wtn_repo_name "$repo")" "$name")" || { echo "worktree-new: bad name: $name" >&2; return 1; }
     [[ -n "$base" ]] || base="$(wtn_default_base "$repo")"
     wtn_create "$repo" "$branch" "$path" "$base" || return 1
+    # Record the owner lease; a failure is logged but never blocks creation
+    # (stdout must stay exactly the path).
+    if declare -F lease_write >/dev/null 2>&1; then
+        lease_write "$path" "$repo" "$branch" "worktree-new" >/dev/null 2>&1 ||
+            echo "worktree-new: lease write failed: $path" >&2
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -48,6 +48,10 @@ print(n); print(c)
         fi
         tries=$((tries + 1))
         wtn_create "$repo" "$branch" "$p" "$(wtn_default_base "$repo")" new; rc=$?
+        if [[ "$rc" == 0 ]] && declare -F lease_write >/dev/null 2>&1; then
+            lease_write "$p" "$repo" "$branch" "worktree-create-hook" >/dev/null 2>&1 ||
+                echo "worktree-create-hook: lease write failed: $p" >&2
+        fi
         case "$rc" in
             2) p="$path-$k"; k=$((k + 1)) ;;
             3) branch="worktree-$name-$n"; n=$((n + 1)) ;;
