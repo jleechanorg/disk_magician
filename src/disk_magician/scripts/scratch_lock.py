@@ -9,10 +9,13 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 
 ENV_FD = "DISK_MAGICIAN_SCRATCH_LOCK_FD"
 ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
+# Contention is a skip, not a failure: EX_TEMPFAIL lets callers tell it apart from rc=1.
+EXIT_LOCK_HELD = 75
 
 
 def lock_path() -> Path:
@@ -78,14 +81,24 @@ def run(caller: str, script: str, args: list[str]) -> int:
         return 1
 
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        os.close(fd)
-        if isinstance(exc, BlockingIOError):
-            print(f"[{caller}] skipped, scratch lock held — not queuing", file=sys.stderr)
-        else:
+        wait = max(0.0, float(os.environ.get("DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS", "20")))
+    except ValueError:
+        wait = 20.0
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) and time.monotonic() < deadline:
+                time.sleep(0.25)
+                continue
+            os.close(fd)
+            if isinstance(exc, BlockingIOError):
+                print(f"[{caller}] skipped, scratch lock held — not queuing", file=sys.stderr)
+                return EXIT_LOCK_HELD
             print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
-        return 1
+            return 1
 
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)

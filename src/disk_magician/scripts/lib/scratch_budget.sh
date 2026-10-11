@@ -62,6 +62,13 @@ _scratch_budget_lsof_snapshot() {
   else
     return 1
   fi
+  local tbin=""
+  declare -F resolve_timeout_bin >/dev/null && tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    # Bounded: a timeout is a failed snapshot -> caller proceeds without prefilter.
+    { "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC:-30}s" "$lsof_bin" -n -P -F n 2>/dev/null || return 1; } | sed -n 's/^n//p'
+    return "${PIPESTATUS[0]}"
+  fi
   "$lsof_bin" -n -P -F n 2>/dev/null | sed -n 's/^n//p'
 }
 

@@ -222,6 +222,28 @@ sandbox_guard_roots "${TMP_DIRS[@]:-}" "$ARCHIVE_ROOT" "${USER_TMP:-}" "${PRIVAT
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
+# Per-probe bound (seconds) for du / recency find / lsof snapshot on a single
+# entry. Exceeding it fails closed for that entry only.
+PROBE_TIMEOUT_SEC="${DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS:-30}"
+[[ "$PROBE_TIMEOUT_SEC" =~ ^[1-9][0-9]?$ ]] || PROBE_TIMEOUT_SEC=30
+
+# resolve_timeout_bin [override] — print a GNU-style timeout executable, or
+# nothing. A non-empty override must be executable or nothing is printed.
+resolve_timeout_bin() {
+  local candidate
+  if [[ -n "${1:-}" ]]; then
+    [[ -x "$1" ]] && echo "$1"
+    return 0
+  fi
+  for candidate in "$(command -v timeout 2>/dev/null || true)" "$(command -v gtimeout 2>/dev/null || true)" \
+      /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+}
+
 path_size_kb() {
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
@@ -233,6 +255,16 @@ path_size_kb() {
   # stderr) so a `du` failure never makes this function's caller (e.g.
   # `kb=$(path_size_kb "$path")` under `set -eo pipefail`) abort the whole
   # script instead of falling back to 0.
+  # Bounded (pressure sweeps share one step budget): a du that exceeds the probe
+  # timeout reports 0 KB, which every caller already treats as "cannot measure,
+  # preserve" -- only the affected entry is skipped, never the whole run.
+  local tbin
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    { "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk "$1" 2>/dev/null \
+        || { (( $? == 124 || $? == 137 )) && log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"; true; }; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+    return 0
+  fi
   { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
@@ -287,7 +319,13 @@ has_recent_activity() {
   local dir="$1" hours="$2" mins hit_file rc=0
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  local tbin
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  else
+    /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  fi
   if (( rc != 0 )); then
     rm -f "$hit_file"
     log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
@@ -366,22 +404,8 @@ has_open_files() {
     return 0
   fi
 
-  local timeout_bin=""
-  if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
-    timeout_bin="$DISK_MAGICIAN_TIMEOUT_BIN"
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout_bin="$(command -v timeout)"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    timeout_bin="$(command -v gtimeout)"
-  else
-    local candidate
-    for candidate in /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
-      if [[ -x "$candidate" ]]; then
-        timeout_bin="$candidate"
-        break
-      fi
-    done
-  fi
+  local timeout_bin
+  timeout_bin="$(resolve_timeout_bin "${DISK_MAGICIAN_TIMEOUT_BIN:-}")"
   if [[ -z "$timeout_bin" || ! -x "$timeout_bin" ]]; then
     log "Open-file check unavailable for $dir (timeout executable not found or not executable) — fail-closed, treating as active."
     return 0
@@ -887,18 +911,20 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    kb=$(path_size_kb "$d")
-    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
-      continue
-    fi
-
+    # Cheap recency/marker verdicts first: an entry that is too recent to touch
+    # never pays for du or lsof (bead dcz: pressure step budget).
     if [[ -e "$d/.in-use" ]]; then
-      log "Skipping active-use marker (.in-use present): $d  (${kb} KB)"
+      log "Skipping active-use marker (.in-use present): $d"
       continue
     fi
 
     if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d  (${kb} KB)"
+      log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+      continue
+    fi
+
+    kb=$(path_size_kb "$d")
+    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
       continue
     fi
 
