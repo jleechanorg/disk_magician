@@ -89,9 +89,9 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
  "last_verdict": null, "last_checked_at": null}
 ```
 
-- **Owner** is the nearest ancestor of the creating process whose executable basename is in a fixed list of agent runtimes (`claude`, `codex`, `agy`, `cursor-agent`, `hermes`). The walk goes hop by hop with `ps -p <pid> -o ppid=,comm=`, never via the full `ps -A` table, which hides ancestors inside sandboxes. This is a process-identity lookup, not a semantic judgment.
+- **Owner** is the nearest ancestor of the creating process whose executable basename is in a fixed list of agent runtimes (`claude`, `codex`, `agy`, `cursor-agent`, `hermes`). The walk goes hop by hop with `ps -p <pid> -o ppid=,comm=`, never via the full `ps -A` table, which hides ancestors inside sandboxes. It stops after 32 hops or on a repeated pid. `created_epoch` is the floor of the current time in whole seconds, matching `stat -f %B`. This is a process-identity lookup, not a semantic judgment.
 - If no ancestor matches (launchd or cron creators), `owner` is `null`. The lease is then never owner-reaped and falls back to the sweeper floor. A short-lived launching shell must never count as the owner, because it would look dead immediately.
-- `start_epoch` guards against pid reuse. Both writer and reader run `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` and parse the result (`%a %b %d %H:%M:%S %Y`) to a UTC epoch. The owner counts as alive only when the two epochs differ by ≤2 s and the `comm` basename matches the recorded one. Raw `lstart` strings are never compared, because they vary with the caller's timezone and locale and launchd's environment differs from the agent's.
+- `start_epoch` guards against pid reuse. Both writer and reader run `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` and parse the result (`%a %b %d %H:%M:%S %Y`) to a UTC epoch. The owner counts as alive when the two epochs differ by ≤2 s. If the epochs match but the `comm` basename differs, the state is `unknown` (keep), never `dead`. `comm` is always queried as the last column (`-o lstart=,comm=` / `-o ppid=,comm=`), because macOS truncates non-final `comm` to 16 characters. Raw `lstart` strings are never compared, because they vary with the caller's timezone and locale and launchd's environment differs from the agent's.
 - **Hermes** runs as `Python`. The owner match therefore also accepts a `python*` process whose script argument's basename starts with `hermes`. This matches process identity, not task semantics.
 - **Writers:**
   - `worktree_new.sh` after a successful `wtn_create`.
@@ -117,17 +117,18 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
    - Delete pending leases older than 1 h whose path has no worktree.
    - For each remaining registered linked worktree under `$STANDARD_WORKTREE_ROOT` with no lease, write one with `owner: null, creator: "adopt"`. These are never reaped by owner exit and stay governed by `cleanup_worktrees.sh`.
 2. **Owner check.** For each lease with a non-null owner, the worktree is a removal candidate only in two cases:
-   - **dead:** pid absent, or start epoch mismatch. Quiet period `REAP_QUIET_MINUTES`, default 30.
+   - **dead:** pid absent, or start epoch mismatch. On the first run that sees it dead, the reaper records `owner_dead_seen_at`. Quiet period `REAP_QUIET_MINUTES`, default 30.
    - **released:** `released_at` is set by `diskm worktree-release <path>`. Quiet period `REAP_RELEASED_QUIET_MINUTES`, default 30.
-   The owner counts as dead only when the pid field is a valid integer and `ps` returns rc 1 with empty stderr. A non-integer pid field is `kept:lease-unreadable`. Any other `ps` outcome, including `ps: process id too large`, is `unknown` (keep). An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status` and can be targeted with `worktree-release`. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
+   - The quiet period is measured from the **later** of the last content change and `owner_dead_seen_at` or `released_at`.
+   The owner counts as dead only when the pid field is a valid integer and `ps` returns rc 1 with empty stderr. A non-integer pid field is `kept:lease-unreadable`. Any other `ps` outcome, including `ps: process id too large`, is `unknown` (keep). An alive owner past `created_at + ttl_hours` (24 h) is **never removed**. It is reported as `kept:owner-alive-expired`, so long-lived orchestrator sessions show up in `diskm status`; only the owning session itself can release them. Any other alive owner: record `state: active` and skip. If `ps` fails, the state is unknown, which means keep.
 3. **Quiet period.** Require no content change for `REAP_QUIET_MINUTES` (default 30) via `worktree_is_recently_active` with minute granularity. Section 9 notes the helper extension this needs. This covers a sibling agent that adopted the worktree after the owner died.
 4. **Remote freshness.** Before any verdict, run `GIT_TERMINAL_PROMPT=0 git fetch --quiet --prune origin` once per owning repo, bounded to 60 s. If the fetch fails, every candidate in that repo gets `kept:remote-unverified`.
    - The reaper's pushed proof is either HEAD contained in `refs/remotes/origin/*` only (stale `fork/*` or `upstream/*` refs don't count), or HEAD equal to the head of a gh-verified MERGED PR. The second form covers squash-merged PRs whose branch was deleted.
-   - At startup the reaper logs `missing tool: <name>` for any of `gh`, `timeout` or `git` not found on PATH, and counts it in the receipt.
+   - At startup the reaper logs `missing tool: <name>` for any of `gh`, `timeout` or `git` not found on PATH, and counts it in the receipt. Without `timeout`, no fetch runs (an unbounded fetch could hold the lock), so every candidate is `kept:remote-unverified`. Without `gh`, the merged-PR proof is unavailable and that path keeps.
    - The merged-PR check is today inline in `cleanup_worktrees.sh` (`classify_content_and_merge` plus `populate_repo_pr_cache`), and sourcing that script runs the sweeper. It moves into `scripts/lib/worktree_merged_pr.sh` with a behavior-preserving test. The shared 1 h cache is written atomically (temp file plus `mv`) because the reaper and the sweeper can write it concurrently.
    - Both proofs live inside `wrh_removal_verdict`'s `pushed_scope=origin-or-merged-pr`, so "safe to remove" stays defined in one place.
    - The fetch runs as `git -c gc.auto=0 -c maintenance.auto=false fetch ...`, so it never triggers auto-gc in busy repos.
-5. **Safety.** Immediately before `git worktree remove`, re-run `has_hidden_state` and the live-cwd check, which narrows the ignored-file race in §9. Run `scripts/safety_check.sh <path>`; a non-zero result means `kept:safety-local`, so the `safety.local.json` `never_delete`, `protected_live_paths` and `needs_decision` rules gate the reaper too. Then call a new `wrh_removal_verdict <real>` extracted from `wrh_main`. It runs the same checks in the same order but with a caller-supplied recency floor, and prints `remove` or `kept:<reason>`:
+5. **Safety.** Immediately before `git worktree remove`, re-run `has_hidden_state`, `has_ignored_user_data` and the live-cwd check, which narrows the ignored-file race in §9. Run `scripts/safety_check.sh <path>`; a non-zero result means `kept:safety-local`, so the `safety.local.json` `never_delete`, `protected_live_paths` and `needs_decision` rules gate the reaper too. Then call a new `wrh_removal_verdict <real>` extracted from `wrh_main`. It runs the same checks in the same order but with a caller-supplied recency floor, and prints `remove` or `kept:<reason>`:
    - registered linked worktree
    - live cwd
    - AO
@@ -145,7 +146,9 @@ Path: `~/.disk_magician_state/worktree_leases/<sha256(realpath)[:16]>.json`, wri
 
 `wrh_removal_verdict` is a pure extraction. Its `has_ignored_user_data` already allows the known-rebuildable dirs (`node_modules`, `venv`, `.venv`, `__pycache__`, caches) and keeps everything else. Its `wrh_live_cwd_reason` already treats an `lsof` failure as keep.
 
-**`diskm worktree-release <path>`** sets `released_at` on the lease, but only when the caller's resolved owner (same ancestry walk, same pid plus start epoch) matches the lease owner. Otherwise it exits 1 with `not lease owner` and changes nothing, so one agent can never release another's worktree. Callers that know their work is done (review and evidence flows, `/advice` lanes) call it so the worktree is reaped after the 30 min released quiet period. It never deletes anything itself.
+**`diskm worktree-release <path>`** sets `released_at` on the lease, but only when the caller's resolved owner (same ancestry walk, same pid plus start epoch) matches the lease owner. Otherwise it exits 1 with `not lease owner` and changes nothing, so one agent can never release another's worktree.
+- A null-owner lease, or a caller with no resolvable owner, also exits 1 (`not lease owner`).
+- Worktrees of expired-but-alive sessions are therefore reclaimed only when that session releases them or exits. A human or sibling agent cannot release them. That is the safe direction, at a cost in coverage. Callers that know their work is done (review and evidence flows, `/advice` lanes) call it so the worktree is reaped after the 30 min released quiet period. It never deletes anything itself.
 
 **Lock, deadline and signals.** The reaper takes `$STATE/worktree_reap.lock` with the same pid-plus-age stale-lock reclamation as `pressure_sweep.sh`. It installs a TERM/INT trap that releases the lock, and it checks an internal deadline (`--deadline-seconds`, default 1500) between candidates, never during a `git worktree remove`. A timeout therefore never strands the lock or interrupts a removal.
 
@@ -194,7 +197,7 @@ Before `wtn_create`:
 - root size in GiB from the observer bucket
 - creations/day over 7 days, from lease `created_at`
 
-`status` becomes `degraded` when the root exceeds 60 GiB or when owner-dead `kept:*` leases exceed 100. `sweeper-health` includes the reaper receipt.
+`status` also shows `remove_requested_not_approved` when the template or flag requests `remove` but the approval marker is absent. `status` becomes `degraded` when the root exceeds 60 GiB or when owner-dead `kept:*` leases exceed 100. `sweeper-health` includes the reaper receipt.
 
 ## 6. Assumptions and recommended defaults (auto-picked under /sq)
 

@@ -22,7 +22,8 @@
 - Reason tokens (fixed set): `not-registered`, `live-cwd`, `cwd-unknown`, `ao-owned`, `ao-config-unreadable`, `not-a-directory`, `git-status-failed`, `recent-activity`, `dirty`, `hidden-state`, `ignored-data`, `not-pushed`, `remote-unverified`, `locked`, `safety-local`, `owner-alive-expired`, `lease-unreadable`, `remove-failed`.
 - Leases carry `admin_id` and `admin_birth_epoch` (`stat -f %B` of `<main>/.git/worktrees/<id>`). A mismatch with the live admin dir marks the lease stale, and it is re-adopted with `owner: null`. The reaper and the remove hook delete the lease after a successful removal; `cleanup_worktrees.sh` removals are retired by prune plus the incarnation check.
 - Base: `main` at or after `b776e56`; the remove hook there has the live-cwd, AO, recency, hidden-state and ignored-data checks.
-- Dead ⇔ the pid field is a valid integer and `ps` returns rc 1 with empty stderr. Anything else is `unknown` (keep), or `lease-unreadable` for an invalid pid.
+- Dead ⇔ the pid field is a valid integer and `ps` returns rc 1 with empty stderr, or the start epochs differ by >2 s. Epochs matching while the `comm` basename differs → `unknown` (keep). `comm` is always the last `ps -o` column. The owner walk is capped at 32 hops with a repeated-pid guard. `created_epoch` is the floor of the time in whole seconds.
+- Anything else is `unknown` (keep), or `lease-unreadable` for an invalid pid.
 - Owner start time: `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` parsed with `%a %b %d %H:%M:%S %Y` to a UTC epoch, stored as `start_epoch`. Alive ⇔ the epochs differ by ≤2 s. Never compare raw `lstart` strings. If `ps` fails, the state is unknown, which means keep.
 - Hermes owner match: a `python*` process whose script argument's basename starts with `hermes`.
 - Reaper quiet period for a dead owner: `REAP_QUIET_MINUTES` default 30. One bounded `git fetch --quiet --prune origin` (60 s) per repo per run; a failed fetch means `kept:remote-unverified`. `scripts/safety_check.sh <path>` must pass. Interval 1800 s. `DISK_MAGICIAN_REAP_MODE` ∈ {`nominate` (default), `remove`}.
@@ -112,13 +113,15 @@
     - `alive` when the lease is written under `TZ=America/Los_Angeles LANG=fr_FR.UTF-8` and checked under `TZ=UTC LANG=C` (the real `ps` with `$$`)
     - `dead` when the fake `ps` exits 1
     - `dead` when the fake `ps` returns a start time 10 s different (pid reuse, Review Focus 1)
-    - `dead` when the start time matches but `comm` differs (pid reuse)
+    - `unknown` (not `dead`) when the start time matches but `comm` differs
+    - with the real `ps`, an owner whose executable path is over 16 characters (copy `/bin/sleep` to `$TMP/a-very-long-executable-name-xyz` and run it) resolves `alive` with the full basename
   - `lease_resolve_owner` succeeds when a fake `ps -A` lists no ancestors but `ps -p` resolves each hop.
     - `unknown` when the fake `ps` exits 2 with no output (treat any non-1 failure as unknown)
     - `none` for an `owner: null` lease
   - `lease_resolve_owner`, given a fake ps tree `500 sh → 400 claude → 1 launchd`, returns pid 400 / comm `claude`. With no runtime in the chain it returns `-`, and `lease_write` stores `owner: null`.
   - A lease created 25 h ago with an alive owner returns `alive-expired`. After `lease_release` by the owner, the state is `released`.
-  - `lease_release` from a caller whose resolved owner differs → rc 1 `not lease owner`, lease byte-identical.
+  - `lease_release` from a caller whose resolved owner differs → rc 1 `not lease owner`, lease byte-identical. A null-owner lease → rc 1. A caller with no resolvable owner → rc 1.
+  - A walk through a fake `ps` cycle (pid 5 → 6 → 5) terminates and returns `-`.
   - A fake ps tree `600 Python /opt/hermes/hermes_gateway.py → 1` resolves the owner to pid 600.
   - `lease_owner_state` with pid field `99999999999` and a fake `ps` printing `ps: process id too large` (rc 1) → `unknown`, not `dead`. A pid field `abc` → `unreadable`.
   - `lease_write` records `admin_id` and `admin_birth_epoch` matching `stat -f %B` of the fixture's admin dir, plus integer `created_epoch`.
@@ -224,7 +227,8 @@
   - Owner dead, dirty → `kept:dirty`, present in both modes.
   - Owner dead, quiet 5 min → `kept:recent-activity` (Review Focus 2).
   - Lease expired with the owner alive, quiet 7 h → `kept:owner-alive-expired` in both modes.
-  - Released lease with the owner alive, quiet 40 min → `remove` verdict. Quiet 5 min → `kept:recent-activity`.
+  - Released lease with the owner alive, content quiet 2 h, `released_at` 40 min ago → `remove` verdict. `released_at` 5 min ago → `kept:recent-activity`, because quiet is measured from the later of content and release.
+  - Owner first seen dead on this run, content quiet 2 h → `kept:recent-activity`, with `owner_dead_seen_at` recorded. The next run 31 min later → `remove` verdict.
   - `owner: null` lease, clean and pushed, in **remove** mode → still present, not reaped.
   - HEAD only on a `fork/*` ref → `kept:not-pushed`. HEAD equal to a mocked gh MERGED PR head with the branch deleted → `remove` verdict.
   - A pending guard lease plus a registered worktree whose admin-dir birth time is ≥ the lease's `created_epoch` → promoted, `creator` stays `guard`, owner kept. Include a same-second case (birth equal to `created_epoch` → promoted) and a stale case (birth 120 s after `created_epoch` → adopted with `owner: null`).
@@ -232,6 +236,8 @@
   - Path reuse: a lease with a dead owner exists for path P; P is removed and recreated with a new admin dir → the lease is detected stale and re-adopted with `owner: null`, never nominated.
   - Removal in remove mode deletes the lease file.
   - An ignored `.env` written after the first verdict, before removal (inject via a hook point between candidates) → the final re-check yields `kept:hidden-state`, worktree present.
+  - An ignored `data/notes.db` injected the same way → `kept:ignored-data`.
+  - With `timeout` absent from PATH → no fetch runs, and every candidate is `kept:remote-unverified`.
   - Owner state `unknown` (fake `ps` rc 2) in remove mode → kept.
   - A worktree locked via `git worktree lock` → `kept:locked` (a new check, stricter than the current hook).
   - Receipt `candidates` include `fetch_ok`, `fetch_failed`, `gh_ok` and `gh_failed` counters.
@@ -268,7 +274,7 @@
 
 - [ ] **Step 1: Write failing tests.**
   - `bash disk_magician.sh worktree-reap --mode nominate` with a temp state dir exits 0 and writes `receipts/worktree_reap.json`.
-  - `bash disk_magician.sh worktree-release <leased path>` exits 0 and the lease has `released_at`. On an unleased path it exits 1 with `no lease`.
+  - With `DISK_MAGICIAN_PS_BIN` pinned to a fake tree where the caller and the lease owner match, `bash disk_magician.sh worktree-release <leased path>` exits 0 and the lease has `released_at`. On an unleased path it exits 1 with `no lease`.
   - `plutil -lint` passes on the rendered template.
   - The template has no `DISK_MAGICIAN_REAP_MODE` key, read with `plutil -p` only.
   - The template's `EnvironmentVariables.PATH` contains `@HOME@/.local/bin` and `/opt/homebrew/bin`. `GIT_TERMINAL_PROMPT` is `0` and `GIT_SSH_COMMAND` contains `BatchMode=yes`.
@@ -311,6 +317,7 @@
   - `leases` (counts by `owner_state`)
   - `verdicts` (counts by `last_verdict`)
   - `coverage` (share of leases with a non-null owner, by creator)
+  - `remove_requested_not_approved` (bool)
   - `created_per_day_7d` (float)
   - `root_gb` (from the latest observer/snapshot bucket for `~/.worktrees`, or null)
   - `degraded_reasons` (list)
@@ -347,4 +354,5 @@ TDD: N/A. This task deploys; verification is listed below.
   - `~/.disk_magician_state/deployed.json` revision equals the merge SHA.
   - Within 35 min, `receipts/worktree_reap.json` has `last_terminal.outcome=="success"`, `fetch_ok > 0`, and `gh_ok > 0` (or `gh_failed == 0` when no candidate needed the merged-PR proof).
   - `diskm status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["worktrees"])'` shows lease counts.
+- [ ] **Conditional on P1:** create `~/.disk_magician_state/worktree_reap.remove_approved` containing the approval date. Verify `diskm status --json` no longer shows `remove_requested_not_approved`, and that the next receipt logs the mode as `remove`.
 - [ ] After 7 days in nominate mode, record projected reclaim (`verdicts.remove` × measured sizes) on bead `disk_magician-oyt4` as P1 decision input.
