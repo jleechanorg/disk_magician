@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import math
 import os
 from pathlib import Path
 import stat
@@ -72,6 +73,15 @@ def verify_fd(fd: int) -> bool:
         return False
 
 
+def parse_wait(raw: str | None) -> float:
+    """Seconds to wait for the lock; non-numeric or non-finite input falls back to 20."""
+    try:
+        value = float(raw) if raw is not None else 20.0
+    except ValueError:
+        return 20.0
+    return max(0.0, value) if math.isfinite(value) else 20.0
+
+
 def run(caller: str, script: str, args: list[str]) -> int:
     path = lock_path()
     try:
@@ -80,10 +90,7 @@ def run(caller: str, script: str, args: list[str]) -> int:
         print(f"[{caller}] failed to open scratch lock {path}: {exc}", file=sys.stderr)
         return 1
 
-    try:
-        wait = max(0.0, float(os.environ.get("DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS", "20")))
-    except ValueError:
-        wait = 20.0
+    wait = parse_wait(os.environ.get("DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"))
     deadline = time.monotonic() + wait
     while True:
         try:
@@ -95,7 +102,8 @@ def run(caller: str, script: str, args: list[str]) -> int:
                 continue
             os.close(fd)
             if isinstance(exc, BlockingIOError):
-                print(f"[{caller}] skipped, scratch lock held — not queuing", file=sys.stderr)
+                note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
+                print(f"[{caller}] skipped, scratch lock held {note}", file=sys.stderr)
                 return EXIT_LOCK_HELD
             print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
             return 1

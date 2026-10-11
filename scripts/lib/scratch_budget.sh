@@ -170,6 +170,10 @@ scratch_budget_evict_root() {
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
     kb=$(path_size_kb "$item")
+    if (( kb < 0 )); then
+      log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."
+      continue
+    fi
     total_kb=$(( total_kb + kb ))
     # "cannot measure -> preserve" (bead disk_magician-lsl follow-up): a
     # non-numeric mtime (stat/find failure, unreadable subtree) is excluded

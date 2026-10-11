@@ -30,7 +30,7 @@ mkdir -p "$BIN" "$TMP_ROOT/emptytmp"
 cat > "$BIN/du" <<EOF
 #!/usr/bin/env bash
 echo "\${@: -1}" >> "$TMP_ROOT/du.log"
-case "\${@: -1}" in *slow*) exec sleep 30 ;; esac
+case "\${@: -1}" in *slow*) exec sleep 30 ;; *big_[123]) printf "1258291\\t%s\\n" "\${@: -1}"; exit 0 ;; esac
 exec /usr/bin/du "\$@"
 EOF
 cat > "$BIN/lsof" <<EOF
@@ -62,7 +62,7 @@ run_tmp() {  # <private_tmp> [VAR=val ...] — sets RC and OUT
     DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
     DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$root" \
     DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$TMP_ROOT/emptytmp" DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/emptytmp" "$@" \
-    bash "$SOURCE_SCRIPT" --clean --large 2>&1)"
+    bash "$SOURCE_SCRIPT" --clean ${TMP_ARGS---large} 2>&1)"
   RC=$?
   set -e
 }
@@ -110,10 +110,89 @@ echo "Test 4: lock held past the wait budget - distinct skip rc 75, nothing touc
 P4="$TMP_ROOT/p4"; mk_fixture "$P4"
 hold_lock 6
 run_tmp "$P4" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=1
+printf "%s" "$OUT" > "$TMP_ROOT/wait4.out"
 kill "$HOLDER_PID" 2>/dev/null || true; wait "$HOLDER_PID" 2>/dev/null || true; HOLDER_PID=""
 check "rc 75 (skip, not failure)" '[[ $RC -eq 75 ]]' "rc=$RC"
 check "skip message" 'grep -q "skipped, scratch lock held" <<<"$OUT"' "$OUT"
 check "fixture untouched" '[[ -e "$P4/old_big" ]]'
+
+echo "Test 5: budget mode - du timeout must NOT evict the unknown-size entry"
+R5="$TMP_ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5"
+for d in a_slow big_1 big_2 big_3; do mkdir -p "$R5/$d"; head -c 100 /dev/zero > "$R5/$d/f"; done
+/usr/bin/find "$R5/a_slow" -exec touch -t 201901010000 {} +
+/usr/bin/find "$R5/big_1" -exec touch -t 202001010000 {} +
+/usr/bin/find "$R5/big_2" -exec touch -t 202101010000 {} +
+/usr/bin/find "$R5/big_3" -exec touch -t 202201010000 {} +
+mk_fixture "$TMP_ROOT/p5"
+set +e
+OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
+  DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" \
+  DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/p5" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$R5" DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/emptytmp" \
+  bash "$SOURCE_SCRIPT" --clean --budget-gb 2 2>&1)"
+RC=$?
+set -e
+check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
+check "unknown-size entry preserved" '[[ -e "$R5/a_slow" ]]' "$OUT"
+check "unknown-size entry reported excluded" 'grep -q "size unknown" <<<"$OUT"'
+check "two oldest measured entries evicted" '[[ ! -e "$R5/big_1" && ! -e "$R5/big_2" ]]'
+check "newest measured entry kept (no over-eviction)" '[[ -e "$R5/big_3" ]]'
+
+echo "Test 6: recency find timeout is treated as active (preserved)"
+cat > "$BIN/find_timeout" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == /usr/bin/find ]] && exit 124; done
+while [[ \$# -gt 0 && "\$1" == -* ]]; do shift; done; shift
+exec "\$@"
+EOF
+chmod +x "$BIN/find_timeout"
+P6="$TMP_ROOT/p6"; mk_fixture "$P6"
+run_tmp "$P6" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/find_timeout"
+check "old dir preserved when find times out" '[[ -e "$P6/old_big" ]]' "$OUT"
+check "logged fail-closed" 'grep -q "Active-use check failed" <<<"$OUT"'
+
+echo "Test 7: budget lsof snapshot timeout -> no prefilter, run continues"
+cat > "$BIN/lsof_timeout" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == */lsof ]] && exit 124; done
+while [[ \$# -gt 0 && "\$1" == -* ]]; do shift; done; shift
+exec "\$@"
+EOF
+chmod +x "$BIN/lsof_timeout"
+set +e
+OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" \
+  DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/lsof_timeout" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/p5" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$R5" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/emptytmp" \
+  bash "$SOURCE_SCRIPT" --dry-run --budget-gb 2 2>&1)"
+RC=$?
+set -e
+check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC"
+check "proceeds without prefilter" 'grep -q "lsof snapshot unavailable" <<<"$OUT"' "$OUT"
+
+echo "Test 8: no usable timeout binary -> one-time unbounded warning"
+P8="$TMP_ROOT/p8"; mk_fixture "$P8"
+run_tmp "$P8" DISK_MAGICIAN_PROBE_TIMEOUT_BIN=/nonexistent
+check "warns once" '[[ "$(grep -c "probes are unbounded" <<<"$OUT")" == 1 ]]' "$OUT"
+check "still archives eligible dir" '[[ ! -e "$P8/old_big" ]]'
+
+echo "Test 9: probe timeout parsing"
+P9="$TMP_ROOT/p9"; mk_fixture "$P9"
+run_tmp "$P9" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=abc
+check "invalid value logs fallback" 'grep -q "invalid DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS" <<<"$OUT"' "$OUT"
+run_tmp "$P9" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=120
+check "values >99 accepted silently" '! grep -q "invalid DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS" <<<"$OUT"'
+
+echo "Test 10: scratch_lock wait parsing rejects non-finite values"
+check "parse_wait" 'python3 -c "
+import sys; sys.path.insert(0, \"$REPO_ROOT/scripts\")
+import scratch_lock as s
+assert s.parse_wait(\"inf\")==20.0 and s.parse_wait(\"nan\")==20.0 and s.parse_wait(\"x\")==20.0
+assert s.parse_wait(\"-5\")==0.0 and s.parse_wait(\"3\")==3.0 and s.parse_wait(None)==20.0"'
+check "message reports the wait" 'grep -q "after waiting" <<<"$(cat "$TMP_ROOT/wait4.out")"'
 
 echo "Results: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))
