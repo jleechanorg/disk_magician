@@ -158,7 +158,7 @@ artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     local p kind='' q done='' st newest ret  # --kind ephemeral adds provenance (c); others keep
     [[ "${2:-}" == --kind ]] && kind=${3:-}
-    p=${1%/} && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
+    p=${1%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }

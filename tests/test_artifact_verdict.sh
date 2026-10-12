@@ -373,6 +373,12 @@ mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
 assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
 assert_eq "$(eph "$HOME/work/run-9")" kept:unproven-content "unique report.md under ~/work/run-9/"
+# '.'/'..' basenames must not resolve to the parent and inherit a row's retention (§7.2 globs).
+mkdir -p "$HOME/.gemini/antigravity/conversations" "$HOME/.aside/u/a/profile" && printf 'c' >"$HOME/.gemini/antigravity/conversations/important.pb"
+printf 'c' >"$HOME/.aside/u/a/profile/Cookies" && age "$HOME/.gemini" 43200 && age "$HOME/.aside" 43200
+for p in "$HOME/.gemini/antigravity/brain/.." "$HOME/.gemini/antigravity/brain/." "$HOME/.aside/u/a/sessions/.." "/"; do
+    assert_eq "$(eph "$p")" kept:check-failed "dot basename: ${p#"$HOME"/}"
+done
 
 echo "== every-kind checks =="
 mkdir -p "$PT/pr-open" "$PT/pr-cwd" "$PT/pr-young" "$PT/pr-live" "$PT/pr-unk" "$PT/pr-rel" "$HOME/.codex/sessions/s"
