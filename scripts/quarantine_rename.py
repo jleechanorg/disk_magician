@@ -13,8 +13,17 @@ def bind_parent(path, out):  # called by quarantine.sh before artifact_removal_v
     resolved = os.path.realpath(parent); fd = os.open(resolved, DIRFL)
     try: st = os.fstat(fd)
     finally: os.close(fd)
-    with open(out, "w") as f: json.dump({"parent_path": resolved, "parent_input": parent, "parent_dev": st.st_dev, "parent_ino": st.st_ino, "base": base}, f)
+    with open(out, "w") as f: json.dump({"parent_path": resolved, "parent_input": parent, "candidate_path": os.path.join(resolved, base), "parent_dev": st.st_dev, "parent_ino": st.st_ino, "base": base}, f)
     return "ok"
+def bound_candidate(binding_file):
+    with open(binding_file) as f: binding = json.load(f)
+    candidate = binding.get("candidate_path")
+    parent, base = binding.get("parent_path"), binding.get("base")
+    if (not isinstance(candidate, str) or not os.path.isabs(candidate) or
+            not isinstance(parent, str) or not os.path.isabs(parent) or
+            candidate != os.path.join(parent, base)):
+        raise ValueError("missing frozen candidate")
+    return candidate
 def visit(dfd, name, p, out):  # one entry read through its parent's fd; every descent opens O_DIRECTORY | O_NOFOLLOW
     st = os.stat(name, dir_fd=dfd, follow_symlinks=False); e = {"path": p, "type": "other", "dev": st.st_dev, "ino": st.st_ino}
     if stat.S_ISLNK(st.st_mode): e.update(type="symlink", target=os.readlink(name, dir_fd=dfd))
@@ -80,6 +89,7 @@ def phase1(path, inv_file, binding_file):
         with os.fdopen(os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd), "w") as f:
             if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")
             f.write(json.dumps(rec)); f.flush(); os.fsync(f.fileno())
+        os.fsync(qfd)
     except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
         try: os.unlink(side, dir_fd=qfd)
         except OSError: pass
@@ -96,6 +106,9 @@ def phase1(path, inv_file, binding_file):
         try: os.unlink(side, dir_fd=qfd)
         except OSError: pass
         return "kept:exclusive_rename_unavailable" if isinstance(e, LookupError) else "kept:rename-failed"
+    try:
+        os.fsync(pfd); os.fsync(qfd)
+    except OSError: return f"quarantine_conflict:{qid}"
     hook("DISK_MAGICIAN_TEST_AFTER_QUARANTINE", path, dest)
     why = verify(pfd, qfd, q, qid, rec, qdir)
     if not why: return f"quarantined:{qid}"
@@ -105,11 +118,16 @@ def phase1(path, inv_file, binding_file):
         if (current.st_dev, current.st_ino) != (rec["dev"], rec["ino"]): return f"quarantine_conflict:{qid}"
         renamex(qfd, qid, pfd, base)
     except OSError: return f"quarantine_conflict:{qid}"  # conflict: preserve quarantined entry and sidecar
+    try: os.fsync(qfd); os.fsync(pfd)
+    except OSError: return f"quarantine_conflict:{qid}"
     try: os.unlink(side, dir_fd=qfd)
+    except OSError: return f"quarantine_conflict:{qid}"
+    try: os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"
     return f"kept:{why}"
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
+    elif args[:1] == ["candidate"] and len(args) == 2: print(bound_candidate(args[1]))
     elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
     else: print("kept:check-failed")

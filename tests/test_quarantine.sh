@@ -3,11 +3,13 @@
 # renamex_np(RENAME_EXCL) commit point, identity/live-user/re-hash checks, exclusive rollback.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TMP="$(cd "$(mktemp -d /tmp/quarantine-test.XXXXXX)" && pwd -P)"
+FIXTURE_ROOT=/tmp/disk_magician/fixtures
+mkdir -p "$FIXTURE_ROOT"
+TMP="$(cd "$(mktemp -d "$FIXTURE_ROOT/quarantine-test.XXXXXX")" && pwd -P)"
 MNT=""
 cleanup() {
   [[ -n "$MNT" ]] && hdiutil detach -quiet -force "$MNT" >/dev/null 2>&1
-  [[ "$TMP" == /private/tmp/quarantine-test.* || "$TMP" == /tmp/quarantine-test.* ]] && rm -rf "$TMP"
+  [[ "$TMP" == /private/tmp/disk_magician/fixtures/quarantine-test.* || "$TMP" == /tmp/disk_magician/fixtures/quarantine-test.* ]] && rm -rf "$TMP"
 }
 trap cleanup EXIT
 PASS=0 FAIL=0
@@ -34,7 +36,14 @@ source "$ROOT/scripts/lib/quarantine.sh" || { echo "FAIL: source quarantine.sh";
 STUB_VERDICT=""
 artifact_removal_verdict() {
   [[ -n "$STUB_VERDICT" ]] && { echo "$STUB_VERDICT"; return 0; }
-  [[ "$2" == --inventory-out ]] && python3 "$TMP/inv.py" "$1" > "$3" && echo remove
+  [[ -n "${VERDICT_ARG_FILE:-}" ]] && printf '%s\n' "$1" > "$VERDICT_ARG_FILE"
+  [[ -z "${EXPECTED_VERDICT_PATH:-}" || "$1" == "$EXPECTED_VERDICT_PATH" ]] || { echo kept:wrong-verdict-path; return 0; }
+  if [[ "$2" == --inventory-out ]]; then
+    [[ -z "${DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY:-}" ]] || bash -c "$DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY"
+    python3 "$TMP/inv.py" "$1" > "$3" || return 1
+    [[ -z "${DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY:-}" ]] || bash -c "$DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY"
+    echo remove
+  fi
 }
 
 N=0
@@ -43,7 +52,7 @@ fixture() {  # fresh parent/art with a published report.md (version A), a subdir
   mkdir -p "$A/sub"; printf 'AAAA' > "$A/report.md"; echo x > "$A/sub/x.txt"; ln -s report.md "$A/link"
 }
 OUT=""
-run() { OUT="$(env "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
+run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
 intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/link" ]]; }
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
 qid() { echo "${OUT#*:}"; }
@@ -140,6 +149,16 @@ run DISK_MAGICIAN_TEST_AFTER_VERDICT="mv '$LINK' '$LINK.saved'; ln -s '$OTHER' '
 check 'retargeted parent with hard link: kept:parent-identity-mismatch' [ "$OUT" = kept:parent-identity-mismatch ]
 check 'retargeted parent: both original and hard link remain' bash -c '[[ "$(cat "$1/item")" == SAME-INODE && "$(cat "$2/item")" == SAME-INODE ]]' _ "$ORIG" "$OTHER"
 check 'retargeted parent: neither directory got a quarantine' [ ! -e "$ORIG/.dm-quarantine" ] && [ ! -e "$OTHER/.dm-quarantine" ]
+
+# A parent alias retargeted during the verdict still gives C14 the frozen canonical candidate.
+N=$((N+1)); ORIG="$TMP/verdict-parent-original$N"; OTHER="$TMP/verdict-parent-other$N"; LINK="$TMP/verdict-parent-link$N"
+mkdir "$ORIG" "$OTHER"; printf 'SAME-INODE' > "$ORIG/item"; ln "$ORIG/item" "$OTHER/item"; ln -s "$ORIG" "$LINK"
+A="$LINK/item"; Q="$ORIG/.dm-quarantine"; VERDICT_ARG_FILE="$TMP/verdict-arg$N"; EXPECTED_VERDICT_PATH="$ORIG/item"
+run VERDICT_ARG_FILE="$VERDICT_ARG_FILE" EXPECTED_VERDICT_PATH="$EXPECTED_VERDICT_PATH" \
+  DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY="rm '$LINK'; ln -s '$OTHER' '$LINK'" \
+  DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY="rm '$LINK'; ln -s '$ORIG' '$LINK'"
+check 'verdict-time parent retarget: C14 receives frozen canonical candidate' [ "$(cat "$VERDICT_ARG_FILE")" = "$ORIG/item" ]
+check 'verdict-time parent retarget: only the original path is quarantined' bash -c '[[ "${1%%:*}" == quarantined && ! -e "$2" && "$(cat "$3")" == SAME-INODE && -e "$4" ]]' _ "$OUT" "$ORIG/item" "$Q/$(qid)" "$OTHER/item"
 
 # renamex_np missing: no rename at all.
 fixture; run DISK_MAGICIAN_TEST_RENAMEX_SYMBOL=renamex_np_missing
