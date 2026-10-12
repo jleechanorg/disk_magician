@@ -112,7 +112,7 @@ c14_repos_ok() {
 c14_ephemeral_retention() {
     local p=$1 r rel
     while IFS= read -r r; do
-        r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" && "$rel" != _disk_magician_archive* ]] || continue
+        r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) ]] || continue
         if [[ "$rel" =~ ^(pr[0-9]|pr-|pr_|claude-|claude_)[^/]*$ ]]; then echo 2880
         elif [[ ( "$rel" =~ ^agent_prompt_[^/]*\.txt$ && -f "$p" ) || ( "$rel" =~ ^[^/]+(/[^/]+)?$ && -d "$p/.git" ) ]]; then echo 240
         elif [[ ( "$rel" =~ ^cli_validation_gemini_[^/]*$ && -d "$p" ) || ( "$rel" != */* && -f "$p/.git" ) ]]; then echo 60
@@ -160,6 +160,8 @@ artifact_removal_verdict() {
     [[ "${2:-}" == --kind ]] && kind=${3:-}
     p=${1%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
+    q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
+    while IFS= read -r st; do [[ "/$p/" != *"/$st/"* ]] || { echo kept:protected; return 0; }; done < <(scratch_roots_protected "$q")
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }

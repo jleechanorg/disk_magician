@@ -360,6 +360,17 @@ E6 4320 $HOME/.llm-inspector/captures/capture-1.json
 E6 4320 $HOME/.llm-inspector/captures/x.summary.json
 E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
 EOF
+# Never-touch tmp roots (cleanup_tmp.sh PROTECTED_TMP_ROOTS) and legacy system basenames keep an idle released E2 clone.
+for d in worldarchitect.ai/br custom-root/br system-x com.apple.y; do
+    git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d" && baseline "$PT/$d"
+    python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/$d")"
+    age "$PT/${d%%/*}" 400
+done
+assert_eq "$(eph "$PT/worldarchitect.ai/br")" kept:protected "default protected tmp root"
+assert_eq "$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS='x custom-root' eph "$PT/custom-root/br")" kept:protected "env protected tmp root"
+assert_eq "$(eph "$PT/custom-root/br")" remove "unlisted root at 400 min"
+assert_eq "$(eph "$PT/system-x")" kept:unproven-content "system-* basename has no row"
+assert_eq "$(eph "$PT/com.apple.y")" kept:unproven-content "com.apple.* basename has no row"
 age "$PT/pr-123" 180
 assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
 mkdir -p "$TMPROOT/stub" && printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/stat" && chmod +x "$TMPROOT/stub/stat"
