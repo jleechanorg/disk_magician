@@ -333,6 +333,8 @@ NOW="$(date +%s)"
 age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
 eph() { artifact_removal_verdict "$1" --kind ephemeral; }
 mkdir -p "$PT/clones" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/clones/repo" && baseline "$PT/clones/repo"
+# A finished run releases its lease; a baseline-only lease (owner absent) would be kept.
+python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/clones/repo")"
 git -C "$TMPROOT/wtbase" worktree add -q "$PT/wtp" -b wtp origin/main 2>/dev/null && git -C "$PT/wtp" push -q -u origin wtp 2>/dev/null
 printf 'p' >"$PT/agent_prompt_1.txt"
 mkdir -p "$PT/cli_validation_gemini_1" "$PT/pr-123/run" "$HOME/.aside/u/a/sessions/s1" "$HOME/.gemini/antigravity/brain/b1" \
@@ -396,6 +398,8 @@ lease() {
 lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
 lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
 assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
+mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
+assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
 lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
 
 echo "== verdict stays blocked =="

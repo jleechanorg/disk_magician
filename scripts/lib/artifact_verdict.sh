@@ -162,7 +162,7 @@ artifact_removal_verdict() (
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
     if [[ -e "$lease" ]]; then case "$(lease_owner_state "$lease")" in
-        none|dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac; fi
+        dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac; fi
     wrh_live_cwd_reason "$p"
     [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
     _av_open_file "$p" && { echo kept:open-file; return 0; }
