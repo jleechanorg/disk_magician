@@ -268,6 +268,8 @@ if pid not in ("-", ""):
         owner = {"pid": int(pid), "start_epoch": int(ep), "comm": comm}
     except ValueError:
         owner = None
+if owner and os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
+    owner["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
 now = datetime.now(timezone.utc)
 d = {
     "schema_version": 1,
@@ -415,6 +417,48 @@ PY
     fi
     echo "not lease owner" >&2
     return 1
+}
+
+# lease_release_owner_session <session> <runtime_pid> <runtime_start_epoch> —
+# session-exit release (spec C8). Releases each lease whose owner.session is
+# <session> and whose owner is the ending runtime (same pid and start epoch)
+# or dead; any other owner is reported as release_skipped_live_owner. Deletes
+# nothing; an unknown session changes nothing. rc 2 only without a session.
+lease_release_owner_session() {
+    local sid="${1:-}" rpid="${2:-}" rep="${3:-}" file match path
+    [[ -n "$sid" ]] || return 2
+    for file in "$(lease_dir)"/*.json; do
+        [[ -f "$file" ]] || continue
+        match="$(python3 - "$file" "$sid" "$rpid" "$rep" <<'PY'
+import json, sys
+f, sid, rpid, rep = sys.argv[1:]
+try:
+    d = json.load(open(f))
+    o = d.get("owner")
+    if isinstance(o, dict) and o.get("session") == sid and not d.get("released_at"):
+        print("self" if (str(o.get("pid")), str(o.get("start_epoch"))) == (rpid, rep) else "other")
+except Exception:
+    pass
+PY
+)"
+        [[ -n "$match" ]] || continue
+        path="$(_lease_get "$file" path)"
+        if [[ "$match" == other && "$(lease_owner_state "$file")" != dead ]]; then
+            printf 'release_skipped_live_owner %s\n' "$path"; continue
+        fi
+        python3 - "$file" <<'PY' && printf 'released %s\n' "$path"
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+p = sys.argv[1]
+d = json.load(open(p))
+d["released_at"] = d.get("released_at") or datetime.now(timezone.utc).isoformat()
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".release-")
+with os.fdopen(fd, "w") as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, p)
+PY
+    done
+    return 0
 }
 
 # lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.
