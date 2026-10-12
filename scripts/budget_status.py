@@ -25,9 +25,10 @@ def events(state, lo, hi):
 def window_max(points, width=600):  # max sum of (t, bytes) inside any [t, t + width) window
     pts = sorted(points)
     return max((sum(b for u, b in pts[i:] if u < t + width) for i, (t, _) in enumerate(pts)), default=0)
-def trough(s, start):  # 7-day max of daily minimum used, None without samples
-    days = [min((u for t, u, _ in s if start + d * DAY <= t < start + (d + 1) * DAY), default=None) for d in range(7)]
-    return max((d for d in days if d is not None), default=None)
+def daily_mins(s, now, n):  # daily minimum used for each of the last n days that has samples
+    days = [min((u for t, u, _ in s if now - (n - d) * DAY <= t < now - (n - d - 1) * DAY), default=None) for d in range(n)]
+    return [d for d in days if d is not None]
+def raised(lines): return any(line.startswith("ALERT:") for line in lines)
 def alerts(state, now, margin_gb=None):
     if margin_gb is None:
         try: margin_gb = json.loads(Path(__import__("resolve_config").resolve()).read_text())["budgets"]["concurrency_margin_gb"]
@@ -43,14 +44,17 @@ def alerts(state, now, margin_gb=None):
     if any(str(e.get("event", "")).startswith("kickstart_blocked") for e in evs): out.append("ALERT:kickstart_blocked within 24 h")
     burst = window_max([(e["at"], e.get("est_bytes") or 0) for e in evs if e.get("event") == "admit"])
     if burst > margin_gb * GIB: out.append(f"ALERT:burst_over_margin admit_burst_bytes={burst}B margin={margin_gb}GiB")
-    cur, old = trough(s, now - 7 * DAY), trough(s, now - 14 * DAY)
-    if cur is not None and old is not None and cur > old: out.append(f"ALERT:trough_rise trough={cur}B previous={old}B")
+    week, month = daily_mins(s, now, 7), daily_mins(s, now, 30)  # C12: 7-day trough > 15 GiB above the 30-day trough
+    if len(week) < 0.9 * 7 or len(month) < 0.9 * 30:
+        out.append(f"trough_rise:insufficient_data days_7d={len(week)}/7 days_30d={len(month)}/30")
+    elif max(week) - min(month) > 15 * GIB:
+        out.append(f"ALERT:trough_rise trough_7d={max(week)}B trough_30d={min(month)}B")
     return out
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) != ["status"]:
         return print("usage: diskm budget status", file=sys.stderr) or 2
     lines = alerts(Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")), time.time())
     print("\n".join(lines or ["no_alerts"]))
-    return 1 if lines else 0
+    return 1 if raised(lines) else 0
 if __name__ == "__main__":
     sys.exit(main())

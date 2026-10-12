@@ -1962,7 +1962,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  [{dim_data['status'].upper():<8}] {dim_name:<18} {dim_data['reason']}")
 
     status = result["status"]
-    if status == STATUS_HEALTHY and not alerts:
+    if status == STATUS_HEALTHY and not budget_status.raised(alerts):
         return EXIT_HEALTHY
     elif status == STATUS_INVALID:
         return EXIT_INVALID

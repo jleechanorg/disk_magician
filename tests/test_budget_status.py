@@ -46,7 +46,7 @@ class AlertsTest(unittest.TestCase):
             return bs.alerts(write_state(tmp, **kw), self.NOW, 10)
 
     def test_quiet_state_has_no_alerts(self):
-        self.assertEqual(self.run_alerts(samples=flat(WEEK)), [])
+        self.assertEqual(codes(self.run_alerts(samples=flat(WEEK))), [])
 
     def test_floor_breach_prints_runbook(self):
         lines = self.run_alerts(samples=[(self.NOW - 60, 880 * GIB, 14 * GIB)])
@@ -59,7 +59,7 @@ class AlertsTest(unittest.TestCase):
 
     def test_govern_stale(self):
         self.assertEqual(codes(self.run_alerts(budget=dict(zone="RED", zone_at=self.NOW - 1801))), ["govern_stale"])
-        self.assertEqual(self.run_alerts(budget=dict(zone="RED", zone_at=self.NOW - 1700)), [])
+        self.assertEqual(codes(self.run_alerts(budget=dict(zone="RED", zone_at=self.NOW - 1700))), [])
 
     def test_admission_degraded_and_kickstart_blocked_within_24h(self):
         ev = [dict(event="admit", at=self.NOW - 600, est_bytes=0, degraded="blind"),
@@ -71,11 +71,27 @@ class AlertsTest(unittest.TestCase):
         ev = [dict(event="admit", at=self.NOW - 3600 + 100 * i, est_bytes=5 * GIB, decision=0) for i in range(4)]
         self.assertEqual(codes(self.run_alerts(events=ev)), ["burst_over_margin"])
         spaced = [dict(event="admit", at=self.NOW - 3600 + 700 * i, est_bytes=5 * GIB, decision=0) for i in range(4)]
-        self.assertEqual(self.run_alerts(events=spaced), [])
+        self.assertEqual(codes(self.run_alerts(events=spaced)), [])
 
-    def test_trough_rise(self):
-        s = flat(self.NOW - 14 * 86400, used_gib=700) + flat(self.NOW - 7 * 86400, used_gib=720)
-        self.assertEqual(codes(self.run_alerts(samples=s)), ["trough_rise"])
+    def month(self, recent_gib, older_days=23, step=3600):
+        return flat(self.NOW - 30 * 86400, days=older_days, used_gib=780, step=step) + \
+            flat(self.NOW - 7 * 86400, used_gib=recent_gib, step=step)
+
+    def test_trough_rise_over_15_gib_above_30_day_floor(self):
+        self.assertEqual(codes(self.run_alerts(samples=self.month(796))), ["trough_rise"])
+
+    def test_trough_noise_and_15_gib_do_not_alert(self):
+        for recent in (780.01, 795):
+            lines = self.run_alerts(samples=self.month(recent))
+            self.assertEqual(codes(lines), [], recent)
+            self.assertFalse(bs.raised(lines))
+
+    def test_trough_insufficient_coverage_reports_instead_of_alerting(self):
+        for s in (self.month(840, older_days=3), flat(self.NOW - 30 * 86400, days=29, used_gib=780, step=3600)):
+            lines = self.run_alerts(samples=s)
+            self.assertEqual(codes(lines), [])
+            self.assertTrue(any(line.startswith("trough_rise:insufficient_data") for line in lines), lines)
+            self.assertFalse(bs.raised(lines))
 
 
 class CliTest(unittest.TestCase):
