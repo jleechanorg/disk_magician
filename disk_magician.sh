@@ -67,6 +67,7 @@ Commands:
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   evidence-push          Sync local evidence dir to remote storage.
+  admit                  Admission decision for a governed write (--class C --est-gb N).
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -398,6 +399,9 @@ case "$CMD" in
     ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
+    ;;
+  admit)
+    exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" "$@"
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
