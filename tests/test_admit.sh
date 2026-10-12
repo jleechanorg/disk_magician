@@ -80,9 +80,34 @@ assert_eq "$?" 0 "admit rc with budget-less user config"
 assert_eq "$(wc -l < "$EVENTS" | tr -d ' ')" 2 "event logged with template budgets"
 config observe
 
+echo "── 2c. non-finite or negative --est-gb is a usage error, nothing logged ──"
+for v in nan inf -inf -1 -0.5; do
+  "$DISKM" admit --class worktrees --est-gb="$v" >/dev/null 2>&1; assert_eq "$?" 2 "--est-gb $v rc"
+done
+assert_eq "$(wc -l < "$EVENTS" | tr -d ' ')" 2 "no event for rejected estimates"
+
+echo "── 2d. corrupt budget.json or a partial budgets block → blind 10, rc 0, no traceback ──"
+for body in '{not json' '[]' '{"zone_at": "x"}' '{"classes": {"worktrees": 5}}'; do
+  printf '%s' "$body" > "$T/state/budget.json"
+  "$DISKM" admit --class worktrees --est-gb 1 >/dev/null 2>"$T/err"; assert_eq "$?" 0 "rc with budget.json $body"
+  assert_eq "$(last decision)" 10 "blind decision with budget.json $body"
+  [[ "$(cat "$T/err")" == *admission_degraded:blind* && "$(cat "$T/err")" != *Traceback* ]] &&
+    ok "admission_degraded:blind, no traceback" || bad "stderr: $(cat "$T/err")"
+done
+rm -f "$T/state/budget.json"
+for partial in '{"enforcement": "observe"}' '{"classes": {"worktrees": {}}}'; do
+  echo "{\"budgets\": $partial}" > "$T/partial.json"
+  DISK_MAGICIAN_CONFIG="$T/partial.json" "$DISKM" admit --class worktrees --est-gb 1 >/dev/null 2>"$T/err"
+  assert_eq "$?" 0 "rc with partial budgets $partial"
+  assert_eq "$(last decision)" 10 "blind decision with partial budgets $partial"
+  [[ "$(cat "$T/err")" == *admission_degraded:blind* && "$(cat "$T/err")" != *Traceback* ]] &&
+    ok "partial budgets degraded, no traceback" || bad "stderr: $(cat "$T/err")"
+done
+
 echo "── 3. --dry-run decides without logging ──"
+n=$(wc -l < "$EVENTS" | tr -d ' ')
 "$DISKM" admit --class worktrees --est-gb 1 --dry-run >/dev/null; assert_eq "$?" 0 "dry-run rc"
-assert_eq "$(wc -l < "$EVENTS" | tr -d ' ')" 2 "dry-run logged nothing"
+assert_eq "$(wc -l < "$EVENTS" | tr -d ' ')" "$n" "dry-run logged nothing"
 
 echo "── 4. RED in refuse_red → 75 whatever the class terms; not degraded ──"
 budget_json 60 RED 45; fake_df 45; config refuse_red

@@ -55,6 +55,17 @@ def test_margin_moves_the_admission_zone():
     assert disk_budget.decide("observe", 105, 70, 0, False, True) == ("RED", 0)
 
 
+@pytest.mark.parametrize("text", ["nan", "inf", "-inf", "-1", "-0.01", "x"])
+def test_est_gb_rejects_non_finite_and_negative(text):
+    with pytest.raises(ValueError):
+        disk_budget.est_gb(text)
+
+
+@pytest.mark.parametrize("text,value", [("0", 0.0), ("1.5", 1.5), ("1e3", 1000.0)])
+def test_est_gb_accepts_finite_non_negative(text, value):
+    assert disk_budget.est_gb(text) == value
+
+
 def test_hard_floor_on_projected_free():
     # projected = 105 - 95 = 10 < 15 -> FLOOR whatever the margin; oversized est likewise.
     assert disk_budget.decide("observe", 105, 95, 0, False, True) == ("FLOOR", 75)
