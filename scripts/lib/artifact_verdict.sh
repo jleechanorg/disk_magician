@@ -60,7 +60,7 @@ c14_repo_content_ok() (
 # object, .git = lease git_meta. Registered linked worktree: only its branch, the branch
 # reflog and the ids under its admin dir (allowlisted names), then wrh_removal_verdict.
 c14_repo_pushed_ok() (
-    local r=$1 root=${2:-$1} gd cd kv out adv='' have tips='' unp v linked= scope=(--all --reflog)
+    local r=$1 root=${2:-$1} deadline=${3:-} gd cd kv out adv='' have tips='' unp v linked= scope=(--all --reflog)
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     gd="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" &&
         cd="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
@@ -74,7 +74,10 @@ c14_repo_pushed_ok() (
         scope=() linked=1
     fi
     while IFS= read -r -d '' kv; do
-        out="$(python3 "$_AV_DIR/../c14_probe.py" lsremote "${kv#*$'\n'}" "$root")" || { echo kept:remote-unverified; return 1; }
+        out="$(python3 "$_AV_DIR/../c14_probe.py" lsremote "${kv#*$'\n'}" "$root" ${deadline:+"$deadline"})" || {
+            [[ "$out" == deferred:* ]] && { echo "$out"; return 1; }
+            echo kept:remote-unverified; return 1;
+        }
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
@@ -96,15 +99,29 @@ c14_repo_pushed_ok() (
 
 # c14_repos_ok <root> [--outer-certificate <receipt>]: content and remote checks on every
 # repository found; `ok` or the first kept reason. Certificate unused here.
-c14_repos_ok() {
-    local r v done=
+c14_check_repo_list() {
+    local root=$1 deadline=${2:-} r v done=
     while IFS= read -r -d '' r; do
         [[ "$r" == OK ]] && { done=1; continue; }
+        [[ "$r" == kept:* ]] && { echo "$r"; return 1; }
         v="$(c14_repo_content_ok "$r")" || { echo "$v"; return 1; }
-        v="$(c14_repo_pushed_ok "$r" "$1")" || { echo "$v"; return 1; }
-    done < <(c14_discover_repos "$1" && printf 'OK\0')
+        v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || { echo "$v"; return 1; }
+    done
     [[ -n "$done" ]] || { echo kept:check-failed; return 1; }
     echo ok
+}
+
+c14_repos_ok() {
+    local root=$1 inv=${2:-} deadline=${3:-}
+    if [[ "$inv" == --outer-certificate ]]; then
+        c14_check_repo_list "$root" "" < <(c14_discover_repos "$root" && printf 'OK\0')
+        return
+    fi
+    if [[ -n "$inv" ]]; then
+        c14_check_repo_list "$root" "$deadline" < <(C14_ROOT="$root" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0')
+    else
+        c14_check_repo_list "$root" "$deadline" < <(c14_discover_repos "$root" && printf 'OK\0')
+    fi
 }
 
 # c14_ephemeral_retention <canonical path>: minutes of the declared-ephemeral row E2-E7
@@ -135,12 +152,9 @@ _av_rebuildable() (
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
 )
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
-_av_newest_mtime() ( set -o pipefail; find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'; )
+_av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
-_av_open_file() {
-    local d=() && [[ -d "$1" ]] && d=(+D)
-    [[ -n "$(lsof -w -n -P -Fn -a -d '^cwd' ${d[@]+"${d[@]}"} "$1" 2>&1)" ]]
-}
+_av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
 _av_secret_like() {
     local out
@@ -158,7 +172,10 @@ _av_lease_scope() {
     stops+="$(cd "$HOME" 2>/dev/null && pwd -P)"$'\n'
     printf '%s\0' "$1"
     while [[ -n "$a" && "$stops" != *$'\n'"$a"$'\n'* ]]; do printf '%s\0' "$a"; a=${a%/*}; done
-    [[ ! -d "$1" ]] || c14_discover_repos "$1"
+    if [[ -d "$1" ]]; then
+        if [[ -n "${2:-}" ]]; then C14_ROOT="$1" python3 "$_AV_DIR/../c14_probe.py" repos "$2"
+        else c14_discover_repos "$1"; fi
+    fi
 }
 
 # _av_path_identity <path>: filesystem identity in the format used by
@@ -201,9 +218,9 @@ _av_os_clone_proof() {
 }
 
 # artifact_removal_verdict <path> [...] | --self-test
-artifact_removal_verdict() {
+_av_artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id=''
+    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -214,15 +231,26 @@ artifact_removal_verdict() {
                     --frozen-identity) frozen_id=$2 ;;
                     --frozen-parent-identity) frozen_parent_id=$2 ;;
                     --frozen-root-identity) frozen_root_id=$2 ;;
+                    --deadline-at) deadline=$2 ;;
+                    --inventory-out) inventory_out=$2 ;;
                 esac
                 shift 2 ;;
             *) shift ;;
         esac
     done
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
+    if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
     while IFS= read -r st; do [[ "/$p/" != *"/$st/"* ]] || { echo kept:protected; return 0; }; done < <(scratch_roots_protected "$q")
+    if [[ -n "${DISK_MAGICIAN_TEST_AFTER_NOMINATE:-}" ]]; then
+        [[ "${DISK_MAGICIAN_TEST_CONTEXT:-}" == 1 ]] || { echo kept:check-failed; return 0; }
+        printf 'race fixture\n' >"$DISK_MAGICIAN_TEST_AFTER_NOMINATE" || { echo kept:check-failed; return 0; }
+    fi
+    inv=${C14_INVENTORY_FILE:-}
+    [[ -n "$inv" ]] || { echo kept:check-failed; return 0; }
+    st="$(python3 "$_AV_DIR/../c14_probe.py" inventory "$p" "$inv" ${deadline:+"$deadline"})"
+    if [[ "$st" != ok ]]; then echo "${st:-kept:check-failed}"; return 0; fi
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
@@ -230,26 +258,50 @@ artifact_removal_verdict() {
 try:os.stat(d);os.stat(sys.argv[1]);print("lease" if os.access(d,os.R_OK|os.X_OK) else "")
 except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; lease) ;; *) echo kept:owner-unknown; return 0 ;; esac
         case "$(lease_owner_state "$q")" in dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
-    done < <(_av_lease_scope "$p" && printf 'OK\0')
+    done < <(_av_lease_scope "$p" "$inv" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"
     [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
-    _av_open_file "$p" && { echo kept:open-file; return 0; }
-    newest="$(_av_newest_mtime "$p")" || { echo kept:mtime-unmeasurable; return 0; }
+    st="$(_av_open_file "$p" "$deadline")"
+    [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
+    [[ "$st" == yes ]] && { echo kept:open-file; return 0; }
+    newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    _av_secret_like "$p" && { echo kept:secret-like; return 0; }
-    if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p")" || { echo "$st"; return 0; }; fi
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv")"
+    if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
+    if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in
         ephemeral) ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
             (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; } ;;
         rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
-        '') st="$({ { [[ ! -d "$p" ]] || c14_discover_repos "$p"; } && printf 'OK\0'; } |  # repos passed above
-                python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")")"
+        '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |
+                    python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"
             [[ "$st" == ok ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; } ;;
         *) echo kept:unproven-content; return 0 ;;
     esac
+    if [[ -n "$inventory_out" ]]; then
+        mkdir -p "$(dirname "$inventory_out")" || { echo kept:check-failed; return 0; }
+        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "${C14_ADMIN_INVENTORY:-}" "$inventory_out.tmp.$$")"
+        [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
+    fi
     echo remove
+}
+
+artifact_removal_verdict() {
+    [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
+    local tmpdir inv result reason admin_inv
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
+    inv="$tmpdir/inventory.json"
+    admin_inv=${C14_INVENTORY_OUT:-"$inv.admin.jsonl"}
+    result="$(C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "$@")"
+    if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
+        reason=${result#*:}
+        python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
+    fi
+    rm -f "$inv"
+    rmdir "$tmpdir" 2>/dev/null || true
+    echo "${result:-kept:check-failed}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then artifact_removal_verdict "$@"; fi

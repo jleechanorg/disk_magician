@@ -378,9 +378,9 @@ assert_eq "$(eph "$PT/system-x")" kept:unproven-content "system-* basename has n
 assert_eq "$(eph "$PT/com.apple.y")" kept:unproven-content "com.apple.* basename has no row"
 age "$PT/pr-123" 180
 assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
-mkdir -p "$TMPROOT/stub" && printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/stat" && chmod +x "$TMPROOT/stub/stat"
 age "$PT/pr-123" 43200
-assert_eq "$(PATH="$TMPROOT/stub:$PATH" eph "$PT/pr-123")" kept:mtime-unmeasurable "stat stub fails"
+printf '{}' >"$TMPROOT/invalid-inventory.json"
+assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
 mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 'k' >"$PT/pr-key/id_ed25519"
 age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
 assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
@@ -566,6 +566,75 @@ age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
 unset DISK_MAGICIAN_STAT_BIN
+
+echo "== fd-bound inventory, deadline and nomination race =="
+inv_case="$TMPROOT/inventory-case"
+mkdir -p "$inv_case/sub" && printf 'inventory bytes' >"$inv_case/sub/file.bin" && ln -s sub/file.bin "$inv_case/link"
+inv_file="$TMPROOT/inventory.json"
+assert_eq "$(python3 "$PROBE" inventory "$inv_case" "$inv_file")" ok "inventory completes"
+python3 - "$inv_file" <<'PY' && ok "inventory records relative paths, identity, hash and symlink target" || bad "inventory fields"
+import hashlib, json, sys
+entries = {e["path"]: e for e in json.load(open(sys.argv[1]))}
+f = entries["sub/file.bin"]
+assert f["type"] == "file" and f["dev"] and f["ino"] and f["size"] == 15
+assert f["sha256"] == hashlib.sha256(b"inventory bytes").hexdigest()
+assert entries["link"]["type"] == "symlink" and entries["link"]["target"] == "sub/file.bin"
+assert entries["."]["type"] == "dir"
+PY
+verdict_inv="$TMPROOT/verdict-inventory.json"
+mkdir -p "$PT/pr-inventory" && printf 'rebuildable' >"$PT/pr-inventory/cache.bin" && age "$PT/pr-inventory" 43200
+assert_eq "$(av "$PT/pr-inventory" --kind ephemeral --inventory-out "$verdict_inv")" remove "verified verdict writes its inventory"
+python3 - "$verdict_inv" <<'PY' && ok "verdict inventory includes the verified candidate" || bad "verdict inventory missing candidate"
+import json, sys
+entries = {e["path"]: e for e in json.load(open(sys.argv[1]))}
+assert entries["cache.bin"]["type"] == "file" and entries["cache.bin"]["size"] == 11
+PY
+mkdir -p "$PT/pr-inventory-kept" && printf 'unknown' >"$PT/pr-inventory-kept/data" && age "$PT/pr-inventory-kept" 43200
+kept_inv="$TMPROOT/kept-inventory.json"
+assert_eq "$(av "$PT/pr-inventory-kept" --kind bogus --inventory-out "$kept_inv")" kept:unproven-content "unproven path stays kept"
+[[ ! -e "$kept_inv" ]] && ok "inventory-out is written only on remove" || bad "inventory-out escaped a kept verdict"
+
+deadline_root="$TMPROOT/deadline-root"
+deadline_repo="$deadline_root/nested"
+deadline_remote="$TMPROOT/remotes/deadline.git"
+deadline_remote2="$TMPROOT/remotes/deadline-second.git"
+mkdir -p "$deadline_root"
+git init -q --bare -b main "$deadline_remote" && mkrepo "$TMPROOT/seed-deadline" && git -C "$TMPROOT/seed-deadline" push -q "$deadline_remote" main
+git clone -q "$deadline_remote" "$deadline_repo" && git -C "$deadline_repo" remote add second "$deadline_remote2"
+git init -q --bare -b main "$deadline_remote2"
+baseline "$deadline_repo"
+deadline_repo_lease="$(lease_path_for "$deadline_repo")"
+python3 - "$deadline_repo_lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(p,"w"))
+PY
+truncate -s 2147483648 "$deadline_root/manifested.bin"
+deadline_lease="$(lease_path_for "$deadline_root")" && mkdir -p "${deadline_lease%/*}"
+printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","published_url":"gs://wa-test-evidence/agent-evidence/deadline","verified_at":"2026-10-01T00:00:00Z","upload_manifest":[{"path":"manifested.bin","size":2147483648,"sha256":"placeholder","object":"gs://wa-test-evidence/agent-evidence/deadline/manifested.bin","generation":"1","md5":"placeholder","crc32c":"placeholder"}]}' >"$deadline_lease"
+age "$deadline_root" 43200
+mkdir -p "$TMPROOT/slow-git"
+real_git="$(command -v git)"
+cat >"$TMPROOT/slow-git/git" <<STUB
+#!/bin/bash
+[[ "\$1" == ls-remote ]] && { sleep 25; exec "$real_git" "\$@"; }
+exec "$real_git" "\$@"
+STUB
+cat >"$TMPROOT/slow-git/lsof" <<'STUB'
+#!/bin/sh
+if [ "$1" = -n ]; then printf 'p1\nfcwd\nn/\n'; fi
+exit 0
+STUB
+chmod +x "$TMPROOT/slow-git/git" "$TMPROOT/slow-git/lsof"
+deadline_at="$(python3 -c 'import time; print(time.monotonic()+30)')"
+deadline_inventory="$TMPROOT/deferred-inventory.json"
+verdict="$(PATH="$TMPROOT/slow-git:$PATH" DISK_MAGICIAN_LSOF_BIN="$TMPROOT/slow-git/lsof" av "$deadline_root" --deadline-at "$deadline_at" --inventory-out "$deadline_inventory")"
+[[ "$verdict" == deferred:* ]] && ok "deadline defers the nested-repo / 2 GiB provenance case ($verdict)" || bad "deadline verdict: $verdict"
+[[ -f "$deadline_root/manifested.bin" && -d "$deadline_repo" && ! -e "$deadline_inventory" ]] && ok "deferred verdict leaves candidate and output inventory untouched" || bad "deferred path changed candidate or emitted output"
+
+mkdir -p "$PT/pr-race" && printf 'old bytes' >"$PT/pr-race/old.txt" && age "$PT/pr-race" 43200
+race_file="$PT/pr-race/untracked-after-nomination.txt"
+assert_eq "$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$PT" DISK_MAGICIAN_TEST_AFTER_NOMINATE="$race_file" eph "$PT/pr-race")" kept:recent-activity "post-nomination file is inventoried and kept"
+[[ -f "$race_file" ]] && ok "nomination race fixture writes only inside the sandbox" || bad "race hook missed its fixture"
 
 echo "== verdict stays blocked =="
 v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
