@@ -34,8 +34,8 @@ def phase1(path, inv_file):
     path = os.path.abspath(path); hook("DISK_MAGICIAN_TEST_AFTER_VERDICT", path, "")
     try:
         with open(inv_file) as f: inv = [e for e in json.load(f) if isinstance(e, dict)]
-        qdir = os.path.join(os.path.realpath(os.path.dirname(path)), ".dm-quarantine"); os.makedirs(qdir, 0o700, exist_ok=True)
-        st = os.lstat(path)
+        qdir = os.path.join(os.path.realpath(os.path.dirname(path)), ".dm-quarantine"); os.makedirs(qdir, 0o700, exist_ok=True); q, st = os.lstat(qdir), os.lstat(path)
+        if not stat.S_ISDIR(q.st_mode) or q.st_uid != os.getuid() or q.st_mode & 0o777 != 0o700: return "kept:quarantine-dir-unsafe"
         if [(st.st_dev, st.st_ino)] != [(e.get("dev"), e.get("ino")) for e in inv if e.get("path") == "."]: return "kept:identity-mismatch"
         if os.stat(qdir).st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"

@@ -56,6 +56,14 @@ check 'proven root: content moved intact' [ "$(cat "$Q/$(qid)/report.md")" = AAA
 check 'proven root: sidecar holds phase intent + inventory' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["phase"]=="intent" and d["original"]==sys.argv[2] and d["inventory"]' "$Q/$(qid).json" "$A"
 check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
 
+# An existing .dm-quarantine must be a real 0700 dir owned by us; a symlink or 0755 dir keeps the artifact.
+fixture; mkdir -p "$TMP/outside$N"; chmod 755 "$TMP/outside$N"; ln -s "$TMP/outside$N" "$Q"; run X=1
+check 'symlinked qdir: kept:quarantine-dir-unsafe' [ "$OUT" = kept:quarantine-dir-unsafe ]
+check 'symlinked qdir: untouched, nothing moved outside' bash -c '[[ -f "$1/report.md" && -z "$(ls -A "$2")" ]]' _ "$A" "$TMP/outside$N"
+fixture; mkdir -m 755 "$Q"; run X=1
+check '0755 qdir: kept:quarantine-dir-unsafe' [ "$OUT" = kept:quarantine-dir-unsafe ]
+check '0755 qdir: untouched, qdir empty' bash -c '[[ -f "$1/report.md" && -z "$(ls -A "$2")" ]]' _ "$A" "$Q"
+
 # Non-remove verdicts pass through and touch nothing.
 fixture; STUB_VERDICT=kept:unproven-content run X=1
 check 'kept verdict passes through' [ "$OUT" = kept:unproven-content ]
@@ -111,7 +119,7 @@ check 'ENOSPC sidecar: untouched, no partial sidecar' bash -c '[[ -f "$1/report.
 if [[ "$(uname)" == Darwin ]] && hdiutil create -quiet -size 4m -fs HFS+ -volname dmq "$TMP/q.dmg" >/dev/null 2>&1; then
   fixture; mkdir -p "$Q"
   if hdiutil attach -quiet -nobrowse -mountpoint "$Q" "$TMP/q.dmg" >/dev/null 2>&1; then
-    MNT="$Q"; run X=1
+    MNT="$Q"; chmod 700 "$Q"; run X=1
     check 'cross-device: kept:cross-device' [ "$OUT" = kept:cross-device ]
     check 'cross-device: untouched' intact AAAA
     check 'cross-device: nothing copied or written' [ -z "$(find "$Q" -mindepth 1 ! -name '.*' -print -quit)" ]
