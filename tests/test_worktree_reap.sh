@@ -136,7 +136,7 @@ touch "$DISK_MAGICIAN_STATE_DIR/test_gate_open"
 new; run --mode remove; check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
-for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-90000'; age 25200; run --mode "$mode"; verdict "alive expired $mode" kept:owner-alive-expired; park; done
+for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-30*3600-86400'; age 25200; run --mode "$mode"; verdict "TTL expired 30h, owner alive $mode" kept:expired_owner_alive; check "TTL expired owner alive present $mode" test -d "$WT"; park; done
 for quiet in 2400 300; do new; edit "d['owner']['pid']=400; d['released_at']=datetime.datetime.fromtimestamp(time.time()-$quiet,datetime.timezone.utc).isoformat()"; age 7200; run; if [[ "$quiet" == 2400 ]]; then verdict 'released quiet' remove; else verdict 'released recent' kept:recent-activity; fi; park; done
 new; edit 'd.pop("owner_dead_seen_at",None)'; age 7200; run; verdict 'first dead waits' kept:recent-activity; check 'first death recorded' test "$(field 'bool(d.get("owner_dead_seen_at"))')" = True; edit 'd["owner_dead_seen_at"]=time.time()-1860'; run; verdict 'next run after quiet' remove; park
 new; edit 'd["owner"]=None'; run --mode remove; check 'null owner never removed' test -d "$WT"
@@ -158,6 +158,16 @@ mkdir "$TMP/minbin"
 for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
 new; before="$(wc -l < "$FAKE_FETCH_LOG")"; PATH="$TMP/minbin" run; verdict 'missing timeout blocks fetch' kept:remote-unverified; check 'no unbounded fetch' test "$(wc -l < "$FAKE_FETCH_LOG")" = "$before"; check 'missing gh logged' grep -q 'missing tool: gh' "$TMP/run.log"; check 'missing gh counted' test "$(receipt 'd["candidates"]["gh_failed"] > 0')" = True; park
 new; edit 'd["owner"]["pid"]=402'; run --mode remove; check 'unknown owner retained' test -d "$WT"; park
+# Owner proof (governor T12): liveness is pid + start epoch only.
+sleep 300 & stopped=$!
+# Stop only after exec: a pre-exec child is bash and would run the EXIT trap.
+for ((i=0;i<100;i++)); do [[ "$(/bin/ps -p "$stopped" -o comm=)" == *sleep ]] && break; sleep .05; done; kill -STOP "$stopped"
+LC_ALL=C TZ=UTC /bin/ps -p "$stopped" -o lstart= > "$FAKE_PS_DIR/lstart/$stopped"; printf 'sleep 300\n' > "$FAKE_PS_DIR/args/$stopped"
+stopped_ep="$(_lease_lstart_to_epoch "$(cat "$FAKE_PS_DIR/lstart/$stopped")")"
+new; edit "d['owner']={'pid':$stopped,'start_epoch':$stopped_ep,'comm':'sleep'}; d['last_verdict']='sentinel'"; age 7200; run --mode remove; verdict 'SIGSTOPped owner kept' sentinel; check 'SIGSTOPped owner present' test -d "$WT"; kill -CONT "$stopped"; kill "$stopped"; wait "$stopped" 2>/dev/null; park
+new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; run; verdict 'pid reused (other start epoch) reads dead' remove; park
+new; edit 'd["owner"]["pid"]=402; d["last_verdict"]="sentinel"'; run --mode remove; verdict 'ps error is unknown, kept' sentinel; check 'ps error present' test -d "$WT"; park
+new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; (cd "$WT" && sleep 30) & child=$!; printf 'p%s\nfcwd\nn%s\n' "$child" "$WT" > "$FAKE_LSOF_FIXTURE"; run --mode remove; verdict 'dead owner, live child cwd kept' kept:live-cwd; check 'child cwd present' test -d "$WT"; kill "$child"; wait "$child" 2>/dev/null; printf 'p999999\nfcwd\nn/\n' > "$FAKE_LSOF_FIXTURE"; park
 new; git -C "$TMP/repo" worktree lock "$WT"; run; verdict 'locked' kept:locked; park
 new; export FAIL_FETCH=1; run; verdict 'fetch failure' kept:remote-unverified; unset FAIL_FETCH; park
 new; export DISK_MAGICIAN_SAFETY_FILE="$TMP/safety.local.json"; printf '{"never_delete":["%s"]}\n' "$WT" > "$DISK_MAGICIAN_SAFETY_FILE"; run; verdict 'safety local' kept:safety-local; unset DISK_MAGICIAN_SAFETY_FILE; park
