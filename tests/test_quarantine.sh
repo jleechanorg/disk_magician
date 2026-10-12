@@ -131,6 +131,16 @@ check 'swap before rename: swapped dir back in place' intact AAAA
 check 'swap before rename: real artifact untouched' [ "$(cat "$TMP/aside/report.md")" = AAAA ]
 check 'swap before rename: quarantine empty' [ "$(qcount)" = 0 ]
 
+# Parent location is frozen before the verdict: retargeting a parent symlink to
+# a directory with a hard link to the same file must not move that alias.
+N=$((N+1)); ORIG="$TMP/parent-original$N"; OTHER="$TMP/parent-other$N"; LINK="$TMP/parent-link$N"
+mkdir "$ORIG" "$OTHER"; printf 'SAME-INODE' > "$ORIG/item"; ln "$ORIG/item" "$OTHER/item"; ln -s "$ORIG" "$LINK"
+A="$LINK/item"; Q="$ORIG/.dm-quarantine"
+run DISK_MAGICIAN_TEST_AFTER_VERDICT="mv '$LINK' '$LINK.saved'; ln -s '$OTHER' '$LINK'"
+check 'retargeted parent with hard link: kept:parent-identity-mismatch' [ "$OUT" = kept:parent-identity-mismatch ]
+check 'retargeted parent: both original and hard link remain' bash -c '[[ "$(cat "$1/item")" == SAME-INODE && "$(cat "$2/item")" == SAME-INODE ]]' _ "$ORIG" "$OTHER"
+check 'retargeted parent: neither directory got a quarantine' [ ! -e "$ORIG/.dm-quarantine" ] && [ ! -e "$OTHER/.dm-quarantine" ]
+
 # renamex_np missing: no rename at all.
 fixture; run DISK_MAGICIAN_TEST_RENAMEX_SYMBOL=renamex_np_missing
 check 'renamex_np missing: kept:exclusive_rename_unavailable' [ "$OUT" = kept:exclusive_rename_unavailable ]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C14 quarantine phase 1 (spec §7.2): `phase1 <path> <inventory.json>` prints quarantined:<id>, quarantine_conflict:<id> or kept:<why>."""
+"""C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
 import ctypes, hashlib, json, os, secrets, stat, subprocess, sys
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol raises LookupError
@@ -8,6 +8,13 @@ def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol
     if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(4)): raise OSError(ctypes.get_errno(), "renameatx_np")
 def hook(name, path, dest):
     if ENV.get(name): subprocess.run(["bash", "-c", ENV[name]], env=dict(ENV, DM_Q_PATH=path, DM_Q_DEST=dest), stdout=subprocess.DEVNULL)
+def bind_parent(path, out):  # called by quarantine.sh before artifact_removal_verdict
+    absolute = os.path.abspath(path); parent = os.path.dirname(absolute); base = os.path.basename(absolute)
+    resolved = os.path.realpath(parent); fd = os.open(resolved, DIRFL)
+    try: st = os.fstat(fd)
+    finally: os.close(fd)
+    with open(out, "w") as f: json.dump({"parent_path": resolved, "parent_input": parent, "parent_dev": st.st_dev, "parent_ino": st.st_ino, "base": base}, f)
+    return "ok"
 def visit(dfd, name, p, out):  # one entry read through its parent's fd; every descent opens O_DIRECTORY | O_NOFOLLOW
     st = os.stat(name, dir_fd=dfd, follow_symlinks=False); e = {"path": p, "type": "other", "dev": st.st_dev, "ino": st.st_ino}
     if stat.S_ISLNK(st.st_mode): e.update(type="symlink", target=os.readlink(name, dir_fd=dfd))
@@ -38,14 +45,25 @@ def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon(visit(qfd, qid, ".", [])) == canon(rec["inventory"]) else "rehash-mismatch"
     except Exception: return "check-failed"
-def phase1(path, inv_file):
-    path = os.path.abspath(path); hook("DISK_MAGICIAN_TEST_AFTER_VERDICT", path, "")
+def phase1(path, inv_file, binding_file):
+    path = os.path.abspath(path)
     parent, base = os.path.dirname(path), os.path.basename(path)
     pfd = qfd = -1
     try:
+        with open(binding_file) as f: binding = json.load(f)
+        parent_id = (binding.get("parent_dev"), binding.get("parent_ino"))
+        if any(type(v) is not int for v in parent_id) or binding.get("base") != base or binding.get("parent_input") != parent:
+            return "kept:parent-identity-missing"
+        hook("DISK_MAGICIAN_TEST_AFTER_VERDICT", path, "")
+        parent = os.path.realpath(parent)
+        if parent != binding.get("parent_path"): return "kept:parent-identity-mismatch"
         with open(inv_file) as f: inv = [e for e in json.load(f) if isinstance(e, dict)]
-        parent = os.path.realpath(parent); path = os.path.join(parent, base)
+        root = next(e for e in inv if e.get("path") == ".")
+        if any(type(root.get(k)) is not int for k in ("dev", "ino")): return "kept:identity-mismatch"
+        path = os.path.join(parent, base)
         pfd = os.open(parent, DIRFL)
+        bound_parent = os.fstat(pfd)
+        if (bound_parent.st_dev, bound_parent.st_ino) != parent_id: return "kept:parent-identity-mismatch"
         try: os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
         except FileExistsError: pass
         qpath_st = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
@@ -90,4 +108,8 @@ def phase1(path, inv_file):
     try: os.unlink(side, dir_fd=qfd)
     except OSError: return f"quarantine_conflict:{qid}"
     return f"kept:{why}"
-if __name__ == "__main__": print(phase1(*sys.argv[2:]) if sys.argv[1:2] == ["phase1"] and len(sys.argv) == 4 else "kept:check-failed")
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
+    elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
+    else: print("kept:check-failed")
