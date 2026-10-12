@@ -165,10 +165,28 @@ PY
 # _lease_write_json <lease_file> <pydict-args...> is not used; writes go
 # through inline python below for atomicity (mktemp sibling + os.replace).
 
-# lease_write <worktree_path> <repo> <branch> <creator> — atomic lease write
-# with the owner resolved from $$.
+# lease_write <worktree_path> [<repo> <branch> <creator>] [--kind K]
+#   [--producer P] [--source S] [--manifest F] [--git-meta F]
+#   [--published URL --upload-manifest F --verified-at TS]
+# Atomic lease write with the owner resolved from $$. Kinds: worktree (default),
+# clone, scratch, evidence. --manifest is an inventory only; publication needs
+# all three --published flags. rc 2 on invalid options (nothing written).
 lease_write() {
-    local wt="$1" repo="${2:-}" branch="${3:-}" creator="${4:-}"
+    local wt="$1"; shift
+    local -a pos=() prov=("" "" "" "" "" "" "" "")
+    while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
+    local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
+    while [[ $# -gt 0 ]]; do
+        [[ $# -ge 2 ]] || return 2
+        case "$1" in
+            --kind) prov[0]="$2" ;; --producer) prov[1]="$2" ;;
+            --source) prov[2]="$2" ;; --manifest) prov[3]="$2" ;;
+            --git-meta) prov[4]="$2" ;; --published) prov[5]="$2" ;;
+            --upload-manifest) prov[6]="$2" ;; --verified-at) prov[7]="$2" ;;
+            *) return 2 ;;
+        esac
+        shift 2
+    done
     local tsv pid ep comm admin_id admin_birth lease ttl
     tsv="$(lease_resolve_owner)"
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
@@ -177,7 +195,20 @@ lease_write() {
     mkdir -p "$(lease_dir)" 2>/dev/null || return 1
     ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
     _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl"
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}"
+}
+
+# lease_kind <lease_file> — kind, "worktree" for leases written before kinds
+# existed, "unreadable" when the file cannot be parsed.
+lease_kind() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("kind") or "worktree")
+except Exception:
+    print("unreadable")
+PY
 }
 
 # lease_write_pending <target_path> <owner_tsv> — pre-creation lease written
@@ -207,17 +238,38 @@ _lease_emit_json() {
     local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
     local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
     python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" <<'PY'
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${@:13}" <<'PY'
 import json, os, sys, tempfile
 from datetime import datetime, timezone
 (lease, wt, repo, branch, creator, pending, pid, ep, comm,
  admin_id, admin_birth, ttl) = sys.argv[1:13]
+(kind, producer, source, manifest, git_meta, pub_url, upload, verified_at) = (
+    sys.argv[13:21] + [""] * 8)[:8]
+UPLOAD_KEYS = {"path", "sha256", "md5", "crc32c", "size", "object", "generation"}
+def load(p):
+    if not p:
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        sys.exit(2)
+if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence"):
+    sys.exit(2)
+if bool(pub_url) != bool(upload) or bool(pub_url) != bool(verified_at):
+    sys.exit(2)
+upload_manifest = load(upload)
+if upload and not (isinstance(upload_manifest, list) and upload_manifest and all(
+        isinstance(e, dict) and UPLOAD_KEYS <= set(e) for e in upload_manifest)):
+    sys.exit(2)
 owner = None
 if pid not in ("-", ""):
     try:
         owner = {"pid": int(pid), "start_epoch": int(ep), "comm": comm}
     except ValueError:
         owner = None
+if owner and os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
+    owner["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
 now = datetime.now(timezone.utc)
 d = {
     "schema_version": 1,
@@ -235,6 +287,16 @@ d = {
     "released_at": None,
     "last_verdict": None,
     "last_checked_at": None,
+    "kind": kind or "worktree",
+    "producer": producer or None,
+    "source": source or None,
+    "manifest": load(manifest),
+    "git_meta": load(git_meta),
+    "published": bool(pub_url),
+    "published_at": now.isoformat() if pub_url else None,
+    "published_url": pub_url or None,
+    "verified_at": verified_at or None,
+    "upload_manifest": upload_manifest,
 }
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".lease-", suffix=".json")
 try:
@@ -355,6 +417,52 @@ PY
     fi
     echo "not lease owner" >&2
     return 1
+}
+
+# lease_release_owner_session <session> <runtime_pid> <runtime_start_epoch> —
+# session-exit release (spec C8). Releases each lease whose owner.session is
+# <session> and whose owner is the ending runtime (same pid and start epoch)
+# or dead; any other owner is reported as release_skipped_live_owner. Deletes
+# nothing; an unknown session changes nothing. rc 2 only without a session.
+lease_release_owner_session() {
+    local sid="${1:-}" rpid="${2:-}" rep="${3:-}" file match opid oep path
+    [[ -n "$sid" ]] || return 2
+    for file in "$(lease_dir)"/*.json; do
+        IFS=$'\t' read -r match opid oep path < <(_lease_session_release scan "$file" "$sid" "$rpid" "$rep") || continue
+        if [[ "$match" == other && "$(lease_owner_state "$file")" != dead ]]; then
+            printf 'release_skipped_live_owner %s\n' "$path"; continue
+        fi # commit re-checks the owner judged above under the lock (TOCTOU)
+        _lease_session_release commit "$file" "$sid" "$opid" "$oep" && printf 'released %s\n' "$path"
+    done
+    return 0
+}
+
+# _lease_session_release scan|commit <lease> <session> <pid> <epoch> — scan prints
+# "self|other<TAB>pid<TAB>epoch<TAB>path"; commit marks released (flock, fsync, rename)
+# only if the re-read lease still has that owner, else rc 1.
+_lease_session_release() {
+    python3 - "$@" <<'PY'
+import fcntl, json, os, sys, tempfile
+from datetime import datetime, timezone
+mode, p, sid, pid, ep = sys.argv[1:]
+try:
+    lk = open(p[:-5] + ".lock", "a") if mode == "commit" else None
+    lk and fcntl.flock(lk, fcntl.LOCK_EX)
+    d = json.load(open(p)); o = d.get("owner")
+    o = (str(o.get("pid")), str(o.get("start_epoch"))) if isinstance(o, dict) and o.get("session") == sid and not d.get("released_at") else None
+    if mode == "scan":
+        o and print("%s\t%s\t%s\t%s" % ("self" if o == (pid, ep) else "other", o[0], o[1], d.get("path", "")))
+    elif o == (pid, ep):
+        d["released_at"] = datetime.now(timezone.utc).isoformat()
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".release-")
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, indent=2); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+    else:
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+PY
 }
 
 # lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.
