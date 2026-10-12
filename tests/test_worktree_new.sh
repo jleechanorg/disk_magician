@@ -303,6 +303,7 @@ assert_eq "$out" "" "stdout empty"
 grep -q "disk low (5 GiB free): reuse an existing worktree" "$TMPROOT/a3.err" && ok "stderr names the floor and the remedy" || bad "stderr message: $(cat "$TMPROOT/a3.err")"
 [[ ! -e "$WTROOT/feat-a3" ]] && ok "no worktree dir created" || bad "worktree created despite refusal"
 if git -C "$REPO" show-ref -q --verify refs/heads/feat/a3; then bad "branch created"; else ok "no branch created"; fi
+grep -q "disk-admission: refused class=worktrees rc=75" "$TMPROOT/a3.err" && ok "stderr carries the refused line" || bad "refused line missing: $(cat "$TMPROOT/a3.err")"
 
 echo "== case A4: WORKTREE_ADMIT_MIN_GB=0 disables the refusal =="
 out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=5 WORKTREE_ADMIT_MIN_GB=0 bash "$SCRIPT" "$REPO" feat/a4 2>"$TMPROOT/a4.err")"; rc=$?
@@ -315,6 +316,24 @@ out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=x bash "$SCRIPT" "$REPO" feat/a5 2>"$TMPRO
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-a5" "stdout is exactly the path"
 grep -q "free-space unmeasurable" "$TMPROOT/a5.err" && ok "stderr logs free-space unmeasurable" || bad "stderr missing free-space unmeasurable: $(cat "$TMPROOT/a5.err")"
+
+echo "== case A6: real diskm admit logs one worktrees event with producer and dest =="
+EV="$HOME/.disk_magician_state/admission/events.jsonl"
+out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a6 2>"$TMPROOT/a6.err")"; rc=$?
+assert_eq "$rc" "0" "exit code (admit is observe-only until D2)"
+assert_eq "$out" "$WTROOT/feat-a6" "stdout is exactly the path"
+assert_eq "$(python3 -c 'import json,sys; e=[json.loads(l) for l in open(sys.argv[1])][-1]; print(e["class"], e["producer"], e["source"], e["dest"])' "$EV" 2>&1)" \
+    "worktrees worktree-new:myrepo worktree-new $WTROOT/feat-a6" "event class/producer/source/dest"
+
+echo "== case A7: admit missing -> admission_degraded:caller, legacy floor still refuses =="
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/no-such-admit" DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a7 2>"$TMPROOT/a7.err")"; rc=$?
+assert_eq "$rc" "75" "exit code 75"
+grep -q "admission_degraded:caller" "$TMPROOT/a7.err" && ok "stderr logs admission_degraded:caller" || bad "stderr: $(cat "$TMPROOT/a7.err")"
+[[ ! -e "$WTROOT/feat-a7" ]] && ok "no worktree dir created" || bad "worktree created despite refusal"
+
+# shellcheck source=tests/lib/admit_contract.sh
+source "$REPO_ROOT/tests/lib/admit_contract.sh"
+run_admit_contract "DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash '$SCRIPT' '$REPO' feat/contract-{n}"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
