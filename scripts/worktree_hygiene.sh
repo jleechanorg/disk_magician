@@ -33,6 +33,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 # shellcheck source=lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/worktree_ignored.sh
+source "$SCRIPT_DIR/lib/worktree_ignored.sh"
 # shellcheck source=scripts/safety_lib.sh
 source "$SCRIPT_DIR/safety_lib.sh"
 
@@ -606,8 +608,8 @@ preserve_wip_blocker() {
         "$igen" && continue
         ibase="${ipath%/}"; ibase="${ibase##*/}"
         case "$ibase" in
-            node_modules|.venv|venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.tox|.nox|.next|.turbo|.parcel-cache|*.egg-info|.gradle|.DS_Store|*.pyc|*.pyo) ;;
-            *) echo "ignored-file:$ipath"; return 0 ;;
+            .nox|.parcel-cache|*.pyo) ;;
+            *) ignored_entry_rebuildable "$wt" "$ipath" leaf || { echo "ignored-file:$ipath"; return 0; } ;;
         esac
     done <<<"$ign"
     return 1

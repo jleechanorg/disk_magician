@@ -849,6 +849,34 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R42" --skip-push --execute --preserve-w
 assert_contains "$OUT" "PRESERVED-WIP" "preserved end-to-end"
 assert_true "! [[ -e '$TMPROOT/fsmon42-ran' ]]" "fsmonitor never ran anywhere in the sweep"
 
+# ---------------------------------------------------------------------------
+echo "case 43: rebuildable-only ignored (test-results) does not block; .env and data/*.db still do"
+R43="$(mk_repo r43)"
+printf 'test-results/\n.env\ndata/\n*.db\n' >"$R43/.gitignore"
+mkdir -p "$R43/mvp_site"; echo x >"$R43/mvp_site/app.py"
+g -C "$R43" add -A; g -C "$R43" commit -q -m ign43
+W43="$(mk_wt "$R43" tr43)"
+mkdir -p "$W43/mvp_site/test-results"; echo r >"$W43/mvp_site/test-results/a.xml"
+echo "edit" >>"$W43/tracked.txt"
+backdate_tree "$W43" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "PRESERVED-WIP" "test-results-only ignored content is preserved as WIP"
+assert_not_contains "$OUT" "ignored-file" "test-results does not block"
+W43B="$(mk_wt "$R43" env43)"
+echo "K=v" >"$W43B/.env"; mkdir -p "$W43B/mvp_site/test-results"; echo r >"$W43B/mvp_site/test-results/a.xml"
+echo "edit" >>"$W43B/tracked.txt"
+backdate_tree "$W43B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret" "ignored .env still blocks alongside test-results"
+assert_true "[[ -f '$W43B/.env' ]]" ".env intact"
+W43C="$(mk_wt "$R43" db43)"
+mkdir -p "$W43C/data"; echo d >"$W43C/data/notes.db"; mkdir -p "$W43C/test-results"; echo r >"$W43C/test-results/a.xml"
+echo "edit" >>"$W43C/tracked.txt"
+backdate_tree "$W43C" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-file:data/" "ignored data/notes.db still blocks"
+assert_true "[[ -f '$W43C/data/notes.db' ]]" "notes.db intact"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
