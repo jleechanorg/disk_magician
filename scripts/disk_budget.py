@@ -76,7 +76,7 @@ def admit(a, budgets, state, now, d2):
         decision = EMERGENCY[z] if z and d2 else 10
     event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
                  zone=z, df_free_bytes=free, degraded=degraded, **{"class": a.cls}, **{k: getattr(a, k) for k in
-                 ("producer", "source", "dest", "ci_job", "tool_use_id")})
+                 ("producer", "source", "dest", "ci_job", "tool_use_id", "compound")})
     try:
         if not a.dry_run:
             with open(state / "admission" / "events.jsonl", "a") as log: log.write(json.dumps(event) + "\n")
@@ -107,7 +107,7 @@ def main():
     p, budgets = argparse.ArgumentParser(prog="diskm admit"), json.loads(Path(resolve_config.resolve()).read_text()).get("budgets") or tmpl
     for flag in ("--producer", "--dest", "--source", "--ci-job", "--tool-use-id"): p.add_argument(flag)
     p.add_argument("--class", dest="cls", choices=sorted((budgets if isinstance(budgets, dict) else {}).get("classes") or tmpl["classes"]))
-    p.add_argument("--est-gb", type=est_gb)
+    p.add_argument("--est-gb", type=est_gb); p.add_argument("--compound", action="store_true")
     mode = p.add_mutually_exclusive_group()
     for flag in ("--dry-run", "--probe"): mode.add_argument(flag, action="store_true")
     for flag in ("--confirm", "--confirm-tool-use"): mode.add_argument(flag)
