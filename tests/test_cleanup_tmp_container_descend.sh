@@ -156,14 +156,16 @@ mkchild "$PT/repo/fresh-child"
 run_sweep t5 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=repo
 assert_exists "t5 child of git-repo container kept" "$PT/repo/old-child"
 
-echo "Test 6: .in-use marker on child keeps it; marker on container keeps all"
+echo "Test 6: .in-use marker on or below child keeps it; marker on container keeps all"
 make_env t6
 mkdir -p "$PT/agent-scratch" "$PT/marked"
 mkchild "$PT/agent-scratch/old-marked"; touch "$PT/agent-scratch/old-marked/.in-use"; set_old "$PT/agent-scratch/old-marked"
+mkchild "$PT/agent-scratch/old-nested-marked"; mkdir -p "$PT/agent-scratch/old-nested-marked/runtime"; touch "$PT/agent-scratch/old-nested-marked/runtime/.in-use"; set_old "$PT/agent-scratch/old-nested-marked"
 mkchild "$PT/agent-scratch/fresh-child"
 mkchild "$PT/marked/old-child"; set_old "$PT/marked/old-child"; touch "$PT/marked/.in-use"
 run_sweep t6 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS="agent-scratch marked"
 assert_exists "t6 marked child kept" "$PT/agent-scratch/old-marked"
+assert_exists "t6 child with nested marker kept" "$PT/agent-scratch/old-nested-marked"
 assert_exists "t6 child under marked container kept" "$PT/marked/old-child"
 
 echo "Test 7: protected-root container children are kept"

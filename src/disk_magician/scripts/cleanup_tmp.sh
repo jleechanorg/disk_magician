@@ -1078,7 +1078,7 @@ large_consider_entry() {
 
   # Cheap recency/marker verdicts first: an entry that is too recent to touch
   # never pays for du or lsof (bead dcz: pressure step budget).
-  if [[ -e "$d/.in-use" ]]; then
+  if has_active_marker "$d"; then
     log "Skipping active-use marker (.in-use present): $d"
     return 0
   fi
