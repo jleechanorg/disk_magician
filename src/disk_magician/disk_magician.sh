@@ -68,7 +68,7 @@ Commands:
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   evidence-push          Sync local evidence dir to remote storage.
-  admit                  Admission decision for a governed write (--class C --est-gb N).
+  admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
