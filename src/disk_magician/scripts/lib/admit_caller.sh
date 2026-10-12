@@ -2,7 +2,7 @@
 # admit_caller.sh — the caller side of `diskm admit` (spec §7.1 exit-code
 # channel). Source it, then gate the command:
 #
-#   admit_gate <class> <est-gb> <producer> <dest> <source> || exit 75
+#   admit_gate <class> <est-gb> <producer> <dest> <source> [admit args…] || exit 75
 #
 # rc 0 = run the command; 75 = refused, the command must not start (the
 # `disk-admission: refused` line is already on stderr). Admit rc 10 warns and
@@ -23,7 +23,7 @@ admit_gate() {
     fi
     for try in 1 2; do
         "${cmd[@]}" --class "$cls" --est-gb "$est" --producer "$producer" \
-            --dest "$dest" --source "$source" >/dev/null
+            --dest "$dest" --source "$source" "${@:6}" >/dev/null
         rc=$?
         [[ "$rc" == 76 && "$try" == 1 ]] || break
         echo "disk-admission: queued class=$cls, retrying once" >&2
