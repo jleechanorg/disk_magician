@@ -544,11 +544,21 @@ assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:unprove
 assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a dirty worktree"
 assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:unproven-content "tracked venv/ in a clean pushed worktree"
 assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a base repo, not a linked worktree"
-mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/c1/app" && age "$PT/X" 43200
-assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/c1" --kind os_clone)" remove "os_clone with the caller's frozen-identity proof"
-assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/c1")" kept:unproven-content "the same clone without --kind os_clone"
+mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1/app" && age "$PT/X" 43200
+assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" --kind os_clone)" kept:check-failed "os_clone without a frozen-identity proof"
+x_thesis="$HOME/Documents/thesis"
+mkdir -p "$x_thesis" && printf 'unique' >"$x_thesis/chapter.txt" && age "$x_thesis" 43200
+assert_eq "$(av "$x_thesis" --kind os_clone)" kept:check-failed "os_clone flag cannot authorize arbitrary ~/Documents/thesis"
+x_clone="$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1"
+x_id="$(stat -f '%d:%i:%u' "$PT/X" 2>/dev/null || stat -c '%d:%i:%u' "$PT/X")"
+x_parent_id="$(stat -f '%d:%i:%u' "${x_clone%/*}" 2>/dev/null || stat -c '%d:%i:%u' "${x_clone%/*}")"
+x_candidate_id="$(stat -f '%d:%i:%u' "$x_clone" 2>/dev/null || stat -c '%d:%i:%u' "$x_clone")"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" remove "os_clone with matching frozen candidate, parent and X-root identities"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_parent_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone identity mismatch is kept"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone proof outside the frozen X scan root is kept"
+assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kind os_clone"
 age "$PT/X" 10
-assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/c1" --kind os_clone)" kept:recent-activity "os_clone still runs every-kind checks"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
 unset DISK_MAGICIAN_STAT_BIN
 

@@ -43,6 +43,9 @@ TMP_DIR=$(mktemp -d -t sweeper_health_test.XXXXXX)
 LOG_DIR="$TMP_DIR/logs"
 PLIST_DIR="$TMP_DIR/launchd"
 mkdir -p "$LOG_DIR" "$PLIST_DIR" "$TMP_DIR/state_repo/ledger"
+# Governor alerts read DISK_MAGICIAN_STATE_DIR; keep every run off the live state.
+export DISK_MAGICIAN_STATE_DIR="$TMP_DIR/governor_state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 git -C "$TMP_DIR/state_repo" init -q
 printf '{"schema_version": 2, "mode": "complete", "coverage_envelope": {"complete": true}, "accounting_equation": {"balanced": true, "display_ledger_valid": true, "displayed_balanced": true}}\n' > "$TMP_DIR/state_repo/ledger/topdown-5g.json"
 git -C "$TMP_DIR/state_repo" add ledger/topdown-5g.json
@@ -220,6 +223,23 @@ if [[ $RC_HAPPY -eq 0 ]] && grep -q "All sweepers healthy." <<<"$OUT_HAPPY"; the
 else
   echo "  FAIL  healthy system: rc=$RC_HAPPY"
   printf '%s\n' "$OUT_HAPPY"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+# Governor alert (plan Task 10): a stale govern tick prints ALERT:govern_stale before any
+# accounting and fails an otherwise healthy run.
+printf '{"zone": "RED", "zone_at": %s}\n' "$(( NOW - 3600 ))" > "$DISK_MAGICIAN_STATE_DIR/budget.json"
+set +e
+OUT_ALERT=$("$SCRIPT" --plist-dir "$ALL_FRESH_DIR/launchd" --state-repo "$TMP_DIR/state_repo" --threshold-days 7 --no-notify 2>&1)
+RC_ALERT=$?
+set -e
+rm -f "$DISK_MAGICIAN_STATE_DIR/budget.json"
+if [[ $RC_ALERT -eq 1 ]] && [[ "$(head -1 <<<"$OUT_ALERT")" == ALERT:govern_stale* ]]; then
+  echo "  PASS  governor alert printed first and exits 1"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  governor alert: rc=$RC_ALERT"
+  printf '%s\n' "$OUT_ALERT"
   FAIL=$(( FAIL + 1 ))
 fi
 

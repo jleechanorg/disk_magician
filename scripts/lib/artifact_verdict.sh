@@ -161,12 +161,65 @@ _av_lease_scope() {
     [[ ! -d "$1" ]] || c14_discover_repos "$1"
 }
 
+# _av_path_identity <path>: filesystem identity in the format used by
+# cleanup_code_sign_clones.sh. Both macOS and GNU stat forms are accepted.
+_av_path_identity() {
+    local id
+    id="$(stat -f '%d:%i:%u' "$1" 2>/dev/null)" || id=''
+    [[ "$id" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || id="$(stat -c '%d:%i:%u' "$1" 2>/dev/null)" || return 1
+    [[ "$id" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+    printf '%s\n' "$id"
+}
+
+# _av_os_clone_proof <path> <candidate-id> <parent-id> <X-root-id>: the
+# caller freezes all three identities during enumeration and passes them back
+# at the final verdict. The path must still be a recognized code-sign clone
+# under the canonical X scan root and each identity must still match.
+_av_os_clone_proof() {
+    local p=$1 candidate_id=$2 parent_id=$3 root_id=$4 user_tmp x_dir parent base uid
+    [[ "$candidate_id" =~ ^[0-9]+:[0-9]+:[0-9]+$ && "$parent_id" =~ ^[0-9]+:[0-9]+:[0-9]+$ &&
+        "$root_id" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+    if [[ -n "${DISK_MAGICIAN_CODE_SIGN_X_DIR:-}" ]]; then
+        x_dir="$(cd "$DISK_MAGICIAN_CODE_SIGN_X_DIR" 2>/dev/null && pwd -P)" || return 1
+    else
+        user_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)" || return 1
+        user_tmp="$(cd "$user_tmp" 2>/dev/null && pwd -P)" || return 1
+        x_dir="$(cd "$(dirname "$user_tmp")/X" 2>/dev/null && pwd -P)" || return 1
+    fi
+    [[ -n "$x_dir" && -d "$x_dir" && ! -L "$x_dir" && "$p" == "$x_dir/"* ]] || return 1
+    parent=${p%/*}; base=${p##*/}
+    if [[ "$parent" == "$x_dir" ]]; then
+        [[ "$base" == *.code_sign_clone ]] || return 1
+    else
+        [[ "${parent%/*}" == "$x_dir" && "${parent##*/}" == *.code_sign_clone && "$base" == code_sign_clone.* ]] || return 1
+    fi
+    [[ -d "$p" && ! -L "$p" && ! -L "$parent" ]] || return 1
+    uid="$(id -u)" || return 1
+    [[ "$(_av_path_identity "$p")" == "$candidate_id" && "${candidate_id##*:}" == "$uid" &&
+        "$(_av_path_identity "$parent")" == "$parent_id" && "$(_av_path_identity "$x_dir")" == "$root_id" &&
+        "${parent_id##*:}" == "$uid" && "${root_id##*:}" == "$uid" ]]
+}
+
 # artifact_removal_verdict <path> [...] | --self-test
 artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p kind='' q done='' st newest ret  # provenance: kind (b)/(c)/os_clone, else (a) or git
-    [[ "${2:-}" == --kind ]] && kind=${3:-}
-    p=${1%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
+    local p=${1:-} kind='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id=''
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--cursor|--inventory-out)
+                [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
+                case "$1" in
+                    --kind) kind=$2 ;;
+                    --frozen-identity) frozen_id=$2 ;;
+                    --frozen-parent-identity) frozen_parent_id=$2 ;;
+                    --frozen-root-identity) frozen_root_id=$2 ;;
+                esac
+                shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
     while IFS= read -r st; do [[ "/$p/" != *"/$st/"* ]] || { echo kept:protected; return 0; }; done < <(scratch_roots_protected "$q")
@@ -190,7 +243,7 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         ephemeral) ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
             (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; } ;;
         rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
-        os_clone) ;;  # the caller matched the frozen identity against the source app bundle
+        os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
         '') st="$({ { [[ ! -d "$p" ]] || c14_discover_repos "$p"; } && printf 'OK\0'; } |  # repos passed above
                 python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")")"
             [[ "$st" == ok ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; } ;;

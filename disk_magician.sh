@@ -65,9 +65,16 @@ Commands:
   worktree-reap          Reap owner leases (nominate by default).
   policy                 Record standing decisions (approve|set-amendment|revoke|list).
   worktree-release <path> Release the caller's lease without deleting the worktree.
+  lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
+                         Session-exit release of that session's leases (deletes nothing).
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
+  scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   evidence-push          Sync local evidence dir to remote storage.
+  admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
+  ci-admit               ezgha job-started hook: admit the CI workspace (class colima).
+  govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
+  budget                 status: governor alerts (ALERT:<code> lines, rc 1 when any).
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -397,14 +404,43 @@ case "$CMD" in
   layout_check|layout-check)
     python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
     ;;
+  scratch_new|scratch-new)
+    "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
+    ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
+    ;;
+  ci_admit|ci-admit)
+    exec bash "$SCRIPT_DIR/scripts/ci_admit.sh" "$@"
+    ;;
+  admit)
+    exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" "$@"
+    ;;
+  govern)
+    exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" --govern "$@"
+    ;;
+  budget)
+    exec python3 "$SCRIPT_DIR/scripts/budget_status.py" "$@"
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
+    ;;
+  lease_release|lease-release)
+    [[ "${1:-}" == --owner-session && -n "${2:-}" ]] || { echo "Usage: diskm lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]" >&2; exit 2; }
+    # --runtime-pid/--runtime-start-epoch are operator-only overrides; hooks pass neither.
+    sid="$2"; shift 2; rpid=""; rep=""
+    while [[ $# -ge 2 ]]; do
+      case "$1" in --runtime-pid) rpid="$2" ;; --runtime-start-epoch) rep="$2" ;; *) exit 2 ;; esac
+      shift 2
+    done
+    [[ $# -eq 0 ]] || exit 2
+    source "$SCRIPT_DIR/scripts/lib/worktree_lease.sh"
+    # Default runtime: the nearest runtime ancestor (the hook's ending session).
+    [[ -n "$rpid" ]] || IFS=$'\t' read -r rpid rep _ < <(lease_resolve_owner)
+    lease_release_owner_session "$sid" "$rpid" "$rep"
     ;;
   worktree_release|worktree-release)
     [[ $# -eq 1 ]] || { echo "Usage: diskm worktree-release <path>" >&2; exit 1; }
