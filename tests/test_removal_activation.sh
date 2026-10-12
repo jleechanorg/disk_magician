@@ -4,13 +4,15 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(cd "$(mktemp -d /tmp/removal-activation-test.XXXXXX)" && pwd -P)"
-trap '[[ "$TMP" == /private/tmp/removal-activation-test.* || "$TMP" == /tmp/removal-activation-test.* ]] && rm -rf "$TMP"' EXIT
+REALHOME="$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+CROOT="$(mktemp -d "$REALHOME/.claude-dmtest.XXXXXX")"
+trap '[[ "$TMP" == /private/tmp/removal-activation-test.* || "$TMP" == /tmp/removal-activation-test.* ]] && rm -rf "$TMP"; [[ "$CROOT" == "$REALHOME"/.claude-dmtest.* ]] && rm -rf "$CROOT"' EXIT
 PASS=0 FAIL=0
 check() { local label="$1"; shift; if "$@"; then echo "PASS: $label"; PASS=$((PASS+1)); else echo "FAIL: $label"; FAIL=$((FAIL+1)); fi; }
 export HOME="$TMP/home" DISK_MAGICIAN_POLICY_FILE="$TMP/cfg/standing_decisions.json" DISK_MAGICIAN_STATE_DIR="$TMP/state"
 export STANDARD_WORKTREE_ROOT="$TMP/worktrees"
 export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-mkdir -p "$HOME" "$TMP/bin"
+mkdir -p "$HOME" "$TMP/bin" "$CROOT/projects/p" "$DISK_MAGICIAN_STATE_DIR"
 g() { git -C "$TMP/$1" "${@:2}" >/dev/null 2>&1; }
 
 # Fixture: bare remote whose main carries the amendment; a clone holds a copy of scripts/.
@@ -28,26 +30,30 @@ OUT=""
 activate() { OUT="$(source "$LIB/removal_activation.sh"; removal_activation_ok "$1")"; }
 blocked() { ! activate "$1" && [[ "$OUT" == "activation_blocked:$2" ]]; }
 c14() { printf 'artifact_removal_verdict() { [[ "$1" == --self-test ]] && echo %s; }\n' "$1" > "$LIB/artifact_verdict.sh"; }
-T="$TMP/t.jsonl"
-printf '%s\n' '{"type":"user","message":{"content":"approve D1 worktree_reap_remove and D1b worktree_cleanup and claude_state_cleanup"}}' > "$T"
-PH='approve D1 worktree_reap_remove'
+T="$CROOT/projects/p/t.jsonl"
+printf '%s\n' '{"type":"user","message":{"content":"APPROVE worktree_reap_remove"}}' '{"type":"user","message":{"content":"APPROVE worktree_cleanup"}}' > "$T"
+LEGACY="$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
 
 check 'no decision blocks' blocked worktree_reap_remove decision_missing
-policy approve worktree_reap_remove --phrase "$PH" --from-transcript "$T"
+policy approve worktree_reap_remove --from-transcript "$T"
 check 'D1 approved, no C14 lib blocks c14_missing' blocked worktree_reap_remove c14_missing
 reap_log() { bash "$TMP/repo/scripts/worktree_reap.sh" --mode remove 2>&1; }
 reap_mode() { [[ "$(reap_log)" == *'remove mode not approved'* ]]; }
-check 'D1 approved, no C14 lib: reap nominates' reap_mode
+touch "$LEGACY"
+check 'legacy marker present, gate closed: reap nominates' reap_mode
 c14 fail
 check 'C14 self-test failure blocks' blocked worktree_reap_remove c14_missing
 c14 ok
 check 'lib present, no amendment blocks' blocked worktree_reap_remove amendment_missing
-echo side > "$TMP/repo/side"; g repo add side; g repo commit -qm side
+echo side >> "$TMP/repo/CLAUDE.md"; g repo commit -qam side
 policy set-amendment worktree_reap_remove "$(git -C "$TMP/repo" rev-parse HEAD)"
 check 'amendment not an ancestor blocks' blocked worktree_reap_remove amendment_not_on_main
 policy set-amendment worktree_reap_remove "$AMEND"
 check 'all present activates' activate worktree_reap_remove
 check 'all present: reap leaves remove mode' bash -c '[[ "$(bash "$1/scripts/worktree_reap.sh" --mode remove 2>&1)" != *"remove mode not approved"* ]]' _ "$TMP/repo"
+rm -f "$LEGACY"
+check 'gate open, legacy marker absent: reap nominates' reap_mode
+touch "$LEGACY"
 
 # Revert lands on the remote while the local origin/main still points at the amendment.
 git clone -q "$TMP/remote.git" "$TMP/other" 2>/dev/null
@@ -74,7 +80,7 @@ check 'remote restored with marker activates' activate worktree_reap_remove
 
 # Other decisions need no fetch; revoke deactivates at the next call.
 check 'D1b unrecorded blocks' blocked worktree_cleanup decision_missing
-policy approve worktree_cleanup --phrase 'D1b worktree_cleanup' --from-transcript "$T"
+policy approve worktree_cleanup --from-transcript "$T"
 check 'D1b approved with C14 activates' activate worktree_cleanup
 rm -f "$LIB/artifact_verdict.sh"
 check 'D1b approved without C14 blocks' blocked worktree_cleanup c14_missing

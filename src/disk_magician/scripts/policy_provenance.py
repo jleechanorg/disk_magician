@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Standing-decision record (C11). Recording activates nothing; see removal_activation_ok."""
-import json, os, re, subprocess, sys, tempfile, time
+import glob, hashlib, json, os, pwd, re, subprocess, sys, tempfile, time
 IDS = {'worktree_reap_remove': 'D1', 'worktree_cleanup': 'D1b', 'admission_enforcement': 'D2', 'budgets': 'D3',
        'ci_autopause': 'D4', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
 PATH = os.environ.get('DISK_MAGICIAN_POLICY_FILE') or os.path.expanduser('~/.config/disk-magician/standing_decisions.json')
+MARK, phrase = 'policy:worktree_reap_remove', 'APPROVE {}'.format  # fixed per id; the caller never chooses it
+USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a typed user message is exactly "APPROVE <id>" (trimmed, case-sensitive); ids: ' + ' '.join(IDS)
+git = lambda repo, *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
 
-def user_texts(path):  # live user text only: no tool results, meta injections or sidechains
-    for m in map(json.loads, open(path)):
-        if m.get('type') == 'user' and not m.get('isMeta') and not m.get('isSidechain'):
-            c = m.get('message', {}).get('content')
-            yield from [c] if isinstance(c, str) else [b.get('text', '') for b in c if b.get('type') == 'text']
+def find_approval(path, want):  # (realpath, line, sha256) of a genuine typed user message equal to want, else None
+    real, home = os.path.realpath(path), pwd.getpwuid(os.getuid()).pw_dir  # real home: $HOME cannot move the root
+    if not (os.path.isfile(real) and real.endswith('.jsonl') and any(real.startswith(os.path.realpath(r) + os.sep)
+            for r in glob.glob(os.path.join(home, '.claude*', 'projects')))): return None
+    for n, line in enumerate(open(real, 'rb'), 1):  # wrapped reminders/notifications can never equal the phrase
+        m = json.loads(line); c = m.get('message', {}).get('content')
+        if m.get('type') != 'user' or any(m.get(k) for k in ('isMeta', 'isSidechain', 'isCompactSummary')): continue
+        if isinstance(c, list) and all(b.get('type') == 'text' for b in c): c = ''.join(b.get('text', '') for b in c)
+        if isinstance(c, str) and c.strip() == want: return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
 
 def amendment(sha, repo):  # bounded fetch on every call; a stale local origin/main is never trusted
-    git = lambda *a, **k: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, **k)
     p = subprocess.Popen(['git', '-C', repo, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/usr/bin/false'), stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -20,25 +26,26 @@ def amendment(sha, repo):  # bounded fetch on every call; a stale local origin/m
     except subprocess.TimeoutExpired: os.killpg(p.pid, 9); p.wait(); ok = False
     if not ok: return 'policy_unverified'
     if not sha: return 'amendment_missing'
-    if git('merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main').returncode: return 'amendment_not_on_main'
-    return None if 'policy:worktree_reap_remove' in git('show', 'refs/remotes/origin/main:CLAUDE.md').stdout else 'amendment_reverted'
+    if git(repo, 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main').returncode: return 'amendment_not_on_main'
+    return None if MARK in git(repo, 'show', 'refs/remotes/origin/main:CLAUDE.md').stdout else 'amendment_reverted'
 
 def main(cmd='', i='', *a):
     d = json.load(open(PATH)) if os.path.exists(PATH) else {}
-    live = i in d and d[i]['revoked_at'] is None
-    if cmd == 'approve' and len(a) == 4 and a[0] == '--phrase' and a[2] == '--from-transcript' and i in IDS:
-        names = '|'.join(re.escape(n) for n in (i, IDS[i]) if n)
-        if not (a[1].strip() and re.search(r'\b(%s)\b' % names, a[1]) and any(a[1] in t for t in user_texts(a[3]))):
-            return print('refused: phrase must name the decision and appear in a live user message', file=sys.stderr) or 2
-        d[i] = {'id': i, 'phrase': a[1], 'transcript': a[3], 'approved_at': int(time.time()), 'revoked_at': None}
-    elif cmd == 'set-amendment' and live and len(a) == 1: d[i]['amendment_commit'] = a[0]
+    live, repo = i in d and d[i]['revoked_at'] is None, os.environ.get('DISK_MAGICIAN_POLICY_REPO') or os.path.dirname(sys.path[0])
+    if cmd == 'approve' and a[:1] == ('--from-transcript',) and len(a) == 2 and i in IDS:
+        hit = find_approval(a[1], phrase(i))
+        if not hit: return print(f'refused: no typed user message equal to {phrase(i)!r} in a ~/.claude*/projects transcript', file=sys.stderr) or 2
+        d[i] = dict(zip(('transcript', 'line', 'line_sha256'), hit), id=i, phrase=phrase(i), approved_at=int(time.time()), revoked_at=None)
+    elif cmd == 'set-amendment' and live and len(a) == 1:  # full commit sha that edits CLAUDE.md and carries MARK
+        if not (re.fullmatch('[0-9a-f]{40}', a[0]) and 'CLAUDE.md' in git(repo, 'diff-tree', '--root', '--name-only', '-r', a[0]).stdout.split()
+                and MARK in git(repo, 'show', f'{a[0]}:CLAUDE.md').stdout): return print('refused: not an amendment commit', file=sys.stderr) or 2
+        d[i]['amendment_commit'] = a[0]
     elif cmd == 'revoke' and i in d: d[i]['revoked_at'] = int(time.time())
-    elif cmd in ('approved', 'amendment') and not live: return 1
-    elif cmd == 'approved': return 0
-    elif cmd == 'amendment' and len(a) == 1:
-        why = amendment(d[i].get('amendment_commit'), a[0]); return print(why, end='') or 1 if why else 0
-    elif cmd == 'list': return print(json.dumps(d, indent=1, sort_keys=True)) or 0
-    else: return print('usage: diskm policy approve <id> --phrase <text> --from-transcript <jsonl> | set-amendment <id> <sha> | revoke <id> | list', file=sys.stderr) or 2
+    elif cmd == 'approved': return 0 if live else 1
+    elif cmd == 'amendment' and len(a) == 1:  # only reached after decision_approved
+        why = amendment(d[i].get('amendment_commit'), a[0]) if live else 'decision_missing'; return print(why, end='') or 1 if why else 0
+    elif cmd == 'list': return print(json.dumps({'phrases': {k: phrase(k) for k in IDS}, 'decisions': d}, indent=1, sort_keys=True)) or 0
+    else: return print(USAGE, file=sys.stderr) or 2
     os.makedirs(os.path.dirname(PATH), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(PATH), prefix='.policy-')
     with os.fdopen(fd, 'w') as f: json.dump(d, f, indent=1, sort_keys=True); f.write('\n')

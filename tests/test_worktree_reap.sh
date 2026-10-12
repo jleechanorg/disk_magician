@@ -123,11 +123,16 @@ park() {
  [[ ! -d "$WT" ]] || git -C "$TMP/repo" worktree move "$WT" "$TMP/parked/c$N" 2>/dev/null || true
 }
 if [[ ! -f "$SCRIPT" ]]; then bash "$SCRIPT"; echo 'RED: scripts/worktree_reap.sh missing'; exit 1; fi
+# removal_activation_ok is covered by test_removal_activation.sh; here it is a switch file.
+cp -R "$ROOT/scripts" "$TMP/root-scripts"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
+echo 'removal_activation_ok() { [[ -f "$DISK_MAGICIAN_STATE_DIR/test_gate_open" ]] || { echo activation_blocked:test; return 1; }; }' > "$TMP/root-scripts/lib/removal_activation.sh"
 new; rm "$LF"; run; check 'unleased adopts null owner' test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True
 new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive unchanged' sentinel; check 'alive present' test -d "$WT"; park
 new; run; verdict 'dead nominate' remove; check 'nominate retains' test -d "$WT"; park
 new; run --mode remove; verdict 'unapproved records verdict' remove; check 'unapproved message' grep -q 'remove mode not approved' "$TMP/run.log"; check 'unapproved retains' test -d "$WT"; park
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"; touch "$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
+new; run --mode remove; check 'legacy marker, gate closed: nominate only' grep -q 'remove mode not approved' "$TMP/run.log"; check 'legacy marker alone retains' test -d "$WT"; park
+touch "$DISK_MAGICIAN_STATE_DIR/test_gate_open"
 new; run --mode remove; check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
