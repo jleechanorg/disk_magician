@@ -7,7 +7,7 @@ _AV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$_AV_DIR/worktree_ignored.sh"
 # shellcheck source=scripts/worktree_remove_hook.sh
-source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state, wrh_live_cwd_reason, lease lib
+source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
 # shellcheck source=scripts/lib/scratch_roots.sh
 source "$_AV_DIR/scratch_roots.sh"
 
@@ -108,8 +108,7 @@ c14_repos_ok() {
 }
 
 # c14_ephemeral_retention <canonical path>: minutes of the declared-ephemeral row E2-E7
-# it matches (spec §7.2; the longest when several do), rc 1 for none. Fixed floors: a
-# sweeper configured lower does not lower them. E1 (archive entries) is not a row here.
+# it matches (§7.2; longest wins), rc 1 for none. Fixed floors; E1 is not a row here.
 c14_ephemeral_retention() {
     local p=$1 r rel
     while IFS= read -r r; do
@@ -127,20 +126,16 @@ c14_ephemeral_retention() {
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
-
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() (
     set -o pipefail
     find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'
 )
-
-# _av_open_file <path>: rc 0 when lsof prints anything, an open non-cwd descriptor under
-# <path> or an error (fail closed); nothing open prints nothing.
+# _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() {
     local d=() && [[ -d "$1" ]] && d=(+D)
     [[ -n "$(lsof -w -n -P -Fn -a -d '^cwd' ${d[@]+"${d[@]}"} "$1" 2>&1)" ]]
 }
-
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
 _av_secret_like() {
     local out
@@ -150,17 +145,6 @@ _av_secret_like() {
         -print 2>/dev/null)" || return 0
     [[ -n "$out" ]]
 }
-
-# _av_lease_kept <path>: print kept:<reason> (rc 0) when <path> has a lease whose owner is
-# alive, unknown, unreadable or absent; rc 1 when there is no lease or it is dead/released.
-_av_lease_kept() {
-    local lease
-    lease="$(lease_path_for "$1")" || { echo kept:check-failed; return 0; }
-    [[ -e "$lease" ]] || return 1
-    case "$(lease_owner_state "$lease")" in
-        dead|released) return 1 ;; alive*) echo kept:live-owner ;; *) echo kept:owner-unknown ;; esac
-}
-
 # _av_lease_scope <path>: NUL-list <path>, its ancestors below its scratch root (else
 # $HOME, else /) and every repository under it; rc 1 when discovery is incomplete.
 _av_lease_scope() {
@@ -172,18 +156,17 @@ _av_lease_scope() {
     [[ ! -d "$1" ]] || c14_discover_repos "$1"
 }
 
-# artifact_removal_verdict <path> [--kind os_clone|rebuildable|ephemeral] | --self-test
-# Every-kind checks, then the git rules and provenance (c) for --kind ephemeral; the
-# manifest, rebuildable and os_clone proofs are not here yet, so those keep.
-artifact_removal_verdict() (
+# artifact_removal_verdict <path> [...] | --self-test
+artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p kind='' q done='' st newest ret
+    local p kind='' q done='' st newest ret  # --kind ephemeral adds provenance (c); others keep
     [[ "${2:-}" == --kind ]] && kind=${3:-}
     p=${1%/} && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
-    while IFS= read -r -d '' q; do
+    while IFS= read -r -d '' q; do  # a lease not dead or released keeps
         [[ "$q" == OK ]] && { done=1; continue; }
-        st="$(_av_lease_kept "$q")" && { echo "$st"; return 0; }
+        q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
+        [[ -e "$q" ]] && case "$(lease_owner_state "$q")" in dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
     done < <(_av_lease_scope "$p" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"
@@ -196,6 +179,6 @@ artifact_removal_verdict() (
     [[ "$kind" == ephemeral ]] && ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
     (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
     echo remove
-)
+}
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then artifact_removal_verdict "$@"; fi
