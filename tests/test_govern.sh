@@ -21,6 +21,9 @@ trap 'chmod -R u+w "$T" 2>/dev/null; rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 export DISK_MAGICIAN_DF_BIN="$T/bin/df"
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl"
+# Confine the tick's birth audit (Task 9) to empty temp roots.
+export HOME="$T/home" TMPDIR="$T/tdir" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T/ptmp"
+mkdir -p "$HOME" "$TMPDIR" "$T/ptmp"
 KICKS="$T/kicks.log"
 
 fake_df() {  # fake_df <free_gib> | fake_df fail
@@ -61,6 +64,19 @@ python3 -c 'import json,os,sys;d=json.load(open(os.environ["DISK_MAGICIAN_STATE_
   && ok "zone_at fresh" || bad "zone_at not fresh"
 assert_eq "$(budget classes)" "{'worktrees': {'used_gb': 1}}" "existing classes key kept"
 assert_eq "$(kicks)" 0 "GREEN never kickstarts"
+
+echo "== 1b. tick keeps a per-day minimum of used bytes (C12 trough baseline), 31 days max"
+fresh_state daily; fake_df 150   # fake df reports Used=1 KiB
+python3 -c 'import json,os,time
+d={time.strftime("%Y-%m-%d",time.localtime(time.time()-i*86400)):10**15 for i in range(1,40)}
+d[time.strftime("%Y-%m-%d")]=5
+json.dump(dict(daily_min_used=d),open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json","w"))'
+"$DISKM" govern --mode observe >/dev/null 2>&1
+dm() { python3 -c 'import json,os,sys,time;m=json.load(open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json"))["daily_min_used"];print(len(m),m[time.strftime("%Y-%m-%d")])'; }
+assert_eq "$(dm)" "31 5" "lower same-day minimum kept, history pruned to 31 days"
+python3 -c 'import json,os,time;p=os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json";b=json.load(open(p));b["daily_min_used"][time.strftime("%Y-%m-%d")]=10**15;json.dump(b,open(p,"w"))'
+"$DISKM" govern --mode observe >/dev/null 2>&1
+assert_eq "$(dm)" "31 1024" "higher same-day value replaced by the df used bytes"
 
 echo "== 2. BLACK with no artifact_verdict.sh in the running tree: kickstart blocked"
 fresh_state black_missing; fake_df 25

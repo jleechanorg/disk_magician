@@ -17,6 +17,10 @@ def decide(stage, free_gb, est_gb, margin_gb, over_budget, d2):
     if z in EMERGENCY or z == "GREEN" or stage == "observe":
         return z, (EMERGENCY[z] if d2 else 10) if z in EMERGENCY else 0
     return z, 75 if z == "RED" and stage != "warn" or over_budget and stage == "refuse_orange" else 10
+def daily_min_used(state, now, used):  # C12 trough baseline: per-day minimum used bytes, last 31 days (observer files rotate out after ~7-11)
+    try: m = {k: v for k, v in json.loads((state / "budget.json").read_text())["daily_min_used"].items() if type(v) is int}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError): m = {}
+    return dict(sorted({**m, (d := time.strftime("%Y-%m-%d", time.localtime(now))): min(used, m.get(d, used))}.items())[-31:])
 def state_update(state, keys, events=()):  # under state.lock: reread, merge only our keys, atomic replace
     with open(state / "state.lock", "a") as lock, open(state / "admission" / "events.jsonl", "a") as log:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -36,7 +40,7 @@ def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kic
             out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
             now, free = time.time(), int(out.splitlines()[-1].split()[3]) * 1024
-            state_update(state, dict(zone=(z := zone(free / GIB)), zone_at=now, free_bytes=free),
+            state_update(state, dict(zone=(z := zone(free / GIB)), zone_at=now, free_bytes=free, daily_min_used=daily_min_used(state, now, int(out.splitlines()[-1].split()[2]) * 1024)),
                          [dict(event="floor_breach", at=now, df_free_bytes=free)] if z == "FLOOR" else [])
             if z in EMERGENCY:  # artifact_verdict.sh is absent until Task 11, so this stays blocked
                 lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
@@ -47,6 +51,8 @@ def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kic
                 state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 else "kickstart_blocked:c14_missing"),
                                               at=time.time(), zone=z, rc=kick if c14 else None)])
                 print(ev)
+            try: subprocess.run(["bash", str(Path(__file__).resolve().parent / "birth_audit.sh")], stdout=subprocess.DEVNULL, timeout=150)
+            except subprocess.TimeoutExpired: print("birth_audit_timeout", file=sys.stderr)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or 0
@@ -74,7 +80,7 @@ def admit(a, budgets, state, now, d2):
         decision = EMERGENCY[z] if z and d2 else 10
     event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
                  zone=z, df_free_bytes=free, degraded=degraded, **{"class": a.cls}, **{k: getattr(a, k) for k in
-                 ("producer", "source", "dest", "ci_job", "tool_use_id")})
+                 ("producer", "source", "dest", "ci_job", "tool_use_id", "compound")})
     try:
         if not a.dry_run:
             with open(state / "admission" / "events.jsonl", "a") as log: log.write(json.dumps(event) + "\n")
@@ -105,7 +111,7 @@ def main():
     p, budgets = argparse.ArgumentParser(prog="diskm admit"), json.loads(Path(resolve_config.resolve()).read_text()).get("budgets") or tmpl
     for flag in ("--producer", "--dest", "--source", "--ci-job", "--tool-use-id"): p.add_argument(flag)
     p.add_argument("--class", dest="cls", choices=sorted((budgets if isinstance(budgets, dict) else {}).get("classes") or tmpl["classes"]))
-    p.add_argument("--est-gb", type=est_gb)
+    p.add_argument("--est-gb", type=est_gb); p.add_argument("--compound", action="store_true")
     mode = p.add_mutually_exclusive_group()
     for flag in ("--dry-run", "--probe"): mode.add_argument(flag, action="store_true")
     for flag in ("--confirm", "--confirm-tool-use"): mode.add_argument(flag)
