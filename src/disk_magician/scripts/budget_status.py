@@ -26,8 +26,7 @@ def window_max(points, width=600):  # max sum of (t, bytes) inside any [t, t + w
     pts = sorted(points)
     return max((sum(b for u, b in pts[i:] if u < t + width) for i, (t, _) in enumerate(pts)), default=0)
 def daily_mins(s, now, n):  # daily minimum used for each of the last n days that has samples
-    days = [min((u for t, u, _ in s if now - (n - d) * DAY <= t < now - (n - d - 1) * DAY), default=None) for d in range(n)]
-    return [d for d in days if d is not None]
+    return [m for d in range(n) if (m := min((u for t, u, _ in s if now - (n - d) * DAY <= t < now - (n - d - 1) * DAY), default=None)) is not None]
 def raised(lines): return any(line.startswith("ALERT:") for line in lines)
 def alerts(state, now, margin_gb=None):
     if margin_gb is None:
