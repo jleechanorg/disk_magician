@@ -299,6 +299,76 @@ lease_set_verdict "$L9" "kept:dirty"
 assert_eq "$(lease_field "$L9" 'd["last_verdict"]')" "kept:dirty" "last_verdict updated"
 assert_eq "$(lease_field "$L9" 'd["last_checked_at"] is not None')" "True" "last_checked_at set"
 
+echo "== lease kind and provenance fields (governor C3, part 1) =="
+PROV="$TMPROOT/prov"; mkdir -p "$PROV"
+printf '[{"path": "a.txt", "sha256": "%s"}]\n' "$(printf a | shasum -a 256 | cut -c1-64)" > "$PROV/inv.json"
+cat > "$PROV/upload.json" <<'EOJ'
+[{"path": "a.txt", "sha256": "ca978112", "md5": "0cc175b9", "crc32c": "6sRbVQ==", "size": 1,
+  "object": "gs://b/a.txt", "generation": "1760000000000001"}]
+EOJ
+cat > "$PROV/upload_bad.json" <<'EOJ'
+[{"path": "a.txt", "sha256": "ca978112", "crc32c": "6sRbVQ==", "size": 1, "object": "gs://b/a.txt", "generation": "1"}]
+EOJ
+printf '{"head": "abc123", "refs": {"refs/heads/x": "abc123"}}\n' > "$PROV/gitmeta.json"
+WTS="$(mk_wt wt_scratch)"
+if lease_write "$WTS" --kind scratch --producer gate-prep --source 'git:https://example.com/r.git@abc123' --manifest "$PROV/inv.json"; then
+    ok "provenance lease_write rc 0"
+else
+    bad "provenance lease_write failed"
+fi
+LS="$(lease_path_for "$WTS")"
+assert_eq "$(lease_field "$LS" 'd["kind"]')" "scratch" "kind round-trips"
+assert_eq "$(lease_field "$LS" 'd["producer"]')" "gate-prep" "producer round-trips"
+assert_eq "$(lease_field "$LS" 'd["source"]')" "git:https://example.com/r.git@abc123" "source round-trips"
+assert_eq "$(lease_field "$LS" 'd["manifest"][0]["path"]')" "a.txt" "manifest stored as inventory"
+assert_eq "$(lease_field "$LS" 'd["published"]')" "False" "manifest alone never sets published"
+assert_eq "$(lease_field "$LS" 'd["verified_at"] is None and d["published_url"] is None')" "True" "manifest alone sets no publication fields"
+assert_eq "$(lease_kind "$LS")" "scratch" "lease_kind reads kind"
+
+assert_eq "$(lease_field "$L1" 'd.get("kind")')" "worktree" "no --kind -> worktree"
+assert_eq "$(lease_field "$L1" 'd.get("producer") is None and d.get("source") is None')" "True" "no --kind -> no provenance"
+LOLD="$TMPROOT/old_lease.json"
+printf '{"schema_version": 1, "path": "/x", "owner": null}\n' > "$LOLD"
+assert_eq "$(lease_kind "$LOLD")" "worktree" "pre-existing lease without kind reads worktree"
+printf 'not json' > "$TMPROOT/garbage_lease.json"
+assert_eq "$(lease_kind "$TMPROOT/garbage_lease.json")" "unreadable" "unreadable lease kind"
+
+WTB="$(mk_wt wt_bad)"
+LB="$(lease_path_for "$WTB")"
+lease_write "$WTB" --kind bogus >/dev/null 2>&1; assert_eq "$?" "2" "--kind bogus -> rc 2"
+[[ -e "$LB" ]] && bad "--kind bogus wrote a lease" || ok "--kind bogus wrote nothing"
+lease_write "$WTB" --frobnicate x >/dev/null 2>&1; assert_eq "$?" "2" "unknown option -> rc 2"
+lease_write "$WTB" --published https://x/y >/dev/null 2>&1; assert_eq "$?" "2" "--published without manifest or verified-at -> rc 2"
+lease_write "$WTB" --published https://x/y --upload-manifest "$PROV/upload.json" >/dev/null 2>&1
+assert_eq "$?" "2" "--published without --verified-at -> rc 2"
+lease_write "$WTB" --published https://x/y --verified-at 2026-10-12T00:00:00Z >/dev/null 2>&1
+assert_eq "$?" "2" "--published without --upload-manifest -> rc 2"
+lease_write "$WTB" --published https://x/y --upload-manifest "$PROV/upload_bad.json" --verified-at 2026-10-12T00:00:00Z >/dev/null 2>&1
+assert_eq "$?" "2" "upload manifest entry missing md5 -> rc 2"
+lease_write "$WTB" --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z >/dev/null 2>&1
+assert_eq "$?" "2" "upload manifest without --published -> rc 2"
+lease_write "$WTB" --manifest "$PROV/missing.json" >/dev/null 2>&1; assert_eq "$?" "2" "unreadable manifest -> rc 2"
+[[ -e "$LB" ]] && bad "a refused write left a lease" || ok "refused writes leave no lease"
+
+WTE="$(mk_wt wt_evidence)"
+if lease_write "$WTE" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
+    --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z --git-meta "$PROV/gitmeta.json"; then
+    ok "published lease_write rc 0"
+else
+    bad "published lease_write failed"
+fi
+LE="$(lease_path_for "$WTE")"
+assert_eq "$(lease_field "$LE" 'd["repo"]')" "myrepo" "positional args still honoured with options"
+assert_eq "$(lease_field "$LE" 'd["kind"]')" "evidence" "evidence kind"
+assert_eq "$(lease_field "$LE" 'd["published"]')" "True" "published set"
+assert_eq "$(lease_field "$LE" 'd["published_url"]')" "gs://b/run1" "published_url"
+assert_eq "$(lease_field "$LE" 'd["verified_at"]')" "2026-10-12T00:00:00Z" "verified_at"
+assert_eq "$(lease_field "$LE" 'd["published_at"] is not None')" "True" "published_at set"
+assert_eq "$(lease_field "$LE" 'sorted(d["upload_manifest"][0])')" "['crc32c', 'generation', 'md5', 'object', 'path', 'sha256', 'size']" "upload manifest fields per file"
+assert_eq "$(lease_field "$LE" 'd["git_meta"]["head"]')" "abc123" "git metadata baseline stored"
+lease_set_verdict "$LE" "kept:test"
+assert_eq "$(lease_field "$LE" 'd["kind"] + str(d["published"])')" "evidenceTrue" "provenance survives verdict update"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
