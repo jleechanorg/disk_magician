@@ -162,6 +162,11 @@ expire() { git -C "$TMPROOT/$1" reflog expire --expire=now --all; }
 mkpushed ctl
 assert_eq "$(pushed ctl)" ok "pushed clean clone with baseline"
 assert_eq "$(c14_repo_pushed_ok "$TMPROOT/ctl")" ok "c14_repo_pushed_ok on pushed clean clone"
+mkdir -p "$TMPROOT/no-remote" && mkrepo "$TMPROOT/no-remote" && baseline "$TMPROOT/no-remote"
+err="$TMPROOT/no-remote.stderr"
+v="$(c14_repo_pushed_ok "$TMPROOT/no-remote" 2>"$err")"
+[[ "$v" == kept:* ]] && ok "no-remote repository returns a kept verdict under nounset ($v)" || bad "no-remote repository returned an empty/non-kept verdict under nounset: '$v'"
+[[ ! -s "$err" ]] && ok "no-remote repository has no nounset diagnostic" || bad "no-remote repository emitted a nounset diagnostic: $(cat "$err")"
 mkpushed headx && unpushed_commit headx X
 assert_eq "$(pushed headx)" kept:not-pushed "HEAD not on remote"
 mkpushed reflog && unpushed_commit reflog X && git -C "$TMPROOT/reflog" reset -q --hard origin/main
