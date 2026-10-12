@@ -34,9 +34,16 @@ c14_discover_repos() {
 }
 
 # c14_repo_content_ok <repo>: print `ok` (rc 0) or `kept:<reason>` (rc 1).
-c14_repo_content_ok() {
+# Caller git env is dropped, and git must resolve <repo> itself: a broken
+# .git (no HEAD, empty dir) makes git walk up to an ancestor repository.
+c14_repo_content_ok() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     local r=$1 st flags
-    [[ "$(git -C "$r" rev-parse --is-bare-repository 2>/dev/null)" == true ]] && { echo ok; return 0; }
+    case "$(git -C "$r" rev-parse --is-bare-repository 2>/dev/null)" in
+        true) [[ "$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" == "$r" ]] && { echo ok; return 0; } ;;
+        false) [[ "$(git -C "$r" rev-parse --show-toplevel 2>/dev/null)" == "$r" ]] ;;
+        *) false ;;
+    esac || { echo kept:check-failed; return 1; }
     if ! st="$(git -C "$r" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" ||
         ! flags="$(git -C "$r" ls-files -v 2>/dev/null)"; then
         echo kept:check-failed; return 1
@@ -48,7 +55,7 @@ c14_repo_content_ok() {
     has_hidden_state "$r" && { echo kept:secret-like; return 1; }
     has_ignored_user_data "$r" && { echo kept:ignored-data; return 1; }
     echo ok
-}
+)
 
 # c14_repos_ok <root> [--outer-certificate <receipt>]: discovery plus the
 # content checks of every repository found; prints `ok` or the first kept

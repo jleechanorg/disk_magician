@@ -100,6 +100,23 @@ mkrepo "$TMPROOT/wtsrc" && git -C "$TMPROOT/wtsrc" worktree add -q "$TMPROOT/wtr
 found="$(c14_discover_repos "$TMPROOT/wtroot" | tr '\0' '\n')"
 assert_eq "$found" "$TMPROOT/wtroot/linked" ".git file (linked worktree) found"
 
+echo "== git must resolve the discovered repository =="
+# W tracks sub/t; sub/.git holds an unpushed commit but lost its HEAD, so a
+# bare `git -C W/sub` walks up and checks clean W instead.
+mkrepo "$TMPROOT/headless" && mkdir -p "$TMPROOT/headless/sub" && printf 't\n' >"$TMPROOT/headless/sub/t"
+git -C "$TMPROOT/headless" add sub/t && git -C "$TMPROOT/headless" commit -qm sub
+git -C "$TMPROOT/headless/sub" init -q -b main && git -C "$TMPROOT/headless/sub" commit -q --allow-empty -m unpushed
+rm "$TMPROOT/headless/sub/.git/HEAD"
+assert_eq "$(c14_repos_ok "$TMPROOT/headless")" kept:check-failed "HEAD-less nested repo is not checked as its ancestor"
+mkrepo "$TMPROOT/emptygit" && mkdir -p "$TMPROOT/emptygit/sub/.git" && printf 't\n' >"$TMPROOT/emptygit/sub/t"
+git -C "$TMPROOT/emptygit" add sub/t && git -C "$TMPROOT/emptygit" commit -qm sub
+assert_eq "$(content "$TMPROOT/emptygit/sub")" kept:check-failed "empty .git dir resolves elsewhere"
+mkrepo "$TMPROOT/envdirty" && printf 'edit\n' >>"$TMPROOT/envdirty/tracked.txt"
+assert_eq "$(export GIT_DIR="$TMPROOT/clean/.git" GIT_WORK_TREE="$TMPROOT/clean"; content "$TMPROOT/envdirty")" \
+    kept:dirty "exported GIT_DIR/GIT_WORK_TREE do not redirect the check"
+assert_eq "$(export GIT_DIR="$TMPROOT/clean/.git"; c14_repos_ok "$TMPROOT/plain")" kept:dirty \
+    "exported GIT_DIR does not hide a nested dirty repo"
+
 echo "== newline in a directory name =="
 mkdir -p "$TMPROOT/cwd"
 mkrepo "$TMPROOT/cwd/bar/r"
