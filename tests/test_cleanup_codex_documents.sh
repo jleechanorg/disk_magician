@@ -24,6 +24,8 @@ trap cleanup EXIT
 
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
 PASS=0
 FAIL=0
@@ -79,6 +81,9 @@ mktask $D_OLD t-secret;       clone_into $D_OLD t-secret;       echo S=1 >"$CODE
 mktask $D_OLD t-ignored-data; clone_into $D_OLD t-ignored-data
 printf 'data/\n' >>"$CODEX/$D_OLD/t-ignored-data/repo/.git/info/exclude"
 mkdir "$CODEX/$D_OLD/t-ignored-data/repo/data"; echo d >"$CODEX/$D_OLD/t-ignored-data/repo/data/db.sqlite"; age "$CODEX/$D_OLD/t-ignored-data"
+mktask $D_OLD t-rebuildable; clone_into $D_OLD t-rebuildable
+printf 'test-results/\n' >>"$CODEX/$D_OLD/t-rebuildable/repo/.git/info/exclude"
+mkdir "$CODEX/$D_OLD/t-rebuildable/repo/test-results"; echo generated >"$CODEX/$D_OLD/t-rebuildable/repo/test-results/results.xml"; age "$CODEX/$D_OLD/t-rebuildable"
 mktask $D_OLD t-live;         clone_into $D_OLD t-live;         age "$CODEX/$D_OLD/t-live"
 ( cd "$CODEX/$D_OLD/t-live/repo" && exec sleep 300 ) & SLEEPERS+=("$!")
 mktask $D_OLD t-scratch;      mkdir -p "$CODEX/$D_OLD/t-scratch/advice-results"; echo r >"$CODEX/$D_OLD/t-scratch/advice-results/r.md"; age "$CODEX/$D_OLD/t-scratch"
@@ -146,6 +151,7 @@ assert_exists  "untracked file kept" "$CODEX/$D_OLD/t-untracked"
 assert_exists  "unpushed commits kept" "$CODEX/$D_OLD/t-unpushed"
 assert_exists  "ignored .env kept" "$CODEX/$D_OLD/t-secret"
 assert_exists  "ignored user data kept" "$CODEX/$D_OLD/t-ignored-data"
+assert_missing "current-base rebuildable test-results removed" "$CODEX/$D_OLD/t-rebuildable"
 assert_exists  "live cwd process kept" "$CODEX/$D_OLD/t-live"
 assert_missing "non-git old scratch removed" "$CODEX/$D_OLD/t-scratch"
 assert_exists  "safety never_delete kept" "$CODEX/$D_OLD/t-protected"
@@ -185,6 +191,42 @@ bash "$REPO_ROOT/disk_magician.sh" cleanup-codex-documents >"$O4" 2>&1 || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T4: dispatch exits 0" || record_fail "T4: dispatch exits 0" "rc=$RC"
 assert_contains "T4: dry-run banner" "DRY RUN" "$(cat "$O4")"
 assert_contains "T4: help lists command" "cleanup-codex-documents" "$(bash "$REPO_ROOT/disk_magician.sh" help 2>&1 || true)"
+
+echo "T5: inherited Git variables are scrubbed and an unreadable worktree path fails closed"
+mktask $D_OLD t-poisoned-env; clone_into $D_OLD t-poisoned-env; age "$CODEX/$D_OLD/t-poisoned-env"
+mktask $D_OLD t-path-unreadable
+git -C "$MAIN" worktree add -q --detach "$CODEX/$D_OLD/t-path-unreadable/wt" origin/main
+age "$CODEX/$D_OLD/t-path-unreadable"
+POISON="$TMP_ROOT/poison"
+git clone -q "$ORIGIN" "$POISON"
+echo dirty >>"$POISON/a.txt"
+pwd() {
+  local physical
+  physical="$(builtin pwd -P)"
+  case "$physical" in
+    */t-path-unreadable/wt) return 1 ;;
+    *) printf '%s\n' "$physical" ;;
+  esac
+}
+export -f pwd
+O5="$TMP_ROOT/o5"; RC=0
+GIT_DIR="$POISON/.git" GIT_WORK_TREE="$POISON" GIT_INDEX_FILE="$POISON/.git/index" \
+  run_sweeper "$O5" --clean || RC=$?
+unset -f pwd
+[[ "$RC" -eq 0 ]] && record_pass "T5: exits 0" || { record_fail "T5: exits 0" "rc=$RC"; cat "$O5"; }
+assert_missing "T5: eligible task removed despite poisoned Git environment" "$CODEX/$D_OLD/t-poisoned-env"
+assert_contains "T5: caller repository remains untouched" "dirty" "$(tail -n 1 "$POISON/a.txt")"
+assert_exists "T5: linked worktree with unreadable physical path is kept" "$CODEX/$D_OLD/t-path-unreadable"
+assert_contains "T5: reports unreadable worktree path" "worktree-path-unreadable" "$(cat "$O5")"
+
+echo "T6: failed removal is kept and does not abort the sweep"
+mktask $D_OLD t-rm-fail; age "$CODEX/$D_OLD/t-rm-fail"
+chmod 500 "$CODEX/$D_OLD/t-rm-fail"
+O6="$TMP_ROOT/o6"; RC=0; run_sweeper "$O6" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T6: exits 0" || { record_fail "T6: exits 0" "rc=$RC"; cat "$O6"; }
+assert_exists "T6: task remains after rm failure" "$CODEX/$D_OLD/t-rm-fail"
+assert_contains "T6: reports fail-closed reason" "KEEP [rm-failed]" "$(cat "$O6")"
+chmod 700 "$CODEX/$D_OLD/t-rm-fail"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

@@ -17,6 +17,8 @@
 #
 # Usage: cleanup_codex_documents.sh [--clean]   (default is DRY RUN)
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/safety_lib.sh
@@ -151,7 +153,7 @@ check_repos() {
         "$task"/*) continue ;;
       esac
       wts="$(git --git-dir="$common" worktree list --porcelain 2>/dev/null)" || { REPO_REASON="worktree-list-failed:$repo"; return; }
-      self="$(abs_dir "$repo")"
+      self="$(abs_dir "$repo")" || { REPO_REASON="worktree-path-unreadable:$repo"; return; }
       blk="$(awk -v p="$self" 'BEGIN{RS="";FS="\n"} {for(i=1;i<=NF;i++) if($i=="worktree " p){print; exit}}' <<<"$wts")"
       [[ -n "$blk" ]] || { REPO_REASON="worktree-unregistered:$repo"; return; }
       if grep -q '^locked' <<<"$blk"; then REPO_REASON="worktree-locked:$repo"; return; fi
@@ -204,7 +206,10 @@ process_task() {
       fi
     done <<<"$WT_REMOVALS"
     log "Removing $task (${kb} KB)"
-    rm -rf "$task"
+    if ! rm -rf "$task"; then
+      keep "rm-failed" "$task"
+      return
+    fi
     if [[ -e "$task" ]]; then keep "rm-incomplete" "$task"; return; fi
     deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
   fi
