@@ -21,6 +21,9 @@ trap 'chmod -R u+w "$T" 2>/dev/null; rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 export DISK_MAGICIAN_DF_BIN="$T/bin/df"
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl"
+# Confine the tick's birth audit (Task 9) to empty temp roots.
+export HOME="$T/home" TMPDIR="$T/tdir" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T/ptmp"
+mkdir -p "$HOME" "$TMPDIR" "$T/ptmp"
 KICKS="$T/kicks.log"
 
 fake_df() {  # fake_df <free_gib> | fake_df fail

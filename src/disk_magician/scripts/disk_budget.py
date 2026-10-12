@@ -47,6 +47,8 @@ def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kic
                 state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 else "kickstart_blocked:c14_missing"),
                                               at=time.time(), zone=z, rc=kick if c14 else None)])
                 print(ev)
+            try: subprocess.run(["bash", str(Path(__file__).resolve().parent / "birth_audit.sh")], stdout=subprocess.DEVNULL, timeout=150)
+            except subprocess.TimeoutExpired: print("birth_audit_timeout", file=sys.stderr)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or 0
