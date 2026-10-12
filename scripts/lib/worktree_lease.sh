@@ -165,10 +165,28 @@ PY
 # _lease_write_json <lease_file> <pydict-args...> is not used; writes go
 # through inline python below for atomicity (mktemp sibling + os.replace).
 
-# lease_write <worktree_path> <repo> <branch> <creator> — atomic lease write
-# with the owner resolved from $$.
+# lease_write <worktree_path> [<repo> <branch> <creator>] [--kind K]
+#   [--producer P] [--source S] [--manifest F] [--git-meta F]
+#   [--published URL --upload-manifest F --verified-at TS]
+# Atomic lease write with the owner resolved from $$. Kinds: worktree (default),
+# clone, scratch, evidence. --manifest is an inventory only; publication needs
+# all three --published flags. rc 2 on invalid options (nothing written).
 lease_write() {
-    local wt="$1" repo="${2:-}" branch="${3:-}" creator="${4:-}"
+    local wt="$1"; shift
+    local -a pos=() prov=("" "" "" "" "" "" "" "")
+    while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
+    local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
+    while [[ $# -gt 0 ]]; do
+        [[ $# -ge 2 ]] || return 2
+        case "$1" in
+            --kind) prov[0]="$2" ;; --producer) prov[1]="$2" ;;
+            --source) prov[2]="$2" ;; --manifest) prov[3]="$2" ;;
+            --git-meta) prov[4]="$2" ;; --published) prov[5]="$2" ;;
+            --upload-manifest) prov[6]="$2" ;; --verified-at) prov[7]="$2" ;;
+            *) return 2 ;;
+        esac
+        shift 2
+    done
     local tsv pid ep comm admin_id admin_birth lease ttl
     tsv="$(lease_resolve_owner)"
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
@@ -177,7 +195,20 @@ lease_write() {
     mkdir -p "$(lease_dir)" 2>/dev/null || return 1
     ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
     _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl"
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}"
+}
+
+# lease_kind <lease_file> — kind, "worktree" for leases written before kinds
+# existed, "unreadable" when the file cannot be parsed.
+lease_kind() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("kind") or "worktree")
+except Exception:
+    print("unreadable")
+PY
 }
 
 # lease_write_pending <target_path> <owner_tsv> — pre-creation lease written
@@ -207,11 +238,30 @@ _lease_emit_json() {
     local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
     local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
     python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" <<'PY'
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${@:13}" <<'PY'
 import json, os, sys, tempfile
 from datetime import datetime, timezone
 (lease, wt, repo, branch, creator, pending, pid, ep, comm,
  admin_id, admin_birth, ttl) = sys.argv[1:13]
+(kind, producer, source, manifest, git_meta, pub_url, upload, verified_at) = (
+    sys.argv[13:21] + [""] * 8)[:8]
+UPLOAD_KEYS = {"path", "sha256", "md5", "crc32c", "size", "object", "generation"}
+def load(p):
+    if not p:
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        sys.exit(2)
+if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence"):
+    sys.exit(2)
+if bool(pub_url) != bool(upload) or bool(pub_url) != bool(verified_at):
+    sys.exit(2)
+upload_manifest = load(upload)
+if upload and not (isinstance(upload_manifest, list) and upload_manifest and all(
+        isinstance(e, dict) and UPLOAD_KEYS <= set(e) for e in upload_manifest)):
+    sys.exit(2)
 owner = None
 if pid not in ("-", ""):
     try:
@@ -235,6 +285,16 @@ d = {
     "released_at": None,
     "last_verdict": None,
     "last_checked_at": None,
+    "kind": kind or "worktree",
+    "producer": producer or None,
+    "source": source or None,
+    "manifest": load(manifest),
+    "git_meta": load(git_meta),
+    "published": bool(pub_url),
+    "published_at": now.isoformat() if pub_url else None,
+    "published_url": pub_url or None,
+    "verified_at": verified_at or None,
+    "upload_manifest": upload_manifest,
 }
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".lease-", suffix=".json")
 try:
