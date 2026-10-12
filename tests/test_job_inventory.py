@@ -46,6 +46,7 @@ class JobInventoryTests(unittest.TestCase):
             "com.jleechanorg.disk-magician-drilldown",
             "com.jleechanorg.disk-magician-frontier-nightly",
             "com.jleechanorg.disk-magician-frontier-root",
+            "com.jleechanorg.disk-magician-govern",
             "com.jleechanorg.disk-magician-main-sweeper",
             "com.jleechanorg.disk-magician-observer",
             "com.jleechanorg.disk-magician-pressure-sweep",
