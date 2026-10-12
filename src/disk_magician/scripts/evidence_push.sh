@@ -3,12 +3,14 @@
 # (spec D8): gcloud storage rsync -r <dir> $EVIDENCE_GCS_PREFIX/<repo>/<slug>/
 #
 # Usage: evidence_push.sh <dir> --repo <repo> --slug <slug>
-# Exit: 0 uploaded, 1 usage/gcloud error, 2 source outside the evidence tmp
-#       root, 3 secret-shaped file present (nothing uploaded).
+# Exit: 0 uploaded and verified (lease marked published), 1 usage/gcloud error,
+#       2 source outside the evidence tmp root, 3 secret-shaped file present
+#       (nothing uploaded), 4 uploaded but not every object verified (spec C3).
 set -euo pipefail
 
 # shellcheck source=scripts/lib/layout_standard.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/lib/layout_standard.sh"
 
 die() { echo "evidence-push: $2" >&2; exit "$1"; }
 
@@ -68,8 +70,22 @@ fi
 command -v gcloud >/dev/null 2>&1 || die 1 "gcloud not found on PATH"
 
 dest="${EVIDENCE_GCS_PREFIX%/}/$repo/$slug/"
+pre="$(mktemp)" post="$(mktemp)"
+trap 'rm -f "$pre" "$post"' EXIT
+# Hash before uploading so the manifest describes the bytes the remote holds.
+python3 "$here/evidence_manifest.py" hash "$real_src" > "$pre" || die 1 "pre-upload hashing failed"
 gcloud storage rsync -r "$real_src" "$dest" || die 1 "gcloud storage rsync failed"
 
 browse="${dest#gs://}"
 echo "$dest"
 echo "https://console.cloud.google.com/storage/browser/${browse%/}"
+
+python3 "$here/evidence_manifest.py" verify "$pre" "$dest" > "$post" ||
+    die 4 "evidence_publish_unverified: not every object in $dest matched its pre-upload hash"
+source "$here/lib/worktree_lease.sh"
+lease="$(lease_path_for "$real_src")"
+kind="$(_lease_get "$lease" kind)" producer="$(_lease_get "$lease" producer)" lsrc="$(_lease_get "$lease" source)"
+lease_write "$real_src" "$(_lease_get "$lease" repo)" "" "$(_lease_get "$lease" creator)" \
+    --kind "${kind:-evidence}" --producer "${producer:-evidence-push}" ${lsrc:+--source "$lsrc"} \
+    --published "$dest" --upload-manifest "$post" --verified-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
+    die 1 "lease write failed for $real_src"
