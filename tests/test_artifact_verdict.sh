@@ -324,8 +324,82 @@ v="$(C14_INVENTORY_OUT="$TMPROOT/inv.jsonl" wt cand)"
 python3 -c 'import json,sys; s={json.loads(l)["path"] for l in open(sys.argv[1])}; sys.exit(not {"HEAD","gitdir","commondir"} <= s)' \
     "$TMPROOT/inv.jsonl" 2>/dev/null && ok "admin entries emitted for the inventory" || bad "admin inventory missing ($v)"
 
-echo "== verdict stub stays blocked =="
-assert_eq "$(artifact_removal_verdict "$TMPROOT/clean")" kept:check-failed "verdict keeps every path"
+echo "== declared-ephemeral rows E2-E7 (--kind ephemeral) =="
+PT="$TMPROOT/ptmp" && mkdir -p "$PT" "$TMPROOT/utmp"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
+NOW="$(date +%s)"
+# age <path> <minutes>: every entry under <path> last modified <minutes> ago.
+age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
+eph() { artifact_removal_verdict "$1" --kind ephemeral; }
+mkdir -p "$PT/clones" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/clones/repo" && baseline "$PT/clones/repo"
+git -C "$TMPROOT/wtbase" worktree add -q "$PT/wtp" -b wtp origin/main 2>/dev/null && git -C "$PT/wtp" push -q -u origin wtp 2>/dev/null
+printf 'p' >"$PT/agent_prompt_1.txt"
+mkdir -p "$PT/cli_validation_gemini_1" "$PT/pr-123/run" "$HOME/.aside/u/a/sessions/s1" "$HOME/.gemini/antigravity/brain/b1" \
+    "$HOME/.gemini/antigravity-cli/brain/b2" "$HOME/.gemini/antigravity/implicit.backup" "$HOME/.llm-inspector/captures" "$HOME/.claude/supervisor"
+printf 'r' >"$PT/pr-123/run/results.json"
+for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$HOME/.gemini/antigravity/brain/b1/t.log" \
+    "$HOME/.gemini/antigravity-cli/brain/b2/t.log" "$HOME/.gemini/antigravity/implicit.backup/i" "$HOME/.llm-inspector/captures/capture-1.json" \
+    "$HOME/.llm-inspector/captures/x.summary.json" "$HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log"; do printf 'x' >"$f"; done
+while read -r row ret p; do
+    age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}"
+    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:recent-activity "$row 1 h short of ${ret} min"
+done <<EOF
+E2 240 $PT/agent_prompt_1.txt
+E2 60 $PT/cli_validation_gemini_1
+E2 240 $PT/clones/repo
+E2 60 $PT/wtp
+E3 2880 $PT/pr-123
+E4 10080 $HOME/.aside/u/a/sessions/s1
+E5 30240 $HOME/.gemini/antigravity/brain/b1
+E5 30240 $HOME/.gemini/antigravity-cli/brain/b2
+E5 43200 $HOME/.gemini/antigravity/implicit.backup
+E6 4320 $HOME/.llm-inspector/captures/capture-1.json
+E6 4320 $HOME/.llm-inspector/captures/x.summary.json
+E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
+EOF
+age "$PT/pr-123" 180
+assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
+mkdir -p "$TMPROOT/stub" && printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/stat" && chmod +x "$TMPROOT/stub/stat"
+age "$PT/pr-123" 43200
+assert_eq "$(PATH="$TMPROOT/stub:$PATH" eph "$PT/pr-123")" kept:mtime-unmeasurable "stat stub fails"
+mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 'k' >"$PT/pr-key/id_ed25519"
+age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
+assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
+assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
+mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
+assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
+mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
+assert_eq "$(eph "$HOME/work/run-9")" kept:unproven-content "unique report.md under ~/work/run-9/"
+
+echo "== every-kind checks =="
+mkdir -p "$PT/pr-open" "$PT/pr-cwd" "$PT/pr-young" "$PT/pr-live" "$PT/pr-unk" "$PT/pr-rel" "$HOME/.codex/sessions/s"
+for d in pr-open pr-cwd pr-young pr-live pr-unk pr-rel; do printf 'x' >"$PT/$d/f"; age "$PT/$d" 43200; done
+printf 'x' >"$HOME/.codex/sessions/s/f" && age "$HOME/.codex/sessions/s" 43200
+age "$PT/agent_prompt_1.txt" 43200
+(exec 7<"$PT/pr-open/f" 8<"$PT/agent_prompt_1.txt"; cd /; sleep 60) & opid=$!
+(cd "$PT/pr-cwd" && exec sleep 60) & cpid=$!
+sleep 1
+assert_eq "$(eph "$PT/pr-open")" kept:open-file "non-git dir with an open file"
+assert_eq "$(eph "$PT/agent_prompt_1.txt")" kept:open-file "open E2 agent_prompt file"
+assert_eq "$(eph "$PT/pr-cwd")" kept:live-cwd "a process with cwd inside"
+kill "$opid" "$cpid" 2>/dev/null; wait "$opid" "$cpid" 2>/dev/null
+age "$PT/pr-young" 10
+assert_eq "$(artifact_removal_verdict "$PT/pr-young")" kept:recent-activity "content 10 min old"
+assert_eq "$(eph "$HOME/.codex/sessions/s")" kept:protected "never-delete path (safety_check.sh)"
+# lease <dir> <released_at>: lease owned by this shell (pid + start epoch).
+lease() {
+    local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
+    printf '{"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
+        $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
+}
+lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
+lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
+lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
+
+echo "== verdict stays blocked =="
+v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
 st="$(artifact_removal_verdict --self-test)"
 [[ "$st" != ok ]] && ok "self-test is not ok ($st)" || bad "self-test reported ok"
 assert_eq "$st" incomplete "self-test reports incomplete"

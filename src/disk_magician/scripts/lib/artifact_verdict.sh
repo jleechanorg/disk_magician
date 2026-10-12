@@ -7,7 +7,9 @@ _AV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$_AV_DIR/worktree_ignored.sh"
 # shellcheck source=scripts/worktree_remove_hook.sh
-source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
+source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state, wrh_live_cwd_reason, lease lib
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$_AV_DIR/scratch_roots.sh"
 
 # c14_discover_repos <root>: print every repository under <root> (itself
 # included), NUL-terminated and absolute: a dir holding a `.git` dir or file,
@@ -105,10 +107,72 @@ c14_repos_ok() {
     echo ok
 }
 
-# artifact_removal_verdict <path> [...] | --self-test
-artifact_removal_verdict() {
-    [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    echo kept:check-failed
+# c14_ephemeral_retention <canonical path>: minutes of the declared-ephemeral row E2-E7
+# it matches (spec §7.2; the longest when several do), rc 1 for none. Fixed floors: a
+# sweeper configured lower does not lower them. E1 (archive entries) is not a row here.
+c14_ephemeral_retention() {
+    local p=$1 r rel
+    while IFS= read -r r; do
+        r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" && "$rel" != _disk_magician_archive* ]] || continue
+        if [[ "$rel" =~ ^(pr[0-9]|pr-|pr_|claude-|claude_)[^/]*$ ]]; then echo 2880
+        elif [[ ( "$rel" =~ ^agent_prompt_[^/]*\.txt$ && -f "$p" ) || ( "$rel" =~ ^[^/]+(/[^/]+)?$ && -d "$p/.git" ) ]]; then echo 240
+        elif [[ ( "$rel" =~ ^cli_validation_gemini_[^/]*$ && -d "$p" ) || ( "$rel" != */* && -f "$p/.git" ) ]]; then echo 60
+        else continue; fi
+        return 0
+    done < <(scratch_roots_get_unique)
+    rel=${p#"$HOME"/}
+    if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
+    elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
+    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
+    else return 1; fi
 }
+
+# _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
+_av_newest_mtime() (
+    set -o pipefail
+    find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'
+)
+
+# _av_open_file <path>: rc 0 when lsof prints anything, an open non-cwd descriptor under
+# <path> or an error (fail closed); nothing open prints nothing.
+_av_open_file() {
+    local d=() && [[ -d "$1" ]] && d=(+D)
+    [[ -n "$(lsof -w -n -P -Fn -a -d '^cwd' ${d[@]+"${d[@]}"} "$1" 2>&1)" ]]
+}
+
+# _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
+_av_secret_like() {
+    local out
+    out="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+        -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
+        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+        -print 2>/dev/null)" || return 0
+    [[ -n "$out" ]]
+}
+
+# artifact_removal_verdict <path> [--kind os_clone|rebuildable|ephemeral] | --self-test
+# Every-kind checks, then the git rules and provenance (c) for --kind ephemeral; the
+# manifest, rebuildable and os_clone proofs are not here yet, so those keep.
+artifact_removal_verdict() (
+    [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
+    local p kind='' lease st newest ret
+    [[ "${2:-}" == --kind ]] && kind=${3:-}
+    p=${1%/} && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
+    "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
+    lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
+    if [[ -e "$lease" ]]; then case "$(lease_owner_state "$lease")" in
+        none|dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac; fi
+    wrh_live_cwd_reason "$p"
+    [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
+    _av_open_file "$p" && { echo kept:open-file; return 0; }
+    newest="$(_av_newest_mtime "$p")" || { echo kept:mtime-unmeasurable; return 0; }
+    (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
+    _av_secret_like "$p" && { echo kept:secret-like; return 0; }
+    if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p")" || { echo "$st"; return 0; }; fi
+    [[ "$kind" == ephemeral ]] && ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
+    (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
+    echo remove
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then artifact_removal_verdict "$@"; fi
