@@ -81,6 +81,16 @@ check 'amendment stored' python3 -c "import json,sys; assert json.load(open(sys.
 check 'set-amendment on unrecorded decision rc 2' test "$(rc_of policy set-amendment ci_autopause "$GOOD")" = 2
 check 'revoke rc 0' test "$(rc_of policy revoke worktree_reap_remove)" = 0
 check 'decision_approved 1 after revoke' test "$(rc_of approved worktree_reap_remove)" = 1
+# Revoke sticks: only a user message timestamped after revoked_at can re-approve (no replay of old lines).
+LATER="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)+d.timedelta(seconds=5)).isoformat())')"
+TS="$CROOT/projects/p/ts.jsonl"
+printf '{"type":"user","timestamp":"%s","message":{"content":"APPROVE worktree_reap_remove"}}\n' 2020-01-01T00:00:00Z > "$TS"
+check 'replay of the same old line after revoke refused' refused worktree_reap_remove "$POS"
+check 'older timestamped line after revoke refused' refused worktree_reap_remove "$TS"
+check 'still unapproved after replay attempts' test "$(rc_of approved worktree_reap_remove)" = 1
+printf '{"type":"user","timestamp":"%s","message":{"content":"APPROVE worktree_reap_remove"}}\n' "$LATER" >> "$TS"
+check 'line timestamped after revoke re-approves' test "$(rc_of policy approve worktree_reap_remove --from-transcript "$TS")" = 0
+check 're-approval records the new line' python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['worktree_reap_remove']['line']==2" "$DISK_MAGICIAN_POLICY_FILE"
 check 'revoke unknown id rc 2' test "$(rc_of policy revoke no_such_id)" = 2
 check 'decision_approved fails closed on unreadable file' bash -c 'echo "{bad" > "$1"; ! (source "$2/scripts/safety_lib.sh"; decision_approved worktree_reap_remove)' _ "$DISK_MAGICIAN_POLICY_FILE" "$ROOT"
 check 'approve refuses to overwrite unreadable file' bash -c '[[ "$(bash "$1/disk_magician.sh" policy approve worktree_reap_remove --from-transcript "$2" >/dev/null 2>&1; echo $?)" != 0 ]] && grep -q "{bad" "$3"' _ "$ROOT" "$POS" "$DISK_MAGICIAN_POLICY_FILE"
