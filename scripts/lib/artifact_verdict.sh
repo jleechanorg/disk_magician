@@ -11,24 +11,26 @@ source "$_AV_DIR/worktree_ignored.sh"
 source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
 
 # c14_discover_repos <root>: print every repository under <root> (itself
-# included), one per line: a dir holding a `.git` dir or file, or a bare repo
-# (HEAD + objects/ + refs/). No -prune, so ignored dirs are walked too. rc 1
-# when the walk is incomplete.
+# included), NUL-terminated and absolute: a dir holding a `.git` dir or file,
+# or a bare repo (HEAD + objects/ + refs/). No -prune, so ignored dirs are
+# walked too. rc 1 when the walk is incomplete or a path escapes <root>.
 c14_discover_repos() {
-    local p d out
-    [[ -d "$1" ]] || return 1
-    out="$(find "$1" \( -name .git -o -name HEAD \) -print 2>/dev/null)" || return 1
-    while IFS= read -r p; do
-        [[ -n "$p" ]] || continue
+    local root p d done=
+    root="$(cd "$1" 2>/dev/null && pwd -P)" && [[ "$root" == /* ]] || return 1
+    # The OK sentinel can never be a find path, which starts with "/".
+    while IFS= read -r -d '' p; do
+        [[ "$p" == OK ]] && { done=1; continue; }
+        [[ "$p" == "$root"/* ]] || return 1
         d="${p%/*}"
         if [[ "${p##*/}" == .git ]]; then
-            printf '%s\n' "$d"
+            printf '%s\0' "$d"
         # A bare repo; git's own internals (.git/modules, .git/worktrees) are
         # covered through the repository that owns them.
         elif [[ -f "$p" && -d "$d/objects" && -d "$d/refs" && "/$d/" != */.git/* ]]; then
-            printf '%s\n' "$d"
+            printf '%s\0' "$d"
         fi
-    done <<<"$out"
+    done < <(find "$root" \( -name .git -o -name HEAD \) -print0 2>/dev/null && printf 'OK\0')
+    [[ -n "$done" ]]
 }
 
 # c14_repo_content_ok <repo>: print `ok` (rc 0) or `kept:<reason>` (rc 1).
@@ -52,12 +54,12 @@ c14_repo_content_ok() {
 # content checks of every repository found; prints `ok` or the first kept
 # reason. The certificate is accepted for advice_own_copy_ok; unused here.
 c14_repos_ok() {
-    local repos r v
-    repos="$(c14_discover_repos "$1")" || { echo kept:check-failed; return 1; }
-    while IFS= read -r r; do
-        [[ -n "$r" ]] || continue
+    local r v done=
+    while IFS= read -r -d '' r; do
+        [[ "$r" == OK ]] && { done=1; continue; }
         v="$(c14_repo_content_ok "$r")" || { echo "$v"; return 1; }
-    done <<<"$repos"
+    done < <(c14_discover_repos "$1" && printf 'OK\0')
+    [[ -n "$done" ]] || { echo kept:check-failed; return 1; }
     echo ok
 }
 

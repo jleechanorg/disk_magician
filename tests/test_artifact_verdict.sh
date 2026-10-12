@@ -78,7 +78,7 @@ mkrepo "$TMPROOT/outer"
 mkdir -p "$TMPROOT/outer/node_modules"
 mkrepo "$TMPROOT/outer/node_modules/inner"
 git init -q --bare "$TMPROOT/outer/node_modules/backup.git"
-found="$(c14_discover_repos "$TMPROOT/outer")"
+found="$(c14_discover_repos "$TMPROOT/outer" | tr '\0' '\n')"
 [[ $'\n'"$found"$'\n' == *$'\n'"$TMPROOT/outer/node_modules/inner"$'\n'* ]] \
     && ok "nested .git dir under an ignored dir found" || bad "nested .git dir not found: $found"
 [[ $'\n'"$found"$'\n' == *$'\n'"$TMPROOT/outer/node_modules/backup.git"$'\n'* ]] \
@@ -97,8 +97,19 @@ printf 'edit\n' >>"$TMPROOT/plain2/node_modules/inner/tracked.txt"
 assert_eq "$(c14_repos_ok "$TMPROOT/plain2" --outer-certificate "$TMPROOT/none.json")" kept:dirty \
     "dirty repo nested under allowlisted node_modules is checked"
 mkrepo "$TMPROOT/wtsrc" && git -C "$TMPROOT/wtsrc" worktree add -q "$TMPROOT/wtroot/linked" -b lw
-found="$(c14_discover_repos "$TMPROOT/wtroot")"
+found="$(c14_discover_repos "$TMPROOT/wtroot" | tr '\0' '\n')"
 assert_eq "$found" "$TMPROOT/wtroot/linked" ".git file (linked worktree) found"
+
+echo "== newline in a directory name =="
+mkdir -p "$TMPROOT/cwd"
+mkrepo "$TMPROOT/cwd/bar/r"
+mkrepo "$TMPROOT/nl/d/foo"$'\n'"bar/r" && printf 'edit\n' >>"$TMPROOT/nl/d/foo"$'\n'"bar/r/tracked.txt"
+assert_eq "$(cd "$TMPROOT/cwd" && c14_repos_ok "$TMPROOT/nl/d")" kept:dirty \
+    "dirty repo under a newline-named dir is checked, not a cwd decoy"
+found="$(cd "$TMPROOT/cwd" && c14_discover_repos "$TMPROOT/nl/d" | tr '\0' '\t')"
+assert_eq "$found" "$TMPROOT/nl/d/foo"$'\n'"bar/r"$'\t' "newline-named repo path stays absolute and whole"
+found="$(cd "$TMPROOT" && c14_discover_repos wtroot | tr '\0' '\n')"
+assert_eq "$found" "$TMPROOT/wtroot/linked" "relative root yields absolute paths"
 
 echo "== incomplete walk =="
 mkdir -p "$TMPROOT/locked/closed"
