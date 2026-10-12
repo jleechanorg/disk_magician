@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# quarantine_remove phase 1 (spec §7.2 C14): verdict-bound inventory, intent sidecar,
-# renamex_np(RENAME_EXCL) commit point, identity/live-user/re-hash checks, exclusive rollback.
+# quarantine_remove phases 1–2 (spec §7.2 C14): verdict-bound inventory,
+# exclusive quarantine, then fd-relative inventory-only deletion.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE_ROOT=/tmp/disk_magician/fixtures
@@ -56,14 +56,36 @@ run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarant
 intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/link" ]]; }
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
 qid() { local value="${OUT#*:}"; echo "${value%%:*}"; }
+sidecar_id() { local f; f="$(find "$Q" -maxdepth 1 -name '*.json' -print -quit)"; basename "$f" .json; }
 
-# Happy path: proven root is quarantined (phase 2 is a stub, so it stays there).
+# Successful C14 verdict survives rename and phase-1 re-hash, then phase 2 removes it.
 fixture; run X=1
-check 'proven root: quarantined:<id>' [ "${OUT%%:*}" = quarantined ]
-check 'proven root: original path gone' [ ! -e "$A" ]
-check 'proven root: content moved intact' [ "$(cat "$Q/$(qid)/report.md")" = AAAA ]
-check 'proven root: sidecar holds phase intent + inventory' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["phase"]=="intent" and d["original"]==sys.argv[2] and d["inventory"]' "$Q/$(qid).json" "$A"
+check 'proven root: phase 1 + phase 2 report removed' [ "$OUT" = "removed:$(qid)" ]
+check 'proven root: original and quarantine candidate are gone' [ ! -e "$A" ] && [ ! -e "$Q/$(qid)" ]
+check 'proven root: sidecar is dropped after candidate' [ ! -e "$Q/$(qid).json" ]
 check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
+
+# A write after the deleting state is durable invalidates the hash and remains quarantined.
+fixture; run DISK_MAGICIAN_TEST_BEFORE_UNLINK='printf BBBB > "$DM_Q_PATH/report.md"'
+QID="$(sidecar_id)"
+check 'phase 2 rewrite: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'phase 2 rewrite: changed file and deleting sidecar remain' bash -c '[[ "$(cat "$1")" == BBBB && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2")" == deleting ]]' _ "$Q/$QID/report.md" "$Q/$QID.json"
+
+# An inventoried directory replaced by a symlink is never followed into the outside tree.
+fixture; mkdir -p "$TMP/outside$N"; printf OUTSIDE > "$TMP/outside$N/keep"
+run DISK_MAGICIAN_TEST_BEFORE_UNLINK="mv \"\$DM_Q_PATH/sub\" '$TMP/moved$N'; ln -s '$TMP/outside$N' \"\$DM_Q_PATH/sub\""
+QID="$(sidecar_id)"
+check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'directory-to-symlink swap: outside data untouched' [ "$(cat "$TMP/outside$N/keep")" = OUTSIDE ]
+check 'directory-to-symlink swap: sidecar and replacement symlink remain' [ -L "$Q/$QID/sub" ] && [ -f "$Q/$QID.json" ]
+
+# A crash after the candidate is removed but before the final sidecar unlink is resumable.
+fixture; run DISK_MAGICIAN_TEST_KILL_AT=before_sidecar_drop
+CRASH_SIDE="$(find "$Q" -maxdepth 1 -name '*.json' -print -quit)"; CRASH_ID="$(basename "$CRASH_SIDE" .json)"
+check 'crash before sidecar drop: deleting sidecar remains, root is gone' bash -c '[[ ! -e "$1" && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2")" == deleting ]]' _ "$Q/$CRASH_ID" "$CRASH_SIDE"
+BINDING="$TMP/resume-binding.json"; python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
+RESUME="$(quarantine_phase2 "$BINDING" "$CRASH_ID")"
+check 'crash before sidecar drop: retry drops the final sidecar' [ "$RESUME" = removed ] && [ ! -e "$CRASH_SIDE" ]
 
 # An existing .dm-quarantine must be a real 0700 dir owned by us; a symlink or 0755 dir keeps the artifact.
 fixture; mkdir -p "$TMP/outside$N"; chmod 755 "$TMP/outside$N"; ln -s "$TMP/outside$N" "$Q"; run X=1

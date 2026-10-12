@@ -203,9 +203,179 @@ def phase1(path, inv_file, binding_file):
     try: os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"
     return f"kept:{why}"
+
+def entry_kind(st):
+    if stat.S_ISDIR(st.st_mode): return "dir"
+    if stat.S_ISREG(st.st_mode): return "file"
+    if stat.S_ISLNK(st.st_mode): return "symlink"
+    return "other"
+
+def inventory_children(inventory):
+    by_path = {}
+    for entry in inventory:
+        rel = entry.get("path")
+        if not isinstance(rel, str) or rel in by_path: raise ValueError("invalid inventory path")
+        if rel != "." and (rel.startswith("/") or any(part in ("", ".", "..") for part in rel.split("/"))):
+            raise ValueError("unsafe inventory path")
+        by_path[rel] = entry
+    if "." not in by_path: raise ValueError("missing root inventory entry")
+    children = {rel: [] for rel in by_path}
+    for rel in by_path:
+        entry = by_path[rel]
+        if entry.get("type") not in ("dir", "file", "symlink") or any(type(entry.get(k)) is not int for k in ("dev", "ino")):
+            raise ValueError("invalid inventory entry")
+        if entry.get("type") == "file" and (type(entry.get("size")) is not int or not isinstance(entry.get("sha256"), str)):
+            raise ValueError("invalid file inventory")
+        if entry.get("type") == "symlink" and not isinstance(entry.get("target"), str):
+            raise ValueError("invalid symlink inventory")
+        if rel == ".": continue
+        parent = rel.rpartition("/")[0] or "."
+        if parent not in by_path or by_path[parent].get("type") != "dir": raise ValueError("orphan inventory entry")
+        children[parent].append((rel.rpartition("/")[2], rel))
+    return by_path, children
+
+def fsync_sidecar(qfd, side, record):
+    # Truncate/write/fsync before deleting anything. A crash before fsync can
+    # only damage the record; it cannot have started phase 2, so later runs
+    # fail closed on a malformed sidecar.
+    fd = os.open(side, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, dir_fd=qfd)
+    try:
+        data = json.dumps(record, separators=(",", ":")).encode()
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0: raise OSError("short sidecar write")
+            view = view[written:]
+        os.fsync(fd)
+    finally: os.close(fd)
+    os.fsync(qfd)
+
+def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
+    """Delete exactly one inventoried entry, using only its pinned parent fd."""
+    try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError: return True  # idempotent resume after an earlier unlink
+    kind = entry_kind(st)
+    if (kind != expected.get("type") or st.st_dev != expected.get("dev") or
+            st.st_ino != expected.get("ino")):
+        return False
+    if kind == "dir":
+        try: child_fd = os.open(name, DIRFL, dir_fd=parent_fd)
+        except OSError: return False
+        try:
+            opened = os.fstat(child_fd)
+            if (entry_kind(opened), opened.st_dev, opened.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
+                return False
+            ok = True
+            for child_name, child_rel in children.get(rel, []):
+                if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children):
+                    ok = False
+            if not ok: return False
+        finally: os.close(child_fd)
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (entry_kind(current), current.st_dev, current.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
+                return False
+            os.rmdir(name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return True
+        except OSError: return False  # includes extra, non-inventoried contents
+    if kind == "file":
+        try: fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError: return False
+        try:
+            opened = os.fstat(fd)
+            if (entry_kind(opened), opened.st_dev, opened.st_ino, opened.st_size) != (
+                    "file", expected.get("dev"), expected.get("ino"), expected.get("size")):
+                return False
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk: break
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if ((after.st_dev, after.st_ino, after.st_size) !=
+                    (opened.st_dev, opened.st_ino, opened.st_size) or digest.hexdigest() != expected.get("sha256")):
+                return False
+        finally: os.close(fd)
+    elif kind == "symlink":
+        try: target = os.readlink(name, dir_fd=parent_fd)
+        except OSError: return False
+        if target != expected.get("target"): return False
+    else: return False
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (entry_kind(current), current.st_dev, current.st_ino) != (kind, expected.get("dev"), expected.get("ino")):
+            return False
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return True
+    except OSError: return False
+
+def phase2(binding_file, qid):
+    """Finish deleting one quarantined tree; every unlink is fd-relative."""
+    pfd = qfd = -1
+    side = qid + ".json"
+    try:
+        if not isinstance(qid, str) or len(qid) != 16 or any(c not in "0123456789abcdef" for c in qid):
+            return "kept:quarantine_partial_kept"
+        with open(binding_file) as f: binding = json.load(f)
+        parent = binding.get("parent_path")
+        if not isinstance(parent, str) or not os.path.isabs(parent): return "kept:quarantine_partial_kept"
+        pfd = os.open(parent, DIRFL)
+        pstat = os.fstat(pfd)
+        if (pstat.st_dev, pstat.st_ino) != (binding.get("parent_dev"), binding.get("parent_ino")):
+            return "kept:quarantine_partial_kept"
+        qst = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
+        if not stat.S_ISDIR(qst.st_mode) or qst.st_uid != os.getuid() or qst.st_mode & 0o777 != 0o700:
+            return "kept:quarantine_partial_kept"
+        qfd = os.open(".dm-quarantine", DIRFL, dir_fd=pfd)
+        qopened = os.fstat(qfd)
+        if (qopened.st_dev, qopened.st_ino) != (qst.st_dev, qst.st_ino):
+            return "kept:quarantine_partial_kept"
+        side_fd = os.open(side, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=qfd)
+        try:
+            with os.fdopen(side_fd, "r") as f: record = json.load(f)
+        except Exception:
+            return "kept:quarantine_partial_kept"
+        if (not isinstance(record, dict) or record.get("id") != qid or
+                record.get("phase") not in ("intent", "deleting") or
+                not isinstance(record.get("inventory"), list)):
+            return "kept:quarantine_partial_kept"
+        if (qst.st_dev, qst.st_ino) != (record.get("quarantine_dev"), record.get("quarantine_ino")):
+            return "kept:quarantine_partial_kept"
+        original = record.get("original")
+        if not isinstance(original, str) or os.path.dirname(original) != parent:
+            return "kept:quarantine_partial_kept"
+        inventory, children = inventory_children(record["inventory"])
+        root = inventory["."]
+        if (root.get("dev"), root.get("ino")) != (record.get("dev"), record.get("ino")):
+            return "kept:quarantine_partial_kept"
+        try: candidate = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+        except FileNotFoundError: candidate = None
+        if candidate is not None and (candidate.st_dev, candidate.st_ino) != (record.get("dev"), record.get("ino")):
+            return "kept:quarantine_partial_kept"
+        if record.get("phase") != "deleting":
+            record["phase"] = "deleting"
+            fsync_sidecar(qfd, side, record)
+        if candidate is not None:
+            hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, qid), "")
+            if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
+            if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children):
+                return "kept:quarantine_partial_kept"
+        os.fsync(qfd)
+        if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
+        if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
+        os.unlink(side, dir_fd=qfd)
+        os.fsync(qfd)
+        return "removed"
+    except Exception: return "kept:quarantine_partial_kept"
+    finally:
+        if qfd >= 0: os.close(qfd)
+        if pfd >= 0: os.close(pfd)
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
     elif args[:1] == ["candidate"] and len(args) == 2: print(bound_candidate(args[1]))
     elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
+    elif args[:1] == ["phase2"] and len(args) == 3: print(phase2(*args[1:]))
     else: print("kept:check-failed")
