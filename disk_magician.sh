@@ -63,6 +63,7 @@ Commands:
   guard-worktree-add     PreToolUse hook guarding worktree placement under ~/.worktrees/.
   worktree-create-hook   Claude WorktreeCreate hook creating under ~/.worktrees/.
   worktree-reap          Reap owner leases (nominate by default).
+  policy                 Record standing decisions (approve|set-amendment|revoke|list).
   worktree-release <path> Release the caller's lease without deleting the worktree.
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
@@ -405,6 +406,9 @@ case "$CMD" in
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
+    ;;
+  policy)
+    exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
     ;;
   worktree_release|worktree-release)
     [[ $# -eq 1 ]] || { echo "Usage: diskm worktree-release <path>" >&2; exit 1; }
