@@ -1072,7 +1072,8 @@ large_consider_entry() {
   # and a child can contain repositories below its root (runtime/run-id/repo).
   # Protect the whole cleanup unit if any nested repository is recent, dirty,
   # unpushed, lacks an upstream, or cannot be measured safely.
-  if (( depth > 0 )) && container_child_has_protected_repository "$d"; then
+  if { (( depth > 0 )) || is_scratch_container "$d"; } &&
+      container_child_has_protected_repository "$d"; then
     return 0
   fi
 

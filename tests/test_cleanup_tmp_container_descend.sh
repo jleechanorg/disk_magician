@@ -312,6 +312,26 @@ run_sweep t17 --clean
 assert_missing "t17 old clean nested worktree child moved out" "$PT/agent-scratch/runtime"
 [[ -n "$(archived runtime)" ]] && pass "t17 old clean nested worktree child archived" || fail "t17 old clean nested worktree child archived"
 
+echo "Test 18: idle scratch container with a dirty nested repository stays in place"
+make_env t18
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t18-main" "$PT/agent-scratch/runtime/run-id/repo" t18wt
+echo dirty >> "$PT/agent-scratch/runtime/run-id/repo/payload.bin"
+set_old "$PT/agent-scratch"
+run_sweep t18 --clean
+assert_exists "t18 idle container with dirty nested repository kept" "$PT/agent-scratch"
+assert_contains "t18 depth-zero nested unsaved-work protection reported" \
+  "nested repository unsaved work" "$OUT"
+
+echo "Test 19: idle scratch container with only an old clean repository stays eligible"
+make_env t19
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t19-main" "$PT/agent-scratch/runtime/run-id/repo" t19wt
+set_old "$PT/agent-scratch"
+run_sweep t19 --clean
+assert_missing "t19 idle container with old clean repository moved out" "$PT/agent-scratch"
+assert_contains "t19 idle safe container archived" "Dirs archived: 1" "$OUT"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
