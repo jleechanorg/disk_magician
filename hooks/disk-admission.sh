@@ -8,10 +8,11 @@ import fcntl, json, os, re, shlex, subprocess, sys, time
 ev = json.load(sys.stdin); cmd = (ev.get("tool_input") or {}).get("command") or ""; tid = ev.get("tool_use_id") or ""
 admit = [os.environ["DISK_MAGICIAN_ADMIT_BIN"]] if os.environ.get("DISK_MAGICIAN_ADMIT_BIN") else ["diskm", "admit"]
 home, tmpd = os.path.expanduser("~"), os.path.realpath(os.environ.get("TMPDIR") or "/nonexistent")
-ROOTS = [(home + "/.worktrees", 2, "worktrees"), ("/private/tmp", 2, "tmp_containers"),
-         (home + "/Documents/Codex", 2, "codex_documents"), (tmpd, 1, "tmpdir_scratch")]
+def canon(p): p = re.sub(r"^/tmp(?=/|$)", "/private/tmp", os.path.normpath(p)); return os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))
+ROOTS = [(os.path.realpath(r), n, c) for r, n, c in [(home + "/.worktrees", 2, "worktrees"), ("/private/tmp", 1, "tmp_containers"),
+         (home + "/Documents/Codex", 2, "codex_documents"), (tmpd, 1, "tmpdir_scratch")]]
 def governed(p):
-    p = re.sub(r"^/tmp(?=/|$)", "/private/tmp", p)
+    p = canon(p)
     for root, depth, cls in ROOTS:
         if p.startswith(root + "/") and len(p[len(root) + 1:].split("/")) >= depth: return p, cls
 def unparsed():
@@ -26,28 +27,32 @@ try:
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=True); lex.whitespace_split = True; toks = list(lex)
 except ValueError: toks = None
 if toks is None or re.search(r"\n|\$\(|`|<<", cmd) or {"eval", "(", ")"} & set(toks or []): sys.exit(unparsed())
-segs, cur = [[]], ev.get("cwd") or os.getcwd()
-for t in toks:
-    if t in ("&&", "||", ";", "|", "&"): segs.append([])
+segs, cur, skip = [[]], ev.get("cwd") or os.getcwd(), False
+for t in toks:  # a redirection drops its target and an fd number before it
+    if skip: skip = False
+    elif re.fullmatch(r"&?[<>]+&?", t): skip = True; segs[-1][-1:] and segs[-1][-1].isdigit() and segs[-1].pop()
+    elif t in ("&&", "||", ";", "|", "|&", "&"): segs.append([])
     else: segs[-1].append(t)
 compound, found = len(segs) > 1, []
 for s in segs:
     while s and re.match(r"[A-Za-z_]\w*=", s[0]): s = s[1:]
     if not s: continue
-    at = lambda p, base=cur: os.path.normpath(os.path.join(base, os.path.expanduser(p)))
+    at = lambda p, base=cur: os.path.normpath(os.path.join(base, os.path.expanduser(re.sub(r"^\$\{?HOME\}?(?=/|$)", "~", p))))
     if s[0] == "cd": cur = at(s[1] if len(s) > 1 else home); continue
     pos, d, i = [], cur, 1
     while s[0] == "git" and i < len(s) and s[i].startswith("-"):
-        if s[i] in ("-C", "-c") and i + 1 < len(s): d = at(s[i + 1], d) if s[i] == "-C" else d; i += 1
+        if s[i] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env") and i + 1 < len(s): d = at(s[i + 1], d) if s[i] == "-C" else d; i += 1
         i += 1
     args = s[i:] if s[0] == "git" else s[1:]
-    pos = [a for j, a in enumerate(args) if not a.startswith("-") and args[j - 1] not in ("-b", "-B", "--branch", "-o", "--origin", "--depth", "--reference", "--config", "-c", "--template", "--filter")]
+    pos = [a for j, a in enumerate(args) if not a.startswith("-") and args[j - 1] not in (("-b", "-B", "--branch", "-o", "--origin", "--depth", "--reference", "--config", "-c", "--template", "--filter",
+           "-j", "--jobs", "--reason", "--separate-git-dir", "--shallow-since", "--shallow-exclude", "--server-option", "--upload-pack") if s[0] == "git" else ())]
     if s[0] == "git" and args[:2] == ["worktree", "add"] and len(pos) > 2: dest, prod, est, src = pos[2], "hook:git-worktree-add:" + os.path.basename(d), 1, None
     elif s[0] == "git" and args[:1] == ["clone"] and len(pos) > 1:
         url = pos[1]; dest = pos[2] if len(pos) > 2 else re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1].split(":")[-1])
         prod, est, src = "hook:git-clone:" + re.sub(r"\.git$", "", re.sub(r"^[a-z+]+://([^@/]*@)?|^[^@/:]*@", "", url).replace(":", "/", 1)), 2, None
-    elif s[0] == "cp" and any(re.fullmatch(r"-[A-Za-z]*[Rr][A-Za-z]*", a) for a in args) and len(pos) > 1: dest, prod, est, src = pos[-1], "hook:cp-R", 1, at(pos[0])
+    elif s[0] == "cp" and any(re.fullmatch(r"-[A-Za-z]*[Rra][A-Za-z]*|--recursive|--archive", a) for a in args) and len(pos) > 1: dest, prod, est, src = pos[-1], "hook:cp-R", 1, at(pos[0])
     else: continue
+    if src and os.path.isdir(dest := at(dest, d)): dest = os.path.join(dest, os.path.basename(src))  # cp into an existing dir
     if (g := governed(at(dest, d))) is None: continue
     if src:
         try: est = max(est, int(subprocess.run(["du", "-sk", src], capture_output=True, text=True, timeout=5).stdout.split()[0]) / 2**20)

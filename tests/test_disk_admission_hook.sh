@@ -14,9 +14,9 @@ ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
-T="$(mktemp -d)"
+T="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/state" "$T/home/.worktrees/r"
+mkdir -p "$T/bin" "$T/state" "$T/home/.worktrees/r" "$T/tmpdir" && ln -s "$T" "$T/alias"
 export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit"
 cat >"$T/bin/admit" <<EOF
 #!/usr/bin/env bash
@@ -125,6 +125,33 @@ for c in $'cat <<EOF\ngit clone url /private/tmp/r/h\nEOF' $'true\ngit clone url
     assert_eq "$ADMITS:$OUT:$RC" "0::0" "unparsed silent: ${c//$'\n'/\\n}"
     assert_eq "$(grep -c '"event": "hook_unparsed"' "$T/state/admission/events.jsonl")" "$n" "hook_unparsed +1"
 done
+
+echo "── 5. canonical dests, redirections, value options, copy into a dir ──"
+mkdir -p /private/tmp/dm-hook-test-$$; R=/private/tmp/dm-hook-test-$$
+forms5=(
+  "cp -R a $T/alias/tmpdir/x|tmpdir_scratch|--dest $T/tmpdir/x"
+  "cp -R a /tmp/x|tmp_containers|--dest /private/tmp/x"
+  "cp -R a /tmp/r/x 2>/dev/null|tmp_containers|--dest /private/tmp/r/x"
+  "git clone url /tmp/r/x >log 2>&1|tmp_containers|--dest /private/tmp/r/x"
+  "cp -R a /private/tmp/r/x &>/dev/null <in|tmp_containers|--dest /private/tmp/r/x"
+  "cp -R a \$HOME/.worktrees/r/h|worktrees|--dest $W/r/h"
+  "cp -R a ~/.worktrees/r/t|worktrees|--dest $W/r/t"
+  "cp -a a $W/r/a|worktrees|--dest $W/r/a"
+  "git clone --jobs 4 url /tmp/r/j|tmp_containers|--dest /private/tmp/r/j"
+  "git --git-dir $W/r/main/.git worktree add $W/r/g|worktrees|--dest $W/r/g"
+  "cp -R src $T/tmpdir/|tmpdir_scratch|--dest $T/tmpdir/src"
+  "cp -R src /tmp/|tmp_containers|--dest /private/tmp/src"
+  "cp -R src $R|tmp_containers|--dest $R/src"
+)
+for f in "${forms5[@]}"; do
+    IFS='|' read -r cmd cls dest <<<"$f"
+    STUB_RC=75 hook PreToolUse "$cmd"
+    valid && ok "valid JSON" || bad "invalid output: $OUT"
+    assert_eq "$ADMITS" 1 "admit called once: $cmd"
+    logged "--class $cls " && logged -- "$dest " && ok "dest $dest" || bad "admit args for '$cmd': $(cat "$T/admit.log")"
+    assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "75 denies: $cmd"
+done
+rmdir "$R"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
