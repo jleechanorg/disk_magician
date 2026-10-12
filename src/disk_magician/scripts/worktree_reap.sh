@@ -95,7 +95,7 @@ for tool in git timeout gh; do
         [[ "$tool" != gh ]] || echo gh_failed >> "$EVENTS"
     fi
 done
-if [[ "$MODE" == remove && ! -f "$STATE/worktree_reap.remove_approved" ]]; then
+if [[ "$MODE" == remove && ! -f "$STATE/worktree_reap.remove_approved" ]] && ! (source "$SCRIPT_DIR/lib/removal_activation.sh" && removal_activation_ok worktree_reap_remove >&2); then
     log 'remove mode not approved'
     MODE=nominate
 fi
