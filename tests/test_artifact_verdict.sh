@@ -289,6 +289,15 @@ mkwt cfgwt && printf '[core]\n\tsparseCheckout = true\n' >"$(admin cfgwt)/config
 assert_eq "$(wt cfgwt)" kept:admin-unknown "changed config.worktree"
 mkwt cfgempty && : >"$(admin cfgempty)/config.worktree"
 assert_eq "$(wt cfgempty)" ok "empty config.worktree"
+mkwt emsg && git -C "$TMPROOT/wts/emsg" commit -q --allow-empty -m "pushed message" && git -C "$TMPROOT/wts/emsg" push -q 2>/dev/null
+assert_eq "$(wt emsg)" ok "COMMIT_EDITMSG matching a pushed commit (-m)"
+printf '#!/bin/sh\nprintf "edited message\\n" | cat - "$1" >"$1.n" && mv "$1.n" "$1"\n' >"$TMPROOT/ed.sh" && chmod +x "$TMPROOT/ed.sh"
+GIT_EDITOR="$TMPROOT/ed.sh" git -C "$TMPROOT/wts/emsg" commit -q --allow-empty && git -C "$TMPROOT/wts/emsg" push -q 2>/dev/null
+[[ "$(git -C "$TMPROOT/wts/emsg" log -1 --format=%s)" == "edited message" ]] && grep -q '^#' "$(admin emsg)/COMMIT_EDITMSG" && assert_eq "$(wt emsg)" ok "COMMIT_EDITMSG with editor comments, pushed" || bad "editor commit"
+mkwt eabort && GIT_EDITOR=true git -C "$TMPROOT/wts/eabort" commit -q --allow-empty 2>/dev/null
+assert_eq "$(wt eabort)" ok "COMMIT_EDITMSG of an aborted commit, comments only"
+printf 'long typed message rejected by a hook\n' >"$(admin emsg)/COMMIT_EDITMSG"
+assert_eq "$(wt emsg)" kept:admin-unknown "COMMIT_EDITMSG holding text of no checked commit"
 mkwt lockd && git -C "$TMPROOT/wtbase" worktree lock "$TMPROOT/wts/lockd"
 assert_eq "$(wt lockd)" kept:locked "worktree already locked"
 mkwt fresh && touch "$TMPROOT/wts/fresh/tracked.txt"

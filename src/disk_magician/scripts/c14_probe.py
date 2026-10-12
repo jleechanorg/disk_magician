@@ -54,7 +54,7 @@ def gitmeta(gd, lease=None):
     base = json.load(open(lease)).get("git_meta") if os.path.isfile(lease) else None
     print("kept:git-unbaselined" if not isinstance(base, dict) else "ok" if base == m else "kept:git-metadata")
 
-ADMIN = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "AUTO_MERGE", "COMMIT_EDITMSG", "index", "commondir", "gitdir", "logs", "refs"}
+ADMIN = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "AUTO_MERGE", "index", "commondir", "gitdir", "logs", "refs"}
 OID = re.compile(r"^(?!0+$)([0-9a-f]{40}|[0-9a-f]{64})$")
 
 def admin(ad, lease=None):
@@ -68,7 +68,7 @@ def admin(ad, lease=None):
         base = (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}
         if os.path.islink(cw) or os.path.getsize(cw) and hashlib.sha256(open(cw, "rb").read()).hexdigest() != base.get("config.worktree"):
             return print("kept:admin-unknown")
-    if names - ADMIN - {"config.worktree"}:
+    if names - ADMIN - {"config.worktree", "COMMIT_EDITMSG"}:
         return print("kept:admin-unknown")
     files, inv = [], os.environ.get("C14_INVENTORY_OUT")
     for dp, dns, fns in os.walk(ad, onerror=lambda e: sys.exit("kept:check-failed")):
@@ -85,7 +85,13 @@ def admin(ad, lease=None):
     if head.startswith("ref: "):  # the branch reflog lives in the common dir
         cd = os.path.join(ad, open(os.path.join(ad, "commondir")).read().strip())
         files += [p for p in [os.path.join(cd, "logs", head[5:])] if os.path.isfile(p)]
-    print("\n".join(sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})))
+    oids = sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})
+    print("kept:admin-unknown" if "COMMIT_EDITMSG" in names and not editmsg_ok(ad, oids) else "\n".join(oids))
+
+def editmsg_ok(ad, oids):  # COMMIT_EDITMSG (beyond the spec list) is only comments or a checked tip's message
+    git = lambda i, *a: subprocess.run(["git", "--git-dir", ad, *a], input=i, capture_output=True, check=True).stdout
+    msgs, p = git("\n".join(oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""], os.path.join(ad, "COMMIT_EDITMSG")
+    return not os.path.islink(p) and any(git(open(p, "rb").read(), "stripspace", *s) in msgs for s in ([], ["-s"]))
 
 if __name__ == "__main__":
     a = sys.argv[1:]
