@@ -13,6 +13,8 @@ SOURCE_SCRIPT="${CLEANUP_TMP_SCRIPT:-$REPO_ROOT/scripts/cleanup_tmp.sh}"
 # macOS /tmp -> /private/tmp alias normalization to lsof paths.
 TMP_ROOT=$(mktemp -d "$REPO_ROOT/cleanup_tmp_container.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
 PASS=0
 FAIL=0
