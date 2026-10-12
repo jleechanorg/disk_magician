@@ -401,6 +401,12 @@ assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:own
 mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
 assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
 lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
+# A lease that cannot be stat'ed is not absent: EACCES on the lease dir or a parent keeps.
+ld="$(lease_dir)" && chmod 000 "$ld"
+assert_eq "$(eph "$PT/pr-live")" kept:owner-unknown "unreadable lease dir keeps a live-owner dir"
+chmod 700 "$ld" && chmod 000 "${ld%/*}"
+assert_eq "$(eph "$PT/pr-live")" kept:owner-unknown "unsearchable lease-dir parent keeps a live-owner dir"
+chmod 700 "${ld%/*}"
 # own <path> <released_at>: set this shell as owner of <path>'s lease, keeping its git_meta.
 own() {
     local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"

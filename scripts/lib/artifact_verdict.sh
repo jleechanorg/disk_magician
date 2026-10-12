@@ -127,10 +127,7 @@ c14_ephemeral_retention() {
     else return 1; fi
 }
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
-_av_newest_mtime() (
-    set -o pipefail
-    find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'
-)
+_av_newest_mtime() ( set -o pipefail; find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'; )
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() {
     local d=() && [[ -d "$1" ]] && d=(+D)
@@ -163,10 +160,13 @@ artifact_removal_verdict() {
     [[ "${2:-}" == --kind ]] && kind=${3:-}
     p=${1%/} && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
-    while IFS= read -r -d '' q; do  # a lease not dead or released keeps
+    while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
-        [[ -e "$q" ]] && case "$(lease_owner_state "$q")" in dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
+        case "$(python3 -c 'import os,sys;d=os.path.dirname(sys.argv[1])
+try:os.stat(d);os.stat(sys.argv[1]);print("lease" if os.access(d,os.R_OK|os.X_OK) else "")
+except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; lease) ;; *) echo kept:owner-unknown; return 0 ;; esac
+        case "$(lease_owner_state "$q")" in dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
     done < <(_av_lease_scope "$p" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"
