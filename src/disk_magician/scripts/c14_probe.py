@@ -2,8 +2,9 @@
 """C14 probes (spec §7.2). lsremote: live, 30 s, uncached, run from / without GIT_* so
 candidate config is never read; a local remote must be an absolute path outside <root>.
 gitmeta: .git outside objects/ refs/ logs/ packed-refs index *HEAD, as a manifest or
-compared with a lease's git_meta."""
-import hashlib, json, os, signal, stat, subprocess, sys
+compared with a lease's git_meta. admin: a linked worktree's admin dir; prints the
+object ids under *HEAD, refs/, logs/ and the branch reflog, or kept:<reason>."""
+import hashlib, json, os, re, signal, stat, subprocess, sys
 
 SKIP = {"objects", "refs", "logs", "packed-refs", "index"}
 
@@ -53,6 +54,39 @@ def gitmeta(gd, lease=None):
     base = json.load(open(lease)).get("git_meta") if os.path.isfile(lease) else None
     print("kept:git-unbaselined" if not isinstance(base, dict) else "ok" if base == m else "kept:git-metadata")
 
+ADMIN = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "AUTO_MERGE", "COMMIT_EDITMSG", "index", "commondir", "gitdir", "logs", "refs"}
+OID = re.compile(r"^(?!0+$)([0-9a-f]{40}|[0-9a-f]{64})$")
+
+def admin(ad, lease=None):
+    names = set(os.listdir(ad))
+    if "locked" in names:
+        return print("kept:locked")
+    if names & {"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}:
+        return print("kept:dirty")
+    cw = os.path.join(ad, "config.worktree")
+    if os.path.lexists(cw):
+        base = (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}
+        if os.path.islink(cw) or os.path.getsize(cw) and hashlib.sha256(open(cw, "rb").read()).hexdigest() != base.get("config.worktree"):
+            return print("kept:admin-unknown")
+    if names - ADMIN - {"config.worktree"}:
+        return print("kept:admin-unknown")
+    files, inv = [], os.environ.get("C14_INVENTORY_OUT")
+    for dp, dns, fns in os.walk(ad, onerror=lambda e: sys.exit("kept:check-failed")):
+        for n in fns + [d for d in dns if os.path.islink(os.path.join(dp, d))]:
+            p = os.path.join(dp, n); rel = os.path.relpath(p, ad); st = os.lstat(p)
+            if stat.S_ISREG(st.st_mode) and (rel.endswith("HEAD") and "/" not in rel or rel.split("/")[0] in ("refs", "logs")):
+                files.append(p)
+            if inv:
+                with open(inv, "a") as f:
+                    f.write(json.dumps({"admin": ad, "path": rel, "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size,
+                                        "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest() if stat.S_ISREG(st.st_mode) else None,
+                                        "target": os.readlink(p) if stat.S_ISLNK(st.st_mode) else None}) + "\n")
+    head = open(os.path.join(ad, "HEAD")).read().strip()
+    if head.startswith("ref: "):  # the branch reflog lives in the common dir
+        cd = os.path.join(ad, open(os.path.join(ad, "commondir")).read().strip())
+        files += [p for p in [os.path.join(cd, "logs", head[5:])] if os.path.isfile(p)]
+    print("\n".join(sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})))
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     try:
@@ -60,6 +94,8 @@ if __name__ == "__main__":
             sys.exit(lsremote(a[1], a[2]))
         if len(a) in (2, 3) and a[0] == "gitmeta":
             sys.exit(gitmeta(*a[1:]))
+        if len(a) in (2, 3) and a[0] == "admin":
+            sys.exit(admin(*a[1:]))
     except Exception:
         sys.exit("kept:check-failed")
-    sys.exit("usage: c14_probe.py lsremote <url> <root> | gitmeta <gitdir> [<lease.json>]")
+    sys.exit("usage: c14_probe.py lsremote <url> <root> | gitmeta <gitdir> [<lease.json>] | admin <admindir> [<lease.json>]")

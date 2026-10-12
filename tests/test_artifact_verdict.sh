@@ -257,6 +257,46 @@ git init -q --bare -b main "$TMPROOT/pr-123/backup.git"
 mkrepo "$TMPROOT/seed-bare" && git -C "$TMPROOT/seed-bare" push -q "$TMPROOT/pr-123/backup.git" main
 assert_eq "$(c14_repos_ok "$TMPROOT/pr-123")" kept:not-pushed "bare pr-123/backup.git with an unpushed commit"
 
+echo "== linked worktree scope =="
+# mkwt <name>: clean, quiet linked worktree of pushed clone `wtbase` on branch <name>, pushed.
+mkpushed wtbase
+mkwt() {
+    git -C "$TMPROOT/wtbase" worktree add -q "$TMPROOT/wts/$1" -b "$1" origin/main 2>/dev/null
+    git -C "$TMPROOT/wts/$1" push -q -u origin "$1" 2>/dev/null
+    find "$TMPROOT/wts/$1" -type f -exec touch -t 202001010000 {} +
+}
+admin() { git -C "$TMPROOT/wts/$1" rev-parse --absolute-git-dir; }
+wt() { c14_repos_ok "$TMPROOT/wts/$1"; }
+
+mkwt cand && mkwt sib && git -C "$TMPROOT/wts/sib" commit -q --allow-empty -m "sibling unpushed"
+sibx="$(git -C "$TMPROOT/wts/sib" rev-parse HEAD)"
+assert_eq "$(wt cand)" ok "sibling's unpushed commit does not veto a clean pushed candidate"
+git -C "$TMPROOT/wtbase" cat-file -e "$sibx^{commit}" && ok "sibling's commit survives" || bad "sibling's commit lost"
+mkwt wstash && printf 'X\n' >>"$TMPROOT/wts/wstash/tracked.txt" && git -C "$TMPROOT/wts/wstash" stash create >/dev/null
+git -C "$TMPROOT/wts/wstash" restore tracked.txt && touch -t 202001010000 "$TMPROOT/wts/wstash/tracked.txt"
+assert_eq "$(wt wstash)" ok "git stash create in a linked worktree is not vetoed"
+mkwt headlog && git -C "$TMPROOT/wts/headlog" commit -q --allow-empty -m X
+git -C "$TMPROOT/wts/headlog" reset -q --hard origin/headlog && touch -t 202001010000 "$TMPROOT/wts/headlog/tracked.txt"
+git -C "$TMPROOT/wts/headlog" reflog expire --expire=now refs/heads/headlog && rm "$(admin headlog)/ORIG_HEAD"
+assert_eq "$(wt headlog)" kept:not-pushed "commit dropped by reset --hard, only in the HEAD reflog"
+mkwt brlog && git -C "$TMPROOT/wts/brlog" commit -q --allow-empty -m X
+git -C "$TMPROOT/wts/brlog" reset -q --hard origin/brlog && touch -t 202001010000 "$TMPROOT/wts/brlog/tracked.txt"
+git -C "$TMPROOT/wts/brlog" reflog expire --expire=now HEAD && rm "$(admin brlog)/ORIG_HEAD"
+assert_eq "$(wt brlog)" kept:not-pushed "unpushed commit only in the branch reflog"
+mkwt priv && printf 'p\n' >"$(admin priv)/private-output.txt"
+assert_eq "$(wt priv)" kept:admin-unknown "admin dir holding private-output.txt"
+mkwt cfgwt && printf '[core]\n\tsparseCheckout = true\n' >"$(admin cfgwt)/config.worktree"
+assert_eq "$(wt cfgwt)" kept:admin-unknown "changed config.worktree"
+mkwt cfgempty && : >"$(admin cfgempty)/config.worktree"
+assert_eq "$(wt cfgempty)" ok "empty config.worktree"
+mkwt lockd && git -C "$TMPROOT/wtbase" worktree lock "$TMPROOT/wts/lockd"
+assert_eq "$(wt lockd)" kept:locked "worktree already locked"
+mkwt fresh && touch "$TMPROOT/wts/fresh/tracked.txt"
+assert_eq "$(wt fresh)" kept:recent-activity "wrh_removal_verdict quiet period applies"
+v="$(C14_INVENTORY_OUT="$TMPROOT/inv.jsonl" wt cand)"
+python3 -c 'import json,sys; s={json.loads(l)["path"] for l in open(sys.argv[1])}; sys.exit(not {"HEAD","gitdir","commondir"} <= s)' \
+    "$TMPROOT/inv.jsonl" 2>/dev/null && ok "admin entries emitted for the inventory" || bad "admin inventory missing ($v)"
+
 echo "== verdict stub stays blocked =="
 assert_eq "$(artifact_removal_verdict "$TMPROOT/clean")" kept:check-failed "verdict keeps every path"
 st="$(artifact_removal_verdict --self-test)"

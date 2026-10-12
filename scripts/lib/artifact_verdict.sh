@@ -53,23 +53,37 @@ c14_repo_content_ok() (
     echo ok
 )
 
-# c14_repo_pushed_ok <repo> [<root>]: independent repo (linked worktree: kept for now): all
-# commits in the live ls-remote set of remotes outside <root> (default <repo>), no
-# unreachable object, .git = lease git_meta.
+# c14_repo_pushed_ok <repo> [<root>]: all commits in the live ls-remote set of remotes
+# outside <root> (default <repo>). Independent repo: every ref and reflog, no unreachable
+# object, .git = lease git_meta. Registered linked worktree: only its branch, the branch
+# reflog and the ids under its admin dir (allowlisted names), then wrh_removal_verdict.
 c14_repo_pushed_ok() (
-    local r=$1 root=${2:-$1} gd kv out adv have unp v
+    local r=$1 root=${2:-$1} gd cd kv out adv have tips='' unp v scope=(--all --reflog)
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     gd="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" &&
-        [[ "$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" == "$gd" ]] ||
+        cd="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
         { echo kept:check-failed; return 1; }
+    if [[ "$cd" != "$gd" ]]; then
+        [[ "$(git -C "$r" config --get extensions.refStorage || echo files)" == files ]] &&
+            tips="$(python3 "$_AV_DIR/../c14_probe.py" admin "$gd" "$(lease_path_for "$r" 2>/dev/null)")" ||
+            { echo kept:check-failed; return 1; }
+        [[ "$tips" == kept:* ]] && { echo "$tips"; return 1; }
+        tips+=$'\n'"$(git -C "$r" rev-parse --verify -q HEAD)" || { echo kept:check-failed; return 1; }
+        scope=()
+    fi
     while IFS= read -r -d '' kv; do
         out="$(python3 "$_AV_DIR/../c14_probe.py" lsremote "${kv#*$'\n'}" "$root")" || { echo kept:remote-unverified; return 1; }
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
     have="$(cut -f1 <<<"$adv" | git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
-    unp="$(git -C "$r" rev-list --all --reflog --stdin -n1 <<<"$have" 2>/dev/null)" || { echo kept:check-failed; return 1; }
+    unp="$(git -C "$r" rev-list ${scope[@]+"${scope[@]}"} --stdin -n1 < <(printf '%s\n' $tips $have) 2>/dev/null)" || { echo kept:check-failed; return 1; }
     [[ -z "$unp" ]] || { echo kept:not-pushed; return 1; }
+    if [[ -z "${scope[*]}" ]]; then  # linked: unreachable objects stay in the common store
+        v="$(wrh_removal_verdict "$r" minutes:30 origin-or-merged-pr)"
+        [[ "$v" == remove ]] && { echo ok; return 0; }
+        echo "$v"; return 1
+    fi
     out="$(git -C "$r" fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>/dev/null)" ||
         { echo kept:check-failed; return 1; }
     grep -q '^unreachable ' <<<"$out" && { echo kept:unreachable-object; return 1; }
