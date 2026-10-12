@@ -74,6 +74,7 @@ Commands:
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
   ci-admit               ezgha job-started hook: admit the CI workspace (class colima).
   govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
+  budget                 status: governor alerts (ALERT:<code> lines, rc 1 when any).
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -417,6 +418,9 @@ case "$CMD" in
     ;;
   govern)
     exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" --govern "$@"
+    ;;
+  budget)
+    exec python3 "$SCRIPT_DIR/scripts/budget_status.py" "$@"
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
