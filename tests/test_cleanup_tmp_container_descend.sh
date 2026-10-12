@@ -11,7 +11,7 @@ SOURCE_SCRIPT="${CLEANUP_TMP_SCRIPT:-$REPO_ROOT/scripts/cleanup_tmp.sh}"
 [[ "$SOURCE_SCRIPT" == /* ]] || SOURCE_SCRIPT="$REPO_ROOT/$SOURCE_SCRIPT"
 # Keep Linux fixtures out of /tmp because cleanup_tmp intentionally applies
 # macOS /tmp -> /private/tmp alias normalization to lsof paths.
-TMP_ROOT=$(mktemp -d "${TMPDIR:-$REPO_ROOT}/cleanup_tmp_container.XXXXXX")
+TMP_ROOT=$(mktemp -d "$REPO_ROOT/cleanup_tmp_container.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
