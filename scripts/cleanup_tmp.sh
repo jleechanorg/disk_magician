@@ -1031,6 +1031,7 @@ container_child_has_protected_repository() {
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
   local d="$1" depth="$2" base kb archive_rc=0
+  local scratch_container=false descend_for_child_safety=false
   base="$(basename "$d")"
 
   case "$base" in
@@ -1068,27 +1069,41 @@ large_consider_entry() {
     return 0
   fi
 
+  if (( depth == 0 )) && is_scratch_container "$d"; then
+    scratch_container=true
+  fi
+
   # cleanup_tmp is not an exception to the canonical worktree recency floor,
   # and a child can contain repositories below its root (runtime/run-id/repo).
   # Protect the whole cleanup unit if any nested repository is recent, dirty,
   # unpushed, lacks an upstream, or cannot be measured safely.
-  if { (( depth > 0 )) || is_scratch_container "$d"; } &&
-      container_child_has_protected_repository "$d"; then
+  if (( depth > 0 )) && container_child_has_protected_repository "$d"; then
     return 0
   fi
 
   # Cheap recency/marker verdicts first: an entry that is too recent to touch
   # never pays for du or lsof (bead dcz: pressure step budget).
-  if has_active_marker "$d"; then
+  if [[ -e "$d/.in-use" ]]; then
     log "Skipping active-use marker (.in-use present): $d"
     return 0
   fi
 
-  if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+  if [[ "$scratch_container" == true ]]; then
+    # A protected child must not veto eligible siblings. Descend so each
+    # immediate child applies the recursive marker and repository guards.
+    if has_active_marker "$d" || container_child_has_protected_repository "$d"; then
+      descend_for_child_safety=true
+    fi
+  elif has_active_marker "$d"; then
+    log "Skipping active-use marker (.in-use present): $d"
+    return 0
+  fi
+
+  if [[ "$descend_for_child_safety" == true ]] || has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
     # Long-lived agent container (non-git dir of per-task dirs): its newest
     # mtime is refreshed by whichever child is live, so judge each immediate
     # child on its own. One level only; the container is never removed here.
-    if (( depth == 0 )) && is_scratch_container "$d"; then
+    if [[ "$scratch_container" == true ]]; then
       log "Descending into active container (children evaluated individually): $d"
       while IFS= read -r -d '' child; do
         large_consider_entry "$child" 1

@@ -163,11 +163,14 @@ make_env t6
 mkdir -p "$PT/agent-scratch" "$PT/marked"
 mkchild "$PT/agent-scratch/old-marked"; touch "$PT/agent-scratch/old-marked/.in-use"; set_old "$PT/agent-scratch/old-marked"
 mkchild "$PT/agent-scratch/old-nested-marked"; mkdir -p "$PT/agent-scratch/old-nested-marked/runtime"; touch "$PT/agent-scratch/old-nested-marked/runtime/.in-use"; set_old "$PT/agent-scratch/old-nested-marked"
+mkchild "$PT/agent-scratch/old-unmarked"; set_old "$PT/agent-scratch/old-unmarked"
 mkchild "$PT/agent-scratch/fresh-child"
 mkchild "$PT/marked/old-child"; set_old "$PT/marked/old-child"; touch "$PT/marked/.in-use"
 run_sweep t6 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS="agent-scratch marked"
 assert_exists "t6 marked child kept" "$PT/agent-scratch/old-marked"
 assert_exists "t6 child with nested marker kept" "$PT/agent-scratch/old-nested-marked"
+assert_missing "t6 eligible sibling of marked children moved out" "$PT/agent-scratch/old-unmarked"
+[[ -n "$(archived old-unmarked)" ]] && pass "t6 eligible sibling archived" || fail "t6 eligible sibling archived"
 assert_exists "t6 child under marked container kept" "$PT/marked/old-child"
 
 echo "Test 7: protected-root container children are kept"
@@ -317,9 +320,13 @@ make_env t18
 mkdir -p "$PT/agent-scratch/runtime/run-id"
 make_clean_pushed_worktree "$TMP_ROOT/t18-main" "$PT/agent-scratch/runtime/run-id/repo" t18wt
 echo dirty >> "$PT/agent-scratch/runtime/run-id/repo/payload.bin"
+mkchild "$PT/agent-scratch/old-sibling"
 set_old "$PT/agent-scratch"
 run_sweep t18 --clean
 assert_exists "t18 idle container with dirty nested repository kept" "$PT/agent-scratch"
+assert_exists "t18 child containing dirty nested repository kept" "$PT/agent-scratch/runtime"
+assert_missing "t18 eligible sibling of dirty repository moved out" "$PT/agent-scratch/old-sibling"
+[[ -n "$(archived old-sibling)" ]] && pass "t18 eligible sibling archived" || fail "t18 eligible sibling archived"
 assert_contains "t18 depth-zero nested unsaved-work protection reported" \
   "nested repository unsaved work" "$OUT"
 
