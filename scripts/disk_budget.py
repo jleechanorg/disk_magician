@@ -17,6 +17,10 @@ def decide(stage, free_gb, est_gb, margin_gb, over_budget, d2):
     if z in EMERGENCY or z == "GREEN" or stage == "observe":
         return z, (EMERGENCY[z] if d2 else 10) if z in EMERGENCY else 0
     return z, 75 if z == "RED" and stage != "warn" or over_budget and stage == "refuse_orange" else 10
+def daily_min_used(state, now, used):  # C12 trough baseline: per-day minimum used bytes, last 31 days (observer files rotate out after ~7-11)
+    try: m = {k: v for k, v in json.loads((state / "budget.json").read_text())["daily_min_used"].items() if type(v) is int}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError): m = {}
+    return dict(sorted({**m, (d := time.strftime("%Y-%m-%d", time.localtime(now))): min(used, m.get(d, used))}.items())[-31:])
 def state_update(state, keys, events=()):  # under state.lock: reread, merge only our keys, atomic replace
     with open(state / "state.lock", "a") as lock, open(state / "admission" / "events.jsonl", "a") as log:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -36,7 +40,7 @@ def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kic
             out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
             now, free = time.time(), int(out.splitlines()[-1].split()[3]) * 1024
-            state_update(state, dict(zone=(z := zone(free / GIB)), zone_at=now, free_bytes=free),
+            state_update(state, dict(zone=(z := zone(free / GIB)), zone_at=now, free_bytes=free, daily_min_used=daily_min_used(state, now, int(out.splitlines()[-1].split()[2]) * 1024)),
                          [dict(event="floor_breach", at=now, df_free_bytes=free)] if z == "FLOOR" else [])
             if z in EMERGENCY:  # artifact_verdict.sh is absent until Task 11, so this stays blocked
                 lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
