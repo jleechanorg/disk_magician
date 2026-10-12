@@ -521,11 +521,29 @@ assert_eq "$(av "$HOME/Library/Developer/Xcode/DerivedData/App-1" --kind rebuild
 assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
 assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
-git -C "$TMPROOT/wtbase" worktree add -q "$HOME/wt-dormant" -b wt-dormant origin/main 2>/dev/null
-mkdir -p "$HOME/wt-dormant/venv/bin" "$HOME/wt-dormant/notvenv" && printf 'py' >"$HOME/wt-dormant/venv/bin/python" && printf 'py' >"$HOME/wt-dormant/notvenv/x"
-age "$HOME/wt-dormant" 43200
-assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's venv/"
-assert_eq "$(av "$HOME/wt-dormant/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir in a worktree"
+# venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
+venvw() {
+    git -C "$TMPROOT/wtbase" worktree add -q "$1" -b "${1##*/}" origin/main 2>/dev/null
+    printf 'venv/\n' >>"$1/.gitignore" && git -C "$1" commit -qam ignore-venv && git -C "$1" push -q -u origin "${1##*/}" 2>/dev/null
+    mkdir -p "$1/venv/bin" && printf 'py' >"$1/venv/bin/python"
+}
+venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
+age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
+assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
+git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
+mkdir -p "$HOME/Documents/venv" "$HOME/Documents/venv.bak.old" && printf 't' >"$HOME/Documents/venv/thesis.txt" && printf 't' >"$HOME/Documents/venv.bak.old/t.txt"
+venvw "$HOME/wt-dirty" && printf 'x\n' >>"$HOME/wt-dirty/tracked.txt"
+venvw "$HOME/wt-tracked" && git -C "$HOME/wt-tracked" add -f venv && git -C "$HOME/wt-tracked" commit -qm tracked-venv && git -C "$HOME/wt-tracked" push -q 2>/dev/null
+git clone -q "$TMPROOT/remotes/wtbase.git" "$HOME/base" && printf 'venv/\n' >>"$HOME/base/.git/info/exclude" && mkdir -p "$HOME/base/venv" && printf 'py' >"$HOME/base/venv/python"
+for d in "$HOME/projects" "$HOME/Documents" "$HOME/wt-dirty" "$HOME/wt-tracked" "$HOME/base"; do age "$d" 43200; done
+assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:unproven-content "tracked, unpushed and dirty venv/ in a base repo"
+assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:unproven-content "venv/ outside any repository"
+assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:unproven-content "venv.bak.old outside any repository"
+assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a dirty worktree"
+assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:unproven-content "tracked venv/ in a clean pushed worktree"
+assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a base repo, not a linked worktree"
 mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/c1/app" && age "$PT/X" 43200
 assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/c1" --kind os_clone)" remove "os_clone with the caller's frozen-identity proof"
 assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/c1")" kept:unproven-content "the same clone without --kind os_clone"

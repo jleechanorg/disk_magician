@@ -126,13 +126,14 @@ c14_ephemeral_retention() {
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
-# _av_rebuildable <canonical path>: rc 0 for an entry under the fixed cache-root table
-# (§7.2 (b)): roots today's cache sweepers clear, or a venv dir cleanup_worktree_venvs strips.
-_av_rebuildable() {
-    local h re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]'
-    [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]] && return 0
+# _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as cleanup_worktree_venvs,
+# an untracked venv dir atop a linked worktree passing the content and push checks.
+_av_rebuildable() (
+    local h w g t re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]'
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]] && { w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] && g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" && [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] && t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] && c14_repo_content_ok "$w" >/dev/null && c14_repo_pushed_ok "$w" >/dev/null; return; }
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
-}
+)
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() ( set -o pipefail; find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'; )
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
