@@ -66,6 +66,13 @@ cat > "$BIN/ssh" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
+# Keep the trusted-socket ownership fixture independent of BSD/GNU stat syntax;
+# the production guard still compares this value with the real current uid.
+TEST_UID=$(id -u)
+cat > "$BIN/stat" <<EOF
+#!/bin/bash
+printf '%s\n' '$TEST_UID'
+EOF
 printf '#!/bin/bash\nprintf "%%s\\t%%s\\n" 9437184 "${!#}"\n' > "$BIN/du"
 chmod +x "$BIN"/*
 
@@ -114,10 +121,13 @@ rm -f "$HOME_D/.colima/_lima/colima/ha.pid"; kill "$LIVE_PID" 2>/dev/null
 
 # 4b. live hostagent process visible via ps -> no unlock
 run stopped 1 1
-: > "$INV"; echo "limactl hostagent --pidfile /x/colima/ha.pid colima" > "$ST/ps_out"
+: > "$INV"; rm -f "$ST/started"; touch "$ST/lock"
+echo "limactl hostagent --pidfile /x/colima/ha.pid colima" > "$ST/ps_out"
 RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 \
   /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
-if [[ $(cnt '^limactl disk unlock') -eq 0 ]]; then ok "live hostagent process: no unlock"; else bad "live ps"; fi
+if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]] && grep -q 'failing closed' "$TMP/out"; then
+  ok "live hostagent process: no unlock, fail closed"
+else bad "live ps"; fi
 
 # 5. no approval -> unchanged
 run stopped 0 0
@@ -137,9 +147,11 @@ RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECO
 if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]]; then ok "unlocked disk: never unlocks"; else bad "unlocked"; fi
 
 # 8. ps failure -> not proven stale
-run stopped 1 1; : > "$INV"; rm -f "$ST/started"; touch "$ST/ps_fail"
+run stopped 1 1; : > "$INV"; rm -f "$ST/started"; touch "$ST/lock" "$ST/ps_fail"
 RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
-if [[ $(cnt '^limactl disk unlock') -eq 0 ]]; then ok "ps failure: fail closed"; else bad "ps failure"; fi
+if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]] && grep -q 'failing closed' "$TMP/out"; then
+  ok "ps failure: no unlock, fail closed"
+else bad "ps failure"; fi
 
 # 9. empty pid file -> not proven stale
 : > "$HOME_D/.colima/_lima/colima/ha.pid"
