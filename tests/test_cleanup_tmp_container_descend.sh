@@ -233,6 +233,34 @@ run_sweep t12 --clean
 assert_missing "t12 old clean pushed worktree moved out" "$PT/agent-scratch/old-wt"
 [[ -n "$(archived old-wt)" ]] && pass "t12 old clean pushed worktree archived" || fail "t12 old clean pushed worktree archived"
 
+echo "Test 13: machine safety policy blocks child quarantine without counting it"
+make_env t13
+mkdir -p "$PT/agent-scratch" "$TMP_ROOT/t13-config"
+mkchild "$PT/agent-scratch/never-child"; set_old "$PT/agent-scratch/never-child"
+mkchild "$PT/agent-scratch/live-child"; set_old "$PT/agent-scratch/live-child"
+mkchild "$PT/agent-scratch/decision-child"; set_old "$PT/agent-scratch/decision-child"
+mkchild "$PT/agent-scratch/fresh-child"
+cat > "$TMP_ROOT/t13-config/safety.local.json" <<JSON
+{
+  "never_delete": ["$PT/agent-scratch/never-child"],
+  "protected_live_paths": [
+    {"path": "$PT/agent-scratch/live-child", "reason": "test live path"}
+  ],
+  "needs_decision": [
+    {"path": "$PT/agent-scratch/decision-child", "reason": "test operator decision"}
+  ]
+}
+JSON
+run_sweep t13 --clean DISK_MAGICIAN_SAFETY_FILE="$TMP_ROOT/t13-config/safety.local.json"
+assert_exists "t13 never_delete child kept at original path" "$PT/agent-scratch/never-child"
+assert_exists "t13 protected_live_paths child kept at original path" "$PT/agent-scratch/live-child"
+assert_exists "t13 needs_decision child kept at original path" "$PT/agent-scratch/decision-child"
+assert_contains "t13 safety refusal reported" "SAFETY-SKIP" "$OUT"
+assert_contains "t13 never_delete reason reported" "never_delete:" "$OUT"
+assert_contains "t13 protected_live_paths reason reported" "protected_live_paths:" "$OUT"
+assert_contains "t13 needs_decision reason reported" "needs_decision:" "$OUT"
+assert_contains "t13 refused children excluded from archive totals" "Dirs archived: 0" "$OUT"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -643,16 +643,30 @@ has_open_files() {
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
-  local path="$1" kb="$2" sub="${3:-}" ts dest
+  local path="$1" kb="$2" sub="${3:-}" ts dest safety_reason
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
   else
-    mkdir -p "$dest"
+    # Quarantine is still a destructive relocation: once moved, an
+    # original-path safety.local.json rule would no longer match and a later
+    # archive purge could delete the content. Gate the source immediately
+    # before mutation and fail closed on unreadable policy.
+    if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
+      log "SAFETY-SKIP $path ($safety_reason)"
+      return 1
+    fi
+    if ! mkdir -p "$dest"; then
+      log "ERROR: could not create archive destination: $dest"
+      return 2
+    fi
     log "Archiving: $path -> $dest/  (${kb} KB)"
-    mv "$path" "$dest/"
+    if ! mv "$path" "$dest/"; then
+      log "ERROR: could not archive: $path -> $dest/"
+      return 2
+    fi
     deletion_log "cleanup_tmp.sh" "archive" "$kb" "$path -> $dest/"
   fi
   echo "$kb"
@@ -972,7 +986,7 @@ is_scratch_container() {
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
-  local d="$1" depth="$2" base kb
+  local d="$1" depth="$2" base kb archive_rc=0
   base="$(basename "$d")"
 
   case "$base" in
@@ -1061,7 +1075,11 @@ large_consider_entry() {
     return 0
   fi
 
-  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" >/dev/null
+  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" >/dev/null || archive_rc=$?
+  if (( archive_rc == 1 )); then
+    return 0
+  fi
+  (( archive_rc == 0 )) || return "$archive_rc"
   ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
   DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
 }
