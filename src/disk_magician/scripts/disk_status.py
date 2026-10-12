@@ -1948,16 +1948,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     result = evaluator.evaluate(publication_only=args.publication_only)
+    import budget_status  # governor alerts (plan Task 10) print before any accounting
+    alerts = [] if args.publication_only else budget_status.alerts(evaluator.state_dir, evaluator.now.timestamp())
+    result["alerts"] = alerts
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
+        if alerts:
+            print("\n".join(alerts))
         print(f"Disk Magician Status: {result['status'].upper()} (checked: {result['checked_at']})")
         for dim_name, dim_data in result["dimensions"].items():
             print(f"  [{dim_data['status'].upper():<8}] {dim_name:<18} {dim_data['reason']}")
 
     status = result["status"]
-    if status == STATUS_HEALTHY:
+    if status == STATUS_HEALTHY and not alerts:
         return EXIT_HEALTHY
     elif status == STATUS_INVALID:
         return EXIT_INVALID

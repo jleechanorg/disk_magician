@@ -94,6 +94,10 @@ if [[ ! -d "$PLIST_DIR" ]]; then
   exit 1
 fi
 
+# Governor alerts (plan Task 10) print before any accounting; any alert fails the run.
+GOVERNOR_ALERTS=$(python3 "$SCRIPT_DIR/budget_status.py" status 2>&1) || true
+[[ "$GOVERNOR_ALERTS" == ALERT:* ]] && echo "$GOVERNOR_ALERTS" || GOVERNOR_ALERTS=""
+
 # Threshold expressed in seconds for date math.
 THRESHOLD_SEC=$(( THRESHOLD_DAYS * 86400 ))
 NOW_EPOCH=$(date +%s)
@@ -340,6 +344,11 @@ fi
 
 if [[ "$PUBLICATION_DEGRADED" == true ]]; then
   log "FAIL: disk-magician publication is degraded, partial, or missing canonical."
+  exit 1
+fi
+
+if [[ -n "$GOVERNOR_ALERTS" ]]; then
+  log "FAIL: governor alerts raised (ALERT: lines above)."
   exit 1
 fi
 
