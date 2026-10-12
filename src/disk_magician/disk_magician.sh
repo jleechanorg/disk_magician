@@ -69,6 +69,7 @@ Commands:
   layout-check           Audit worktree and evidence placement against standard layout.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N).
+  govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -403,6 +404,9 @@ case "$CMD" in
     ;;
   admit)
     exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" "$@"
+    ;;
+  govern)
+    exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" --govern "$@"
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
