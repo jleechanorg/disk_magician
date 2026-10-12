@@ -26,8 +26,8 @@ def verify(dest, rec):  # "" = identity, live-user and re-hash checks all pass; 
     try:
         d = os.lstat(dest)
         if (d.st_dev, d.st_ino) != (rec["dev"], rec["ino"]): return "identity-mismatch"
-        lsof = subprocess.run(["lsof", "+D", dest], capture_output=True, timeout=120)  # open files and cwds inside
-        if lsof.returncode != 1 or lsof.stdout: return "live-user"
+        lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", dest], capture_output=True, timeout=120)  # +D is dirs-only
+        if lsof.stdout or lsof.returncode != 1 or lsof.stderr.strip(): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         return "" if canon(visit(None, dest, ".", [])) == canon(rec["inventory"]) else "rehash-mismatch"
     except Exception: return "check-failed"
 def phase1(path, inv_file):

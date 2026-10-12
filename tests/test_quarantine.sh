@@ -90,6 +90,18 @@ fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE="sleep 30 < \"\$DM_Q_DEST/repor
 kill "$(cat "$TMP/pid")" 2>/dev/null
 check 'open file: kept:live-user' [ "$OUT" = kept:live-user ]
 check 'open file: rolled back intact' intact AAAA
+# Single-file root held open: `lsof +D` on a file exits 1 with only a stderr warning, which must not read as "no user".
+fixture; A="$TMP/p$N/rotated.log"; printf 'LOG' > "$A"
+run DISK_MAGICIAN_TEST_AFTER_QUARANTINE="sleep 30 < \"\$DM_Q_DEST\" & echo \$! > '$TMP/pid'; sleep 0.3"
+kill "$(cat "$TMP/pid")" 2>/dev/null
+check 'open single file: kept:live-user' [ "$OUT" = kept:live-user ]
+check 'open single file: rolled back intact' [ "$(cat "$A")" = LOG ]
+check 'open single file: quarantine empty' [ "$(qcount)" = 0 ]
+# lsof exits 1 with an error on stderr (stat failure, unreadable subtree): check-failed, rolled back.
+mkdir -p "$TMP/fakebin"; printf '#!/bin/sh\necho "lsof: WARNING: can'"'"'t stat()" >&2\nexit 1\n' > "$TMP/fakebin/lsof"; chmod +x "$TMP/fakebin/lsof"
+fixture; run PATH="$TMP/fakebin:$PATH"
+check 'lsof error: kept:check-failed' [ "$OUT" = kept:check-failed ]
+check 'lsof error: rolled back intact' intact AAAA
 # Same hook also recreates the original path (empty dir, which plain rename(2) would replace): rollback hits EEXIST.
 fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE="sleep 30 < \"\$DM_Q_DEST/report.md\" & echo \$! > '$TMP/pid'; mkdir \"\$DM_Q_PATH\""
 kill "$(cat "$TMP/pid")" 2>/dev/null
