@@ -48,7 +48,7 @@ mkrepo "$TMPROOT/clean"
 assert_eq "$(content "$TMPROOT/clean")" ok "clean repo"
 mkdir -p "$TMPROOT/clean/node_modules/pkg" && printf 'x' >"$TMPROOT/clean/node_modules/pkg/i.js"
 assert_eq "$(content "$TMPROOT/clean")" ok "clean repo with rebuildable node_modules"
-assert_eq "$(c14_repos_ok "$TMPROOT/clean")" ok "c14_repos_ok on clean repo"
+assert_eq "$(c14_repos_ok "$TMPROOT/clean")" kept:not-pushed "c14_repos_ok on clean repo with no remote"
 
 echo "== tracked changes, every repo type =="
 mkrepo "$TMPROOT/unstaged" && printf 'edit\n' >>"$TMPROOT/unstaged/tracked.txt"
@@ -92,7 +92,10 @@ v="$(c14_repos_ok "$TMPROOT/outer")"
 mkdir -p "$TMPROOT/plain2/node_modules"
 mkrepo "$TMPROOT/plain2/node_modules/inner"
 git init -q --bare "$TMPROOT/plain2/node_modules/backup.git"
-assert_eq "$(c14_repos_ok "$TMPROOT/plain2")" ok "clean nested and bare repos under a non-git root"
+assert_eq "$(content "$TMPROOT/plain2/node_modules/inner")" ok "clean nested repo under a non-git root"
+assert_eq "$(content "$TMPROOT/plain2/node_modules/backup.git")" ok "bare repo under a non-git root"
+v="$(c14_repos_ok "$TMPROOT/plain2")"
+[[ "$v" == kept:* ]] && ok "unpushed, unbaselined nested repos are kept ($v)" || bad "nested repos with no remote: $v"
 printf 'edit\n' >>"$TMPROOT/plain2/node_modules/inner/tracked.txt"
 assert_eq "$(c14_repos_ok "$TMPROOT/plain2" --outer-certificate "$TMPROOT/none.json")" kept:dirty \
     "dirty repo nested under allowlisted node_modules is checked"
@@ -134,6 +137,107 @@ chmod 000 "$TMPROOT/locked/closed"
 assert_eq "$(c14_repos_ok "$TMPROOT/locked")" kept:check-failed "unreadable directory"
 chmod 700 "$TMPROOT/locked/closed"
 assert_eq "$(c14_repos_ok "$TMPROOT/missing")" kept:check-failed "missing root"
+
+echo "== remote proof (independent repositories) =="
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
+PROBE="$REPO_ROOT/scripts/c14_probe.py"
+# shellcheck source=scripts/lib/worktree_lease.sh
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+# baseline <repo>: record the producer's git_meta in the repo's lease.
+baseline() {
+    local f gd
+    f="$(lease_path_for "$1")" && gd="$(git -C "$1" rev-parse --absolute-git-dir)"
+    mkdir -p "${f%/*}" && printf '{"git_meta": %s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
+}
+# mkpushed <name>: bare remote + clone with main pushed and a git_meta baseline.
+mkpushed() {
+    git init -q --bare -b main "$TMPROOT/remotes/$1.git"
+    mkrepo "$TMPROOT/seed-$1" && git -C "$TMPROOT/seed-$1" push -q "$TMPROOT/remotes/$1.git" main
+    git clone -q "$TMPROOT/remotes/$1.git" "$TMPROOT/$1" && baseline "$TMPROOT/$1"
+}
+pushed() { c14_repos_ok "$TMPROOT/$1"; }
+unpushed_commit() { git -C "$TMPROOT/$1" commit -q --allow-empty -m "unpushed $2"; }
+expire() { git -C "$TMPROOT/$1" reflog expire --expire=now --all; }
+
+mkpushed ctl
+assert_eq "$(pushed ctl)" ok "pushed clean clone with baseline"
+assert_eq "$(c14_repo_pushed_ok "$TMPROOT/ctl")" ok "c14_repo_pushed_ok on pushed clean clone"
+mkpushed headx && unpushed_commit headx X
+assert_eq "$(pushed headx)" kept:not-pushed "HEAD not on remote"
+mkpushed reflog && unpushed_commit reflog X && git -C "$TMPROOT/reflog" reset -q --hard origin/main
+assert_eq "$(pushed reflog)" kept:not-pushed "reflog-only commit"
+mkpushed rewritten && unpushed_commit rewritten X
+git -C "$TMPROOT/rewritten" update-ref refs/rewritten/secret HEAD && git -C "$TMPROOT/rewritten" reset -q --hard origin/main
+expire rewritten
+assert_eq "$(pushed rewritten)" kept:not-pushed "refs/rewritten-only commit"
+mkpushed tag && unpushed_commit tag X && git -C "$TMPROOT/tag" tag t1 && git -C "$TMPROOT/tag" reset -q --hard origin/main
+expire tag
+assert_eq "$(pushed tag)" kept:not-pushed "unpushed local tag"
+mkpushed stash && printf 'x\n' >>"$TMPROOT/stash/tracked.txt" && git -C "$TMPROOT/stash" stash -q
+assert_eq "$(pushed stash)" kept:not-pushed "stash only"
+mkpushed screate && printf 'X\n' >>"$TMPROOT/screate/tracked.txt" && git -C "$TMPROOT/screate" stash create >/dev/null
+git -C "$TMPROOT/screate" restore tracked.txt
+assert_eq "$(pushed screate)" kept:unreachable-object "git stash create"
+mkpushed blob && printf 'unique bytes\n' >"$TMPROOT/blob/new.txt" && git -C "$TMPROOT/blob" add new.txt
+git -C "$TMPROOT/blob" reset -q && rm "$TMPROOT/blob/new.txt"
+assert_eq "$(pushed blob)" kept:unreachable-object "staged-then-reset blob (round 9)"
+
+echo "== stale remote-tracking refs =="
+# feat_on_remote <name>: commit X pushed to remote feat, local feat deleted, reflogs expired.
+feat_on_remote() {
+    mkpushed "$1" && git -C "$TMPROOT/$1" checkout -q -b "$2" && unpushed_commit "$1" X
+    git -C "$TMPROOT/$1" push -q origin "$2" && git -C "$TMPROOT/$1" checkout -q main
+    git -C "$TMPROOT/$1" branch -q -D "$2" && expire "$1"
+}
+feat_on_remote staledel feat && git -C "$TMPROOT/remotes/staledel.git" branch -q -D feat
+assert_eq "$(pushed staledel)" kept:not-pushed "stale origin/feat after remote delete"
+feat_on_remote staleforce feat && git -C "$TMPROOT/remotes/staleforce.git" update-ref refs/heads/feat main
+assert_eq "$(pushed staleforce)" kept:not-pushed "stale origin/feat after remote force-push"
+feat_on_remote narrow old-feature
+git -C "$TMPROOT/narrow" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+git -C "$TMPROOT/remotes/narrow.git" branch -q -D old-feature
+assert_eq "$(pushed narrow)" kept:not-pushed "narrowed refspec, stale origin/old-feature"
+
+echo "== advertisement changed after nomination (no cache) =="
+mkpushed advdel && git -C "$TMPROOT/advdel" checkout -q -b feat && unpushed_commit advdel X
+git -C "$TMPROOT/advdel" push -q origin feat && baseline "$TMPROOT/advdel"
+assert_eq "$(pushed advdel)" ok "X advertised at nomination"
+git -C "$TMPROOT/remotes/advdel.git" branch -q -D feat
+assert_eq "$(pushed advdel)" kept:not-pushed "remote branch deleted before removal"
+mkpushed advforce && git -C "$TMPROOT/advforce" checkout -q -b feat && unpushed_commit advforce X
+git -C "$TMPROOT/advforce" push -q origin feat && baseline "$TMPROOT/advforce"
+assert_eq "$(pushed advforce)" ok "X advertised at nomination (force-push variant)"
+git -C "$TMPROOT/remotes/advforce.git" update-ref refs/heads/feat main
+assert_eq "$(pushed advforce)" kept:not-pushed "remote branch force-pushed before removal"
+
+echo "== ls-remote failure =="
+mkpushed lsmiss && git -C "$TMPROOT/lsmiss" remote set-url origin "$TMPROOT/remotes/nonexistent.git"
+assert_eq "$(pushed lsmiss </dev/null)" kept:remote-unverified "missing remote path"
+mkdir -p "$TMPROOT/stub"
+cat >"$TMPROOT/stub/git" <<STUB
+#!/bin/bash
+[[ "\$1" == ls-remote ]] && exec sleep 45.1729
+exec $(command -v git) "\$@"
+STUB
+chmod +x "$TMPROOT/stub/git"
+mkpushed lsslow
+t0=$SECONDS
+v="$(PATH="$TMPROOT/stub:$PATH" pushed lsslow </dev/null)"
+el=$((SECONDS - t0))
+assert_eq "$v" kept:remote-unverified "ls-remote stub sleeping past 30 s"
+[[ $el -ge 29 && $el -lt 40 ]] && ok "ls-remote bounded at 30 s (${el}s)" || bad "ls-remote bound: ${el}s"
+pgrep -f "sleep 45.1729" >/dev/null && bad "stub sleep left running" || ok "stub process group killed"
+
+echo "== .git metadata baseline =="
+mkpushed hooks && printf 'private\n' >"$TMPROOT/hooks/.git/hooks/private-output"
+assert_eq "$(pushed hooks)" kept:git-metadata ".git/hooks/private-output"
+mkpushed nobase && rm -f "$(lease_path_for "$TMPROOT/nobase")"
+assert_eq "$(pushed nobase)" kept:git-unbaselined "no git_meta baseline"
+
+echo "== bare repository =="
+git init -q --bare -b main "$TMPROOT/pr-123/backup.git"
+mkrepo "$TMPROOT/seed-bare" && git -C "$TMPROOT/seed-bare" push -q "$TMPROOT/pr-123/backup.git" main
+assert_eq "$(c14_repos_ok "$TMPROOT/pr-123")" kept:not-pushed "bare pr-123/backup.git with an unpushed commit"
 
 echo "== verdict stub stays blocked =="
 assert_eq "$(artifact_removal_verdict "$TMPROOT/clean")" kept:check-failed "verdict keeps every path"
