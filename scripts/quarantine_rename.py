@@ -2,6 +2,7 @@
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
 import ctypes, hashlib, json, os, secrets, stat, subprocess, sys
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+UPDATE_COUNT = 0
 def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol raises LookupError
     try: fn = ctypes.CDLL(None, use_errno=True)[ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL", "renameatx_np")]
     except (AttributeError, OSError): raise LookupError
@@ -42,7 +43,10 @@ def same_entry(fd, name, st):
     except OSError: return False
     return (current.st_dev, current.st_ino) == (st.st_dev, st.st_ino)
 def update_sidecar(qfd, side, rec):
-    temp = side + ".update"
+    global UPDATE_COUNT
+    UPDATE_COUNT += 1
+    if ENV.get("DISK_MAGICIAN_TEST_SIDECAR_UPDATE_FAIL_AT") == str(UPDATE_COUNT): raise OSError("injected sidecar update failure")
+    temp = side + ".update." + secrets.token_hex(8)
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd)
     try:
         data = json.dumps(rec, separators=(",", ":")).encode()
@@ -58,7 +62,11 @@ def update_sidecar(qfd, side, rec):
         except OSError: pass
         raise
     else: os.close(fd)
-    os.rename(temp, side, src_dir_fd=qfd, dst_dir_fd=qfd)
+    try: os.rename(temp, side, src_dir_fd=qfd, dst_dir_fd=qfd)
+    except OSError:
+        try: os.unlink(temp, dir_fd=qfd)
+        except OSError: pass
+        raise
     os.fsync(qfd)
 def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re-hash checks all pass
     canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
@@ -132,6 +140,11 @@ def phase1(path, inv_file, binding_file):
     why = verify(pfd, qfd, q, qid, rec, qdir)
     if not why: return f"quarantined:{qid}"
     if why in ("identity-mismatch", "quarantine-dir-changed"): return f"quarantine_conflict:{qid}"  # preserve uncertain identity and recovery record
+    rec["phase"] = "rollback_pending"
+    rec["rollback"] = {"from": dest, "to": path, "reason": why,
+                       "expected": {"dev": rec["dev"], "ino": rec["ino"]}}
+    try: update_sidecar(qfd, side, rec)
+    except OSError: return f"quarantine_conflict:{qid}:rollback-intent-write-failed"
     try:
         current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (rec["dev"], rec["ino"]): return f"quarantine_conflict:{qid}"
@@ -144,26 +157,34 @@ def phase1(path, inv_file, binding_file):
         expected_identity = (rec["dev"], rec["ino"])
         if restored_identity != expected_identity:
             locations = []
+            relative_locations = []
             for name in os.listdir(qfd):
                 try: found = os.stat(name, dir_fd=qfd, follow_symlinks=False)
                 except OSError: continue
                 if (found.st_dev, found.st_ino) == expected_identity:
-                    locations.append(os.path.join(qdir, name))
+                    relative_locations.append(name)
+            q_bound = same_entry(pfd, ".dm-quarantine", q) and (os.fstat(qfd).st_dev, os.fstat(qfd).st_ino) == (q.st_dev, q.st_ino)
+            parent_stat = os.stat(parent, follow_symlinks=False)
+            parent_bound = (parent_stat.st_dev, parent_stat.st_ino) == (os.fstat(pfd).st_dev, os.fstat(pfd).st_ino)
+            if q_bound: locations = [os.path.join(qdir, name) for name in relative_locations]
             rec["phase"] = "rollback_conflict"
             rec["rollback_conflict"] = {
                 "expected": {"dev": expected_identity[0], "ino": expected_identity[1]},
                 "original_path": path,
+                "parent_path_bound": parent_bound,
                 "original_observed": {"dev": restored.st_dev, "ino": restored.st_ino},
                 "quarantine_path": dest,
+                "quarantine_dir_bound": q_bound,
                 "quarantine_observed": None,
                 "expected_locations_in_quarantine": locations,
+                "expected_entry_names_in_bound_quarantine": relative_locations,
             }
             try:
                 quarantined = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
                 rec["rollback_conflict"]["quarantine_observed"] = {"dev": quarantined.st_dev, "ino": quarantined.st_ino}
             except FileNotFoundError: pass
             try: update_sidecar(qfd, side, rec)
-            except OSError: pass  # retain the original intent sidecar on write failure
+            except OSError: return f"quarantine_conflict:{qid}:rollback-state-update-failed"
             return f"quarantine_conflict:{qid}"
     except OSError: return f"quarantine_conflict:{qid}"
     try: os.fsync(qfd); os.fsync(pfd)

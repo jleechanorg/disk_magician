@@ -55,7 +55,7 @@ OUT=""
 run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
 intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/link" ]]; }
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
-qid() { echo "${OUT#*:}"; }
+qid() { local value="${OUT#*:}"; echo "${value%%:*}"; }
 
 # Happy path: proven root is quarantined (phase 2 is a stub, so it stays there).
 fixture; run X=1
@@ -130,11 +130,22 @@ check 'replaced quarantine entry: sidecar retained' [ -f "$Q/$(qid).json" ]
 # recovery metadata records where the inventoried inode can still be found.
 fixture; run \
   DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' \
-  DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"'
+  DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='printf occupied > "$DM_Q_DEST.json.update"; mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"'
 check 'rollback source swap: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
 check 'rollback source swap: replacement path identity is not claimed as restored' [ "$(cat "$A/report.md")" = SUBSTITUTE ]
 check 'rollback source swap: inventoried artifact remains at the reported path' bash -c '[[ "$(cat "$1/report.md")" == BBBB && "$(python3 -c '\''import json,sys; d=json.load(open(sys.argv[1])); c=d["rollback_conflict"]; assert d["phase"]=="rollback_conflict" and c["expected_locations_in_quarantine"]==[sys.argv[2]]; print("ok")'\'' "$2" "$1")" == ok ]]' _ "$Q/$(qid).saved" "$Q/$(qid).json"
 check 'rollback source swap: recovery sidecar remains' [ -f "$Q/$(qid).json" ]
+check 'rollback source swap: fixed-name temp collision does not block metadata update' python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["phase"]=="rollback_conflict"' "$Q/$(qid).json"
+
+# If the post-rollback metadata update fails, retain the durable rollback intent and both payloads.
+fixture; run \
+  DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' \
+  DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"' \
+  DISK_MAGICIAN_TEST_SIDECAR_UPDATE_FAIL_AT=2
+QID="$(qid)"
+check 'rollback source swap with metadata update failure: failure reported' [ "$OUT" = "quarantine_conflict:$QID:rollback-state-update-failed" ]
+check 'rollback source swap with metadata update failure: both payloads remain' [ "$(cat "$A/report.md")" = SUBSTITUTE ] && [ "$(cat "$Q/$QID.saved/report.md")" = BBBB ]
+check 'rollback source swap with metadata update failure: rollback intent remains durable' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["phase"]=="rollback_pending" and d["rollback"]["expected"]=={"dev":d["dev"],"ino":d["ino"]} and d["rollback"]["reason"]=="rehash-mismatch"' "$Q/$QID.json"
 
 # Replacing .dm-quarantine after intent creation must not redirect the candidate into a symlink target.
 fixture; mkdir "$TMP/outside$N"; run DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME="mv '$Q' '$Q.saved'; ln -s '$TMP/outside$N' '$Q'"
