@@ -414,6 +414,7 @@ case "$CMD" in
     ;;
   lease_release|lease-release)
     [[ "${1:-}" == --owner-session && -n "${2:-}" ]] || { echo "Usage: diskm lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]" >&2; exit 2; }
+    # --runtime-pid/--runtime-start-epoch are operator-only overrides; hooks pass neither.
     sid="$2"; shift 2; rpid=""; rep=""
     while [[ $# -ge 2 ]]; do
       case "$1" in --runtime-pid) rpid="$2" ;; --runtime-start-epoch) rep="$2" ;; *) exit 2 ;; esac

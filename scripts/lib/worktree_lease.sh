@@ -425,40 +425,44 @@ PY
 # or dead; any other owner is reported as release_skipped_live_owner. Deletes
 # nothing; an unknown session changes nothing. rc 2 only without a session.
 lease_release_owner_session() {
-    local sid="${1:-}" rpid="${2:-}" rep="${3:-}" file match path
+    local sid="${1:-}" rpid="${2:-}" rep="${3:-}" file match opid oep path
     [[ -n "$sid" ]] || return 2
     for file in "$(lease_dir)"/*.json; do
-        [[ -f "$file" ]] || continue
-        match="$(python3 - "$file" "$sid" "$rpid" "$rep" <<'PY'
-import json, sys
-f, sid, rpid, rep = sys.argv[1:]
-try:
-    d = json.load(open(f))
-    o = d.get("owner")
-    if isinstance(o, dict) and o.get("session") == sid and not d.get("released_at"):
-        print("self" if (str(o.get("pid")), str(o.get("start_epoch"))) == (rpid, rep) else "other")
-except Exception:
-    pass
-PY
-)"
-        [[ -n "$match" ]] || continue
-        path="$(_lease_get "$file" path)"
+        IFS=$'\t' read -r match opid oep path < <(_lease_session_release scan "$file" "$sid" "$rpid" "$rep") || continue
         if [[ "$match" == other && "$(lease_owner_state "$file")" != dead ]]; then
             printf 'release_skipped_live_owner %s\n' "$path"; continue
-        fi
-        python3 - "$file" <<'PY' && printf 'released %s\n' "$path"
-import json, os, sys, tempfile
-from datetime import datetime, timezone
-p = sys.argv[1]
-d = json.load(open(p))
-d["released_at"] = d.get("released_at") or datetime.now(timezone.utc).isoformat()
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".release-")
-with os.fdopen(fd, "w") as f:
-    json.dump(d, f, indent=2)
-os.replace(tmp, p)
-PY
+        fi # commit re-checks the owner judged above under the lock (TOCTOU)
+        _lease_session_release commit "$file" "$sid" "$opid" "$oep" && printf 'released %s\n' "$path"
     done
     return 0
+}
+
+# _lease_session_release scan|commit <lease> <session> <pid> <epoch> — scan prints
+# "self|other<TAB>pid<TAB>epoch<TAB>path"; commit marks released (flock, fsync, rename)
+# only if the re-read lease still has that owner, else rc 1.
+_lease_session_release() {
+    python3 - "$@" <<'PY'
+import fcntl, json, os, sys, tempfile
+from datetime import datetime, timezone
+mode, p, sid, pid, ep = sys.argv[1:]
+try:
+    lk = open(p[:-5] + ".lock", "a") if mode == "commit" else None
+    lk and fcntl.flock(lk, fcntl.LOCK_EX)
+    d = json.load(open(p)); o = d.get("owner")
+    o = (str(o.get("pid")), str(o.get("start_epoch"))) if isinstance(o, dict) and o.get("session") == sid and not d.get("released_at") else None
+    if mode == "scan":
+        o and print("%s\t%s\t%s\t%s" % ("self" if o == (pid, ep) else "other", o[0], o[1], d.get("path", "")))
+    elif o == (pid, ep):
+        d["released_at"] = datetime.now(timezone.utc).isoformat()
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".release-")
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, indent=2); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+    else:
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+PY
 }
 
 # lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.

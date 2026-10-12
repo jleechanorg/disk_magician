@@ -14,6 +14,8 @@ cat > "$TMP/bin/ps" <<'MOCK'
 pid= spec=
 while [[ $# -gt 0 ]]; do case "$1" in -p) pid="$2"; shift 2;; -o) spec="$2"; shift 2;; *) shift;; esac; done
 case "$spec" in lstart=) f="$FAKE_PS_DIR/lstart/$pid";; args=) f="$FAKE_PS_DIR/args/$pid";; ppid=,comm=) f="$FAKE_PS_DIR/comm/$pid";; *) exit 1;; esac
+[[ "$spec" == lstart= && -x "$FAKE_PS_DIR/on_lstart/$pid" ]] && "$FAKE_PS_DIR/on_lstart/$pid"
+[[ "$spec" == lstart= && -f "$FAKE_PS_DIR/err/$pid" ]] && { echo "ps: error" >&2; exit 2; }
 [[ -f "$f" ]] || exit 1
 cat "$f"
 MOCK
@@ -58,6 +60,33 @@ check 'A reads released to the reaper' test "$(lease_owner_state "$(lease_path_f
 mk E S 501; out="$(lease_release_owner_session S 501 1)"
 check 'pid match with other start epoch is not self' grep -q "release_skipped_live_owner $TMP/wt/E" <<<"$out"
 
+# Release-path races and unknowns: each lease is kept and nothing is deleted.
+# 503/504/505 are dead or erroring owners probed while the scan is in flight.
+mkdir -p "$FAKE_PS_DIR/on_lstart" "$FAKE_PS_DIR/err"; rm -f "$(lease_dir)"/*.json
+not_released() { [[ -f "$(lease_path_for "$TMP/wt/$1")" ]] && ! released "$1"; }
+for p in 503 504 505; do echo "1 claude" > "$FAKE_PS_DIR/comm/$p"; touch "$FAKE_PS_DIR/lstart/$p"; done
+mk G S3 503  # owner probe for 503 hands the lease to live pid 501 mid-release
+G="$(lease_path_for "$TMP/wt/G")"
+printf '#!/bin/bash\nrm -f "%s"\npython3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[\\"owner\\"].update(pid=501, start_epoch=1760000501); json.dump(d,open(p,\\"w\\"))" "%s"\nexit 1\n' "$FAKE_PS_DIR/lstart/503" "$G" > "$FAKE_PS_DIR/on_lstart/503"
+chmod +x "$FAKE_PS_DIR/on_lstart/503"
+out="$(lease_release_owner_session S3 500 1760000500)"
+check 'owner changed between scan and write: kept' not_released G
+check 'owner changed: not reported released' bash -c "! grep -q '^released' <<<\"\$1\"" _ "$out"
+mk H S4 504; H="$(lease_path_for "$TMP/wt/H")"
+printf '#!/bin/bash\nrm -f "%s" "%s"\nexit 1\n' "$FAKE_PS_DIR/lstart/504" "$H" > "$FAKE_PS_DIR/on_lstart/504"; chmod +x "$FAKE_PS_DIR/on_lstart/504"
+out="$(lease_release_owner_session S4 500 1760000500)"; rc=$?
+check 'lease vanished mid-release: rc 0' test "$rc" = 0
+check 'lease vanished mid-release: not recreated' test ! -e "$H"
+check 'lease vanished mid-release: not reported released' bash -c "! grep -q '^released' <<<\"\$1\"" _ "$out"
+mk I S5 500; I="$(lease_path_for "$TMP/wt/I")"; printf '{"owner": {"session": "S5", "pid": 500' > "$I"
+before="$(shasum < "$I")"; out="$(lease_release_owner_session S5 500 1760000500)"
+check 'corrupt lease kept byte-identical' test "$(shasum < "$I")" = "$before"
+mk J S6 505; touch "$FAKE_PS_DIR/err/505"
+out="$(lease_release_owner_session S6 500 1760000500)"
+check 'unknown owner (ps error) kept' not_released J
+check 'unknown owner reported skipped' grep -q "^release_skipped_live_owner $TMP/wt/J\$" <<<"$out"
+check 'no worktree deleted' test -d "$TMP/wt/G" -a -d "$TMP/wt/H" -a -d "$TMP/wt/I" -a -d "$TMP/wt/J"
+
 # CLI dispatch.
 mk F S2 500
 bash "$ROOT/disk_magician.sh" lease-release --owner-session S2 --runtime-pid 500 --runtime-start-epoch 1760000500 > "$TMP/cli.out" 2>&1; rc=$?
@@ -75,7 +104,7 @@ STUB
 chmod +x "$TMP/bin/diskm-stub"
 export STUB_LOG="$TMP/stub.log" DISKM_BIN="$TMP/bin/diskm-stub"
 HOOK="$ROOT/hooks/session-end-lease-release.sh"
-out="$(printf '{"session_id":"abc-123","hook_event_name":"SessionEnd"}' | bash "$HOOK")"; rc=$?
+out="$(printf '{"session_id":"abc-123","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}' | bash "$HOOK")"; rc=$?
 check 'hook exits 0' test "$rc" = 0
 check 'hook prints nothing' test -z "$out"
 check 'hook calls lease-release with the session' test "$(cat "$STUB_LOG" 2>/dev/null)" = 'lease-release --owner-session abc-123'
@@ -84,6 +113,15 @@ printf 'not json' | bash "$HOOK"; rc=$?
 printf '{"session_id":"x; rm -rf /"}' | bash "$HOOK"
 check 'hook on junk exits 0' test "$rc" = 0
 check 'hook on junk or unsafe id calls nothing' test ! -s "$STUB_LOG"
+for r in logout other; do printf '{"session_id":"t-%s","hook_event_name":"SessionEnd","reason":"%s"}' "$r" "$r" | bash "$HOOK"; done
+check 'hook releases on logout and other' test "$(cat "$STUB_LOG")" = $'lease-release --owner-session t-logout\nlease-release --owner-session t-other'
+: > "$STUB_LOG"
+printf '{"session_id":"c1","hook_event_name":"SessionEnd","reason":"clear"}' | bash "$HOOK"
+printf '{"session_id":"r1","hook_event_name":"SessionEnd","reason":"resume"}' | bash "$HOOK"
+printf '{"session_id":"n1","hook_event_name":"SessionEnd"}' | bash "$HOOK"
+printf '{"session_id":"s1","hook_event_name":"SubagentStop","reason":"other","agent_id":"a1"}' | bash "$HOOK"; rc=$?
+check 'hook on SubagentStop exits 0' test "$rc" = 0
+check 'hook no-ops for clear, resume, missing reason and SubagentStop' test ! -s "$STUB_LOG"
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" == 0 ]]
