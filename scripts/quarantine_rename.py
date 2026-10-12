@@ -111,7 +111,10 @@ def phase1(path, inv_file, binding_file):
         if q.st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"
     qdir = os.path.join(parent, ".dm-quarantine"); qid = secrets.token_hex(8); side = qid + ".json"
-    rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino, "inventory": inv, "phase": "intent"}
+    rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
+           "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
+           "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
+           "inventory": inv, "phase": "intent"}
     try:
         with os.fdopen(os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd), "w") as f:
             if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")
@@ -163,18 +166,23 @@ def phase1(path, inv_file, binding_file):
                 except OSError: continue
                 if (found.st_dev, found.st_ino) == expected_identity:
                     relative_locations.append(name)
-            q_bound = same_entry(pfd, ".dm-quarantine", q) and (os.fstat(qfd).st_dev, os.fstat(qfd).st_ino) == (q.st_dev, q.st_ino)
-            parent_stat = os.stat(parent, follow_symlinks=False)
-            parent_bound = (parent_stat.st_dev, parent_stat.st_ino) == (os.fstat(pfd).st_dev, os.fstat(pfd).st_ino)
-            if q_bound: locations = [os.path.join(qdir, name) for name in relative_locations]
+            qfd_stat = os.fstat(qfd)
+            q_bound = same_entry(pfd, ".dm-quarantine", q) and (qfd_stat.st_dev, qfd_stat.st_ino) == (q.st_dev, q.st_ino)
+            try: parent_stat = os.stat(parent, follow_symlinks=False)
+            except OSError: parent_stat = None
+            parent_fd_stat = os.fstat(pfd)
+            parent_bound = parent_stat is not None and (parent_stat.st_dev, parent_stat.st_ino) == (parent_fd_stat.st_dev, parent_fd_stat.st_ino)
+            if q_bound and parent_bound: locations = [os.path.join(qdir, name) for name in relative_locations]
             rec["phase"] = "rollback_conflict"
             rec["rollback_conflict"] = {
                 "expected": {"dev": expected_identity[0], "ino": expected_identity[1]},
                 "original_path": path,
                 "parent_path_bound": parent_bound,
+                "parent_identity": {"dev": parent_fd_stat.st_dev, "ino": parent_fd_stat.st_ino},
                 "original_observed": {"dev": restored.st_dev, "ino": restored.st_ino},
                 "quarantine_path": dest,
                 "quarantine_dir_bound": q_bound,
+                "quarantine_identity": {"dev": qfd_stat.st_dev, "ino": qfd_stat.st_ino},
                 "quarantine_observed": None,
                 "expected_locations_in_quarantine": locations,
                 "expected_entry_names_in_bound_quarantine": relative_locations,

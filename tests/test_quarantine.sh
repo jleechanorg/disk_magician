@@ -147,6 +147,15 @@ check 'rollback source swap with metadata update failure: failure reported' [ "$
 check 'rollback source swap with metadata update failure: both payloads remain' [ "$(cat "$A/report.md")" = SUBSTITUTE ] && [ "$(cat "$Q/$QID.saved/report.md")" = BBBB ]
 check 'rollback source swap with metadata update failure: rollback intent remains durable' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["phase"]=="rollback_pending" and d["rollback"]["expected"]=={"dev":d["dev"],"ino":d["ino"]} and d["rollback"]["reason"]=="rehash-mismatch"' "$Q/$QID.json"
 
+# A moved parent leaves only descriptor-relative recovery names; stale absolute paths are not published.
+fixture; run \
+  DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' \
+  DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"; mv "$(dirname "$DM_Q_PATH")" "$(dirname "$DM_Q_PATH").moved"'
+QID="$(qid)"; MOVED_PARENT="$(dirname "$A").moved"; MOVED_Q="$MOVED_PARENT/.dm-quarantine"
+check 'moved parent rollback: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
+check 'moved parent rollback: both payloads preserved under moved parent' [ "$(cat "$MOVED_PARENT/art/report.md")" = SUBSTITUTE ] && [ "$(cat "$MOVED_Q/$QID.saved/report.md")" = BBBB ]
+check 'moved parent rollback: sidecar preserves directory identities and relative recovery name' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); c=d["rollback_conflict"]; assert not c["parent_path_bound"] and c["quarantine_dir_bound"] and c["expected_locations_in_quarantine"]==[] and c["expected_entry_names_in_bound_quarantine"]==[sys.argv[2]] and c["parent_identity"]=={"dev":d["parent_dev"],"ino":d["parent_ino"]} and c["quarantine_identity"]=={"dev":d["quarantine_dev"],"ino":d["quarantine_ino"]}' "$MOVED_Q/$QID.json" "$QID.saved"
+
 # Replacing .dm-quarantine after intent creation must not redirect the candidate into a symlink target.
 fixture; mkdir "$TMP/outside$N"; run DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME="mv '$Q' '$Q.saved'; ln -s '$TMP/outside$N' '$Q'"
 check 'replaced quarantine dir: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
