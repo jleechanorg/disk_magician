@@ -17,6 +17,39 @@ def decide(stage, free_gb, est_gb, margin_gb, over_budget, d2):
     if z in EMERGENCY or z == "GREEN" or stage == "observe":
         return z, (EMERGENCY[z] if d2 else 10) if z in EMERGENCY else 0
     return z, 75 if z == "RED" and stage != "warn" or over_budget and stage == "refuse_orange" else 10
+def state_update(state, keys, events=()):  # under state.lock: reread, merge only our keys, atomic replace
+    with open(state / "state.lock", "a") as lock, open(state / "admission" / "events.jsonl", "a") as log:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try: data = json.loads((state / "budget.json").read_text())
+        except (OSError, ValueError): data = {}
+        (tmp := state / f".budget.{os.getpid()}.tmp").write_text(json.dumps({**data, **keys}))
+        os.replace(tmp, state / "budget.json")
+        log.writelines(json.dumps(e) + "\n" for e in events)
+def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kickstart only if C14's self-test passes
+    (p := argparse.ArgumentParser(prog="diskm govern")).add_argument("--mode", choices=["observe"], default="observe"); p.parse_args(argv)
+    (state / "admission").mkdir(parents=True, exist_ok=True)
+    with open(state / "govern.lock", "a+") as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: return print("skipped_tick_lock") or 0
+        lock.truncate(0); lock.write(str(os.getpid())); lock.flush()
+        try:
+            out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
+                                 capture_output=True, text=True, timeout=5, check=True).stdout
+            now, free = time.time(), int(out.splitlines()[-1].split()[3]) * 1024
+            state_update(state, dict(zone=(z := zone(free / GIB)), zone_at=now, free_bytes=free),
+                         [dict(event="floor_breach", at=now, df_free_bytes=free)] if z == "FLOOR" else [])
+            if z in EMERGENCY:  # artifact_verdict.sh is absent until Task 11, so this stays blocked
+                lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
+                c14 = lib.is_file() and subprocess.run(["bash", "-c", 'source "$1" && artifact_removal_verdict --self-test', "-", lib],
+                                                       capture_output=True, text=True, timeout=60).stdout.strip() == "ok"
+                kick = c14 and subprocess.run([os.environ.get("DISK_MAGICIAN_LAUNCHCTL_BIN", "launchctl"), "kickstart",
+                                               f"gui/{os.getuid()}/com.jleechanorg.disk-magician-pressure-sweep"], timeout=30).returncode
+                state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 else "kickstart_blocked:c14_missing"),
+                                              at=time.time(), zone=z, rc=kick if c14 else None)])
+                print(ev)
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+            return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
+    return print(f"zone={z}") or 0
 def admit(a, budgets, state, now, d2):
     try:  # a corrupt or wrong-typed budget.json, or a partial budgets block, degrades to the blind decision
         last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, None
@@ -66,6 +99,8 @@ def confirm(state, key, value, now):  # admit_confirm with the admitted dest's d
         print("admission_degraded:log", file=sys.stderr)
     return 0
 def main():
+    if sys.argv[1:2] == ["--govern"]:
+        return govern(sys.argv[2:], Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")))
     tmpl = json.loads((Path(__file__).resolve().parents[1] / "config.json.template").read_text())["budgets"]
     p, budgets = argparse.ArgumentParser(prog="diskm admit"), json.loads(Path(resolve_config.resolve()).read_text()).get("budgets") or tmpl
     for flag in ("--producer", "--dest", "--source", "--ci-job", "--tool-use-id"): p.add_argument(flag)
