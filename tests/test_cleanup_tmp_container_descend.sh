@@ -9,7 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="${CLEANUP_TMP_SCRIPT:-$REPO_ROOT/scripts/cleanup_tmp.sh}"
 [[ "$SOURCE_SCRIPT" == /* ]] || SOURCE_SCRIPT="$REPO_ROOT/$SOURCE_SCRIPT"
-TMP_ROOT=$(mktemp -d -t cleanup_tmp_container.XXXXXX)
+# Keep Linux fixtures out of /tmp because cleanup_tmp intentionally applies
+# macOS /tmp -> /private/tmp alias normalization to lsof paths.
+TMP_ROOT=$(mktemp -d "${TMPDIR:-$REPO_ROOT}/cleanup_tmp_container.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -26,7 +28,10 @@ set_old() { /usr/bin/find "$1" -exec touch -t 202001010000 {} +; }
 make_env() {
   local n="$1"
   PT="$TMP_ROOT/$n-private-tmp"; AR="$TMP_ROOT/$n-archive"; BIN="$TMP_ROOT/$n-bin"
-  mkdir -p "$PT" "$AR" "$BIN" "$TMP_ROOT/$n-tmp"
+  # Clean mode acquires the shared scratch lock under HOME.  The lock contract
+  # requires HOME to be an existing, user-owned directory.
+  mkdir -p "$PT" "$AR" "$BIN" "$TMP_ROOT/$n-tmp" "$TMP_ROOT/$n-home"
+  chmod 700 "$TMP_ROOT/$n-home"
   cat > "$BIN/getconf" <<'S'
 #!/usr/bin/env bash
 [[ "${1:-}" == DARWIN_USER_TEMP_DIR ]] && exit 0
@@ -64,6 +69,9 @@ run_sweep() {
   RC=$?
   set -e
   OUT="$(cat "$TMP_ROOT/$n.out")"
+  if (( RC != 0 )); then
+    fail "$n sweep exits 0 (rc=$RC; output: $OUT)"
+  fi
 }
 
 mkchild() { mkdir -p "$1"; head -c 20000 /dev/zero > "$1/payload.bin"; }

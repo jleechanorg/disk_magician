@@ -569,5 +569,56 @@ for i in range(10):
         self.assertIsNotNone(data["last_skipped"])
 
 
+class TestDfDelta(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dm_receipt_dfdelta_")
+        self.store = job_receipt.JobReceiptStore(state_dir=self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def last(self, job):
+        return job_receipt.get_last_receipt(job, state_dir=self.tmp)
+
+    def test_finish_records_df_delta(self):
+        rid = self.store.begin("govern_tmp_containers", precondition={"free_bytes_before": 10_000})
+        self.store.finish("govern_tmp_containers", rid, "success",
+                          postcondition={"free_bytes_after": 15_000})
+        r = self.last("govern_tmp_containers")
+        self.assertEqual(r["postcondition"]["df_delta_bytes"], 5_000)
+        self.assertEqual(r["outcome"], "success")
+
+    def test_governor_receipt_null_delta_is_error(self):
+        rid = self.store.begin("govern_worktrees", precondition={})
+        self.store.finish("govern_worktrees", rid, "success", postcondition={})
+        r = self.last("govern_worktrees")
+        self.assertEqual((r["outcome"], r["reason"]), ("error", "null_df_delta"))
+        self.assertIsNone(r["postcondition"]["df_delta_bytes"])
+        self.assertIsNone(self.store.read("govern_worktrees").get("last_success"))
+
+    def test_existing_df_delta_is_kept(self):  # worktree_reap.sh already computes it
+        rid = self.store.begin("worktree_reap")
+        self.store.finish("worktree_reap", rid, "success",
+                          postcondition={"df_delta_bytes": 7, "free_bytes_before": 1, "free_bytes_after": 8})
+        self.assertEqual(self.last("worktree_reap")["postcondition"]["df_delta_bytes"], 7)
+
+    def test_governor_skip_without_delta_stays_skip(self):
+        self.store.finish("govern_worktrees", None, "skipped_lock", reason="lock_held")
+        r = self.last("govern_worktrees")
+        self.assertEqual((r["outcome"], r["reason"]), ("skipped_lock", "lock_held"))
+
+    def test_governor_error_keeps_its_reason(self):
+        rid = self.store.begin("govern_worktrees")
+        self.store.finish("govern_worktrees", rid, "timeout", reason="deadline")
+        self.assertEqual(self.last("govern_worktrees")["reason"], "deadline")
+
+    def test_non_governor_without_delta_unchanged(self):
+        rid = self.store.begin("snapshot_commit", precondition={"free_bytes_before": True})
+        self.store.finish("snapshot_commit", rid, "success", postcondition={"free_bytes_after": 3})
+        r = self.last("snapshot_commit")
+        self.assertEqual(r["outcome"], "success")
+        self.assertNotIn("df_delta_bytes", r["postcondition"])
+
+
 if __name__ == "__main__":
     unittest.main()

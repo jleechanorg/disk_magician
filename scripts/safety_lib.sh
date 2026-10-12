@@ -256,3 +256,5 @@ if own is not None:
 print(floor)
 PY
 }
+# decision_approved <id>: rc 0 when a standing decision is recorded and not revoked (C11).
+decision_approved() { python3 "$_SAFETY_REPO_ROOT/scripts/policy_provenance.py" approved "$1" 2>/dev/null; }
