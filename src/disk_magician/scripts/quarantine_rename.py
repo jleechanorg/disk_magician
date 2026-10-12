@@ -41,6 +41,25 @@ def same_entry(fd, name, st):
     try: current = os.stat(name, dir_fd=fd, follow_symlinks=False)
     except OSError: return False
     return (current.st_dev, current.st_ino) == (st.st_dev, st.st_ino)
+def update_sidecar(qfd, side, rec):
+    temp = side + ".update"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd)
+    try:
+        data = json.dumps(rec, separators=(",", ":")).encode()
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0: raise OSError("short sidecar write")
+            view = view[written:]
+        os.fsync(fd)
+    except Exception:
+        os.close(fd)
+        try: os.unlink(temp, dir_fd=qfd)
+        except OSError: pass
+        raise
+    else: os.close(fd)
+    os.rename(temp, side, src_dir_fd=qfd, dst_dir_fd=qfd)
+    os.fsync(qfd)
 def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re-hash checks all pass
     canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
     try:
@@ -116,10 +135,40 @@ def phase1(path, inv_file, binding_file):
     try:
         current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (rec["dev"], rec["ino"]): return f"quarantine_conflict:{qid}"
+        hook("DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME", path, dest)
         renamex(qfd, qid, pfd, base)
     except OSError: return f"quarantine_conflict:{qid}"  # conflict: preserve quarantined entry and sidecar
+    try:
+        restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        restored_identity = (restored.st_dev, restored.st_ino)
+        expected_identity = (rec["dev"], rec["ino"])
+        if restored_identity != expected_identity:
+            locations = []
+            for name in os.listdir(qfd):
+                try: found = os.stat(name, dir_fd=qfd, follow_symlinks=False)
+                except OSError: continue
+                if (found.st_dev, found.st_ino) == expected_identity:
+                    locations.append(os.path.join(qdir, name))
+            rec["phase"] = "rollback_conflict"
+            rec["rollback_conflict"] = {
+                "expected": {"dev": expected_identity[0], "ino": expected_identity[1]},
+                "original_path": path,
+                "original_observed": {"dev": restored.st_dev, "ino": restored.st_ino},
+                "quarantine_path": dest,
+                "quarantine_observed": None,
+                "expected_locations_in_quarantine": locations,
+            }
+            try:
+                quarantined = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+                rec["rollback_conflict"]["quarantine_observed"] = {"dev": quarantined.st_dev, "ino": quarantined.st_ino}
+            except FileNotFoundError: pass
+            try: update_sidecar(qfd, side, rec)
+            except OSError: pass  # retain the original intent sidecar on write failure
+            return f"quarantine_conflict:{qid}"
+    except OSError: return f"quarantine_conflict:{qid}"
     try: os.fsync(qfd); os.fsync(pfd)
     except OSError: return f"quarantine_conflict:{qid}"
+    if not same_entry(pfd, base, restored): return f"quarantine_conflict:{qid}"
     try: os.unlink(side, dir_fd=qfd)
     except OSError: return f"quarantine_conflict:{qid}"
     try: os.fsync(qfd)

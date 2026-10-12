@@ -126,6 +126,16 @@ check 'replaced quarantine entry: source not falsely restored' [ ! -e "$A" ]
 check 'replaced quarantine entry: original retained separately' [ "$(cat "$TMP/original$N/report.md")" = AAAA ]
 check 'replaced quarantine entry: sidecar retained' [ -f "$Q/$(qid).json" ]
 
+# A replacement after rollback's identity check is detected after the rename;
+# recovery metadata records where the inventoried inode can still be found.
+fixture; run \
+  DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' \
+  DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"'
+check 'rollback source swap: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
+check 'rollback source swap: replacement path identity is not claimed as restored' [ "$(cat "$A/report.md")" = SUBSTITUTE ]
+check 'rollback source swap: inventoried artifact remains at the reported path' bash -c '[[ "$(cat "$1/report.md")" == BBBB && "$(python3 -c '\''import json,sys; d=json.load(open(sys.argv[1])); c=d["rollback_conflict"]; assert d["phase"]=="rollback_conflict" and c["expected_locations_in_quarantine"]==[sys.argv[2]]; print("ok")'\'' "$2" "$1")" == ok ]]' _ "$Q/$(qid).saved" "$Q/$(qid).json"
+check 'rollback source swap: recovery sidecar remains' [ -f "$Q/$(qid).json" ]
+
 # Replacing .dm-quarantine after intent creation must not redirect the candidate into a symlink target.
 fixture; mkdir "$TMP/outside$N"; run DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME="mv '$Q' '$Q.saved'; ln -s '$TMP/outside$N' '$Q'"
 check 'replaced quarantine dir: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
