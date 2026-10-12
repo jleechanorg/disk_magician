@@ -204,7 +204,7 @@ mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t10 --clean
 assert_exists "t10 25h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
 assert_contains "t10 seven-day worktree floor reported" \
-  "Skipping recently active container child repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<7d)" "$OUT"
 
 echo "Test 11: unmeasurable clean pushed worktree fails closed"
 make_env t11
@@ -221,7 +221,7 @@ chmod +x "$BIN/find"
 run_sweep t11 --clean FAIL_RECENCY_ROOT="$PT/agent-scratch/old-wt"
 assert_exists "t11 unmeasurable clean pushed worktree kept" "$PT/agent-scratch/old-wt"
 assert_contains "t11 fail-closed recency protection reported" \
-  "Skipping recently active container child repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<7d)" "$OUT"
 
 echo "Test 12: clean pushed worktree older than seven days remains eligible"
 make_env t12
@@ -260,6 +260,53 @@ assert_contains "t13 never_delete reason reported" "never_delete:" "$OUT"
 assert_contains "t13 protected_live_paths reason reported" "protected_live_paths:" "$OUT"
 assert_contains "t13 needs_decision reason reported" "needs_decision:" "$OUT"
 assert_contains "t13 refused children excluded from archive totals" "Dirs archived: 0" "$OUT"
+
+echo "Test 14: nested repository with an uncommitted change protects its container child"
+make_env t14
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t14-main" "$PT/agent-scratch/runtime/run-id/repo" t14wt
+echo dirty >> "$PT/agent-scratch/runtime/run-id/repo/payload.bin"
+set_old "$PT/agent-scratch/runtime"
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t14 --clean
+assert_exists "t14 child containing dirty nested repository kept" "$PT/agent-scratch/runtime"
+assert_contains "t14 nested unsaved-work protection reported" \
+  "nested repository unsaved work" "$OUT"
+
+echo "Test 15: nested repository with an unpushed commit protects its container child"
+make_env t15
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t15-main" "$PT/agent-scratch/runtime/run-id/repo" t15wt
+echo committed >> "$PT/agent-scratch/runtime/run-id/repo/payload.bin"
+git -C "$PT/agent-scratch/runtime/run-id/repo" add payload.bin
+git -C "$PT/agent-scratch/runtime/run-id/repo" commit -q -m unpushed
+set_old "$PT/agent-scratch/runtime"
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t15 --clean
+assert_exists "t15 child containing unpushed nested repository kept" "$PT/agent-scratch/runtime"
+assert_contains "t15 nested unpushed-work protection reported" \
+  "nested repository unsaved work" "$OUT"
+
+echo "Test 16: recently active clean nested worktree honors the seven-day floor"
+make_env t16
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t16-main" "$PT/agent-scratch/runtime/run-id/repo" t16wt
+set_age_hours "$PT/agent-scratch/runtime" 25
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t16 --clean
+assert_exists "t16 child containing 25h-old clean nested worktree kept" "$PT/agent-scratch/runtime"
+assert_contains "t16 nested worktree recency protection reported" \
+  "recently active nested repository/worktree (<7d)" "$OUT"
+
+echo "Test 17: old clean pushed nested worktree leaves its container child eligible"
+make_env t17
+mkdir -p "$PT/agent-scratch/runtime/run-id"
+make_clean_pushed_worktree "$TMP_ROOT/t17-main" "$PT/agent-scratch/runtime/run-id/repo" t17wt
+set_old "$PT/agent-scratch/runtime"
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t17 --clean
+assert_missing "t17 old clean nested worktree child moved out" "$PT/agent-scratch/runtime"
+[[ -n "$(archived runtime)" ]] && pass "t17 old clean nested worktree child archived" || fail "t17 old clean nested worktree child archived"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

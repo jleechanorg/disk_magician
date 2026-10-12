@@ -983,6 +983,50 @@ is_scratch_container() {
   return 1
 }
 
+# container_child_has_protected_repository <child> — true when a descended
+# cleanup unit contains any repository/worktree that is too recent or cannot
+# be proved clean and pushed.  Repositories may live several levels below the
+# immediate container child (runtime/run-id/repo), so checking only
+# <child>/.git can lose nested work. Discovery failures protect the whole child.
+container_child_has_protected_repository() {
+  local child="$1" marker_file marker repo rc=0 tbin
+  marker_file="$(mktemp -t disk-magician-container-git.XXXXXX)" || {
+    log "Skipping container child (cannot allocate nested-repository scan): $child"
+    return 0
+  }
+
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  if [[ -n "$tbin" ]]; then
+    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" \
+      /usr/bin/find "$child" -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
+  else
+    warn_unbounded_probes_once
+    /usr/bin/find "$child" -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
+  fi
+  if (( rc != 0 )); then
+    rm -f "$marker_file"
+    log "Skipping container child (nested-repository scan failed rc=${rc}): $child"
+    return 0
+  fi
+
+  while IFS= read -r -d '' marker; do
+    repo="${marker%/.git}"
+    if worktree_is_recently_active "$repo" "$WORKTREE_MIN_AGE_DAYS"; then
+      rm -f "$marker_file"
+      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $repo (child: $child)"
+      return 0
+    fi
+    if worktree_has_unsaved_work "$repo"; then
+      rm -f "$marker_file"
+      log "Skipping container child with nested repository unsaved work (uncommitted/unpushed/no-upstream): $repo (child: $child)"
+      return 0
+    fi
+  done < "$marker_file"
+
+  rm -f "$marker_file"
+  return 1
+}
+
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
@@ -1024,19 +1068,12 @@ large_consider_entry() {
     return 0
   fi
 
-  # Child repository/worktree of a descended container: cleanup_tmp is not an
-  # exception to the canonical worktree recency floor.  The helper fails
-  # closed, so an unmeasurable tree is protected too.  Only after it is old
-  # enough do we ask whether it is also provably clean and pushed.
-  if (( depth > 0 )) && [[ -e "$d/.git" || -L "$d/.git" ]]; then
-    if worktree_is_recently_active "$d" "$WORKTREE_MIN_AGE_DAYS"; then
-      log "Skipping recently active container child repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $d"
-      return 0
-    fi
-    if worktree_has_unsaved_work "$d"; then
-      log "Skipping container child with unsaved work (uncommitted/unpushed/no-upstream): $d"
-      return 0
-    fi
+  # cleanup_tmp is not an exception to the canonical worktree recency floor,
+  # and a child can contain repositories below its root (runtime/run-id/repo).
+  # Protect the whole cleanup unit if any nested repository is recent, dirty,
+  # unpushed, lacks an upstream, or cannot be measured safely.
+  if (( depth > 0 )) && container_child_has_protected_repository "$d"; then
+    return 0
   fi
 
   # Cheap recency/marker verdicts first: an entry that is too recent to touch
