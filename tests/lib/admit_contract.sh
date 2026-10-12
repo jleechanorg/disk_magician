@@ -2,8 +2,9 @@
 # admit_contract.sh — shared caller-contract cases for `diskm admit` callers
 # (spec §7.1 exit-code channel). Source after defining ok/bad/assert_eq.
 #
-#   run_admit_contract "<caller command with {n} placeholder>"
+#   run_admit_contract "<caller command with {n} placeholder>" [class]
 #
+# class defaults to worktrees.
 # {n} is replaced by a unique token per case. A stub admit
 # (DISK_MAGICIAN_ADMIT_BIN) replays a scripted rc sequence, and a `git` shim
 # on PATH stands in for the caller's command: it logs `worktree add` calls to
@@ -49,11 +50,11 @@ _contract_case() {
 _refused_line() { grep -q "disk-admission: refused class=$1 rc=$2" <<<"$C_ERR"; }
 
 run_admit_contract() {
-    local caller="$1"
+    local caller="$1" cls="${2:-worktrees}"
     echo "== contract: admit 0 -> command runs, caller rc 0 =="
     _contract_case c0 "0" "" "$caller"
     assert_eq "$C_RC" "0" "rc"; assert_eq "$C_CMDS" "1" "command ran once"
-    grep -q -- "--class worktrees" "$CONTRACT_DIR/admit.log" && ok "admit got --class" || bad "admit args: $(cat "$CONTRACT_DIR/admit.log")"
+    grep -q -- "--class $cls" "$CONTRACT_DIR/admit.log" && ok "admit got --class" || bad "admit args: $(cat "$CONTRACT_DIR/admit.log")"
 
     echo "== contract: admit 10 -> warn, command runs =="
     _contract_case c10 "10" "" "$caller"
@@ -63,7 +64,7 @@ run_admit_contract() {
     echo "== contract: admit 75 -> caller 75, command never started =="
     _contract_case c75 "75" "" "$caller"
     assert_eq "$C_RC" "75" "rc"; assert_eq "$C_CMDS" "0" "command never ran"
-    _refused_line worktrees 75 && ok "refused line rc=75" || bad "refused line missing: $C_ERR"
+    _refused_line "$cls" 75 && ok "refused line rc=75" || bad "refused line missing: $C_ERR"
 
     echo "== contract: admit 76 then 0 -> one retry, command runs =="
     _contract_case c760 "76 0" "" "$caller"
@@ -72,7 +73,7 @@ run_admit_contract() {
     echo "== contract: admit 76 twice -> caller 75, no third try =="
     _contract_case c7676 "76 76 0" "" "$caller"
     assert_eq "$C_RC" "75" "rc"; assert_eq "$C_ADMITS" "2" "admit called exactly twice"; assert_eq "$C_CMDS" "0" "command never ran"
-    _refused_line worktrees 76 && ok "refused line rc=76" || bad "refused line missing: $C_ERR"
+    _refused_line "$cls" 76 && ok "refused line rc=76" || bad "refused line missing: $C_ERR"
 
     echo "== contract: unexpected admit rc 3 -> admission_degraded, command runs =="
     _contract_case cx "3" "" "$caller"
