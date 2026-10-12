@@ -497,6 +497,18 @@ class JobReceiptStore:
                     if fb is not None and (not isinstance(fb, int) or fb < 0):
                         raise ValueError(f"freed_bytes must be non-negative integer or null, got {fb}")
 
+                pre = precondition or (matching_active or {}).get("precondition") or {}
+                if post.get("df_delta_bytes") is None:
+                    before = post.get("free_bytes_before", pre.get("free_bytes_before"))
+                    after = post.get("free_bytes_after")
+                    if all(isinstance(v, int) and not isinstance(v, bool) for v in (before, after)):
+                        post["df_delta_bytes"] = after - before
+                # A governor receipt claiming work must prove its effect in df.
+                if job.startswith("govern_") and outcome in ("success", "success_noop", "partial") \
+                        and post.get("df_delta_bytes") is None:
+                    post["df_delta_bytes"] = None
+                    outcome, reason = "error", "null_df_delta"
+
                 identity_info = (
                     matching_active.get("identity")
                     if matching_active and matching_active.get("identity")
