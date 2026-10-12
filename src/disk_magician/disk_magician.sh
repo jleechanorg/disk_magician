@@ -69,7 +69,7 @@ Commands:
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   evidence-push          Sync local evidence dir to remote storage.
-  admit                  Admission decision for a governed write (--class C --est-gb N).
+  admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.

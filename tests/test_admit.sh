@@ -3,8 +3,8 @@
 #
 # A fake `df` (DISK_MAGICIAN_DF_BIN) reports a chosen free size; all state lives
 # in a temp DISK_MAGICIAN_STATE_DIR. Nothing touches the live machine's state.
-# v1 ships observe-only (D2 not recordable until the policy PR): rc is always 0
-# and the table decision is asserted from admission/events.jsonl.
+# Without D2 (admission_enforcement) the rc is always 0 and the table decision is
+# asserted from admission/events.jsonl; DISK_MAGICIAN_POLICY_FILE is a temp file.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,6 +21,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state"
 export DISK_MAGICIAN_STATE_DIR="$T/state"
 export DISK_MAGICIAN_DF_BIN="$T/bin/df"
+export DISK_MAGICIAN_POLICY_FILE="$T/policy.json"  # absent: D2 not recorded
 EVENTS="$T/state/admission/events.jsonl"
 
 fake_df() {  # fake_df <free_gib> | fake_df fail
@@ -158,6 +159,77 @@ assert len({r["admit_id"] for r in rows}) == 20
 assert all(r["decision"] == 0 for r in rows)
 ats = [r["at"] for r in rows]; assert ats == sorted(ats), ats
 PY
+
+echo "── 9. wrong-type budget.json / config values degrade to blind 10, rc 0, no traceback (yzky) ──"
+fake_df fail; config refuse_red
+check_blind() {  # check_blind <label> [admit args...]
+  local label="$1"; shift
+  "$DISKM" admit --class worktrees --est-gb 0 "$@" >/dev/null 2>"$T/err"; assert_eq "$?" 0 "rc: $label"
+  assert_eq "$(last decision)" 10 "blind decision: $label"
+  [[ "$(cat "$T/err")" == *admission_degraded:blind* && "$(cat "$T/err")" != *Traceback* ]] &&
+    ok "degraded, no traceback: $label" || bad "stderr ($label): $(cat "$T/err")"
+}
+python3 -c 'import json,sys,time; json.dump({"zone":"RED","zone_at":time.time()-60,"free_bytes":"x"}, open(sys.argv[1],"w"))' "$T/state/budget.json"
+check_blind 'free_bytes "x" on the stale_df path'
+python3 -c 'import json,sys,time; json.dump({"zone":[1],"zone_at":time.time()-1800,"free_bytes":1}, open(sys.argv[1],"w"))' "$T/state/budget.json"
+check_blind 'zone [1] on the blind path'
+rm -f "$T/state/budget.json"; fake_df 150
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["budgets"]["concurrency_margin_gb"]="10"; json.dump(c, open(sys.argv[2],"w"))' \
+  "$REPO_ROOT/config.json.template" "$T/strmargin.json"
+DISK_MAGICIAN_CONFIG="$T/strmargin.json" check_blind 'string concurrency_margin_gb'
+
+echo "── 10. a df_delta_only class never counts as over budget ──"
+fake_df 80; config refuse_orange
+python3 -c 'import json,sys,time; t=time.time(); json.dump({"zone":"ORANGE","zone_at":t,"free_bytes":80<<30,"classes":{"codex_documents":{"used_gb":99,"budget_gb":3,"measured_at":t}}}, open(sys.argv[1],"w"))' "$T/state/budget.json"
+"$DISKM" admit --class codex_documents --est-gb 0 >/dev/null 2>&1; assert_eq "$(last decision)" 10 "df_delta_only overage ignored in ORANGE"
+
+echo "── 11. D2 recorded: rc is the decision; degraded is never 0; revoke restores observe-only rc ──"
+d2() { echo "{\"admission_enforcement\": {\"id\": \"admission_enforcement\", \"revoked_at\": $1}}" > "$DISK_MAGICIAN_POLICY_FILE"; }
+d2 null; rm -f "$T/state/budget.json"
+fake_df 45; config refuse_red
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 75 "RED refuse_red rc with D2"
+fake_df 25; config observe
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 76 "BLACK rc with D2"
+fake_df 10
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 75 "FLOOR rc with D2"
+fake_df 80
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 0 "ORANGE observe rc with D2"
+fake_df fail
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 10 "blind rc with D2 is 10, never 0"
+printf '{bad' > "$T/state/budget.json"
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 10 "corrupt budget.json rc with D2 is 10"
+rm -f "$T/state/budget.json"
+d2 1; fake_df 25
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>&1; assert_eq "$?" 0 "revoked D2 → rc 0"
+printf '{bad' > "$DISK_MAGICIAN_POLICY_FILE"
+"$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>"$T/err"; assert_eq "$?" 0 "unreadable policy file → not approved, rc 0"
+[[ "$(cat "$T/err")" != *Traceback* ]] && ok "no traceback on unreadable policy" || bad "stderr: $(cat "$T/err")"
+
+echo "── 12. --probe: emergency_probe line, not an admit birth; rc 76 when projected − margin = 20 with D2 ──"
+d2 null; fake_df 105; config observe
+"$DISKM" admit --class worktrees --est-gb 75 --probe >/dev/null 2>&1; assert_eq "$?" 76 "probe rc"
+assert_eq "$(last event)" emergency_probe "probe event"
+assert_eq "$(last zone)" BLACK "probe zone"
+"$DISKM" admit --class worktrees --est-gb 1 --probe --dry-run >/dev/null 2>&1; assert_eq "$?" 2 "--probe with --dry-run is a usage error"
+rm -f "$DISK_MAGICIAN_POLICY_FILE"
+
+echo "── 13. --confirm / --confirm-tool-use log admit_confirm with dev + inode; missing dest → rc 2, nothing logged ──"
+fake_df 150; config observe
+id=$("$DISKM" admit --class worktrees --est-gb 1 --dest "$T/made" --tool-use-id tu-1 2>/dev/null); id=${id#admit_id=}
+n=$(wc -l < "$EVENTS" | tr -d ' ')
+"$DISKM" admit --confirm "$id" >/dev/null 2>&1; assert_eq "$?" 2 "confirm with dest absent rc"
+assert_eq "$(wc -l < "$EVENTS" | tr -d ' ')" "$n" "nothing logged for absent dest"
+"$DISKM" admit --confirm no-such-id >/dev/null 2>&1; assert_eq "$?" 2 "unknown admit_id rc"
+mkdir "$T/made"
+"$DISKM" admit --confirm "$id" >/dev/null 2>&1; assert_eq "$?" 0 "confirm rc"
+assert_eq "$(last event)" admit_confirm "admit_confirm logged"
+assert_eq "$(last admit_id)" "$id" "confirm carries admit_id"
+assert_eq "$(last inode)" "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$T/made")" "inode"
+assert_eq "$(last dev)" "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_dev)' "$T/made")" "dev"
+"$DISKM" admit --confirm-tool-use tu-1 >/dev/null 2>&1; assert_eq "$?" 0 "confirm-tool-use rc"
+assert_eq "$(last admit_id)" "$id" "confirm-tool-use resolves the admit"
+"$DISKM" admit --confirm-tool-use tu-none >/dev/null 2>&1; assert_eq "$?" 2 "unknown tool_use_id rc"
+"$DISKM" admit --confirm "$id" --confirm-tool-use tu-1 >/dev/null 2>&1; assert_eq "$?" 2 "both confirm forms is a usage error"
 
 echo "── 8. event-log ENOSPC keeps the decision, writes admission_degraded:log ──"
 if command -v hdiutil >/dev/null 2>&1; then
