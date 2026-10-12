@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_cleanup_tmp_container_descend.sh — --large descends one level into
-# active non-git container dirs (e.g. /private/tmp/worldai_claw) so idle
-# children are reclaimed while the container and live children are kept.
+# explicitly known active container dirs (e.g. /private/tmp/agent-scratch) so
+# idle children are reclaimed while the container and live children are kept.
 # RED: run against a script lacking the descent (CLEANUP_TMP_SCRIPT=<old copy>).
 set -euo pipefail
 
@@ -79,50 +79,50 @@ archived() { /usr/bin/find "$AR" -mindepth 3 -maxdepth 3 -name "$1" 2>/dev/null 
 
 echo "Test 1: active container -> idle child archived; fresh child and container kept"
 make_env t1
-mkdir -p "$PT/agentbox"
-mkchild "$PT/agentbox/old-child"; set_old "$PT/agentbox/old-child"
-mkchild "$PT/agentbox/fresh-child"
+mkdir -p "$PT/agent-scratch"
+mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
+mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t1 --clean
-assert_missing "t1 old child moved out" "$PT/agentbox/old-child"
+assert_missing "t1 old child moved out" "$PT/agent-scratch/old-child"
 [[ -n "$(archived old-child)" ]] && pass "t1 old child present in archive" || fail "t1 old child present in archive"
-assert_exists "t1 fresh child kept" "$PT/agentbox/fresh-child"
-assert_exists "t1 container kept" "$PT/agentbox"
+assert_exists "t1 fresh child kept" "$PT/agent-scratch/fresh-child"
+assert_exists "t1 container kept" "$PT/agent-scratch"
 assert_contains "t1 archived total counts child size only" "Dirs archived: 1" "$OUT"
 
 echo "Test 2: dry-run reports child, changes nothing, counts child KB"
 make_env t2
-mkdir -p "$PT/agentbox"
-mkchild "$PT/agentbox/old-child"; set_old "$PT/agentbox/old-child"
-mkchild "$PT/agentbox/fresh-child"
+mkdir -p "$PT/agent-scratch"
+mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
+mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t2 --dry-run
-assert_exists "t2 old child untouched" "$PT/agentbox/old-child"
-assert_contains "t2 dry-run names child" "would archive: $PT/agentbox/old-child" "$OUT"
-KB=$(du -sk "$PT/agentbox/old-child" | awk '{print $1}')
+assert_exists "t2 old child untouched" "$PT/agent-scratch/old-child"
+assert_contains "t2 dry-run names child" "would archive: $PT/agent-scratch/old-child" "$OUT"
+KB=$(du -sk "$PT/agent-scratch/old-child" | awk '{print $1}')
 assert_contains "t2 archived KB equals child size" "Total archived: ${KB} KB" "$OUT"
 
 echo "Test 3: idle child with a live open file is kept"
 make_env t3
-mkdir -p "$PT/agentbox"
-mkchild "$PT/agentbox/old-open"; set_old "$PT/agentbox/old-open"
-mkchild "$PT/agentbox/fresh-child"
-CANON="$(cd "$PT/agentbox/old-open" && pwd -P)"
+mkdir -p "$PT/agent-scratch"
+mkchild "$PT/agent-scratch/old-open"; set_old "$PT/agent-scratch/old-open"
+mkchild "$PT/agent-scratch/fresh-child"
+CANON="$(cd "$PT/agent-scratch/old-open" && pwd -P)"
 echo "$CANON/payload.bin" > "$TMP_ROOT/t3-open.list"
 run_sweep t3 --clean FAKE_OPEN_FILE="$TMP_ROOT/t3-open.list"
-assert_exists "t3 open child kept" "$PT/agentbox/old-open"
+assert_exists "t3 open child kept" "$PT/agent-scratch/old-open"
 
 echo "Test 4: idle child linked worktree with uncommitted change is kept"
 # (a .git *file* keeps the legacy depth-2 git-clone pass out of the way)
 make_env t4
-mkdir -p "$PT/agentbox" "$TMP_ROOT/t4-main"
+mkdir -p "$PT/agent-scratch" "$TMP_ROOT/t4-main"
 git -C "$TMP_ROOT/t4-main" init -q
 git -C "$TMP_ROOT/t4-main" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
-git -C "$TMP_ROOT/t4-main" worktree add -q "$PT/agentbox/old-wt" -b t4wt
-echo dirty > "$PT/agentbox/old-wt/uncommitted.txt"
-head -c 20000 /dev/zero > "$PT/agentbox/old-wt/payload.bin"
-set_old "$PT/agentbox/old-wt"
-mkchild "$PT/agentbox/fresh-child"
+git -C "$TMP_ROOT/t4-main" worktree add -q "$PT/agent-scratch/old-wt" -b t4wt
+echo dirty > "$PT/agent-scratch/old-wt/uncommitted.txt"
+head -c 20000 /dev/zero > "$PT/agent-scratch/old-wt/payload.bin"
+set_old "$PT/agent-scratch/old-wt"
+mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t4 --clean
-assert_exists "t4 dirty worktree child kept" "$PT/agentbox/old-wt"
+assert_exists "t4 dirty worktree child kept" "$PT/agent-scratch/old-wt"
 assert_contains "t4 logs unsaved-work skip" "unsaved work" "$OUT"
 
 echo "Test 5: container that is itself a git repo is not descended"
@@ -131,17 +131,17 @@ mkdir -p "$PT/repo"
 git -C "$PT/repo" init -q
 mkchild "$PT/repo/old-child"; set_old "$PT/repo/old-child"
 mkchild "$PT/repo/fresh-child"
-run_sweep t5 --clean
+run_sweep t5 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=repo
 assert_exists "t5 child of git-repo container kept" "$PT/repo/old-child"
 
 echo "Test 6: .in-use marker on child keeps it; marker on container keeps all"
 make_env t6
-mkdir -p "$PT/agentbox" "$PT/marked"
-mkchild "$PT/agentbox/old-marked"; touch "$PT/agentbox/old-marked/.in-use"; set_old "$PT/agentbox/old-marked"
-mkchild "$PT/agentbox/fresh-child"
+mkdir -p "$PT/agent-scratch" "$PT/marked"
+mkchild "$PT/agent-scratch/old-marked"; touch "$PT/agent-scratch/old-marked/.in-use"; set_old "$PT/agent-scratch/old-marked"
+mkchild "$PT/agent-scratch/fresh-child"
 mkchild "$PT/marked/old-child"; set_old "$PT/marked/old-child"; touch "$PT/marked/.in-use"
-run_sweep t6 --clean
-assert_exists "t6 marked child kept" "$PT/agentbox/old-marked"
+run_sweep t6 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS="agent-scratch marked"
+assert_exists "t6 marked child kept" "$PT/agent-scratch/old-marked"
 assert_exists "t6 child under marked container kept" "$PT/marked/old-child"
 
 echo "Test 7: protected-root container children are kept"
@@ -149,19 +149,29 @@ make_env t7
 mkdir -p "$PT/keepme"
 mkchild "$PT/keepme/old-child"; set_old "$PT/keepme/old-child"
 mkchild "$PT/keepme/fresh-child"
-run_sweep t7 --clean DISK_MAGICIAN_PROTECTED_TMP_ROOTS=keepme
+run_sweep t7 --clean DISK_MAGICIAN_PROTECTED_TMP_ROOTS=keepme DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=keepme
 assert_exists "t7 protected container child kept" "$PT/keepme/old-child"
 
 echo "Test 8: nested grandchildren are not descended (one level only)"
 make_env t8
-mkdir -p "$PT/agentbox/mid/deep"
-head -c 20000 /dev/zero > "$PT/agentbox/mid/deep/payload.bin"
-set_old "$PT/agentbox/mid"
-mkchild "$PT/agentbox/fresh-child"
+mkdir -p "$PT/agent-scratch/mid/deep"
+head -c 20000 /dev/zero > "$PT/agent-scratch/mid/deep/payload.bin"
+set_old "$PT/agent-scratch/mid"
+mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t8 --clean
 # mid is idle (child level) so it goes whole; deep is never archived separately.
-assert_missing "t8 idle mid archived as a unit" "$PT/agentbox/mid"
+assert_missing "t8 idle mid archived as a unit" "$PT/agent-scratch/mid"
 if grep -qE "archive.*/deep|evaluat.*/deep" <<<"$OUT"; then fail "t8 grandchild not separately evaluated"; else pass "t8 grandchild not separately evaluated"; fi
+
+echo "Test 9: unknown active workspace is atomic even when one child is idle"
+make_env t9
+mkdir -p "$PT/build"
+mkchild "$PT/build/sources"; set_old "$PT/build/sources"
+mkchild "$PT/build/logs"
+run_sweep t9 --clean
+assert_exists "t9 idle sources in unknown active workspace kept" "$PT/build/sources"
+assert_exists "t9 fresh logs in unknown active workspace kept" "$PT/build/logs"
+assert_contains "t9 unknown workspace skipped as one active unit" "Skipping recently active dir" "$OUT"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

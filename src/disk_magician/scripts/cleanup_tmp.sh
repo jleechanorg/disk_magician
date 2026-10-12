@@ -107,6 +107,31 @@ if [[ ${#PROTECTED_TMP_ROOTS[@]} -eq 0 ]]; then
   PROTECTED_TMP_ROOTS=("${DEFAULT_PROTECTED_TMP_ROOTS[@]}")
 fi
 
+# --large may descend one level into active top-level directories only when
+# their basename is explicitly known to contain independent cleanup units.
+# A generic directory-with-children test is unsafe: an active build workspace
+# can contain both fresh logs and idle-but-required sources.  The canonical
+# agent-scratch root has per-runtime/run-id children by contract.  Additional
+# container roots must be named explicitly via the environment or config.
+DEFAULT_SCRATCH_CONTAINER_ROOTS=(agent-scratch)
+SCRATCH_CONTAINER_ROOTS=()
+if [[ -n "${DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS:-}" ]]; then
+  read -r -a SCRATCH_CONTAINER_ROOTS <<<"$DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS"
+elif [[ -f "$CONFIG_FILE" ]]; then
+  while IFS= read -r root; do
+    [[ -n "$root" ]] && SCRATCH_CONTAINER_ROOTS+=("$root")
+  done < <(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("scratch_container_roots") or []:
+    print(r)
+PY
+)
+fi
+if [[ ${#SCRATCH_CONTAINER_ROOTS[@]} -eq 0 ]]; then
+  SCRATCH_CONTAINER_ROOTS=("${DEFAULT_SCRATCH_CONTAINER_ROOTS[@]}")
+fi
+
 DRY_RUN=true
 SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 INCLUDE_LARGE=false
@@ -928,13 +953,20 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
   fi
 fi
 
-# is_scratch_container <dir> — non-git dir that holds child directories.
-# A git repo/worktree is never a container (its children are tracked content).
+# is_scratch_container <dir> — explicitly known non-git container that holds
+# child directories.  Exact basename membership proves the children are
+# independent cleanup units; arbitrary active directories remain atomic.
 is_scratch_container() {
-  local d="$1" hit
-  [[ -e "$d/.git" || -L "$d/.git" ]] && return 1
-  hit="$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
-  [[ -n "$hit" ]]
+  local d="$1" base root hit
+  base="$(basename "$d")"
+  for root in "${SCRATCH_CONTAINER_ROOTS[@]}"; do
+    [[ "$base" == "$root" ]] || continue
+    [[ -e "$d/.git" || -L "$d/.git" ]] && return 1
+    hit="$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
+    [[ -n "$hit" ]]
+    return
+  done
+  return 1
 }
 
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
@@ -1032,7 +1064,7 @@ if [[ "$INCLUDE_LARGE" == true && -z "$PRIVATE_TMP_ROOT" ]]; then
   # doesn't exist) must never silently fall back to the real /private/tmp.
   log "Skipping --large scan: private-tmp root is unavailable (resolution failed closed)"
 elif [[ "$INCLUDE_LARGE" == true ]]; then
-  log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}) ..."
+  log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}, scratch containers: ${SCRATCH_CONTAINER_ROOTS[*]}) ..."
   while IFS= read -r -d '' d; do
     large_consider_entry "$d" 0
   done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
