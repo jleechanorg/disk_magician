@@ -126,6 +126,13 @@ c14_ephemeral_retention() {
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
+# _av_rebuildable <canonical path>: rc 0 for an entry under the fixed cache-root table
+# (§7.2 (b)): roots today's cache sweepers clear, or a venv dir cleanup_worktree_venvs strips.
+_av_rebuildable() {
+    local h re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]'
+    [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]] && return 0
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
+}
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() ( set -o pipefail; find "$1" -print0 2>/dev/null | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1 | grep -E '^[0-9]+$'; )
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
@@ -156,7 +163,7 @@ _av_lease_scope() {
 # artifact_removal_verdict <path> [...] | --self-test
 artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p kind='' q done='' st newest ret  # --kind ephemeral adds provenance (c); others keep
+    local p kind='' q done='' st newest ret  # provenance: kind (b)/(c)/os_clone, else (a) or git
     [[ "${2:-}" == --kind ]] && kind=${3:-}
     p=${1%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
@@ -178,8 +185,16 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
     _av_secret_like "$p" && { echo kept:secret-like; return 0; }
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p")" || { echo "$st"; return 0; }; fi
-    [[ "$kind" == ephemeral ]] && ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
-    (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
+    case "$kind" in
+        ephemeral) ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
+            (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; } ;;
+        rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
+        os_clone) ;;  # the caller matched the frozen identity against the source app bundle
+        '') st="$({ { [[ ! -d "$p" ]] || c14_discover_repos "$p"; } && printf 'OK\0'; } |  # repos passed above
+                python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")")"
+            [[ "$st" == ok ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; } ;;
+        *) echo kept:unproven-content; return 0 ;;
+    esac
     echo remove
 }
 

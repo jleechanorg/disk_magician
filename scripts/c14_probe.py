@@ -93,6 +93,54 @@ def editmsg_ok(ad, oids):  # COMMIT_EDITMSG (beyond the spec list) is only comme
     msgs, p = git("\n".join(oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""], os.path.join(ad, "COMMIT_EDITMSG")
     return any(git(open(p, "rb").read(), "stripspace", *s) in msgs for s in ([], ["-s"]))
 
+def describe(obj):  # `gcloud storage objects describe` (DISK_MAGICIAN_STAT_BIN in tests), 10 s; {} on any failure
+    cmd = [os.environ["DISK_MAGICIAN_STAT_BIN"], obj] if os.environ.get("DISK_MAGICIAN_STAT_BIN") else [
+        "gcloud", "storage", "objects", "describe", obj, "--format=json"]
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        out = p.communicate(timeout=10)[0]
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL); p.wait(); return {}
+    try:
+        return json.loads(out) if p.returncode == 0 else {}
+    except ValueError:
+        return {}
+
+def provenance(root, lease):
+    """stdin: the NUL-terminated repositories under root, then OK. ok when every file outside them
+    is in a verified upload manifest (size, sha256) and its own object still holds that generation
+    and hash (one describe per object per run); else kept:unproven-content."""
+    *repos, ok, tail = sys.stdin.buffer.read().split(b"\0")
+    if (ok, tail) != (b"OK", b""):
+        return print("kept:check-failed")
+    repos, files = set(map(os.fsdecode, repos)), [] if os.path.isdir(root) and not os.path.islink(root) else [root]
+    for dp, dns, fns in os.walk(root, onerror=lambda e: sys.exit("kept:check-failed")) if not files else ():
+        if dp in repos:
+            dns[:] = []
+            continue
+        files += [os.path.join(dp, n) for n in fns + [d for d in dns if os.path.islink(os.path.join(dp, d))]]
+    d = json.load(open(lease)) if files and os.path.isfile(lease) else {}
+    ent = {e["path"]: e for e in d.get("upload_manifest") or [] if isinstance(e, dict)} if d.get("published_url") and d.get("verified_at") else {}
+    seen = {}
+    for f in files:
+        e, st = ent.get(os.path.relpath(f, root), {}), os.lstat(f)
+        if not (stat.S_ISREG(st.st_mode) and e.get("size") == st.st_size and e.get("sha256") == sha256(f)):
+            return print("kept:unproven-content")
+        if e["object"] not in seen:
+            seen[e["object"]] = describe(e["object"])
+        m = seen[e["object"]]
+        if not (m.get("generation") and str(m["generation"]) == str(e["generation"]) and (
+                m["md5_hash"] == e["md5"] if m.get("md5_hash") else m.get("crc32c_hash") == e["crc32c"])):
+            return print("kept:unproven-content")
+    print("ok")
+
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     try:
@@ -102,6 +150,8 @@ if __name__ == "__main__":
             sys.exit(gitmeta(*a[1:]))
         if len(a) in (2, 3) and a[0] == "admin":
             sys.exit(admin(*a[1:]))
+        if len(a) == 3 and a[0] == "provenance":
+            sys.exit(provenance(*a[1:]))
     except Exception:
         sys.exit("kept:check-failed")
-    sys.exit("usage: c14_probe.py lsremote <url> <root> | gitmeta <gitdir> [<lease.json>] | admin <admindir> [<lease.json>]")
+    sys.exit("usage: c14_probe.py lsremote <url> <root> | gitmeta <gitdir> [<lease.json>] | admin <admindir> [<lease.json>] | provenance <root> <lease.json>")
