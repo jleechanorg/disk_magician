@@ -176,11 +176,11 @@ def phase1(path, inv_file, binding_file):
             rec["phase"] = "rollback_conflict"
             rec["rollback_conflict"] = {
                 "expected": {"dev": expected_identity[0], "ino": expected_identity[1]},
-                "original_path": path,
+                "original_path": path if parent_bound else None,
                 "parent_path_bound": parent_bound,
                 "parent_identity": {"dev": parent_fd_stat.st_dev, "ino": parent_fd_stat.st_ino},
                 "original_observed": {"dev": restored.st_dev, "ino": restored.st_ino},
-                "quarantine_path": dest,
+                "quarantine_path": dest if parent_bound and q_bound else None,
                 "quarantine_dir_bound": q_bound,
                 "quarantine_identity": {"dev": qfd_stat.st_dev, "ino": qfd_stat.st_ino},
                 "quarantine_observed": None,
