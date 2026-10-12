@@ -24,6 +24,28 @@ assert_contains() { if grep -qF -- "$2" <<<"$3"; then pass "$1"; else fail "$1 (
 
 set_old() { /usr/bin/find "$1" -exec touch -t 202001010000 {} +; }
 
+set_age_hours() {
+  local path="$1" hours="$2" stamp
+  stamp="$(date -v-"${hours}"H '+%Y%m%d%H%M' 2>/dev/null || date -d "${hours} hours ago" '+%Y%m%d%H%M')"
+  /usr/bin/find "$path" -name .git -prune -o -exec touch -t "$stamp" {} +
+}
+
+make_clean_pushed_worktree() {
+  local main="$1" wt="$2" branch="$3" remote
+  remote="${main}-remote.git"
+  git init --bare -q "$remote"
+  git init -q -b main "$main"
+  git -C "$main" config user.name test
+  git -C "$main" config user.email test@example.com
+  head -c 20000 /dev/zero > "$main/payload.bin"
+  git -C "$main" add payload.bin
+  git -C "$main" commit -q -m init
+  git -C "$main" remote add origin "$remote"
+  git -C "$main" push -q -u origin main
+  git -C "$main" worktree add -q -b "$branch" "$wt"
+  git -C "$wt" push -q -u origin "$branch"
+}
+
 # make_env <name>: sets PT (private tmp), AR (archive), BIN
 make_env() {
   local n="$1"
@@ -172,6 +194,44 @@ run_sweep t9 --clean
 assert_exists "t9 idle sources in unknown active workspace kept" "$PT/build/sources"
 assert_exists "t9 fresh logs in unknown active workspace kept" "$PT/build/logs"
 assert_contains "t9 unknown workspace skipped as one active unit" "Skipping recently active dir" "$OUT"
+
+echo "Test 10: clean pushed worktree 25h old remains protected by seven-day floor"
+make_env t10
+mkdir -p "$PT/agent-scratch"
+make_clean_pushed_worktree "$TMP_ROOT/t10-main" "$PT/agent-scratch/old-wt" t10wt
+set_age_hours "$PT/agent-scratch/old-wt" 25
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t10 --clean
+assert_exists "t10 25h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
+assert_contains "t10 seven-day worktree floor reported" \
+  "Skipping recently active container child repository/worktree (<7d)" "$OUT"
+
+echo "Test 11: unmeasurable clean pushed worktree fails closed"
+make_env t11
+mkdir -p "$PT/agent-scratch"
+make_clean_pushed_worktree "$TMP_ROOT/t11-main" "$PT/agent-scratch/old-wt" t11wt
+set_old "$PT/agent-scratch/old-wt"
+mkchild "$PT/agent-scratch/fresh-child"
+cat > "$BIN/find" <<'S'
+#!/usr/bin/env bash
+[[ "${FAIL_RECENCY_ROOT:-}" == "${1:-}" ]] && exit 91
+exec /usr/bin/find "$@"
+S
+chmod +x "$BIN/find"
+run_sweep t11 --clean FAIL_RECENCY_ROOT="$PT/agent-scratch/old-wt"
+assert_exists "t11 unmeasurable clean pushed worktree kept" "$PT/agent-scratch/old-wt"
+assert_contains "t11 fail-closed recency protection reported" \
+  "Skipping recently active container child repository/worktree (<7d)" "$OUT"
+
+echo "Test 12: clean pushed worktree older than seven days remains eligible"
+make_env t12
+mkdir -p "$PT/agent-scratch"
+make_clean_pushed_worktree "$TMP_ROOT/t12-main" "$PT/agent-scratch/old-wt" t12wt
+set_old "$PT/agent-scratch/old-wt"
+mkchild "$PT/agent-scratch/fresh-child"
+run_sweep t12 --clean
+assert_missing "t12 old clean pushed worktree moved out" "$PT/agent-scratch/old-wt"
+[[ -n "$(archived old-wt)" ]] && pass "t12 old clean pushed worktree archived" || fail "t12 old clean pushed worktree archived"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

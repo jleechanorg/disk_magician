@@ -1010,11 +1010,19 @@ large_consider_entry() {
     return 0
   fi
 
-  # Child of a descended container: a repo/worktree is only archived when
-  # provably clean and pushed (same guard the approved wt_*/worktree_* path uses).
-  if (( depth > 0 )) && [[ -e "$d/.git" || -L "$d/.git" ]] && worktree_has_unsaved_work "$d"; then
-    log "Skipping container child with unsaved work (uncommitted/unpushed/no-upstream): $d"
-    return 0
+  # Child repository/worktree of a descended container: cleanup_tmp is not an
+  # exception to the canonical worktree recency floor.  The helper fails
+  # closed, so an unmeasurable tree is protected too.  Only after it is old
+  # enough do we ask whether it is also provably clean and pushed.
+  if (( depth > 0 )) && [[ -e "$d/.git" || -L "$d/.git" ]]; then
+    if worktree_is_recently_active "$d" "$WORKTREE_MIN_AGE_DAYS"; then
+      log "Skipping recently active container child repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $d"
+      return 0
+    fi
+    if worktree_has_unsaved_work "$d"; then
+      log "Skipping container child with unsaved work (uncommitted/unpushed/no-upstream): $d"
+      return 0
+    fi
   fi
 
   # Cheap recency/marker verdicts first: an entry that is too recent to touch
