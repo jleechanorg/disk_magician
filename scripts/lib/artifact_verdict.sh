@@ -151,18 +151,41 @@ _av_secret_like() {
     [[ -n "$out" ]]
 }
 
+# _av_lease_kept <path>: print kept:<reason> (rc 0) when <path> has a lease whose owner is
+# alive, unknown, unreadable or absent; rc 1 when there is no lease or it is dead/released.
+_av_lease_kept() {
+    local lease
+    lease="$(lease_path_for "$1")" || { echo kept:check-failed; return 0; }
+    [[ -e "$lease" ]] || return 1
+    case "$(lease_owner_state "$lease")" in
+        dead|released) return 1 ;; alive*) echo kept:live-owner ;; *) echo kept:owner-unknown ;; esac
+}
+
+# _av_lease_scope <path>: NUL-list <path>, its ancestors below its scratch root (else
+# $HOME, else /) and every repository under it; rc 1 when discovery is incomplete.
+_av_lease_scope() {
+    local a=${1%/*} r stops=$'\n'
+    while IFS= read -r r; do r="$(cd "$r" 2>/dev/null && pwd -P)" && stops+="$r"$'\n'; done < <(scratch_roots_get_unique)
+    stops+="$(cd "$HOME" 2>/dev/null && pwd -P)"$'\n'
+    printf '%s\0' "$1"
+    while [[ -n "$a" && "$stops" != *$'\n'"$a"$'\n'* ]]; do printf '%s\0' "$a"; a=${a%/*}; done
+    [[ ! -d "$1" ]] || c14_discover_repos "$1"
+}
+
 # artifact_removal_verdict <path> [--kind os_clone|rebuildable|ephemeral] | --self-test
 # Every-kind checks, then the git rules and provenance (c) for --kind ephemeral; the
 # manifest, rebuildable and os_clone proofs are not here yet, so those keep.
 artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p kind='' lease st newest ret
+    local p kind='' q done='' st newest ret
     [[ "${2:-}" == --kind ]] && kind=${3:-}
     p=${1%/} && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
-    lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
-    if [[ -e "$lease" ]]; then case "$(lease_owner_state "$lease")" in
-        dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac; fi
+    while IFS= read -r -d '' q; do
+        [[ "$q" == OK ]] && { done=1; continue; }
+        st="$(_av_lease_kept "$q")" && { echo "$st"; return 0; }
+    done < <(_av_lease_scope "$p" && printf 'OK\0')
+    [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"
     [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
     _av_open_file "$p" && { echo kept:open-file; return 0; }

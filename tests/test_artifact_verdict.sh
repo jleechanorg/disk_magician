@@ -401,6 +401,19 @@ assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:own
 mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
 assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
 lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
+# own <path> <released_at>: set this shell as owner of <path>'s lease, keeping its git_meta.
+own() {
+    local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
+    python3 -c 'import json,os,sys; f=sys.argv[1]; d=json.load(open(f)) if os.path.exists(f) else {}
+d.update(owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
+        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2"
+}
+mkdir -p "$PT/pr-nest" "$PT/pr-1" && for d in pr-nest pr-1; do git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d/repo" && baseline "$PT/$d/repo"; done
+own "$PT/pr-nest/repo" null && own "$PT/pr-1/repo" '"2026-10-01T00:00:00Z"' && own "$PT/pr-1" null && age "$PT/pr-nest" 43200 && age "$PT/pr-1" 43200
+assert_eq "$(eph "$PT/pr-nest/repo")" kept:live-owner "live owner on the candidate repository"
+assert_eq "$(eph "$PT/pr-nest")" kept:live-owner "live-owner lease on a repository nested in the candidate"
+assert_eq "$(eph "$PT/pr-1/repo")" kept:live-owner "live-owner lease on a dir enclosing the candidate"
+own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released"
 
 echo "== verdict stays blocked =="
 v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
