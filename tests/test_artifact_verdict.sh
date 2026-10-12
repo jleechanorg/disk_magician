@@ -228,6 +228,24 @@ assert_eq "$v" kept:remote-unverified "ls-remote stub sleeping past 30 s"
 [[ $el -ge 29 && $el -lt 40 ]] && ok "ls-remote bounded at 30 s (${el}s)" || bad "ls-remote bound: ${el}s"
 pgrep -f "sleep 45.1729" >/dev/null && bad "stub sleep left running" || ok "stub process group killed"
 
+echo "== remote that is removed with the candidate =="
+# seturl <name> <url>: point origin at <url> and re-baseline (the config is git_meta).
+seturl() { git -C "$TMPROOT/$1" remote set-url origin "$2" && baseline "$TMPROOT/$1"; }
+mkpushed selfabs && seturl selfabs "$TMPROOT/selfabs"
+assert_eq "$(pushed selfabs)" kept:remote-unverified "remote is the repository itself"
+assert_eq "$(c14_repo_pushed_ok "$TMPROOT/selfabs")" kept:remote-unverified "self remote, no root given"
+mkpushed selffile && seturl selffile "file://$TMPROOT/selffile/."
+assert_eq "$(pushed selffile)" kept:remote-unverified "file:// remote is the repository itself"
+mkpushed selflink && ln -s "$TMPROOT/selflink" "$TMPROOT/selflink-alias" && seturl selflink "$TMPROOT/selflink-alias"
+assert_eq "$(pushed selflink)" kept:remote-unverified "symlink to the repository itself"
+mkpushed relurl && seturl relurl "../remotes/relurl.git"
+assert_eq "$(pushed relurl)" kept:remote-unverified "relative local remote path"
+mkdir -p "$TMPROOT/sib" && git clone -q --bare "$TMPROOT/remotes/ctl.git" "$TMPROOT/sib/up.git"
+git clone -q "$TMPROOT/sib/up.git" "$TMPROOT/sib/down" && baseline "$TMPROOT/sib/down"
+assert_eq "$(c14_repo_pushed_ok "$TMPROOT/sib/down" "$TMPROOT/sib")" kept:remote-unverified \
+    "remote is a sibling inside the deletion root"
+assert_eq "$(c14_repo_pushed_ok "$TMPROOT/sib/down")" ok "same sibling remote, root is the repository"
+
 echo "== .git metadata baseline =="
 mkpushed hooks && printf 'private\n' >"$TMPROOT/hooks/.git/hooks/private-output"
 assert_eq "$(pushed hooks)" kept:git-metadata ".git/hooks/private-output"
