@@ -72,6 +72,7 @@ Commands:
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
+  govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -409,6 +410,9 @@ case "$CMD" in
     ;;
   admit)
     exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" "$@"
+    ;;
+  govern)
+    exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" --govern "$@"
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
