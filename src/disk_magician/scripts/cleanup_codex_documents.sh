@@ -40,12 +40,12 @@ done
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
 dry_prefix() { if [[ "$DRY_RUN" == true ]]; then echo "DRY RUN: "; fi; }
 
-ROOT="$HOME/Documents/Codex"
-if [[ ! -d "$ROOT" ]]; then
-  log "No $ROOT — nothing to do."
+ROOT_LOGICAL="$HOME/Documents/Codex"
+if [[ ! -d "$ROOT_LOGICAL" ]]; then
+  log "No $ROOT_LOGICAL — nothing to do."
   exit 0
 fi
-ROOT="$(cd "$ROOT" && pwd -P)"
+ROOT="$(cd "$ROOT_LOGICAL" && pwd -P)"
 
 MIN_DAYS="$(safety_min_stale_days)"
 [[ "$MIN_DAYS" =~ ^[0-9]+$ ]] || MIN_DAYS=7
@@ -69,12 +69,34 @@ snapshot_live_paths() {
   out="$($t "$lsof_bin" -n -P -Fn 2>/dev/null)" || rc=$?
   # rc 1 with output is lsof's normal "some items unreadable"; anything else is unknown.
   if (( rc > 1 )) || [[ -z "$out" ]]; then LIVE_BLOCKED="lsof-failed"; return; fi
-  LIVE_PATHS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$out" | R="$ROOT" awk 'index($0, ENVIRON["R"] "/") == 1')"
+  # Keep every absolute record. Filtering by only ROOT's physical spelling
+  # drops macOS firmlink and logical-symlink aliases of the same open path.
+  LIVE_PATHS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$out")"
+  [[ -n "$LIVE_PATHS" ]] || LIVE_BLOCKED="lsof-failed"
+}
+
+path_aliases() {
+  local p="$1"
+  printf '%s\n' "$p"
+  case "$p" in
+    /System/Volumes/Data/*) printf '%s\n' "${p#/System/Volumes/Data}" ;;
+    /*) printf '/System/Volumes/Data%s\n' "$p" ;;
+  esac
 }
 
 path_is_live() {
   [[ -n "$LIVE_PATHS" ]] || return 1
-  P="$1" awk '$0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1 {f=1; exit} END {exit !f}' <<<"$LIVE_PATHS"
+  local task="$1" logical alias
+  case "$task" in
+    "$ROOT"|"$ROOT"/*) logical="$ROOT_LOGICAL${task#"$ROOT"}" ;;
+    *) logical="$task" ;;
+  esac
+  while IFS= read -r alias; do
+    if P="$alias" awk '$0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1 {f=1; exit} END {exit !f}' <<<"$LIVE_PATHS"; then
+      return 0
+    fi
+  done < <({ path_aliases "$task"; path_aliases "$logical"; } | awk '!seen[$0]++')
+  return 1
 }
 
 abs_dir() { (cd "$1" 2>/dev/null && pwd -P); }
@@ -181,7 +203,7 @@ N_KEPT=0
 keep() { log "KEEP [$1] $2"; N_KEPT=$(( N_KEPT + 1 )); }
 
 process_task() {
-  local task="$1" rc reason kb row main wt
+  local task="$1" rc reason kb row main wt removed_worktrees=0
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
@@ -199,18 +221,31 @@ process_task() {
     snapshot_live_paths
     if [[ -n "$LIVE_BLOCKED" ]]; then keep "$LIVE_BLOCKED" "$task"; return; fi
     if path_is_live "$task"; then keep live-process-recheck "$task"; return; fi
+    rc=0; worktree_is_recently_active "$task" "$MIN_DAYS" || rc=$?
+    if (( rc != 1 )); then keep "recent-recheck" "$task"; return; fi
+    check_repos "$task"
+    if [[ -n "$REPO_REASON" ]]; then keep "recheck:$REPO_REASON" "$task"; return; fi
     while IFS=$'\t' read -r main wt; do
       [[ -n "$main" ]] || continue
       if ! git --git-dir="$main" worktree remove --force "$wt" 2>/dev/null; then
+        if (( removed_worktrees > 0 )); then
+          deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+        fi
         keep "worktree-remove-failed:$wt" "$task"; return
       fi
+      removed_worktrees=$(( removed_worktrees + 1 ))
     done <<<"$WT_REMOVALS"
     log "Removing $task (${kb} KB)"
     if ! rm -rf "$task"; then
+      deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
       keep "rm-failed" "$task"
       return
     fi
-    if [[ -e "$task" ]]; then keep "rm-incomplete" "$task"; return; fi
+    if [[ -e "$task" ]]; then
+      deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+      keep "rm-incomplete" "$task"
+      return
+    fi
     deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
   fi
   REMOVED="${REMOVED}${task}"$'\n'

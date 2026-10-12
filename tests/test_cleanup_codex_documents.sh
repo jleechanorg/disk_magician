@@ -226,7 +226,87 @@ O6="$TMP_ROOT/o6"; RC=0; run_sweeper "$O6" --clean || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T6: exits 0" || { record_fail "T6: exits 0" "rc=$RC"; cat "$O6"; }
 assert_exists "T6: task remains after rm failure" "$CODEX/$D_OLD/t-rm-fail"
 assert_contains "T6: reports fail-closed reason" "KEEP [rm-failed]" "$(cat "$O6")"
+assert_contains "T6: partial deletion is audited" $'\tpartial\t' "$(grep -F "$CODEX/$D_OLD/t-rm-fail" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || true)"
 chmod 700 "$CODEX/$D_OLD/t-rm-fail"
+
+FAKE_LSOF="$TMP_ROOT/fake-lsof"
+cat >"$FAKE_LSOF" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[[ -f "${FAKE_LSOF_COUNT:-}" ]] && read -r count <"$FAKE_LSOF_COUNT"
+count=$(( count + 1 ))
+[[ -n "${FAKE_LSOF_COUNT:-}" ]] && printf '%s\n' "$count" >"$FAKE_LSOF_COUNT"
+if [[ "$count" -eq 2 ]]; then
+  case "${FAKE_LSOF_MODE:-closed}" in
+    recent) echo changed >>"$FAKE_LSOF_TARGET/payload.bin" ;;
+    dirty-old)
+      echo local >"$FAKE_LSOF_TARGET/repo/local.txt"
+      touch -t 202609010000 "$FAKE_LSOF_TARGET/repo/local.txt"
+      ;;
+  esac
+fi
+printf 'p1\nfcwd\nn%s\n' "${FAKE_LSOF_PATH:-/tmp/outside-codex-task}"
+EOF
+chmod +x "$FAKE_LSOF"
+
+echo "T7: macOS firmlink alias from lsof protects the physical task path"
+ALIAS_HOME="$TMP_ROOT/alias-home"; ALIAS_CODEX="$ALIAS_HOME/Documents/Codex"; ALIAS_TASK="$ALIAS_CODEX/$D_OLD/t-alias"
+mkdir -p "$ALIAS_TASK"; echo data >"$ALIAS_TASK/payload.bin"; age "$ALIAS_TASK"
+export FAKE_LSOF_MODE=alias FAKE_LSOF_PATH="/System/Volumes/Data$ALIAS_TASK" FAKE_LSOF_COUNT="$TMP_ROOT/alias-count" FAKE_LSOF_TARGET="$ALIAS_TASK"
+O7="$TMP_ROOT/o7"; RC=0
+HOME="$ALIAS_HOME" DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" run_sweeper "$O7" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T7: exits 0" || { record_fail "T7: exits 0" "rc=$RC"; cat "$O7"; }
+assert_exists "T7: alias-form live path keeps task" "$ALIAS_TASK"
+assert_contains "T7: reports live process" "KEEP [live-process]" "$(cat "$O7")"
+
+echo "T8: recency is rechecked after the final lsof scan"
+RECENT_HOME="$TMP_ROOT/recent-home"; RECENT_CODEX="$RECENT_HOME/Documents/Codex"; RECENT_TASK="$RECENT_CODEX/$D_OLD/t-recent-race"
+mkdir -p "$RECENT_TASK"; echo data >"$RECENT_TASK/payload.bin"; age "$RECENT_TASK"
+export FAKE_LSOF_MODE=recent FAKE_LSOF_PATH=/tmp/outside-codex-task FAKE_LSOF_COUNT="$TMP_ROOT/recent-count" FAKE_LSOF_TARGET="$RECENT_TASK"
+O8="$TMP_ROOT/o8"; RC=0
+HOME="$RECENT_HOME" DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" run_sweeper "$O8" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T8: exits 0" || { record_fail "T8: exits 0" "rc=$RC"; cat "$O8"; }
+assert_exists "T8: task changed during lsof is kept" "$RECENT_TASK"
+assert_contains "T8: reports recent recheck" "KEEP [recent-recheck]" "$(cat "$O8")"
+
+echo "T9: Git state is rechecked after the final lsof scan"
+DIRTY_HOME="$TMP_ROOT/dirty-home"; DIRTY_CODEX="$DIRTY_HOME/Documents/Codex"; DIRTY_TASK="$DIRTY_CODEX/$D_OLD/t-dirty-race"
+mkdir -p "$DIRTY_TASK"; git clone -q "$ORIGIN" "$DIRTY_TASK/repo"; age "$DIRTY_TASK"
+export FAKE_LSOF_MODE=dirty-old FAKE_LSOF_PATH=/tmp/outside-codex-task FAKE_LSOF_COUNT="$TMP_ROOT/dirty-count" FAKE_LSOF_TARGET="$DIRTY_TASK"
+O9="$TMP_ROOT/o9"; RC=0
+HOME="$DIRTY_HOME" DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" run_sweeper "$O9" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T9: exits 0" || { record_fail "T9: exits 0" "rc=$RC"; cat "$O9"; }
+assert_exists "T9: task dirtied during lsof is kept" "$DIRTY_TASK"
+assert_contains "T9: reports dirty Git recheck" "KEEP [recheck:dirty:" "$(cat "$O9")"
+
+echo "T10: partial linked-worktree removal is audited"
+PART_HOME="$TMP_ROOT/partial-home"; PART_CODEX="$PART_HOME/Documents/Codex"; PART_TASK="$PART_CODEX/$D_OLD/t-partial-wt"
+mkdir -p "$PART_TASK"
+git -C "$MAIN" worktree add -q --detach "$PART_TASK/w1" origin/main
+git -C "$MAIN" worktree add -q --detach "$PART_TASK/w2" origin/main
+age "$PART_TASK"
+REAL_GIT_BIN="$(command -v git)"; FAKE_GIT_BIN="$TMP_ROOT/fake-git-bin"; mkdir -p "$FAKE_GIT_BIN"
+cat >"$FAKE_GIT_BIN/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" worktree remove "* ]]; then
+  count=0
+  [[ -f "$FAKE_GIT_COUNT" ]] && read -r count <"$FAKE_GIT_COUNT"
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" >"$FAKE_GIT_COUNT"
+  [[ "$count" -eq 2 ]] && exit 1
+fi
+exec "$REAL_GIT_BIN" "$@"
+EOF
+chmod +x "$FAKE_GIT_BIN/git"
+export FAKE_LSOF_MODE=closed FAKE_LSOF_PATH=/tmp/outside-codex-task FAKE_LSOF_COUNT="$TMP_ROOT/partial-lsof-count" FAKE_LSOF_TARGET="$PART_TASK"
+export REAL_GIT_BIN FAKE_GIT_COUNT="$TMP_ROOT/git-remove-count"
+PART_LOG="$TMP_ROOT/partial-deletions.log"; O10="$TMP_ROOT/o10"; RC=0
+HOME="$PART_HOME" PATH="$FAKE_GIT_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_DELETION_LOG="$PART_LOG" run_sweeper "$O10" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T10: exits 0" || { record_fail "T10: exits 0" "rc=$RC"; cat "$O10"; }
+assert_exists "T10: task remains after second unregister fails" "$PART_TASK"
+assert_contains "T10: reports worktree removal failure" "KEEP [worktree-remove-failed:" "$(cat "$O10")"
+assert_contains "T10: partial worktree removal is audited" $'\tpartial\t' "$(grep -F "$PART_TASK" "$PART_LOG" 2>/dev/null || true)"
+unset FAKE_LSOF_MODE FAKE_LSOF_PATH FAKE_LSOF_COUNT FAKE_LSOF_TARGET REAL_GIT_BIN FAKE_GIT_COUNT
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
