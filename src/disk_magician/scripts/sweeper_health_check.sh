@@ -96,7 +96,6 @@ fi
 
 # Governor alerts (plan Task 10) print before any accounting; an alert or a crash fails the run.
 GOVERNOR_ALERTS=$(python3 "$SCRIPT_DIR/budget_status.py" status 2>&1) && GOVERNOR_ALERTS="" || echo "$GOVERNOR_ALERTS"
-
 # Threshold expressed in seconds for date math.
 THRESHOLD_SEC=$(( THRESHOLD_DAYS * 86400 ))
 NOW_EPOCH=$(date +%s)
@@ -347,6 +346,5 @@ if [[ "$PUBLICATION_DEGRADED" == true ]]; then
 fi
 
 [[ -n "$GOVERNOR_ALERTS" ]] && { log "FAIL: governor alerts raised (ALERT: lines above)."; exit 1; }
-
 log "All sweepers healthy. Liveness diagnostics verified."
 exit 0

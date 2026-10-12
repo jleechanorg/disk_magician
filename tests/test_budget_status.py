@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -72,25 +73,31 @@ class AlertsTest(unittest.TestCase):
         self.assertEqual(codes(self.run_alerts(events=ev)), ["burst_over_margin"])
         spaced = [dict(event="admit", at=self.NOW - 3600 + 700 * i, est_bytes=5 * GIB, decision=0) for i in range(4)]
         self.assertEqual(codes(self.run_alerts(events=spaced)), [])
+        refused = [dict(event="admit", at=self.NOW - 3600 + 100 * i, est_bytes=5 * GIB, decision=d) for i, d in enumerate((75, 76, 75, 10))]
+        self.assertEqual(codes(self.run_alerts(events=refused)), [])  # only decisions 0 and 10 (admitted) count
 
-    def month(self, recent_gib, older_days=23, step=3600):
-        return flat(self.NOW - 30 * 86400, days=older_days, used_gib=780, step=step) + \
-            flat(self.NOW - 7 * 86400, used_gib=recent_gib, step=step)
+    def month(self, recent_gib, older_days=23):  # govern's daily_min_used: last 7 days at recent_gib, older days at 780 GiB
+        day = lambda d: time.strftime("%Y-%m-%d", time.localtime(self.NOW - d * 86400))
+        mins = {day(d): int((recent_gib if d < 7 else 780) * GIB) for d in range(7 + older_days)}
+        return dict(zone="GREEN", zone_at=self.NOW, daily_min_used=mins)
 
     def test_trough_rise_over_15_gib_above_30_day_floor(self):
-        self.assertEqual(codes(self.run_alerts(samples=self.month(796))), ["trough_rise"])
+        lines = self.run_alerts(samples=flat(WEEK), budget=self.month(796))
+        self.assertEqual(codes(lines), ["trough_rise"])
+        self.assertFalse(any("insufficient" in line for line in lines), lines)
 
     def test_trough_noise_and_15_gib_do_not_alert(self):
         for recent in (780.01, 795):
-            lines = self.run_alerts(samples=self.month(recent))
+            lines = self.run_alerts(budget=self.month(recent))
             self.assertEqual(codes(lines), [], recent)
             self.assertFalse(bs.raised(lines))
 
-    def test_trough_insufficient_coverage_reports_instead_of_alerting(self):
-        for s in (self.month(840, older_days=3), flat(self.NOW - 30 * 86400, days=29, used_gib=780, step=3600)):
-            lines = self.run_alerts(samples=s)
+    def test_trough_insufficient_history_is_reported_not_silent(self):
+        # 11 days of observer samples (live retention) and a short govern history: explicit status, no alert
+        for budget in (None, self.month(840, older_days=3), dict(zone="GREEN", zone_at=self.NOW, daily_min_used="corrupt")):
+            lines = self.run_alerts(samples=flat(self.NOW - 11 * 86400, days=11, used_gib=780, step=3600), budget=budget)
             self.assertEqual(codes(lines), [])
-            self.assertTrue(any(line.startswith("trough_rise:insufficient_data") for line in lines), lines)
+            self.assertTrue(any(line.startswith("trough_rise:insufficient_history") for line in lines), lines)
             self.assertFalse(bs.raised(lines))
 
 
