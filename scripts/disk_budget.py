@@ -3,7 +3,10 @@
 import argparse, fcntl, json, os, subprocess, sys, time, uuid, resolve_config
 from pathlib import Path
 GIB, ZONES, EMERGENCY = 1 << 30, ((100, "GREEN"), (60, "ORANGE"), (30, "RED"), (15, "BLACK")), {"BLACK": 76, "FLOOR": 75}
-D2 = False  # decision_approved admission_enforcement arrives with the policy PR; until then observe-only, rc 0
+STAGES = ("observe", "warn", "refuse_red", "refuse_orange")
+def d2_approved():  # decision_approved admission_enforcement; an unreadable record is not approved (rc stays 0)
+    try: import policy_provenance; return policy_provenance.main("approved", "admission_enforcement") == 0
+    except Exception: return False
 def zone(free_gb):
     return next((name for floor, name in ZONES if free_gb >= floor), "FLOOR")
 def est_gb(text):  # finite and >= 0, else argparse exits 2 before any event is written
@@ -47,11 +50,13 @@ def govern(argv, state):  # observe tick (plan Task 8): zone first, then the kic
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or 0
-def admit(a, budgets, state, now):
-    try:  # a corrupt budget.json or a partial budgets block degrades to the blind decision
+def admit(a, budgets, state, now, d2):
+    try:  # a corrupt or wrong-typed budget.json, or a partial budgets block, degrades to the blind decision
         last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, None
         cls, age, stage, margin = last.get("classes", {}).get(a.cls, {}), now - last.get("zone_at", 0), budgets["enforcement"], budgets["concurrency_margin_gb"]
-        over = now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > cls.get("budget_gb", 1e9)
+        over = budgets["classes"][a.cls].get("measure") != "df_delta_only" and now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > cls.get("budget_gb", 1e9)
+        if stage not in STAGES or not all(isinstance(v, (int, float)) for v in (margin, last.get("free_bytes", 0))) \
+                or not isinstance(last.get("zone") or "", str): raise TypeError("budget value type")
         try:
             out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
@@ -63,11 +68,11 @@ def admit(a, budgets, state, now):
         last, free, degraded = {}, None, "blind"
     if degraded: print(f"admission_degraded:{degraded}", file=sys.stderr)
     if free is not None:
-        z, decision = decide(stage, free / GIB, a.est_gb, margin, over, D2)
+        z, decision = decide(stage, free / GIB, a.est_gb, margin, over, d2)
     else:  # blind -> 10, unless the last zone within 60 min was BLACK/FLOOR
         z = last.get("zone") if last.get("zone") in EMERGENCY and age <= 3600 else None
-        decision = EMERGENCY[z] if z and D2 else 10
-    event = dict(event="admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
+        decision = EMERGENCY[z] if z and d2 else 10
+    event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
                  zone=z, df_free_bytes=free, degraded=degraded, **{"class": a.cls}, **{k: getattr(a, k) for k in
                  ("producer", "source", "dest", "ci_job", "tool_use_id")})
     try:
@@ -76,20 +81,43 @@ def admit(a, budgets, state, now):
     except OSError:
         print("admission_degraded:log", file=sys.stderr)
     print(f"admit_id={event['admit_id']}")
-    return decision if D2 else 0
+    return decision if d2 else 0
+def confirm(state, key, value, now):  # admit_confirm with the admitted dest's dev + inode; rc 2 if it is missing
+    hit, log = None, state / "admission" / "events.jsonl"
+    try:
+        for line in open(log):
+            try: e = json.loads(line)
+            except ValueError: continue
+            if isinstance(e, dict) and e.get("event") == "admit" and e.get(key) == value: hit = e
+        st = os.stat(hit["dest"])
+    except (OSError, TypeError, KeyError):
+        return print(f"admit_confirm: no admitted dest for {key}={value}", file=sys.stderr) or 2
+    try:
+        with open(log, "a") as f: f.write(json.dumps(dict(event="admit_confirm", admit_id=hit["admit_id"], at=now,
+                                   tool_use_id=hit.get("tool_use_id"), dest=hit["dest"], dev=st.st_dev, inode=st.st_ino)) + "\n")
+    except OSError:
+        print("admission_degraded:log", file=sys.stderr)
+    return 0
 def main():
     if sys.argv[1:2] == ["--govern"]:
         return govern(sys.argv[2:], Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")))
     tmpl = json.loads((Path(__file__).resolve().parents[1] / "config.json.template").read_text())["budgets"]
     p, budgets = argparse.ArgumentParser(prog="diskm admit"), json.loads(Path(resolve_config.resolve()).read_text()).get("budgets") or tmpl
     for flag in ("--producer", "--dest", "--source", "--ci-job", "--tool-use-id"): p.add_argument(flag)
-    p.add_argument("--class", dest="cls", required=True, choices=sorted(budgets.get("classes") or tmpl["classes"]))
-    p.add_argument("--est-gb", type=est_gb, required=True)
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--class", dest="cls", choices=sorted((budgets if isinstance(budgets, dict) else {}).get("classes") or tmpl["classes"]))
+    p.add_argument("--est-gb", type=est_gb)
+    mode = p.add_mutually_exclusive_group()
+    for flag in ("--dry-run", "--probe"): mode.add_argument(flag, action="store_true")
+    for flag in ("--confirm", "--confirm-tool-use"): mode.add_argument(flag)
     a, state = p.parse_args(), Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"))
+    if a.confirm is None and a.confirm_tool_use is None and None in (a.cls, a.est_gb):
+        p.error("--class and --est-gb are required unless confirming")
     (state / "admission").mkdir(parents=True, exist_ok=True)
+    d2 = d2_approved()
     with open(state / "state.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return admit(a, budgets, state, time.time())
+        if a.confirm is not None or a.confirm_tool_use is not None:
+            return confirm(state, *(("admit_id", a.confirm) if a.confirm is not None else ("tool_use_id", a.confirm_tool_use)), time.time())
+        return admit(a, budgets, state, time.time(), d2)
 if __name__ == "__main__":
     sys.exit(main())
