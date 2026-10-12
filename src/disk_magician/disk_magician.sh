@@ -67,6 +67,7 @@ Commands:
   worktree-release <path> Release the caller's lease without deleting the worktree.
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
+  scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
 
@@ -397,6 +398,9 @@ case "$CMD" in
     ;;
   layout_check|layout-check)
     python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
+    ;;
+  scratch_new|scratch-new)
+    "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
     ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
