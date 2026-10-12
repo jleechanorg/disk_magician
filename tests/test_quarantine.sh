@@ -110,6 +110,20 @@ check 'recreated original: new empty dir untouched' bash -c '[[ -d "$1" && -z "$
 check 'recreated original: artifact still quarantined' [ "$(cat "$Q/$(qid)/report.md")" = AAAA ]
 check 'recreated original: sidecar kept' [ -f "$Q/$(qid).json" ]
 
+# A changed quarantine entry must never be rolled back over the source or lose the intent record.
+fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE="mv \"\$DM_Q_DEST\" '$TMP/original$N'; mkdir \"\$DM_Q_DEST\"; printf SUBSTITUTE > \"\$DM_Q_DEST/report.md\""
+check 'replaced quarantine entry: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
+check 'replaced quarantine entry: source not falsely restored' [ ! -e "$A" ]
+check 'replaced quarantine entry: original retained separately' [ "$(cat "$TMP/original$N/report.md")" = AAAA ]
+check 'replaced quarantine entry: sidecar retained' [ -f "$Q/$(qid).json" ]
+
+# Replacing .dm-quarantine after intent creation must not redirect the candidate into a symlink target.
+fixture; mkdir "$TMP/outside$N"; run DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME="mv '$Q' '$Q.saved'; ln -s '$TMP/outside$N' '$Q'"
+check 'replaced quarantine dir: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
+check 'replaced quarantine dir: source remains in place' intact AAAA
+check 'replaced quarantine dir: outside untouched' [ -z "$(ls -A "$TMP/outside$N")" ]
+check 'replaced quarantine dir: intent retained with original dir' [ -f "$Q.saved/$(qid).json" ]
+
 # Source swapped for another dir between lstat and rename: identity mismatch.
 fixture; run DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME="mv \"\$DM_Q_PATH\" '$TMP/aside'; cp -R '$TMP/aside' \"\$DM_Q_PATH\""
 check 'swap before rename: kept:identity-mismatch' [ "$OUT" = kept:identity-mismatch ]
