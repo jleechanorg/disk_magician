@@ -740,6 +740,66 @@ for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
 PY
 )" "" "old claim restored after lease failure"
 
+echo "== case 37: replacement checkout after detach is parked, not switched =="
+REPLACE_WT="$WTROOT/reuse-replacement"
+git -C "$REPO" branch reuse/replacement "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$REPLACE_WT" reuse/replacement
+cat > "$TMPROOT/replace-checkout-hook" <<EOF
+#!/usr/bin/env bash
+set -e
+"$REAL_GIT" -C "\$1" worktree remove --force "\$3"
+"$REAL_GIT" -C "\$1" worktree add -q -b reuse/replacement-new "\$3" "$ORIGIN_SHA"
+EOF
+chmod +x "$TMPROOT/replace-checkout-hook"
+export DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF="$TMPROOT/replace-checkout-hook"
+fresh="$(run_reuse_attempt "$REPLACE_WT" reuse/replacement feat/replacement replacement)"; rc=$?
+unset DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF
+assert_eq "$rc" "0" "replacement fallback exit"
+assert_eq "$fresh" "$WTROOT/replacement" "replacement checkout uses fresh path"
+assert_eq "$(git -C "$REPLACE_WT" rev-parse --abbrev-ref HEAD)" "reuse/replacement-new" "replacement checkout keeps its own branch"
+assert_eq "$(git -C "$REPLACE_WT" rev-parse HEAD)" "$ORIGIN_SHA" "replacement checkout content unchanged"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$REPLACE_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse',{}).get('state','')); break
+ except OSError: pass
+PY
+)" "reuse_incomplete" "replacement lease parked incomplete"
+
+echo "== case 38: failed claim restore at pre-detach C14 parks the lease =="
+RESTOREFAIL_WT="$WTROOT/reuse-restorefail"
+git -C "$REPO" branch reuse/restorefail "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$RESTOREFAIL_WT" reuse/restorefail
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/restorefail reuse-test' _ "$SCRIPT" "$RESTOREFAIL_WT" "$REPO" >/dev/null 2>&1
+RESTOREFAIL_MARK="$TMPROOT/restorefail-verdict"
+fresh="$(bash -c '
+    source "$1"
+    RESTORE_MARK="$3"
+    RESTORE_TARGET="$2"
+    lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$RESTORE_TARGET" ]] && echo dead || echo alive; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() {
+        [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }
+        if [[ -e "$RESTORE_MARK" ]]; then echo keep; else touch "$RESTORE_MARK"; echo remove; fi
+    }
+    lease_restore_reuse_claim() { return 1; }
+    wtn_main "$4" feat/restorefail --base origin/main --name restorefail
+' _ "$SCRIPT" "$RESTOREFAIL_WT" "$RESTOREFAIL_MARK" "$REPO" 2>"$TMPROOT/restorefail.err")"; rc=$?
+assert_eq "$rc" "0" "failed-restore fallback exit"
+assert_eq "$fresh" "$WTROOT/restorefail" "failed-restore creates fresh path"
+assert_eq "$(git -C "$RESTOREFAIL_WT" rev-parse --abbrev-ref HEAD)" "reuse/restorefail" "failed-restore candidate untouched"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$RESTOREFAIL_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse',{}).get('state','')); break
+ except OSError: pass
+PY
+)" "reuse_incomplete" "failed-restore lease parked incomplete"
+
 echo "== case 20: incomplete C14 fails closed to a fresh worktree =="
 git -C "$REPO" branch reuse/incomplete "$ORIGIN_SHA"
 git -C "$REPO" worktree add -q "$WTROOT/reuse-incomplete" reuse/incomplete

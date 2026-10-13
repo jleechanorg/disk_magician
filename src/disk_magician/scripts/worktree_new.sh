@@ -266,6 +266,24 @@ wtn_branch_is_checked_out() {
     return 1
 }
 
+# wtn_reuse_rollback <lease_file> <candidate> <old> — restore the claimed
+# candidate checkout to <old>, but only while the lease's exact incarnation is
+# still proven. A failed identity check parks reuse_incomplete and leaves the
+# path alone: a replacement checkout may now own it, and switching that path
+# would mutate code this call never created. rc 0 when switched.
+wtn_reuse_rollback() {
+    local file="$1" candidate="$2" old="$3"
+    if ! lease_matches_incarnation "$file"; then
+        lease_mark_reuse_incomplete "$file"
+        return 1
+    fi
+    if ! git -C "$candidate" switch --no-overwrite-ignore "$old" >&2; then
+        lease_mark_reuse_incomplete "$file"
+        return 1
+    fi
+    return 0
+}
+
 
 wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
@@ -322,7 +340,7 @@ PY
         fi
         # Claim first, then repeat the final content/removal verdict.
         verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
-        if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file"; continue; fi
+        if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"; continue; fi
         if ! git -C "$candidate" switch --detach "$tip" >&2; then
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
@@ -332,7 +350,7 @@ PY
         # pre-switch observation.
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]]; then
-            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
@@ -343,7 +361,7 @@ PY
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]] ||
             [[ "$(artifact_removal_verdict "$candidate" 2>/dev/null)" != remove ]]; then
-            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
@@ -362,7 +380,7 @@ PY
             fi
         fi
         if ! git -C "$repo" update-ref -d "refs/heads/$old" "$tip"; then
-            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
@@ -395,7 +413,7 @@ PY
             continue
         fi
         if ! git -C "$repo" update-ref "refs/heads/$old" "$tip" 0000000000000000000000000000000000000000 ||
-            ! git -C "$candidate" switch --no-overwrite-ignore "$old" >&2; then
+            ! wtn_reuse_rollback "$file" "$candidate" "$old"; then
             lease_mark_reuse_incomplete "$file"
             continue
         fi
