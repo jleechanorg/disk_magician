@@ -129,6 +129,27 @@ assert_eq "$(c14_repos_ok "$TMPROOT/plain2")" kept:dirty \
 mkrepo "$TMPROOT/wtsrc" && git -C "$TMPROOT/wtsrc" worktree add -q "$TMPROOT/wtroot/linked" -b lw
 found="$(c14_discover_repos "$TMPROOT/wtroot" | tr '\0' '\n')"
 assert_eq "$found" "$TMPROOT/wtroot/linked" ".git file (linked worktree) found"
+# A submodule's metadata (super/.git/modules/<sm>) is owned by the
+# superproject, but the submodule worktree is its own repository. The
+# inventory path must use the same .git/ exclusion as legacy discovery or
+# every submodule-bearing clone is kept.
+mkrepo "$TMPROOT/subsrc"
+mkrepo "$TMPROOT/super"
+git -C "$TMPROOT/super" -c protocol.file.allow=always submodule add -q "$TMPROOT/subsrc" sm 2>/dev/null
+git -C "$TMPROOT/super" commit -qm add-sm
+[[ -d "$TMPROOT/super/.git/modules/sm" ]] && ok "submodule metadata present" || bad "submodule metadata missing"
+sub_inv="$TMPROOT/submodule-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/super" "$sub_inv")" ok "inventory of a submodule superproject"
+sub_repos="$(C14_ROOT="$TMPROOT/super" python3 "$_AV_DIR/../c14_probe.py" repos "$sub_inv" | tr '\0' '\n' | sort)"
+legacy_repos="$(c14_discover_repos "$TMPROOT/super" | tr '\0' '\n' | sort)"
+[[ $'\n'"$sub_repos"$'\n' == *$'\n'"$TMPROOT/super"$'\n'* ]] && ok "superproject repo found" || bad "superproject not found: $sub_repos"
+[[ $'\n'"$sub_repos"$'\n' == *$'\n'"$TMPROOT/super/sm"$'\n'* ]] && ok "submodule worktree repo found" || bad "submodule worktree not found: $sub_repos"
+[[ $'\n'"$sub_repos"$'\n' != *$'\n'"$TMPROOT/super/.git/modules/sm"$'\n'* ]] && ok "submodule metadata under .git/ is not a repository" || bad "submodule metadata misclassified: $sub_repos"
+assert_eq "$sub_repos" "$legacy_repos" "inventory and legacy discovery agree on a submodule superproject"
+# The exclusion is metadata-scoped: a real nested independent repository in
+# candidate content is still discovered.
+mkrepo "$TMPROOT/super/vendor/inner"
+assert_eq "$(content "$TMPROOT/super/vendor/inner")" ok "clean nested repo under a submodule superproject"
 
 echo "== git must resolve the discovered repository =="
 # W tracks sub/t; sub/.git holds an unpushed commit but lost its HEAD, so a
@@ -463,6 +484,36 @@ E6 4320 $HOME/.llm-inspector/captures/capture-1.json
 E6 4320 $HOME/.llm-inspector/captures/x.summary.json
 E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
 EOF
+# An exact-worktree-root receipt binds only that candidate's own admin rows.
+# The admin channel is per-call: a caller-owned C14_INVENTORY_OUT is neither
+# appended to nor removed, a stale row planted there cannot bind, and a second
+# verdict in the same shell starts from an empty channel. The venv receipt
+# above already proves a child directory binds no parent admin rows at all.
+caller_channel="$TMPROOT/caller-admin.jsonl"
+printf '{"admin":"%s/other-admin","path":"HEAD","mode":"100644","dev":1,"ino":1,"size":0,"sha256":"sentinel"}\n' "$TMPROOT" >"$caller_channel"
+caller_before="$(shasum -a 256 "$caller_channel" | awk '{print $1}')"
+export C14_INVENTORY_OUT="$caller_channel"
+av_tmp="$TMPROOT/av-tmp" && mkdir -p "$av_tmp" && export TMPDIR="$av_tmp"
+age "$PT/wtp" 120
+wt_gd="$(git -C "$PT/wtp" rev-parse --absolute-git-dir)"
+wt_inv_one="$TMPROOT/wt-root-inventory-one.json"
+assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out "$wt_inv_one")" remove "exact worktree root is eligible and writes its receipt"
+wt_inv_two="$TMPROOT/wt-root-inventory-two.json"
+assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out "$wt_inv_two")" remove "a second consecutive worktree-root verdict is eligible"
+assert_eq "$(shasum -a 256 "$caller_channel" | awk '{print $1}')" "$caller_before" "caller-owned C14_INVENTORY_OUT is never written or removed"
+[[ -z "$(find "$av_tmp" -mindepth 1 -print -quit 2>/dev/null)" ]] && ok "each verdict removes its owned admin channel and temp dir" || bad "verdict temp files leaked: $(find "$av_tmp" -print)"
+python3 - "$wt_gd" "$TMPROOT/other-admin" "$wt_inv_one" "$wt_inv_two" <<'PY' && ok "worktree-root receipts bind only the candidate's own admin rows" || bad "worktree-root receipt admin binding"
+import json, sys
+gd, stale, *paths = sys.argv[1:]
+for p in paths:
+    rows = json.load(open(p, encoding="utf-8"))
+    admins = [r for r in rows if r.get("type") == "admin"]
+    assert admins, p
+    assert all(r.get("admin") == gd for r in admins), (p, {r.get("admin") for r in admins})
+    assert all(r.get("admin") != stale for r in rows), p
+PY
+unset C14_INVENTORY_OUT
+unset TMPDIR
 # Never-touch tmp roots (cleanup_tmp.sh PROTECTED_TMP_ROOTS) and legacy system basenames keep an idle released E2 clone.
 for d in worldarchitect.ai/br custom-root/br system-x com.apple.y; do
     git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d" && baseline "$PT/$d"
