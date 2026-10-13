@@ -10,6 +10,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 DRY_RUN=true
 MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
@@ -50,6 +52,18 @@ fi
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
+
+# c14_remove <path> [quarantine_remove args...] — the only removal route.
+# rc 0 only when quarantine_remove reports removed:*; a kept verdict prints
+# the reason and returns 1 so the caller does not count freed bytes.
+c14_remove() {
+  local _out
+  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
+  case "$_out" in
+    removed:*) return 0 ;;
+    *) log "C14 kept: $1 ($_out)"; return 1 ;;
+  esac
+}
 
 path_size_kb() {
   du -sk "$1" 2>/dev/null | awk '{print $1+0}' || echo 0
@@ -215,6 +229,8 @@ for i in "${!CANDIDATES[@]}"; do
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: INACTIVE candidate: $d  (${kb} KB, mtime=$(path_mtime "$d"))"
+    TOTAL_KB=$(( TOTAL_KB + kb ))
+    DIRS_REMOVED=$(( DIRS_REMOVED + 1 ))
   else
     # Recheck handles immediately before removal, then verify that neither the
     # candidate nor its trusted parent changed while lsof was running.
@@ -253,10 +269,17 @@ for i in "${!CANDIDATES[@]}"; do
       log "Candidate changed after safety_gate — preserving: $d"
       continue
     fi
-    rm -rf "$d"
+    if c14_remove "$d" --kind os_clone \
+        --frozen-identity "$frozen_identity" \
+        --frozen-parent-identity "$frozen_parent_identity" \
+        --frozen-root-identity "$X_IDENTITY"; then
+      log "Removed (quarantined): $d  (${kb} KB)"
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+      DIRS_REMOVED=$(( DIRS_REMOVED + 1 ))
+    else
+      log "Preserving (C14 kept): $d  (${kb} KB)"
+    fi
   fi
-  TOTAL_KB=$(( TOTAL_KB + kb ))
-  DIRS_REMOVED=$(( DIRS_REMOVED + 1 ))
 done
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_REMOVED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
