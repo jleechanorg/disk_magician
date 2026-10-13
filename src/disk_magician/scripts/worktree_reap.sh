@@ -4,7 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
-set -- "${ACT_ARGS[@]}"
+if (( ${#ACT_ARGS[@]} )); then set -- "${ACT_ARGS[@]}"; else set --; fi
 source "$SCRIPT_DIR/worktree_remove_hook.sh"
 source "$SCRIPT_DIR/lib/quarantine.sh"
 source "$SCRIPT_DIR/lib/worktree_merged_pr.sh"
@@ -122,7 +122,9 @@ expired() {
 }
 record() {
     log "$2 $3"
-    printf '%s\n' "$3" >> "$EVENTS"
+    # Only the successful mutation path emits the removal counter token.
+    if [[ "$3" == remove ]]; then printf '%s\n' nominated >> "$EVENTS"
+    else printf '%s\n' "$3" >> "$EVENTS"; fi
     lease_set_verdict "$1" "$3" "${4:-}"
 }
 # Atomic metadata updates used for promotion, adoption and death observation.
@@ -296,7 +298,9 @@ process_lease() {
         return 0
     fi
     case "$owner" in
-        none|alive|unknown) return 0 ;;
+        none) record "$file" "$real" kept:owner-null; return 0 ;;
+        alive) record "$file" "$real" kept:live-owner; return 0 ;;
+        unknown) record "$file" "$real" kept:owner-unknown; return 0 ;;
         unreadable) record "$file" "$real" kept:lease-unreadable; return 0 ;;
         # TTL only reports: an expired lease with a live owner is parked, never T1.
         alive-expired) record "$file" "$real" kept:expired_owner_alive; return 0 ;;
@@ -341,17 +345,36 @@ process_lease() {
         # original receipt (checkout inventory plus linked-worktree admin rows).
         # WRH consumes exactly that receipt via --quarantine; no second fresh
         # inventory may reauthorize the mutation.
-        local reap_c14_inv reap_c14_verdict
+        local reap_c14_inv reap_c14_verdict reap_removed=0
         reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { lease_reuse_lock_release "$file"; record "$file" "$real" kept:check-failed; return 0; }
-        reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv")"
-        if [[ "$reap_c14_verdict" == remove ]] && wrh_remove_now "$real" "$real" --quarantine "$reap_c14_inv"; then
+        if [[ -n "$ACT_DEADLINE_AT" ]]; then
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
+        else
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv")"
+        fi
+        if [[ "$reap_c14_verdict" == remove ]]; then
+            if [[ -n "$ACT_DEADLINE_AT" ]]; then
+                wrh_remove_now "$real" "$real" --quarantine "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT" && reap_removed=1
+            else
+                wrh_remove_now "$real" "$real" --quarantine "$reap_c14_inv" && reap_removed=1
+            fi
+        fi
+        if [[ "$reap_removed" == 1 ]]; then
             rm -f "$reap_c14_inv"
             lease_reuse_lock_release "$file"
             echo remove >> "$EVENTS"
             return 0
         fi
         rm -f "$reap_c14_inv"
-        [[ "$reap_c14_verdict" == remove ]] || verdict="$reap_c14_verdict"
+        # A deferred C14 verdict is a completed-for-this-pass unit: the cursor
+        # still advances, and the deferred token (not "remove") is recorded so
+        # removed_count never counts it. A failed quarantine is kept, never
+        # reported as a removal.
+        if [[ "$reap_c14_verdict" == remove ]]; then
+            verdict="kept:remove-failed"
+        else
+            verdict="$reap_c14_verdict"
+        fi
         verdict="${verdict:-kept:remove-failed}"
         record "$file" "$real" "$verdict" --lock-held
         lease_reuse_lock_release "$file"

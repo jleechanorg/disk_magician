@@ -221,6 +221,13 @@ def phase1(main, worktree, inventory_file, deadline=None):
                     "worktree_admin": True, "worktree_admin_path": admin,
                     "worktree_admin_inventory": admin_inventory, "worktree_main": main,
                     "worktree_reason": reason, "wrh_phase": "intent",
+                    # Durable expected lock identity: git writes exactly the
+                    # lock reason plus a trailing newline. Recording the digest
+                    # BEFORE `git worktree lock` lets reconcile disambiguate
+                    # our own lock from a foreign one after a crash in the
+                    # window between lock and journal, without adopting
+                    # arbitrary current lock contents.
+                    "locked_sha256": hashlib.sha256((reason + "\n").encode()).hexdigest(),
                     "original_gitdir_sha256": old_gitdir.get("sha256"),
                     "original_gitdir_hex": Path(os.path.join(admin, "gitdir")).read_bytes().hex(),
                 }
@@ -240,9 +247,12 @@ def phase1(main, worktree, inventory_file, deadline=None):
                         return "deferred:deadline"
                     run("git", "-C", main, "worktree", "lock", "--reason", reason, worktree, deadline=deadline)
                     record["wrh_phase"] = "locked"
-                    record["locked_sha256"] = digest(os.path.join(admin, "locked"))
                     if not check_admin(record, lock=True, repaired=False, deadline=deadline):
                         raise OSError("admin changed after lock")
+                    # Kill between the lock and its journal entry: the sidecar
+                    # already carries the expected lock digest, so reconcile
+                    # can clear exactly this owned lock and repair the gitdir.
+                    if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_lock_before_journal": os.kill(os.getpid(), 9)
                     write_record(pfd, qfd, side, record)
                     if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_lock": os.kill(os.getpid(), 9)
                     if not qr.same_entry(pfd, base, st): raise OSError("checkout changed")

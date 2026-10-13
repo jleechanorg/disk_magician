@@ -181,6 +181,20 @@ if [[ -n "$ACT_CURSOR" ]]; then
     GOVERN_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
     GOVERN_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job cleanup_worktrees --trigger govern)" || exit 3
 fi
+# A begun govern receipt must always reach a terminal state, including an early
+# checkpoint/cursor error (exit 3) that bypasses the normal finish block below.
+# Reuse the same job_receipt machinery rather than a second framework.
+GOVERN_RECEIPT_CLOSED=0
+govern_receipt_finish() {
+    [[ -n "$GOVERN_RUN_ID" && "$GOVERN_RECEIPT_CLOSED" == 0 ]] || return 0
+    GOVERN_RECEIPT_CLOSED=1
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
+      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
+      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
+}
+govern_temp_cleanup() { [[ -z "$RUN_TMP" ]] || rm -rf "$RUN_TMP"; }
+trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
 
 act_candidate_begin() {
     local path="$1" index items_before
@@ -736,8 +750,16 @@ process_antigravity_orphan() {
             fi
         fi
         local ag_c14_result
-        ag_c14_result="$(quarantine_remove "$abs_subdir")"
+        if [[ -n "$ACT_DEADLINE_AT" ]]; then
+            ag_c14_result="$(quarantine_remove "$abs_subdir" --deadline-at "$ACT_DEADLINE_AT")"
+        else
+            ag_c14_result="$(quarantine_remove "$abs_subdir")"
+        fi
         if [[ "$ag_c14_result" != removed:* || -e "$abs_subdir" || -L "$abs_subdir" ]]; then
+            # A deferred quarantine verdict is a completed visit for this pass
+            # (the candidate is left in place); count it and let the caller
+            # advance the cursor via act_candidate_done.
+            [[ "$ag_c14_result" == deferred:* ]] && ACT_DEFERRED_COUNT=$(( ACT_DEFERRED_COUNT + 1 ))
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "${ag_c14_result#kept:}"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
@@ -915,7 +937,7 @@ process_repo_local_worktrees() {
                 # Same C14 -> WRH route as worktree_reap: the REAL verdict
                 # writes the single original receipt, and WRH consumes exactly
                 # that receipt. No fresh inventory may reauthorize removal.
-                local cw_c14_inv cw_c14_verdict
+                local cw_c14_inv cw_c14_verdict cw_removed=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
                 if [[ -n "$cw_c14_inv" ]]; then
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
@@ -923,14 +945,29 @@ process_repo_local_worktrees() {
                     # candidate's own owner-null lease (never an
                     # ancestor/descendant), after all other C14 checks and the
                     # recency/policy/remote proof above.
-                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
-                    if [[ "$cw_c14_verdict" == remove ]] && wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]]; then
+                    if [[ -n "$ACT_DEADLINE_AT" ]]; then
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
+                    else
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
+                    fi
+                    if [[ "$cw_c14_verdict" == remove ]]; then
+                        if [[ -n "$ACT_DEADLINE_AT" ]]; then
+                            wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT" && [[ ! -e "$abs_path" ]] && cw_removed=1
+                        else
+                            wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
+                        fi
+                    fi
+                    if [[ "$cw_removed" == 1 ]]; then
                         rm -f "$cw_c14_inv"
                         ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
                         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                         REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
                     else
                         rm -f "$cw_c14_inv"
+                        # A deferred verdict is a completed visit for this pass
+                        # (the candidate stays put and the cursor advances via
+                        # act_candidate_done); a failed quarantine is kept.
+                        [[ "$cw_c14_verdict" == deferred:* ]] && ACT_DEFERRED_COUNT=$(( ACT_DEFERRED_COUNT + 1 ))
                         ledger_line "repo-local" "PRESERVE" "$abs_path" "${cw_c14_verdict#kept:}" "$extra"
                         REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                     fi
@@ -1041,6 +1078,7 @@ if [[ -n "$ACT_CURSOR" ]]; then
       --outcome "$GOVERN_OUTCOME" --reason "$GOVERN_REASON" \
       --candidates "{\"removed_count\":$GOVERN_REMOVED,\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
       --postcondition "{\"df_delta_bytes\":${GOVERN_DELTA:-null},\"freed_bytes\":$GOVERN_FREED,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_AFTER:-null}}" || exit 3
+    GOVERN_RECEIPT_CLOSED=1
 fi
 
 total_gb=$(awk "BEGIN {printf \"%.2f\", $TOTAL_RECLAIMED_KB / 1048576}")

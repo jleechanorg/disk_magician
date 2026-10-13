@@ -154,19 +154,46 @@ wrh_removal_verdict() {
     return 0
 }
 
-# wrh_remove_now <real_path> <display_path> --quarantine <inventory.json> —
-# remove an approved worktree. The inventory MUST be the receipt produced by a
-# same-target `artifact_removal_verdict` (C14) immediately before this call; the
-# quarantine remover re-validates identity/locks against that exact receipt.
-# There is no unguarded `git worktree remove` fallback. rc 0 only when the
-# worktree was removed.
+# wrh_quarantine_capable — explicit capability contract for callers that must
+# know whether this adapter implements `wrh_remove_now ... --quarantine <inv>`.
+# The canonical WRH adapter always provides quarantine mode; a consumer must
+# ask this function rather than infer support from the body text of
+# wrh_remove_now (a partial/older adapter can mention the flag without
+# implementing the contract). Returns 0 only when quarantine removal is
+# supported; any other adapter shape fails closed.
+wrh_quarantine_capable() { return 0; }
+
+# wrh_remove_now <real_path> <display_path> --quarantine <inventory.json>
+#   [--deadline-at <monotonic>] — remove an approved worktree. The inventory
+# MUST be the receipt produced by a same-target `artifact_removal_verdict`
+# (C14) immediately before this call; the quarantine remover re-validates
+# identity/locks against that exact receipt. `--deadline-at` is optional and
+# forwarded verbatim to the quarantine remover's own cooperative deadline; an
+# absent flag preserves today's unbounded behavior. There is no unguarded
+# `git worktree remove` fallback. rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch result
-    [[ ${3:-} == --quarantine && $# == 4 && -f ${4:-} ]] || return 1
+    local real="$1" display="$2" main branch result inv='' deadline=''
+    shift 2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quarantine)
+                [[ $# -ge 2 && -n ${2:-} && -f ${2:-} ]] || return 1
+                inv="$2"; shift 2 ;;
+            --deadline-at)
+                [[ $# -ge 2 && -n ${2:-} ]] || return 1
+                deadline="$2"; shift 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    [[ -n "$inv" ]] || return 1
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
-    result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$4")" || return 1
+    if [[ -n "$deadline" ]]; then
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv" --deadline-at "$deadline")" || return 1
+    else
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv")" || return 1
+    fi
     [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
     if [[ "$branch" == worktree-* ]]; then

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # artifact_verdict.sh — C14 artifact_removal_verdict (spec §7.2), sourced.
-# Discovery and per-repository content checks; the verdict keeps every path and
-# the self-test is `incomplete` until the rest of C14 lands (activation blocked).
+# Discovery plus per-repository content, ownership, lease, live-cwd and
+# fd-relative inventory checks. Prints `remove` only when every check passes;
+# any unknown prints `kept:<why>` or `deferred:<why>` (fail closed).
+# `--self-test` drives a real self-owned /tmp remove/kept/corrupt-evidence
+# triple through this verdict and prints `ok` only on a full pass, else
+# `incomplete`.
 
 _AV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/worktree_ignored.sh

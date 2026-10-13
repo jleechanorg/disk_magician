@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 - "$ROOT" "${REMOVAL_SITES_AUDIT:-0}" <<'PY'
-import os, re, sys, json, tempfile
+import os, re, sys, json, tempfile, ast, textwrap
 
 ROOT = os.path.abspath(sys.argv[1])
 AUDIT_FATAL = sys.argv[2] == "1"
@@ -299,8 +299,199 @@ def verifier_backed(body, line, kind):
     return any(m in body for m in markers)
 
 
-def is_exempt(file_name, func_name, d, body_before, body, file_src):
+# Tool-owned metadata/sidecar removal sites. Each key names an exact
+# (file, function, kind); a match must ALSO pass the matching provenance
+# predicate, so a similarly named user path or an unanchored removal in the
+# same function stays UNRESOLVED. These are records the tool itself creates
+# next to its own state (observer rotations, reuse-lock members, quarantine
+# temp bindings) — never artifact content.
+METADATA_SITES = {
+    ("disk_observer.py", "rotate_if_needed", "python-unlink"): "rotation-sibling",
+    ("worktree_lease.sh", "lease_claim_reuse", "python-unlink"): "reuse-lock-member",
+    ("worktree_lease.sh", "lease_reuse_lock_recover", "rm-file"): "reuse-lock-member",
+    ("worktree_lease.sh", "lease_reuse_lock_release", "rm-file"): "reuse-lock-member",
+    ("quarantine_rename.py", "reconcile_record", "python-unlink"): "named-temp-binding",
+}
+
+
+def _prov_rotation_sibling(d, body_before, body, line):
+    """disk_observer rotation: the removed leaf is built from this function's
+    own `path` parameter plus the bounded integer loop index, exactly
+    Path(f"{path}.{index}").  A traversal component, a different suffix, an
+    unbounded/non-loop index, or any reassignment of `path`/the leaf is rejected."""
     var = d["vars"][-1] if d["vars"] else ""
+    if var not in ("archive", "destination"):
+        return False
+    # exactly one assignment to the removed leaf: no later reassignment
+    if len(re.findall(r"(?m)^\s*" + re.escape(var) + r"\s*=", body)) != 1:
+        return False
+    anchored = re.search(
+        r"(?m)^\s*" + re.escape(var) +
+        r'\s*=\s*Path\(\s*f(["\'])\{path\}\.\{index\}\1\s*\)\s*$', body)
+    if not anchored:
+        return False
+    # the anchored assignment must be the one before this removal site
+    if anchored.group(0).strip() not in body_before:
+        return False
+    # `path` is the function parameter, never reassigned
+    if re.search(r"(?m)^\s*path\s*=", body):
+        return False
+    # `index` is bound only by a bounded range() loop before the assignment
+    if re.search(r"(?m)^\s*for\s+index\s+in\s+range\s*\([^)]*\)\s*:", body_before) is None:
+        return False
+    if re.search(r"(?m)^\s*index\s*=", body):
+        return False
+    return True
+
+
+def _prov_reuse_lock_member(d, body_before, body, line):
+    """worktree_lease reuse-lock: only the two fixed members (`pid`,
+    `acquired_at`) of a lock dir anchored to this function's own lease path +
+    the fixed literal `.reuse-lock`.  Any other member/suffix, an unbound
+    member, an arbitrary lock base, or a lock reassignment before the removal
+    stays UNRESOLVED."""
+    expr = (d["expr"] or "").strip().strip("\"'")
+    if d["kind"] == "python-unlink":
+        # lease_claim_reuse heredoc: os.unlink(os.path.join(lock, <member>))
+        if re.search(r"os\.path\.join\(\s*lock\b", line or "") is None:
+            return False
+        # anchored lock construction: exactly one assignment, exact suffix
+        if len(re.findall(r"(?m)^\s*lock\s*=", body)) != 1:
+            return False
+        if re.search(r'(?m)^\s*lock\s*=\s*path\s*\+\s*"\.reuse-lock"\s*$', body) is None:
+            return False
+        if re.search(r'(?m)^\s*lock\s*=\s*path\s*\+\s*"\.reuse-lock"\s*$', body_before) is None:
+            return False
+        # the member loop must be restricted to exactly the two fixed names
+        loop = re.search(
+            r'(?m)^\s*for\s+([A-Za-z_]\w*)\s+in\s*\(\s*"pid"\s*,\s*"acquired_at"\s*\)\s*:',
+            body_before)
+        if not loop:
+            return False
+        member = loop.group(1)
+        if re.search(r"os\.path\.join\(\s*lock\s*,\s*" + re.escape(member) + r"\s*\)",
+                     line or "") is None:
+            return False
+        # the loop member must not be reassigned later
+        if re.search(r"(?m)^\s*" + re.escape(member) + r"\s*=", body):
+            return False
+        return True
+    # shell form anchored to a local lock="$1.reuse-lock" assignment
+    if re.fullmatch(r"\$lock/(pid|acquired_at)", expr):
+        if len(re.findall(r'(?<![A-Za-z0-9_])lock\s*=', body)) != 1:
+            return False
+        if re.search(r'(?<![A-Za-z0-9_])lock\s*=\s*"\$1\.reuse-lock"', body) is None:
+            return False
+        if re.search(r'(?<![A-Za-z0-9_])lock\s*=\s*"\$1\.reuse-lock"', body_before) is None:
+            return False
+        refs = re.findall(r'\$\{?lock\}?/([A-Za-z0-9_.-]+)', body)
+        return bool(refs) and all(r in ("pid", "acquired_at") for r in refs)
+    # shell form anchored to the function's own positional lease
+    if re.fullmatch(r"\$1\.reuse-lock/(pid|acquired_at)", expr):
+        if re.search(r"(?m)^\s*set\s+--", body):
+            return False
+        refs = re.findall(r'\$1\.reuse-lock/([A-Za-z0-9_.-]+)', body)
+        return bool(refs) and all(r in ("pid", "acquired_at") for r in refs)
+    return False
+
+
+def _named_temp_call_ok(call):
+    """Exact NamedTemporaryFile shape: dir=index_dir() and prefix='.reconcile.'."""
+    f = call.func
+    name = f.attr if isinstance(f, ast.Attribute) else (
+        f.id if isinstance(f, ast.Name) else None)
+    if name != "NamedTemporaryFile":
+        return False
+    kw = {k.arg: k.value for k in call.keywords}
+    dnode, pnode = kw.get("dir"), kw.get("prefix")
+    if not (isinstance(dnode, ast.Call) and isinstance(dnode.func, ast.Name)
+            and dnode.func.id == "index_dir"):
+        return False
+    return isinstance(pnode, ast.Constant) and pnode.value == ".reconcile."
+
+
+def _prov_named_temp_binding(d, body_before, body, line):
+    """quarantine reconcile: `binding_path` is the `.name` of the SAME
+    NamedTemporaryFile handle the function creates under index_dir() with the
+    fixed `.reconcile.` prefix.  An unrelated tempfile, a different prefix/dir,
+    or any reassignment of binding_path or the handle between allocation and
+    removal must not exempt the site."""
+    var = d["vars"][-1] if d["vars"] else ""
+    if var != "binding_path":
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(body))
+    except SyntaxError:
+        return False
+    handles = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not (isinstance(call, ast.Call) and _named_temp_call_ok(call)):
+                continue
+            if not isinstance(item.optional_vars, ast.Name):
+                continue
+            handle = item.optional_vars.id
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                        and isinstance(sub.targets[0], ast.Name)
+                        and sub.targets[0].id == "binding_path"
+                        and isinstance(sub.value, ast.Attribute)
+                        and sub.value.attr == "name"
+                        and isinstance(sub.value.value, ast.Name)
+                        and sub.value.value.id == handle):
+                    handles.append(handle)
+    if len(handles) != 1:
+        return False
+    handle = handles[0]
+    # exactly one binding_path assignment in the whole function
+    bp_assigns = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "binding_path"
+                          for t in n.targets)]
+    if len(bp_assigns) != 1:
+        return False
+    # the same handle must never be rebound before the removal
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == handle:
+                    return False
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == handle:
+            return False
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == handle:
+            return False
+        if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name) and node.target.id == handle:
+            return False
+        if isinstance(node, ast.comprehension) and isinstance(node.target, ast.Name) and node.target.id == handle:
+            return False
+    # the anchored binding must precede this removal site
+    if re.search(r"binding_path\s*=\s*" + re.escape(handle) + r"\.name\b", body_before) is None:
+        return False
+    return True
+
+
+_METADATA_PROV = {
+    "rotation-sibling": _prov_rotation_sibling,
+    "reuse-lock-member": _prov_reuse_lock_member,
+    "named-temp-binding": _prov_named_temp_binding,
+}
+
+
+def metadata_exempt(file_name, func_name, d, body_before, body, line):
+    kind = METADATA_SITES.get((file_name, func_name, d["kind"]))
+    if not kind:
+        return False
+    return _METADATA_PROV[kind](d, body_before, body, line)
+
+
+def is_exempt(file_name, func_name, d, body_before, body, file_src, line):
+    var = d["vars"][-1] if d["vars"] else ""
+    # tool-owned metadata with a provenance-bound exact site (never blanket)
+    if metadata_exempt(file_name, func_name, d, body_before, body, line):
+        return True
     # exact site keyed by (file, func, kind)
     if (file_name, func_name, d["kind"]) in EXEMPT_SITES:
         # tool-owned artifacts still need to look tool-owned
@@ -345,7 +536,7 @@ def classify(file_name, func_name, line, body_before, body, src_ref=None):
         if verifier_backed(body, line, d["kind"]):
             results.append(_site("VERIFIED", "+".join(d["vars"]) or d["expr"], d, line))
             continue
-        if is_exempt(file_name, func_name, d, body_before, body, src_ref[0]):
+        if is_exempt(file_name, func_name, d, body_before, body, src_ref[0], line):
             results.append(_site("EXEMPT", "+".join(d["vars"]) or d["expr"], d, line))
             continue
         results.append(_site("UNRESOLVED", "+".join(d["vars"]) or d["expr"].strip()[:80], d, line))
@@ -367,7 +558,17 @@ def python_spans(src):
         if not m:
             continue
         indent, name = len(m.group(1)), m.group(2)
-        body, j = [], i + 1
+        # Skip a multi-line parameter list: track parenthesis depth until the
+        # header's closing ')' (and trailing ':') so the body starts after it.
+        # Without this, a def whose signature spans lines is truncated at the
+        # first unindented line, and its real body leaks to <toplevel>.
+        depth, k = 0, i
+        while k < len(lines):
+            depth += lines[k].count("(") - lines[k].count(")")
+            if depth <= 0:
+                break
+            k += 1
+        body, j = [], k + 1
         while j < len(lines):
             cur_line = lines[j]
             if cur_line.strip() == "":
@@ -630,6 +831,245 @@ for fname, src in [
         failures += 1
         print(f"FAIL fixture {fname}: {got}")
 
+# Tool-owned metadata exemptions: an exact (file, function, kind) site must ALSO
+# satisfy a provenance check. A similarly named user path or an unanchored
+# removal in the same function must stay UNRESOLVED (never a blanket pass).
+METADATA_CASES = [
+    ("observer rotation archive (proven)", "disk_observer.py",
+     "def rotate_if_needed(path, max_bytes, keep):\n"
+     "    for index in range(1, keep + 1):\n"
+     "        archive = Path(f\"{path}.{index}\")\n"
+     "        if expired:\n"
+     "            archive.unlink()\n",
+     [("rotate_if_needed", "archive", "EXEMPT")]),
+    ("observer rotation destination (proven)", "disk_observer.py",
+     "def rotate_if_needed(path, keep):\n"
+     "    for index in range(keep, 0, -1):\n"
+     "        destination = Path(f\"{path}.{index}\")\n"
+     "        destination.unlink()\n",
+     [("rotate_if_needed", "destination", "EXEMPT")]),
+    ("reuse claim lock member (proven)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lock\"\n"
+     "for name in (\"pid\", \"acquired_at\"):\n"
+     "    try: os.unlink(os.path.join(lock, name))\n"
+     "    except FileNotFoundError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "EXEMPT")]),
+    ("reuse lock recover members (proven)", "worktree_lease.sh",
+     "lease_reuse_lock_recover() {\n"
+     "  local lease=\"$1\" lock=\"$1.reuse-lock\" pid stamp\n"
+     "  pid=\"$(cat \"$lock/pid\")\"; stamp=\"$(cat \"$lock/acquired_at\")\"\n"
+     "  rm -f \"$lock/pid\" \"$lock/acquired_at\"\n"
+     "}\n",
+     [("lease_reuse_lock_recover", "lock", "EXEMPT")]),
+    ("reuse lock release members (proven)", "worktree_lease.sh",
+     "lease_reuse_lock_release() {\n"
+     "  rm -f \"$1.reuse-lock/pid\" \"$1.reuse-lock/acquired_at\" 2>/dev/null\n"
+     "}\n",
+     [("lease_reuse_lock_release", '"$1.reuse-lock/pid"', "EXEMPT"),
+      ("lease_reuse_lock_release", '"$1.reuse-lock/acquired_at"', "EXEMPT")]),
+    ("quarantine reconcile temp binding (proven)", "quarantine_rename.py",
+     "def reconcile_record(index_dir, qid, deadline):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        json.dump(binding, f); binding_path = f.name\n"
+     "    try:\n"
+     "        os.unlink(binding_path)\n"
+     "    except OSError:\n"
+     "        pass\n",
+     [("reconcile_record", "binding_path", "EXEMPT")]),
+    ("observer rotation user path (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path, keep):\n"
+     "    archive = path\n"
+     "    archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("observer rotation unanchored (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path):\n"
+     "    archive = Path(sys.argv[1])\n"
+     "    archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("observer arbitrary function (rejected)", "disk_observer.py",
+     "def purge_all(path):\n"
+     "    destination = Path(sys.argv[1])\n"
+     "    destination.unlink()\n",
+     [("purge_all", "destination", "UNRESOLVED")]),
+    ("reuse lock unanchored rm (rejected)", "worktree_lease.sh",
+     "lease_reuse_lock_release() {\n"
+     "  rm -f \"$1/pid\" \"$1/acquired_at\"\n"
+     "}\n",
+     [("lease_reuse_lock_release", '"$1/pid"', "UNRESOLVED"),
+      ("lease_reuse_lock_release", '"$1/acquired_at"', "UNRESOLVED")]),
+    ("quarantine reconcile user binding (rejected)", "quarantine_rename.py",
+     "def reconcile_record(binding_path):\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    # --- tightened negative fixtures: every widening gap the parent flagged ---
+    ("reuse claim unbound member (rejected)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lock\"\n"
+     "try: os.unlink(os.path.join(lock, name))\n"
+     "except OSError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "UNRESOLVED")]),
+    ("reuse claim wrong member loop (rejected)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lock\"\n"
+     "for name in (\"pid\", \"other\"):\n"
+     "    try: os.unlink(os.path.join(lock, name))\n"
+     "    except OSError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "UNRESOLVED")]),
+    ("reuse claim pid-private member loop (rejected)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lock\"\n"
+     "for name in (\"pid-private\", \"acquired_at\"):\n"
+     "    try: os.unlink(os.path.join(lock, name))\n"
+     "    except OSError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "UNRESOLVED")]),
+    ("reuse claim different lock suffix (rejected)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lockx\"\n"
+     "for name in (\"pid\", \"acquired_at\"):\n"
+     "    try: os.unlink(os.path.join(lock, name))\n"
+     "    except OSError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "UNRESOLVED")]),
+    ("reuse claim lock reassigned (rejected)", "worktree_lease.sh",
+     "lease_claim_reuse() {\n"
+     "python3 - \"$1\" <<'PY'\n"
+     "import os, sys\n"
+     "path = sys.argv[1]\n"
+     "lock = path + \".reuse-lock\"\n"
+     "lock = user_input\n"
+     "for name in (\"pid\", \"acquired_at\"):\n"
+     "    try: os.unlink(os.path.join(lock, name))\n"
+     "    except OSError: pass\n"
+     "PY\n"
+     "}\n",
+     [("lease_claim_reuse", "path+join+lock", "UNRESOLVED")]),
+    ("reuse lock arbitrary member (rejected)", "worktree_lease.sh",
+     "lease_reuse_lock_recover() {\n"
+     "  local lease=\"$1\" lock=\"$1.reuse-lock\"\n"
+     "  rm -f \"$lock/anything\"\n"
+     "}\n",
+     [("lease_reuse_lock_recover", "lock", "UNRESOLVED")]),
+    ("reuse lock pid-private suffix (rejected)", "worktree_lease.sh",
+     "lease_reuse_lock_release() {\n"
+     "  rm -f \"$1.reuse-lock/pid-private\"\n"
+     "}\n",
+     [("lease_reuse_lock_release", '"$1.reuse-lock/pid-private"', "UNRESOLVED")]),
+    ("reuse lock arbitrary base (rejected)", "worktree_lease.sh",
+     "lease_reuse_lock_recover() {\n"
+     "  local lease=\"$1\" lock=\"$1.reuse-lock\"\n"
+     "  rm -f \"$foo/pid\"\n"
+     "}\n",
+     [("lease_reuse_lock_recover", "foo", "UNRESOLVED")]),
+    ("reuse lock reassigned (rejected)", "worktree_lease.sh",
+     "lease_reuse_lock_recover() {\n"
+     "  local lease=\"$1\" lock=\"$1.reuse-lock\"\n"
+     "  lock=\"$2\"\n"
+     "  rm -f \"$lock/pid\"\n"
+     "}\n",
+     [("lease_reuse_lock_recover", "lock", "UNRESOLVED")]),
+    ("observer rotation traversal (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path, keep):\n"
+     "    for index in range(1, keep + 1):\n"
+     "        archive = Path(f\"{path}/../{index}\")\n"
+     "        archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("observer rotation different suffix (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path, keep):\n"
+     "    for index in range(1, keep + 1):\n"
+     "        archive = Path(f\"{path}.bak.{index}\")\n"
+     "        archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("observer rotation unbounded index (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path):\n"
+     "    archive = Path(f\"{path}.{index}\")\n"
+     "    archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("observer rotation reassigned (rejected)", "disk_observer.py",
+     "def rotate_if_needed(path, keep):\n"
+     "    for index in range(1, keep + 1):\n"
+     "        archive = Path(f\"{path}.{index}\")\n"
+     "        archive = path\n"
+     "        archive.unlink()\n",
+     [("rotate_if_needed", "archive", "UNRESOLVED")]),
+    ("quarantine unrelated tempfile (rejected)", "quarantine_rename.py",
+     "def reconcile_record(index_dir, binding_path):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        json.dump(binding, f)\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    ("quarantine wrong handle binding (rejected)", "quarantine_rename.py",
+     "def reconcile_record(index_dir):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        json.dump(binding, f)\n"
+     "    other = open(user_path)\n"
+     "    binding_path = other.name\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    ("quarantine wrong prefix (rejected)", "quarantine_rename.py",
+     "def reconcile_record(index_dir):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".other.\", delete=False) as f:\n"
+     "        binding_path = f.name\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    ("quarantine wrong dir (rejected)", "quarantine_rename.py",
+     "def reconcile_record(other_dir):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=other_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        binding_path = f.name\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    ("quarantine binding reassigned (rejected)", "quarantine_rename.py",
+     "def reconcile_record(index_dir, user_path):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        binding_path = f.name\n"
+     "    binding_path = user_path\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+    ("quarantine handle reassigned (rejected)", "quarantine_rename.py",
+     "def reconcile_record(index_dir, other):\n"
+     "    with tempfile.NamedTemporaryFile(\"w\", dir=index_dir(), prefix=\".reconcile.\", delete=False) as f:\n"
+     "        binding_path = f.name\n"
+     "    f = other\n"
+     "    os.unlink(binding_path)\n",
+     [("reconcile_record", "binding_path", "UNRESOLVED")]),
+]
+for label, fname, src, expected in METADATA_CASES:
+    got = lint(fname, src)
+    ok = all(any(g["func"] == f and g["target"] == t and g["verdict"] == v
+                 for g in got) for f, t, v in expected)
+    extra = [g for g in got if g["verdict"] in ("FORBIDDEN", "UNRESOLVED")
+             and not any(g["func"] == f and g["target"] == t and g["verdict"] == v
+                         for f, t, v in expected)]
+    if ok and not extra:
+        print(f"PASS metadata {label}")
+    else:
+        failures += 1
+        print(f"FAIL metadata {label}: got {got} expected {expected}")
+
 # Closure discovery fixtures: a planted helper reachable via source AND via exec
 # must be pulled into the closure and its unguarded removal must be caught.
 def _write(path, text):
@@ -716,15 +1156,35 @@ print("=== T11-14 positive wiring (already landed) ===")
 def _body(src, name):
     m = re.search(r"(?ms)^" + re.escape(name) + r"\(\)\s*[{(]\n(.*?)^\}", src)
     return m.group(1) if m else ""
+
+def _calls_with(body, callee, target):
+    """True when `body` directly invokes `callee` with `target` as an
+    argument (same-target link, not a bare symbol mention)."""
+    return bool(re.search(r"\b" + re.escape(callee) + r"\s+" + re.escape(target)
+                          + r"(?:\s|$|[|;&)])", body))
+
 tmp_src = open(os.path.join(ROOT, "scripts/cleanup_tmp.sh"), encoding="utf-8").read()
 budget_src = open(os.path.join(ROOT, "scripts/lib/scratch_budget.sh"), encoding="utf-8").read()
+# purge_aged_archives no longer calls C14 directly: it hands each candidate
+# `$d` to the shared per-unit processor purge_archive_entry, which is the only
+# function that names that SAME `$d` to scratch_budget_quarantine_remove. Verify
+# the real same-target call graph, not a file-level string coincidence.
+purge_aged_body = _body(tmp_src, "purge_aged_archives")
+purge_entry_body = _body(tmp_src, "purge_archive_entry")
+purge_chain_ok = (
+    _calls_with(purge_aged_body, "purge_archive_entry", '"$d"')
+    and 'scratch_budget_quarantine_remove "$d"' in purge_entry_body)
+budget_gate_body = _body(budget_src, "scratch_budget_quarantine_remove")
 t11_pairs = [
     (_body(tmp_src, "remove_path"), 'scratch_budget_quarantine_remove "$path"'),
-    (_body(tmp_src, "purge_aged_archives"), 'scratch_budget_quarantine_remove "$d"'),
     (_body(budget_src, "scratch_budget_evict_root"), 'scratch_budget_quarantine_remove "$item_i"'),
-    (_body(budget_src, "scratch_budget_quarantine_remove"), "--kind ephemeral"),
+    (budget_gate_body, "--kind ephemeral"),
 ]
 t11_fail = [needle for body, needle in t11_pairs if needle not in body]
+if not purge_chain_ok:
+    t11_fail.append("purge_aged_archives -> purge_archive_entry $d -> scratch_budget_quarantine_remove $d")
+if 'quarantine_remove "$1"' not in budget_gate_body:
+    t11_fail.append('scratch_budget_quarantine_remove -> quarantine_remove "$1"')
 if t11_fail:
     failures += len(t11_fail)
     print(f"FAIL T11-14 positive wiring missing: {t11_fail}")
@@ -748,7 +1208,11 @@ if AUDIT_FATAL and (unresolved or forbidden or missing or dep_failures):
 if fatal:
     print("RESULT: FAIL")
     sys.exit(1)
-print("RESULT: PASS (self-test green; production audit report-only)")
+if AUDIT_FATAL:
+    print("RESULT: PASS (self-test green; strict audit: zero unresolved/forbidden/"
+          "dependency failures)")
+else:
+    print("RESULT: PASS (self-test green; production audit report-only)")
 PY
 
 PASS=0

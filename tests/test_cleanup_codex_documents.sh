@@ -89,6 +89,7 @@ quarantine_remove() {
   local p="${1:-}"; shift || true
   if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then printf 'removed:stub\n'; else printf 'kept:rm-failed\n'; fi
 }
+wrh_quarantine_capable() { return 0; }
 wrh_remove_now() {
   local raw="$1" display="$2"
   [[ "${3:-}" == --quarantine && $# == 4 && -f "${4:-}" ]] || { printf 'kept:wrh-contract-violation\n'; return 1; }
@@ -652,6 +653,7 @@ artifact_removal_verdict() {
   printf 'remove\n'
 }
 quarantine_remove() { local p="${1:-}"; rm -rf -- "$p" 2>/dev/null && printf 'removed:stub\n' || printf 'kept:rm-failed\n'; }
+wrh_quarantine_capable() { return 0; }
 wrh_remove_now() {
   local raw="$1" display="$2"
   [[ "${3:-}" == --quarantine && $# == 4 && -f "${4:-}" ]] || return 1

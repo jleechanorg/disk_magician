@@ -136,8 +136,9 @@ if [[ ! -f "$SCRIPT" ]]; then bash "$SCRIPT"; echo 'RED: scripts/worktree_reap.s
 cp -R "$ROOT/scripts" "$TMP/root-scripts"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
 echo 'removal_activation_ok() { [[ -f "$DISK_MAGICIAN_STATE_DIR/test_gate_open" ]] || { echo activation_blocked:test; return 1; }; }' > "$TMP/root-scripts/lib/removal_activation.sh"
 new; rm "$LF"; run; check 'unleased adopts null owner' test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True
-new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive unchanged' sentinel; check 'alive present' test -d "$WT"; park
-new; run; verdict 'dead nominate' remove; check 'nominate retains' test -d "$WT"; park
+new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive recorded' kept:live-owner; check 'alive present' test -d "$WT"; park
+new; edit 'd["owner"]=None'; age 90000; run; verdict 'owner-null 25h parked' kept:owner-null; check 'parked retained' test -d "$WT"; park
+new; run; verdict 'dead nominate' remove; check 'nominate retains' test -d "$WT"; check 'nomination is not removal' test "$(receipt 'd["candidates"]["removed_count"]')" = 0; park
 new; run --mode remove; verdict 'unapproved records verdict' remove; check 'unapproved message' grep -q 'remove mode not approved' "$TMP/run.log"; check 'unapproved retains' test -d "$WT"; park
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"; touch "$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
 new; run --mode remove; check 'legacy marker, gate closed: nominate only' grep -q 'remove mode not approved' "$TMP/run.log"; check 'legacy marker alone retains' test -d "$WT"; park
@@ -232,7 +233,7 @@ run
 check 'guard promote keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
 check 'guard promote clears pending' test "$(field 'd["pending"]')" = False
 check 'guard promote records checkout dev/ino' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
-verdict 'guard promote keeps live-owner verdict' sentinel
+verdict 'guard promote records live-owner verdict' kept:live-owner
 run
 check 'guard second pass keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
 check 'guard second pass keeps complete identity' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
@@ -245,7 +246,7 @@ edit 'd.pop("checkout_dev",None); d.pop("checkout_ino",None); d["owner"]["pid"]=
 run
 check 'legacy lease keeps owner' test "$(field 'd["owner"]["pid"]')" = 400
 check 'legacy lease not adopted' test "$(field 'd["creator"]=="test"')" = True
-verdict 'legacy lease live-owner verdict' sentinel
+verdict 'legacy lease live-owner verdict' kept:live-owner
 park
 # The strict half: a lease that records identity must not be blessed when it
 # is stale, even though admin/birth still match.
@@ -294,9 +295,9 @@ sleep 300 & stopped=$!
 for ((i=0;i<100;i++)); do [[ "$(/bin/ps -p "$stopped" -o comm=)" == *sleep ]] && break; sleep .05; done; kill -STOP "$stopped"
 LC_ALL=C TZ=UTC /bin/ps -p "$stopped" -o lstart= > "$FAKE_PS_DIR/lstart/$stopped"; printf 'sleep 300\n' > "$FAKE_PS_DIR/args/$stopped"
 stopped_ep="$(_lease_lstart_to_epoch "$(cat "$FAKE_PS_DIR/lstart/$stopped")")"
-new; edit "d['owner']={'pid':$stopped,'start_epoch':$stopped_ep,'comm':'sleep'}; d['last_verdict']='sentinel'"; age 7200; run --mode remove; verdict 'SIGSTOPped owner kept' sentinel; check 'SIGSTOPped owner present' test -d "$WT"; kill -CONT "$stopped"; kill "$stopped"; wait "$stopped" 2>/dev/null; park
+new; edit "d['owner']={'pid':$stopped,'start_epoch':$stopped_ep,'comm':'sleep'}; d['last_verdict']='sentinel'"; age 7200; run --mode remove; verdict 'SIGSTOPped owner kept' kept:live-owner; check 'SIGSTOPped owner present' test -d "$WT"; kill -CONT "$stopped"; kill "$stopped"; wait "$stopped" 2>/dev/null; park
 new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; run; verdict 'pid reused (other start epoch) reads dead' remove; park
-new; edit 'd["owner"]["pid"]=402; d["last_verdict"]="sentinel"'; run --mode remove; verdict 'ps error is unknown, kept' sentinel; check 'ps error present' test -d "$WT"; park
+new; edit 'd["owner"]["pid"]=402; d["last_verdict"]="sentinel"'; run --mode remove; verdict 'ps error is unknown, kept' kept:owner-unknown; check 'ps error present' test -d "$WT"; park
 new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; (cd "$WT" && sleep 30) & child=$!; printf 'p%s\nfcwd\nn%s\n' "$child" "$WT" > "$FAKE_LSOF_FIXTURE"; run --mode remove; verdict 'dead owner, live child cwd kept' kept:live-cwd; check 'child cwd present' test -d "$WT"; kill "$child"; wait "$child" 2>/dev/null; printf 'p999999\nfcwd\nn/\n' > "$FAKE_LSOF_FIXTURE"; park
 new; git -C "$TMP/repo" worktree lock "$WT"; run; verdict 'locked' kept:locked; park
 new; export FAIL_FETCH=1; run; verdict 'fetch failure' kept:remote-unverified; unset FAIL_FETCH; park
@@ -332,7 +333,8 @@ rm -f "$HOOK_SEEN"
 export DISK_MAGICIAN_REAP_CANDIDATE_HOOK="$TMP/pause"
 run --deadline-seconds 1
 check 'deadline partial' test "$(receipt 'd["outcome"]')" = partial
-check 'deadline processed a candidate' test "$(receipt 'd["candidates"].get("remove",0)')" = 1
+check 'deadline nominated a candidate' test "$(receipt 'd["candidates"].get("nominated",0)')" = 1
+check 'deadline nomination removed nothing' test "$(receipt 'd["candidates"]["removed_count"]')" = 0
 check 'deadline releases lock' test ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_reap.lock"
 unset DISK_MAGICIAN_REAP_CANDIDATE_HOOK REAP_CLOCK
 run; check 'receipt success' test "$(receipt 'd["outcome"]')" = success; check 'receipt counters' test "$(receipt 'all(k in d["candidates"] for k in ("fetch_ok","fetch_failed","gh_ok","gh_failed"))')" = True; check 'receipt freed bytes' test "$(receipt 'isinstance(d["postcondition"]["freed_bytes"],int)')" = True

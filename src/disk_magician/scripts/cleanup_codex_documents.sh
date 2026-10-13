@@ -453,13 +453,15 @@ PY
 quarantine_remove_available() { declare -F quarantine_remove >/dev/null 2>&1; }
 # wrh_quarantine_available: the shared WRH adapter advertises quarantine mode
 # (`wrh_remove_now <real> <display> --quarantine <inventory>`), the canonical
-# C14-before-removal path after a same-target receipt. A wrh_remove_now without
-# it fails closed here rather than falling back to unguarded removal.
-# TODO(final WRH, parent-owned): replace this transitional body probe with the
-# adapter's direct capability API; do not treat the probe as the final contract.
+# C14-before-removal path after a same-target receipt. The adapter exports the
+# explicit `wrh_quarantine_capable` capability; consume it fail-closed. A
+# missing capability function (older/partial adapter) keeps the task rather
+# than inferring support from function text or falling back to unguarded
+# removal.
 wrh_quarantine_available() {
   declare -F wrh_remove_now >/dev/null 2>&1 || return 1
-  declare -f wrh_remove_now | grep -q -- '--quarantine'
+  declare -F wrh_quarantine_capable >/dev/null 2>&1 || return 1
+  wrh_quarantine_capable
 }
 # quarantine_gate <task>: route one artifact through C14/quarantine and print
 # its verdict token. The caller interprets removed:/quarantined:/kept:/deferred:.

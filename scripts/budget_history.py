@@ -130,37 +130,124 @@ def collect_colima_status(deadline_at=None):
         return "unknown"
 
 
+PARKED_SOURCE = "worktree_reap_leases"
+PARKED_FRESH_S = 86400
+# A worktree whose owner is still alive is actively used: the adapter records
+# `kept:live-owner` on the lease for provenance, but the owner holds it, so it
+# is not parked bytes. Every other `kept:*` reason is parked (spec 7.3).
+_NON_PARKED_KEPT = frozenset({"kept:live-owner"})
+
+
+def _parked_reason(row):
+    """The canonical parked reason a lease records, or None when not parked."""
+    verdict = row.get("last_verdict")
+    if not isinstance(verdict, str) or not verdict.startswith("kept:"):
+        return None
+    return None if verdict in _NON_PARKED_KEPT else verdict
+
+
+def parked_records(state, now):
+    """Derive the parked set from the canonical lease outcome writer.
+
+    The reaper's `lease_set_verdict` is the single authority for whether a
+    worktree was kept and why; this never re-derives ownership. A lease whose
+    recorded path is gone is dropped (the next reaper pass prunes it). Returns
+    (records, incomplete): `records` maps realpath -> reason, and `incomplete`
+    marks any unreadable/stale lease so callers never report a partial set as
+    a complete zero. Deduplicated by realpath so hardlinked/symlinked leases
+    are measured once.
+    """
+    records, incomplete = {}, False
+    try:
+        paths = sorted((Path(state) / "worktree_leases").glob("*.json"))
+    except OSError:
+        return records, True
+    for path in paths:
+        row = controls.read_json(path)
+        if not isinstance(row, dict):
+            incomplete = True
+            continue
+        reason = _parked_reason(row)
+        if reason is None:
+            continue
+        target = row.get("path")
+        checked = row.get("last_checked_at")
+        if not isinstance(target, str) or not target or not isinstance(checked, str):
+            incomplete = True
+            continue
+        try:
+            checked_ts = datetime.datetime.fromisoformat(checked.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            incomplete = True
+            continue
+        if not 0 <= now - checked_ts <= PARKED_FRESH_S:
+            incomplete = True
+            continue
+        if not os.path.lexists(target):
+            continue
+        records[os.path.realpath(target)] = reason
+    return records, incomplete
+
+
+def _write_parked_jsonl(state, entries):
+    """Materialize the parked listing from the same records we measured.
+
+    There is exactly one producer of parked.jsonl (this function), so the
+    listing can never diverge from the lease authority. Written atomically;
+    an unwritable state directory leaves the previous listing intact.
+    """
+    path = Path(state) / "parked.jsonl"
+    body = "".join(json.dumps(e, allow_nan=False) + "\n" for e in entries)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+        tmp.write_text(body)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def measure_parked(state, deadline_at=None, now=None):
-    """Measure the reaper's fresh parked verdicts, without reclassifying owners."""
+    """Measure parked worktrees from the canonical lease/reaper outcome writer.
+
+    Parked is every `kept:*` lease (owner-null, expired-live-owner,
+    kept:unproven-content, released-but-still-kept, ...), not only
+    `kept:expired_owner_alive`. Paths actually gone are excluded, records are
+    deduplicated by realpath, and one bounded `du` measures them all. Missing,
+    stale or malformed state stays `unknown`/`incomplete`, never a zero.
+    """
     import job_receipt
     now = time.time() if now is None else now
-    result = dict(status="unknown", measured_at=now, bytes=None, source="worktree_reap_leases")
+    result = dict(status="unknown", measured_at=now, bytes=None, source=PARKED_SOURCE)
     receipt = job_receipt.get_last_receipt("worktree_reap", str(state))
     try:
         ended = datetime.datetime.fromisoformat(receipt["times"]["ended_at"].replace("Z", "+00:00")).timestamp()
-        if receipt.get("outcome") != "success" or not 0 <= now - ended <= 86400:
+        if receipt.get("outcome") != "success" or not 0 <= now - ended <= PARKED_FRESH_S:
             return result
-        paths = set()
-        for path in (Path(state) / "worktree_leases").glob("*.json"):
-            row = controls.read_json(path)
-            if not isinstance(row, dict):
-                return result
-            if row.get("last_verdict") != "kept:expired_owner_alive" or row.get("released_at"):
-                continue
-            checked = datetime.datetime.fromisoformat(row["last_checked_at"].replace("Z", "+00:00")).timestamp()
-            target = row.get("path")
-            if not 0 <= now - checked <= 86400 or not isinstance(target, str) or not os.path.isdir(target):
-                return result
-            paths.add(os.path.realpath(target))
-        if not paths:
-            return dict(result, status="ok", bytes=0)
-        measured = _run_bounded([os.environ.get("DISK_MAGICIAN_DU_BIN", "du"), "-sk", *sorted(paths)],
+        records, incomplete = parked_records(state, now)
+        if incomplete and not records:
+            return dict(result, status="incomplete")
+        real = sorted(records)
+        if not real:
+            _write_parked_jsonl(state, [])
+            return dict(result, status="ok", bytes=0, paths=0)
+        measured = _run_bounded([os.environ.get("DISK_MAGICIAN_DU_BIN", "du"), "-sk", *real],
                                  cap=20, deadline=deadline_at)
         if measured is None or measured[0] != 0:
             return result
-        values = [int(line.split()[0]) * 1024 for line in measured[1].splitlines()]
-        if len(values) != len(paths) or any(value < 0 for value in values):
-            return result
-        return dict(result, status="ok", bytes=sum(values), paths=len(paths))
+        values = []
+        for line in measured[1].splitlines():
+            parts = line.split()
+            if not parts or not parts[0].isdigit():
+                return dict(result, status="incomplete", paths=len(real))
+            values.append(int(parts[0]) * 1024)
+        if len(values) != len(real) or any(value < 0 for value in values):
+            return dict(result, status="incomplete", paths=len(real))
+        entries = [{"path": p, "reason": records[p], "bytes": values[i],
+                    "measured_at": now, "source": PARKED_SOURCE}
+                   for i, p in enumerate(real)]
+        _write_parked_jsonl(state, entries)
+        status = "incomplete" if incomplete else "ok"
+        return dict(result, status=status, bytes=sum(values), paths=len(real))
     except (AttributeError, KeyError, TypeError, ValueError, OSError):
         return result

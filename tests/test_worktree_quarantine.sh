@@ -4,9 +4,12 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="$REPO_ROOT/scripts/worktree_remove_hook.sh"
 HELPER="$REPO_ROOT/scripts/worktree_quarantine.py"
-TMPROOT="$(mktemp -d /tmp/dm-wrh-test.XXXXXX)"
-CANON_TMPROOT="$(cd "$TMPROOT" && pwd -P)"
+TMPROOT="$(mktemp -d /tmp/dm-wrh-test.XXXXXX)" || exit 1
+[[ "$TMPROOT" == /tmp/dm-wrh-test.* && -d "$TMPROOT" && ! -L "$TMPROOT" ]] || exit 1
+CANON_TMPROOT="$(cd "$TMPROOT" && pwd -P)" || exit 1
 trap '[[ -n "$TMPROOT" && "$TMPROOT" == /tmp/dm-wrh-test.* ]] && rm -rf -- "$TMPROOT"' EXIT
+export HOME="$TMPROOT/home" GIT_CONFIG_GLOBAL=/dev/null
+mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=jleechan2015@users.noreply.github.com
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=jleechan2015@users.noreply.github.com
 export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
@@ -75,7 +78,7 @@ assert_eq "${restore%%:*}" restored 'restore succeeds after conflict is removed'
 git -C "$TMPROOT/recreated-path" status --porcelain >/dev/null && ok 'restored checkout is usable after conflict' || bad 'restored checkout is unusable'
 
 echo '== crash points reconcile to the original checkout =='
-for point in after_lock after_rename after_repair; do
+for point in after_lock_before_journal after_lock after_rename after_repair; do
   name="crash-$point"
   git -C "$TMPROOT/main" worktree add -q -b "$name" "$TMPROOT/$name"
   ADMIN_BEFORE="$(git -C "$TMPROOT/$name" rev-parse --absolute-git-dir)"
@@ -99,6 +102,21 @@ for point in after_lock after_rename after_repair; do
   listing="$(git -C "$TMPROOT/main" worktree list --porcelain)"
   if grep -qxF "worktree $CANON_TMPROOT/$name" <<<"$listing" && ! grep -qF "$CANON_TMPROOT/.dm-quarantine/" <<<"$listing"; then ok "$point reconcile left a clean worktree registry"; else bad "$point reconcile left a stale worktree registry"; fi
 done
+
+echo '== a foreign lock substituted at the crash boundary stays untouched =='
+name="crash-foreign-lock"
+git -C "$TMPROOT/main" worktree add -q -b "$name" "$TMPROOT/$name"
+ADMIN_FC="$(git -C "$TMPROOT/$name" rev-parse --absolute-git-dir)"
+GITDIR_FC="$(cat "$ADMIN_FC/gitdir")"
+wrh_receipt "$TMPROOT/$name" "$TMPROOT/$name.inventory.json"
+DISK_MAGICIAN_TEST_WRH_KILL_AT=after_lock_before_journal python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/$name" "$TMPROOT/$name.inventory.json" >/dev/null 2>&1
+assert_eq "$?" 137 'foreign-lock boundary crash injected'
+printf 'foreign\n' > "$ADMIN_FC/locked"
+python3 "$HELPER" reconcile >/dev/null
+[[ "$(cat "$ADMIN_FC/locked")" == foreign ]] && ok 'foreign lock left byte-identical' || bad 'foreign lock was changed'
+[[ -d "$TMPROOT/$name" ]] && ok 'foreign-lock checkout retained' || bad 'foreign-lock checkout moved'
+[[ "$(cat "$ADMIN_FC/gitdir")" == "$GITDIR_FC" ]] && ok 'foreign-lock reconcile preserved gitdir bytes' || bad 'foreign-lock reconcile changed gitdir'
+git -C "$TMPROOT/$name" status --porcelain >/dev/null 2>&1 && ok 'foreign-lock worktree remains usable' || bad 'foreign-lock worktree unusable'
 
 echo '== phase 2 crash point 4 preserves siblings and reconciles =='
 SIBLING_ADMIN_HASH="$(find "$ADMIN_B" -type f -exec shasum -a 256 {} \; | sort | shasum -a 256 | awk '{print $1}')"
@@ -198,6 +216,23 @@ if git -C "$TMPROOT/main" worktree list --porcelain | grep -qxF "worktree $TMPRO
 [[ "$(find "$SIBLING_ADMIN" -type f -exec shasum -a 256 {} \; | sort | shasum -a 256 | awk '{print $1}')" == "$SIBLING_ADMIN_HASH" ]] && ok 'sibling admin files stayed byte-identical' || bad 'sibling admin files changed'
 [[ "$(shasum -a 256 "$TMPROOT/main/.git/refs/rewritten/sibling-private" | awk '{print $1}')" == "$SIBLING_REWRITTEN" ]] && ok 'sibling rewritten ref stayed byte-identical' || bad 'sibling rewritten ref changed'
 [[ "$(shasum -a 256 "$ADMIN_B/logs/HEAD" | awk '{print $1}')" == "$SIBLING_HEAD_LOG" ]] && ok 'sibling HEAD reflog stayed byte-identical' || bad 'sibling HEAD reflog changed'
+
+echo '== wrh_remove_now forwards a cooperative deadline and defers safely =='
+git -C "$TMPROOT/main" worktree add -q -b wrh-forward "$TMPROOT/wrh-forward"
+wrh_receipt "$TMPROOT/wrh-forward" "$TMPROOT/wrh-forward.inventory.json"
+PAST="$(python3 -c 'import time; print(time.monotonic()-1)')"
+if wrh_remove_now "$TMPROOT/wrh-forward" "$TMPROOT/wrh-forward" --quarantine "$TMPROOT/wrh-forward.inventory.json" --deadline-at "$PAST"; then
+  bad 'wrh_remove_now reported success despite a passed deadline'
+else
+  ok 'wrh_remove_now fails closed on a passed forwarded deadline'
+fi
+[[ -d "$TMPROOT/wrh-forward" ]] && ok 'deadline-forwarded wrh_remove_now left the worktree in place' || bad 'deadline-forwarded wrh_remove_now removed the worktree'
+git -C "$TMPROOT/wrh-forward" status --porcelain >/dev/null && ok 'deadline-forwarded worktree still usable' || bad 'deadline-forwarded worktree unusable'
+
+# git status may refresh the index, so authorize the second operation afresh.
+wrh_receipt "$TMPROOT/wrh-forward" "$TMPROOT/wrh-forward.inventory.json"
+wrh_remove_now "$TMPROOT/wrh-forward" "$TMPROOT/wrh-forward" --quarantine "$TMPROOT/wrh-forward.inventory.json" && ok 'no-deadline wrh_remove_now still removes' || bad 'no-deadline wrh_remove_now failed'
+[[ ! -e "$TMPROOT/wrh-forward" ]] && ok 'no-deadline removal completed' || bad 'no-deadline removal left the worktree'
 
 echo '== interrupted phase 2 resumes only inside quarantine =='
 for point in mid_delete; do
