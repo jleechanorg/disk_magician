@@ -233,8 +233,8 @@ class RepairContracts(unittest.TestCase):
             self.assertEqual(state["locally_preserved_wip_count"], 1)
             self.assertEqual(state["counters"]["removed"], 0)
             self.assertEqual(state["pushed_refs_count"], 0)
-            self.assertEqual(state["scanned_repos"], [str(repo)])
-            self.assertEqual(state["discovered_repos"], [str(repo)])
+            self.assertEqual(state["scanned_repos"], [str(repo.resolve())])
+            self.assertEqual(state["discovered_repos"], [str(repo.resolve())])
             self.assertEqual(state["skipped_repos"], [])
 
     def test_genuine_non_fast_forward_uses_verified_backup(self):
@@ -446,7 +446,7 @@ class RepairContracts(unittest.TestCase):
             result = json.loads(state.read_text())
             self.assertEqual(result["status"], "interrupted")
             self.assertTrue(result["partial"])
-            self.assertEqual(result["skipped_repos"], [str(repo)])
+            self.assertEqual(result["skipped_repos"], [str(repo.resolve())])
             self.assertEqual(result["scanned_repos"], [])
 
 
