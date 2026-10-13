@@ -462,6 +462,146 @@ assert_eq "$(eph "$PT/claude-commands")" kept:check-failed "malformed lease reco
 rm -f "$(lease_dir)/zz-malformed.json"
 assert_eq "$(eph "$PT/claude-commands")" remove "malformed record removed: candidate removable again"
 
+echo "== non-git provenance (T11-5) =="
+GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
+# Stub for `gcloud storage objects describe`: fixture JSON per object, else 404 (rc 1); logs each call.
+printf '#!/bin/sh\nf="%s/$(printf %%s "$1" | tr "/:" "__").json"\necho "$1" >>"%s/calls"\n[ -f "$f" ] || { echo 404 >&2; exit 1; }\ncat "$f"\n' "$GCS" "$GCS" >"$TMPROOT/stub/describe"
+chmod +x "$TMPROOT/stub/describe" && export DISK_MAGICIAN_STAT_BIN="$TMPROOT/stub/describe"
+# publish <dir> [<url>] [<verified_at|->]: released lease marking every file under <dir> published
+# (upload_manifest: path, sha256, md5, crc32c, size, object, generation 1) plus matching remote objects.
+publish() {
+    python3 - "$1" "$(lease_path_for "$1")" "${2:-gs://wa-test-evidence/agent-evidence/${1##*/}/}" "${3:-2026-10-01T00:00:00Z}" "$GCS" <<'PY'
+import base64, hashlib, json, os, sys
+d, lease, url, ver, gcs = sys.argv[1:]
+m = []
+for dp, _, fns in os.walk(d):
+    for n in sorted(fns):
+        p = os.path.join(dp, n); b = open(p, "rb").read(); rel = os.path.relpath(p, d)
+        m.append(dict(path=rel, sha256=hashlib.sha256(b).hexdigest(), md5=base64.b64encode(hashlib.md5(b).digest()).decode(),
+                      crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
+        json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
+os.makedirs(os.path.dirname(lease), exist_ok=True)
+json.dump({"path": d, "owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+           "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
+           "upload_manifest": m}, open(lease, "w"))
+PY
+}
+# lease_edit <dir> <python statement on d>: rewrite <dir>'s lease JSON.
+lease_edit() { python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); exec(sys.argv[2]); json.dump(d,open(f,"w"))' "$(lease_path_for "$1")" "$2"; }
+gobj() { printf '%s/%s.json' "$GCS" "$(printf %s "gs://wa-test-evidence/agent-evidence/$1" | tr '/:' '__')"; }
+av() { artifact_removal_verdict "$@"; }
+mkdir -p "$PT/advice-x" "$PT/deploy" && printf 'n' >"$PT/advice-x/notes.txt" && printf 'TOKEN=abc' >"$PT/deploy/deploy_backup.txt"
+age "$PT/advice-x" 90 && age "$PT/deploy" 43200
+assert_eq "$(av "$PT/advice-x")" kept:unproven-content "unique notes.txt under \$TMPDIR/advice-x/"
+assert_eq "$(av "$PT/deploy")" kept:unproven-content "custom-named deploy_backup.txt"
+git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
+assert_eq "$(av "$PT/evrepo/evidence")" kept:unproven-content "unpublished evidence/results.json"
+mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
+printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+    "$PT/inv" "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
+assert_eq "$(av "$PT/inv")" kept:unproven-content "manifest is not a copy (inventory only, never published)"
+for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
+    mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
+    publish "$PT/$d" "" "$([[ $d == ev-unver ]] && echo - || echo 2026-10-01T00:00:00Z)" && age "$PT/$d" 120
+done
+: >"$GCS/calls"
+assert_eq "$(av "$PT/ev-ok")" remove "published evidence with verified_at, every file matching"
+assert_eq "$(wc -l <"$GCS/calls" | tr -d ' ')" 3 "one objects describe per object"
+assert_eq "$(av "$PT/ev-unver")" kept:unproven-content "unverified publication (no verified_at)"
+printf 'mine' >"$PT/ev-added/private_notes.txt" && age "$PT/ev-added" 120
+assert_eq "$(av "$PT/ev-added")" kept:unproven-content "publish, then add private_notes.txt"
+printf 'mp4dato' >"$PT/ev-byte/sub/recording.mp4" && age "$PT/ev-byte" 120
+assert_eq "$(av "$PT/ev-byte")" kept:unproven-content "publish, then change one byte of recording.mp4"
+lease_edit "$PT/ev-subset" 'd["upload_manifest"]=d["upload_manifest"][:2]'
+assert_eq "$(av "$PT/ev-subset")" kept:unproven-content "manifest lists a subset"
+lease_edit "$PT/ev-nomf" 'd["upload_manifest"]=None'
+assert_eq "$(av "$PT/ev-nomf")" kept:unproven-content "URL with no manifest"
+rm -f "$(gobj ev-del/report.md)" "$(gobj ev-del/results.json)" "$(gobj ev-del/sub/recording.mp4)"
+assert_eq "$(av "$PT/ev-del")" kept:unproven-content "objects deleted after publication"
+printf '{"generation":"2","md5_hash":"x"}' >"$(gobj ev-regen/report.md)"
+assert_eq "$(av "$PT/ev-regen")" kept:unproven-content "object replaced by a new generation"
+printf '{"generation":"1","md5_hash":"bm90IHRoZSBzYW1l"}' >"$(gobj ev-exp/results.json)"
+assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object hash differs from the manifest"
+rm -f "$(gobj ev-exp/results.json)"
+assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object past its 30-day lifecycle (stat stub 404)"
+rm -f "$(gobj ev-miss/sub/recording.mp4)"
+assert_eq "$(av "$PT/ev-miss")" kept:unproven-content "one of three objects missing"
+lease_edit "$PT/ev-ok" 'd["verified_at"]=""'
+assert_eq "$(av "$PT/ev-ok")" kept:unproven-content "empty verified_at"
+mkdir -p "$PT/ev-link" && printf 'r' >"$PT/ev-link/report.md" && publish "$PT/ev-link" && ln -s /etc "$PT/ev-link/l" && age "$PT/ev-link" 120
+assert_eq "$(av "$PT/ev-link")" kept:unproven-content "unlisted symlink in a published dir"
+mkdir -p "$PT/nm" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/nm/repo" && baseline "$PT/nm/repo"
+lease_edit "$PT/nm/repo" 'd.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z")'
+mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules/pkg/i.js" && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed clean clone (no kind)"
+printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm")" kept:unproven-content "the same clone beside a unique non-git file"
+echo "-- rebuildable (--kind rebuildable) and os_clone --"
+mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1"
+for d in .cache/uv/archive-v0/x .cache/other/x Library/Developer/Xcode/DerivedData/App-1; do printf 'b' >"$HOME/$d/f"; done
+age "$HOME/.cache" 43200 && age "$HOME/Library" 43200
+assert_eq "$(av "$HOME/.cache/uv/archive-v0/x" --kind rebuildable)" remove "rebuildable ~/.cache/uv/archive-v0/x"
+assert_eq "$(av "$HOME/Library/Developer/Xcode/DerivedData/App-1" --kind rebuildable)" remove "rebuildable Xcode DerivedData entry"
+assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
+assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
+assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
+# venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
+venvw() {
+    git -C "$TMPROOT/wtbase" worktree add -q "$1" -b "${1##*/}" origin/main 2>/dev/null
+    printf 'venv/\n' >>"$1/.gitignore" && git -C "$1" commit -qam ignore-venv && git -C "$1" push -q -u origin "${1##*/}" 2>/dev/null
+    mkdir -p "$1/venv/bin" && printf 'py' >"$1/venv/bin/python"
+}
+venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
+age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
+assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+# B1: the enclosing linked worktree's canonical 7-day floor protects its venv/.
+# Root, .git and venv/ are 30 days old, but the tracked content was touched 2h ago.
+venvw "$HOME/wt-young" && age "$HOME/wt-young" 43200 && age "$HOME/wt-young/tracked.txt" 120
+assert_eq "$(av "$HOME/wt-young/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ in a worktree with 2h-old tracked content"
+[[ "$(cat "$HOME/wt-young/venv/bin/python")" == py ]] \
+    && ok "young venv path bytes intact after the verdict" || bad "young venv path bytes changed"
+# An 8-day-quiet worktree is past the strict 7-day floor and stays eligible.
+venvw "$HOME/wt-eligible" && age "$HOME/wt-eligible" 11520
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
+    "ignored venv/ in a worktree quiet for 8 days"
+# Canonical unmeasurable recency fails closed (reports active), so the venv stays.
+worktree_is_recently_active() { return 0; }
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ when canonical worktree recency cannot be measured"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$REPO_ROOT/scripts/lib/worktree_recency.sh"
+mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
+git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
+mkdir -p "$HOME/Documents/venv" "$HOME/Documents/venv.bak.old" && printf 't' >"$HOME/Documents/venv/thesis.txt" && printf 't' >"$HOME/Documents/venv.bak.old/t.txt"
+venvw "$HOME/wt-dirty" && printf 'x\n' >>"$HOME/wt-dirty/tracked.txt"
+venvw "$HOME/wt-tracked" && git -C "$HOME/wt-tracked" add -f venv && git -C "$HOME/wt-tracked" commit -qm tracked-venv && git -C "$HOME/wt-tracked" push -q 2>/dev/null
+git clone -q "$TMPROOT/remotes/wtbase.git" "$HOME/base" && printf 'venv/\n' >>"$HOME/base/.git/info/exclude" && mkdir -p "$HOME/base/venv" && printf 'py' >"$HOME/base/venv/python"
+for d in "$HOME/projects" "$HOME/Documents" "$HOME/wt-dirty" "$HOME/wt-tracked" "$HOME/base"; do age "$d" 43200; done
+assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:unproven-content "tracked, unpushed and dirty venv/ in a base repo"
+assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:unproven-content "venv/ outside any repository"
+assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:unproven-content "venv.bak.old outside any repository"
+assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a dirty worktree"
+assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:unproven-content "tracked venv/ in a clean pushed worktree"
+assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a base repo, not a linked worktree"
+mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1/app" && age "$PT/X" 43200
+assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" --kind os_clone)" kept:check-failed "os_clone without a frozen-identity proof"
+x_thesis="$HOME/Documents/thesis"
+mkdir -p "$x_thesis" && printf 'unique' >"$x_thesis/chapter.txt" && age "$x_thesis" 43200
+assert_eq "$(av "$x_thesis" --kind os_clone)" kept:check-failed "os_clone flag cannot authorize arbitrary ~/Documents/thesis"
+x_clone="$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1"
+x_id="$(stat -f '%d:%i:%u' "$PT/X" 2>/dev/null || stat -c '%d:%i:%u' "$PT/X")"
+x_parent_id="$(stat -f '%d:%i:%u' "${x_clone%/*}" 2>/dev/null || stat -c '%d:%i:%u' "${x_clone%/*}")"
+x_candidate_id="$(stat -f '%d:%i:%u' "$x_clone" 2>/dev/null || stat -c '%d:%i:%u' "$x_clone")"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" remove "os_clone with matching frozen candidate, parent and X-root identities"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_parent_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone identity mismatch is kept"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone proof outside the frozen X scan root is kept"
+assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kind os_clone"
+age "$PT/X" 10
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
+assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
+unset DISK_MAGICIAN_STAT_BIN
 # B1/F1: the lease-record scan must fail closed on unusable records and bind each
 # record to the canonical lease filename for its recorded path.
 mkdir -p "$PT/pr-lease-scan/child" && printf 'KEEP\n' >"$PT/pr-lease-scan/child/data.bin"
