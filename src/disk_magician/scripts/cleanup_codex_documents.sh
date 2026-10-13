@@ -43,8 +43,9 @@
 # existing scripts/job_receipt.py schema (job cleanup_codex_documents) carrying
 # candidates.removed_count / deferred_count / interrupted_count / retained_count
 # and a signed postcondition.df_delta_bytes measured from df before and after the
-# run. Only C14 removed:* is reclaimed bytes; quarantined:*/quarantine_conflict:*
-# is retained recovery state, reported as partial with a kept reason.
+# run. Only C14 removed:* is reclaimed bytes; quarantined:*,
+# quarantine_conflict:* and kept:quarantine_partial_kept* are retained recovery
+# state, reported as partial with a kept reason.
 #   (default is DRY RUN)
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -553,6 +554,17 @@ process_task() {
         N_DEFERRED=$(( N_DEFERRED + 1 ))
         deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
         keep "deferred:${qout#deferred:}" "$task"; return
+        ;;
+      kept:quarantine_partial_kept*)
+        # Real phase-2 partial: the tree was moved into quarantine but the
+        # deletion walk did not complete (content changed under the walk, an
+        # unlink failed, etc.). The bytes remain recoverable quarantine state,
+        # so this is retained, never reclaimed, and the run must end `partial`
+        # rather than falling through to the generic kept:*/success_noop path.
+        # A deferred:* result is matched above and is never collapsed here.
+        N_RETAINED=$(( N_RETAINED + 1 ))
+        deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+        keep "quarantine-partial-kept${qout#kept:quarantine_partial_kept}" "$task"; return
         ;;
       kept:*)
         keep "${qout#kept:}" "$task"; return
