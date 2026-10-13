@@ -1310,9 +1310,9 @@ receipt=json.load(open(sys.argv[1]))['last_terminal']
 assert receipt['outcome']=='success', receipt
 assert receipt['reason']=='database_maintenance_complete', receipt
 # VACUUM rewrites pages in place and removes no artifact: removed_count stays 0
-# and the successful vacuum is recorded separately as cleaned_count.
+# and the successful vacuum is recorded separately as vacuumed_count.
 assert receipt['candidates']['removed_count']==0, receipt['candidates']
-assert receipt['candidates']['cleaned_count']==1, receipt['candidates']
+assert receipt['candidates']['vacuumed_count']==1, receipt['candidates']
 assert receipt['candidates']['deferred_count']==0, receipt['candidates']
 assert receipt['candidates']['interrupted_count']==0, receipt['candidates']
 assert receipt['postcondition']['df_delta_bytes'] is not None, receipt['postcondition']

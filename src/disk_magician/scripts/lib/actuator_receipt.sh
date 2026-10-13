@@ -14,7 +14,7 @@ PY
   ACTUATOR_REMOVED_COUNT=0
   ACTUATOR_DEFERRED_COUNT=0
   ACTUATOR_INTERRUPTED_COUNT=0
-  ACTUATOR_CLEANED_COUNT=0
+  ACTUATOR_VACUUMED_COUNT=0
   ACTUATOR_OUTCOME=""
   ACTUATOR_REASON=""
   ACTUATOR_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
@@ -37,15 +37,15 @@ actuator_receipt_exit() {
     delta=$((free_after - ACTUATOR_FREE_BEFORE))
     (( delta > 0 )) && freed="$delta" || freed=0
   fi
-  if ! PYTHONPATH="$ACTUATOR_RECEIPT_SCRIPT_DIR" python3 - "$ACTUATOR_RECEIPT_STATE_DIR" "$ACTUATOR_RECEIPT_JOB" "$ACTUATOR_RECEIPT_RUN_ID" "$outcome" "$reason" "$ACTUATOR_REMOVED_COUNT" "$ACTUATOR_DEFERRED_COUNT" "$ACTUATOR_INTERRUPTED_COUNT" "$ACTUATOR_CLEANED_COUNT" "$delta" "$freed" <<'PY'
+  if ! PYTHONPATH="$ACTUATOR_RECEIPT_SCRIPT_DIR" python3 - "$ACTUATOR_RECEIPT_STATE_DIR" "$ACTUATOR_RECEIPT_JOB" "$ACTUATOR_RECEIPT_RUN_ID" "$outcome" "$reason" "$ACTUATOR_REMOVED_COUNT" "$ACTUATOR_DEFERRED_COUNT" "$ACTUATOR_INTERRUPTED_COUNT" "$ACTUATOR_VACUUMED_COUNT" "$delta" "$freed" <<'PY'
 import sys
 from job_receipt import JobReceiptStore
-state,job,run,outcome,reason,removed,deferred,interrupted,cleaned,delta,freed=sys.argv[1:]
+state,job,run,outcome,reason,removed,deferred,interrupted,vacuumed,delta,freed=sys.argv[1:]
 post={"df_delta_bytes":None if delta=="null" else int(delta),
       "freed_bytes":None if freed=="null" else int(freed)}
 JobReceiptStore(state_dir=state).finish(job, run_id=run, outcome=outcome, reason=reason,
     candidates={"removed_count":int(removed),"deferred_count":int(deferred),
-                "interrupted_count":int(interrupted),"cleaned_count":int(cleaned)},
+                "interrupted_count":int(interrupted),"vacuumed_count":int(vacuumed)},
     postcondition=post)
 PY
   then

@@ -972,9 +972,9 @@ echo
 if [[ "$any_non_success" == true ]]; then
   if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
     # VACUUM rewrites pages in place; it removes no database artifact.
-    # Successfully vacuumed databases are counted separately as cleaned_count.
+    # Successfully vacuumed databases are counted separately as vacuumed_count.
     ACTUATOR_REMOVED_COUNT=0
-    ACTUATOR_CLEANED_COUNT="$total_vacuumed"
+    ACTUATOR_VACUUMED_COUNT="$total_vacuumed"
     ACTUATOR_DEFERRED_COUNT="$total_locked"
     ACTUATOR_OUTCOME=error
     ACTUATOR_REASON=database_maintenance_incomplete
@@ -999,9 +999,9 @@ if [[ "$DRY_RUN" == true ]]; then
 else
   if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
     # VACUUM rewrites pages in place; it removes no database artifact.
-    # Successfully vacuumed databases are counted separately as cleaned_count.
+    # Successfully vacuumed databases are counted separately as vacuumed_count.
     ACTUATOR_REMOVED_COUNT=0
-    ACTUATOR_CLEANED_COUNT="$total_vacuumed"
+    ACTUATOR_VACUUMED_COUNT="$total_vacuumed"
     ACTUATOR_DEFERRED_COUNT="$total_locked"
     ACTUATOR_OUTCOME=success
     ACTUATOR_REASON=database_maintenance_complete
