@@ -19,7 +19,10 @@ if [[ ! -x "$SCRIPT" ]]; then
   exit 2
 fi
 
-TMP_DIR=$(mktemp -d -t test_code_sign_clones.XXXXXX)
+TMP_DIR=$(mktemp -d /tmp/test_code_sign_clones.XXXXXX) || exit 1
+[[ "$TMP_DIR" == /tmp/test_code_sign_clones.* && -d "$TMP_DIR" && ! -L "$TMP_DIR" ]] || exit 1
+export HOME="$TMP_DIR/home" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state"
+mkdir -p "$HOME" "$DISK_MAGICIAN_STATE_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 MOCK_BIN="$TMP_DIR/bin"
