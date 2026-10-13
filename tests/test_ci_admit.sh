@@ -45,6 +45,20 @@ echo "== no --completed mode =="
 _contract_case a5 "0" "" "bash '$CI' --completed"
 assert_eq "$C_RC" 2 "--completed rejected"; assert_eq "$C_ADMITS" 0 "no admit for --completed"
 
+echo "== runner's bash -e invocation preserves admit outcome contract =="
+rm -f "$T/state/budget.json"
+_contract_case e0 "0" "" "bash -e '$CI'"
+assert_eq "$C_RC" 0 "bash -e admit 0 succeeds with missing budget.json"; assert_eq "$C_ADMITS" 1 "bash -e admit 0 called once"
+_contract_case e10 "10" "" "bash -e '$CI'"
+assert_eq "$C_RC" 0 "bash -e admit 10 warns and continues"; assert_eq "$C_ADMITS" 1 "bash -e admit 10 called once"
+grep -q "disk-admission: warn class=colima" <<<"$C_ERR" && ok "bash -e admit 10 warns" || bad "bash -e rc10 stderr: $C_ERR"
+_contract_case e3 "3" "" "bash -e '$CI'"
+assert_eq "$C_RC" 0 "bash -e unexpected rc degrades and continues"; assert_eq "$C_ADMITS" 1 "bash -e rc3 called once"
+grep -q "admission_degraded:caller rc=3" <<<"$C_ERR" && ok "bash -e rc3 degrades" || bad "bash -e rc3 stderr: $C_ERR"
+_contract_case e76 "76 76" "" "bash -e '$CI'"
+assert_eq "$C_RC" 75 "bash -e rc76 refuses after retry"; assert_eq "$C_ADMITS" 2 "bash -e rc76 retries exactly once"
+grep -q "disk-admission: refused class=colima rc=76" <<<"$C_ERR" && ok "bash -e rc76 refusal logged" || bad "bash -e rc76 stderr: $C_ERR"
+
 echo "== RED/BLACK prints the pause command; auto-pause only with ci_autopause =="
 zone() { python3 -c 'import json,sys,time; json.dump({"zone":sys.argv[2],"zone_at":time.time()},open(sys.argv[1],"w"))' "$T/state/budget.json" "$1"; }
 for z in RED BLACK; do
