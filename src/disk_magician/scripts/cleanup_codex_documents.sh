@@ -622,6 +622,9 @@ while (( _i < ${#CANDIDATES[@]} )); do
 done
 
 # Date dirs left with nothing but already-removed tasks (and .DS_Store).
+# The date dir is itself a removal target: route its teardown through the SAME
+# C14/quarantine gate (same target variable). An unproven .DS_Store or other
+# metadata keeps the dir; there is no direct rm/rmdir bypass.
 for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
   left=0
   while IFS= read -r -d '' e; do
@@ -630,11 +633,18 @@ for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
   done < <(/usr/bin/find "$dd" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   if (( left == 0 )); then
     if [[ "$DRY_RUN" == true ]]; then
-      log "DRY RUN: would remove emptied date dir $dd"
-    else
-      rm -f "$dd/.DS_Store"
-      rmdir "$dd" 2>/dev/null && log "Removed emptied date dir $dd"
+      log "DRY RUN: would verify and remove emptied date dir $dd"
+      continue
     fi
+    if ! quarantine_remove_available; then
+      log "kept:quarantine-unavailable $dd"
+      continue
+    fi
+    dd_qout="$(quarantine_gate "$dd")"
+    case "$dd_qout" in
+      removed:*) log "Removed emptied date dir $dd" ;;
+      *) log "date-dir retained ($dd_qout): $dd" ;;
+    esac
   fi
 done
 

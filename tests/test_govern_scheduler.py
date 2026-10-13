@@ -304,6 +304,120 @@ class GovernSchedulerTest(unittest.TestCase):
                 self.assertEqual(gov["postcondition"]["c14_ledger_status"], "ok")
                 self.assertNotIn("stale", gov["postcondition"]["c14_kept_bytes"])
 
+    def test_dispatch_preserves_keeps_when_owner_terminal_absent(self):
+        import subprocess
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="govern-no-terminal-") as tmp:
+            base = Path(tmp)
+            scripts = base / "scripts"
+            (scripts / "lib").mkdir(parents=True)
+            (scripts / "job_receipt.py").write_text(
+                (Path(disk_budget.__file__).parent / "job_receipt.py").read_text())
+            (scripts / "lib" / "artifact_verdict.sh").write_text(
+                'artifact_removal_verdict() { [[ "$1" == --self-test ]] && echo ok; }\n')
+            (scripts / "cleanup_tmp.sh").write_text("#!/bin/bash\ntrue\n")
+            (scripts / "cleanup_tmp.sh").chmod(0o755)
+            state = base / "state"
+            state.mkdir()
+            fake_df = base / "df"
+            fake_df.write_text("#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                               "echo '/dev/test 999999 1 500000 1% /'\n")
+            fake_df.chmod(0o755)
+            ledgers = []
+
+            def fake_supervise(command, slice_end):
+                ledger = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+                ledgers.append(ledger)
+                inv = base / "inv.json"
+                inv.write_text(json.dumps([{"type": "file", "size": 777}]))
+                subprocess.run([sys.executable, str(root / "scripts" / "c14_probe.py"), "account",
+                                str(inv), ledger, "unproven-content"], check=True, capture_output=True)
+                return {"rc": 1, "output": "boom", "hard_stop": False, "orphan_survivors": False}
+
+            saved = {k: os.environ.get(k) for k in ("DISK_MAGICIAN_DF_BIN", "DISK_MAGICIAN_STATE_DIR")}
+            os.environ["DISK_MAGICIAN_DF_BIN"] = str(fake_df)
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = str(state)
+            original = disk_budget.supervise_actuator
+            disk_budget.supervise_actuator = fake_supervise
+            try:
+                disk_budget.dispatch_actuators(
+                    scripts, state,
+                    {"classes": {"tmp_containers": {"act": "tmp_containers", "trigger": "always",
+                     "unit_budget_s": 10}}},
+                    {"classes": {}}, "RED", time.time(), time.monotonic() + 200, {"schema": 1, "classes": {}})
+            finally:
+                disk_budget.supervise_actuator = original
+                for k, v in saved.items():
+                    if v is None: os.environ.pop(k, None)
+                    else: os.environ[k] = v
+            gov = disk_budget._receipt_data(state, "govern_tmp_containers")
+            self.assertEqual(gov["outcome"], "error")
+            self.assertEqual(gov["postcondition"]["c14_kept_bytes"], {"unproven-content": 777})
+            self.assertEqual(gov["postcondition"]["c14_ledger_status"], "incomplete")
+            self.assertEqual(gov["postcondition"]["c14_ledger_source"], "owner_terminal_absent")
+            self.assertEqual(len(ledgers), 1)
+            self.assertFalse(os.path.exists(ledgers[0]))
+
+    def test_dispatch_retains_scoped_ledger_when_govern_persist_raises(self):
+        import subprocess
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="govern-persist-fail-") as tmp:
+            base = Path(tmp)
+            scripts = base / "scripts"
+            (scripts / "lib").mkdir(parents=True)
+            (scripts / "job_receipt.py").write_text(
+                (Path(disk_budget.__file__).parent / "job_receipt.py").read_text())
+            (scripts / "lib" / "artifact_verdict.sh").write_text(
+                'artifact_removal_verdict() { [[ "$1" == --self-test ]] && echo ok; }\n')
+            (scripts / "cleanup_tmp.sh").write_text("#!/bin/bash\ntrue\n")
+            (scripts / "cleanup_tmp.sh").chmod(0o755)
+            state = base / "state"; state.mkdir()
+            fake_df = base / "df"
+            fake_df.write_text("#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                               "echo '/dev/test 999999 1 500000 1% /'\n")
+            fake_df.chmod(0o755)
+            ledgers = []
+
+            def fake_supervise(command, slice_end):
+                ledger = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+                ledgers.append(ledger)
+                inv = base / "inv.json"
+                inv.write_text(json.dumps([{"type": "file", "size": 42}]))
+                subprocess.run([sys.executable, str(root / "scripts" / "c14_probe.py"), "account",
+                                str(inv), ledger, "unproven-content"], check=True, capture_output=True)
+                return {"rc": 1, "output": "boom", "hard_stop": False, "orphan_survivors": False}
+
+            saved = {k: os.environ.get(k) for k in ("DISK_MAGICIAN_DF_BIN", "DISK_MAGICIAN_STATE_DIR")}
+            os.environ["DISK_MAGICIAN_DF_BIN"] = str(fake_df)
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = str(state)
+            original_sup = disk_budget.supervise_actuator
+            original_write = disk_budget._write_govern_receipt
+            disk_budget.supervise_actuator = fake_supervise
+
+            def boom(*args, **kwargs):
+                raise RuntimeError("govern persist failed")
+
+            disk_budget._write_govern_receipt = boom
+            try:
+                with self.assertRaises(RuntimeError):
+                    disk_budget.dispatch_actuators(
+                        scripts, state,
+                        {"classes": {"tmp_containers": {"act": "tmp_containers", "trigger": "always",
+                         "unit_budget_s": 10}}},
+                        {"classes": {}}, "RED", time.time(), time.monotonic() + 200,
+                        {"schema": 1, "classes": {}})
+            finally:
+                disk_budget.supervise_actuator = original_sup
+                disk_budget._write_govern_receipt = original_write
+                for k, v in saved.items():
+                    if v is None: os.environ.pop(k, None)
+                    else: os.environ[k] = v
+            # Terminal govern persistence raised, so the raw scoped ledger must
+            # survive for recovery rather than being unlinked.
+            self.assertEqual(len(ledgers), 1)
+            self.assertTrue(os.path.exists(ledgers[0]))
+            os.unlink(ledgers[0])
+
     def test_three_tick_deferred_actuator_gets_exclusive_300_second_slice(self):
         schedule = {"classes": {"stuck": {"deferred_ticks": 3}}}
         row, _ = disk_budget.next_actuator(

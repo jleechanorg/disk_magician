@@ -30,6 +30,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
@@ -358,6 +360,11 @@ RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job pressure_sweep --trigger 
   log "ERROR: failed to record receipt begin"
   exit 1
 }
+# Aggregate step keeps into this wrapper's terminal receipt; owner=pressure_sweep
+# means the nested step receipts never double-fold the same ledger.
+if ! c14_scope_open "$STATE_DIR" pressure_sweep; then
+  log "WARN: could not allocate C14 scope ledger; step keeps stay unaccounted"
+fi
 
 clean_flag="--clean"
 [[ "$DRY_RUN" == true ]] && clean_flag="--dry-run"
@@ -484,5 +491,7 @@ if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
   log "ERROR: failed to record receipt finish"
   exit 1
 fi
+# Release the ephemeral scoped ledger only after the terminal receipt persisted.
+c14_scope_release
 
 log "pressure_sweep: sweep complete."

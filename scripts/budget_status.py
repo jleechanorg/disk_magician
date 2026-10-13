@@ -81,17 +81,36 @@ def _c14_fields(post):  # explicit invalid/incomplete instead of a silent none/z
     if kept is None: kept_str = "absent"
     elif not isinstance(kept, dict): kept_str = "invalid"
     elif any(not (isinstance(k, str) and k and type(v) is int and v >= 0) for k, v in kept.items()): kept_str = "invalid"
-    elif not kept: kept_str = "none"
-    else: kept_str = ",".join(f"{k}:{kept[k]}" for k in sorted(kept))
+    elif ledger_status == "error": kept_str = "unknown"
+    elif not kept: kept_str = "none" if ledger_status == "ok" else "unknown"
+    else:
+        values = ",".join(f"{k}:{kept[k]}" for k in sorted(kept))
+        kept_str = f"partial({values})" if ledger_status == "incomplete" else values
     return ledger_status, kept_str
+def _receipt_fields(rec):  # receipt metric tail shared by class and wrapper rows
+    if not rec:
+        return "receipt=missing deleted_bytes=unknown df_delta_bytes=unknown"
+    post = rec.get("postcondition") if isinstance(rec.get("postcondition"), dict) else {}
+    cand = rec.get("candidates") if isinstance(rec.get("candidates"), dict) else {}
+    df, freed, removed = _int_or_none(post.get("df_delta_bytes")), _int_or_none(post.get("freed_bytes")), _int_or_none(cand.get("removed_count"))
+    deleted = _int_or_none(post.get("deleted_bytes"))
+    ledger_status, kept_str = _c14_fields(post)
+    return (f"receipt={rec.get('outcome', 'unknown')}"
+            f" removed_count={removed if removed is not None else 'unknown'}"
+            f" deleted_bytes={deleted if deleted is not None else 'unknown'}"
+            f" df_delta_bytes={df if df is not None else 'unknown'}"
+            f" freed_bytes_df_based={freed if freed is not None else 'unknown'}"
+            f" ledger_status={ledger_status} c14_kept_bytes={kept_str}")
 def accounting(state):  # per-class baseline + receipt metrics; receipt fields stay distinct
-    """Report each class's Task 0 baseline and receipt metrics.
+    """Report each class's Task 0 baseline and receipt metrics, plus wrapper rows.
 
     Baseline bytes are logical would-delete values, never df. `df_delta_bytes`
     keeps its signed receipt meaning; `freed_bytes_df_based` is explicitly
     df-derived; `deleted_bytes` is `unknown` because no receipt field holds
-    logical deleted bytes (never derived from df or C14 kept). Reads only
-    existing govern_<class> receipts and the optional task0_baseline.json.
+    logical deleted bytes (never derived from df or C14 kept). Governed class
+    rows (`c14 class=`) are kept separate from wrapper aggregate receipts
+    (`wrapper job=`) and from optional class baselines. Reads only existing
+    govern_<class>/wrapper receipts and the optional task0_baseline.json.
     """
     base = load_baseline(state)
     classes = set(base["classes"]) if base["status"] == "ok" else set()
@@ -105,24 +124,20 @@ def accounting(state):  # per-class baseline + receipt metrics; receipt fields s
         classes.update(p.name[len("govern_"):-len(".json")] for p in receipts.glob("govern_*.json"))
     lines = []
     for name in sorted(c for c in classes if c):
-        line = f"c14 class={name} " + _baseline_fields(base, name)
         try:
             import job_receipt
             rec = job_receipt.get_last_receipt(f"govern_{name}", str(state))
         except (ImportError, OSError, ValueError, TypeError): rec = None
-        if not rec:
-            lines.append(line + " receipt=missing deleted_bytes=unknown df_delta_bytes=unknown"); continue
-        post = rec.get("postcondition") if isinstance(rec.get("postcondition"), dict) else {}
-        cand = rec.get("candidates") if isinstance(rec.get("candidates"), dict) else {}
-        df, freed, removed = _int_or_none(post.get("df_delta_bytes")), _int_or_none(post.get("freed_bytes")), _int_or_none(cand.get("removed_count"))
-        deleted = _int_or_none(post.get("deleted_bytes"))
-        ledger_status, kept_str = _c14_fields(post)
-        lines.append(line + f" receipt={rec.get('outcome', 'unknown')}"
-                     f" removed_count={removed if removed is not None else 'unknown'}"
-                     f" deleted_bytes={deleted if deleted is not None else 'unknown'}"
-                     f" df_delta_bytes={df if df is not None else 'unknown'}"
-                     f" freed_bytes_df_based={freed if freed is not None else 'unknown'}"
-                     f" ledger_status={ledger_status} c14_kept_bytes={kept_str}")
+        lines.append(f"c14 class={name} " + _baseline_fields(base, name) + " " + _receipt_fields(rec))
+    # Wrapper receipts carry aggregate data only (no per-class assignment); expose
+    # them under their own job/scope, never as a guessed governed class.
+    for job in ("main_sweeper", "pressure_sweep"):
+        try:
+            import job_receipt
+            rec = job_receipt.get_last_receipt(job, str(state))
+        except (ImportError, OSError, ValueError, TypeError): rec = None
+        if rec:
+            lines.append(f"wrapper job={job} scope=wrapper " + _receipt_fields(rec))
     return lines
 def alerts(state, now, margin_gb=None):
     if margin_gb is None:

@@ -14,8 +14,17 @@ source "$SCRIPT_DIR/lib/sandbox_env.sh"
 # shellcheck source=scripts/lib/actuator_deadline.sh
 source "$REPO_ROOT/scripts/lib/actuator_deadline.sh"
 
-TMP_ROOT=$(mktemp -d -t cleanup_codex_documents.XXXXXX)
+TMP_ROOT="$(mktemp -d /tmp/disk-magician-codex-docs.XXXXXX)" || {
+  echo "FATAL: could not allocate /tmp fixture root" >&2; exit 2;
+}
+if [[ -z "$TMP_ROOT" || ! -d "$TMP_ROOT" ]]; then
+  echo "FATAL: empty or invalid fixture root '$TMP_ROOT'" >&2; exit 2
+fi
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
+case "$TMP_ROOT" in
+  /tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: fixture root not under /tmp: '$TMP_ROOT'" >&2; exit 2 ;;
+esac
 SLEEPERS=()
 cleanup() {
   local p
@@ -41,6 +50,9 @@ assert_contains() {
 
 # Fixture HOME with a bare origin that holds a committed .gitignore.
 export HOME="$TMP_ROOT/home"
+# Bind STATE to this fixture immediately (overrides any ambient/parent state so
+# no child writer can leak into a real or unrelated state root).
+export DISK_MAGICIAN_STATE_DIR="$HOME/.disk_magician_state"
 export DISK_MAGICIAN_DELETION_LOG="$TMP_ROOT/deletions.log"
 export DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT"
 export DISK_MAGICIAN_SAFETY_FILE="$TMP_ROOT/safety.json"
@@ -391,6 +403,21 @@ HOME="$RC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
 [[ "$RC" -eq 0 ]] && record_pass "T14: exits 0" || { record_fail "T14: exits 0" "rc=$RC"; cat "$O14"; }
 assert_exists "T14: raced replacement kept" "$RC_TASK"
 assert_contains "T14: reports recent activity" "recent-activity" "$(cat "$O14")"
+
+echo "T14b: secondary date-dir teardown is C14-gated, not a .DS_Store bypass"
+DD_HOME="$TMP_ROOT/dd-home"; DD_CODEX="$DD_HOME/Documents/Codex"; DD_DATE="$DD_CODEX/$D_OLD"
+mkdir -p "$DD_DATE"; printf 'finder metadata\n' >"$DD_DATE/.DS_Store"
+age "$DD_DATE"
+O14B="$TMP_ROOT/o14b"; RC=0
+HOME="$DD_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O14B" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T14b: exits 0" || { record_fail "T14b: exits 0" "rc=$RC"; cat "$O14B"; }
+assert_exists "T14b: date dir with unproven .DS_Store kept" "$DD_DATE"
+assert_exists "T14b: .DS_Store not directly destroyed" "$DD_DATE/.DS_Store"
+if grep -q 'rm -f "$dd/.DS_Store"' "$SWEEPER"; then
+  record_fail "T14b: no direct .DS_Store removal bypass" "sweeper still contains rm -f \"\$dd/.DS_Store\""
+else
+  record_pass "T14b: no direct .DS_Store removal bypass"
+fi
 unset DISK_MAGICIAN_QUARANTINE_LIB
 
 # --- T15-T19: shared cursor resume + cooperative deadline + typed receipt --

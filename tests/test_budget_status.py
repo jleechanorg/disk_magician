@@ -311,13 +311,64 @@ class C14AccountingTest(unittest.TestCase):
             self.assertNotIn("c14_kept_bytes=bad", line)
         finally: tmp.cleanup()
 
-    def test_current_observed_stage0_artifact_renders_without_mutation(self):
-        artifact = Path("/tmp/disk_magician/resume-0649/stage0-current/task0_baseline.json")
-        if not artifact.is_file():
-            self.skipTest("stage0-current artifact not present")
+    def test_folded_c14_ledger_error_and_incomplete_render_explicitly(self):
+        import job_receipt
+
+        def folded_line(state, ledger):
+            folded = job_receipt.fold_c14_ledger(str(ledger))
+            self.assertIsNotNone(folded)
+            post = {"df_delta_bytes": 0, "freed_bytes": 0}
+            post.update(folded)
+            store = job_receipt.JobReceiptStore(state_dir=str(state))
+            rid = store.begin("govern_alpha", trigger="act")
+            store.finish("govern_alpha", rid, "success",
+                         candidates={"removed_count": 0, "deferred_count": 0, "interrupted_count": 0},
+                         postcondition=post)
+            return self._alpha_line(state)
+
+        tmp, state = self._baseline_state()
+        try:
+            # error: configured ledger path is unreadable (a directory).
+            err_ledger = state / "c14-error.jsonl"
+            err_ledger.mkdir()
+            line = folded_line(state, err_ledger)
+            self.assertIn("ledger_status=error", line)
+            self.assertIn("c14_kept_bytes=unknown", line)
+            self.assertNotIn("c14_kept_bytes=none", line)
+
+            # incomplete empty: only a malformed row, no valid keeps -> unknown.
+            inc_empty = state / "c14-incomplete-empty.jsonl"
+            inc_empty.write_text("not-json\n")
+            line = folded_line(state, inc_empty)
+            self.assertIn("ledger_status=incomplete", line)
+            self.assertIn("c14_kept_bytes=unknown", line)
+            self.assertNotIn("c14_kept_bytes=none", line)
+
+            # incomplete partial: a valid row plus a malformed row -> explicit marker.
+            inc_part = state / "c14-incomplete-partial.jsonl"
+            inc_part.write_text(json.dumps({"reason": "unproven-content", "bytes": 777}) + "\nnot-json\n")
+            line = folded_line(state, inc_part)
+            self.assertIn("ledger_status=incomplete", line)
+            self.assertIn("c14_kept_bytes=partial(unproven-content:777)", line)
+            self.assertNotIn("c14_kept_bytes=unproven-content:777 ", line)
+
+            # ok empty: a validated-empty ledger still means an explicit none.
+            ok_empty = state / "c14-ok-empty.jsonl"
+            ok_empty.write_text("")
+            line = folded_line(state, ok_empty)
+            self.assertIn("ledger_status=ok", line)
+            self.assertIn("c14_kept_bytes=none", line)
+        finally: tmp.cleanup()
+
+    def test_representative_baseline_renders_complete_and_incomplete_via_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
-            (state / "task0_baseline.json").write_bytes(artifact.read_bytes())
+            (state / "task0_baseline.json").write_text(json.dumps({
+                "schema_version": 1, "captured_at": "2026-10-13T07:04:13Z",
+                "source": "hermetic representative fixture",
+                "classes": {
+                    "codex_documents": {"would_delete_bytes": 0, "status": "complete", "source": "cmd codex"},
+                    "worktrees": {"would_delete_bytes": None, "status": "incomplete", "source": "cmd worktrees"}}}))
             out = subprocess.run([sys.executable, str(ROOT / "scripts" / "budget_status.py"), "status"],
                                  env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)},
                                  capture_output=True, text=True)
@@ -328,7 +379,6 @@ class C14AccountingTest(unittest.TestCase):
             self.assertIn("baseline_captured_at=2026-10-13T07:04:13Z", codex)
             self.assertIn("baseline_class_source=", codex)
             self.assertIn("baseline_bytes=unknown baseline_status=incomplete", worktrees)
-            self.assertEqual(artifact.read_bytes(), (state / "task0_baseline.json").read_bytes())
 
 
 if __name__ == "__main__":

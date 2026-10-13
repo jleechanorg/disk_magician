@@ -1,5 +1,32 @@
 #!/usr/bin/env bash
 # Shared terminal receipt support for atomic governed adapters.
+#
+# Wrapper ledger scope (main_sweeper, pressure_sweep): open a unique per-run
+# C14 kept-byte ledger and make the wrapper job its owner. The wrapper's own
+# terminal receipt folds it exactly once; nested Tier receipts inherit the path
+# but a different owner, so they never re-fold the same rows. The caller must
+# call c14_scope_release only after its terminal receipt is persisted.
+c14_scope_open() {
+  local state_dir="$1" owner_job="$2" ledger
+  # Allocation must be collision-safe: mktemp in the state dir, never a
+  # PID+RANDOM name. Fail closed: on any failure there is no scope and no
+  # ambient/stale DISK_MAGICIAN_C14_LEDGER* leakage into child writers.
+  if [[ ! -d "$state_dir" ]] || ! ledger="$(mktemp "${state_dir}/c14_scope_${owner_job}.XXXXXX" 2>/dev/null)"; then
+    unset DISK_MAGICIAN_C14_LEDGER DISK_MAGICIAN_C14_LEDGER_OWNER 2>/dev/null || true
+    C14_SCOPE_LEDGER=""
+    return 1
+  fi
+  C14_SCOPE_LEDGER="$ledger"
+  export DISK_MAGICIAN_C14_LEDGER="$C14_SCOPE_LEDGER"
+  export DISK_MAGICIAN_C14_LEDGER_OWNER="$owner_job"
+}
+c14_scope_release() {
+  if [[ -n "${C14_SCOPE_LEDGER:-}" ]]; then
+    rm -f "$C14_SCOPE_LEDGER" 2>/dev/null || true
+    C14_SCOPE_LEDGER=""
+  fi
+  unset DISK_MAGICIAN_C14_LEDGER DISK_MAGICIAN_C14_LEDGER_OWNER 2>/dev/null || true
+}
 actuator_receipt_begin() {
   local script_dir="$1" job="$2" state_dir="$3"
   ACTUATOR_RECEIPT_SCRIPT_DIR="$script_dir"

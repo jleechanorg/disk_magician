@@ -31,6 +31,8 @@ REPO_ROOT="${DISK_MAGICIAN_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 if [[ -f "$SCRIPT_DIR/safety_lib.sh" ]]; then
   source "$SCRIPT_DIR/safety_lib.sh"
 fi
+# shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 
 DRY_RUN=false
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
@@ -244,6 +246,11 @@ main() {
     RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job main_sweeper \
       --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}" \
       --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' 2>/dev/null || echo "")
+    # Aggregate Tier keeps into this wrapper's terminal receipt; owner=main_sweeper
+    # means the Tier receipts (different job) never double-fold the same ledger.
+    if [[ -n "$RECEIPT_RUN_ID" ]] && ! c14_scope_open "$STATE_DIR" main_sweeper; then
+      log "WARN: could not allocate C14 scope ledger; wrapper keeps stay unaccounted"
+    fi
   fi
 
   log "=== Starting Unified Main Sweeper ==="
@@ -417,11 +424,18 @@ main() {
   fi
 
   if [[ -n "$RECEIPT_RUN_ID" && -f "$RECEIPT_HELPER" ]]; then
-    python3 "$RECEIPT_HELPER" finish --job main_sweeper \
+    if python3 "$RECEIPT_HELPER" finish --job main_sweeper \
       --run-id "$RECEIPT_RUN_ID" \
       --outcome "$outcome" \
       --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' \
-      --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}, \"errors\": $ERRORS}" >/dev/null 2>&1 || true
+      --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}, \"errors\": $ERRORS}" >/dev/null 2>&1; then
+      c14_scope_release
+    else
+      # Terminal persistence failed: keep the raw scoped ledger so the real
+      # keep rows survive for recovery, and surface the failure (nonzero exit).
+      log "WARN: failed to persist main_sweeper terminal receipt; scoped ledger preserved at ${C14_SCOPE_LEDGER:-none}"
+      exit_code=1
+    fi
   fi
 
   return "$exit_code"

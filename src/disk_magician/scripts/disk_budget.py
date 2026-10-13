@@ -309,7 +309,7 @@ def _receipt_data(state, job):
         return job_receipt.get_last_receipt(job, str(state)) or {}
     except (ImportError, OSError, ValueError, TypeError): return {}
 
-def _write_govern_receipt(state, class_name, result, before, after, actuator_receipt):
+def _write_govern_receipt(state, class_name, result, before, after, actuator_receipt, raw_ledger_path=None):
     delta = after - before if isinstance(before, int) and isinstance(after, int) else None
     candidates = actuator_receipt.get("candidates", {}) if isinstance(actuator_receipt, dict) else {}
     removed = candidates.get("removed_count") if isinstance(candidates, dict) else None
@@ -358,6 +358,15 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
         if isinstance(ledger_status, str) and ledger_status:
             post["c14_ledger_status"] = ledger_status
     import job_receipt
+    # If the owning adapter never wrote a terminal receipt, its scoped ledger
+    # still holds real keep rows. Fold it at most once, mark the accounting
+    # explicitly incomplete, and never infer a completed removal or success.
+    if raw_ledger_path and not any(k in post for k in ("c14_kept_bytes", "c14_ledger_status")):
+        folded = job_receipt.fold_c14_ledger(str(raw_ledger_path))
+        if folded and folded.get("c14_kept_bytes"):
+            post["c14_kept_bytes"] = folded["c14_kept_bytes"]
+            post["c14_ledger_status"] = "incomplete"
+            post["c14_ledger_source"] = "owner_terminal_absent"
     store = job_receipt.JobReceiptStore(state_dir=str(state))
     run_id = store.begin(f"govern_{class_name}", trigger="act")
     saved_ledger = os.environ.pop(job_receipt.C14_LEDGER_ENV, None)
@@ -457,7 +466,13 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
         after = _df_free_bytes(state)
         current = _receipt_data(state, row["job"])
         adapter_receipt = current if current.get("id") != prior.get("id") else {}
-        metrics = _write_govern_receipt(state, row["class"], result, before, after, adapter_receipt)
+        # No owning terminal receipt -> fold the raw scoped ledger once into the
+        # govern receipt (explicit incomplete quality). A terminal-presence means
+        # the owner already folded it, so pass nothing (no double count).
+        metrics = _write_govern_receipt(state, row["class"], result, before, after, adapter_receipt,
+                                        c14_ledger if not adapter_receipt else None)
+        # Only release the ephemeral ledger after the terminal govern receipt is
+        # persisted; a raise above leaves the raw ledger in place for recovery.
         try: c14_ledger.unlink()
         except OSError: pass
         completed = (metrics["outcome"] in {"success", "success_noop"}
