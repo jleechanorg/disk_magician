@@ -126,12 +126,25 @@ c14_ephemeral_retention() {
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
-# _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as cleanup_worktree_venvs,
-# an untracked venv dir atop a linked worktree passing the content and push checks.
+# _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as
+# cleanup_worktree_venvs does, an untracked venv dir atop a linked worktree that
+# passes the content and push checks and is past the strict 7-day floor. Prints
+# `recent-activity` (and returns 1) when that floor protects the venv, or when
+# worktree recency cannot be measured; the caller maps it back to kept.
 _av_rebuildable() (
     local h w g t re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]'
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
-    [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]] && { w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] && g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" && [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] && t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] && c14_repo_content_ok "$w" >/dev/null && c14_repo_pushed_ok "$w" >/dev/null; return; }
+    if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
+        w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
+            g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
+            [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
+            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] &&
+            c14_repo_content_ok "$w" >/dev/null && c14_repo_pushed_ok "$w" >/dev/null || return 1
+        # Canonical strict floor: no venv is stripped from a worktree touched
+        # within 7 days, and unmeasurable recency fails closed as active.
+        worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
+        return 0
+    fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
 )
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
@@ -281,7 +294,7 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     case "$kind" in
         ephemeral) ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
             (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; } ;;
-        rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
+        rebuildable) ret="$(_av_rebuildable "$p")" || { echo "kept:${ret:-unproven-content}"; return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
         '') st="$({ { [[ ! -d "$p" ]] || c14_discover_repos "$p"; } && printf 'OK\0'; } |  # repos passed above
                 python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")")"

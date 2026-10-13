@@ -555,6 +555,23 @@ venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOM
 age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
 assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
 assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+# B1: the enclosing linked worktree's canonical 7-day floor protects its venv/.
+# Root, .git and venv/ are 30 days old, but the tracked content was touched 2h ago.
+venvw "$HOME/wt-young" && age "$HOME/wt-young" 43200 && age "$HOME/wt-young/tracked.txt" 120
+assert_eq "$(av "$HOME/wt-young/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ in a worktree with 2h-old tracked content"
+[[ "$(cat "$HOME/wt-young/venv/bin/python")" == py ]] \
+    && ok "young venv path bytes intact after the verdict" || bad "young venv path bytes changed"
+# An 8-day-quiet worktree is past the strict 7-day floor and stays eligible.
+venvw "$HOME/wt-eligible" && age "$HOME/wt-eligible" 11520
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
+    "ignored venv/ in a worktree quiet for 8 days"
+# Canonical unmeasurable recency fails closed (reports active), so the venv stays.
+worktree_is_recently_active() { return 0; }
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ when canonical worktree recency cannot be measured"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$REPO_ROOT/scripts/lib/worktree_recency.sh"
 mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
 git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
 mkdir -p "$HOME/Documents/venv" "$HOME/Documents/venv.bak.old" && printf 't' >"$HOME/Documents/venv/thesis.txt" && printf 't' >"$HOME/Documents/venv.bak.old/t.txt"
