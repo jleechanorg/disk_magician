@@ -591,6 +591,36 @@ assert_contains "T22: real quarantine_conflict reported" "KEEP [quarantine-confl
 [[ "$(receipt_get "$RCN_HOME" candidates.retained_count)" == 1 ]] && record_pass "T22: real retained outcome retained_count=1" || record_fail "T22: real retained outcome retained_count=1" "got '$(receipt_get "$RCN_HOME" candidates.retained_count)'"
 [[ "$(receipt_get "$RCN_HOME" outcome)" == partial ]] && record_pass "T22: real retained outcome reports partial" || record_fail "T22: real retained outcome reports partial" "got '$(receipt_get "$RCN_HOME" outcome)'"
 
+echo "T23: REAL C14 phase-2 mutation stays retained (kept:quarantine_partial_kept), never generic keep/success_noop"
+# Same real-callstack fixture pattern as T22, but the sanctioned BEFORE_UNLINK
+# hook mutates the quarantined root so the deletion walk cannot finish. The real
+# `quarantine.sh -> artifact_verdict.sh -> c14_probe.py -> quarantine_rename.py`
+# callstack then returns `kept:quarantine_partial_kept` (no return-value stub).
+# The bytes stay in quarantine with sidecar + index recovery evidence; the
+# caller must record retained_count=1, removed_count=0 and outcome partial.
+P2_HOME="$TMP_ROOT/p2-home"; P2_CODEX="$P2_HOME/Documents/Codex"; P2_DATE="$P2_CODEX/$D_OLD"; P2_TASK="$P2_DATE/pr-230"
+mkdir -p "$P2_TASK"; printf 'generated\n' >"$P2_TASK/results.json"; age "$P2_TASK"
+P2_FILE="$CUR_DIR/p2-cursor.json"; O23="$TMP_ROOT/o23"; RC=0
+HOME="$P2_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
+  DISK_MAGICIAN_STATE_DIR="$P2_HOME/.disk_magician_state" \
+  DISK_MAGICIAN_CODEX_KIND=ephemeral DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$P2_DATE" \
+  DISK_MAGICIAN_TEST_BEFORE_UNLINK='chmod 500 "$DM_Q_PATH"' \
+  run_sweeper "$O23" --clean --cursor "$P2_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T23: real phase-2 partial run exits 0" || { record_fail "T23: real phase-2 partial run exits 0" "rc=$RC"; cat "$O23"; }
+assert_contains "T23: real kept:quarantine_partial_kept reported" "KEEP [quarantine-partial-kept" "$(cat "$O23")"
+assert_missing "T23: original path moved into quarantine" "$P2_TASK"
+P2_QUAR="$(find "$P2_DATE/.dm-quarantine" -maxdepth 1 -type d -name '[0-9a-f]*' 2>/dev/null | head -1)"
+assert_exists "T23: retained bytes remain in quarantine" "$P2_QUAR/results.json"
+assert_contains "T23: retained file content intact" "generated" "$(cat "$P2_QUAR/results.json" 2>/dev/null)"
+assert_exists "T23: quarantine recovery sidecar remains" "$P2_DATE/.dm-quarantine/$(basename "$P2_QUAR").json"
+P2_INDEX="$(find "$P2_HOME/.disk_magician_state/quarantine-index" -maxdepth 1 -type f -name '*.json' 2>/dev/null | head -1)"
+assert_exists "T23: quarantine recovery index record remains" "$P2_INDEX"
+[[ "$(receipt_get "$P2_HOME" candidates.removed_count)" == 0 ]] && record_pass "T23: phase-2 partial removed_count=0" || record_fail "T23: phase-2 partial removed_count=0" "got '$(receipt_get "$P2_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$P2_HOME" candidates.retained_count)" == 1 ]] && record_pass "T23: phase-2 partial retained_count=1" || record_fail "T23: phase-2 partial retained_count=1" "got '$(receipt_get "$P2_HOME" candidates.retained_count)'"
+[[ "$(receipt_get "$P2_HOME" outcome)" == partial ]] && record_pass "T23: phase-2 partial reports partial" || record_fail "T23: phase-2 partial reports partial" "got '$(receipt_get "$P2_HOME" outcome)'"
+# Restore perms so the fixture trap can clean the mutated quarantine dir.
+chmod -R u+rwx "$P2_DATE/.dm-quarantine" 2>/dev/null || true
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
