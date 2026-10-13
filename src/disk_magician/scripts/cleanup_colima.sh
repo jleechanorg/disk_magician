@@ -152,8 +152,13 @@ select_colima_docker_backend() {
   fi
 
   if [[ "$endpoint" == "unix://$COLIMA_DOCKER_SOCKET" ]]; then
-    prove_colima_docker_backend
-    return $?
+    if prove_colima_docker_backend; then
+      return 0
+    fi
+    # Expected Colima socket path, but absent/untrusted: the VM may simply be
+    # Stopped (a Stopped VM has no socket). Signal 2 so main can still reach
+    # the guarded recovery path instead of silently skipping.
+    return 2
   fi
 
   if ! colima_socket_is_trusted; then
@@ -210,9 +215,12 @@ colima_vm_is_stopped() {
 }
 
 # Stale lima disk lock: disk "colima" IN-USE-BY the colima instance while no
-# hostagent/VZ process or live pid file exists (unclean stop). Live -> not stale.
+# hostagent/VZ/QEMU/unknown process or live pid file holds the datadisk.
+# lsof is authoritative: it lists ANY process (VZ's Virtualization VM has no
+# "colima" token in its cmdline). Missing/erroring lsof means holder state is
+# unproven -> fail closed. Live -> not stale.
 colima_disk_lock_is_stale() {
-  local lima_home="$COLIMA_LIMA" listing pidf pid psout
+  local lima_home="$COLIMA_LIMA" listing pidf pid psout disk_dir lsof_out lsof_rc
   [[ "${COLIMA_PROFILE:-default}" == "default" ]] || return 1
   command -v limactl >/dev/null 2>&1 || return 1
   listing=$(LIMA_HOME="$lima_home" bounded 15 limactl disk list colima 2>/dev/null) || return 1
@@ -225,9 +233,21 @@ colima_disk_lock_is_stale() {
       return 1
     fi
   done
+  # Any process holding a file under the datadisk dir keeps the lock live.
+  # lsof exits 1 when nothing is open (and on this host's directory-scan mode
+  # even when output is produced); anything other than 0/1 is a probe failure.
+  disk_dir="$lima_home/_disks/colima"
+  lsof_rc=0
+  lsof_out=$(bounded 15 lsof -nP +D "$disk_dir" 2>/dev/null) || lsof_rc=$?
+  if [[ "$lsof_rc" -ne 0 && "$lsof_rc" -ne 1 ]]; then
+    return 1   # lsof missing, erroring, or timed out: holder state unproven
+  fi
+  if printf '%s\n' "$lsof_out" | awk '$2 ~ /^[0-9]+$/ {f=1} END {exit !f}'; then
+    return 1   # a live process still holds the disk
+  fi
   psout=$(ps -axo command 2>/dev/null) || return 1
   [[ -n "$psout" ]] || return 1
-  if printf '%s\n' "$psout" | grep -E 'limactl.*hostagent|lima.*hostagent|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
+  if printf '%s\n' "$psout" | grep -E 'limactl.*hostagent|lima.*hostagent|qemu-system|qemu-kvm|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
     return 1
   fi
   return 0
@@ -293,6 +313,24 @@ recover_colima_wedge_once() {
   return 1
 }
 
+# Shared guarded-recovery entry point. Reached both when the Docker daemon is
+# unreachable on a proven Colima backend and when the Colima socket is simply
+# absent because the VM is Stopped. Approval + dry-run gates still apply.
+attempt_guarded_colima_recovery() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DEGRADED / SKIPPED: guarded Colima restart recovery was not attempted in dry-run."
+    return 1
+  fi
+  if command -v colima >/dev/null 2>&1; then
+    if recover_colima_wedge_once; then
+      log "Colima restart recovery succeeded."
+      return 0
+    fi
+    log "WARNING: initial Docker recovery failed"
+  fi
+  return 1
+}
+
 if [[ "$TRIM_ONLY" == true ]]; then
   # Bead disk_magician-mux: cheap scheduled trim so the sparse datadisk never
   # balloons. Never prunes, never restarts, never fails the caller.
@@ -332,24 +370,22 @@ select_colima_docker_backend || backend_rc=$?
 if [[ "$backend_rc" -eq 10 ]]; then
   log "DEGRADED / SKIPPED: Docker backend identity probe failed or timed out."
   exit 1
+elif [[ "$backend_rc" -eq 2 ]] && colima_vm_is_stopped; then
+  # Colima socket absent/untrusted but the default profile is provably Stopped:
+  # a Stopped VM has no socket, so recovery must not depend on one.
+  log "DEGRADED / SKIPPED: Colima backend expected but socket absent; default profile is Stopped — checking guarded Colima recovery."
+  if attempt_guarded_colima_recovery; then
+    exit 0
+  fi
+  exit 1
 elif [[ "$backend_rc" -ne 0 ]]; then
   exit 0
 fi
 
 if ! docker_probe info >/dev/null 2>&1; then
   log "DEGRADED / SKIPPED: Docker daemon unreachable or probe timed out — checking guarded Colima recovery."
-  if [[ "$DRY_RUN" == true ]]; then
-    log "DEGRADED / SKIPPED: guarded Colima restart recovery was not attempted in dry-run."
-    exit 1
-  fi
-  if command -v colima >/dev/null 2>&1; then
-    if recover_colima_wedge_once; then
-      log "Colima restart recovery succeeded."
-      exit 0
-    else
-      log "WARNING: initial Docker recovery failed"
-      exit 1
-    fi
+  if attempt_guarded_colima_recovery; then
+    exit 0
   fi
   exit 1
 fi

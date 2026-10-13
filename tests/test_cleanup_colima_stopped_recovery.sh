@@ -7,6 +7,12 @@
 #   4. lock with live hostagent pid / process -> no unlock, fail closed.
 #   5. no approval -> unchanged refusal.
 #   6. --trim-only on a Stopped VM logs a clear Stopped line, not DEGRADED.
+#   7-10. unlocked listing / ps failure / empty pid / non-default profile fail closed.
+#  11. Stopped VM with no Docker socket -> guarded recovery still reachable (PR #150).
+#  12. QEMU holds the disk (ps+lsof) -> never unlock.
+#  13. VZ holds the disk with no colima token in cmdline -> never unlock (PR #150).
+#  14. lsof holder probe fails -> never unlock, fail closed.
+#  15. No proven holder -> stale lock still unlocks once.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/cleanup_colima.sh"
@@ -62,6 +68,15 @@ cat > "$BIN/ps" <<EOF
 cat "$ST/ps_out" 2>/dev/null || echo /sbin/launchd
 exit 0
 EOF
+# lsof models the authoritative holder probe: real lsof exits 1 when nothing
+# has the disk open, 0 when it lists a holder. A non-{0,1} exit is a failure.
+cat > "$BIN/lsof" <<EOF
+#!/bin/bash
+echo "lsof \$*" >> "$INV"
+if [[ -e "$ST/lsof_fail" ]]; then exit 2; fi
+if [[ -e "$ST/lsof_out" ]]; then cat "$ST/lsof_out"; else exit 1; fi
+exit 0
+EOF
 cat > "$BIN/ssh" <<'EOF'
 #!/bin/bash
 exit 0
@@ -84,7 +99,7 @@ cnt() { grep -c "$1" "$INV" || true; }
 # $1 list_mode  $2 lock(0/1)  $3 approval(0/1)  rest: extra args
 run() {
   local mode="$1" lock="$2" appr="$3"; shift 3
-  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail"
+  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out" "$ST/lsof_fail"
   echo "$mode" > "$ST/list_mode"
   [[ "$lock" == 1 ]] && touch "$ST/lock"
   RC=0
@@ -162,6 +177,55 @@ rm -f "$HOME_D/.colima/_lima/colima/ha.pid"
 # 10. non-default profile never acts on the default instance
 PROFILE=other run stopped 1 1
 if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 0 ]]; then ok "non-default profile: no action on default instance"; else bad "profile"; fi
+
+# --- PR #150 review regression cases (RED before the shared-cause fix). ---
+
+# 11. Stopped VM with no Docker socket -> guarded recovery must still be reached.
+rm -f "$HOME_D/.colima/default/docker.sock"
+run stopped 0 1
+if [[ $(cnt '^colima start') -eq 1 ]] && ! grep -qi 'could not prove' "$TMP/out"; then
+  ok "no docker socket + stopped: guarded recovery reached"
+else bad "no docker socket + stopped"; fi
+python3 - "$HOME_D/.colima/default/docker.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(sys.argv[1]); s.close()
+PY
+
+# 12. QEMU holds the datadisk (ps + lsof) -> never unlock.
+: > "$INV"; rm -f "$ST/started" "$ST/ps_out" "$ST/ps_fail" "$ST/lsof_out" "$ST/lsof_fail"
+echo stopped > "$ST/list_mode"; touch "$ST/lock"
+echo "qemu-system-aarch64 -drive file=$HOME_D/.colima/_lima/_disks/colima/datadisk,if=virtio" > "$ST/ps_out"
+echo "qemu-syst 4242 jleechan 5u REG 1,18 107374182400 1 $HOME_D/.colima/_lima/_disks/colima/datadisk" > "$ST/lsof_out"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]] && grep -q 'failing closed' "$TMP/out"; then
+  ok "qemu holds disk: no unlock, fail closed"
+else bad "qemu holds disk"; fi
+
+# 13. VZ holds the disk but its real cmdline has no colima token -> no unlock.
+: > "$INV"; rm -f "$ST/started" "$ST/ps_out" "$ST/lsof_out"; touch "$ST/lock"
+echo "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine" > "$ST/ps_out"
+echo "com.apple 93307 jleechan 4u REG 1,18 21474836480 1 $HOME_D/.colima/_lima/colima/diffdisk" > "$ST/lsof_out"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock') -eq 0 ]] && grep -q 'failing closed' "$TMP/out"; then
+  ok "vz holds disk with clean ps: no unlock, fail closed"
+else bad "vz holds disk"; fi
+
+# 14. lsof cannot prove holder state (probe failure) -> no unlock.
+: > "$INV"; rm -f "$ST/started" "$ST/ps_out" "$ST/lsof_out"; touch "$ST/lock" "$ST/lsof_fail"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock') -eq 0 ]] && grep -q 'failing closed' "$TMP/out"; then
+  ok "lsof failure: no unlock, fail closed"
+else bad "lsof failure"; fi
+rm -f "$ST/lsof_fail"
+
+# 15. No disk holders proven -> stale lock still unlocks (no over-fail-closed).
+: > "$INV"; rm -f "$ST/started" "$ST/ps_out" "$ST/lsof_out" "$ST/lsof_fail"; touch "$ST/lock"
+echo "limactl usernet --listen-qemu /x/user-v2_qemu.sock" > "$ST/ps_out"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^limactl disk unlock colima') -eq 1 && -e "$ST/started" ]]; then
+  ok "no holders (lsof clean): unlock still allowed"
+else bad "no holders unlock"; fi
+rm -f "$ST/lsof_out"
 
 echo "passed=$PASS failed=$FAIL"
 [[ $FAIL -eq 0 ]]
