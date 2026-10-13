@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE_ROOT=/tmp/disk_magician/fixtures
 mkdir -p "$FIXTURE_ROOT"
 TMP="$(cd "$(mktemp -d "$FIXTURE_ROOT/quarantine-test.XXXXXX")" && pwd -P)"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 MNT=""
 cleanup() {
   [[ -n "$MNT" ]] && hdiutil detach -quiet -force "$MNT" >/dev/null 2>&1
@@ -46,9 +48,10 @@ artifact_removal_verdict() {
   fi
 }
 
-N=0
+N=0 ACTIVE_STATE=""
 fixture() {  # fresh parent/art with a published report.md (version A), a subdir and a symlink
   N=$((N+1)); A="$TMP/p$N/art"; Q="$TMP/p$N/.dm-quarantine"
+  export DISK_MAGICIAN_STATE_DIR="${ACTIVE_STATE:-$TMP/state-$N}"; mkdir -p "$DISK_MAGICIAN_STATE_DIR"
   mkdir -p "$A/sub"; printf 'AAAA' > "$A/report.md"; echo x > "$A/sub/x.txt"; ln -s report.md "$A/link"
 }
 OUT=""
@@ -57,6 +60,18 @@ intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/lin
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
 qid() { local value="${OUT#*:}"; echo "${value%%:*}"; }
 sidecar_id() { local f; f="$(find "$Q" -maxdepth 1 -name '*.json' -print -quit)"; basename "$f" .json; }
+index_id() { local f; f="$(find "$DISK_MAGICIAN_STATE_DIR/quarantine-index" -maxdepth 1 -name '*.json' -print -quit)"; basename "$f" .json; }
+prepare_inputs() {
+  fixture
+  BINDING="$TMP/binding$N.json"; INV="$TMP/inventory$N.json"
+  python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
+  python3 "$TMP/inv.py" "$A" > "$INV"
+}
+prepare_quarantine() {
+  prepare_inputs
+  OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING")"
+  QID="${OUT#quarantined:}"
+}
 
 # Successful C14 verdict survives rename and phase-1 re-hash, then phase 2 removes it.
 fixture; run X=1
@@ -232,6 +247,40 @@ if [[ "$(uname)" == Darwin ]] && hdiutil create -quiet -size 4m -fs HFS+ -volnam
     check 'cross-device: nothing copied or written' [ -z "$(find "$Q" -mindepth 1 ! -name '.*' -print -quit)" ]
   else echo "SKIP: cross-device (hdiutil attach failed)"; fi
 else echo "SKIP: cross-device (no hdiutil)"; fi
+
+# Durable reconciliation resolves pre-delete crashes through the advisory index.
+prepare_inputs; env DISK_MAGICIAN_TEST_KILL_AT=after_intent python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING"; KILL_RC=$?
+QID="$(index_id)"; RECON="$(quarantine_reconcile)"
+check 'crash after intent: original is retained and metadata reconciled' bash -c '[[ "$1" -eq 137 && -f "$2/report.md" && "$3" == *"reconciled:$4:original"* && ! -e "$5/$4.json" ]]' _ "$KILL_RC" "$A" "$RECON" "$QID" "$Q"
+prepare_inputs; env DISK_MAGICIAN_TEST_KILL_AT=after_rename python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING"; KILL_RC=$?
+QID="$(index_id)"; RECON="$(quarantine_reconcile)"
+check 'crash after rename: exclusive rollback restores the artifact' bash -c '[[ "$1" -eq 137 && -f "$2/report.md" && ! -e "$3/$4" && "$5" == *"reconciled:$4:rolled-back"* ]]' _ "$KILL_RC" "$A" "$Q" "$QID" "$RECON"
+prepare_inputs; env DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' DISK_MAGICIAN_TEST_KILL_AT=before_rollback python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING"; KILL_RC=$?
+QID="$(index_id)"; RECON="$(quarantine_reconcile)"
+check 'crash before rollback: rollback_pending is reconciled' bash -c '[[ "$1" -eq 137 && "$(cat "$2/report.md" 2>/dev/null)" == BBBB && ! -e "$3/$4" && "$5" == *"reconciled:$4:rolled-back"* ]]' _ "$KILL_RC" "$A" "$Q" "$QID" "$RECON"
+
+# Mid-delete resume never sweeps new entries and rechecks every remaining digest.
+prepare_quarantine; MTIMES="$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_atime_ns, s.st_mtime_ns)' "$Q/$QID/report.md")"; env DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?
+printf BBBB > "$Q/$QID/report.md"; python3 -c 'import os,sys; a,m=map(int,sys.argv[2:]); os.utime(sys.argv[1],ns=(a,m))' "$Q/$QID/report.md" $MTIMES; printf EXTRA > "$Q/$QID/new-after-crash"
+RECON="$(quarantine_reconcile)"
+check 'mid-delete crash: changed and added entries remain quarantined' bash -c '[[ "$1" -eq 137 && "$2" == *quarantine_partial_kept* && "$(cat "$3/$4/report.md")" == BBBB && "$(cat "$3/$4/new-after-crash")" == EXTRA && -f "$3/$4.json" ]]' _ "$KILL_RC" "$RECON" "$Q" "$QID"
+
+# Malformed sidecars alert without touching payload; exact-ID restore works only to a free path.
+prepare_quarantine; printf '{malformed' > "$Q/$QID.json"; RECON="$(quarantine_reconcile)"
+check 'malformed sidecar: alert and keep indexed payload' bash -c '[[ "$1" == *"alert:$2:"* && -f "$3/$2/report.md" && -f "$4/quarantine-index/$2.json" ]]' _ "$RECON" "$QID" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+prepare_quarantine; RESTORE="$(bash "$ROOT/disk_magician.sh" quarantine restore "$QID")"
+check 'restore: exact kept artifact returns when original path is free' bash -c '[[ "$1" == "restored:$2" && -f "$3/report.md" && ! -e "$4/$2" && ! -e "$5/quarantine-index/$2.json" ]]' _ "$RESTORE" "$QID" "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+check 'restore unknown id: kept' [ "$(bash "$ROOT/disk_magician.sh" quarantine restore ffffffffffffffff)" = kept:unknown-quarantine-id ]
+
+# An expired absolute monotonic deadline leaves a cursor which the next call resumes.
+ACTIVE_STATE="$TMP/state-deadline"; prepare_quarantine; QID_A="$QID"; A_A="$A"; Q_A="$Q"
+ACTIVE_STATE="$TMP/state-deadline"; prepare_quarantine; QID_B="$QID"; A_B="$A"; Q_B="$Q"
+CURSOR="$TMP/reconcile.cursor"; NOW="$(python3 -c 'import time; print(time.monotonic())')"
+RECON="$(quarantine_reconcile --deadline-at "$NOW" --cursor "$CURSOR")"
+check 'deadline: deferred cursor preserves unprocessed sidecars' bash -c '[[ "$1" == deferred:* && -f "$2" && -f "$3/$5.json" && -e "$3/$5" && -f "$4/$6.json" && -e "$4/$6" && -f "$7/quarantine-index/$5.json" && -f "$7/quarantine-index/$6.json" ]]' _ "$RECON" "$CURSOR" "$Q_A" "$Q_B" "$QID_A" "$QID_B" "$DISK_MAGICIAN_STATE_DIR"
+RECON="$(quarantine_reconcile --cursor "$CURSOR")"
+check 'deadline resume: cursor processes remaining indexed entries' bash -c '[[ "$1" == *"reconciled:$2:rolled-back"* && "$1" == *"reconciled:$3:rolled-back"* && ! -e "$4" && -f "$5/report.md" && -f "$6/report.md" ]]' _ "$RECON" "$QID_A" "$QID_B" "$CURSOR" "$A_A" "$A_B"
+ACTIVE_STATE=""
 
 echo "quarantine: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

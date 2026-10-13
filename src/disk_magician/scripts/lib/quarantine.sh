@@ -26,3 +26,10 @@ quarantine_phase2() {
   [[ "$result" == removed ]] || { echo kept:quarantine_partial_kept; return 0; }
   echo removed
 }
+quarantine_reconcile() {
+  python3 "$_Q_LIB/../quarantine_rename.py" reconcile "$@"
+}
+quarantine_restore() {
+  [[ $# -eq 1 ]] || { echo "kept:unknown-quarantine-id"; return 0; }
+  python3 "$_Q_LIB/../quarantine_rename.py" restore "$1"
+}

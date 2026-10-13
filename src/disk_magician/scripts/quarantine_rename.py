@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, hashlib, json, os, secrets, stat, subprocess, sys
+import ctypes, hashlib, json, os, secrets, stat, subprocess, sys, tempfile, time
+from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
 def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol raises LookupError
@@ -9,6 +10,8 @@ def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol
     if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(4)): raise OSError(ctypes.get_errno(), "renameatx_np")
 def hook(name, path, dest):
     if ENV.get(name): subprocess.run(["bash", "-c", ENV[name]], env=dict(ENV, DM_Q_PATH=path, DM_Q_DEST=dest), stdout=subprocess.DEVNULL)
+def kill_at(point):
+    if os.environ.get("DISK_MAGICIAN_TEST_KILL_AT") == point: os.kill(os.getpid(), 9)
 def bind_parent(path, out):  # called by quarantine.sh before artifact_removal_verdict
     absolute = os.path.abspath(path); parent = os.path.dirname(absolute); base = os.path.basename(absolute)
     resolved = os.path.realpath(parent); fd = os.open(resolved, DIRFL)
@@ -68,6 +71,65 @@ def update_sidecar(qfd, side, rec):
         except OSError: pass
         raise
     os.fsync(qfd)
+def index_dir():
+    root = Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")).expanduser()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / "quarantine-index"
+    path.mkdir(mode=0o700, exist_ok=True)
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise OSError("unsafe quarantine index directory")
+    return path
+def index_record(qid, parent, pstat, qstat):
+    return {"schema": 1, "id": qid, "parent_path": parent,
+            "parent_dev": pstat.st_dev, "parent_ino": pstat.st_ino,
+            "quarantine_path": os.path.join(parent, ".dm-quarantine"),
+            "quarantine_dev": qstat.st_dev, "quarantine_ino": qstat.st_ino}
+def index_write(qid, record):
+    if ENV.get("DISK_MAGICIAN_TEST_INDEX_WRITE_FAIL"): raise OSError("injected index write failure")
+    directory = index_dir(); temp = "." + qid + "." + secrets.token_hex(8) + ".tmp"
+    dfd = os.open(directory, DIRFL)
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            data = json.dumps(record, separators=(",", ":")).encode()
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0: raise OSError("short quarantine index write")
+                view = view[written:]
+            os.fsync(fd)
+        finally: os.close(fd)
+        os.link(temp, qid + ".json", src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
+        os.unlink(temp, dir_fd=dfd)
+        os.fsync(dfd)
+    except Exception:
+        try: os.unlink(temp, dir_fd=dfd)
+        except OSError: pass
+        raise
+    finally: os.close(dfd)
+def index_read(qid):
+    directory = index_dir(); dfd = os.open(directory, DIRFL)
+    try:
+        fd = os.open(qid + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+        with os.fdopen(fd, "r") as f: record = json.load(f)
+    finally: os.close(dfd)
+    if (not isinstance(record, dict) or record.get("schema") != 1 or record.get("id") != qid or
+            not isinstance(record.get("parent_path"), str) or not os.path.isabs(record["parent_path"]) or
+            record.get("quarantine_path") != os.path.join(record["parent_path"], ".dm-quarantine") or
+            any(type(record.get(k)) is not int for k in ("parent_dev", "parent_ino", "quarantine_dev", "quarantine_ino"))):
+        raise ValueError("invalid quarantine index entry")
+    return record
+def index_drop(qid):
+    try: directory = index_dir()
+    except OSError: return False
+    dfd = os.open(directory, DIRFL)
+    try:
+        try: os.unlink(qid + ".json", dir_fd=dfd)
+        except FileNotFoundError: return True
+        os.fsync(dfd); return True
+    except OSError: return False
+    finally: os.close(dfd)
 def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re-hash checks all pass
     canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
     try:
@@ -111,6 +173,8 @@ def phase1(path, inv_file, binding_file):
         if q.st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"
     qdir = os.path.join(parent, ".dm-quarantine"); qid = secrets.token_hex(8); side = qid + ".json"
+    try: index_write(qid, index_record(qid, parent, bound_parent, q))
+    except Exception: return "kept:quarantine-index-write-failed"
     rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
            "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
            "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
@@ -123,22 +187,27 @@ def phase1(path, inv_file, binding_file):
     except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
         try: os.unlink(side, dir_fd=qfd)
         except OSError: pass
+        index_drop(qid)
         return "kept:intent-write-failed"
+    kill_at("after_intent")
     dest = os.path.join(qdir, qid)
     hook("DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME", path, dest)
     if not same_entry(pfd, ".dm-quarantine", q): return f"quarantine_conflict:{qid}"
     if not same_entry(pfd, base, st):
         try: os.unlink(side, dir_fd=qfd)
         except OSError: pass
+        index_drop(qid)
         return "kept:identity-mismatch"
     try: renamex(pfd, base, qfd, qid)  # commit point; both directory bindings stay pinned
     except (LookupError, OSError) as e:
         try: os.unlink(side, dir_fd=qfd)
         except OSError: pass
+        index_drop(qid)
         return "kept:exclusive_rename_unavailable" if isinstance(e, LookupError) else "kept:rename-failed"
     try:
         os.fsync(pfd); os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"
+    kill_at("after_rename")
     hook("DISK_MAGICIAN_TEST_AFTER_QUARANTINE", path, dest)
     why = verify(pfd, qfd, q, qid, rec, qdir)
     if not why: return f"quarantined:{qid}"
@@ -152,6 +221,7 @@ def phase1(path, inv_file, binding_file):
         current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (rec["dev"], rec["ino"]): return f"quarantine_conflict:{qid}"
         hook("DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME", path, dest)
+        kill_at("before_rollback")
         renamex(qfd, qid, pfd, base)
     except OSError: return f"quarantine_conflict:{qid}"  # conflict: preserve quarantined entry and sidecar
     try:
@@ -202,6 +272,7 @@ def phase1(path, inv_file, binding_file):
     except OSError: return f"quarantine_conflict:{qid}"
     try: os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"
+    if not index_drop(qid): return f"quarantine_conflict:{qid}:index-cleanup-failed"
     return f"kept:{why}"
 
 def entry_kind(st):
@@ -308,6 +379,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
             return False
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
+        kill_at("mid_delete")
         return True
     except OSError: return False
 
@@ -367,15 +439,157 @@ def phase2(binding_file, qid):
         if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
         os.unlink(side, dir_fd=qfd)
         os.fsync(qfd)
+        if not index_drop(qid): return "kept:quarantine_partial_kept"
         return "removed"
     except Exception: return "kept:quarantine_partial_kept"
     finally:
         if qfd >= 0: os.close(qfd)
         if pfd >= 0: os.close(pfd)
+def indexed_item(qid):
+    index = index_read(qid)
+    pfd = os.open(index["parent_path"], DIRFL)
+    try:
+        parent_stat = os.fstat(pfd)
+        if (parent_stat.st_dev, parent_stat.st_ino) != (index["parent_dev"], index["parent_ino"]):
+            raise ValueError("parent identity mismatch")
+        qstat = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
+        if (not stat.S_ISDIR(qstat.st_mode) or qstat.st_uid != os.getuid() or qstat.st_mode & 0o777 != 0o700 or
+                (qstat.st_dev, qstat.st_ino) != (index["quarantine_dev"], index["quarantine_ino"])):
+            raise ValueError("quarantine directory identity mismatch")
+        qfd = os.open(".dm-quarantine", DIRFL, dir_fd=pfd)
+    except Exception:
+        os.close(pfd); raise
+    try:
+        opened = os.fstat(qfd)
+        if (opened.st_dev, opened.st_ino) != (index["quarantine_dev"], index["quarantine_ino"]):
+            raise ValueError("quarantine directory retargeted")
+        fd = os.open(qid + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=qfd)
+        with os.fdopen(fd, "r") as f: record = json.load(f)
+        inventory = record.get("inventory", []) if isinstance(record, dict) else []
+        root = next((e for e in inventory if isinstance(e, dict) and e.get("path") == "."), None)
+        if (not isinstance(record, dict) or record.get("id") != qid or
+                record.get("parent_dev") != index["parent_dev"] or record.get("parent_ino") != index["parent_ino"] or
+                record.get("quarantine_dev") != index["quarantine_dev"] or record.get("quarantine_ino") != index["quarantine_ino"] or
+                not isinstance(record.get("original"), str) or not os.path.isabs(record["original"]) or
+                os.path.dirname(record["original"]) != index["parent_path"] or
+                not isinstance(inventory, list) or not isinstance(root, dict) or
+                (record.get("dev"), record.get("ino")) != (root.get("dev"), root.get("ino"))):
+            raise ValueError("sidecar identity or path mismatch")
+        return index, pfd, qfd, record
+    except Exception:
+        os.close(qfd); os.close(pfd); raise
+def finish_sidecar(qfd, qid):
+    os.unlink(qid + ".json", dir_fd=qfd); os.fsync(qfd)
+    if not index_drop(qid): raise OSError("quarantine index cleanup failed")
+def reconcile_one(qid):
+    pfd = qfd = -1
+    try:
+        index, pfd, qfd, record = indexed_item(qid)
+        phase = record.get("phase")
+        base = os.path.basename(record["original"])
+        expected = (record["dev"], record["ino"])
+        try: at_original = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError: at_original = None
+        try: at_quarantine = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+        except FileNotFoundError: at_quarantine = None
+        original_matches = at_original is not None and (at_original.st_dev, at_original.st_ino) == expected
+        quarantine_matches = at_quarantine is not None and (at_quarantine.st_dev, at_quarantine.st_ino) == expected
+        if phase == "deleting":
+            binding = {"parent_path": index["parent_path"], "parent_dev": index["parent_dev"], "parent_ino": index["parent_ino"]}
+            with tempfile.NamedTemporaryFile("w", dir=index_dir(), prefix=".reconcile.", delete=False) as f:
+                json.dump(binding, f); binding_path = f.name
+            try: result = phase2(binding_path, qid)
+            finally:
+                try: os.unlink(binding_path)
+                except OSError: pass
+            return result
+        if phase not in ("intent", "rollback_pending", "rollback_conflict"):
+            return f"alert:{qid}:malformed-phase"
+        if original_matches and at_quarantine is None:
+            finish_sidecar(qfd, qid); return f"reconciled:{qid}:original"
+        if at_original is None and quarantine_matches:
+            renamex(qfd, qid, pfd, base)
+            os.fsync(qfd); os.fsync(pfd)
+            restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+            if (restored.st_dev, restored.st_ino) != expected: return f"alert:{qid}:rollback-identity-mismatch"
+            finish_sidecar(qfd, qid); return f"reconciled:{qid}:rolled-back"
+        return f"alert:{qid}:location-conflict"
+    except FileNotFoundError:
+        return f"alert:{qid}:missing-index-or-sidecar"
+    except Exception as exc:
+        reason = str(exc).replace("\n", " ")[:120]
+        return f"alert:{qid}:reconcile-failed:{reason}"
+    finally:
+        if qfd >= 0: os.close(qfd)
+        if pfd >= 0: os.close(pfd)
+def cursor_write(path, last_id):
+    target = os.path.abspath(os.path.expanduser(path)); parent = os.path.dirname(target)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    temp = os.path.join(parent, "." + os.path.basename(target) + "." + secrets.token_hex(8) + ".tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        data = json.dumps({"last_id": last_id}, separators=(",", ":")).encode()
+        os.write(fd, data); os.fsync(fd)
+    finally: os.close(fd)
+    os.replace(temp, target)
+    dfd = os.open(parent, DIRFL)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+def quarantine_reconcile(args):
+    deadline = None; cursor = None; i = 0
+    while i < len(args):
+        if args[i] == "--deadline-at" and i + 1 < len(args): deadline = float(args[i + 1]); i += 2
+        elif args[i] == "--cursor" and i + 1 < len(args): cursor = args[i + 1]; i += 2
+        else: raise ValueError("usage: reconcile [--deadline-at MONOTONIC] [--cursor FILE]")
+    directory = index_dir(); cursor = cursor or str(directory / "reconcile.cursor")
+    last = None
+    try:
+        with open(cursor) as f: last = json.load(f).get("last_id")
+    except FileNotFoundError: pass
+    except Exception:
+        print("ALERT: quarantine reconcile cursor is malformed"); return 1
+    dfd = os.open(directory, DIRFL)
+    try: ids = sorted(n[:-5] for n in os.listdir(dfd) if len(n) == 21 and n.endswith(".json") and all(c in "0123456789abcdef" for c in n[:-5]))
+    finally: os.close(dfd)
+    if last is not None: ids = [qid for qid in ids if qid > last]
+    completed = last
+    for qid in ids:
+        if deadline is not None and time.monotonic() >= deadline:
+            cursor_write(cursor, completed); print(f"deferred:{qid}"); return 0
+        result = reconcile_one(qid); print(result)
+        if result.startswith("alert:"): print(f"ALERT: {result}")
+        completed = qid; cursor_write(cursor, completed)
+    try: os.unlink(cursor)
+    except FileNotFoundError: pass
+    return 0
+def quarantine_restore(qid):
+    pfd = qfd = -1
+    try:
+        if len(qid) != 16 or any(c not in "0123456789abcdef" for c in qid): return "kept:unknown-quarantine-id"
+        index, pfd, qfd, record = indexed_item(qid)
+        if record.get("phase") == "deleting": return "kept:quarantine_partial_kept"
+        base = os.path.basename(record["original"]); root = next(e for e in record["inventory"] if e.get("path") == ".")
+        try: os.stat(base, dir_fd=pfd, follow_symlinks=False); return "kept:restore-target-exists"
+        except FileNotFoundError: pass
+        current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (root.get("dev"), root.get("ino")): return "kept:identity-mismatch"
+        if canon_inventory(visit(qfd, qid, ".", [])) != canon_inventory(record["inventory"]): return "kept:quarantine_partial_kept"
+        renamex(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
+        finish_sidecar(qfd, qid)
+        return f"restored:{qid}"
+    except FileNotFoundError: return "kept:unknown-quarantine-id"
+    except Exception: return "kept:quarantine_restore_failed"
+    finally:
+        if qfd >= 0: os.close(qfd)
+        if pfd >= 0: os.close(pfd)
+def canon_inventory(entries):
+    return sorted(json.dumps([e.get(k) for k in KEYS]) for e in entries)
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
     elif args[:1] == ["candidate"] and len(args) == 2: print(bound_candidate(args[1]))
     elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
     elif args[:1] == ["phase2"] and len(args) == 3: print(phase2(*args[1:]))
+    elif args[:1] == ["restore"] and len(args) == 2: print(quarantine_restore(args[1]))
+    elif args[:1] == ["reconcile"]: sys.exit(quarantine_reconcile(args[1:]))
     else: print("kept:check-failed")
