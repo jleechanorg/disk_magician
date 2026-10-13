@@ -23,9 +23,9 @@ SYSTEM_BOUNDARY_PATHS = (
     "/System/Volumes/Data/.DocumentRevisions-V100",
 )
 USER_PROBE_PATHS = {
-    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
-    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
-    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+    "mobile_sync": os.path.join("/Users/fixture", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/fixture", "Library", "Mail"),
+    "messages": os.path.join("/Users/fixture", "Library", "Messages"),
 }
 FORGED_USER_PROBE_PATHS = {
     "mobile_sync": "/Users/reviewer/../../tmp/forged/Library/Application Support/MobileSync/Backup",
@@ -332,9 +332,9 @@ class TestValidateLedger(unittest.TestCase):
                 }) for a in d["system_boundary_attestations"]],
             )),
             ("non_canonical_relative", lambda d: (
-                d["fda_probe_paths"].update(mail=os.path.join(os.path.expanduser("~"), "Mail")),
-                d["fda_preflight"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")),
-                [a["verifier"]["fda"]["probes"]["mail"].update(path=os.path.join(os.path.expanduser("~"), "Mail")) for a in d["system_boundary_attestations"]],
+                d["fda_probe_paths"].update(mail=os.path.join("/Users/fixture", "Mail")),
+                d["fda_preflight"]["probes"]["mail"].update(path=os.path.join("/Users/fixture", "Mail")),
+                [a["verifier"]["fda"]["probes"]["mail"].update(path=os.path.join("/Users/fixture", "Mail")) for a in d["system_boundary_attestations"]],
             )),
             ("catalog_dot_segments", lambda d: (
                 d["fda_probe_paths"].update(FORGED_USER_PROBE_PATHS),
@@ -545,23 +545,41 @@ class TestCLIIntegration(unittest.TestCase):
         floor = (now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S%z")
         head = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
         _write_ledger_commit(
-            self.repo, ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}]),
+            self.repo, ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}], captured_at=(now - datetime.timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")),
             "old", old,
         )
         _write_ledger_commit(
-            self.repo, ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}]),
+            self.repo, ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}], captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
             "floor", floor,
         )
         _write_ledger_commit(
             self.repo, ledger(5 * GIB_KB, 0, [
                 {"path": "/a", "measured_kb": 2 * GIB_KB},
                 {"path": "/growth", "measured_kb": 3 * GIB_KB},
-            ]), "head", head,
+            ], captured_at=now.strftime("%Y-%m-%dT%H:%M:%SZ")), "head", head,
         )
         result = self._run_cli("--days", "3")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("floor (3d):", result.stdout)
         self.assertIn("+3.00 GiB  /growth", result.stdout)
+
+    def test_sparse_window_reports_capture_span_and_samples(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for age, used in [(2, 2), (0, 4)]:
+            captured = (now - datetime.timedelta(days=age)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _write_ledger_commit(self.repo, ledger(used * GIB_KB, 0, [{"path": "/a", "measured_kb": used * GIB_KB}], captured_at=captured), "capture")
+        result = self._run_cli("--days", "30")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("samples=2", result.stdout)
+        self.assertIn("observed_span_days=2.00", result.stdout)
+        self.assertIn("coverage_status=partial", result.stdout)
+        self.assertIn("capture_dates=", result.stdout)
+
+    def test_recent_commit_cannot_recover_ancient_capture(self):
+        _write_ledger_commit(self.repo, ledger(GIB_KB, 0, [{"path": "/a", "measured_kb": GIB_KB}], captured_at="2020-01-01T00:00:00Z"), "copied old data")
+        result = self._run_cli("--days", "30")
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("no valid ledger snapshots", result.stderr)
 
     def test_days_cannot_be_combined_with_explicit_ref(self):
         result = self._run_cli("HEAD~1", "--days", "7")

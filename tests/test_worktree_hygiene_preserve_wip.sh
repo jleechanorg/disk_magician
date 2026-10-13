@@ -2,8 +2,8 @@
 # test_worktree_hygiene_preserve_wip.sh — worktree_hygiene.sh --preserve-wip.
 #
 # Every case runs against throwaway repos under a temp HOME; no real worktree,
-# remote, or GitHub call is ever touched (origin URLs point at nonexistent
-# local paths; `gh` is a fake on PATH where a PR state is needed).
+# remote, or GitHub call is ever touched (origin URLs point at private fixture bare
+# repositories; `gh` is a fake on PATH where a PR state is needed).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,7 +66,9 @@ mk_repo() {
     echo base >"$r/tracked.txt"
     g -C "$r" add -A
     g -C "$r" commit -q -m init
-    g -C "$r" remote add origin "$TMPROOT/no-such-remote.git"
+    g init -q --bare "$r-origin.git"
+    g -C "$r" remote add origin "$r-origin.git"
+    g -C "$r" push -q origin main
     echo "$r"
 }
 
@@ -97,7 +99,7 @@ R1="$(mk_repo r1)"
 W1="$(mk_wt "$R1" dirty1)"
 echo "my precious edit" >>"$W1/tracked.txt"
 backdate_tree "$W1" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R1" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R1" --push-wip --execute --preserve-wip)"
 B1="wip/worktree-hygiene/$TODAY/dirty1"
 assert_contains "$OUT" "PRESERVED-WIP" "ledger PRESERVED-WIP line"
 assert_contains "$OUT" "$W1 -> $B1" "ledger names path -> branch"
@@ -115,7 +117,7 @@ R2="$(mk_repo r2)"
 W2="$(mk_wt "$R2" untracked2)"
 echo "new notes" >"$W2/notes.md"
 backdate_tree "$W2" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R2" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R2" --push-wip --execute --preserve-wip)"
 B2="wip/worktree-hygiene/$TODAY/untracked2"
 assert_contains "$OUT" "$W2 -> $B2" "untracked preserved"
 assert_true "git -C '$R2' show '$B2:notes.md' | grep -q 'new notes'" "branch contains untracked file"
@@ -131,7 +133,7 @@ g -C "$W3" commit -q -m "detached commit"
 SHA3="$(git -C "$W3" rev-parse HEAD)"
 backdate_tree "$W3" 30
 # No --skip-push: push to the nonexistent origin fails -> rejected-nonff.
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R3" --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R3" --execute --preserve-wip --push-wip)"
 B3="wip/worktree-hygiene/$TODAY/detached3"
 assert_contains "$OUT" "$W3 -> $B3" "detached-unpushed preserved"
 assert_true "[[ \"\$(git -C '$R3' rev-parse '$B3')\" == '$SHA3' ]]" "wip branch points at detached commit (no empty commit)"
@@ -145,7 +147,7 @@ echo "edit" >>"$W4/tracked.txt"
 mkdir -p "$W4/node_modules/pkg"
 echo "x" >"$W4/node_modules/pkg/index.js"
 backdate_tree "$W4" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R4" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R4" --push-wip --execute --preserve-wip)"
 B4="wip/worktree-hygiene/$TODAY/nm4"
 assert_contains "$OUT" "$W4 -> $B4" "node_modules worktree preserved"
 assert_true "! git -C '$R4' ls-tree -r --name-only '$B4' | grep -q node_modules" "node_modules not committed"
@@ -158,7 +160,7 @@ W5="$(mk_wt "$R5" env5)"
 echo "edit" >>"$W5/tracked.txt"
 echo "SECRET=1" >"$W5/.env"
 backdate_tree "$W5" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R5" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R5" --push-wip --execute --preserve-wip)"
 assert_not_contains "$OUT" "PRESERVED-WIP" "no preservation with ignored .env"
 assert_contains "$OUT" "ignored-secret" "skip reason names ignored secret"
 assert_true "[[ -f '$W5/.env' ]] && wt_registered '$R5' '$W5'" ".env worktree kept"
@@ -186,7 +188,7 @@ cat >"$FAKEBIN/gh" <<'EOF'
 echo '[{"number":1,"state":"OPEN","title":"t","headRefOid":"abc"}]'
 EOF
 chmod +x "$FAKEBIN/gh"
-OUT="$(WORKTREE_APPROVED=1 PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repos "$R6" --skip-push --execute --preserve-wip 2>&1)"
+OUT="$(WORKTREE_APPROVED=1 PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repos "$R6" --push-wip --execute --preserve-wip 2>&1)"
 assert_contains "$OUT" "large-diff" "large-diff classified"
 assert_contains "$OUT" "open-pr" "open-pr classified"
 assert_not_contains "$OUT" "PRESERVED-WIP" "neither preserved"
@@ -198,7 +200,7 @@ R7="$(mk_repo r7)"
 W7="$(mk_wt "$R7" young7)"
 echo "fresh" >>"$W7/tracked.txt"
 backdate_tree "$W7" 3
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R7" --skip-push --execute --preserve-wip --min-age 1)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R7" --push-wip --execute --preserve-wip --min-age 1)"
 assert_contains "$OUT" "young" "young preserved"
 assert_not_contains "$OUT" "PRESERVED-WIP" "young not wip-preserved"
 assert_true "[[ -d '$W7' ]]" "young worktree kept"
@@ -213,7 +215,7 @@ backdate_tree "$W8" 30
 (cd "$W8/sub" && exec sleep 300) &
 BG_PIDS+=("$!")
 sleep 0.5
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R8" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R8" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "live-cwd" "skip reason live-cwd"
 assert_not_contains "$OUT" "PRESERVED-WIP" "live worktree not preserved"
 assert_true "[[ -d '$W8' ]] && git -C '$W8' status --porcelain | grep -q tracked.txt" "live worktree untouched (still dirty)"
@@ -235,7 +237,7 @@ assert_true "[[ \"\$MAN_BEFORE\" == \"\$(cat '$MANIFEST' 2>/dev/null || true)\" 
 
 # ---------------------------------------------------------------------------
 echo "case 10: --execute without WORKTREE_APPROVED=1 refuses"
-OUT="$(run_hygiene "$R9" --skip-push --execute --preserve-wip)"
+OUT="$(run_hygiene "$R9" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "Refusing" "refuses without approval"
 assert_true "[[ -d '$W9' ]] && ! git -C '$R9' for-each-ref refs/heads/wip | grep -q ." "nothing changed"
 
@@ -246,7 +248,7 @@ W11="$(mk_wt "$R11" collide11)"
 g -C "$R11" branch "wip/worktree-hygiene/$TODAY/collide11" main
 echo "edit" >>"$W11/tracked.txt"
 backdate_tree "$W11" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R11" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R11" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "$W11 -> wip/worktree-hygiene/$TODAY/collide11-2" "collision suffix -2"
 assert_true "git -C '$R11' show 'wip/worktree-hygiene/$TODAY/collide11-2:tracked.txt' | grep -q edit" "-2 branch has the edit"
 
@@ -272,7 +274,7 @@ GD13b="$(git -C "$W13b" rev-parse --git-dir)"
 git -C "$W13b" rev-parse HEAD >"$GD13b/MERGE_HEAD"
 backdate_tree "$W13" 30
 backdate_tree "$W13b" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R13" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R13" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "locked" "locked skip reason"
 assert_contains "$OUT" "in-progress-op" "in-progress skip reason"
 assert_not_contains "$OUT" "PRESERVED-WIP" "neither preserved"
@@ -300,7 +302,7 @@ g -C "$W14b/third/clone" add y.txt
 g -C "$W14b/third/clone" commit -q -m local
 backdate_tree "$W14" 30
 backdate_tree "$W14b" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R14" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R14" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "nested-repo" "skip reason nested-repo"
 assert_not_contains "$OUT" "PRESERVED-WIP" "nested-repo worktrees not preserved"
 assert_true "[[ -f '$W14/vendor/lib/.env' ]] && wt_registered '$R14' '$W14'" "ignored nested repo + .env kept"
@@ -317,7 +319,7 @@ g -C "$W15" commit -q -m many
 for i in $(seq 1 60); do echo "changed" >>"$W15/f$i.txt"; done
 echo "u" >"$W15/untracked.txt"
 backdate_tree "$W15" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R15" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R15" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "large-diff" "masked large-diff detected"
 assert_not_contains "$OUT" "PRESERVED-WIP" "masked large-diff not preserved"
 assert_true "[[ -d '$W15' && -f '$W15/untracked.txt' ]]" "large-diff worktree kept"
@@ -331,7 +333,7 @@ W16="$TMPROOT/wts/orphan16"
 g -C "$R16" worktree add -q --detach "$W16" "$ORPHAN"
 echo "u" >"$W16/untracked.txt"
 backdate_tree "$W16" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R16" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R16" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "no-merge-base" "masked no-merge-base detected"
 assert_not_contains "$OUT" "PRESERVED-WIP" "no-merge-base not preserved"
 assert_true "[[ -d '$W16' ]]" "no-merge-base worktree kept"
@@ -343,7 +345,7 @@ W17="$(mk_wt "$R17" dirtypr17)"
 echo "edit" >>"$W17/tracked.txt"
 g -C "$R17" remote set-url origin "https://github.com/example/fake.git"
 backdate_tree "$W17" 30
-OUT="$(WORKTREE_APPROVED=1 PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repos "$R17" --skip-push --execute --preserve-wip 2>&1)"
+OUT="$(WORKTREE_APPROVED=1 PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repos "$R17" --push-wip --execute --preserve-wip 2>&1)"
 assert_contains "$OUT" "open-pr" "open PR detected on dirty worktree"
 assert_not_contains "$OUT" "PRESERVED-WIP" "open-PR worktree not preserved"
 assert_true "[[ -d '$W17' ]] && git -C '$W17' status --porcelain | grep -q tracked.txt" "open-PR worktree untouched"
@@ -356,7 +358,7 @@ echo "new content never seen by git" >"$W18/fresh.txt"
 echo "edit" >>"$W18/tracked.txt"
 backdate_tree "$W18" 30
 find "$R18/.git/objects" -type d -exec chmod a-w {} +
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R18" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R18" --push-wip --execute --preserve-wip)"
 find "$R18/.git/objects" -type d -exec chmod u+w {} +
 assert_contains "$OUT" "WIP-FAILED" "failure logged"
 assert_true "[[ \"\$(git -C '$W18' symbolic-ref -q HEAD)\" == refs/heads/feat/fail18 ]]" "HEAD restored to original branch"
@@ -375,7 +377,7 @@ g -C "$W19" update-index --assume-unchanged au.txt
 echo PRECIOUS-AU >"$W19/au.txt"
 echo "edit" >>"$W19/tracked.txt"
 backdate_tree "$W19" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R19" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R19" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "index-flagged" "index-flagged blocker reported"
 assert_not_contains "$OUT" "PRESERVED-WIP" "flagged worktree not preserved"
 assert_true "[[ \"\$(cat '$W19/skip.txt')\" == PRECIOUS-SKIP && \"\$(cat '$W19/au.txt')\" == PRECIOUS-AU ]]" "flagged local edits intact"
@@ -389,7 +391,7 @@ W20="$(mk_wt "$R20" envrc20)"
 echo "export TOKEN=x" >"$W20/.envrc"
 echo "edit" >>"$W20/tracked.txt"
 backdate_tree "$W20" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R20" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R20" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "ignored .envrc blocks"
 assert_true "[[ -f '$W20/.envrc' ]]" ".envrc intact"
 
@@ -403,7 +405,7 @@ echo "my precious notes" >"$W21/notes.local"
 mkdir -p "$W21/node_modules/x"; echo junk >"$W21/node_modules/x/i.js"
 echo "edit" >>"$W21/tracked.txt"
 backdate_tree "$W21" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R21" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R21" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:notes.local" "non-allowlisted ignored file blocks"
 assert_not_contains "$OUT" "PRESERVED-WIP" "worktree with ignored notes not preserved"
 assert_true "[[ -f '$W21/notes.local' ]]" "ignored notes intact"
@@ -418,7 +420,7 @@ g -C "$W22" config filter.strip.clean "grep -v OUTPUT"
 g -C "$W22" config filter.strip.smudge cat
 printf 'cell\nOUTPUT: expensive 3h result 42\n' >"$W22/analysis.nb"
 backdate_tree "$W22" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R22" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R22" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "committed bytes differ" "lossy filter detected"
 assert_not_contains "$OUT" "PRESERVED-WIP" "lossy worktree not preserved"
 assert_true "grep -q 'OUTPUT: expensive' '$W22/analysis.nb'" "filtered content intact on disk"
@@ -432,7 +434,7 @@ g -C "$R23" add -A; g -C "$R23" commit -q -m eol
 W23="$(mk_wt "$R23" crlf23)"
 printf 'line1\r\nline2\r\n' >"$W23/win.txt"
 backdate_tree "$W23" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R23" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R23" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "committed bytes differ" "eol conversion detected"
 assert_true "[[ -f '$W23/win.txt' ]] && grep -q $'\r' '$W23/win.txt'" "CRLF bytes intact on disk"
 
@@ -446,7 +448,7 @@ backdate_tree "$W24" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R24" --skip-push --execute)"
 assert_not_contains "$OUT" "SAFE" "hidden-untracked worktree not SAFE"
 assert_true "[[ -f '$W24/new-work.txt' ]]" "untracked work intact without --preserve-wip"
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R24" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R24" --push-wip --execute --preserve-wip)"
 assert_true "! [[ -d '$W24' ]] || [[ -f '$W24/new-work.txt' ]]" "either preserved+removed or kept"
 assert_true "! [[ -d '$W24' ]] && git -C '$R24' show \"\$(git -C '$R24' for-each-ref --format='%(refname)' refs/heads/wip | head -1):new-work.txt\" | grep -q precious || [[ -f '$W24/new-work.txt' ]]" "untracked content on wip branch if removed"
 
@@ -462,7 +464,7 @@ g -C "$W25" config filter.strip.smudge cat
 printf 'cell\nOUTPUT: 99\n' >"$W25/a.nb"
 echo "edit" >>"$W25/tracked.txt"
 backdate_tree "$W25" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R25" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R25" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "committed bytes differ" "hidden filtered edit detected"
 assert_true "[[ -d '$W25' ]] && grep -q 'OUTPUT: 99' '$W25/a.nb'" "filtered edit intact, worktree kept"
 
@@ -476,7 +478,7 @@ W26="$(mk_wt "$R26" crlf26)"
 printf 'l1\r\nl2\r\n' >"$W26/doc.txt"
 echo "edit" >>"$W26/tracked.txt"
 backdate_tree "$W26" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R26" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R26" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "committed bytes differ" "tracked CRLF change detected"
 assert_true "[[ -d '$W26' ]] && grep -q $'\r' '$W26/doc.txt'" "CRLF bytes intact, worktree kept"
 
@@ -491,7 +493,7 @@ mkdir -p "$W27/src/build"; echo "hand secret" >"$W27/src/build/secret.txt"
 mkdir -p "$W27/dist"; echo "//registry/:_authToken=x" >"$W27/dist/.npmrc"
 echo "edit" >>"$W27/tracked.txt"
 backdate_tree "$W27" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R27" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R27" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:" "ignored build/dist content blocks"
 assert_true "[[ -f '$W27/src/build/secret.txt' && -f '$W27/dist/.npmrc' ]]" "build/dist content intact"
 
@@ -503,23 +505,28 @@ echo "staged-version" >>"$W28/tracked.txt"
 g -C "$W28" add tracked.txt
 echo "disk-version" >>"$W28/tracked.txt"
 backdate_tree "$W28" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R28" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R28" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "partially-staged:tracked.txt" "MM path blocks"
 assert_true "[[ -d '$W28' ]] && git -C '$W28' show :tracked.txt | grep -q staged-version" "staged version intact"
 
 # ---------------------------------------------------------------------------
-echo "case 29: repo hooks never run during preservation"
+echo "case 29: local preservation hooks disabled; normal push hooks run"
 R29="$(mk_repo r29)"
 W29="$(mk_wt "$R29" hook29)"
 for h in post-checkout post-commit reference-transaction post-index-change; do
     printf '#!/bin/sh\ntouch "%s/hook-%s-ran"\n' "$TMPROOT" "$h" >"$R29/.git/hooks/$h"
     chmod +x "$R29/.git/hooks/$h"
 done
+printf '#!/bin/sh\ntouch "%s/prepush-ran"\n' "$TMPROOT" >"$R29/.git/hooks/pre-push"
+chmod +x "$R29/.git/hooks/pre-push"
 echo "edit" >>"$W29/tracked.txt"
 backdate_tree "$W29" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29" --push-wip --execute --preserve-wip)"
 assert_true "! [[ -d '$W29' ]]" "worktree preserved+removed"
-assert_true "! ls '$TMPROOT'/hook-*-ran >/dev/null 2>&1" "no hook ran"
+for h in post-checkout post-commit post-index-change; do
+    assert_true "! [[ -e '$TMPROOT/hook-$h-ran' ]]" "local $h hook did not run"
+done
+assert_true "[[ -e '$TMPROOT/prepush-ran' ]]" "normal publication pre-push hook ran"
 
 # ---------------------------------------------------------------------------
 echo "case 29b: hooks never run on the failure/restore path either"
@@ -535,7 +542,7 @@ for h in post-checkout post-commit reference-transaction post-index-change; do
 done
 printf 'cell\nOUTPUT: 1\n' >"$W29B/new.nb"
 backdate_tree "$W29B" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29B" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R29B" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "WIP-RESTORED" "failure path restored"
 assert_true "[[ -d '$W29B' ]] && grep -q 'OUTPUT: 1' '$W29B/new.nb'" "content intact"
 assert_true "! ls '$TMPROOT'/hookb-*-ran >/dev/null 2>&1" "no hook ran on failure path"
@@ -548,7 +555,7 @@ if [[ "$(g -C "$W30" config --bool core.ignorecase 2>/dev/null)" == "true" ]]; t
     mv "$W30/tracked.txt" "$W30/TRACKED.txt"
     echo "edit" >>"$W30/TRACKED.txt"
     backdate_tree "$W30" 30
-    OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R30" --skip-push --execute --preserve-wip)"
+    OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R30" --push-wip --execute --preserve-wip)"
     assert_contains "$OUT" "case-only-rename" "case-only rename blocks"
     assert_true "[[ -d '$W30' ]] && ls '$W30' | grep -qx TRACKED.txt" "renamed file intact, worktree kept"
 else
@@ -566,7 +573,7 @@ mkdir -p "$W31/pkg/__pycache__"
 echo "x" >"$W31/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
 echo "edit" >>"$W31/tracked.txt"
 backdate_tree "$W31" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
 assert_not_contains "$OUT" "ignored-secret" "bytecode name does not block"
 assert_true "! [[ -d '$W31' ]]" "worktree preserved+removed"
 W31B="$(mk_wt "$R31" pyc31b)"
@@ -574,7 +581,7 @@ echo "TOKEN=1" >"$W31B/pkg_credentials.pyc"
 echo "TOKEN=1" >"$W31B/pkg/.env"
 echo "edit" >>"$W31B/tracked.txt"
 backdate_tree "$W31B" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
 assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
 
@@ -592,7 +599,7 @@ echo "../../main/.beads" >"$W32/.beads/redirect"
 : >"$W32/.beads/.br-db-write-abc123.lock"
 echo "edit" >>"$W32/tracked.txt"
 backdate_tree "$W32" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --push-wip --execute --preserve-wip)"
 assert_not_contains "$OUT" "ignored-file" "generated tool state does not block"
 assert_true "! [[ -d '$W32' ]]" "worktree preserved+removed"
 W32B="$(mk_wt "$R32" gen32b)"
@@ -601,7 +608,7 @@ echo "notes" >"$W32B/.beads/my-notes.lock.txt"
 printf '.beads/my-notes.lock.txt\n' >>"$R32/.git/info/exclude"
 echo "edit" >>"$W32B/tracked.txt"
 backdate_tree "$W32B" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:.beads/my-notes.lock.txt" "other ignored beads content still blocks"
 assert_true "[[ -f '$W32B/.beads/my-notes.lock.txt' ]]" "content intact"
 W32C="$(mk_wt "$R32" gen32c)"
@@ -614,7 +621,7 @@ printf 'vendor/node_modules/local-patch.diff\n' >>"$R32/.git/info/exclude"
 printf '*\n' >"$W32C/.husky/_/.gitignore"; echo "#!/bin/sh" >"$W32C/.husky/_/h"
 echo "edit" >>"$W32C/tracked.txt"
 backdate_tree "$W32C" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:vendor/node_modules/local-patch.diff" "ignored user file inside a tracked node_modules dir still blocks"
 assert_true "[[ -f '$W32C/vendor/node_modules/local-patch.diff' ]]" "patch intact"
 W32D="$(mk_wt "$R32" gen32d)"
@@ -624,7 +631,7 @@ echo "n" >"$W32D/.beads/.br-db-write-x/n.lock"
 printf '.beads/.br-db-write-x/n.lock\n' >>"$R32/.git/info/exclude"
 echo "edit" >>"$W32D/tracked.txt"
 backdate_tree "$W32D" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R32" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:.beads/.br-db-write-x/" "lock glob does not cross directories"
 assert_not_contains "$OUT" "ignored-file:.husky" "husky v9 self-ignored shim dir does not block"
 
@@ -636,6 +643,7 @@ g -C "$R33" config filter.strip.clean "grep -v OUTPUT"
 g -C "$R33" config filter.strip.smudge cat
 printf 'cell\n' >"$R33/analysis.nb"
 g -C "$R33" add -A; g -C "$R33" commit -q -m "attrs + notebook"
+g -C "$R33" push -q origin main
 W33="$(mk_wt "$R33" hidden33)"
 W33C="$(mk_wt "$R33" control33)"
 printf 'OUTPUT: unrecoverable 3h result\n' >>"$W33/analysis.nb"
@@ -659,7 +667,7 @@ W34="$(mk_wt "$R34" sub34)"
 g -C "$W34" -c protocol.file.allow=always submodule add -q "$S34" sub >/dev/null 2>&1
 echo "my precious edit" >>"$W34/tracked.txt"
 backdate_tree "$W34" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R34" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R34" --push-wip --execute --preserve-wip)"
 B34="wip/worktree-hygiene/$TODAY/sub34"
 assert_contains "$OUT" "REMOVE-REFUSED" "removal refusal logged"
 assert_not_contains "$OUT" "DELETE         $W34" "ledger does not claim the worktree was retired"
@@ -680,7 +688,7 @@ g -C "$W35" config filter.lfs.clean "grep -v OUTPUT"
 g -C "$W35" config filter.lfs.smudge cat
 printf 'data\nOUTPUT: precious\n' >"$W35/blob.bin"
 backdate_tree "$W35" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R35" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R35" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "committed bytes differ from disk for blob.bin" "fake lfs filter byte-verified"
 assert_not_contains "$OUT" "PRESERVED-WIP" "fake-lfs worktree not preserved"
 assert_true "[[ -d '$W35' ]] && grep -q 'OUTPUT: precious' '$W35/blob.bin'" "content intact"
@@ -695,7 +703,7 @@ g -C "$W35B" config filter.lfs.clean "git-lfs clean -- %f"
 g -C "$W35B" config filter.lfs.smudge "git-lfs smudge -- %f"
 printf 'big binary\n' >"$W35B/blob.bin"
 backdate_tree "$W35B" 30
-OUT="$(PATH="$TMPROOT/fakebin:$PATH" WORKTREE_APPROVED=1 run_hygiene "$R35B" --skip-push --execute --preserve-wip)"
+OUT="$(PATH="$TMPROOT/fakebin:$PATH" WORKTREE_APPROVED=1 run_hygiene "$R35B" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "PRESERVED-WIP" "genuine git-lfs filter still exempt"
 
 # ---------------------------------------------------------------------------
@@ -734,7 +742,7 @@ printf 'staged new file body\n' >"$W37/added.txt"
 g -C "$W37" add added.txt
 printf 'cell\nOUTPUT: 1\n' >"$W37/new.nb"
 backdate_tree "$W37" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R37" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R37" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "WIP-RESTORED" "failure path restored"
 assert_true "git -C '$W37' status --porcelain | grep -q '^?? added.txt'" "staged-new file now untracked"
 assert_true "[[ \"\$(cat '$W37/added.txt')\" == 'staged new file body' ]]" "staged-new file content intact"
@@ -751,7 +759,7 @@ echo "named work" >>"$W38N/tracked.txt"
 g -C "$W38N" commit -q -am "named local commit"
 C38N="$(git -C "$W38N" rev-parse HEAD)"
 backdate_tree "$W38D" 30; backdate_tree "$W38N" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R38" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R38" --push-wip --execute --preserve-wip)"
 assert_true "[[ ! -d '$W38D' ]] && ! wt_registered '$R38' '$W38D'" "detached ahead worktree removed"
 assert_true "[[ -n \"\$(git -C '$R38' branch --list 'wip/*' --contains '$C38D')\" ]]" "detached commit reachable from a wip branch"
 assert_true "[[ ! -d '$W38N' ]] && ! wt_registered '$R38' '$W38N'" "named ahead worktree removed"
@@ -794,7 +802,7 @@ g -C "$W40" config filter.lossy.smudge cat
 printf 'cell\nOUTPUT: 1\n' >"$W40/many/f00000.nb"
 echo "edit" >>"$W40/tracked.txt"
 backdate_tree "$W40" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --skip-push --execute --preserve-wip; echo "rc=$?")"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --push-wip --execute --preserve-wip; echo "rc=$?")"
 assert_contains "$OUT" "rc=0" "run completes (no SIGPIPE abort)"
 assert_contains "$OUT" "WIP-RESTORED" "failure path restored HEAD"
 assert_true "[[ \"\$(git -C '$W40' symbolic-ref -q --short HEAD)\" != wip/* ]] && grep -q 'OUTPUT: 1' '$W40/many/f00000.nb'" "not stranded on wip branch; content intact"
@@ -802,7 +810,7 @@ W40B="$(mk_wt "$R40" big40b)"
 g -C "$W40B" update-index --skip-worktree many/f00000.nb
 echo "edit" >>"$W40B/tracked.txt"
 backdate_tree "$W40B" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "index-flagged:many/f00000.nb" "early index flag reported, not scan-failed"
 W40C="$(mk_wt "$R40" big40c)"
 g -C "$W40C" config filter.lossy.clean "grep -v OUTPUT"
@@ -845,7 +853,7 @@ printf '#!/bin/sh\ntouch "%s/fsmon42-ran"\nexit 1\n' "$TMPROOT" >"$TMPROOT/fsmon
 g -C "$R42" config core.fsmonitor "$TMPROOT/fsmon42.sh"
 echo "edit" >>"$W42/tracked.txt"
 backdate_tree "$W42" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R42" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R42" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "PRESERVED-WIP" "preserved end-to-end"
 assert_true "! [[ -e '$TMPROOT/fsmon42-ran' ]]" "fsmonitor never ran anywhere in the sweep"
 
@@ -859,21 +867,21 @@ W43="$(mk_wt "$R43" tr43)"
 mkdir -p "$W43/mvp_site/test-results"; echo r >"$W43/mvp_site/test-results/a.xml"
 echo "edit" >>"$W43/tracked.txt"
 backdate_tree "$W43" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "PRESERVED-WIP" "test-results-only ignored content is preserved as WIP"
 assert_not_contains "$OUT" "ignored-file" "test-results does not block"
 W43B="$(mk_wt "$R43" env43)"
 echo "K=v" >"$W43B/.env"; mkdir -p "$W43B/mvp_site/test-results"; echo r >"$W43B/mvp_site/test-results/a.xml"
 echo "edit" >>"$W43B/tracked.txt"
 backdate_tree "$W43B" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "ignored .env still blocks alongside test-results"
 assert_true "[[ -f '$W43B/.env' ]]" ".env intact"
 W43C="$(mk_wt "$R43" db43)"
 mkdir -p "$W43C/data"; echo d >"$W43C/data/notes.db"; mkdir -p "$W43C/test-results"; echo r >"$W43C/test-results/a.xml"
 echo "edit" >>"$W43C/tracked.txt"
 backdate_tree "$W43C" 30
-OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --skip-push --execute --preserve-wip)"
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-file:data/" "ignored data/notes.db still blocks"
 assert_true "[[ -f '$W43C/data/notes.db' ]]" "notes.db intact"
 

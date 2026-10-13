@@ -121,7 +121,9 @@ def load_registry(path, home=None, darwin_tmp=None):
 
 
 def is_covered(path, roots):
-    for root, _owner in roots:
+    for root, owner in roots:
+        if owner.startswith("decision:"):
+            continue
         if not root:
             continue
         if path == root or path.startswith(root + "/"):
@@ -443,6 +445,9 @@ def main(argv=None):
 
     roots = load_registry(args.registry, home=home, darwin_tmp=darwin_tmp)
     rules = load_safety_rules(repo_root, home)
+    for root, owner in roots:
+        if owner.startswith("decision:"):
+            rules["needs_decision"].append((root, "report-only registry route: " + owner.split(":", 1)[1] + "; no automatic cleanup authority"))
     direct_kb, source = pick_direct_kb(args.snapshot, args.discover, args.max_age_hours)
 
     empty_result = {"source": source, "threshold_gib": args.threshold_gib,

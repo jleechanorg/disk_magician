@@ -44,6 +44,7 @@ REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
 PRESERVE_WIP=false
+PUSH_WIP=false
 MAX_CANDIDATES=0
 # A raw `git rev-list --count main..HEAD` ahead-count above this is not
 # trusted as a real commit count -- a history rewrite (rebase --onto,
@@ -59,7 +60,7 @@ WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push] [--skip-gh] [--preserve-wip] [--max-candidates N] [-h|--help]
+Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push|--no-push] [--skip-gh] [--preserve-wip] [--push-wip] [--max-candidates N] [-h|--help]
 
 Repeatable worktree-hygiene sweep: IDENTIFY -> TRIAGE -> CLASSIFY -> (optionally) DELETE.
 
@@ -73,20 +74,25 @@ Options:
                 CLAUDE_WORKTREE_REPOS env override, else auto-discover --
                 same logic as cleanup_worktrees.sh).
   --skip-push   Skip the 'git push origin HEAD:<branch>' preservation step
-                during triage (offline/test runs). push_status="skipped".
+                during triage and WIP publication (alias: --no-push).
+                Locally preserved WIP stays in its worktree when push is skipped.
   --skip-gh     Skip the 'gh pr list' lookup during triage (offline/test
                 runs). pr_state="unknown".
   --preserve-wip
                 Opt-in. NEEDS-REVIEW worktrees whose only reason is dirty,
                 untracked, or detached-unpushed are committed (git add -A,
                 ignored files excluded) onto a LOCAL branch
-                wip/worktree-hygiene/<YYYYMMDD>/<name> and then removed with
-                'git worktree remove' (no --force). Never pushes. Skipped
+                wip/worktree-hygiene/<YYYYMMDD>/<name> and then, with --push-wip, removed with
+                'git worktree remove' (no --force) only after normal push
+                and exact remote-ref verification. Failed/disabled push keeps
+                the worktree and local WIP branch. Skipped
                 when a live process cwd is inside, the worktree is locked,
                 a merge/rebase/cherry-pick is in progress, or an ignored
                 secret-ish file (.env, *.pem, *.key, ...) would be lost.
                 Dry-run prints WOULD-PRESERVE-WIP only. Manifest:
                 \${DISK_MAGICIAN_STATE_DIR:-~/.disk_magician_state}/worktree_hygiene_wip_manifest.txt
+  --push-wip   Publish WIP refs by normal push and verify exact remote HEAD
+                before removal. Without this flag local WIP is kept in place.
   --max-candidates N
                 Cap the number of age-qualifying candidates triaged per
                 repo per run (0 = unlimited, default). On a registry with
@@ -393,25 +399,14 @@ triage_candidate() {
             # A detached HEAD has no branch to push; pushing HEAD:detached
             # would mint a bogus remote branch (then backup/detached-<date>).
             push_status="skipped-detached"
-        elif [[ "${SKIP_PUSH:-false}" == true ]]; then
+        elif [[ "${SKIP_PUSH:-false}" == true || "${EXECUTE:-false}" != true ]]; then
             push_status="skipped"
         else
             if git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
-                local push_rc
-                git -C "$wt_path" push origin "HEAD:${branch}" >/dev/null 2>&1
-                push_rc=$?
-                if [[ $push_rc -eq 0 ]]; then
+                if publish_wip_ref "$wt_path" "$branch" >/dev/null; then
                     push_status="pushed"
                 else
-                    # Non-fast-forward (or any) rejection: retry to a dated
-                    # backup ref instead of forcing the original branch.
-                    local backup_ref
-                    backup_ref="backup/${branch}-$(date +%Y%m%d)"
-                    if git -C "$wt_path" push origin "HEAD:${backup_ref}" >/dev/null 2>&1; then
-                        push_status="pushed"
-                    else
-                        push_status="rejected-nonff"
-                    fi
+                    push_status="rejected-nonff"
                 fi
             else
                 push_status="no-remote"
@@ -570,6 +565,11 @@ preserve_wip_blocker() {
         if [[ "$name" == */ ]]; then
             echo "nested-repo:$name"; return 0
         fi
+        # Only ignored, known-rebuildable outputs bypass credential-name matching.
+        if git -C "$wt" check-ignore -q -- "$name" \
+            && ignored_entry_rebuildable "$wt" "$name"; then
+            continue
+        fi
         base="${name##*/}"
         # Compiled bytecode (e.g. __pycache__/clock_skew_credentials.*.pyc) is
         # regenerated from its source; its name is not a credential.
@@ -609,7 +609,13 @@ preserve_wip_blocker() {
         ibase="${ipath%/}"; ibase="${ibase##*/}"
         case "$ibase" in
             .nox|.parcel-cache|*.pyo) ;;
-            *) ignored_entry_rebuildable "$wt" "$ipath" leaf || { echo "ignored-file:$ipath"; return 0; } ;;
+            *) ignored_entry_rebuildable "$wt" "$ipath" leaf || {
+                case "/$ipath" in
+                    */evidence/*|*/docs/evidence/*) echo "ignored-evidence:$ipath" ;;
+                    *) echo "ignored-file:$ipath" ;;
+                esac
+                return 0
+            } ;;
         esac
     done <<<"$ign"
     return 1
@@ -697,8 +703,40 @@ worktree_bytes_mismatch() {
         }
 }
 
+# A normal push runs the repository's configured hooks. Backup fallback is
+# permitted only for Git's explicit non-fast-forward/fetch-first rejection.
+publish_wip_ref() {
+    local wt="$1" ref="$2" sha remote_sha err backup
+    local -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false
+    sha="$(git -C "$wt" rev-parse HEAD)" || return 1
+    # Publication is opt-in, but credential safety still fails closed. Scan
+    # reachable history because an older unpushed commit can contain secrets.
+    command -v gitleaks >/dev/null 2>&1 || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 90 gitleaks git "$wt" --log-opts="$sha" --redact --no-banner >/dev/null 2>&1 || return 1
+    err="$(mktemp)" || return 1
+    if ! timeout 90 git -C "$wt" push origin "HEAD:refs/heads/$ref" >"$err" 2>&1; then
+        if ! grep -Eq '\[rejected\].*\((non-fast-forward|fetch first)\)' "$err"; then
+            rm -f "$err"
+            return 1
+        fi
+        backup="backup/$ref-$(date +%Y%m%d)"
+        if ! timeout 90 git -C "$wt" push origin "HEAD:refs/heads/$backup" >"$err" 2>&1; then
+            rm -f "$err"
+            return 1
+        fi
+        ref="$backup"
+    fi
+    rm -f "$err"
+    remote_sha="$(timeout 90 git -C "$wt" ls-remote --exit-code origin "refs/heads/$ref" | awk '{print $1}')" || return 1
+    [[ "$remote_sha" == "$sha" ]] || return 1
+    PUBLISHED_WIP_REF="$ref"
+    pushed_count=$(( ${pushed_count:-0} + 1 ))
+    ledger_line "VERIFIED-WIP" "$wt" "$ref $sha"
+}
+
 # preserve_wip_and_remove <repo_abs> <wt_path> — commit all non-ignored WIP to
-# a new local branch, record it, then `git worktree remove` (no --force).
+# a new local branch; optional verified publication precedes non-forced removal.
 # Returns 0 if removed, 1 if preserved-but-kept or preservation failed.
 preserve_wip_and_remove() {
     local repo_abs="$1" wt="$2" branch name email sha orig_ref orig_sha
@@ -751,12 +789,24 @@ preserve_wip_and_remove() {
         return 1
     fi
 
+    local_wip_count=$(( ${local_wip_count:-0} + 1 ))
     ledger_line "PRESERVED-WIP" "$wt -> $branch $sha"
     local state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
     mkdir -p "$state_dir" 2>/dev/null || true
-    printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wt" "$branch" "$sha" \
+    printf '%s\t%s\t%s\t%s\tlocal\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wt" "$branch" "$sha" \
         >>"$state_dir/worktree_hygiene_wip_manifest.txt" \
         || echo "WARN: could not append wip manifest in $state_dir"
+
+    if [[ "$SKIP_PUSH" == true || "$PUSH_WIP" != true ]]; then
+        ledger_line "WIP-KEPT" "$wt" "$branch $sha; push disabled; worktree retained"
+        return 1
+    fi
+    if ! publish_wip_ref "$wt" "$branch"; then
+        ledger_line "WIP-KEPT" "$wt" "$branch $sha; remote backup unverified; worktree retained"
+        return 1
+    fi
+
+    printf '%s\t%s\t%s\t%s\tremote-verified:%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wt" "$branch" "$sha" "$PUBLISHED_WIP_REF" >>"$state_dir/worktree_hygiene_wip_manifest.txt" || return 1
 
     if git -C "$repo_abs" worktree remove "$wt" 2>/dev/null; then
         ledger_line "DELETE" "$wt" "preserved on $branch"
@@ -774,7 +824,43 @@ preserve_wip_and_remove() {
 # Main
 # ---------------------------------------------------------------------------
 
+hygiene_finish() {
+    local rc="$1" state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    [[ "$HYGIENE_STATUS" != running ]] || HYGIENE_STATUS=failed
+    python3 - "$state" "$HYGIENE_STATUS" "$rc" "$safe_count" "$review_count" \
+        "$preserved_count" "$wip_count" "$removed_count" "$failed_count" "$HYGIENE_CURRENT" "$HYGIENE_COMPLETED" "$HYGIENE_ALL_REPOS" "$HYGIENE_SCANNED_REPOS" "$HYGIENE_REPO" "$pushed_count" "$EXECUTE" "$local_wip_count" <<'PYTHON'
+import datetime, json, os, pathlib, sys, tempfile
+state = pathlib.Path(sys.argv[1]); state.mkdir(parents=True, exist_ok=True)
+keys = ["safe", "needs_review", "preserved", "wip_removed", "removed", "failed"]
+data = {"status": sys.argv[2], "exit_status": int(sys.argv[3]),
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "counters": dict(zip(keys, map(int, sys.argv[4:10]))),
+        "current_candidate": sys.argv[10] or None,
+        "completed_candidates": sys.argv[11].splitlines(),
+        "partial": sys.argv[2] != "completed",
+        "discovered_repos": [os.path.realpath(p) for p in sys.argv[12].splitlines()],
+        "scanned_repos": sys.argv[13].splitlines(),
+        "unfinished_repo": sys.argv[14] or None,
+        "skipped_repos": sorted({os.path.realpath(p) for p in sys.argv[12].splitlines()} - set(sys.argv[13].splitlines())),
+        "pushed_refs_count": int(sys.argv[15]),
+        "mode": "execute" if sys.argv[16] == "true" else "dry_run",
+        "locally_preserved_wip_count": int(sys.argv[17]),
+        "resume": "Re-run the same command; all safety and publication gates are rechecked."}
+if sys.argv[16] != "true":
+    data["counters"]["would_preserve_wip"] = data["counters"]["wip_removed"]
+    data["counters"]["wip_removed"] = 0
+fd, name = tempfile.mkstemp(dir=state, prefix=".hygiene-summary-")
+with os.fdopen(fd, "w") as stream:
+    json.dump(data, stream, indent=2)
+os.replace(name, state / "worktree_hygiene_summary.json")
+PYTHON
+    echo "Worktree-hygiene status: $HYGIENE_STATUS; removed=$removed_count failed=$failed_count; checkpoint=$state/worktree_hygiene_summary.json"
+}
+
 main() {
+    safe_count=0 review_count=0 preserved_count=0 wip_count=0 removed_count=0 failed_count=0 pushed_count=0 local_wip_count=0
+    HYGIENE_ALL_REPOS="" HYGIENE_SCANNED_REPOS="" HYGIENE_REPO=""
+    HYGIENE_STATUS=running HYGIENE_CURRENT="" HYGIENE_COMPLETED=""
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
             --execute) EXECUTE=true ;;
@@ -788,9 +874,10 @@ main() {
                 IFS=',' read -ra REPOS <<<"$2"
                 shift
                 ;;
-            --skip-push) SKIP_PUSH=true ;;
+            --skip-push|--no-push) SKIP_PUSH=true ;;
             --skip-gh) SKIP_GH=true ;;
             --preserve-wip) PRESERVE_WIP=true ;;
+            --push-wip) PUSH_WIP=true ;;
             --max-candidates)
                 [[ $# -ge 2 ]] || { echo "--max-candidates requires a value" >&2; exit 2; }
                 MAX_CANDIDATES="$2"
@@ -852,14 +939,18 @@ main() {
         echo "=== WORKTREE HYGIENE (DRY-RUN) ==="
     fi
 
-    local safe_count=0 review_count=0 preserved_count=0 wip_count=0
 
+    trap 'HYGIENE_STATUS=interrupted; exit 130' INT
+    trap 'HYGIENE_STATUS=interrupted; exit 143' TERM
+    trap 'hygiene_finish "$?"' EXIT
+    [[ ${#REPOS[@]} -eq 0 ]] || HYGIENE_ALL_REPOS="$(printf '%s\n' "${REPOS[@]}")"
     for repo in "${REPOS[@]}"; do
         [[ -d "$repo" ]] || continue
         local repo_abs
         repo_abs=$(cd "$repo" 2>/dev/null && pwd -P) || continue
 
         echo ""
+        HYGIENE_REPO="$repo_abs"
         echo "--- ${repo_abs} ---"
 
         local all_candidates candidates capped=false
@@ -918,6 +1009,7 @@ main() {
                 continue
             fi
 
+            HYGIENE_CURRENT="$wt_path"
             local branch
             branch="$(branch_for_worktree "$repo_abs" "$wt_path")"
             [[ -n "$branch" ]] || branch="detached"
@@ -925,6 +1017,7 @@ main() {
             local record
             record="$(triage_candidate "$repo_abs" "$wt_path" "$branch")"
 
+            [[ "$record" != *'|pushed|'* ]] || pushed_count=$((pushed_count + 1))
             IFS='|' read -r uncommitted_count untracked_present push_status pr_state ahead_count has_merge_base suspect_rewrite <<<"$record"
 
             local verdict
@@ -948,9 +1041,14 @@ main() {
                 ledger_line "SAFE" "$wt_path" "$reason"
                 safe_count=$(( safe_count + 1 ))
                 if [[ "$EXECUTE" == true ]]; then
-                    ledger_line "DELETE" "$wt_path" ""
                     git -C "$repo_abs" worktree unlock "$wt_path" 2>/dev/null || true
-                    git -C "$repo_abs" worktree remove --force --force "$wt_path" || echo "WARN: failed to remove $wt_path"
+                    if git -C "$repo_abs" worktree remove --force --force "$wt_path"; then
+                        ledger_line "DELETE" "$wt_path" ""
+                        removed_count=$((removed_count + 1))
+                    else
+                        failed_count=$((failed_count + 1))
+                        echo "WARN: failed to remove $wt_path"
+                    fi
                 fi
             elif [[ "$PRESERVE_WIP" == true ]] && preserve_wip_reason_eligible "$reason"; then
                 # classify_candidate reports only the first matching reason, so
@@ -969,10 +1067,14 @@ main() {
                 fi
                 if [[ -n "$blocker" ]] || blocker="$(preserve_wip_blocker "$repo_abs" "$wt_path")"; then
                     ledger_line "NEEDS-REVIEW" "$wt_path" "$reason; preserve-wip skipped: $blocker"
+                    case "$blocker" in
+                        ignored-evidence:*) ledger_line "DECISION-REQUIRED" "$wt_path" "$blocker; retained; review ignored evidence explicitly before preservation" ;;
+                    esac
                     review_count=$(( review_count + 1 ))
                 elif [[ "$EXECUTE" == true ]]; then
                     if preserve_wip_and_remove "$repo_abs" "$wt_path"; then
                         wip_count=$(( wip_count + 1 ))
+                        removed_count=$((removed_count + 1))
                     else
                         review_count=$(( review_count + 1 ))
                     fi
@@ -984,16 +1086,25 @@ main() {
                 ledger_line "NEEDS-REVIEW" "$wt_path" "$reason"
                 review_count=$(( review_count + 1 ))
             fi
+            HYGIENE_COMPLETED="${HYGIENE_COMPLETED}${wt_path}"$'\n'
+            HYGIENE_CURRENT=""
         done
+        HYGIENE_SCANNED_REPOS="${HYGIENE_SCANNED_REPOS}${repo_abs}"$'\n'
+        HYGIENE_REPO=""
     done
+    HYGIENE_STATUS=completed
 
     echo ""
-    echo "Worktree-hygiene: ${safe_count} safe, ${review_count} needs-review, ${preserved_count} preserved (young)."
+    echo "Worktree-hygiene: ${safe_count} safe, ${review_count} needs-review, ${preserved_count} preserved (protected or capped)."
     if [[ "$PRESERVE_WIP" == true ]]; then
         if [[ "$EXECUTE" == true ]]; then
-            echo "Preserve-wip: ${wip_count} preserved to local wip/ branches and removed."
+            echo "Preserve-wip: ${wip_count} preserved to local wip/ branches, published and removed."
         else
-            echo "Preserve-wip: ${wip_count} would be preserved to local wip/ branches and removed."
+            if [[ "$PUSH_WIP" == true && "$SKIP_PUSH" != true ]]; then
+                echo "Preserve-wip: ${wip_count} would be preserved, verified remotely and removed."
+            else
+                echo "Preserve-wip: ${wip_count} would be preserved locally and kept (publication disabled)."
+            fi
         fi
     fi
     echo "Note: NEEDS-REVIEW candidates are NOT auto-filed as beads by this script."
