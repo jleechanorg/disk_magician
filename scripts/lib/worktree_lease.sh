@@ -270,6 +270,10 @@ finally:
 PY
 }
 
+# The reaper holds this same lock from its final check through removal.
+lease_reuse_lock_acquire() { mkdir "$1.reuse-lock" 2>/dev/null; }
+lease_reuse_lock_release() { rmdir "$1.reuse-lock" 2>/dev/null; }
+
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
 lease_restore_reuse_claim() {
@@ -335,6 +339,11 @@ if upload and not (isinstance(upload_manifest, list) and upload_manifest and all
         isinstance(e, dict) and UPLOAD_KEYS <= set(e) for e in upload_manifest)):
     sys.exit(2)
 owner = None
+try:
+    st = os.stat(wt)
+    checkout_dev, checkout_ino = st.st_dev, st.st_ino
+except OSError:
+    checkout_dev = checkout_ino = None
 if pid not in ("-", ""):
     try:
         owner = {"pid": int(pid), "start_epoch": int(ep), "comm": comm}
@@ -356,6 +365,8 @@ d = {
     "owner": owner,
     "admin_id": None if admin_id in ("", "-") else admin_id,
     "admin_birth_epoch": None if admin_birth in ("", "-") else int(admin_birth),
+    "checkout_dev": checkout_dev,
+    "checkout_ino": checkout_ino,
     "released_at": None,
     "last_verdict": None,
     "last_checked_at": None,
@@ -563,11 +574,21 @@ PY
 # unresolvable side is a mismatch (the reaper then re-adopts with owner:
 # null, which can never be owner-reaped — the safe direction).
 lease_matches_incarnation() {
-    local lease="$1" path aid birth live_aid live_birth
+    local lease="$1" path aid birth live_aid live_birth dev ino live_dev live_ino
     path="$(_lease_get "$lease" path)"
     aid="$(_lease_get "$lease" admin_id)"
     birth="$(_lease_get "$lease" admin_birth_epoch)"
-    [[ -n "$path" && -n "$aid" ]] || return 1
+    dev="$(_lease_get "$lease" checkout_dev)"
+    ino="$(_lease_get "$lease" checkout_ino)"
+    [[ -n "$path" && -n "$aid" && -n "$dev" && -n "$ino" ]] || return 1
+    IFS=$'\t' read -r live_dev live_ino < <(python3 - "$path" <<'PY'
+import os,sys
+try:
+    st=os.stat(sys.argv[1]); print(f"{st.st_dev}\t{st.st_ino}")
+except OSError: print("-\t-")
+PY
+)
+    [[ "$live_dev" == "$dev" && "$live_ino" == "$ino" ]] || return 1
     IFS=$'\t' read -r live_aid live_birth < <(_lease_admin_info "$path")
     [[ "$live_aid" == "$aid" ]] || return 1
     [[ "$live_birth" == "$birth" ]] || return 1

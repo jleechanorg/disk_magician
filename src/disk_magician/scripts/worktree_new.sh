@@ -241,6 +241,9 @@ wtn_reuse() {
         candidate="$(_lease_get "$file" path)"
         old="$(_lease_get "$file" branch)"
         [[ -n "$candidate" && -n "$old" && -d "$candidate" && "$old" != "$branch" ]] || continue
+        # A path can be removed and recreated while its old lease survives.
+        # Bind eligibility to both the worktree admin dir and checkout inode.
+        lease_matches_incarnation "$file" || continue
         [[ "$(wtn_main_repo "$candidate")" == "$repo" ]] || continue
         state="$(lease_owner_state "$file")"
         [[ "$state" == dead || "$state" == released ]] || continue
@@ -262,6 +265,7 @@ PY
 )" || continue
         owner="$(lease_resolve_owner)"
         lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" || continue
+        lease_matches_incarnation "$file" || { lease_restore_reuse_claim "$file"; continue; }
         # Claim first, then repeat the final content/removal verdict.
         verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
         if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file"; continue; fi

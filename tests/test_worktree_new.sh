@@ -375,6 +375,28 @@ run_reuse_attempt() {
     return "$rc"
 }
 
+echo "== case 29: stale lease cannot authorize replacement checkout reuse =="
+STALE_WT="$WTROOT/reuse-stale-incarnation"
+git -C "$REPO" branch reuse/stale-incarnation "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$STALE_WT" reuse/stale-incarnation
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/stale-incarnation reuse-test' _ "$SCRIPT" "$STALE_WT" "$REPO" >/dev/null 2>&1
+STALE_LEASE="$(bash -c 'source "$1"; lease_path_for "$2"' _ "$SCRIPT" "$STALE_WT")"
+cp "$STALE_LEASE" "$TMPROOT/stale-lease.json"
+git -C "$REPO" worktree remove "$STALE_WT"
+git -C "$REPO" worktree add -q "$STALE_WT" reuse/stale-incarnation
+cp "$TMPROOT/stale-lease.json" "$STALE_LEASE"
+fresh="$(bash -c '
+    source "$1"
+    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+    lease_owner_state() { echo dead; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+    wtn_main "$3" feat/stale-incarnation --base origin/main --name stale-incarnation
+' _ "$SCRIPT" "$STALE_WT" "$REPO" 2>"$TMPROOT/stale-incarnation.err")"; rc=$?
+assert_eq "$rc" "0" "stale-incarnation fallback exit"
+[[ "$fresh" != "$STALE_WT" ]] && ok "stale lease cannot recycle replacement checkout" || bad "stale lease recycled replacement checkout"
+assert_eq "$(git -C "$STALE_WT" rev-parse --abbrev-ref HEAD)" "reuse/stale-incarnation" "replacement checkout remains intact"
+
 echo "== case 21: unpushed old branch falls back to fresh worktree =="
 UNPUSHED_WT="$WTROOT/reuse-unpushed"
 git -C "$REPO" branch reuse/unpushed "$LOCAL_SHA"

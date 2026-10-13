@@ -264,15 +264,34 @@ for file in "$(lease_dir)"/*.json; do
     if ! fetch_repo "$repo"; then record "$file" "$real" kept:remote-unverified; continue; fi
     verdict="$(verdict_for "$real" "$repo" "$quiet")"
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
+        # Exclude reuse from the final lease/verdict check through the actual
+        # removal. A fresh unlocked claim check would leave the same TOCTOU.
+        if ! lease_reuse_lock_acquire "$file"; then
+            record "$file" "$real" kept:reuse-locked
+            continue
+        fi
+        if [[ "$(reuse_claim_state "$file")" == pending || "$(reuse_claim_state "$file")" == reuse_incomplete ]] ||
+            ! lease_matches_incarnation "$file"; then
+            lease_reuse_lock_release "$file"
+            record "$file" "$real" kept:reuse-claim-or-incarnation-changed
+            continue
+        fi
+        if [[ -n "${DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK" "$file" "$real" || true
+        fi
         if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK" "$real"; fi
-        (( STOP )) && break
+        if (( STOP )); then lease_reuse_lock_release "$file"; break; fi
         verdict="$(verdict_for "$real" "$repo" "$quiet")"
         if [[ "$verdict" == remove ]]; then
             if wrh_remove_now "$real" "$real"; then
+                lease_reuse_lock_release "$file"
                 echo remove >> "$EVENTS"; continue
             fi
             verdict=kept:remove-failed
         fi
+        record "$file" "$real" "$verdict"
+        lease_reuse_lock_release "$file"
+        continue
     fi
     record "$file" "$real" "$verdict"
 done
@@ -284,6 +303,7 @@ import json,os,sys,time
 try:
     p=sys.argv[1]; d=json.load(open(p)); target=d.get('path')
     if not isinstance(target,str) or not target or os.path.lexists(target): sys.exit(0)
+    if d.get('reuse',{}).get('state') in ('pending','reuse_incomplete'): sys.exit(0)
     if d.get('pending') and time.time()-d.get('created_epoch',time.time())<3600: sys.exit(0)
     os.unlink(p)
 except (OSError,ValueError,TypeError,AttributeError): pass

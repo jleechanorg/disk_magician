@@ -133,7 +133,24 @@ new; run --mode remove; verdict 'unapproved records verdict' remove; check 'unap
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"; touch "$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
 new; run --mode remove; check 'legacy marker, gate closed: nominate only' grep -q 'remove mode not approved' "$TMP/run.log"; check 'legacy marker alone retains' test -d "$WT"; park
 touch "$DISK_MAGICIAN_STATE_DIR/test_gate_open"
-new; run --mode remove; check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
+cat > "$TMP/reuse-lock-hook" <<'HOOK'
+#!/usr/bin/env bash
+source "$TEST_LEASE_LIB"
+file="$1"
+hash="$(shasum -a 256 "$file" | awk '{print $1}')"
+if lease_claim_reuse "$file" "$hash" hook/branch deadbeef $'401\t1760000000\tclaude'; then
+    echo raced > "$TEST_HOOK_RESULT"
+else
+    echo blocked > "$TEST_HOOK_RESULT"
+fi
+HOOK
+chmod +x "$TMP/reuse-lock-hook"
+export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" TEST_HOOK_RESULT="$TMP/reuse-lock-result"
+export DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK="$TMP/reuse-lock-hook"
+new; run --mode remove
+unset DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK
+check 'reuse claim cannot start inside final removal boundary' grep -qx blocked "$TEST_HOOK_RESULT"
+check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
 for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-30*3600-86400'; age 25200; run --mode "$mode"; verdict "TTL expired 30h, owner alive $mode" kept:expired_owner_alive; check "TTL expired owner alive present $mode" test -d "$WT"; park; done
@@ -142,6 +159,7 @@ new; edit 'd.pop("owner_dead_seen_at",None)'; age 7200; run; verdict 'first dead
 new; edit 'd["owner"]=None'; run --mode remove; check 'null owner never removed' test -d "$WT"
 new; edit 'd["pending"]=True; d["reuse"]={"state":"pending","old_branch":"old","old_tip":"abc"}'; run --mode remove; check 'pending reuse claim is skipped' grep -q 'kept:pending' "$TMP/run.log"; check 'pending reuse path preserved' test -d "$WT"; check 'pending reuse marker preserved' test "$(field 'd["reuse"]["state"]')" = pending; park
 new; edit 'd["reuse"]={"state":"reuse_incomplete","old_branch":"old","old_tip":"abc"}'; run --mode remove; check 'incomplete reuse is skipped' grep -q 'kept:reuse_incomplete' "$TMP/run.log"; check 'incomplete reuse path preserved' test -d "$WT"; park
+new; edit 'd["reuse"]={"state":"reuse_incomplete","old_branch":"old","old_tip":"abc"}'; git -C "$TMP/repo" worktree remove "$WT"; run; check 'missing incomplete claim remains available for recovery' test -f "$LF"; check 'missing incomplete claim state retained' test "$(field 'd["reuse"]["state"]')" = reuse_incomplete
 new; git -C "$WT" commit -q --allow-empty -m fork; git -C "$WT" update-ref refs/remotes/fork/test HEAD; age; run; verdict 'fork only not pushed' kept:not-pushed; park
 new; git -C "$WT" commit -q --allow-empty -m merged; age; export GH_HEAD="$(git -C "$WT" rev-parse HEAD)"; run; verdict 'merged PR deleted branch' remove; unset GH_HEAD; park
 for offset in 0 -30 -120 1; do new; edit "d['pending']=True; d['creator']='guard'; d['owner']['pid']=400; d['created_epoch']=d['admin_birth_epoch']+$offset; d['admin_id']=None; d['admin_birth_epoch']=None"; run; if [[ "$offset" == 0 || "$offset" == -30 ]]; then check "pending promotion offset $offset" test "$(field 'd["creator"] == "guard" and d["owner"]["pid"] == 400 and not d["pending"]')" = True; else check "pending stale offset $offset" test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True; fi; park; done
