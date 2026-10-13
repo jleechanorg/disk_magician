@@ -45,6 +45,7 @@ Commands:
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
+  cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
   cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
@@ -67,6 +68,8 @@ Commands:
   worktree-release <path> Release the caller's lease without deleting the worktree.
   lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
                          Session-exit release of that session's leases (deletes nothing).
+  quarantine restore <id> Restore one identity-checked kept quarantine entry.
+  quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
@@ -341,6 +344,9 @@ case "$CMD" in
   cleanup_pr_scratch|cleanup-pr-scratch)
     "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
     ;;
+  cleanup_codex_documents|cleanup-codex-documents)
+    "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"
+    ;;
   prune_aside_sessions|prune-aside-sessions)
     "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
     ;;
@@ -424,6 +430,14 @@ case "$CMD" in
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
+    ;;
+  quarantine)
+    subcommand="${1:-}"; shift || true
+    case "$subcommand" in
+      restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
+      reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
+      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
+    esac
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"

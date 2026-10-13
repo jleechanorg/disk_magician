@@ -1295,6 +1295,31 @@ RC13=$?
 expect_eq "directory with spaces exit code 0" "0" "$RC13"
 expect "discovered db in directory with spaces" "logs_space_1.sqlite" "$OUT13"
 
+echo "Governed cleanup emits a typed per-database terminal receipt"
+GOV_DB_DIR="$TMP_DIR/governed-codex"
+GOV_STATE="$TMP_DIR/governed-state"
+mkdir -p "$GOV_DB_DIR" "$GOV_STATE"
+GOV_DB="$GOV_DB_DIR/governed.sqlite"
+create_test_db "$GOV_DB" 200 100 2
+DISK_MAGICIAN_ACTUATOR_TRIGGER=act DISK_MAGICIAN_STATE_DIR="$GOV_STATE" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" CODEX_DIR="$GOV_DB_DIR" \
+  "$SCRIPT" --clean --db "$GOV_DB" >/dev/null 2>&1
+python3 - "$GOV_STATE/receipts/cleanup_codex_db.json" <<'PY'
+import json,sys
+receipt=json.load(open(sys.argv[1]))['last_terminal']
+assert receipt['outcome']=='success', receipt
+assert receipt['reason']=='database_maintenance_complete', receipt
+# VACUUM rewrites pages in place and removes no artifact: removed_count stays 0
+# and the successful vacuum is recorded separately as vacuumed_count.
+assert receipt['candidates']['removed_count']==0, receipt['candidates']
+assert receipt['candidates']['vacuumed_count']==1, receipt['candidates']
+assert receipt['candidates']['deferred_count']==0, receipt['candidates']
+assert receipt['candidates']['interrupted_count']==0, receipt['candidates']
+assert receipt['postcondition']['df_delta_bytes'] is not None, receipt['postcondition']
+print('  PASS: governed Codex DB receipt records vacuums separately with removed_count 0')
+PY
+
+echo
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]

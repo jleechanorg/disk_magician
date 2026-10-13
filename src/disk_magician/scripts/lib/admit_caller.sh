@@ -22,9 +22,12 @@ admit_gate() {
         return 0
     fi
     for try in 1 2; do
-        "${cmd[@]}" --class "$cls" --est-gb "$est" --producer "$producer" \
-            --dest "$dest" --source "$source" "${@:6}" >/dev/null
-        rc=$?
+        if "${cmd[@]}" --class "$cls" --est-gb "$est" --producer "$producer" \
+            --dest "$dest" --source "$source" "${@:6}" >/dev/null; then
+            rc=0
+        else
+            rc=$?
+        fi
         [[ "$rc" == 76 && "$try" == 1 ]] || break
         echo "disk-admission: queued class=$cls, retrying once" >&2
         sleep "${DISK_MAGICIAN_ADMIT_RETRY_S:-600}"

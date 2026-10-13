@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared by cleanup_worktrees.sh and worktree_remove_hook.sh (sourced, not run).
+# Shared by cleanup_worktrees.sh, worktree_remove_hook.sh and cleanup_codex_documents.sh (sourced, not run).
 
 # ignored_entry_rebuildable <wt> <entry>: rc 0 when the ignored entry is a
 # known-rebuildable path (any component matches the allowlist below; with a
@@ -43,4 +43,26 @@ has_ignored_user_data() {
         ignored_entry_rebuildable "$1" "$entry" || return 0
     done <<<"$out"
     return 1
+}
+
+# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
+# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
+# probe fails/times out (fail closed).
+has_hidden_state() {
+    local out flags t=""
+    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
+    grep -q '^[a-zS]' <<<"$flags" && return 0
+    # shellcheck disable=SC2086
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
+        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
+        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
+        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
+        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
+        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
+    # is rebuildable, not a secret; dependency dirs stay covered.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
+    [[ -n "$out" ]]
 }

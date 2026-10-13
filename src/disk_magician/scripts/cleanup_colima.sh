@@ -16,6 +16,8 @@ while [[ -h "$SCRIPT_SOURCE" ]]; do
   [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+# shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 
 # shellcheck source=scripts/lib/docker_probe.sh
 if [[ -f "$SCRIPT_DIR/lib/docker_probe.sh" ]]; then
@@ -29,6 +31,7 @@ PRUNE_VOLUMES=false
 TRIM_ONLY=false
 TRIM_GB="${DISK_MAGICIAN_COLIMA_TRIM_GB:-8}"
 TRIM_TIMEOUT_SEC="${DISK_MAGICIAN_COLIMA_TRIM_TIMEOUT:-300}"
+ACTUATOR_REMOVED_COUNT=0
 
 usage() {
   cat <<EOF
@@ -56,6 +59,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+  ACTUATOR_RECEIPT_ENABLED=1
+  actuator_receipt_begin "$SCRIPT_DIR" cleanup_colima "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" || {
+    echo "ERROR: could not begin governed cleanup receipt" >&2; exit 3;
+  }
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -86,8 +96,44 @@ run_cmd() {
     log "[dry-run] $*"
   else
     log "+ $*"
-    "$@" || log "WARNING: command failed: $*"
+    local output rc=0 line
+    output="$("$@" 2>&1)" || rc=$?
+    while IFS= read -r line; do [[ -z "$line" ]] || log "$line"; done <<< "$output"
+    if [[ "$rc" == 0 ]]; then record_docker_prune_output "$output"; else
+      log "WARNING: command failed: $* (rc=$rc)"
+      report_status=1
+    fi
   fi
+}
+
+run_builder_prune() {
+  [[ "$DRY_RUN" == true ]] && { log "[dry-run] docker builder prune -af --reserved-space 5g"; return 0; }
+  local output rc=0 line
+  if output="$(docker builder prune -af --reserved-space 5g 2>&1)"; then :
+  else
+    if output="$(docker builder prune -af --keep-storage 5g 2>&1)"; then rc=0; else rc=$?; fi
+  fi
+  while IFS= read -r line; do [[ -z "$line" ]] || log "$line"; done <<< "$output"
+  if [[ "$rc" == 0 ]]; then record_docker_prune_output "$output"; else
+    log "WARNING: builder prune failed (rc=$rc)"
+    report_status=1
+  fi
+}
+
+record_docker_prune_output() {
+  local count
+  count="$(printf '%s\n' "$1" | awk '
+    /^Deleted Containers:$/ {section="items"; next}
+    /^Deleted Networks:$/ {section="items"; next}
+    /^Deleted Volumes:$/ {section="items"; next}
+    /^Deleted Images:$/ {section="images"; next}
+    /^Deleted build cache objects:/ {section="build"; next}
+    /^Total reclaimed space:/ {section=""; next}
+    section == "items" && NF {n++; next}
+    section == "images" && /^deleted:[[:space:]]+/ {n++; next}
+    section == "build" && NF {n++}
+    END {print n+0}' )"
+  ACTUATOR_REMOVED_COUNT=$((ACTUATOR_REMOVED_COUNT + count))
 }
 
 COLIMA_LIMA="$HOME/.colima/_lima"
@@ -259,6 +305,9 @@ fi
 
 if ! command -v docker >/dev/null 2>&1; then
   log "docker CLI not found — skipping Colima cleanup."
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=docker_unavailable
+  fi
   exit 0
 fi
 
@@ -268,6 +317,9 @@ if [[ "$backend_rc" -eq 10 ]]; then
   log "DEGRADED / SKIPPED: Docker backend identity probe failed or timed out."
   exit 1
 elif [[ "$backend_rc" -ne 0 ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=non_colima_docker_backend
+  fi
   exit 0
 fi
 
@@ -300,13 +352,7 @@ if ! docker_probe system df; then
 fi
 
 log "=== builder prune (cap 5g reserved) ==="
-if [[ "$DRY_RUN" == true ]]; then
-  log "[dry-run] docker builder prune -af --reserved-space 5g"
-else
-  docker builder prune -af --reserved-space 5g 2>/dev/null \
-    || docker builder prune -af --keep-storage 5g 2>/dev/null \
-    || log "WARNING: builder prune failed"
-fi
+run_builder_prune
 
 log "=== image prune (unused) ==="
 run_cmd docker image prune -af
@@ -329,7 +375,8 @@ prune_orphaned_volumes() {
     refs=$(printf "%s\n" "$ps_out" | grep -c . || true)
     [[ "$refs" -ne 0 ]] && continue
     log "+ docker volume rm $vol"
-    docker volume rm "$vol" 2>/dev/null || log "WARNING: could not remove $vol"
+    if docker volume rm "$vol" 2>/dev/null; then ACTUATOR_REMOVED_COUNT=$((ACTUATOR_REMOVED_COUNT + 1))
+    else log "WARNING: could not remove $vol"; fi
   done <<< "$vol_list"
 }
 
@@ -349,6 +396,9 @@ if [[ "$PRUNE_VOLUMES" == true ]]; then
 fi
 
 if [[ "$DRY_RUN" == true ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=success_noop; ACTUATOR_REASON=dry_run
+  fi
   log "=== DRY-RUN complete — nothing pruned ==="
 else
   after_kb=$(size_kb "$COLIMA_LIMA")
