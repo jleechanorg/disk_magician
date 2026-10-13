@@ -207,6 +207,20 @@ check 'deadline releases lock' test ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_reap
 unset DISK_MAGICIAN_REAP_CANDIDATE_HOOK REAP_CLOCK
 run; check 'receipt success' test "$(receipt 'd["outcome"]')" = success; check 'receipt counters' test "$(receipt 'all(k in d["candidates"] for k in ("fetch_ok","fetch_failed","gh_ok","gh_failed"))')" = True; check 'receipt freed bytes' test "$(receipt 'isinstance(d["postcondition"]["freed_bytes"],int)')" = True
 check 'one fetch per repository for three candidates' test "$RUN_FETCHES" = 1
+OLD_STATE="$DISK_MAGICIAN_STATE_DIR"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state.cursor"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+new
+cursor="$TMP/reap-cursor.json"
+run --mode nominate --deadline-at 0 --cursor "$cursor"
+check 'deadline before unit leaves cursor on candidate' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["next_index"])' "$cursor")" = 0
+check 'deadline cursor contains pending lease' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["items"][0])' "$cursor")" = "$LF"
+deadline="$(python3 -c 'import time;print(time.monotonic()+500)')"
+run --mode nominate --deadline-at "$deadline" --cursor "$cursor"
+check 'completed unit advances cursor' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["next_index"])' "$cursor")" = 1
+check 'deadline metrics have explicit count fields' test "$(receipt 'all(k in d["candidates"] for k in ("removed_count","deferred_count","interrupted_count"))')" = True
+park
+export DISK_MAGICIAN_STATE_DIR="$OLD_STATE"
 export FAKE_DF_DELTA_KB=128
 run
 check 'freed bytes measured from df delta' test "$(receipt 'd["postcondition"]["freed_bytes"]')" = 131072

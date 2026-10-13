@@ -28,28 +28,6 @@ wrh_log() {
     return 0
 }
 
-# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
-# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
-# probe fails/times out (fail closed).
-has_hidden_state() {
-    local out flags t=""
-    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
-    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
-    grep -q '^[a-zS]' <<<"$flags" && return 0
-    # shellcheck disable=SC2086
-    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
-        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
-        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
-        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
-        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
-        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
-        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
-    [[ -n "$out" ]]
-}
-
 wrh_live_cwd_reason() {
     local target=$1 out err rc=0 line pid= seen=0 live=0 path path_seen=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
     WRH_LIVE_CWD_REASON=

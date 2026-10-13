@@ -127,11 +127,22 @@ echo 999999 > "$DISK_MAGICIAN_STATE_DIR/govern.lock"
 assert_eq "$rc" 0 "tick after stale lock rc"
 assert_eq "$(budget zone)" GREEN "zone written after takeover"
 
-echo "== 8. Act mode is not implemented here: rc 2, nothing written"
+echo "== 8. Act mode writes its observation then blocks before dispatch until C14 is complete"
 fresh_state act; fake_df 25
-"$DISKM" govern --mode act >/dev/null 2>&1; rc=$?
-assert_eq "$rc" 2 "--mode act rc"
-[[ ! -e "$DISK_MAGICIAN_STATE_DIR/budget.json" ]] && ok "act wrote nothing" || bad "act wrote budget.json"
+act_output=$("$DISKM" govern --mode act 2>&1); rc=$?
+assert_eq "$rc" 0 "--mode act rc"
+[[ -e "$DISK_MAGICIAN_STATE_DIR/budget.json" ]] && ok "act records zone" || bad "act failed to record zone"
+[[ "$act_output" == *activation_blocked:c14_incomplete* ]] && ok "C14 gate blocks adapters" || bad "act did not report C14 gate: $act_output"
+[[ ! -e "$DISK_MAGICIAN_STATE_DIR/govern_sched.json" ]] && ok "blocked act starts no scheduler" || bad "blocked act wrote scheduler state"
+python3 - "$DISK_MAGICIAN_STATE_DIR/receipts" <<'PY' && ok "blocked act records skip receipts only" || bad "blocked act receipt state wrong"
+import json, pathlib, sys
+p=pathlib.Path(sys.argv[1])
+files=list(p.glob("govern_*.json"))
+assert files
+for f in files:
+ d=json.loads(f.read_text()); assert d["last_terminal"]["outcome"] == "blocked_safety", f
+assert not list(p.glob("cleanup_*.json"))
+PY
 
 echo "== 9. df failure: exit 3, previous budget.json kept"
 fresh_state dffail; fake_df 150
