@@ -17,13 +17,17 @@ source "$_AV_DIR/scratch_roots.sh"
 # walked too. rc 1 when the walk is incomplete or a path escapes <root>; the
 # OK sentinel can never be a find path, which starts with "/".
 c14_discover_repos() {
-    local root p d done=
+    local root p d target done=
     root="$(cd "$1" 2>/dev/null && pwd -P)" && [[ "$root" == /* ]] || return 1
     while IFS= read -r -d '' p; do
         [[ "$p" == OK ]] && { done=1; continue; }
         [[ "$p" == "$root"/* ]] || return 1
         d="${p%/*}"
         if [[ "${p##*/}" == .git ]]; then
+            if [[ -L "$p" ]]; then
+                target="$(cd "$p" 2>/dev/null && pwd -P)" || { printf 'kept:gitdir-invalid\0'; return 1; }
+                [[ "$target" == "$root"/* ]] || { printf 'kept:gitdir-invalid\0'; return 1; }
+            fi
             printf '%s\0' "$d"
         # A bare repo; git internals (.git/modules, .git/worktrees) go with their owner.
         elif [[ -f "$p" && -d "$d/objects" && -d "$d/refs" && "/$d/" != */.git/* ]]; then
@@ -265,7 +269,7 @@ _av_os_clone_proof() {
 # artifact_removal_verdict <path> [...] | --self-test
 _av_artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv
+    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -333,7 +337,19 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     esac
     if [[ -n "$inventory_out" ]]; then
         mkdir -p "$(dirname "$inventory_out")" || { echo kept:check-failed; return 0; }
-        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "${C14_ADMIN_INVENTORY:-}" "$inventory_out.tmp.$$")"
+        # Linked-worktree admin state belongs only to a candidate that is the
+        # worktree root. A venv or other child directory has its own inventory;
+        # appending the parent's admin rows makes later payload verification fail.
+        if [[ -d "$p" ]]; then
+            local top gd cd
+            top="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || top=''
+            if [[ "$top" == "$p" ]]; then
+                gd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --absolute-git-dir 2>/dev/null)" || gd=''
+                cd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || cd=''
+                [[ -n "$gd" && -n "$cd" && "$gd" != "$cd" ]] && admin_source=${C14_ADMIN_INVENTORY:-}
+            fi
+        fi
+        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "$admin_source" "$inventory_out.tmp.$$")"
         [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
     fi
     echo remove

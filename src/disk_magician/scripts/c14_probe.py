@@ -521,8 +521,10 @@ def repos(inv_file):
                 continue
             link_parent = root if parent == "." else os.path.join(root, parent)
             target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
-            if target.startswith(root.rstrip(os.sep) + os.sep) and os.path.isdir(target):
-                gitdir_targets.add(os.path.relpath(target, root))
+            if not target.startswith(root.rstrip(os.sep) + os.sep) or not os.path.isdir(target):
+                sys.stdout.write("kept:gitdir-invalid\0")
+                return 1
+            gitdir_targets.add(os.path.relpath(target, root))
         for rel, e in by_path.items():
             if rel == ".": parent, name = ".", "."
             else: parent, _, name = rel.rpartition("/"); parent = parent or "."
@@ -531,8 +533,10 @@ def repos(inv_file):
             elif name == ".git" and e.get("type") == "symlink":
                 link_parent = root if parent == "." else os.path.join(root, parent)
                 target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
-                if target.startswith(root.rstrip(os.sep) + os.sep) and os.path.isdir(target):
-                    roots.add(parent)
+                if not target.startswith(root.rstrip(os.sep) + os.sep) or not os.path.isdir(target):
+                    sys.stdout.write("kept:gitdir-invalid\0")
+                    return 1
+                roots.add(parent)
             if rel == "." and e.get("type") == "dir" and all(
                     by_path.get(name, {}).get("type") == kind for name, kind in
                     (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
@@ -544,8 +548,10 @@ def repos(inv_file):
         # Caller supplies C14_ROOT to bind relative inventory paths to its candidate.
         for rel in sorted(roots):
             print(os.path.join(root, rel) if rel != "." else root, end="\0")
+        return 0
     except Exception:
         print("kept:check-failed")
+        return 1
 
 def newest_mtime(inv_file):
     try:

@@ -69,6 +69,22 @@ assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/symlink-repo
 symlink_repos="$(C14_ROOT="$TMPROOT/symlink-repo" python3 "$_AV_DIR/../c14_probe.py" repos "$symlink_inventory" | tr '\0' '\n')"
 assert_eq "$symlink_repos" "$TMPROOT/symlink-repo/nested" "inventory classifies linked metadata only as the worktree"
 assert_eq "$(c14_repos_ok "$TMPROOT/symlink-repo" "$symlink_inventory")" kept:dirty "inventory finds nested repo with internal .git symlink"
+mkdir -p "$TMPROOT/external-gitdir/nested"
+mkrepo "$TMPROOT/external-gitdir-source"
+cp "$TMPROOT/external-gitdir-source/tracked.txt" "$TMPROOT/external-gitdir/nested/tracked.txt"
+ln -s "$TMPROOT/external-gitdir-source/.git" "$TMPROOT/external-gitdir/nested/.git"
+printf 'dirty\n' >>"$TMPROOT/external-gitdir/nested/tracked.txt"
+external_gitdir_inventory="$TMPROOT/external-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" ok "inventory of nested repo with external .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/external-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$external_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on an external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" kept:gitdir-invalid "C14 rejects dirty repo with external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects external .git symlink"
+mkdir -p "$TMPROOT/broken-gitdir/nested"
+ln -s "$TMPROOT/no-such-gitdir" "$TMPROOT/broken-gitdir/nested/.git"
+broken_gitdir_inventory="$TMPROOT/broken-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/broken-gitdir" "$broken_gitdir_inventory")" ok "inventory of nested repo with broken .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/broken-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$broken_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on a broken .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/broken-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects broken .git symlink"
 mkrepo "$TMPROOT/assume" && git -C "$TMPROOT/assume" update-index --assume-unchanged tracked.txt
 assert_eq "$(content "$TMPROOT/assume")" kept:dirty "assume-unchanged entry"
 mkrepo "$TMPROOT/skip" && git -C "$TMPROOT/skip" update-index --skip-worktree tracked.txt
@@ -626,6 +642,13 @@ venvw() {
 venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
 age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
 assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+subtree_inventory="$TMPROOT/dormant-venv-inventory.json"
+assert_eq "$(artifact_removal_verdict "$HOME/wt-dormant/venv" --kind rebuildable --inventory-out "$subtree_inventory")" remove "a linked worktree venv receives a subtree-only receipt"
+python3 - "$subtree_inventory" <<'PY' && ok "subtree receipt excludes unrelated parent worktree admin rows" || bad "subtree receipt contains parent worktree admin rows"
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rows and all(row.get("type") != "admin" for row in rows)
+PY
 assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
 mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
 git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
