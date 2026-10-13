@@ -108,25 +108,33 @@ def canonical(entries, exclude=()):
 
 
 def admin_entries(rows):
-    """Normalize C14 admin receipt rows into file inventory entries."""
+    """Normalize C14 admin receipt rows (entry_type dir/file) into inventory entries."""
     normalized = []
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             raise ValueError("malformed admin receipt row")
-        if any(type(row.get(k)) is not int for k in ("dev", "ino", "size")) or not isinstance(row.get("sha256"), str):
+        if any(type(row.get(k)) is not int for k in ("dev", "ino")):
             raise ValueError("incomplete admin receipt row")
-        normalized.append({"path": row["path"], "type": "file", "dev": row["dev"],
-                           "ino": row["ino"], "size": row["size"], "sha256": row["sha256"]})
+        kind = row.get("entry_type") or ("file" if isinstance(row.get("sha256"), str) else "dir")
+        if kind == "dir":
+            normalized.append({"path": row["path"], "type": "dir", "dev": row["dev"], "ino": row["ino"]})
+        elif kind == "file":
+            if not isinstance(row.get("sha256"), str) or type(row.get("size")) is not int:
+                raise ValueError("incomplete admin file row")
+            normalized.append({"path": row["path"], "type": "file", "dev": row["dev"],
+                               "ino": row["ino"], "size": row["size"], "sha256": row["sha256"]})
+        else:
+            raise ValueError("unsupported admin entry type")
     return normalized
 
 
-def admin_file_inventory(path, deadline=None):
-    return [e for e in inventory(path, deadline) if e.get("type") == "file"]
+def admin_current_inventory(path, deadline=None):
+    return inventory(path, deadline)
 
 
 def check_admin(record, lock=True, repaired=True, deadline=None):
     base = record["worktree_admin_inventory"]
-    current = admin_file_inventory(record["worktree_admin_path"], deadline)
+    current = admin_current_inventory(record["worktree_admin_path"], deadline)
     allowed = {"locked", "gitdir"}
     if canonical(base, allowed) != canonical(current, allowed):
         return False
@@ -180,7 +188,7 @@ def phase1(main, worktree, inventory_file, deadline=None):
         if any(e.get("path") == "locked" for e in admin_inventory):
             return "kept:already-locked"
         # The live admin dir must still equal the C14 receipt before any own write.
-        if canonical(admin_inventory) != canonical(admin_file_inventory(admin, deadline)):
+        if canonical(admin_inventory) != canonical(admin_current_inventory(admin, deadline)):
             return "kept:admin-changed"
         if qr.deadline_passed(deadline): return "deferred:deadline"
         pfd = os.open(parent, DIR)
@@ -327,6 +335,8 @@ def phase2(qid, deadline=None):
         finally:
             try: os.unlink(bind)
             except OSError: pass
+        if result == "deferred:phase2":
+            return "deferred:phase2"
         if result not in ("checkout_removed", "removed"):
             return "kept:quarantine_partial_kept"
         if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_checkout_removed":
@@ -347,10 +357,14 @@ def phase2(qid, deadline=None):
                 admin_record = dict(record)
                 admin_record["journal_key"] = "admin_removed_paths"
                 admin_record["admin_removed_paths"] = list(record.get("admin_removed_paths", []))
-                if not qr.unlink_inventory_entry(afd, os.path.basename(admin), ".", admin_inv["."], admin_inv, children,
-                                                 deadline=deadline,
-                                                 qfd=qfd, side=qid + ".json", record=admin_record,
-                                                 removed_paths=set(record.get("admin_removed_paths", []))):
+                try:
+                    removed_admin = qr.unlink_inventory_entry(afd, os.path.basename(admin), ".", admin_inv["."], admin_inv, children,
+                                                              deadline=deadline,
+                                                              qfd=qfd, side=qid + ".json", record=admin_record,
+                                                              removed_paths=set(record.get("admin_removed_paths", [])))
+                except qr.DeadlineExceeded:
+                    return "deferred:phase2"
+                if not removed_admin:
                     return "kept:quarantine_partial_kept"
         finally:
             os.close(afd)
@@ -360,10 +374,22 @@ def phase2(qid, deadline=None):
             return "kept:quarantine_partial_kept"
         if not qr.finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
         return "removed"
+    except qr.DeadlineExceeded:
+        return "deferred:phase2"
     except Exception:
         return "kept:quarantine_partial_kept"
     finally:
         os.close(qfd); os.close(pfd)
+
+
+def combined_remove(main, worktree, inventory_file, deadline=None):
+    """Phase 1 + phase 2 (including admin teardown) under the caller's single lock."""
+    first = phase1(main, worktree, inventory_file, deadline)
+    if not first.startswith("quarantined:"): return first
+    qid = first.split(":", 1)[1]
+    result = phase2(qid, deadline)
+    if result == "removed": return f"removed:{qid}"
+    return result if result.endswith(":" + qid) else f"{result}:{qid}"
 
 
 def restore(qid, deadline=None):
@@ -395,7 +421,7 @@ def restore(qid, deadline=None):
         if os.path.exists(locked):
             if digest(locked) != record.get("locked_sha256"): return "kept:lock-owner-mismatch"
             run("git", "-C", record["worktree_main"], "worktree", "unlock", original)
-        if canonical(record["worktree_admin_inventory"]) != canonical(admin_file_inventory(record["worktree_admin_path"])):
+        if canonical(record["worktree_admin_inventory"]) != canonical(admin_current_inventory(record["worktree_admin_path"])):
             return "kept:admin-changed"
         if not qr.finish_sidecar(qfd, qid, "restored"): return "kept:quarantine_partial_kept"
         return "restored:" + qid
@@ -413,7 +439,7 @@ def reconcile(deadline=None):
         ids = sorted(n[:-5] for n in os.listdir(directory) if len(n) == 21 and n.endswith(".json") and
                      all(c in "0123456789abcdef" for c in n[:-5]))
         for qid in ids:
-            if deadline is not None and time.monotonic() >= deadline:
+            if qr.deadline_passed(deadline):
                 print("deferred:" + qid); return 0
             try: _, pfd, qfd, record = qr.indexed_item(qid)
             except Exception: continue
@@ -464,6 +490,11 @@ def main(argv):
         lock = qr.operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); return 0
         try: return reconcile(deadline)
+        finally: qr.operation_unlock(lock)
+    elif len(args) == 4 and args[0] == "remove":
+        lock = qr.operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); return 0
+        try: print(combined_remove(args[1], args[2], args[3], deadline))
         finally: qr.operation_unlock(lock)
     else: print("kept:check-failed")
     return 0

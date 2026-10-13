@@ -291,8 +291,25 @@ REAL_SEL_REAL="$(cd "$REAL_SEL" && pwd -P)"
 REAL_VERDICT="$(HOME="$REALHOME" artifact_removal_verdict "$REAL_SEL_REAL" --inventory-out "$REAL_RECEIPT")"
 assert_eq "$REAL_VERDICT" remove 'real C14 verdict approves the pushed selected worktree'
 [[ -f "$REAL_RECEIPT" ]] && ok 'verdict published the merged receipt' || bad 'verdict receipt missing'
-REAL_ADMIN_ROWS="$(python3 -c 'import json,sys; print(sum(1 for e in json.load(open(sys.argv[1])) if e.get("type")=="admin"))' "$REAL_RECEIPT" 2>/dev/null)"
-assert_eq "$REAL_ADMIN_ROWS" 6 'receipt carries the selected worktree admin rows'
+REAL_SEL_ADMIN="$(git -C "$REAL_SEL" rev-parse --absolute-git-dir)"
+REAL_SHAPE="$(python3 - "$REAL_RECEIPT" "$REAL_SEL_ADMIN" <<'PY'
+import json, os, sys
+receipt, admin_dir = sys.argv[1], os.path.realpath(sys.argv[2])
+rows = json.load(open(receipt))
+admin = [r for r in rows if r.get("type") == "admin"]
+roots = [r for r in admin if r.get("path") == "."]
+dirs = [r for r in admin if r.get("entry_type") == "dir" and r.get("path") != "."]
+files = [r for r in admin if r.get("entry_type") == "file"]
+st = os.lstat(admin_dir)
+ok = bool(roots) and roots[0].get("entry_type") == "dir" and (roots[0].get("dev"), roots[0].get("ino")) == (st.st_dev, st.st_ino)
+ok = ok and bool(dirs) and all(isinstance(r.get("dev"), int) and isinstance(r.get("ino"), int) for r in dirs)
+ok = ok and any(isinstance(r.get("sha256"), str) and len(r["sha256"]) == 64 for r in files)
+ok = ok and "logs" in {r.get("path") for r in dirs}
+ok = ok and all(os.path.realpath(r.get("admin") or "") == admin_dir for r in admin)
+print("ok" if ok else "bad")
+PY
+)"
+assert_eq "$REAL_SHAPE" ok 'receipt carries root + nested-dir + file admin rows for the candidate git dir'
 REAL_HASH_BEFORE="$(shasum -a 256 "$REAL_RECEIPT" | awk '{print $1}')"
 SAVED_STATE="$DISK_MAGICIAN_STATE_DIR"
 export DISK_MAGICIAN_STATE_DIR="$REALROOT/state"

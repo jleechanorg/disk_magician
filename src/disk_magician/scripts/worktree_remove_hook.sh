@@ -187,11 +187,8 @@ wrh_remove_now() {
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     if [[ ${3:-} == --quarantine ]]; then
         [[ $# == 4 && -f $4 ]] || return 1
-        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" phase1 "$main" "$real" "$4")" || return 1
-        [[ $result == quarantined:* ]] || { wrh_log "kept $display: $result"; return 1; }
-        qid="${result#quarantined:}"
-        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" phase2 "$qid")" || result=kept:quarantine_partial_kept
-        [[ $result == removed ]] || { wrh_log "kept $display: $result"; return 1; }
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$4")" || return 1
+        [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     else
         [[ $# == 2 ]] || return 1
         git -C "$main" worktree remove "$real" >&2 || return 1
