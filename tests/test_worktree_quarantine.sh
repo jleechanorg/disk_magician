@@ -271,7 +271,7 @@ echo '== real artifact_removal_verdict --inventory-out drives wrh_remove_now =='
 REALROOT="$(cd "$(mktemp -d)" && pwd -P)"; REALHOME="$REALROOT/home"; mkdir -p "$REALHOME"
 REAL_ORIGIN="$REALROOT/origin.git"; REAL_SEED="$REALROOT/seed"; REAL_SEL="$REALROOT/selected"; REAL_SIB="$REALROOT/sibling"
 git init -q --bare -b main "$REAL_ORIGIN"
-git init -q "$REAL_SEED"; git -C "$REAL_SEED" config user.name test; git -C "$REAL_SEED" config user.email t@e
+git init -q -b main "$REAL_SEED"; git -C "$REAL_SEED" config user.name test; git -C "$REAL_SEED" config user.email t@e
 printf 'base\n' > "$REAL_SEED/base"; git -C "$REAL_SEED" add base; git -C "$REAL_SEED" commit -qm base
 git -C "$REAL_SEED" remote add origin "$REAL_ORIGIN"; git -C "$REAL_SEED" push -q -u origin main
 git -C "$REAL_SEED" worktree add -q -b real-selected "$REAL_SEL"

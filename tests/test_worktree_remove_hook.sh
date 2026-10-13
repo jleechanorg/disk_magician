@@ -28,6 +28,11 @@ mkdir -p "$MOCK_BIN"
 cat >"$MOCK_BIN/lsof" <<'MOCK'
 #!/usr/bin/env bash
 [[ "${FAKE_LSOF_FAIL:-0}" == 1 ]] && exit 1
+# C14's open-file probe asks for non-cwd descriptors (`-d ^cwd`) and the
+# quarantine verifier asks `+D <dir>`; these fixtures describe cwd records only
+# (never files open inside the queried directory), so a faithful stub returns
+# no output and rc 1 for both forms.
+if [[ " $* " == *" ^cwd "* || " $* " == *" +D "* ]]; then exit 1; fi
 if [[ "${FAKE_LSOF_MODE:-}" == caller ]]; then
   printf 'p%s\nfcwd\nn%s\n' "$WRH_LIFECYCLE_CALLER_PID" "$FAKE_LSOF_CWD"
 elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
@@ -38,7 +43,10 @@ elif [[ "${FAKE_LSOF_MODE:-}" == dispatcher ]]; then
   cli=$(ps -o ppid= -p "$shell" | tr -d '[:space:]')
   printf 'p%s\nfcwd\nn/\n' "$command_sub"
   printf 'p%s\nfcwd\nn/\n' "$helper"
-  for pid in "$hook" "$shell"; do printf 'p%s\nfcwd\nn%s\n' "$pid" "$FAKE_LSOF_CWD"; done
+  # The process that runs with cwd=target is the lifecycle parent recorded by
+  # disk_magician.sh; report FAKE_LSOF_CWD for exactly that pid so a nested
+  # C14 re-check sees the same caller, never a non-chain process.
+  printf 'p%s\nfcwd\nn%s\n' "${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-$hook}" "$FAKE_LSOF_CWD"
 else
   cat "${FAKE_LSOF_FIXTURE:?}"
 fi
@@ -68,20 +76,25 @@ import os, sys, time
 root = sys.argv[1]
 old = time.time() - 8 * 86400
 for base, dirs, files in os.walk(root):
-    for name in files:
+    for name in dirs + files:
         path = os.path.join(base, name)
         try: os.utime(path, (old, old))
         except OSError: pass
+try: os.utime(root, (old, old))
+except OSError: pass
 AGEWT
 }
 age_wt() { python3 - "$1" <<'AGEWT2'
 import os, sys, time
+root = sys.argv[1]
 old = time.time() - 8 * 86400
-for base, dirs, files in os.walk(sys.argv[1]):
-    for name in files:
+for base, dirs, files in os.walk(root):
+    for name in dirs + files:
         path = os.path.join(base, name)
         try: os.utime(path, (old, old))
         except OSError: pass
+try: os.utime(root, (old, old))
+except OSError: pass
 AGEWT2
 }
 run_hook() { printf '%s' "$1" | bash "$SCRIPT" >/dev/null 2>&1; }
@@ -189,15 +202,33 @@ branch_exists worktree-i && ok "branch kept" || bad "branch deleted"
 tail -n 1 "$LOG" | grep -q "ignored" && ok "log names ignored files" || bad "log does not mention ignored files"
 grep -q -e SECRET_VALUE_XYZ -e '\.env' "$LOG" && bad "log leaks ignored file name/contents" || ok "log has no ignored file name/contents"
 
-echo "== case 11b: only ignored __pycache__ *credentials*.pyc → removed =="
+echo "== case 11b: only ignored __pycache__ non-secret .pyc → removed =="
 add_wt i2 worktree-i2
 printf '__pycache__/\n' >"$WTROOT/i2/.gitignore"; git -C "$WTROOT/i2" add .gitignore; git -C "$WTROOT/i2" commit -q -m ignore
 git -C "$WTROOT/i2" push -q origin HEAD:refs/heads/i2 2>/dev/null
-mkdir -p "$WTROOT/i2/__pycache__"; printf 'x' >"$WTROOT/i2/__pycache__/openrouter_credentials.cpython-312.pyc"
+# Fixture uses a rebuildable bytecode name that does not collide with C14's
+# secret-like pattern (`*credentials*`); C14 safety is never relaxed for a
+# fixture pass. Credential-named bytecode stays protected (case 11c).
+mkdir -p "$WTROOT/i2/__pycache__"; printf 'x' >"$WTROOT/i2/__pycache__/openrouter_cache.cpython-312.pyc"
 age_wt "$WTROOT/i2"
 run_hook "$(json "$WTROOT/i2")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 [[ ! -e "$WTROOT/i2" ]] && ok "bytecode-only worktree removed" || bad "bytecode-only worktree kept"
+
+echo "== case 11c: ignored __pycache__ *credentials*.pyc → preserved (C14 fails closed) =="
+add_wt i3 worktree-i3
+printf '__pycache__/\n' >"$WTROOT/i3/.gitignore"; git -C "$WTROOT/i3" add .gitignore; git -C "$WTROOT/i3" commit -q -m ignore
+age_wt "$WTROOT/i3"
+git -C "$WTROOT/i3" push -q origin HEAD:refs/heads/i3 2>/dev/null
+mkdir -p "$WTROOT/i3/__pycache__"; printf 'x' >"$WTROOT/i3/__pycache__/openrouter_credentials.cpython-312.pyc"
+age_wt "$WTROOT/i3"
+before="$(log_lines)"
+run_hook "$(json "$WTROOT/i3")"; rc=$?
+assert_eq "$rc" "0" "exit code"
+[[ -e "$WTROOT/i3/__pycache__/openrouter_credentials.cpython-312.pyc" ]] && ok "credentials-named bytecode preserved" || bad "credentials-named bytecode removed"
+branch_exists worktree-i3 && ok "credentials bytecode branch kept" || bad "credentials bytecode branch deleted"
+[[ "$(log_lines)" -gt "$before" ]] && ok "credentials bytecode log line appended" || bad "credentials bytecode no log line"
+tail -n 1 "$LOG" | grep -q "secret-like" && ok "c14 names secret-like reason" || bad "c14 secret-like reason missing"
 
 echo "== case 12: locked but otherwise removable → left, exit 0 (no --force) =="
 add_wt j worktree-j

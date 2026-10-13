@@ -629,54 +629,16 @@ def reconcile_one(qid, deadline=None):
     pfd = qfd = -1
     try:
         index, pfd, qfd, record = indexed_item(qid)
-        terminal = index.get("terminal")
-        if terminal is None and index.get("phase") == "preparing" and record is None:
-            try: original = os.stat(os.path.basename(index["original"]), dir_fd=pfd, follow_symlinks=False)
-            except FileNotFoundError: original = None
-            if original is None or (original.st_dev, original.st_ino) != (index.get("root_dev"), index.get("root_ino")):
-                return f"alert:{qid}:preparing-location-conflict"
-            if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
-            return f"reconciled:{qid}:original"
-        if terminal in ("removed", "restored", "original", "rolled-back"):
-            if record is not None and record.get("id") != qid:
-                return f"alert:{qid}:terminal-sidecar-mismatch"
-            if record is not None:
-                try: os.unlink(qid + ".json", dir_fd=qfd)
-                except FileNotFoundError: pass
-                os.fsync(qfd)
-            if not index_drop(qid): return f"alert:{qid}:terminal-index-cleanup-failed"
-            return f"reconciled:{qid}:terminal-{terminal}"
-        phase = record.get("phase")
-        base = os.path.basename(record["original"])
-        expected = (record["dev"], record["ino"])
-        try: at_original = os.stat(base, dir_fd=pfd, follow_symlinks=False)
-        except FileNotFoundError: at_original = None
-        try: at_quarantine = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
-        except FileNotFoundError: at_quarantine = None
-        original_matches = at_original is not None and (at_original.st_dev, at_original.st_ino) == expected
-        quarantine_matches = at_quarantine is not None and (at_quarantine.st_dev, at_quarantine.st_ino) == expected
-        if phase == "deleting":
-            binding = {"parent_path": index["parent_path"], "parent_dev": index["parent_dev"], "parent_ino": index["parent_ino"]}
-            with tempfile.NamedTemporaryFile("w", dir=index_dir(), prefix=".reconcile.", delete=False) as f:
-                json.dump(binding, f); binding_path = f.name
-            try: result = phase2(binding_path, qid, deadline)
-            finally:
-                try: os.unlink(binding_path)
-                except OSError: pass
-            return result if result.endswith(":" + qid) else f"{result}:{qid}"
-        if phase not in ("intent", "rollback_pending", "rollback_conflict"):
-            return f"alert:{qid}:malformed-phase"
-        if original_matches and at_quarantine is None:
-            if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
-            return f"reconciled:{qid}:original"
-        if at_original is None and quarantine_matches:
-            renamex(qfd, qid, pfd, base)
-            os.fsync(qfd); os.fsync(pfd)
-            restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
-            if (restored.st_dev, restored.st_ino) != expected: return f"alert:{qid}:rollback-identity-mismatch"
-            if not finish_sidecar(qfd, qid, "rolled-back"): return f"alert:{qid}:terminal-index-cleanup-failed"
-            return f"reconciled:{qid}:rolled-back"
-        return f"alert:{qid}:location-conflict"
+        # Worktree-admin records carry git registration state (gitdir/locked)
+        # that the plain rename/delete below would leave corrupt. Route them
+        # through the worktree repair/rollback machinery, which owns the
+        # admin-dir writes. This runs under the caller's operation lock, so the
+        # delegate must not take it again.
+        if record is not None and record.get("worktree_admin") is True:
+            os.close(qfd); os.close(pfd); pfd = qfd = -1
+            import worktree_quarantine
+            return worktree_quarantine.reconcile_one(qid, deadline)
+        return reconcile_record(qid, index, pfd, qfd, record, deadline)
     except FileNotFoundError:
         return f"alert:{qid}:missing-index-or-sidecar"
     except Exception as exc:
@@ -685,6 +647,61 @@ def reconcile_one(qid, deadline=None):
     finally:
         if qfd >= 0: os.close(qfd)
         if pfd >= 0: os.close(pfd)
+
+def reconcile_record(qid, index, pfd, qfd, record, deadline=None):
+    """Per-record resolver for a non-worktree record; caller owns pfd/qfd.
+
+    Shared by the generic dispatcher and worktree_quarantine's per-record entry
+    point, so neither re-enters the other and fds are opened exactly once.
+    """
+    terminal = index.get("terminal")
+    if terminal is None and index.get("phase") == "preparing" and record is None:
+        try: original = os.stat(os.path.basename(index["original"]), dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError: original = None
+        if original is None or (original.st_dev, original.st_ino) != (index.get("root_dev"), index.get("root_ino")):
+            return f"alert:{qid}:preparing-location-conflict"
+        if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
+        return f"reconciled:{qid}:original"
+    if terminal in ("removed", "restored", "original", "rolled-back"):
+        if record is not None and record.get("id") != qid:
+            return f"alert:{qid}:terminal-sidecar-mismatch"
+        if record is not None:
+            try: os.unlink(qid + ".json", dir_fd=qfd)
+            except FileNotFoundError: pass
+            os.fsync(qfd)
+        if not index_drop(qid): return f"alert:{qid}:terminal-index-cleanup-failed"
+        return f"reconciled:{qid}:terminal-{terminal}"
+    phase = record.get("phase")
+    base = os.path.basename(record["original"])
+    expected = (record["dev"], record["ino"])
+    try: at_original = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+    except FileNotFoundError: at_original = None
+    try: at_quarantine = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+    except FileNotFoundError: at_quarantine = None
+    original_matches = at_original is not None and (at_original.st_dev, at_original.st_ino) == expected
+    quarantine_matches = at_quarantine is not None and (at_quarantine.st_dev, at_quarantine.st_ino) == expected
+    if phase == "deleting":
+        binding = {"parent_path": index["parent_path"], "parent_dev": index["parent_dev"], "parent_ino": index["parent_ino"]}
+        with tempfile.NamedTemporaryFile("w", dir=index_dir(), prefix=".reconcile.", delete=False) as f:
+            json.dump(binding, f); binding_path = f.name
+        try: result = phase2(binding_path, qid, deadline)
+        finally:
+            try: os.unlink(binding_path)
+            except OSError: pass
+        return result if result.endswith(":" + qid) else f"{result}:{qid}"
+    if phase not in ("intent", "rollback_pending", "rollback_conflict"):
+        return f"alert:{qid}:malformed-phase"
+    if original_matches and at_quarantine is None:
+        if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
+        return f"reconciled:{qid}:original"
+    if at_original is None and quarantine_matches:
+        renamex(qfd, qid, pfd, base)
+        os.fsync(qfd); os.fsync(pfd)
+        restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        if (restored.st_dev, restored.st_ino) != expected: return f"alert:{qid}:rollback-identity-mismatch"
+        if not finish_sidecar(qfd, qid, "rolled-back"): return f"alert:{qid}:terminal-index-cleanup-failed"
+        return f"reconciled:{qid}:rolled-back"
+    return f"alert:{qid}:location-conflict"
 def cursor_write(path, last_id):
     target = os.path.abspath(os.path.expanduser(path)); parent = os.path.dirname(target)
     os.makedirs(parent, mode=0o700, exist_ok=True)

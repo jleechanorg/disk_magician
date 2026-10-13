@@ -244,7 +244,7 @@ lease_write_pending() {
 # previous lease is retained for rollback; an abandoned claim is never reaped.
 lease_claim_reuse() {
     python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY'
-import hashlib, json, os, sys, tempfile
+import hashlib, json, os, sys, tempfile, time
 path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:]
 lock = path + ".reuse-lock"
 try:
@@ -252,6 +252,8 @@ try:
 except OSError:
     sys.exit(1)
 try:
+    with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
+    with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
     with open(path, "rb") as f: raw = f.read()
     if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
     old = json.loads(raw)
@@ -284,6 +286,9 @@ try:
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
 finally:
+    for name in ("pid", "acquired_at"):
+        try: os.unlink(os.path.join(lock, name))
+        except FileNotFoundError: pass
     try: os.rmdir(lock)
     except OSError: pass
 PY
@@ -326,8 +331,58 @@ PY
 }
 
 # The reaper holds this same lock from its final check through removal.
-lease_reuse_lock_acquire() { mkdir "$1.reuse-lock" 2>/dev/null; }
-lease_reuse_lock_release() { rmdir "$1.reuse-lock" 2>/dev/null; }
+#
+# Stale-lock recovery (reproduced: a holder killed between mkdir and rmdir
+# leaves an empty .reuse-lock dir forever). This library writes `pid` and
+# `acquired_at` inside the dir and, on mkdir failure, reclaims ONLY its own
+# two known files when the pid is provably dead AND the lock is past the TTL.
+# Unknown shape, a live pid, or an unreadable probe keeps the lock (fail
+# closed). A nested reclaim gate makes the reclaim single-writer.
+LEASE_REUSE_LOCK_TTL_SEC="${LEASE_REUSE_LOCK_TTL_SEC:-3600}"
+
+_reuse_lock_dead_pid() {
+    local pid="$1" out rc err
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    err="$(mktemp)" || return 1
+    out="$(LC_ALL=C TZ=UTC _lease_ps -p "$pid" -o pid= 2>"$err")"; rc=$?
+    [[ "$rc" == 1 && ! -s "$err" && -z "$out" ]]; rc=$?
+    rm -f "$err"
+    return "$rc"
+}
+
+lease_reuse_lock_recover() {
+    local lease="$1" lock="$1.reuse-lock" gate="$1.reuse-lock.reclaim_gate" pid stamp
+    [[ -d "$lock" && ! -L "$lock" ]] || return 1
+    pid="$(cat "$lock/pid" 2>/dev/null)"; stamp="$(cat "$lock/acquired_at" 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$stamp" =~ ^[0-9]+$ ]] || return 1
+    (( $(date +%s) - stamp > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
+    _reuse_lock_dead_pid "$pid" || return 1
+    mkdir "$gate" 2>/dev/null || return 1
+    pid="$(cat "$lock/pid" 2>/dev/null)"; stamp="$(cat "$lock/acquired_at" 2>/dev/null)"
+    if [[ "$pid" =~ ^[1-9][0-9]*$ && "$stamp" =~ ^[0-9]+$ ]] &&
+        (( $(date +%s) - stamp > LEASE_REUSE_LOCK_TTL_SEC )) && _reuse_lock_dead_pid "$pid"; then
+        rm -f "$lock/pid" "$lock/acquired_at"
+        rmdir "$lock" 2>/dev/null || { rmdir "$gate" 2>/dev/null; return 1; }
+        rmdir "$gate" 2>/dev/null
+        return 0
+    fi
+    rmdir "$gate" 2>/dev/null
+    return 1
+}
+
+lease_reuse_lock_acquire() {
+    local lease="$1" lock="$1.reuse-lock"
+    if ! mkdir "$lock" 2>/dev/null; then
+        lease_reuse_lock_recover "$lease" || return 1
+        mkdir "$lock" 2>/dev/null || return 1
+    fi
+    echo "$$" > "$lock/pid" 2>/dev/null || true
+    date +%s > "$lock/acquired_at" 2>/dev/null || true
+}
+lease_reuse_lock_release() {
+    rm -f "$1.reuse-lock/pid" "$1.reuse-lock/acquired_at" 2>/dev/null
+    rmdir "$1.reuse-lock" 2>/dev/null
+}
 lease_mutation_lock_enter() {
     local lease="$1" mode="${2:-}"
     if [[ "$mode" == --lock-held ]]; then

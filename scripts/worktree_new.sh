@@ -206,24 +206,27 @@ wtn_free_gb() {
 }
 
 # wtn_admit <path> <repo> — admission gate, run before wtn_create so a
-# refusal never creates a directory or a branch. First `diskm admit --class
-# worktrees` per the caller contract (lib/admit_caller.sh; estimate
-# WORKTREE_ADMIT_EST_GB, default 2). Admit is observe-only until D2 is
-# recorded, so the legacy floor below stays as the live backstop: warn below
-# WORKTREE_ADMIT_WARN_GB (default 25), refuse with rc 75 below
-# WORKTREE_ADMIT_MIN_GB (default 10; 0 disables the refusal). Unmeasurable
-# free space fails OPEN — the gate must not block work because it cannot read
-# df. All output goes to stderr; stdout stays exactly the path.
+# refusal never creates a directory or a branch. When the shared admission
+# gate exists it owns the decision (plan Task 4): `diskm admit --class
+# worktrees --producer worktree-new:<repo> --dest <path> --source worktree-new`,
+# and its rc decides (0/10 proceed, 75/76 refuse). WORKTREE_ADMIT_EST_GB, if
+# set, is an explicit caller override; otherwise the admit side resolves the
+# calibrated producer estimate. The legacy env thresholds below run ONLY when
+# the shared admit is missing, and log admission_degraded:caller. All output
+# goes to stderr; stdout stays exactly the path.
 wtn_admit() {
-    local warn="${WORKTREE_ADMIT_WARN_GB:-25}" min="${WORKTREE_ADMIT_MIN_GB:-10}" free
-    local est="${WORKTREE_ADMIT_EST_GB:-2}"
-    [[ "$est" =~ ^[0-9]+(\.[0-9]+)?$ ]] || est=2
-    if ! declare -F admit_gate >/dev/null; then
-        echo "admission_degraded:caller admit missing" >&2
-    elif ! admit_gate worktrees "$est" "worktree-new:$(wtn_repo_name "$2")" "$1" worktree-new; then
+    local producer="worktree-new:$(wtn_repo_name "$2")" est="${WORKTREE_ADMIT_EST_GB:-}"
+    [[ -n "$est" ]] && { [[ "$est" =~ ^[0-9]+(\.[0-9]+)?$ ]] || est=-; }
+    if declare -F admit_gate >/dev/null && { ! declare -F admit_available >/dev/null || admit_available; }; then
+        if admit_gate worktrees "$est" "$producer" "$1" worktree-new; then
+            return 0
+        fi
         echo "worktree-new: disk admission refused: reuse an existing worktree" >&2
         return 75
     fi
+    # Shared admit unavailable: legacy env thresholds own the decision.
+    echo "admission_degraded:caller admit missing" >&2
+    local warn="${WORKTREE_ADMIT_WARN_GB:-25}" min="${WORKTREE_ADMIT_MIN_GB:-10}" free
     [[ "$warn" =~ ^[0-9]+$ ]] || warn=25
     [[ "$min" =~ ^[0-9]+$ ]] || min=10
     if ! free="$(wtn_free_gb)"; then
@@ -331,6 +334,10 @@ PY
         }
         verdict="$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)"
         [[ "$verdict" == remove ]] || continue
+        # Reclaim a provably-dead stale .reuse-lock left by a killed holder
+        # before claiming; a live/unknown lock is preserved and the claim
+        # fails closed. Never a broad cleanup.
+        declare -F lease_reuse_lock_recover >/dev/null && lease_reuse_lock_recover "$file" >/dev/null 2>&1 || true
         owner="$(lease_resolve_owner)"
         lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" \
             "$repo" "$candidate" "$admin_id" "$admin_birth" "$checkout_dev" "$checkout_ino" || continue
@@ -468,6 +475,7 @@ wtn_main() {
     wtn_admit "$path" "$repo" || return $?
     WTN_ADD_RC=1
     wtn_create "$repo" "$branch" "$path" "$base" || return "$WTN_ADD_RC"
+    admit_confirm_created
     # Record the owner lease; a failure is logged but never blocks creation
     # (stdout must stay exactly the path).
     if declare -F lease_write >/dev/null 2>&1; then

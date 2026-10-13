@@ -39,7 +39,8 @@ SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
 # Do not change to HEAD or HEAD^ — see comment block above.
 PRE_FIX_SHA="b1a30f95d4a75dd52ed313b100629c9af783717c"
 
-TMP_ROOT=$(mktemp -d -t cleanup_tmp_large_protections.XXXXXX)
+TMP_ROOT=$(mktemp -d /tmp/cleanup_tmp_large_protections.XXXXXX) || exit 1
+[[ -d "$TMP_ROOT" && "$TMP_ROOT" == /tmp/cleanup_tmp_large_protections.* ]] || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -573,7 +574,7 @@ EOF
 chmod +x "$G4B_BIN/python3"
 G4B_OUT="$TMP_ROOT/g4b.out"
 if run_capture "$G4B_OUT" env -i HOME="$TMP_ROOT/g4b-home" \
-  PATH="$G4B_BIN:/usr/bin:/bin" \
+  PATH="$G4B_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G4B_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
@@ -593,7 +594,10 @@ assert_rc "GREEN 4b: failed candidate was not moved" 0 "$G4B_FAIL_ARCHIVED"
 assert_exists "GREEN 4b: later eligible candidate archived" "$G4B_ARCHIVE"/*/ok_candidate/payload.bin
 assert_contains "GREEN 4b: archive failure is logged honestly" "could not archive" "$G4B_OUT_CONTENT"
 assert_contains "GREEN 4b: only the successful archive is counted" "Dirs archived: 1" "$G4B_OUT_CONTENT"
-assert_missing "GREEN 4b: run continued to purge_aged_archives" "$G4B_ARCHIVE/20200101T000000Z"
+assert_missing "GREEN 4b: run continued to purge_aged_archives (valid E2 entry reclaimed)" \
+  "$G4B_ARCHIVE/20200101T000000Z/cli_validation_gemini_continue"
+assert_contains "GREEN 4b: aged E2 archive purge logged" \
+  "archive after C14 approval" "$G4B_OUT_CONTENT"
 
 echo "GREEN 5: an aged archive entry is purged (space actually reclaimed on a later run)"
 echo "GREEN 5: an aged E2 archive entry with a matching origin receipt is purged"

@@ -38,40 +38,64 @@
 # ACT_DEADLINE_AT after parsing the shared actuator deadline flags.
 _SCRATCH_BUDGET_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_SCRATCH_BUDGET_LIB/quarantine.sh"
+# Cursor discipline (Cursor review 5/6): this is the ONE place a cleanup
+# candidate advances the shared resume cursor. The cursor is validated with the
+# shared act_cursor_load/act_cursor_save helpers (never a private JSON
+# reader/writer) and follows the same ordered-list contract as
+# cleanup_worktrees.sh's act_candidate_begin/act_candidate_done:
+#   - the caller resets a fully-consumed cursor ONCE per invocation
+#     (act_cursor_reset_once), never per artifact;
+#   - a candidate already behind the resume point is skipped as
+#     complete:cursor-complete; a candidate ahead of it advances the point
+#     past the units in between, so an interrupted unit never stalls the rest;
+#   - every FINISHED visit (removed, any kept verdict, and a completed C14
+#     deferral) advances the cursor;
+#   - an interruption (deadline-before-unit) never advances, so the next
+#     invocation retries the same unit;
+#   - an invalid/stale scope fails closed (no candidate is processed).
 scratch_budget_quarantine_remove() {
-  local cursor_step="" cursor_index cursor_items result
+  local cursor_step="" cursor_index=0 cursor_item_index=0 cursor_items="[]" cursor_visit_complete=false result
   if [[ -n "${ACT_CURSOR:-}" && -n "${ACT_CURSOR_SOURCE:-}" ]]; then
-    cursor_step="$(python3 - "${ACT_CURSOR}" "${ACT_CURSOR_SOURCE}" "$1" <<'PY'
+    local _cursor_state _cursor_plan _cursor_rest
+    _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { echo 'kept:cursor-invalid'; return 0; }
+    _cursor_plan="$(python3 - "$_cursor_state" "$1" <<'PY'
 import json, os, sys
-path, source, item=sys.argv[1:]
+state, item = json.loads(sys.argv[1]), sys.argv[2]
+items = list(state["items"])
+i = state["next_index"]
+# Skip candidates that vanished since the cursor was written.
+while i < len(items) and not os.path.lexists(items[i]):
+    i += 1
 try:
-    with open(path,encoding="utf-8") as f: state=json.load(f)
-except FileNotFoundError: state={"schema":1,"source":source,"items":[],"next_index":0}
-except (OSError,ValueError): print("invalid"); raise SystemExit
-items=state.get("items") if isinstance(state,dict) else None
-i=state.get("next_index") if isinstance(state,dict) else None
-if (state.get("schema") != 1 or state.get("source") != source or not isinstance(items,list) or
-    any(not isinstance(x,str) for x in items) or not isinstance(i,int) or isinstance(i,bool) or not 0<=i<=len(items)):
-    print("invalid"); raise SystemExit
-while i<len(items) and not os.path.lexists(items[i]): i+=1
-if item in items[:i]: print("complete"); raise SystemExit
-if i<len(items) and items[i]!=item: print("mismatch"); raise SystemExit
-if i==len(items):
+    idx = items.index(item)
+except ValueError:
     items.append(item)
-print("ready\t"+str(i)+"\t"+json.dumps(items,separators=(",",":")))
+    idx = len(items) - 1
+# Behind the resume point: already visited in this pass.
+if idx < i:
+    print("complete"); raise SystemExit
+# At or ahead of the resume point. Emit the unit own index separately and
+# leave next_index where it is: the resume point moves only when the visit
+# FINISHES, so an interrupted unit (idx > i) keeps the cursor on the earlier
+# unfinished unit instead of being stepped over.
+print("ready\t" + str(i) + "\t" + str(idx) + "\t" + json.dumps(items, separators=(",", ":")))
 PY
 )" || { echo 'kept:cursor-invalid'; return 0; }
-    case "$cursor_step" in
+    case "$_cursor_plan" in
       complete) echo 'kept:cursor-complete'; return 0 ;;
-      mismatch) echo 'kept:cursor-mismatch'; return 0 ;;
       invalid) echo 'kept:cursor-invalid'; return 0 ;;
       ready$'\t'*)
-        cursor_index="${cursor_step#*$'\t'}"; cursor_index="${cursor_index%%$'\t'*}"
-        cursor_items="${cursor_step#*$'\t'}"; cursor_items="${cursor_items#*$'\t'}" ;;
+        _cursor_rest="${_cursor_plan#*$'\t'}"
+        cursor_index="${_cursor_rest%%$'\t'*}"
+        _cursor_rest="${_cursor_rest#*$'\t'}"
+        cursor_item_index="${_cursor_rest%%$'\t'*}"
+        cursor_items="${_cursor_rest#*$'\t'}"
+        cursor_step="ready" ;;
       *) echo 'kept:cursor-invalid'; return 0 ;;
-        esac
-  fi
-  if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready$'\t'* ]]; then
+    esac
+    # Persist the appended candidate BEFORE any destructive work, so a kill
+    # mid-unit resumes the same unit next run. next_index stays at the
+    # resume point (not the candidate's own index).
     act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$cursor_index" || { echo 'kept:cursor-save-failed'; return 0; }
   fi
   if [[ -n "${ACT_DEADLINE_AT:-}" ]]; then
@@ -93,14 +117,15 @@ PY
       deferred:*) CANDIDATE_DEFERRED_COUNT=$((CANDIDATE_DEFERRED_COUNT + 1)) ;;
     esac
   fi
+  # A finished visit advances; only an interruption (or a preflight config
+  # failure) leaves the cursor on the unit so the next invocation retries it.
   case "$result" in
-    removed:*|deferred:*) cursor_visit_complete=true ;;
-    kept:protected|kept:live-owner|kept:cwd-unknown|kept:open-file|kept:recent-activity|kept:secret-like|kept:unproven-content|kept:archive-identity|kept:dirty|kept:not-pushed|kept:unreachable-object|kept:ignored-data|kept:admin-unknown|kept:locked|kept:remote-unverified)
-      cursor_visit_complete=true ;;
-    *) cursor_visit_complete=false ;;
+    deferred:deadline-before-unit|kept:invalid-deadline|kept:cursor-*)
+      cursor_visit_complete=false ;;
+    *) cursor_visit_complete=true ;;
   esac
-  if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready$'\t'* && "$cursor_visit_complete" == true ]]; then
-    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$((cursor_index + 1))" || { echo 'kept:cursor-save-failed'; return 0; }
+  if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready && "$cursor_visit_complete" == true ]]; then
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$((cursor_item_index + 1))" || { echo 'kept:cursor-save-failed'; return 0; }
   fi
   echo "$result"
   return 0
@@ -312,6 +337,14 @@ scratch_budget_evict_root() {
           deferred:*) CANDIDATE_DEFERRED_COUNT=$((CANDIDATE_DEFERRED_COUNT + 1)) ;;
         esac
       fi
+      # No unit after an interruption can fit the (strictly shrinking) deadline
+      # budget, so stop this pass. The cursor stays on the interrupted unit for
+      # the next invocation to retry (Cursor review 5/6).
+      case "$result" in
+        deferred:deadline-before-unit|kept:invalid-deadline)
+          log "scratch_budget: stopping pass ($result): $item_i"
+          break ;;
+      esac
       if [[ "$result" != removed:* ]]; then
         log "scratch_budget: preserved by C14 ($result): $item_i"
         continue

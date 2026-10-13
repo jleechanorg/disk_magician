@@ -34,6 +34,28 @@ set_age_hours() {
   /usr/bin/find "$path" -name .git -prune -o -exec touch -t "$stamp" {} +
 }
 
+# make_depth3_c14_entry <source> <entry> <retention> <private_tmp> <tmp_root>
+# Builds a valid expired E2 origin receipt and moves its source to an
+# arbitrary archive <entry> (including a depth-3 container child). Mirrors
+# test_cleanup_tmp_archive_purge.sh: the source is flattened onto <tmp_root>
+# so its declared-ephemeral row is a single component, and archived_at is
+# backdated past the retention window so C14 E1 approves the reclaimed unit.
+make_depth3_c14_entry() {
+  local source="$1" entry="$2" retention="$3" private_tmp="$4" tmp_root="$5" archived_at actual_retention
+  private_tmp="$(cd "$private_tmp" && pwd -P)"
+  tmp_root="$(cd "$tmp_root" && pwd -P)"
+  source="$tmp_root/${source##*/}"
+  mkdir -p "$source" "${entry%/*}"
+  printf 'depth3 expired scratch fixture\n' >"$source/payload.bin"
+  actual_retention="$(DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$private_tmp" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$tmp_root" \
+    bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2"' _ "$REPO_ROOT" "$source")"
+  [[ "$actual_retention" == "$retention" ]] || { fail "depth3 fixture retention for $source (expected $retention, got $actual_retention)"; return 1; }
+  archived_at="$(python3 -c 'import sys,time; print(int(time.time())-int(sys.argv[1])*3600)' "$(( retention / 60 + 25 ))")"
+  python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null
+  mv "$source" "$entry"
+  set_old "$entry"
+}
+
 make_clean_pushed_worktree() {
   local main="$1" wt="$2" branch="$3" remote
   remote="${main}-remote.git"
@@ -69,9 +91,27 @@ S
 shift
 exec "$@"
 S
-  # lsof stub: reports every path listed in $FAKE_OPEN_FILE as open.
+  # lsof stub: emulates the real targeted contract C14 reads. A targeted
+  # query (a +D tree scan or an explicit path) prints the FAKE_OPEN_FILE
+  # records and exits 0 when a match exists, otherwise prints nothing and
+  # exits 1. A targetless table query (cleanup_tmp fail-closed has_open_files)
+  # always keeps a well-formed synthetic record so it stays fail-closed.
   cat > "$BIN/lsof" <<'S'
 #!/usr/bin/env bash
+target=""
+for arg in "$@"; do
+  case "$arg" in
+    +D|--) target=1 ;;
+    /*) target=1 ;;
+  esac
+done
+if [[ -n "$target" ]]; then
+  if [[ -n "${FAKE_OPEN_FILE:-}" && -s "$FAKE_OPEN_FILE" ]]; then
+    while IFS= read -r f; do printf 'p1234\nf3\nn%s\ntREG\n' "$f"; done < "$FAKE_OPEN_FILE"
+    exit 0
+  fi
+  exit 1
+fi
 echo p1234; echo fcwd; echo n/
 if [[ -n "${FAKE_OPEN_FILE:-}" && -s "$FAKE_OPEN_FILE" ]]; then
   while IFS= read -r f; do printf 'f3\nn%s\ntREG\n' "$f"; done < "$FAKE_OPEN_FILE"
@@ -175,13 +215,21 @@ assert_missing "t6 eligible sibling of marked children moved out" "$PT/agent-scr
 [[ -n "$(archived old-unmarked)" ]] && pass "t6 eligible sibling archived" || fail "t6 eligible sibling archived"
 assert_exists "t6 child under marked container kept" "$PT/marked/old-child"
 
-echo "Test 7: protected-root container children are kept"
+echo "Test 7: protected root keeps itself and canonical evidence; stale scratch children archived"
 make_env t7
 mkdir -p "$PT/keepme"
 mkchild "$PT/keepme/old-child"; set_old "$PT/keepme/old-child"
 mkchild "$PT/keepme/fresh-child"
+# Canonical `evidence` child of a protected root is never touched, even when
+# stale, while the root itself is preserved and other stale children are
+# reclaimable (origin/main protected-root descent).
+mkchild "$PT/keepme/evidence"; set_old "$PT/keepme/evidence"
 run_sweep t7 --clean DISK_MAGICIAN_PROTECTED_TMP_ROOTS=keepme DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=keepme
-assert_exists "t7 protected container child kept" "$PT/keepme/old-child"
+assert_exists "t7 protected root kept" "$PT/keepme"
+assert_exists "t7 canonical evidence child kept" "$PT/keepme/evidence"
+assert_exists "t7 fresh child kept" "$PT/keepme/fresh-child"
+assert_missing "t7 stale scratch child archived out" "$PT/keepme/old-child"
+[[ -n "$(archived old-child)" ]] && pass "t7 stale scratch child present in archive" || fail "t7 stale scratch child present in archive"
 
 echo "Test 8: nested grandchildren are not descended (one level only)"
 make_env t8
@@ -340,6 +388,40 @@ set_old "$PT/agent-scratch"
 run_sweep t19 --clean
 assert_missing "t19 idle container with old clean repository moved out" "$PT/agent-scratch"
 assert_contains "t19 idle safe container archived" "Dirs archived: 1" "$OUT"
+
+echo "Test 20: depth-3 receipt traversal reclaims valid entries and preserves unknown bytes"
+# Cursor review 6 / bead cuea.12: a child archived under a container lands at
+# "$AR/<ts>/<container>/<unit>" with its receipt as a sibling file at depth 3.
+# The purge scan must discover those receipts (never walk container bytes),
+# reclaim a VALID expired E2 entry, and leave unclassifiable content, the
+# container, and the receipt sidecar untouched.
+make_env t20
+
+# 20a: a real swept descended child with no declared-ephemeral row is
+# discovered but preserved as unknown archive content.
+mkdir -p "$PT/agent-scratch"
+mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
+run_sweep t20 --clean
+UNKNOWN_ENTRY="$(archived old-child)"
+if [[ -n "$UNKNOWN_ENTRY" ]]; then pass "t20a descended child archived under container"; else fail "t20a descended child archived under container"; fi
+assert_exists "t20a descended origin receipt written" "$UNKNOWN_ENTRY.c14-origin.json"
+set_old "$UNKNOWN_ENTRY"
+run_sweep t20 --clean LARGE_TMP_ARCHIVE_RETENTION_HOURS=1
+assert_exists "t20a unknown descended child preserved (same archive guard)" "$UNKNOWN_ENTRY"
+assert_exists "t20a origin receipt sidecar preserved" "$UNKNOWN_ENTRY.c14-origin.json"
+assert_exists "t20a container itself never removed" "$PT/agent-scratch"
+assert_contains "t20a unknown descended child is discovered and evaluated" \
+  "Skipping aged archive (C14 kept:archive-identity): $UNKNOWN_ENTRY" "$OUT"
+
+# 20b: a valid expired E2 receipt placed at depth 3 is reclaimed through the
+# same traversal (the receipt names the original top-level scratch path).
+D3_STAMP="$AR/20200102T000000Z"
+D3_ENTRY="$D3_STAMP/agent-scratch/cli_validation_gemini_depth3"
+mkdir -p "$PT" "$TMP_ROOT/t20-tmp"
+make_depth3_c14_entry "$TMP_ROOT/t20-tmp/cli_validation_gemini_depth3" "$D3_ENTRY" 60 "$PT" "$TMP_ROOT/t20-tmp"
+run_sweep t20 --clean LARGE_TMP_ARCHIVE_RETENTION_HOURS=1
+assert_missing "t20b valid depth-3 receipted entry reclaimed" "$D3_ENTRY"
+assert_contains "t20b depth-3 purge is logged" "Purged aged archive after C14 approval" "$OUT"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

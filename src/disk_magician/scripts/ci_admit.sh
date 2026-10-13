@@ -9,7 +9,7 @@ if [[ -n "${GITHUB_RUN_ID:-}" && -n "${GITHUB_RUN_ATTEMPT:-}" && -n "${GITHUB_JO
 else
     job="unknown-${RUNNER_NAME:-$(hostname -s)}-$(date +%s)"; echo "admission_degraded:ci_identity" >&2
 fi
-if admit_gate colima "${CI_ADMIT_EST_GB:-20}" ci "${GITHUB_WORKSPACE:-$PWD}" ci --ci-job "$job"; then
+if admit_gate colima "${CI_ADMIT_EST_GB:-}" ci "${GITHUB_WORKSPACE:-$PWD}" ci --ci-job "$job"; then
     rc=0
 else
     rc=$?

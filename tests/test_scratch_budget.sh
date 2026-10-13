@@ -462,6 +462,102 @@ result20="$(bash -c '
 assert_eq "Test20: completed C14 deferral is reported" "deferred:tree-walk" "$result20"
 assert_eq "Test20: completed C14 deferral advances cursor" 1 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$CURSOR20")"
 
+# ============ Tests 21-24: shared resume-cursor contract (Cursor review 5/6) ============
+# The governed /tmp cleanup must (a) advance on every FINISHED visit even when
+# its kept reason is not in a hardcoded list, (b) keep the resume point on an
+# INTERRUPTED unit without stalling later candidates, (c) reset a fully-consumed
+# cursor ONCE per invocation, and (d) fail closed on a stale scope. Each case
+# drives a full mini-invocation in one bash process against the shared helpers.
+
+# Test 21: an unlisted kept reason (kept:check-failed) must not stall the pass.
+C21_DIR="$TMP_TEST_ROOT/t21"
+mkdir -p "$C21_DIR/a" "$C21_DIR/b"
+C21_CURSOR="$TMP_TEST_ROOT/t21.cursor.json"
+out21="$(C21_CURSOR="$C21_CURSOR" C21_A="$C21_DIR/a" C21_B="$C21_DIR/b" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  ACT_CURSOR="$C21_CURSOR"; ACT_CURSOR_SOURCE="cleanup_tmp-test:t21"
+  quarantine_remove() { local v="DM_VERDICT_$(basename "$1")"; echo "${!v:-removed:stub}"; }
+  act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0
+  DM_VERDICT_a=kept:check-failed
+  echo "a=$(scratch_budget_quarantine_remove "$C21_A")"
+  echo "b=$(scratch_budget_quarantine_remove "$C21_B")"
+')"
+assert_contains "Test21: unlisted kept reason is reported" "a=kept:check-failed" "$out21"
+assert_contains "Test21: later candidate is still processed (no cursor stall)" "b=removed:stub" "$out21"
+assert_eq "Test21: cursor advanced past both finished visits" 2 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$C21_CURSOR")"
+
+# Test 22: interruption (deadline-before-unit) keeps the resume point; it must
+# not turn every later candidate into kept:cursor-mismatch.
+C22_DIR="$TMP_TEST_ROOT/t22"
+mkdir -p "$C22_DIR/i1" "$C22_DIR/i2"
+C22_CURSOR="$TMP_TEST_ROOT/t22.cursor.json"
+out22="$(C22_CURSOR="$C22_CURSOR" C22_I1="$C22_DIR/i1" C22_I2="$C22_DIR/i2" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  ACT_CURSOR="$C22_CURSOR"; ACT_CURSOR_SOURCE="cleanup_tmp-test:t22"
+  ACT_DEADLINE_AT=0
+  quarantine_remove() { echo removed:stub; }
+  act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0
+  echo "i1=$(scratch_budget_quarantine_remove "$C22_I1")"
+  echo "i2=$(scratch_budget_quarantine_remove "$C22_I2")"
+')"
+assert_contains "Test22: first unit is interrupted" "i1=deferred:deadline-before-unit" "$out22"
+assert_contains "Test22: later unit is deferred, never cursor-mismatch" "i2=deferred:deadline-before-unit" "$out22"
+assert_eq "Test22: resume point stays on the interrupted unit" 0 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$C22_CURSOR")"
+
+# Test 23: a fully-consumed cursor resets ONCE at the next invocation (the
+# shared act_cursor_reset_once helper), so a completed pass is retried instead
+# of reporting kept:cursor-complete forever.
+C23_DIR="$TMP_TEST_ROOT/t23"
+mkdir -p "$C23_DIR/p1" "$C23_DIR/p2"
+C23_CURSOR="$TMP_TEST_ROOT/t23.cursor.json"
+out23="$(C23_CURSOR="$C23_CURSOR" C23_P1="$C23_DIR/p1" C23_P2="$C23_DIR/p2" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  ACT_CURSOR="$C23_CURSOR"; ACT_CURSOR_SOURCE="cleanup_tmp-test:t23"
+  quarantine_remove() { echo removed:stub; }
+  act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0
+  scratch_budget_quarantine_remove "$C23_P1" >/dev/null
+  scratch_budget_quarantine_remove "$C23_P2" >/dev/null
+')"
+assert_eq "Test23: pass completes the cursor" 2 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$C23_CURSOR")"
+out23_reset="$(C23_CURSOR="$C23_CURSOR" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  act_cursor_reset_once "$C23_CURSOR" "cleanup_tmp-test:t23"
+')"
+assert_eq "Test23: shared reset clears the consumed cursor" 0 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$C23_CURSOR")"
+out23_revisit="$(C23_CURSOR="$C23_CURSOR" C23_P1="$C23_DIR/p1" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  ACT_CURSOR="$C23_CURSOR"; ACT_CURSOR_SOURCE="cleanup_tmp-test:t23"
+  quarantine_remove() { echo removed:stub; }
+  echo "p1_again=$(scratch_budget_quarantine_remove "$C23_P1")"
+')"
+assert_contains "Test23: next invocation revisits instead of cursor-complete" "p1_again=removed:stub" "$out23_revisit"
+
+# Test 24: a cursor written for different effective options (stale scope) fails
+# closed, so no candidate is processed under the wrong resume contract.
+C24_DIR="$TMP_TEST_ROOT/t24"
+mkdir -p "$C24_DIR/a"
+C24_CURSOR="$TMP_TEST_ROOT/t24.cursor.json"
+out24="$(C24_CURSOR="$C24_CURSOR" C24_A="$C24_DIR/a" bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  ACT_CURSOR="$C24_CURSOR"; ACT_CURSOR_SOURCE="cleanup_tmp-test:t24"
+  quarantine_remove() { echo removed:stub; }
+  act_cursor_save "$ACT_CURSOR" "other-source:t24" "[]" 0
+  echo "a=$(scratch_budget_quarantine_remove "$C24_A")"
+')"
+assert_contains "Test24: stale scope fails closed" "a=kept:cursor-invalid" "$out24"
+
 if bash -c '
   source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
   find() { return 1; }

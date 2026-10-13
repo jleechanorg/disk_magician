@@ -115,17 +115,22 @@ SHIM
 
   cat > "$bin_dir/lsof" <<'SHIM'
 #!/usr/bin/env bash
+# Fixture lsof emulating the real contract c14_probe.open_file reads:
+# a TARGETED query (a path argument or a +D tree scan) prints nothing and
+# exits 1 when no descriptor matches. A TARGETLESS table query keeps the
+# synthetic record so cleanup_tmp's fail-closed has_open_files() still sees
+# well-formed output. (The old unconditional `-a` -> exit 0 made every
+# targeted probe look empty-with-rc-0, i.e. kept:check-failed.)
+target=""
 for arg in "$@"; do
-  if [[ "$arg" == *"+D"* || "$arg" == "+D" ]]; then
-    exit 1
-  fi
-  if [[ "$arg" == "--" ]]; then
-    exit 1
-  fi
-  if [[ "$arg" == "-a" ]]; then
-    exit 0
-  fi
+  case "$arg" in
+    +D|--) exit 1 ;;
+    /*) target="$arg" ;;
+  esac
 done
+if [[ -n "$target" ]]; then
+  exit 1
+fi
 echo "p1234"
 echo "fcwd"
 echo "n/"
@@ -381,7 +386,12 @@ if run_capture "$T7_OUT" env -i HOME="$TMP_ROOT/t7-home" PATH="$T7_BIN:/usr/bin:
 else
   T7_RC=$?
 fi
-assert_rc "Test 7: receipt collision aborts archive with rc 2" 2 "$T7_RC"
+# Cursor review 5/6 / parent archive-error contract: a receipt collision no
+# longer aborts the whole sweep. The source is left unmoved, the preexisting
+# receipt bytes are untouched, and the run continues (rc 0). The ORIGINAL
+# abort behavior (rc 2, set -e) would fail this assertion, so the RED is
+# preserved.
+assert_rc "Test 7: receipt collision continues the run" 0 "$T7_RC"
 assert_contains "Test 7: receipt collision fails closed" "could not write archive origin receipt" "$(cat "$T7_OUT")"
 if cmp -s "$T7_RECEIPT" "$TMP_ROOT/t7-receipt.expected"; then record_pass "Test 7: preexisting receipt bytes are preserved"; else record_fail "Test 7: preexisting receipt bytes are preserved" "receipt changed or disappeared"; fi
 assert_exists "Test 7: candidate remains unmoved" "$T7_PRIVATE_TMP/collision_candidate/payload.bin"

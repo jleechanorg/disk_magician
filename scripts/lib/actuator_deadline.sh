@@ -100,3 +100,19 @@ finally:
     if os.path.exists(tmp): os.unlink(tmp)
 PY
 }
+
+# act_cursor_reset_once <path> <source> — the ONE reset point at the START of a
+# governed invocation. A fully-consumed cursor (next_index at/past the last
+# item) means the previous pass finished; clear it so the next pass revisits
+# every candidate — including one that was deferred earlier — instead of
+# reporting `kept:cursor-complete` forever. Called exactly once per invocation,
+# NEVER per candidate (a per-candidate reset loses the resume list and is the
+# Cursor review 5/6 defect). Returns 0 (nothing to do), 2 (invalid/corrupt
+# cursor), or 3 (reset could not be persisted); callers fail closed on non-zero.
+act_cursor_reset_once() {
+  local path="$1" source="$2" state complete
+  state="$(act_cursor_load "$path" "$source")" || return 2
+  complete="$(python3 -c 'import json,sys; print(1 if json.loads(sys.argv[1])["next_index"] >= len(json.loads(sys.argv[1])["items"]) else 0)' "$state")" || return 2
+  [[ "$complete" == 1 ]] || return 0
+  act_cursor_save "$path" "$source" "[]" 0 || return 3
+}

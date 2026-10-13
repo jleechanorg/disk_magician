@@ -15,12 +15,28 @@ assert_eq() {
     if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi
 }
 
-TMPROOT="$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)"
-trap 'rm -rf "$TMPROOT"' EXIT
+TMPROOT_RAW="$(mktemp -d /tmp/dm-worktree-new.XXXXXX)" || { echo "FATAL: fixture allocation failed" >&2; exit 1; }
+if [[ -z "$TMPROOT_RAW" || "$TMPROOT_RAW" != /tmp/dm-worktree-new.* || ! -d "$TMPROOT_RAW" || -L "$TMPROOT_RAW" ]]; then
+    echo "FATAL: refusing non-/tmp fixture root '$TMPROOT_RAW'" >&2
+    exit 1
+fi
+# Canonicalize (/tmp is a symlink to /private/tmp on macOS): lease paths,
+# own-claim canonicalization and git all compare canonical bytes.
+TMPROOT="$(CDPATH= cd -- "$TMPROOT_RAW" && pwd -P)"
+trap 'rm -rf -- "$TMPROOT_RAW"' EXIT
+# No ambient Git redirection or injected tool stubs may reach the fixtures.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_COMMON_DIR GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_TEMPLATE_DIR GIT_EXEC_PATH GIT_CEILING_DIRECTORIES \
+    DISK_MAGICIAN_PS_BIN DISK_MAGICIAN_STAT_BIN DISK_MAGICIAN_LSOF_BIN DISK_MAGICIAN_GIT_BIN \
+    DISK_MAGICIAN_C14_LEDGER C14_INVENTORY_OUT C14_INVENTORY_FILE 2>/dev/null || true
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
 unset STANDARD_WORKTREE_ROOT
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+cd "$TMPROOT" || exit 1
 
 # Bare origin with one commit, cloned to $TMPROOT/myrepo, plus one local-only
 # commit so origin/HEAD and HEAD differ.
@@ -270,10 +286,10 @@ assert_eq "$(lease_field "$L" branch)" "feat/lease" "lease branch"
 [[ "$(lease_field "$L" path)" == "$WTROOT/feat-lease" ]] && ok "lease path" || bad "lease path wrong"
 
 echo "== case L2: failing lease write still prints the path, exit 0 =="
-mkdir -p "$HOME/.disk_magician_state/worktree_leases"
-chmod 500 "$HOME/.disk_magician_state/worktree_leases"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR/worktree_leases"
+chmod 500 "$DISK_MAGICIAN_STATE_DIR/worktree_leases"
 out="$(bash "$SCRIPT" "$REPO" feat/leasefail 2>"$TMPROOT/lease_err")"; rc=$?
-chmod 700 "$HOME/.disk_magician_state/worktree_leases"
+chmod 700 "$DISK_MAGICIAN_STATE_DIR/worktree_leases"
 assert_eq "$rc" "0" "exit code stays 0"
 assert_eq "$out" "$WTROOT/feat-leasefail" "stdout is still exactly the path"
 grep -q "lease write failed" "$TMPROOT/lease_err" && ok "stderr logs lease write failed" || bad "stderr missing lease write failed"
@@ -284,52 +300,74 @@ out="$(env -u DISK_MAGICIAN_FREE_GB_OVERRIDE bash "$SCRIPT" "$REPO" feat/nogate 
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-nogate" "stdout is exactly the path"
 
-echo "== case A1: free 50 GiB -> creates, no warning =="
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a1 2>"$TMPROOT/a1.err")"; rc=$?
+# The shared admit gate owns the decision when it is available (plan Task 4).
+# These cases pass an explicit estimate so the real disk_budget.py (whose
+# producer-estimate adapter is a separate lane) records a real event.
+echo "== case A1: free 50 GiB -> creates, no legacy warning ="
+out="$(WORKTREE_ADMIT_EST_GB=2 DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a1 2>"$TMPROOT/a1.err")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-a1" "stdout is exactly the path"
 grep -q "low disk" "$TMPROOT/a1.err" && bad "warned above the warn threshold: $(cat "$TMPROOT/a1.err")" || ok "no warning"
 
-echo "== case A2: free 20 GiB -> creates with a warning; stdout unchanged =="
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=20 bash "$SCRIPT" "$REPO" feat/a2 2>"$TMPROOT/a2.err")"; rc=$?
+# D2 is not recorded, so the shared admit decision is observe (rc 0). The old
+# legacy floor must NOT override it (Task 4 gap): low df now proceeds through
+# the shared gate, and only the missing-admit fallback rejects.
+echo "== case A2: free 5 GiB, shared admit observe -> proceeds (no legacy refusal) =="
+out="$(WORKTREE_ADMIT_EST_GB=2 DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a2 2>"$TMPROOT/a2.err")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-a2" "stdout is exactly the path"
-grep -q "low disk (20 GiB free)" "$TMPROOT/a2.err" && ok "stderr warns low disk (20 GiB free)" || bad "stderr missing warning: $(cat "$TMPROOT/a2.err")"
+grep -q "disk low" "$TMPROOT/a2.err" && bad "legacy floor ran despite shared admit: $(cat "$TMPROOT/a2.err")" || ok "shared admit owns the decision"
+[[ -d "$WTROOT/feat-a2" ]] && ok "worktree created" || bad "worktree not created"
 
-echo "== case A3: free 5 GiB -> exit 75, nothing created =="
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a3 2>"$TMPROOT/a3.err")"; rc=$?
+# Producer lookup: with no explicit override the caller omits --est-gb and
+# lets the admit side resolve the calibrated producer estimate; an explicit
+# override is always forwarded.
+echo "== case A2b: producer lookup vs explicit estimate override =="
+cat > "$TMPROOT/admit-args" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DISK_MAGICIAN_ADMIT_ARGS_LOG"
+exit 0
+EOF
+chmod +x "$TMPROOT/admit-args"
+A2B_LOG="$TMPROOT/admit-args.log"; : > "$A2B_LOG"
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2b --name a2b 2>/dev/null)"
+assert_eq "$rc" "0" "exit code"
+grep -q -- "--producer worktree-new:myrepo" "$A2B_LOG" && ok "producer passed" || bad "producer missing: $(cat "$A2B_LOG")"
+grep -q -- "--est-gb" "$A2B_LOG" && bad "--est-gb passed without an explicit override: $(cat "$A2B_LOG")" || ok "producer-only lookup when unset"
+: > "$A2B_LOG"
+out="$(WORKTREE_ADMIT_EST_GB=7 DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2c --name a2c 2>/dev/null)"
+grep -q -- "--est-gb 7" "$A2B_LOG" && ok "explicit estimate override forwarded" || bad "override lost: $(cat "$A2B_LOG")"
+
+# Missing admit: the legacy thresholds own the decision and reject at low df.
+echo "== case A3: admit missing + free 5 GiB -> legacy floor rejects (rc 75) =="
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/no-such-admit" DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a3 2>"$TMPROOT/a3.err")"; rc=$?
 assert_eq "$rc" "75" "exit code 75"
 assert_eq "$out" "" "stdout empty"
+grep -q "admission_degraded:caller" "$TMPROOT/a3.err" && ok "stderr logs admission_degraded:caller" || bad "stderr: $(cat "$TMPROOT/a3.err")"
 grep -q "disk low (5 GiB free): reuse an existing worktree" "$TMPROOT/a3.err" && ok "stderr names the floor and the remedy" || bad "stderr message: $(cat "$TMPROOT/a3.err")"
 [[ ! -e "$WTROOT/feat-a3" ]] && ok "no worktree dir created" || bad "worktree created despite refusal"
 if git -C "$REPO" show-ref -q --verify refs/heads/feat/a3; then bad "branch created"; else ok "no branch created"; fi
 grep -q "disk-admission: refused class=worktrees rc=75" "$TMPROOT/a3.err" && ok "stderr carries the refused line" || bad "refused line missing: $(cat "$TMPROOT/a3.err")"
 
-echo "== case A4: WORKTREE_ADMIT_MIN_GB=0 disables the refusal =="
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=5 WORKTREE_ADMIT_MIN_GB=0 bash "$SCRIPT" "$REPO" feat/a4 2>"$TMPROOT/a4.err")"; rc=$?
+echo "== case A4: missing admit + WORKTREE_ADMIT_MIN_GB=0 disables the refusal =="
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/no-such-admit" DISK_MAGICIAN_FREE_GB_OVERRIDE=5 WORKTREE_ADMIT_MIN_GB=0 bash "$SCRIPT" "$REPO" feat/a4 2>"$TMPROOT/a4.err")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-a4" "stdout is exactly the path"
 [[ -d "$WTROOT/feat-a4" ]] && ok "worktree created" || bad "worktree not created"
 
-echo "== case A5: unmeasurable free space fails open =="
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=x bash "$SCRIPT" "$REPO" feat/a5 2>"$TMPROOT/a5.err")"; rc=$?
+echo "== case A5: missing admit + unmeasurable free space fails open =="
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/no-such-admit" DISK_MAGICIAN_FREE_GB_OVERRIDE=x bash "$SCRIPT" "$REPO" feat/a5 2>"$TMPROOT/a5.err")"; rc=$?
 assert_eq "$rc" "0" "exit code"
 assert_eq "$out" "$WTROOT/feat-a5" "stdout is exactly the path"
 grep -q "free-space unmeasurable" "$TMPROOT/a5.err" && ok "stderr logs free-space unmeasurable" || bad "stderr missing free-space unmeasurable: $(cat "$TMPROOT/a5.err")"
 
 echo "== case A6: real diskm admit logs one worktrees event with producer and dest =="
-EV="$HOME/.disk_magician_state/admission/events.jsonl"
-out="$(DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a6 2>"$TMPROOT/a6.err")"; rc=$?
+EV="$DISK_MAGICIAN_STATE_DIR/admission/events.jsonl"
+out="$(WORKTREE_ADMIT_EST_GB=2 DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a6 2>"$TMPROOT/a6.err")"; rc=$?
 assert_eq "$rc" "0" "exit code (admit is observe-only until D2)"
 assert_eq "$out" "$WTROOT/feat-a6" "stdout is exactly the path"
 assert_eq "$(python3 -c 'import json,sys; e=[json.loads(l) for l in open(sys.argv[1])][-1]; print(e["class"], e["producer"], e["source"], e["dest"])' "$EV" 2>&1)" \
     "worktrees worktree-new:myrepo worktree-new $WTROOT/feat-a6" "event class/producer/source/dest"
-
-echo "== case A7: admit missing -> admission_degraded:caller, legacy floor still refuses =="
-out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/no-such-admit" DISK_MAGICIAN_FREE_GB_OVERRIDE=5 bash "$SCRIPT" "$REPO" feat/a7 2>"$TMPROOT/a7.err")"; rc=$?
-assert_eq "$rc" "75" "exit code 75"
-grep -q "admission_degraded:caller" "$TMPROOT/a7.err" && ok "stderr logs admission_degraded:caller" || bad "stderr: $(cat "$TMPROOT/a7.err")"
-[[ ! -e "$WTROOT/feat-a7" ]] && ok "no worktree dir created" || bad "worktree created despite refusal"
 
 # shellcheck source=tests/lib/admit_contract.sh
 source "$REPO_ROOT/tests/lib/admit_contract.sh"
@@ -808,7 +846,6 @@ out="$(bash "$SCRIPT" "$REPO" feat/c14-incomplete --name c14-incomplete 2>/dev/n
 assert_eq "$rc" "0" "incomplete C14 fresh path exit"
 assert_eq "$out" "$WTROOT/c14-incomplete" "incomplete C14 uses fresh path"
 assert_eq "$(git -C "$WTROOT/reuse-incomplete" rev-parse --abbrev-ref HEAD 2>/dev/null)" "reuse/incomplete" "incomplete C14 leaves candidate untouched"
-unset DISK_MAGICIAN_STATE_DIR
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

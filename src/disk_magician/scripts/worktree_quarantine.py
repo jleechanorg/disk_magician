@@ -433,6 +433,47 @@ def restore(qid, deadline=None):
         os.close(qfd); os.close(pfd)
 
 
+def reconcile_one(qid, deadline=None):
+    """Resolve one indexed record without taking the operation lock.
+
+    Called by the generic ``quarantine_rename.reconcile_one`` dispatcher (which
+    already holds the canonical operation lock) so worktree records use the
+    repair/rollback machinery instead of the plain generic rename. Records that
+    are not worktree-admin fall back to the generic per-record resolver.
+    """
+    try:
+        index, pfd, qfd, record = qr.indexed_item(qid)
+    except qr.DeadlineExceeded:
+        return f"deferred:{qid}:operation"
+    except Exception:
+        return f"alert:{qid}:missing-index-or-sidecar"
+    if record is None or record.get("worktree_admin") is not True:
+        try:
+            return qr.reconcile_record(qid, index, pfd, qfd, record, deadline)
+        finally:
+            os.close(qfd); os.close(pfd)
+    try:
+        phase = record.get("wrh_phase")
+        if phase == "checkout_removed" or record.get("phase") == "deleting":
+            result = phase2(qid, deadline)
+        else:
+            result = rollback(pfd, qfd, qid, record, reason="rolled-back")
+    except qr.DeadlineExceeded:
+        return f"deferred:{qid}:operation"
+    except Exception:
+        return f"alert:{qid}:reconcile-failed"
+    finally:
+        os.close(qfd); os.close(pfd)
+    if result in ("removed", "checkout_removed"):
+        return f"reconciled:{qid}:removed"
+    if result == "kept:rolled-back":
+        return f"reconciled:{qid}:rolled-back"
+    if result.startswith("deferred"):
+        return f"{result}:{qid}"
+    reason = result.split(":", 1)[1] if result.startswith("kept:") else result
+    return f"alert:{qid}:{reason}"
+
+
 def reconcile(deadline=None):
     try:
         directory = qr.index_dir()

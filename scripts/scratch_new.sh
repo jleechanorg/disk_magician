@@ -12,22 +12,12 @@ source "$_SN_DIR/worktree_new.sh"
 # refuse, 76 retry once then refuse, any other rc proceeds as degraded (bypass).
 # DISK_MAGICIAN_ADMIT_BIN replaces `diskm admit` in tests.
 sn_admit() {
-    local rc tries=0 admit=("${DISK_MAGICIAN_ADMIT_BIN:-python3}")
-    [[ -n "${DISK_MAGICIAN_ADMIT_BIN:-}" ]] || admit+=("$_SN_DIR/disk_budget.py")
-    while :; do
-        "${admit[@]}" --class "$1" --est-gb "$2" --dest "$3" --producer "$4" --source scratch-new >&2; rc=$?
-        case "$rc" in
-            0|10) return 0 ;;
-            75|76) [[ "$rc" == 76 ]] && (( tries++ == 0 )) && continue
-                echo "disk-admission: refused ($1, rc $rc)" >&2; return 75 ;;
-            *) echo "admission_degraded:caller (admit rc $rc)" >&2; return 0 ;;
-        esac
-    done
+    admit_gate "$1" "$2" "$4" "$3" scratch-new
 }
 
 sn_main() {
     local -a pos=()
-    local kind=scratch sha="" est=1 repo name path root cls=worktrees src=""
+    local kind=scratch sha="" est="" repo name path root cls=worktrees src=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind) kind="${2:-}"; shift 2 || return 2 ;;
@@ -37,7 +27,7 @@ sn_main() {
             *) pos+=("$1"); shift ;;
         esac
     done
-    [[ ${#pos[@]} -eq 2 && "${pos[1]}" =~ ^[a-z0-9-]{1,40}$ && "$est" =~ ^[0-9]+(\.[0-9]+)?$ ]] &&
+    [[ ${#pos[@]} -eq 2 && "${pos[1]}" =~ ^[a-z0-9-]{1,40}$ && ( -z "$est" || "$est" =~ ^[0-9]+(\.[0-9]+)?$ ) ]] &&
         [[ "$kind" == scratch || ( "$kind" == evidence && -z "$sha" ) ]] ||
         { echo "usage: diskm scratch-new <repo-path> <purpose ^[a-z0-9-]{1,40}\$> [--kind scratch|evidence] [--detach <sha>] [--est-gb N]" >&2; return 2; }
     repo="$(wtn_main_repo "${pos[0]}")" || { echo "scratch-new: not a git repo: ${pos[0]}" >&2; return 2; }
@@ -59,6 +49,7 @@ sn_main() {
         wtn_registered "$repo" "$path" || wtn_unclaim "$path"
         return 1
     fi
+    admit_confirm_created
     declare -F lease_write >/dev/null 2>&1 && { lease_write "$path" "$repo" "" scratch-new --kind "$kind" \
         --producer scratch-new ${src:+--source "$src"} >/dev/null 2>&1 || echo "scratch-new: lease write failed: $path" >&2; }
     printf '%s\n' "$path"

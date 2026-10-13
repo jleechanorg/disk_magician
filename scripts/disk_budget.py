@@ -2,6 +2,9 @@
 """diskm admit: decide on zone(df_free - est - margin) under state.lock; one event line per call (spec §7.1)."""
 import argparse, fcntl, json, os, signal, subprocess, sys, tempfile, time, uuid, resolve_config
 from pathlib import Path
+import budget_controls
+import budget_history
+from c14_probe import _run_bounded
 GIB, ZONES, EMERGENCY = 1 << 30, ((100, "GREEN"), (60, "ORANGE"), (30, "RED"), (15, "BLACK")), {"BLACK": 76, "FLOOR": 75}
 STAGES = ("observe", "warn", "refuse_red", "refuse_orange")
 def d2_approved():  # decision_approved admission_enforcement; an unreadable record is not approved (rc stays 0)
@@ -21,14 +24,14 @@ def daily_min_used(state, now, used):  # C12 trough baseline: per-day minimum us
     try: m = {k: v for k, v in json.loads((state / "budget.json").read_text())["daily_min_used"].items() if type(v) is int}
     except (OSError, ValueError, KeyError, TypeError, AttributeError): m = {}
     return dict(sorted({**m, (d := time.strftime("%Y-%m-%d", time.localtime(now))): min(used, m.get(d, used))}.items())[-31:])
-def state_update(state, keys, events=()):  # under state.lock: reread, merge only our keys, atomic replace
-    with open(state / "state.lock", "a") as lock, open(state / "admission" / "events.jsonl", "a") as log:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try: data = json.loads((state / "budget.json").read_text())
-        except (OSError, ValueError): data = {}
-        (tmp := state / f".budget.{os.getpid()}.tmp").write_text(json.dumps({**data, **keys}))
-        os.replace(tmp, state / "budget.json")
-        log.writelines(json.dumps(e) + "\n" for e in events)
+def state_update(state, keys, events=()):
+    """Merge this owner's fields under the shared lock; malformed state is kept."""
+    def mutate(data):
+        data.update(keys)
+        for event in events:
+            budget_history._append_locked(state, event)
+    return budget_controls.locked_mutate(state, mutate)
+
 
 def next_actuator(eligible, schedule, wall_now, mono_now, deadline, zone_name, reserve=60):
     """Choose one serial C10 slice; callers re-evaluate against the clock after it returns."""
@@ -372,12 +375,13 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
     saved_ledger = os.environ.pop(job_receipt.C14_LEDGER_ENV, None)
     saved_owner = os.environ.pop(job_receipt.C14_LEDGER_OWNER_ENV, None)
     try:
-        store.finish(f"govern_{class_name}", run_id=run_id, outcome=outcome, reason=reason,
+        terminal = store.finish(f"govern_{class_name}", run_id=run_id, outcome=outcome, reason=reason,
                      candidates={"removed_count": removed, "deferred_count": deferred,
                                  "interrupted_count": interrupted}, postcondition=post)
     finally:
         if saved_ledger is not None: os.environ[job_receipt.C14_LEDGER_ENV] = saved_ledger
         if saved_owner is not None: os.environ[job_receipt.C14_LEDGER_OWNER_ENV] = saved_owner
+    budget_history.record_event(state, "govern_receipt", receipt=terminal)
     return {"outcome": outcome, "reason": reason, "df_delta_bytes": delta,
             "removed_count": removed, "deferred_count": deferred,
             "interrupted_count": interrupted}
@@ -498,16 +502,379 @@ def _df_free_bytes(path):
         return int(out.splitlines()[-1].split()[3]) * 1024
     except (OSError, ValueError, IndexError, subprocess.SubprocessError): return None
 
-def govern(argv, state):  # observe tick or C10 act scheduler
+def _measure_lock(state):
+    """Non-blocking daily-measure lock; None means the daily job owns measurement."""
+    fd = -1
+    try:
+        fd = os.open(Path(state) / "measure.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        if fd >= 0: os.close(fd)
+        return None
+
+def _measure_unlock(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+# Fixed class -> roots table (spec 7.2 class table). Read-only measurement only;
+# no actuator is invoked from here. DISK_MAGICIAN_MEASURE_ROOTS_JSON overrides
+# the whole table for hermetic tests.
+def class_measure_roots(class_name):
+    override = os.environ.get("DISK_MAGICIAN_MEASURE_ROOTS_JSON")
+    if override:
+        try:
+            rows = json.loads(override).get(class_name)
+            return [str(Path(p).expanduser()) for p in rows] if isinstance(rows, list) else []
+        except (ValueError, TypeError, AttributeError):
+            return []
+    home = Path(os.environ.get("HOME") or str(Path.home()))
+    table = {
+        "worktrees": [home / ".worktrees"],
+        "tmp_containers": [Path(os.environ.get("DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE", "/private/tmp"))],
+        "tmpdir_scratch": [Path(os.environ.get("TMPDIR", "/tmp"))],
+        "codex_documents": [home / "Documents" / "Codex"],
+        "claude_codex_state": [home / ".claude" / "state", home / ".codex"],
+        "colima": [home / ".colima" / "_lima"],
+    }
+    return [str(p) for p in table.get(class_name, [])]
+
+def _run_group(argv, timeout, stdout=None):
+    """Use the shared process-group deadline owner for measurement subprocesses."""
+    try:
+        result = _run_bounded(argv, cap=max(0.01, timeout))
+    except OSError:
+        return 127, "", ""
+    if result is None:
+        return -9, "", ""
+    rc, raw = result
+    out = raw.decode(errors="replace")
+    if stdout is not None:
+        stdout.write(out)
+    return rc, out, ""
+
+def _du_kb(paths, timeout, deadline=None):
+    """Sum one `du -sk` over every existing root (one invocation, one deadline).
+
+    A single invocation shares one timeout and lets du dedup cross-root hardlinks.
+    None on timeout/error or when no root exists.
+    """
+    existing = [p for p in paths if os.path.isdir(p)]
+    if not existing:
+        return None
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
+    rc, out, _ = _run_group([os.environ.get("DISK_MAGICIAN_DU_BIN", "du"), "-sk", *existing], timeout)
+    if rc != 0:
+        return None
+    total = 0
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0].isdigit():
+            total += int(parts[0])
+    return total
+
+def merge_classes(state, updates, events=()):
+    """Merge only measured class fields under the same state lock as controls."""
+    def mutate(data):
+        classes = data.setdefault("classes", {})
+        if not isinstance(classes, dict):
+            raise ValueError("malformed class measurements")
+        for name, values in updates.items():
+            current = classes.get(name, {})
+            if not isinstance(current, dict):
+                raise ValueError("malformed class measurement")
+            classes[name] = {**current, **values}
+        for event in events:
+            budget_history._append_locked(state, event)
+    return budget_controls.locked_mutate(state, mutate)
+
+OBSERVER_FRESH_S = 900
+
+def _observer_colima(state, now):
+    """Latest canonical observer record's ``colima.root_allocated_kb`` (no du).
+
+    Reuses disk_observer.read_records so the nested ``colima`` object is parsed by
+    the producer's own parser. A row older than ``OBSERVER_FRESH_S`` is returned
+    with ``fresh=False`` -- never recorded as if measured now.
+    """
+    paths = [Path(state) / name for name in
+             ("disk_observer.jsonl", "disk_observer.jsonl.1", "disk_observer.jsonl.2")]
+    records = []
+    try:
+        import disk_observer
+        records = [r for r in disk_observer.read_records(paths) if isinstance(r, dict)]
+    except (ImportError, OSError, ValueError, TypeError):
+        records = []
+    for row in reversed(records):
+        colima = row.get("colima")
+        kb = colima.get("root_allocated_kb") if isinstance(colima, dict) else None
+        if not isinstance(kb, (int, float)) or isinstance(kb, bool) or kb < 0:
+            kb = row.get("colima.root_allocated_kb")
+        if not isinstance(kb, (int, float)) or isinstance(kb, bool) or kb < 0:
+            continue
+        epoch = row.get("epoch")
+        if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
+            continue
+        return {"kb": kb, "observed_at": epoch, "fresh": 0 <= now - epoch <= OBSERVER_FRESH_S}
+    return None
+
+def _rotation_stamp(stats):
+    """Round-robin key: always the last *attempt*, success or timeout.
+
+    Ordering on measured_at alone starves a class that keeps timing out, because
+    its measured_at never advances and it is chosen every tick.
+    """
+    for field in ("attempted_at", "measured_at"):
+        value = stats.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return 0
+
+def measure_tick_class(state, budgets, now, deadline):
+    """Measure exactly one du class (round-robin by oldest attempt).
+
+    A class with no prior stats is still a candidate, so a fresh budget
+    bootstraps every configured class before the nightly job runs. A timeout
+    advances ``attempted_at`` without touching ``measured_at``/``used_gb``.
+    """
+    classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}
+    data = _read_json(Path(state) / "budget.json")
+    measured = data.get("classes") if isinstance(data.get("classes"), dict) else {}
+    candidates = []
+    for name, config in classes.items():
+        if not isinstance(config, dict) or config.get("measure") != "du":
+            continue
+        roots = class_measure_roots(name)
+        if not any(os.path.isdir(p) for p in roots):
+            continue
+        stats = measured.get(name) if isinstance(measured.get(name), dict) else {}
+        candidates.append((_rotation_stamp(stats), name, stats, roots))
+    if not candidates:
+        return None
+    _, name, stats, roots = min(candidates, key=lambda row: (row[0], row[1]))
+    lock = _measure_lock(state)
+    if lock is None:
+        print("skipped_measure_lock")
+        return None
+    try:
+        timeout = 60.0
+        if deadline is not None:
+            timeout = max(1.0, min(60.0, deadline - time.monotonic() - 40))
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        kb = _du_kb(roots, timeout, deadline=deadline)
+        if kb is None:
+            base = stats.get("measured_at") if isinstance(stats.get("measured_at"), (int, float)) \
+                and not isinstance(stats.get("measured_at"), bool) else now
+            merge_classes(state, {name: {"attempted_at": now, "stale_s": int(max(0, now - base))}})
+        else:
+            merge_classes(state, {name: {"used_gb": kb / 1024.0 / 1024.0, "measured_at": now,
+                                         "attempted_at": now, "stale_s": 0}})
+        return name
+    finally:
+        _measure_unlock(lock)
+
+def observer_refresh(state, budgets, now):
+    """Step 4 observer classes (spec 7.1): colima root_allocated_kb, no du.
+
+    Only a fresh observer row refreshes ``measured_at``; a stale row grows
+    ``stale_s`` and advances the rotation instead of pretending it is now.
+    """
+    classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}
+    prior = _read_json(Path(state) / "budget.json").get("classes")
+    prior = prior if isinstance(prior, dict) else {}
+    updates = {}
+    for name, config in classes.items():
+        if not isinstance(config, dict) or config.get("measure") != "observer":
+            continue
+        stats = prior.get(name) if isinstance(prior.get(name), dict) else {}
+        seen = _observer_colima(state, now)
+        base = stats.get("measured_at") if isinstance(stats.get("measured_at"), (int, float)) \
+            and not isinstance(stats.get("measured_at"), bool) else None
+        if seen is not None and seen["fresh"]:
+            updates[name] = {"used_gb": seen["kb"] / 1024.0 / 1024.0,
+                             "measured_at": seen["observed_at"], "attempted_at": now, "stale_s": 0}
+        elif base is not None:
+            # A stale observer row must not invent a first observation; only grow
+            # the age of one already recorded.
+            updates[name] = {"attempted_at": now, "stale_s": int(max(0, now - base))}
+    if updates:
+        merge_classes(state, updates)
+
+def _history_producer():
+    return budget_history
+
+def daily_measure(state, budgets, tick_seconds=900):
+    """03:00 job: measure every class once; timeouts carried; one merge at the end.
+
+    du classes get 60 s, df_delta_only classes get the plan's 120 s accounting
+    du (never a fabricated measured_at with no measurement).
+    """
+    state = Path(state)
+    deadline = time.monotonic() + tick_seconds
+    lock = _measure_lock(state)
+    if lock is None:
+        print("skipped_measure_lock")
+        return 0
+    updates, events, snapshot, carried = {}, [], {}, []
+    try:
+        data = _read_json(state / "budget.json")
+        prior = data.get("classes") if isinstance(data.get("classes"), dict) else {}
+        classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}
+        for name, config in classes.items():
+            if not isinstance(config, dict):
+                continue
+            now = time.time()
+            stats = prior.get(name) if isinstance(prior.get(name), dict) else {}
+            base = stats.get("measured_at") if isinstance(stats.get("measured_at"), (int, float)) \
+                and not isinstance(stats.get("measured_at"), bool) else now
+            carry = {"attempted_at": now, "carried": True, "stale_s": int(max(0, now - base))}
+            if config.get("measure") == "observer":
+                seen = _observer_colima(state, now)
+                if seen is not None and seen["fresh"]:
+                    updates[name] = {"used_gb": seen["kb"] / 1024.0 / 1024.0, "measured_at": seen["observed_at"],
+                                     "attempted_at": now, "stale_s": 0, "carried": False}
+                    snapshot[name] = {"used_gb": updates[name]["used_gb"]}
+                else:
+                    updates[name] = carry
+                    carried.append(name)
+                continue
+            df_delta_only = config.get("measure") == "df_delta_only"
+            budget = 120.0 if df_delta_only else 60.0
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                updates[name] = carry
+                carried.append(name)
+                events.append(dict(event="daily_measure_carried", at=now, **{"class": name}))
+                continue
+            timeout = max(1.0, min(budget, remaining - 40))
+            kb = _du_kb(class_measure_roots(name), timeout, deadline=deadline)
+            if kb is None:
+                updates[name] = carry
+                carried.append(name)
+                events.append(dict(event="daily_measure_carried", at=now, **{"class": name}))
+            else:
+                updates[name] = {"used_gb": kb / 1024.0 / 1024.0, "measured_at": now,
+                                 "attempted_at": now, "stale_s": 0, "carried": False}
+                snapshot[name] = {"used_gb": updates[name]["used_gb"]}
+        pause = os.environ.get("DISK_MAGICIAN_TEST_PAUSE_BEFORE_MERGE")
+        if pause:
+            ready = Path(pause) / "ready"
+            release = Path(pause) / "release"
+            try:
+                ready.parent.mkdir(parents=True, exist_ok=True)
+                ready.write_text("")
+                wait_end = time.monotonic() + 60
+                while not release.exists() and time.monotonic() < wait_end:
+                    time.sleep(0.02)
+            except OSError:
+                pass
+        merge_classes(state, updates, events)
+        producer = _history_producer()
+        if producer is not None:
+            try:
+                producer.record_measurement(state, now=time.time(), classes=snapshot, carried=carried)
+                state_update(state, {"parked_measurement": producer.measure_parked(state, deadline)})
+            except (OSError, ValueError, TypeError):
+                pass
+    finally:
+        _measure_unlock(lock)
+    return 0
+
+def _run_reconcile(state, deadline_mono):
+    """Step 2 C14 reconciliation under one bounded monotonic deadline."""
+    script = Path(__file__).resolve().parent / "quarantine_rename.py"
+    if not script.is_file():
+        return "reconcile_unavailable"
+    remaining = deadline_mono - time.monotonic()
+    if remaining <= 0:
+        print("reconcile_deferred:deadline")
+        return None
+    command = ["python3", str(script), "reconcile", "--deadline-at", f"{deadline_mono:.6f}",
+               "--cursor", str(Path(state) / "reconcile_cursor.json")]
+    rc, out, _ = _run_group(command, remaining)
+    if rc == -9:
+        print("reconcile_timeout")
+        return None
+    if out:
+        print(out.rstrip())
+    return rc
+
+def _run_birth_audit(state, deadline_mono):
+    """Step 5 birth audit, bounded by the same absolute tick deadline."""
+    script = Path(__file__).resolve().parent / "birth_audit.sh"
+    if not script.is_file():
+        return None
+    remaining = deadline_mono - time.monotonic()
+    if remaining <= 0:
+        print("birth_audit_timeout", file=sys.stderr)
+        return None
+    rc, _, _ = _run_group(["bash", str(script)], remaining)
+    if rc == -9:
+        print("birth_audit_timeout", file=sys.stderr)
+    return rc
+
+def _record_govern_tick(state, budgets, now, deadline, zone_name):
+    """Hand one tick to the budget_history producer (its fields, not ours)."""
+    producer = _history_producer()
+    if producer is None:
+        return
+    classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}
+    measured = _read_json(Path(state) / "budget.json").get("classes")
+    measured = measured if isinstance(measured, dict) else {}
+    fresh = {}
+    for name, config in classes.items():
+        if not isinstance(config, dict) or config.get("measure") != "du":
+            continue
+        stats = measured.get(name) if isinstance(measured.get(name), dict) else {}
+        stamp = stats.get("measured_at")
+        fresh[name] = (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+                       and 0 <= now - stamp <= 3 * 3600 and stats.get("carried") is not True)
+    try:
+        fleet, _ = producer.collect_fleet_health(state, now, deadline_at=deadline)
+        producer.record_tick(state, now=now, classes_fresh=fresh, fleet_status=fleet, zone=zone_name,
+                             colima_status=producer.collect_colima_status(deadline))
+    except (OSError, ValueError, TypeError):
+        pass
+
+def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
     p = argparse.ArgumentParser(prog="diskm govern")
     p.add_argument("--mode", choices=["observe", "act"], default="observe")
+    p.add_argument("--daily-measure", action="store_true")
+    p.add_argument("--tick-seconds", type=est_gb, default=540.0)
     args = p.parse_args(argv)
+    state = Path(state)
     (state / "admission").mkdir(parents=True, exist_ok=True)
+    budgets = {}
+    try:
+        config_path = resolve_config.resolve()
+        if config_path:
+            budgets = _read_json(config_path).get("budgets", {})
+            if not isinstance(budgets, dict):
+                budgets = {}
+    except (OSError, ValueError, TypeError):
+        budgets = {}
+    if args.daily_measure:
+        if args.tick_seconds == 540.0:
+            args.tick_seconds = 900.0
+        with open(state / "govern.lock", "a+") as lock:
+            try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError: return print("skipped_tick_lock") or 0
+            try:
+                return daily_measure(state, budgets, args.tick_seconds)
+            except (OSError, ValueError, TypeError) as e:
+                return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     with open(state / "govern.lock", "a+") as lock:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: return print("skipped_tick_lock") or 0
         lock.truncate(0); lock.write(str(os.getpid())); lock.flush()
-        tick_deadline = time.monotonic() + 600
+        tick_start = time.monotonic()
+        tick_deadline = tick_start + max(1.0, args.tick_seconds)
         try:
             out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
@@ -516,34 +883,53 @@ def govern(argv, state):  # observe tick or C10 act scheduler
                          [dict(event="floor_breach", at=now, df_free_bytes=free)] if z == "FLOOR" else [])
             if z in EMERGENCY:  # artifact_verdict.sh is absent until Task 11, so this stays blocked
                 lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
-                c14 = lib.is_file() and subprocess.run(["bash", "-c", 'source "$1" && artifact_removal_verdict --self-test', "-", lib],
-                                                       capture_output=True, text=True, timeout=60).stdout.strip() == "ok"
-                kick = c14 and subprocess.run([os.environ.get("DISK_MAGICIAN_LAUNCHCTL_BIN", "launchctl"), "kickstart",
-                                               f"gui/{os.getuid()}/com.jleechanorg.disk-magician-pressure-sweep"], timeout=30).returncode
-                state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 else "kickstart_blocked:c14_missing"),
+                cap = min(60.0, max(0.0, tick_deadline - time.monotonic()))
+                check_rc, check_out, _ = _run_group(["bash", "-c", 'source "$1" && artifact_removal_verdict --self-test', "-", str(lib)], cap) if lib.is_file() and cap > 0 else (1, "", "")
+                c14 = check_rc == 0 and check_out.strip() == "ok"
+                kick = None
+                cap = min(30.0, max(0.0, tick_deadline - time.monotonic()))
+                if c14 and cap > 0:
+                    kick, _, _ = _run_group([os.environ.get("DISK_MAGICIAN_LAUNCHCTL_BIN", "launchctl"), "kickstart",
+                                            f"gui/{os.getuid()}/com.jleechanorg.disk-magician-pressure-sweep"], cap)
+                state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 and kick == 0 else "kickstart_blocked:c14_missing" if not c14 else "kickstart_blocked:launchctl"),
                                               at=time.time(), zone=z, rc=kick if c14 else None)])
                 print(ev)
-            try: subprocess.run(["bash", str(Path(__file__).resolve().parent / "birth_audit.sh")], stdout=subprocess.DEVNULL, timeout=150)
-            except subprocess.TimeoutExpired: print("birth_audit_timeout", file=sys.stderr)
+            # Step 2: bounded quarantine reconciliation before du/audit (60s in
+            # BLACK/FLOOR, else min(120, D - now - 300)); never past D.
+            recon_budget = 60.0 if z in EMERGENCY else min(120.0, max(0.0, tick_deadline - time.monotonic() - 300.0))
+            _run_reconcile(state, min(time.monotonic() + recon_budget, tick_deadline))
+            if z not in EMERGENCY:
+                # Steps 3-5: one du class, observer refresh, birth audit (120 s
+                # cap, 60 s receipt reserve), every phase inside D.
+                measure_tick_class(state, budgets, now, tick_deadline)
+                observer_refresh(state, budgets, now)
+                audit_budget = max(0.0, min(120.0, tick_deadline - time.monotonic() - 60.0))
+                if audit_budget > 0:
+                    _run_birth_audit(state, time.monotonic() + audit_budget)
             if args.mode == "act":
-                config_path = resolve_config.resolve()
-                if not config_path:
+                if not budgets:
                     print("activation_blocked:config_missing")
                 else:
-                    config = _read_json(config_path)
-                    budget_config = config.get("budgets", {})
                     budget_state = _read_json(state / "budget.json")
                     schedule = load_govern_schedule(state / "govern_sched.json")
-                    dispatch_actuators(Path(__file__).resolve().parent, state, budget_config,
+                    dispatch_actuators(Path(__file__).resolve().parent, state, budgets,
                                        budget_state, z, now, tick_deadline, schedule)
+            _record_govern_tick(state, budgets, now, tick_deadline, z)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or 0
 def admit(a, budgets, state, now, d2):
+    estimate_degraded = None
+    if a.est_gb is None:
+        a.est_gb = budget_controls.effective_estimate(state, a.producer)
+        if a.est_gb is None:
+            a.est_gb, estimate_degraded = 0.0, "producer_estimate"
     try:  # a corrupt or wrong-typed budget.json, or a partial budgets block, degrades to the blind decision
-        last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, None
-        cls, age, stage, margin = last.get("classes", {}).get(a.cls, {}), now - last.get("zone_at", 0), budgets["enforcement"], budgets["concurrency_margin_gb"]
-        over = budgets["classes"][a.cls].get("measure") != "df_delta_only" and now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > cls.get("budget_gb", 1e9)
+        last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, estimate_degraded
+        cls, age = last.get("classes", {}).get(a.cls, {}), now - last.get("zone_at", 0)
+        stage = budget_controls.effective_stage(last, budgets)
+        margin = budget_controls.effective_margin(last, budgets)
+        over = budgets["classes"][a.cls].get("measure") != "df_delta_only" and now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > budgets["classes"][a.cls].get("budget_gb", 1e9)
         if stage not in STAGES or not all(isinstance(v, (int, float)) for v in (margin, last.get("free_bytes", 0))) \
                 or not isinstance(last.get("zone") or "", str): raise TypeError("budget value type")
         try:
@@ -561,6 +947,8 @@ def admit(a, budgets, state, now, d2):
     else:  # blind -> 10, unless the last zone within 60 min was BLACK/FLOOR
         z = last.get("zone") if last.get("zone") in EMERGENCY and age <= 3600 else None
         decision = EMERGENCY[z] if z and d2 else 10
+    if estimate_degraded and z not in EMERGENCY:
+        decision = 10
     event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
                  zone=z, df_free_bytes=free, degraded=degraded, **{"class": a.cls}, **{k: getattr(a, k) for k in
                  ("producer", "source", "dest", "ci_job", "tool_use_id", "compound")})
@@ -599,8 +987,8 @@ def main():
     for flag in ("--dry-run", "--probe"): mode.add_argument(flag, action="store_true")
     for flag in ("--confirm", "--confirm-tool-use"): mode.add_argument(flag)
     a, state = p.parse_args(), Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"))
-    if a.confirm is None and a.confirm_tool_use is None and None in (a.cls, a.est_gb):
-        p.error("--class and --est-gb are required unless confirming")
+    if a.confirm is None and a.confirm_tool_use is None and (a.cls is None or (a.est_gb is None and not a.producer)):
+        p.error("--class and either --est-gb or --producer are required unless confirming")
     (state / "admission").mkdir(parents=True, exist_ok=True)
     d2 = d2_approved()
     with open(state / "state.lock", "a") as lock:
