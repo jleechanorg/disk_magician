@@ -19,7 +19,8 @@ if [[ ! -x "$TARGET_SCRIPT" ]]; then
   exit 2
 fi
 
-TMP_ROOT=$(mktemp -d -t test_sweepers_preflight.XXXXXX)
+TMP_ROOT=$(mktemp -d /tmp/test_sweepers_preflight.XXXXXX) || exit 1
+[[ -d "$TMP_ROOT" && "$TMP_ROOT" == /tmp/test_sweepers_preflight.* ]] || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 STATE_DIR="$TMP_ROOT/state"
@@ -242,10 +243,11 @@ if [[ $RC_DISKM -eq 0 ]] || [[ "$(cat "$LAUNCHAGENTS_DIR/com.disk-magician.needs
 fi
 
 # Test --consolidate flag:
-# 1. Tests that --consolidate successfully installs the 5 selected templates:
+# 1. Tests that --consolidate successfully installs the 6 selected templates:
 #    - com.jleechanorg.disk-magician-main-sweeper.plist.template
 #    - com.jleechanorg.disk-magician-worktree-reap.plist.template
 #    - com.jleechanorg.disk-magician-govern.plist.template
+#    - com.jleechanorg.disk-magician-govern-measure.plist.template
 #    - com.disk-magician.claude-state.plist.template
 #    - com.disk-magician.worktree-venvs.plist
 # 2. Tests that redundant plists are archived to .consolidated/ ONLY after successful installation.
@@ -259,6 +261,7 @@ chmod +x "$CONSOLIDATE_HOME/.local/bin/diskm"
 cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-worktree-reap.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern.plist.template" "$CONSOLIDATE_SRC/"
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern-measure.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.claude-state.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.worktree-venvs.plist" "$CONSOLIDATE_SRC/"
 
@@ -290,6 +293,10 @@ if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-worktree-rea
 fi
 if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-govern.plist" ]]; then
   echo "FAIL: govern.plist not installed under --consolidate" >&2
+  exit 1
+fi
+if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-govern-measure.plist" ]]; then
+  echo "FAIL: govern-measure.plist not installed under --consolidate" >&2
   exit 1
 fi
 if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.claude-state.plist" ]]; then

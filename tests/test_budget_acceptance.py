@@ -292,13 +292,13 @@ class PilotCheckTest(IsolatedConfigTest):
             for t in range(int(WEEK_START), int(WEEK_END), 600):
                 bh.record_tick(state, now=t, classes_fresh={"worktrees": True}, fleet_status="healthy", zone="orange")
             receipts = state / "receipts"; receipts.mkdir(parents=True, exist_ok=True)
-            # zone tick started at t0; first positive reclaim 240 s later; other ticks no-op
-            entries = [{"times": {"started_at": iso(WEEK_START), "ended_at": iso(WEEK_START + 240)},
-                        "postcondition": {"df_delta_bytes": GIB}, "candidates": {"removed_count": 1}}]
-            t = WEEK_START + 600
+            # Every emergency-zone tick must have a later positive terminal
+            # receipt; reclaim is unknown if any tick is unresolved.
+            entries = []
+            t = WEEK_START
             while t < WEEK_END:
-                entries.append({"times": {"started_at": iso(t - 5), "ended_at": iso(t)},
-                                "postcondition": {"df_delta_bytes": 0}, "candidates": {"removed_count": 0}})
+                entries.append({"times": {"started_at": iso(t), "ended_at": iso(t + 240)},
+                                "postcondition": {"df_delta_bytes": GIB}, "candidates": {"removed_count": 1}})
                 t += 600
             (receipts / "govern_worktrees.json").write_text(json.dumps({"completed": entries}))
             lines, rc = ba.pilot_check(state, WEEK_END)
@@ -359,6 +359,13 @@ class CoverageRegressionTest(unittest.TestCase):
         self.assertEqual(ba._reclaim_seconds(recs, ticks), 600)
         self.assertIsNone(ba._reclaim_seconds(recs, [{"at": 0, "zone": "GREEN"}]))
 
+    def test_reclaim_unknown_when_last_emergency_tick_unresolved(self):
+        ticks = [{"at": 0, "zone": "RED"}, {"at": 1000, "zone": "ORANGE"}]
+        self.assertEqual(ba._reclaim_seconds([receipt(240), receipt(1600)], ticks), 600)
+        # The last emergency tick has no later positive receipt: unknown, never
+        # an optimistic maximum measured over only the resolved subset.
+        self.assertIsNone(ba._reclaim_seconds([receipt(240)], ticks))
+
     def test_repeated_week_does_not_count_as_adjacent(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = passing_pilot_state(tmp)
@@ -366,6 +373,63 @@ class CoverageRegressionTest(unittest.TestCase):
             lines, rc = ba.weekly_check(state, WEEK_END)
             self.assertEqual(rc, 0, lines)
             self.assertIn("adjacent_passing_weeks=1", lines)
+
+
+class BirthProducerConsumerRegressionTest(unittest.TestCase):
+    """Real birth_audit output must feed budget_acceptance._births (Cursor blocker)."""
+
+    def test_real_registry_three_statuses_then_preexisting_and_malformed(self):
+        import contextlib
+        import io
+        import birth_audit
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            home, state = root / "home", root / "state"
+            ptmp, utmp = root / "private-tmp", root / "user-tmp"
+            for folder in (home, state / "admission", ptmp / "proj", utmp,
+                           home / "codex", home / "worktrees"):
+                folder.mkdir(parents=True)
+            # admitted: a 0/10 admit with a matching confirm for the canonical path
+            admitted = ptmp / "proj" / "admitted-a"
+            admitted.mkdir()
+            (ptmp / "proj" / "bypass-b").mkdir()
+            (utmp / "foreign-thing").mkdir()
+            st = os.lstat(admitted)
+            cp = birth_audit.canon(str(admitted))
+            (state / "admission" / "events.jsonl").write_text("\n".join(json.dumps(e) for e in (
+                {"event": "admit", "admit_id": "adm-1", "decision": 0, "degraded": False,
+                 "dest": cp, "est_bytes": GIB, "producer": "worktree-new"},
+                {"event": "admit_confirm", "admit_id": "adm-1", "dev": st.st_dev, "inode": st.st_ino},
+            )) + "\n")
+            roots = [str(ptmp), str(utmp), str(home / "codex"), str(home / "worktrees")]
+            env = patch.dict(os.environ, {"HOME": str(home)})
+            env.start()
+            self.addCleanup(env.stop)
+            with contextlib.redirect_stdout(io.StringIO()):
+                birth_audit.audit(state, roots, time.time())
+                # A later entry seen after `since` moved ahead of its birthtime is preexisting.
+                (ptmp / "proj" / "preexisting-d").mkdir()
+                registry = json.loads((state / "admission" / "births.json").read_text())
+                registry["since"] = time.time() + 10000
+                (state / "admission" / "births.json").write_text(json.dumps(registry))
+                birth_audit.audit(state, roots, time.time())
+            rows = json.loads((state / "admission" / "births.json").read_text())["gens"]
+            by_name = {Path(row["path"]).name: row["status"] for row in rows.values()}
+            self.assertEqual(by_name, {"admitted-a": "admitted", "bypass-b": "bypass",
+                                       "foreign-thing": "foreign", "preexisting-d": "preexisting"})
+            lo, hi = 0, time.time() + 10000
+            admitted_n, bypass_n, ratio = ba._births(state, lo, hi)
+            self.assertEqual((admitted_n, bypass_n), (1, 1))
+            self.assertAlmostEqual(ratio, 0.5)
+            # A valid excluded status is skipped; malformed/unknown rows stay unknown.
+            valid_registry = (state / "admission" / "births.json").read_text()
+            for corrupt in ({"status": "alien"}, {"status": None}, {"first_seen": "never"},
+                            {"first_seen": float("nan")}, {"first_seen": float("inf")},
+                            {"first_seen": -1}):
+                data = json.loads(valid_registry)
+                next(iter(data["gens"].values())).update(corrupt)
+                (state / "admission" / "births.json").write_text(json.dumps(data))
+                self.assertIsNone(ba._births(state, lo, hi), corrupt)
 
 
 if __name__ == "__main__":

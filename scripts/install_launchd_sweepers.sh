@@ -142,6 +142,7 @@ if [[ "$CONSOLIDATE" == true ]]; then
     "com.jleechanorg.disk-magician-main-sweeper.plist.template"
     "com.jleechanorg.disk-magician-worktree-reap.plist.template"
     "com.jleechanorg.disk-magician-govern.plist.template"
+    "com.jleechanorg.disk-magician-govern-measure.plist.template"
     "com.disk-magician.claude-state.plist.template"
     "com.disk-magician.worktree-venvs.plist"
   )

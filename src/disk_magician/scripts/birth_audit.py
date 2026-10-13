@@ -33,6 +33,11 @@ PRUNE_AFTER_S = 14 * 86400
 CALIBRATION_MIN_BIRTHS = 20
 SIZE_FIELDS = ("bytes", "charge", "estimate_bytes", "unknown_retries", "measured_at")
 BIRTH_CLASSES = ("tmp_containers", "tmpdir_scratch", "codex_documents", "worktrees")
+# Authoritative C7 birth status schema. budget_acceptance imports these so the
+# producer and consumer cannot disagree: every status is a structurally valid
+# record, but only SLO_BIRTH_STATUSES count toward the 24h bypass ratio.
+BIRTH_STATUSES = ("preexisting", "foreign", "admitted", "bypass")
+SLO_BIRTH_STATUSES = ("admitted", "bypass")
 IDENTITY_SEP = "\x1f"
 QUALITY_RC = 3  # nonzero quality error; the original registry is never overwritten
 
@@ -190,7 +195,7 @@ def measure_births(gens, budgets, now, budget_s, deadline_at):
         deadline = min(deadline, time.monotonic() + max(0.0, deadline_at - now))
     exhausted = False
     for g in gens.values():
-        if g.get("status") not in ("admitted", "bypass"):
+        if g.get("status") not in SLO_BIRTH_STATUSES:
             continue
         if g.get("charge") == "measured" and _as_int(g.get("bytes")) is not None:
             continue
@@ -369,7 +374,7 @@ def audit(state, roots, now, budget_s=DEFAULT_BUDGET_S, deadline_at=None):
     def first_seen(g):
         return _as_float(g.get("first_seen")) if _as_float(g.get("first_seen")) is not None else now
 
-    born_all = [g for g in gens.values() if g.get("status") in ("admitted", "bypass")]
+    born_all = [g for g in gens.values() if g.get("status") in SLO_BIRTH_STATUSES]
     born_24h = [g for g in born_all if now - first_seen(g) <= RATIO_WINDOW_S]
 
     def class_counts(items):

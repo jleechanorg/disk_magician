@@ -10,11 +10,13 @@ import datetime
 import bisect
 import hashlib
 import json
+import math
 import os
 import time
 from pathlib import Path
 
 import disk_observer
+from birth_audit import BIRTH_STATUSES, SLO_BIRTH_STATUSES
 
 GIB = 1 << 30
 DAY = 86400
@@ -155,7 +157,10 @@ def daily_mins(pts, start, end):
 def _births(state, lo, hi):
     """(admitted, bypass, ratio) or None when no birth registry exists.
 
-    A missing or malformed registry is `unknown`, never a zero-ratio pass.
+    Statuses come from the producer's authoritative ``birth_audit`` schema: a
+    valid non-SLO status (``preexisting``/``foreign``) is skipped for the SLO,
+    while a structurally malformed row or unknown status is ``unknown`` for the
+    whole registry, never a zero-ratio pass.
     """
     reg = read_json(Path(state) / "admission" / "births.json")
     gens = reg.get("gens") if isinstance(reg, dict) else None
@@ -164,13 +169,16 @@ def _births(state, lo, hi):
     admitted = bypass = 0
     for gen in gens.values():
         if (not isinstance(gen, dict) or type(gen.get("first_seen")) not in (int, float)
-                or gen.get("status") not in ("admitted", "bypass")):
+                or not math.isfinite(gen["first_seen"]) or gen["first_seen"] < 0
+                or gen.get("status") not in BIRTH_STATUSES):
             return None
+        if gen["status"] not in SLO_BIRTH_STATUSES:
+            continue
         if not lo <= gen["first_seen"] < hi:
             continue
-        if gen.get("status") == "admitted":
+        if gen["status"] == "admitted":
             admitted += 1
-        elif gen.get("status") == "bypass":
+        else:
             bypass += 1
     total = admitted + bypass
     return admitted, bypass, (bypass / total if total else 0.0)
@@ -203,7 +211,7 @@ def r_peak_and_largest_delta(inside):
 
 
 def _reclaim_seconds(receipts, ticks=()):
-    """Maximum zone-tick to first positive terminal receipt observation."""
+    """Maximum observed reclaim delay; unknown if any emergency tick is unresolved."""
     positive = []
     for rec in receipts:
         ended = _epoch((rec.get("times") or {}).get("ended_at"))
@@ -217,8 +225,9 @@ def _reclaim_seconds(receipts, ticks=()):
             continue
         at = tick["at"]
         j = bisect.bisect_left(positive, at)
-        if j < len(positive):
-            observed.append(positive[j] - at)
+        if j >= len(positive):
+            return None
+        observed.append(positive[j] - at)
     return max(observed) if observed else None
 
 

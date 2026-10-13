@@ -438,6 +438,7 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
             _write_govern_skip(state, row["class"], "actuator_unadapted:missing_entrypoint", "blocked_safety")
             pending = [r for r in pending if r["class"] != row["class"]]
             continue
+        old_approval = os.environ.get("WORKTREE_APPROVED")
         if row["act"] == "worktree_cleanup":
             # The governed approval becomes the script's explicit --clean approval only after policy approval.
             if not _activation_ok(script_dir, "worktree_cleanup"):
@@ -461,6 +462,8 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
         try:
             result = supervise_actuator(command, row["slice_end"])
         finally:
+            if old_approval is None: os.environ.pop("WORKTREE_APPROVED", None)
+            else: os.environ["WORKTREE_APPROVED"] = old_approval
             if old_trigger is None: os.environ.pop("DISK_MAGICIAN_ACTUATOR_TRIGGER", None)
             else: os.environ["DISK_MAGICIAN_ACTUATOR_TRIGGER"] = old_trigger
             if old_ledger is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
@@ -706,9 +709,6 @@ def observer_refresh(state, budgets, now):
     if updates:
         merge_classes(state, updates)
 
-def _history_producer():
-    return budget_history
-
 def daily_measure(state, budgets, tick_seconds=900):
     """03:00 job: measure every class once; timeouts carried; one merge at the end.
 
@@ -775,7 +775,7 @@ def daily_measure(state, budgets, tick_seconds=900):
             except OSError:
                 pass
         merge_classes(state, updates, events)
-        producer = _history_producer()
+        producer = budget_history
         if producer is not None:
             try:
                 producer.record_measurement(state, now=time.time(), classes=snapshot, carried=carried)
@@ -821,7 +821,7 @@ def _run_birth_audit(state, deadline_mono):
 
 def _record_govern_tick(state, budgets, now, deadline, zone_name):
     """Hand one tick to the budget_history producer (its fields, not ours)."""
-    producer = _history_producer()
+    producer = budget_history
     if producer is None:
         return
     classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}

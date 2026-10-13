@@ -171,13 +171,13 @@ chmod 755 "$DISK_MAGICIAN_STATE_DIR"
 assert_eq "$rc" 3 "unwritable state dir rc"
 assert_eq "$(budget zone)" GREEN "previous budget.json intact"
 
-echo "== 11. Template: 600 s observe tick through packaged diskm"
+echo "== 11. Template: 600 s gated act tick through packaged diskm"
 P="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern.plist.template"
 if [[ -f "$P" ]] && plutil -lint "$P" >/dev/null 2>&1; then ok "template lints"; else bad "template missing or invalid"; fi
 python3 - "$P" <<'PY' && ok "template args and interval" || bad "template args/interval wrong"
 import plistlib, sys
 d = plistlib.load(open(sys.argv[1], "rb"))
-assert d["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "govern", "--mode", "observe"], d["ProgramArguments"]
+assert d["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "govern", "--mode", "act"], d["ProgramArguments"]
 assert d["StartInterval"] == 600 and d["Label"] == "com.jleechanorg.disk-magician-govern"
 PY
 
