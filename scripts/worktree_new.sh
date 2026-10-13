@@ -227,6 +227,17 @@ wtn_admit() {
 
 # wtn_reuse <repo> <branch> <base> — reuse only a proven, idle, dead/released
 # same-repository worktree. Any missing or incomplete guard falls back to fresh.
+wtn_reuse_path_is_canonical() {
+    local repo="$1" candidate="$2" file="$3" expected_path resolved_candidate resolved_expected expected_lease
+    path_is_under_standard_root "$candidate" || return 1
+    expected_path="$(standard_worktree_path "$(wtn_repo_name "$repo")" "$(basename -- "$candidate")")" || return 1
+    resolved_candidate="$(_layout_resolve "$candidate")" || return 1
+    resolved_expected="$(_layout_resolve "$expected_path")" || return 1
+    [[ "$resolved_candidate" == "$resolved_expected" ]] || return 1
+    expected_lease="$(lease_path_for "$candidate")" || return 1
+    [[ "$file" == "$expected_lease" ]]
+}
+
 wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
@@ -253,6 +264,10 @@ PY
         checkout_dev="$(_lease_get "$file" checkout_dev)"
         checkout_ino="$(_lease_get "$file" checkout_ino)"
         [[ -n "$candidate" && -n "$old" && -d "$candidate" && "$old" != "$branch" ]] || continue
+        # Only recycle leases created under the canonical same-repository
+        # worktree directory, and only when the lease filename is the one
+        # derived from that exact checkout path.
+        wtn_reuse_path_is_canonical "$repo" "$candidate" "$file" || continue
         # A path can be removed and recreated while its old lease survives.
         # Bind eligibility to both the worktree admin dir and checkout inode.
         lease_matches_incarnation "$file" || continue
@@ -272,7 +287,10 @@ PY
         owner="$(lease_resolve_owner)"
         lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" \
             "$repo" "$candidate" "$admin_id" "$admin_birth" "$checkout_dev" "$checkout_ino" || continue
-        lease_matches_incarnation "$file" || { lease_restore_reuse_claim "$file"; continue; }
+        if ! wtn_reuse_path_is_canonical "$repo" "$candidate" "$file" || ! lease_matches_incarnation "$file"; then
+            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            continue
+        fi
         # Claim first, then repeat the final content/removal verdict.
         verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
         if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file"; continue; fi
@@ -280,8 +298,25 @@ PY
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
+        # Verify the exact checkout incarnation and detached tip after Git
+        # has switched the worktree; neither should be accepted from a stale
+        # pre-switch observation.
+        if ! lease_matches_incarnation "$file" ||
+            [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]]; then
+            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            continue
+        fi
         if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF:-}" ]]; then
             "$DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF" "$repo" "$old" "$candidate" >&2 || true
+        fi
+        # Last C14 check after any external work at the branch-delete boundary.
+        if ! lease_matches_incarnation "$file" ||
+            [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]] ||
+            [[ "$(artifact_removal_verdict "$candidate" 2>/dev/null)" != remove ]]; then
+            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            continue
         fi
         if ! git -C "$repo" update-ref -d "refs/heads/$old" "$tip"; then
             git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"

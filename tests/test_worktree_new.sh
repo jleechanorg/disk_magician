@@ -375,6 +375,39 @@ run_reuse_attempt() {
     return "$rc"
 }
 
+echo "== case 31: registered worktrees outside the canonical repository root are not reused =="
+OUTSIDE_WT="$TMPROOT/outside-myrepo/reuse-outside"
+mkdir -p "$(dirname "$OUTSIDE_WT")"
+git -C "$REPO" branch reuse/outside "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$OUTSIDE_WT" reuse/outside
+fresh="$(run_reuse_attempt "$OUTSIDE_WT" reuse/outside feat/outside outside)"; rc=$?
+assert_eq "$rc" "0" "outside-root fallback exit"
+assert_eq "$fresh" "$WTROOT/outside" "outside-root candidate is not recycled"
+assert_eq "$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)" main "main worktree remains on main"
+assert_eq "$(git -C "$OUTSIDE_WT" rev-parse --abbrev-ref HEAD 2>/dev/null)" reuse/outside "outside-root candidate remains intact"
+
+echo "== case 32: noncanonical lease filename cannot authorize reuse =="
+NONCAN_WT="$WTROOT/reuse-noncanonical-lease"
+git -C "$REPO" branch reuse/noncanonical-lease "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$NONCAN_WT" reuse/noncanonical-lease
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/noncanonical-lease reuse-test' _ "$SCRIPT" "$NONCAN_WT" "$REPO" >/dev/null 2>&1
+NONCAN_LEASE="$(bash -c 'source "$1"; lease_path_for "$2"' _ "$SCRIPT" "$NONCAN_WT")"
+NONCAN_STATE="$TMPROOT/noncanonical-state"
+mkdir -p "$NONCAN_STATE/worktree_leases"
+cp "$NONCAN_LEASE" "$NONCAN_STATE/worktree_leases/noncanonical-copy.json"
+rm "$NONCAN_LEASE"
+fresh="$(bash -c '
+    source "$1"
+    export DISK_MAGICIAN_STATE_DIR="$4"
+    lease_owner_state() { echo dead; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; echo remove; }
+    wtn_main "$3" feat/noncanonical --base origin/main --name noncanonical
+' _ "$SCRIPT" "$NONCAN_WT" "$REPO" "$NONCAN_STATE" 2>"$TMPROOT/noncanonical.err")"; rc=$?
+assert_eq "$rc" "0" "noncanonical-lease fallback exit"
+assert_eq "$fresh" "$WTROOT/noncanonical" "noncanonical lease cannot authorize reuse"
+assert_eq "$(git -C "$NONCAN_WT" rev-parse --abbrev-ref HEAD 2>/dev/null)" reuse/noncanonical-lease "noncanonical candidate remains intact"
+
 echo "== case 29: stale lease cannot authorize replacement checkout reuse =="
 STALE_WT="$WTROOT/reuse-stale-incarnation"
 git -C "$REPO" branch reuse/stale-incarnation "$ORIGIN_SHA"
@@ -500,6 +533,23 @@ assert_eq "$rc" "0" "last-moment commit fallback exits zero"
 assert_eq "$fresh" "$WTROOT/boundary" "last-moment commit creates fresh path"
 assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/boundary)" "$(git -C "$BOUNDARY_WT" rev-parse HEAD)" "new old-branch commit is preserved"
 assert_eq "$(git -C "$BOUNDARY_WT" rev-parse --abbrev-ref HEAD)" "reuse/boundary" "candidate switches back to preserved old branch"
+
+echo "== case 33: content added at the branch-delete boundary blocks reuse =="
+ACTIVITY_WT="$WTROOT/reuse-activity-boundary"
+git -C "$REPO" branch reuse/activity-boundary "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$ACTIVITY_WT" reuse/activity-boundary
+cat > "$TMPROOT/add-user-data-hook" <<'EOF'
+#!/usr/bin/env bash
+echo keep > "$3/late-untracked.txt"
+EOF
+chmod +x "$TMPROOT/add-user-data-hook"
+export DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF="$TMPROOT/add-user-data-hook"
+fresh="$(run_reuse_attempt "$ACTIVITY_WT" reuse/activity-boundary feat/activity-boundary activity-boundary)"; rc=$?
+unset DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF
+assert_eq "$rc" "0" "late-activity fallback exit"
+assert_eq "$fresh" "$WTROOT/activity-boundary" "late content blocks candidate recycle"
+assert_eq "$(git -C "$ACTIVITY_WT" rev-parse --abbrev-ref HEAD)" "reuse/activity-boundary" "late-activity branch preserved"
+[[ -f "$ACTIVITY_WT/late-untracked.txt" ]] && ok "late content remains intact" || bad "late content was lost"
 
 echo "== case 26: failure after conditional delete restores the old branch =="
 RESTORE_WT="$WTROOT/reuse-restore"
