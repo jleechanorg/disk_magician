@@ -121,13 +121,31 @@ DEADLINE="$(python3 -c 'import time; print(time.monotonic()+0.12)')"
 START="$(python3 -c 'import time; print(time.monotonic())')"
 OUT="$(PATH="$SLOWBIN:$PATH" python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$DEADLINE")"
 END="$(python3 -c 'import time; print(time.monotonic())')"
-check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "kept:deferred:deadline" ]
+check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "deferred:deadline" ]
 check 'deferred phase1 retains the original artifact' [ -f "$A/report.md" ] && [ -f "$A/sub/deep/y.txt" ] && [ -L "$A/link" ]
 check 'deferred phase1 leaves no quarantine payload' [ -z "$(find "$Q" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
 check 'phase1 deadline returns before the 0.5s probe completes' python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 0.4 else 1)"
 for bad in nan inf -1; do
   check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
 done
+# An expired phase 2 must not commit an intact item to delete-only.
+prepare_quarantine; EXPIRED_AT="$(python3 -c 'import time; print(time.monotonic())')"
+EXPIRED_PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" --deadline-at "$EXPIRED_AT")"
+check 'expired phase2 defers and leaves the item restorable' bash -c '[[ "$1" == deferred:phase2 && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2/$3.json")" == intent && -f "$4/quarantine-index/$3.json" ]]' _ "$EXPIRED_PHASE2" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
+# Interrupted destructive work is resumable and its reconcile outcome names the id.
+prepare_quarantine; DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1
+RECON_ID="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile)"
+check 'reconcile deleting outcome carries the quarantine id' bash -c '[[ "$1" == *"removed:$2"* ]]' _ "$RECON_ID" "$QID"
+# Malformed reconcile deadlines fail closed without an unlocked traceback fallback.
+BAD_RECON="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at abc 2>&1; echo "rc=$?")"
+check 'malformed reconcile deadline fails closed without traceback' bash -c '[[ "$1" == *"ALERT: invalid quarantine reconcile deadline"* && "$1" == *"rc=1"* && "$1" != *Traceback* ]]' _ "$BAD_RECON"
+# Phase 1 and phase 2 run under one lock, so reconcile cannot roll back an in-flight remove.
+prepare_inputs; JOURNAL_READY="$TMP/combined-ready"; LOCK_RELEASE="$TMP/combined-release"
+env DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL="touch '$JOURNAL_READY'; while [[ ! -e '$LOCK_RELEASE' ]]; do sleep 0.02; done" python3 "$ROOT/scripts/quarantine_rename.py" remove "$A" "$INV" "$BINDING" >"$TMP/combined-out" & CPID=$!
+for _ in $(seq 1 250); do [[ -e "$JOURNAL_READY" ]] && break; sleep 0.02; done
+RECON_LOCK="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at "$(python3 -c 'import time; print(time.monotonic()+0.15)')")"
+touch "$LOCK_RELEASE"; wait "$CPID"
+check 'concurrent reconcile cannot roll back an in-flight combined remove' bash -c '[[ "$1" == deferred:operation-lock && "$2" == removed:* && ! -e "$3" ]]' _ "$RECON_LOCK" "$(cat "$TMP/combined-out")" "$A"
 fixture; run_contract --unknown-option value
 check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
 fixture; QUARANTINE_TEST_BASH=/bin/bash QUARANTINE_TEST_NOUNSET=1 run_contract
@@ -136,14 +154,14 @@ check 'Bash 3.2 nounset: no optional args reaches removal verdict' bash -c 'case
 # A write after the deleting state is durable invalidates the hash and remains quarantined.
 fixture; run DISK_MAGICIAN_TEST_BEFORE_UNLINK='printf BBBB > "$DM_Q_PATH/report.md"'
 QID="$(sidecar_id)"
-check 'phase 2 rewrite: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'phase 2 rewrite: kept:quarantine_partial_kept' [ "$OUT" = "kept:quarantine_partial_kept:$QID" ]
 check 'phase 2 rewrite: changed file and deleting sidecar remain' bash -c '[[ "$(cat "$1")" == BBBB && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2")" == deleting ]]' _ "$Q/$QID/report.md" "$Q/$QID.json"
 
 # An inventoried directory replaced by a symlink is never followed into the outside tree.
 fixture; mkdir -p "$TMP/outside$N"; printf OUTSIDE > "$TMP/outside$N/keep"
 run DISK_MAGICIAN_TEST_BEFORE_UNLINK="mv \"\$DM_Q_PATH/sub\" '$TMP/moved$N'; ln -s '$TMP/outside$N' \"\$DM_Q_PATH/sub\""
 QID="$(sidecar_id)"
-check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = "kept:quarantine_partial_kept:$QID" ]
 check 'directory-to-symlink swap: outside data untouched' [ "$(cat "$TMP/outside$N/keep")" = OUTSIDE ]
 check 'directory-to-symlink swap: sidecar and replacement symlink remain' [ -L "$Q/$QID/sub" ] && [ -f "$Q/$QID.json" ]
 
@@ -176,7 +194,7 @@ check 'reconcile terminal-mark crash clears both metadata files' bash -c '[[ "$1
 
 fixture; run DISK_MAGICIAN_TEST_INDEX_DROP_FAIL=1 X=1
 CRASH_ID="$(index_id)"
-check 'index cleanup failure preserves terminal recovery marker' bash -c '[[ "$1" == kept:quarantine_partial_kept && ! -e "$2" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"'\'' "$3"' _ "$OUT" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+check 'index cleanup failure preserves terminal recovery marker' bash -c '[[ "$1" == "kept:quarantine_partial_kept:$4" && ! -e "$2" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"'\'' "$3"' _ "$OUT" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json" "$CRASH_ID"
 RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
 check 'index cleanup failure is replayed by reconcile' bash -c '[[ "$1" == *"reconciled:$2:terminal-removed"* && ! -e "$3" ]]' _ "$RECOVERED" "$CRASH_ID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
 # A missing frozen root does not prove deletion: it may have moved elsewhere.

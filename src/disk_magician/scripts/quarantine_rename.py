@@ -344,7 +344,7 @@ def phase1(path, inv_file, binding_file, deadline=None):
     except OSError: return f"quarantine_conflict:{qid}"
     if not same_entry(pfd, base, restored): return f"quarantine_conflict:{qid}"
     if not finish_sidecar(qfd, qid, "rolled-back"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
-    return f"kept:{why}"
+    return why if why.startswith("deferred:") else f"kept:{why}"
 
 def entry_kind(st):
     if stat.S_ISDIR(st.st_mode): return "dir"
@@ -399,7 +399,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                            removed_paths=()):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
     if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
-    if deadline is not None and time.monotonic() >= deadline: return False
+    if deadline_passed(deadline): raise DeadlineExceeded()
     try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError: return rel != "." and rel in removed_paths
     kind = entry_kind(st)
@@ -434,7 +434,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if (entry_kind(current), current.st_dev, current.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
-            if deadline is not None and time.monotonic() >= deadline: return False
+            if deadline_passed(deadline): raise DeadlineExceeded()
             os.rmdir(name, dir_fd=parent_fd)
             os.fsync(parent_fd)
             kill_at("entry_removed_before_journal")
@@ -455,6 +455,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                 return False
             digest = hashlib.sha256()
             while True:
+                if deadline_passed(deadline): raise DeadlineExceeded()
                 chunk = os.read(fd, 1 << 20)
                 if not chunk: break
                 digest.update(chunk)
@@ -473,7 +474,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (entry_kind(current), current.st_dev, current.st_ino) != (kind, expected.get("dev"), expected.get("ino")):
             return False
-        if deadline is not None and time.monotonic() >= deadline: return False
+        if deadline_passed(deadline): raise DeadlineExceeded()
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
         kill_at("entry_removed_before_journal")
@@ -545,15 +546,20 @@ def phase2(binding_file, qid, deadline=None):
             if not finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
             return "removed"
         if record.get("phase") != "deleting":
+            if deadline_passed(deadline): return "deferred:phase2"
             record["phase"] = "deleting"
             update_sidecar(qfd, side, record)
         hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, ".dm-quarantine", qid), "")
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
         rootstat = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         location_guard = (pfd, qfd, qid, qst, rootstat)
-        if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline,
-                                      location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
-                                      qfd, side, record, removed_paths):
+        try:
+            removed = unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline,
+                                             location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
+                                             qfd, side, record, removed_paths)
+        except DeadlineExceeded:
+            return "deferred:phase2"
+        if not removed:
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
@@ -650,7 +656,7 @@ def reconcile_one(qid, deadline=None):
             finally:
                 try: os.unlink(binding_path)
                 except OSError: pass
-            return result
+            return result if result.endswith(":" + qid) else f"{result}:{qid}"
         if phase not in ("intent", "rollback_pending", "rollback_conflict"):
             return f"alert:{qid}:malformed-phase"
         if original_matches and at_quarantine is None:
@@ -689,8 +695,8 @@ def quarantine_reconcile(args):
     deadline = None; cursor = None; i = 0
     while i < len(args):
         if args[i] == "--deadline-at" and i + 1 < len(args):
-            deadline = float(args[i + 1])
-            if not math.isfinite(deadline) or deadline < 0: raise ValueError("invalid deadline")
+            deadline = parse_deadline(args[i + 1])
+            if deadline is None: raise ValueError("invalid deadline")
             i += 2
         elif args[i] == "--cursor" and i + 1 < len(args): cursor = args[i + 1]; i += 2
         else: raise ValueError("usage: reconcile [--deadline-at MONOTONIC] [--cursor FILE]")
@@ -763,6 +769,14 @@ def parse_deadline(raw):
     try: value = float(raw)
     except (TypeError, ValueError): return None
     return value if math.isfinite(value) and value >= 0 else None
+def combined_remove(path, inv_file, binding_file, deadline=None):
+    """Phase 1 + phase 2 for one candidate under the caller's single operation lock."""
+    verdict = phase1(path, inv_file, binding_file, deadline)
+    if not verdict.startswith("quarantined:"): return verdict
+    qid = verdict.split(":", 1)[1]
+    result = phase2(binding_file, qid, deadline)
+    if result == "removed": return f"removed:{qid}"
+    return result if result.endswith(":" + qid) else f"{result}:{qid}"
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
@@ -781,19 +795,20 @@ if __name__ == "__main__":
     elif args[:1] == ["phase2"] and len(args) in (3, 5):
         deadline = None
         if len(args) == 5 and args[3] == "--deadline-at":
-            try: deadline = float(args[4])
-            except ValueError: print("kept:quarantine_partial_kept"); sys.exit(0)
-            if not math.isfinite(deadline) or deadline < 0: print("kept:quarantine_partial_kept"); sys.exit(0)
+            deadline = parse_deadline(args[4])
+            if deadline is None: print("kept:quarantine_partial_kept"); sys.exit(0)
         lock = operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
-        try:
-            if len(args) == 5 and args[3] == "--deadline-at":
-                try:
-                    value = float(args[4])
-                    print(phase2(args[1], args[2], value if math.isfinite(value) and value >= 0 else -1))
-                except ValueError: print("kept:quarantine_partial_kept")
-            elif len(args) == 3: print(phase2(*args[1:]))
-            else: print("kept:quarantine_partial_kept")
+        try: print(phase2(args[1], args[2], deadline))
+        finally: operation_unlock(lock)
+    elif args[:1] == ["remove"] and len(args) in (4, 6):
+        deadline = None
+        if len(args) == 6 and args[4] == "--deadline-at":
+            deadline = parse_deadline(args[5])
+            if deadline is None: print("kept:check-failed"); sys.exit(0)
+        lock = operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); sys.exit(0)
+        try: print(combined_remove(args[1], args[2], args[3], deadline))
         finally: operation_unlock(lock)
     elif args[:1] == ["restore"] and len(args) == 2:
         lock = operation_lock()
@@ -810,9 +825,8 @@ if __name__ == "__main__":
         deadline = None
         for i in range(1, len(args) - 1):
             if args[i] == "--deadline-at":
-                try: deadline = float(args[i + 1])
-                except ValueError: sys.exit(quarantine_reconcile(args[1:]))
-                if not math.isfinite(deadline) or deadline < 0:
+                deadline = parse_deadline(args[i + 1])
+                if deadline is None:
                     print("ALERT: invalid quarantine reconcile deadline"); sys.exit(1)
         lock = operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
