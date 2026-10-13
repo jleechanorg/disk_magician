@@ -141,13 +141,15 @@ assert_eq "$(c14_repos_ok "$TMPROOT/missing")" kept:check-failed "missing root"
 echo "== remote proof (independent repositories) =="
 export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
 PROBE="$REPO_ROOT/scripts/c14_probe.py"
+PT="$TMPROOT/ptmp" && mkdir -p "$PT"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 # shellcheck source=scripts/lib/worktree_lease.sh
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
 # baseline <repo>: record the producer's git_meta in the repo's lease.
 baseline() {
     local f gd
     f="$(lease_path_for "$1")" && gd="$(git -C "$1" rev-parse --absolute-git-dir)"
-    mkdir -p "${f%/*}" && printf '{"git_meta": %s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
+    mkdir -p "${f%/*}" && printf '{"owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
 }
 # mkpushed <name>: bare remote + clone with main pushed and a git_meta baseline.
 mkpushed() {
@@ -162,6 +164,11 @@ expire() { git -C "$TMPROOT/$1" reflog expire --expire=now --all; }
 mkpushed ctl
 assert_eq "$(pushed ctl)" ok "pushed clean clone with baseline"
 assert_eq "$(c14_repo_pushed_ok "$TMPROOT/ctl")" ok "c14_repo_pushed_ok on pushed clean clone"
+mkdir -p "$TMPROOT/no-remote" && mkrepo "$TMPROOT/no-remote" && baseline "$TMPROOT/no-remote"
+err="$TMPROOT/no-remote.stderr"
+v="$(c14_repo_pushed_ok "$TMPROOT/no-remote" 2>"$err")"
+[[ "$v" == kept:* ]] && ok "no-remote repository returns a kept verdict under nounset ($v)" || bad "no-remote repository returned an empty/non-kept verdict under nounset: '$v'"
+[[ ! -s "$err" ]] && ok "no-remote repository has no nounset diagnostic" || bad "no-remote repository emitted a nounset diagnostic: $(cat "$err")"
 mkpushed headx && unpushed_commit headx X
 assert_eq "$(pushed headx)" kept:not-pushed "HEAD not on remote"
 mkpushed reflog && unpushed_commit reflog X && git -C "$TMPROOT/reflog" reset -q --hard origin/main
@@ -324,8 +331,449 @@ v="$(C14_INVENTORY_OUT="$TMPROOT/inv.jsonl" wt cand)"
 python3 -c 'import json,sys; s={json.loads(l)["path"] for l in open(sys.argv[1])}; sys.exit(not {"HEAD","gitdir","commondir"} <= s)' \
     "$TMPROOT/inv.jsonl" 2>/dev/null && ok "admin entries emitted for the inventory" || bad "admin inventory missing ($v)"
 
-echo "== verdict stub stays blocked =="
-assert_eq "$(artifact_removal_verdict "$TMPROOT/clean")" kept:check-failed "verdict keeps every path"
+echo "== declared-ephemeral rows E2-E7 (--kind ephemeral) =="
+PT="$TMPROOT/ptmp" && mkdir -p "$PT" "$TMPROOT/utmp"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
+NOW="$(date +%s)"
+# age <path> <minutes>: every entry under <path> last modified <minutes> ago.
+age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
+eph() { artifact_removal_verdict "$1" --kind ephemeral; }
+index_candidate="$PT/pr-index-inventory-check"
+git clone -q "$TMPROOT/remotes/ctl.git" "$index_candidate" && baseline "$index_candidate"
+age "$index_candidate" 50000
+index_before="$(shasum -a 256 "$index_candidate/.git/index" | awk '{print $1}')"
+index_inventory="$TMPROOT/index-inventory.json"
+assert_eq "$(GIT_OPTIONAL_LOCKS=1 artifact_removal_verdict "$index_candidate" --kind ephemeral --inventory-out "$index_inventory")" remove "full C14 verification can remove an old, clean pushed clone"
+python3 - "$index_candidate/.git/index" "$index_inventory" <<'PY' && ok "read-side Git verification preserves the indexed bytes" || bad "C14 inventory's index hash changed during verification"
+import hashlib, json, sys
+index_path, inventory_path = sys.argv[1:]
+entries = {row["path"]: row for row in json.load(open(inventory_path, encoding="utf-8"))}
+actual = hashlib.sha256(open(index_path, "rb").read()).hexdigest()
+assert entries[".git/index"]["sha256"] == actual
+PY
+assert_eq "$(shasum -a 256 "$index_candidate/.git/index" | awk '{print $1}')" "$index_before" "index bytes are unchanged across the verifier"
+mkdir -p "$PT/clones" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/clones/repo" && baseline "$PT/clones/repo"
+# A finished run releases its lease; a baseline-only lease (owner absent) would be kept.
+python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/clones/repo")"
+git -C "$TMPROOT/wtbase" worktree add -q "$PT/wtp" -b wtp origin/main 2>/dev/null && git -C "$PT/wtp" push -q -u origin wtp 2>/dev/null
+printf 'p' >"$PT/agent_prompt_1.txt"
+mkdir -p "$PT/cli_validation_gemini_1" "$PT/pr-123/run" "$HOME/.aside/u/a/sessions/s1" "$HOME/.gemini/antigravity/brain/b1" \
+    "$HOME/.gemini/antigravity-cli/brain/b2" "$HOME/.gemini/antigravity/implicit.backup" "$HOME/.llm-inspector/captures" "$HOME/.claude/supervisor"
+printf 'r' >"$PT/pr-123/run/results.json"
+for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$HOME/.gemini/antigravity/brain/b1/t.log" \
+    "$HOME/.gemini/antigravity-cli/brain/b2/t.log" "$HOME/.gemini/antigravity/implicit.backup/i" "$HOME/.llm-inspector/captures/capture-1.json" \
+    "$HOME/.llm-inspector/captures/x.summary.json" "$HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log"; do printf 'x' >"$f"; done
+while read -r row ret p; do
+    age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}"
+    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:recent-activity "$row 1 h short of ${ret} min"
+done <<EOF
+E2 240 $PT/agent_prompt_1.txt
+E2 60 $PT/cli_validation_gemini_1
+E2 240 $PT/clones/repo
+E2 60 $PT/wtp
+E3 2880 $PT/pr-123
+E4 10080 $HOME/.aside/u/a/sessions/s1
+E5 30240 $HOME/.gemini/antigravity/brain/b1
+E5 30240 $HOME/.gemini/antigravity-cli/brain/b2
+E5 43200 $HOME/.gemini/antigravity/implicit.backup
+E6 4320 $HOME/.llm-inspector/captures/capture-1.json
+E6 4320 $HOME/.llm-inspector/captures/x.summary.json
+E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
+EOF
+# Never-touch tmp roots (cleanup_tmp.sh PROTECTED_TMP_ROOTS) and legacy system basenames keep an idle released E2 clone.
+for d in worldarchitect.ai/br custom-root/br system-x com.apple.y; do
+    git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d" && baseline "$PT/$d"
+    python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/$d")"
+    age "$PT/${d%%/*}" 400
+done
+assert_eq "$(eph "$PT/worldarchitect.ai/br")" kept:protected "default protected tmp root"
+assert_eq "$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS='x custom-root' eph "$PT/custom-root/br")" kept:protected "env protected tmp root"
+assert_eq "$(eph "$PT/custom-root/br")" remove "unlisted root at 400 min"
+assert_eq "$(eph "$PT/system-x")" kept:unproven-content "system-* basename has no row"
+assert_eq "$(eph "$PT/com.apple.y")" kept:unproven-content "com.apple.* basename has no row"
+age "$PT/pr-123" 180
+assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
+age "$PT/pr-123" 43200
+printf '{}' >"$TMPROOT/invalid-inventory.json"
+assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
+mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 'k' >"$PT/pr-key/id_ed25519"
+age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
+assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
+assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
+mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
+assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
+mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
+assert_eq "$(eph "$HOME/work/run-9")" kept:unproven-content "unique report.md under ~/work/run-9/"
+# '.'/'..' basenames must not resolve to the parent and inherit a row's retention (§7.2 globs).
+mkdir -p "$HOME/.gemini/antigravity/conversations" "$HOME/.aside/u/a/profile" && printf 'c' >"$HOME/.gemini/antigravity/conversations/important.pb"
+printf 'c' >"$HOME/.aside/u/a/profile/Cookies" && age "$HOME/.gemini" 43200 && age "$HOME/.aside" 43200
+for p in "$HOME/.gemini/antigravity/brain/.." "$HOME/.gemini/antigravity/brain/." "$HOME/.aside/u/a/sessions/.." "/"; do
+    assert_eq "$(eph "$p")" kept:check-failed "dot basename: ${p#"$HOME"/}"
+done
+
+echo "== every-kind checks =="
+mkdir -p "$PT/pr-open" "$PT/pr-cwd" "$PT/pr-young" "$PT/pr-live" "$PT/pr-unk" "$PT/pr-rel" "$HOME/.codex/sessions/s"
+for d in pr-open pr-cwd pr-young pr-live pr-unk pr-rel; do printf 'x' >"$PT/$d/f"; age "$PT/$d" 43200; done
+printf 'x' >"$HOME/.codex/sessions/s/f" && age "$HOME/.codex/sessions/s" 43200
+age "$PT/agent_prompt_1.txt" 43200
+(exec 7<"$PT/pr-open/f" 8<"$PT/agent_prompt_1.txt"; cd /; sleep 60) & opid=$!
+(cd "$PT/pr-cwd" && exec sleep 60) & cpid=$!
+sleep 1
+assert_eq "$(eph "$PT/pr-open")" kept:open-file "non-git dir with an open file"
+assert_eq "$(eph "$PT/agent_prompt_1.txt")" kept:open-file "open E2 agent_prompt file"
+assert_eq "$(eph "$PT/pr-cwd")" kept:live-cwd "a process with cwd inside"
+kill "$opid" "$cpid" 2>/dev/null; wait "$opid" "$cpid" 2>/dev/null
+age "$PT/pr-young" 10
+assert_eq "$(artifact_removal_verdict "$PT/pr-young")" kept:recent-activity "content 10 min old"
+assert_eq "$(eph "$HOME/.codex/sessions/s")" kept:protected "never-delete path (safety_check.sh)"
+# lease <dir> <released_at>: lease owned by this shell (pid + start epoch).
+lease() {
+    local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
+    printf '{"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
+        $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
+}
+lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
+lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
+mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
+assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
+lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
+# A lease that cannot be stat'ed is not absent: EACCES on the lease dir or a parent keeps.
+ld="$(lease_dir)" && chmod 000 "$ld"
+assert_eq "$(eph "$PT/pr-live")" kept:owner-unknown "unreadable lease dir keeps a live-owner dir"
+chmod 700 "$ld" && chmod 000 "${ld%/*}"
+assert_eq "$(eph "$PT/pr-live")" kept:owner-unknown "unsearchable lease-dir parent keeps a live-owner dir"
+chmod 700 "${ld%/*}"
+# own <path> <released_at>: set this shell as owner of <path>'s lease, keeping its git_meta.
+own() {
+    local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
+    python3 -c 'import json,os,sys; f=sys.argv[1]; d=json.load(open(f)) if os.path.exists(f) else {}
+d.update(owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
+        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2"
+}
+mkdir -p "$PT/pr-nest" "$PT/pr-1" && for d in pr-nest pr-1; do git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d/repo" && baseline "$PT/$d/repo"; done
+own "$PT/pr-nest/repo" null && own "$PT/pr-1/repo" '"2026-10-01T00:00:00Z"' && own "$PT/pr-1" null && age "$PT/pr-nest" 43200 && age "$PT/pr-1" 43200
+assert_eq "$(eph "$PT/pr-nest/repo")" kept:live-owner "live owner on the candidate repository"
+assert_eq "$(eph "$PT/pr-nest")" kept:live-owner "live-owner lease on a repository nested in the candidate"
+assert_eq "$(eph "$PT/pr-1/repo")" kept:live-owner "live-owner lease on a dir enclosing the candidate"
+own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released"
+
+echo "== non-git provenance (T11-5) =="
+GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
+# Stub for `gcloud storage objects describe`: fixture JSON per object, else 404 (rc 1); logs each call.
+printf '#!/bin/sh\nf="%s/$(printf %%s "$1" | tr "/:" "__").json"\necho "$1" >>"%s/calls"\n[ -f "$f" ] || { echo 404 >&2; exit 1; }\ncat "$f"\n' "$GCS" "$GCS" >"$TMPROOT/stub/describe"
+chmod +x "$TMPROOT/stub/describe" && export DISK_MAGICIAN_STAT_BIN="$TMPROOT/stub/describe"
+# publish <dir> [<url>] [<verified_at|->]: released lease marking every file under <dir> published
+# (upload_manifest: path, sha256, md5, crc32c, size, object, generation 1) plus matching remote objects.
+publish() {
+    python3 - "$1" "$(lease_path_for "$1")" "${2:-gs://wa-test-evidence/agent-evidence/${1##*/}/}" "${3:-2026-10-01T00:00:00Z}" "$GCS" <<'PY'
+import base64, hashlib, json, os, sys
+d, lease, url, ver, gcs = sys.argv[1:]
+m = []
+for dp, _, fns in os.walk(d):
+    for n in sorted(fns):
+        p = os.path.join(dp, n); b = open(p, "rb").read(); rel = os.path.relpath(p, d)
+        m.append(dict(path=rel, sha256=hashlib.sha256(b).hexdigest(), md5=base64.b64encode(hashlib.md5(b).digest()).decode(),
+                      crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
+        json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
+os.makedirs(os.path.dirname(lease), exist_ok=True)
+json.dump({"owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+           "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
+           "upload_manifest": m}, open(lease, "w"))
+PY
+}
+# lease_edit <dir> <python statement on d>: rewrite <dir>'s lease JSON.
+lease_edit() { python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); exec(sys.argv[2]); json.dump(d,open(f,"w"))' "$(lease_path_for "$1")" "$2"; }
+gobj() { printf '%s/%s.json' "$GCS" "$(printf %s "gs://wa-test-evidence/agent-evidence/$1" | tr '/:' '__')"; }
+av() { artifact_removal_verdict "$@"; }
+mkdir -p "$PT/advice-x" "$PT/deploy" && printf 'n' >"$PT/advice-x/notes.txt" && printf 'TOKEN=abc' >"$PT/deploy/deploy_backup.txt"
+age "$PT/advice-x" 90 && age "$PT/deploy" 43200
+assert_eq "$(av "$PT/advice-x")" kept:unproven-content "unique notes.txt under \$TMPDIR/advice-x/"
+assert_eq "$(av "$PT/deploy")" kept:unproven-content "custom-named deploy_backup.txt"
+git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
+assert_eq "$(av "$PT/evrepo/evidence")" kept:unproven-content "unpublished evidence/results.json"
+mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
+printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+    "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
+assert_eq "$(av "$PT/inv")" kept:unproven-content "manifest is not a copy (inventory only, never published)"
+for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
+    mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
+    publish "$PT/$d" "" "$([[ $d == ev-unver ]] && echo - || echo 2026-10-01T00:00:00Z)" && age "$PT/$d" 120
+done
+: >"$GCS/calls"
+assert_eq "$(av "$PT/ev-ok")" remove "published evidence with verified_at, every file matching"
+assert_eq "$(wc -l <"$GCS/calls" | tr -d ' ')" 3 "one objects describe per object"
+assert_eq "$(av "$PT/ev-unver")" kept:unproven-content "unverified publication (no verified_at)"
+printf 'mine' >"$PT/ev-added/private_notes.txt" && age "$PT/ev-added" 120
+assert_eq "$(av "$PT/ev-added")" kept:unproven-content "publish, then add private_notes.txt"
+printf 'mp4dato' >"$PT/ev-byte/sub/recording.mp4" && age "$PT/ev-byte" 120
+assert_eq "$(av "$PT/ev-byte")" kept:unproven-content "publish, then change one byte of recording.mp4"
+lease_edit "$PT/ev-subset" 'd["upload_manifest"]=d["upload_manifest"][:2]'
+assert_eq "$(av "$PT/ev-subset")" kept:unproven-content "manifest lists a subset"
+lease_edit "$PT/ev-nomf" 'd["upload_manifest"]=None'
+assert_eq "$(av "$PT/ev-nomf")" kept:unproven-content "URL with no manifest"
+rm -f "$(gobj ev-del/report.md)" "$(gobj ev-del/results.json)" "$(gobj ev-del/sub/recording.mp4)"
+assert_eq "$(av "$PT/ev-del")" kept:unproven-content "objects deleted after publication"
+printf '{"generation":"2","md5_hash":"x"}' >"$(gobj ev-regen/report.md)"
+assert_eq "$(av "$PT/ev-regen")" kept:unproven-content "object replaced by a new generation"
+printf '{"generation":"1","md5_hash":"bm90IHRoZSBzYW1l"}' >"$(gobj ev-exp/results.json)"
+assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object hash differs from the manifest"
+rm -f "$(gobj ev-exp/results.json)"
+assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object past its 30-day lifecycle (stat stub 404)"
+rm -f "$(gobj ev-miss/sub/recording.mp4)"
+assert_eq "$(av "$PT/ev-miss")" kept:unproven-content "one of three objects missing"
+lease_edit "$PT/ev-ok" 'd["verified_at"]=""'
+assert_eq "$(av "$PT/ev-ok")" kept:unproven-content "empty verified_at"
+mkdir -p "$PT/ev-link" && printf 'r' >"$PT/ev-link/report.md" && publish "$PT/ev-link" && ln -s /etc "$PT/ev-link/l" && age "$PT/ev-link" 120
+assert_eq "$(av "$PT/ev-link")" kept:unproven-content "unlisted symlink in a published dir"
+mkdir -p "$PT/nm" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/nm/repo" && baseline "$PT/nm/repo"
+lease_edit "$PT/nm/repo" 'd.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z")'
+mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules/pkg/i.js" && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed clean clone (no kind)"
+printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm")" kept:unproven-content "the same clone beside a unique non-git file"
+echo "-- rebuildable (--kind rebuildable) and os_clone --"
+mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1"
+for d in .cache/uv/archive-v0/x .cache/other/x Library/Developer/Xcode/DerivedData/App-1; do printf 'b' >"$HOME/$d/f"; done
+age "$HOME/.cache" 43200 && age "$HOME/Library" 43200
+assert_eq "$(av "$HOME/.cache/uv/archive-v0/x" --kind rebuildable)" remove "rebuildable ~/.cache/uv/archive-v0/x"
+assert_eq "$(av "$HOME/Library/Developer/Xcode/DerivedData/App-1" --kind rebuildable)" remove "rebuildable Xcode DerivedData entry"
+assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
+assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
+assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
+# venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
+venvw() {
+    git -C "$TMPROOT/wtbase" worktree add -q "$1" -b "${1##*/}" origin/main 2>/dev/null
+    printf 'venv/\n' >>"$1/.gitignore" && git -C "$1" commit -qam ignore-venv && git -C "$1" push -q -u origin "${1##*/}" 2>/dev/null
+    mkdir -p "$1/venv/bin" && printf 'py' >"$1/venv/bin/python"
+}
+venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
+age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
+assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
+git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
+mkdir -p "$HOME/Documents/venv" "$HOME/Documents/venv.bak.old" && printf 't' >"$HOME/Documents/venv/thesis.txt" && printf 't' >"$HOME/Documents/venv.bak.old/t.txt"
+venvw "$HOME/wt-dirty" && printf 'x\n' >>"$HOME/wt-dirty/tracked.txt"
+venvw "$HOME/wt-tracked" && git -C "$HOME/wt-tracked" add -f venv && git -C "$HOME/wt-tracked" commit -qm tracked-venv && git -C "$HOME/wt-tracked" push -q 2>/dev/null
+git clone -q "$TMPROOT/remotes/wtbase.git" "$HOME/base" && printf 'venv/\n' >>"$HOME/base/.git/info/exclude" && mkdir -p "$HOME/base/venv" && printf 'py' >"$HOME/base/venv/python"
+for d in "$HOME/projects" "$HOME/Documents" "$HOME/wt-dirty" "$HOME/wt-tracked" "$HOME/base"; do age "$d" 43200; done
+assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:unproven-content "tracked, unpushed and dirty venv/ in a base repo"
+assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:unproven-content "venv/ outside any repository"
+assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:unproven-content "venv.bak.old outside any repository"
+assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a dirty worktree"
+assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:unproven-content "tracked venv/ in a clean pushed worktree"
+assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a base repo, not a linked worktree"
+mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1/app" && age "$PT/X" 43200
+assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" --kind os_clone)" kept:check-failed "os_clone without a frozen-identity proof"
+x_thesis="$HOME/Documents/thesis"
+mkdir -p "$x_thesis" && printf 'unique' >"$x_thesis/chapter.txt" && age "$x_thesis" 43200
+assert_eq "$(av "$x_thesis" --kind os_clone)" kept:check-failed "os_clone flag cannot authorize arbitrary ~/Documents/thesis"
+x_clone="$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1"
+x_id="$(stat -f '%d:%i:%u' "$PT/X" 2>/dev/null || stat -c '%d:%i:%u' "$PT/X")"
+x_parent_id="$(stat -f '%d:%i:%u' "${x_clone%/*}" 2>/dev/null || stat -c '%d:%i:%u' "${x_clone%/*}")"
+x_candidate_id="$(stat -f '%d:%i:%u' "$x_clone" 2>/dev/null || stat -c '%d:%i:%u' "$x_clone")"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" remove "os_clone with matching frozen candidate, parent and X-root identities"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_parent_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone identity mismatch is kept"
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone proof outside the frozen X scan root is kept"
+assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kind os_clone"
+age "$PT/X" 10
+assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
+assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
+typo_candidate="$PT/agent_prompt_bad_deadline.txt"
+printf 'eligible only when every option parses' >"$typo_candidate"
+age "$typo_candidate" 50000
+assert_eq "$(av "$typo_candidate" --kind ephemeral --deadlin-at bogus)" kept:check-failed "unknown option cannot authorize removal"
+
+echo "== archive origin receipt (E1) =="
+ARCHIVE_ROOT="$TMPROOT/archive-root"
+export DISK_MAGICIAN_ARCHIVE_ROOT="$ARCHIVE_ROOT"
+archive_fixture() {
+    local source="$1" entry="$2" archived_at="$3" retention
+    retention="$(c14_ephemeral_retention "$source")" || retention=0
+    mkdir -p "${entry%/*}" && "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null && mv "$source" "$entry"
+}
+archive_source="$PT/pr-archive-123"
+archive_entry="$ARCHIVE_ROOT/20261010T000000Z/pr-archive-123"
+mkdir -p "$archive_source" && printf 'archived pr payload' >"$archive_source/payload"
+age "$archive_source" 43200
+archive_fixture "$archive_source" "$archive_entry" "$((NOW - 49 * 3600))"
+age "$archive_entry" 43200
+assert_eq "$(av "$archive_entry" --kind ephemeral)" remove "archived E3 origin past its 48 h row retention"
+
+# A bare repository at the candidate root is discovered from inventory too.
+root_bare="$PT/pr-root-bare"
+git init --bare -q "$root_bare"
+printf 'unreachable root object' | git --git-dir="$root_bare" hash-object -w --stdin >/dev/null
+age "$root_bare" 50000
+assert_eq "$(av "$root_bare" --kind ephemeral)" kept:git-unbaselined "candidate-root bare repository is checked and fails closed"
+
+unknown_source="$TMPROOT/unregistered-origin"
+unknown_entry="$ARCHIVE_ROOT/20261010T010000Z/large-unknown"
+mkdir -p "$unknown_source" && truncate -s 209715200 "$unknown_source/large.bin"
+archive_fixture "$unknown_source" "$unknown_entry" "$((NOW - 25 * 3600))"
+age "$unknown_entry" 43200
+assert_eq "$(av "$unknown_entry" --kind ephemeral)" kept:archive-identity "200 MiB archive with unknown origin stays kept"
+
+arbitrary_source="$PT/unregistered-origin-48h"
+arbitrary_entry="$ARCHIVE_ROOT/20261010T011000Z/unregistered-origin-48h"
+mkdir -p "$arbitrary_source" && printf 'must not trust arbitrary retention' >"$arbitrary_source/payload"
+mkdir -p "${arbitrary_entry%/*}"
+"$PROBE" archive-receipt "$arbitrary_source" "$arbitrary_entry.c14-origin.json" "$((NOW - 49 * 3600))" 2880 >/dev/null
+mv "$arbitrary_source" "$arbitrary_entry"
+age "$arbitrary_entry" 50000
+assert_eq "$(av "$arbitrary_entry" --kind ephemeral)" kept:archive-identity "E1 rejects allowed retention without a matching E2/E3 origin row"
+
+later_row_source="$PT/e4-origin-fixture"
+later_row_entry="$ARCHIVE_ROOT/20261010T012000Z/e4-origin-fixture"
+mkdir -p "$later_row_source" "${later_row_entry%/*}" && printf 'E4 is not an E1 origin row' >"$later_row_source/payload"
+"$PROBE" archive-receipt "$later_row_source" "$later_row_entry.c14-origin.json" "$((NOW - 49 * 3600))" 10080 >/dev/null
+python3 - "$later_row_entry.c14-origin.json" "$HOME/.aside/u/a/sessions/s1" <<'PY'
+import json, sys
+path, original = sys.argv[1:]
+row = json.load(open(path, encoding="utf-8"))
+row["original_path"] = original
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(row, f, separators=(",", ":"))
+    f.write("\n")
+PY
+mv "$later_row_source" "$later_row_entry"
+age "$later_row_entry" 50000
+assert_eq "$(av "$later_row_entry" --kind ephemeral)" kept:archive-identity "E1 rejects a valid E4 row outside its E2/E3 origin scope"
+
+legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
+mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
+assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:unproven-content "pre-receipt archive falls through to ordinary provenance"
+
+replaced_source="$PT/pr-replaced-123"
+replaced_entry="$ARCHIVE_ROOT/20261010T030000Z/pr-replaced-123"
+mkdir -p "$replaced_source" && printf 'original inode' >"$replaced_source/payload"
+archive_fixture "$replaced_source" "$replaced_entry" "$((NOW - 49 * 3600))"
+mv "$replaced_entry" "$replaced_entry.original" && mkdir -p "$replaced_entry" && printf 'replacement inode' >"$replaced_entry/new"
+age "$replaced_entry" 43200
+assert_eq "$(av "$replaced_entry" --kind ephemeral)" kept:archive-identity "replaced E1 entry does not inherit its old receipt"
+
+short_source="$PT/cli_validation_gemini_archive"
+short_entry="$ARCHIVE_ROOT/20261010T040000Z/cli_validation_gemini_archive"
+mkdir -p "$short_source" && printf 'short-row archive' >"$short_source/payload"
+age "$short_source" 50000
+archive_fixture "$short_source" "$short_entry" "$((NOW - 5 * 3600))"
+age "$short_entry" 50000
+assert_eq "$(av "$short_entry" --kind ephemeral)" kept:recent-activity "E1 archive retains its 24 h minimum over a short E2 row"
+
+reused_source="$PT/unclassified-origin"
+reused_entry="$ARCHIVE_ROOT/20261010T050000Z/unclassified-origin"
+mkdir -p "$reused_source" && printf 'unique original' >"$reused_source/payload"
+age "$reused_source" 50000
+archive_fixture "$reused_source" "$reused_entry" "$((NOW - 5 * 3600))"
+mkdir -p "$reused_source" && git -C "$reused_source" init -q
+age "$reused_entry" 50000
+assert_eq "$(av "$reused_entry" --kind ephemeral)" kept:archive-identity "recreated original path cannot confer E1 eligibility"
+
+receipt_failure_source="$PT/receipt-failure-source"
+receipt_failure_entry="$ARCHIVE_ROOT/20261010T060000Z/receipt-failure-source"
+mkdir -p "$receipt_failure_source" "${receipt_failure_entry%/*}" && printf 'preserve me' >"$receipt_failure_source/payload"
+touch "$TMPROOT/not-a-directory"
+if "$PROBE" archive-receipt "$receipt_failure_source" "$TMPROOT/not-a-directory/receipt.json" "$NOW" >"$TMPROOT/receipt-failure.out" 2>&1; then
+    mv "$receipt_failure_source" "$receipt_failure_entry"
+    bad "receipt creation failure blocks archive move"
+else
+    ok "receipt creation failure is nonzero"
+fi
+[[ -d "$receipt_failure_source" ]] && ok "receipt creation failure preserves original" || bad "receipt creation failure moved original"
+
+missing_identity="$ARCHIVE_ROOT/20261010T040000Z/missing-identity"
+mkdir -p "$missing_identity" && printf 'missing ids' >"$missing_identity/payload"
+printf '{"original_path":"%s/pr-123","archived_at":%s}\n' "$PT" "$((NOW - 49 * 3600))" >"$missing_identity.c14-origin.json"
+age "$missing_identity" 43200
+assert_eq "$(av "$missing_identity" --kind ephemeral)" kept:archive-identity "E1 receipt missing dev and inode is kept"
+
+missing_size="$ARCHIVE_ROOT/20261010T070000Z/missing-size"
+mkdir -p "$missing_size" && printf 'size is binding' >"$missing_size/payload"
+python3 - "$missing_size" "$PT/pr-123" "$((NOW - 49 * 3600))" <<'PY'
+import json, os, sys
+path, original, archived_at = sys.argv[1], sys.argv[2], int(sys.argv[3])
+st = os.lstat(path)
+json.dump({"original_path": original, "dev": st.st_dev, "ino": st.st_ino, "archived_at": archived_at},
+          open(path + ".c14-origin.json", "w"))
+PY
+age "$missing_size" 50000
+assert_eq "$(av "$missing_size" --kind ephemeral)" kept:archive-identity "E1 receipt missing size is kept"
+
+unset DISK_MAGICIAN_STAT_BIN
+
+echo "== fd-bound inventory, deadline and nomination race =="
+inv_case="$TMPROOT/inventory-case"
+mkdir -p "$inv_case/sub" && printf 'inventory bytes' >"$inv_case/sub/file.bin" && ln -s sub/file.bin "$inv_case/link"
+inv_file="$TMPROOT/inventory.json"
+assert_eq "$(python3 "$PROBE" inventory "$inv_case" "$inv_file")" ok "inventory completes"
+python3 - "$inv_file" <<'PY' && ok "inventory records relative paths, identity, hash and symlink target" || bad "inventory fields"
+import hashlib, json, sys
+entries = {e["path"]: e for e in json.load(open(sys.argv[1]))}
+f = entries["sub/file.bin"]
+assert f["type"] == "file" and f["dev"] and f["ino"] and f["size"] == 15
+assert f["sha256"] == hashlib.sha256(b"inventory bytes").hexdigest()
+assert entries["link"]["type"] == "symlink" and entries["link"]["target"] == "sub/file.bin"
+assert entries["."]["type"] == "dir"
+PY
+verdict_inv="$TMPROOT/verdict-inventory.json"
+mkdir -p "$PT/pr-inventory" && printf 'rebuildable' >"$PT/pr-inventory/cache.bin" && age "$PT/pr-inventory" 43200
+assert_eq "$(av "$PT/pr-inventory" --kind ephemeral --inventory-out "$verdict_inv")" remove "verified verdict writes its inventory"
+python3 - "$verdict_inv" <<'PY' && ok "verdict inventory includes the verified candidate" || bad "verdict inventory missing candidate"
+import json, sys
+entries = {e["path"]: e for e in json.load(open(sys.argv[1]))}
+assert entries["cache.bin"]["type"] == "file" and entries["cache.bin"]["size"] == 11
+PY
+mkdir -p "$PT/pr-inventory-kept" && printf 'unknown' >"$PT/pr-inventory-kept/data" && age "$PT/pr-inventory-kept" 43200
+kept_inv="$TMPROOT/kept-inventory.json"
+assert_eq "$(av "$PT/pr-inventory-kept" --kind bogus --inventory-out "$kept_inv")" kept:unproven-content "unproven path stays kept"
+[[ ! -e "$kept_inv" ]] && ok "inventory-out is written only on remove" || bad "inventory-out escaped a kept verdict"
+
+deadline_root="$TMPROOT/deadline-root"
+deadline_repo="$deadline_root/nested"
+deadline_remote="$TMPROOT/remotes/deadline.git"
+deadline_remote2="$TMPROOT/remotes/deadline-second.git"
+mkdir -p "$deadline_root"
+git init -q --bare -b main "$deadline_remote" && mkrepo "$TMPROOT/seed-deadline" && git -C "$TMPROOT/seed-deadline" push -q "$deadline_remote" main
+git clone -q "$deadline_remote" "$deadline_repo" && git -C "$deadline_repo" remote add second "$deadline_remote2"
+git init -q --bare -b main "$deadline_remote2"
+baseline "$deadline_repo"
+deadline_repo_lease="$(lease_path_for "$deadline_repo")"
+python3 - "$deadline_repo_lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(p,"w"))
+PY
+truncate -s 2147483648 "$deadline_root/manifested.bin"
+deadline_lease="$(lease_path_for "$deadline_root")" && mkdir -p "${deadline_lease%/*}"
+printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","published_url":"gs://wa-test-evidence/agent-evidence/deadline","verified_at":"2026-10-01T00:00:00Z","upload_manifest":[{"path":"manifested.bin","size":2147483648,"sha256":"placeholder","object":"gs://wa-test-evidence/agent-evidence/deadline/manifested.bin","generation":"1","md5":"placeholder","crc32c":"placeholder"}]}' >"$deadline_lease"
+age "$deadline_root" 43200
+mkdir -p "$TMPROOT/slow-git"
+real_git="$(command -v git)"
+cat >"$TMPROOT/slow-git/git" <<STUB
+#!/bin/bash
+[[ "\$1" == ls-remote ]] && { sleep 25; exec "$real_git" "\$@"; }
+exec "$real_git" "\$@"
+STUB
+cat >"$TMPROOT/slow-git/lsof" <<'STUB'
+#!/bin/sh
+if [ "$1" = -n ]; then printf 'p1\nfcwd\nn/\n'; fi
+exit 0
+STUB
+chmod +x "$TMPROOT/slow-git/git" "$TMPROOT/slow-git/lsof"
+deadline_at="$(python3 -c 'import time; print(time.monotonic()+30)')"
+deadline_inventory="$TMPROOT/deferred-inventory.json"
+verdict="$(PATH="$TMPROOT/slow-git:$PATH" DISK_MAGICIAN_LSOF_BIN="$TMPROOT/slow-git/lsof" av "$deadline_root" --deadline-at "$deadline_at" --inventory-out "$deadline_inventory")"
+[[ "$verdict" == deferred:* ]] && ok "deadline defers the nested-repo / 2 GiB provenance case ($verdict)" || bad "deadline verdict: $verdict"
+[[ -f "$deadline_root/manifested.bin" && -d "$deadline_repo" && ! -e "$deadline_inventory" ]] && ok "deferred verdict leaves candidate and output inventory untouched" || bad "deferred path changed candidate or emitted output"
+
+mkdir -p "$PT/pr-race" && printf 'old bytes' >"$PT/pr-race/old.txt" && age "$PT/pr-race" 43200
+race_file="$PT/pr-race/untracked-after-nomination.txt"
+assert_eq "$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$PT" DISK_MAGICIAN_TEST_AFTER_NOMINATE="$race_file" eph "$PT/pr-race")" kept:recent-activity "post-nomination file is inventoried and kept"
+[[ -f "$race_file" ]] && ok "nomination race fixture writes only inside the sandbox" || bad "race hook missed its fixture"
+
+echo "== verdict stays blocked =="
+v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
 st="$(artifact_removal_verdict --self-test)"
 [[ "$st" != ok ]] && ok "self-test is not ok ($st)" || bad "self-test reported ok"
 assert_eq "$st" incomplete "self-test reports incomplete"
