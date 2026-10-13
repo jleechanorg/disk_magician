@@ -34,6 +34,77 @@
 #   DRY_RUN                       "true" or "false"
 # Sourced directly (not duck-typed): safety_gate (safety_lib.sh).
 # Repository containers are preserved for the canonical worktree cleanup.
+# Actual artifact removal is delegated to C14 quarantine; callers may set
+# ACT_DEADLINE_AT after parsing the shared actuator deadline flags.
+_SCRATCH_BUDGET_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_SCRATCH_BUDGET_LIB/quarantine.sh"
+scratch_budget_quarantine_remove() {
+  local cursor_step="" cursor_index cursor_items result
+  if [[ -n "${ACT_CURSOR:-}" && -n "${ACT_CURSOR_SOURCE:-}" ]]; then
+    cursor_step="$(python3 - "${ACT_CURSOR}" "${ACT_CURSOR_SOURCE}" "$1" <<'PY'
+import json, os, sys
+path, source, item=sys.argv[1:]
+try:
+    with open(path,encoding="utf-8") as f: state=json.load(f)
+except FileNotFoundError: state={"schema":1,"source":source,"items":[],"next_index":0}
+except (OSError,ValueError): print("invalid"); raise SystemExit
+items=state.get("items") if isinstance(state,dict) else None
+i=state.get("next_index") if isinstance(state,dict) else None
+if (state.get("schema") != 1 or state.get("source") != source or not isinstance(items,list) or
+    any(not isinstance(x,str) for x in items) or not isinstance(i,int) or isinstance(i,bool) or not 0<=i<=len(items)):
+    print("invalid"); raise SystemExit
+while i<len(items) and not os.path.lexists(items[i]): i+=1
+if item in items[:i]: print("complete"); raise SystemExit
+if i<len(items) and items[i]!=item: print("mismatch"); raise SystemExit
+if i==len(items):
+    items.append(item)
+print("ready\t"+str(i)+"\t"+json.dumps(items,separators=(",",":")))
+PY
+)" || { echo 'kept:cursor-invalid'; return 0; }
+    case "$cursor_step" in
+      complete) echo 'kept:cursor-complete'; return 0 ;;
+      mismatch) echo 'kept:cursor-mismatch'; return 0 ;;
+      invalid) echo 'kept:cursor-invalid'; return 0 ;;
+      ready$'\t'*)
+        cursor_index="${cursor_step#*$'\t'}"; cursor_index="${cursor_index%%$'\t'*}"
+        cursor_items="${cursor_step#*$'\t'}"; cursor_items="${cursor_items#*$'\t'}" ;;
+      *) echo 'kept:cursor-invalid'; return 0 ;;
+        esac
+  fi
+  if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready$'\t'* ]]; then
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$cursor_index" || { echo 'kept:cursor-save-failed'; return 0; }
+  fi
+  if [[ -n "${ACT_DEADLINE_AT:-}" ]]; then
+    local fit_rc=0 unit_budget=20
+    if [[ -d "$1/.git" || -f "$1/.git" ]]; then unit_budget=60; fi
+    act_unit_fits "$unit_budget" || fit_rc=$?
+    case "$fit_rc" in
+      1) [[ "${CANDIDATE_INTERRUPTED_COUNT+x}" == x ]] && CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)); echo 'deferred:deadline-before-unit'; return 0 ;;
+      2) [[ "${CANDIDATE_INTERRUPTED_COUNT+x}" == x ]] && CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)); echo 'kept:invalid-deadline'; return 0 ;;
+    esac
+  fi
+  local args=(--kind ephemeral)
+  [[ -n "${ACT_DEADLINE_AT:-}" ]] && args+=(--deadline-at "$ACT_DEADLINE_AT")
+  result="$(quarantine_remove "$1" "${args[@]}")" || result=kept:check-failed
+  if [[ "${CANDIDATE_REMOVED_COUNT+x}" == x ]]; then
+    case "$result" in
+      removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
+      deferred:deadline-before-unit) CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)) ;;
+      deferred:*) CANDIDATE_DEFERRED_COUNT=$((CANDIDATE_DEFERRED_COUNT + 1)) ;;
+    esac
+  fi
+  case "$result" in
+    removed:*|deferred:*) cursor_visit_complete=true ;;
+    kept:protected|kept:live-owner|kept:cwd-unknown|kept:open-file|kept:recent-activity|kept:secret-like|kept:unproven-content|kept:archive-identity|kept:dirty|kept:not-pushed|kept:unreachable-object|kept:ignored-data|kept:admin-unknown|kept:locked|kept:remote-unverified)
+      cursor_visit_complete=true ;;
+    *) cursor_visit_complete=false ;;
+  esac
+  if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready$'\t'* && "$cursor_visit_complete" == true ]]; then
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$((cursor_index + 1))" || { echo 'kept:cursor-save-failed'; return 0; }
+  fi
+  echo "$result"
+  return 0
+}
 #
 # Caller must declare (and reset per invocation) these globals; this file
 # accumulates into them rather than returning a value, matching the
@@ -199,11 +270,11 @@ scratch_budget_evict_root() {
   local over_kb=$(( total_kb - budget_kb ))
   log "scratch_budget: $root total ${total_kb} KB exceeds budget ${budget_kb} KB by ${over_kb} KB — evicting oldest-first (floor ${floor_minutes}m)."
 
-  local now floor_epoch freed_kb=0
+    local now floor_epoch freed_kb=0
   now="$(date +%s)"
   floor_epoch=$(( now - floor_minutes * 60 ))
 
-  local mtime_i kb_i item_i was_dir
+    local mtime_i kb_i item_i was_dir result
   while IFS=$'\t' read -r mtime_i kb_i item_i; do
     (( freed_kb >= over_kb )) && break
     [[ -e "$item_i" ]] || continue  # already gone (e.g. removed by an earlier pass)
@@ -232,19 +303,18 @@ scratch_budget_evict_root() {
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would evict (budget): $item_i  (${kb_i} KB)"
     else
-      log "Evicting (budget): $item_i  (${kb_i} KB)"
-      if [[ "$was_dir" == true ]]; then
-        chmod -R u+w "$item_i" 2>/dev/null || true
-        if ! rm -rf "$item_i" 2>/dev/null; then
-          log "scratch_budget: rm failed for $item_i"
-          continue
-        fi
-      else
-        chmod u+w "$item_i" 2>/dev/null || true
-        if ! rm -f "$item_i" 2>/dev/null; then
-          log "scratch_budget: rm failed for $item_i"
-          continue
-        fi
+      log "Requesting C14 eviction: $item_i  (${kb_i} KB)"
+      result="$(scratch_budget_quarantine_remove "$item_i")"
+      if [[ "${CANDIDATE_REMOVED_COUNT+x}" == x ]]; then
+        case "$result" in
+          removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
+          deferred:deadline-before-unit) CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)) ;;
+          deferred:*) CANDIDATE_DEFERRED_COUNT=$((CANDIDATE_DEFERRED_COUNT + 1)) ;;
+        esac
+      fi
+      if [[ "$result" != removed:* ]]; then
+        log "scratch_budget: preserved by C14 ($result): $item_i"
+        continue
       fi
       deletion_log "$(basename "${0:-scratch_budget}")" "evict_budget" "$kb_i" "$item_i"
     fi

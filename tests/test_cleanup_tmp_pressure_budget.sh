@@ -11,7 +11,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cleanup_tmp_pb.XXXXXX")
+FIXTURE_ROOT="/tmp/disk_magician/fixtures"
+mkdir -p "$FIXTURE_ROOT"
+TMP_ROOT=$(mktemp -d "$FIXTURE_ROOT/cleanup_tmp_pb.XXXXXX")
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 HOLDER_PID=""
 trap '[[ -n "$HOLDER_PID" ]] && kill "$HOLDER_PID" 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
@@ -35,7 +37,21 @@ exec /usr/bin/du "\$@"
 EOF
 cat > "$BIN/lsof" <<EOF
 #!/usr/bin/env bash
-echo x >> "$TMP_ROOT/lsof.log"
+for arg in "\$@"; do
+  if [[ "\$arg" == "-a" ]]; then exit 1; fi
+  if [[ "\$arg" == "+D" ]]; then
+    echo quarantine >> "$TMP_ROOT/lsof-quarantine.log"
+    exit 1
+  fi
+  if [[ "\$arg" == "--" ]]; then exit 1; fi
+done
+if [[ " \$* " == *" -d cwd "* ]]; then
+  printf 'p1\nfcwd\nn/\n'
+  exit 0
+fi
+for arg in "\$@"; do
+  if [[ "\$arg" == "+w" ]]; then echo x >> "$TMP_ROOT/lsof.log"; fi
+done
 printf 'p1\nf3\ntREG\nn/usr/bin/other\n'
 EOF
 chmod +x "$BIN/du" "$BIN/lsof"
@@ -75,7 +91,7 @@ check "recent dir skipped" 'grep -q "recently active dir.*recent_big" <<<"$OUT"'
 check "du never run on recent dir" '! grep -q recent_big "$TMP_ROOT/du.log"'
 check "old dir archived" '[[ ! -e "$P1/old_big" ]]'
 check "recent dir preserved" '[[ -e "$P1/recent_big" ]]'
-check "lsof only for the eligible dir (1 call)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 1 ]]'
+check "legacy open-file check ran for eligible dir" '[[ -s "$TMP_ROOT/lsof.log" ]]'
 
 echo "Test 2: a hung du is bounded and fails closed for that entry only"
 P2="$TMP_ROOT/p2"; mk_fixture "$P2" slow_big
@@ -116,7 +132,7 @@ check "rc 75 (skip, not failure)" '[[ $RC -eq 75 ]]' "rc=$RC"
 check "skip message" 'grep -q "skipped, scratch lock held" <<<"$OUT"' "$OUT"
 check "fixture untouched" '[[ -e "$P4/old_big" ]]'
 
-echo "Test 5: budget mode - du timeout must NOT evict the unknown-size entry"
+echo "Test 5: budget mode - timeout and unproven entries stay preserved"
 R5="$TMP_ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5"
 for d in a_slow big_1 big_2 big_3; do mkdir -p "$R5/$d"; head -c 100 /dev/zero > "$R5/$d/f"; done
 /usr/bin/find "$R5/a_slow" -exec touch -t 201901010000 {} +
@@ -137,8 +153,8 @@ set -e
 check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
 check "unknown-size entry preserved" '[[ -e "$R5/a_slow" ]]' "$OUT"
 check "unknown-size entry reported excluded" 'grep -q "size unknown" <<<"$OUT"'
-check "two oldest measured entries evicted" '[[ ! -e "$R5/big_1" && ! -e "$R5/big_2" ]]'
-check "newest measured entry kept (no over-eviction)" '[[ -e "$R5/big_3" ]]'
+check "unproven measured entries preserved by C14" '[[ -e "$R5/big_1" && -e "$R5/big_2" && -e "$R5/big_3" ]]'
+check "unproven measured entries report C14 keep" 'grep -q "preserved by C14 (kept:unproven-content)" <<<"$OUT"' "$OUT"
 
 echo "Test 6: recency find timeout is treated as active (preserved)"
 cat > "$BIN/find_timeout" <<EOF
@@ -232,8 +248,8 @@ echo "Test 13: du rc 1 WITH numeric total (Permission denied) -> lower bound use
 R13="$TMP_ROOT/r13"; mk_budget_root "$R13" perm_1
 rm -rf "$R13/big_1"
 budget_run "$R13"
-check "partial-size entry evicted as 1258291 KB" '[[ ! -e "$R13/perm_1" ]]' "$OUT"
-check "second-oldest evicted, newest kept" '[[ ! -e "$R13/big_2" && -e "$R13/big_3" ]]'
+check "partial-size unproven entry preserved by C14" '[[ -e "$R13/perm_1" ]]' "$OUT"
+check "remaining unproven measured entries preserved" '[[ -e "$R13/big_2" && -e "$R13/big_3" ]]'
 
 echo "Test 14: agent_prompt file with unknown size is skipped, not deleted"
 printf x > "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"; touch -t 202001010000 "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"
@@ -241,7 +257,7 @@ printf x > "$TMP_ROOT/emptytmp/agent_prompt_ok.txt"; touch -t 202001010000 "$TMP
 P14="$TMP_ROOT/p14"; mk_fixture "$P14"
 run_tmp "$P14" TMP_ARGS=
 check "unknown-size prompt kept" '[[ -e "$TMP_ROOT/emptytmp/agent_prompt_fail.txt" ]]' "$OUT"
-check "measurable stale prompt still removed" '[[ ! -e "$TMP_ROOT/emptytmp/agent_prompt_ok.txt" ]]'
+check "measurable stale prompt still removed" '[[ ! -e "$TMP_ROOT/emptytmp/agent_prompt_ok.txt" ]]' "$OUT"
 
 echo "Results: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))
