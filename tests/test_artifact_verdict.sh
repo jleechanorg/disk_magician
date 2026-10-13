@@ -17,8 +17,9 @@ assert_eq() {
 
 TMPROOT="$(mktemp -d /tmp/dm-c14-test.XXXXXX)" || exit 1
 [[ -d "$TMPROOT" && "$TMPROOT" == /tmp/dm-c14-test.* ]] || exit 1
+TMPROOT="$(cd "$TMPROOT" && pwd -P)" || exit 1
 cleanup() {
-    [[ -d "$TMPROOT" && "$TMPROOT" == /tmp/dm-c14-test.* ]] || return
+    [[ -d "$TMPROOT" && "$TMPROOT" == /private/tmp/dm-c14-test.* ]] || return
     chmod -R u+rwx "$TMPROOT" 2>/dev/null
     rm -rf "$TMPROOT"
 }
