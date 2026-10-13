@@ -5,18 +5,71 @@ IDS = {'worktree_reap_remove': 'D1', 'worktree_cleanup': 'D1b', 'admission_enfor
        'ci_autopause': 'D4', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
 PATH = os.environ.get('DISK_MAGICIAN_POLICY_FILE') or os.path.expanduser('~/.config/disk-magician/standing_decisions.json')
 MARK, phrase = 'policy:worktree_reap_remove', 'APPROVE {}'.format  # fixed per id; the caller never chooses it
-USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a typed user message is exactly "APPROVE <id>" (trimmed, case-sensitive); ids: ' + ' '.join(IDS)
+USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a typed user message is exactly "APPROVE <id>" (trimmed, case-sensitive); ids: ' + ' '.join(IDS)
 git = lambda repo, *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
 stamp = lambda m: datetime.datetime.fromisoformat(m.get('timestamp') or '1970-01-01T00:00:00+00:00').timestamp()  # after a revoke only newer lines count
-def find_approval(path, want, after):  # (realpath, line, sha256) of a genuine typed user message equal to want, else None
-    real, home = os.path.realpath(path), pwd.getpwuid(os.getuid()).pw_dir  # real home: $HOME cannot move the root
-    if not (os.path.isfile(real) and real.endswith('.jsonl') and any(real.startswith(os.path.realpath(r) + os.sep)
-            for r in glob.glob(os.path.join(home, '.claude*', 'projects')))): return None
-    for n, line in enumerate(open(real, 'rb'), 1):  # wrapped reminders/notifications can never equal the phrase
+def _trusted_root(home, uid):  # fixed OS-home trust: .codex AND .codex/sessions must be real uid-owned dirs
+    for p in (os.path.join(home, '.codex'), os.path.join(home, '.codex', 'sessions')):
+        try: st = os.lstat(p)
+        except OSError: return False
+        if os.path.islink(p) or not os.path.isdir(p) or st.st_uid != uid: return False  # symlink/wrong owner never counts
+    return True
+FLAGS = ('isMeta', 'isSidechain', 'isCompactSummary', 'inherited_user_message')
+def _flagged(*objs):  # provenance flags on ANY envelope layer refuse the entry/header
+    return any(isinstance(o, dict) and any(o.get(k) for k in FLAGS) for o in objs)
+def _codex_header(m):  # session_meta must be the interactive codex-tui CLI; flags on any layer never count
+    p = m.get('payload')
+    if not isinstance(p, dict): return False
+    return (m.get('type') == 'session_meta'
+            and not _flagged(m, p, m.get('metadata'), p.get('internal_chat_message_metadata_passthrough'))
+            and p.get('source') == 'cli' and p.get('originator') == 'codex-tui')
+def _codex_text(m):  # exact observed genuine typed user envelope, else None; unknown future forms refuse
+    if m.get('type') != 'response_item': return None
+    p = m.get('payload')
+    if not isinstance(p, dict): return None
+    pt, md = p.get('internal_chat_message_metadata_passthrough'), m.get('metadata')
+    if _flagged(m, p, pt, md): return None  # metadata/sidechain/summary/inherited on any layer
+    if p.get('type') != 'message' or p.get('role') != 'user': return None
+    c = p.get('content')
+    if not (isinstance(c, list) and c and all(isinstance(b, dict) and b.get('type') == 'input_text'
+            and isinstance(b.get('text'), str) for b in c)): return None  # mixed text/image or tool blocks refuse
+    if not (isinstance(pt, dict) and pt.get('content_item_kinds') == ['user.text']): return None
+    if not isinstance(md, dict): return None
+    if md.get('client_authored') is not False or not isinstance(md.get('mcp_attribution'), dict) \
+            or md['mcp_attribution'].get('status') != 'none': return None
+    rs = md.get('retained_source')
+    if not (isinstance(rs, dict) and rs.get('complete') is True
+            and isinstance(rs.get('id'), dict) and rs['id'].get('role') == 'user'): return None
+    return ''.join(b['text'] for b in c)
+def _codex_approval(real, want, after, uid):  # (realpath, line, sha256) in the trusted OS-home codex root
+    if os.stat(real).st_uid != uid: return None  # the transcript file itself must be uid-owned
+    with open(real, 'rb') as f:
+        head = f.readline()
+        try: meta = json.loads(head)
+        except ValueError: return None  # missing/unparseable source header: fail closed
+        if not _codex_header(meta): return None
+        for n, line in enumerate(f, 2):
+            try: m = json.loads(line)
+            except ValueError: continue
+            text = _codex_text(m)
+            if text is not None and text.strip() == want and stamp(m) > (after or -1):
+                return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
+def _claude_approval(real, want, after):  # original fixed-phrase Claude projects scan, semantics unchanged
+    for n, line in enumerate(open(real, 'rb'), 1):
         m = json.loads(line); c = m.get('message', {}).get('content')
         if m.get('type') != 'user' or any(m.get(k) for k in ('isMeta', 'isSidechain', 'isCompactSummary')): continue
         if isinstance(c, list) and all(b.get('type') == 'text' for b in c): c = ''.join(b.get('text', '') for b in c)
         if isinstance(c, str) and c.strip() == want and stamp(m) > (after or -1): return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
+def find_approval(path, want, after):  # (realpath, line, sha256) of a genuine typed user message equal to want, else None
+    home, uid = pwd.getpwuid(os.getuid()).pw_dir, os.getuid()  # real OS home: $HOME/CODEX_HOME cannot move the root
+    real = os.path.realpath(path)
+    if not (os.path.isfile(real) and real.endswith('.jsonl')): return None
+    croot = os.path.join(home, '.codex', 'sessions')  # observed adapter: fixed root, never a caller-chosen path
+    if real.startswith(os.path.realpath(croot) + os.sep):
+        return _codex_approval(real, want, after, uid) if _trusted_root(home, uid) and not os.path.islink(path) else None
+    if any(real.startswith(os.path.realpath(r) + os.sep) for r in glob.glob(os.path.join(home, '.claude*', 'projects'))):
+        return _claude_approval(real, want, after)  # Claude semantics unchanged, incl. in-root symlink acceptance
+    return None
 
 def amendment(sha, repo):  # bounded fetch on every call; a stale local origin/main is never trusted
     p = subprocess.Popen(['git', '-C', repo, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
@@ -34,7 +87,7 @@ def main(cmd='', i='', *a):
     live, repo = i in d and d[i]['revoked_at'] is None, os.environ.get('DISK_MAGICIAN_POLICY_REPO') or os.path.dirname(sys.path[0])
     if cmd == 'approve' and a[:1] == ('--from-transcript',) and len(a) == 2 and i in IDS:
         hit = find_approval(a[1], phrase(i), d.get(i, {}).get('revoked_at'))
-        if not hit: return print(f'refused: no typed user message equal to {phrase(i)!r} in a ~/.claude*/projects transcript', file=sys.stderr) or 2
+        if not hit: return print(f'refused: no typed user message equal to {phrase(i)!r} in a supported Claude projects or Codex sessions transcript', file=sys.stderr) or 2
         d[i] = dict(zip(('transcript', 'line', 'line_sha256'), hit), id=i, phrase=phrase(i), approved_at=int(time.time()), revoked_at=None)
     elif cmd == 'set-amendment' and live and len(a) == 1:  # full commit sha that edits CLAUDE.md and carries MARK
         if not (re.fullmatch('[0-9a-f]{40}', a[0]) and 'CLAUDE.md' in git(repo, 'diff-tree', '--root', '--name-only', '-r', a[0]).stdout.split()

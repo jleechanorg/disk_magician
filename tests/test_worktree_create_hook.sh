@@ -189,6 +189,93 @@ L="$(lease_path_for "$WTROOT/leased")"
 creator="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("creator"))' "$L" 2>/dev/null)"
 assert_eq "$creator" "worktree-create-hook" "lease creator"
 
+# ---- WorktreeCreate -> session-bound lease -> SessionEnd release -------------
+# Controlled owner resolution: fake ps reports the hook process itself as a
+# claude runtime with a fixed start time, so owner pid/start_epoch are exact.
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/leasestate"
+export DISK_MAGICIAN_FAKE_PS_LOG="$TMPROOT/ps.queried"
+mkdir -p "$TMPROOT/psbin"
+cat > "$TMPROOT/psbin/ps" <<'MOCK'
+#!/usr/bin/env bash
+pid= spec=
+while [[ $# -gt 0 ]]; do case "$1" in -p) pid="$2"; shift 2;; -o) spec="$2"; shift 2;; *) shift;; esac; done
+case "$spec" in
+  ppid=,comm=) printf '%s\n' "$pid" >> "$DISK_MAGICIAN_FAKE_PS_LOG"; echo "1 claude" ;;
+  lstart=) echo "Thu Oct  9 12:00:00 2026" ;;
+  args=) echo "/usr/bin/claude" ;;
+  comm=) echo "claude" ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$TMPROOT/psbin/ps"
+export DISK_MAGICIAN_PS_BIN="$TMPROOT/psbin/ps"
+PS_LSTART='Thu Oct  9 12:00:00 2026'
+EXP_EP="$(_lease_lstart_to_epoch "$PS_LSTART")"
+owner_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner"].get(sys.argv[2], ""))' "$1" "$2"; }
+lease_released() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("released_at") or "")' "$1"; }
+
+# Real temp git repo + real lease writer: event session reaches owner.session
+# with the exact runtime pid/start_epoch.
+echo "== case L2: event session binds owner.session with exact runtime pid/start_epoch =="
+: > "$DISK_MAGICIAN_FAKE_PS_LOG"
+run_hook "{\"session_id\":\"S-event\",\"name\":\"sess-bound\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "session create exit code"
+LP="$(lease_path_for "$WTROOT/sess-bound")"
+assert_eq "$(owner_field "$LP" session)" "S-event" "owner.session from event"
+assert_eq "$(owner_field "$LP" start_epoch)" "$EXP_EP" "exact runtime start_epoch"
+assert_eq "$(owner_field "$LP" pid)" "$(tail -n 1 "$DISK_MAGICIAN_FAKE_PS_LOG")" "exact runtime pid probed"
+assert_eq "$(owner_field "$LP" comm)" "claude" "owner comm unchanged"
+
+# SubagentStop must remain a no-op: the parent lease stays unreleased.
+echo "== case L2b: SubagentStop event leaves the parent lease unreleased =="
+printf '%s' "{\"session_id\":\"S-event\",\"hook_event_name\":\"SubagentStop\",\"reason\":\"other\",\"agent_id\":\"a1\"}" |
+    DISKM_BIN="$REPO_ROOT/disk_magician.sh" bash "$REPO_ROOT/hooks/session-end-lease-release.sh"
+[[ -z "$(lease_released "$LP")" ]] && ok "parent lease unreleased after SubagentStop" || bad "SubagentStop released the parent lease"
+
+# Missing / invalid session: no identity invented, no ambient override, no leak.
+echo "== case L3: missing/invalid session binds nothing; ambient never wins =="
+DISK_MAGICIAN_OWNER_SESSION=stale-ambient run_hook "{\"name\":\"no-sess\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "missing session create exit code"
+[[ -z "$(owner_field "$(lease_path_for "$WTROOT/no-sess")" session)" ]] && ok "ambient session not bound when event omits it" || bad "ambient session leaked into lease"
+DISK_MAGICIAN_OWNER_SESSION=stale-ambient run_hook "{\"session_id\":\"S-event2\",\"name\":\"sess-two\",\"cwd\":\"$REPO\"}"
+assert_eq "$(owner_field "$(lease_path_for "$WTROOT/sess-two")" session)" "S-event2" "supplied event overrides ambient session"
+run_hook "{\"session_id\":12345,\"name\":\"bad-num\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "non-string session create exit code"
+[[ -z "$(owner_field "$(lease_path_for "$WTROOT/bad-num")" session)" ]] && ok "non-string session dropped" || bad "non-string session bound"
+run_hook "{\"session_id\":\"a\\nb\",\"name\":\"bad-nl\",\"cwd\":\"$REPO\"}"
+assert_eq "$RC" "0" "newline session create exit code"
+[[ -z "$(owner_field "$(lease_path_for "$WTROOT/bad-nl")" session)" ]] && ok "newline session dropped, not field-split" || bad "newline session bound"
+
+# Sourcing the hook must not leak the event session into the caller's env.
+# wth_main is invoked in the SAME shell (here-string, no pipeline subshell) so a
+# plain exported assignment inside it would be observable here; only real
+# same-shell scoping keeps the caller's value.
+echo "== case L3b: sourced wth_main does not leak session to the caller =="
+( export DISK_MAGICIAN_OWNER_SESSION=parent-sess
+  source "$SCRIPT"
+  wth_main <<< "{\"session_id\":\"S-sourced\",\"name\":\"sourced-one\",\"cwd\":\"$REPO\"}" >/dev/null 2>&1
+  printf 'after=%s\n' "${DISK_MAGICIAN_OWNER_SESSION:-UNSET}" ) > "$TMPROOT/leak.out"
+assert_eq "$(cat "$TMPROOT/leak.out")" "after=parent-sess" "sourced wth_main leaves caller session untouched"
+assert_eq "$(owner_field "$(lease_path_for "$WTROOT/sourced-one")" session)" "S-sourced" "sourced call still bound the event session"
+
+# Release the ending runtime: only the matching lease is released; a
+# same-session other live pid and another session are preserved.
+echo "== case L4: release for the ending runtime frees only the matching lease =="
+peer() { mkdir -p "$WTROOT/$1"; _lease_emit_json "$(lease_path_for "$WTROOT/$1")" "$WTROOT/$1" repo br test False "$2" "$3" claude - - 24
+    python3 - "$(lease_path_for "$WTROOT/$1")" "$4" <<'PY'
+import json,sys
+p,s=sys.argv[1:]
+d=json.load(open(p)); d["owner"]["session"]=s; json.dump(d,open(p,"w"))
+PY
+}
+peer other-live 700 "$EXP_EP" S-event
+peer other-sess 701 "$EXP_EP" S-other
+lease_release_owner_session S-event "$(owner_field "$LP" pid)" "$EXP_EP" >/dev/null
+[[ -n "$(lease_released "$LP")" ]] && ok "matching session lease released" || bad "matching session lease not released"
+[[ -z "$(lease_released "$(lease_path_for "$WTROOT/other-live")")" ]] && ok "same-session other live pid preserved" || bad "same-session other pid wrongly released"
+[[ -z "$(lease_released "$(lease_path_for "$WTROOT/other-sess")")" ]] && ok "another session preserved" || bad "another session wrongly released"
+[[ -d "$WTROOT/sess-bound" && -d "$WTROOT/other-live" ]] && ok "worktrees survive release" || bad "release deleted a worktree"
+
 
 echo "== case 6: never fetches =="
 [[ -s "$TMPROOT/git_calls.log" ]] && ok "fake git was used" || bad "fake git never invoked"
