@@ -25,8 +25,14 @@ import quarantine_rename as qr
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
-def run(*args):
-    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+def run(*args, deadline=None):
+    timeout = qr.remaining_seconds(deadline)
+    if timeout is not None and timeout <= 0: raise qr.DeadlineExceeded()
+    try:
+        return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                              timeout=None if timeout is None else timeout)
+    except subprocess.TimeoutExpired:
+        raise qr.DeadlineExceeded()
 
 
 def digest(path):
@@ -66,11 +72,13 @@ def restore_gitdir(admin, expected):
         os.close(dfd)
 
 
-def inventory(path):
+def inventory(path, deadline=None):
     fd, out = tempfile.mkstemp(prefix=".wrh-inventory-")
     os.close(fd)
     try:
-        result = run(sys.executable, str(HERE / "c14_probe.py"), "inventory", path, out)
+        args = [sys.executable, str(HERE / "c14_probe.py"), "inventory", path, out]
+        if deadline is not None: args.append(str(deadline))
+        result = run(*args, deadline=deadline)
         if result.stdout.strip() != b"ok":
             raise OSError("inventory failed")
         with open(out, encoding="utf-8") as f:
@@ -85,8 +93,8 @@ def inventory(path):
             pass
 
 
-def admin_path(wt):
-    return run("git", "-C", wt, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
+def admin_path(wt, deadline=None):
+    return run("git", "-C", wt, "rev-parse", "--absolute-git-dir", deadline=deadline).stdout.decode().strip()
 
 
 def canonical(entries, exclude=()):
@@ -99,10 +107,26 @@ def canonical(entries, exclude=()):
     return sorted(json.dumps(e, sort_keys=True, separators=(",", ":")) for e in normalized)
 
 
-def check_admin(record, lock=True, repaired=True):
+def admin_entries(rows):
+    """Normalize C14 admin receipt rows into file inventory entries."""
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise ValueError("malformed admin receipt row")
+        if any(type(row.get(k)) is not int for k in ("dev", "ino", "size")) or not isinstance(row.get("sha256"), str):
+            raise ValueError("incomplete admin receipt row")
+        normalized.append({"path": row["path"], "type": "file", "dev": row["dev"],
+                           "ino": row["ino"], "size": row["size"], "sha256": row["sha256"]})
+    return normalized
+
+
+def admin_file_inventory(path, deadline=None):
+    return [e for e in inventory(path, deadline) if e.get("type") == "file"]
+
+
+def check_admin(record, lock=True, repaired=True, deadline=None):
     base = record["worktree_admin_inventory"]
-    path = record["worktree_admin_path"]
-    current = inventory(path)
+    current = admin_file_inventory(record["worktree_admin_path"], deadline)
     allowed = {"locked", "gitdir"}
     if canonical(base, allowed) != canonical(current, allowed):
         return False
@@ -128,21 +152,37 @@ def safe_rename(srcfd, src, dstfd, dst):
     qr.renamex(srcfd, src, dstfd, dst)
 
 
-def phase1(main, worktree, inventory_file):
+def phase1(main, worktree, inventory_file, deadline=None):
+    if qr.deadline_passed(deadline): return "deferred:deadline"
     main, worktree = os.path.realpath(main), os.path.abspath(worktree)
     parent, base = os.path.dirname(worktree), os.path.basename(worktree)
     try:
         with open(inventory_file, encoding="utf-8") as f:
-            checkout_inventory = json.load(f)
+            receipt = json.load(f)
+        if not isinstance(receipt, list): return "kept:admin-proof-missing"
+        admin_rows = [e for e in receipt if isinstance(e, dict) and e.get("type") == "admin"]
+        checkout_inventory = [e for e in receipt if not (isinstance(e, dict) and e.get("type") == "admin")]
         root = next(e for e in checkout_inventory if e.get("path") == ".")
         if root.get("type") != "dir" or any(type(root.get(k)) is not int for k in ("dev", "ino")):
             return "kept:identity-mismatch"
-        admin = admin_path(worktree)
-        admin_inventory = inventory(admin)
-        admin_root = next(e for e in admin_inventory if e.get("path") == ".")
-        old_gitdir = next(e for e in admin_inventory if e.get("path") == "gitdir")
+        if not admin_rows: return "kept:admin-proof-missing"
+        # Bind to the selected worktree's own C14 admin receipt rows; never refresh proof.
+        admin = os.path.realpath(admin_path(worktree, deadline))
+        admins = {os.path.realpath(r["admin"]) for r in admin_rows
+                  if isinstance(r.get("admin"), str) and r.get("admin")}
+        if len(admins) != 1 or admins != {admin}: return "kept:admin-proof-mismatch"
+        try:
+            admin_inventory = admin_entries(admin_rows)
+        except ValueError:
+            return "kept:admin-proof-missing"
+        old_gitdir = next((e for e in admin_inventory if e.get("path") == "gitdir"), None)
+        if old_gitdir is None: return "kept:admin-proof-missing"
         if any(e.get("path") == "locked" for e in admin_inventory):
             return "kept:already-locked"
+        # The live admin dir must still equal the C14 receipt before any own write.
+        if canonical(admin_inventory) != canonical(admin_file_inventory(admin, deadline)):
+            return "kept:admin-changed"
+        if qr.deadline_passed(deadline): return "deferred:deadline"
         pfd = os.open(parent, DIR)
         try:
             pstat = os.fstat(pfd)
@@ -187,9 +227,14 @@ def phase1(main, worktree, inventory_file):
                 os.fsync(qfd)
                 try:
                     qr.hook("DISK_MAGICIAN_TEST_AFTER_VERDICT", worktree, qpath)
-                    run("git", "-C", main, "worktree", "lock", "--reason", reason, worktree)
+                    if qr.deadline_passed(deadline):
+                        if not qr.finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
+                        return "deferred:deadline"
+                    run("git", "-C", main, "worktree", "lock", "--reason", reason, worktree, deadline=deadline)
                     record["wrh_phase"] = "locked"
                     record["locked_sha256"] = digest(os.path.join(admin, "locked"))
+                    if not check_admin(record, lock=True, repaired=False, deadline=deadline):
+                        raise OSError("admin changed after lock")
                     write_record(pfd, qfd, side, record)
                     if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_lock": os.kill(os.getpid(), 9)
                     if not qr.same_entry(pfd, base, st): raise OSError("checkout changed")
@@ -198,29 +243,38 @@ def phase1(main, worktree, inventory_file):
                     record["wrh_phase"] = "renamed"
                     write_record(pfd, qfd, side, record)
                     if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_rename": os.kill(os.getpid(), 9)
-                    run("git", "-C", main, "worktree", "repair", qpath)
+                    why = qr.verify(pfd, qfd, qst, qid, {"dev": st.st_dev, "ino": st.st_ino, "inventory": checkout_inventory},
+                                    os.path.join(parent, ".dm-quarantine"), deadline)
+                    if why in ("identity-mismatch", "quarantine-dir-changed"): return f"quarantine_conflict:{qid}"
+                    if why: return rollback(pfd, qfd, qid, record, reason=why)
+                    if qr.deadline_passed(deadline): raise qr.DeadlineExceeded()
+                    run("git", "-C", main, "worktree", "repair", qpath, deadline=deadline)
                     record["wrh_phase"] = "repaired"
                     record["repaired_gitdir_sha256"] = digest(os.path.join(admin, "gitdir"))
                     write_record(pfd, qfd, side, record)
                     if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_repair": os.kill(os.getpid(), 9)
                     qr.hook("DISK_MAGICIAN_TEST_WRH_AFTER_REPAIR", admin, qpath)
-                    if not check_admin(record):
+                    if not check_admin(record, deadline=deadline):
                         return rollback(pfd, qfd, qid, record)
-                    record["worktree_admin_teardown_inventory"] = inventory(admin)
+                    record["worktree_admin_teardown_inventory"] = inventory(admin, deadline)
                     record["wrh_phase"] = "ready"
                     write_record(pfd, qfd, side, record)
                     return "quarantined:" + qid
+                except qr.DeadlineExceeded:
+                    return rollback(pfd, qfd, qid, record, reason="deferred:deadline")
                 except Exception:
                     return rollback(pfd, qfd, qid, record)
             finally:
                 os.close(qfd)
         finally:
             os.close(pfd)
+    except qr.DeadlineExceeded:
+        return "deferred:deadline"
     except Exception:
         return "kept:check-failed"
 
 
-def rollback(pfd, qfd, qid, record):
+def rollback(pfd, qfd, qid, record, reason="admin-changed"):
     parent = record["original"].rsplit("/", 1)[0]
     base = os.path.basename(record["original"])
     admin = record["worktree_admin_path"]
@@ -250,7 +304,7 @@ def rollback(pfd, qfd, qid, record):
         if (restored.st_dev, restored.st_ino) != (record["dev"], record["ino"]):
             return "quarantine_conflict:" + qid
         if not qr.finish_sidecar(qfd, qid, "rolled-back"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
-        return "kept:admin-changed"
+        return "kept:" + reason
     except Exception:
         return "quarantine_conflict:" + qid
 
@@ -263,7 +317,7 @@ def phase2(qid, deadline=None):
     try:
         if record.get("worktree_admin") is not True:
             return "kept:quarantine_partial_kept"
-        if not record.get("root_removed") and not check_admin(record):
+        if not record.get("root_removed") and not check_admin(record, deadline=deadline):
             return "kept:quarantine_partial_kept"
         binding = {"parent_path": index["parent_path"], "parent_dev": index["parent_dev"], "parent_ino": index["parent_ino"]}
         fd, bind = tempfile.mkstemp(prefix=".wrh-bind-")
@@ -300,7 +354,7 @@ def phase2(qid, deadline=None):
                     return "kept:quarantine_partial_kept"
         finally:
             os.close(afd)
-        listing = run("git", "-C", record["worktree_main"], "worktree", "list", "--porcelain").stdout.decode()
+        listing = run("git", "-C", record["worktree_main"], "worktree", "list", "--porcelain", deadline=deadline).stdout.decode()
         qpath = os.path.join(index["parent_path"], ".dm-quarantine", qid)
         if "worktree " + qpath in listing or os.path.exists(admin):
             return "kept:quarantine_partial_kept"
@@ -312,7 +366,8 @@ def phase2(qid, deadline=None):
         os.close(qfd); os.close(pfd)
 
 
-def restore(qid):
+def restore(qid, deadline=None):
+    if qr.deadline_passed(deadline): return "deferred:deadline"
     try:
         index, pfd, qfd, record = qr.indexed_item(qid)
     except Exception:
@@ -325,8 +380,12 @@ def restore(qid):
         except FileNotFoundError: pass
         qst = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (qst.st_dev, qst.st_ino) != (record["dev"], record["ino"]): return "kept:identity-mismatch"
-        if canonical(qr.visit(qfd, qid, ".", [])) != canonical(record["inventory"]):
-            return "kept:quarantine_partial_kept"
+        try:
+            payload_matches = canonical(qr.visit(qfd, qid, ".", [], deadline)) == canonical(record["inventory"])
+        except qr.DeadlineExceeded:
+            return "deferred:deadline"
+        if not payload_matches:
+            return "deferred:deadline" if qr.deadline_passed(deadline) else "kept:quarantine_partial_kept"
         safe_rename(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
         original = record["original"]
         run("git", "-C", record["worktree_main"], "worktree", "repair", original)
@@ -336,10 +395,12 @@ def restore(qid):
         if os.path.exists(locked):
             if digest(locked) != record.get("locked_sha256"): return "kept:lock-owner-mismatch"
             run("git", "-C", record["worktree_main"], "worktree", "unlock", original)
-        if canonical(record["worktree_admin_inventory"]) != canonical(inventory(record["worktree_admin_path"])):
+        if canonical(record["worktree_admin_inventory"]) != canonical(admin_file_inventory(record["worktree_admin_path"])):
             return "kept:admin-changed"
         if not qr.finish_sidecar(qfd, qid, "restored"): return "kept:quarantine_partial_kept"
         return "restored:" + qid
+    except qr.DeadlineExceeded:
+        return "deferred:deadline"
     except Exception:
         return "kept:quarantine_partial_kept"
     finally:
@@ -387,7 +448,7 @@ def main(argv):
     if len(args) == 4 and args[0] == "phase1":
         lock = qr.operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); return 0
-        try: print(phase1(*args[1:]))
+        try: print(phase1(*args[1:], deadline))
         finally: qr.operation_unlock(lock)
     elif len(args) == 2 and args[0] == "phase2":
         lock = qr.operation_lock(deadline)
@@ -397,7 +458,7 @@ def main(argv):
     elif len(args) == 2 and args[0] == "restore":
         lock = qr.operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); return 0
-        try: print(restore(args[1]))
+        try: print(restore(args[1], deadline))
         finally: qr.operation_unlock(lock)
     elif args == ["reconcile"]:
         lock = qr.operation_lock(deadline)
