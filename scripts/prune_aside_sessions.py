@@ -55,6 +55,25 @@ def get_dir_size(dir_path: Path) -> int:
     return total
 
 
+def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
+    """Run the shared C14 two-phase quarantine remover (scripts/lib/quarantine.sh).
+
+    Returns (removed, reason). `removed` is True only when the helper printed
+    ``removed:<id>``; anything else (kept:<why>, deferred:<step>, check failure)
+    leaves the artifact in place. This is the only removal route for a session;
+    the hard-link asset dedup above deletes no content and stays ungated.
+    """
+    lib = Path(__file__).resolve().parent / "lib" / "quarantine.sh"
+    cmd = ["bash", "-c", 'source "$1"; shift; quarantine_remove "$@"', "_", str(lib), str(path), *extra]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"check-failed ({exc})"
+    lines = [line for line in proc.stdout.strip().splitlines() if line]
+    result = lines[-1] if lines else "kept:check-failed"
+    return result.startswith("removed:"), result
+
+
 def get_dir_max_mtime(dir_path: Path) -> float:
     """Return the most recent mtime of any file inside dir_path, or dir mtime."""
     max_mtime = 0.0
@@ -461,20 +480,18 @@ class AsideSessionPruner:
 
         # Execute Session Pruning
         for session_dir, container, age_days, size in stale_candidates:
-            self.stats["sessions_pruned"] += 1
-            self.stats["bytes_pruned"] += size
-
             if self.dry_run:
+                self.stats["sessions_pruned"] += 1
+                self.stats["bytes_pruned"] += size
                 print(f"[DRY-RUN] Would prune stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
             else:
-                try:
-                    shutil.rmtree(session_dir)
+                removed, reason = quarantine_remove(session_dir, "--kind", "ephemeral")
+                if removed:
+                    self.stats["sessions_pruned"] += 1
+                    self.stats["bytes_pruned"] += size
                     print(f"Pruned stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
-                except OSError as exc:
-                    print(f"Error removing {session_dir}: {exc}", file=sys.stderr)
-                    # Revert stats for failed removal
-                    self.stats["sessions_pruned"] -= 1
-                    self.stats["bytes_pruned"] -= size
+                else:
+                    print(f"Kept stale session (C14 {reason}): {session_dir}", file=sys.stderr)
                     retained_dirs.append(session_dir)
 
         # Execute Deduplication on Retained Sessions (if enabled)
