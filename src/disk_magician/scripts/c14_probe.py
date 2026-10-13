@@ -75,6 +75,76 @@ def gitmeta(gd, lease=None):
     base = json.load(open(lease)).get("git_meta") if os.path.isfile(lease) else None
     print("kept:git-unbaselined" if not isinstance(base, dict) else "ok" if base == m else "kept:git-metadata")
 
+def worktrees(admin_dir, root, deadline=None):
+    """Fail closed when the removal candidate contains admin_dir (the common Git
+    admin storage) yet a registered linked worktree lives outside the candidate:
+    removing the candidate would orphan that worktree's admin. Paths come from
+    git's own NUL-delimited records, so spaces/newlines are not token-split."""
+    try:
+        root = os.path.realpath(root)
+        admin_dir = os.path.realpath(admin_dir)
+        if not (admin_dir == root or admin_dir.startswith(root.rstrip(os.sep) + os.sep)):
+            print("ok")  # shared admin storage is outside the candidate: siblings cannot be orphaned
+            return 0
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = _run_bounded(["git", "--git-dir", admin_dir, "worktree", "list", "--porcelain", "-z"],
+                              cwd="/", env=env, cap=10, deadline=deadline, step="worktree-topology")
+        if result is None:
+            if deadline is not None:
+                print("deferred:worktree-topology")
+                return 0
+            print("kept:check-failed")
+            return 1
+        rc, out = result
+        if rc != 0 or not out:
+            print("kept:check-failed")
+            return 1
+        if not out.endswith(b"\0\0"):  # a complete -z record list ends with two NUL bytes
+            print("kept:check-failed")
+            return 1
+        fields, i, records = out.split(b"\0"), 0, 0
+        n = len(fields)
+        while i < n:
+            name = fields[i]
+            if name == b"":
+                i += 1
+                continue
+            if not name.startswith(b"worktree "):
+                print("kept:check-failed")  # a field outside a worktree record
+                return 1
+            path = os.fsdecode(name[len(b"worktree "):])
+            if not path or not os.path.isabs(path):
+                print("kept:check-failed")
+                return 1
+            real = os.path.realpath(path)
+            if not (real == root or real.startswith(root.rstrip(os.sep) + os.sep)):
+                print("kept:external-worktree")
+                return 1
+            i += 1
+            attrs = 0
+            while i < n and fields[i] != b"":  # consume the record until its NUL terminator
+                f = fields[i]
+                if f.startswith((b"HEAD ", b"branch ", b"detached", b"bare", b"locked", b"prunable ")):
+                    attrs += 1
+                else:
+                    print("kept:check-failed")
+                    return 1
+                i += 1
+            if attrs == 0:
+                print("kept:check-failed")  # worktree line without a recognized attribute
+                return 1
+            records += 1
+            if i < n:
+                i += 1  # skip the record terminator
+        if records == 0:
+            print("kept:check-failed")
+            return 1
+        print("ok")
+        return 0
+    except Exception:
+        print("kept:check-failed")
+        return 1
+
 def outer_certificate(root, receipt_path):
     """Validate the advice runner's exact-SHA clone receipt and declared overlay."""
     try:
@@ -738,6 +808,8 @@ if __name__ == "__main__":
             sys.exit(lsremote(a[1], a[2], a[3]))
         if len(a) in (2, 3) and a[0] == "gitmeta":
             sys.exit(gitmeta(*a[1:]))
+        if len(a) in (3, 4) and a[0] == "worktrees":
+            sys.exit(worktrees(a[1], a[2], a[3] if len(a) == 4 and a[3] else None))
         if len(a) == 3 and a[0] == "outer-certificate":
             result = outer_certificate(a[1], a[2])
             print(result)
