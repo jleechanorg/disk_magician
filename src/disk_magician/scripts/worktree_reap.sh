@@ -119,6 +119,12 @@ record() {
 update() {
     local file="$1" rc
     lease_mutation_lock_enter "$file" || return 1
+    local reuse_state
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        lease_mutation_lock_exit "$file"
+        return 1
+    fi
     python3 - "$@" <<'PY'
 import json,os,sys,tempfile,time
 path,action,*args=sys.argv[1:]
@@ -144,9 +150,22 @@ PY
 adopt() {
     local real="$1" repo="$2" branch="$3" admin birth file
     file="$(lease_path_for "$real")"
+    lease_mutation_lock_enter "$file" || return 1
+    local reuse_state
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        lease_mutation_lock_exit "$file"
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        return 1
+    fi
     # Use the library writer directly so adoption never resolves a live owner.
     IFS=$'\t' read -r admin birth < <(_lease_admin_info "$real")
-    _lease_emit_json "$file" "$real" "$repo" "$branch" adopt False - - - "$admin" "$birth" 24
+    _lease_emit_json "$file" "$real" "$repo" "$branch" adopt False - - - "$admin" "$birth" 24 \
+        "" "" "" "" "" "" "" "" --lock-held
+    local rc=$?
+    lease_mutation_lock_exit "$file"
+    return "$rc"
 }
 registered() {
     git -C "$2" worktree list --porcelain 2>/dev/null |
@@ -181,8 +200,14 @@ while IFS= read -r -d '' real; do
     fi
     if [[ "$(_lease_get "$file" pending)" == True ]]; then
         IFS=$'\t' read -r admin birth < <(_lease_admin_info "$real")
+        if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_PROMOTE_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_BEFORE_PROMOTE_HOOK" "$file" "$repo" "$real" "$branch" >&2 || true
+        fi
         update "$file" promote "$admin" "$birth" "$repo" "$branch" || adopt "$real" "$repo" "$branch"
     elif ! lease_matches_incarnation "$file"; then
+        if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK" "$file" "$repo" "$real" "$branch" >&2 || true
+        fi
         adopt "$real" "$repo" "$branch"
     fi
 done < "$RUN_TMP/paths"

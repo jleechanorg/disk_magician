@@ -238,6 +238,7 @@ wtn_reuse_path_is_canonical() {
     [[ "$file" == "$expected_lease" ]]
 }
 
+
 wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
@@ -328,7 +329,12 @@ PY
         fi
         local switch_rc=0
         if [[ -n "${DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE:-}" ]]; then switch_rc=1
-        else git -C "$candidate" switch -c "$branch" "$base" >&2 || switch_rc=$?; fi
+        else
+            if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_BRANCH_SWITCH:-}" ]]; then
+                "$DISK_MAGICIAN_TEST_BEFORE_BRANCH_SWITCH" "$repo" "$old" "$candidate" "$branch" "$base" >&2 || true
+            fi
+            git -C "$candidate" checkout -b "$branch" --no-track --no-overwrite-ignore "$base" >&2 || switch_rc=$?
+        fi
         local lease_rc=0
         if [[ -n "${DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE:-}" ]]; then lease_rc=1
         elif [[ "$switch_rc" == 0 ]]; then

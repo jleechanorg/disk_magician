@@ -210,6 +210,21 @@ new; git -C "$WT" commit -q --allow-empty -m fork; git -C "$WT" update-ref refs/
 new; git -C "$WT" commit -q --allow-empty -m merged; age; export GH_HEAD="$(git -C "$WT" rev-parse HEAD)"; run; verdict 'merged PR deleted branch' remove; unset GH_HEAD; park
 for offset in 0 -30 -120 1; do new; edit "d['pending']=True; d['creator']='guard'; d['owner']['pid']=400; d['created_epoch']=d['admin_birth_epoch']+$offset; d['admin_id']=None; d['admin_birth_epoch']=None"; run; if [[ "$offset" == 0 || "$offset" == -30 ]]; then check "pending promotion offset $offset" test "$(field 'd["creator"] == "guard" and d["owner"]["pid"] == 400 and not d["pending"]')" = True; else check "pending stale offset $offset" test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True; fi; park; done
 new; saved="$TMP/saved-lease"; cp "$LF" "$saved"; git -C "$TMP/repo" worktree remove "$WT"; git -C "$TMP/repo" worktree add -qb reuse "$WT" origin/main; cp "$saved" "$LF"; edit 'd["admin_id"]="old-incarnation"'; run --mode remove; check 'path reuse adopted' test "$(field 'd["owner"] is None and d["creator"] == "adopt"')" = True; check 'reuse preserved' test -d "$WT"
+new; edit 'd["admin_id"]="stale-incarnation"'
+cat > "$TMP/claim-before-adopt" <<'HOOK'
+#!/bin/bash
+source "$TEST_LEASE_LIB"
+file="$1"; branch="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["branch"])' "$file")"
+tip="$(git -C "$2" rev-parse "refs/heads/$branch")"
+hash="$(shasum -a 256 "$file" | awk '{print $1}')"
+lease_claim_reuse "$file" "$hash" "$branch" "$tip" $'401\t1760000000\tclaude'
+HOOK
+chmod +x "$TMP/claim-before-adopt"
+export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK="$TMP/claim-before-adopt"
+run --mode nominate
+unset TEST_LEASE_LIB DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK
+check 'adoption race preserves pending reuse state' test "$(field 'd["reuse"]["state"]')" = pending
+check 'adoption race retains old tip' test "$(field 'bool(d["reuse"]["old_tip"])')" = True
 cat > "$TMP/inject" <<'HOOK'
 #!/bin/bash
 if [[ "$1" == "$INJECT_WT" ]]; then mkdir -p "$1/data"; touch "$1/$INJECT_FILE"; python3 - "$1/$INJECT_FILE" <<'PY'

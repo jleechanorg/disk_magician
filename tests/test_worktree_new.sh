@@ -551,6 +551,31 @@ assert_eq "$fresh" "$WTROOT/activity-boundary" "late content blocks candidate re
 assert_eq "$(git -C "$ACTIVITY_WT" rev-parse --abbrev-ref HEAD)" "reuse/activity-boundary" "late-activity branch preserved"
 [[ -f "$ACTIVITY_WT/late-untracked.txt" ]] && ok "late content remains intact" || bad "late content was lost"
 
+echo "== case 34: ignored user content blocks branch switch and remains intact =="
+IGNORED_WT="$WTROOT/reuse-ignored-boundary"
+git -C "$REPO" branch reuse/ignored-boundary "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$IGNORED_WT" reuse/ignored-boundary
+git -C "$REPO" config --add core.excludesFile "$TMPROOT/global-excludes"
+echo ignored-target.txt >> "$TMPROOT/global-excludes"
+git -C "$REPO" checkout -q -b target/ignored-file "$ORIGIN_SHA"
+echo committed > "$REPO/ignored-target.txt"
+git -C "$REPO" add -f ignored-target.txt
+git -C "$REPO" commit -q -m target-ignored-file
+IGNORED_BASE="$(git -C "$REPO" rev-parse target/ignored-file)"
+git -C "$REPO" update-ref refs/remotes/origin/main "$IGNORED_BASE"
+git -C "$REPO" checkout -q main
+cat > "$TMPROOT/add-ignored-user-data-hook" <<'EOF'
+#!/usr/bin/env bash
+echo keep-user-bytes > "$3/ignored-target.txt"
+EOF
+chmod +x "$TMPROOT/add-ignored-user-data-hook"
+export DISK_MAGICIAN_TEST_BEFORE_BRANCH_SWITCH="$TMPROOT/add-ignored-user-data-hook"
+fresh="$(run_reuse_attempt "$IGNORED_WT" reuse/ignored-boundary target/ignored-reuse ignored-reuse)"; rc=$?
+unset DISK_MAGICIAN_TEST_BEFORE_BRANCH_SWITCH
+assert_eq "$rc" "0" "ignored-content fallback exits zero"
+assert_eq "$fresh" "$WTROOT/ignored-reuse" "ignored-content candidate falls back to fresh path"
+assert_eq "$(cat "$IGNORED_WT/ignored-target.txt")" "keep-user-bytes" "ignored user bytes survive failed switch"
+
 echo "== case 26: failure after conditional delete restores the old branch =="
 RESTORE_WT="$WTROOT/reuse-restore"
 git -C "$REPO" branch reuse/restore "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$RESTORE_WT" reuse/restore
