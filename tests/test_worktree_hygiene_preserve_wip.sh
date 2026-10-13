@@ -167,6 +167,20 @@ assert_true "[[ -f '$W5/.env' ]] && wt_registered '$R5' '$W5'" ".env worktree ke
 assert_true "! git -C '$R5' for-each-ref refs/heads/wip | grep -q ." "no wip branch created"
 
 # ---------------------------------------------------------------------------
+echo "case 5b: secret-like basename inside a rebuildable dir is not a secret"
+R5B="$(mk_repo r5b)"
+W5B="$(mk_wt "$R5B" nm5b)"
+echo "edit" >>"$W5B/tracked.txt"
+mkdir -p "$W5B/node_modules/@firebase/firestore/dist/firestore/src/api"
+echo "// vendored" >"$W5B/node_modules/@firebase/firestore/dist/firestore/src/api/credentials.d.ts"
+backdate_tree "$W5B" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R5B" --push-wip --execute --preserve-wip)"
+B5B="wip/worktree-hygiene/$TODAY/nm5b"
+assert_not_contains "$OUT" "ignored-secret" "vendored credentials.d.ts is not treated as a secret"
+assert_contains "$OUT" "$W5B -> $B5B" "vendored-credentials worktree preserved"
+assert_true "[[ ! -d '$W5B' ]]" "vendored-credentials worktree removed"
+
+# ---------------------------------------------------------------------------
 echo "case 6: large-diff and open-pr untouched"
 R6="$(mk_repo r6)"
 W6="$(mk_wt "$R6" large6)"
