@@ -11,7 +11,9 @@ SOURCE_SCRIPT="${CLEANUP_TMP_SCRIPT:-$REPO_ROOT/scripts/cleanup_tmp.sh}"
 [[ "$SOURCE_SCRIPT" == /* ]] || SOURCE_SCRIPT="$REPO_ROOT/$SOURCE_SCRIPT"
 # Keep Linux fixtures out of /tmp because cleanup_tmp intentionally applies
 # macOS /tmp -> /private/tmp alias normalization to lsof paths.
-TMP_ROOT=$(mktemp -d "$REPO_ROOT/cleanup_tmp_container.XXXXXX")
+FIXTURE_ROOT="/tmp/disk_magician/fixtures"
+mkdir -p "$FIXTURE_ROOT"
+TMP_ROOT=$(mktemp -d "$FIXTURE_ROOT/cleanup_tmp_container.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
   GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
@@ -38,7 +40,7 @@ make_clean_pushed_worktree() {
   git init --bare -q "$remote"
   git init -q -b main "$main"
   git -C "$main" config user.name test
-  git -C "$main" config user.email test@example.com
+  git -C "$main" config user.email jleechan2015@users.noreply.github.com
   head -c 20000 /dev/zero > "$main/payload.bin"
   git -C "$main" add payload.bin
   git -C "$main" commit -q -m init

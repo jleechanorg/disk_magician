@@ -495,6 +495,22 @@ else
 fi
 assert_exists "GREEN 4: archived payload is still readable (data preserved, not lost)" \
   "$G4_ARCHIVE"/*/stale_scratch_dir/payload.bin
+G4_ENTRY=$(/usr/bin/find "$G4_ARCHIVE" -mindepth 2 -maxdepth 2 \
+  -type d -name stale_scratch_dir -print -quit 2>/dev/null || true)
+if python3 - "$G4_ENTRY" "$G4_ENTRY.c14-origin.json" "$G4_PRIVATE_TMP/stale_scratch_dir" <<'PY'
+import json, os, sys
+entry, receipt, original = sys.argv[1:]
+st = os.lstat(entry)
+data = json.load(open(receipt, encoding="utf-8"))
+assert data["original_path"] == original
+assert (data["dev"], data["ino"], data["size"]) == (st.st_dev, st.st_ino, st.st_size)
+assert type(data["archived_at"]) is int and data["archived_at"] > 0
+PY
+then
+  record_pass "GREEN 4: archive origin receipt binds the moved directory"
+else
+  record_fail "GREEN 4: archive origin receipt binds the moved directory" "receipt missing or identity differs"
+fi
 G4_TARGET_DU_COUNT=$(grep -cFx "$G4_PRIVATE_TMP/stale_scratch_dir" "$G4_DU_LOG" || true)
 assert_rc "GREEN 4: candidate size is measured once" 1 "$G4_TARGET_DU_COUNT"
 assert_contains "GREEN 4: archive move is not counted as a removed dir" \

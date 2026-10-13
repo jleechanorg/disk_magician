@@ -9,9 +9,13 @@ if [[ -n "${GITHUB_RUN_ID:-}" && -n "${GITHUB_RUN_ATTEMPT:-}" && -n "${GITHUB_JO
 else
     job="unknown-${RUNNER_NAME:-$(hostname -s)}-$(date +%s)"; echo "admission_degraded:ci_identity" >&2
 fi
-admit_gate colima "${CI_ADMIT_EST_GB:-20}" ci "${GITHUB_WORKSPACE:-$PWD}" ci --ci-job "$job"; rc=$?
+if admit_gate colima "${CI_ADMIT_EST_GB:-20}" ci "${GITHUB_WORKSPACE:-$PWD}" ci --ci-job "$job"; then
+    rc=0
+else
+    rc=$?
+fi
 zone="$(python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); print(d["zone"] if time.time()-d["zone_at"]<=900 else "")' \
-    "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/budget.json" 2>/dev/null)"
+    "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/budget.json" 2>/dev/null)" || zone=""
 if [[ "$zone" == RED || "$zone" == BLACK || "$zone" == FLOOR ]]; then
     target="gui/$(id -u)/${EZGHA_LAUNCHD_LABEL:-org.jleechanorg.ezgha}"
     echo "disk-admission: zone=$zone; pause CI with: launchctl bootout $target" >&2
