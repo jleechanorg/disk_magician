@@ -210,7 +210,7 @@ run VERDICT_ARG_FILE="$VERDICT_ARG_FILE" EXPECTED_VERDICT_PATH="$EXPECTED_VERDIC
   DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY="rm '$LINK'; ln -s '$OTHER' '$LINK'" \
   DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY="rm '$LINK'; ln -s '$ORIG' '$LINK'"
 check 'verdict-time parent retarget: C14 receives frozen canonical candidate' [ "$(cat "$VERDICT_ARG_FILE")" = "$ORIG/item" ]
-check 'verdict-time parent retarget: only the original path is quarantined' bash -c '[[ "${1%%:*}" == quarantined && ! -e "$2" && "$(cat "$3")" == SAME-INODE && -e "$4" ]]' _ "$OUT" "$ORIG/item" "$Q/$(qid)" "$OTHER/item"
+check 'verdict-time parent retarget: only the original path is removed' bash -c '[[ "${1%%:*}" == removed && ! -e "$2" && ! -e "$3" && "$(cat "$4")" == SAME-INODE ]]' _ "$OUT" "$ORIG/item" "$Q/$(qid)" "$OTHER/item"
 
 # renamex_np missing: no rename at all.
 fixture; run DISK_MAGICIAN_TEST_RENAMEX_SYMBOL=renamex_np_missing

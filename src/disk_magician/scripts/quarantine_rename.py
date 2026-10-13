@@ -358,7 +358,7 @@ def phase2(binding_file, qid):
             record["phase"] = "deleting"
             fsync_sidecar(qfd, side, record)
         if candidate is not None:
-            hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, qid), "")
+            hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, ".dm-quarantine", qid), "")
             if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
             if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children):
                 return "kept:quarantine_partial_kept"
