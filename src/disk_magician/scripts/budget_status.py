@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """diskm budget status: governor alerts from budget.json, the admission event log and observer df samples (plan Task 10)."""
-import json, os, sys, time
+import datetime, json, os, sys, time
 from pathlib import Path
 import disk_observer
 GIB, DAY = 1 << 30, 86400
@@ -26,16 +26,75 @@ def daily_mins(budget, now, n):  # C12: govern's per-day minimum used bytes (bud
     return [v for d in range(n) if isinstance(m, dict) and type(v := m.get(time.strftime("%Y-%m-%d", time.localtime(now - d * DAY)))) is int]
 def raised(lines): return any(line.startswith("ALERT:") for line in lines)
 def _int_or_none(value): return value if isinstance(value, int) and not isinstance(value, bool) else None
-def accounting(state):  # per-class C14 kept bytes and receipt metrics from govern_<class> receipts
-    """Report each class's kept/reclaim metrics without fabricating a baseline.
+BASELINE_SCHEMA_VERSION = 1
+C14_LEDGER_STATUSES = ("ok", "incomplete", "error")
+def _valid_utc(value):  # true only for a timezone-aware UTC ISO-8601 timestamp
+    if not isinstance(value, str) or not value: return False
+    ts = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try: dt = datetime.datetime.fromisoformat(ts)
+    except ValueError: return False
+    return dt.tzinfo is not None and dt.utcoffset() == datetime.timedelta(0)
+def _nonempty_source(value): return value.strip() if isinstance(value, str) and value.strip() else None
+def load_baseline(state):  # strict task0_baseline.json reader; nothing defaulted
+    """Validate `$STATE/task0_baseline.json` before any byte is displayed.
 
-    The Task 0 reclaim baseline has no canonical machine-readable representation
-    in this tree yet, so `baseline_bytes` is reported as explicit `unknown` rather
-    than invented. `freed_bytes`/`df_reclaimed_bytes` come from the receipt and
-    stay separate from the logical `c14_kept_bytes`; `ledger_status` is the fold
-    quality signal. Reads only existing govern_<class> receipts.
+    Returns {"status": missing|malformed|ok, "captured_at", "source", "classes"}.
+    A bad header fails the whole file to `malformed`; a bad class row fails only
+    that class to `malformed`. Valid rows keep status complete|incomplete.
     """
-    classes = set()
+    try: data = json.loads((state / "task0_baseline.json").read_text())
+    except OSError: return {"status": "missing", "captured_at": None, "source": None, "classes": {}}
+    except ValueError: return {"status": "malformed", "captured_at": None, "source": None, "classes": {}}
+    if not isinstance(data, dict): return {"status": "malformed", "captured_at": None, "source": None, "classes": {}}
+    captured = data.get("captured_at") if _valid_utc(data.get("captured_at")) else None
+    source = _nonempty_source(data.get("source"))
+    classes = data.get("classes")
+    if (type(data.get("schema_version")) is not int or data.get("schema_version") != BASELINE_SCHEMA_VERSION
+            or not _valid_utc(data.get("captured_at")) or source is None or not isinstance(classes, dict)):
+        return {"status": "malformed", "captured_at": captured, "source": source, "classes": {}}
+    rows = {}
+    for name, row in classes.items():
+        if not isinstance(name, str) or not name or not isinstance(row, dict): continue
+        wdb, row_source, row_status = row.get("would_delete_bytes"), _nonempty_source(row.get("source")), row.get("status")
+        if row_source is None or row_status not in ("complete", "incomplete") \
+                or not (wdb is None or (type(wdb) is int and wdb >= 0)):
+            rows[name] = {"status": "malformed", "bytes": None, "source": None}; continue
+        if wdb is None or row_status == "incomplete": rows[name] = {"status": "incomplete", "bytes": None, "source": row_source}
+        else: rows[name] = {"status": "complete", "bytes": wdb, "source": row_source}
+    return {"status": "ok", "captured_at": data["captured_at"], "source": source, "classes": rows}
+def _baseline_fields(base, name):  # baseline_bytes plus explicit quality status
+    top = (f" baseline_captured_at={base['captured_at']}" if base.get("captured_at") else "") \
+          + (f" baseline_source={json.dumps(base['source'])}" if base.get("source") else "")
+    if base["status"] == "missing": return "baseline_bytes=unknown baseline_status=missing"
+    if base["status"] == "malformed": return f"baseline_bytes=unknown baseline_status=malformed{top}"
+    row = base["classes"].get(name)
+    if row is None: return f"baseline_bytes=unknown baseline_status=missing{top}"
+    if row["status"] == "malformed": return f"baseline_bytes=unknown baseline_status=malformed{top}"
+    suffix = f" baseline_class_source={json.dumps(row['source'])}" if row.get("source") else ""
+    if row["status"] == "complete" and row["bytes"] is not None:
+        return f"baseline_bytes={row['bytes']} baseline_status=complete{top}{suffix}"
+    return f"baseline_bytes=unknown baseline_status=incomplete{top}{suffix}"
+def _c14_fields(post):  # explicit invalid/incomplete instead of a silent none/zero
+    status = post.get("c14_ledger_status")
+    ledger_status = "absent" if status is None else (status if isinstance(status, str) and status in C14_LEDGER_STATUSES else "invalid")
+    kept = post.get("c14_kept_bytes")
+    if kept is None: kept_str = "absent"
+    elif not isinstance(kept, dict): kept_str = "invalid"
+    elif any(not (isinstance(k, str) and k and type(v) is int and v >= 0) for k, v in kept.items()): kept_str = "invalid"
+    elif not kept: kept_str = "none"
+    else: kept_str = ",".join(f"{k}:{kept[k]}" for k in sorted(kept))
+    return ledger_status, kept_str
+def accounting(state):  # per-class baseline + receipt metrics; receipt fields stay distinct
+    """Report each class's Task 0 baseline and receipt metrics.
+
+    Baseline bytes are logical would-delete values, never df. `df_delta_bytes`
+    keeps its signed receipt meaning; `freed_bytes_df_based` is explicitly
+    df-derived; `deleted_bytes` is `unknown` because no receipt field holds
+    logical deleted bytes (never derived from df or C14 kept). Reads only
+    existing govern_<class> receipts and the optional task0_baseline.json.
+    """
+    base = load_baseline(state)
+    classes = set(base["classes"]) if base["status"] == "ok" else set()
     try:
         import resolve_config
         cfg = json.loads(Path(resolve_config.resolve()).read_text())
@@ -46,24 +105,24 @@ def accounting(state):  # per-class C14 kept bytes and receipt metrics from gove
         classes.update(p.name[len("govern_"):-len(".json")] for p in receipts.glob("govern_*.json"))
     lines = []
     for name in sorted(c for c in classes if c):
-        line = f"c14 class={name} baseline_bytes=unknown"
+        line = f"c14 class={name} " + _baseline_fields(base, name)
         try:
             import job_receipt
             rec = job_receipt.get_last_receipt(f"govern_{name}", str(state))
         except (ImportError, OSError, ValueError, TypeError): rec = None
         if not rec:
-            lines.append(line + " receipt=missing"); continue
+            lines.append(line + " receipt=missing deleted_bytes=unknown df_delta_bytes=unknown"); continue
         post = rec.get("postcondition") if isinstance(rec.get("postcondition"), dict) else {}
         cand = rec.get("candidates") if isinstance(rec.get("candidates"), dict) else {}
         df, freed, removed = _int_or_none(post.get("df_delta_bytes")), _int_or_none(post.get("freed_bytes")), _int_or_none(cand.get("removed_count"))
-        status = post.get("c14_ledger_status") if isinstance(post.get("c14_ledger_status"), str) else "absent"
-        kept = post.get("c14_kept_bytes") if isinstance(post.get("c14_kept_bytes"), dict) else {}
-        kept_str = ",".join(f"{k}:{_int_or_none(v)}" for k, v in sorted(kept.items()) if _int_or_none(v) is not None) or "none"
+        deleted = _int_or_none(post.get("deleted_bytes"))
+        ledger_status, kept_str = _c14_fields(post)
         lines.append(line + f" receipt={rec.get('outcome', 'unknown')}"
                      f" removed_count={removed if removed is not None else 'unknown'}"
-                     f" freed_bytes={freed if freed is not None else 'unknown'}"
-                     f" df_reclaimed_bytes={df if df is not None else 'unknown'}"
-                     f" ledger_status={status} c14_kept_bytes={kept_str}")
+                     f" deleted_bytes={deleted if deleted is not None else 'unknown'}"
+                     f" df_delta_bytes={df if df is not None else 'unknown'}"
+                     f" freed_bytes_df_based={freed if freed is not None else 'unknown'}"
+                     f" ledger_status={ledger_status} c14_kept_bytes={kept_str}")
     return lines
 def alerts(state, now, margin_gb=None):
     if margin_gb is None:

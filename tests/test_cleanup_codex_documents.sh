@@ -218,6 +218,19 @@ bash "$REPO_ROOT/disk_magician.sh" cleanup-codex-documents >"$O4" 2>&1 || RC=$?
 assert_contains "T4: dry-run banner" "DRY RUN" "$(cat "$O4")"
 assert_contains "T4: help lists command" "cleanup-codex-documents" "$(bash "$REPO_ROOT/disk_magician.sh" help 2>&1 || true)"
 
+echo "T4b: explicit --dry-run parity never activates removal"
+mktask $D_OLD t-explicit-dry; clone_into $D_OLD t-explicit-dry; age "$CODEX/$D_OLD/t-explicit-dry"
+O4B="$TMP_ROOT/o4b"; RC=0; run_sweeper "$O4B" --dry-run || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T4b: --dry-run exits 0" || { record_fail "T4b: --dry-run exits 0" "rc=$RC"; cat "$O4B"; }
+assert_contains "T4b: dry-run banner" "DRY RUN" "$(cat "$O4B")"
+assert_contains "T4b: reports would-remove" "would remove" "$(cat "$O4B")"
+assert_exists "T4b: eligible task kept under --dry-run" "$CODEX/$D_OLD/t-explicit-dry"
+O4C="$TMP_ROOT/o4c"; RC=0
+bash "$REPO_ROOT/disk_magician.sh" cleanup-codex-documents --dry-run >"$O4C" 2>&1 || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T4b: dispatch --dry-run exits 0" || record_fail "T4b: dispatch --dry-run exits 0" "rc=$RC"
+assert_contains "T4b: dispatch --dry-run banner" "DRY RUN" "$(cat "$O4C")"
+assert_exists "T4b: dispatch --dry-run kept eligible task" "$CODEX/$D_OLD/t-explicit-dry"
+
 echo "T5: inherited Git variables are scrubbed and an unreadable worktree path fails closed"
 mktask $D_OLD t-poisoned-env; clone_into $D_OLD t-poisoned-env; age "$CODEX/$D_OLD/t-poisoned-env"
 mktask $D_OLD t-path-unreadable

@@ -220,6 +220,90 @@ class GovernSchedulerTest(unittest.TestCase):
             self.assertEqual(wrapped["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
             self.assertEqual(wrapped["postcondition"]["c14_ledger_status"], "ok")
 
+    def test_dispatch_assigns_per_run_ledgers_and_copies_owner_c14_once(self):
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="govern-ledger-scope-") as tmp:
+            base = Path(tmp)
+            scripts = base / "scripts"
+            (scripts / "lib").mkdir(parents=True)
+            (scripts / "job_receipt.py").write_text(
+                (Path(disk_budget.__file__).parent / "job_receipt.py").read_text())
+            (scripts / "lib" / "artifact_verdict.sh").write_text(
+                'artifact_removal_verdict() { [[ "$1" == --self-test ]] && echo ok; }\n')
+            log = base / "dispatch.jsonl"
+            probe = str(root / "scripts" / "c14_probe.py")
+            for fname, job in (("cleanup_tmp.sh", "cleanup_tmp"),
+                               ("tmp_scratch_sweep.sh", "tmp_scratch_sweep")):
+                (scripts / f"{job}_stub.py").write_text(
+                    "import json, os, subprocess, sys\n"
+                    "script_dir = os.path.dirname(os.path.abspath(__file__))\n"
+                    "sys.path.insert(0, script_dir)\n"
+                    "import job_receipt\n"
+                    f"job = {job!r}\n"
+                    "with open(os.environ['C14_DISPATCH_LOG'], 'a') as f:\n"
+                    "    f.write(json.dumps({'job': job, 'ledger': os.environ.get('DISK_MAGICIAN_C14_LEDGER'),\n"
+                    "                        'owner': os.environ.get('DISK_MAGICIAN_C14_LEDGER_OWNER')}) + '\\n')\n"
+                    "inv = os.path.join(script_dir, 'inv-' + job + '.json')\n"
+                    "with open(inv, 'w') as f: f.write(json.dumps([{'type': 'file', 'size': 1300}]))\n"
+                    "subprocess.run([sys.executable, os.environ['C14_PROBE'], 'account', inv,\n"
+                    "                os.environ['DISK_MAGICIAN_C14_LEDGER'], 'unproven-content'], check=True)\n"
+                    "store = job_receipt.JobReceiptStore(state_dir=os.environ['DISK_MAGICIAN_STATE_DIR'])\n"
+                    "run = store.begin(job, trigger='act')\n"
+                    "store.finish(job, run_id=run, outcome='success',\n"
+                    "             candidates={'removed_count': 1, 'deferred_count': 0, 'interrupted_count': 0},\n"
+                    "             postcondition={'df_delta_bytes': 0, 'freed_bytes': 0})\n"
+                    "nested = store.begin('nested_child', trigger='act')\n"
+                    "store.finish('nested_child', run_id=nested, outcome='success_noop')\n")
+                (scripts / fname).write_text(
+                    "#!/bin/bash\n"
+                    f'exec python3 "$(dirname "$0")/{job}_stub.py" "$@"\n')
+                (scripts / fname).chmod(0o755)
+            state = base / "state"
+            state.mkdir()
+            stale = base / "stale.jsonl"
+            stale.write_text(json.dumps({"at": 1, "reason": "stale", "bytes": 999999}) + "\n")
+            fake_df = base / "df"
+            fake_df.write_text("#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                               "echo '/dev/test 999999 1 500000 1% /'\n")
+            fake_df.chmod(0o755)
+            budgets = {"classes": {
+                "tmp_containers": {"act": "tmp_containers", "trigger": "always", "unit_budget_s": 10},
+                "tmpdir_scratch": {"act": "tmpdir_scratch", "trigger": "always", "unit_budget_s": 10}}}
+            saved = {k: os.environ.get(k) for k in ("DISK_MAGICIAN_DF_BIN", "DISK_MAGICIAN_STATE_DIR",
+                     "DISK_MAGICIAN_C14_LEDGER", "DISK_MAGICIAN_C14_LEDGER_OWNER",
+                     "C14_DISPATCH_LOG", "C14_PROBE")}
+            os.environ["DISK_MAGICIAN_DF_BIN"] = str(fake_df)
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = str(state)
+            os.environ["DISK_MAGICIAN_C14_LEDGER"] = str(stale)
+            os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+            os.environ["C14_DISPATCH_LOG"] = str(log)
+            os.environ["C14_PROBE"] = probe
+            try:
+                for _ in range(2):
+                    disk_budget.dispatch_actuators(
+                        scripts, state, budgets, {"classes": {}}, "RED",
+                        time.time(), time.monotonic() + 200, {"schema": 1, "classes": {}})
+            finally:
+                for k, v in saved.items():
+                    if v is None: os.environ.pop(k, None)
+                    else: os.environ[k] = v
+            records = [json.loads(l) for l in log.read_text().splitlines()]
+            self.assertEqual(len(records), 4)
+            self.assertEqual({r["job"] for r in records}, {"cleanup_tmp", "tmp_scratch_sweep"})
+            for r in records: self.assertEqual(r["owner"], r["job"])
+            self.assertEqual(len({r["ledger"] for r in records}), 4)  # distinct per run/class
+            for job in ("cleanup_tmp", "tmp_scratch_sweep"):
+                rec = disk_budget._receipt_data(state, job)
+                self.assertEqual(rec["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+                self.assertEqual(rec["postcondition"]["c14_ledger_status"], "ok")
+            nested = disk_budget._receipt_data(state, "nested_child")
+            self.assertNotIn("c14_kept_bytes", nested["postcondition"])
+            for name in ("govern_tmp_containers", "govern_tmpdir_scratch"):
+                gov = disk_budget._receipt_data(state, name)
+                self.assertEqual(gov["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+                self.assertEqual(gov["postcondition"]["c14_ledger_status"], "ok")
+                self.assertNotIn("stale", gov["postcondition"]["c14_kept_bytes"])
+
     def test_three_tick_deferred_actuator_gets_exclusive_300_second_slice(self):
         schedule = {"classes": {"stuck": {"deferred_ticks": 3}}}
         row, _ = disk_budget.next_actuator(

@@ -178,13 +178,15 @@ class C14AccountingTest(unittest.TestCase):
             alpha_line = next(l for l in out.stdout.splitlines() if "class=alpha " in l)
             beta_line = next(l for l in out.stdout.splitlines() if "class=beta " in l)
             self.assertIn("baseline_bytes=unknown", alpha_line)
+            self.assertIn("baseline_status=missing", alpha_line)
             self.assertIn("ledger_status=ok", alpha_line)
             self.assertIn("c14_kept_bytes=secret-like:512", alpha_line)
             self.assertNotIn("unproven-content", alpha_line)
             self.assertNotIn("not-pushed", alpha_line)
             self.assertIn("removed_count=2", alpha_line)
-            self.assertIn("freed_bytes=0", alpha_line)
-            self.assertIn("df_reclaimed_bytes=0", alpha_line)
+            self.assertIn("deleted_bytes=unknown", alpha_line)
+            self.assertIn("freed_bytes_df_based=0", alpha_line)
+            self.assertIn("df_delta_bytes=0", alpha_line)
             self.assertIn("c14_kept_bytes=not-pushed:4096", beta_line)
             self.assertNotIn("secret-like", beta_line)
             self.assertNotIn("unproven-content", beta_line)
@@ -202,7 +204,131 @@ class C14AccountingTest(unittest.TestCase):
                 if saved is None: os.environ.pop("DISK_MAGICIAN_CONFIG", None)
                 else: os.environ["DISK_MAGICIAN_CONFIG"] = saved
             self.assertIn("baseline_bytes=unknown", line)
+            self.assertIn("baseline_status=missing", line)
             self.assertIn("receipt=missing", line)
+            self.assertIn("deleted_bytes=unknown", line)
+            self.assertIn("df_delta_bytes=unknown", line)
+
+    def _baseline_state(self):
+        tmp = tempfile.TemporaryDirectory()
+        state = Path(tmp.name)
+        (state / "config.json").write_text(json.dumps({"budgets": {"classes": {"alpha": {}, "beta": {}}}}))
+        return tmp, state
+
+    def _class_line(self, state, name):
+        saved = os.environ.get("DISK_MAGICIAN_CONFIG")
+        os.environ["DISK_MAGICIAN_CONFIG"] = str(state / "config.json")
+        try:
+            return next(l for l in bs.accounting(state) if f"class={name} " in l)
+        finally:
+            if saved is None: os.environ.pop("DISK_MAGICIAN_CONFIG", None)
+            else: os.environ["DISK_MAGICIAN_CONFIG"] = saved
+
+    def _alpha_line(self, state):
+        return self._class_line(state, "alpha")
+
+    def test_complete_baseline_prints_measured_bytes_and_provenance(self):
+        tmp, state = self._baseline_state()
+        try:
+            (state / "task0_baseline.json").write_text(json.dumps({
+                "schema_version": 1, "captured_at": "2026-10-13T07:04:13Z",
+                "source": "measured stage0 fixture",
+                "classes": {"alpha": {"would_delete_bytes": 1234, "status": "complete", "source": "cmd alpha"}}}))
+            line = self._alpha_line(state)
+            self.assertIn("baseline_bytes=1234 baseline_status=complete", line)
+            self.assertIn("baseline_captured_at=2026-10-13T07:04:13Z", line)
+            self.assertIn('baseline_source="measured stage0 fixture"', line)
+            self.assertIn('baseline_class_source="cmd alpha"', line)
+        finally: tmp.cleanup()
+
+    def test_incomplete_baseline_row_is_unknown_not_zero(self):
+        tmp, state = self._baseline_state()
+        try:
+            (state / "task0_baseline.json").write_text(json.dumps({
+                "schema_version": 1, "captured_at": "2026-10-13T07:04:13Z", "source": "s",
+                "classes": {"alpha": {"would_delete_bytes": None, "status": "incomplete", "source": "cmd"}}}))
+            line = self._alpha_line(state)
+            self.assertIn("baseline_bytes=unknown baseline_status=incomplete", line)
+            self.assertNotIn("baseline_bytes=0", line)
+        finally: tmp.cleanup()
+
+    def test_malformed_baseline_header_is_explicit(self):
+        for bad in ({"schema_version": 1, "captured_at": "2026-10-13T07:04:13", "source": "s", "classes": {}},
+                    {"schema_version": 1, "captured_at": "2026-10-13T07:04:13+05:00", "source": "s", "classes": {}},
+                    {"schema_version": True, "captured_at": "2026-10-13T07:04:13Z", "source": "s", "classes": {}},
+                    {"schema_version": 1, "captured_at": "2026-10-13T07:04:13Z", "source": "  ", "classes": {}},
+                    {"schema_version": 1, "captured_at": "2026-10-13T07:04:13Z", "source": "s", "classes": []}):
+            tmp, state = self._baseline_state()
+            try:
+                (state / "task0_baseline.json").write_text(json.dumps(bad))
+                line = self._alpha_line(state)
+                self.assertIn("baseline_bytes=unknown baseline_status=malformed", line)
+            finally: tmp.cleanup()
+
+    def test_malformed_baseline_row_is_explicit_and_isolated(self):
+        for bad_row in ({"would_delete_bytes": -1, "status": "complete", "source": "s"},
+                        {"would_delete_bytes": True, "status": "complete", "source": "s"},
+                        {"would_delete_bytes": 5, "status": "partial", "source": "s"},
+                        {"would_delete_bytes": 5, "status": "complete", "source": " "}):
+            tmp, state = self._baseline_state()
+            try:
+                (state / "task0_baseline.json").write_text(json.dumps({
+                    "schema_version": 1, "captured_at": "2026-10-13T07:04:13Z", "source": "s",
+                    "classes": {"alpha": bad_row, "beta": {"would_delete_bytes": 7, "status": "complete", "source": "b"}}}))
+                self.assertIn("baseline_bytes=unknown baseline_status=malformed", self._alpha_line(state))
+                self.assertIn("baseline_bytes=7 baseline_status=complete", self._class_line(state, "beta"))
+            finally: tmp.cleanup()
+
+    def test_signed_negative_df_is_not_a_deleted_or_reclaimed_byte(self):
+        import job_receipt
+        tmp, state = self._baseline_state()
+        try:
+            store = job_receipt.JobReceiptStore(state_dir=str(state))
+            rid = store.begin("govern_alpha", trigger="act")
+            store.finish("govern_alpha", rid, "success",
+                         candidates={"removed_count": 1, "deferred_count": 0, "interrupted_count": 0},
+                         postcondition={"df_delta_bytes": -4096, "freed_bytes": 0})
+            line = self._alpha_line(state)
+            self.assertIn("df_delta_bytes=-4096", line)
+            self.assertIn("freed_bytes_df_based=0", line)
+            self.assertIn("deleted_bytes=unknown", line)
+        finally: tmp.cleanup()
+
+    def test_malformed_c14_fields_are_explicit_invalid_not_none(self):
+        import job_receipt
+        tmp, state = self._baseline_state()
+        try:
+            store = job_receipt.JobReceiptStore(state_dir=str(state))
+            rid = store.begin("govern_alpha", trigger="act")
+            store.finish("govern_alpha", rid, "success",
+                         candidates={"removed_count": 1, "deferred_count": 0, "interrupted_count": 0},
+                         postcondition={"df_delta_bytes": 0, "freed_bytes": 0,
+                                        "c14_ledger_status": 7, "c14_kept_bytes": {"bad": "x"}})
+            line = self._alpha_line(state)
+            self.assertIn("ledger_status=invalid", line)
+            self.assertIn("c14_kept_bytes=invalid", line)
+            self.assertNotIn("c14_kept_bytes=none", line)
+            self.assertNotIn("c14_kept_bytes=bad", line)
+        finally: tmp.cleanup()
+
+    def test_current_observed_stage0_artifact_renders_without_mutation(self):
+        artifact = Path("/tmp/disk_magician/resume-0649/stage0-current/task0_baseline.json")
+        if not artifact.is_file():
+            self.skipTest("stage0-current artifact not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / "task0_baseline.json").write_bytes(artifact.read_bytes())
+            out = subprocess.run([sys.executable, str(ROOT / "scripts" / "budget_status.py"), "status"],
+                                 env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)},
+                                 capture_output=True, text=True)
+            self.assertIn(out.returncode, (0, 1), out.stderr)
+            codex = next(l for l in out.stdout.splitlines() if "class=codex_documents " in l)
+            worktrees = next(l for l in out.stdout.splitlines() if "class=worktrees " in l)
+            self.assertIn("baseline_bytes=0 baseline_status=complete", codex)
+            self.assertIn("baseline_captured_at=2026-10-13T07:04:13Z", codex)
+            self.assertIn("baseline_class_source=", codex)
+            self.assertIn("baseline_bytes=unknown baseline_status=incomplete", worktrees)
+            self.assertEqual(artifact.read_bytes(), (state / "task0_baseline.json").read_bytes())
 
 
 if __name__ == "__main__":

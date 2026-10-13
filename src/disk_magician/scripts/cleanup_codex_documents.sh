@@ -22,7 +22,9 @@
 # deferred:<step> or kept:<reason>. A provenance-less document is therefore kept
 # even when it is old and idle. The pre-existing safety/age/live-cwd gates remain.
 #
-# Usage: cleanup_codex_documents.sh [--clean] [--deadline-at MONOTONIC] [--cursor FILE]
+# Usage: cleanup_codex_documents.sh [--clean|--dry-run] [--deadline-at MONOTONIC] [--cursor FILE]
+#   --clean        enable removal (default is DRY RUN)
+#   --dry-run      explicit preview (same as the default); never activates cleanup
 #   --deadline-at  cooperative soft deadline (monotonic seconds, from the shared
 #                  actuator_deadline.sh helper). Before each unit the sweep asks
 #                  act_unit_fits; when a unit would not finish in time it stops
@@ -82,6 +84,7 @@ DRY_RUN=true
 for _arg in ${ACT_ARGS[@]+"${ACT_ARGS[@]}"}; do
   case "$_arg" in
     --clean) DRY_RUN=false ;;
+    --dry-run) DRY_RUN=true ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown argument: $_arg" >&2; exit 2 ;;
   esac
