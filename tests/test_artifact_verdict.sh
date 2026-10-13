@@ -147,7 +147,7 @@ source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
 baseline() {
     local f gd
     f="$(lease_path_for "$1")" && gd="$(git -C "$1" rev-parse --absolute-git-dir)"
-    mkdir -p "${f%/*}" && printf '{"git_meta": %s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
+    mkdir -p "${f%/*}" && printf '{"path": "%s", "git_meta": %s}\n' "$1" "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
 }
 # mkpushed <name>: bare remote + clone with main pushed and a git_meta baseline.
 mkpushed() {
@@ -420,7 +420,7 @@ lease() {
 lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
 lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
 assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
-mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
+mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && printf '{"path":"%s","owner":null}\n' "$PT/pr-none" >"$f"
 assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
 lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
 # A lease that cannot be stat'ed is not absent: EACCES on the lease dir or a parent keeps.
@@ -433,8 +433,8 @@ chmod 700 "${ld%/*}"
 own() {
     local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
     python3 -c 'import json,os,sys; f=sys.argv[1]; d=json.load(open(f)) if os.path.exists(f) else {}
-d.update(owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
-        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2"
+d.update(path=sys.argv[7], owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
+        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" "$1"
 }
 mkdir -p "$PT/pr-nest" "$PT/pr-1" && for d in pr-nest pr-1; do git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d/repo" && baseline "$PT/$d/repo"; done
 own "$PT/pr-nest/repo" null && own "$PT/pr-1/repo" '"2026-10-01T00:00:00Z"' && own "$PT/pr-1" null && age "$PT/pr-nest" 43200 && age "$PT/pr-1" 43200
@@ -481,7 +481,7 @@ for dp, _, fns in os.walk(d):
                       crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
         json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
 os.makedirs(os.path.dirname(lease), exist_ok=True)
-json.dump({"owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+json.dump({"path": d, "owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
            "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
            "upload_manifest": m}, open(lease, "w"))
 PY
@@ -497,8 +497,8 @@ assert_eq "$(av "$PT/deploy")" kept:unproven-content "custom-named deploy_backup
 git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
 assert_eq "$(av "$PT/evrepo/evidence")" kept:unproven-content "unpublished evidence/results.json"
 mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
-printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
-    "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
+printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+    "$PT/inv" "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
 assert_eq "$(av "$PT/inv")" kept:unproven-content "manifest is not a copy (inventory only, never published)"
 for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
     mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
@@ -602,6 +602,36 @@ age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
 unset DISK_MAGICIAN_STAT_BIN
+# B1/F1: the lease-record scan must fail closed on unusable records and bind each
+# record to the canonical lease filename for its recorded path.
+mkdir -p "$PT/pr-lease-scan/child" && printf 'KEEP\n' >"$PT/pr-lease-scan/child/data.bin"
+age "$PT/pr-lease-scan" 43200
+CL="$(lease_path_for "$PT/pr-lease-scan/child")" && mkdir -p "${CL%/*}"
+# leasefrag: live-owner fragment so an unchecked record would otherwise be ignored.
+leasefrag() { printf '"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":null' \
+    $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW"; }
+printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/ps-dead" && chmod +x "$TMPROOT/stub/ps-dead"
+lease "$PT/pr-lease-scan/child" null
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:live-owner "canonical live child lease keeps candidate (control)"
+printf '{%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease missing path key keeps candidate"
+printf '{"path":"",%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease empty path keeps candidate"
+printf '{"path":123,%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease non-string path keeps candidate"
+printf '[1,2]\n' >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "valid JSON non-object record keeps candidate"
+rm -f "$CL"
+printf '{"path":"%s","owner":{"pid":%d}}\n' "$PT/pr-lease-scan/child" $$ >"$(lease_dir)/c14-lease-misnamed.json"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "record under non-canonical filename keeps candidate"
+rm -f "$(lease_dir)/c14-lease-misnamed.json"
+[[ "$(cat "$PT/pr-lease-scan/child/data.bin")" == KEEP ]] \
+    && ok "unusable-record probes left candidate bytes intact" || bad "candidate bytes changed"
+lease "$PT/pr-lease-scan/child" null && own "$PT/pr-lease-scan/child" '"2026-10-01T00:00:00Z"'
+assert_eq "$(eph "$PT/pr-lease-scan")" remove "canonical released child lease leaves candidate eligible (control)"
+lease "$PT/pr-lease-scan/child" null
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps-dead" eph "$PT/pr-lease-scan")" remove "canonical dead child lease leaves candidate eligible (control)"
+own "$PT/pr-lease-scan/child" '"2026-10-01T00:00:00Z"'
 
 echo "== verdict stays blocked =="
 v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
