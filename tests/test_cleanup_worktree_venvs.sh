@@ -179,16 +179,23 @@ env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
   >"$OUT3" 2>&1
 OUT3_CONTENT=$(cat "$OUT3")
-# NOTE: currently BLOCKED on the shared artifact_verdict admin-inventory bug
-# (repair_167): a linked worktree's rebuildable verdict appends its admin
-# entries to the verdict inventory, so quarantine_remove's re-hash compares
-# candidate-only content against a merged inventory and keeps the entry
-# (kept:rehash-mismatch). This assertion is intentionally NOT weakened to
-# accept an arbitrary C14 keep; it stays red until the shared fix lands.
-if [[ ! -d "$STALE_WT/venv.bak.20260101" && ! -d "$STALE_WT/.venv.bak.20260101" ]]; then
-  record_pass "stale bak dirs actually removed with approval"
+# The shared admin-inventory reconciliation (repair_167) is now merged, so the
+# eligible `venv.bak.*` entry (approved rebuildable table) is ACTUALLY removed.
+# `.venv.bak.*` is NOT in that table (see _av_rebuildable's name regex), so it
+# must be kept with an explicit C14 reason. The positive removal assertion below
+# remains strict on the eligible path; the ineligible path is asserted KEPT
+# rather than silently widening policy to force it removable.
+if [[ ! -d "$STALE_WT/venv.bak.20260101" ]]; then
+  record_pass "eligible venv.bak dir actually removed with approval"
 else
-  record_fail "stale bak dirs actually removed with approval" "BLOCKED on shared admin-inventory fix (repair_167): still present in: $STALE_WT"
+  record_fail "eligible venv.bak dir actually removed with approval" "still present in: $STALE_WT/venv.bak.20260101"
+fi
+assert_contains "ineligible .venv.bak kept with explicit C14 reason" \
+  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:unproven-content)" "$OUT3_CONTENT"
+if [[ -d "$STALE_WT/.venv.bak.20260101" ]]; then
+  record_pass "ineligible .venv.bak retained on disk (outside approved table)"
+else
+  record_fail "ineligible .venv.bak retained on disk (outside approved table)" "was removed despite being outside the approved table"
 fi
 if [[ -d "$RECENT_WT/venv.bak.20251201" ]]; then
   record_pass "recent-worktree bak dir survives real --clean run"
