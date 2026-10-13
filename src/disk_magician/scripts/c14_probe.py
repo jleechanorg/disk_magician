@@ -185,16 +185,24 @@ def admin(ad, lease=None):
     names = set(os.listdir(ad))
     if "locked" in names or names & {"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}:
         return print("kept:locked" if "locked" in names else "kept:dirty")
-    files, inv = [], os.environ.get("C14_INVENTORY_OUT")
+    files, inv, rows = [], os.environ.get("C14_INVENTORY_OUT"), []
+    def receipt(rel, st):  # original admin state for the receipt; entry_type stays distinct from the type=admin envelope
+        if not inv: return
+        row = {"admin": ad, "path": rel, "entry_type": "dir" if stat.S_ISDIR(st.st_mode) else "file",
+               "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size}
+        if stat.S_ISREG(st.st_mode):
+            row["sha256"] = hashlib.sha256(open(os.path.join(ad, rel), "rb").read()).hexdigest()
+        rows.append(row)
+    receipt(".", os.lstat(ad))  # the admin root carries its own dev/ino for the downstream remover
     for dp, dns, fns in os.walk(ad, onerror=lambda e: sys.exit("kept:check-failed")):
         for n in fns + dns:  # a symlink, special file or unparsed entry anywhere: admin-unknown
             p = os.path.join(dp, n); rel = os.path.relpath(p, ad); st = os.lstat(p)
             if not entry_ok(p, rel, st): return print("kept:admin-unknown")
-            if stat.S_ISDIR(st.st_mode): continue
+            if stat.S_ISDIR(st.st_mode):
+                receipt(rel, st)  # allowed refs/** and logs/** directories carry dev/ino too
+                continue
             files += [p] if rel.endswith("HEAD") or "/" in rel else []  # *HEAD, refs/**, logs/**
-            if inv:
-                print(json.dumps({"admin": ad, "path": rel, "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size,
-                                  "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}), file=open(inv, "a"))
+            receipt(rel, st)
     cw = os.path.join(ad, "config.worktree")  # regular here; non-empty must match the lease git_meta baseline
     if "config.worktree" in names and os.path.getsize(cw) and hashlib.sha256(open(cw, "rb").read()).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
@@ -202,6 +210,9 @@ def admin(ad, lease=None):
     head = open(os.path.join(ad, "HEAD")).read().strip()
     if head.startswith("ref: "):  # the branch reflog lives in the common dir
         files += [p for p in [os.path.join(ad, open(os.path.join(ad, "commondir")).read().strip(), "logs", head[5:])] if os.path.isfile(p)]
+    if inv:
+        with open(inv, "a", encoding="utf-8") as fh:
+            for row in rows: print(json.dumps(row), file=fh)
     oids = sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})
     print("kept:admin-unknown" if "COMMIT_EDITMSG" in names and not editmsg_ok(ad, oids) else "\n".join(oids))
 
@@ -541,7 +552,12 @@ def repos(inv_file):
                     by_path.get(name, {}).get("type") == kind for name, kind in
                     (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                 roots.add(".")
-            if e.get("type") == "dir" and rel not in gitdir_targets and rel != ".git" and not rel.endswith("/.git"):
+            # Bare repos inside any .git/ directory (e.g. .git/modules/<sm>) are
+            # metadata owned by the repo above them; the legacy find path
+            # excludes them with the same component rule. A directory actually
+            # named foo.git is untouched.
+            if (e.get("type") == "dir" and rel not in gitdir_targets
+                    and ".git" not in rel.split("/")):
                 if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
                        (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                     roots.add(rel)
@@ -571,15 +587,22 @@ def secrets(inv_file):
     except Exception:
         print("kept:check-failed")
 
-def merge_inventory(inv_file, admin_file, out_file):
+def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         if os.path.isfile(admin_file):
             for line in open(admin_file, encoding="utf-8"):
-                if line.strip():
-                    entry = json.loads(line)
-                    entry["type"] = "admin"
-                    entries.append(entry)
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                # A caller-supplied channel can accumulate rows for every
+                # repository checked in a run. A receipt for one worktree root
+                # may bind only rows canonicalized to that candidate's own git
+                # dir; an empty/absent filter binds none.
+                if admin_filter is not None and entry.get("admin") != admin_filter:
+                    continue
+                entry["type"] = "admin"
+                entries.append(entry)
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"), sort_keys=True)
             f.flush(); os.fsync(f.fileno())
@@ -640,7 +663,7 @@ if __name__ == "__main__":
             sys.exit(newest_mtime(a[1]))
         if len(a) == 2 and a[0] == "secrets":
             sys.exit(secrets(a[1]))
-        if len(a) == 4 and a[0] == "merge-inventory":
+        if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":
             sys.exit(open_file(a[1], a[2] if len(a) == 3 and a[2] else None))
