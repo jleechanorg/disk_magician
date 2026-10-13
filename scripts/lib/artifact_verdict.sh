@@ -29,9 +29,16 @@ c14_discover_repos() {
                 [[ "$target" == "$root"/* ]] || { printf 'kept:gitdir-invalid\0'; return 1; }
             fi
             printf '%s\0' "$d"
-        # A bare repo; git internals (.git/modules, .git/worktrees) go with their owner.
-        elif [[ -f "$p" && -d "$d/objects" && -d "$d/refs" && "/$d/" != */.git/* ]]; then
-            printf '%s\0' "$d"
+        # A bare repo; git internals (.git/modules, .git/worktrees) go with their
+        # owner. HEAD/objects/refs may be internal symlinks, but a repo-looking
+        # shape we cannot validate fails closed rather than falling through to
+        # ordinary ephemeral content.
+        elif [[ "${p##*/}" == HEAD && "/$d/" != */.git/* ]]; then
+            if [[ -f "$p" && -d "$d/objects" && -d "$d/refs" ]]; then
+                printf '%s\0' "$d"
+            elif [[ -L "$p" || -L "$d/objects" || -L "$d/refs" || -e "$d/objects" || -e "$d/refs" ]]; then
+                printf 'kept:gitdir-invalid\0'; return 1
+            fi
         fi
     done < <(find "$root" \( -name .git -o -name HEAD \) -print0 2>/dev/null && printf 'OK\0')
     [[ -n "$done" ]]

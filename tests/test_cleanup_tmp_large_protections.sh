@@ -520,6 +520,53 @@ assert_contains "GREEN 4: same-filesystem archive move reports zero reclaimed by
 assert_contains "GREEN 4: quarantine accounting is reported separately" \
   "Dirs archived: 1" "$G4_OUT_CONTENT"
 
+echo "GREEN 4b: a receipt-write failure preserves the source and the run continues"
+G4B_PRIVATE_TMP="$TMP_ROOT/g4b-private-tmp"
+G4B_TMP="$TMP_ROOT/g4b-tmp"
+G4B_ARCHIVE="$TMP_ROOT/g4b-archive"
+G4B_BIN="$TMP_ROOT/g4b-bin"
+mkdir -p "$G4B_PRIVATE_TMP" "$G4B_TMP" "$TMP_ROOT/g4b-home" "$G4B_ARCHIVE/20200101T000000Z/aged_entry"
+touch "$G4B_ARCHIVE/20200101T000000Z/aged_entry/payload.bin"
+set_old_mtime "$G4B_ARCHIVE/20200101T000000Z"
+make_find_shim "$G4B_BIN" "$G4B_PRIVATE_TMP" "$G4B_TMP"
+make_large_dir "$G4B_PRIVATE_TMP/fail_candidate"
+make_large_dir "$G4B_PRIVATE_TMP/ok_candidate"
+set_old_mtime "$G4B_PRIVATE_TMP/fail_candidate"
+set_old_mtime "$G4B_PRIVATE_TMP/ok_candidate"
+REAL_PYTHON3="$(command -v python3)"
+cat > "$G4B_BIN/python3" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == *c14_probe.py && "\${2:-}" == "archive-receipt" && "\${3:-}" == *fail_candidate* ]]; then
+  echo "injected archive receipt failure" >&2
+  exit 1
+fi
+exec "$REAL_PYTHON3" "\$@"
+EOF
+chmod +x "$G4B_BIN/python3"
+G4B_OUT="$TMP_ROOT/g4b.out"
+if run_capture "$G4B_OUT" env -i HOME="$TMP_ROOT/g4b-home" \
+  PATH="$G4B_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G4B_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$G4B_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$G4B_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G4B_RC=0
+else
+  G4B_RC=$?
+fi
+G4B_OUT_CONTENT=$(cat "$G4B_OUT")
+assert_rc "GREEN 4b: exits 0 after a receipt failure (no set -e abort)" 0 "$G4B_RC"
+assert_exists "GREEN 4b: failed candidate path is intact" "$G4B_PRIVATE_TMP/fail_candidate/payload.bin"
+G4B_FAIL_ARCHIVED=$(/usr/bin/find "$G4B_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name fail_candidate 2>/dev/null | wc -l | tr -d ' ')
+assert_rc "GREEN 4b: failed candidate was not moved" 0 "$G4B_FAIL_ARCHIVED"
+assert_exists "GREEN 4b: later eligible candidate archived" "$G4B_ARCHIVE"/*/ok_candidate/payload.bin
+assert_contains "GREEN 4b: archive failure is logged honestly" "could not archive" "$G4B_OUT_CONTENT"
+assert_contains "GREEN 4b: only the successful archive is counted" "Dirs archived: 1" "$G4B_OUT_CONTENT"
+assert_missing "GREEN 4b: run continued to purge_aged_archives" "$G4B_ARCHIVE/20200101T000000Z"
+
 echo "GREEN 5: an aged archive entry is purged (space actually reclaimed on a later run)"
 G5_PRIVATE_TMP="$TMP_ROOT/g5-private-tmp"
 G5_TMP="$TMP_ROOT/g5-tmp"

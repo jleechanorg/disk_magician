@@ -1012,9 +1012,14 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    archive_path "$d" "$kb" >/dev/null
-    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
-    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+    if archive_path "$d" "$kb" >/dev/null; then
+      ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+      DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+    else
+      # A failing archive (mkdir, origin receipt or mv) preserves the source;
+      # keep going so later independent candidates and purge_aged_archives still run.
+      log "ERROR: could not archive $d; leaving it in place and continuing"
+    fi
   done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 

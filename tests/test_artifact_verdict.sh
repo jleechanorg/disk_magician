@@ -503,7 +503,7 @@ assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out
 assert_eq "$(shasum -a 256 "$caller_channel" | awk '{print $1}')" "$caller_before" "caller-owned C14_INVENTORY_OUT is never written or removed"
 [[ -z "$(find "$av_tmp" -mindepth 1 -print -quit 2>/dev/null)" ]] && ok "each verdict removes its owned admin channel and temp dir" || bad "verdict temp files leaked: $(find "$av_tmp" -print)"
 python3 - "$wt_gd" "$TMPROOT/other-admin" "$wt_inv_one" "$wt_inv_two" <<'PY' && ok "worktree-root receipts bind only the candidate's own admin rows" || bad "worktree-root receipt admin binding"
-import json, os, sys
+import hashlib, json, os, sys
 gd, stale, *paths = sys.argv[1:]
 root_st = os.lstat(gd)
 for p in paths:
@@ -514,17 +514,23 @@ for p in paths:
     assert all(r.get("admin") != stale for r in rows), p
     # The original admin receipt carries the root identity and every allowed
     # refs/** / logs/** directory, plus file hashes. type=admin is the merge
-    # envelope; entry_type keeps the underlying filesystem kind.
+    # envelope; entry_type keeps the underlying filesystem kind. Each row's
+    # dev/ino and file hash must bind to that exact path.
     by_path = {r["path"]: r for r in admins}
     root = by_path.get(".")
     assert root is not None and root.get("entry_type") == "dir", (p, sorted(by_path))
-    assert type(root.get("dev")) is int and type(root.get("ino")) is int, (p, root)
-    assert (root["dev"], root["ino"]) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
+    assert (root.get("dev"), root.get("ino")) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
     dirs = [r for r in admins if r.get("path") != "." and r.get("entry_type") == "dir"]
     assert dirs and all(type(r.get("dev")) is int and type(r.get("ino")) is int for r in dirs), (p, dirs)
     assert "logs" in {r["path"] for r in dirs}, (p, [r["path"] for r in dirs])
     files = [r for r in admins if r.get("entry_type") == "file"]
     assert files and all(len(r.get("sha256", "")) == 64 for r in files), (p, files)
+    for r in admins:
+        st = os.lstat(gd if r["path"] == "." else os.path.join(gd, r["path"]))
+        assert (r["dev"], r["ino"]) == (st.st_dev, st.st_ino), (p, r, st)
+        if r["entry_type"] == "file":
+            digest = hashlib.sha256(open(os.path.join(gd, r["path"]), "rb").read()).hexdigest()
+            assert r["sha256"] == digest, (p, r, digest)
 PY
 unset C14_INVENTORY_OUT
 unset TMPDIR
