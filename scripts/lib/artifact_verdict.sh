@@ -124,18 +124,22 @@ c14_repos_ok() {
     fi
 }
 
-# c14_ephemeral_retention <canonical path>: minutes of the declared-ephemeral row E2-E7
-# it matches (§7.2; longest wins), rc 1 for none. Fixed floors; E1 is not a row here.
+# c14_ephemeral_retention <canonical path> [<archived content path>] [--archive-origin]: minutes of
+# the declared-ephemeral row E2-E7 it matches (§7.2; longest wins), rc 1 for
+# none. --archive-origin restricts classification to the E2/E3 scratch-root
+# rows. When validating a receipt, path selects the row and archived content
+# supplies the source-shape check without probing a recreated original path.
 c14_ephemeral_retention() {
-    local p=$1 r rel
+    local p=$1 content=${2:-$1} archive_origin=${3:-} r rel
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) ]] || continue
         if [[ "$rel" =~ ^(pr[0-9]|pr-|pr_|claude-|claude_)[^/]*$ ]]; then echo 2880
-        elif [[ ( "$rel" =~ ^agent_prompt_[^/]*\.txt$ && -f "$p" ) || ( "$rel" =~ ^[^/]+(/[^/]+)?$ && -d "$p/.git" ) ]]; then echo 240
-        elif [[ ( "$rel" =~ ^cli_validation_gemini_[^/]*$ && -d "$p" ) || ( "$rel" != */* && -f "$p/.git" ) ]]; then echo 60
+        elif [[ ( "$rel" =~ ^agent_prompt_[^/]*\.txt$ && -f "$content" ) || ( "$rel" =~ ^[^/]+(/[^/]+)?$ && -d "$content/.git" ) ]]; then echo 240
+        elif [[ ( "$rel" =~ ^cli_validation_gemini_[^/]*$ && -d "$content" ) || ( "$rel" != */* && -f "$content/.git" ) ]]; then echo 60
         else continue; fi
         return 0
     done < <(scratch_roots_get_unique)
+    [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
@@ -147,7 +151,7 @@ c14_ephemeral_retention() {
 # origin receipt. `none` falls through to ordinary provenance; invalid identity
 # or a receipt whose E2/E3 retention has not elapsed stays kept.
 c14_archive_origin() (
-    local p=$1 inv=$2 archive_root receipt info original archived_at retention now minimum
+    local p=$1 inv=$2 archive_root receipt info original archived_at retention expected_retention now minimum
     archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
     [[ -d "$archive_root" ]] || { echo none; return 0; }
     archive_root="$(cd "$archive_root" 2>/dev/null && pwd -P)" || { echo kept:archive-identity; return 0; }
@@ -160,6 +164,8 @@ c14_archive_origin() (
     archived_at="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archived_at"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
     retention="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["retention_minutes"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
     case "$retention" in 60|240|2880|4320|10080|30240|43200) ;; *) echo kept:archive-identity; return 0 ;; esac
+    expected_retention="$(c14_ephemeral_retention "$original" "$p" --archive-origin)" || { echo kept:archive-identity; return 0; }
+    [[ "$retention" == "$expected_retention" ]] || { echo kept:archive-identity; return 0; }
     minimum=1440
     (( retention > minimum )) && minimum=$retention
     now="$(date +%s)"

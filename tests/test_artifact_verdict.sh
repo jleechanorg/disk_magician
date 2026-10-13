@@ -616,6 +616,32 @@ archive_fixture "$unknown_source" "$unknown_entry" "$((NOW - 25 * 3600))"
 age "$unknown_entry" 43200
 assert_eq "$(av "$unknown_entry" --kind ephemeral)" kept:archive-identity "200 MiB archive with unknown origin stays kept"
 
+arbitrary_source="$PT/unregistered-origin-48h"
+arbitrary_entry="$ARCHIVE_ROOT/20261010T011000Z/unregistered-origin-48h"
+mkdir -p "$arbitrary_source" && printf 'must not trust arbitrary retention' >"$arbitrary_source/payload"
+mkdir -p "${arbitrary_entry%/*}"
+"$PROBE" archive-receipt "$arbitrary_source" "$arbitrary_entry.c14-origin.json" "$((NOW - 49 * 3600))" 2880 >/dev/null
+mv "$arbitrary_source" "$arbitrary_entry"
+age "$arbitrary_entry" 50000
+assert_eq "$(av "$arbitrary_entry" --kind ephemeral)" kept:archive-identity "E1 rejects allowed retention without a matching E2/E3 origin row"
+
+later_row_source="$PT/e4-origin-fixture"
+later_row_entry="$ARCHIVE_ROOT/20261010T012000Z/e4-origin-fixture"
+mkdir -p "$later_row_source" "${later_row_entry%/*}" && printf 'E4 is not an E1 origin row' >"$later_row_source/payload"
+"$PROBE" archive-receipt "$later_row_source" "$later_row_entry.c14-origin.json" "$((NOW - 49 * 3600))" 10080 >/dev/null
+python3 - "$later_row_entry.c14-origin.json" "$HOME/.aside/u/a/sessions/s1" <<'PY'
+import json, sys
+path, original = sys.argv[1:]
+row = json.load(open(path, encoding="utf-8"))
+row["original_path"] = original
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(row, f, separators=(",", ":"))
+    f.write("\n")
+PY
+mv "$later_row_source" "$later_row_entry"
+age "$later_row_entry" 50000
+assert_eq "$(av "$later_row_entry" --kind ephemeral)" kept:archive-identity "E1 rejects a valid E4 row outside its E2/E3 origin scope"
+
 legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
 mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
 assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:unproven-content "pre-receipt archive falls through to ordinary provenance"
