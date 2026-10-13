@@ -71,3 +71,18 @@ scratch_roots_get() {
 scratch_roots_get_unique() {
   scratch_roots_get | awk '!seen[$0]++'
 }
+
+# scratch_roots_protected [config.json] — never-touch tmp root basenames, one per
+# line: DISK_MAGICIAN_PROTECTED_TMP_ROOTS (space-separated), else the config's
+# "protected_tmp_roots", else the defaults cleanup_tmp.sh uses.
+scratch_roots_protected() {
+  local r out=()
+  if [[ -n "${DISK_MAGICIAN_PROTECTED_TMP_ROOTS:-}" ]]; then
+    read -r -a out <<<"$DISK_MAGICIAN_PROTECTED_TMP_ROOTS"
+  elif [[ -f "${1:-}" ]]; then
+    while IFS= read -r r; do [[ -n "$r" ]] && out+=("$r"); done < <(python3 -c 'import json,sys
+for r in json.load(open(sys.argv[1])).get("protected_tmp_roots") or []: print(r)' "$1" 2>/dev/null)
+  fi
+  [[ ${#out[@]} -gt 0 ]] || out=(worldarchitect.ai worldai_claw wa-missions)
+  printf '%s\n' "${out[@]}"
+}

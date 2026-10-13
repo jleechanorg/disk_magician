@@ -103,6 +103,8 @@ class FleetSourceRootTests(unittest.TestCase):
             "resolve_state_repo_path.py",
             "check_launchd_fleet.sh",
             "job_inventory.py",
+            "budget_status.py",
+            "disk_observer.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         (scripts / "check_launchd_fleet.sh").chmod(0o755)
