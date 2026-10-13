@@ -131,6 +131,30 @@ BINDING="$TMP/resume-binding.json"; python3 "$ROOT/scripts/quarantine_rename.py"
 RESUME="$(quarantine_phase2 "$BINDING" "$CRASH_ID")"
 check 'crash before sidecar drop: retry drops the final sidecar' [ "$RESUME" = removed ] && [ ! -e "$CRASH_SIDE" ]
 
+# The terminal index record makes each sidecar/index cleanup gap crash-recoverable.
+fixture; DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index run
+CRASH_ID="$(index_id)"
+check 'phase2 terminal-mark crash leaves durable index marker' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'phase2 terminal-mark crash reconciles cleanly' bash -c '[[ "$1" == *"reconciled:$2:terminal-removed"* && ! -e "$3" ]]' _ "$RECOVERED" "$CRASH_ID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+
+prepare_quarantine; CRASH_ID="$QID"
+RESTORE_CRASH="$(env DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index bash "$ROOT/disk_magician.sh" quarantine restore "$QID" 2>&1 || true)"
+check 'restore terminal-mark crash leaves restored root and durable index' bash -c '[[ -e "$1" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "restored"'\'' "$2"' _ "$A" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'restore terminal-mark crash reconciles cleanly' bash -c '[[ "$1" == *"reconciled:$2:terminal-restored"* && ! -e "$3" && ! -e "$4" ]]' _ "$RECOVERED" "$QID" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+
+prepare_quarantine; CRASH_ID="$QID"; mv "$Q/$QID" "$A"
+env DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index bash "$ROOT/disk_magician.sh" quarantine reconcile >/dev/null 2>&1 || true
+check 'reconcile terminal-mark crash leaves durable index marker' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "original"' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'reconcile terminal-mark crash clears both metadata files' bash -c '[[ "$1" == *"reconciled:$2:terminal-original"* && ! -e "$3" && ! -e "$4" ]]' _ "$RECOVERED" "$CRASH_ID" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+
+fixture; run DISK_MAGICIAN_TEST_INDEX_DROP_FAIL=1 X=1
+CRASH_ID="$(index_id)"
+check 'index cleanup failure preserves terminal recovery marker' bash -c '[[ "$1" == kept:quarantine_partial_kept && ! -e "$2" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"'\'' "$3"' _ "$OUT" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'index cleanup failure is replayed by reconcile' bash -c '[[ "$1" == *"reconciled:$2:terminal-removed"* && ! -e "$3" ]]' _ "$RECOVERED" "$CRASH_ID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
 # A missing frozen root does not prove deletion: it may have moved elsewhere.
 prepare_quarantine; MOVED="$TMP/moved-root-$QID"; mv "$Q/$QID" "$MOVED"
 PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"

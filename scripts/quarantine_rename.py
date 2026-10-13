@@ -122,6 +122,7 @@ def index_read(qid):
         raise ValueError("invalid quarantine index entry")
     return record
 def index_drop(qid):
+    if ENV.get("DISK_MAGICIAN_TEST_INDEX_DROP_FAIL"): return False
     try: directory = index_dir()
     except OSError: return False
     dfd = os.open(directory, DIRFL)
@@ -131,6 +132,30 @@ def index_drop(qid):
         os.fsync(dfd); return True
     except OSError: return False
     finally: os.close(dfd)
+def index_mark_terminal(qid, outcome):
+    record = index_read(qid)
+    record["terminal"] = outcome
+    directory = index_dir(); temp = "." + qid + "." + secrets.token_hex(8) + ".tmp"
+    dfd = os.open(directory, DIRFL)
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            data = json.dumps(record, separators=(",", ":")).encode()
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0: raise OSError("short terminal index write")
+                view = view[written:]
+            os.fsync(fd)
+        finally: os.close(fd)
+        os.replace(temp, qid + ".json", src_dir_fd=dfd, dst_dir_fd=dfd)
+        os.fsync(dfd)
+    except Exception:
+        try: os.unlink(temp, dir_fd=dfd)
+        except OSError: pass
+        raise
+    finally: os.close(dfd)
+    if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
 def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re-hash checks all pass
     canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
     try:
@@ -470,9 +495,7 @@ def phase2(binding_file, qid, deadline=None):
             os.fsync(qfd)
             if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
             if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
-            os.unlink(side, dir_fd=qfd)
-            os.fsync(qfd)
-            if not index_drop(qid): return "kept:quarantine_partial_kept"
+            if not finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
             return "removed"
         if record.get("phase") != "deleting":
             record["phase"] = "deleting"
@@ -490,9 +513,7 @@ def phase2(binding_file, qid, deadline=None):
         record["root_removed"] = True
         update_sidecar(qfd, side, record)
         if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
-        os.unlink(side, dir_fd=qfd)
-        os.fsync(qfd)
-        if not index_drop(qid): return "kept:quarantine_partial_kept"
+        if not finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
         return "removed"
     except Exception: return "kept:quarantine_partial_kept"
     finally:
@@ -516,8 +537,13 @@ def indexed_item(qid):
         opened = os.fstat(qfd)
         if (opened.st_dev, opened.st_ino) != (index["quarantine_dev"], index["quarantine_ino"]):
             raise ValueError("quarantine directory retargeted")
-        fd = os.open(qid + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=qfd)
-        with os.fdopen(fd, "r") as f: record = json.load(f)
+        try:
+            fd = os.open(qid + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=qfd)
+            with os.fdopen(fd, "r") as f: record = json.load(f)
+        except FileNotFoundError:
+            if index.get("terminal") not in ("removed", "restored", "original", "rolled-back"):
+                raise
+            return index, pfd, qfd, None
         inventory = record.get("inventory", []) if isinstance(record, dict) else []
         root = next((e for e in inventory if isinstance(e, dict) and e.get("path") == "."), None)
         if (not isinstance(record, dict) or record.get("id") != qid or
@@ -531,13 +557,26 @@ def indexed_item(qid):
         return index, pfd, qfd, record
     except Exception:
         os.close(qfd); os.close(pfd); raise
-def finish_sidecar(qfd, qid):
-    os.unlink(qid + ".json", dir_fd=qfd); os.fsync(qfd)
-    if not index_drop(qid): raise OSError("quarantine index cleanup failed")
+def finish_sidecar(qfd, qid, outcome):
+    index_mark_terminal(qid, outcome)
+    try: os.unlink(qid + ".json", dir_fd=qfd)
+    except FileNotFoundError: pass
+    os.fsync(qfd)
+    return index_drop(qid)
 def reconcile_one(qid, deadline=None):
     pfd = qfd = -1
     try:
         index, pfd, qfd, record = indexed_item(qid)
+        terminal = index.get("terminal")
+        if terminal in ("removed", "restored", "original", "rolled-back"):
+            if record is not None and record.get("id") != qid:
+                return f"alert:{qid}:terminal-sidecar-mismatch"
+            if record is not None:
+                try: os.unlink(qid + ".json", dir_fd=qfd)
+                except FileNotFoundError: pass
+                os.fsync(qfd)
+            if not index_drop(qid): return f"alert:{qid}:terminal-index-cleanup-failed"
+            return f"reconciled:{qid}:terminal-{terminal}"
         phase = record.get("phase")
         base = os.path.basename(record["original"])
         expected = (record["dev"], record["ino"])
@@ -559,13 +598,15 @@ def reconcile_one(qid, deadline=None):
         if phase not in ("intent", "rollback_pending", "rollback_conflict"):
             return f"alert:{qid}:malformed-phase"
         if original_matches and at_quarantine is None:
-            finish_sidecar(qfd, qid); return f"reconciled:{qid}:original"
+            if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
+            return f"reconciled:{qid}:original"
         if at_original is None and quarantine_matches:
             renamex(qfd, qid, pfd, base)
             os.fsync(qfd); os.fsync(pfd)
             restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
             if (restored.st_dev, restored.st_ino) != expected: return f"alert:{qid}:rollback-identity-mismatch"
-            finish_sidecar(qfd, qid); return f"reconciled:{qid}:rolled-back"
+            if not finish_sidecar(qfd, qid, "rolled-back"): return f"alert:{qid}:terminal-index-cleanup-failed"
+            return f"reconciled:{qid}:rolled-back"
         return f"alert:{qid}:location-conflict"
     except FileNotFoundError:
         return f"alert:{qid}:missing-index-or-sidecar"
@@ -645,7 +686,7 @@ def quarantine_restore(qid):
             try: update_sidecar(qfd, qid + ".json", record)
             except OSError: pass
             return "kept:restore-identity-mismatch"
-        finish_sidecar(qfd, qid)
+        if not finish_sidecar(qfd, qid, "restored"): return "kept:quarantine_partial_kept"
         return f"restored:{qid}"
     except FileNotFoundError: return "kept:unknown-quarantine-id"
     except Exception: return "kept:quarantine_restore_failed"
