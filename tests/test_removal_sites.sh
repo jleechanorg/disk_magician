@@ -20,6 +20,32 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/sandbox_env.sh
+source "$ROOT/tests/lib/sandbox_env.sh"
+
+# This lint reads and analyzes destructive cleanup sources but never executes a
+# cleanup command. Keep its temporary dependency-closure fixtures inside an
+# explicit sandbox so the test remains valid under the repository's sandbox
+# context lint and any future fixture operation fails closed.
+TEST_SANDBOX="$(mktemp -d /tmp/disk-magician-removal-sites.XXXXXX)" || {
+  echo "FATAL: could not allocate /tmp sandbox" >&2
+  exit 2
+}
+if [[ -z "$TEST_SANDBOX" || ! -d "$TEST_SANDBOX" || -L "$TEST_SANDBOX" ]]; then
+  echo "FATAL: invalid or symlinked sandbox '$TEST_SANDBOX'" >&2
+  exit 2
+fi
+TEST_SANDBOX="$(cd "$TEST_SANDBOX" && pwd -P)" || {
+  echo "FATAL: could not canonicalize sandbox" >&2
+  exit 2
+}
+case "$TEST_SANDBOX" in
+  /tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: sandbox not under /tmp: '$TEST_SANDBOX'" >&2; exit 2 ;;
+esac
+trap 'rm -rf "$TEST_SANDBOX"' EXIT
+export DISK_MAGICIAN_TEST_CONTEXT=1
+export DISK_MAGICIAN_TEST_SANDBOX="$TEST_SANDBOX"
 
 python3 - "$ROOT" "${REMOVAL_SITES_AUDIT:-0}" <<'PY'
 import os, re, sys, json, tempfile, ast, textwrap
@@ -1077,7 +1103,8 @@ def _write(path, text):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
 
-closure_root = tempfile.mkdtemp(prefix="dm-lint-closure-", dir="/tmp")
+closure_root = tempfile.mkdtemp(prefix="dm-lint-closure-",
+                                dir=os.environ["DISK_MAGICIAN_TEST_SANDBOX"])
 _write(os.path.join(closure_root, "main.sh"),
        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
        'source "$SCRIPT_DIR/helper.sh"\n'
@@ -1102,7 +1129,8 @@ for dep in ("helper.sh", "other.sh"):
         print(f"PASS planted {dep} unguarded removal caught")
 
 # Missing local dependency must be reported, not silently omitted.
-bad_root = tempfile.mkdtemp(prefix="dm-lint-bad-", dir="/tmp")
+bad_root = tempfile.mkdtemp(prefix="dm-lint-bad-",
+                             dir=os.environ["DISK_MAGICIAN_TEST_SANDBOX"])
 _write(os.path.join(bad_root, "main.sh"),
        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
        'source "$SCRIPT_DIR/missing.sh"\n')

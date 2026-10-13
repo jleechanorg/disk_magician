@@ -6,16 +6,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/tmp_scratch_sweep.sh"
 
-FIXTURE_ROOT="/tmp/disk_magician/fixtures"
-mkdir -p "$FIXTURE_ROOT"
-TMP_ROOT=$(mktemp -d "$FIXTURE_ROOT/tmp_scratch_sweep_test.XXXXXX")
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+TMP_ROOT="$(mktemp -d /tmp/disk-magician-tmp-scratch-sweep.XXXXXX)" || {
+  echo "FATAL: could not allocate /tmp fixture root" >&2
+  exit 2
+}
+if [[ -z "$TMP_ROOT" || ! -d "$TMP_ROOT" || -L "$TMP_ROOT" ]]; then
+  echo "FATAL: invalid or symlinked fixture root '$TMP_ROOT'" >&2
+  exit 2
+fi
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || {
+  echo "FATAL: could not canonicalize fixture root" >&2
+  exit 2
+}
+case "$TMP_ROOT" in
+  /tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: fixture root not under /tmp: '$TMP_ROOT'" >&2; exit 2 ;;
+esac
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
 INVOCATION_LOG="$TMP_ROOT/invocations.log"
-mkdir -p "$MOCK_BIN" "$STATE_DIR"
+HOME_DIR="$TMP_ROOT/home"
+mkdir -p "$MOCK_BIN" "$STATE_DIR" "$HOME_DIR"
+export HOME="$HOME_DIR"
 : > "$INVOCATION_LOG"
 
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
@@ -43,6 +57,7 @@ cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
 mkdir -p "$MOCK_BIN/lib"
 cp "$REPO_ROOT/scripts/lib/actuator_deadline.sh" "$MOCK_BIN/lib/actuator_deadline.sh"
+cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/tmp_scratch_sweep.sh"
 chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 SCRIPT="$MOCK_BIN/tmp_scratch_sweep.sh"

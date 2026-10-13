@@ -11,14 +11,29 @@ if [[ ! -x "$SOURCE_SCRIPT" ]]; then
   exit 2
 fi
 
-TMP_ROOT=$(mktemp -d -t pressure_sweep_test.XXXXXX)
+TMP_ROOT="$(mktemp -d /tmp/disk-magician-pressure-sweep.XXXXXX)" || {
+  echo "FATAL: could not allocate /tmp fixture root" >&2
+  exit 2
+}
+if [[ -z "$TMP_ROOT" || ! -d "$TMP_ROOT" || -L "$TMP_ROOT" ]]; then
+  echo "FATAL: invalid or symlinked fixture root '$TMP_ROOT'" >&2
+  exit 2
+fi
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || {
+  echo "FATAL: could not canonicalize fixture root" >&2
+  exit 2
+}
+case "$TMP_ROOT" in
+  /tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: fixture root not under /tmp: '$TMP_ROOT'" >&2; exit 2 ;;
+esac
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
 LOG_FILE="$TMP_ROOT/pressure-sweep.log"
 INVOCATION_LOG="$TMP_ROOT/invocations.log"
-mkdir -p "$MOCK_BIN" "$STATE_DIR"
+mkdir -p "$MOCK_BIN" "$STATE_DIR" "$TMP_ROOT/home"
 : > "$INVOCATION_LOG"
 
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
@@ -46,6 +61,8 @@ MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_colima.sh" "$MOCK_BIN/cleanup_code_sign_clones.sh"
 cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
+mkdir -p "$MOCK_BIN/lib"
+cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
 sed "s|\"/private/tmp\"|\"$TMP_ROOT/private/tmp\"|g" "$SOURCE_SCRIPT" > "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
