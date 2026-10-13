@@ -12,6 +12,13 @@ def hook(name, path, dest):
     if ENV.get(name): subprocess.run(["bash", "-c", ENV[name]], env=dict(ENV, DM_Q_PATH=path, DM_Q_DEST=dest), stdout=subprocess.DEVNULL)
 def kill_at(point):
     if os.environ.get("DISK_MAGICIAN_TEST_KILL_AT") == point: os.kill(os.getpid(), 9)
+class DeadlineExceeded(Exception): pass
+def deadline_passed(deadline):
+    """True when an optional monotonic deadline has elapsed. None never expires."""
+    return deadline is not None and time.monotonic() >= deadline
+def remaining_seconds(deadline):
+    """Seconds left before the optional deadline, or None when unbounded."""
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
 def bind_parent(path, out):  # called by quarantine.sh before artifact_removal_verdict
     absolute = os.path.abspath(path); parent = os.path.dirname(absolute); base = os.path.basename(absolute)
     resolved = os.path.realpath(parent); fd = os.open(resolved, DIRFL)
@@ -28,17 +35,20 @@ def bound_candidate(binding_file):
             candidate != os.path.join(parent, base)):
         raise ValueError("missing frozen candidate")
     return candidate
-def visit(dfd, name, p, out):  # one entry read through its parent's fd; every descent opens O_DIRECTORY | O_NOFOLLOW
+def visit(dfd, name, p, out, deadline=None):  # one entry read through its parent's fd; every descent opens O_DIRECTORY | O_NOFOLLOW
+    if deadline_passed(deadline): raise DeadlineExceeded()
     st = os.stat(name, dir_fd=dfd, follow_symlinks=False); e = {"path": p, "type": "other", "dev": st.st_dev, "ino": st.st_ino}
     if stat.S_ISLNK(st.st_mode): e.update(type="symlink", target=os.readlink(name, dir_fd=dfd))
     elif stat.S_ISDIR(st.st_mode):
         e["type"], fd = "dir", os.open(name, DIRFL, dir_fd=dfd)
-        try: [visit(fd, n, n if p == "." else f"{p}/{n}", out) for n in os.listdir(fd)]
+        try: [visit(fd, n, n if p == "." else f"{p}/{n}", out, deadline) for n in os.listdir(fd)]
         finally: os.close(fd)
     elif stat.S_ISREG(st.st_mode):
         h = hashlib.sha256()
         with os.fdopen(os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd), "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""): h.update(chunk)
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                if deadline_passed(deadline): raise DeadlineExceeded()
+                h.update(chunk)
         e.update(type="file", size=st.st_size, sha256=h.hexdigest())
     out.append(e); return out
 def same_entry(fd, name, st):
@@ -185,18 +195,25 @@ def index_mark_terminal(qid, outcome):
         raise
     finally: os.close(dfd)
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
-def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re-hash checks all pass
+def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
     try:
+        if deadline_passed(deadline): return "deferred:deadline"
         d = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (d.st_dev, d.st_ino) != (rec["dev"], rec["ino"]): return "identity-mismatch"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
-        lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120)  # +D is dirs-only
+        timeout = remaining_seconds(deadline)
+        if timeout is not None and timeout <= 0: return "deferred:deadline"
+        try:
+            lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
+        except subprocess.TimeoutExpired:
+            return "deferred:deadline"
         if lsof.stdout or lsof.returncode != 1 or lsof.stderr.strip(): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
-        return "" if canon(visit(qfd, qid, ".", [])) == canon(rec["inventory"]) else "rehash-mismatch"
+        return "" if canon(visit(qfd, qid, ".", [], deadline)) == canon(rec["inventory"]) else "rehash-mismatch"
+    except DeadlineExceeded: return "deferred:deadline"
     except Exception: return "check-failed"
 def phase1(path, inv_file, binding_file, deadline=None):
     if deadline is not None and time.monotonic() >= deadline: return "deferred:deadline-before-phase1"
@@ -250,6 +267,9 @@ def phase1(path, inv_file, binding_file, deadline=None):
         return "kept:intent-write-failed"
     kill_at("after_intent")
     dest = os.path.join(qdir, qid)
+    if deadline_passed(deadline):
+        if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
+        return "deferred:deadline"
     hook("DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME", path, dest)
     if not same_entry(pfd, ".dm-quarantine", q): return f"quarantine_conflict:{qid}"
     if not same_entry(pfd, base, st):
@@ -264,7 +284,7 @@ def phase1(path, inv_file, binding_file, deadline=None):
     except OSError: return f"quarantine_conflict:{qid}"
     kill_at("after_rename")
     hook("DISK_MAGICIAN_TEST_AFTER_QUARANTINE", path, dest)
-    why = verify(pfd, qfd, q, qid, rec, qdir)
+    why = verify(pfd, qfd, q, qid, rec, qdir, deadline)
     if not why: return f"quarantined:{qid}"
     if why in ("identity-mismatch", "quarantine-dir-changed"): return f"quarantine_conflict:{qid}"  # preserve uncertain identity and recovery record
     rec["phase"] = "rollback_pending"
@@ -702,9 +722,10 @@ def quarantine_reconcile(args):
     try: os.unlink(cursor)
     except FileNotFoundError: pass
     return 0
-def quarantine_restore(qid):
+def quarantine_restore(qid, deadline=None):
     pfd = qfd = restored_fd = -1
     try:
+        if deadline_passed(deadline): return "deferred:deadline"
         if len(qid) != 16 or any(c not in "0123456789abcdef" for c in qid): return "kept:unknown-quarantine-id"
         index, pfd, qfd, record = indexed_item(qid)
         if record.get("phase") == "deleting": return "kept:quarantine_partial_kept"
@@ -713,7 +734,8 @@ def quarantine_restore(qid):
         except FileNotFoundError: pass
         current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (root.get("dev"), root.get("ino")): return "kept:identity-mismatch"
-        if canon_inventory(visit(qfd, qid, ".", [])) != canon_inventory(record["inventory"]): return "kept:quarantine_partial_kept"
+        if canon_inventory(visit(qfd, qid, ".", [], deadline)) != canon_inventory(record["inventory"]):
+            return "deferred:deadline" if deadline_passed(deadline) else "kept:quarantine_partial_kept"
         hook("DISK_MAGICIAN_TEST_BEFORE_RESTORE_RENAME", os.path.join(index["parent_path"], ".dm-quarantine", qid), os.path.join(index["parent_path"], base))
         renamex(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
         restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
@@ -735,6 +757,7 @@ def quarantine_restore(qid):
         if not finish_sidecar(qfd, qid, "restored"): return "kept:quarantine_partial_kept"
         return f"restored:{qid}"
     except FileNotFoundError: return "kept:unknown-quarantine-id"
+    except DeadlineExceeded: return "deferred:deadline"
     except Exception: return "kept:quarantine_restore_failed"
     finally:
         if restored_fd >= 0: os.close(restored_fd)
@@ -742,6 +765,11 @@ def quarantine_restore(qid):
         if pfd >= 0: os.close(pfd)
 def canon_inventory(entries):
     return sorted(json.dumps([e.get(k) for k in KEYS]) for e in entries)
+def parse_deadline(raw):
+    """Finite nonnegative monotonic deadline or None when invalid."""
+    try: value = float(raw)
+    except (TypeError, ValueError): return None
+    return value if math.isfinite(value) and value >= 0 else None
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
@@ -751,8 +779,8 @@ if __name__ == "__main__":
         try: print(phase1(*args[1:]))
         finally: operation_unlock(lock)
     elif args[:1] == ["phase1"] and len(args) == 6 and args[4] == "--deadline-at":
-        try: deadline = float(args[5])
-        except ValueError: print("kept:check-failed"); sys.exit(0)
+        deadline = parse_deadline(args[5])
+        if deadline is None: print("kept:check-failed"); sys.exit(0)
         lock = operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
         try: print(phase1(*args[1:4], deadline))
@@ -777,6 +805,13 @@ if __name__ == "__main__":
     elif args[:1] == ["restore"] and len(args) == 2:
         lock = operation_lock()
         try: print(quarantine_restore(args[1]))
+        finally: operation_unlock(lock)
+    elif args[:1] == ["restore"] and len(args) == 4 and args[2] == "--deadline-at":
+        deadline = parse_deadline(args[3])
+        if deadline is None: print("kept:check-failed"); sys.exit(0)
+        lock = operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); sys.exit(0)
+        try: print(quarantine_restore(args[1], deadline))
         finally: operation_unlock(lock)
     elif args[:1] == ["reconcile"]:
         deadline = None

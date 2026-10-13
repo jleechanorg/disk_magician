@@ -109,6 +109,25 @@ check 'caller options: path reaches artifact_removal_verdict' grep -Fx "$A" "$TM
 check 'caller options: kind and deadline values are preserved' bash -c 'grep -Fx -- --kind "$1" >/dev/null && grep -Fx os_clone "$1" >/dev/null && grep -Fx -- --deadline-at "$1" >/dev/null && grep -Fx 123.5 "$1" >/dev/null' _ "$TMP/verdict-args"
 check 'caller options: frozen identity proof is preserved' bash -c 'grep -Fx -- --frozen-identity "$1" >/dev/null && grep -Fx 1:2:501 "$1" >/dev/null && grep -Fx -- --frozen-parent-identity "$1" >/dev/null && grep -Fx 3:4:501 "$1" >/dev/null && grep -Fx -- --frozen-root-identity "$1" >/dev/null && grep -Fx 5:6:501 "$1" >/dev/null' _ "$TMP/verdict-args"
 check 'caller options: expired deadline defers before rename' [ "$OUT" = deferred:deadline-before-phase1 ] && [ -f "$A/report.md" ] && [ ! -e "$Q" ]
+
+# Optional deadline bounds the whole entrypoint, including the lsof probe and re-hash.
+fixture
+BINDING="$TMP/binding-deadline$N.json"; INV="$TMP/inventory-deadline$N.json"
+python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
+python3 "$TMP/inv.py" "$A" > "$INV"
+SLOWBIN="$TMP/slowbin$N"; mkdir -p "$SLOWBIN"
+printf '#!/bin/bash\nsleep 0.5\nexit 1\n' > "$SLOWBIN/lsof"; chmod +x "$SLOWBIN/lsof"
+DEADLINE="$(python3 -c 'import time; print(time.monotonic()+0.12)')"
+START="$(python3 -c 'import time; print(time.monotonic())')"
+OUT="$(PATH="$SLOWBIN:$PATH" python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$DEADLINE")"
+END="$(python3 -c 'import time; print(time.monotonic())')"
+check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "kept:deferred:deadline" ]
+check 'deferred phase1 retains the original artifact' [ -f "$A/report.md" ] && [ -f "$A/sub/deep/y.txt" ] && [ -L "$A/link" ]
+check 'deferred phase1 leaves no quarantine payload' [ -z "$(find "$Q" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+check 'phase1 deadline returns before the 0.5s probe completes' python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 0.4 else 1)"
+for bad in nan inf -1; do
+  check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
+done
 fixture; run_contract --unknown-option value
 check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
 fixture; QUARANTINE_TEST_BASH=/bin/bash QUARANTINE_TEST_NOUNSET=1 run_contract
