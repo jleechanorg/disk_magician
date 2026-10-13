@@ -185,16 +185,24 @@ def admin(ad, lease=None):
     names = set(os.listdir(ad))
     if "locked" in names or names & {"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}:
         return print("kept:locked" if "locked" in names else "kept:dirty")
-    files, inv = [], os.environ.get("C14_INVENTORY_OUT")
+    files, inv, rows = [], os.environ.get("C14_INVENTORY_OUT"), []
+    def receipt(rel, st):  # original admin state for the receipt; entry_type stays distinct from the type=admin envelope
+        if not inv: return
+        row = {"admin": ad, "path": rel, "entry_type": "dir" if stat.S_ISDIR(st.st_mode) else "file",
+               "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size}
+        if stat.S_ISREG(st.st_mode):
+            row["sha256"] = hashlib.sha256(open(os.path.join(ad, rel), "rb").read()).hexdigest()
+        rows.append(row)
+    receipt(".", os.lstat(ad))  # the admin root carries its own dev/ino for the downstream remover
     for dp, dns, fns in os.walk(ad, onerror=lambda e: sys.exit("kept:check-failed")):
         for n in fns + dns:  # a symlink, special file or unparsed entry anywhere: admin-unknown
             p = os.path.join(dp, n); rel = os.path.relpath(p, ad); st = os.lstat(p)
             if not entry_ok(p, rel, st): return print("kept:admin-unknown")
-            if stat.S_ISDIR(st.st_mode): continue
+            if stat.S_ISDIR(st.st_mode):
+                receipt(rel, st)  # allowed refs/** and logs/** directories carry dev/ino too
+                continue
             files += [p] if rel.endswith("HEAD") or "/" in rel else []  # *HEAD, refs/**, logs/**
-            if inv:
-                print(json.dumps({"admin": ad, "path": rel, "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size,
-                                  "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}), file=open(inv, "a"))
+            receipt(rel, st)
     cw = os.path.join(ad, "config.worktree")  # regular here; non-empty must match the lease git_meta baseline
     if "config.worktree" in names and os.path.getsize(cw) and hashlib.sha256(open(cw, "rb").read()).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
@@ -202,6 +210,9 @@ def admin(ad, lease=None):
     head = open(os.path.join(ad, "HEAD")).read().strip()
     if head.startswith("ref: "):  # the branch reflog lives in the common dir
         files += [p for p in [os.path.join(ad, open(os.path.join(ad, "commondir")).read().strip(), "logs", head[5:])] if os.path.isfile(p)]
+    if inv:
+        with open(inv, "a", encoding="utf-8") as fh:
+            for row in rows: print(json.dumps(row), file=fh)
     oids = sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})
     print("kept:admin-unknown" if "COMMIT_EDITMSG" in names and not editmsg_ok(ad, oids) else "\n".join(oids))
 

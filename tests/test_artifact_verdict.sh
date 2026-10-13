@@ -503,14 +503,28 @@ assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out
 assert_eq "$(shasum -a 256 "$caller_channel" | awk '{print $1}')" "$caller_before" "caller-owned C14_INVENTORY_OUT is never written or removed"
 [[ -z "$(find "$av_tmp" -mindepth 1 -print -quit 2>/dev/null)" ]] && ok "each verdict removes its owned admin channel and temp dir" || bad "verdict temp files leaked: $(find "$av_tmp" -print)"
 python3 - "$wt_gd" "$TMPROOT/other-admin" "$wt_inv_one" "$wt_inv_two" <<'PY' && ok "worktree-root receipts bind only the candidate's own admin rows" || bad "worktree-root receipt admin binding"
-import json, sys
+import json, os, sys
 gd, stale, *paths = sys.argv[1:]
+root_st = os.lstat(gd)
 for p in paths:
     rows = json.load(open(p, encoding="utf-8"))
     admins = [r for r in rows if r.get("type") == "admin"]
     assert admins, p
     assert all(r.get("admin") == gd for r in admins), (p, {r.get("admin") for r in admins})
     assert all(r.get("admin") != stale for r in rows), p
+    # The original admin receipt carries the root identity and every allowed
+    # refs/** / logs/** directory, plus file hashes. type=admin is the merge
+    # envelope; entry_type keeps the underlying filesystem kind.
+    by_path = {r["path"]: r for r in admins}
+    root = by_path.get(".")
+    assert root is not None and root.get("entry_type") == "dir", (p, sorted(by_path))
+    assert type(root.get("dev")) is int and type(root.get("ino")) is int, (p, root)
+    assert (root["dev"], root["ino"]) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
+    dirs = [r for r in admins if r.get("path") != "." and r.get("entry_type") == "dir"]
+    assert dirs and all(type(r.get("dev")) is int and type(r.get("ino")) is int for r in dirs), (p, dirs)
+    assert "logs" in {r["path"] for r in dirs}, (p, [r["path"] for r in dirs])
+    files = [r for r in admins if r.get("entry_type") == "file"]
+    assert files and all(len(r.get("sha256", "")) == 64 for r in files), (p, files)
 PY
 unset C14_INVENTORY_OUT
 unset TMPDIR
