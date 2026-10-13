@@ -75,6 +75,76 @@ def gitmeta(gd, lease=None):
     base = json.load(open(lease)).get("git_meta") if os.path.isfile(lease) else None
     print("kept:git-unbaselined" if not isinstance(base, dict) else "ok" if base == m else "kept:git-metadata")
 
+def worktrees(admin_dir, root, deadline=None):
+    """Fail closed when the removal candidate contains admin_dir (the common Git
+    admin storage) yet a registered linked worktree lives outside the candidate:
+    removing the candidate would orphan that worktree's admin. Paths come from
+    git's own NUL-delimited records, so spaces/newlines are not token-split."""
+    try:
+        root = os.path.realpath(root)
+        admin_dir = os.path.realpath(admin_dir)
+        if not (admin_dir == root or admin_dir.startswith(root.rstrip(os.sep) + os.sep)):
+            print("ok")  # shared admin storage is outside the candidate: siblings cannot be orphaned
+            return 0
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = _run_bounded(["git", "--git-dir", admin_dir, "worktree", "list", "--porcelain", "-z"],
+                              cwd="/", env=env, cap=10, deadline=deadline, step="worktree-topology")
+        if result is None:
+            if deadline is not None:
+                print("deferred:worktree-topology")
+                return 0
+            print("kept:check-failed")
+            return 1
+        rc, out = result
+        if rc != 0 or not out:
+            print("kept:check-failed")
+            return 1
+        if not out.endswith(b"\0\0"):  # a complete -z record list ends with two NUL bytes
+            print("kept:check-failed")
+            return 1
+        fields, i, records = out.split(b"\0"), 0, 0
+        n = len(fields)
+        while i < n:
+            name = fields[i]
+            if name == b"":
+                i += 1
+                continue
+            if not name.startswith(b"worktree "):
+                print("kept:check-failed")  # a field outside a worktree record
+                return 1
+            path = os.fsdecode(name[len(b"worktree "):])
+            if not path or not os.path.isabs(path):
+                print("kept:check-failed")
+                return 1
+            real = os.path.realpath(path)
+            if not (real == root or real.startswith(root.rstrip(os.sep) + os.sep)):
+                print("kept:external-worktree")
+                return 1
+            i += 1
+            attrs = 0
+            while i < n and fields[i] != b"":  # consume the record until its NUL terminator
+                f = fields[i]
+                if f.startswith((b"HEAD ", b"branch ", b"detached", b"bare", b"locked", b"prunable ")):
+                    attrs += 1
+                else:
+                    print("kept:check-failed")
+                    return 1
+                i += 1
+            if attrs == 0:
+                print("kept:check-failed")  # worktree line without a recognized attribute
+                return 1
+            records += 1
+            if i < n:
+                i += 1  # skip the record terminator
+        if records == 0:
+            print("kept:check-failed")
+            return 1
+        print("ok")
+        return 0
+    except Exception:
+        print("kept:check-failed")
+        return 1
+
 def outer_certificate(root, receipt_path):
     """Validate the advice runner's exact-SHA clone receipt and declared overlay."""
     try:
@@ -175,51 +245,103 @@ ADMIN = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "AUTO_MERGE", "index", "commondir", 
 OID, HEX = re.compile(r"^(?!0+$)([0-9a-f]{40}|[0-9a-f]{64})$"), rb"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 REF, LOG = re.compile(HEX + rb"\n?"), re.compile(HEX + b" " + HEX + rb" [^\n]*> \d+ [+-]\d{4}(?:\t[^\n]*)?\n?")
 
-def entry_ok(p, rel, st):  # git's own type and name; files under refs/ and logs/ must parse as a ref or reflog
+def entry_ok(rel, st, data=None):  # git's own type and name; refs/logs files must parse from the verified bytes
     top, d, f = rel.split("/")[0], stat.S_ISDIR(st.st_mode), stat.S_ISREG(st.st_mode)
     if top not in ("refs", "logs") or not f or "/" not in rel:
         return d and top in ("refs", "logs") or f and top in ADMIN and "/" not in rel
-    return bool(REF.fullmatch(open(p, "rb").read())) if top == "refs" else all(map(LOG.fullmatch, open(p, "rb").read().splitlines(True)))
+    if data is None:
+        return False
+    return bool(REF.fullmatch(data)) if top == "refs" else all(map(LOG.fullmatch, data.splitlines(True)))
+
+def _read_verified(p, keep=False):
+    """lstat then fd-open; hash (and optionally keep) the same inode, verifying it did
+    not change across the read. Returns (stat, sha256_hex or None, bytes)."""
+    st = os.lstat(p)
+    if not stat.S_ISREG(st.st_mode):
+        return st, None, b""
+    fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (st.st_dev, st.st_ino):
+            return st, None, b""
+        h, buf = hashlib.sha256(), bytearray()
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                break
+            h.update(block)
+            if keep:
+                buf += block
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+                before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            return st, None, b""
+        return before, h.hexdigest(), bytes(buf)
+    finally:
+        os.close(fd)
 
 def admin(ad, lease=None):
     names = set(os.listdir(ad))
     if "locked" in names or names & {"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}:
         return print("kept:locked" if "locked" in names else "kept:dirty")
-    files, inv, rows = [], os.environ.get("C14_INVENTORY_OUT"), []
-    def receipt(rel, st):  # original admin state for the receipt; entry_type stays distinct from the type=admin envelope
+    inv, rows, oids, dirs, small = os.environ.get("C14_INVENTORY_OUT"), [], [], [], {}
+    def receipt(rel, st, digest=None):  # original admin state; entry_type stays distinct from the type=admin envelope
         if not inv: return
         row = {"admin": ad, "path": rel, "entry_type": "dir" if stat.S_ISDIR(st.st_mode) else "file",
                "mode": "%o" % st.st_mode, "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size}
-        if stat.S_ISREG(st.st_mode):
-            row["sha256"] = hashlib.sha256(open(os.path.join(ad, rel), "rb").read()).hexdigest()
+        if digest is not None:
+            row["sha256"] = digest
         rows.append(row)
-    receipt(".", os.lstat(ad))  # the admin root carries its own dev/ino for the downstream remover
+    root_st = os.lstat(ad)
+    receipt(".", root_st)  # the admin root carries its own dev/ino for the downstream remover
+    dirs.append((".", root_st))
     for dp, dns, fns in os.walk(ad, onerror=lambda e: sys.exit("kept:check-failed")):
         for n in fns + dns:  # a symlink, special file or unparsed entry anywhere: admin-unknown
             p = os.path.join(dp, n); rel = os.path.relpath(p, ad); st = os.lstat(p)
-            if not entry_ok(p, rel, st): return print("kept:admin-unknown")
             if stat.S_ISDIR(st.st_mode):
+                if not entry_ok(rel, st): return print("kept:admin-unknown")
                 receipt(rel, st)  # allowed refs/** and logs/** directories carry dev/ino too
+                dirs.append((rel, st))
                 continue
-            files += [p] if rel.endswith("HEAD") or "/" in rel else []  # *HEAD, refs/**, logs/**
-            receipt(rel, st)
-    cw = os.path.join(ad, "config.worktree")  # regular here; non-empty must match the lease git_meta baseline
-    if "config.worktree" in names and os.path.getsize(cw) and hashlib.sha256(open(cw, "rb").read()).hexdigest() != (
+            if not stat.S_ISREG(st.st_mode):
+                return print("kept:admin-unknown")
+            need = rel.endswith("HEAD") or "/" in rel  # *HEAD, refs/**, logs/**
+            keep = need or rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG")
+            fst, digest, data = _read_verified(p, keep=keep)
+            if digest is None or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                return print("kept:check-failed")
+            if not entry_ok(rel, st, data if (rel.split("/")[0] in ("refs", "logs") and "/" in rel) else None):
+                return print("kept:admin-unknown")
+            if need:
+                oids += [w for l in data.decode("utf-8", "replace").splitlines() for w in l.split()[:2] if OID.match(w)]
+            if rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG"):
+                small[rel] = data
+            receipt(rel, st, digest)
+    for rel, st in dirs:  # post-walk stability: every recorded directory is still the same inode
+        now = os.lstat(ad if rel == "." else os.path.join(ad, rel))
+        if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+            return print("kept:check-failed")
+    if "config.worktree" in names and small.get("config.worktree") and hashlib.sha256(small["config.worktree"]).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
         return print("kept:admin-unknown")
-    head = open(os.path.join(ad, "HEAD")).read().strip()
-    if head.startswith("ref: "):  # the branch reflog lives in the common dir
-        files += [p for p in [os.path.join(ad, open(os.path.join(ad, "commondir")).read().strip(), "logs", head[5:])] if os.path.isfile(p)]
+    head = small.get("HEAD", b"").strip()
+    if head.startswith(b"ref: "):  # the branch reflog lives in the common dir; scan only verified bytes
+        rp = os.path.join(ad, os.fsdecode(small.get("commondir", b"").strip()), "logs", os.fsdecode(head[5:]))
+        if os.path.isfile(rp):
+            fst, digest, data = _read_verified(rp, keep=True)
+            if digest is None:
+                return print("kept:check-failed")
+            oids += [w for l in data.decode("utf-8", "replace").splitlines() for w in l.split()[:2] if OID.match(w)]
     if inv:
         with open(inv, "a", encoding="utf-8") as fh:
             for row in rows: print(json.dumps(row), file=fh)
-    oids = sorted({w for p in files for l in open(p) for w in l.split()[:2] if OID.match(w)})
-    print("kept:admin-unknown" if "COMMIT_EDITMSG" in names and not editmsg_ok(ad, oids) else "\n".join(oids))
+    oid_set = sorted(set(oids))
+    print("kept:admin-unknown" if "COMMIT_EDITMSG" in names and not editmsg_ok(ad, oid_set, small.get("COMMIT_EDITMSG", b"")) else "\n".join(oid_set))
 
-def editmsg_ok(ad, oids):  # COMMIT_EDITMSG (beyond the spec list) is only comments or a checked tip's message
+def editmsg_ok(ad, oids, data):  # COMMIT_EDITMSG (beyond the spec list) is only comments or a checked tip's message
     git = lambda i, *a: subprocess.run(["git", "--git-dir", ad, *a], input=i, capture_output=True, check=True).stdout
-    msgs, p = git("\n".join(oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""], os.path.join(ad, "COMMIT_EDITMSG")
-    return any(git(open(p, "rb").read(), "stripspace", *s) in msgs for s in ([], ["-s"]))
+    msgs = git("\n".join(oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""]
+    return any(git(data, "stripspace", *s) in msgs for s in ([], ["-s"]))
 
 def describe(obj, deadline=None):  # bounded removal-time object metadata read
     cmd = [os.environ["DISK_MAGICIAN_STAT_BIN"], obj] if os.environ.get("DISK_MAGICIAN_STAT_BIN") else [
@@ -516,6 +638,50 @@ def archive_info(candidate, receipt, inv_file):
     except Exception:
         print("kept:archive-identity")
 
+def _internal_target(root, rel, entry):
+    """Absolute realpath a symlink entry points at, or None when it escapes root."""
+    parent = os.path.dirname(rel) or "."
+    link_parent = root if parent == "." else os.path.join(root, parent)
+    target = os.path.realpath(os.path.join(link_parent, entry.get("target", "")))
+    return target if target.startswith(root.rstrip(os.sep) + os.sep) else None
+
+def _entry_kind(root, rel, entry):
+    """Effective file/dir kind Git's own -f/-d tests would see, following a symlink
+    only when it resolves inside root. None means unsupported or escaping."""
+    kind = entry.get("type")
+    if kind in ("file", "dir"):
+        return kind
+    if kind != "symlink":
+        return None
+    target = _internal_target(root, rel, entry)
+    if target is None:
+        return None
+    if os.path.isdir(target):
+        return "dir"
+    if os.path.isfile(target):
+        return "file"
+    return None
+
+def _bare_repo_state(root, base, by_path):
+    """'repo' for a Git-accepted bare layout (HEAD=file, objects=dir, refs=dir,
+    symlinks allowed when internal); 'invalid' for a repo-looking dir we cannot
+    validate (caller fails closed); 'none' otherwise."""
+    def entry(name):
+        rel = name if base == "." else base + "/" + name
+        return rel, by_path.get(rel)
+    head_rel, head = entry("HEAD")
+    objects_rel, objects = entry("objects")
+    refs_rel, refs = entry("refs")
+    if head is None:
+        return "none"
+    kinds = {rel: _entry_kind(root, rel, e) if e is not None else None
+             for rel, e in ((head_rel, head), (objects_rel, objects), (refs_rel, refs))}
+    if kinds[head_rel] == "file" and kinds[objects_rel] == "dir" and kinds[refs_rel] == "dir":
+        return "repo"
+    if objects is None or refs is None:
+        return "none"
+    return "invalid"
+
 def repos(inv_file):
     """Print discovered repository roots from a complete JSON inventory."""
     try:
@@ -548,19 +714,20 @@ def repos(inv_file):
                     sys.stdout.write("kept:gitdir-invalid\0")
                     return 1
                 roots.add(parent)
-            if rel == "." and e.get("type") == "dir" and all(
-                    by_path.get(name, {}).get("type") == kind for name, kind in
-                    (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
-                roots.add(".")
-            # Bare repos inside any .git/ directory (e.g. .git/modules/<sm>) are
-            # metadata owned by the repo above them; the legacy find path
-            # excludes them with the same component rule. A directory actually
-            # named foo.git is untouched.
-            if (e.get("type") == "dir" and rel not in gitdir_targets
-                    and ".git" not in rel.split("/")):
-                if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
-                       (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
+            # A bare repo is any dir Git accepts: HEAD a file (or internal
+            # symlink), objects and refs dirs (or internal symlinks). Metadata
+            # under .git/ (e.g. .git/modules/<sm>) belongs to its owner; a dir
+            # named foo.git is untouched. A repo-looking dir we cannot validate
+            # fails closed rather than falling through to ordinary content.
+            if rel in gitdir_targets or ".git" in rel.split("/"):
+                continue
+            if rel == "." or e.get("type") == "dir":
+                state = _bare_repo_state(root, rel, by_path)
+                if state == "repo":
                     roots.add(rel)
+                elif state == "invalid":
+                    sys.stdout.write("kept:gitdir-invalid\0")
+                    return 1
         # Caller supplies C14_ROOT to bind relative inventory paths to its candidate.
         for rel in sorted(roots):
             print(os.path.join(root, rel) if rel != "." else root, end="\0")
@@ -617,7 +784,7 @@ def open_file(root, deadline=None):
     else:
         cmd += [root]
     try:
-        result = _run_bounded(cmd, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+        result = _run_bounded(cmd, cap=float(os.environ.get("DISK_MAGICIAN_LSOF_CAP", "30")), deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
     except OSError:
         print("kept:check-failed")
         return
@@ -641,6 +808,8 @@ if __name__ == "__main__":
             sys.exit(lsremote(a[1], a[2], a[3]))
         if len(a) in (2, 3) and a[0] == "gitmeta":
             sys.exit(gitmeta(*a[1:]))
+        if len(a) in (3, 4) and a[0] == "worktrees":
+            sys.exit(worktrees(a[1], a[2], a[3] if len(a) == 4 and a[3] else None))
         if len(a) == 3 and a[0] == "outer-certificate":
             result = outer_certificate(a[1], a[2])
             print(result)

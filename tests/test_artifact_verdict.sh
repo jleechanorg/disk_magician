@@ -15,10 +15,12 @@ assert_eq() {
     if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi
 }
 
-TMPROOT="$(cd "$(mktemp -d)" && pwd -P)"
+TMPROOT="$(mktemp -d /tmp/dm-c14-test.XXXXXX)" || exit 1
+[[ -d "$TMPROOT" && "$TMPROOT" == /tmp/dm-c14-test.* ]] || exit 1
 cleanup() {
+    [[ -d "$TMPROOT" && "$TMPROOT" == /tmp/dm-c14-test.* ]] || return
     chmod -R u+rwx "$TMPROOT" 2>/dev/null
-    [[ -n "$TMPROOT" && "$TMPROOT" == /*/tmp.* ]] && rm -rf "$TMPROOT"
+    rm -rf "$TMPROOT"
 }
 trap cleanup EXIT
 export HOME="$TMPROOT/home"
@@ -252,7 +254,7 @@ assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$adv
 baseline() {
     local f gd
     f="$(lease_path_for "$1")" && gd="$(git -C "$1" rev-parse --absolute-git-dir)"
-    mkdir -p "${f%/*}" && printf '{"owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
+    mkdir -p "${f%/*}" && printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$1" "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
 }
 # mkpushed <name>: bare remote + clone with main pushed and a git_meta baseline.
 mkpushed() {
@@ -503,7 +505,7 @@ assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out
 assert_eq "$(shasum -a 256 "$caller_channel" | awk '{print $1}')" "$caller_before" "caller-owned C14_INVENTORY_OUT is never written or removed"
 [[ -z "$(find "$av_tmp" -mindepth 1 -print -quit 2>/dev/null)" ]] && ok "each verdict removes its owned admin channel and temp dir" || bad "verdict temp files leaked: $(find "$av_tmp" -print)"
 python3 - "$wt_gd" "$TMPROOT/other-admin" "$wt_inv_one" "$wt_inv_two" <<'PY' && ok "worktree-root receipts bind only the candidate's own admin rows" || bad "worktree-root receipt admin binding"
-import json, os, sys
+import hashlib, json, os, sys
 gd, stale, *paths = sys.argv[1:]
 root_st = os.lstat(gd)
 for p in paths:
@@ -514,17 +516,23 @@ for p in paths:
     assert all(r.get("admin") != stale for r in rows), p
     # The original admin receipt carries the root identity and every allowed
     # refs/** / logs/** directory, plus file hashes. type=admin is the merge
-    # envelope; entry_type keeps the underlying filesystem kind.
+    # envelope; entry_type keeps the underlying filesystem kind. Each row's
+    # dev/ino and file hash must bind to that exact path.
     by_path = {r["path"]: r for r in admins}
     root = by_path.get(".")
     assert root is not None and root.get("entry_type") == "dir", (p, sorted(by_path))
-    assert type(root.get("dev")) is int and type(root.get("ino")) is int, (p, root)
-    assert (root["dev"], root["ino"]) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
+    assert (root.get("dev"), root.get("ino")) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
     dirs = [r for r in admins if r.get("path") != "." and r.get("entry_type") == "dir"]
     assert dirs and all(type(r.get("dev")) is int and type(r.get("ino")) is int for r in dirs), (p, dirs)
     assert "logs" in {r["path"] for r in dirs}, (p, [r["path"] for r in dirs])
     files = [r for r in admins if r.get("entry_type") == "file"]
     assert files and all(len(r.get("sha256", "")) == 64 for r in files), (p, files)
+    for r in admins:
+        st = os.lstat(gd if r["path"] == "." else os.path.join(gd, r["path"]))
+        assert (r["dev"], r["ino"]) == (st.st_dev, st.st_ino), (p, r, st)
+        if r["entry_type"] == "file":
+            digest = hashlib.sha256(open(os.path.join(gd, r["path"]), "rb").read()).hexdigest()
+            assert r["sha256"] == digest, (p, r, digest)
 PY
 unset C14_INVENTORY_OUT
 unset TMPDIR
@@ -586,13 +594,13 @@ assert_eq "$(eph "$HOME/.codex/sessions/s")" kept:protected "never-delete path (
 # lease <dir> <released_at>: lease owned by this shell (pid + start epoch).
 lease() {
     local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
-    printf '{"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
-        $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
+    printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
+        "$1" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
 }
 lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
 lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
 assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
-mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && echo '{"owner":null}' >"$f"
+mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && printf '{"path":"%s","owner":null}\n' "$PT/pr-none" >"$f"
 assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
 lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
 # A lease that cannot be stat'ed is not absent: EACCES on the lease dir or a parent keeps.
@@ -605,8 +613,8 @@ chmod 700 "${ld%/*}"
 own() {
     local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
     python3 -c 'import json,os,sys; f=sys.argv[1]; d=json.load(open(f)) if os.path.exists(f) else {}
-d.update(owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
-        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2"
+d.update(path=sys.argv[7], owner={"pid":int(sys.argv[2]),"start_epoch":int(sys.argv[3]),"comm":sys.argv[4]}, created_epoch=int(sys.argv[5]), ttl_hours=24, released_at=json.loads(sys.argv[6])); json.dump(d,open(f,"w"))' \
+        "$f" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" "$1"
 }
 mkdir -p "$PT/pr-nest" "$PT/pr-1" && for d in pr-nest pr-1; do git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d/repo" && baseline "$PT/$d/repo"; done
 own "$PT/pr-nest/repo" null && own "$PT/pr-1/repo" '"2026-10-01T00:00:00Z"' && own "$PT/pr-1" null && age "$PT/pr-nest" 43200 && age "$PT/pr-1" 43200
@@ -614,6 +622,25 @@ assert_eq "$(eph "$PT/pr-nest/repo")" kept:live-owner "live owner on the candida
 assert_eq "$(eph "$PT/pr-nest")" kept:live-owner "live-owner lease on a repository nested in the candidate"
 assert_eq "$(eph "$PT/pr-1/repo")" kept:live-owner "live-owner lease on a dir enclosing the candidate"
 own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released"
+# B1: scratch-new --kind evidence leases a plain, non-git run dir. A live lease on
+# that nested plain dir must keep the outer candidate even with no open file/cwd.
+mkdir -p "$PT/claude-commands/evidence/run-1" && printf 'report-body\n' >"$PT/claude-commands/evidence/run-1/report.md"
+lease "$PT/claude-commands/evidence/run-1" null && age "$PT/claude-commands" 3000
+assert_eq "$(eph "$PT/claude-commands")" kept:live-owner "live lease on a plain dir nested in the candidate"
+[[ "$(cat "$PT/claude-commands/evidence/run-1/report.md")" == report-body ]] \
+    && ok "nested plain-dir lease left the candidate bytes intact" || bad "candidate bytes changed"
+own "$PT/claude-commands/evidence/run-1" '"2026-10-01T00:00:00Z"'
+assert_eq "$(eph "$PT/claude-commands")" remove "released child lease no longer saves the outer candidate"
+# A dead child lease (owner gone) is not protection either: strict removal.
+lease "$PT/claude-commands/evidence/run-1" null
+mkdir -p "$TMPROOT/stub" && printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/ps-dead" && chmod +x "$TMPROOT/stub/ps-dead"
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps-dead" eph "$PT/claude-commands")" remove "dead child lease no longer saves the outer candidate"
+own "$PT/claude-commands/evidence/run-1" '"2026-10-01T00:00:00Z"'
+# A malformed lease record makes the descendant scan unmeasurable: keep, never remove.
+printf '{not json' >"$(lease_dir)/zz-malformed.json"
+assert_eq "$(eph "$PT/claude-commands")" kept:check-failed "malformed lease record keeps an otherwise-removable candidate"
+rm -f "$(lease_dir)/zz-malformed.json"
+assert_eq "$(eph "$PT/claude-commands")" remove "malformed record removed: candidate removable again"
 
 echo "== non-git provenance (T11-5) =="
 GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
@@ -634,7 +661,7 @@ for dp, _, fns in os.walk(d):
                       crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
         json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
 os.makedirs(os.path.dirname(lease), exist_ok=True)
-json.dump({"owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+json.dump({"path": d, "owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
            "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
            "upload_manifest": m}, open(lease, "w"))
 PY
@@ -650,8 +677,8 @@ assert_eq "$(av "$PT/deploy")" kept:unproven-content "custom-named deploy_backup
 git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
 assert_eq "$(av "$PT/evrepo/evidence")" kept:unproven-content "unpublished evidence/results.json"
 mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
-printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
-    "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
+printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+    "$PT/inv" "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
 assert_eq "$(av "$PT/inv")" kept:unproven-content "manifest is not a copy (inventory only, never published)"
 for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
     mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
@@ -715,6 +742,23 @@ rows = json.load(open(sys.argv[1], encoding="utf-8"))
 assert rows and all(row.get("type") != "admin" for row in rows)
 PY
 assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+# B1: the enclosing linked worktree's canonical 7-day floor protects its venv/.
+# Root, .git and venv/ are 30 days old, but the tracked content was touched 2h ago.
+venvw "$HOME/wt-young" && age "$HOME/wt-young" 43200 && age "$HOME/wt-young/tracked.txt" 120
+assert_eq "$(av "$HOME/wt-young/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ in a worktree with 2h-old tracked content"
+[[ "$(cat "$HOME/wt-young/venv/bin/python")" == py ]] \
+    && ok "young venv path bytes intact after the verdict" || bad "young venv path bytes changed"
+# An 8-day-quiet worktree is past the strict 7-day floor and stays eligible.
+venvw "$HOME/wt-eligible" && age "$HOME/wt-eligible" 11520
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
+    "ignored venv/ in a worktree quiet for 8 days"
+# Canonical unmeasurable recency fails closed (reports active), so the venv stays.
+worktree_is_recently_active() { return 0; }
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
+    "ignored venv/ when canonical worktree recency cannot be measured"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$REPO_ROOT/scripts/lib/worktree_recency.sh"
 mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
 git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
 mkdir -p "$HOME/Documents/venv" "$HOME/Documents/venv.bak.old" && printf 't' >"$HOME/Documents/venv/thesis.txt" && printf 't' >"$HOME/Documents/venv.bak.old/t.txt"
@@ -865,6 +909,36 @@ age "$missing_size" 50000
 assert_eq "$(av "$missing_size" --kind ephemeral)" kept:archive-identity "E1 receipt missing size is kept"
 
 unset DISK_MAGICIAN_STAT_BIN
+# B1/F1: the lease-record scan must fail closed on unusable records and bind each
+# record to the canonical lease filename for its recorded path.
+mkdir -p "$PT/pr-lease-scan/child" && printf 'KEEP\n' >"$PT/pr-lease-scan/child/data.bin"
+age "$PT/pr-lease-scan" 43200
+CL="$(lease_path_for "$PT/pr-lease-scan/child")" && mkdir -p "${CL%/*}"
+# leasefrag: live-owner fragment so an unchecked record would otherwise be ignored.
+leasefrag() { printf '"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":null' \
+    $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW"; }
+printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/ps-dead" && chmod +x "$TMPROOT/stub/ps-dead"
+lease "$PT/pr-lease-scan/child" null
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:live-owner "canonical live child lease keeps candidate (control)"
+printf '{%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease missing path key keeps candidate"
+printf '{"path":"",%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease empty path keeps candidate"
+printf '{"path":123,%s}\n' "$(leasefrag)" >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "child lease non-string path keeps candidate"
+printf '[1,2]\n' >"$CL"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "valid JSON non-object record keeps candidate"
+rm -f "$CL"
+printf '{"path":"%s","owner":{"pid":%d}}\n' "$PT/pr-lease-scan/child" $$ >"$(lease_dir)/c14-lease-misnamed.json"
+assert_eq "$(eph "$PT/pr-lease-scan")" kept:check-failed "record under non-canonical filename keeps candidate"
+rm -f "$(lease_dir)/c14-lease-misnamed.json"
+[[ "$(cat "$PT/pr-lease-scan/child/data.bin")" == KEEP ]] \
+    && ok "unusable-record probes left candidate bytes intact" || bad "candidate bytes changed"
+lease "$PT/pr-lease-scan/child" null && own "$PT/pr-lease-scan/child" '"2026-10-01T00:00:00Z"'
+assert_eq "$(eph "$PT/pr-lease-scan")" remove "canonical released child lease leaves candidate eligible (control)"
+lease "$PT/pr-lease-scan/child" null
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps-dead" eph "$PT/pr-lease-scan")" remove "canonical dead child lease leaves candidate eligible (control)"
+own "$PT/pr-lease-scan/child" '"2026-10-01T00:00:00Z"'
 
 echo "== fd-bound inventory, deadline and nomination race =="
 inv_case="$TMPROOT/inventory-case"
@@ -909,7 +983,7 @@ p=sys.argv[1]; d=json.load(open(p)); d.update(owner={"pid":1}, released_at="2026
 PY
 truncate -s 2147483648 "$deadline_root/manifested.bin"
 deadline_lease="$(lease_path_for "$deadline_root")" && mkdir -p "${deadline_lease%/*}"
-printf '{"owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","published_url":"gs://wa-test-evidence/agent-evidence/deadline","verified_at":"2026-10-01T00:00:00Z","upload_manifest":[{"path":"manifested.bin","size":2147483648,"sha256":"placeholder","object":"gs://wa-test-evidence/agent-evidence/deadline/manifested.bin","generation":"1","md5":"placeholder","crc32c":"placeholder"}]}' >"$deadline_lease"
+printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","published_url":"gs://wa-test-evidence/agent-evidence/deadline","verified_at":"2026-10-01T00:00:00Z","upload_manifest":[{"path":"manifested.bin","size":2147483648,"sha256":"placeholder","object":"gs://wa-test-evidence/agent-evidence/deadline/manifested.bin","generation":"1","md5":"placeholder","crc32c":"placeholder"}]}' "$deadline_root" >"$deadline_lease"
 age "$deadline_root" 43200
 mkdir -p "$TMPROOT/slow-git"
 real_git="$(command -v git)"
@@ -929,11 +1003,83 @@ deadline_inventory="$TMPROOT/deferred-inventory.json"
 verdict="$(PATH="$TMPROOT/slow-git:$PATH" DISK_MAGICIAN_LSOF_BIN="$TMPROOT/slow-git/lsof" av "$deadline_root" --deadline-at "$deadline_at" --inventory-out "$deadline_inventory")"
 [[ "$verdict" == deferred:* ]] && ok "deadline defers the nested-repo / 2 GiB provenance case ($verdict)" || bad "deadline verdict: $verdict"
 [[ -f "$deadline_root/manifested.bin" && -d "$deadline_repo" && ! -e "$deadline_inventory" ]] && ok "deferred verdict leaves candidate and output inventory untouched" || bad "deferred path changed candidate or emitted output"
+# Rebuildable deadline: the caller's --deadline-at must reach the enclosing
+# worktree's shared push (ls-remote) probe; a slow remote defers, never removes.
+venvw "$HOME/wt-rbdl" && age "$HOME/wt-rbdl" 11520
+rb_short="$(python3 -c 'import time; print(time.monotonic()+5)')"
+assert_eq "$(PATH="$TMPROOT/slow-git:$PATH" av "$HOME/wt-rbdl/venv" --kind rebuildable --deadline-at "$rb_short")" deferred:lsremote \
+    "rebuildable venv honors the caller deadline on a slow remote"
+# Far-deadline positive: the same eligible venv still removes when time allows.
+rb_far="$(python3 -c 'import time; print(time.monotonic()+120)')"
+assert_eq "$(av "$HOME/wt-rbdl/venv" --kind rebuildable --deadline-at "$rb_far")" remove \
+    "far-deadline rebuildable venv still removes"
 
 mkdir -p "$PT/pr-race" && printf 'old bytes' >"$PT/pr-race/old.txt" && age "$PT/pr-race" 43200
 race_file="$PT/pr-race/untracked-after-nomination.txt"
 assert_eq "$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$PT" DISK_MAGICIAN_TEST_AFTER_NOMINATE="$race_file" eph "$PT/pr-race")" kept:recent-activity "post-nomination file is inventoried and kept"
 [[ -f "$race_file" ]] && ok "nomination race fixture writes only inside the sandbox" || bad "race hook missed its fixture"
+
+echo "== repository with an external registered linked worktree =="
+# A backing repo whose linked worktree lives OUTSIDE the candidate must keep the
+# candidate: removing it would destroy the common Git admin storage the worktree
+# needs, even when the worktree's visible branch is pushed. The baseline is
+# recorded after the worktree exists, so git_meta alone cannot catch this.
+ext_candidate="$PT/extwt/repo"
+git clone -q "$TMPROOT/remotes/wtbase.git" "$ext_candidate"
+ext_wt="$TMPROOT/ext-elsewhere/wt"
+git -C "$ext_candidate" worktree add -q "$ext_wt" -b extwt origin/main 2>/dev/null
+git -C "$ext_wt" push -q -u origin extwt 2>/dev/null
+printf 'EXTERNAL WORK\n' >>"$ext_wt/tracked.txt"
+baseline "$ext_candidate"
+# The external worktree's live lease is outside the candidate scope, so it cannot
+# be what keeps the candidate.
+lease "$ext_wt" null
+# Age the whole outer candidate (recursively covers the nested backing repo).
+age "$PT/extwt" 43200
+# An external `git status` may refresh the worktree index; re-age the outer
+# candidate afterwards so index refresh cannot mask the topology flaw.
+git -C "$ext_wt" status --porcelain >/dev/null 2>&1
+age "$PT/extwt" 43200
+assert_eq "$(eph "$ext_candidate")" kept:external-worktree "backing repo with an external registered worktree keeps"
+assert_eq "$(eph "$PT/extwt")" kept:external-worktree "outer candidate containing the external worktree admin keeps"
+[[ "$(tail -n1 "$ext_wt/tracked.txt")" == "EXTERNAL WORK" ]] \
+    && ok "external worktree bytes intact after the verdict" || bad "external worktree bytes changed"
+[[ -d "$ext_candidate/.git/worktrees/wt" ]] && ok "external worktree admin intact after the verdict" || bad "external worktree admin missing"
+own "$ext_wt" '"2026-10-01T00:00:00Z"'
+# Control: the same pushed, baselined, old candidate with no external worktree removes.
+ext_ctl="$PT/extctl/repo"
+git clone -q "$TMPROOT/remotes/wtbase.git" "$ext_ctl" && baseline "$ext_ctl"
+age "$ext_ctl" 43200
+assert_eq "$(eph "$ext_ctl")" remove "no-external control still removes"
+# Control: a normal linked-worktree candidate is not vetoed by its sibling
+# worktrees, whose shared admin storage lives outside that candidate.
+assert_eq "$(wt cand)" ok "normal linked-worktree candidate still removes with siblings present"
+
+# Topology deadline: a delayed worktree-list command must defer, not remove.
+mkdir -p "$TMPROOT/slow-wt"
+cat >"$TMPROOT/slow-wt/git" <<STUB
+#!/bin/bash
+[[ "\$1" == --git-dir && "\$3" == worktree ]] && sleep 25
+exec "$real_git" "\$@"
+STUB
+chmod +x "$TMPROOT/slow-wt/git"
+wt_deadline="$(python3 -c 'import time; print(time.monotonic()+5)')"
+assert_eq "$(PATH="$TMPROOT/slow-wt:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl" "$wt_deadline")" deferred:worktree-topology \
+    "short deadline defers the worktree topology probe"
+# Empty and malformed worktree records fail closed instead of passing as ok.
+mkdir -p "$TMPROOT/bad-wt/empty" "$TMPROOT/bad-wt/junk"
+printf '#!/bin/bash\n[[ "$1" == --git-dir && "$3" == worktree ]] && exit 0\nexec "%s" "$@"\n' "$real_git" >"$TMPROOT/bad-wt/empty/git"
+printf '#!/bin/bash\n[[ "$1" == --git-dir && "$3" == worktree ]] && { printf "garbage\\0"; exit 0; }\nexec "%s" "$@"\n' "$real_git" >"$TMPROOT/bad-wt/junk/git"
+chmod +x "$TMPROOT/bad-wt/empty/git" "$TMPROOT/bad-wt/junk/git"
+assert_eq "$(PATH="$TMPROOT/bad-wt/empty:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "empty worktree topology fails closed"
+assert_eq "$(PATH="$TMPROOT/bad-wt/junk:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "malformed worktree topology fails closed"
+# A complete Git worktree -z record ends with two NUL bytes; reject truncation.
+mkdir -p "$TMPROOT/bad-wt/trunc-nonul" "$TMPROOT/bad-wt/trunc-sep"
+printf '#!/bin/bash\n[[ "$1" == --git-dir && "$3" == worktree ]] && { printf "worktree /tmp/c14-owned\\0HEAD deadbeef"; exit 0; }\nexec "%s" "$@"\n' "$real_git" >"$TMPROOT/bad-wt/trunc-nonul/git"
+printf '#!/bin/bash\n[[ "$1" == --git-dir && "$3" == worktree ]] && { printf "worktree /tmp/c14-owned\\0HEAD deadbeef\\0"; exit 0; }\nexec "%s" "$@"\n' "$real_git" >"$TMPROOT/bad-wt/trunc-sep/git"
+chmod +x "$TMPROOT/bad-wt/trunc-nonul/git" "$TMPROOT/bad-wt/trunc-sep/git"
+assert_eq "$(PATH="$TMPROOT/bad-wt/trunc-nonul:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "worktree topology missing final NUL fails closed"
+assert_eq "$(PATH="$TMPROOT/bad-wt/trunc-sep:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "worktree topology missing record separator fails closed"
 
 echo "== verdict stays blocked =="
 v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"

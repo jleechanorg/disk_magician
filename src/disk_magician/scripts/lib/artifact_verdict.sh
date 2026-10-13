@@ -29,9 +29,16 @@ c14_discover_repos() {
                 [[ "$target" == "$root"/* ]] || { printf 'kept:gitdir-invalid\0'; return 1; }
             fi
             printf '%s\0' "$d"
-        # A bare repo; git internals (.git/modules, .git/worktrees) go with their owner.
-        elif [[ -f "$p" && -d "$d/objects" && -d "$d/refs" && "/$d/" != */.git/* ]]; then
-            printf '%s\0' "$d"
+        # A bare repo; git internals (.git/modules, .git/worktrees) go with their
+        # owner. HEAD/objects/refs may be internal symlinks, but a repo-looking
+        # shape we cannot validate fails closed rather than falling through to
+        # ordinary ephemeral content.
+        elif [[ "${p##*/}" == HEAD && "/$d/" != */.git/* ]]; then
+            if [[ -f "$p" && -d "$d/objects" && -d "$d/refs" ]]; then
+                printf '%s\0' "$d"
+            elif [[ -L "$p" || -L "$d/objects" || -L "$d/refs" || -e "$d/objects" || -e "$d/refs" ]]; then
+                printf 'kept:gitdir-invalid\0'; return 1
+            fi
         fi
     done < <(find "$root" \( -name .git -o -name HEAD \) -print0 2>/dev/null && printf 'OK\0')
     [[ -n "$done" ]]
@@ -77,6 +84,15 @@ c14_repo_pushed_ok() (
     gd="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" &&
         cd="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
         { echo kept:check-failed; return 1; }
+    # Fail closed when the candidate contains the common admin storage but a
+    # registered linked worktree lives outside it: removing the candidate would
+    # orphan that worktree's admin even if its visible branch is pushed. A
+    # linked-worktree candidate keeps its host's admin outside itself, so its
+    # siblings do not veto it.
+    out="$(python3 "$_AV_DIR/../c14_probe.py" worktrees "$cd" "$root" ${deadline:+"$deadline"})" || {
+        echo "${out:-kept:check-failed}"; return 1;
+    }
+    [[ "$out" == ok ]] || { echo "${out:-kept:check-failed}"; return 1; }
     if [[ "$cd" != "$gd" ]]; then
         [[ "$(git -C "$r" config --get extensions.refStorage || echo files)" == files ]] &&
             tips="$(python3 "$_AV_DIR/../c14_probe.py" admin "$gd" "$(lease_path_for "$r" 2>/dev/null)")" ||
@@ -192,12 +208,29 @@ c14_archive_origin() (
     (( now >= archived_at && now - archived_at >= minimum * 60 )) || { echo kept:recent-activity; return 0; }
     echo ok
 )
-# _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as cleanup_worktree_venvs,
-# an untracked venv dir atop a linked worktree passing the content and push checks.
+# _av_rebuildable <path> [<deadline>]: rc 0 under the cache-root table (§7.2 (b)) or,
+# as cleanup_worktree_venvs does, an untracked venv dir atop a linked worktree that
+# passes the content and push checks and is past the strict 7-day floor. Prints
+# `recent-activity` (and returns 1) when that floor protects the venv, or when
+# worktree recency cannot be measured; a kept/deferred verdict from the push check
+# is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]'
+    local h w g t re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
-    [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]] && { w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] && g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" && [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] && t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] && c14_repo_content_ok "$w" >/dev/null && c14_repo_pushed_ok "$w" >/dev/null; return; }
+    if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
+        w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
+            g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
+            [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
+            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] &&
+            c14_repo_content_ok "$w" >/dev/null || return 1
+        # The caller's deadline reaches the bounded shared remote/topology probes;
+        # their kept/deferred verdict is propagated verbatim (never kept:-prefixed).
+        pushed="$(c14_repo_pushed_ok "$w" "$w" "$deadline")" || { printf '%s\n' "${pushed:-kept:check-failed}"; return 1; }
+        # Canonical strict floor: no venv is stripped from a worktree touched
+        # within 7 days, and unmeasurable recency fails closed as active.
+        worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
+        return 0
+    fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
 )
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
@@ -213,8 +246,50 @@ _av_secret_like() {
         -print 2>/dev/null)" || return 0
     [[ -n "$out" ]]
 }
+# _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
+# canonical path is <path> or under it, for any filesystem kind (plain dir, plain
+# file, repo). Reads the lease store, not Git discovery, so a lease on a plain dir
+# inside <path> still keeps it. rc 1 when the store cannot be scanned, a record is
+# malformed, or a record's source filename is not the canonical lease name for its
+# recorded path (fail closed: a lease we cannot rule out must keep the path).
+_av_lease_record_paths() {
+    local ld
+    ld="$(lease_dir)" && [[ -d "$ld" ]] || return 0
+    python3 - "$ld" "$1" <<'PY'
+import hashlib, json, os, sys
+ld, cand = sys.argv[1], os.path.realpath(sys.argv[2])
+try:
+    names = sorted(os.listdir(ld))
+except OSError:
+    sys.exit(1)
+out = []
+for n in names:
+    if not n.endswith(".json") or n.startswith("."):
+        continue
+    try:
+        with open(os.path.join(ld, n)) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        sys.exit(1)
+    rec = d.get("path") if isinstance(d, dict) else None
+    if not isinstance(rec, str) or not rec:
+        sys.exit(1)
+    real = os.path.realpath(rec)
+    # Bind the record to the file it came from. lease_path_for keys a lease as
+    # sha256(realpath(path))[:16].json; a file stored under any other name has
+    # an unknown identity and must fail closed rather than be silently dropped.
+    if n != hashlib.sha256(os.fsencode(real)).hexdigest()[:16] + ".json":
+        sys.exit(1)
+    if real == cand or real.startswith(cand.rstrip("/") + "/"):
+        out.append(real)
+sys.stdout.buffer.write(b"".join(os.fsencode(p) + b"\0" for p in out))
+PY
+}
+
 # _av_lease_scope <path>: NUL-list <path>, its ancestors below its scratch root (else
-# $HOME, else /) and every repository under it; rc 1 when discovery is incomplete.
+# $HOME, else /), every repository under it, and every lease record whose path is
+# <path> or under it; rc 1 when discovery is incomplete. The lease-record scan runs
+# last so the candidate's own lease is checked first; a failed scan still blocks.
 _av_lease_scope() {
     local a=${1%/*} r stops=$'\n'
     while IFS= read -r r; do r="$(cd "$r" 2>/dev/null && pwd -P)" && stops+="$r"$'\n'; done < <(scratch_roots_get_unique)
@@ -222,9 +297,10 @@ _av_lease_scope() {
     printf '%s\0' "$1"
     while [[ -n "$a" && "$stops" != *$'\n'"$a"$'\n'* ]]; do printf '%s\0' "$a"; a=${a%/*}; done
     if [[ -d "$1" ]]; then
-        if [[ -n "${2:-}" ]]; then C14_ROOT="$1" python3 "$_AV_DIR/../c14_probe.py" repos "$2"
-        else c14_discover_repos "$1"; fi
+        if [[ -n "${2:-}" ]]; then C14_ROOT="$1" python3 "$_AV_DIR/../c14_probe.py" repos "$2" || return 1
+        else c14_discover_repos "$1" || return 1; fi
     fi
+    _av_lease_record_paths "$1"
 }
 
 # _av_path_identity <path>: filesystem identity in the format used by
@@ -267,7 +343,8 @@ _av_os_clone_proof() {
 }
 
 # artifact_removal_verdict <path> [...] | --self-test
-_av_artifact_removal_verdict() {
+# Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
+_av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter=''
     shift || true
@@ -328,7 +405,13 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
             else
                 [[ "$ret" == ok ]] || { echo "$ret"; return 0; }
             fi ;;
-        rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
+        rebuildable) ret="$(_av_rebuildable "$p" "$deadline")" || {
+            case "$ret" in
+                deferred:*|kept:*) echo "$ret" ;;
+                '') echo kept:unproven-content ;;
+                *) echo "kept:$ret" ;;
+            esac
+            return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
         '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |
                     python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"
@@ -353,7 +436,7 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
     fi
     echo remove
-}
+)
 
 artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
