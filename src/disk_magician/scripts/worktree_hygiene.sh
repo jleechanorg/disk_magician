@@ -399,7 +399,8 @@ triage_candidate() {
             # A detached HEAD has no branch to push; pushing HEAD:detached
             # would mint a bogus remote branch (then backup/detached-<date>).
             push_status="skipped-detached"
-        elif [[ "${SKIP_PUSH:-false}" == true || "${EXECUTE:-false}" != true ]]; then
+        elif [[ "${SKIP_PUSH:-false}" == true || "${EXECUTE:-false}" != true \
+            || ( "${PRESERVE_WIP:-false}" == true && "${PUSH_WIP:-false}" != true ) ]]; then
             push_status="skipped"
         else
             if git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
@@ -708,20 +709,20 @@ worktree_bytes_mismatch() {
 publish_wip_ref() {
     local wt="$1" ref="$2" sha remote_sha err backup
     local -x GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false
-    sha="$(git -C "$wt" rev-parse HEAD)" || return 1
+    sha="$(git -C "$wt" rev-parse "${3:-HEAD}")" || return 1
     # Publication is opt-in, but credential safety still fails closed. Scan
     # reachable history because an older unpushed commit can contain secrets.
     command -v gitleaks >/dev/null 2>&1 || return 1
     command -v timeout >/dev/null 2>&1 || return 1
     timeout 90 gitleaks git "$wt" --log-opts="$sha" --redact --no-banner >/dev/null 2>&1 || return 1
     err="$(mktemp)" || return 1
-    if ! timeout 90 git -C "$wt" push origin "HEAD:refs/heads/$ref" >"$err" 2>&1; then
+    if ! timeout 90 git -C "$wt" push origin "$sha:refs/heads/$ref" >"$err" 2>&1; then
         if ! grep -Eq '\[rejected\].*\((non-fast-forward|fetch first)\)' "$err"; then
             rm -f "$err"
             return 1
         fi
         backup="backup/$ref-$(date +%Y%m%d)"
-        if ! timeout 90 git -C "$wt" push origin "HEAD:refs/heads/$backup" >"$err" 2>&1; then
+        if ! timeout 90 git -C "$wt" push origin "$sha:refs/heads/$backup" >"$err" 2>&1; then
             rm -f "$err"
             return 1
         fi
@@ -733,6 +734,29 @@ publish_wip_ref() {
     PUBLISHED_WIP_REF="$ref"
     pushed_count=$(( ${pushed_count:-0} + 1 ))
     ledger_line "VERIFIED-WIP" "$wt" "$ref $sha"
+}
+
+# Normal publication hooks can change local state; all removal preconditions
+# must still hold for the exact preserved commit after those hooks have run.
+wip_post_publication_blocker() {
+    local repo_abs="$1" wt="$2" branch="$3" sha="$4" value blocker
+    value="$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null)" || { echo "head-unreadable"; return 0; }
+    [[ "$value" == "$sha" ]] || { echo "head-changed"; return 0; }
+    value="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null)" || { echo "head-detached"; return 0; }
+    [[ "$value" == "refs/heads/$branch" ]] || { echo "branch-changed"; return 0; }
+    value="$(git -C "$wt" rev-parse --verify "refs/heads/$branch" 2>/dev/null)" || { echo "ref-unreadable"; return 0; }
+    [[ "$value" == "$sha" ]] || { echo "ref-changed"; return 0; }
+    if blocker="$(preserve_wip_blocker "$repo_abs" "$wt")"; then
+        echo "$blocker"; return 0
+    fi
+    value="$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || { echo "status-unreadable"; return 0; }
+    [[ -z "$value" ]] || { echo "working-state-changed"; return 0; }
+    value="$(worktree_bytes_mismatch "$wt")" || { echo "byte-check-failed"; return 0; }
+    [[ -z "$value" ]] || { echo "preserved-bytes-changed:$value"; return 0; }
+    if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS"; then
+        echo "recently-active"; return 0
+    fi
+    return 1
 }
 
 # preserve_wip_and_remove <repo_abs> <wt_path> — commit all non-ignored WIP to
@@ -801,12 +825,18 @@ preserve_wip_and_remove() {
         ledger_line "WIP-KEPT" "$wt" "$branch $sha; push disabled; worktree retained"
         return 1
     fi
-    if ! publish_wip_ref "$wt" "$branch"; then
+    if ! publish_wip_ref "$wt" "$branch" "$sha"; then
         ledger_line "WIP-KEPT" "$wt" "$branch $sha; remote backup unverified; worktree retained"
         return 1
     fi
 
     printf '%s\t%s\t%s\t%s\tremote-verified:%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wt" "$branch" "$sha" "$PUBLISHED_WIP_REF" >>"$state_dir/worktree_hygiene_wip_manifest.txt" || return 1
+
+    local post_blocker
+    if post_blocker="$(wip_post_publication_blocker "$repo_abs" "$wt" "$branch" "$sha")"; then
+        ledger_line "WIP-KEPT" "$wt" "$branch $sha; post-publication revalidation: $post_blocker; retained"
+        return 1
+    fi
 
     if git -C "$repo_abs" worktree remove "$wt" 2>/dev/null; then
         ledger_line "DELETE" "$wt" "preserved on $branch"
@@ -825,10 +855,11 @@ preserve_wip_and_remove() {
 # ---------------------------------------------------------------------------
 
 hygiene_finish() {
-    local rc="$1" state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    local rc="$1" state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" persist_rc=0
     [[ "$HYGIENE_STATUS" != running ]] || HYGIENE_STATUS=failed
+    echo "Worktree-hygiene status: $HYGIENE_STATUS; partial=$([[ $HYGIENE_STATUS == completed ]] && echo false || echo true); removed=$removed_count failed=$failed_count; checkpoint=$state/worktree_hygiene_summary.json"
     python3 - "$state" "$HYGIENE_STATUS" "$rc" "$safe_count" "$review_count" \
-        "$preserved_count" "$wip_count" "$removed_count" "$failed_count" "$HYGIENE_CURRENT" "$HYGIENE_COMPLETED" "$HYGIENE_ALL_REPOS" "$HYGIENE_SCANNED_REPOS" "$HYGIENE_REPO" "$pushed_count" "$EXECUTE" "$local_wip_count" <<'PYTHON'
+        "$preserved_count" "$wip_count" "$removed_count" "$failed_count" "$HYGIENE_CURRENT" "$HYGIENE_COMPLETED" "$HYGIENE_ALL_REPOS" "$HYGIENE_SCANNED_REPOS" "$HYGIENE_REPO" "$pushed_count" "$EXECUTE" "$local_wip_count" <<'PYTHON' || persist_rc=$?
 import datetime, json, os, pathlib, sys, tempfile
 state = pathlib.Path(sys.argv[1]); state.mkdir(parents=True, exist_ok=True)
 keys = ["safe", "needs_review", "preserved", "wip_removed", "removed", "failed"]
@@ -854,7 +885,11 @@ with os.fdopen(fd, "w") as stream:
     json.dump(data, stream, indent=2)
 os.replace(name, state / "worktree_hygiene_summary.json")
 PYTHON
-    echo "Worktree-hygiene status: $HYGIENE_STATUS; removed=$removed_count failed=$failed_count; checkpoint=$state/worktree_hygiene_summary.json"
+    if [[ "$persist_rc" -ne 0 ]]; then
+        echo "WARN: failed to persist resume state in $state (exit $persist_rc); human partial summary remains available" >&2
+    fi
+    [[ "$rc" -eq 0 ]] || return "$rc"
+    return "$persist_rc"
 }
 
 main() {

@@ -574,7 +574,8 @@ def describe_capture_window(state_dir, days):
     ordered = sorted(captures)
     dates = sorted({ts.date().isoformat() for ts in ordered})
     span = (ordered[-1] - ordered[0]).total_seconds() / 86400 if ordered else 0
-    status = "complete" if len(dates) >= days else "partial"
+    required_dates = {(now.date() - datetime.timedelta(days=offset)).isoformat() for offset in range(days)}
+    status = "complete" if required_dates.issubset(dates) else "partial"
     return (f"history window: requested_days={days} observed_span_days={span:.2f} "
             f"samples={len(ordered)} observed_dates={len(dates)} coverage_status={status} "
             f"capture_dates={','.join(dates) or 'none'}; floor is observed samples only")

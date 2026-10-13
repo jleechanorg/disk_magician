@@ -123,6 +123,8 @@ class RepairContracts(unittest.TestCase):
             git("-C", repo, "remote", "add", "origin", remote)
             git("-C", repo, "worktree", "add", "-qb", "feature", wt)
             (wt / "file").write_text("wip")
+            old = time.time() - 30 * 86400
+            os.utime(wt / "file", (old, old))
             script = (
                 'source "$1"; SKIP_PUSH=true; preserve_wip_and_remove "$2" "$3" || true'
             )
@@ -281,6 +283,8 @@ class RepairContracts(unittest.TestCase):
             ref = "wip/worktree-hygiene/" + day + "/wt"
             git("--git-dir", remote, "update-ref", "refs/heads/" + ref, ahead)
             (wt / "file").write_text("wip")
+            old = time.time() - 30 * 86400
+            os.utime(wt / "file", (old, old))
             env = {
                 **os.environ,
                 "HOME": str(root),
@@ -374,6 +378,254 @@ class RepairContracts(unittest.TestCase):
                 ).stdout,
                 "",
             )
+
+    def test_publication_hook_mutation_keeps_worktree(self):
+        for mutation in (
+            "ignored-secret",
+            "tracked-edit",
+            "head-change",
+            "lock",
+            "recent-touch",
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                repo = root / "repo"
+                wt = root / "wt"
+                remote = root / "remote.git"
+
+                def git(*args):
+                    return subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            "user.name=test",
+                            "-c",
+                            "user.email=test@example.com",
+                            *map(str, args),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+
+                git("init", "-qb", "main", repo)
+                (repo / "file").write_text("base")
+                (repo / ".gitignore").write_text(".env\n")
+                git("-C", repo, "add", ".")
+                git("-C", repo, "commit", "-qm", "base")
+                git("init", "-q", "--bare", remote)
+                git("-C", repo, "remote", "add", "origin", remote)
+                git("-C", repo, "worktree", "add", "-qb", "feature", wt)
+                (wt / "file").write_text("wip")
+                old = time.time() - 30 * 86400
+                for file in (wt / "file", wt / ".gitignore"):
+                    os.utime(file, (old, old))
+                hook = repo / ".git/hooks/pre-push"
+                commands = {
+                    "ignored-secret": 'printf "synthetic fixture" > "$FIXTURE_WT/.env"',
+                    "tracked-edit": 'printf "hook edit" >> "$FIXTURE_WT/file"',
+                    "head-change": 'git -C "$FIXTURE_WT" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm "hook commit"',
+                    "lock": 'git -C "$FIXTURE_REPO" worktree lock "$FIXTURE_WT"',
+                    "recent-touch": 'touch "$FIXTURE_WT/file"',
+                }
+                hook.write_text("#!/bin/sh\n" + commands[mutation] + "\n")
+                hook.chmod(0o755)
+                env = {
+                    **os.environ,
+                    "HOME": str(root),
+                    "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
+                    "FIXTURE_WT": str(wt),
+                    "FIXTURE_REPO": str(repo),
+                }
+                script = 'source "$1"; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
+                r = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        script,
+                        "fixture",
+                        str(ROOT / "scripts/worktree_hygiene.sh"),
+                        str(repo),
+                        str(wt),
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertTrue(wt.exists())
+                self.assertIn("WIP-KEPT", r.stdout)
+                if mutation == "ignored-secret":
+                    self.assertEqual((wt / ".env").read_text(), "synthetic fixture")
+                elif mutation == "tracked-edit":
+                    self.assertIn("hook edit", (wt / "file").read_text())
+                elif mutation == "head-change":
+                    self.assertEqual(
+                        git("-C", wt, "log", "-1", "--format=%s"), "hook commit"
+                    )
+                elif mutation == "lock":
+                    self.assertIn("locked", r.stdout)
+                else:
+                    self.assertIn("recently-active", r.stdout)
+
+    def test_publication_sends_only_the_scanned_immutable_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo = root / "repo"
+            remote = root / "remote.git"
+            fakebin = root / "bin"
+            fakebin.mkdir()
+
+            def git(*args):
+                return subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=test",
+                        "-c",
+                        "user.email=test@example.com",
+                        *map(str, args),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "-qb", "main", repo)
+            (repo / "file").write_text("scanned")
+            git("-C", repo, "add", ".")
+            git("-C", repo, "commit", "-qm", "scanned")
+            scanned = git("-C", repo, "rev-parse", "HEAD")
+            git("init", "-q", "--bare", remote)
+            git("-C", repo, "remote", "add", "origin", remote)
+            scanner = fakebin / "gitleaks"
+            scanner.write_text(
+                '#!/bin/sh\nprintf "new unscanned content" > "$FIXTURE_REPO/file"\ngit -C "$FIXTURE_REPO" add file\ngit -C "$FIXTURE_REPO" -c user.name=test -c user.email=test@example.com commit -qm unscanned\n'
+            )
+            scanner.chmod(0o755)
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "PATH": str(fakebin) + ":" + os.environ["PATH"],
+                "FIXTURE_REPO": str(repo),
+            }
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; publish_wip_ref "$2" backup-test',
+                    "fixture",
+                    str(ROOT / "scripts/worktree_hygiene.sh"),
+                    str(repo),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                git("--git-dir", remote, "rev-parse", "refs/heads/backup-test"), scanned
+            )
+            self.assertNotEqual(git("-C", repo, "rev-parse", "HEAD"), scanned)
+            moved = git("-C", repo, "rev-parse", "HEAD")
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "--git-dir", str(remote), "cat-file", "-e", moved],
+                    capture_output=True,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_interrupted_summary_survives_unwritable_state_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo = root / "repo"
+            repo.mkdir()
+            state = root / "blocked-state"
+            state.write_text("owned regular file blocks a state directory")
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "DISK_MAGICIAN_STATE_DIR": str(state),
+            }
+            script = 'source "$1"; identify_candidates(){ kill -TERM "$$"; sleep 1; }; main --repos "$2" --skip-push --skip-gh'
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "fixture",
+                    str(ROOT / "scripts/worktree_hygiene.sh"),
+                    str(repo),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(r.returncode, 143, r.stdout + r.stderr)
+            self.assertIn("partial", r.stdout)
+            self.assertIn("Worktree-hygiene status: interrupted", r.stdout)
+            self.assertIn("failed to persist", r.stderr)
+            self.assertEqual(
+                state.read_text(), "owned regular file blocks a state directory"
+            )
+
+    def test_preservation_without_push_wip_does_not_publish_clean_ahead_branch(self):
+        for preserve, expected in ((True, False), (False, True)):
+            with self.subTest(preserve=preserve), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                repo = root / "repo"
+                remote = root / "remote.git"
+
+                def git(*args):
+                    return subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            "user.name=test",
+                            "-c",
+                            "user.email=test@example.com",
+                            *map(str, args),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+
+                git("init", "-qb", "main", repo)
+                (repo / "file").write_text("base")
+                git("-C", repo, "add", ".")
+                git("-C", repo, "commit", "-qm", "base")
+                git("init", "-q", "--bare", remote)
+                git("-C", repo, "remote", "add", "origin", remote)
+                git("-C", repo, "push", "-q", "origin", "main")
+                git("-C", repo, "checkout", "-qb", "feature")
+                (repo / "file").write_text("ahead")
+                git("-C", repo, "add", ".")
+                git("-C", repo, "commit", "-qm", "ahead")
+                script = 'source "$1"; EXECUTE=true; SKIP_GH=true; PRESERVE_WIP="$3"; triage_candidate "$2" "$2" feature'
+                env = {**os.environ, "HOME": str(root)}
+                r = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        script,
+                        "fixture",
+                        str(ROOT / "scripts/worktree_hygiene.sh"),
+                        str(repo),
+                        str(preserve).lower(),
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                refs = git("--git-dir", remote, "show-ref")
+                self.assertEqual("refs/heads/feature" in refs, expected)
 
     def test_ignored_evidence_is_listed_for_decision_and_retained(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -581,6 +581,21 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn("no valid ledger snapshots", result.stderr)
 
+    def test_capture_window_requires_every_requested_calendar_date(self):
+        real_datetime = datetime.datetime
+        now = real_datetime(2026, 10, 13, 12, tzinfo=datetime.timezone.utc)
+        class FixedDateTime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        for captures, status in [([6, 7, 8, 9, 10, 11, 13], "partial"), ([13] * 7, "partial"), ([7, 8, 9, 10, 11, 12, 13], "complete")]:
+            with self.subTest(captures=captures):
+                refs = [str(i) for i in range(len(captures))]
+                ledgers = {ref: ledger(GIB_KB, 0, [{"path": "/a", "measured_kb": GIB_KB}], captured_at=f"2026-10-{day:02d}T12:00:00Z") for ref, day in zip(refs, captures)}
+                with mock.patch.object(hd.datetime, "datetime", FixedDateTime), mock.patch.object(hd.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "\n".join(refs), "")), mock.patch.object(hd, "load_ledger_from_git", side_effect=lambda state, ref: ledgers[ref]):
+                    result = hd.describe_capture_window(self.repo, 7)
+                self.assertIn("coverage_status=" + status, result)
+
     def test_days_cannot_be_combined_with_explicit_ref(self):
         result = self._run_cli("HEAD~1", "--days", "7")
         self.assertEqual(result.returncode, 2)
