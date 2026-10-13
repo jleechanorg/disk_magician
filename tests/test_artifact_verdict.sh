@@ -565,6 +565,47 @@ assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kin
 age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
+
+echo "== archive origin receipt (E1) =="
+ARCHIVE_ROOT="$TMPROOT/archive-root"
+export DISK_MAGICIAN_ARCHIVE_ROOT="$ARCHIVE_ROOT"
+archive_fixture() {
+    local source="$1" entry="$2" archived_at="$3"
+    mkdir -p "${entry%/*}" && "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" >/dev/null && mv "$source" "$entry"
+}
+archive_source="$PT/pr-archive-123"
+archive_entry="$ARCHIVE_ROOT/20261010T000000Z/pr-archive-123"
+mkdir -p "$archive_source" && printf 'archived pr payload' >"$archive_source/payload"
+age "$archive_source" 43200
+archive_fixture "$archive_source" "$archive_entry" "$((NOW - 49 * 3600))"
+age "$archive_entry" 43200
+assert_eq "$(av "$archive_entry" --kind ephemeral)" remove "archived E3 origin past its 48 h row retention"
+
+unknown_source="$TMPROOT/unregistered-origin"
+unknown_entry="$ARCHIVE_ROOT/20261010T010000Z/large-unknown"
+mkdir -p "$unknown_source" && truncate -s 209715200 "$unknown_source/large.bin"
+archive_fixture "$unknown_source" "$unknown_entry" "$((NOW - 25 * 3600))"
+age "$unknown_entry" 43200
+assert_eq "$(av "$unknown_entry" --kind ephemeral)" kept:archive-identity "200 MiB archive with unknown origin stays kept"
+
+legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
+mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
+assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:unproven-content "pre-receipt archive falls through to ordinary provenance"
+
+replaced_source="$PT/pr-replaced-123"
+replaced_entry="$ARCHIVE_ROOT/20261010T030000Z/pr-replaced-123"
+mkdir -p "$replaced_source" && printf 'original inode' >"$replaced_source/payload"
+archive_fixture "$replaced_source" "$replaced_entry" "$((NOW - 49 * 3600))"
+mv "$replaced_entry" "$replaced_entry.original" && mkdir -p "$replaced_entry" && printf 'replacement inode' >"$replaced_entry/new"
+age "$replaced_entry" 43200
+assert_eq "$(av "$replaced_entry" --kind ephemeral)" kept:archive-identity "replaced E1 entry does not inherit its old receipt"
+
+missing_identity="$ARCHIVE_ROOT/20261010T040000Z/missing-identity"
+mkdir -p "$missing_identity" && printf 'missing ids' >"$missing_identity/payload"
+printf '{"original_path":"%s/pr-123","archived_at":%s}\n' "$PT" "$((NOW - 49 * 3600))" >"$missing_identity.c14-origin.json"
+age "$missing_identity" 43200
+assert_eq "$(av "$missing_identity" --kind ephemeral)" kept:archive-identity "E1 receipt missing dev and inode is kept"
+
 unset DISK_MAGICIAN_STAT_BIN
 
 echo "== fd-bound inventory, deadline and nomination race =="

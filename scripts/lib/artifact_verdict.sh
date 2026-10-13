@@ -143,6 +143,27 @@ c14_ephemeral_retention() {
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
+# c14_archive_origin <candidate> <inventory>: E1 uses only a matching durable
+# origin receipt. `none` falls through to ordinary provenance; invalid identity
+# or a receipt whose E2/E3 retention has not elapsed stays kept.
+c14_archive_origin() (
+    local p=$1 inv=$2 archive_root receipt info original archived_at retention now
+    archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
+    [[ -d "$archive_root" ]] || { echo none; return 0; }
+    archive_root="$(cd "$archive_root" 2>/dev/null && pwd -P)" || { echo kept:archive-identity; return 0; }
+    [[ "$p" == "$archive_root/"* ]] || { echo none; return 0; }
+    receipt="$p.c14-origin.json"
+    [[ -e "$receipt" || -L "$receipt" ]] || { echo none; return 0; }
+    info="$(python3 "$_AV_DIR/../c14_probe.py" archive-info "$p" "$receipt" "$inv")"
+    [[ "$info" != kept:* ]] || { echo kept:archive-identity; return 0; }
+    IFS= read -r -d '' original < <(python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["original_path"]); sys.stdout.write("\0")' "$info" 2>/dev/null) || { echo kept:archive-identity; return 0; }
+    archived_at="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archived_at"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
+    retention="$(c14_ephemeral_retention "$original")" || { echo kept:archive-identity; return 0; }
+    case "$retention" in 60|240|2880) ;; *) echo kept:archive-identity; return 0 ;; esac
+    now="$(date +%s)"
+    (( now >= archived_at && now - archived_at >= retention * 60 )) || { echo kept:recent-activity; return 0; }
+    echo ok
+)
 # _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as cleanup_worktree_venvs,
 # an untracked venv dir atop a linked worktree passing the content and push checks.
 _av_rebuildable() (
@@ -271,8 +292,13 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in
-        ephemeral) ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
-            (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; } ;;
+        ephemeral) ret="$(c14_archive_origin "$p" "$inv")"
+            if [[ "$ret" == none ]]; then
+                ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
+                (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
+            else
+                [[ "$ret" == ok ]] || { echo "$ret"; return 0; }
+            fi ;;
         rebuildable) _av_rebuildable "$p" || { echo kept:unproven-content; return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
         '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |

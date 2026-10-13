@@ -342,6 +342,65 @@ def account(inv_file, ledger, reason):
     except Exception:
         print("kept:check-failed")
 
+def archive_receipt(source, receipt, archived_at=None):
+    """Write an exclusive, durable identity receipt for a directory before it moves."""
+    try:
+        st = os.lstat(source)
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError("archive entries must be directories")
+        row = {"original_path": os.path.abspath(source), "dev": st.st_dev, "ino": st.st_ino,
+               "size": st.st_size, "archived_at": int(archived_at) if archived_at else int(time.time())}
+        parent = os.path.dirname(os.path.abspath(receipt))
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, (json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n").encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        dfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
+        print("ok")
+    except Exception:
+        print("kept:archive-identity")
+
+def archive_info(candidate, receipt, inv_file):
+    """Validate archive identity against both the live path and verdict inventory."""
+    try:
+        entries = json.load(open(inv_file, encoding="utf-8"))
+        root = next(e for e in entries if e.get("path") == ".")
+        st = os.lstat(candidate)
+        if not stat.S_ISDIR(st.st_mode) or root.get("type") != "dir":
+            raise ValueError("not an inventoried directory")
+        identity = (st.st_dev, st.st_ino, st.st_size)
+        if identity != (root.get("dev"), root.get("ino"), root.get("size")):
+            raise ValueError("candidate changed")
+        rst = os.lstat(receipt)
+        if not stat.S_ISREG(rst.st_mode):
+            raise ValueError("receipt is not a regular file")
+        with open(receipt, "r", encoding="utf-8") as f:
+            before = os.fstat(f.fileno())
+            row = json.load(f)
+            after = os.fstat(f.fileno())
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                rst.st_dev, rst.st_ino, rst.st_size, rst.st_mtime_ns) or (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+                before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            raise ValueError("receipt changed")
+        original = row.get("original_path")
+        dev, ino, archived_at = row.get("dev"), row.get("ino"), row.get("archived_at")
+        if not isinstance(original, str) or not os.path.isabs(original) or type(dev) is not int or type(ino) is not int or type(archived_at) is not int or archived_at <= 0:
+            raise ValueError("receipt fields missing")
+        if (dev, ino) != identity[:2] or ("size" in row and row["size"] != st.st_size):
+            raise ValueError("archive identity changed")
+        if "size" in row and type(row["size"]) is not int:
+            raise ValueError("invalid archive size")
+        if "sha256" in row:
+            raise ValueError("unsupported receipt digest")
+        print(json.dumps({"original_path": original, "archived_at": archived_at}, separators=(",", ":")))
+    except Exception:
+        print("kept:archive-identity")
+
 def repos(inv_file):
     """Print discovered repository roots from a complete JSON inventory."""
     try:
@@ -429,6 +488,10 @@ if __name__ == "__main__":
             sys.exit(inventory(a[1], a[2], a[3] if len(a) == 4 else None))
         if len(a) == 4 and a[0] == "account":
             sys.exit(account(*a[1:]))
+        if len(a) in (3, 4) and a[0] == "archive-receipt":
+            sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) == 4 else None))
+        if len(a) == 4 and a[0] == "archive-info":
+            sys.exit(archive_info(a[1], a[2], a[3]))
         if len(a) == 2 and a[0] == "repos":
             sys.exit(repos(a[1]))
         if len(a) == 2 and a[0] == "newest-mtime":
