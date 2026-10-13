@@ -269,7 +269,7 @@ _av_os_clone_proof() {
 # artifact_removal_verdict <path> [...] | --self-test
 _av_artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source=''
+    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -346,10 +346,10 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
             if [[ "$top" == "$p" ]]; then
                 gd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --absolute-git-dir 2>/dev/null)" || gd=''
                 cd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || cd=''
-                [[ -n "$gd" && -n "$cd" && "$gd" != "$cd" ]] && admin_source=${C14_ADMIN_INVENTORY:-}
+                [[ -n "$gd" && -n "$cd" && "$gd" != "$cd" ]] && { admin_source=${C14_ADMIN_INVENTORY:-}; admin_filter=$gd; }
             fi
         fi
-        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "$admin_source" "$inventory_out.tmp.$$")"
+        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "$admin_source" "$inventory_out.tmp.$$" "$admin_filter")"
         [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
     fi
     echo remove
@@ -360,13 +360,16 @@ artifact_removal_verdict() {
     local tmpdir inv result reason admin_inv
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
     inv="$tmpdir/inventory.json"
-    admin_inv=${C14_INVENTORY_OUT:-"$inv.admin.jsonl"}
+    # The admin row channel is per-call and owned by this verdict. A caller's
+    # C14_INVENTORY_OUT is never inherited, and only --inventory-out names the
+    # external receipt destination.
+    admin_inv="$tmpdir/admin.jsonl"
     result="$(GIT_OPTIONAL_LOCKS=0 C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "$@")"
     if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
         reason=${result#*:}
         python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
     fi
-    rm -f "$inv"
+    rm -f "$inv" "$admin_inv"
     rmdir "$tmpdir" 2>/dev/null || true
     echo "${result:-kept:check-failed}"
 }

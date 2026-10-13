@@ -541,7 +541,12 @@ def repos(inv_file):
                     by_path.get(name, {}).get("type") == kind for name, kind in
                     (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                 roots.add(".")
-            if e.get("type") == "dir" and rel not in gitdir_targets and rel != ".git" and not rel.endswith("/.git"):
+            # Bare repos inside any .git/ directory (e.g. .git/modules/<sm>) are
+            # metadata owned by the repo above them; the legacy find path
+            # excludes them with the same component rule. A directory actually
+            # named foo.git is untouched.
+            if (e.get("type") == "dir" and rel not in gitdir_targets
+                    and ".git" not in rel.split("/")):
                 if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
                        (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                     roots.add(rel)
@@ -571,15 +576,22 @@ def secrets(inv_file):
     except Exception:
         print("kept:check-failed")
 
-def merge_inventory(inv_file, admin_file, out_file):
+def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         if os.path.isfile(admin_file):
             for line in open(admin_file, encoding="utf-8"):
-                if line.strip():
-                    entry = json.loads(line)
-                    entry["type"] = "admin"
-                    entries.append(entry)
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                # A caller-supplied channel can accumulate rows for every
+                # repository checked in a run. A receipt for one worktree root
+                # may bind only rows canonicalized to that candidate's own git
+                # dir; an empty/absent filter binds none.
+                if admin_filter is not None and entry.get("admin") != admin_filter:
+                    continue
+                entry["type"] = "admin"
+                entries.append(entry)
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"), sort_keys=True)
             f.flush(); os.fsync(f.fileno())
@@ -640,7 +652,7 @@ if __name__ == "__main__":
             sys.exit(newest_mtime(a[1]))
         if len(a) == 2 and a[0] == "secrets":
             sys.exit(secrets(a[1]))
-        if len(a) == 4 and a[0] == "merge-inventory":
+        if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":
             sys.exit(open_file(a[1], a[2] if len(a) == 3 and a[2] else None))
