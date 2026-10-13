@@ -67,6 +67,7 @@ fixture() {  # fresh parent/art with a report, nested files and a symlink
 }
 OUT=""
 run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
+run_nounset() { OUT="$(env TMPDIR="$TMP" "$@" bash -u -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
 run_contract() {
   local qpath qtmp qverdict arg qarg command
   printf -v qpath '%q' "$A"; printf -v qtmp '%q' "$TMP"; printf -v qverdict '%q' "$STUB_VERDICT"
@@ -152,6 +153,9 @@ check '0755 qdir: untouched, qdir empty' bash -c '[[ -f "$1/report.md" && -z "$(
 fixture; STUB_VERDICT=kept:unproven-content run X=1
 check 'kept verdict passes through' [ "$OUT" = kept:unproven-content ]
 check 'kept verdict: untouched, no quarantine dir' bash -c '[[ -f "$1/report.md" && ! -e "$2" ]]' _ "$A" "$Q"
+fixture; STUB_VERDICT=kept:unproven-content run_nounset X=1
+check 'nounset no-option kept verdict passes through' [ "$OUT" = kept:unproven-content ]
+check 'nounset no-option kept verdict: untouched' intact AAAA
 fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; quarantine_remove '$A'")"
 check 'no verdict function: kept:check-failed' [ "$OUT" = kept:check-failed ]
 check 'no verdict function: untouched' intact AAAA
