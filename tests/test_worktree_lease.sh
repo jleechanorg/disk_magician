@@ -369,6 +369,29 @@ assert_eq "$(lease_field "$LE" 'd["git_meta"]["head"]')" "abc123" "git metadata 
 lease_set_verdict "$LE" "kept:test"
 assert_eq "$(lease_field "$LE" 'd["kind"] + str(d["published"])')" "evidenceTrue" "provenance survives verdict update"
 
+echo "== atomic reuse lease claim and recovery =="
+REUSE_WT="$(mk_wt wt_reuse)"
+lease_write "$REUSE_WT" myrepo old-branch test
+REUSE_LEASE="$(lease_path_for "$REUSE_WT")"
+REUSE_HASH="$(python3 - "$REUSE_LEASE" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PY
+)"
+REUSE_OWNER="$(printf '500\t%s\tcodex' "$OWNER_EPOCH")"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then ok "exact lease claimed"; else bad "exact lease claim failed"; fi
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_branch"]')" "old-branch" "old branch preserved in claim"
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_tip"]')" "abc123" "old tip preserved in claim"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then bad "stale lease claim succeeded"; else ok "stale/concurrent lease claim refused"; fi
+if lease_restore_reuse_claim "$REUSE_LEASE"; then ok "claim rollback restored"; else bad "claim rollback failed"; fi
+assert_eq "$(python3 - "$REUSE_LEASE" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PY
+)" "$REUSE_HASH" "rollback restores exact original lease"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER" && lease_mark_reuse_incomplete "$REUSE_LEASE"; then ok "incomplete reuse marked"; else bad "incomplete reuse marker failed"; fi
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["state"]')" "reuse_incomplete" "incomplete state retained"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

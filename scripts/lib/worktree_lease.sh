@@ -232,6 +232,78 @@ lease_write_pending() {
         "$pid" "$ep" "$comm" "-" "-" "${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
 }
 
+# lease_claim_reuse <lease_file> <expected_sha256> <old_branch> <old_tip> <owner_tsv>
+# Atomically converts the exact observed lease to a pending reuse claim. The
+# previous lease is retained for rollback; an abandoned claim is never reaped.
+lease_claim_reuse() {
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import hashlib, json, os, sys, tempfile
+path, expected, branch, tip, owner_tsv = sys.argv[1:]
+lock = path + ".reuse-lock"
+try:
+    os.mkdir(lock)
+except OSError:
+    sys.exit(1)
+try:
+    with open(path, "rb") as f: raw = f.read()
+    if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
+    old = json.loads(raw)
+    if not isinstance(old, dict) or old.get("reuse") or old.get("pending") is True: sys.exit(1)
+    owner = None
+    fields = owner_tsv.split("\t")
+    if len(fields) >= 3 and fields[0].isdigit() and fields[1].isdigit():
+        owner = {"pid": int(fields[0]), "start_epoch": int(fields[1]), "comm": fields[2]}
+    d = dict(old)
+    d["pending"] = True
+    d["owner"] = owner
+    d["reuse"] = {"state": "pending", "old_branch": branch, "old_tip": tip,
+                  "previous_lease": old}
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".reuse-lease-")
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(d, f, indent=2); f.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+finally:
+    try: os.rmdir(lock)
+    except OSError: pass
+PY
+}
+
+# lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
+# while this file still carries our pending claim.
+lease_restore_reuse_claim() {
+    python3 - "$1" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as f: d = json.load(f)
+    prev = d.get("reuse", {}).get("previous_lease")
+    if d.get("reuse", {}).get("state") != "pending" or not isinstance(prev, dict): sys.exit(1)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".restore-lease-")
+    with os.fdopen(fd, "w") as f: json.dump(prev, f, indent=2); f.write("\n")
+    os.replace(tmp, path)
+except Exception: sys.exit(1)
+PY
+}
+
+# lease_mark_reuse_incomplete <lease_file> — preserve old branch/tip and block
+# future claims when recovery could not restore the candidate safely.
+lease_mark_reuse_incomplete() {
+    python3 - "$1" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as f: d = json.load(f)
+    if not isinstance(d.get("reuse"), dict): sys.exit(1)
+    d["reuse"]["state"] = "reuse_incomplete"
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".incomplete-lease-")
+    with os.fdopen(fd, "w") as f: json.dump(d, f, indent=2); f.write("\n")
+    os.replace(tmp, path)
+except Exception: sys.exit(1)
+PY
+}
+
 # _lease_emit_json <lease_file> ... — shared writer. owner fields "-" produce
 # owner: null. Atomic: temp file in the same dir, then os.replace.
 _lease_emit_json() {

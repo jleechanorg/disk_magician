@@ -44,6 +44,13 @@ lock_dead() {
     rm -f "$err"
     return "$rc"
 }
+reuse_claim_state() {
+    python3 - "$1" <<'PY'
+import json,sys
+try: print(json.load(open(sys.argv[1])).get('reuse',{}).get('state',''))
+except Exception: print('unreadable')
+PY
+}
 acquire_lock() {
     local pid stamp now gate="$LOCK.reclaim_gate"
     if ! mkdir "$LOCK" 2>/dev/null; then
@@ -157,8 +164,16 @@ while IFS= read -r -d '' real; do
     file="$(lease_path_for "$real")"
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     if [[ ! -e "$file" ]]; then adopt "$real" "$repo" "$branch"; continue; fi
+    reuse_state="$(reuse_claim_state "$file")"
+    [[ "$reuse_state" != pending && "$reuse_state" != reuse_incomplete ]] || continue
     # Invalid JSON is preserved and reported by the owner phase.
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d,dict)' "$file" 2>/dev/null || continue
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        continue
+    fi
     if [[ "$(_lease_get "$file" pending)" == True ]]; then
         IFS=$'\t' read -r admin birth < <(_lease_admin_info "$real")
         update "$file" promote "$admin" "$birth" "$repo" "$branch" || adopt "$real" "$repo" "$branch"
@@ -210,6 +225,13 @@ verdict_for() {
 for file in "$(lease_dir)"/*.json; do
     [[ -e "$file" ]] || continue
     expired && break
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        real="$(_lease_get "$file" path)"
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        continue
+    fi
     real="$(_lease_get "$file" path)"
     if [[ -z "$real" ]]; then log "kept:lease-unreadable $file"; echo kept:lease-unreadable >> "$EVENTS"; continue; fi
     [[ -e "$real" ]] || continue

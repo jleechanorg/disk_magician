@@ -16,6 +16,14 @@ source "$_WTN_DIR/lib/layout_standard.sh"
 [[ -f "$_WTN_DIR/lib/worktree_lease.sh" ]] && source "$_WTN_DIR/lib/worktree_lease.sh"
 # shellcheck source=scripts/lib/admit_caller.sh
 [[ -f "$_WTN_DIR/lib/admit_caller.sh" ]] && source "$_WTN_DIR/lib/admit_caller.sh"
+[[ -f "$_WTN_DIR/lib/worktree_recency.sh" ]] && source "$_WTN_DIR/lib/worktree_recency.sh"
+# C14 sources worktree_remove_hook, which sources this file back. Guard that
+# source cycle so a missing/incomplete C14 still fails closed without recursion.
+if [[ -z "${_WTN_LOADING_C14:-}" && -f "$_WTN_DIR/lib/artifact_verdict.sh" ]]; then
+    _WTN_LOADING_C14=1
+    source "$_WTN_DIR/lib/artifact_verdict.sh"
+    unset _WTN_LOADING_C14
+fi
 
 # wtn_main_repo <path> — the repo that owns <path>'s worktrees: the main
 # checkout for a linked worktree, the submodule checkout for a submodule
@@ -217,6 +225,96 @@ wtn_admit() {
     return 0
 }
 
+# wtn_reuse <repo> <branch> <base> — reuse only a proven, idle, dead/released
+# same-repository worktree. Any missing or incomplete guard falls back to fresh.
+wtn_reuse() {
+    local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip
+    wtn_branch_exists "$repo" "$branch" && return 1
+    wtn_remote_branch_exists "$repo" "$branch" && return 1
+    base_tip="$(git -C "$repo" rev-parse -q --verify "$base^{commit}" 2>/dev/null)" || return 1
+    declare -F lease_claim_reuse >/dev/null && declare -F worktree_is_recently_active_minutes >/dev/null &&
+        declare -F artifact_removal_verdict >/dev/null || return 1
+    [[ "$(artifact_removal_verdict --self-test 2>/dev/null)" == complete ]] || return 1
+    for file in "$(lease_dir)"/*.json; do
+        [[ -f "$file" ]] || continue
+        [[ "$(_lease_get "$file" repo)" == "$repo" ]] || continue
+        candidate="$(_lease_get "$file" path)"
+        old="$(_lease_get "$file" branch)"
+        [[ -n "$candidate" && -n "$old" && -d "$candidate" && "$old" != "$branch" ]] || continue
+        [[ "$(wtn_main_repo "$candidate")" == "$repo" ]] || continue
+        state="$(lease_owner_state "$file")"
+        [[ "$state" == dead || "$state" == released ]] || continue
+        worktree_is_recently_active_minutes "$candidate" 120 && continue
+        [[ "$(git -C "$candidate" symbolic-ref -q --short HEAD 2>/dev/null)" == "$old" ]] || continue
+        wtn_registered "$repo" "$candidate" || continue
+        tip="$(git -C "$repo" rev-parse -q --verify "refs/heads/$old^{commit}" 2>/dev/null)" || continue
+        git -C "$repo" merge-base --is-ancestor "$tip" origin/main 2>/dev/null || {
+            remote_tip="$(wtn_timeout 30 git -C "$repo" ls-remote origin "refs/heads/$old" 2>/dev/null | awk 'NR==1{print $1}')"
+            [[ -n "$remote_tip" && "$remote_tip" == "$tip" ]] || continue
+        }
+        verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
+        [[ "$verdict" == remove ]] || continue
+        lease_hash="$(python3 - "$file" <<'PY'
+import hashlib,sys
+try: print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+except OSError: sys.exit(1)
+PY
+)" || continue
+        owner="$(lease_resolve_owner)"
+        lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" || continue
+        # Claim first, then repeat the final content/removal verdict.
+        verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
+        if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file"; continue; fi
+        if ! git -C "$candidate" switch --detach "$tip" >&2; then
+            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            continue
+        fi
+        if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF" "$repo" "$old" "$candidate" >&2 || true
+        fi
+        if ! git -C "$repo" update-ref -d "refs/heads/$old" "$tip"; then
+            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            continue
+        fi
+        if [[ -n "${DISK_MAGICIAN_TEST_RECREATE_OLD_REF_AFTER_DELETE:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_RECREATE_OLD_REF_AFTER_DELETE" "$repo" "$old" "$tip" >&2 || true
+        fi
+        local switch_rc=0
+        if [[ -n "${DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE:-}" ]]; then switch_rc=1
+        else git -C "$candidate" switch -c "$branch" "$base" >&2 || switch_rc=$?; fi
+        local lease_rc=0
+        if [[ -n "${DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE:-}" ]]; then lease_rc=1
+        elif [[ "$switch_rc" == 0 ]]; then
+            lease_write "$candidate" "$repo" "$branch" worktree-new >/dev/null 2>&1 || lease_rc=$?
+        fi
+        if [[ "$switch_rc" == 0 && "$lease_rc" == 0 ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        # Restore is create-only: a concurrent ref is never overwritten.
+        if git -C "$repo" show-ref -q --verify "refs/heads/$old"; then
+            lease_mark_reuse_incomplete "$file"
+            continue
+        fi
+        if ! git -C "$repo" update-ref "refs/heads/$old" "$tip" 0000000000000000000000000000000000000000 ||
+            ! git -C "$candidate" switch "$old" >&2; then
+            lease_mark_reuse_incomplete "$file"
+            continue
+        fi
+        if [[ "$switch_rc" == 0 ]] && ! git -C "$repo" update-ref -d "refs/heads/$branch" "$base_tip"; then
+            # The branch moved or another worktree claimed it during recovery.
+            echo "worktree-new: could not remove failed new branch $branch at $base_tip" >&2
+            lease_mark_reuse_incomplete "$file"
+            continue
+        fi
+        if ! lease_restore_reuse_claim "$file"; then
+            lease_mark_reuse_incomplete "$file"
+        fi
+    done
+    return 1
+}
+
 wtn_main() {
     local repo_arg="" branch="" base="" name=""
     while [[ $# -gt 0 ]]; do
@@ -249,6 +347,7 @@ wtn_main() {
     fi
     path="$(standard_worktree_path "$(wtn_repo_name "$repo")" "$name")" || { echo "worktree-new: bad name: $name" >&2; return 1; }
     [[ -n "$base" ]] || base="$(wtn_default_base "$repo")"
+    if wtn_reuse "$repo" "$branch" "$base"; then return 0; fi
     wtn_admit "$path" "$repo" || return $?
     WTN_ADD_RC=1
     wtn_create "$repo" "$branch" "$path" "$base" || return "$WTN_ADD_RC"

@@ -335,6 +335,198 @@ grep -q "admission_degraded:caller" "$TMPROOT/a7.err" && ok "stderr logs admissi
 source "$REPO_ROOT/tests/lib/admit_contract.sh"
 run_admit_contract "DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash '$SCRIPT' '$REPO' feat/contract-{n}"
 
+echo "== case 19: complete C14 permits merged idle worktree reuse =="
+REUSE_WT="$WTROOT/reuse-old"
+git -C "$REPO" branch reuse/old "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$REUSE_WT" reuse/old
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+reuse_out="$(bash -c '
+    source "$1"
+    lease_write "$2" "$3" reuse/old reuse-test
+    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+    lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == reuse/old ]] && echo dead || echo alive; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+    wtn_main "$3" feat/recycled --base origin/main --name recycled
+' _ "$SCRIPT" "$REUSE_WT" "$REPO" 2>"$TMPROOT/reuse.err")"; rc=$?
+[[ "$rc" == 0 && "$reuse_out" == "$REUSE_WT" ]] || cat "$TMPROOT/reuse.err" >&2
+assert_eq "$rc" "0" "reuse exit code"
+assert_eq "$reuse_out" "$REUSE_WT" "reuse keeps existing path"
+assert_eq "$(git -C "$REUSE_WT" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/recycled" "reuse checks out requested branch"
+if git -C "$REPO" show-ref -q --verify refs/heads/reuse/old; then bad "recycled old branch remains"; else ok "old branch removed after successful recycle"; fi
+
+run_reuse_attempt() {
+    local wt="$1" old="$2" wanted="$3" name="$4" cd_into="${5:-}"
+    local err="$TMPROOT/reuse-$name.err" out rc
+    out="$(bash -c '
+        source "$1"
+        lease_write "$2" "$3" "$4" reuse-test
+        DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+        DISK_MAGICIAN_TEST_OWNER_BRANCH="$4"
+        lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == "$DISK_MAGICIAN_TEST_OWNER_BRANCH" ]] && echo dead || echo alive; }
+        worktree_is_recently_active_minutes() { return 1; }
+        artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+        [[ -z "$7" ]] || cd "$2"
+        wtn_main "$3" "$5" --base origin/main --name "$6"
+    ' _ "$SCRIPT" "$wt" "$REPO" "$old" "$wanted" "$name" "$cd_into" 2>"$err")"; rc=$?
+    [[ "$rc" == 0 ]] || cat "$err" >&2
+    printf '%s\n' "$out"
+    return "$rc"
+}
+
+echo "== case 21: unpushed old branch falls back to fresh worktree =="
+UNPUSHED_WT="$WTROOT/reuse-unpushed"
+git -C "$REPO" branch reuse/unpushed "$LOCAL_SHA"
+git -C "$REPO" worktree add -q "$UNPUSHED_WT" reuse/unpushed
+fresh="$(run_reuse_attempt "$UNPUSHED_WT" reuse/unpushed feat/unpushed unpushed)"; rc=$?
+assert_eq "$rc" "0" "unpushed fallback exit"
+assert_eq "$fresh" "$WTROOT/unpushed" "unpushed branch uses fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/unpushed)" "$LOCAL_SHA" "unpushed branch tip preserved"
+assert_eq "$(git -C "$UNPUSHED_WT" rev-parse --abbrev-ref HEAD)" "reuse/unpushed" "unpushed candidate checkout preserved"
+
+echo "== case 22: untracked and ignored user data block reuse =="
+printf '\n.env\ndata/notes.db\n' >> "$REPO/.git/info/exclude"
+for payload in untracked ignored_env ignored_db; do
+    wt="$WTROOT/reuse-$payload"; old="reuse/$payload"; wanted="feat/$payload"
+    git -C "$REPO" branch "$old" "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$wt" "$old"
+    case "$payload" in
+        untracked) echo keep > "$wt/notes.txt" ;;
+        ignored_env) echo keep > "$wt/.env" ;;
+        ignored_db) mkdir -p "$wt/data"; echo keep > "$wt/data/notes.db" ;;
+    esac
+    fresh="$(run_reuse_attempt "$wt" "$old" "$wanted" "$payload")"; rc=$?
+    assert_eq "$rc" "0" "$payload fallback exit"
+    assert_eq "$fresh" "$WTROOT/$payload" "$payload uses fresh path"
+    if [[ "$payload" == untracked ]]; then checkfile="$wt/notes.txt"; elif [[ "$payload" == ignored_env ]]; then checkfile="$wt/.env"; else checkfile="$wt/data/notes.db"; fi
+    [[ -f "$checkfile" ]] && ok "$payload preserved" || bad "$payload was lost"
+done
+
+echo "== case 23: live current working directory blocks reuse =="
+LIVE_WT="$WTROOT/reuse-live"
+git -C "$REPO" branch reuse/live "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$LIVE_WT" reuse/live
+(cd "$LIVE_WT" && sleep 60) & LIVE_CWD_PID=$!
+sleep 0.2
+fresh="$(run_reuse_attempt "$LIVE_WT" reuse/live feat/live live)"; rc=$?
+kill "$LIVE_CWD_PID" 2>/dev/null || true
+wait "$LIVE_CWD_PID" 2>/dev/null || true
+assert_eq "$rc" "0" "live cwd fallback exit"
+assert_eq "$fresh" "$WTROOT/live" "live cwd uses fresh path"
+assert_eq "$(git -C "$LIVE_WT" rev-parse --abbrev-ref HEAD)" "reuse/live" "live cwd candidate branch preserved"
+
+echo "== case 24: concurrent reuse claims yield one recycle and one fresh create =="
+RACE_WT="$WTROOT/reuse-race"
+git -C "$REPO" branch reuse/race "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$RACE_WT" reuse/race
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/race reuse-test' _ "$SCRIPT" "$RACE_WT" "$REPO" >/dev/null 2>&1
+run_reuse_attempt "$RACE_WT" reuse/race feat/reuse-race-a reuse-race-a >"$TMPROOT/reuse-race-a.out" 2>/dev/null & P1=$!
+run_reuse_attempt "$RACE_WT" reuse/race feat/reuse-race-b reuse-race-b >"$TMPROOT/reuse-race-b.out" 2>/dev/null & P2=$!
+wait "$P1"; RC1=$?; wait "$P2"; RC2=$?
+R1="$(cat "$TMPROOT/reuse-race-a.out")"; R2="$(cat "$TMPROOT/reuse-race-b.out")"
+assert_eq "$RC1" "0" "concurrent recycle caller A succeeds"
+assert_eq "$RC2" "0" "concurrent recycle caller B succeeds"
+if { [[ "$R1" == "$RACE_WT" && "$R2" == "$WTROOT/reuse-race-b" ]] || [[ "$R2" == "$RACE_WT" && "$R1" == "$WTROOT/reuse-race-a" ]]; }; then ok "one caller recycles while the other creates fresh"; else bad "unexpected concurrent results: A=$R1 B=$R2"; fi
+
+echo "== case 25: conditional ref deletion catches a last-moment commit =="
+BOUNDARY_WT="$WTROOT/reuse-boundary"
+git -C "$REPO" branch reuse/boundary "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$BOUNDARY_WT" reuse/boundary
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/boundary reuse-test' _ "$SCRIPT" "$BOUNDARY_WT" "$REPO" >/dev/null 2>&1
+cat > "$TMPROOT/race-ref-hook" <<EOF
+#!/usr/bin/env bash
+set -e
+repo=\$1; branch=\$2
+tip=\$("$REAL_GIT" -C "\$repo" rev-parse "refs/heads/\$branch")
+new=\$("$REAL_GIT" -C "\$repo" commit-tree "\$tip^{tree}" -p "\$tip" -m interloper)
+"$REAL_GIT" -C "\$repo" update-ref "refs/heads/\$branch" "\$new" "\$tip"
+EOF
+chmod +x "$TMPROOT/race-ref-hook"
+export DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF="$TMPROOT/race-ref-hook"
+fresh="$(run_reuse_attempt "$BOUNDARY_WT" reuse/boundary feat/boundary boundary)"; rc=$?
+unset DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF
+assert_eq "$rc" "0" "last-moment commit fallback exits zero"
+assert_eq "$fresh" "$WTROOT/boundary" "last-moment commit creates fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/boundary)" "$(git -C "$BOUNDARY_WT" rev-parse HEAD)" "new old-branch commit is preserved"
+assert_eq "$(git -C "$BOUNDARY_WT" rev-parse --abbrev-ref HEAD)" "reuse/boundary" "candidate switches back to preserved old branch"
+
+echo "== case 26: failure after conditional delete restores the old branch =="
+RESTORE_WT="$WTROOT/reuse-restore"
+git -C "$REPO" branch reuse/restore "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$RESTORE_WT" reuse/restore
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/restore reuse-test' _ "$SCRIPT" "$RESTORE_WT" "$REPO" >/dev/null 2>&1
+export DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE=1
+fresh="$(run_reuse_attempt "$RESTORE_WT" reuse/restore feat/restore restore)"; rc=$?
+unset DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE
+assert_eq "$rc" "0" "post-delete failure fallback exits zero"
+assert_eq "$fresh" "$WTROOT/restore" "post-delete failure creates fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/restore)" "$ORIGIN_SHA" "old branch restored at its recorded tip"
+assert_eq "$(git -C "$RESTORE_WT" rev-parse --abbrev-ref HEAD)" "reuse/restore" "candidate switches back to old branch"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$RESTORE_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse','')) ; break
+ except OSError: pass
+PY
+)" "" "lease claim restored after recovery"
+
+echo "== case 27: conflicting recreated old ref is preserved and marked incomplete =="
+CONFLICT_WT="$WTROOT/reuse-conflict"
+git -C "$REPO" branch reuse/conflict "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$CONFLICT_WT" reuse/conflict
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/conflict reuse-test' _ "$SCRIPT" "$CONFLICT_WT" "$REPO" >/dev/null 2>&1
+cat > "$TMPROOT/conflict-ref-hook" <<EOF
+#!/usr/bin/env bash
+set -e
+repo=\$1; branch=\$2; tip=\$3
+new=\$("$REAL_GIT" -C "\$repo" commit-tree "\$tip^{tree}" -p "\$tip" -m competing-ref)
+"$REAL_GIT" -C "\$repo" update-ref "refs/heads/\$branch" "\$new" 0000000000000000000000000000000000000000
+EOF
+chmod +x "$TMPROOT/conflict-ref-hook"
+export DISK_MAGICIAN_TEST_RECREATE_OLD_REF_AFTER_DELETE="$TMPROOT/conflict-ref-hook" DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE=1
+fresh="$(run_reuse_attempt "$CONFLICT_WT" reuse/conflict feat/conflict conflict)"; rc=$?
+unset DISK_MAGICIAN_TEST_RECREATE_OLD_REF_AFTER_DELETE DISK_MAGICIAN_TEST_FAIL_AFTER_REF_DELETE
+assert_eq "$rc" "0" "conflicting ref fallback exits zero"
+assert_eq "$fresh" "$WTROOT/conflict" "conflicting ref leaves fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/conflict^ )" "$ORIGIN_SHA" "conflicting ref commit is preserved"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$CONFLICT_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse',{}).get('state','')); break
+ except OSError: pass
+PY
+)" "reuse_incomplete" "lease records incomplete recovery"
+
+echo "== case 28: lease rewrite failure restores the old branch and claim =="
+LEASEFAIL_WT="$WTROOT/reuse-leasefail"
+git -C "$REPO" branch reuse/leasefail "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$LEASEFAIL_WT" reuse/leasefail
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/leasefail reuse-test' _ "$SCRIPT" "$LEASEFAIL_WT" "$REPO" >/dev/null 2>&1
+export DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE=1
+fresh="$(run_reuse_attempt "$LEASEFAIL_WT" reuse/leasefail feat/reuse-leasefail leasefail)"; rc=$?
+unset DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE
+assert_eq "$rc" "0" "lease rewrite failure fallback exits zero"
+assert_eq "$fresh" "$WTROOT/leasefail" "lease rewrite failure creates fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/leasefail)" "$ORIGIN_SHA" "old branch restored after lease failure"
+assert_eq "$(git -C "$LEASEFAIL_WT" rev-parse --abbrev-ref HEAD)" "reuse/leasefail" "candidate restored after lease failure"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$LEASEFAIL_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse','')); break
+ except OSError: pass
+PY
+)" "" "old claim restored after lease failure"
+
+echo "== case 20: incomplete C14 fails closed to a fresh worktree =="
+git -C "$REPO" branch reuse/incomplete "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$WTROOT/reuse-incomplete" reuse/incomplete
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/incomplete reuse-test' _ "$SCRIPT" "$WTROOT/reuse-incomplete" "$REPO" >/dev/null 2>&1
+out="$(bash "$SCRIPT" "$REPO" feat/c14-incomplete --name c14-incomplete 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "incomplete C14 fresh path exit"
+assert_eq "$out" "$WTROOT/c14-incomplete" "incomplete C14 uses fresh path"
+assert_eq "$(git -C "$WTROOT/reuse-incomplete" rev-parse --abbrev-ref HEAD 2>/dev/null)" "reuse/incomplete" "incomplete C14 leaves candidate untouched"
+unset DISK_MAGICIAN_STATE_DIR
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
