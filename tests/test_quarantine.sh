@@ -105,11 +105,47 @@ check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
 
 # Removal-site options are explicit and preserved to the C14 dispatcher.
 fixture; run_contract --kind os_clone --frozen-identity 1:2:501 --frozen-parent-identity 3:4:501 --frozen-root-identity 5:6:501 --deadline-at 123.5
-OPTION_QID="$(sidecar_id)"
 check 'caller options: path reaches artifact_removal_verdict' grep -Fx "$A" "$TMP/verdict-args"
 check 'caller options: kind and deadline values are preserved' bash -c 'grep -Fx -- --kind "$1" >/dev/null && grep -Fx os_clone "$1" >/dev/null && grep -Fx -- --deadline-at "$1" >/dev/null && grep -Fx 123.5 "$1" >/dev/null' _ "$TMP/verdict-args"
 check 'caller options: frozen identity proof is preserved' bash -c 'grep -Fx -- --frozen-identity "$1" >/dev/null && grep -Fx 1:2:501 "$1" >/dev/null && grep -Fx -- --frozen-parent-identity "$1" >/dev/null && grep -Fx 3:4:501 "$1" >/dev/null && grep -Fx -- --frozen-root-identity "$1" >/dev/null && grep -Fx 5:6:501 "$1" >/dev/null' _ "$TMP/verdict-args"
-check 'caller options: expired deadline keeps deleting sidecar and index' [ "$OUT" = kept:quarantine_partial_kept ] && [ -f "$Q/$OPTION_QID.json" ] && [ -f "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$OPTION_QID.json" ]
+check 'caller options: expired deadline defers before rename' [ "$OUT" = deferred:deadline-before-phase1 ] && [ -f "$A/report.md" ] && [ ! -e "$Q" ]
+
+# Optional deadline bounds the whole entrypoint, including the lsof probe and re-hash.
+fixture
+BINDING="$TMP/binding-deadline$N.json"; INV="$TMP/inventory-deadline$N.json"
+python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
+python3 "$TMP/inv.py" "$A" > "$INV"
+SLOWBIN="$TMP/slowbin$N"; mkdir -p "$SLOWBIN"
+printf '#!/bin/bash\nsleep 0.5\nexit 1\n' > "$SLOWBIN/lsof"; chmod +x "$SLOWBIN/lsof"
+DEADLINE="$(python3 -c 'import time; print(time.monotonic()+0.12)')"
+START="$(python3 -c 'import time; print(time.monotonic())')"
+OUT="$(PATH="$SLOWBIN:$PATH" python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$DEADLINE")"
+END="$(python3 -c 'import time; print(time.monotonic())')"
+check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "deferred:deadline" ]
+check 'deferred phase1 retains the original artifact' [ -f "$A/report.md" ] && [ -f "$A/sub/deep/y.txt" ] && [ -L "$A/link" ]
+check 'deferred phase1 leaves no quarantine payload' [ -z "$(find "$Q" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+check 'phase1 deadline returns before the 0.5s probe completes' python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 0.4 else 1)"
+for bad in nan inf -1; do
+  check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
+done
+# An expired phase 2 must not commit an intact item to delete-only.
+prepare_quarantine; EXPIRED_AT="$(python3 -c 'import time; print(time.monotonic())')"
+EXPIRED_PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" --deadline-at "$EXPIRED_AT")"
+check 'expired phase2 defers and leaves the item restorable' bash -c '[[ "$1" == deferred:phase2 && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2/$3.json")" == intent && -f "$4/quarantine-index/$3.json" ]]' _ "$EXPIRED_PHASE2" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
+# Interrupted destructive work is resumable and its reconcile outcome names the id.
+prepare_quarantine; DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1
+RECON_ID="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile)"
+check 'reconcile deleting outcome carries the quarantine id' bash -c '[[ "$1" == *"removed:$2"* ]]' _ "$RECON_ID" "$QID"
+# Malformed reconcile deadlines fail closed without an unlocked traceback fallback.
+BAD_RECON="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at abc 2>&1; echo "rc=$?")"
+check 'malformed reconcile deadline fails closed without traceback' bash -c '[[ "$1" == *"ALERT: invalid quarantine reconcile deadline"* && "$1" == *"rc=1"* && "$1" != *Traceback* ]]' _ "$BAD_RECON"
+# Phase 1 and phase 2 run under one lock, so reconcile cannot roll back an in-flight remove.
+prepare_inputs; JOURNAL_READY="$TMP/combined-ready"; LOCK_RELEASE="$TMP/combined-release"
+env DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL="touch '$JOURNAL_READY'; while [[ ! -e '$LOCK_RELEASE' ]]; do sleep 0.02; done" python3 "$ROOT/scripts/quarantine_rename.py" remove "$A" "$INV" "$BINDING" >"$TMP/combined-out" & CPID=$!
+for _ in $(seq 1 250); do [[ -e "$JOURNAL_READY" ]] && break; sleep 0.02; done
+RECON_LOCK="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at "$(python3 -c 'import time; print(time.monotonic()+0.15)')")"
+touch "$LOCK_RELEASE"; wait "$CPID"
+check 'concurrent reconcile cannot roll back an in-flight combined remove' bash -c '[[ "$1" == deferred:operation-lock && "$2" == removed:* && ! -e "$3" ]]' _ "$RECON_LOCK" "$(cat "$TMP/combined-out")" "$A"
 fixture; run_contract --unknown-option value
 check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
 fixture; QUARANTINE_TEST_BASH=/bin/bash QUARANTINE_TEST_NOUNSET=1 run_contract
@@ -118,14 +154,14 @@ check 'Bash 3.2 nounset: no optional args reaches removal verdict' bash -c 'case
 # A write after the deleting state is durable invalidates the hash and remains quarantined.
 fixture; run DISK_MAGICIAN_TEST_BEFORE_UNLINK='printf BBBB > "$DM_Q_PATH/report.md"'
 QID="$(sidecar_id)"
-check 'phase 2 rewrite: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'phase 2 rewrite: kept:quarantine_partial_kept' [ "$OUT" = "kept:quarantine_partial_kept:$QID" ]
 check 'phase 2 rewrite: changed file and deleting sidecar remain' bash -c '[[ "$(cat "$1")" == BBBB && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2")" == deleting ]]' _ "$Q/$QID/report.md" "$Q/$QID.json"
 
 # An inventoried directory replaced by a symlink is never followed into the outside tree.
 fixture; mkdir -p "$TMP/outside$N"; printf OUTSIDE > "$TMP/outside$N/keep"
 run DISK_MAGICIAN_TEST_BEFORE_UNLINK="mv \"\$DM_Q_PATH/sub\" '$TMP/moved$N'; ln -s '$TMP/outside$N' \"\$DM_Q_PATH/sub\""
 QID="$(sidecar_id)"
-check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = kept:quarantine_partial_kept ]
+check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = "kept:quarantine_partial_kept:$QID" ]
 check 'directory-to-symlink swap: outside data untouched' [ "$(cat "$TMP/outside$N/keep")" = OUTSIDE ]
 check 'directory-to-symlink swap: sidecar and replacement symlink remain' [ -L "$Q/$QID/sub" ] && [ -f "$Q/$QID.json" ]
 
@@ -137,6 +173,30 @@ BINDING="$TMP/resume-binding.json"; python3 "$ROOT/scripts/quarantine_rename.py"
 RESUME="$(quarantine_phase2 "$BINDING" "$CRASH_ID")"
 check 'crash before sidecar drop: retry drops the final sidecar' [ "$RESUME" = removed ] && [ ! -e "$CRASH_SIDE" ]
 
+# The terminal index record makes each sidecar/index cleanup gap crash-recoverable.
+fixture; DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index run
+CRASH_ID="$(index_id)"
+check 'phase2 terminal-mark crash leaves durable index marker' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'phase2 terminal-mark crash reconciles cleanly' bash -c '[[ "$1" == *"reconciled:$2:terminal-removed"* && ! -e "$3" ]]' _ "$RECOVERED" "$CRASH_ID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+
+prepare_quarantine; CRASH_ID="$QID"
+RESTORE_CRASH="$(env DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index bash "$ROOT/disk_magician.sh" quarantine restore "$QID" 2>&1 || true)"
+check 'restore terminal-mark crash leaves restored root and durable index' bash -c '[[ -e "$1" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "restored"'\'' "$2"' _ "$A" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'restore terminal-mark crash reconciles cleanly' bash -c '[[ "$1" == *"reconciled:$2:terminal-restored"* && ! -e "$3" && ! -e "$4" ]]' _ "$RECOVERED" "$QID" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+
+prepare_quarantine; CRASH_ID="$QID"; mv "$Q/$QID" "$A"
+env DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index bash "$ROOT/disk_magician.sh" quarantine reconcile >/dev/null 2>&1 || true
+check 'reconcile terminal-mark crash leaves durable index marker' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "original"' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'reconcile terminal-mark crash clears both metadata files' bash -c '[[ "$1" == *"reconciled:$2:terminal-original"* && ! -e "$3" && ! -e "$4" ]]' _ "$RECOVERED" "$CRASH_ID" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
+
+fixture; run DISK_MAGICIAN_TEST_INDEX_DROP_FAIL=1 X=1
+CRASH_ID="$(index_id)"
+check 'index cleanup failure preserves terminal recovery marker' bash -c '[[ "$1" == "kept:quarantine_partial_kept:$4" && ! -e "$2" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal") == "removed"'\'' "$3"' _ "$OUT" "$Q/$CRASH_ID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json" "$CRASH_ID"
+RECOVERED="$(bash "$ROOT/disk_magician.sh" quarantine reconcile)"
+check 'index cleanup failure is replayed by reconcile' bash -c '[[ "$1" == *"reconciled:$2:terminal-removed"* && ! -e "$3" ]]' _ "$RECOVERED" "$CRASH_ID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$CRASH_ID.json"
 # A missing frozen root does not prove deletion: it may have moved elsewhere.
 prepare_quarantine; MOVED="$TMP/moved-root-$QID"; mv "$Q/$QID" "$MOVED"
 PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
@@ -300,6 +360,9 @@ if [[ "$(uname)" == Darwin ]] && hdiutil create -quiet -size 4m -fs HFS+ -volnam
 else echo "SKIP: cross-device (no hdiutil)"; fi
 
 # Durable reconciliation resolves pre-delete crashes through the advisory index.
+prepare_inputs; env DISK_MAGICIAN_TEST_KILL_AT=after_index python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" >/dev/null 2>&1; KILL_RC=$?
+QID="$(index_id)"; RECON="$(quarantine_reconcile)"
+check 'crash after index publication: original identity reconciles preparing record' bash -c '[[ "$1" -eq 137 && -f "$2/report.md" && "$3" == *"reconciled:$4:original"* && ! -e "$5/quarantine-index/$4.json" ]]' _ "$KILL_RC" "$A" "$RECON" "$QID" "$DISK_MAGICIAN_STATE_DIR"
 prepare_inputs; env DISK_MAGICIAN_TEST_KILL_AT=after_intent python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING"; KILL_RC=$?
 QID="$(index_id)"; RECON="$(quarantine_reconcile)"
 check 'crash after intent: original is retained and metadata reconciled' bash -c '[[ "$1" -eq 137 && -f "$2/report.md" && "$3" == *"reconciled:$4:original"* && ! -e "$5/$4.json" ]]' _ "$KILL_RC" "$A" "$RECON" "$QID" "$Q"
@@ -309,6 +372,32 @@ check 'crash after rename: exclusive rollback restores the artifact' bash -c '[[
 prepare_inputs; env DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' DISK_MAGICIAN_TEST_KILL_AT=before_rollback python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING"; KILL_RC=$?
 QID="$(index_id)"; RECON="$(quarantine_reconcile)"
 check 'crash before rollback: rollback_pending is reconciled' bash -c '[[ "$1" -eq 137 && "$(cat "$2/report.md" 2>/dev/null)" == BBBB && ! -e "$3/$4" && "$5" == *"reconciled:$4:rolled-back"* ]]' _ "$KILL_RC" "$A" "$Q" "$QID" "$RECON"
+
+# A failed terminal index drop after rollback remains recoverable.
+prepare_inputs; env DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"' DISK_MAGICIAN_TEST_INDEX_DROP_FAIL=1 python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" >"$TMP/rollback-out"; OUT="$(cat "$TMP/rollback-out")"; QID="$(index_id)"
+check 'rollback index-drop failure preserves terminal marker and original' bash -c '[[ "$1" == quarantine_conflict:*:index-cleanup-failed && -f "$2/report.md" ]] && python3 -c '\''import json,sys; assert json.load(open(sys.argv[1])).get("terminal")=="rolled-back"'\'' "$3"' _ "$OUT" "$A" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+RECON="$(quarantine_reconcile)"
+check 'rollback terminal marker is cleared by reconciliation' bash -c '[[ "$1" == *"terminal-rolled-back"* && ! -e "$2" ]]' _ "$RECON" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+
+# Restore waits while phase 2 owns the transition lock, so it cannot report a
+# partially deleted tree as restored.
+prepare_quarantine; LOCK_ID="$QID"; JOURNAL_READY="$TMP/journal-ready"; LOCK_RELEASE="$TMP/lock-release"; RESTORE_WAITING="$TMP/restore-waiting"; RESTORE_ACQUIRED="$TMP/restore-acquired"
+env DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL="touch '$JOURNAL_READY'; while [[ ! -e '$LOCK_RELEASE' ]]; do sleep 0.02; done" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$LOCK_ID" >"$TMP/phase2-lock-out" & PHASE2_PID=$!
+for _ in $(seq 1 250); do [[ -e "$JOURNAL_READY" ]] && break; sleep 0.02; done
+env DISK_MAGICIAN_TEST_BEFORE_OPERATION_LOCK="touch '$RESTORE_WAITING'" DISK_MAGICIAN_TEST_AFTER_OPERATION_LOCK="touch '$RESTORE_ACQUIRED'" python3 "$ROOT/scripts/quarantine_rename.py" restore "$LOCK_ID" >"$TMP/restore-lock-out" & RESTORE_PID=$!
+for _ in $(seq 1 250); do [[ -e "$RESTORE_WAITING" ]] && break; sleep 0.02; done
+LOCK_BLOCKED=1; [[ -e "$RESTORE_ACQUIRED" ]] && LOCK_BLOCKED=0
+touch "$LOCK_RELEASE"; wait "$PHASE2_PID"; PHASE2_RC=$?; wait "$RESTORE_PID"; RESTORE_RC=$?
+check 'phase2 and restore serialize whole transitions' bash -c '[[ "$1" -eq 1 && "$2" -eq 0 && "$3" == removed && "$4" == kept:unknown-quarantine-id && ! -e "$5" && ! -e "$6/$7" ]]' _ "$LOCK_BLOCKED" "$PHASE2_RC" "$(cat "$TMP/phase2-lock-out")" "$(cat "$TMP/restore-lock-out")" "$A" "$Q" "$LOCK_ID"
+
+# Scheduler deadlines bound lock contention; the still-quarantined item remains resumable.
+prepare_quarantine; LOCK_ID="$QID"; LOCK_READY="$TMP/deadline-lock-ready"; LOCK_RELEASE="$TMP/deadline-lock-release"
+python3 -c 'import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); exec("while not os.path.exists(sys.argv[3]): time.sleep(.01)")' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/operations.lock" "$LOCK_READY" "$LOCK_RELEASE" & HOLDER_PID=$!
+for _ in $(seq 1 250); do [[ -e "$LOCK_READY" ]] && break; sleep 0.02; done
+NOW="$(python3 -c 'import time; print(time.monotonic()+0.15)')"
+LOCK_RESULT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$LOCK_ID" --deadline-at "$NOW")"
+touch "$LOCK_RELEASE"; wait "$HOLDER_PID"
+check 'operation lock deadline defers without blocking or losing quarantine state' bash -c '[[ "$1" == deferred:operation-lock && -f "$2/$3.json" && -f "$4/quarantine-index/$3.json" && -f "$2/$3/report.md" ]]' _ "$LOCK_RESULT" "$Q" "$LOCK_ID" "$DISK_MAGICIAN_STATE_DIR"
 
 # Mid-delete resume never sweeps new entries and rechecks every remaining digest.
 prepare_quarantine; MTIMES="$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_atime_ns, s.st_mtime_ns)' "$Q/$QID/report.md")"; env DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?

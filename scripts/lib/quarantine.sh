@@ -35,15 +35,12 @@ quarantine_remove() {
   verdict_path="$(python3 "$_Q_LIB/../quarantine_rename.py" candidate "$binding" 2>/dev/null)" || verdict_path=""
   if [[ -z "$verdict_path" ]]; then rm -f "$inv" "$binding"; echo kept:parent-identity-missing; return 0; fi
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
-  [[ "$v" == remove ]] && v="$(python3 "$_Q_LIB/../quarantine_rename.py" phase1 "$path_arg" "$inv" "$binding" 2>/dev/null)"
-  if [[ "$v" == quarantined:* ]]; then
-    qid="${v#quarantined:}"
+  if [[ "$v" == remove ]]; then
     if [[ "$deadline_seen" == 1 ]]; then
-      v="$(quarantine_phase2 "$binding" "$qid" --deadline-at "$deadline")" || v=kept:quarantine_partial_kept
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" --deadline-at "$deadline" 2>/dev/null)"
     else
-      v="$(quarantine_phase2 "$binding" "$qid")" || v=kept:quarantine_partial_kept
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" 2>/dev/null)"
     fi
-    [[ "$v" == removed ]] && v="removed:$qid"
   fi
   rm -f "$inv" "$binding"
   echo "${v:-kept:check-failed}"
@@ -51,6 +48,7 @@ quarantine_remove() {
 quarantine_phase2() {
   local result
   result="$(python3 "$_Q_LIB/../quarantine_rename.py" phase2 "$@" 2>/dev/null)" || { echo kept:quarantine_partial_kept; return 0; }
+  [[ "$result" == deferred:* ]] && { echo "$result"; return 0; }
   [[ "$result" == removed ]] || { echo kept:quarantine_partial_kept; return 0; }
   echo removed
 }
