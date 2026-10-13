@@ -145,14 +145,14 @@ _av_secret_like() {
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
 # canonical path is <path> or under it, for any filesystem kind (plain dir, plain
 # file, repo). Reads the lease store, not Git discovery, so a lease on a plain dir
-# inside <path> still keeps it. rc 1 when the store cannot be scanned or a record is
-# malformed (fail closed: a lease we cannot rule out must keep the path). Records
-# without a usable `path` are legacy fixtures and are skipped, never guessed at.
+# inside <path> still keeps it. rc 1 when the store cannot be scanned, a record is
+# malformed, or a record's source filename is not the canonical lease name for its
+# recorded path (fail closed: a lease we cannot rule out must keep the path).
 _av_lease_record_paths() {
     local ld
     ld="$(lease_dir)" && [[ -d "$ld" ]] || return 0
     python3 - "$ld" "$1" <<'PY'
-import json, os, sys
+import hashlib, json, os, sys
 ld, cand = sys.argv[1], os.path.realpath(sys.argv[2])
 try:
     names = sorted(os.listdir(ld))
@@ -169,8 +169,13 @@ for n in names:
         sys.exit(1)
     rec = d.get("path") if isinstance(d, dict) else None
     if not isinstance(rec, str) or not rec:
-        continue
+        sys.exit(1)
     real = os.path.realpath(rec)
+    # Bind the record to the file it came from. lease_path_for keys a lease as
+    # sha256(realpath(path))[:16].json; a file stored under any other name has
+    # an unknown identity and must fail closed rather than be silently dropped.
+    if n != hashlib.sha256(os.fsencode(real)).hexdigest()[:16] + ".json":
+        sys.exit(1)
     if real == cand or real.startswith(cand.rstrip("/") + "/"):
         out.append(real)
 sys.stdout.buffer.write(b"".join(os.fsencode(p) + b"\0" for p in out))
