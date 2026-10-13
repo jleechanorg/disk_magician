@@ -206,10 +206,11 @@ PY
         act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || return 3
     fi
     if [[ -n "$ACT_DEADLINE_AT" ]] && ! act_unit_fits "${DISK_MAGICIAN_UNIT_BUDGET_S:-60}"; then
+        # A unit that never started is an interrupted/unfinished visit, not a
+        # completed C14 deferral: count interrupted only and leave the cursor here.
         ACT_STOP=1
-        ACT_DEFERRED_COUNT=$((ACT_DEFERRED_COUNT + 1))
         ACT_INTERRUPTED_COUNT=$((ACT_INTERRUPTED_COUNT + 1))
-        echo "deferred:deadline-before-unit:$path"
+        echo "deadline_before_unit:$path"
         return 2
     fi
     ACT_CURRENT_INDEX="$index"

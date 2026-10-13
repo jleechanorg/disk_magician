@@ -31,16 +31,25 @@ first_output="$(HOME="$HOME_DIR" CANDIDATE_LOG="$log" DISK_MAGICIAN_STATE_DIR="$
   DISK_MAGICIAN_UNIT_BUDGET_S=1 DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK="$hook" \
   /bin/bash "$ROOT/scripts/cleanup_worktrees.sh" --repos "$REPO" \
     --deadline-at "$deadline" --cursor "$cursor")"
-grep -q 'deferred:deadline-before-unit:' <<<"$first_output"
+grep -q 'deadline_before_unit:' <<<"$first_output"
 python3 - "$cursor" "$WORKTREES_REAL" <<'PY'
 import json,sys
 value=json.load(open(sys.argv[1]))
 assert value["items"] == [sys.argv[2] + "/wt-one", sys.argv[2] + "/wt-two"]
 assert value["next_index"] == 1, value
 PY
+first_receipt="$(HOME="$HOME_DIR" DISK_MAGICIAN_STATE_DIR="$TMP/state" python3 "$ROOT/scripts/job_receipt.py" read --job cleanup_worktrees --last)"
+python3 - "$first_receipt" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert value["outcome"] == "partial", value["outcome"]
+# A not-started unit is interrupted, never a completed C14 deferral.
+assert value["candidates"]["interrupted_count"] == 1, value["candidates"]
+assert value["candidates"]["deferred_count"] == 0, value["candidates"]
+PY
 grep -q 'deadline_before_candidate' <<<"$first_output"
 test "$(grep -Fc "$WORKTREES_REAL/wt-one" "$log")" = 1
-echo 'PASS stop midway leaves the interrupted candidate pending'
+echo 'PASS stop midway leaves the interrupted candidate pending and counts it as interrupted, not deferred'
 
 far_deadline="$(python3 -c 'import time; print(time.monotonic()+120)')"
 second_output="$(HOME="$HOME_DIR" CANDIDATE_LOG="$log" DISK_MAGICIAN_STATE_DIR="$TMP/state" \

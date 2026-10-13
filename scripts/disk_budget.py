@@ -318,13 +318,27 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
     valid_counts = all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
                        for v in (removed, deferred, interrupted))
     rc = result["rc"]
-    outcome = "success" if rc == 0 and not result["hard_stop"] and not result["orphan_survivors"] else "partial"
-    reason = "actuator_completed"
-    if result["hard_stop"]: reason = "hard_stop"
-    elif result["orphan_survivors"]: reason = "orphan_survivors"
-    elif rc != 0: outcome, reason = "error", f"adapter_rc:{rc}"
+    allowed_outcomes = {"skipped_lock", "skipped_threshold", "blocked_safety", "error",
+                        "timeout", "partial", "success_noop", "success"}
+    source_outcome = actuator_receipt.get("outcome") if isinstance(actuator_receipt, dict) else None
+    source_reason = actuator_receipt.get("reason") if isinstance(actuator_receipt, dict) else None
+    typed_outcome = source_outcome in allowed_outcomes and valid_counts
+    if typed_outcome:
+        # The adapter is the authority for its semantic result. In particular,
+        # a completed safety skip is not a successful cleanup.
+        outcome = source_outcome
+        reason = source_reason if isinstance(source_reason, str) and source_reason else "adapter_terminal"
+    else:
+        outcome = "success" if rc == 0 and not result["hard_stop"] and not result["orphan_survivors"] else "partial"
+        reason = "actuator_completed"
+        if result["hard_stop"]: outcome, reason = "timeout", "hard_stop"
+        elif result["orphan_survivors"]: outcome, reason = "partial", "orphan_survivors"
+        elif rc != 0: outcome, reason = "error", f"adapter_rc:{rc}"
     if delta is None or not valid_counts:
-        outcome, reason = "error", "adapter_metrics_unavailable"
+        # Keep typed safety/error outcomes and their reason visible even if
+        # measurement fields are incomplete; success cannot claim valid work.
+        if outcome in {"success", "success_noop"}:
+            outcome, reason = "error", "adapter_metrics_unavailable"
         removed = removed if isinstance(removed, int) and not isinstance(removed, bool) and removed >= 0 else None
         deferred = deferred if isinstance(deferred, int) and not isinstance(deferred, bool) and deferred >= 0 else 0
         interrupted = interrupted if isinstance(interrupted, int) and not isinstance(interrupted, bool) and interrupted >= 0 else 0
@@ -403,12 +417,25 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
             os.environ["WORKTREE_APPROVED"] = "1"
         before = _df_free_bytes(state)
         prior = _receipt_data(state, row["job"])
-        result = supervise_actuator(command, row["slice_end"])
+        old_trigger = os.environ.get("DISK_MAGICIAN_ACTUATOR_TRIGGER")
+        if row["kind"] == "atomic":
+            os.environ["DISK_MAGICIAN_ACTUATOR_TRIGGER"] = "act"
+        try:
+            result = supervise_actuator(command, row["slice_end"])
+        finally:
+            if old_trigger is None: os.environ.pop("DISK_MAGICIAN_ACTUATOR_TRIGGER", None)
+            else: os.environ["DISK_MAGICIAN_ACTUATOR_TRIGGER"] = old_trigger
         after = _df_free_bytes(state)
         current = _receipt_data(state, row["job"])
         adapter_receipt = current if current.get("id") != prior.get("id") else {}
         metrics = _write_govern_receipt(state, row["class"], result, before, after, adapter_receipt)
-        completed = metrics["interrupted_count"] == 0 and not result["hard_stop"] and not result["orphan_survivors"]
+        completed = (metrics["outcome"] in {"success", "success_noop"}
+                     and metrics["deferred_count"] == 0
+                     and metrics["interrupted_count"] == 0
+                     and not result["hard_stop"] and not result["orphan_survivors"])
+        if metrics["deferred_count"] > 0 or metrics["interrupted_count"] > 0:
+            queue = list(dict.fromkeys([*queue, row["class"]]))
+        schedule["deferred_queue"] = queue
         record_actuator_result(schedule, row["class"], time.time(), completed=completed,
                                df_delta_bytes=metrics["df_delta_bytes"],
                                removed_count=metrics["removed_count"] or 0,

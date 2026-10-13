@@ -152,6 +152,30 @@ class GovernSchedulerTest(unittest.TestCase):
             self.assertEqual(receipt["candidates"]["removed_count"], 2)
             self.assertEqual(receipt["candidates"]["deferred_count"], 1)
             self.assertEqual(receipt["postcondition"]["df_delta_bytes"], 0)
+            self.assertEqual(schedule["deferred_queue"], ["tmp_containers"])
+            self.assertTrue(schedule["classes"]["tmp_containers"]["last_interrupted"])
+
+    def test_blocked_safety_adapter_outcome_and_reason_survive_govern_wrapping(self):
+        import job_receipt
+        with tempfile.TemporaryDirectory(prefix="govern-blocked-receipt-") as tmp:
+            store = job_receipt.JobReceiptStore(state_dir=tmp)
+            run_id = store.begin("cleanup_codex_db", trigger="act")
+            adapter = store.finish(
+                "cleanup_codex_db", run_id=run_id, outcome="blocked_safety",
+                reason="live-owner",
+                candidates={"removed_count": 0, "deferred_count": 0, "interrupted_count": 0},
+                postcondition={"df_delta_bytes": 0, "freed_bytes": 0},
+            )
+            metrics = disk_budget._write_govern_receipt(
+                Path(tmp), "claude_codex_state",
+                {"rc": 0, "hard_stop": False, "orphan_survivors": False},
+                100, 100, adapter,
+            )
+            wrapped = disk_budget._receipt_data(tmp, "govern_claude_codex_state")
+            self.assertEqual(metrics["outcome"], "blocked_safety")
+            self.assertEqual(metrics["reason"], "live-owner")
+            self.assertEqual(wrapped["outcome"], "blocked_safety")
+            self.assertEqual(wrapped["reason"], "live-owner")
 
     def test_three_tick_deferred_actuator_gets_exclusive_300_second_slice(self):
         schedule = {"classes": {"stuck": {"deferred_ticks": 3}}}

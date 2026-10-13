@@ -282,7 +282,7 @@ PY
     CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
     while (( CURSOR_INDEX < CURSOR_LEN )); do
         if ! act_unit_fits "$ACT_UNIT_BUDGET_S"; then
-            OUTCOME=partial; log deferred:deadline-before-unit; echo deadline_before_unit >> "$EVENTS"; break
+            OUTCOME=partial; log deadline_before_unit; echo deadline_before_unit >> "$EVENTS"; break
         fi
         file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[int(sys.argv[2])])' "$CURSOR_ITEMS" "$CURSOR_INDEX")"
         process_lease "$file" || { OUTCOME=partial; break; }

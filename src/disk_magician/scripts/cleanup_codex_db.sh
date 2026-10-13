@@ -14,8 +14,12 @@
 # Defaults to dry-run (pass --clean to actually vacuum and checkpoint).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # shellcheck source=scripts/safety_lib.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+source "$SCRIPT_DIR/safety_lib.sh"
+# shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 
 DRY_RUN=true
 BUSY_TIMEOUT_MS="${CODEX_DB_BUSY_TIMEOUT_MS:-5000}"
@@ -42,12 +46,15 @@ cleanup_all_leases() {
 }
 
 trap_handler() {
+  local rc=$?
   local sig="${1:-0}"
   cleanup_all_leases
   if [[ "$sig" -ne 0 ]]; then
     trap - EXIT HUP INT TERM
+    actuator_receipt_exit $((128 + sig))
     exit $(( 128 + sig ))
   fi
+  actuator_receipt_exit "$rc"
 }
 
 trap 'trap_handler 0' EXIT
@@ -120,6 +127,14 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+  actuator_receipt_begin "$SCRIPT_DIR" cleanup_codex_db "$STATE_DIR" || {
+    echo "ERROR: could not begin governed cleanup receipt" >&2; exit 3;
+  }
+  # Keep the lease-cleanup trap and add its terminal-receipt call.
+  trap 'trap_handler 0' EXIT
+fi
 
 # Numeric validation (rejects out-of-bounds without bash arithmetic overflow)
 validate_numeric_param() {
@@ -955,6 +970,15 @@ done
 
 echo
 if [[ "$any_non_success" == true ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    # VACUUM rewrites pages in place; it removes no database artifact.
+    # Successfully vacuumed databases are counted separately as cleaned_count.
+    ACTUATOR_REMOVED_COUNT=0
+    ACTUATOR_CLEANED_COUNT="$total_vacuumed"
+    ACTUATOR_DEFERRED_COUNT="$total_locked"
+    ACTUATOR_OUTCOME=error
+    ACTUATOR_REASON=database_maintenance_incomplete
+  fi
   if [[ "$DRY_RUN" == true ]]; then
     log "Codex DB vacuum preview incomplete: checked $total_checked database(s), total reclaimable: $(fmt_bytes $total_reclaimable)"
   else
@@ -967,8 +991,21 @@ if [[ "$any_non_success" == true ]]; then
 fi
 
 if [[ "$DRY_RUN" == true ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=success_noop
+    ACTUATOR_REASON=dry_run
+  fi
   log "Codex DB vacuum preview: checked $total_checked database(s), total reclaimable: $(fmt_bytes $total_reclaimable)"
 else
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    # VACUUM rewrites pages in place; it removes no database artifact.
+    # Successfully vacuumed databases are counted separately as cleaned_count.
+    ACTUATOR_REMOVED_COUNT=0
+    ACTUATOR_CLEANED_COUNT="$total_vacuumed"
+    ACTUATOR_DEFERRED_COUNT="$total_locked"
+    ACTUATOR_OUTCOME=success
+    ACTUATOR_REASON=database_maintenance_complete
+  fi
   log "Codex DB vacuum complete: checked $total_checked database(s), vacuumed $total_vacuumed, total freed: $(fmt_bytes $total_freed)"
 fi
 
