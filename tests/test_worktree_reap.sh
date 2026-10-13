@@ -22,6 +22,13 @@ case "$spec" in lstart=) cat "$FAKE_PS_DIR/lstart/$pid" 2>/dev/null;; args=) cat
 MOCK
 cat > "$TMP/bin/lsof" <<'MOCK'
 #!/bin/bash
+# C14's open-file probe uses `-d ^cwd`; the quarantine verify probe uses `+D`.
+# The fixture is a cwd record, so both must see no live users. wrh_live_cwd_reason
+# uses `-d cwd` and must still see the fixture.
+for a in "$@"; do
+  [[ "$a" == ^cwd ]] && exit 1
+  [[ "$a" == +D ]] && exit 1
+done
 cat "$FAKE_LSOF_FIXTURE"
 MOCK
 cat > "$TMP/bin/git" <<'MOCK'
@@ -71,11 +78,13 @@ git -C "$TMP/repo" add .
 git -C "$TMP/repo" commit -qm base
 git -C "$TMP/repo" push -q origin HEAD:main
 N=0
-age() { python3 - "$WT" "${1:-2400}" <<'PY'
+age() { python3 - "$WT" "${1:-7200}" <<'PY'
 import os,sys,time
 old=time.time()-int(sys.argv[2])
 for base,dirs,files in os.walk(sys.argv[1]):
  for name in files: os.utime(os.path.join(base,name),(old,old))
+ for name in dirs: os.utime(os.path.join(base,name),(old,old))
+os.utime(sys.argv[1],(old,old))
 PY
 }
 new() {
@@ -146,14 +155,18 @@ for offset in 0 -30 -120 1; do new; edit "d['pending']=True; d['creator']='guard
 new; saved="$TMP/saved-lease"; cp "$LF" "$saved"; git -C "$TMP/repo" worktree remove "$WT"; git -C "$TMP/repo" worktree add -qb reuse "$WT" origin/main; cp "$saved" "$LF"; edit 'd["admin_id"]="old-incarnation"'; run --mode remove; check 'path reuse adopted' test "$(field 'd["owner"] is None and d["creator"] == "adopt"')" = True; check 'reuse preserved' test -d "$WT"
 cat > "$TMP/inject" <<'HOOK'
 #!/bin/bash
-if [[ "$1" == "$INJECT_WT" ]]; then mkdir -p "$1/data"; touch "$1/$INJECT_FILE"; python3 - "$1/$INJECT_FILE" <<'PY'
+if [[ "$1" == "$INJECT_WT" ]]; then mkdir -p "$1/data"; touch "$1/$INJECT_FILE"; python3 - "$1" "$1/$INJECT_FILE" <<'PY'
 import os,sys,time
-os.utime(sys.argv[1],(time.time()-4000,)*2)
+old=time.time()-4000
+os.utime(sys.argv[2],(old,old))
+os.utime(os.path.dirname(sys.argv[2]),(old,old))
+if os.path.isdir(os.path.join(sys.argv[1],"data")): os.utime(os.path.join(sys.argv[1],"data"),(old,old))
+os.utime(sys.argv[1],(old,old))
 PY
 fi
 HOOK
 chmod +x "$TMP/inject"
-for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:hidden-state; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
+for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:secret-like; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
 mkdir "$TMP/minbin"
 for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
 new; before="$(wc -l < "$FAKE_FETCH_LOG")"; PATH="$TMP/minbin" run; verdict 'missing timeout blocks fetch' kept:remote-unverified; check 'no unbounded fetch' test "$(wc -l < "$FAKE_FETCH_LOG")" = "$before"; check 'missing gh logged' grep -q 'missing tool: gh' "$TMP/run.log"; check 'missing gh counted' test "$(receipt 'd["candidates"]["gh_failed"] > 0')" = True; park

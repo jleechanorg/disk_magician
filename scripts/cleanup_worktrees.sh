@@ -22,6 +22,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_merged_pr.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_ignored.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+# Brings artifact_removal_verdict (via artifact_verdict.sh) and, transitively,
+# wrh_remove_now (worktree_remove_hook.sh) for the C14 -> WRH removal route.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
@@ -731,8 +735,10 @@ process_antigravity_orphan() {
                 return 0
             fi
         fi
-        if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
-            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"
+        local ag_c14_result
+        ag_c14_result="$(quarantine_remove "$abs_subdir")"
+        if [[ "$ag_c14_result" != removed:* || -e "$abs_subdir" || -L "$abs_subdir" ]]; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "${ag_c14_result#kept:}"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
@@ -906,12 +912,25 @@ process_repo_local_worktrees() {
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
                 fi
-                if git -C "$repo_abs" worktree remove --force --force "$abs_path" && [[ ! -e "$abs_path" ]]; then
-                    ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
-                    TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
-                    REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                # Same C14 -> WRH route as worktree_reap: the REAL verdict
+                # writes the single original receipt, and WRH consumes exactly
+                # that receipt. No fresh inventory may reauthorize removal.
+                local cw_c14_inv cw_c14_verdict
+                cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
+                if [[ -n "$cw_c14_inv" ]]; then
+                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --inventory-out "$cw_c14_inv")"
+                    if [[ "$cw_c14_verdict" == remove ]] && wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]]; then
+                        rm -f "$cw_c14_inv"
+                        ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
+                        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                        REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                    else
+                        rm -f "$cw_c14_inv"
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "${cw_c14_verdict#kept:}" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    fi
                 else
-                    ledger_line "repo-local" "PRESERVE" "$abs_path" "remove-failed" "$extra"
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "check-failed" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                 fi
             fi

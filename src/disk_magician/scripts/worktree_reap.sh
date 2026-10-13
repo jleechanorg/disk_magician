@@ -6,6 +6,7 @@ source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
 set -- "${ACT_ARGS[@]}"
 source "$SCRIPT_DIR/worktree_remove_hook.sh"
+source "$SCRIPT_DIR/lib/quarantine.sh"
 source "$SCRIPT_DIR/lib/worktree_merged_pr.sh"
 STATE="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 LOCK="$STATE/worktree_reap.lock"
@@ -254,11 +255,19 @@ process_lease() {
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
         if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK" "$real"; fi
         (( STOP )) && return 1
-        verdict="$(verdict_for "$real" "$repo" "$quiet")"
-        if [[ "$verdict" == remove ]]; then
-            if wrh_remove_now "$real" "$real"; then echo remove >> "$EVENTS"; return 0; fi
-            verdict=kept:remove-failed
+        # Re-verify through the REAL C14 verdict, which also writes the single
+        # original receipt (checkout inventory plus linked-worktree admin rows).
+        # WRH consumes exactly that receipt via --quarantine; no second fresh
+        # inventory may reauthorize the mutation.
+        local reap_c14_inv reap_c14_verdict
+        reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { record "$file" "$real" kept:check-failed; return 0; }
+        reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv")"
+        if [[ "$reap_c14_verdict" == remove ]] && wrh_remove_now "$real" "$real" --quarantine "$reap_c14_inv"; then
+            rm -f "$reap_c14_inv"; echo remove >> "$EVENTS"; return 0
         fi
+        rm -f "$reap_c14_inv"
+        [[ "$reap_c14_verdict" == remove ]] || verdict="$reap_c14_verdict"
+        verdict="${verdict:-kept:remove-failed}"
     fi
     record "$file" "$real" "$verdict"
     return 0

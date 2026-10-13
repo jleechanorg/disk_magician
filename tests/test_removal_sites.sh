@@ -65,6 +65,7 @@ EXEMPT_TARGETS = {
     # tool-owned temp/lock files and script run dirs
     "err", "hit_file", "err_file", "dylib_candidate_file", "snapshot_file",
     "candidates_file", "RUN_TMP", "LOCK", "LOCK_DIR", "_lsof_tmp",
+    "marker_file", "gl",
     # immutable hardlink dedup: removing a freshly-made link changes no content
     "tmp_link",
 }
@@ -143,6 +144,9 @@ def classify(file_name, func_name, line, body_before):
     tgt = targets_of(raw)
     if not tgt:
         return "UNRESOLVED", raw.strip()[:80]
+    # macOS .DS_Store metadata cleanup (never artifact content).
+    if raw.strip().strip("\"'").endswith(".DS_Store"):
+        return "EXEMPT", raw.strip()
     if guarded_in(body_before, tgt):
         return "GUARDED", "+".join(sorted(tgt))
     if tgt <= EXEMPT_TARGETS:
