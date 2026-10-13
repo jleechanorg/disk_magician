@@ -158,6 +158,12 @@ check 'no verdict function: untouched' intact AAAA
 fixture; STUB_VERDICT=remove run X=1
 check 'remove without inventory: kept:check-failed, untouched' bash -c '[[ "$1" == kept:check-failed && -f "$2/report.md" && $(ls -A "$3" 2>/dev/null | wc -l) -eq 0 ]]' _ "$OUT" "$A" "$Q"
 
+# Caller rejects unknown options before they can influence a replacement verdict implementation.
+fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; artifact_removal_verdict() { touch '$TMP/verdict-called'; echo remove; }; quarantine_remove '$A' --unsupported-option" 2>/dev/null)"
+check 'unknown caller option: kept before verdict' [ "$OUT" = kept:check-failed ]
+check 'unknown caller option: verdict not called' [ ! -e "$TMP/verdict-called" ]
+check 'unknown caller option: source untouched' intact AAAA
+
 # Verdict binding: A rewritten to same-length B after C14, before the rename.
 fixture; run DISK_MAGICIAN_TEST_AFTER_VERDICT='printf BBBB > "$DM_Q_PATH/report.md"'
 check 'rewrite before rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]
@@ -323,6 +329,17 @@ RECON="$(quarantine_reconcile --deadline-at "$NOW" --cursor "$CURSOR")"
 check 'deadline: deferred cursor preserves unprocessed sidecars' bash -c '[[ "$1" == deferred:* && -f "$2" && -f "$3/$5.json" && -e "$3/$5" && -f "$4/$6.json" && -e "$4/$6" && -f "$7/quarantine-index/$5.json" && -f "$7/quarantine-index/$6.json" ]]' _ "$RECON" "$CURSOR" "$Q_A" "$Q_B" "$QID_A" "$QID_B" "$DISK_MAGICIAN_STATE_DIR"
 RECON="$(quarantine_reconcile --cursor "$CURSOR")"
 check 'deadline resume: cursor processes remaining indexed entries' bash -c '[[ "$1" == *"reconciled:$2:rolled-back"* && "$1" == *"reconciled:$3:rolled-back"* && ! -e "$4" && -f "$5/report.md" && -f "$6/report.md" ]]' _ "$RECON" "$QID_A" "$QID_B" "$CURSOR" "$A_A" "$A_B"
+
+# A crash while persisting the post-delete marker must preserve the prior valid sidecar.
+prepare_quarantine
+env DISK_MAGICIAN_TEST_KILL_AT=before_root_removed_replace python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?
+RECON="$(quarantine_reconcile)"
+check 'root-removed marker crash: payload is gone but sidecar remains valid and indexed' python3 -c 'import json,os,sys; assert sys.argv[1]=="137"; d=json.load(open(sys.argv[2])); assert d["phase"]=="deleting" and d.get("root_removed") is not True; assert not os.path.lexists(sys.argv[3]); assert os.path.isfile(sys.argv[4]); assert os.path.isfile(sys.argv[5]); assert "kept" in sys.argv[6]' "$KILL_RC" "$Q/$QID.json" "$Q/$QID" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json" "$RECON"
+
+# If the quarantined root moves after opening, phase2 must stop before deleting through its fd.
+prepare_quarantine; MOVED="$TMP/moved-after-open-$QID"
+RECON="$(env DISK_MAGICIAN_TEST_AFTER_ROOT_OPEN="mv \"\$DM_Q_PATH\" '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'root moved after open: deletion stops and recovery records remain' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2/report.md" && "$(cat "$2/report.md")" == AAAA && -f "$3/$4.json" && -f "$5/quarantine-index/$4.json" ]]' _ "$RECON" "$MOVED" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
 ACTIVE_STATE=""
 
 echo "quarantine: $PASS passed, $FAIL failed"

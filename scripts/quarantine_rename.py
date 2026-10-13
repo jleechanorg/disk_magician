@@ -59,6 +59,7 @@ def update_sidecar(qfd, side, rec):
             if written <= 0: raise OSError("short sidecar write")
             view = view[written:]
         os.fsync(fd)
+        if rec.get("root_removed") is True: kill_at("before_root_removed_replace")
     except Exception:
         os.close(fd)
         try: os.unlink(temp, dir_fd=qfd)
@@ -305,24 +306,14 @@ def inventory_children(inventory):
         children[parent].append((rel.rpartition("/")[2], rel))
     return by_path, children
 
-def fsync_sidecar(qfd, side, record):
-    # Truncate/write/fsync before deleting anything. A crash before fsync can
-    # only damage the record; it cannot have started phase 2, so later runs
-    # fail closed on a malformed sidecar.
-    fd = os.open(side, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, dir_fd=qfd)
-    try:
-        data = json.dumps(record, separators=(",", ":")).encode()
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0: raise OSError("short sidecar write")
-            view = view[written:]
-        os.fsync(fd)
-    finally: os.close(fd)
-    os.fsync(qfd)
+def tree_still_quarantined(location_guard):
+    pfd, qfd, qid, qstat, rootstat = location_guard
+    return same_entry(pfd, ".dm-quarantine", qstat) and same_entry(qfd, qid, rootstat)
 
-def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None):
+def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
+                           location_guard=None, root_label=""):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
+    if location_guard is not None and not tree_still_quarantined(location_guard): return False
     if deadline is not None and time.monotonic() >= deadline: return False
     try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError: return rel != "."  # the root's absence is ambiguous until root_removed is durable
@@ -337,13 +328,18 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             opened = os.fstat(child_fd)
             if (entry_kind(opened), opened.st_dev, opened.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
+            if rel == ".":
+                hook("DISK_MAGICIAN_TEST_AFTER_ROOT_OPEN", root_label, "")
+                if location_guard is not None and not tree_still_quarantined(location_guard): return False
             ok = True
             for child_name, child_rel in children.get(rel, []):
-                if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children, deadline):
+                if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children,
+                                              deadline, location_guard, root_label):
                     ok = False
             if not ok: return False
         finally: os.close(child_fd)
         try:
+            if location_guard is not None and not tree_still_quarantined(location_guard): return False
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if (entry_kind(current), current.st_dev, current.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
@@ -376,6 +372,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         if target != expected.get("target"): return False
     else: return False
     try:
+        if location_guard is not None and not tree_still_quarantined(location_guard): return False
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (entry_kind(current), current.st_dev, current.st_ino) != (kind, expected.get("dev"), expected.get("ino")):
             return False
@@ -444,15 +441,18 @@ def phase2(binding_file, qid, deadline=None):
             return "removed"
         if record.get("phase") != "deleting":
             record["phase"] = "deleting"
-            fsync_sidecar(qfd, side, record)
+            update_sidecar(qfd, side, record)
         hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, ".dm-quarantine", qid), "")
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
-        if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline):
+        rootstat = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
+        location_guard = (pfd, qfd, qid, qst, rootstat)
+        if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline,
+                                      location_guard, os.path.join(parent, ".dm-quarantine", qid)):
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
         record["root_removed"] = True
-        fsync_sidecar(qfd, side, record)
+        update_sidecar(qfd, side, record)
         if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
         os.unlink(side, dir_fd=qfd)
         os.fsync(qfd)
