@@ -220,14 +220,16 @@ def inventory(root, out, deadline=None):
                         if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                             raise OSError("file changed")
                         entries.append({"path": ".", "type": "file", "dev": before.st_dev, "ino": before.st_ino,
-                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns})
+                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns,
+                                        "name": os.path.basename(root.rstrip(os.sep))})
                     finally: os.close(ffd)
                 elif stat.S_ISLNK(st.st_mode):
                     target = os.readlink(name, dir_fd=pfd)
                     now = os.stat(name, dir_fd=pfd, follow_symlinks=False)
                     if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino): raise OSError("symlink replaced")
                     entries.append({"path": ".", "type": "symlink", "dev": st.st_dev, "ino": st.st_ino,
-                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns})
+                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns,
+                                    "name": os.path.basename(root.rstrip(os.sep))})
                 else:
                     raise OSError("unsupported entry type")
             finally: os.close(pfd)
@@ -240,7 +242,8 @@ def inventory(root, out, deadline=None):
             if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
                 raise OSError("directory replaced")
             entries.append({"path": rel, "type": "dir", "dev": opened.st_dev, "ino": opened.st_ino,
-                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns})
+                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns,
+                            **({"name": os.path.basename(root.rstrip(os.sep))} if rel == "." else {})})
             names = sorted(os.listdir(fd))
             for name in names:
                 left = _remaining(deadline, "tree-walk")
@@ -461,7 +464,8 @@ def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        print("yes" if any(pattern.fullmatch(e["path"].rsplit("/", 1)[-1]) for e in entries) else "no")
+        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
+                            for e in entries) else "no")
     except Exception:
         print("kept:check-failed")
 

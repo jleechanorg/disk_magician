@@ -412,6 +412,13 @@ mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 
 age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
 assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
 assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
+mkdir -p "$PT/pr-review-only.pem" && printf 'synthetic sentinel\n' >"$PT/pr-review-only.pem/payload"
+age "$PT/pr-review-only.pem" 43200
+assert_eq "$(eph "$PT/pr-review-only.pem")" kept:secret-like "secret-like root name in an E3 directory"
+printf 'synthetic sentinel\n' >"$PT/review-only.pem"
+root_file_inventory="$TMPROOT/root-secret-file-inventory.json"
+assert_eq "$(python3 "$PROBE" inventory "$PT/review-only.pem" "$root_file_inventory")" ok "inventory of a regular-file candidate"
+assert_eq "$(python3 "$PROBE" secrets "$root_file_inventory")" yes "secret-like regular-file root name is recognized"
 mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
 assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
