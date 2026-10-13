@@ -206,6 +206,35 @@ set_old_mtime() {
   /usr/bin/find "$dir" -exec touch -t 202001010000 {} +
 }
 
+# make_c14_archive_entry <source> <entry> <retention_min> <private_tmp> <tmp_root>
+# Builds a real E2 origin source and its matching archive receipt, then moves it
+# to <entry>. Mirrors test_cleanup_tmp_archive_purge.sh: the receipt is written
+# before the same-filesystem move, so its dev/ino/size still match the entry
+# that C14 re-checks (approved contract E1). A raw directory with no receipt is
+# deliberately not eligible.
+make_c14_archive_entry() {
+  local source="$1" entry="$2" retention="$3" private_tmp="$4" tmp_root="$5"
+  local actual_retention archived_at
+  # Canonicalize the E2 scratch roots: c14_ephemeral_retention resolves them
+  # with `cd && pwd -P` (macOS /tmp -> /private/tmp), so the receipt's
+  # original_path must be canonical for the row to match at verdict time.
+  private_tmp="$(cd "$private_tmp" && pwd -P)"
+  tmp_root="$(cd "$tmp_root" && pwd -P)"
+  source="$tmp_root/${source##*/}"
+  mkdir -p "$source" "${entry%/*}"
+  printf 'archived fixture\n' >"$source/payload.bin"
+  actual_retention="$(DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$private_tmp" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$tmp_root" \
+    bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2"' _ "$REPO_ROOT" "$source")"
+  if [[ "$actual_retention" != "$retention" ]]; then
+    record_fail "archive fixture retention for $source" "expected $retention, got '$actual_retention'"
+    return 1
+  fi
+  archived_at="$(python3 -c 'import sys,time; print(int(time.time())-int(sys.argv[1])*3600)' "$(( retention / 60 + 25 ))")"
+  python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null
+  mv "$source" "$entry"
+  set_old_mtime "$entry"
+}
+
 echo "=== cleanup_tmp.sh --large protection tests ==="
 
 if [[ "$PRE_FIX_SHA" =~ ^[[:xdigit:]]{40}$ ]]; then
@@ -520,22 +549,21 @@ assert_contains "GREEN 4: same-filesystem archive move reports zero reclaimed by
 assert_contains "GREEN 4: quarantine accounting is reported separately" \
   "Dirs archived: 1" "$G4_OUT_CONTENT"
 
-echo "GREEN 5: an aged archive entry is purged (space actually reclaimed on a later run)"
+echo "GREEN 5: an aged E2 archive entry with a matching origin receipt is purged"
 G5_PRIVATE_TMP="$TMP_ROOT/g5-private-tmp"
 G5_TMP="$TMP_ROOT/g5-tmp"
 G5_ARCHIVE="$TMP_ROOT/g5-archive"
 G5_BIN="$TMP_ROOT/g5-bin"
-mkdir -p "$G5_PRIVATE_TMP" "$G5_TMP" "$G5_ARCHIVE/20200101T000000Z/already_archived_dir"
-touch "$G5_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
-set_old_mtime "$G5_ARCHIVE/20200101T000000Z"
+G5_ENTRY="$G5_ARCHIVE/20200101T000000Z/cli_validation_gemini_g5"
+mkdir -p "$G5_PRIVATE_TMP" "$G5_TMP"
 make_find_shim "$G5_BIN" "$G5_PRIVATE_TMP" "$G5_TMP"
+make_c14_archive_entry "$G5_TMP/cli_validation_gemini_g5" "$G5_ENTRY" 60 "$G5_PRIVATE_TMP" "$G5_TMP"
 
 G5_OUT="$TMP_ROOT/g5.out"
 if run_capture "$G5_OUT" env -i HOME="$TMP_ROOT/g5-home" \
-  PATH="$G5_BIN:/usr/bin:/bin" \
+  PATH="$G5_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
-  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
-  FAIL_FIND_ROOT="$G5_ARCHIVE" \
+  LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -548,11 +576,48 @@ else
 fi
 G5_OUT_CONTENT=$(cat "$G5_OUT")
 assert_rc "GREEN 5: exits 0" 0 "$G5_RC"
-assert_contains "GREEN 5: logs purging the aged archive entry" \
-  "Purging aged archive" "$G5_OUT_CONTENT"
-assert_missing "GREEN 5: aged archive entry actually reclaimed" "$G5_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 5: logs the C14-approved aged archive purge" \
+  "Purged aged archive after C14 approval" "$G5_OUT_CONTENT"
+assert_missing "GREEN 5: aged archive entry actually reclaimed" "$G5_ENTRY"
 assert_contains "GREEN 5: actual purge is counted as a removed dir" \
   "Dirs removed: 1" "$G5_OUT_CONTENT"
+
+echo "GREEN 5g: an aged archive entry whose receipt no longer matches its identity is kept"
+G5G_PRIVATE_TMP="$TMP_ROOT/g5g-private-tmp"
+G5G_TMP="$TMP_ROOT/g5g-tmp"
+G5G_ARCHIVE="$TMP_ROOT/g5g-archive"
+G5G_BIN="$TMP_ROOT/g5g-bin"
+G5G_ENTRY="$G5G_ARCHIVE/20200101T000000Z/cli_validation_gemini_g5g"
+mkdir -p "$G5G_PRIVATE_TMP" "$G5G_TMP"
+make_find_shim "$G5G_BIN" "$G5G_PRIVATE_TMP" "$G5G_TMP"
+make_c14_archive_entry "$G5G_TMP/cli_validation_gemini_g5g" "$G5G_ENTRY" 60 "$G5G_PRIVATE_TMP" "$G5G_TMP"
+# Move the receipted entry out of the archive and put a fresh inode at the same
+# path: the stale receipt still names the *old* dev/ino, so E1 must reject it
+# (`kept:archive-identity`) rather than confer eligibility on the replacement.
+mv "$G5G_ENTRY" "$TMP_ROOT/g5g-receipted-entry-removed"
+mkdir -p "$G5G_ENTRY" && printf 'replacement\n' >"$G5G_ENTRY/payload.bin"
+set_old_mtime "$G5G_ENTRY"
+
+G5G_OUT="$TMP_ROOT/g5g.out"
+if run_capture "$G5G_OUT" env -i HOME="$TMP_ROOT/g5g-home" \
+  PATH="$G5G_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G5G_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$G5G_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$G5G_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G5G_RC=0
+else
+  G5G_RC=$?
+fi
+G5G_OUT_CONTENT=$(cat "$G5G_OUT")
+assert_rc "GREEN 5g: exits 0" 0 "$G5G_RC"
+assert_contains "GREEN 5g: mismatched receipt is rejected as archive-identity" \
+  "kept:archive-identity" "$G5G_OUT_CONTENT"
+assert_exists "GREEN 5g: replacement entry is preserved" "$G5G_ENTRY/payload.bin"
 
 echo "GREEN 5b: LARGE_TMP_ARCHIVE_RETENTION_HOURS env overrides config"
 G5B_PRIVATE_TMP="$TMP_ROOT/g5b-private-tmp"
@@ -697,7 +762,7 @@ G5F_OUT="$TMP_ROOT/g5f.out"
 if run_capture "$G5F_OUT" env -i HOME="$TMP_ROOT/g5f-home" \
   PATH="$G5F_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
-  DU_OPEN_ON_PATH="$G5F_STAMP" DU_OPEN_PATH="$G5F_PAYLOAD" \
+  DU_OPEN_ON_PATH="$G5F_STAMP/already_archived_dir" DU_OPEN_PATH="$G5F_PAYLOAD" \
   DU_HOLDER_PID_FILE="$G5F_PID_FILE" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5F_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
@@ -758,7 +823,7 @@ assert_exists "GREEN 6: initial archive candidate survives lsof failure" \
 assert_exists "GREEN 6: aged archive survives lsof failure" \
   "$G6_AGED/payload.bin"
 
-echo "GREEN 7: over-cap archive entry is purged despite an active marker (hard cap, bead jleechan-mtow)"
+echo "GREEN 7: over-cap archive entry with an active marker is KEPT (approved contract: no guard bypass)"
 G7_PRIVATE_TMP="$TMP_ROOT/g7-private-tmp"
 G7_TMP="$TMP_ROOT/g7-tmp"
 G7_ARCHIVE="$TMP_ROOT/g7-archive"
@@ -786,10 +851,11 @@ else
 fi
 G7_OUT_CONTENT=$(cat "$G7_OUT")
 assert_rc "GREEN 7: exits 0" 0 "$G7_RC"
-assert_contains "GREEN 7: logs over-cap purge with guards bypassed" \
-  "Purging over-cap archive" "$G7_OUT_CONTENT"
-assert_missing "GREEN 7: over-cap marked entry actually reclaimed" \
-  "$G7_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 7: logs the marked-active skip" \
+  "Skipping marked-active aged archive" "$G7_OUT_CONTENT"
+assert_contains "GREEN 7: over-cap keep is surfaced with a reason" \
+  "archive_overcap_kept" "$G7_OUT_CONTENT"
+assert_exists "GREEN 7: over-cap marked entry is preserved" "$G7_ENTRY/payload.bin"
 
 echo "GREEN 7b: under-cap long-lived skipped entry logs a loud warning"
 G7B_PRIVATE_TMP="$TMP_ROOT/g7b-private-tmp"
@@ -901,20 +967,20 @@ fi
 assert_contains "GREEN 8b: approved dir is actually archived (evaluation proceeded)" \
   "Archiving: $G8B_PRIVATE_TMP/worktree_stale_dir ->" "$G8B_OUT_CONTENT"
 
-echo "GREEN 9a: aged archive entry is purged during standard run WITHOUT --large (bead disk_magician-f0f)"
+echo "GREEN 9a: an aged E2 archive entry with a matching receipt is purged without --large"
 G9A_PRIVATE_TMP="$TMP_ROOT/g9a-private-tmp"
 G9A_TMP="$TMP_ROOT/g9a-tmp"
 G9A_ARCHIVE="$TMP_ROOT/g9a-archive"
 G9A_BIN="$TMP_ROOT/g9a-bin"
-mkdir -p "$G9A_PRIVATE_TMP" "$G9A_TMP" "$G9A_ARCHIVE/20200101T000000Z/already_archived_dir"
-touch "$G9A_ARCHIVE/20200101T000000Z/already_archived_dir/payload.bin"
-set_old_mtime "$G9A_ARCHIVE/20200101T000000Z"
+G9A_ENTRY="$G9A_ARCHIVE/20200101T000000Z/cli_validation_gemini_g9a"
+mkdir -p "$G9A_PRIVATE_TMP" "$G9A_TMP"
 make_find_shim "$G9A_BIN" "$G9A_PRIVATE_TMP" "$G9A_TMP"
+make_c14_archive_entry "$G9A_TMP/cli_validation_gemini_g9a" "$G9A_ENTRY" 60 "$G9A_PRIVATE_TMP" "$G9A_TMP"
 
 G9A_OUT="$TMP_ROOT/g9a.out"
 if run_capture "$G9A_OUT" env -i HOME="$TMP_ROOT/g9a-home" \
-  PATH="$G9A_BIN:/usr/bin:/bin" \
-  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  PATH="$G9A_BIN:/usr/sbin:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G9A_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -927,13 +993,13 @@ else
 fi
 G9A_OUT_CONTENT=$(cat "$G9A_OUT")
 assert_rc "GREEN 9a: exits 0" 0 "$G9A_RC"
-assert_contains "GREEN 9a: logs purging the aged archive entry without --large" \
-  "Purging aged archive" "$G9A_OUT_CONTENT"
-assert_missing "GREEN 9a: aged archive entry actually reclaimed without --large" "$G9A_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 9a: logs the C14-approved aged archive purge without --large" \
+  "Purged aged archive after C14 approval" "$G9A_OUT_CONTENT"
+assert_missing "GREEN 9a: aged archive entry actually reclaimed without --large" "$G9A_ENTRY"
 assert_contains "GREEN 9a: actual purge is counted as a removed dir without --large" \
   "Dirs removed: 1" "$G9A_OUT_CONTENT"
 
-echo "GREEN 9b: over-cap archive entry is purged during standard run WITHOUT --large (bead disk_magician-f0f)"
+echo "GREEN 9b: over-cap archive entry with an active marker is KEPT without --large (approved contract)"
 G9B_PRIVATE_TMP="$TMP_ROOT/g9b-private-tmp"
 G9B_TMP="$TMP_ROOT/g9b-tmp"
 G9B_ARCHIVE="$TMP_ROOT/g9b-archive"
@@ -961,10 +1027,11 @@ else
 fi
 G9B_OUT_CONTENT=$(cat "$G9B_OUT")
 assert_rc "GREEN 9b: exits 0" 0 "$G9B_RC"
-assert_contains "GREEN 9b: logs over-cap purge without --large" \
-  "Purging over-cap archive" "$G9B_OUT_CONTENT"
-assert_missing "GREEN 9b: over-cap marked entry actually reclaimed without --large" \
-  "$G9B_ARCHIVE/20200101T000000Z"
+assert_contains "GREEN 9b: logs the marked-active skip without --large" \
+  "Skipping marked-active aged archive" "$G9B_OUT_CONTENT"
+assert_contains "GREEN 9b: over-cap keep is surfaced without --large" \
+  "archive_overcap_kept" "$G9B_OUT_CONTENT"
+assert_exists "GREEN 9b: over-cap marked entry is preserved without --large" "$G9B_ENTRY/payload.bin"
 
 echo "GREEN 9c: standard dry-run reports aged archive without deleting (bead disk_magician-f0f)"
 G9C_PRIVATE_TMP="$TMP_ROOT/g9c-private-tmp"
