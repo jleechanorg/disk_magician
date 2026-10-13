@@ -329,12 +329,30 @@ RECON="$(quarantine_reconcile --deadline-at "$NOW" --cursor "$CURSOR")"
 check 'deadline: deferred cursor preserves unprocessed sidecars' bash -c '[[ "$1" == deferred:* && -f "$2" && -f "$3/$5.json" && -e "$3/$5" && -f "$4/$6.json" && -e "$4/$6" && -f "$7/quarantine-index/$5.json" && -f "$7/quarantine-index/$6.json" ]]' _ "$RECON" "$CURSOR" "$Q_A" "$Q_B" "$QID_A" "$QID_B" "$DISK_MAGICIAN_STATE_DIR"
 RECON="$(quarantine_reconcile --cursor "$CURSOR")"
 check 'deadline resume: cursor processes remaining indexed entries' bash -c '[[ "$1" == *"reconciled:$2:rolled-back"* && "$1" == *"reconciled:$3:rolled-back"* && ! -e "$4" && -f "$5/report.md" && -f "$6/report.md" ]]' _ "$RECON" "$QID_A" "$QID_B" "$CURSOR" "$A_A" "$A_B"
+ACTIVE_STATE=""
 
 # A crash while persisting the post-delete marker must preserve the prior valid sidecar.
 prepare_quarantine
 env DISK_MAGICIAN_TEST_KILL_AT=before_root_removed_replace python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?
 RECON="$(quarantine_reconcile)"
 check 'root-removed marker crash: payload is gone but sidecar remains valid and indexed' python3 -c 'import json,os,sys; assert sys.argv[1]=="137"; d=json.load(open(sys.argv[2])); assert d["phase"]=="deleting" and d.get("root_removed") is not True; assert not os.path.lexists(sys.argv[3]); assert os.path.isfile(sys.argv[4]); assert os.path.isfile(sys.argv[5]); assert "kept" in sys.argv[6]' "$KILL_RC" "$Q/$QID.json" "$Q/$QID" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json" "$RECON"
+
+# A crash after unlink but before its progress record leaves the absence ambiguous and the record retained.
+prepare_quarantine
+env DISK_MAGICIAN_TEST_KILL_AT=entry_removed_before_journal python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?
+RECON="$(quarantine_reconcile)"
+check 'entry crash before progress journal: ambiguous absence keeps recovery records' python3 -c 'import json,os,sys; assert sys.argv[1]=="137" and "kept:quarantine_partial_kept" in sys.argv[2]; d=json.load(open(sys.argv[3])); assert d["phase"]=="deleting"; done=set(d.get("removed_paths",[])); assert any(e["path"]!="." and e["path"] not in done and not os.path.lexists(os.path.join(sys.argv[4],*e["path"].split("/"))) for e in d["inventory"]); assert os.path.lexists(sys.argv[4]); assert os.path.isfile(sys.argv[5])' "$KILL_RC" "$RECON" "$Q/$QID.json" "$Q/$QID" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+
+# A crash after the progress record is durable resumes from the exact completed entry.
+prepare_quarantine
+env DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1; KILL_RC=$?
+RECON="$(quarantine_reconcile)"
+check 'entry crash after progress journal: resume completes and drops records' python3 -c 'import os,sys; assert sys.argv[1]=="137" and "removed" in sys.argv[2] and "kept" not in sys.argv[2]; assert not os.path.lexists(sys.argv[3]); assert not os.path.lexists(sys.argv[4]); assert not os.path.exists(sys.argv[5])' "$KILL_RC" "$RECON" "$A" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$QID.json"
+
+# A child moved by the root-open hook, before its first lookup, is not mistaken for prior deletion.
+prepare_quarantine; MOVED="$TMP/moved-child-before-lookup-$QID"
+RECON="$(env DISK_MAGICIAN_TEST_AFTER_ROOT_OPEN="mv \"\$DM_Q_PATH/sub\" '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'child moved before lookup: payload and recovery records remain' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2/x.txt" && -f "$2/deep/y.txt" && -f "$3/$4.json" && -f "$5/quarantine-index/$4.json" ]]' _ "$RECON" "$MOVED" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
 
 # If the quarantined root moves after opening, phase2 must stop before deleting through its fd.
 prepare_quarantine; MOVED="$TMP/moved-after-open-$QID"

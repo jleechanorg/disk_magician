@@ -314,13 +314,24 @@ def tree_ancestry_still_quarantined(location_guard, ancestors):
     if not tree_still_quarantined(location_guard): return False
     return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
 
+def record_removed_path(qfd, side, record, rel):
+    removed = record.setdefault("removed_paths", [])
+    if rel in removed: return True
+    removed.append(rel)
+    try: update_sidecar(qfd, side, record)
+    except OSError:
+        removed.pop()
+        return False
+    return True
+
 def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
-                           location_guard=None, root_label="", ancestors=()):
+                           location_guard=None, root_label="", ancestors=(), qfd=-1, side="", record=None,
+                           removed_paths=()):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
     if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
     if deadline is not None and time.monotonic() >= deadline: return False
     try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError: return rel != "."  # the root's absence is ambiguous until root_removed is durable
+    except FileNotFoundError: return rel != "." and rel in removed_paths
     kind = entry_kind(st)
     if (kind != expected.get("type") or st.st_dev != expected.get("dev") or
             st.st_ino != expected.get("ino")):
@@ -343,7 +354,8 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             ok = True
             for child_name, child_rel in children.get(rel, []):
                 if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children,
-                                              deadline, location_guard, root_label, child_ancestors):
+                                              deadline, location_guard, root_label, child_ancestors,
+                                              qfd, side, record, removed_paths):
                     ok = False
             if not ok: return False
         finally: os.close(child_fd)
@@ -355,6 +367,11 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             if deadline is not None and time.monotonic() >= deadline: return False
             os.rmdir(name, dir_fd=parent_fd)
             os.fsync(parent_fd)
+            kill_at("entry_removed_before_journal")
+            if rel == ".": return True
+            if not record_removed_path(qfd, side, record, rel): return False
+            removed_paths.add(rel)
+            kill_at("mid_delete")
             return True
         except OSError: return False  # includes extra, non-inventoried contents
     if kind == "file":
@@ -388,6 +405,9 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         if deadline is not None and time.monotonic() >= deadline: return False
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
+        kill_at("entry_removed_before_journal")
+        if not record_removed_path(qfd, side, record, rel): return False
+        removed_paths.add(rel)
         kill_at("mid_delete")
         return True
     except OSError: return False
@@ -428,6 +448,12 @@ def phase2(binding_file, qid, deadline=None):
         if not isinstance(original, str) or os.path.dirname(original) != parent:
             return "kept:quarantine_partial_kept"
         inventory, children = inventory_children(record["inventory"])
+        removed_paths = record.get("removed_paths", [])
+        if (not isinstance(removed_paths, list) or any(not isinstance(rel, str) for rel in removed_paths) or
+                len(set(removed_paths)) != len(removed_paths) or
+                any(rel == "." or rel not in inventory for rel in removed_paths)):
+            return "kept:quarantine_partial_kept"
+        removed_paths = set(removed_paths)
         root = inventory["."]
         if (root.get("dev"), root.get("ino")) != (record.get("dev"), record.get("ino")):
             return "kept:quarantine_partial_kept"
@@ -456,7 +482,8 @@ def phase2(binding_file, qid, deadline=None):
         rootstat = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         location_guard = (pfd, qfd, qid, qst, rootstat)
         if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline,
-                                      location_guard, os.path.join(parent, ".dm-quarantine", qid)):
+                                      location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
+                                      qfd, side, record, removed_paths):
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
