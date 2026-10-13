@@ -414,8 +414,8 @@ assert_eq "$(eph "$HOME/.codex/sessions/s")" kept:protected "never-delete path (
 # lease <dir> <released_at>: lease owned by this shell (pid + start epoch).
 lease() {
     local f; f="$(lease_path_for "$1")" && mkdir -p "${f%/*}"
-    printf '{"owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
-        $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
+    printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
+        "$1" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
 }
 lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
 lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
@@ -442,6 +442,25 @@ assert_eq "$(eph "$PT/pr-nest/repo")" kept:live-owner "live owner on the candida
 assert_eq "$(eph "$PT/pr-nest")" kept:live-owner "live-owner lease on a repository nested in the candidate"
 assert_eq "$(eph "$PT/pr-1/repo")" kept:live-owner "live-owner lease on a dir enclosing the candidate"
 own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released"
+# B1: scratch-new --kind evidence leases a plain, non-git run dir. A live lease on
+# that nested plain dir must keep the outer candidate even with no open file/cwd.
+mkdir -p "$PT/claude-commands/evidence/run-1" && printf 'report-body\n' >"$PT/claude-commands/evidence/run-1/report.md"
+lease "$PT/claude-commands/evidence/run-1" null && age "$PT/claude-commands" 3000
+assert_eq "$(eph "$PT/claude-commands")" kept:live-owner "live lease on a plain dir nested in the candidate"
+[[ "$(cat "$PT/claude-commands/evidence/run-1/report.md")" == report-body ]] \
+    && ok "nested plain-dir lease left the candidate bytes intact" || bad "candidate bytes changed"
+own "$PT/claude-commands/evidence/run-1" '"2026-10-01T00:00:00Z"'
+assert_eq "$(eph "$PT/claude-commands")" remove "released child lease no longer saves the outer candidate"
+# A dead child lease (owner gone) is not protection either: strict removal.
+lease "$PT/claude-commands/evidence/run-1" null
+mkdir -p "$TMPROOT/stub" && printf '#!/bin/sh\nexit 1\n' >"$TMPROOT/stub/ps-dead" && chmod +x "$TMPROOT/stub/ps-dead"
+assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps-dead" eph "$PT/claude-commands")" remove "dead child lease no longer saves the outer candidate"
+own "$PT/claude-commands/evidence/run-1" '"2026-10-01T00:00:00Z"'
+# A malformed lease record makes the descendant scan unmeasurable: keep, never remove.
+printf '{not json' >"$(lease_dir)/zz-malformed.json"
+assert_eq "$(eph "$PT/claude-commands")" kept:check-failed "malformed lease record keeps an otherwise-removable candidate"
+rm -f "$(lease_dir)/zz-malformed.json"
+assert_eq "$(eph "$PT/claude-commands")" remove "malformed record removed: candidate removable again"
 
 echo "== non-git provenance (T11-5) =="
 GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
