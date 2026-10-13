@@ -133,6 +133,48 @@ new; run --mode remove; verdict 'unapproved records verdict' remove; check 'unap
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"; touch "$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
 new; run --mode remove; check 'legacy marker, gate closed: nominate only' grep -q 'remove mode not approved' "$TMP/run.log"; check 'legacy marker alone retains' test -d "$WT"; park
 touch "$DISK_MAGICIAN_STATE_DIR/test_gate_open"
+echo "== reuse lease claim cannot race reaper's dead-owner update =="
+new
+mkdir -p "$TMP/pythonhook"
+cat > "$TMP/pythonhook/sitecustomize.py" <<'PYHOOK'
+import os, time
+_replace = os.replace
+def replace(src, dst, *args, **kwargs):
+    if (os.path.basename(src).startswith('.reap-') and
+        os.path.realpath(dst) == os.path.realpath(os.environ.get('RACE_LEASE','')) and
+        os.path.exists(os.environ.get('RACE_ARM',''))):
+        open(os.environ['RACE_READY'],'w').write(str(src))
+        deadline=time.time()+20
+        while not os.path.exists(os.environ['RACE_RELEASE']):
+            if time.time()>deadline: raise TimeoutError('test release timeout')
+            time.sleep(.01)
+    return _replace(src,dst,*args,**kwargs)
+os.replace=replace
+PYHOOK
+RACE_ARM="$TMP/race-arm"; RACE_READY="$TMP/race-ready"; RACE_RELEASE="$TMP/race-release"
+export RACE_ARM RACE_READY RACE_RELEASE RACE_LEASE="$LF"
+touch "$RACE_ARM"
+PYTHONPATH="$TMP/pythonhook${PYTHONPATH:+:$PYTHONPATH}" bash "$SCRIPT" --mode nominate > "$TMP/race-reaper.log" 2>&1 & reaper_pid=$!
+for _ in $(seq 1 1000); do [[ -e "$RACE_READY" ]] && break; sleep .01; done
+check 'reaper update pauses at atomic replace' test -e "$RACE_READY"
+RACE_HASH="$(python3 - "$LF" <<'PYHASH'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PYHASH
+)"
+RACE_BRANCH="worktree-c$N"
+RACE_TIP="$(git -C "$TMP/repo" rev-parse "refs/heads/$RACE_BRANCH")"
+if lease_claim_reuse "$LF" "$RACE_HASH" "$RACE_BRANCH" "$RACE_TIP" $'401\t1760000000\tclaude'; then check 'claim must not enter during reaper mutation' false; else check 'claim waits/fails while reaper owns shared lease lock' true; fi
+touch "$RACE_RELEASE"
+wait "$reaper_pid"
+RACE_HASH="$(python3 - "$LF" <<'PYHASH'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PYHASH
+)"
+if lease_claim_reuse "$LF" "$RACE_HASH" "$RACE_BRANCH" "$RACE_TIP" $'401\t1760000000\tclaude'; then check 'claim succeeds after serialized reaper update' true; else check 'claim remains blocked after reaper completed' false; fi
+check 'pending claim survives the reaper update' test "$(field 'd.get("reuse",{}).get("state")')" = pending
+unset PYTHONPATH RACE_ARM RACE_READY RACE_RELEASE RACE_LEASE
 cat > "$TMP/reuse-lock-hook" <<'HOOK'
 #!/usr/bin/env bash
 source "$TEST_LEASE_LIB"

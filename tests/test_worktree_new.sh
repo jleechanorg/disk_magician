@@ -397,6 +397,38 @@ assert_eq "$rc" "0" "stale-incarnation fallback exit"
 [[ "$fresh" != "$STALE_WT" ]] && ok "stale lease cannot recycle replacement checkout" || bad "stale lease recycled replacement checkout"
 assert_eq "$(git -C "$STALE_WT" rev-parse --abbrev-ref HEAD)" "reuse/stale-incarnation" "replacement checkout remains intact"
 
+echo "== case 30: lease changed to a live owner after eligibility read is not claimed =="
+LIVE_OWNER_WT="$WTROOT/reuse-live-owner-race"
+export LIVE_OWNER_WT
+git -C "$REPO" branch reuse/live-owner-race "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$LIVE_OWNER_WT" reuse/live-owner-race
+export LIVE_OWNER_MARKER="$TMPROOT/live-owner-marker"
+live_owner_out="$(bash -c '
+    source "$1"
+    lease_write "$2" "$3" reuse/live-owner-race reuse-test
+    lease_owner_state() { echo dead; }
+    worktree_is_recently_active_minutes() {
+        local lease pid ep comm
+        lease="$(lease_path_for "$LIVE_OWNER_WT")"; pid="$$"
+        ep="$(_lease_ps_lstart_epoch "$pid")"; comm="$(_lease_full_comm "$pid")"
+        python3 - "$lease" "$pid" "$ep" "$comm" <<'PY'
+import json,os,sys
+p,pid,epoch,comm=sys.argv[1:]
+d=json.load(open(p)); d["owner"]={"pid":int(pid),"start_epoch":int(epoch),"comm":comm}
+tmp=p+".live-owner-race"; json.dump(d,open(tmp,"w")); os.replace(tmp,p)
+open(os.environ["LIVE_OWNER_MARKER"],"w").write(pid)
+PY
+        return 0
+    }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; echo remove; }
+    wtn_main "$2" feat/live-owner-race --base origin/main --name live-owner-race
+    kill -0 "$(cat "$LIVE_OWNER_MARKER")" 2>/dev/null
+' _ "$SCRIPT" "$LIVE_OWNER_WT" "$REPO" 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "live-owner race fallback and marker"
+assert_eq "$live_owner_out" "$WTROOT/live-owner-race" "live-owner lease cannot authorize reuse"
+assert_eq "$(git -C "$LIVE_OWNER_WT" rev-parse --abbrev-ref HEAD)" "reuse/live-owner-race" "live-owner candidate branch preserved"
+unset LIVE_OWNER_MARKER
+
 echo "== case 21: unpushed old branch falls back to fresh worktree =="
 UNPUSHED_WT="$WTROOT/reuse-unpushed"
 git -C "$REPO" branch reuse/unpushed "$LOCAL_SHA"

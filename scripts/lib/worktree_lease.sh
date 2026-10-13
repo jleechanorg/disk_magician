@@ -218,27 +218,34 @@ PY
 lease_write_pending() {
     local target="$1" tsv="$2"
     local pid ep comm lease existing_path
-    [[ -e "$target" ]] && return 1
     lease="$(lease_path_for "$target")"
+    mkdir -p "$(lease_dir)" 2>/dev/null || return 1
+    lease_mutation_lock_enter "$lease" || return 1
+    if [[ -e "$target" ]]; then lease_mutation_lock_exit "$lease"; return 1; fi
     if [[ -f "$lease" ]]; then
         existing_path="$(_lease_get "$lease" path)"
         if [[ -n "$existing_path" && -e "$existing_path" ]]; then
+            lease_mutation_lock_exit "$lease"
             return 1
         fi
     fi
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
-    mkdir -p "$(lease_dir)" 2>/dev/null || return 1
-    _lease_emit_json "$(lease_path_for "$target")" "$target" "" "" "guard" "True" \
-        "$pid" "$ep" "$comm" "-" "-" "${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
+    _lease_emit_json "$lease" "$target" "" "" "guard" "True" \
+        "$pid" "$ep" "$comm" "-" "-" "${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}" \
+        "" "" "" "" "" "" "" "" --lock-held
+    local rc=$?
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
 }
 
 # lease_claim_reuse <lease_file> <expected_sha256> <old_branch> <old_tip> <owner_tsv>
+#   <repo> <path> <admin_id> <admin_birth> <checkout_dev> <checkout_ino>
 # Atomically converts the exact observed lease to a pending reuse claim. The
 # previous lease is retained for rollback; an abandoned claim is never reaped.
 lease_claim_reuse() {
-    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY'
 import hashlib, json, os, sys, tempfile
-path, expected, branch, tip, owner_tsv = sys.argv[1:]
+path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:]
 lock = path + ".reuse-lock"
 try:
     os.mkdir(lock)
@@ -249,6 +256,17 @@ try:
     if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
     old = json.loads(raw)
     if not isinstance(old, dict) or old.get("reuse") or old.get("pending") is True: sys.exit(1)
+    if repo and (old.get("repo") != repo or old.get("path") != worktree or
+                 old.get("branch") != branch or old.get("admin_id") != admin_id or
+                 str(old.get("admin_birth_epoch")) != admin_birth or
+                 str(old.get("checkout_dev")) != checkout_dev or
+                 str(old.get("checkout_ino")) != checkout_ino): sys.exit(1)
+    if worktree:
+        try:
+            st = os.stat(worktree)
+        except OSError:
+            sys.exit(1)
+        if str(st.st_dev) != checkout_dev or str(st.st_ino) != checkout_ino: sys.exit(1)
     owner = None
     fields = owner_tsv.split("\t")
     if len(fields) >= 3 and fields[0].isdigit() and fields[1].isdigit():
@@ -273,11 +291,24 @@ PY
 # The reaper holds this same lock from its final check through removal.
 lease_reuse_lock_acquire() { mkdir "$1.reuse-lock" 2>/dev/null; }
 lease_reuse_lock_release() { rmdir "$1.reuse-lock" 2>/dev/null; }
+lease_mutation_lock_enter() {
+    local lease="$1" mode="${2:-}"
+    if [[ "$mode" == --lock-held ]]; then
+        [[ -d "$lease.reuse-lock" ]]
+    else
+        lease_reuse_lock_acquire "$lease"
+    fi
+}
+lease_mutation_lock_exit() {
+    [[ "${2:-}" == --lock-held ]] || lease_reuse_lock_release "$1"
+}
 
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
 lease_restore_reuse_claim() {
-    python3 - "$1" <<'PY'
+    local lease="$1"
+    lease_mutation_lock_enter "$lease" || return 1
+    python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
 try:
@@ -289,12 +320,17 @@ try:
     os.replace(tmp, path)
 except Exception: sys.exit(1)
 PY
+    local rc=$?
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
 }
 
 # lease_mark_reuse_incomplete <lease_file> — preserve old branch/tip and block
 # future claims when recovery could not restore the candidate safely.
 lease_mark_reuse_incomplete() {
-    python3 - "$1" <<'PY'
+    local lease="$1"
+    lease_mutation_lock_enter "$lease" || return 1
+    python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
 try:
@@ -306,6 +342,9 @@ try:
     os.replace(tmp, path)
 except Exception: sys.exit(1)
 PY
+    local rc=$?
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
 }
 
 # _lease_emit_json <lease_file> ... — shared writer. owner fields "-" produce
@@ -313,6 +352,8 @@ PY
 _lease_emit_json() {
     local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
     local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
+    local lock_mode="${21:-}"
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
         "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${@:13}" <<'PY'
 import json, os, sys, tempfile
@@ -394,6 +435,9 @@ except Exception:
         pass
     sys.exit(1)
 PY
+    local rc=$?
+    lease_mutation_lock_exit "$lease" "$lock_mode"
+    return "$rc"
 }
 
 # lease_owner_state <lease_file> [now_epoch] — prints exactly one of:
@@ -472,6 +516,7 @@ lease_release() {
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "not lease owner" >&2; return 1; }
     [[ "$ep" =~ ^-?[0-9]+$ ]] || { echo "not lease owner" >&2; return 1; }
+    lease_mutation_lock_enter "$lease" || { echo "lease busy" >&2; return 1; }
     if python3 - "$lease" "$pid" "$ep" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
@@ -496,8 +541,10 @@ with open(tmp, "w") as f:
 os.replace(tmp, lease)
 PY
     then
+        lease_mutation_lock_exit "$lease"
         return 0
     fi
+    lease_mutation_lock_exit "$lease"
     echo "not lease owner" >&2
     return 1
 }
@@ -524,6 +571,8 @@ lease_release_owner_session() {
 # "self|other<TAB>pid<TAB>epoch<TAB>path"; commit marks released (flock, fsync, rename)
 # only if the re-read lease still has that owner, else rc 1.
 _lease_session_release() {
+    local mode="$1" p="$2"
+    if [[ "$mode" == commit ]]; then lease_mutation_lock_enter "$p" || return 1; fi
     python3 - "$@" <<'PY'
 import fcntl, json, os, sys, tempfile
 from datetime import datetime, timezone
@@ -546,11 +595,15 @@ try:
 except Exception:
     sys.exit(1)
 PY
+    local rc=$?
+    if [[ "$mode" == commit ]]; then lease_mutation_lock_exit "$p"; fi
+    return "$rc"
 }
 
 # lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.
 lease_set_verdict() {
-    local lease="$1" verdict="$2"
+    local lease="$1" verdict="$2" lock_mode="${3:-}" rc
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" "$verdict" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
@@ -567,6 +620,9 @@ with open(tmp, "w") as f:
     json.dump(d, f, indent=2)
 os.replace(tmp, lease)
 PY
+    rc=$?
+    lease_mutation_lock_exit "$lease" "$lock_mode"
+    return "$rc"
 }
 
 # lease_matches_incarnation <lease_file> — rc 0 when the lease's admin_id and

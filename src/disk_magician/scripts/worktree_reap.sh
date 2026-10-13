@@ -113,10 +113,12 @@ expired() {
 record() {
     log "$2 $3"
     printf '%s\n' "$3" >> "$EVENTS"
-    lease_set_verdict "$1" "$3"
+    lease_set_verdict "$1" "$3" "${4:-}"
 }
 # Atomic metadata updates used for promotion, adoption and death observation.
 update() {
+    local file="$1" rc
+    lease_mutation_lock_enter "$file" || return 1
     python3 - "$@" <<'PY'
 import json,os,sys,tempfile,time
 path,action,*args=sys.argv[1:]
@@ -135,6 +137,9 @@ try:
 finally:
     if os.path.exists(tmp): os.unlink(tmp)
 PY
+    rc=$?
+    lease_mutation_lock_exit "$file"
+    return "$rc"
 }
 adopt() {
     local real="$1" repo="$2" branch="$3" admin birth file
@@ -279,7 +284,7 @@ for file in "$(lease_dir)"/*.json; do
             continue
         fi
         if ! lease_matches_incarnation "$file"; then
-            record "$file" "$real" kept:reuse-claim-or-incarnation-changed
+            record "$file" "$real" kept:reuse-claim-or-incarnation-changed --lock-held
             lease_reuse_lock_release "$file"
             continue
         fi
@@ -296,7 +301,7 @@ for file in "$(lease_dir)"/*.json; do
             fi
             verdict=kept:remove-failed
         fi
-        record "$file" "$real" "$verdict"
+        record "$file" "$real" "$verdict" --lock-held
         lease_reuse_lock_release "$file"
         continue
     fi

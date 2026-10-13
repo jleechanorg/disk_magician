@@ -228,7 +228,7 @@ wtn_admit() {
 # wtn_reuse <repo> <branch> <base> — reuse only a proven, idle, dead/released
 # same-repository worktree. Any missing or incomplete guard falls back to fresh.
 wtn_reuse() {
-    local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip
+    local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
     wtn_remote_branch_exists "$repo" "$branch" && return 1
     base_tip="$(git -C "$repo" rev-parse -q --verify "$base^{commit}" 2>/dev/null)" || return 1
@@ -237,9 +237,21 @@ wtn_reuse() {
     [[ "$(artifact_removal_verdict --self-test 2>/dev/null)" == complete ]] || return 1
     for file in "$(lease_dir)"/*.json; do
         [[ -f "$file" ]] || continue
+        # Bind all eligibility checks to the exact lease read before owner
+        # liveness is evaluated; the claim rechecks this hash under the lock.
+        lease_hash="$(python3 - "$file" <<'PY'
+import hashlib,sys
+try: print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+except OSError: sys.exit(1)
+PY
+)" || continue
         [[ "$(_lease_get "$file" repo)" == "$repo" ]] || continue
         candidate="$(_lease_get "$file" path)"
         old="$(_lease_get "$file" branch)"
+        admin_id="$(_lease_get "$file" admin_id)"
+        admin_birth="$(_lease_get "$file" admin_birth_epoch)"
+        checkout_dev="$(_lease_get "$file" checkout_dev)"
+        checkout_ino="$(_lease_get "$file" checkout_ino)"
         [[ -n "$candidate" && -n "$old" && -d "$candidate" && "$old" != "$branch" ]] || continue
         # A path can be removed and recreated while its old lease survives.
         # Bind eligibility to both the worktree admin dir and checkout inode.
@@ -257,14 +269,9 @@ wtn_reuse() {
         }
         verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
         [[ "$verdict" == remove ]] || continue
-        lease_hash="$(python3 - "$file" <<'PY'
-import hashlib,sys
-try: print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
-except OSError: sys.exit(1)
-PY
-)" || continue
         owner="$(lease_resolve_owner)"
-        lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" || continue
+        lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" \
+            "$repo" "$candidate" "$admin_id" "$admin_birth" "$checkout_dev" "$checkout_ino" || continue
         lease_matches_incarnation "$file" || { lease_restore_reuse_claim "$file"; continue; }
         # Claim first, then repeat the final content/removal verdict.
         verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
