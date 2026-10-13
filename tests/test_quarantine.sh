@@ -68,11 +68,16 @@ fixture() {  # fresh parent/art with a report, nested files and a symlink
 OUT=""
 run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
 run_contract() {
-  local qpath qtmp qverdict arg qarg command
+  local qpath qtmp qverdict arg qarg command shell_bin
   printf -v qpath '%q' "$A"; printf -v qtmp '%q' "$TMP"; printf -v qverdict '%q' "$STUB_VERDICT"
   command="source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT=$qverdict TMP=$qtmp; quarantine_remove $qpath"
   for arg in "$@"; do printf -v qarg '%q' "$arg"; command+=" $qarg"; done
-  OUT="$(env TMPDIR="$TMP" VERDICT_ARGS_FILE="$TMP/verdict-args" bash -c "$command")"
+  shell_bin="${QUARANTINE_TEST_BASH:-bash}"
+  if [[ "${QUARANTINE_TEST_NOUNSET:-0}" == 1 ]]; then
+    OUT="$(env TMPDIR="$TMP" VERDICT_ARGS_FILE="$TMP/verdict-args" "$shell_bin" -uc "$command")"
+  else
+    OUT="$(env TMPDIR="$TMP" VERDICT_ARGS_FILE="$TMP/verdict-args" "$shell_bin" -c "$command")"
+  fi
 }
 intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/link" ]]; }
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
@@ -107,6 +112,8 @@ check 'caller options: frozen identity proof is preserved' bash -c 'grep -Fx -- 
 check 'caller options: expired deadline keeps deleting sidecar and index' [ "$OUT" = kept:quarantine_partial_kept ] && [ -f "$Q/$OPTION_QID.json" ] && [ -f "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$OPTION_QID.json" ]
 fixture; run_contract --unknown-option value
 check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
+fixture; QUARANTINE_TEST_BASH=/bin/bash QUARANTINE_TEST_NOUNSET=1 run_contract
+check 'Bash 3.2 nounset: no optional args reaches removal verdict' bash -c 'case "$1" in removed:*) exit 0;; *) exit 1;; esac' _ "$OUT"
 
 # A write after the deleting state is durable invalidates the hash and remains quarantined.
 fixture; run DISK_MAGICIAN_TEST_BEFORE_UNLINK='printf BBBB > "$DM_Q_PATH/report.md"'
@@ -152,7 +159,7 @@ check '0755 qdir: untouched, qdir empty' bash -c '[[ -f "$1/report.md" && -z "$(
 fixture; STUB_VERDICT=kept:unproven-content run X=1
 check 'kept verdict passes through' [ "$OUT" = kept:unproven-content ]
 check 'kept verdict: untouched, no quarantine dir' bash -c '[[ -f "$1/report.md" && ! -e "$2" ]]' _ "$A" "$Q"
-fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; quarantine_remove '$A'")"
+fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; artifact_removal_verdict() { :; }; quarantine_remove '$A'")"
 check 'no verdict function: kept:check-failed' [ "$OUT" = kept:check-failed ]
 check 'no verdict function: untouched' intact AAAA
 fixture; STUB_VERDICT=remove run X=1
