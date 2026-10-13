@@ -238,6 +238,18 @@ wtn_reuse_path_is_canonical() {
     [[ "$file" == "$expected_lease" ]]
 }
 
+# Return 0 when another linked worktree owns <branch>, 1 when none does, and
+# 2 when Git could not enumerate worktrees. Use at the branch-delete boundary
+# after the candidate has detached.
+wtn_branch_is_checked_out() {
+    local repo="$1" branch="$2" worktrees line
+    worktrees="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || return 2
+    while IFS= read -r line; do
+        [[ "$line" == "branch refs/heads/$branch" ]] && return 0
+    done <<<"$worktrees"
+    return 1
+}
+
 
 wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
@@ -304,23 +316,35 @@ PY
         # pre-switch observation.
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]]; then
-            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
         if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF:-}" ]]; then
             "$DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF" "$repo" "$old" "$candidate" >&2 || true
         fi
+        # update-ref does not know whether another worktree has checked out
+        # this branch. Preserve and park the candidate if it is now occupied.
+        if wtn_branch_is_checked_out "$repo" "$old"; then
+            lease_mark_reuse_incomplete "$file"
+            continue
+        else
+            local checkout_rc=$?
+            if [[ "$checkout_rc" != 1 ]]; then
+                lease_mark_reuse_incomplete "$file"
+                continue
+            fi
+        fi
         # Last C14 check after any external work at the branch-delete boundary.
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]] ||
             [[ "$(artifact_removal_verdict "$candidate" 2>/dev/null)" != remove ]]; then
-            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
         if ! git -C "$repo" update-ref -d "refs/heads/$old" "$tip"; then
-            git -C "$candidate" switch "$old" >&2 || lease_mark_reuse_incomplete "$file"
+            git -C "$candidate" switch --no-overwrite-ignore "$old" >&2 || lease_mark_reuse_incomplete "$file"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
@@ -334,6 +358,9 @@ PY
                 "$DISK_MAGICIAN_TEST_BEFORE_BRANCH_SWITCH" "$repo" "$old" "$candidate" "$branch" "$base" >&2 || true
             fi
             git -C "$candidate" checkout -b "$branch" --no-track --no-overwrite-ignore "$base" >&2 || switch_rc=$?
+        fi
+        if [[ "$switch_rc" == 0 && -n "${DISK_MAGICIAN_TEST_AFTER_BRANCH_SWITCH:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_AFTER_BRANCH_SWITCH" "$repo" "$old" "$candidate" "$branch" "$base" >&2 || true
         fi
         local lease_rc=0
         if [[ -n "${DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE:-}" ]]; then lease_rc=1
@@ -350,7 +377,7 @@ PY
             continue
         fi
         if ! git -C "$repo" update-ref "refs/heads/$old" "$tip" 0000000000000000000000000000000000000000 ||
-            ! git -C "$candidate" switch "$old" >&2; then
+            ! git -C "$candidate" switch --no-overwrite-ignore "$old" >&2; then
             lease_mark_reuse_incomplete "$file"
             continue
         fi

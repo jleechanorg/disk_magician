@@ -576,6 +576,60 @@ assert_eq "$rc" "0" "ignored-content fallback exits zero"
 assert_eq "$fresh" "$WTROOT/ignored-reuse" "ignored-content candidate falls back to fresh path"
 assert_eq "$(cat "$IGNORED_WT/ignored-target.txt")" "keep-user-bytes" "ignored user bytes survive failed switch"
 
+echo "== case 35: second checkout at delete boundary keeps the old branch alive =="
+BRANCH_BUSY_WT="$WTROOT/reuse-branch-busy"
+BRANCH_BUSY_OTHER="$TMPROOT/second-branch-checkout"
+git -C "$REPO" branch reuse/branch-busy "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$BRANCH_BUSY_WT" reuse/branch-busy
+cat > "$TMPROOT/add-second-checkout" <<EOF
+#!/usr/bin/env bash
+set -e
+"$REAL_GIT" -C "\$1" worktree add -q "$BRANCH_BUSY_OTHER" "\$2"
+EOF
+chmod +x "$TMPROOT/add-second-checkout"
+export DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF="$TMPROOT/add-second-checkout"
+fresh="$(run_reuse_attempt "$BRANCH_BUSY_WT" reuse/branch-busy feat/branch-busy branch-busy)"; rc=$?
+unset DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF
+assert_eq "$rc" "0" "occupied-branch fallback exits zero"
+assert_eq "$fresh" "$WTROOT/branch-busy" "occupied old branch uses fresh path"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/branch-busy)" "$ORIGIN_SHA" "old branch ref survives second checkout"
+assert_eq "$(git -C "$BRANCH_BUSY_OTHER" symbolic-ref --short HEAD)" "reuse/branch-busy" "second worktree remains attached to its branch"
+assert_eq "$(git -C "$BRANCH_BUSY_OTHER" rev-parse HEAD)" "$ORIGIN_SHA" "second worktree HEAD remains valid"
+assert_eq "$(git -C "$BRANCH_BUSY_WT" symbolic-ref -q --short HEAD || true)" "" "candidate stays detached when recovery is unsafe"
+assert_eq "$(python3 - "$DISK_MAGICIAN_STATE_DIR" "$BRANCH_BUSY_WT" <<'PY'
+import glob,json,os,sys
+for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
+ try:
+  d=json.load(open(p))
+  if d.get('path')==sys.argv[2]: print(d.get('reuse',{}).get('state','')); break
+ except OSError: pass
+PY
+)" "reuse_incomplete" "occupied candidate is parked for recovery"
+
+echo "== case 36: ignored bytes created after checkout survive rollback =="
+ROLLBACK_WT="$WTROOT/reuse-rollback-ignored"
+git -C "$REPO" config --add core.excludesFile "$TMPROOT/global-excludes"
+echo ignored-target.txt >> "$TMPROOT/global-excludes"
+git -C "$REPO" checkout -q main
+git -C "$REPO" branch reuse/rollback-ignored HEAD
+echo original-tracked > "$REPO/ignored-target.txt"
+git -C "$REPO" add -f ignored-target.txt
+git -C "$REPO" commit -q -m old-branch-tracked-file
+git -C "$REPO" push -q origin reuse/rollback-ignored
+git -C "$REPO" update-ref refs/remotes/origin/main "$(git -C "$REPO" rev-parse main)"
+git -C "$REPO" worktree add -q "$ROLLBACK_WT" reuse/rollback-ignored
+cat > "$TMPROOT/add-ignored-after-switch" <<'EOF'
+#!/usr/bin/env bash
+echo keep-user-bytes > "$3/ignored-target.txt"
+EOF
+chmod +x "$TMPROOT/add-ignored-after-switch"
+export DISK_MAGICIAN_TEST_AFTER_BRANCH_SWITCH="$TMPROOT/add-ignored-after-switch" DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE=1
+fallback="$(run_reuse_attempt "$ROLLBACK_WT" reuse/rollback-ignored feat/rollback-ignored rollback-ignored)"; rc=$?
+unset DISK_MAGICIAN_TEST_AFTER_BRANCH_SWITCH DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE
+[[ "$rc" -ne 0 ]] && ok "unsafe rollback fails closed ($rc)" || bad "unsafe rollback unexpectedly succeeded: $fallback"
+assert_eq "$(cat "$ROLLBACK_WT/ignored-target.txt")" "keep-user-bytes" "ignored bytes survive failed rollback"
+assert_eq "$(git -C "$REPO" rev-parse refs/heads/reuse/rollback-ignored)" "$(git -C "$REPO" ls-remote origin refs/heads/reuse/rollback-ignored | awk 'NR==1{print $1}')" "old branch ref restored at remote tip"
+
 echo "== case 26: failure after conditional delete restores the old branch =="
 RESTORE_WT="$WTROOT/reuse-restore"
 git -C "$REPO" branch reuse/restore "$ORIGIN_SHA"; git -C "$REPO" worktree add -q "$RESTORE_WT" reuse/restore
