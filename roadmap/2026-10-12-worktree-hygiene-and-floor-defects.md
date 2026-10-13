@@ -1,6 +1,6 @@
-# Filed defects (2026-10-12): worktree-hygiene + floor methodology
+# Filed defects (2026-10-12): worktree-hygiene, floor methodology, worktree/bead tooling
 
-Evidence bundle for the seven beads below. Each section is the bead body verbatim (br show).
+Evidence bundle for the beads below. Each section is the bead body verbatim (br show).
 
 ## disk_magician-hygiene-wip-secret-false-positive-damk
 
@@ -87,4 +87,38 @@ snapshot floors and per-path deltas are mostly unusable and 'diskm history diff 
 back to a single ledger commit. Investigate the coverage regression (frontier_last.json recorded
 mode=partial at 2026-10-11T11:06) and alert when coverage_pct < 70 for N consecutive runs.
 Acceptance: coverage >= 70 across the daily series and an alert on consecutive sub-gate runs.
+
+## disk_magician-worktree-new-push-lfs-lock-vefm
+
+pre-push lock verification, and it fails with 'Authentication required: You must have push access to
+verify locks' even though this repo has ZERO LFS files ('git lfs ls-files' = 0, no filter=lfs in
+.gitattributes). Verified 2026-10-12 in
+/Users/jleechan/.worktrees/disk_magician/fix-worktree-hygiene-preserve-wip (branch
+fix/worktree-hygiene-preserve-wip): plain 'git push' and 'git -c credential.helper=!gh\ auth\
+git-credential push' both failed; the push succeeded only with GIT_LFS_SKIP_PUSH=1 plus the gh
+credential helper. Pushes from the main checkout (same .git hooks, same remote) succeed, so this is
+specific to newly created worktrees. Impact: the documented worktree flow (diskm worktree-new ->
+work -> push) is broken out of the box for agents. Fix: detect that the repo has no LFS
+objects/attributes and skip LFS lock verification (set lfs.locksverify=false, or short-circuit the
+wrapper), or install/configure the hook so it succeeds. Acceptance: 'git push' from a worktree
+created by diskm worktree-new succeeds with no GIT_LFS_SKIP_PUSH and no gh-specific credential
+workaround.
+
+## disk_magician-br-export-fallback-db-6ye1
+
+.beads: the worktree has .beads/{config.yaml,issues.jsonl,metadata.json} but no .beads/*.db, so br
+resolves ~/.beads/beads.db and writes/export its JSONL to ~/.beads/issues.jsonl. Consequence
+(2026-10-12): seven beads created in the worktree were reportable by 'br show'/'br list' with the
+correct disk_magician prefix, but never appeared in the repo's tracked .beads/issues.jsonl, so a
+remote lane reading the repo on GitHub could not see them ('br sync --flush-only' said 'Nothing to
+export (no dirty issues)' while 'br sync --status' had said 'Database is newer (export
+recommended)'). Workaround used: a verbatim evidence bundle committed to
+roadmap/2026-10-12-worktree-hygiene-and-floor-defects.md. Fix: make the export path follow the
+discovered .beads directory (or create/materialize a local DB there), and make 'br sync
+--status'/'--flush-only' agree. Acceptance: a bead created in a fresh worktree appears in that
+worktree's .beads/issues.jsonl after 'br sync --flush-only', and 'br vcs-status' reports the export
+worktree-clean.
+
+## disk_magician-tmp-full-clones-still-produced
+
 
