@@ -106,6 +106,9 @@ FREED_BYTES="null"
 if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   DF_DELTA=$(( FREE_AFTER - FREE_BEFORE ))
   FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
+  # A dry-run deletes nothing, so any positive df delta is unrelated system
+  # activity and must never be reported as reclaimed bytes.
+  [[ "$clean_flag" == "--dry-run" ]] && FREED_BYTES=0
 fi
 if [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
   OUTCOME="error"
