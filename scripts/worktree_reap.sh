@@ -267,13 +267,20 @@ for file in "$(lease_dir)"/*.json; do
         # Exclude reuse from the final lease/verdict check through the actual
         # removal. A fresh unlocked claim check would leave the same TOCTOU.
         if ! lease_reuse_lock_acquire "$file"; then
-            record "$file" "$real" kept:reuse-locked
+            log "kept:reuse-locked $real"
+            echo kept:reuse-locked >> "$EVENTS"
             continue
         fi
-        if [[ "$(reuse_claim_state "$file")" == pending || "$(reuse_claim_state "$file")" == reuse_incomplete ]] ||
-            ! lease_matches_incarnation "$file"; then
+        reuse_state="$(reuse_claim_state "$file")"
+        if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
             lease_reuse_lock_release "$file"
+            log "kept:$reuse_state $real"
+            echo "kept:$reuse_state" >> "$EVENTS"
+            continue
+        fi
+        if ! lease_matches_incarnation "$file"; then
             record "$file" "$real" kept:reuse-claim-or-incarnation-changed
+            lease_reuse_lock_release "$file"
             continue
         fi
         if [[ -n "${DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK:-}" ]]; then

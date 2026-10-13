@@ -151,6 +151,10 @@ new; run --mode remove
 unset DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK
 check 'reuse claim cannot start inside final removal boundary' grep -qx blocked "$TEST_HOOK_RESULT"
 check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
+new; mkdir "$LF.reuse-lock"; run --mode remove
+check 'pre-existing reuse lock preserves candidate' test -d "$WT"
+check 'pre-existing reuse lock leaves lease untouched' test "$(field 'd.get("branch")')" = "worktree-c$N"
+rmdir "$LF.reuse-lock"
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
 for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-30*3600-86400'; age 25200; run --mode "$mode"; verdict "TTL expired 30h, owner alive $mode" kept:expired_owner_alive; check "TTL expired owner alive present $mode" test -d "$WT"; park; done
