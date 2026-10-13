@@ -142,19 +142,58 @@ _av_secret_like() {
         -print 2>/dev/null)" || return 0
     [[ -n "$out" ]]
 }
+# _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
+# canonical path is <path> or under it, for any filesystem kind (plain dir, plain
+# file, repo). Reads the lease store, not Git discovery, so a lease on a plain dir
+# inside <path> still keeps it. rc 1 when the store cannot be scanned or a record is
+# malformed (fail closed: a lease we cannot rule out must keep the path). Records
+# without a usable `path` are legacy fixtures and are skipped, never guessed at.
+_av_lease_record_paths() {
+    local ld
+    ld="$(lease_dir)" && [[ -d "$ld" ]] || return 0
+    python3 - "$ld" "$1" <<'PY'
+import json, os, sys
+ld, cand = sys.argv[1], os.path.realpath(sys.argv[2])
+try:
+    names = sorted(os.listdir(ld))
+except OSError:
+    sys.exit(1)
+out = []
+for n in names:
+    if not n.endswith(".json") or n.startswith("."):
+        continue
+    try:
+        with open(os.path.join(ld, n)) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        sys.exit(1)
+    rec = d.get("path") if isinstance(d, dict) else None
+    if not isinstance(rec, str) or not rec:
+        continue
+    real = os.path.realpath(rec)
+    if real == cand or real.startswith(cand.rstrip("/") + "/"):
+        out.append(real)
+sys.stdout.buffer.write(b"".join(os.fsencode(p) + b"\0" for p in out))
+PY
+}
+
 # _av_lease_scope <path>: NUL-list <path>, its ancestors below its scratch root (else
-# $HOME, else /) and every repository under it; rc 1 when discovery is incomplete.
+# $HOME, else /), every repository under it, and every lease record whose path is
+# <path> or under it; rc 1 when discovery is incomplete. The lease-record scan runs
+# last so the candidate's own lease is checked first; a failed scan still blocks.
 _av_lease_scope() {
     local a=${1%/*} r stops=$'\n'
     while IFS= read -r r; do r="$(cd "$r" 2>/dev/null && pwd -P)" && stops+="$r"$'\n'; done < <(scratch_roots_get_unique)
     stops+="$(cd "$HOME" 2>/dev/null && pwd -P)"$'\n'
     printf '%s\0' "$1"
     while [[ -n "$a" && "$stops" != *$'\n'"$a"$'\n'* ]]; do printf '%s\0' "$a"; a=${a%/*}; done
-    [[ ! -d "$1" ]] || c14_discover_repos "$1"
+    [[ ! -d "$1" ]] || c14_discover_repos "$1" || return 1
+    _av_lease_record_paths "$1"
 }
 
 # artifact_removal_verdict <path> [...] | --self-test
-artifact_removal_verdict() {
+# Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
+artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     local p kind='' q done='' st newest ret  # --kind ephemeral adds provenance (c); others keep
     [[ "${2:-}" == --kind ]] && kind=${3:-}
@@ -181,6 +220,6 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     [[ "$kind" == ephemeral ]] && ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
     (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
     echo remove
-}
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then artifact_removal_verdict "$@"; fi
