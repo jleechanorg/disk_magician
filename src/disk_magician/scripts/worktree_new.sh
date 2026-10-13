@@ -329,7 +329,7 @@ PY
             remote_tip="$(wtn_timeout 30 git -C "$repo" ls-remote origin "refs/heads/$old" 2>/dev/null | awk 'NR==1{print $1}')"
             [[ -n "$remote_tip" && "$remote_tip" == "$tip" ]] || continue
         }
-        verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
+        verdict="$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)"
         [[ "$verdict" == remove ]] || continue
         owner="$(lease_resolve_owner)"
         lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" \
@@ -338,8 +338,10 @@ PY
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue
         fi
-        # Claim first, then repeat the final content/removal verdict.
-        verdict="$(artifact_removal_verdict "$candidate" 2>/dev/null)"
+        # Claim first, then repeat the final content/removal verdict. The
+        # verdict only honors this pending claim when it names the exact
+        # candidate lease it just claimed (never an ancestor or a competitor).
+        verdict="$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)"
         if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"; continue; fi
         if ! git -C "$candidate" switch --detach "$tip" >&2; then
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
@@ -360,7 +362,7 @@ PY
         # Last C14 check after any external work at the branch-delete boundary.
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]] ||
-            [[ "$(artifact_removal_verdict "$candidate" 2>/dev/null)" != remove ]]; then
+            [[ "$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)" != remove ]]; then
             wtn_reuse_rollback "$file" "$candidate" "$old"
             lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
             continue

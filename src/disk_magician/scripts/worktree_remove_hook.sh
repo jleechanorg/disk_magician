@@ -154,23 +154,20 @@ wrh_removal_verdict() {
     return 0
 }
 
-# wrh_remove_now <real_path> <display_path> [--quarantine <inventory.json>] —
-# remove an approved worktree. The historical path remains the default. The
-# opt-in quarantine path is intentionally not wired to any production caller.
-# rc 0 only when the worktree was removed.
+# wrh_remove_now <real_path> <display_path> --quarantine <inventory.json> —
+# remove an approved worktree. The inventory MUST be the receipt produced by a
+# same-target `artifact_removal_verdict` (C14) immediately before this call; the
+# quarantine remover re-validates identity/locks against that exact receipt.
+# There is no unguarded `git worktree remove` fallback. rc 0 only when the
+# worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch result qid
+    local real="$1" display="$2" main branch result
+    [[ ${3:-} == --quarantine && $# == 4 && -f ${4:-} ]] || return 1
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
-    if [[ ${3:-} == --quarantine ]]; then
-        [[ $# == 4 && -f $4 ]] || return 1
-        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$4")" || return 1
-        [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
-    else
-        [[ $# == 2 ]] || return 1
-        git -C "$main" worktree remove "$real" >&2 || return 1
-    fi
+    result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$4")" || return 1
+    [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
@@ -188,7 +185,7 @@ wrh_remove_now() {
 }
 
 wrh_main() {
-    local p main real verdict
+    local p main real verdict inv wrh_c14_verdict
     p="$(python3 -c '
 import json, sys
 try:
@@ -221,10 +218,23 @@ print(v)
         *)                            wrh_log "kept $p: ${verdict#kept:}"; return 0 ;;
     esac
 
-    if ! wrh_remove_now "$real" "$p"; then
-        wrh_log "kept $p: git worktree remove failed"
+    # Canonical C14-before-removal: the shared WRH entry point produces the
+    # same-target inventory receipt and hands exactly it to the quarantine
+    # remover. No second verdict, no unguarded git removal.
+    declare -F artifact_removal_verdict >/dev/null 2>&1 || { wrh_log "kept $p: C14 unavailable"; return 0; }
+    inv="$(mktemp "${TMPDIR:-/tmp}/wrh-c14-inventory.XXXXXX")" || { wrh_log "kept $p: inventory allocation failed"; return 0; }
+    wrh_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
+    if [[ "$wrh_c14_verdict" != remove ]]; then
+        rm -f -- "$inv" 2>/dev/null
+        wrh_log "kept $p: ${wrh_c14_verdict#kept:}"
         return 0
     fi
+    if ! wrh_remove_now "$real" "$p" --quarantine "$inv"; then
+        rm -f -- "$inv" 2>/dev/null
+        wrh_log "kept $p: quarantine remove failed"
+        return 0
+    fi
+    rm -f -- "$inv" 2>/dev/null
     return 0
 }
 

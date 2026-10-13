@@ -346,11 +346,11 @@ _av_os_clone_proof() {
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out)
+            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
                     --kind) kind=$2 ;;
@@ -359,11 +359,18 @@ _av_artifact_removal_verdict() (
                     --frozen-root-identity) frozen_root_id=$2 ;;
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
+                    --own-reuse-claim) own_claim=$2 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
         esac
     done
+    # A named reuse claim must be an absolute, existing lease file; never a
+    # bare name that could resolve against the caller's cwd.
+    if [[ -n "$own_claim" ]]; then
+        [[ "$own_claim" == /* && -f "$own_claim" && ! -L "$own_claim" ]] || { echo kept:check-failed; return 0; }
+        own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
+    fi
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
@@ -383,7 +390,20 @@ _av_artifact_removal_verdict() (
         case "$(python3 -c 'import os,sys;d=os.path.dirname(sys.argv[1])
 try:os.stat(d);os.stat(sys.argv[1]);print("lease" if os.access(d,os.R_OK|os.X_OK) else "")
 except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; lease) ;; *) echo kept:owner-unknown; return 0 ;; esac
-        case "$(lease_owner_state "$q")" in dead|released) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
+        # A dead/released lease frees the path. A pending reuse claim is
+        # honored ONLY when the caller names the exact claim file it holds
+        # (--own-reuse-claim) AND that file is this candidate's own lease (never
+        # an ancestor's) AND the pending owner exactly matches this runtime.
+        # Any other pending/live owner keeps, so a shared runtime ancestor or a
+        # competing caller can never bypass the claim.
+        if [[ -n "$own_claim" && "$q" == "$own_claim" && "$q" == "$(lease_path_for "$p")" ]] &&
+            declare -F lease_owner_state_for >/dev/null 2>&1; then
+            _av_own_owner="$(lease_resolve_owner 2>/dev/null)"
+            _av_owner_state="$(lease_owner_state_for "$q" "$_av_own_owner" "$p")"
+        else
+            _av_owner_state="$(lease_owner_state "$q")"
+        fi
+        case "$_av_owner_state" in dead|released|own-live) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
     done < <(_av_lease_scope "$p" "$inv" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"
@@ -438,8 +458,95 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     echo remove
 )
 
+# _av_self_test_run <root> — genuine kept/remove pair plus a corrupted-evidence
+# negative through the production artifact_removal_verdict on self-owned /tmp
+# fixtures. Prints `ok` only when every proof holds; prints nothing otherwise.
+# Isolated: its own DISK_MAGICIAN_STATE_DIR under <root>, no ledger, no host
+# policy decisions, no process stubs.
+_av_self_test_run() {
+    local root="$1" base seed good bad corrupt probe gd lm f out
+    export HOME="$root/home"
+    mkdir -p "$HOME" || return 0
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_TEMPLATE_DIR GIT_EXEC_PATH
+    export GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=c14-selftest GIT_AUTHOR_EMAIL=c14-selftest@invalid
+    export GIT_COMMITTER_NAME=c14-selftest GIT_COMMITTER_EMAIL=c14-selftest@invalid
+    export DISK_MAGICIAN_STATE_DIR="$root/state"
+    # Drop ambient test-injection overrides so the self-test's own /tmp fixture
+    # is classified and probed with the real tools, never an inherited stub.
+    unset DISK_MAGICIAN_C14_LEDGER C14_INVENTORY_OUT C14_INVENTORY_FILE DISK_MAGICIAN_LIFECYCLE_PARENT_PID \
+        DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE DISK_MAGICIAN_TMP_ROOT_OVERRIDE DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE \
+        DISK_MAGICIAN_ARCHIVE_ROOT DISK_MAGICIAN_STAT_BIN DISK_MAGICIAN_PS_BIN DISK_MAGICIAN_LSOF_BIN DISK_MAGICIAN_GIT_BIN
+    probe="$_AV_DIR/../c14_probe.py"
+    [[ -f "$probe" ]] || { echo incomplete; return 0; }
+    declare -F c14_repo_content_ok >/dev/null 2>&1 || { echo incomplete; return 0; }
+    # A corrupt/unreadable helper library must never authorize removal.
+    python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$probe" 2>/dev/null || { echo incomplete; return 0; }
+    base="$root/origin.git"
+    seed="$root/seed"
+    git init -q --bare -b main "$base" 2>/dev/null || return 0
+    git init -q -b main "$seed" 2>/dev/null || return 0
+    printf 'selftest\n' >"$seed/keep.txt" || return 0
+    git -C "$seed" add -A >/dev/null 2>&1 && git -C "$seed" commit -qm selftest >/dev/null 2>&1 || return 0
+    git -C "$seed" push -q "$base" main >/dev/null 2>&1 || return 0
+
+    # remove fixture: clean, pushed clone with a released baseline lease.
+    good="$root/remove-candidate"
+    git clone -q "$base" "$good" 2>/dev/null || return 0
+    gd="$(git -C "$good" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+    lm="$(python3 "$probe" gitmeta "$gd" 2>/dev/null)" || return 0
+    f="$(lease_path_for "$good")" || return 0
+    mkdir -p "${f%/*}" 2>/dev/null || return 0
+    printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$good" "$lm" >"$f" || return 0
+    find "$good" -exec touch -h -t 202001010000 {} + 2>/dev/null
+    out="$(artifact_removal_verdict "$good" --kind ephemeral 2>/dev/null)"
+    [[ "$out" == remove ]] || return 0
+
+    # kept fixture: a dirty tracked edit must never be removed.
+    bad="$root/keep-candidate"
+    git clone -q "$base" "$bad" 2>/dev/null || return 0
+    printf 'dirty\n' >>"$bad/keep.txt" || return 0
+    gd="$(git -C "$bad" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+    lm="$(python3 "$probe" gitmeta "$gd" 2>/dev/null)" || return 0
+    f="$(lease_path_for "$bad")" || return 0
+    mkdir -p "${f%/*}" 2>/dev/null || return 0
+    printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$bad" "$lm" >"$f" || return 0
+    find "$bad" -exec touch -h -t 202001010000 {} + 2>/dev/null
+    out="$(artifact_removal_verdict "$bad" --kind ephemeral 2>/dev/null)"
+    [[ "$out" == kept:* ]] || return 0
+
+    # corrupted helper-evidence negative: the same removable shape with a
+    # damaged git_meta must fail closed (never remove).
+    corrupt="$root/corrupt-candidate"
+    git clone -q "$base" "$corrupt" 2>/dev/null || return 0
+    f="$(lease_path_for "$corrupt")" || return 0
+    mkdir -p "${f%/*}" 2>/dev/null || return 0
+    printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":{}}\n' "$corrupt" >"$f" || return 0
+    find "$corrupt" -exec touch -h -t 202001010000 {} + 2>/dev/null
+    out="$(artifact_removal_verdict "$corrupt" --kind ephemeral 2>/dev/null)"
+    [[ "$out" != remove ]] || return 0
+
+    echo ok
+}
+
+# _av_self_test — allocate a self-owned /tmp root, run the real pair, and clean
+# up only that root. Prints `ok` on a full pass, `incomplete` otherwise. A
+# failed allocation or a missing/corrupt helper library never reports ok.
+_av_self_test() {
+    local root out
+    root="$(mktemp -d /tmp/c14-selftest.XXXXXX)" || { echo incomplete; return 0; }
+    if [[ -z "$root" || ( "$root" != /tmp/c14-selftest.* && "$root" != /private/tmp/c14-selftest.* ) || ! -d "$root" || -L "$root" ]]; then
+        echo incomplete
+        return 0
+    fi
+    out="$(_av_self_test_run "$root" 2>/dev/null)" || out=incomplete
+    rm -rf -- "$root" 2>/dev/null
+    [[ "$out" == ok ]] || out=incomplete
+    printf '%s\n' "$out"
+}
+
 artifact_removal_verdict() {
-    [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
+    [[ "${1:-}" == --self-test ]] && { _av_self_test; return 0; }
     local tmpdir inv result reason admin_inv
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
     inv="$tmpdir/inventory.json"

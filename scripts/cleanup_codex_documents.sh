@@ -12,9 +12,10 @@
 #     remote-tracking ref (standalone repos: also no local-only branch/stash)
 #   - a linked worktree whose main repo lives outside the task, or any repo
 #     with worktrees outside the task, is handled safely: the former is removed
-#     with `wrh_remove_now --quarantine` before the rest is deleted, the latter
-#     is kept. While the quarantine-capable WRH adapter is unavailable the task
-#     is kept (fail closed, never the old unguarded `git worktree remove`).
+#     by the shared WRH C14-before-removal path (`artifact_removal_verdict`
+#     same-target receipt, then `wrh_remove_now --quarantine`) before the rest is
+#     deleted, the latter is kept. When that adapter is unavailable the task is
+#     kept (fail closed, never an unguarded `git worktree remove`).
 # Non-git scratch is age-gated only. Empty date dirs are removed afterwards.
 #
 # C14 gate (spec §7.2): the task root is removed only through `quarantine_remove`,
@@ -450,13 +451,12 @@ PY
 
 # quarantine_remove_available: the C14/quarantine gate is the only root-removal path.
 quarantine_remove_available() { declare -F quarantine_remove >/dev/null 2>&1; }
-# wrh_quarantine_available: the WRH adapter must advertise quarantine mode
-# (`wrh_remove_now <real> <display> --quarantine`). Until the committed adapter
-# lands, no wrh_remove_now accepts it, so linked worktrees fail closed instead of
-# falling back to the old unguarded `git worktree remove`.
-# TODO(final WRH, parent-owned): the adapter will expose a direct capability API;
-# this transitional body probe must be replaced by that API, never treated as the
-# final capability contract.
+# wrh_quarantine_available: the shared WRH adapter advertises quarantine mode
+# (`wrh_remove_now <real> <display> --quarantine <inventory>`), the canonical
+# C14-before-removal path after a same-target receipt. A wrh_remove_now without
+# it fails closed here rather than falling back to unguarded removal.
+# TODO(final WRH, parent-owned): replace this transitional body probe with the
+# adapter's direct capability API; do not treat the probe as the final contract.
 wrh_quarantine_available() {
   declare -F wrh_remove_now >/dev/null 2>&1 || return 1
   declare -f wrh_remove_now | grep -q -- '--quarantine'
@@ -471,7 +471,7 @@ quarantine_gate() {
   quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
 }
 process_task() {
-  local task="$1" rc reason kb main wt removed_worktrees=0 qout wrh_out wrh_rc
+  local task="$1" rc reason kb main wt removed_worktrees=0 qout wrh_out wrh_rc wrh_inv wrh_c14_verdict
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
@@ -506,8 +506,18 @@ process_task() {
         # non-zero. Capture stdout so a future contract that reports a
         # quarantined:<id>/quarantine_conflict:<id> verdict on success is never
         # counted as removed: only a real removal increments removed_worktrees.
+        # Canonical C14-before-removal per linked worktree: produce the exact
+        # same-target inventory receipt, then hand only that receipt to WRH's
+        # quarantine remover (which re-validates lock/identity).
+        wrh_inv="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-inventory.XXXXXX")" || { keep "wrh-inventory-unavailable" "$task"; return; }
+        wrh_c14_verdict="$(artifact_removal_verdict "$wt" --inventory-out "$wrh_inv" 2>/dev/null)" || wrh_c14_verdict=kept:check-failed
+        if [[ "$wrh_c14_verdict" != remove ]]; then
+          rm -f -- "$wrh_inv" 2>/dev/null
+          keep "wrh-c14-${wrh_c14_verdict#kept:}:$wt" "$task"; return
+        fi
         wrh_rc=0
-        wrh_out="$(wrh_remove_now "$wt" "$wt" --quarantine 2>/dev/null)" || wrh_rc=$?
+        wrh_out="$(wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>/dev/null)" || wrh_rc=$?
+        rm -f -- "$wrh_inv" 2>/dev/null
         if (( wrh_rc != 0 )); then
           if (( removed_worktrees > 0 )); then
             deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
