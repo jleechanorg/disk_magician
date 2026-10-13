@@ -18,6 +18,10 @@
 #  18. Explicit DOCKER_CONTEXT at the expected Colima socket + Stopped -> recovery (PR #150).
 #  19. Explicit DOCKER_CONTEXT at an unrelated endpoint -> stays refused (PR #150).
 #  20. A holder appearing after the first stale check -> recheck blocks unlock.
+#  21. Implicit context, second identity probe fails -> Stopped must not recover.
+#  22. Implicit context, second identity probe returns empty -> no recovery.
+#  23. Implicit context, second identity probe reports a changed endpoint -> refused.
+#  24. lsof is invoked argument-faithfully (+D for a dir, bare for a file).
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/cleanup_colima.sh"
@@ -63,7 +67,17 @@ cat > "$BIN/docker" <<EOF
 echo "docker \$*" >> "$INV"
 case "\$1 \$2" in
   "context show") echo colima;;
-  "context inspect") case "\$3" in other) echo "unix:///var/run/docker.sock";; *) echo "unix://$HOME_D/.colima/default/docker.sock";; esac ;;
+  "context inspect")
+    if [[ -e "$ST/inspect_mode" ]]; then
+      ic=0; [[ -f "$ST/inspect_count" ]] && ic=\$(cat "$ST/inspect_count")
+      ic=\$((ic + 1)); echo "\$ic" > "$ST/inspect_count"
+      case "\$(cat "$ST/inspect_mode")" in
+        fail_second) [[ "\$ic" -ge 2 ]] && exit 1 ;;
+        empty_second) [[ "\$ic" -ge 2 ]] && exit 0 ;;
+        changed_second) if [[ "\$ic" -ge 2 ]]; then echo "unix:///var/run/docker.sock"; exit 0; fi ;;
+      esac
+    fi
+    case "\$3" in other) echo "unix:///var/run/docker.sock";; *) echo "unix://$HOME_D/.colima/default/docker.sock";; esac ;;
   "info "*) [[ -e "$ST/started" ]] || exit 1;;
   "ps -q") exit 1;;
 esac
@@ -83,6 +97,11 @@ cat > "$BIN/lsof" <<EOF
 #!/bin/bash
 echo "lsof \$*" >> "$INV"
 target="\${!#}"
+# Argument-faithful contract: +D for directory scans, bare path for a file.
+case "\$target" in
+  */_disks/colima) [[ " \$* " == *" +D "* ]] || { echo "dir scan without +D" >> "$ST/lsof_badargs"; exit 3; } ;;
+  */colima/diffdisk) [[ " \$* " != *" +D "* ]] || { echo "file scan with +D" >> "$ST/lsof_badargs"; exit 3; } ;;
+esac
 if [[ -e "$ST/lsof_fail" ]]; then exit 2; fi
 if [[ -e "$ST/lsof_live_after_first" ]]; then
   count=0
@@ -126,7 +145,7 @@ cnt() { grep -c "$1" "$INV" || true; }
 # $1 list_mode  $2 lock(0/1)  $3 approval(0/1)  rest: extra args
 run() {
   local mode="$1" lock="$2" appr="$3"; shift 3
-  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out_datadisk" "$ST/lsof_out_diffdisk" "$ST/lsof_diag" "$ST/lsof_fail" "$ST/lsof_live_after_first" "$ST/lsof_count"
+  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out_datadisk" "$ST/lsof_out_diffdisk" "$ST/lsof_diag" "$ST/lsof_fail" "$ST/lsof_live_after_first" "$ST/lsof_count" "$ST/lsof_badargs"
   echo "$mode" > "$ST/list_mode"
   [[ "$lock" == 1 ]] && touch "$ST/lock"
   RC=0
@@ -307,6 +326,40 @@ if [[ $(cnt '^lsof ') -eq 3 && $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^co
   ok "holder appears before unlock: recheck fails closed"
 else bad "holder appears before unlock"; fi
 rm -f "$ST/lsof_live_after_first" "$ST/lsof_count"
+
+# --- PR #150 review r3 regression cases: preserve the second identity proof. ---
+
+# 21. Implicit context: first inspect reports the expected socket, second
+#     identity probe fails/times out -> approved Stopped must NOT recover.
+: > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_badargs" "$ST/inspect_count"
+echo stopped > "$ST/list_mode"; echo fail_second > "$ST/inspect_mode"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^colima start') -eq 0 && $(cnt '^limactl disk unlock') -eq 0 ]] && grep -q DEGRADED "$TMP/out"; then
+  ok "implicit second inspect failure + stopped: no recovery, unproven identity"
+else bad "implicit second inspect failure"; fi
+
+# 22. Implicit context: second identity probe returns empty -> no recovery.
+: > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_badargs" "$ST/inspect_count"
+echo stopped > "$ST/list_mode"; echo empty_second > "$ST/inspect_mode"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^colima start') -eq 0 && $(cnt '^limactl disk unlock') -eq 0 ]] && grep -q DEGRADED "$TMP/out"; then
+  ok "implicit second inspect empty + stopped: no recovery, unproven identity"
+else bad "implicit second inspect empty"; fi
+
+# 23. Implicit context: second identity probe reports a changed endpoint ->
+#     refused; a changed endpoint must never be treated as the Stopped socket.
+: > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_badargs" "$ST/inspect_count"
+echo stopped > "$ST/list_mode"; echo changed_second > "$ST/inspect_mode"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^colima start') -eq 0 && $(cnt '^limactl disk unlock') -eq 0 ]] && grep -q 'does not match the expected Colima socket' "$TMP/out"; then
+  ok "implicit changed second endpoint + stopped: stays refused"
+else bad "implicit changed second endpoint"; fi
+rm -f "$ST/inspect_mode" "$ST/inspect_count"
+
+# 24. Argument-faithful lsof: directory scans use +D, a file path is bare.
+if [[ ! -e "$ST/lsof_badargs" ]]; then
+  ok "lsof argument-faithful: +D for dirs, bare for files"
+else bad "lsof argument-faithful"; fi
 
 echo "passed=$PASS failed=$FAIL"
 [[ $FAIL -eq 0 ]]

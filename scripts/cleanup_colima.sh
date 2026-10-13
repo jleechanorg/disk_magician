@@ -158,13 +158,12 @@ select_colima_docker_backend() {
   fi
 
   if [[ "$endpoint" == "unix://$COLIMA_DOCKER_SOCKET" ]]; then
-    if prove_colima_docker_backend; then
-      return 0
-    fi
-    # Expected Colima socket path, but absent/untrusted: the VM may simply be
-    # Stopped (a Stopped VM has no socket). Signal 2 so main can still reach
-    # the guarded recovery path instead of silently skipping.
-    return 2
+    # Reuse the explicit-selection contract: prove re-inspects and returns its
+    # measured result (0 trusted, 2 expected socket absent/untrusted for a
+    # Stopped VM, 1 changed endpoint, 10 probe failure/timeout). Preserve that
+    # rc so main never treats a failed or changed second proof as Stopped.
+    prove_colima_docker_backend
+    return $?
   fi
 
   if ! colima_socket_is_trusted; then
