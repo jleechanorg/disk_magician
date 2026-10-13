@@ -17,6 +17,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
 dylib_candidate_file=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -618,16 +619,28 @@ has_open_files() {
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
-  local path="$1" kb="$2" ts dest
+  local path="$1" kb="$2" ts dest entry receipt retention
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts"
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
   else
-    mkdir -p "$dest"
+    mkdir -p "$dest" || { log "ERROR: could not create archive destination: $dest"; return 2; }
+    entry="$dest/${path##*/}"
+    receipt="$entry.c14-origin.json"
+    retention="$(c14_ephemeral_retention "$path")" || retention=0
+    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$path" "$receipt" "" "$retention"; then
+      rm -f "$receipt"
+      log "ERROR: could not write archive origin receipt: $receipt"
+      return 2
+    fi
     log "Archiving: $path -> $dest/  (${kb} KB)"
-    mv "$path" "$dest/"
+    if ! mv "$path" "$dest/"; then
+      rm -f "$receipt"
+      log "ERROR: could not archive: $path -> $dest/"
+      return 2
+    fi
     deletion_log "cleanup_tmp.sh" "archive" "$kb" "$path -> $dest/"
   fi
   echo "$kb"
@@ -999,9 +1012,14 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
       continue
     fi
 
-    archive_path "$d" "$kb" >/dev/null
-    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
-    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+    if archive_path "$d" "$kb" >/dev/null; then
+      ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+      DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+    else
+      # A failing archive (mkdir, origin receipt or mv) preserves the source;
+      # keep going so later independent candidates and purge_aged_archives still run.
+      log "ERROR: could not archive $d; leaving it in place and continuing"
+    fi
   done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 
