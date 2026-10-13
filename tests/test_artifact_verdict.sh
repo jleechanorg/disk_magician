@@ -19,7 +19,11 @@ TMPROOT="$(mktemp -d /tmp/dm-c14-test.XXXXXX)" || exit 1
 [[ -d "$TMPROOT" && "$TMPROOT" == /tmp/dm-c14-test.* ]] || exit 1
 TMPROOT="$(cd "$TMPROOT" && pwd -P)" || exit 1
 cleanup() {
-    [[ -d "$TMPROOT" && "$TMPROOT" == /private/tmp/dm-c14-test.* ]] || return
+    case "$TMPROOT" in
+        /tmp/dm-c14-test.*|/private/tmp/dm-c14-test.*) ;;
+        *) return ;;
+    esac
+    [[ -d "$TMPROOT" ]] || return
     chmod -R u+rwx "$TMPROOT" 2>/dev/null
     rm -rf "$TMPROOT"
 }
@@ -471,8 +475,10 @@ for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$
     "$HOME/.gemini/antigravity-cli/brain/b2/t.log" "$HOME/.gemini/antigravity/implicit.backup/i" "$HOME/.llm-inspector/captures/capture-1.json" \
     "$HOME/.llm-inspector/captures/x.summary.json" "$HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log"; do printf 'x' >"$f"; done
 while read -r row ret p; do
-    age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}"
-    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:recent-activity "$row 1 h short of ${ret} min"
+    age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}" \
+        || bad "$row age-old fixture setup (${p#"$TMPROOT"/})"
+    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:recent-activity "$row 1 h short of ${ret} min" \
+        || bad "$row age-fresh fixture setup (${p#"$TMPROOT"/})"
 done <<EOF
 E2 240 $PT/agent_prompt_1.txt
 E2 60 $PT/cli_validation_gemini_1
@@ -598,12 +604,14 @@ lease() {
     printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24,"released_at":%s}\n' \
         "$1" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" "$2" >"$f"
 }
-lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner"
+lease "$PT/pr-live" null && assert_eq "$(eph "$PT/pr-live")" kept:live-owner "idle live lease owner" \
+    || bad "pr-live lease fixture setup"
 lease "$PT/pr-unk" null && printf '#!/bin/sh\necho boom >&2; exit 2\n' >"$TMPROOT/stub/ps" && chmod +x "$TMPROOT/stub/ps"
 assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps" eph "$PT/pr-unk")" kept:owner-unknown "owner unknown (ps stub fails)"
 mkdir -p "$PT/pr-none" && age "$PT/pr-none" 43200 && f="$(lease_path_for "$PT/pr-none")" && mkdir -p "${f%/*}" && printf '{"path":"%s","owner":null}\n' "$PT/pr-none" >"$f"
 assert_eq "$(eph "$PT/pr-none")" kept:owner-unknown "owner:null lease (no resolvable owner) is kept"
-lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid"
+lease "$PT/pr-rel" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-rel")" remove "released lease with a live pid" \
+    || bad "pr-rel lease fixture setup"
 # A lease that cannot be stat'ed is not absent: EACCES on the lease dir or a parent keeps.
 ld="$(lease_dir)" && chmod 000 "$ld"
 assert_eq "$(eph "$PT/pr-live")" kept:owner-unknown "unreadable lease dir keeps a live-owner dir"
@@ -622,7 +630,8 @@ own "$PT/pr-nest/repo" null && own "$PT/pr-1/repo" '"2026-10-01T00:00:00Z"' && o
 assert_eq "$(eph "$PT/pr-nest/repo")" kept:live-owner "live owner on the candidate repository"
 assert_eq "$(eph "$PT/pr-nest")" kept:live-owner "live-owner lease on a repository nested in the candidate"
 assert_eq "$(eph "$PT/pr-1/repo")" kept:live-owner "live-owner lease on a dir enclosing the candidate"
-own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released"
+own "$PT/pr-1" '"2026-10-01T00:00:00Z"' && assert_eq "$(eph "$PT/pr-1/repo")" remove "enclosing and own leases released" \
+    || bad "pr-1 own lease fixture setup"
 # B1: scratch-new --kind evidence leases a plain, non-git run dir. A live lease on
 # that nested plain dir must keep the outer candidate even with no open file/cwd.
 mkdir -p "$PT/claude-commands/evidence/run-1" && printf 'report-body\n' >"$PT/claude-commands/evidence/run-1/report.md"

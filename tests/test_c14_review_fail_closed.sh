@@ -3,11 +3,43 @@
 set -uo pipefail
 
 REPO_ROOT="${C14_REGRESSION_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
-source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
-TMPROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/c14-review-regressions.XXXXXX")" && pwd -P)"
-trap 'rm -rf -- "$TMPROOT"' EXIT
-export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=jleechan2015@users.noreply.github.com
+
+# The cleanup/validation selector: only this test's own /tmp fixture roots are
+# ever eligible for removal, so an empty or out-of-prefix value is refused.
+is_owned_tmp_root() {
+    case "$1" in
+        /tmp/c14-review-regressions.*|/private/tmp/c14-review-regressions.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Explicit, validated /tmp allocation. Validate success, prefix (before and
+# after canonicalization) and refuse a symlinked root so a failed mktemp can
+# never resolve to "" / cwd and let the exit trap delete the repository.
+TMPROOT="$(mktemp -d /tmp/c14-review-regressions.XXXXXX)" || {
+    echo "FATAL: could not allocate /tmp fixture root" >&2; exit 2;
+}
+[[ -n "$TMPROOT" && -d "$TMPROOT" && ! -L "$TMPROOT" ]] && is_owned_tmp_root "$TMPROOT" || {
+    echo "FATAL: fixture root not a real dir under /tmp: '$TMPROOT'" >&2; exit 2;
+}
+TMPROOT="$(cd "$TMPROOT" && pwd -P)" || exit 2
+is_owned_tmp_root "$TMPROOT" || {
+    echo "FATAL: canonical fixture root not under /tmp: '$TMPROOT'" >&2; exit 2;
+}
+cleanup() {
+    is_owned_tmp_root "$TMPROOT" || return 0
+    chmod -R u+rwx "$TMPROOT" 2>/dev/null; rm -rf -- "$TMPROOT"
+}
+trap cleanup EXIT
+
+export HOME="$TMPROOT/home"; mkdir -p "$HOME"
+export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"; mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=jleechan2015@users.noreply.github.com
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=jleechan2015@users.noreply.github.com
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
 
 PASS=0
 FAIL=0
@@ -21,6 +53,19 @@ check() {
         FAIL=$((FAIL + 1))
     fi
 }
+
+# Negative allocation guard: the selector that gates cleanup must refuse empty,
+# cwd/repo and out-of-prefix roots (a failed mktemp must never become a cleanup
+# target). This exercises the same function the EXIT trap uses.
+if ! is_owned_tmp_root "" && ! is_owned_tmp_root "$PWD" \
+   && ! is_owned_tmp_root /tmp/not-c14-review-regressions \
+   && is_owned_tmp_root "$TMPROOT"; then
+    echo "PASS: allocation cleanup guard refuses empty/out-of-prefix roots"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: allocation cleanup guard accepted an unsafe root"
+    FAIL=$((FAIL + 1))
+fi
 
 candidate="$TMPROOT/candidate"
 repo="$candidate/nested"

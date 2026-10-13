@@ -184,19 +184,23 @@ class PilotCheckTest(IsolatedConfigTest):
     def test_fewer_than_six_qualifying_days_invalidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = passing_pilot_state(tmp)
-            budget = json.loads((state / "budget.json").read_text())
             (state / "admission" / "events.jsonl").write_text("")
-            (state / "budget.json").write_text(json.dumps(budget))
             lines, rc = ba.pilot_check(state, WEEK_END)
             self.assertEqual(rc, 1)
             self.assertTrue(lines[0].startswith("pilot_invalid:qualifying_days"), lines)
 
-    def test_missing_du_freshness_evidence_fails_closed(self):
+    def test_stale_du_freshness_with_govern_ticks_present_invalidates(self):
+        # Real du-freshness negative: govern ticks ARE present, but every slot
+        # reports classes_fresh=false, so du coverage is zero — distinct from
+        # the no-ticks case above, which also yields qualifying_days=0.
         with tempfile.TemporaryDirectory() as tmp:
             state = passing_pilot_state(tmp)
-            budget = json.loads((state / "budget.json").read_text())
-            (state / "admission" / "events.jsonl").write_text("")
-            (state / "budget.json").write_text(json.dumps(budget))
+            for t in range(int(WEEK_START), int(WEEK_END), ba.TICK_INTERVAL_S):
+                bh.record_tick(state, now=t + 1, classes_fresh={"worktrees": False},
+                               fleet_status="healthy")
+            self.assertTrue(ba._tick_records(state, WEEK_START, WEEK_END), "govern ticks must be present")
+            self.assertEqual(
+                ba._qualifying_days(state, WEEK_START, WEEK_END, ba.samples(state)), 0)
             lines, rc = ba.pilot_check(state, WEEK_END)
             self.assertEqual(rc, 1)
             self.assertTrue(lines[0].startswith("pilot_invalid:qualifying_days"), lines)
@@ -236,11 +240,8 @@ class PilotCheckTest(IsolatedConfigTest):
     def test_fleet_unhealthy_over_two_hours_invalidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = passing_pilot_state(tmp)
-            budget = json.loads((state / "budget.json").read_text())
-            
             for t in range(int(WEEK_START), int(WEEK_START + 3 * 3600), 600):
                 bh.record_tick(state, now=t + 1, classes_fresh={"worktrees": True}, fleet_status="degraded")
-            (state / "budget.json").write_text(json.dumps(budget))
             lines, rc = ba.pilot_check(state, WEEK_END)
             self.assertEqual(rc, 1)
             self.assertTrue(lines[0].startswith("pilot_invalid:fleet_unhealthy"), lines)
@@ -248,11 +249,8 @@ class PilotCheckTest(IsolatedConfigTest):
     def test_missing_fleet_health_is_insufficient_not_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = passing_pilot_state(tmp)
-            budget = json.loads((state / "budget.json").read_text())
-            
             for t in range(int(WEEK_START), int(WEEK_END), 600):
                 bh.record_tick(state, now=t + 1, classes_fresh={"worktrees": True}, fleet_status="unknown")
-            (state / "budget.json").write_text(json.dumps(budget))
             lines, rc = ba.pilot_check(state, WEEK_END)
             self.assertEqual((rc, lines[0]), (1, "insufficient_data:fleet_health"))
 
@@ -337,7 +335,7 @@ class CliTest(IsolatedConfigTest):
             self.assertEqual(self.run_cli(Path(tmp), "status", "--nope").returncode, 2)
 
 
-class CoverageRegressionTest(unittest.TestCase):
+class CoverageRegressionTest(IsolatedConfigTest):
     def test_hourly_samples_and_duplicate_samples_never_fill_missing_minutes(self):
         hourly = [(at, 0, 1) for at in range(0, 86400, 3600)]
         self.assertAlmostEqual(ba.coverage(hourly, 0, 86400), 1 / 60)
@@ -432,11 +430,7 @@ class BirthProducerConsumerRegressionTest(unittest.TestCase):
                 self.assertIsNone(ba._births(state, lo, hi), corrupt)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class ReceiptHistoryTest(unittest.TestCase):
+class ReceiptHistoryTest(IsolatedConfigTest):
     def test_actual_writer_survives_terminal_store_rotation(self):
         import disk_budget
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,3 +447,7 @@ class ReceiptHistoryTest(unittest.TestCase):
             self.assertEqual(sum(r["postcondition"]["df_delta_bytes"] is None
                                  for r in records), 1)
             self.assertEqual(len({r["run_id"] for r in records}), 66)
+
+
+if __name__ == "__main__":
+    unittest.main()

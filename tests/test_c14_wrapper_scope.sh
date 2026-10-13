@@ -292,7 +292,10 @@ fi
 P_STATUS="$(HOME="$PRES_HOME" DISK_MAGICIAN_STATE_DIR="$P_STATE" \
   DISK_MAGICIAN_CONFIG="$DISK_MAGICIAN_CONFIG" \
   python3 "$ROOT/scripts/budget_status.py" status 2>&1 || true)"
-grep -Eq 'wrapper job=pressure_sweep scope=wrapper .*c14_kept_bytes=partial\(|.*keep-cleanup_colima:111' <<<"$P_STATUS" \
+# Exact complete-ledger wrapper row: anchored, no alternate branch that could
+# match the same text on a different (class) row. The wrapper folded all three
+# steps once with ledger_status=ok, so the kept tail is the exact sorted list.
+grep -Eq '^wrapper job=pressure_sweep scope=wrapper .*ledger_status=ok c14_kept_bytes=keep-cleanup_code_sign_clones:111,keep-cleanup_colima:111,keep-cleanup_tmp:111$' <<<"$P_STATUS" \
   && ok "actual pressure_sweep wrapper row exposed by budget_status" \
   || bad "actual pressure_sweep wrapper row exposed by budget_status: $P_STATUS"
 

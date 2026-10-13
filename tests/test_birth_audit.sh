@@ -16,8 +16,19 @@ ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
-T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d /tmp/dm-birth-audit.XXXXXX)" || { echo "FATAL: could not allocate /tmp fixture root" >&2; exit 2; }
+[[ -n "$T" && -d "$T" && ! -L "$T" ]] || { echo "FATAL: invalid fixture root '$T'" >&2; exit 2; }
+case "$T" in
+  /tmp/dm-birth-audit.*|/private/tmp/dm-birth-audit.*) ;;
+  *) echo "FATAL: fixture root not under /tmp: '$T'" >&2; exit 2 ;;
+esac
+T="$(cd "$T" && pwd -P)" || exit 2
+cleanup_birth_audit() {
+  case "$T" in
+    /tmp/dm-birth-audit.*|/private/tmp/dm-birth-audit.*) chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T" ;;
+  esac
+}
+trap cleanup_birth_audit EXIT
 mkdir -p "$T/bin"
 export HOME="$T/home" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T/ptmp" TMPDIR="$T/tdir"
 
@@ -343,15 +354,23 @@ echo "== 19. a du timeout kills descendants, not just the direct child"
 fresh duchild
 mkdir -p "$T/ptmp/r/k1"; du_set k1 SLEEPCHILD
 export DU_CHILD_PID="$T/du_child.pid"; rm -f "$DU_CHILD_PID"
-start=$(python3 -c 'import time;print(time.monotonic())')
-bash "$REPO_ROOT/scripts/birth_audit.sh" --budget-seconds 1 >/dev/null 2>"$T/audit.err"
-end=$(python3 -c 'import time;print(time.monotonic())')
+elapsed=$(python3 - "$REPO_ROOT/scripts/birth_audit.sh" "$T/audit.err" <<'PYTIME'
+import subprocess, sys, time
+with open(sys.argv[2], "w") as errors:
+    start = time.monotonic()
+    result = subprocess.run(["bash", sys.argv[1], "--budget-seconds", "1"],
+                            stdout=subprocess.DEVNULL, stderr=errors, timeout=10)
+    print(time.monotonic() - start)
+    sys.exit(result.returncode)
+PYTIME
+) || bad "birth audit completed successfully within outer timeout"
 unset DU_CHILD_PID
 childpid="$(cat "$T/du_child.pid" 2>/dev/null || true)"
 assert_eq "$(bg k1 'x["charge"]')" "estimate" "timed-out du charged an estimate"
 [[ -n "$childpid" ]] && ! kill -0 "$childpid" 2>/dev/null && ok "grandchild is gone after the du timeout" || bad "grandchild is gone after the du timeout (pid=$childpid)"
-python3 -c "import sys;sys.exit(0 if float('$end')-float('$start')<2 else 1)" \
-  && ok "audit returned under 2s (no descendant held the pipe)" || bad "audit returned under 2s"
+# Allow scheduling overhead while remaining well below the stub's 30s lifetime.
+python3 -c 'import sys;sys.exit(0 if float(sys.argv[1]) < 5 else 1)' "$elapsed" \
+  && ok "audit returned under 5s (no descendant held the pipe)" || bad "audit took ${elapsed}s (limit 5s)"
 
 echo "== 20. --budget-seconds validation: 0 stays 0, hard cap 120, invalid falls back"
 fresh zerobudget

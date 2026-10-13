@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tests/test_budget_alerts_extra.py — Task 10 missing alert classes (plan Task 10 Step 1)."""
 import json
+import os
 import sys
 import tempfile
 import time
@@ -42,7 +43,20 @@ def alerts(state):
     return bs.alerts(state, NOW, 10)
 
 
-class ExtraAlertsTest(unittest.TestCase):
+class IsolatedConfigTest(unittest.TestCase):
+    """Isolate HOME and DISK_MAGICIAN_CONFIG from the live machine."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        cfg = Path(tmp.name) / "config.json"
+        cfg.write_text(json.dumps({"budgets": {"concurrency_margin_gb": 10, "classes": {}}}))
+        env = patch.dict(os.environ, {"DISK_MAGICIAN_CONFIG": str(cfg), "HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+
+class ExtraAlertsTest(IsolatedConfigTest):
     def test_event_backed_alerts(self):
         for token in ("activation_blocked:c14_missing", "quarantine_conflict:abc",
                       "quarantine_partial_kept:x", "exclusive_rename_unavailable",
@@ -115,11 +129,7 @@ class ExtraAlertsTest(unittest.TestCase):
             self.assertEqual(codes(alerts(state)), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class ProducerAlertsTest(unittest.TestCase):
+class ProducerAlertsTest(IsolatedConfigTest):
     def test_colima_observations_reach_alert_and_recovery_clears_it(self):
         import budget_history as bh
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,3 +162,7 @@ class ProducerAlertsTest(unittest.TestCase):
                 measurement = bh.measure_parked(state, now=NOW)
             bc.locked_mutate(state, lambda data: data.update(parked_measurement=measurement))
             self.assertIn("parked_large", codes(alerts(state)))
+
+
+if __name__ == "__main__":
+    unittest.main()

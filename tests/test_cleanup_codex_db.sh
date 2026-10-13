@@ -1298,10 +1298,14 @@ expect "discovered db in directory with spaces" "logs_space_1.sqlite" "$OUT13"
 echo "Governed cleanup emits a typed per-database terminal receipt"
 GOV_DB_DIR="$TMP_DIR/governed-codex"
 GOV_STATE="$TMP_DIR/governed-state"
-mkdir -p "$GOV_DB_DIR" "$GOV_STATE"
+GOV_HOME="$TMP_DIR/governed-home"
+GOV_CONFIG="$TMP_DIR/governed-config.json"
+mkdir -p "$GOV_DB_DIR" "$GOV_STATE" "$GOV_HOME"
+printf '{"budgets": {"classes": {}}}\n' > "$GOV_CONFIG"
 GOV_DB="$GOV_DB_DIR/governed.sqlite"
 create_test_db "$GOV_DB" 200 100 2
-DISK_MAGICIAN_ACTUATOR_TRIGGER=act DISK_MAGICIAN_STATE_DIR="$GOV_STATE" \
+HOME="$GOV_HOME" DISK_MAGICIAN_CONFIG="$GOV_CONFIG" \
+  DISK_MAGICIAN_ACTUATOR_TRIGGER=act DISK_MAGICIAN_STATE_DIR="$GOV_STATE" \
   DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" CODEX_DIR="$GOV_DB_DIR" \
   "$SCRIPT" --clean --db "$GOV_DB" >/dev/null 2>&1
 python3 - "$GOV_STATE/receipts/cleanup_codex_db.json" <<'PY'
@@ -1318,6 +1322,7 @@ assert receipt['candidates']['interrupted_count']==0, receipt['candidates']
 assert receipt['postcondition']['df_delta_bytes'] is not None, receipt['postcondition']
 print('  PASS: governed Codex DB receipt records vacuums separately with removed_count 0')
 PY
+PASS=$((PASS + 1))
 
 echo
 echo

@@ -9,6 +9,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -39,7 +40,24 @@ def codes(lines):
     return [line.split()[0][len("ALERT:"):] for line in lines if line.startswith("ALERT:")]
 
 
-class AlertsTest(unittest.TestCase):
+class IsolatedConfigTest(unittest.TestCase):
+    """Isolate HOME and DISK_MAGICIAN_CONFIG from the live machine for every
+    test, including subprocesses that inherit os.environ."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        cfg = Path(tmp.name) / "config.json"
+        cfg.write_text(json.dumps({"budgets": {
+            "concurrency_margin_gb": 10,
+            "classes": {"codex_documents": {"measure": "du"},
+                        "worktrees": {"measure": "du"}}}}))
+        env = patch.dict(os.environ, {"DISK_MAGICIAN_CONFIG": str(cfg), "HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+
+class AlertsTest(IsolatedConfigTest):
     NOW = WEEK + 7 * 86400
 
     def run_alerts(self, **kw):
@@ -101,7 +119,7 @@ class AlertsTest(unittest.TestCase):
             self.assertFalse(bs.raised(lines))
 
 
-class CliTest(unittest.TestCase):
+class CliTest(IsolatedConfigTest):
     def test_diskm_budget_status_alerts_and_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = write_state(tmp, budget=dict(zone="RED", zone_at=1))
@@ -117,7 +135,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out.returncode, 2)
 
 
-class DiskStatusAlertsTest(unittest.TestCase):
+class DiskStatusAlertsTest(IsolatedConfigTest):
     def test_disk_status_prints_alerts_before_accounting(self):
         import contextlib, io
         import disk_status
@@ -134,7 +152,7 @@ class DiskStatusAlertsTest(unittest.TestCase):
             self.assertTrue(json.loads(buf.getvalue())["alerts"][0].startswith("ALERT:govern_stale"))
 
 
-class C14AccountingTest(unittest.TestCase):
+class C14AccountingTest(IsolatedConfigTest):
     """Real c14_probe account -> canonical terminal receipt -> budget status output."""
 
     def _account(self, state, name, entries, reason):
