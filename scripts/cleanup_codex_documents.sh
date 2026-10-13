@@ -12,10 +12,22 @@
 #     remote-tracking ref (standalone repos: also no local-only branch/stash)
 #   - a linked worktree whose main repo lives outside the task, or any repo
 #     with worktrees outside the task, is handled safely: the former is removed
-#     with `git worktree remove` before the rest is deleted, the latter is kept.
+#     with `wrh_remove_now --quarantine` before the rest is deleted, the latter
+#     is kept. While the quarantine-capable WRH adapter is unavailable the task
+#     is kept (fail closed, never the old unguarded `git worktree remove`).
 # Non-git scratch is age-gated only. Empty date dirs are removed afterwards.
 #
-# Usage: cleanup_codex_documents.sh [--clean]   (default is DRY RUN)
+# C14 gate (spec §7.2): the task root is removed only through `quarantine_remove`,
+# which owns the verified inventory and returns removed:<id>, quarantined:<id>,
+# deferred:<step> or kept:<reason>. A provenance-less document is therefore kept
+# even when it is old and idle. The pre-existing safety/age/live-cwd gates remain.
+#
+# Usage: cleanup_codex_documents.sh [--clean] [--deadline-at SECONDS] [--cursor FILE]
+#   --deadline-at  cooperative soft deadline forwarded to C14 (Task 14 helper
+#                  actuator_deadline.sh, when committed, will gate unit starts)
+#   --cursor       enumeration cursor checkpoint file (reserved: exact integration
+#                  lands with the committed actuator_deadline.sh helper)
+#   (default is DRY RUN)
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
@@ -28,16 +40,38 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$SCRIPT_DIR/lib/worktree_ignored.sh"
 
+# C14/quarantine removal gate (spec §7.2). The library is owned by the C14 /
+# quarantine tasks; DISK_MAGICIAN_QUARANTINE_LIB is a test/override seam, the
+# same pattern as DISK_MAGICIAN_LSOF_BIN. Sourcing is best-effort because the
+# deletion site still fails closed when the functions are absent.
+QUARANTINE_LIB_DEFAULT="$SCRIPT_DIR/lib/quarantine.sh"
+QUARANTINE_LIB="${DISK_MAGICIAN_QUARANTINE_LIB:-$QUARANTINE_LIB_DEFAULT}"
+if [[ -f "$QUARANTINE_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$QUARANTINE_LIB"
+fi
+
 DRY_RUN=true
-for arg in "$@"; do
-  case "$arg" in
-    --clean) DRY_RUN=false ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+DEADLINE=""
+CURSOR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --clean) DRY_RUN=false; shift ;;
+    --deadline-at)
+      [[ $# -ge 2 ]] || { echo "--deadline-at needs a value" >&2; exit 2; }
+      DEADLINE="$2"
+      [[ "$DEADLINE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "invalid --deadline-at: $DEADLINE" >&2; exit 2; }
+      shift 2 ;;
+    --cursor)
+      [[ $# -ge 2 ]] || { echo "--cursor needs a value" >&2; exit 2; }
+      CURSOR="$2"; shift 2 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
+[[ -z "$CURSOR" ]] || log "note: --cursor '$CURSOR' accepted; actuator_deadline.sh cursor checkpointing integration pending"
 dry_prefix() { if [[ "$DRY_RUN" == true ]]; then echo "DRY RUN: "; fi; }
 
 ROOT_LOGICAL="$HOME/Documents/Codex"
@@ -202,8 +236,31 @@ N_REMOVED=0
 N_KEPT=0
 keep() { log "KEEP [$1] $2"; N_KEPT=$(( N_KEPT + 1 )); }
 
+# quarantine_remove_available: the C14/quarantine gate is the only root-removal path.
+quarantine_remove_available() { declare -F quarantine_remove >/dev/null 2>&1; }
+# wrh_quarantine_available: the WRH adapter must advertise quarantine mode
+# (`wrh_remove_now <real> <display> --quarantine`). Until the committed adapter
+# lands, no wrh_remove_now accepts it, so linked worktrees fail closed instead of
+# falling back to the old unguarded `git worktree remove`.
+wrh_quarantine_available() {
+  declare -F wrh_remove_now >/dev/null 2>&1 || return 1
+  declare -f wrh_remove_now | grep -q -- '--quarantine'
+}
+# quarantine_gate <task>: route one artifact through C14/quarantine and print
+# its verdict token. The caller interprets removed:/quarantined:/kept:/deferred:.
+quarantine_gate() {
+  local task="$1"
+  local -a args=()
+  [[ -n "$QUARANTINE_KIND" ]] && args+=(--kind "$QUARANTINE_KIND")
+  [[ -n "$DEADLINE" ]] && args+=(--deadline-at "$DEADLINE")
+  quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
+}
+# QUARANTINE_KIND is empty by default: codex task scratch must prove positive
+# provenance. A caller that has declared its row (spec §7.2 E1-E7) may set it.
+QUARANTINE_KIND="${DISK_MAGICIAN_CODEX_KIND:-}"
+
 process_task() {
-  local task="$1" rc reason kb row main wt removed_worktrees=0
+  local task="$1" rc reason kb main wt removed_worktrees=0 qout
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
@@ -225,28 +282,43 @@ process_task() {
     if (( rc != 1 )); then keep "recent-recheck" "$task"; return; fi
     check_repos "$task"
     if [[ -n "$REPO_REASON" ]]; then keep "recheck:$REPO_REASON" "$task"; return; fi
-    while IFS=$'\t' read -r main wt; do
-      [[ -n "$main" ]] || continue
-      if ! git --git-dir="$main" worktree remove --force "$wt" 2>/dev/null; then
-        if (( removed_worktrees > 0 )); then
-          deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
-        fi
-        keep "worktree-remove-failed:$wt" "$task"; return
+    # Linked worktrees are removed by the WRH quarantine adapter before the
+    # task root is quarantined; without that adapter the task stays (fail closed).
+    if [[ -n "$WT_REMOVALS" ]]; then
+      if ! wrh_quarantine_available; then
+        keep "wrh-quarantine-unavailable" "$task"; return
       fi
-      removed_worktrees=$(( removed_worktrees + 1 ))
-    done <<<"$WT_REMOVALS"
-    log "Removing $task (${kb} KB)"
-    if ! rm -rf "$task"; then
-      deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
-      keep "rm-failed" "$task"
-      return
+      while IFS=$'\t' read -r main wt; do
+        [[ -n "$main" ]] || continue
+        if ! wrh_remove_now "$wt" "$wt" --quarantine; then
+          if (( removed_worktrees > 0 )); then
+            deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+          fi
+          keep "wrh-quarantine-failed:$wt" "$task"; return
+        fi
+        removed_worktrees=$(( removed_worktrees + 1 ))
+      done <<<"$WT_REMOVALS"
     fi
-    if [[ -e "$task" ]]; then
-      deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
-      keep "rm-incomplete" "$task"
-      return
+    if ! quarantine_remove_available; then
+      keep "quarantine-unavailable" "$task"; return
     fi
-    deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
+    log "Removing $task (${kb} KB) via C14/quarantine"
+    qout="$(quarantine_gate "$task")"
+    case "$qout" in
+      removed:*|quarantined:*|quarantine_conflict:*)
+        deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
+        ;;
+      deferred:*)
+        deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+        keep "deferred:${qout#deferred:}" "$task"; return
+        ;;
+      kept:*)
+        keep "${qout#kept:}" "$task"; return
+        ;;
+      *)
+        keep "quarantine-unexpected:$qout" "$task"; return
+        ;;
+    esac
   fi
   REMOVED="${REMOVED}${task}"$'\n'
   TOTAL_KB=$(( TOTAL_KB + kb ))

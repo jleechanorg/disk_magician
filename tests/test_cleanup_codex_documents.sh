@@ -46,6 +46,30 @@ echo '{"never_delete": []}' >"$DISK_MAGICIAN_SAFETY_FILE"
 CODEX="$HOME/Documents/Codex"
 mkdir -p "$CODEX"
 
+# C14/quarantine is a dependency owned by other tasks. The caller suite exercises
+# its gates and routing against a minimal double (DISK_MAGICIAN_QUARANTINE_LIB);
+# the T11-T14 regressions below use the real scripts/lib/quarantine.sh instead.
+QUARANTINE_STUB="$TMP_ROOT/quarantine_stub.sh"
+cat >"$QUARANTINE_STUB" <<'STUB'
+quarantine_remove() {
+  local p="${1:-}"; shift || true
+  if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then printf 'removed:stub\n'; else printf 'kept:rm-failed\n'; fi
+}
+wrh_remove_now() {
+  local real="$1"
+  [[ "${3:-}" == --quarantine ]] || return 1
+  real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
+  local common main
+  common="$(git -C "$real" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common" in /*) ;; *) common="$real/$common" ;; esac
+  main="$(dirname "$common")"
+  git -C "$main" worktree remove --force "$real" >/dev/null 2>&1 || return 1
+  return 0
+}
+STUB
+export DISK_MAGICIAN_QUARANTINE_LIB="$QUARANTINE_STUB"
+REAL_QUARANTINE_LIB="$REPO_ROOT/scripts/lib/quarantine.sh"
+
 ORIGIN="$TMP_ROOT/origin.git"
 SEED="$TMP_ROOT/seed"
 git init -q --bare -b main "$ORIGIN"
@@ -226,7 +250,9 @@ O6="$TMP_ROOT/o6"; RC=0; run_sweeper "$O6" --clean || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T6: exits 0" || { record_fail "T6: exits 0" "rc=$RC"; cat "$O6"; }
 assert_exists "T6: task remains after rm failure" "$CODEX/$D_OLD/t-rm-fail"
 assert_contains "T6: reports fail-closed reason" "KEEP [rm-failed]" "$(cat "$O6")"
-assert_contains "T6: partial deletion is audited" $'\tpartial\t' "$(grep -F "$CODEX/$D_OLD/t-rm-fail" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || true)"
+if grep -F "$CODEX/$D_OLD/t-rm-fail" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null | grep -q $'\tremoved\t'; then
+  record_fail "T6: failed removal is not audited as removed" "found a removed audit entry"
+else record_pass "T6: failed removal is not audited as removed"; fi
 chmod 700 "$CODEX/$D_OLD/t-rm-fail"
 
 FAKE_LSOF="$TMP_ROOT/fake-lsof"
@@ -304,9 +330,53 @@ PART_LOG="$TMP_ROOT/partial-deletions.log"; O10="$TMP_ROOT/o10"; RC=0
 HOME="$PART_HOME" PATH="$FAKE_GIT_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_DELETION_LOG="$PART_LOG" run_sweeper "$O10" --clean || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T10: exits 0" || { record_fail "T10: exits 0" "rc=$RC"; cat "$O10"; }
 assert_exists "T10: task remains after second unregister fails" "$PART_TASK"
-assert_contains "T10: reports worktree removal failure" "KEEP [worktree-remove-failed:" "$(cat "$O10")"
+assert_contains "T10: reports worktree removal failure" "KEEP [wrh-quarantine-failed:" "$(cat "$O10")"
 assert_contains "T10: partial worktree removal is audited" $'\tpartial\t' "$(grep -F "$PART_TASK" "$PART_LOG" 2>/dev/null || true)"
 unset FAKE_LSOF_MODE FAKE_LSOF_PATH FAKE_LSOF_COUNT FAKE_LSOF_TARGET REAL_GIT_BIN FAKE_GIT_COUNT
+
+echo "T11: real C14 keeps a provenance-less old task"
+PL_HOME="$TMP_ROOT/pl-home"; PL_CODEX="$PL_HOME/Documents/Codex"; PL_TASK="$PL_CODEX/$D_OLD/t-doc"
+mkdir -p "$PL_TASK"; printf 'unique\n' >"$PL_TASK/report.md"; age "$PL_TASK"
+O11="$TMP_ROOT/o11"; RC=0
+HOME="$PL_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O11" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T11: exits 0" || { record_fail "T11: exits 0" "rc=$RC"; cat "$O11"; }
+assert_exists "T11: provenance-less document kept" "$PL_TASK"
+assert_contains "T11: reports unproven content" "KEEP [unproven-content]" "$(cat "$O11")"
+
+echo "T12: real C14 keeps a dirty/unpushed nested repo"
+DR_HOME="$TMP_ROOT/dr-home"; DR_CODEX="$DR_HOME/Documents/Codex"; DR_TASK="$DR_CODEX/$D_OLD/t-nested"
+mkdir -p "$DR_TASK"; git clone -q "$ORIGIN" "$DR_TASK/repo"
+git -C "$DR_TASK/repo" commit -q --allow-empty -m local-only
+age "$DR_TASK"
+O12="$TMP_ROOT/o12"; RC=0
+HOME="$DR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O12" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T12: exits 0" || { record_fail "T12: exits 0" "rc=$RC"; cat "$O12"; }
+assert_exists "T12: unpushed nested repo kept" "$DR_TASK"
+assert_contains "T12: reports unpushed head" "KEEP [unpushed-head:" "$(cat "$O12")"
+
+echo "T13: real C14 + quarantine removes an eligible ephemeral fixture"
+QC_HOME="$TMP_ROOT/qc-home"; QC_CODEX="$QC_HOME/Documents/Codex"; QC_DATE="$QC_CODEX/$D_OLD"; QC_TASK="$QC_DATE/pr-123"
+mkdir -p "$QC_TASK"; printf 'generated\n' >"$QC_TASK/results.json"; age "$QC_TASK"
+O13="$TMP_ROOT/o13"; RC=0
+HOME="$QC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
+  DISK_MAGICIAN_CODEX_KIND=ephemeral DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$QC_DATE" \
+  run_sweeper "$O13" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T13: exits 0" || { record_fail "T13: exits 0" "rc=$RC"; cat "$O13"; }
+assert_missing "T13: eligible ephemeral task removed via quarantine" "$QC_TASK"
+assert_contains "T13: routed through C14/quarantine" "via C14/quarantine" "$(cat "$O13")"
+
+echo "T14: replacement race after nomination keeps the artifact"
+RC_HOME="$TMP_ROOT/rc-home"; RC_CODEX="$RC_HOME/Documents/Codex"; RC_DATE="$RC_CODEX/$D_OLD"; RC_TASK="$RC_DATE/pr-456"
+mkdir -p "$RC_TASK"; printf 'generated\n' >"$RC_TASK/results.json"; age "$RC_TASK"
+O14="$TMP_ROOT/o14"; RC=0
+HOME="$RC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
+  DISK_MAGICIAN_CODEX_KIND=ephemeral DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$RC_DATE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_AFTER_NOMINATE="$RC_TASK/raced.txt" \
+  run_sweeper "$O14" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T14: exits 0" || { record_fail "T14: exits 0" "rc=$RC"; cat "$O14"; }
+assert_exists "T14: raced replacement kept" "$RC_TASK"
+assert_contains "T14: reports recent activity" "recent-activity" "$(cat "$O14")"
+unset DISK_MAGICIAN_QUARANTINE_LIB
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
