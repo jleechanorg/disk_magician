@@ -385,7 +385,8 @@ def tree_ancestry_still_quarantined(location_guard, ancestors):
     return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
 
 def record_removed_path(qfd, side, record, rel):
-    removed = record.setdefault("removed_paths", [])
+    key = record.get("journal_key", "removed_paths")
+    removed = record.setdefault(key, [])
     if rel in removed: return True
     removed.append(rel)
     try: update_sidecar(qfd, side, record)
@@ -541,6 +542,8 @@ def phase2(binding_file, qid, deadline=None):
             if record.get("phase") != "deleting" or record.get("root_removed") is not True:
                 return "kept:quarantine_partial_kept"
             os.fsync(qfd)
+            if record.get("worktree_admin") is True:
+                return "checkout_removed"
             if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
             if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
             if not finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
@@ -564,6 +567,10 @@ def phase2(binding_file, qid, deadline=None):
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
         record["root_removed"] = True
+        if record.get("worktree_admin") is True:
+            record["wrh_phase"] = "checkout_removed"
+            update_sidecar(qfd, side, record)
+            return "checkout_removed"
         update_sidecar(qfd, side, record)
         if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
         if not finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"

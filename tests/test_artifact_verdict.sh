@@ -58,6 +58,33 @@ assert_eq "$(content "$TMPROOT/staged")" kept:dirty "staged tracked edit"
 mkdir -p "$TMPROOT/plain/sub"
 mkrepo "$TMPROOT/plain/sub/nested" && printf 'edit\n' >>"$TMPROOT/plain/sub/nested/tracked.txt"
 assert_eq "$(c14_repos_ok "$TMPROOT/plain")" kept:dirty "nested dirty repo under a non-git root"
+mkdir -p "$TMPROOT/symlink-repo/nested"
+mkrepo "$TMPROOT/symlink-repo/nested"
+mv "$TMPROOT/symlink-repo/nested/.git" "$TMPROOT/symlink-repo/gitmeta"
+ln -s ../gitmeta "$TMPROOT/symlink-repo/nested/.git"
+printf 'edit\n' >>"$TMPROOT/symlink-repo/nested/tracked.txt"
+assert_eq "$(content "$TMPROOT/symlink-repo/nested")" kept:dirty "Git recognizes a nested repo with an internal .git symlink"
+symlink_inventory="$TMPROOT/symlink-repo-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/symlink-repo" "$symlink_inventory")" ok "inventory of nested repo with internal .git symlink"
+symlink_repos="$(C14_ROOT="$TMPROOT/symlink-repo" python3 "$_AV_DIR/../c14_probe.py" repos "$symlink_inventory" | tr '\0' '\n')"
+assert_eq "$symlink_repos" "$TMPROOT/symlink-repo/nested" "inventory classifies linked metadata only as the worktree"
+assert_eq "$(c14_repos_ok "$TMPROOT/symlink-repo" "$symlink_inventory")" kept:dirty "inventory finds nested repo with internal .git symlink"
+mkdir -p "$TMPROOT/external-gitdir/nested"
+mkrepo "$TMPROOT/external-gitdir-source"
+cp "$TMPROOT/external-gitdir-source/tracked.txt" "$TMPROOT/external-gitdir/nested/tracked.txt"
+ln -s "$TMPROOT/external-gitdir-source/.git" "$TMPROOT/external-gitdir/nested/.git"
+printf 'dirty\n' >>"$TMPROOT/external-gitdir/nested/tracked.txt"
+external_gitdir_inventory="$TMPROOT/external-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" ok "inventory of nested repo with external .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/external-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$external_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on an external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" kept:gitdir-invalid "C14 rejects dirty repo with external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects external .git symlink"
+mkdir -p "$TMPROOT/broken-gitdir/nested"
+ln -s "$TMPROOT/no-such-gitdir" "$TMPROOT/broken-gitdir/nested/.git"
+broken_gitdir_inventory="$TMPROOT/broken-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/broken-gitdir" "$broken_gitdir_inventory")" ok "inventory of nested repo with broken .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/broken-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$broken_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on a broken .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/broken-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects broken .git symlink"
 mkrepo "$TMPROOT/assume" && git -C "$TMPROOT/assume" update-index --assume-unchanged tracked.txt
 assert_eq "$(content "$TMPROOT/assume")" kept:dirty "assume-unchanged entry"
 mkrepo "$TMPROOT/skip" && git -C "$TMPROOT/skip" update-index --skip-worktree tracked.txt
@@ -97,11 +124,32 @@ assert_eq "$(content "$TMPROOT/plain2/node_modules/backup.git")" ok "bare repo u
 v="$(c14_repos_ok "$TMPROOT/plain2")"
 [[ "$v" == kept:* ]] && ok "unpushed, unbaselined nested repos are kept ($v)" || bad "nested repos with no remote: $v"
 printf 'edit\n' >>"$TMPROOT/plain2/node_modules/inner/tracked.txt"
-assert_eq "$(c14_repos_ok "$TMPROOT/plain2" --outer-certificate "$TMPROOT/none.json")" kept:dirty \
+assert_eq "$(c14_repos_ok "$TMPROOT/plain2")" kept:dirty \
     "dirty repo nested under allowlisted node_modules is checked"
 mkrepo "$TMPROOT/wtsrc" && git -C "$TMPROOT/wtsrc" worktree add -q "$TMPROOT/wtroot/linked" -b lw
 found="$(c14_discover_repos "$TMPROOT/wtroot" | tr '\0' '\n')"
 assert_eq "$found" "$TMPROOT/wtroot/linked" ".git file (linked worktree) found"
+# A submodule's metadata (super/.git/modules/<sm>) is owned by the
+# superproject, but the submodule worktree is its own repository. The
+# inventory path must use the same .git/ exclusion as legacy discovery or
+# every submodule-bearing clone is kept.
+mkrepo "$TMPROOT/subsrc"
+mkrepo "$TMPROOT/super"
+git -C "$TMPROOT/super" -c protocol.file.allow=always submodule add -q "$TMPROOT/subsrc" sm 2>/dev/null
+git -C "$TMPROOT/super" commit -qm add-sm
+[[ -d "$TMPROOT/super/.git/modules/sm" ]] && ok "submodule metadata present" || bad "submodule metadata missing"
+sub_inv="$TMPROOT/submodule-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/super" "$sub_inv")" ok "inventory of a submodule superproject"
+sub_repos="$(C14_ROOT="$TMPROOT/super" python3 "$_AV_DIR/../c14_probe.py" repos "$sub_inv" | tr '\0' '\n' | sort)"
+legacy_repos="$(c14_discover_repos "$TMPROOT/super" | tr '\0' '\n' | sort)"
+[[ $'\n'"$sub_repos"$'\n' == *$'\n'"$TMPROOT/super"$'\n'* ]] && ok "superproject repo found" || bad "superproject not found: $sub_repos"
+[[ $'\n'"$sub_repos"$'\n' == *$'\n'"$TMPROOT/super/sm"$'\n'* ]] && ok "submodule worktree repo found" || bad "submodule worktree not found: $sub_repos"
+[[ $'\n'"$sub_repos"$'\n' != *$'\n'"$TMPROOT/super/.git/modules/sm"$'\n'* ]] && ok "submodule metadata under .git/ is not a repository" || bad "submodule metadata misclassified: $sub_repos"
+assert_eq "$sub_repos" "$legacy_repos" "inventory and legacy discovery agree on a submodule superproject"
+# The exclusion is metadata-scoped: a real nested independent repository in
+# candidate content is still discovered.
+mkrepo "$TMPROOT/super/vendor/inner"
+assert_eq "$(content "$TMPROOT/super/vendor/inner")" ok "clean nested repo under a submodule superproject"
 
 echo "== git must resolve the discovered repository =="
 # W tracks sub/t; sub/.git holds an unpushed commit but lost its HEAD, so a
@@ -145,6 +193,61 @@ PT="$TMPROOT/ptmp" && mkdir -p "$PT"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 # shellcheck source=scripts/lib/worktree_lease.sh
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+# Advice-owned copies are remote-less by construction; the exact-sha receipt
+# permits only its hash-listed review-document overlay and binds .git metadata.
+git init -q --bare -b main "$TMPROOT/advice-source.git"
+mkrepo "$TMPROOT/advice-source-seed"
+mkdir -p "$TMPROOT/advice-source-seed/nested"
+printf 'nested content\n' >"$TMPROOT/advice-source-seed/nested/tracked.txt"
+git -C "$TMPROOT/advice-source-seed" add nested/tracked.txt && git -C "$TMPROOT/advice-source-seed" commit -qm nested
+git -C "$TMPROOT/advice-source-seed" push -q "$TMPROOT/advice-source.git" main
+git init -q "$TMPROOT/advice-copy"
+advice_sha="$(git -C "$TMPROOT/advice-source-seed" rev-parse HEAD)"
+git -C "$TMPROOT/advice-copy" fetch -q --no-tags "$TMPROOT/advice-source.git" "$advice_sha"
+git -C "$TMPROOT/advice-copy" checkout -q --detach "$advice_sha"
+mkdir -p "$TMPROOT/advice-copy/.advice-review-documents"
+printf 'review document\n' >"$TMPROOT/advice-copy/.advice-review-documents/0.md"
+advice_receipt="$TMPROOT/advice-receipt.json"
+python3 - "$PROBE" "$TMPROOT/advice-copy" "$TMPROOT/advice-source-seed" "$advice_receipt" <<'PY'
+import hashlib, json, os, subprocess, sys
+probe, clone, source, out = sys.argv[1:]
+meta = json.loads(subprocess.run([sys.executable, probe, "gitmeta", os.path.join(clone, ".git")],
+                                 check=True, capture_output=True, text=True).stdout)
+path = os.path.join(clone, ".advice-review-documents", "0.md")
+overlay = [{"path": ".advice-review-documents/0.md",
+            "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest()}]
+json.dump({"source_repo": source, "sha": subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+         check=True, capture_output=True, text=True).stdout.strip(), "clone_kind": "independent_exact_sha_fetch",
+         "overlay_manifest": overlay, "git_meta": meta, "receipt_path": out,
+         "pid": os.getpid(), "start_epoch": 1, "created_epoch": 1}, open(out, "w"))
+PY
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$advice_receipt")" ok \
+    "receipt-listed review overlay is accepted"
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" ok \
+    "outer certificate exempts only the remote-less outer copy"
+assert_eq "$(GIT_DIR="$TMPROOT/clean/.git" GIT_WORK_TREE="$TMPROOT/clean" c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" ok \
+    "outer certificate ignores caller Git environment"
+git -C "$TMPROOT/advice-copy/nested" init -q
+git -C "$TMPROOT/advice-copy/nested" config user.email nested@example.invalid
+git -C "$TMPROOT/advice-copy/nested" config user.name nested
+git -C "$TMPROOT/advice-copy/nested" add tracked.txt
+git -C "$TMPROOT/advice-copy/nested" commit -qm nested
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" kept:not-pushed \
+    "outer certificate does not skip a nested independent repository"
+cp "$advice_receipt" "$TMPROOT/advice-bad-meta.json"
+python3 - "$TMPROOT/advice-bad-meta.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["receipt_path"]=p; d["git_meta"]["config"]= "0"*64; json.dump(d,open(p,"w"))
+PY
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$TMPROOT/advice-bad-meta.json")" kept:git-metadata \
+    "receipt rejects changed .git metadata baseline"
+printf 'tampered review document\n' >"$TMPROOT/advice-copy/.advice-review-documents/0.md"
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" kept:dirty \
+    "receipt rejects overlay bytes changed after certification"
+printf 'unlisted\n' >"$TMPROOT/advice-copy/extra.txt"
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$advice_receipt")" kept:dirty \
+    "receipt does not exempt unrelated untracked files"
+
 # baseline <repo>: record the producer's git_meta in the repo's lease.
 baseline() {
     local f gd
@@ -381,6 +484,50 @@ E6 4320 $HOME/.llm-inspector/captures/capture-1.json
 E6 4320 $HOME/.llm-inspector/captures/x.summary.json
 E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
 EOF
+# An exact-worktree-root receipt binds only that candidate's own admin rows.
+# The admin channel is per-call: a caller-owned C14_INVENTORY_OUT is neither
+# appended to nor removed, a stale row planted there cannot bind, and a second
+# verdict in the same shell starts from an empty channel. The venv receipt
+# above already proves a child directory binds no parent admin rows at all.
+caller_channel="$TMPROOT/caller-admin.jsonl"
+printf '{"admin":"%s/other-admin","path":"HEAD","mode":"100644","dev":1,"ino":1,"size":0,"sha256":"sentinel"}\n' "$TMPROOT" >"$caller_channel"
+caller_before="$(shasum -a 256 "$caller_channel" | awk '{print $1}')"
+export C14_INVENTORY_OUT="$caller_channel"
+av_tmp="$TMPROOT/av-tmp" && mkdir -p "$av_tmp" && export TMPDIR="$av_tmp"
+age "$PT/wtp" 120
+wt_gd="$(git -C "$PT/wtp" rev-parse --absolute-git-dir)"
+wt_inv_one="$TMPROOT/wt-root-inventory-one.json"
+assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out "$wt_inv_one")" remove "exact worktree root is eligible and writes its receipt"
+wt_inv_two="$TMPROOT/wt-root-inventory-two.json"
+assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out "$wt_inv_two")" remove "a second consecutive worktree-root verdict is eligible"
+assert_eq "$(shasum -a 256 "$caller_channel" | awk '{print $1}')" "$caller_before" "caller-owned C14_INVENTORY_OUT is never written or removed"
+[[ -z "$(find "$av_tmp" -mindepth 1 -print -quit 2>/dev/null)" ]] && ok "each verdict removes its owned admin channel and temp dir" || bad "verdict temp files leaked: $(find "$av_tmp" -print)"
+python3 - "$wt_gd" "$TMPROOT/other-admin" "$wt_inv_one" "$wt_inv_two" <<'PY' && ok "worktree-root receipts bind only the candidate's own admin rows" || bad "worktree-root receipt admin binding"
+import json, os, sys
+gd, stale, *paths = sys.argv[1:]
+root_st = os.lstat(gd)
+for p in paths:
+    rows = json.load(open(p, encoding="utf-8"))
+    admins = [r for r in rows if r.get("type") == "admin"]
+    assert admins, p
+    assert all(r.get("admin") == gd for r in admins), (p, {r.get("admin") for r in admins})
+    assert all(r.get("admin") != stale for r in rows), p
+    # The original admin receipt carries the root identity and every allowed
+    # refs/** / logs/** directory, plus file hashes. type=admin is the merge
+    # envelope; entry_type keeps the underlying filesystem kind.
+    by_path = {r["path"]: r for r in admins}
+    root = by_path.get(".")
+    assert root is not None and root.get("entry_type") == "dir", (p, sorted(by_path))
+    assert type(root.get("dev")) is int and type(root.get("ino")) is int, (p, root)
+    assert (root["dev"], root["ino"]) == (root_st.st_dev, root_st.st_ino), (p, root, root_st)
+    dirs = [r for r in admins if r.get("path") != "." and r.get("entry_type") == "dir"]
+    assert dirs and all(type(r.get("dev")) is int and type(r.get("ino")) is int for r in dirs), (p, dirs)
+    assert "logs" in {r["path"] for r in dirs}, (p, [r["path"] for r in dirs])
+    files = [r for r in admins if r.get("entry_type") == "file"]
+    assert files and all(len(r.get("sha256", "")) == 64 for r in files), (p, files)
+PY
+unset C14_INVENTORY_OUT
+unset TMPDIR
 # Never-touch tmp roots (cleanup_tmp.sh PROTECTED_TMP_ROOTS) and legacy system basenames keep an idle released E2 clone.
 for d in worldarchitect.ai/br custom-root/br system-x com.apple.y; do
     git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d" && baseline "$PT/$d"
@@ -401,6 +548,13 @@ mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 
 age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
 assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
 assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
+mkdir -p "$PT/pr-review-only.pem" && printf 'synthetic sentinel\n' >"$PT/pr-review-only.pem/payload"
+age "$PT/pr-review-only.pem" 43200
+assert_eq "$(eph "$PT/pr-review-only.pem")" kept:secret-like "secret-like root name in an E3 directory"
+printf 'synthetic sentinel\n' >"$PT/review-only.pem"
+root_file_inventory="$TMPROOT/root-secret-file-inventory.json"
+assert_eq "$(python3 "$PROBE" inventory "$PT/review-only.pem" "$root_file_inventory")" ok "inventory of a regular-file candidate"
+assert_eq "$(python3 "$PROBE" secrets "$root_file_inventory")" yes "secret-like regular-file root name is recognized"
 mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
 assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
@@ -413,6 +567,8 @@ for p in "$HOME/.gemini/antigravity/brain/.." "$HOME/.gemini/antigravity/brain/.
 done
 
 echo "== every-kind checks =="
+mkdir -p "$TMPROOT/no-lsof" && printf x >"$TMPROOT/no-lsof/f"
+assert_eq "$(DISK_MAGICIAN_LSOF_BIN="$TMPROOT/missing-lsof" python3 "$PROBE" open-file "$TMPROOT/no-lsof")" kept:check-failed "missing lsof fails closed"
 mkdir -p "$PT/pr-open" "$PT/pr-cwd" "$PT/pr-young" "$PT/pr-live" "$PT/pr-unk" "$PT/pr-rel" "$HOME/.codex/sessions/s"
 for d in pr-open pr-cwd pr-young pr-live pr-unk pr-rel; do printf 'x' >"$PT/$d/f"; age "$PT/$d" 43200; done
 printf 'x' >"$HOME/.codex/sessions/s/f" && age "$HOME/.codex/sessions/s" 43200
@@ -551,6 +707,13 @@ venvw() {
 venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
 age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
 assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+subtree_inventory="$TMPROOT/dormant-venv-inventory.json"
+assert_eq "$(artifact_removal_verdict "$HOME/wt-dormant/venv" --kind rebuildable --inventory-out "$subtree_inventory")" remove "a linked worktree venv receives a subtree-only receipt"
+python3 - "$subtree_inventory" <<'PY' && ok "subtree receipt excludes unrelated parent worktree admin rows" || bad "subtree receipt contains parent worktree admin rows"
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rows and all(row.get("type") != "admin" for row in rows)
+PY
 assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
 mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
 git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"
@@ -757,8 +920,8 @@ exec "$real_git" "\$@"
 STUB
 cat >"$TMPROOT/slow-git/lsof" <<'STUB'
 #!/bin/sh
-if [ "$1" = -n ]; then printf 'p1\nfcwd\nn/\n'; fi
-exit 0
+case " $* " in *" -d cwd "*) printf 'p%s\nfcwd\nn/\n' "$$"; exit 0 ;; esac
+exit 1
 STUB
 chmod +x "$TMPROOT/slow-git/git" "$TMPROOT/slow-git/lsof"
 deadline_at="$(python3 -c 'import time; print(time.monotonic()+30)')"
