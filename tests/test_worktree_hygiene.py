@@ -70,7 +70,7 @@ def _call(func_name, *args, timeout=15):
     passed as positional shell parameters (avoids shell-quoting injection
     for paths/URLs containing spaces or special characters)."""
     positional = " ".join(f'"${i + 1}"' for i in range(len(args)))
-    body = f'source "{SCRIPT}"; {func_name} {positional}'
+    body = f'source "{SCRIPT}"; EXECUTE=true; {func_name} {positional}'
     cmd = ["bash", "-c", body, "call"] + [str(a) for a in args]
     with tempfile.TemporaryDirectory() as home:
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
@@ -489,7 +489,7 @@ class TriageCandidateSanityCapTest(unittest.TestCase):
             "HOME": str(self.tmp / "home"),
             "WORKTREE_AHEAD_SANITY_CAP": str(cap),
         }
-        body = 'source "%s"; triage_candidate "$1" "$2" "$3"' % SCRIPT
+        body = 'source "%s"; EXECUTE=true; triage_candidate "$1" "$2" "$3"' % SCRIPT
         cmd = ["bash", "-c", body, "call", str(repo), str(wt), branch]
         return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
 
