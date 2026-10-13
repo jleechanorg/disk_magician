@@ -58,6 +58,17 @@ assert_eq "$(content "$TMPROOT/staged")" kept:dirty "staged tracked edit"
 mkdir -p "$TMPROOT/plain/sub"
 mkrepo "$TMPROOT/plain/sub/nested" && printf 'edit\n' >>"$TMPROOT/plain/sub/nested/tracked.txt"
 assert_eq "$(c14_repos_ok "$TMPROOT/plain")" kept:dirty "nested dirty repo under a non-git root"
+mkdir -p "$TMPROOT/symlink-repo/nested"
+mkrepo "$TMPROOT/symlink-repo/nested"
+mv "$TMPROOT/symlink-repo/nested/.git" "$TMPROOT/symlink-repo/gitmeta"
+ln -s ../gitmeta "$TMPROOT/symlink-repo/nested/.git"
+printf 'edit\n' >>"$TMPROOT/symlink-repo/nested/tracked.txt"
+assert_eq "$(content "$TMPROOT/symlink-repo/nested")" kept:dirty "Git recognizes a nested repo with an internal .git symlink"
+symlink_inventory="$TMPROOT/symlink-repo-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/symlink-repo" "$symlink_inventory")" ok "inventory of nested repo with internal .git symlink"
+symlink_repos="$(C14_ROOT="$TMPROOT/symlink-repo" python3 "$_AV_DIR/../c14_probe.py" repos "$symlink_inventory" | tr '\0' '\n')"
+assert_eq "$symlink_repos" "$TMPROOT/symlink-repo/nested" "inventory classifies linked metadata only as the worktree"
+assert_eq "$(c14_repos_ok "$TMPROOT/symlink-repo" "$symlink_inventory")" kept:dirty "inventory finds nested repo with internal .git symlink"
 mkrepo "$TMPROOT/assume" && git -C "$TMPROOT/assume" update-index --assume-unchanged tracked.txt
 assert_eq "$(content "$TMPROOT/assume")" kept:dirty "assume-unchanged entry"
 mkrepo "$TMPROOT/skip" && git -C "$TMPROOT/skip" update-index --skip-worktree tracked.txt
@@ -401,6 +412,13 @@ mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 
 age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
 assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
 assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
+mkdir -p "$PT/pr-review-only.pem" && printf 'synthetic sentinel\n' >"$PT/pr-review-only.pem/payload"
+age "$PT/pr-review-only.pem" 43200
+assert_eq "$(eph "$PT/pr-review-only.pem")" kept:secret-like "secret-like root name in an E3 directory"
+printf 'synthetic sentinel\n' >"$PT/review-only.pem"
+root_file_inventory="$TMPROOT/root-secret-file-inventory.json"
+assert_eq "$(python3 "$PROBE" inventory "$PT/review-only.pem" "$root_file_inventory")" ok "inventory of a regular-file candidate"
+assert_eq "$(python3 "$PROBE" secrets "$root_file_inventory")" yes "secret-like regular-file root name is recognized"
 mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
 assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
@@ -413,6 +431,8 @@ for p in "$HOME/.gemini/antigravity/brain/.." "$HOME/.gemini/antigravity/brain/.
 done
 
 echo "== every-kind checks =="
+mkdir -p "$TMPROOT/no-lsof" && printf x >"$TMPROOT/no-lsof/f"
+assert_eq "$(DISK_MAGICIAN_LSOF_BIN="$TMPROOT/missing-lsof" python3 "$PROBE" open-file "$TMPROOT/no-lsof")" kept:check-failed "missing lsof fails closed"
 mkdir -p "$PT/pr-open" "$PT/pr-cwd" "$PT/pr-young" "$PT/pr-live" "$PT/pr-unk" "$PT/pr-rel" "$HOME/.codex/sessions/s"
 for d in pr-open pr-cwd pr-young pr-live pr-unk pr-rel; do printf 'x' >"$PT/$d/f"; age "$PT/$d" 43200; done
 printf 'x' >"$HOME/.codex/sessions/s/f" && age "$HOME/.codex/sessions/s" 43200
@@ -757,8 +777,8 @@ exec "$real_git" "\$@"
 STUB
 cat >"$TMPROOT/slow-git/lsof" <<'STUB'
 #!/bin/sh
-if [ "$1" = -n ]; then printf 'p1\nfcwd\nn/\n'; fi
-exit 0
+case " $* " in *" -d cwd "*) printf 'p%s\nfcwd\nn/\n' "$$"; exit 0 ;; esac
+exit 1
 STUB
 chmod +x "$TMPROOT/slow-git/git" "$TMPROOT/slow-git/lsof"
 deadline_at="$(python3 -c 'import time; print(time.monotonic()+30)')"

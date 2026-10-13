@@ -220,14 +220,16 @@ def inventory(root, out, deadline=None):
                         if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                             raise OSError("file changed")
                         entries.append({"path": ".", "type": "file", "dev": before.st_dev, "ino": before.st_ino,
-                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns})
+                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns,
+                                        "name": os.path.basename(root.rstrip(os.sep))})
                     finally: os.close(ffd)
                 elif stat.S_ISLNK(st.st_mode):
                     target = os.readlink(name, dir_fd=pfd)
                     now = os.stat(name, dir_fd=pfd, follow_symlinks=False)
                     if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino): raise OSError("symlink replaced")
                     entries.append({"path": ".", "type": "symlink", "dev": st.st_dev, "ino": st.st_ino,
-                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns})
+                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns,
+                                    "name": os.path.basename(root.rstrip(os.sep))})
                 else:
                     raise OSError("unsupported entry type")
             finally: os.close(pfd)
@@ -240,7 +242,8 @@ def inventory(root, out, deadline=None):
             if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
                 raise OSError("directory replaced")
             entries.append({"path": rel, "type": "dir", "dev": opened.st_dev, "ino": opened.st_ino,
-                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns})
+                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns,
+                            **({"name": os.path.basename(root.rstrip(os.sep))} if rel == "." else {})})
             names = sorted(os.listdir(fd))
             for name in names:
                 left = _remaining(deadline, "tree-walk")
@@ -412,23 +415,37 @@ def repos(inv_file):
         entries = json.load(open(inv_file, encoding="utf-8"))
         if not isinstance(entries, list): raise ValueError("inventory must be a list")
         by_path = {e["path"]: e for e in entries}
+        root = os.path.realpath(os.environ.get("C14_ROOT", os.path.dirname(os.path.abspath(inv_file))))
         roots = set()
+        gitdir_targets = set()
+        for rel, e in by_path.items():
+            if rel == ".": parent, name = ".", "."
+            else: parent, _, name = rel.rpartition("/"); parent = parent or "."
+            if name != ".git" or e.get("type") != "symlink":
+                continue
+            link_parent = root if parent == "." else os.path.join(root, parent)
+            target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
+            if target.startswith(root.rstrip(os.sep) + os.sep) and os.path.isdir(target):
+                gitdir_targets.add(os.path.relpath(target, root))
         for rel, e in by_path.items():
             if rel == ".": parent, name = ".", "."
             else: parent, _, name = rel.rpartition("/"); parent = parent or "."
             if name == ".git" and e.get("type") in ("dir", "file"):
                 roots.add(parent)
+            elif name == ".git" and e.get("type") == "symlink":
+                link_parent = root if parent == "." else os.path.join(root, parent)
+                target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
+                if target.startswith(root.rstrip(os.sep) + os.sep) and os.path.isdir(target):
+                    roots.add(parent)
             if rel == "." and e.get("type") == "dir" and all(
                     by_path.get(name, {}).get("type") == kind for name, kind in
                     (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                 roots.add(".")
-            if e.get("type") == "dir" and rel != ".git" and not rel.endswith("/.git"):
+            if e.get("type") == "dir" and rel not in gitdir_targets and rel != ".git" and not rel.endswith("/.git"):
                 if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
                        (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                     roots.add(rel)
-        root = os.path.dirname(os.path.abspath(inv_file))
         # Caller supplies C14_ROOT to bind relative inventory paths to its candidate.
-        root = os.path.realpath(os.environ["C14_ROOT"])
         for rel in sorted(roots):
             print(os.path.join(root, rel) if rel != "." else root, end="\0")
     except Exception:
@@ -447,7 +464,8 @@ def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        print("yes" if any(pattern.fullmatch(e["path"].rsplit("/", 1)[-1]) for e in entries) else "no")
+        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
+                            for e in entries) else "no")
     except Exception:
         print("kept:check-failed")
 
@@ -473,12 +491,21 @@ def open_file(root, deadline=None):
         cmd += ["+D", root]
     else:
         cmd += [root]
-    result = _run_bounded(cmd, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+    try:
+        result = _run_bounded(cmd, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+    except OSError:
+        print("kept:check-failed")
+        return
     if result is None:
         print("deferred:tree-walk")
     else:
         rc, out = result
-        print("yes" if out else "no")
+        if out:
+            print("yes")
+        elif rc == 1:
+            print("no")
+        else:
+            print("kept:check-failed")
 
 if __name__ == "__main__":
     a = sys.argv[1:]
