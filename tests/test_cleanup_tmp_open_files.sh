@@ -177,7 +177,8 @@ make_find_shim "$T1_BIN" "$T1_PRIVATE_TMP" "$T1_TMP"
 make_fake_timeout "$T1_BIN/timeout"
 cat > "$T1_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "-w" ]]; then exit 0; fi
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1234"
   echo "fcwd"
@@ -745,7 +746,8 @@ reset_t9_archive() {
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "-w" ]]; then exit 0; fi
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p901"
   echo "fcwd"
@@ -850,7 +852,8 @@ assert_contains "Test 9d: logs malformed output" "Open-file check produced malfo
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "-w" ]]; then exit 0; fi
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p907"
   echo "fcwd"
@@ -972,7 +975,8 @@ assert_contains "Test 11a: logs in-use" "Skipping in-use aged archive" "$(cat "$
 reset_t11_archive
 cat > "$T11_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "-w" ]]; then exit 0; fi
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1102"
   echo "fcwd"

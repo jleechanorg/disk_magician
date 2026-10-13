@@ -542,7 +542,11 @@ scan_protected_root_children() {
     archive_rc=0
     archive_path "$child" "$kb" "$(basename "$root")" >/dev/null || archive_rc=$?
     (( archive_rc == 1 )) && continue
-    (( archive_rc == 0 )) || return "$archive_rc"
+    if (( archive_rc != 0 )); then
+      log "ERROR: could not archive: $child (rc=$archive_rc); preserving and continuing"
+      cleanup_tmp_count_candidate_result deferred:archive-error
+      continue
+    fi
     ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
     DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
   done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
@@ -1390,7 +1394,11 @@ large_consider_entry() {
   if (( archive_rc == 1 )); then
     return 0
   fi
-  (( archive_rc == 0 )) || return "$archive_rc"
+  if (( archive_rc != 0 )); then
+    log "ERROR: could not archive: $d (rc=$archive_rc); preserving and continuing"
+    cleanup_tmp_count_candidate_result deferred:archive-error
+    return 0
+  fi
   ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
   DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
 }
