@@ -121,22 +121,34 @@ def locked_mutate(state, mutate):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def effective_stage(budget, config_budget=None):
-    """Stage from budget.json, else the configured enforcement, else observe."""
+def effective_stage(budget, config_budget=None, strict=False):
+    """Resolve stage; strict admission rejects invalid overrides or config."""
     value = budget.get("stage") if isinstance(budget, dict) else None
     if value in STAGES:
         return value
+    if strict and isinstance(budget, dict) and "stage" in budget:
+        raise ValueError("malformed stage override")
     configured = config_budget.get("enforcement") if isinstance(config_budget, dict) else None
-    return configured if configured in STAGES else "observe"
+    if configured in STAGES:
+        return configured
+    if strict:
+        raise ValueError("malformed configured enforcement")
+    return "observe"
 
 
-def effective_margin(budget, config_budget=None):
-    """Margin (GiB) from budget.json, else the configured value, else 10."""
+def effective_margin(budget, config_budget=None, strict=False):
+    """Resolve margin; strict admission rejects invalid overrides or config."""
     value = budget.get("margin_gb") if isinstance(budget, dict) else None
     if finite_nonneg(value):
         return float(value)
+    if strict and isinstance(budget, dict) and "margin_gb" in budget:
+        raise ValueError("malformed margin override")
     configured = config_budget.get("concurrency_margin_gb") if isinstance(config_budget, dict) else None
-    return float(configured) if finite_nonneg(configured) else 10.0
+    if finite_nonneg(configured):
+        return float(configured)
+    if strict:
+        raise ValueError("malformed configured concurrency_margin_gb")
+    return 10.0
 
 
 def effective_estimates(state):

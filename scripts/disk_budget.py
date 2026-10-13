@@ -927,8 +927,8 @@ def admit(a, budgets, state, now, d2):
     try:  # a corrupt or wrong-typed budget.json, or a partial budgets block, degrades to the blind decision
         last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, estimate_degraded
         cls, age = last.get("classes", {}).get(a.cls, {}), now - last.get("zone_at", 0)
-        stage = budget_controls.effective_stage(last, budgets)
-        margin = budget_controls.effective_margin(last, budgets)
+        stage = budget_controls.effective_stage(last, budgets, strict=True)
+        margin = budget_controls.effective_margin(last, budgets, strict=True)
         over = budgets["classes"][a.cls].get("measure") != "df_delta_only" and now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > budgets["classes"][a.cls].get("budget_gb", 1e9)
         if stage not in STAGES or not all(isinstance(v, (int, float)) for v in (margin, last.get("free_bytes", 0))) \
                 or not isinstance(last.get("zone") or "", str): raise TypeError("budget value type")

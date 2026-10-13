@@ -75,6 +75,43 @@ class StageMarginTest(unittest.TestCase):
             self.assertIsNone(bc.set_margin(state, float("nan"), CONFIG))
 
 
+class EffectiveResolutionStrictTest(unittest.TestCase):
+    """Strict admission resolution: absent optional overrides fall through to a
+    valid config, while present malformed overrides or malformed config raise."""
+
+    def test_non_strict_defaults_are_unchanged(self):
+        # setter/reporting prior-value callers intentionally have no config.
+        self.assertEqual(bc.effective_stage({}), "observe")
+        self.assertEqual(bc.effective_margin({}), 10.0)
+        self.assertEqual(bc.effective_stage({"stage": "bogus"}, CONFIG), "warn")
+        self.assertEqual(bc.effective_margin({}, {"enforcement": "observe", "concurrency_margin_gb": "10"}), 10.0)
+
+    def test_strict_uses_valid_persisted_override(self):
+        budget = {"stage": "refuse_red", "margin_gb": 20}
+        self.assertEqual(bc.effective_stage(budget, CONFIG, strict=True), "refuse_red")
+        self.assertEqual(bc.effective_margin(budget, CONFIG, strict=True), 20.0)
+
+    def test_strict_absent_override_falls_back_to_valid_config(self):
+        self.assertEqual(bc.effective_stage({}, CONFIG, strict=True), "warn")
+        self.assertEqual(bc.effective_margin({}, CONFIG, strict=True), 10.0)
+
+    def test_strict_malformed_persisted_override_raises(self):
+        for budget in ({"stage": None}, {"margin_gb": None}, {"stage": "bogus"}, {"stage": 5}, {"margin_gb": "x"}, {"margin_gb": True}, {"margin_gb": -1}):
+            with self.assertRaises(ValueError, msg=budget):
+                if "stage" in budget:
+                    bc.effective_stage(budget, CONFIG, strict=True)
+                else:
+                    bc.effective_margin(budget, CONFIG, strict=True)
+
+    def test_strict_malformed_config_raises(self):
+        for config in ({}, {"enforcement": "bogus"}, {"enforcement": "observe"},
+                       {"enforcement": "observe", "concurrency_margin_gb": "10"},
+                       {"enforcement": "observe", "concurrency_margin_gb": -1}):
+            with self.assertRaises(ValueError, msg=config):
+                bc.effective_stage({}, config, strict=True)
+                bc.effective_margin({}, config, strict=True)
+
+
 class PromoteEstimatesTest(unittest.TestCase):
     def test_valid_pending_promotes_hash_and_epoch(self):
         with tempfile.TemporaryDirectory() as tmp:
