@@ -981,5 +981,37 @@ assert_contains "GREEN 9c: logs DRY RUN preview of aged archive purge" \
 assert_exists "GREEN 9c: entry is preserved during dry run" "$G9C_ARCHIVE/20200101T000000Z"
 
 echo
+G10_PRIVATE_TMP="$TMP_ROOT/g10-private-tmp"
+G10_TMP="$TMP_ROOT/g10-tmp"
+G10_ARCHIVE="$TMP_ROOT/g10-archive"
+G10_BIN="$TMP_ROOT/g10-bin"
+mkdir -p "$G10_PRIVATE_TMP" "$G10_TMP"
+make_find_shim "$G10_BIN" "$G10_PRIVATE_TMP" "$G10_TMP"
+make_large_dir "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
+make_large_dir "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
+set_old_mtime "$G10_PRIVATE_TMP/worldarchitect.ai"
+G10_OUT="$TMP_ROOT/g10.out"
+if run_capture "$G10_OUT" env -i HOME="$TMP_ROOT/g10-home" \
+  PATH="$G10_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G10_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$G10_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$G10_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G10_RC=0
+else
+  G10_RC=$?
+fi
+G10_OUT_CONTENT=$(cat "$G10_OUT")
+assert_rc "GREEN 10: exits 0" 0 "$G10_RC"
+assert_exists "GREEN 10: protected root itself preserved" "$G10_PRIVATE_TMP/worldarchitect.ai"
+assert_exists "GREEN 10: canonical evidence child preserved" "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
+assert_missing "GREEN 10: stale non-evidence child reclaimed" "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
+assert_contains "GREEN 10: logs the protected-child skip" \
+  "Skipping protected child of a protected root: $G10_PRIVATE_TMP/worldarchitect.ai/evidence" "$G10_OUT_CONTENT"
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
