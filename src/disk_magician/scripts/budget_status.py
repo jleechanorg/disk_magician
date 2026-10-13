@@ -25,6 +25,46 @@ def daily_mins(budget, now, n):  # C12: govern's per-day minimum used bytes (bud
     m = budget.get("daily_min_used") if isinstance(budget, dict) else None
     return [v for d in range(n) if isinstance(m, dict) and type(v := m.get(time.strftime("%Y-%m-%d", time.localtime(now - d * DAY)))) is int]
 def raised(lines): return any(line.startswith("ALERT:") for line in lines)
+def _int_or_none(value): return value if isinstance(value, int) and not isinstance(value, bool) else None
+def accounting(state):  # per-class C14 kept bytes and receipt metrics from govern_<class> receipts
+    """Report each class's kept/reclaim metrics without fabricating a baseline.
+
+    The Task 0 reclaim baseline has no canonical machine-readable representation
+    in this tree yet, so `baseline_bytes` is reported as explicit `unknown` rather
+    than invented. `freed_bytes`/`df_reclaimed_bytes` come from the receipt and
+    stay separate from the logical `c14_kept_bytes`; `ledger_status` is the fold
+    quality signal. Reads only existing govern_<class> receipts.
+    """
+    classes = set()
+    try:
+        import resolve_config
+        cfg = json.loads(Path(resolve_config.resolve()).read_text())
+        classes.update(((cfg.get("budgets") or {}).get("classes") or {}).keys())
+    except (OSError, ValueError, TypeError, ImportError): pass
+    receipts = state / "receipts"
+    if receipts.is_dir():
+        classes.update(p.name[len("govern_"):-len(".json")] for p in receipts.glob("govern_*.json"))
+    lines = []
+    for name in sorted(c for c in classes if c):
+        line = f"c14 class={name} baseline_bytes=unknown"
+        try:
+            import job_receipt
+            rec = job_receipt.get_last_receipt(f"govern_{name}", str(state))
+        except (ImportError, OSError, ValueError, TypeError): rec = None
+        if not rec:
+            lines.append(line + " receipt=missing"); continue
+        post = rec.get("postcondition") if isinstance(rec.get("postcondition"), dict) else {}
+        cand = rec.get("candidates") if isinstance(rec.get("candidates"), dict) else {}
+        df, freed, removed = _int_or_none(post.get("df_delta_bytes")), _int_or_none(post.get("freed_bytes")), _int_or_none(cand.get("removed_count"))
+        status = post.get("c14_ledger_status") if isinstance(post.get("c14_ledger_status"), str) else "absent"
+        kept = post.get("c14_kept_bytes") if isinstance(post.get("c14_kept_bytes"), dict) else {}
+        kept_str = ",".join(f"{k}:{_int_or_none(v)}" for k, v in sorted(kept.items()) if _int_or_none(v) is not None) or "none"
+        lines.append(line + f" receipt={rec.get('outcome', 'unknown')}"
+                     f" removed_count={removed if removed is not None else 'unknown'}"
+                     f" freed_bytes={freed if freed is not None else 'unknown'}"
+                     f" df_reclaimed_bytes={df if df is not None else 'unknown'}"
+                     f" ledger_status={status} c14_kept_bytes={kept_str}")
+    return lines
 def alerts(state, now, margin_gb=None):
     if margin_gb is None:
         try: margin_gb = json.loads(Path(__import__("resolve_config").resolve()).read_text())["budgets"]["concurrency_margin_gb"]
@@ -48,7 +88,12 @@ def alerts(state, now, margin_gb=None):
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) != ["status"]:
         return print("usage: diskm budget status", file=sys.stderr) or 2
-    lines = alerts(Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")), time.time())
-    return print("\n".join(lines or ["no_alerts"])) or (1 if raised(lines) else 0)
+    state = Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"))
+    lines = alerts(state, time.time())
+    acct = accounting(state)
+    out = "\n".join(lines or ["no_alerts"])
+    if acct: out += "\n" + "\n".join(acct)
+    print(out)
+    return 1 if raised(lines) else 0
 if __name__ == "__main__":
     sys.exit(main())

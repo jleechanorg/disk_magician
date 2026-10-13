@@ -63,6 +63,10 @@ JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 # receipt folding only sums those producer rows: it never infers reclaimed
 # bytes or removals, and an absent ledger leaves receipts byte-compatible.
 C14_LEDGER_ENV = "DISK_MAGICIAN_C14_LEDGER"
+# A shared per-run ledger is folded by exactly one owning receipt. The govern
+# wrapper and nested adapters inherit the path but are given a different owner,
+# so the same producer rows are never counted into two terminal receipts.
+C14_LEDGER_OWNER_ENV = "DISK_MAGICIAN_C14_LEDGER_OWNER"
 MAX_C14_LEDGER_BYTES = 1024 * 1024
 
 C14_LEDGER_STATUS_OK = "ok"
@@ -586,9 +590,12 @@ class JobReceiptStore:
                     post["df_delta_bytes"] = None
                     outcome, reason = "error", "null_df_delta"
 
-                c14_post = fold_c14_ledger(os.environ.get(C14_LEDGER_ENV))
-                if c14_post is not None:
-                    post.update(c14_post)
+                c14_env = os.environ.get(C14_LEDGER_ENV)
+                c14_owner = os.environ.get(C14_LEDGER_OWNER_ENV)
+                if c14_env and (not c14_owner or c14_owner == job):
+                    c14_post = fold_c14_ledger(c14_env)
+                    if c14_post is not None:
+                        post.update(c14_post)
 
                 identity_info = (
                     matching_active.get("identity")

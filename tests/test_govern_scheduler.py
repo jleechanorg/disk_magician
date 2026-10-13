@@ -177,6 +177,49 @@ class GovernSchedulerTest(unittest.TestCase):
             self.assertEqual(wrapped["outcome"], "blocked_safety")
             self.assertEqual(wrapped["reason"], "live-owner")
 
+    def test_govern_wrapper_copies_adapter_c14_bytes_without_double_counting(self):
+        import subprocess
+        import job_receipt
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="govern-c14-") as tmp:
+            state = Path(tmp)
+            inv = state / "inv.json"
+            inv.write_text(json.dumps([{"type": "file", "size": 1300}]))
+            ledger = state / "adapter-ledger.jsonl"
+            subprocess.run([sys.executable, str(root / "scripts" / "c14_probe.py"), "account",
+                            str(inv), str(ledger), "unproven-content"], check=True, capture_output=True)
+            store = job_receipt.JobReceiptStore(state_dir=tmp)
+            run = store.begin("cleanup_codex_db", trigger="act")
+            saved = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+            os.environ["DISK_MAGICIAN_C14_LEDGER"] = str(ledger)
+            try:
+                adapter = store.finish("cleanup_codex_db", run_id=run, outcome="success",
+                                       candidates={"removed_count": 1, "deferred_count": 0,
+                                                   "interrupted_count": 0},
+                                       postcondition={"df_delta_bytes": 0, "freed_bytes": 0})
+            finally:
+                if saved is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+                else: os.environ["DISK_MAGICIAN_C14_LEDGER"] = saved
+            self.assertEqual(adapter["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+            # Govern still holds the shared per-class ledger; it must copy the
+            # adapter's folded bytes, not re-fold them (which would double to 2600).
+            saved = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+            saved_owner = os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+            os.environ["DISK_MAGICIAN_C14_LEDGER"] = str(ledger)
+            os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = "cleanup_codex_db"
+            try:
+                metrics = disk_budget._write_govern_receipt(
+                    state, "claude_codex_state",
+                    {"rc": 0, "hard_stop": False, "orphan_survivors": False}, 100, 100, adapter)
+            finally:
+                if saved is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+                else: os.environ["DISK_MAGICIAN_C14_LEDGER"] = saved
+                if saved_owner is not None: os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = saved_owner
+            self.assertEqual(metrics["outcome"], "success")
+            wrapped = disk_budget._receipt_data(state, "govern_claude_codex_state")
+            self.assertEqual(wrapped["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+            self.assertEqual(wrapped["postcondition"]["c14_ledger_status"], "ok")
+
     def test_three_tick_deferred_actuator_gets_exclusive_300_second_slice(self):
         schedule = {"classes": {"stuck": {"deferred_ticks": 3}}}
         row, _ = disk_budget.next_actuator(

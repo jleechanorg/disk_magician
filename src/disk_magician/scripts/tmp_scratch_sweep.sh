@@ -38,6 +38,10 @@ RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job tmp_scratch_sweep --trigg
 }
 
 CHILD_TRIGGER="tmp_scratch_sweep:${RECEIPT_RUN_ID}"
+# This run owns the shared C14 ledger; the nested cleanup_tmp receipt inherits
+# the path but a different owner, so it cannot double-count the same kept bytes.
+: "${DISK_MAGICIAN_C14_LEDGER_OWNER:=tmp_scratch_sweep}"
+export DISK_MAGICIAN_C14_LEDGER_OWNER
 OLD_CHILD_ID="$(python3 "$RECEIPT_HELPER" read --job cleanup_tmp --last 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x.get("id", "") if x else "")' 2>/dev/null || true)"
 run_cleanup_tmp() {
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then

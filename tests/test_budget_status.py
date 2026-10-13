@@ -134,5 +134,76 @@ class DiskStatusAlertsTest(unittest.TestCase):
             self.assertTrue(json.loads(buf.getvalue())["alerts"][0].startswith("ALERT:govern_stale"))
 
 
+class C14AccountingTest(unittest.TestCase):
+    """Real c14_probe account -> canonical terminal receipt -> budget status output."""
+
+    def _account(self, state, name, entries, reason):
+        inv = state / f"{name}-inv.json"
+        inv.write_text(json.dumps(entries))
+        ledger = state / f"{name}.jsonl"
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "c14_probe.py"),
+                        "account", str(inv), str(ledger), reason], check=True, capture_output=True)
+        return ledger
+
+    def _govern_receipt(self, state, class_name, ledger):
+        import job_receipt
+        store = job_receipt.JobReceiptStore(state_dir=str(state))
+        saved = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+        saved_owner = os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = str(ledger)
+        try:
+            rid = store.begin(f"govern_{class_name}", trigger="act")
+            store.finish(f"govern_{class_name}", rid, "success",
+                         candidates={"removed_count": 2, "deferred_count": 0, "interrupted_count": 0},
+                         postcondition={"df_delta_bytes": 0, "freed_bytes": 0})
+        finally:
+            if saved is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+            else: os.environ["DISK_MAGICIAN_C14_LEDGER"] = saved
+            if saved_owner is not None: os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = saved_owner
+
+    def test_real_producer_receipts_stay_isolated_per_class_and_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            a1 = self._account(state, "alpha1", [{"type": "file", "size": 1300},
+                                                 {"type": "symlink", "size": 7}], "unproven-content")
+            b = self._account(state, "beta", [{"type": "file", "size": 4096}], "not-pushed")
+            self._govern_receipt(state, "alpha", a1)
+            self._govern_receipt(state, "beta", b)
+            a2 = self._account(state, "alpha2", [{"type": "file", "size": 512}], "secret-like")
+            self._govern_receipt(state, "alpha", a2)  # second run replaces, never accumulates
+            out = subprocess.run([sys.executable, str(ROOT / "scripts" / "budget_status.py"), "status"],
+                                 env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)},
+                                 capture_output=True, text=True)
+            self.assertIn(out.returncode, (0, 1), out.stderr)
+            alpha_line = next(l for l in out.stdout.splitlines() if "class=alpha " in l)
+            beta_line = next(l for l in out.stdout.splitlines() if "class=beta " in l)
+            self.assertIn("baseline_bytes=unknown", alpha_line)
+            self.assertIn("ledger_status=ok", alpha_line)
+            self.assertIn("c14_kept_bytes=secret-like:512", alpha_line)
+            self.assertNotIn("unproven-content", alpha_line)
+            self.assertNotIn("not-pushed", alpha_line)
+            self.assertIn("removed_count=2", alpha_line)
+            self.assertIn("freed_bytes=0", alpha_line)
+            self.assertIn("df_reclaimed_bytes=0", alpha_line)
+            self.assertIn("c14_kept_bytes=not-pushed:4096", beta_line)
+            self.assertNotIn("secret-like", beta_line)
+            self.assertNotIn("unproven-content", beta_line)
+
+    def test_accounting_reports_missing_receipt_without_fabricating_a_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            cfg = state / "config.json"
+            cfg.write_text(json.dumps({"budgets": {"classes": {"alpha": {}}}}))
+            saved = os.environ.get("DISK_MAGICIAN_CONFIG")
+            os.environ["DISK_MAGICIAN_CONFIG"] = str(cfg)
+            try:
+                line = next(l for l in bs.accounting(state) if "class=alpha" in l)
+            finally:
+                if saved is None: os.environ.pop("DISK_MAGICIAN_CONFIG", None)
+                else: os.environ["DISK_MAGICIAN_CONFIG"] = saved
+            self.assertIn("baseline_bytes=unknown", line)
+            self.assertIn("receipt=missing", line)
+
+
 if __name__ == "__main__":
     unittest.main()

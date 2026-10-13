@@ -638,12 +638,16 @@ class TestC14KeptBytes(unittest.TestCase):
         self.ledger = os.path.join(self.test_dir, "c14-ledger.jsonl")
         self.store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
         self._saved_ledger_env = os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+        self._saved_owner_env = os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
         os.environ["DISK_MAGICIAN_STATE_DIR"] = self.state_dir
 
     def tearDown(self):
         os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+        os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
         if self._saved_ledger_env is not None:
             os.environ["DISK_MAGICIAN_C14_LEDGER"] = self._saved_ledger_env
+        if self._saved_owner_env is not None:
+            os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = self._saved_owner_env
         os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
@@ -738,6 +742,28 @@ class TestC14KeptBytes(unittest.TestCase):
         self.assertEqual(rec["postcondition"]["c14_ledger_status"], "error")
         self.assertEqual(rec["outcome"], "success_noop")
         self.assertIsNotNone(self.store.read("cleanup_tmp")["last_terminal"])
+
+    def test_owner_matching_job_folds_the_per_run_ledger(self):
+        self._write_rows([{"at": 1, "reason": "unproven-content", "bytes": 1300}])
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+        os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = "cleanup_tmp"
+        rec = self._finish()
+        self.assertEqual(rec["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+        self.assertEqual(rec["postcondition"]["c14_ledger_status"], "ok")
+
+    def test_non_owning_nested_receipt_does_not_fold_the_shared_ledger(self):
+        # A tmp_scratch_sweep run owns the ledger; its nested cleanup_tmp receipt
+        # must not re-count the same producer rows.
+        self._write_rows([{"at": 1, "reason": "unproven-content", "bytes": 1300}])
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+        os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = "tmp_scratch_sweep"
+        nested = self._finish()
+        self.assertNotIn("c14_kept_bytes", nested["postcondition"])
+        self.assertNotIn("c14_ledger_status", nested["postcondition"])
+        # The owner (same ledger) folds it exactly once.
+        rid = self.store.begin("tmp_scratch_sweep")
+        owned = self.store.finish("tmp_scratch_sweep", rid, "success_noop")
+        self.assertEqual(owned["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
 
 
 if __name__ == "__main__":

@@ -345,12 +345,30 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
     post = {"df_delta_bytes": delta, "freed_bytes": max(0, delta) if delta is not None else None,
             "free_bytes_before": before, "free_bytes_after": after,
             "hard_stop": result["hard_stop"], "orphan_survivors": result["orphan_survivors"]}
+    # The govern wrapper copies the owning adapter's already-folded C14 fields;
+    # it must not fold the shared ledger a second time.
+    adapter_post = actuator_receipt.get("postcondition", {}) if isinstance(actuator_receipt, dict) else {}
+    if isinstance(adapter_post, dict):
+        kept = adapter_post.get("c14_kept_bytes")
+        if isinstance(kept, dict) and all(
+                isinstance(k, str) and k and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                for k, v in kept.items()):
+            post["c14_kept_bytes"] = kept
+        ledger_status = adapter_post.get("c14_ledger_status")
+        if isinstance(ledger_status, str) and ledger_status:
+            post["c14_ledger_status"] = ledger_status
     import job_receipt
     store = job_receipt.JobReceiptStore(state_dir=str(state))
     run_id = store.begin(f"govern_{class_name}", trigger="act")
-    store.finish(f"govern_{class_name}", run_id=run_id, outcome=outcome, reason=reason,
-                 candidates={"removed_count": removed, "deferred_count": deferred,
-                             "interrupted_count": interrupted}, postcondition=post)
+    saved_ledger = os.environ.pop(job_receipt.C14_LEDGER_ENV, None)
+    saved_owner = os.environ.pop(job_receipt.C14_LEDGER_OWNER_ENV, None)
+    try:
+        store.finish(f"govern_{class_name}", run_id=run_id, outcome=outcome, reason=reason,
+                     candidates={"removed_count": removed, "deferred_count": deferred,
+                                 "interrupted_count": interrupted}, postcondition=post)
+    finally:
+        if saved_ledger is not None: os.environ[job_receipt.C14_LEDGER_ENV] = saved_ledger
+        if saved_owner is not None: os.environ[job_receipt.C14_LEDGER_OWNER_ENV] = saved_owner
     return {"outcome": outcome, "reason": reason, "df_delta_bytes": delta,
             "removed_count": removed, "deferred_count": deferred,
             "interrupted_count": interrupted}
@@ -418,17 +436,30 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
         before = _df_free_bytes(state)
         prior = _receipt_data(state, row["job"])
         old_trigger = os.environ.get("DISK_MAGICIAN_ACTUATOR_TRIGGER")
+        old_ledger = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
+        old_owner = os.environ.get("DISK_MAGICIAN_C14_LEDGER_OWNER")
+        c14_ledger = Path(state) / f"c14_{row['class']}_{os.getpid()}_{uuid.uuid4().hex}.jsonl"
         if row["kind"] == "atomic":
             os.environ["DISK_MAGICIAN_ACTUATOR_TRIGGER"] = "act"
+        # One C14 kept-byte ledger per class run. Only the owning top-level adapter
+        # folds it, so nested adapters and the govern receipt cannot double count.
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = str(c14_ledger)
+        os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = row["job"]
         try:
             result = supervise_actuator(command, row["slice_end"])
         finally:
             if old_trigger is None: os.environ.pop("DISK_MAGICIAN_ACTUATOR_TRIGGER", None)
             else: os.environ["DISK_MAGICIAN_ACTUATOR_TRIGGER"] = old_trigger
+            if old_ledger is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+            else: os.environ["DISK_MAGICIAN_C14_LEDGER"] = old_ledger
+            if old_owner is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+            else: os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = old_owner
         after = _df_free_bytes(state)
         current = _receipt_data(state, row["job"])
         adapter_receipt = current if current.get("id") != prior.get("id") else {}
         metrics = _write_govern_receipt(state, row["class"], result, before, after, adapter_receipt)
+        try: c14_ledger.unlink()
+        except OSError: pass
         completed = (metrics["outcome"] in {"success", "success_noop"}
                      and metrics["deferred_count"] == 0
                      and metrics["interrupted_count"] == 0
