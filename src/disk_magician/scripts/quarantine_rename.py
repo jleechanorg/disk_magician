@@ -310,10 +310,14 @@ def tree_still_quarantined(location_guard):
     pfd, qfd, qid, qstat, rootstat = location_guard
     return same_entry(pfd, ".dm-quarantine", qstat) and same_entry(qfd, qid, rootstat)
 
+def tree_ancestry_still_quarantined(location_guard, ancestors):
+    if not tree_still_quarantined(location_guard): return False
+    return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
+
 def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
-                           location_guard=None, root_label=""):
+                           location_guard=None, root_label="", ancestors=()):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
-    if location_guard is not None and not tree_still_quarantined(location_guard): return False
+    if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
     if deadline is not None and time.monotonic() >= deadline: return False
     try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError: return rel != "."  # the root's absence is ambiguous until root_removed is durable
@@ -328,18 +332,23 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             opened = os.fstat(child_fd)
             if (entry_kind(opened), opened.st_dev, opened.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
+            child_ancestors = ancestors + ((parent_fd, name, opened),)
             if rel == ".":
                 hook("DISK_MAGICIAN_TEST_AFTER_ROOT_OPEN", root_label, "")
-                if location_guard is not None and not tree_still_quarantined(location_guard): return False
+                if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, child_ancestors): return False
+            else:
+                child_path = os.path.join(root_label, rel)
+                hook("DISK_MAGICIAN_TEST_AFTER_CHILD_OPEN", child_path, "")
+                if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, child_ancestors): return False
             ok = True
             for child_name, child_rel in children.get(rel, []):
                 if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children,
-                                              deadline, location_guard, root_label):
+                                              deadline, location_guard, root_label, child_ancestors):
                     ok = False
             if not ok: return False
         finally: os.close(child_fd)
         try:
-            if location_guard is not None and not tree_still_quarantined(location_guard): return False
+            if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if (entry_kind(current), current.st_dev, current.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
@@ -372,7 +381,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         if target != expected.get("target"): return False
     else: return False
     try:
-        if location_guard is not None and not tree_still_quarantined(location_guard): return False
+        if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (entry_kind(current), current.st_dev, current.st_ino) != (kind, expected.get("dev"), expected.get("ino")):
             return False

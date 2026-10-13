@@ -60,10 +60,10 @@ artifact_removal_verdict() {
 }
 
 N=0 ACTIVE_STATE=""
-fixture() {  # fresh parent/art with a published report.md (version A), a subdir and a symlink
+fixture() {  # fresh parent/art with a report, nested files and a symlink
   N=$((N+1)); A="$TMP/p$N/art"; Q="$TMP/p$N/.dm-quarantine"
   export DISK_MAGICIAN_STATE_DIR="${ACTIVE_STATE:-$TMP/state-$N}"; mkdir -p "$DISK_MAGICIAN_STATE_DIR"
-  mkdir -p "$A/sub"; printf 'AAAA' > "$A/report.md"; echo x > "$A/sub/x.txt"; ln -s report.md "$A/link"
+  mkdir -p "$A/sub/deep"; printf 'AAAA' > "$A/report.md"; echo x > "$A/sub/x.txt"; echo y > "$A/sub/deep/y.txt"; ln -s report.md "$A/link"
 }
 OUT=""
 run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
@@ -340,6 +340,16 @@ check 'root-removed marker crash: payload is gone but sidecar remains valid and 
 prepare_quarantine; MOVED="$TMP/moved-after-open-$QID"
 RECON="$(env DISK_MAGICIAN_TEST_AFTER_ROOT_OPEN="mv \"\$DM_Q_PATH\" '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
 check 'root moved after open: deletion stops and recovery records remain' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2/report.md" && "$(cat "$2/report.md")" == AAAA && -f "$3/$4.json" && -f "$5/quarantine-index/$4.json" ]]' _ "$RECON" "$MOVED" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
+
+# A child directory moved after open must not be recursively deleted via its stale descriptor.
+prepare_quarantine; MOVED="$TMP/moved-child-after-open-$QID"
+RECON="$(env DISK_MAGICIAN_TEST_AFTER_CHILD_OPEN="[[ \"\$DM_Q_PATH\" == */sub ]] && mv \"\$DM_Q_PATH\" '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'child moved after open: payload and recovery records remain' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2/x.txt" && -f "$2/deep/y.txt" && -f "$3/$4.json" && -f "$5/quarantine-index/$4.json" ]]' _ "$RECON" "$MOVED" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
+
+# The same ancestry check applies to a deeper directory opened below a child.
+prepare_quarantine; MOVED="$TMP/moved-deep-after-open-$QID"
+RECON="$(env DISK_MAGICIAN_TEST_AFTER_CHILD_OPEN="[[ \"\$DM_Q_PATH\" == */sub/deep ]] && mv \"\$DM_Q_PATH\" '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'deep child moved after open: its payload and recovery records remain' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2/y.txt" && -f "$3/$4.json" && -f "$5/quarantine-index/$4.json" ]]' _ "$RECON" "$MOVED" "$Q" "$QID" "$DISK_MAGICIAN_STATE_DIR"
 ACTIVE_STATE=""
 
 echo "quarantine: $PASS passed, $FAIL failed"
