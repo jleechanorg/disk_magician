@@ -184,23 +184,56 @@ cat > "$FBVIS/gh" <<'EOF12'
 #!/usr/bin/env bash
 case "$1 $2" in
   "auth status") exit 0 ;;
-  "repo view") echo "public" ;;
+  "api repos/"*)
+    cat "$(dirname "$0")/visibility"
+    [[ ! -f "$(dirname "$0")/api-fail" ]] ;;
+  "repo view") exit 1 ;; # GraphQL quota exhausted
   *) exit 0 ;;
 esac
 EOF12
 chmod +x "$FBVIS/gh"
+echo public > "$FBVIS/visibility"
 run_sr "$HVIS" - init >/dev/null 2>&1
 SDVIS="$HVIS/.local/state/disk-magician"
 # wire a github.com origin so the visibility guard engages
 git -C "$SDVIS" remote add origin https://github.com/jleechan2015/disk-magician-state-h12.git 2>/dev/null ||   git -C "$SDVIS" remote set-url origin https://github.com/jleechan2015/disk-magician-state-h12.git
 OUTVIS=$(env -i HOME="$HVIS" PATH="$FBVIS:/usr/bin:/bin" bash "$SR" push 2>&1); RCVIS=$?
 [[ $RCVIS -ne 0 ]] && ok "public-origin push refused (nonzero)" || bad "public refused" "rc=0: $OUTVIS"
-echo "$OUTVIS" | grep -qi "public\|private\|visibility" && ok "explains the visibility refusal" || bad "visibility message" "$OUTVIS"
+echo "$OUTVIS" | grep -q 'public visibility (public)' && ok "explains the public visibility refusal" || bad "visibility message" "$OUTVIS"
 
 echo "Test 13: DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 overrides the public refusal"
 OUTVISB=$(env -i HOME="$HVIS" PATH="$FBVIS:/usr/bin:/bin" DISK_MAGICIAN_ALLOW_PUBLIC_STATE=1 bash "$SR" push 2>&1); RCVISB=$?
 # origin is a bogus URL so the actual push fails, but it must get PAST the visibility guard
 echo "$OUTVISB" | grep -qi "public visibility refused\|refusing.*public" && bad "override bypasses guard" "still blocked: $OUTVISB" || ok "override bypasses the visibility guard"
+
+echo "Test 13b: REST visibility works with exhausted GraphQL quota and fails closed"
+# Stop at the next guard without contacting GitHub or publishing fixture data.
+cat > "$FBVIS/git" <<'EOFGIT'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in fetch|ls-remote|push) exit 1 ;; esac
+done
+exec /usr/bin/git "$@"
+EOFGIT
+chmod +x "$FBVIS/git"
+echo private > "$FBVIS/visibility"
+OUTPRIVATE=$(run_sr "$HVIS" "$FBVIS" push 2>&1); RCPRIVATE=$?
+[[ $RCPRIVATE -ne 0 ]] && echo "$OUTPRIVATE" | grep -q 'could not verify origin/' \
+  && ok "REST-private passes visibility despite GraphQL failure" \
+  || bad "REST-private reaches remote guard" "$OUTPRIVATE"
+touch "$FBVIS/api-fail"
+OUTERROR=$(run_sr "$HVIS" "$FBVIS" push 2>&1); RCERROR=$?
+[[ $RCERROR -ne 0 ]] && echo "$OUTERROR" | grep -q 'could not confirm .* is private' \
+  && ok "failed REST command cannot approve private stdout" || bad "REST command error" "$OUTERROR"
+rm "$FBVIS/api-fail"
+: > "$FBVIS/visibility"
+OUTUNKNOWN=$(run_sr "$HVIS" "$FBVIS" push 2>&1); RCUNKNOWN=$?
+[[ $RCUNKNOWN -ne 0 ]] && echo "$OUTUNKNOWN" | grep -q 'could not confirm .* is private' \
+  && ok "empty REST response fails closed" || bad "empty visibility" "$OUTUNKNOWN"
+echo malformed > "$FBVIS/visibility"
+OUTINVALID=$(run_sr "$HVIS" "$FBVIS" push 2>&1); RCINVALID=$?
+[[ $RCINVALID -ne 0 ]] && echo "$OUTINVALID" | grep -q 'refusing to push disk state' \
+  && ok "unrecognized REST visibility fails closed" || bad "malformed visibility" "$OUTINVALID"
 
 echo "Test 14: non-github origin skips the visibility check (local bare remote pushes fine)"
 HVIS2="$TMP_ROOT/hvis2"; mkdir -p "$HVIS2"
