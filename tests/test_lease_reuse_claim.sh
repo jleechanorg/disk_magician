@@ -81,8 +81,15 @@ if command -v ps >/dev/null 2>&1 && ps -p $$ -o pid= >/dev/null 2>&1; then
         ep_="$(_lease_lstart_to_epoch "$ts_" 2>/dev/null)" && [[ "$ep_" =~ ^-?[0-9]+$ ]] && ps_ok=1
 fi
 if (( ps_ok == 0 )); then
-    echo "skip - live-process candidate-binding cases (ps unavailable in this sandbox)"
-else
+    if [[ "${LEASE_CLAIM_ALLOW_PS_SKIP:-0}" == "1" ]]; then
+        echo "skip - live-process candidate-binding cases (ps/lstart unavailable; explicit LEASE_CLAIM_ALLOW_PS_SKIP=1)"
+        echo "RESULT: SKIP ($0)"
+        exit 0
+    fi
+    echo "FAIL - live-process candidate-binding cases could not run: ps/lstart unavailable in this sandbox"
+    echo "RESULT: FAIL (ps unavailable)"
+    exit 1
+fi
     cand="$TMP/candidate-live"
     mkdir -p "$cand"
     claim="$TMP/claim-live.json"
@@ -117,7 +124,6 @@ PY
     [[ "$(lease_owner_state_for "$TMP/claim-noprev.json" "$own" "$cand")" == alive ]] \
         && ok "pending claim without previous_lease proof is not exempted" \
         || bad "pending claim without rollback proof leaked an exemption"
-fi
 
 echo
 if (( fail == 0 )); then

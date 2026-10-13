@@ -24,9 +24,22 @@ case "$*" in
   *) echo "unexpected docker args: $*" >&2; exit 2 ;;
 esac
 SH
-chmod +x "$BIN/docker"
-HOME="$HOME_DIR" PATH="$BIN:$PATH" DISK_MAGICIAN_STATE_DIR="$STATE" \
-  DISK_MAGICIAN_ACTUATOR_TRIGGER=act bash "$ROOT/scripts/cleanup_colima.sh" --clean >/dev/null
+# Hermetic backends: never let an ambient Colima/limactl/ssh touch the real VM.
+cat > "$BIN/colima" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$BIN/limactl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$BIN/ssh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$BIN/docker" "$BIN/colima" "$BIN/limactl" "$BIN/ssh"
+env -i HOME="$HOME_DIR" PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" DISK_MAGICIAN_STATE_DIR="$STATE" \
+  DISK_MAGICIAN_ACTUATOR_TRIGGER=act /bin/bash "$ROOT/scripts/cleanup_colima.sh" --clean >/dev/null
 python3 - "$STATE/receipts/cleanup_colima.json" <<'PY'
 import json,sys
 receipt=json.load(open(sys.argv[1]))['last_terminal']

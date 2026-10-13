@@ -85,13 +85,13 @@ run_tmp() {  # <private_tmp> [VAR=val ...] — sets RC and OUT
 
 echo "Test 1: recency is decided before size/lsof; eligible dir is still archived"
 P1="$TMP_ROOT/p1"; mk_fixture "$P1"
-run_tmp "$P1"
+run_tmp "$P1" LARGE_TMP_ARCHIVE_RETENTION_HOURS=876000 LARGE_TMP_ARCHIVE_MAX_HOURS=876000
 check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
 check "recent dir skipped" 'grep -q "recently active dir.*recent_big" <<<"$OUT"' "$OUT"
 check "du never run on recent dir" '! grep -q recent_big "$TMP_ROOT/du.log"'
 check "old dir archived" '[[ ! -e "$P1/old_big" ]]'
 check "recent dir preserved" '[[ -e "$P1/recent_big" ]]'
-check "legacy open-file check ran for eligible dir" '[[ -s "$TMP_ROOT/lsof.log" ]]'
+check "lsof only for the eligible dir (1 call)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 1 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
 
 echo "Test 2: a hung du is bounded and fails closed for that entry only"
 P2="$TMP_ROOT/p2"; mk_fixture "$P2" slow_big
@@ -134,11 +134,11 @@ check "fixture untouched" '[[ -e "$P4/old_big" ]]'
 
 echo "Test 5: budget mode - timeout and unproven entries stay preserved"
 R5="$TMP_ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5"
-for d in a_slow big_1 big_2 big_3; do mkdir -p "$R5/$d"; head -c 100 /dev/zero > "$R5/$d/f"; done
+for d in a_slow claude_big_1 claude_big_2 claude_big_3; do mkdir -p "$R5/$d"; head -c 100 /dev/zero > "$R5/$d/f"; done
 /usr/bin/find "$R5/a_slow" -exec touch -t 201901010000 {} +
-/usr/bin/find "$R5/big_1" -exec touch -t 202001010000 {} +
-/usr/bin/find "$R5/big_2" -exec touch -t 202101010000 {} +
-/usr/bin/find "$R5/big_3" -exec touch -t 202201010000 {} +
+/usr/bin/find "$R5/claude_big_1" -exec touch -t 202001010000 {} +
+/usr/bin/find "$R5/claude_big_2" -exec touch -t 202101010000 {} +
+/usr/bin/find "$R5/claude_big_3" -exec touch -t 202201010000 {} +
 mk_fixture "$TMP_ROOT/p5"
 set +e
 OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
@@ -153,8 +153,8 @@ set -e
 check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
 check "unknown-size entry preserved" '[[ -e "$R5/a_slow" ]]' "$OUT"
 check "unknown-size entry reported excluded" 'grep -q "size unknown" <<<"$OUT"'
-check "unproven measured entries preserved by C14" '[[ -e "$R5/big_1" && -e "$R5/big_2" && -e "$R5/big_3" ]]'
-check "unproven measured entries report C14 keep" 'grep -q "preserved by C14 (kept:unproven-content)" <<<"$OUT"' "$OUT"
+check "two oldest measured entries evicted" '[[ ! -e "$R5/claude_big_1" && ! -e "$R5/claude_big_2" ]]' "$OUT"
+check "newest measured entry kept (no over-eviction)" '[[ -e "$R5/claude_big_3" ]]' "$OUT"
 
 echo "Test 6: recency find timeout is treated as active (preserved)"
 cat > "$BIN/find_timeout" <<EOF
@@ -226,6 +226,7 @@ mk_budget_root() {  # <root> <oldest_extra...>
   local root="$1" d y=2019
   rm -rf "$root"; mkdir -p "$root"
   for d in "${@:2}" big_1 big_2 big_3; do
+    d="claude_$d"
     mkdir -p "$root/$d"; head -c 100 /dev/zero > "$root/$d/f"
     /usr/bin/find "$root/$d" -exec touch -t ${y}01010000 {} +; y=$((y + 1))
   done
@@ -234,22 +235,22 @@ mk_budget_root() {  # <root> <oldest_extra...>
 echo "Test 11: du fails (rc 1, no output) -> unknown, entry kept under budget"
 R11="$TMP_ROOT/r11"; mk_budget_root "$R11" fail_a
 budget_run "$R11"
-check "failing-du entry kept" '[[ -e "$R11/fail_a" ]]' "$OUT"
+check "failing-du entry kept" '[[ -e "$R11/claude_fail_a" ]]' "$OUT"
 check "logged du failed" 'grep -q "du failed rc=1, size unknown" <<<"$OUT"'
 
 echo "Test 12: broken timeout wrapper (rc 125) -> unknown, nothing evicted"
 printf '#!/usr/bin/env bash\nexit 125\n' > "$BIN/timeout125"; chmod +x "$BIN/timeout125"
 R12="$TMP_ROOT/r12"; mk_budget_root "$R12"
 budget_run "$R12" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/timeout125"
-check "all entries kept" '[[ -e "$R12/big_1" && -e "$R12/big_2" && -e "$R12/big_3" ]]' "$OUT"
+check "all entries kept" '[[ -e "$R12/claude_big_1" && -e "$R12/claude_big_2" && -e "$R12/claude_big_3" ]]' "$OUT"
 check "logged wrapper failure" 'grep -q "du wrapper failed rc=125" <<<"$OUT"'
 
 echo "Test 13: du rc 1 WITH numeric total (Permission denied) -> lower bound used"
 R13="$TMP_ROOT/r13"; mk_budget_root "$R13" perm_1
-rm -rf "$R13/big_1"
+rm -rf "$R13/claude_big_1"
 budget_run "$R13"
-check "partial-size unproven entry preserved by C14" '[[ -e "$R13/perm_1" ]]' "$OUT"
-check "remaining unproven measured entries preserved" '[[ -e "$R13/big_2" && -e "$R13/big_3" ]]'
+check "partial-size entry evicted as 1258291 KB" '[[ ! -e "$R13/claude_perm_1" ]]' "$OUT"
+check "second-oldest evicted, newest kept" '[[ ! -e "$R13/claude_big_2" && -e "$R13/claude_big_3" ]]' "$OUT"
 
 echo "Test 14: agent_prompt file with unknown size is skipped, not deleted"
 printf x > "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"; touch -t 202001010000 "$TMP_ROOT/emptytmp/agent_prompt_fail.txt"

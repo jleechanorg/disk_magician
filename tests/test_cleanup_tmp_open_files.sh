@@ -337,13 +337,32 @@ touch "$T4_ARCHIVE/20200101T000000Z/app/payload.bin"
 set_old_mtime "$T4_ARCHIVE/20200101T000000Z"
 make_find_shim "$T4_BIN" "$T4_PRIVATE_TMP" "$T4_TMP"
 make_fake_timeout "$T4_BIN/timeout"
-T4_CANON=$(cd "$T4_ARCHIVE/20200101T000000Z" && pwd -P)
+T4_CANON=$(cd "$T4_ARCHIVE/20200101T000000Z/app" && pwd -P)
 # 4a: Prefix collision: file in "${T4_CANON}_other/file.txt" must NOT match "${T4_CANON}"
 cat > "$T4_BIN/lsof" <<EOF
 #!/usr/bin/env bash
+# C14 open-file probe starts with -w: no matching descriptor => closed.
+if [[ "\${1:-}" == "-w" ]]; then exit 1; fi
+# Live-cwd probe must return a well-formed non-candidate cwd record.
+if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1234"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
+for arg in "\$@"; do
+  if [[ "\$arg" == *"+D"* || "\$arg" == "+D" ]]; then
+    echo "ERROR: +D is forbidden: \$*" >&2
+    exit 99
+  fi
+done
+if [[ "\$*" != "+w -n -P -F fnt" ]]; then
+  echo "ERROR: unexpected flags: \$*" >&2
+  exit 98
+fi
+# Prefix collision: candidate path is prefix but not slash-delimited
 echo "p3333"
 echo "f4"
-# Prefix collision: candidate path is prefix but not slash-delimited
 echo "n${T4_CANON}_collision_extra/sub/file.txt"
 exit 0
 EOF
@@ -361,15 +380,29 @@ run_capture "$T4_OUT" env -i HOME="$TMP_ROOT/t4-home" \
 T4_RC=$?
 T4_OUT_CONTENT=$(cat "$T4_OUT")
 assert_rc "Test 4a: exits 0" 0 "$T4_RC"
-assert_exists "Test 4a: prefix collision does not cause an open-file keep" "$T4_ARCHIVE/20200101T000000Z/app"
-assert_contains "Test 4a: candidate is kept by C14 provenance" "C14 kept:open-file" "$T4_OUT_CONTENT"
+assert_exists "Test 4a: prefix-collision candidate is not protected by the open-file check" "$T4_ARCHIVE/20200101T000000Z/app"
+assert_not_contains "Test 4a: prefix collision did not count as an open file" "Skipping in-use aged archive" "$T4_OUT_CONTENT"
+assert_not_contains "Test 4a: C14 open-file probe did not match the collision" "C14 kept:open-file" "$T4_OUT_CONTENT"
+assert_contains "Test 4a: candidate reaches C14 provenance (unproven receipt)" "C14 kept:unproven-content" "$T4_OUT_CONTENT"
 # 4b: Exact directory match protects candidate
 mkdir -p "$T4_ARCHIVE/20200102T000000Z/app"
 touch "$T4_ARCHIVE/20200102T000000Z/app/payload.bin"
 set_old_mtime "$T4_ARCHIVE/20200102T000000Z"
-T4B_CANON=$(cd "$T4_ARCHIVE/20200102T000000Z" && pwd -P)
+T4B_CANON=$(cd "$T4_ARCHIVE/20200102T000000Z/app" && pwd -P)
 cat > "$T4_BIN/lsof" <<EOF
 #!/usr/bin/env bash
+# C14 open-file probe starts with -w: no matching descriptor => closed.
+if [[ "\${1:-}" == "-w" ]]; then exit 1; fi
+for arg in "\$@"; do
+  if [[ "\$arg" == *"+D"* || "\$arg" == "+D" ]]; then
+    echo "ERROR: +D is forbidden: \$*" >&2
+    exit 99
+  fi
+done
+if [[ "\$*" != "+w -n -P -F fnt" ]]; then
+  echo "ERROR: unexpected flags: \$*" >&2
+  exit 98
+fi
 echo "p4444"
 echo "fcwd"
 # Exact directory match (e.g. cwd of process)
@@ -391,7 +424,8 @@ T4B_RC=$?
 T4B_OUT_CONTENT=$(cat "$T4_OUT")
 assert_rc "Test 4b: exits 0" 0 "$T4B_RC"
 assert_exists "Test 4b: exact dir match preserves archive" "$T4_ARCHIVE/20200102T000000Z"
-assert_contains "Test 4b: C14 independently keeps open content" "C14 kept:open-file" "$T4B_OUT_CONTENT"
+assert_contains "Test 4b: logs skipping in-use" "Skipping in-use aged archive" "$T4B_OUT_CONTENT"
+assert_not_contains "Test 4b: lsof stub did not reject the targeted scan" "unexpected flags" "$T4B_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 5: Fail-closed matrix: timeout, nonzero, stderr, malformed, missing-lsof, missing-timeout
 # ─────────────────────────────────────────────────────────────────────────────

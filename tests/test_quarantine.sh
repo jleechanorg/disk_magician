@@ -100,7 +100,7 @@ prepare_quarantine() {
 # Successful C14 verdict survives rename and phase-1 re-hash, then phase 2 removes it.
 fixture; run X=1
 check 'proven root: phase 1 + phase 2 report removed' [ "$OUT" = "removed:$(qid)" ]
-check 'proven root: original and quarantine candidate are gone' [ ! -e "$A" ] && [ ! -e "$Q/$(qid)" ]
+check 'proven root: original and quarantine candidate are gone' bash -c '[[ ! -e "$1" && ! -e "$2" ]]' _ "$A" "$Q/$(qid)"
 check 'proven root: sidecar is dropped after candidate' [ ! -e "$Q/$(qid).json" ]
 check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
 
@@ -109,7 +109,7 @@ fixture; run_contract --kind os_clone --frozen-identity 1:2:501 --frozen-parent-
 check 'caller options: path reaches artifact_removal_verdict' grep -Fx "$A" "$TMP/verdict-args"
 check 'caller options: kind and deadline values are preserved' bash -c 'grep -Fx -- --kind "$1" >/dev/null && grep -Fx os_clone "$1" >/dev/null && grep -Fx -- --deadline-at "$1" >/dev/null && grep -Fx 123.5 "$1" >/dev/null' _ "$TMP/verdict-args"
 check 'caller options: frozen identity proof is preserved' bash -c 'grep -Fx -- --frozen-identity "$1" >/dev/null && grep -Fx 1:2:501 "$1" >/dev/null && grep -Fx -- --frozen-parent-identity "$1" >/dev/null && grep -Fx 3:4:501 "$1" >/dev/null && grep -Fx -- --frozen-root-identity "$1" >/dev/null && grep -Fx 5:6:501 "$1" >/dev/null' _ "$TMP/verdict-args"
-check 'caller options: expired deadline defers before rename' [ "$OUT" = deferred:deadline-before-phase1 ] && [ -f "$A/report.md" ] && [ ! -e "$Q" ]
+check 'caller options: expired deadline defers before rename' bash -c '[[ "$1" == deferred:deadline-before-phase1 && -f "$2/report.md" && ! -e "$3" ]]' _ "$OUT" "$A" "$Q"
 
 # Optional deadline bounds the whole entrypoint, including the lsof probe and re-hash.
 fixture
@@ -123,7 +123,7 @@ START="$(python3 -c 'import time; print(time.monotonic())')"
 OUT="$(PATH="$SLOWBIN:$PATH" python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$DEADLINE")"
 END="$(python3 -c 'import time; print(time.monotonic())')"
 check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "deferred:deadline" ]
-check 'deferred phase1 retains the original artifact' [ -f "$A/report.md" ] && [ -f "$A/sub/deep/y.txt" ] && [ -L "$A/link" ]
+check 'deferred phase1 retains the original artifact' bash -c '[[ -f "$1/report.md" && -f "$1/sub/deep/y.txt" && -L "$1/link" ]]' _ "$A"
 check 'deferred phase1 leaves no quarantine payload' [ -z "$(find "$Q" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
 check 'phase1 deadline returns before the 0.5s probe completes' python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 0.4 else 1)"
 for bad in nan inf -1; do
@@ -148,7 +148,7 @@ RECON_LOCK="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-
 touch "$LOCK_RELEASE"; wait "$CPID"
 check 'concurrent reconcile cannot roll back an in-flight combined remove' bash -c '[[ "$1" == deferred:operation-lock && "$2" == removed:* && ! -e "$3" ]]' _ "$RECON_LOCK" "$(cat "$TMP/combined-out")" "$A"
 fixture; run_contract --unknown-option value
-check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
+check 'caller options: unknown option fails closed' bash -c '[[ "$1" == kept:check-failed && -e "$2" ]]' _ "$OUT" "$A"
 fixture; QUARANTINE_TEST_BASH=/bin/bash QUARANTINE_TEST_NOUNSET=1 run_contract
 check 'Bash 3.2 nounset: no optional args reaches removal verdict' bash -c 'case "$1" in removed:*) exit 0;; *) exit 1;; esac' _ "$OUT"
 
@@ -164,7 +164,7 @@ run DISK_MAGICIAN_TEST_BEFORE_UNLINK="mv \"\$DM_Q_PATH/sub\" '$TMP/moved$N'; ln 
 QID="$(sidecar_id)"
 check 'directory-to-symlink swap: kept:quarantine_partial_kept' [ "$OUT" = "kept:quarantine_partial_kept:$QID" ]
 check 'directory-to-symlink swap: outside data untouched' [ "$(cat "$TMP/outside$N/keep")" = OUTSIDE ]
-check 'directory-to-symlink swap: sidecar and replacement symlink remain' [ -L "$Q/$QID/sub" ] && [ -f "$Q/$QID.json" ]
+check 'directory-to-symlink swap: sidecar and replacement symlink remain' bash -c '[[ -L "$1" && -f "$2" ]]' _ "$Q/$QID/sub" "$Q/$QID.json"
 
 # A crash after the candidate is removed but before the final sidecar unlink is resumable.
 fixture; run DISK_MAGICIAN_TEST_KILL_AT=before_sidecar_drop
@@ -172,7 +172,7 @@ CRASH_SIDE="$(find "$Q" -maxdepth 1 -name '*.json' -print -quit)"; CRASH_ID="$(b
 check 'crash before sidecar drop: deleting sidecar remains, root is gone' bash -c '[[ ! -e "$1" && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$2")" == deleting ]]' _ "$Q/$CRASH_ID" "$CRASH_SIDE"
 BINDING="$TMP/resume-binding.json"; python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
 RESUME="$(quarantine_phase2 "$BINDING" "$CRASH_ID")"
-check 'crash before sidecar drop: retry drops the final sidecar' [ "$RESUME" = removed ] && [ ! -e "$CRASH_SIDE" ]
+check 'crash before sidecar drop: retry drops the final sidecar' bash -c '[[ "$1" == removed && ! -e "$2" ]]' _ "$RESUME" "$CRASH_SIDE"
 
 # The terminal index record makes each sidecar/index cleanup gap crash-recoverable.
 fixture; DISK_MAGICIAN_TEST_KILL_AT=after_terminal_index run
@@ -299,7 +299,7 @@ fixture; run \
   DISK_MAGICIAN_TEST_SIDECAR_UPDATE_FAIL_AT=2
 QID="$(qid)"
 check 'rollback source swap with metadata update failure: failure reported' [ "$OUT" = "quarantine_conflict:$QID:rollback-state-update-failed" ]
-check 'rollback source swap with metadata update failure: both payloads remain' [ "$(cat "$A/report.md")" = SUBSTITUTE ] && [ "$(cat "$Q/$QID.saved/report.md")" = BBBB ]
+check 'rollback source swap with metadata update failure: both payloads remain' bash -c '[[ "$(cat "$1/report.md")" == SUBSTITUTE && "$(cat "$2")" == BBBB ]]' _ "$A" "$Q/$QID.saved/report.md"
 check 'rollback source swap with metadata update failure: rollback intent remains durable' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["phase"]=="rollback_pending" and d["rollback"]["expected"]=={"dev":d["dev"],"ino":d["ino"]} and d["rollback"]["reason"]=="rehash-mismatch"' "$Q/$QID.json"
 
 # A moved parent leaves only descriptor-relative recovery names; stale absolute paths are not published.
@@ -308,7 +308,7 @@ fixture; run \
   DISK_MAGICIAN_TEST_BEFORE_ROLLBACK_RENAME='mv "$DM_Q_DEST" "$DM_Q_DEST.saved"; mkdir "$DM_Q_DEST"; printf SUBSTITUTE > "$DM_Q_DEST/report.md"; mv "$(dirname "$DM_Q_PATH")" "$(dirname "$DM_Q_PATH").moved"'
 QID="$(qid)"; MOVED_PARENT="$(dirname "$A").moved"; MOVED_Q="$MOVED_PARENT/.dm-quarantine"
 check 'moved parent rollback: conflict reported' [ "${OUT%%:*}" = quarantine_conflict ]
-check 'moved parent rollback: both payloads preserved under moved parent' [ "$(cat "$MOVED_PARENT/art/report.md")" = SUBSTITUTE ] && [ "$(cat "$MOVED_Q/$QID.saved/report.md")" = BBBB ]
+check 'moved parent rollback: both payloads preserved under moved parent' bash -c '[[ "$(cat "$1")" == SUBSTITUTE && "$(cat "$2")" == BBBB ]]' _ "$MOVED_PARENT/art/report.md" "$MOVED_Q/$QID.saved/report.md"
 check 'moved parent rollback: sidecar preserves directory identities and relative recovery name' python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); c=d["rollback_conflict"]; assert not c["parent_path_bound"] and c["quarantine_dir_bound"] and c["original_path"] is None and c["quarantine_path"] is None and c["expected_locations_in_quarantine"]==[] and c["expected_entry_names_in_bound_quarantine"]==[sys.argv[2]] and c["parent_identity"]=={"dev":d["parent_dev"],"ino":d["parent_ino"]} and c["quarantine_identity"]=={"dev":d["quarantine_dev"],"ino":d["quarantine_ino"]}' "$MOVED_Q/$QID.json" "$QID.saved"
 
 # Replacing .dm-quarantine after intent creation must not redirect the candidate into a symlink target.
@@ -333,7 +333,7 @@ A="$LINK/item"; Q="$ORIG/.dm-quarantine"
 run DISK_MAGICIAN_TEST_AFTER_VERDICT="mv '$LINK' '$LINK.saved'; ln -s '$OTHER' '$LINK'"
 check 'retargeted parent with hard link: kept:parent-identity-mismatch' [ "$OUT" = kept:parent-identity-mismatch ]
 check 'retargeted parent: both original and hard link remain' bash -c '[[ "$(cat "$1/item")" == SAME-INODE && "$(cat "$2/item")" == SAME-INODE ]]' _ "$ORIG" "$OTHER"
-check 'retargeted parent: neither directory got a quarantine' [ ! -e "$ORIG/.dm-quarantine" ] && [ ! -e "$OTHER/.dm-quarantine" ]
+check 'retargeted parent: neither directory got a quarantine' bash -c '[[ ! -e "$1/.dm-quarantine" && ! -e "$2/.dm-quarantine" ]]' _ "$ORIG" "$OTHER"
 
 # A parent alias retargeted during the verdict still gives C14 the frozen canonical candidate.
 N=$((N+1)); ORIG="$TMP/verdict-parent-original$N"; OTHER="$TMP/verdict-parent-other$N"; LINK="$TMP/verdict-parent-link$N"

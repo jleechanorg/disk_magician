@@ -98,9 +98,13 @@ cat > "$BIN/lsof" <<EOF
 echo "lsof \$*" >> "$INV"
 target="\${!#}"
 # Argument-faithful contract: +D for directory scans, bare path for a file.
+# Records both good and bad outcomes in a log that is never cleared between
+# cases, so case 24 can actually fail if any lsof scan used the wrong shape.
 case "\$target" in
-  */_disks/colima) [[ " \$* " == *" +D "* ]] || { echo "dir scan without +D" >> "$ST/lsof_badargs"; exit 3; } ;;
-  */colima/diffdisk) [[ " \$* " != *" +D "* ]] || { echo "file scan with +D" >> "$ST/lsof_badargs"; exit 3; } ;;
+  */_disks/colima)
+    if [[ " \$* " == *" +D "* ]]; then echo "dir:+D:ok" >> "$ST/lsof_argcheck"; else echo "dir:+D:BAD" >> "$ST/lsof_argcheck"; exit 3; fi ;;
+  */colima/diffdisk)
+    if [[ " \$* " != *" +D "* ]]; then echo "file:bare:ok" >> "$ST/lsof_argcheck"; else echo "file:+D:BAD" >> "$ST/lsof_argcheck"; exit 3; fi ;;
 esac
 if [[ -e "$ST/lsof_fail" ]]; then exit 2; fi
 if [[ -e "$ST/lsof_live_after_first" ]]; then
@@ -145,7 +149,7 @@ cnt() { grep -c "$1" "$INV" || true; }
 # $1 list_mode  $2 lock(0/1)  $3 approval(0/1)  rest: extra args
 run() {
   local mode="$1" lock="$2" appr="$3"; shift 3
-  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out_datadisk" "$ST/lsof_out_diffdisk" "$ST/lsof_diag" "$ST/lsof_fail" "$ST/lsof_live_after_first" "$ST/lsof_count" "$ST/lsof_badargs"
+  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out_datadisk" "$ST/lsof_out_diffdisk" "$ST/lsof_diag" "$ST/lsof_fail" "$ST/lsof_live_after_first" "$ST/lsof_count"
   echo "$mode" > "$ST/list_mode"
   [[ "$lock" == 1 ]] && touch "$ST/lock"
   RC=0
@@ -357,7 +361,10 @@ else bad "implicit changed second endpoint"; fi
 rm -f "$ST/inspect_mode" "$ST/inspect_count"
 
 # 24. Argument-faithful lsof: directory scans use +D, a file path is bare.
-if [[ ! -e "$ST/lsof_badargs" ]]; then
+# The argcheck log is never cleared, so any wrong-shaped scan anywhere above
+# fails this case; the positive markers prove both scan shapes really ran.
+if [[ -s "$ST/lsof_argcheck" ]] && ! grep -q 'BAD' "$ST/lsof_argcheck" \
+  && grep -q 'dir:+D:ok' "$ST/lsof_argcheck" && grep -q 'file:bare:ok' "$ST/lsof_argcheck"; then
   ok "lsof argument-faithful: +D for dirs, bare for files"
 else bad "lsof argument-faithful"; fi
 
