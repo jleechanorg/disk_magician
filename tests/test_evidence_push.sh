@@ -31,8 +31,17 @@ GLOG="$T/gcloud.log"
 cat > "$T/bin/gcloud" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$GLOG"
+printf '%s' "\$4" > "$T/last_src"
 EOF
 chmod +x "$T/bin/gcloud"
+# Object stat stub (spec C3 upload manifest): reports the md5 of the file the
+# last fake rsync uploaded, so every object verifies.
+cat > "$T/bin/stat_obj" <<EOF
+#!/usr/bin/env bash
+python3 -c 'import base64,hashlib,json,os,sys; d=open(os.path.join(sys.argv[2], sys.argv[1].split("/", 6)[6]),"rb").read(); print(json.dumps({"md5_hash": base64.b64encode(hashlib.md5(d).digest()).decode(), "generation": "1"}))' "\$1" "\$(cat "$T/last_src")"
+EOF
+chmod +x "$T/bin/stat_obj"
+export DISK_MAGICIAN_STAT_BIN="$T/bin/stat_obj"
 
 export HOME="$T/home"
 export EVIDENCE_TMP_ROOT="$T/allowed"
