@@ -425,7 +425,7 @@ classify_repo_local_worktree() {
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(GIT_OPTIONAL_LOCKS=0 git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         echo "status-failed"
         return 0
@@ -604,7 +604,7 @@ process_antigravity_orphan() {
     fi
     if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
         local status_porcelain status_rc=0
-        status_porcelain="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+        status_porcelain="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
         if [[ "$status_rc" -ne 0 ]]; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "status-failed"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -742,7 +742,7 @@ process_antigravity_orphan() {
         fi
         local final_status final_status_rc=0
         if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
-            final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+            final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
             if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -926,7 +926,7 @@ process_repo_local_worktrees() {
                     return 0
                 fi
                 local final_status final_status_rc=0
-                final_status="$(git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+                final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
                 if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
