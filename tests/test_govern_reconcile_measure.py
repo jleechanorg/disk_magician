@@ -6,6 +6,7 @@ worktree crash test drives the canonical quarantine entrypoints in a temp repo.
 No host actuator is dispatched (observe mode; dispatch is monkeypatched).
 """
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -263,11 +264,12 @@ class GovernReconcileMeasureTest(unittest.TestCase):
 
             with mock.patch.object(disk_budget, "_run_group", side_effect=fake_group), \
                  mock.patch.object(disk_budget, "measure_tick_class") as measure, \
-                 mock.patch.object(disk_budget, "observer_refresh") as observer:
+                 mock.patch.object(disk_budget, "observer_refresh") as observer, \
+                 mock.patch.object(disk_budget, "_run_birth_audit") as audit:
                 disk_budget.govern(["--mode", "observe"], self.state)
             measure.assert_not_called()
             observer.assert_not_called()
-            self.assertFalse((self.tmp / "audit-called").exists(), "BLACK skips birth audit")
+            audit.assert_not_called()
             budget = captured[0] - time.monotonic()
             self.assertGreater(budget, 0)
             self.assertLessEqual(budget, 60.5)
@@ -343,6 +345,51 @@ class GovernReconcileMeasureTest(unittest.TestCase):
             self.assertTrue(data["classes"]["worktrees"]["measured_at"] >= 1)
         finally:
             os.environ.clear(); os.environ.update(old)
+
+    def test_birth_audit_adapter_persists_estimates_before_deadline(self):
+        """Real governor adapter -> real birth_audit.sh -> real birth_audit.py.
+
+        A slow, controlled du must be stopped by the budget the adapter hands the
+        audit (remaining minus the persistence reserve) and the birth registry must
+        be published as an estimate/unknown record before the outer deadline -- the
+        regression was a bare call that defaulted to a 120 s du budget and was
+        SIGKILLed every tick before it could persist anything.
+        """
+        ptmp = self.tmp / "ptmp"
+        (ptmp / "r" / "slow-one").mkdir(parents=True)
+        tdir = self.tmp / "tdir"
+        tdir.mkdir()
+        du = self.tmp / "slow-du"
+        write_exec(du, "#!/bin/sh\nsleep 30\n")
+        cfg = self.tmp / "birth-config.json"
+        cfg.write_text(json.dumps({"budgets": {"classes": {
+            "tmp_containers": {"budget_gb": 15, "measure": "du", "trigger": "overage",
+                               "act": "tmp_containers", "unit_budget_s": 30}}}}))
+        source = ROOT / "scripts" / "birth_audit.py"
+        digest_before = hashlib.sha256(source.read_bytes()).hexdigest()
+        env = dict(os.environ, HOME=str(self.home), DISK_MAGICIAN_STATE_DIR=str(self.state),
+                   DISK_MAGICIAN_CONFIG=str(cfg), DISK_MAGICIAN_DU_BIN=str(du),
+                   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE=str(ptmp),
+                   TMPDIR=str(tdir), **GIT_ENV)
+        reserve = disk_budget.BIRTH_AUDIT_PERSIST_RESERVE_S
+        old = dict(os.environ)
+        os.environ.clear(); os.environ.update(env)
+        try:
+            started = time.monotonic()
+            rc = disk_budget._run_birth_audit(self.state, time.monotonic() + reserve + 1.5)
+            elapsed = time.monotonic() - started
+        finally:
+            os.environ.clear(); os.environ.update(old)
+        self.assertEqual(rc, 0, "birth audit adapter completed")
+        self.assertLess(elapsed, reserve + 6, "slow du must not outlive the granted slice")
+        registry = self.state / "admission" / "births.json"
+        self.assertTrue(registry.is_file(), "records persisted before the outer deadline")
+        row = next(iter(json.loads(registry.read_text())["gens"].values()))
+        self.assertEqual(row["charge"], "estimate")
+        self.assertIsNone(row["bytes"])
+        self.assertGreaterEqual(row["unknown_retries"], 1)
+        # No source mutation: the audit only wrote under the isolated HOME/state.
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest_before)
 
     def test_reconcile_deadline_caps(self):
         self.fake_df(150)

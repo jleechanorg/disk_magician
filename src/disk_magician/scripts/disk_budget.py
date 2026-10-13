@@ -805,8 +805,10 @@ def _run_reconcile(state, deadline_mono):
         print(out.rstrip())
     return rc
 
+BIRTH_AUDIT_PERSIST_RESERVE_S = 10.0  # time to publish estimates after du stops
+
 def _run_birth_audit(state, deadline_mono):
-    """Step 5 birth audit, bounded by the same absolute tick deadline."""
+    """Stop du early enough to persist births before the outer deadline."""
     script = Path(__file__).resolve().parent / "birth_audit.sh"
     if not script.is_file():
         return None
@@ -814,16 +816,14 @@ def _run_birth_audit(state, deadline_mono):
     if remaining <= 0:
         print("birth_audit_timeout", file=sys.stderr)
         return None
-    rc, _, _ = _run_group(["bash", str(script)], remaining)
+    budget_s = max(0.0, remaining - BIRTH_AUDIT_PERSIST_RESERVE_S)
+    rc, _, _ = _run_group(["bash", str(script), "--budget-seconds", f"{budget_s:.6f}"], remaining)
     if rc == -9:
         print("birth_audit_timeout", file=sys.stderr)
     return rc
 
 def _record_govern_tick(state, budgets, now, deadline, zone_name):
     """Hand one tick to the budget_history producer (its fields, not ours)."""
-    producer = budget_history
-    if producer is None:
-        return
     classes = budgets.get("classes", {}) if isinstance(budgets, dict) else {}
     measured = _read_json(Path(state) / "budget.json").get("classes")
     measured = measured if isinstance(measured, dict) else {}
@@ -836,9 +836,9 @@ def _record_govern_tick(state, budgets, now, deadline, zone_name):
         fresh[name] = (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
                        and 0 <= now - stamp <= 3 * 3600 and stats.get("carried") is not True)
     try:
-        fleet, _ = producer.collect_fleet_health(state, now, deadline_at=deadline)
-        producer.record_tick(state, now=now, classes_fresh=fresh, fleet_status=fleet, zone=zone_name,
-                             colima_status=producer.collect_colima_status(deadline))
+        fleet, _ = budget_history.collect_fleet_health(state, now, deadline_at=deadline)
+        budget_history.record_tick(state, now=now, classes_fresh=fresh, fleet_status=fleet, zone=zone_name,
+                             colima_status=budget_history.collect_colima_status(deadline))
     except (OSError, ValueError, TypeError):
         pass
 

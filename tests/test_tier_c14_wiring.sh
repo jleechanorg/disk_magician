@@ -12,7 +12,9 @@ export TMPDIR=/tmp
 set +e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-T="$(cd "$(mktemp -d /tmp/dm-tier-wiring.XXXXXX)" && pwd -P)"
+T="$(mktemp -d /tmp/dm-tier-wiring.XXXXXX)" || exit 1
+[[ "$T" == /tmp/dm-tier-wiring.* && -d "$T" && ! -L "$T" ]] || exit 1
+T="$(cd -- "$T" && pwd -P)" || exit 1
 trap 'rm -rf "$T"' EXIT
 
 export GIT_CONFIG_NOSYSTEM=1

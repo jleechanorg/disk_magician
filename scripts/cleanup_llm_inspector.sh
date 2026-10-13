@@ -45,16 +45,6 @@ done
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
-# c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
-c14_remove() {
-  local _out
-  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
-  case "$_out" in
-    removed:*) return 0 ;;
-    *) log "C14 kept: $1 ($_out)"; return 1 ;;
-  esac
-}
-
 path_size_kb() {
   local path="$1"
   du -sk "$path" 2>/dev/null | awk '{print $1+0}' || echo 0

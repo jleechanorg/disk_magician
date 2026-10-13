@@ -78,5 +78,8 @@ PY
   then
     [[ "$rc" != 0 ]] || rc=3
   fi
-  return "$rc"
+  # A trap handler's `return` does not replace the shell's exit status; `exit`
+  # here turns a failed receipt write into a nonzero process while preserving an
+  # existing failure code (rc != 0).
+  exit "$rc"
 }

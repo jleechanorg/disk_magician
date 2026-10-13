@@ -1,7 +1,23 @@
 # shellcheck shell=bash
-# quarantine_remove <path>: C14 two-phase removal (spec §7.2), no callers yet; prints quarantined:<id>, quarantine_conflict:<id> or kept:<why>.
+# quarantine.sh — C14 two-phase removal API (spec §7.2), sourced.
+# quarantine_remove <path> [--kind ...] [--deadline-at ...] runs the same-target
+# artifact_removal_verdict then the two-phase quarantine remover; prints
+# removed:<id>, quarantined:<id>, quarantine_conflict:<id> or kept:<why> (fail
+# closed). quarantine_phase2/quarantine_reconcile/quarantine_restore expose
+# crash recovery. Called by the cleanup scripts and the worktree adapters;
+# each caller re-validates identity before removal.
 _Q_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$_Q_LIB/artifact_verdict.sh" ]] && source "$_Q_LIB/artifact_verdict.sh"
+# c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
+c14_remove() {
+  local _out
+  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
+  case "$_out" in
+    removed:*) return 0 ;;
+    *) log "C14 kept: $1 ($_out)"; return 1 ;;
+  esac
+}
+
 quarantine_remove() {
   local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }

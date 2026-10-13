@@ -33,16 +33,6 @@ done
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
-c14_remove() {
-  local _out
-  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
-  case "$_out" in
-    removed:*) return 0 ;;
-    *) log "C14 kept: $1 ($_out)"; return 1 ;;
-  esac
-}
-
 resolve_existing_path() {
   local path="$1" resolved=""
   if command -v realpath >/dev/null 2>&1; then
