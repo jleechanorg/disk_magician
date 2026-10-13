@@ -4,6 +4,12 @@ import sys
 import subprocess
 from pathlib import Path
 
+def _build_orchestrator_env(source_env=None, platform=None):
+    env = dict(os.environ if source_env is None else source_env)
+    if (platform or sys.platform) == "darwin":
+        env["BASH_COMPAT"] = "5.0"
+    return env
+
 def get_orchestrator_path() -> Path:
     # Locate disk_magician.sh
     pkg_dir = Path(__file__).parent
@@ -42,7 +48,7 @@ def main():
     # If they run "clean" and we want to allow it:
     
     # Ensure environment variables are passed along
-    env = os.environ.copy()
+    env = _build_orchestrator_env()
     if auto_clean_env:
         env["DISK_MAGICIAN_AUTO_CLEAN"] = auto_clean_env
 
