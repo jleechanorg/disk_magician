@@ -1026,5 +1026,40 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             {"reason": "lstat_failed", "errno": errno.ENOENT}))
 
 
+class TestPerPathAccounting(unittest.TestCase):
+    """Per-root measured_kb is raw; deltas must not be presented as comparable
+    when clone/hardlink sharing inflates the raw sum (bead
+    disk_magician-ledger-30d-coverage-gap-egia follow-up)."""
+
+    def test_overcounting_ledger_is_marked_incomparable(self):
+        ledger = [
+            {"path": "/System/Volumes/Data/Users", "measured_kb": 600 * GIB_KB},
+            {"path": "/System/Volumes/Data/private", "measured_kb": 400 * GIB_KB},
+        ]
+        result = frontier.per_path_accounting(ledger, 800 * GIB_KB)
+        self.assertFalse(result["per_path_comparable"])
+        self.assertEqual(result["per_path_overcount_kb"], 200 * GIB_KB)
+        self.assertIn("clone/hardlink", result["per_path_incomparable_reason"])
+
+    def test_balanced_ledger_is_comparable(self):
+        ledger = [{"path": "/a", "measured_kb": 500 * GIB_KB}]
+        result = frontier.per_path_accounting(ledger, 500 * GIB_KB)
+        self.assertTrue(result["per_path_comparable"])
+        self.assertEqual(result["per_path_overcount_kb"], 0)
+        self.assertIsNone(result["per_path_incomparable_reason"])
+
+    def test_small_overcount_within_tolerance_stays_comparable(self):
+        # 0.5% overcount is inside PER_PATH_TOLERANCE_RATIO and must not block.
+        ledger = [{"path": "/a", "measured_kb": 1005 * GIB_KB}]
+        result = frontier.per_path_accounting(ledger, 1000 * GIB_KB)
+        self.assertTrue(result["per_path_comparable"])
+
+    def test_unreadable_ledger_fails_closed(self):
+        result = frontier.per_path_accounting([{"measured_kb": "x"}], 100 * GIB_KB)
+        self.assertFalse(result["per_path_comparable"])
+        self.assertIsNone(result["per_path_raw_total_kb"])
+        self.assertIn("unreadable", result["per_path_incomparable_reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
