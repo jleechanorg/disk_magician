@@ -347,7 +347,7 @@ reuse_out="$(bash -c '
     DISK_MAGICIAN_TEST_OWNER_PATH="$2"
     lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == reuse/old ]] && echo dead || echo alive; }
     worktree_is_recently_active_minutes() { return 1; }
-    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
     wtn_main "$3" feat/recycled --base origin/main --name recycled
 ' _ "$SCRIPT" "$REUSE_WT" "$REPO" 2>"$TMPROOT/reuse.err")"; rc=$?
 [[ "$rc" == 0 && "$reuse_out" == "$REUSE_WT" ]] || cat "$TMPROOT/reuse.err" >&2
@@ -355,6 +355,23 @@ assert_eq "$rc" "0" "reuse exit code"
 assert_eq "$reuse_out" "$REUSE_WT" "reuse keeps existing path"
 assert_eq "$(git -C "$REUSE_WT" rev-parse --abbrev-ref HEAD 2>/dev/null)" "feat/recycled" "reuse checks out requested branch"
 if git -C "$REPO" show-ref -q --verify refs/heads/reuse/old; then bad "recycled old branch remains"; else ok "old branch removed after successful recycle"; fi
+
+echo "== case 19b: non-ok C14 self-test refuses reuse (double) =="
+NEG_WT="$WTROOT/reuse-neg-c14"
+git -C "$REPO" branch reuse/neg-c14 "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$NEG_WT" reuse/neg-c14
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/neg-c14 reuse-test' _ "$SCRIPT" "$NEG_WT" "$REPO" >/dev/null 2>&1
+neg_out="$(bash -c '
+    source "$1"
+    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+    lease_owner_state() { echo dead; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }; echo remove; }
+    wtn_main "$3" feat/neg-c14 --base origin/main --name neg-c14
+' _ "$SCRIPT" "$NEG_WT" "$REPO" 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "non-ok C14 fallback exit"
+assert_eq "$neg_out" "$WTROOT/neg-c14" "non-ok C14 self-test refuses reuse"
+assert_eq "$(git -C "$NEG_WT" rev-parse --abbrev-ref HEAD)" "reuse/neg-c14" "non-ok C14 candidate preserved"
 
 run_reuse_attempt() {
     local wt="$1" old="$2" wanted="$3" name="$4" cd_into="${5:-}"
@@ -366,7 +383,7 @@ run_reuse_attempt() {
         DISK_MAGICIAN_TEST_OWNER_BRANCH="$4"
         lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == "$DISK_MAGICIAN_TEST_OWNER_BRANCH" ]] && echo dead || echo alive; }
         worktree_is_recently_active_minutes() { return 1; }
-        artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+        artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
         [[ -z "$7" ]] || cd "$2"
         wtn_main "$3" "$5" --base origin/main --name "$6"
     ' _ "$SCRIPT" "$wt" "$REPO" "$old" "$wanted" "$name" "$cd_into" 2>"$err")"; rc=$?
@@ -401,7 +418,7 @@ fresh="$(bash -c '
     export DISK_MAGICIAN_STATE_DIR="$4"
     lease_owner_state() { echo dead; }
     worktree_is_recently_active_minutes() { return 1; }
-    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; echo remove; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; echo remove; }
     wtn_main "$3" feat/noncanonical --base origin/main --name noncanonical
 ' _ "$SCRIPT" "$NONCAN_WT" "$REPO" "$NONCAN_STATE" 2>"$TMPROOT/noncanonical.err")"; rc=$?
 assert_eq "$rc" "0" "noncanonical-lease fallback exit"
@@ -423,12 +440,35 @@ fresh="$(bash -c '
     DISK_MAGICIAN_TEST_OWNER_PATH="$2"
     lease_owner_state() { echo dead; }
     worktree_is_recently_active_minutes() { return 1; }
-    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
     wtn_main "$3" feat/stale-incarnation --base origin/main --name stale-incarnation
 ' _ "$SCRIPT" "$STALE_WT" "$REPO" 2>"$TMPROOT/stale-incarnation.err")"; rc=$?
 assert_eq "$rc" "0" "stale-incarnation fallback exit"
 [[ "$fresh" != "$STALE_WT" ]] && ok "stale lease cannot recycle replacement checkout" || bad "stale lease recycled replacement checkout"
 assert_eq "$(git -C "$STALE_WT" rev-parse --abbrev-ref HEAD)" "reuse/stale-incarnation" "replacement checkout remains intact"
+
+echo "== case 29b: legacy lease without checkout identity cannot authorize reuse =="
+LEGACY_WT="$WTROOT/reuse-legacy-lease"
+git -C "$REPO" branch reuse/legacy-lease "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$LEGACY_WT" reuse/legacy-lease
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/legacy-lease reuse-test' _ "$SCRIPT" "$LEGACY_WT" "$REPO" >/dev/null 2>&1
+LEGACY_LEASE="$(bash -c 'source "$1"; lease_path_for "$2"' _ "$SCRIPT" "$LEGACY_WT")"
+python3 - "$LEGACY_LEASE" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d.pop("checkout_dev",None); d.pop("checkout_ino",None)
+json.dump(d,open(p,'w'))
+PY
+fresh="$(bash -c '
+    source "$1"
+    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+    lease_owner_state() { echo dead; }
+    worktree_is_recently_active_minutes() { return 1; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
+    wtn_main "$3" feat/legacy-lease --base origin/main --name legacy-lease
+' _ "$SCRIPT" "$LEGACY_WT" "$REPO" 2>"$TMPROOT/legacy-lease.err")"; rc=$?
+assert_eq "$rc" "0" "legacy-lease fallback exit"
+[[ "$fresh" != "$LEGACY_WT" ]] && ok "legacy lease cannot authorize reuse without checkout identity" || bad "legacy lease authorized reuse"
+assert_eq "$(git -C "$LEGACY_WT" rev-parse --abbrev-ref HEAD)" "reuse/legacy-lease" "legacy-lease candidate preserved"
 
 echo "== case 30: lease changed to a live owner after eligibility read is not claimed =="
 LIVE_OWNER_WT="$WTROOT/reuse-live-owner-race"
@@ -453,7 +493,7 @@ open(os.environ["LIVE_OWNER_MARKER"],"w").write(pid)
 PY
         return 0
     }
-    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo complete; return 0; }; echo remove; }
+    artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; echo remove; }
     wtn_main "$2" feat/live-owner-race --base origin/main --name live-owner-race
     kill -0 "$(cat "$LIVE_OWNER_MARKER")" 2>/dev/null
 ' _ "$SCRIPT" "$LIVE_OWNER_WT" "$REPO" 2>/dev/null)"; rc=$?

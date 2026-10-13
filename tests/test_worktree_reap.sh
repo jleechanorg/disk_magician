@@ -209,6 +209,42 @@ new; edit 'd["reuse"]={"state":"reuse_incomplete","old_branch":"old","old_tip":"
 new; git -C "$WT" commit -q --allow-empty -m fork; git -C "$WT" update-ref refs/remotes/fork/test HEAD; age; run; verdict 'fork only not pushed' kept:not-pushed; park
 new; git -C "$WT" commit -q --allow-empty -m merged; age; export GH_HEAD="$(git -C "$WT" rev-parse HEAD)"; run; verdict 'merged PR deleted branch' remove; unset GH_HEAD; park
 for offset in 0 -30 -120 1; do new; edit "d['pending']=True; d['creator']='guard'; d['owner']['pid']=400; d['created_epoch']=d['admin_birth_epoch']+$offset; d['admin_id']=None; d['admin_birth_epoch']=None"; run; if [[ "$offset" == 0 || "$offset" == -30 ]]; then check "pending promotion offset $offset" test "$(field 'd["creator"] == "guard" and d["owner"]["pid"] == 400 and not d["pending"]')" = True; else check "pending stale offset $offset" test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True; fi; park; done
+# Review blocker regression: a real guard pending lease is written before the
+# checkout exists, so it has no dev/ino or admin id/birth. Promotion must
+# record the complete identity under the lock, and two passes must preserve the
+# original live owner instead of re-adopting it with owner: null.
+N=$((N+1)); PEND_WT="$STANDARD_WORKTREE_ROOT/repo/c$N"
+lease_write_pending "$PEND_WT" $'400\t1760000000\tclaude'
+LF="$(lease_path_for "$PEND_WT")"
+git -C "$TMP/repo" worktree add -qb "worktree-c$N" "$PEND_WT" origin/main
+WT="$PEND_WT"
+edit 'd["last_verdict"]="sentinel"'
+run
+check 'guard promote keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'guard promote clears pending' test "$(field 'd["pending"]')" = False
+check 'guard promote records checkout dev/ino' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
+verdict 'guard promote keeps live-owner verdict' sentinel
+run
+check 'guard second pass keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'guard second pass keeps complete identity' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
+check 'guard not re-adopted on second pass' test "$(field 'd["creator"]=="guard"')" = True
+park
+# Legacy lease (written before checkout identity) keeps its owner through the
+# admin/birth proof instead of being adopted.
+new
+edit 'd.pop("checkout_dev",None); d.pop("checkout_ino",None); d["owner"]["pid"]=400; d["last_verdict"]="sentinel"'
+run
+check 'legacy lease keeps owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'legacy lease not adopted' test "$(field 'd["creator"]=="test"')" = True
+verdict 'legacy lease live-owner verdict' sentinel
+park
+# The strict half: a lease that records identity must not be blessed when it
+# is stale, even though admin/birth still match.
+new
+edit 'd["checkout_dev"]=1; d["checkout_ino"]=1'
+run
+check 'stale checkout identity adopts null owner' test "$(field 'd["owner"] is None and d["creator"]=="adopt"')" = True
+park
 new; saved="$TMP/saved-lease"; cp "$LF" "$saved"; git -C "$TMP/repo" worktree remove "$WT"; git -C "$TMP/repo" worktree add -qb reuse "$WT" origin/main; cp "$saved" "$LF"; edit 'd["admin_id"]="old-incarnation"'; run --mode remove; check 'path reuse adopted' test "$(field 'd["owner"] is None and d["creator"] == "adopt"')" = True; check 'reuse preserved' test -d "$WT"
 new; edit 'd["admin_id"]="stale-incarnation"'
 cat > "$TMP/claim-before-adopt" <<'HOOK'

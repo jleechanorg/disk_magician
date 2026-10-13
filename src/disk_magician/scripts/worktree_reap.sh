@@ -133,7 +133,15 @@ if action=='promote':
     admin,birth,repo,branch=args
     created=d.get('created_epoch')
     if not isinstance(created,int) or not created<=int(birth)<=created+60: sys.exit(1)
-    d.update(pending=False,admin_id=admin,admin_birth_epoch=int(birth),repo=repo,branch=branch)
+    # Record the checkout identity in the same locked write that clears
+    # pending, so the owner phase's incarnation check passes on this and every
+    # later pass instead of adopting (and erasing) the live owner.
+    try:
+        st=os.stat(d.get('path',''))
+    except OSError:
+        sys.exit(1)
+    d.update(pending=False,admin_id=admin,admin_birth_epoch=int(birth),repo=repo,branch=branch,
+             checkout_dev=st.st_dev,checkout_ino=st.st_ino)
 elif action=='dead':
     d.setdefault('owner_dead_seen_at',int(time.time()))
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix='.reap-')

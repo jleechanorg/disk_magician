@@ -626,17 +626,30 @@ PY
 }
 
 # lease_matches_incarnation <lease_file> — rc 0 when the lease's admin_id and
-# admin_birth_epoch still match the live admin dir for its path. Any
-# unresolvable side is a mismatch (the reaper then re-adopts with owner:
-# null, which can never be owner-reaped — the safe direction).
+# admin_birth_epoch still match the live admin dir for its path, and (when the
+# lease records them) its checkout device/inode still match that path. Legacy
+# leases written before checkout identity existed carry no dev/ino; they fall
+# back to the admin/birth proof so a reaper pass preserves their owner instead
+# of re-adopting with owner: null. A replacement checkout always gets a fresh
+# admin dir/birth, so it still fails this check; the reuse claim separately
+# requires the recorded dev/ino, so a legacy lease can never authorize a
+# recycle. Any unresolvable side is a mismatch (the reaper then re-adopts with
+# owner: null, which can never be owner-reaped — the safe direction).
 lease_matches_incarnation() {
-    local lease="$1" path aid birth live_aid live_birth dev ino live_dev live_ino
+    local lease="$1" path aid birth dev ino live_aid live_birth live_dev live_ino
     path="$(_lease_get "$lease" path)"
     aid="$(_lease_get "$lease" admin_id)"
     birth="$(_lease_get "$lease" admin_birth_epoch)"
     dev="$(_lease_get "$lease" checkout_dev)"
     ino="$(_lease_get "$lease" checkout_ino)"
-    [[ -n "$path" && -n "$aid" && -n "$dev" && -n "$ino" ]] || return 1
+    [[ -n "$path" && -n "$aid" ]] || return 1
+    IFS=$'\t' read -r live_aid live_birth < <(_lease_admin_info "$path")
+    [[ "$live_aid" == "$aid" ]] || return 1
+    [[ "$live_birth" == "$birth" ]] || return 1
+    # Legacy lease (pre-checkout-identity): admin/birth proof is authoritative.
+    [[ -z "$dev" && -z "$ino" ]] && return 0
+    # A lease must record both fields or neither; a partial record is corrupt.
+    [[ -n "$dev" && -n "$ino" ]] || return 1
     IFS=$'\t' read -r live_dev live_ino < <(python3 - "$path" <<'PY'
 import os,sys
 try:
@@ -644,9 +657,5 @@ try:
 except OSError: print("-\t-")
 PY
 )
-    [[ "$live_dev" == "$dev" && "$live_ino" == "$ino" ]] || return 1
-    IFS=$'\t' read -r live_aid live_birth < <(_lease_admin_info "$path")
-    [[ "$live_aid" == "$aid" ]] || return 1
-    [[ "$live_birth" == "$birth" ]] || return 1
-    return 0
+    [[ "$live_dev" == "$dev" && "$live_ino" == "$ino" ]]
 }
