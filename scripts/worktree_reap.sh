@@ -50,6 +50,13 @@ lock_dead() {
     rm -f "$err"
     return "$rc"
 }
+reuse_claim_state() {
+    python3 - "$1" <<'PY'
+import json,sys
+try: print(json.load(open(sys.argv[1])).get('reuse',{}).get('state',''))
+except Exception: print('unreadable')
+PY
+}
 acquire_lock() {
     local pid stamp now gate="$LOCK.reclaim_gate"
     if ! mkdir "$LOCK" 2>/dev/null; then
@@ -116,10 +123,18 @@ expired() {
 record() {
     log "$2 $3"
     printf '%s\n' "$3" >> "$EVENTS"
-    lease_set_verdict "$1" "$3"
+    lease_set_verdict "$1" "$3" "${4:-}"
 }
 # Atomic metadata updates used for promotion, adoption and death observation.
 update() {
+    local file="$1" rc
+    lease_mutation_lock_enter "$file" || return 1
+    local reuse_state
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        lease_mutation_lock_exit "$file"
+        return 1
+    fi
     python3 - "$@" <<'PY'
 import json,os,sys,tempfile,time
 path,action,*args=sys.argv[1:]
@@ -128,7 +143,15 @@ if action=='promote':
     admin,birth,repo,branch=args
     created=d.get('created_epoch')
     if not isinstance(created,int) or not created<=int(birth)<=created+60: sys.exit(1)
-    d.update(pending=False,admin_id=admin,admin_birth_epoch=int(birth),repo=repo,branch=branch)
+    # Record the checkout identity in the same locked write that clears
+    # pending, so the owner phase's incarnation check passes on this and every
+    # later pass instead of adopting (and erasing) the live owner.
+    try:
+        st=os.stat(d.get('path',''))
+    except OSError:
+        sys.exit(1)
+    d.update(pending=False,admin_id=admin,admin_birth_epoch=int(birth),repo=repo,branch=branch,
+             checkout_dev=st.st_dev,checkout_ino=st.st_ino)
 elif action=='dead':
     d.setdefault('owner_dead_seen_at',int(time.time()))
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix='.reap-')
@@ -138,13 +161,29 @@ try:
 finally:
     if os.path.exists(tmp): os.unlink(tmp)
 PY
+    rc=$?
+    lease_mutation_lock_exit "$file"
+    return "$rc"
 }
 adopt() {
     local real="$1" repo="$2" branch="$3" admin birth file
     file="$(lease_path_for "$real")"
+    lease_mutation_lock_enter "$file" || return 1
+    local reuse_state
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        lease_mutation_lock_exit "$file"
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        return 1
+    fi
     # Use the library writer directly so adoption never resolves a live owner.
     IFS=$'\t' read -r admin birth < <(_lease_admin_info "$real")
-    _lease_emit_json "$file" "$real" "$repo" "$branch" adopt False - - - "$admin" "$birth" 24
+    _lease_emit_json "$file" "$real" "$repo" "$branch" adopt False - - - "$admin" "$birth" 24 \
+        "" "" "" "" "" "" "" "" --lock-held
+    local rc=$?
+    lease_mutation_lock_exit "$file"
+    return "$rc"
 }
 registered() {
     git -C "$2" worktree list --porcelain 2>/dev/null |
@@ -167,12 +206,26 @@ while IFS= read -r -d '' real; do
     file="$(lease_path_for "$real")"
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     if [[ ! -e "$file" ]]; then adopt "$real" "$repo" "$branch"; continue; fi
+    reuse_state="$(reuse_claim_state "$file")"
+    [[ "$reuse_state" != pending && "$reuse_state" != reuse_incomplete ]] || continue
     # Invalid JSON is preserved and reported by the owner phase.
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d,dict)' "$file" 2>/dev/null || continue
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        continue
+    fi
     if [[ "$(_lease_get "$file" pending)" == True ]]; then
         IFS=$'\t' read -r admin birth < <(_lease_admin_info "$real")
+        if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_PROMOTE_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_BEFORE_PROMOTE_HOOK" "$file" "$repo" "$real" "$branch" >&2 || true
+        fi
         update "$file" promote "$admin" "$birth" "$repo" "$branch" || adopt "$real" "$repo" "$branch"
     elif ! lease_matches_incarnation "$file"; then
+        if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK" "$file" "$repo" "$real" "$branch" >&2 || true
+        fi
         adopt "$real" "$repo" "$branch"
     fi
 done < "$RUN_TMP/paths"
@@ -218,9 +271,16 @@ verdict_for() {
     printf '%s\n' "$verdict"
 }
 process_lease() {
-    local file="$1" real owner repo branch since quiet verdict
+    local file="$1" real owner repo branch since quiet verdict reuse_state
     [[ -e "$file" ]] || return 0
     expired && return 1
+    reuse_state="$(reuse_claim_state "$file")"
+    if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+        real="$(_lease_get "$file" path)"
+        log "kept:$reuse_state $real"
+        echo "kept:$reuse_state" >> "$EVENTS"
+        return 0
+    fi
     real="$(_lease_get "$file" path)"
     if [[ -z "$real" ]]; then log "kept:lease-unreadable $file"; echo kept:lease-unreadable >> "$EVENTS"; return 0; fi
     [[ -e "$real" ]] || return 0
@@ -253,21 +313,49 @@ process_lease() {
     if ! fetch_repo "$repo"; then record "$file" "$real" kept:remote-unverified; return 0; fi
     verdict="$(verdict_for "$real" "$repo" "$quiet")"
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
+        # Exclude reuse from the final lease/verdict check through the actual
+        # removal. A fresh unlocked claim check would leave the same TOCTOU.
+        if ! lease_reuse_lock_acquire "$file"; then
+            log "kept:reuse-locked $real"
+            echo kept:reuse-locked >> "$EVENTS"
+            return 0
+        fi
+        reuse_state="$(reuse_claim_state "$file")"
+        if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
+            lease_reuse_lock_release "$file"
+            log "kept:$reuse_state $real"
+            echo "kept:$reuse_state" >> "$EVENTS"
+            return 0
+        fi
+        if ! lease_matches_incarnation "$file"; then
+            record "$file" "$real" kept:reuse-claim-or-incarnation-changed --lock-held
+            lease_reuse_lock_release "$file"
+            return 0
+        fi
+        if [[ -n "${DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK:-}" ]]; then
+            "$DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK" "$file" "$real" || true
+        fi
         if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK" "$real"; fi
-        (( STOP )) && return 1
+        if (( STOP )); then lease_reuse_lock_release "$file"; return 1; fi
         # Re-verify through the REAL C14 verdict, which also writes the single
         # original receipt (checkout inventory plus linked-worktree admin rows).
         # WRH consumes exactly that receipt via --quarantine; no second fresh
         # inventory may reauthorize the mutation.
         local reap_c14_inv reap_c14_verdict
-        reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { record "$file" "$real" kept:check-failed; return 0; }
+        reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { lease_reuse_lock_release "$file"; record "$file" "$real" kept:check-failed; return 0; }
         reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv")"
         if [[ "$reap_c14_verdict" == remove ]] && wrh_remove_now "$real" "$real" --quarantine "$reap_c14_inv"; then
-            rm -f "$reap_c14_inv"; echo remove >> "$EVENTS"; return 0
+            rm -f "$reap_c14_inv"
+            lease_reuse_lock_release "$file"
+            echo remove >> "$EVENTS"
+            return 0
         fi
         rm -f "$reap_c14_inv"
         [[ "$reap_c14_verdict" == remove ]] || verdict="$reap_c14_verdict"
         verdict="${verdict:-kept:remove-failed}"
+        record "$file" "$real" "$verdict" --lock-held
+        lease_reuse_lock_release "$file"
+        return 0
     fi
     record "$file" "$real" "$verdict"
     return 0
@@ -314,6 +402,7 @@ import json,os,sys,time
 try:
     p=sys.argv[1]; d=json.load(open(p)); target=d.get('path')
     if not isinstance(target,str) or not target or os.path.lexists(target): sys.exit(0)
+    if d.get('reuse',{}).get('state') in ('pending','reuse_incomplete'): sys.exit(0)
     if d.get('pending') and time.time()-d.get('created_epoch',time.time())<3600: sys.exit(0)
     os.unlink(p)
 except (OSError,ValueError,TypeError,AttributeError): pass
