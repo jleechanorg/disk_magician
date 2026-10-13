@@ -119,3 +119,6 @@ discovered .beads directory (or create/materialize a local DB there), and make '
 worktree's .beads/issues.jsonl after 'br sync --flush-only', and 'br vcs-status' reports the export
 worktree-clean.
 
+## disk_magician-tmp-full-clones-still-produced
+
+
