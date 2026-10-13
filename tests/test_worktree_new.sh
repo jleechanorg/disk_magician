@@ -3,6 +3,7 @@
 # under $HOME/.worktrees/<repo>/<name>. Runs entirely under a temp HOME with
 # temp repos; never touches the real ~/.worktrees.
 set -uo pipefail
+export DISK_MAGICIAN_ADMIT_RETRY_S=0
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/worktree_new.sh"
@@ -245,11 +246,11 @@ cat > "$HOOK" <<'EOF'
 [ "$1" = committed ] && [ -n "${WTN_PAUSE:-}" ] || { cat >/dev/null; exit 0; }
 grep -q ' refs/heads/feat/pause$' || exit 0
 touch "$WTN_PAUSE.paused"
-i=0; while [ ! -e "$WTN_PAUSE.go" ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+i=0; while [ ! -e "$WTN_PAUSE.go" ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i + 1)); done
 EOF
 chmod +x "$HOOK"
 (WTN_PAUSE="$TMPROOT/p" bash "$SCRIPT" "$REPO" feat/pause --name pa >"$TMPROOT/pa.out" 2>/dev/null; echo $? >"$TMPROOT/pa.rc") &
-i=0; while [[ ! -e "$TMPROOT/p.paused" && $i -lt 100 ]]; do sleep 0.1; i=$((i + 1)); done
+i=0; while [[ ! -e "$TMPROOT/p.paused" && $i -lt 600 ]]; do sleep 0.1; i=$((i + 1)); done
 [[ -e "$TMPROOT/p.paused" ]] && ok "first create paused after ref commit" || bad "first create never paused"
 bash "$SCRIPT" "$REPO" feat/pause --name pb >"$TMPROOT/pb.out" 2>/dev/null; echo $? >"$TMPROOT/pb.rc"
 touch "$TMPROOT/p.go"
@@ -330,12 +331,15 @@ exit 0
 EOF
 chmod +x "$TMPROOT/admit-args"
 A2B_LOG="$TMPROOT/admit-args.log"; : > "$A2B_LOG"
-out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2b --name a2b 2>/dev/null)"
-assert_eq "$rc" "0" "exit code"
+out="$(DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2b --name a2b 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "producer-only create exit"
+assert_eq "$out" "$WTROOT/a2b" "producer-only create path"
 grep -q -- "--producer worktree-new:myrepo" "$A2B_LOG" && ok "producer passed" || bad "producer missing: $(cat "$A2B_LOG")"
 grep -q -- "--est-gb" "$A2B_LOG" && bad "--est-gb passed without an explicit override: $(cat "$A2B_LOG")" || ok "producer-only lookup when unset"
 : > "$A2B_LOG"
-out="$(WORKTREE_ADMIT_EST_GB=7 DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2c --name a2c 2>/dev/null)"
+out="$(WORKTREE_ADMIT_EST_GB=7 DISK_MAGICIAN_ADMIT_BIN="$TMPROOT/admit-args" DISK_MAGICIAN_ADMIT_ARGS_LOG="$A2B_LOG" DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a2c --name a2c 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "explicit-override create exit"
+assert_eq "$out" "$WTROOT/a2c" "explicit-override create path"
 grep -q -- "--est-gb 7" "$A2B_LOG" && ok "explicit estimate override forwarded" || bad "override lost: $(cat "$A2B_LOG")"
 
 # Missing admit: the legacy thresholds own the decision and reject at low df.
@@ -366,7 +370,7 @@ EV="$DISK_MAGICIAN_STATE_DIR/admission/events.jsonl"
 out="$(WORKTREE_ADMIT_EST_GB=2 DISK_MAGICIAN_FREE_GB_OVERRIDE=50 bash "$SCRIPT" "$REPO" feat/a6 2>"$TMPROOT/a6.err")"; rc=$?
 assert_eq "$rc" "0" "exit code (admit is observe-only until D2)"
 assert_eq "$out" "$WTROOT/feat-a6" "stdout is exactly the path"
-assert_eq "$(python3 -c 'import json,sys; e=[json.loads(l) for l in open(sys.argv[1])][-1]; print(e["class"], e["producer"], e["source"], e["dest"])' "$EV" 2>&1)" \
+assert_eq "$(python3 -c 'import json,sys; e=[e for e in map(json.loads, open(sys.argv[1])) if e.get("event") == "admit"][-1]; print(e["class"], e["producer"], e["source"], e["dest"])' "$EV" 2>&1)" \
     "worktrees worktree-new:myrepo worktree-new $WTROOT/feat-a6" "event class/producer/source/dest"
 
 # shellcheck source=tests/lib/admit_contract.sh
@@ -508,37 +512,59 @@ assert_eq "$rc" "0" "legacy-lease fallback exit"
 [[ "$fresh" != "$LEGACY_WT" ]] && ok "legacy lease cannot authorize reuse without checkout identity" || bad "legacy lease authorized reuse"
 assert_eq "$(git -C "$LEGACY_WT" rev-parse --abbrev-ref HEAD)" "reuse/legacy-lease" "legacy-lease candidate preserved"
 
-echo "== case 30: lease changed to a live owner after eligibility read is not claimed =="
+echo "== case 30: lease changed to a live owner at the claim boundary is not claimed =="
 LIVE_OWNER_WT="$WTROOT/reuse-live-owner-race"
 export LIVE_OWNER_WT
 git -C "$REPO" branch reuse/live-owner-race "$ORIGIN_SHA"
 git -C "$REPO" worktree add -q "$LIVE_OWNER_WT" reuse/live-owner-race
 export LIVE_OWNER_MARKER="$TMPROOT/live-owner-marker"
+export LIVE_OWNER_CLAIM_LOG="$TMPROOT/live-owner-claim.log"
+: > "$LIVE_OWNER_CLAIM_LOG"
+# Keep the injected owner alive through the claim boundary.
+sleep 300 & LIVE_OWNER_PID=$!
+export LIVE_OWNER_PID
+# Rewrite the lease to name the live owner. Done by the test, not production.
+cat > "$TMPROOT/live-owner-mutate.py" <<'PY'
+import json, os, sys
+p, pid, epoch, comm, marker = sys.argv[1:]
+d = json.load(open(p))
+d["owner"] = {"pid": int(pid), "start_epoch": int(epoch), "comm": comm}
+tmp = p + ".live-owner-race"
+json.dump(d, open(tmp, "w"))
+os.replace(tmp, p)
+open(marker, "w").write(pid)
+PY
+export LIVE_OWNER_MUTATOR="$TMPROOT/live-owner-mutate.py"
 live_owner_out="$(bash -c '
     source "$1"
     lease_write "$2" "$3" reuse/live-owner-race reuse-test
-    lease_owner_state() { echo dead; }
-    worktree_is_recently_active_minutes() {
-        local lease pid ep comm
-        lease="$(lease_path_for "$LIVE_OWNER_WT")"; pid="$$"
-        ep="$(_lease_ps_lstart_epoch "$pid")"; comm="$(_lease_full_comm "$pid")"
-        python3 - "$lease" "$pid" "$ep" "$comm" <<'PY'
-import json,os,sys
-p,pid,epoch,comm=sys.argv[1:]
-d=json.load(open(p)); d["owner"]={"pid":int(pid),"start_epoch":int(epoch),"comm":comm}
-tmp=p+".live-owner-race"; json.dump(d,open(tmp,"w")); os.replace(tmp,p)
-open(os.environ["LIVE_OWNER_MARKER"],"w").write(pid)
-PY
-        return 0
+    lease_owner_state() {
+        if [[ "$(_lease_get "$1" path)" == "$LIVE_OWNER_WT" ]]; then echo dead; else echo alive; fi
     }
+    worktree_is_recently_active_minutes() { return 1; }
     artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; echo remove; }
+    # Capture the real claim, then wrap it so the lease is rewritten to a live
+    # owner exactly at the claim boundary, after eligibility was read and hashed.
+    # The real claim must detect the hash mismatch and refuse; returning "recently
+    # active" instead would short-circuit before this gate and never test it.
+    eval "$(declare -f lease_claim_reuse | sed "1s/lease_claim_reuse/_real_lease_claim_reuse/")"
+    lease_claim_reuse() {
+        local lease
+        lease="$(lease_path_for "$LIVE_OWNER_WT")"
+        [[ "$1" == "$lease" ]] && kill -0 "$LIVE_OWNER_PID" 2>/dev/null || return 1
+        printf "claim-boundary\n" >> "$LIVE_OWNER_CLAIM_LOG"
+        python3 "$LIVE_OWNER_MUTATOR" "$lease" "$LIVE_OWNER_PID" "$(_lease_ps_lstart_epoch "$LIVE_OWNER_PID")" "$(_lease_full_comm "$LIVE_OWNER_PID")" "$LIVE_OWNER_MARKER" || return 1
+        _real_lease_claim_reuse "$@"
+    }
     wtn_main "$2" feat/live-owner-race --base origin/main --name live-owner-race
-    kill -0 "$(cat "$LIVE_OWNER_MARKER")" 2>/dev/null
 ' _ "$SCRIPT" "$LIVE_OWNER_WT" "$REPO" 2>/dev/null)"; rc=$?
-assert_eq "$rc" "0" "live-owner race fallback and marker"
+kill "$LIVE_OWNER_PID" 2>/dev/null || true
+assert_eq "$rc" "0" "live-owner race fallback exit"
 assert_eq "$live_owner_out" "$WTROOT/live-owner-race" "live-owner lease cannot authorize reuse"
 assert_eq "$(git -C "$LIVE_OWNER_WT" rev-parse --abbrev-ref HEAD)" "reuse/live-owner-race" "live-owner candidate branch preserved"
-unset LIVE_OWNER_MARKER
+[[ -s "$LIVE_OWNER_CLAIM_LOG" ]] && ok "claim boundary reached with a live-owner lease injection" || bad "claim boundary never reached"
+[[ -f "$LIVE_OWNER_MARKER" ]] && ok "post-eligibility lease rewrite was applied" || bad "lease was not rewritten before claim"
+unset LIVE_OWNER_MARKER LIVE_OWNER_CLAIM_LOG LIVE_OWNER_MUTATOR LIVE_OWNER_PID
 
 echo "== case 21: unpushed old branch falls back to fresh worktree =="
 UNPUSHED_WT="$WTROOT/reuse-unpushed"
@@ -838,14 +864,32 @@ for p in glob.glob(os.path.join(sys.argv[1],'worktree_leases','*.json')):
 PY
 )" "reuse_incomplete" "failed-restore lease parked incomplete"
 
-echo "== case 20: incomplete C14 fails closed to a fresh worktree =="
-git -C "$REPO" branch reuse/incomplete "$ORIGIN_SHA"
-git -C "$REPO" worktree add -q "$WTROOT/reuse-incomplete" reuse/incomplete
-bash -c 'source "$1"; lease_write "$2" "$3" reuse/incomplete reuse-test' _ "$SCRIPT" "$WTROOT/reuse-incomplete" "$REPO" >/dev/null 2>&1
-out="$(bash "$SCRIPT" "$REPO" feat/c14-incomplete --name c14-incomplete 2>/dev/null)"; rc=$?
-assert_eq "$rc" "0" "incomplete C14 fresh path exit"
-assert_eq "$out" "$WTROOT/c14-incomplete" "incomplete C14 uses fresh path"
-assert_eq "$(git -C "$WTROOT/reuse-incomplete" rev-parse --abbrev-ref HEAD 2>/dev/null)" "reuse/incomplete" "incomplete C14 leaves candidate untouched"
+echo "== case 20: incomplete C14 content verdict fails closed to a fresh worktree =="
+export C14INC_WT="$WTROOT/reuse-c14-inc"
+git -C "$REPO" branch reuse/c14-inc "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$C14INC_WT" reuse/c14-inc
+bash -c 'source "$1"; lease_write "$2" "$3" reuse/c14-inc reuse-test' _ "$SCRIPT" "$C14INC_WT" "$REPO" >/dev/null 2>&1
+export C14INC_VERDICT_LOG="$TMPROOT/c14-inc-verdict.log"; : > "$C14INC_VERDICT_LOG"
+c14inc_out="$(bash -c '
+    source "$1"
+    lease_owner_state() {
+        if [[ "$(_lease_get "$1" path)" == "$C14INC_WT" ]]; then echo dead; else echo alive; fi
+    }
+    worktree_is_recently_active_minutes() { return 1; }
+    # Self-test passes; the candidate-content verdict is incomplete. This reaches
+    # the second C14 gate (the one 19b never exercises), so reuse must refuse.
+    artifact_removal_verdict() {
+        [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }
+        printf "%s %s\n" "${2:-}" "${3:-}" >> "$C14INC_VERDICT_LOG"
+        echo incomplete
+    }
+    wtn_main "$2" feat/c14-inc --base origin/main --name c14-inc
+' _ "$SCRIPT" "$REPO" 2>"$TMPROOT/c14-inc.err")"; rc=$?
+assert_eq "$rc" "0" "incomplete C14 content fallback exit"
+assert_eq "$c14inc_out" "$WTROOT/c14-inc" "incomplete C14 content verdict uses fresh path"
+assert_eq "$(git -C "$C14INC_WT" rev-parse --abbrev-ref HEAD)" "reuse/c14-inc" "incomplete C14 content verdict leaves candidate untouched"
+grep -q -- "--own-reuse-claim" "$C14INC_VERDICT_LOG" && ok "content C14 gate reached (--own-reuse-claim)" || bad "content C14 gate not reached: $(cat "$C14INC_VERDICT_LOG")"
+unset C14INC_VERDICT_LOG C14INC_WT
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

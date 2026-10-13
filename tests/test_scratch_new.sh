@@ -5,6 +5,7 @@
 # DISK_MAGICIAN_ADMIT_BIN except for one case that runs the real `diskm admit`
 # against a fake df.
 set -uo pipefail
+export DISK_MAGICIAN_ADMIT_RETRY_S=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISKM="$REPO_ROOT/src/disk_magician/disk_magician.sh"
@@ -14,8 +15,9 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 assert_contains() { if [[ "$1" == *"$2"* ]]; then ok "$3"; else bad "$3 — missing '$2' in: $1"; fi; }
 
-T="$(mktemp -d)"
-T="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$T")"
+T="$(mktemp -d /tmp/dm-scratch-new.XXXXXX)" || exit 1
+[[ "$T" == /tmp/dm-scratch-new.* && -d "$T" && ! -L "$T" ]] || exit 1
+T="$(cd -- "$T" && pwd -P)" || exit 1
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/bin" "$T/tmp" "$T/bucket" "$T/state" "$T/elsewhere"
 export HOME="$T/home" STANDARD_WORKTREE_ROOT="$T/home/.worktrees" EVIDENCE_TMP_ROOT="$T/tmp"
@@ -112,7 +114,7 @@ chmod +x "$T/bin/df"
 OUT="$(env -u DISK_MAGICIAN_ADMIT_BIN DISK_MAGICIAN_DF_BIN="$T/bin/df" bash "$DISKM" scratch-new "$T/myrepo" real --detach HEAD 2>"$T/err")"; RC=$?
 assert_eq "$RC" 0 "real admit: exit 0"
 [[ -d "$OUT" && "$(printf '%s' "$OUT" | wc -l | tr -d ' ')" == 0 ]] && ok "real admit: stdout is exactly the path" || bad "real admit: stdout '$OUT'"
-assert_eq "$(grep -c '"producer": "scratch-new:myrepo"' "$T/state/admission/events.jsonl")" 1 "one admit event"
+assert_eq "$(python3 -c 'import json,sys; print(sum(e.get("event") == "admit" and e.get("producer") == "scratch-new:myrepo" for e in map(json.loads, open(sys.argv[1]))))' "$T/state/admission/events.jsonl")" 1 "one admit event"
 
 echo "== evidence-push upload manifest =="
 # Fake gcloud rsync copies the tree into $T/bucket/<repo>/<slug>/; knobs:
@@ -127,7 +129,7 @@ mkdir -p "\$dst" && (cd "\$src" && find . -type f ! -name "\${SKIP:-/}" -exec sh
 [[ -n "\${POST:-}" ]] && echo later > "\$src/\$POST"
 exit 0
 EOF
-cat > "$T/bin/stat" <<EOF
+cat > "$T/bin/gcs-stat" <<EOF
 #!/usr/bin/env bash
 [[ -n "\${STAT_SLEEP:-}" ]] && sleep "\$STAT_SLEEP"
 [[ -n "\${STAT_FAIL:-}" ]] && exit 1
@@ -138,8 +140,16 @@ except OSError: sys.exit(1)
 print(json.dumps({"md5_hash": base64.b64encode(hashlib.md5(data).digest()).decode(), "generation": "1700", "size": len(data)}))
 PY
 EOF
-chmod +x "$T/bin/gcloud" "$T/bin/stat"
-export DISK_MAGICIAN_STAT_BIN="$T/bin/stat"
+chmod +x "$T/bin/gcloud" "$T/bin/gcs-stat"
+export DISK_MAGICIAN_STAT_BIN="$T/bin/gcs-stat"
+# The cloud-object fake must never be reachable as `stat`: the lease library
+# shells out to the real `stat -f %B` for the git admin dir birth. Probe that
+# under the same PATH evidence-push uses. A shadowing `stat` loses the birth.
+echo "== lease birth uses the OS stat, not the cloud-object fake =="
+git -C "$T/myrepo" worktree add -q -b birth-probe "$T/birth-wt" HEAD 2>/dev/null || bad "admin-birth fixture setup"
+birth_info="$(PATH="$T/bin:/usr/bin:/bin" bash -c 'source "$1"; _lease_admin_info "$2"' _ "$REPO_ROOT/scripts/lib/worktree_lease.sh" "$T/birth-wt")"
+assert_contains "$birth_info" "birth-wt" "OS stat reaches the git admin dir"
+[[ "$(printf '%s' "$birth_info" | cut -f2)" =~ ^[1-9][0-9]*$ ]] && ok "admin birth is a positive epoch under the evidence PATH" || bad "admin birth lost to a PATH stat shadow: '$birth_info'"
 manifest() { (source "$REPO_ROOT/scripts/lib/worktree_lease.sh"; python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("upload_manifest")))' "$(lease_path_for "$1")"); }
 push() {  # push <dir> <slug> [ENV=V...]
     local d="$1" s="$2"; shift 2

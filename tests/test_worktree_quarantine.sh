@@ -303,7 +303,12 @@ DISK_MAGICIAN_STATE_DIR="$STATE_RB" python3 "$HELPER" reconcile >/dev/null
 git -C "$TMPROOT/wrh-rollback" status --porcelain >/dev/null && ok 'rolled-back worktree remains usable' || bad 'rolled-back worktree unusable'
 
 echo '== real artifact_removal_verdict --inventory-out drives wrh_remove_now =='
-REALROOT="$(cd "$(mktemp -d)" && pwd -P)"; REALHOME="$REALROOT/home"; mkdir -p "$REALHOME"
+# Keep this under $TMPROOT so the existing EXIT trap owns its cleanup; a bare
+# mktemp -d would land in $TMPDIR and leak on any abort after this point.
+REALROOT="$(mktemp -d "$TMPROOT/real-root.XXXXXX")" || exit 1
+[[ "$REALROOT" == "$TMPROOT"/real-root.* && -d "$REALROOT" && ! -L "$REALROOT" ]] || exit 1
+REALROOT="$(cd "$REALROOT" && pwd -P)" || exit 1
+REALHOME="$REALROOT/home"; mkdir -p "$REALHOME"
 REAL_ORIGIN="$REALROOT/origin.git"; REAL_SEED="$REALROOT/seed"; REAL_SEL="$REALROOT/selected"; REAL_SIB="$REALROOT/sibling"
 git init -q --bare -b main "$REAL_ORIGIN"
 git init -q -b main "$REAL_SEED"; git -C "$REAL_SEED" config user.name test; git -C "$REAL_SEED" config user.email t@e
