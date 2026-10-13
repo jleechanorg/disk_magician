@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, hashlib, json, math, os, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, fcntl, hashlib, json, math, os, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
@@ -81,11 +81,40 @@ def index_dir():
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
         raise OSError("unsafe quarantine index directory")
     return path
-def index_record(qid, parent, pstat, qstat):
+def operation_lock(deadline=None):
+    """Serialize quarantine state transitions across remove, restore and reconcile."""
+    directory = index_dir()
+    fd = os.open(directory / "operations.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or opened.st_mode & 0o077:
+            raise OSError("unsafe quarantine operation lock")
+        hook("DISK_MAGICIAN_TEST_BEFORE_OPERATION_LOCK", "", "")
+        if deadline is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            while True:
+                try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        os.close(fd)
+                        return None
+                    time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+        hook("DISK_MAGICIAN_TEST_AFTER_OPERATION_LOCK", "", "")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+def operation_unlock(fd):
+    try: fcntl.flock(fd, fcntl.LOCK_UN)
+    finally: os.close(fd)
+def index_record(qid, parent, pstat, qstat, original, rootstat):
     return {"schema": 1, "id": qid, "parent_path": parent,
             "parent_dev": pstat.st_dev, "parent_ino": pstat.st_ino,
             "quarantine_path": os.path.join(parent, ".dm-quarantine"),
-            "quarantine_dev": qstat.st_dev, "quarantine_ino": qstat.st_ino}
+            "quarantine_dev": qstat.st_dev, "quarantine_ino": qstat.st_ino,
+            "phase": "preparing", "original": original,
+            "root_dev": rootstat.st_dev, "root_ino": rootstat.st_ino}
 def index_write(qid, record):
     if ENV.get("DISK_MAGICIAN_TEST_INDEX_WRITE_FAIL"): raise OSError("injected index write failure")
     directory = index_dir(); temp = "." + qid + "." + secrets.token_hex(8) + ".tmp"
@@ -169,7 +198,8 @@ def verify(pfd, qfd, qentry, qid, rec, qdir):  # "" = identity, live-user and re
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon(visit(qfd, qid, ".", [])) == canon(rec["inventory"]) else "rehash-mismatch"
     except Exception: return "check-failed"
-def phase1(path, inv_file, binding_file):
+def phase1(path, inv_file, binding_file, deadline=None):
+    if deadline is not None and time.monotonic() >= deadline: return "deferred:deadline-before-phase1"
     path = os.path.abspath(path)
     parent, base = os.path.dirname(path), os.path.basename(path)
     pfd = qfd = -1
@@ -199,8 +229,9 @@ def phase1(path, inv_file, binding_file):
         if q.st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"
     qdir = os.path.join(parent, ".dm-quarantine"); qid = secrets.token_hex(8); side = qid + ".json"
-    try: index_write(qid, index_record(qid, parent, bound_parent, q))
+    try: index_write(qid, index_record(qid, parent, bound_parent, q, path, st))
     except Exception: return "kept:quarantine-index-write-failed"
+    kill_at("after_index")
     rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
            "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
            "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
@@ -211,24 +242,22 @@ def phase1(path, inv_file, binding_file):
             f.write(json.dumps(rec)); f.flush(); os.fsync(f.fileno())
         os.fsync(qfd)
     except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
-        try: os.unlink(side, dir_fd=qfd)
-        except OSError: pass
-        index_drop(qid)
+        try:
+            if not finish_sidecar(qfd, qid, "original"):
+                return f"quarantine_conflict:{qid}:index-cleanup-failed"
+        except Exception:
+            return f"quarantine_conflict:{qid}:index-cleanup-failed"
         return "kept:intent-write-failed"
     kill_at("after_intent")
     dest = os.path.join(qdir, qid)
     hook("DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME", path, dest)
     if not same_entry(pfd, ".dm-quarantine", q): return f"quarantine_conflict:{qid}"
     if not same_entry(pfd, base, st):
-        try: os.unlink(side, dir_fd=qfd)
-        except OSError: pass
-        index_drop(qid)
+        if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
         return "kept:identity-mismatch"
     try: renamex(pfd, base, qfd, qid)  # commit point; both directory bindings stay pinned
     except (LookupError, OSError) as e:
-        try: os.unlink(side, dir_fd=qfd)
-        except OSError: pass
-        index_drop(qid)
+        if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
         return "kept:exclusive_rename_unavailable" if isinstance(e, LookupError) else "kept:rename-failed"
     try:
         os.fsync(pfd); os.fsync(qfd)
@@ -294,11 +323,7 @@ def phase1(path, inv_file, binding_file):
     try: os.fsync(qfd); os.fsync(pfd)
     except OSError: return f"quarantine_conflict:{qid}"
     if not same_entry(pfd, base, restored): return f"quarantine_conflict:{qid}"
-    try: os.unlink(side, dir_fd=qfd)
-    except OSError: return f"quarantine_conflict:{qid}"
-    try: os.fsync(qfd)
-    except OSError: return f"quarantine_conflict:{qid}"
-    if not index_drop(qid): return f"quarantine_conflict:{qid}:index-cleanup-failed"
+    if not finish_sidecar(qfd, qid, "rolled-back"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
     return f"kept:{why}"
 
 def entry_kind(st):
@@ -397,6 +422,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             if rel == ".": return True
             if not record_removed_path(qfd, side, record, rel): return False
             removed_paths.add(rel)
+            hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
             kill_at("mid_delete")
             return True
         except OSError: return False  # includes extra, non-inventoried contents
@@ -434,6 +460,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         kill_at("entry_removed_before_journal")
         if not record_removed_path(qfd, side, record, rel): return False
         removed_paths.add(rel)
+        hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
         kill_at("mid_delete")
         return True
     except OSError: return False
@@ -548,6 +575,8 @@ def indexed_item(qid):
             fd = os.open(qid + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=qfd)
             with os.fdopen(fd, "r") as f: record = json.load(f)
         except FileNotFoundError:
+            if index.get("phase") == "preparing":
+                return index, pfd, qfd, None
             if index.get("terminal") not in ("removed", "restored", "original", "rolled-back"):
                 raise
             return index, pfd, qfd, None
@@ -575,6 +604,13 @@ def reconcile_one(qid, deadline=None):
     try:
         index, pfd, qfd, record = indexed_item(qid)
         terminal = index.get("terminal")
+        if terminal is None and index.get("phase") == "preparing" and record is None:
+            try: original = os.stat(os.path.basename(index["original"]), dir_fd=pfd, follow_symlinks=False)
+            except FileNotFoundError: original = None
+            if original is None or (original.st_dev, original.st_ino) != (index.get("root_dev"), index.get("root_ino")):
+                return f"alert:{qid}:preparing-location-conflict"
+            if not finish_sidecar(qfd, qid, "original"): return f"alert:{qid}:terminal-index-cleanup-failed"
+            return f"reconciled:{qid}:original"
         if terminal in ("removed", "restored", "original", "rolled-back"):
             if record is not None and record.get("id") != qid:
                 return f"alert:{qid}:terminal-sidecar-mismatch"
@@ -639,7 +675,10 @@ def cursor_write(path, last_id):
 def quarantine_reconcile(args):
     deadline = None; cursor = None; i = 0
     while i < len(args):
-        if args[i] == "--deadline-at" and i + 1 < len(args): deadline = float(args[i + 1]); i += 2
+        if args[i] == "--deadline-at" and i + 1 < len(args):
+            deadline = float(args[i + 1])
+            if not math.isfinite(deadline) or deadline < 0: raise ValueError("invalid deadline")
+            i += 2
         elif args[i] == "--cursor" and i + 1 < len(args): cursor = args[i + 1]; i += 2
         else: raise ValueError("usage: reconcile [--deadline-at MONOTONIC] [--cursor FILE]")
     directory = index_dir(); cursor = cursor or str(directory / "reconcile.cursor")
@@ -707,15 +746,48 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
     elif args[:1] == ["candidate"] and len(args) == 2: print(bound_candidate(args[1]))
-    elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
+    elif args[:1] == ["phase1"] and len(args) == 4:
+        lock = operation_lock()
+        try: print(phase1(*args[1:]))
+        finally: operation_unlock(lock)
+    elif args[:1] == ["phase1"] and len(args) == 6 and args[4] == "--deadline-at":
+        try: deadline = float(args[5])
+        except ValueError: print("kept:check-failed"); sys.exit(0)
+        lock = operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); sys.exit(0)
+        try: print(phase1(*args[1:4], deadline))
+        finally: operation_unlock(lock)
     elif args[:1] == ["phase2"] and len(args) in (3, 5):
+        deadline = None
         if len(args) == 5 and args[3] == "--deadline-at":
-            try:
-                value = float(args[4])
-                print(phase2(args[1], args[2], value if math.isfinite(value) and value >= 0 else -1))
-            except ValueError: print("kept:quarantine_partial_kept")
-        elif len(args) == 3: print(phase2(*args[1:]))
-        else: print("kept:quarantine_partial_kept")
-    elif args[:1] == ["restore"] and len(args) == 2: print(quarantine_restore(args[1]))
-    elif args[:1] == ["reconcile"]: sys.exit(quarantine_reconcile(args[1:]))
+            try: deadline = float(args[4])
+            except ValueError: print("kept:quarantine_partial_kept"); sys.exit(0)
+            if not math.isfinite(deadline) or deadline < 0: print("kept:quarantine_partial_kept"); sys.exit(0)
+        lock = operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); sys.exit(0)
+        try:
+            if len(args) == 5 and args[3] == "--deadline-at":
+                try:
+                    value = float(args[4])
+                    print(phase2(args[1], args[2], value if math.isfinite(value) and value >= 0 else -1))
+                except ValueError: print("kept:quarantine_partial_kept")
+            elif len(args) == 3: print(phase2(*args[1:]))
+            else: print("kept:quarantine_partial_kept")
+        finally: operation_unlock(lock)
+    elif args[:1] == ["restore"] and len(args) == 2:
+        lock = operation_lock()
+        try: print(quarantine_restore(args[1]))
+        finally: operation_unlock(lock)
+    elif args[:1] == ["reconcile"]:
+        deadline = None
+        for i in range(1, len(args) - 1):
+            if args[i] == "--deadline-at":
+                try: deadline = float(args[i + 1])
+                except ValueError: sys.exit(quarantine_reconcile(args[1:]))
+                if not math.isfinite(deadline) or deadline < 0:
+                    print("ALERT: invalid quarantine reconcile deadline"); sys.exit(1)
+        lock = operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); sys.exit(0)
+        try: sys.exit(quarantine_reconcile(args[1:]))
+        finally: operation_unlock(lock)
     else: print("kept:check-failed")
