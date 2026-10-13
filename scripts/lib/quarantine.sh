@@ -21,7 +21,12 @@ quarantine_remove() {
     esac
   done
   local -a verdict_args=(--inventory-out)
-  verdict_args+=("${caller_verdict_args[@]}")
+  # Bash 3.2 with nounset treats expanding an empty array as an unbound
+  # variable. Keep the no-option caller contract portable without disabling
+  # nounset for the function or the caller.
+  if ((${#caller_verdict_args[@]})); then
+    verdict_args+=("${caller_verdict_args[@]}")
+  fi
   inv="$(mktemp "${TMPDIR:-/tmp}/dm-q-inv.XXXXXX")" || { echo kept:check-failed; return 0; }
   binding="$(mktemp "${TMPDIR:-/tmp}/dm-q-parent.XXXXXX")" || { rm -f "$inv"; echo kept:check-failed; return 0; }
   if ! python3 "$_Q_LIB/../quarantine_rename.py" bind "$path_arg" "$binding" >/dev/null 2>&1; then
