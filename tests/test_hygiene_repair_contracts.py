@@ -569,6 +569,9 @@ class RepairContracts(unittest.TestCase):
             self.assertIn("partial", r.stdout)
             self.assertIn("Worktree-hygiene status: interrupted", r.stdout)
             self.assertIn("failed to persist", r.stderr)
+            self.assertIn("preserved=0", r.stdout)
+            self.assertIn("pushed=0", r.stdout)
+            self.assertIn("unfinished-repo=" + str(repo), r.stdout)
             self.assertEqual(
                 state.read_text(), "owned regular file blocks a state directory"
             )
@@ -666,6 +669,77 @@ class RepairContracts(unittest.TestCase):
             )
             self.assertIn("ignored-evidence:evidence/", r.stdout)
             self.assertEqual(evidence.read_text(), "fixture evidence")
+
+    def test_failed_persistence_fallback_retains_all_actual_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            state = root / "state"
+            state.write_text("owned regular file")
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "DISK_MAGICIAN_STATE_DIR": str(state),
+            }
+            script = 'source "$1"; HYGIENE_STATUS=interrupted; safe_count=1; review_count=2; preserved_count=3; wip_count=4; removed_count=5; failed_count=6; pushed_count=7; local_wip_count=8; HYGIENE_CURRENT=fixture; HYGIENE_COMPLETED=fixture; HYGIENE_ALL_REPOS=/fixture/repo; HYGIENE_SCANNED_REPOS=""; HYGIENE_REPO=/fixture/repo; hygiene_finish 143'
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "fixture",
+                    str(ROOT / "scripts/worktree_hygiene.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(r.returncode, 143, r.stdout + r.stderr)
+            for field in (
+                "safe=1",
+                "needs-review=2",
+                "preserved=3",
+                "wip-actions=4",
+                "removed=5",
+                "failed=6",
+                "pushed=7",
+                "local-wip=8",
+                "unfinished-repo=/fixture/repo",
+            ):
+                self.assertIn(field, r.stdout)
+            self.assertEqual(r.stdout.count("Worktree-hygiene status: interrupted"), 1)
+            self.assertIn("failed to persist", r.stderr)
+            self.assertEqual(state.read_text(), "owned regular file")
+
+    def test_term_during_discovery_records_partial_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
+            }
+            script = 'source "$1"; discover_worktree_repos(){ kill -TERM "$$"; sleep 1; }; main --skip-push --skip-gh'
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "fixture",
+                    str(ROOT / "scripts/worktree_hygiene.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(r.returncode, 143, r.stdout + r.stderr)
+            self.assertIn("Worktree-hygiene status: interrupted", r.stdout)
+            state = root / "state/worktree_hygiene_summary.json"
+            self.assertTrue(state.exists(), r.stdout + r.stderr)
+            data = json.loads(state.read_text())
+            self.assertTrue(data["partial"])
+            self.assertEqual(data["phase"], "discovery")
 
     def test_interrupted_main_writes_partial_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

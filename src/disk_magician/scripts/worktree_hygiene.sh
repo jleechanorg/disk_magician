@@ -857,9 +857,16 @@ preserve_wip_and_remove() {
 hygiene_finish() {
     local rc="$1" state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" persist_rc=0
     [[ "$HYGIENE_STATUS" != running ]] || HYGIENE_STATUS=failed
+    [[ ${#REPOS[@]} -eq 0 ]] || HYGIENE_ALL_REPOS="$(printf '%s\n' "${REPOS[@]}")"
     echo "Worktree-hygiene status: $HYGIENE_STATUS; partial=$([[ $HYGIENE_STATUS == completed ]] && echo false || echo true); removed=$removed_count failed=$failed_count; checkpoint=$state/worktree_hygiene_summary.json"
+    echo "Worktree-hygiene counters: safe=$safe_count needs-review=$review_count preserved=$preserved_count wip-actions=$wip_count removed=$removed_count failed=$failed_count pushed=$pushed_count local-wip=$local_wip_count"
+    echo "Worktree-hygiene resume: phase=${HYGIENE_PHASE:-unknown} unfinished-repo=${HYGIENE_REPO:-none} candidate=${HYGIENE_CURRENT:-none}"
+    printf 'Known repositories:\n%s\nScanned repositories:\n%s\n' "${HYGIENE_ALL_REPOS:-none}" "${HYGIENE_SCANNED_REPOS:-none}"
+    if [[ "${HYGIENE_PHASE:-unknown}" == discovery ]]; then
+        echo "Discovery incomplete: repository inventory is partial; unknown repositories have not been claimed scanned."
+    fi
     python3 - "$state" "$HYGIENE_STATUS" "$rc" "$safe_count" "$review_count" \
-        "$preserved_count" "$wip_count" "$removed_count" "$failed_count" "$HYGIENE_CURRENT" "$HYGIENE_COMPLETED" "$HYGIENE_ALL_REPOS" "$HYGIENE_SCANNED_REPOS" "$HYGIENE_REPO" "$pushed_count" "$EXECUTE" "$local_wip_count" <<'PYTHON' || persist_rc=$?
+        "$preserved_count" "$wip_count" "$removed_count" "$failed_count" "$HYGIENE_CURRENT" "$HYGIENE_COMPLETED" "$HYGIENE_ALL_REPOS" "$HYGIENE_SCANNED_REPOS" "$HYGIENE_REPO" "$pushed_count" "$EXECUTE" "$local_wip_count" "${HYGIENE_PHASE:-unknown}" <<'PYTHON' || persist_rc=$?
 import datetime, json, os, pathlib, sys, tempfile
 state = pathlib.Path(sys.argv[1]); state.mkdir(parents=True, exist_ok=True)
 keys = ["safe", "needs_review", "preserved", "wip_removed", "removed", "failed"]
@@ -876,6 +883,8 @@ data = {"status": sys.argv[2], "exit_status": int(sys.argv[3]),
         "pushed_refs_count": int(sys.argv[15]),
         "mode": "execute" if sys.argv[16] == "true" else "dry_run",
         "locally_preserved_wip_count": int(sys.argv[17]),
+        "phase": sys.argv[18],
+        "discovery_complete": sys.argv[18] in ("scan", "completed"),
         "resume": "Re-run the same command; all safety and publication gates are rechecked."}
 if sys.argv[16] != "true":
     data["counters"]["would_preserve_wip"] = data["counters"]["wip_removed"]
@@ -931,6 +940,14 @@ main() {
         shift
     done
 
+    if [[ "$EXECUTE" == true && "${WORKTREE_APPROVED:-0}" != 1 ]]; then
+        echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval."
+        exit 0
+    fi
+    trap 'HYGIENE_STATUS=interrupted; exit 130' INT
+    trap 'HYGIENE_STATUS=interrupted; exit 143' TERM
+    trap 'hygiene_finish "$?"' EXIT
+    HYGIENE_PHASE=configuration
     # Staleness floor: read from safety.local.json (safety_min_stale_days), with a
     # hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
     # may only RAISE the floor, never lower it below 7.
@@ -959,6 +976,7 @@ main() {
     [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
     if [[ ${#REPOS[@]} -eq 0 ]]; then
+        HYGIENE_PHASE=discovery
         while IFS= read -r repo; do
             [[ -n "$repo" ]] && REPOS+=("$repo")
         done < <(discover_worktree_repos "${CLAUDE_WORKTREE_REPOS:-}")
@@ -966,19 +984,13 @@ main() {
 
     if [[ "$EXECUTE" == true ]]; then
         echo "=== WORKTREE HYGIENE ==="
-        if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
-            echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval."
-            exit 0
-        fi
     else
         echo "=== WORKTREE HYGIENE (DRY-RUN) ==="
     fi
 
 
-    trap 'HYGIENE_STATUS=interrupted; exit 130' INT
-    trap 'HYGIENE_STATUS=interrupted; exit 143' TERM
-    trap 'hygiene_finish "$?"' EXIT
     [[ ${#REPOS[@]} -eq 0 ]] || HYGIENE_ALL_REPOS="$(printf '%s\n' "${REPOS[@]}")"
+    HYGIENE_PHASE=scan
     for repo in "${REPOS[@]}"; do
         [[ -d "$repo" ]] || continue
         local repo_abs
@@ -1127,6 +1139,7 @@ main() {
         HYGIENE_SCANNED_REPOS="${HYGIENE_SCANNED_REPOS}${repo_abs}"$'\n'
         HYGIENE_REPO=""
     done
+    HYGIENE_PHASE=completed
     HYGIENE_STATUS=completed
 
     echo ""
