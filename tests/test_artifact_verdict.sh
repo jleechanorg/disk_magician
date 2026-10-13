@@ -800,7 +800,7 @@ export DISK_MAGICIAN_ARCHIVE_ROOT="$ARCHIVE_ROOT"
 archive_fixture() {
     local source="$1" entry="$2" archived_at="$3" retention
     retention="$(c14_ephemeral_retention "$source")" || retention=0
-    mkdir -p "${entry%/*}" && "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null && mv "$source" "$entry"
+    mkdir -p "${entry%/*}" && python3 "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null && mv "$source" "$entry"
 }
 archive_source="$PT/pr-archive-123"
 archive_entry="$ARCHIVE_ROOT/20261010T000000Z/pr-archive-123"
@@ -828,7 +828,7 @@ arbitrary_source="$PT/unregistered-origin-48h"
 arbitrary_entry="$ARCHIVE_ROOT/20261010T011000Z/unregistered-origin-48h"
 mkdir -p "$arbitrary_source" && printf 'must not trust arbitrary retention' >"$arbitrary_source/payload"
 mkdir -p "${arbitrary_entry%/*}"
-"$PROBE" archive-receipt "$arbitrary_source" "$arbitrary_entry.c14-origin.json" "$((NOW - 49 * 3600))" 2880 >/dev/null
+python3 "$PROBE" archive-receipt "$arbitrary_source" "$arbitrary_entry.c14-origin.json" "$((NOW - 49 * 3600))" 2880 >/dev/null
 mv "$arbitrary_source" "$arbitrary_entry"
 age "$arbitrary_entry" 50000
 assert_eq "$(av "$arbitrary_entry" --kind ephemeral)" kept:archive-identity "E1 rejects allowed retention without a matching E2/E3 origin row"
@@ -836,7 +836,7 @@ assert_eq "$(av "$arbitrary_entry" --kind ephemeral)" kept:archive-identity "E1 
 later_row_source="$PT/e4-origin-fixture"
 later_row_entry="$ARCHIVE_ROOT/20261010T012000Z/e4-origin-fixture"
 mkdir -p "$later_row_source" "${later_row_entry%/*}" && printf 'E4 is not an E1 origin row' >"$later_row_source/payload"
-"$PROBE" archive-receipt "$later_row_source" "$later_row_entry.c14-origin.json" "$((NOW - 49 * 3600))" 10080 >/dev/null
+python3 "$PROBE" archive-receipt "$later_row_source" "$later_row_entry.c14-origin.json" "$((NOW - 49 * 3600))" 10080 >/dev/null
 python3 - "$later_row_entry.c14-origin.json" "$HOME/.aside/u/a/sessions/s1" <<'PY'
 import json, sys
 path, original = sys.argv[1:]
@@ -883,7 +883,7 @@ receipt_failure_source="$PT/receipt-failure-source"
 receipt_failure_entry="$ARCHIVE_ROOT/20261010T060000Z/receipt-failure-source"
 mkdir -p "$receipt_failure_source" "${receipt_failure_entry%/*}" && printf 'preserve me' >"$receipt_failure_source/payload"
 touch "$TMPROOT/not-a-directory"
-if "$PROBE" archive-receipt "$receipt_failure_source" "$TMPROOT/not-a-directory/receipt.json" "$NOW" >"$TMPROOT/receipt-failure.out" 2>&1; then
+if python3 "$PROBE" archive-receipt "$receipt_failure_source" "$TMPROOT/not-a-directory/receipt.json" "$NOW" >"$TMPROOT/receipt-failure.out" 2>&1; then
     mv "$receipt_failure_source" "$receipt_failure_entry"
     bad "receipt creation failure blocks archive move"
 else
