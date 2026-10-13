@@ -570,6 +570,27 @@ assert_contains "T21: WRH retained reason reported" "wrh-retained" "$(cat "$O21"
 [[ "$(receipt_get "$WR_HOME" candidates.retained_count)" == 1 ]] && record_pass "T21: receipt retained_count=1" || record_fail "T21: receipt retained_count=1" "got '$(receipt_get "$WR_HOME" candidates.retained_count)'"
 [[ "$(receipt_get "$WR_HOME" outcome)" == partial ]] && record_pass "T21: WRH-retained run reports partial" || record_fail "T21: WRH-retained run reports partial" "got '$(receipt_get "$WR_HOME" outcome)'"
 
+echo "T22: REAL C14 callstack (quarantine.sh -> artifact_verdict -> c14_probe -> quarantine_rename.py) retains a conflicted tree"
+# Beyond the recording doubles, this drives the production C14 callstack on an
+# eligible ephemeral fixture and forces phase1's post-intent identity check to
+# see a changed `.dm-quarantine` (the sanctioned BEFORE_QUARANTINE_RENAME hook),
+# so the real callstack returns `quarantine_conflict:<id>` and the tree stays.
+# It proves the retained-outcome receipt fix against real code: removed_count=0,
+# retained_count=1, outcome partial (never a clean removal success).
+RCN_HOME="$TMP_ROOT/rconf-home"; RCN_CODEX="$RCN_HOME/Documents/Codex"; RCN_DATE="$RCN_CODEX/$D_OLD"; RCN_TASK="$RCN_DATE/pr-220"
+mkdir -p "$RCN_TASK"; printf 'generated\n' >"$RCN_TASK/results.json"; age "$RCN_TASK"
+RCN_FILE="$CUR_DIR/rconf-cursor.json"; O22="$TMP_ROOT/o22"; RC=0
+HOME="$RCN_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
+  DISK_MAGICIAN_CODEX_KIND=ephemeral DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$RCN_DATE" \
+  DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME='rm -rf "$(dirname "$DM_Q_PATH")/.dm-quarantine"' \
+  run_sweeper "$O22" --clean --cursor "$RCN_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T22: real-conflict run exits 0" || { record_fail "T22: real-conflict run exits 0" "rc=$RC"; cat "$O22"; }
+assert_exists "T22: real conflicted tree retained on disk" "$RCN_TASK/results.json"
+assert_contains "T22: real quarantine_conflict reported" "KEEP [quarantine-conflict:" "$(cat "$O22")"
+[[ "$(receipt_get "$RCN_HOME" candidates.removed_count)" == 0 ]] && record_pass "T22: real retained outcome removed_count=0" || record_fail "T22: real retained outcome removed_count=0" "got '$(receipt_get "$RCN_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$RCN_HOME" candidates.retained_count)" == 1 ]] && record_pass "T22: real retained outcome retained_count=1" || record_fail "T22: real retained outcome retained_count=1" "got '$(receipt_get "$RCN_HOME" candidates.retained_count)'"
+[[ "$(receipt_get "$RCN_HOME" outcome)" == partial ]] && record_pass "T22: real retained outcome reports partial" || record_fail "T22: real retained outcome reports partial" "got '$(receipt_get "$RCN_HOME" outcome)'"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
