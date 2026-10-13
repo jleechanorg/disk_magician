@@ -42,6 +42,25 @@ LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
 LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
+# Stale children of a protected root. The protected-roots list guards a
+# canonical evidence/repo root that lands directly in /private/tmp (e.g.
+# worldarchitect.ai's evidence path) -- see the 9 logged incidents documented
+# in tests/test_cleanup_tmp_large_protections.sh. Protecting the whole parent
+# also hid its stale scratch children from every sweeper (2026-10-12: a 9.0 GB
+# 'split-gates' child sat 26h idle and was invisible, bead
+# disk_magician-tmp-protected-root-blocks-stale-children-ekm1). Children are
+# therefore evaluated individually, on a stricter clock, and the canonical
+# children below stay permanently protected.
+PROTECTED_ROOT_CHILD_MIN_AGE_HOURS="${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS:-48}"
+# Basenames, relative to any protected root, that are never reclaimed.
+DEFAULT_PROTECTED_ROOT_CHILDREN=(evidence)
+PROTECTED_ROOT_CHILDREN=()
+if [[ -n "${DISK_MAGICIAN_PROTECTED_ROOT_CHILDREN:-}" ]]; then
+  read -r -a PROTECTED_ROOT_CHILDREN <<<"$DISK_MAGICIAN_PROTECTED_ROOT_CHILDREN"
+fi
+if [[ ${#PROTECTED_ROOT_CHILDREN[@]} -eq 0 ]]; then
+  PROTECTED_ROOT_CHILDREN=("${DEFAULT_PROTECTED_ROOT_CHILDREN[@]}")
+fi
 # Hard cap (bead jleechan-mtow): an archive entry older than this is purged
 # even if it still looks active (marker/mtime/open files). Without a cap, a
 # process holding fds into an archived dir keeps it alive forever and the
@@ -471,6 +490,62 @@ is_protected_root() {
     [[ "$base" == "$root" ]] && return 0
   done
   return 1
+}
+
+# is_protected_root_child <basename> -- true for a child of a protected root
+# that must never be reclaimed even when stale (the canonical evidence dirs).
+is_protected_root_child() {
+  local base="$1" child
+  for child in "${PROTECTED_ROOT_CHILDREN[@]}"; do
+    [[ "$base" == "$child" ]] && return 0
+  done
+  return 1
+}
+
+# scan_protected_root_children <protected_root_path> -- evaluate the DIRECT
+# children of a protected root so stale scratch inside it is still reclaimable
+# while the root and its canonical children (evidence/) are never touched.
+# Uses the same guards as the large-dir class (marker, recency, size, open
+# files, unsaved work) on a stricter recency clock.
+scan_protected_root_children() {
+  local root="$1" child base rel kb archive_rc
+  while IFS= read -r -d '' child; do
+    base="$(basename "$child")"
+    if is_protected_root_child "$base"; then
+      log "Skipping protected child of a protected root: $child"
+      continue
+    fi
+    if [[ -e "$child/.in-use" ]]; then
+      log "Skipping active-use marker (.in-use present): $child"
+      continue
+    fi
+    if has_recent_activity "$child" "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"; then
+      log "Skipping recently active protected-root child (mtime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
+      continue
+    fi
+    kb=$(path_size_kb "$child")
+    if [[ "$kb" -lt 0 ]]; then
+      log "Skipping protected-root child (size unknown): $child"
+      continue
+    fi
+    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+      continue
+    fi
+    if [[ "$DRY_RUN" != true ]] && has_open_files "$child"; then
+      log "Skipping in-use protected-root child: $child  (${kb} KB)"
+      continue
+    fi
+    if declare -F worktree_has_unsaved_work >/dev/null 2>&1 && worktree_has_unsaved_work "$child"; then
+      log "Skipping protected-root child with unsaved work (uncommitted/unpushed/no-upstream): $child"
+      continue
+    fi
+    archive_rc=0
+    archive_path "$child" "$kb" "$(basename "$root")" >/dev/null || archive_rc=$?
+    (( archive_rc == 1 )) && continue
+    (( archive_rc == 0 )) || return "$archive_rc"
+    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 }
 
 # is_protected_tmp_path <path> — true for a configured protected root and
@@ -1246,6 +1321,9 @@ large_consider_entry() {
 
   if is_protected_root "$base" || { (( depth > 0 )) && is_protected_tmp_path "$d"; }; then
     log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+    if (( depth == 0 )); then
+      scan_protected_root_children "$d"
+    fi
     return 0
   fi
 
