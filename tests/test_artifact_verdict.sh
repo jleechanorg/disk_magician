@@ -69,6 +69,22 @@ assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/symlink-repo
 symlink_repos="$(C14_ROOT="$TMPROOT/symlink-repo" python3 "$_AV_DIR/../c14_probe.py" repos "$symlink_inventory" | tr '\0' '\n')"
 assert_eq "$symlink_repos" "$TMPROOT/symlink-repo/nested" "inventory classifies linked metadata only as the worktree"
 assert_eq "$(c14_repos_ok "$TMPROOT/symlink-repo" "$symlink_inventory")" kept:dirty "inventory finds nested repo with internal .git symlink"
+mkdir -p "$TMPROOT/external-gitdir/nested"
+mkrepo "$TMPROOT/external-gitdir-source"
+cp "$TMPROOT/external-gitdir-source/tracked.txt" "$TMPROOT/external-gitdir/nested/tracked.txt"
+ln -s "$TMPROOT/external-gitdir-source/.git" "$TMPROOT/external-gitdir/nested/.git"
+printf 'dirty\n' >>"$TMPROOT/external-gitdir/nested/tracked.txt"
+external_gitdir_inventory="$TMPROOT/external-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" ok "inventory of nested repo with external .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/external-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$external_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on an external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir" "$external_gitdir_inventory")" kept:gitdir-invalid "C14 rejects dirty repo with external .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/external-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects external .git symlink"
+mkdir -p "$TMPROOT/broken-gitdir/nested"
+ln -s "$TMPROOT/no-such-gitdir" "$TMPROOT/broken-gitdir/nested/.git"
+broken_gitdir_inventory="$TMPROOT/broken-gitdir-inventory.json"
+assert_eq "$(python3 "$_AV_DIR/../c14_probe.py" inventory "$TMPROOT/broken-gitdir" "$broken_gitdir_inventory")" ok "inventory of nested repo with broken .git symlink"
+assert_eq "$(C14_ROOT="$TMPROOT/broken-gitdir" python3 "$_AV_DIR/../c14_probe.py" repos "$broken_gitdir_inventory")" kept:gitdir-invalid "inventory fails closed on a broken .git symlink"
+assert_eq "$(c14_repos_ok "$TMPROOT/broken-gitdir")" kept:gitdir-invalid "legacy repo discovery rejects broken .git symlink"
 mkrepo "$TMPROOT/assume" && git -C "$TMPROOT/assume" update-index --assume-unchanged tracked.txt
 assert_eq "$(content "$TMPROOT/assume")" kept:dirty "assume-unchanged entry"
 mkrepo "$TMPROOT/skip" && git -C "$TMPROOT/skip" update-index --skip-worktree tracked.txt
@@ -108,7 +124,7 @@ assert_eq "$(content "$TMPROOT/plain2/node_modules/backup.git")" ok "bare repo u
 v="$(c14_repos_ok "$TMPROOT/plain2")"
 [[ "$v" == kept:* ]] && ok "unpushed, unbaselined nested repos are kept ($v)" || bad "nested repos with no remote: $v"
 printf 'edit\n' >>"$TMPROOT/plain2/node_modules/inner/tracked.txt"
-assert_eq "$(c14_repos_ok "$TMPROOT/plain2" --outer-certificate "$TMPROOT/none.json")" kept:dirty \
+assert_eq "$(c14_repos_ok "$TMPROOT/plain2")" kept:dirty \
     "dirty repo nested under allowlisted node_modules is checked"
 mkrepo "$TMPROOT/wtsrc" && git -C "$TMPROOT/wtsrc" worktree add -q "$TMPROOT/wtroot/linked" -b lw
 found="$(c14_discover_repos "$TMPROOT/wtroot" | tr '\0' '\n')"
@@ -156,6 +172,61 @@ PT="$TMPROOT/ptmp" && mkdir -p "$PT"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 # shellcheck source=scripts/lib/worktree_lease.sh
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+# Advice-owned copies are remote-less by construction; the exact-sha receipt
+# permits only its hash-listed review-document overlay and binds .git metadata.
+git init -q --bare -b main "$TMPROOT/advice-source.git"
+mkrepo "$TMPROOT/advice-source-seed"
+mkdir -p "$TMPROOT/advice-source-seed/nested"
+printf 'nested content\n' >"$TMPROOT/advice-source-seed/nested/tracked.txt"
+git -C "$TMPROOT/advice-source-seed" add nested/tracked.txt && git -C "$TMPROOT/advice-source-seed" commit -qm nested
+git -C "$TMPROOT/advice-source-seed" push -q "$TMPROOT/advice-source.git" main
+git init -q "$TMPROOT/advice-copy"
+advice_sha="$(git -C "$TMPROOT/advice-source-seed" rev-parse HEAD)"
+git -C "$TMPROOT/advice-copy" fetch -q --no-tags "$TMPROOT/advice-source.git" "$advice_sha"
+git -C "$TMPROOT/advice-copy" checkout -q --detach "$advice_sha"
+mkdir -p "$TMPROOT/advice-copy/.advice-review-documents"
+printf 'review document\n' >"$TMPROOT/advice-copy/.advice-review-documents/0.md"
+advice_receipt="$TMPROOT/advice-receipt.json"
+python3 - "$PROBE" "$TMPROOT/advice-copy" "$TMPROOT/advice-source-seed" "$advice_receipt" <<'PY'
+import hashlib, json, os, subprocess, sys
+probe, clone, source, out = sys.argv[1:]
+meta = json.loads(subprocess.run([sys.executable, probe, "gitmeta", os.path.join(clone, ".git")],
+                                 check=True, capture_output=True, text=True).stdout)
+path = os.path.join(clone, ".advice-review-documents", "0.md")
+overlay = [{"path": ".advice-review-documents/0.md",
+            "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest()}]
+json.dump({"source_repo": source, "sha": subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+         check=True, capture_output=True, text=True).stdout.strip(), "clone_kind": "independent_exact_sha_fetch",
+         "overlay_manifest": overlay, "git_meta": meta, "receipt_path": out,
+         "pid": os.getpid(), "start_epoch": 1, "created_epoch": 1}, open(out, "w"))
+PY
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$advice_receipt")" ok \
+    "receipt-listed review overlay is accepted"
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" ok \
+    "outer certificate exempts only the remote-less outer copy"
+assert_eq "$(GIT_DIR="$TMPROOT/clean/.git" GIT_WORK_TREE="$TMPROOT/clean" c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" ok \
+    "outer certificate ignores caller Git environment"
+git -C "$TMPROOT/advice-copy/nested" init -q
+git -C "$TMPROOT/advice-copy/nested" config user.email nested@example.invalid
+git -C "$TMPROOT/advice-copy/nested" config user.name nested
+git -C "$TMPROOT/advice-copy/nested" add tracked.txt
+git -C "$TMPROOT/advice-copy/nested" commit -qm nested
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" kept:not-pushed \
+    "outer certificate does not skip a nested independent repository"
+cp "$advice_receipt" "$TMPROOT/advice-bad-meta.json"
+python3 - "$TMPROOT/advice-bad-meta.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["receipt_path"]=p; d["git_meta"]["config"]= "0"*64; json.dump(d,open(p,"w"))
+PY
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$TMPROOT/advice-bad-meta.json")" kept:git-metadata \
+    "receipt rejects changed .git metadata baseline"
+printf 'tampered review document\n' >"$TMPROOT/advice-copy/.advice-review-documents/0.md"
+assert_eq "$(c14_repos_ok "$TMPROOT/advice-copy" --outer-certificate "$advice_receipt")" kept:dirty \
+    "receipt rejects overlay bytes changed after certification"
+printf 'unlisted\n' >"$TMPROOT/advice-copy/extra.txt"
+assert_eq "$(c14_repo_content_ok "$TMPROOT/advice-copy" --overlay-manifest "$advice_receipt")" kept:dirty \
+    "receipt does not exempt unrelated untracked files"
+
 # baseline <repo>: record the producer's git_meta in the repo's lease.
 baseline() {
     local f gd
@@ -571,6 +642,13 @@ venvw() {
 venvw "$HOME/wt-dormant" && mkdir -p "$HOME/plain/notvenv" && printf 'py' >"$HOME/plain/notvenv/x"
 age "$HOME/wt-dormant" 43200 && age "$HOME/plain" 43200
 assert_eq "$(av "$HOME/wt-dormant/venv" --kind rebuildable)" remove "a dormant worktree's ignored venv/"
+subtree_inventory="$TMPROOT/dormant-venv-inventory.json"
+assert_eq "$(artifact_removal_verdict "$HOME/wt-dormant/venv" --kind rebuildable --inventory-out "$subtree_inventory")" remove "a linked worktree venv receives a subtree-only receipt"
+python3 - "$subtree_inventory" <<'PY' && ok "subtree receipt excludes unrelated parent worktree admin rows" || bad "subtree receipt contains parent worktree admin rows"
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rows and all(row.get("type") != "admin" for row in rows)
+PY
 assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
 mkdir -p "$HOME/projects/app/venv" && git -C "$HOME/projects/app" init -q -b main && printf 'n' >"$HOME/projects/app/venv/notes.txt"
 git -C "$HOME/projects/app" add -A && git -C "$HOME/projects/app" commit -qm notes && printf 'edit' >>"$HOME/projects/app/venv/notes.txt"

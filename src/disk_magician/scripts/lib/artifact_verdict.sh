@@ -17,13 +17,17 @@ source "$_AV_DIR/scratch_roots.sh"
 # walked too. rc 1 when the walk is incomplete or a path escapes <root>; the
 # OK sentinel can never be a find path, which starts with "/".
 c14_discover_repos() {
-    local root p d done=
+    local root p d target done=
     root="$(cd "$1" 2>/dev/null && pwd -P)" && [[ "$root" == /* ]] || return 1
     while IFS= read -r -d '' p; do
         [[ "$p" == OK ]] && { done=1; continue; }
         [[ "$p" == "$root"/* ]] || return 1
         d="${p%/*}"
         if [[ "${p##*/}" == .git ]]; then
+            if [[ -L "$p" ]]; then
+                target="$(cd "$p" 2>/dev/null && pwd -P)" || { printf 'kept:gitdir-invalid\0'; return 1; }
+                [[ "$target" == "$root"/* ]] || { printf 'kept:gitdir-invalid\0'; return 1; }
+            fi
             printf '%s\0' "$d"
         # A bare repo; git internals (.git/modules, .git/worktrees) go with their owner.
         elif [[ -f "$p" && -d "$d/objects" && -d "$d/refs" && "/$d/" != */.git/* ]]; then
@@ -33,10 +37,18 @@ c14_discover_repos() {
     [[ -n "$done" ]]
 }
 
-# c14_repo_content_ok <repo>: print `ok` (rc 0) or `kept:<reason>` (rc 1).
+# c14_repo_content_ok <repo> [--overlay-manifest <receipt>]: print `ok` (rc 0) or `kept:<reason>` (rc 1).
 # Git env dropped; git must resolve <repo> itself, not an ancestor (broken .git).
 c14_repo_content_ok() (
-    local r=$1 st flags && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    local r=$1 mode=${2:-} receipt=${3:-} st flags cert && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    r="$(cd "$r" 2>/dev/null && pwd -P)" || { echo kept:check-failed; return 1; }
+    if [[ "$mode" == --overlay-manifest ]]; then
+        [[ -n "$receipt" ]] || { echo kept:check-failed; return 1; }
+        cert="$(python3 "$_AV_DIR/../c14_probe.py" outer-certificate "$r" "$receipt")" || { echo "${cert:-kept:check-failed}"; return 1; }
+        [[ "$cert" == ok ]] || { echo "$cert"; return 1; }
+    elif [[ -n "$mode" || -n "$receipt" ]]; then
+        echo kept:check-failed; return 1
+    fi
     case "$(git -C "$r" rev-parse --is-bare-repository 2>/dev/null)" in
         true) [[ "$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" == "$r" ]] && { echo ok; return 0; } ;;
         false) [[ "$(git -C "$r" rev-parse --show-toplevel 2>/dev/null)" == "$r" ]] ;;
@@ -47,7 +59,7 @@ c14_repo_content_ok() (
         echo kept:check-failed; return 1
     fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
-    if [[ -n "$st" ]] || grep -q '^[a-zS]' <<<"$flags"; then
+    if [[ -n "$st" && "$mode" != --overlay-manifest ]] || grep -q '^[a-zS]' <<<"$flags"; then
         echo kept:dirty; return 1
     fi
     has_hidden_state "$r" && { echo kept:secret-like; return 1; }
@@ -97,13 +109,19 @@ c14_repo_pushed_ok() (
     [[ "$v" == ok ]]
 )
 
-# c14_repos_ok <root> [--outer-certificate <receipt>]: content and remote checks on every
-# repository found; `ok` or the first kept reason. Certificate unused here.
+# c14_repos_ok <root> [--outer-certificate <receipt>]: validate the outer copy
+# certificate, then run ordinary content and remote checks on every nested repository.
 c14_check_repo_list() {
-    local root=$1 deadline=${2:-} r v done=
+    local root=$1 deadline=${2:-} outer_receipt=${3:-} r v done= canon
+    canon="$(cd "$root" 2>/dev/null && pwd -P)" || { echo kept:check-failed; return 1; }
+    if [[ -n "$outer_receipt" ]]; then
+        v="$(python3 "$_AV_DIR/../c14_probe.py" outer-certificate "$canon" "$outer_receipt")" || { echo "${v:-kept:check-failed}"; return 1; }
+        [[ "$v" == ok ]] || { echo "$v"; return 1; }
+    fi
     while IFS= read -r -d '' r; do
         [[ "$r" == OK ]] && { done=1; continue; }
         [[ "$r" == kept:* ]] && { echo "$r"; return 1; }
+        if [[ -n "$outer_receipt" && "$r" == "$canon" ]]; then continue; fi
         v="$(c14_repo_content_ok "$r")" || { echo "$v"; return 1; }
         v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || { echo "$v"; return 1; }
     done
@@ -112,9 +130,11 @@ c14_check_repo_list() {
 }
 
 c14_repos_ok() {
-    local root=$1 inv=${2:-} deadline=${3:-}
+    local root=$1 inv=${2:-} deadline=${3:-} receipt=
     if [[ "$inv" == --outer-certificate ]]; then
-        c14_check_repo_list "$root" "" < <(c14_discover_repos "$root" && printf 'OK\0')
+        receipt=${3:-}
+        [[ -n "$receipt" && -z "${4:-}" ]] || { echo kept:check-failed; return 1; }
+        c14_check_repo_list "$root" "" "$receipt" < <(c14_discover_repos "$root" && printf 'OK\0')
         return
     fi
     if [[ -n "$inv" ]]; then
@@ -249,7 +269,7 @@ _av_os_clone_proof() {
 # artifact_removal_verdict <path> [...] | --self-test
 _av_artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv
+    local p=${1:-} kind='' deadline='' inventory_out='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -317,7 +337,19 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
     esac
     if [[ -n "$inventory_out" ]]; then
         mkdir -p "$(dirname "$inventory_out")" || { echo kept:check-failed; return 0; }
-        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "${C14_ADMIN_INVENTORY:-}" "$inventory_out.tmp.$$")"
+        # Linked-worktree admin state belongs only to a candidate that is the
+        # worktree root. A venv or other child directory has its own inventory;
+        # appending the parent's admin rows makes later payload verification fail.
+        if [[ -d "$p" ]]; then
+            local top gd cd
+            top="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || top=''
+            if [[ "$top" == "$p" ]]; then
+                gd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --absolute-git-dir 2>/dev/null)" || gd=''
+                cd="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY -u GIT_CEILING_DIRECTORIES git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || cd=''
+                [[ -n "$gd" && -n "$cd" && "$gd" != "$cd" ]] && admin_source=${C14_ADMIN_INVENTORY:-}
+            fi
+        fi
+        st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "$admin_source" "$inventory_out.tmp.$$")"
         [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
     fi
     echo remove
