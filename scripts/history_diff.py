@@ -22,6 +22,10 @@ import resolve_state_repo_path
 
 GIB_KB = 1024 * 1024
 LEDGER_REL_PATH = "ledger/topdown-5g.json"
+# How far the sum of per-path deltas may drift from the disk_used delta before
+# it is reported as an overcount (clone/hardlink shared blocks are counted per
+# path in granularity_buckets).
+DELTA_TOLERANCE_RATIO = 0.01
 
 
 class LedgerError(ValueError):
@@ -474,13 +478,54 @@ def format_kb(delta_kb: int) -> str:
     return f"{sign}{abs(delta_kb) / GIB_KB:.2f} GiB"
 
 
-def format_diff(deltas: list, residual_delta: int) -> str:
+def resolve_commit(state_dir: pathlib.Path, ref: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(state_dir), "rev-parse", ref],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def delta_overcount_note(base: dict, target: dict, deltas: list) -> str:
+    """Name the clone/hardlink overcount when per-path rows cannot sum to the
+    disk delta.
+
+    granularity_buckets values are raw: shared clone/hardlink blocks are counted
+    once per path, so the rows overcount by clone_shared_adjustment_kb. Observed
+    2026-10-13: rows summed to -165.86 GiB while disk_used changed -9.13 GiB. A
+    consumer that silently trusts the rows reports growth that never happened,
+    so say it out loud instead. The ledger's own per_path_comparable verdict
+    (when both runs carry it) suppresses the note.
+    """
+    expected = int(target.get("disk_used_kb") or 0) - int(base.get("disk_used_kb") or 0)
+    observed = sum(delta for _, delta in deltas)
+    gap = observed - expected
+    tolerance = max(1, int(abs(expected) * DELTA_TOLERANCE_RATIO))
+    if abs(gap) <= tolerance:
+        return ""
+    flags = [
+        (ledger.get("accounting_equation") or {}).get("per_path_comparable")
+        for ledger in (base, target)
+    ]
+    if flags and all(flag is True for flag in flags):
+        return ""
+    return (
+        f"note: per-path rows sum to {format_kb(observed)} but disk_used changed "
+        f"{format_kb(expected)}; the {format_kb(gap)} difference is clone/hardlink "
+        "shared space counted once per path — rows are directional, not exact"
+    )
+
+
+def format_diff(deltas: list, residual_delta: int, note: str = "") -> str:
     lines = [
         f"{format_kb(delta_kb)}  {path}"
         for path, delta_kb in deltas
         if delta_kb != 0
     ]
     lines.append(f"residual delta: {format_kb(residual_delta)}")
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
@@ -599,6 +644,16 @@ def main(argv) -> int:
     try:
         if args.days is not None:
             base_ref, base = select_floor_ref(state_dir, args.days)
+            # The floor is often HEAD itself (today was the lowest-used day), and
+            # diffing HEAD against HEAD prints nothing but a zero residual. Fall
+            # back to the previous distinct run so --days always shows movement.
+            if resolve_commit(state_dir, base_ref) == resolve_commit(state_dir, "HEAD"):
+                base_ref = "HEAD~1"
+                base = load_ledger_from_git(state_dir, base_ref)
+                print(
+                    f"floor ({args.days}d) is HEAD ({base_ref} used instead): "
+                    "diffing against the previous committed run"
+                )
         else:
             base = load_ledger_from_git(state_dir, base_ref)
         target = load_ledger_from_git(state_dir, "HEAD")
@@ -611,13 +666,14 @@ def main(argv) -> int:
         return 2
 
     deltas, residual_delta = compute_deltas(base, target)
+    note = delta_overcount_note(base, target, deltas)
     if args.days is not None:
         captured_at = base.get("captured_at", "unknown")
         print(
             f"floor ({args.days}d): {base['disk_used_kb'] / GIB_KB:.2f} GiB used "
             f"at {captured_at} ({base_ref})"
         )
-    print(format_diff(deltas, residual_delta))
+    print(format_diff(deltas, residual_delta, note))
     return 0
 
 
