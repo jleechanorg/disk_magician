@@ -10,7 +10,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit 2
-set -- "${ACT_ARGS[@]}"
+# Bash 3.2 with nounset treats an empty array expansion as an unbound variable.
+if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 clean_flag="${1:---dry-run}"
 if [[ $# -gt 1 || ( "$clean_flag" != "--clean" && "$clean_flag" != "--dry-run" ) ]]; then
   echo "Usage: $(basename "$0") [--clean|--dry-run] [--deadline-at MONOTONIC] [--cursor PATH]" >&2
@@ -40,7 +41,7 @@ CHILD_TRIGGER="tmp_scratch_sweep:${RECEIPT_RUN_ID}"
 OLD_CHILD_ID="$(python3 "$RECEIPT_HELPER" read --job cleanup_tmp --last 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x.get("id", "") if x else "")' 2>/dev/null || true)"
 run_cleanup_tmp() {
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
-    DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" "$@" "${governor_args[@]}"
+    DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" "$@" ${governor_args[@]+"${governor_args[@]}"}
   else
     DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" "$@"
   fi
@@ -49,7 +50,7 @@ run_cleanup_tmp() {
 rc=0
 if [[ "$clean_flag" == "--clean" ]]; then
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
-    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large "${governor_args[@]}" || rc=1
+    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large ${governor_args[@]+"${governor_args[@]}"} || rc=1
   else
     env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large || rc=1
   fi
@@ -105,6 +106,9 @@ FREED_BYTES="null"
 if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   DF_DELTA=$(( FREE_AFTER - FREE_BEFORE ))
   FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
+  # A dry-run deletes nothing, so any positive df delta is unrelated system
+  # activity and must never be reported as reclaimed bytes.
+  [[ "$clean_flag" == "--dry-run" ]] && FREED_BYTES=0
 fi
 if [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
   OUTCOME="error"
