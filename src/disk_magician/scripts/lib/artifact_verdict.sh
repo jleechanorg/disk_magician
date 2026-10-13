@@ -147,7 +147,7 @@ c14_ephemeral_retention() {
 # origin receipt. `none` falls through to ordinary provenance; invalid identity
 # or a receipt whose E2/E3 retention has not elapsed stays kept.
 c14_archive_origin() (
-    local p=$1 inv=$2 archive_root receipt info original archived_at retention now
+    local p=$1 inv=$2 archive_root receipt info original archived_at retention now minimum
     archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
     [[ -d "$archive_root" ]] || { echo none; return 0; }
     archive_root="$(cd "$archive_root" 2>/dev/null && pwd -P)" || { echo kept:archive-identity; return 0; }
@@ -158,10 +158,12 @@ c14_archive_origin() (
     [[ "$info" != kept:* ]] || { echo kept:archive-identity; return 0; }
     IFS= read -r -d '' original < <(python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["original_path"]); sys.stdout.write("\0")' "$info" 2>/dev/null) || { echo kept:archive-identity; return 0; }
     archived_at="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archived_at"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
-    retention="$(c14_ephemeral_retention "$original")" || { echo kept:archive-identity; return 0; }
-    case "$retention" in 60|240|2880) ;; *) echo kept:archive-identity; return 0 ;; esac
+    retention="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["retention_minutes"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
+    case "$retention" in 60|240|2880|4320|10080|30240|43200) ;; *) echo kept:archive-identity; return 0 ;; esac
+    minimum=1440
+    (( retention > minimum )) && minimum=$retention
     now="$(date +%s)"
-    (( now >= archived_at && now - archived_at >= retention * 60 )) || { echo kept:recent-activity; return 0; }
+    (( now >= archived_at && now - archived_at >= minimum * 60 )) || { echo kept:recent-activity; return 0; }
     echo ok
 )
 # _av_rebuildable <path>: rc 0 under the cache-root table (§7.2 (b)) or, as cleanup_worktree_venvs,
@@ -245,7 +247,7 @@ _av_artifact_removal_verdict() {
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--cursor|--inventory-out)
+            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
                     --kind) kind=$2 ;;
@@ -256,7 +258,7 @@ _av_artifact_removal_verdict() {
                     --inventory-out) inventory_out=$2 ;;
                 esac
                 shift 2 ;;
-            *) shift ;;
+            *) echo kept:check-failed; return 0 ;;
         esac
     done
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
@@ -320,7 +322,7 @@ artifact_removal_verdict() {
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
     inv="$tmpdir/inventory.json"
     admin_inv=${C14_INVENTORY_OUT:-"$inv.admin.jsonl"}
-    result="$(C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "$@")"
+    result="$(GIT_OPTIONAL_LOCKS=0 C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "$@")"
     if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
         reason=${result#*:}
         python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true

@@ -342,14 +342,18 @@ def account(inv_file, ledger, reason):
     except Exception:
         print("kept:check-failed")
 
-def archive_receipt(source, receipt, archived_at=None):
+def archive_receipt(source, receipt, archived_at=None, retention_minutes=None):
     """Write an exclusive, durable identity receipt for a directory before it moves."""
     try:
         st = os.lstat(source)
         if not stat.S_ISDIR(st.st_mode):
             raise ValueError("archive entries must be directories")
+        retention = int(retention_minutes) if retention_minutes is not None else 0
+        if retention < 0:
+            raise ValueError("invalid retention")
         row = {"original_path": os.path.abspath(source), "dev": st.st_dev, "ino": st.st_ino,
-               "size": st.st_size, "archived_at": int(archived_at) if archived_at else int(time.time())}
+               "size": st.st_size, "archived_at": int(archived_at) if archived_at else int(time.time()),
+               "retention_minutes": retention}
         parent = os.path.dirname(os.path.abspath(receipt))
         fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
@@ -363,6 +367,7 @@ def archive_receipt(source, receipt, archived_at=None):
         print("ok")
     except Exception:
         print("kept:archive-identity")
+        return 1
 
 def archive_info(candidate, receipt, inv_file):
     """Validate archive identity against both the live path and verdict inventory."""
@@ -389,15 +394,15 @@ def archive_info(candidate, receipt, inv_file):
             raise ValueError("receipt changed")
         original = row.get("original_path")
         dev, ino, archived_at = row.get("dev"), row.get("ino"), row.get("archived_at")
-        if not isinstance(original, str) or not os.path.isabs(original) or type(dev) is not int or type(ino) is not int or type(archived_at) is not int or archived_at <= 0:
+        retention = row.get("retention_minutes")
+        if not isinstance(original, str) or not os.path.isabs(original) or type(dev) is not int or type(ino) is not int or type(archived_at) is not int or archived_at <= 0 or type(retention) is not int or retention < 0:
             raise ValueError("receipt fields missing")
-        if (dev, ino) != identity[:2] or ("size" in row and row["size"] != st.st_size):
+        if (dev, ino) != identity[:2] or type(row.get("size")) is not int or row["size"] != st.st_size:
             raise ValueError("archive identity changed")
-        if "size" in row and type(row["size"]) is not int:
-            raise ValueError("invalid archive size")
         if "sha256" in row:
             raise ValueError("unsupported receipt digest")
-        print(json.dumps({"original_path": original, "archived_at": archived_at}, separators=(",", ":")))
+        print(json.dumps({"original_path": original, "archived_at": archived_at,
+                          "retention_minutes": retention}, separators=(",", ":")))
     except Exception:
         print("kept:archive-identity")
 
@@ -413,6 +418,10 @@ def repos(inv_file):
             else: parent, _, name = rel.rpartition("/"); parent = parent or "."
             if name == ".git" and e.get("type") in ("dir", "file"):
                 roots.add(parent)
+            if rel == "." and e.get("type") == "dir" and all(
+                    by_path.get(name, {}).get("type") == kind for name, kind in
+                    (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
+                roots.add(".")
             if e.get("type") == "dir" and rel != ".git" and not rel.endswith("/.git"):
                 if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
                        (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
@@ -488,8 +497,8 @@ if __name__ == "__main__":
             sys.exit(inventory(a[1], a[2], a[3] if len(a) == 4 else None))
         if len(a) == 4 and a[0] == "account":
             sys.exit(account(*a[1:]))
-        if len(a) in (3, 4) and a[0] == "archive-receipt":
-            sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) == 4 else None))
+        if len(a) in (3, 4, 5) and a[0] == "archive-receipt":
+            sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) >= 5 else None))
         if len(a) == 4 and a[0] == "archive-info":
             sys.exit(archive_info(a[1], a[2], a[3]))
         if len(a) == 2 and a[0] == "repos":

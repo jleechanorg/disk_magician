@@ -141,13 +141,15 @@ assert_eq "$(c14_repos_ok "$TMPROOT/missing")" kept:check-failed "missing root"
 echo "== remote proof (independent repositories) =="
 export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
 PROBE="$REPO_ROOT/scripts/c14_probe.py"
+PT="$TMPROOT/ptmp" && mkdir -p "$PT"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 # shellcheck source=scripts/lib/worktree_lease.sh
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
 # baseline <repo>: record the producer's git_meta in the repo's lease.
 baseline() {
     local f gd
     f="$(lease_path_for "$1")" && gd="$(git -C "$1" rev-parse --absolute-git-dir)"
-    mkdir -p "${f%/*}" && printf '{"git_meta": %s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
+    mkdir -p "${f%/*}" && printf '{"owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$(python3 "$PROBE" gitmeta "$gd")" >"$f"
 }
 # mkpushed <name>: bare remote + clone with main pushed and a git_meta baseline.
 mkpushed() {
@@ -337,6 +339,20 @@ NOW="$(date +%s)"
 # age <path> <minutes>: every entry under <path> last modified <minutes> ago.
 age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
 eph() { artifact_removal_verdict "$1" --kind ephemeral; }
+index_candidate="$PT/pr-index-inventory-check"
+git clone -q "$TMPROOT/remotes/ctl.git" "$index_candidate" && baseline "$index_candidate"
+age "$index_candidate" 50000
+index_before="$(shasum -a 256 "$index_candidate/.git/index" | awk '{print $1}')"
+index_inventory="$TMPROOT/index-inventory.json"
+assert_eq "$(GIT_OPTIONAL_LOCKS=1 artifact_removal_verdict "$index_candidate" --kind ephemeral --inventory-out "$index_inventory")" remove "full C14 verification can remove an old, clean pushed clone"
+python3 - "$index_candidate/.git/index" "$index_inventory" <<'PY' && ok "read-side Git verification preserves the indexed bytes" || bad "C14 inventory's index hash changed during verification"
+import hashlib, json, sys
+index_path, inventory_path = sys.argv[1:]
+entries = {row["path"]: row for row in json.load(open(inventory_path, encoding="utf-8"))}
+actual = hashlib.sha256(open(index_path, "rb").read()).hexdigest()
+assert entries[".git/index"]["sha256"] == actual
+PY
+assert_eq "$(shasum -a 256 "$index_candidate/.git/index" | awk '{print $1}')" "$index_before" "index bytes are unchanged across the verifier"
 mkdir -p "$PT/clones" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/clones/repo" && baseline "$PT/clones/repo"
 # A finished run releases its lease; a baseline-only lease (owner absent) would be kept.
 python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/clones/repo")"
@@ -565,13 +581,18 @@ assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kin
 age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
+typo_candidate="$PT/agent_prompt_bad_deadline.txt"
+printf 'eligible only when every option parses' >"$typo_candidate"
+age "$typo_candidate" 50000
+assert_eq "$(av "$typo_candidate" --kind ephemeral --deadlin-at bogus)" kept:check-failed "unknown option cannot authorize removal"
 
 echo "== archive origin receipt (E1) =="
 ARCHIVE_ROOT="$TMPROOT/archive-root"
 export DISK_MAGICIAN_ARCHIVE_ROOT="$ARCHIVE_ROOT"
 archive_fixture() {
-    local source="$1" entry="$2" archived_at="$3"
-    mkdir -p "${entry%/*}" && "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" >/dev/null && mv "$source" "$entry"
+    local source="$1" entry="$2" archived_at="$3" retention
+    retention="$(c14_ephemeral_retention "$source")" || retention=0
+    mkdir -p "${entry%/*}" && "$PROBE" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null && mv "$source" "$entry"
 }
 archive_source="$PT/pr-archive-123"
 archive_entry="$ARCHIVE_ROOT/20261010T000000Z/pr-archive-123"
@@ -580,6 +601,13 @@ age "$archive_source" 43200
 archive_fixture "$archive_source" "$archive_entry" "$((NOW - 49 * 3600))"
 age "$archive_entry" 43200
 assert_eq "$(av "$archive_entry" --kind ephemeral)" remove "archived E3 origin past its 48 h row retention"
+
+# A bare repository at the candidate root is discovered from inventory too.
+root_bare="$PT/pr-root-bare"
+git init --bare -q "$root_bare"
+printf 'unreachable root object' | git --git-dir="$root_bare" hash-object -w --stdin >/dev/null
+age "$root_bare" 50000
+assert_eq "$(av "$root_bare" --kind ephemeral)" kept:git-unbaselined "candidate-root bare repository is checked and fails closed"
 
 unknown_source="$TMPROOT/unregistered-origin"
 unknown_entry="$ARCHIVE_ROOT/20261010T010000Z/large-unknown"
@@ -600,11 +628,52 @@ mv "$replaced_entry" "$replaced_entry.original" && mkdir -p "$replaced_entry" &&
 age "$replaced_entry" 43200
 assert_eq "$(av "$replaced_entry" --kind ephemeral)" kept:archive-identity "replaced E1 entry does not inherit its old receipt"
 
+short_source="$PT/cli_validation_gemini_archive"
+short_entry="$ARCHIVE_ROOT/20261010T040000Z/cli_validation_gemini_archive"
+mkdir -p "$short_source" && printf 'short-row archive' >"$short_source/payload"
+age "$short_source" 50000
+archive_fixture "$short_source" "$short_entry" "$((NOW - 5 * 3600))"
+age "$short_entry" 50000
+assert_eq "$(av "$short_entry" --kind ephemeral)" kept:recent-activity "E1 archive retains its 24 h minimum over a short E2 row"
+
+reused_source="$PT/unclassified-origin"
+reused_entry="$ARCHIVE_ROOT/20261010T050000Z/unclassified-origin"
+mkdir -p "$reused_source" && printf 'unique original' >"$reused_source/payload"
+age "$reused_source" 50000
+archive_fixture "$reused_source" "$reused_entry" "$((NOW - 5 * 3600))"
+mkdir -p "$reused_source" && git -C "$reused_source" init -q
+age "$reused_entry" 50000
+assert_eq "$(av "$reused_entry" --kind ephemeral)" kept:archive-identity "recreated original path cannot confer E1 eligibility"
+
+receipt_failure_source="$PT/receipt-failure-source"
+receipt_failure_entry="$ARCHIVE_ROOT/20261010T060000Z/receipt-failure-source"
+mkdir -p "$receipt_failure_source" "${receipt_failure_entry%/*}" && printf 'preserve me' >"$receipt_failure_source/payload"
+touch "$TMPROOT/not-a-directory"
+if "$PROBE" archive-receipt "$receipt_failure_source" "$TMPROOT/not-a-directory/receipt.json" "$NOW" >"$TMPROOT/receipt-failure.out" 2>&1; then
+    mv "$receipt_failure_source" "$receipt_failure_entry"
+    bad "receipt creation failure blocks archive move"
+else
+    ok "receipt creation failure is nonzero"
+fi
+[[ -d "$receipt_failure_source" ]] && ok "receipt creation failure preserves original" || bad "receipt creation failure moved original"
+
 missing_identity="$ARCHIVE_ROOT/20261010T040000Z/missing-identity"
 mkdir -p "$missing_identity" && printf 'missing ids' >"$missing_identity/payload"
 printf '{"original_path":"%s/pr-123","archived_at":%s}\n' "$PT" "$((NOW - 49 * 3600))" >"$missing_identity.c14-origin.json"
 age "$missing_identity" 43200
 assert_eq "$(av "$missing_identity" --kind ephemeral)" kept:archive-identity "E1 receipt missing dev and inode is kept"
+
+missing_size="$ARCHIVE_ROOT/20261010T070000Z/missing-size"
+mkdir -p "$missing_size" && printf 'size is binding' >"$missing_size/payload"
+python3 - "$missing_size" "$PT/pr-123" "$((NOW - 49 * 3600))" <<'PY'
+import json, os, sys
+path, original, archived_at = sys.argv[1], sys.argv[2], int(sys.argv[3])
+st = os.lstat(path)
+json.dump({"original_path": original, "dev": st.st_dev, "ino": st.st_ino, "archived_at": archived_at},
+          open(path + ".c14-origin.json", "w"))
+PY
+age "$missing_size" 50000
+assert_eq "$(av "$missing_size" --kind ephemeral)" kept:archive-identity "E1 receipt missing size is kept"
 
 unset DISK_MAGICIAN_STAT_BIN
 
