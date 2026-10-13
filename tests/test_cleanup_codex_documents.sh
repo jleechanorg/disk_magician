@@ -380,7 +380,7 @@ assert_exists "T14: raced replacement kept" "$RC_TASK"
 assert_contains "T14: reports recent activity" "recent-activity" "$(cat "$O14")"
 unset DISK_MAGICIAN_QUARANTINE_LIB
 
-# --- T15-T17: shared cursor resume + cooperative deadline -----------------
+# --- T15-T19: shared cursor resume + cooperative deadline + typed receipt --
 # A recording quarantine double: records every invocation, can keep or defer a
 # named unit. Used to observe exactly which candidates the resumed run touches.
 CUR_DIR="$TMP_ROOT/cursor-fixtures"; mkdir -p "$CUR_DIR"
@@ -395,8 +395,25 @@ quarantine_remove() {
 }
 STUB
 cursor_next_index() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$1" 2>/dev/null || echo missing; }
+# receipt_get <home> <dotted key under last_terminal>: strings raw, other JSON.
+receipt_get() {
+  python3 - "$1/.disk_magician_state/receipts/cleanup_codex_documents.json" "$2" <<'PY'
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: data = json.load(f)
+except Exception:
+    print("missing"); raise SystemExit
+cur = data.get("last_terminal")
+for part in key.split("."):
+    if not isinstance(cur, dict) or part not in cur:
+        print("missing"); raise SystemExit
+    cur = cur[part]
+print(cur if isinstance(cur, str) else json.dumps(cur))
+PY
+}
 
-echo "T15: cursor resume restarts at the deferred unit with no repeat and no skip"
+echo "T15: a completed C14 deferral counts and advances the cursor; later units are not starved"
 CUR_HOME="$TMP_ROOT/cursor-home"; CUR_CODEX="$CUR_HOME/Documents/Codex"; CUR_DATE="$CUR_CODEX/$D_OLD"
 mkdir -p "$CUR_CODEX"
 for n in 00 01 02 03; do mkdir -p "$CUR_DATE/t-r$n"; printf 'x' >"$CUR_DATE/t-r$n/payload.bin"; done
@@ -406,27 +423,25 @@ O15a="$TMP_ROOT/o15a"; RC=0
 HOME="$CUR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" \
   STUB_LOG="$R1" STUB_KEEP_PATH="$CUR_DATE/t-r00" STUB_DEFER_PATH="$CUR_DATE/t-r01" \
   run_sweeper "$O15a" --clean --cursor "$CUR_FILE" || RC=$?
-[[ "$RC" -eq 0 ]] && record_pass "T15: first (interrupted) run exits 0" || { record_fail "T15: first run exits 0" "rc=$RC"; cat "$O15a"; }
-assert_contains "T15: first run reports deferral" "deferred" "$(cat "$O15a")"
+[[ "$RC" -eq 0 ]] && record_pass "T15: deferred run exits 0" || { record_fail "T15: deferred run exits 0" "rc=$RC"; cat "$O15a"; }
+assert_contains "T15: reports the completed deferral as counted" "deferred — counted" "$(cat "$O15a")"
 NEXT15="$(cursor_next_index "$CUR_FILE")"
-[[ "$NEXT15" == 1 ]] && record_pass "T15: cursor next_index stops at the deferred unit" || record_fail "T15: cursor next_index stops at the deferred unit" "got '$NEXT15'"
+[[ "$NEXT15" == 4 ]] && record_pass "T15: deferred visit advances the cursor past it" || record_fail "T15: deferred visit advances the cursor past it" "got '$NEXT15'"
 assert_exists "T15: kept unit still present" "$CUR_DATE/t-r00"
-assert_exists "T15: deferred unit still present" "$CUR_DATE/t-r01"
+assert_exists "T15: deferred unit kept this pass" "$CUR_DATE/t-r01"
+assert_missing "T15: unit after the deferral still processed (no starvation)" "$CUR_DATE/t-r02"
+assert_missing "T15: last unit processed in the same pass" "$CUR_DATE/t-r03"
+[[ "$(receipt_get "$CUR_HOME" candidates.removed_count)" == 2 ]] && record_pass "T15: receipt removed_count=2" || record_fail "T15: receipt removed_count=2" "got '$(receipt_get "$CUR_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$CUR_HOME" candidates.deferred_count)" == 1 ]] && record_pass "T15: receipt deferred_count=1" || record_fail "T15: receipt deferred_count=1" "got '$(receipt_get "$CUR_HOME" candidates.deferred_count)'"
+[[ "$(receipt_get "$CUR_HOME" candidates.interrupted_count)" == 0 ]] && record_pass "T15: receipt interrupted_count=0" || record_fail "T15: receipt interrupted_count=0" "got '$(receipt_get "$CUR_HOME" candidates.interrupted_count)'"
+# A completed cursor starts a fresh pass, so the deferred unit is revisited.
 O15b="$TMP_ROOT/o15b"; RC=0
 HOME="$CUR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$R2" \
   run_sweeper "$O15b" --clean --cursor "$CUR_FILE" || RC=$?
-[[ "$RC" -eq 0 ]] && record_pass "T15: resumed run exits 0" || { record_fail "T15: resumed run exits 0" "rc=$RC"; cat "$O15b"; }
-assert_missing "T15: deferred unit completed on resume" "$CUR_DATE/t-r01"
-assert_missing "T15: middle unit completed on resume" "$CUR_DATE/t-r02"
-assert_missing "T15: last unit completed on resume" "$CUR_DATE/t-r03"
-assert_exists  "T15: pre-defer kept unit reprocessed? (expect kept, no repeat)" "$CUR_DATE/t-r00"
-if grep -qxF "$CUR_DATE/t-r00" "$R2" 2>/dev/null; then
-  record_fail "T15: resumed run did not re-invoke the pre-defer unit" "r00 present in run2 log"
-else record_pass "T15: resumed run did not re-invoke the pre-defer unit (no repeat)"; fi
-for n in 01 02 03; do
-  c="$(grep -cxF "$CUR_DATE/t-r$n" "$R2" 2>/dev/null || true)"
-  [[ "$c" == 1 ]] && record_pass "T15: t-r$n processed exactly once (no skip)" || record_fail "T15: t-r$n processed exactly once (no skip)" "count=$c"
-done
+[[ "$RC" -eq 0 ]] && record_pass "T15: second pass exits 0" || { record_fail "T15: second pass exits 0" "rc=$RC"; cat "$O15b"; }
+assert_contains "T15: completed cursor starts a fresh pass" "starting a fresh pass" "$(cat "$O15b")"
+assert_missing "T15: deferred unit completed on the fresh pass" "$CUR_DATE/t-r01"
+assert_missing "T15: kept unit completed on the fresh pass" "$CUR_DATE/t-r00"
 
 echo "T16: an expired deadline stops before the first unit and preserves content"
 DL_HOME="$TMP_ROOT/dl-home"; DL_CODEX="$DL_HOME/Documents/Codex"; DL_DATE="$DL_CODEX/$D_OLD"
@@ -444,6 +459,12 @@ assert_exists "T16: second unit preserved" "$DL_DATE/t-dl1"
 [[ ! -s "$DL_LOG" ]] && record_pass "T16: no unit was started before the deadline" || record_fail "T16: no unit was started before the deadline" "stub log: $(cat "$DL_LOG" 2>/dev/null || true)"
 NEXT16="$(cursor_next_index "$DL_FILE")"
 [[ "$NEXT16" == 0 ]] && record_pass "T16: cursor stays at index 0" || record_fail "T16: cursor stays at index 0" "got '$NEXT16'"
+[[ "$(receipt_get "$DL_HOME" candidates.interrupted_count)" == 1 ]] && record_pass "T16: receipt interrupted_count=1 (never started)" || record_fail "T16: receipt interrupted_count=1" "got '$(receipt_get "$DL_HOME" candidates.interrupted_count)'"
+[[ "$(receipt_get "$DL_HOME" candidates.removed_count)" == 0 ]] && record_pass "T16: receipt removed_count=0" || record_fail "T16: receipt removed_count=0" "got '$(receipt_get "$DL_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$DL_HOME" candidates.deferred_count)" == 0 ]] && record_pass "T16: receipt deferred_count=0" || record_fail "T16: receipt deferred_count=0" "got '$(receipt_get "$DL_HOME" candidates.deferred_count)'"
+[[ "$(receipt_get "$DL_HOME" outcome)" == timeout ]] && record_pass "T16: interrupted-only run reports timeout" || record_fail "T16: interrupted-only run reports timeout" "got '$(receipt_get "$DL_HOME" outcome)'"
+DELTA16="$(receipt_get "$DL_HOME" postcondition.df_delta_bytes)"
+[[ "$DELTA16" =~ ^-?[0-9]+$ ]] && record_pass "T16: receipt df_delta_bytes is a signed integer" || record_fail "T16: receipt df_delta_bytes is a signed integer" "got '$DELTA16'"
 
 # T17: a cursor bound to different scope/order options must fail closed.
 MM_HOME="$TMP_ROOT/mm-home"; MM_CODEX="$MM_HOME/Documents/Codex"; MM_DATE="$MM_CODEX/$D_OLD"
@@ -480,6 +501,24 @@ HOME="$CN_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$CN_LOG2" \
 [[ "$RC" -eq 0 ]] && record_pass "T18: second pass exits 0" || { record_fail "T18: second pass exits 0" "rc=$RC"; cat "$O18b"; }
 assert_contains "T18: completed cursor starts a fresh pass" "starting a fresh pass" "$(cat "$O18b")"
 assert_missing "T18: new task not starved by completed cursor" "$CN_DATE/t-c1"
+
+echo "T19: a clean run emits typed aggregate receipt fields with a signed df delta"
+AG_HOME="$TMP_ROOT/agg-home"; AG_CODEX="$AG_HOME/Documents/Codex"; AG_DATE="$AG_CODEX/$D_OLD"
+for n in 0 1 2; do mkdir -p "$AG_DATE/t-ag$n"; printf 'x' >"$AG_DATE/t-ag$n/payload.bin"; done
+age "$AG_DATE"
+AG_FILE="$CUR_DIR/ag-cursor.json"; AG_LOG="$CUR_DIR/ag-stub.log"
+O19="$TMP_ROOT/o19"; RC=0
+HOME="$AG_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$AG_LOG" \
+  run_sweeper "$O19" --clean --cursor "$AG_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T19: clean run exits 0" || { record_fail "T19: clean run exits 0" "rc=$RC"; cat "$O19"; }
+[[ "$(receipt_get "$AG_HOME" candidates.removed_count)" == 3 ]] && record_pass "T19: receipt removed_count=3" || record_fail "T19: receipt removed_count=3" "got '$(receipt_get "$AG_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$AG_HOME" candidates.deferred_count)" == 0 ]] && record_pass "T19: receipt deferred_count=0" || record_fail "T19: receipt deferred_count=0" "got '$(receipt_get "$AG_HOME" candidates.deferred_count)'"
+[[ "$(receipt_get "$AG_HOME" candidates.interrupted_count)" == 0 ]] && record_pass "T19: receipt interrupted_count=0" || record_fail "T19: receipt interrupted_count=0" "got '$(receipt_get "$AG_HOME" candidates.interrupted_count)'"
+[[ "$(receipt_get "$AG_HOME" outcome)" == success ]] && record_pass "T19: clean run reports success" || record_fail "T19: clean run reports success" "got '$(receipt_get "$AG_HOME" outcome)'"
+DELTA19="$(receipt_get "$AG_HOME" postcondition.df_delta_bytes)"
+[[ "$DELTA19" =~ ^-?[0-9]+$ ]] && record_pass "T19: receipt df_delta_bytes is a signed integer" || record_fail "T19: receipt df_delta_bytes is a signed integer" "got '$DELTA19'"
+FREED19="$(receipt_get "$AG_HOME" postcondition.freed_bytes)"
+{ [[ "$FREED19" == null ]] || [[ "$FREED19" =~ ^[0-9]+$ ]]; } && record_pass "T19: receipt freed_bytes non-negative or null" || record_fail "T19: receipt freed_bytes non-negative or null" "got '$FREED19'"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

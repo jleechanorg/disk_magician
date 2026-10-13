@@ -32,9 +32,17 @@
 #                  normalized scope/order options (root, floor, kind, order); a
 #                  stale or different-scope cursor fails closed and preserves
 #                  content. The candidate list and next index are checkpointed
-#                  after every completed unit, so an interrupted run restarts at
-#                  the deferred unit with no repeat and no skip. A deferred C14
-#                  verdict never advances the index. Dry runs never advance it.
+#                  after every completed unit. A completed C14 deferred:<step> is
+#                  a completed visit: it is counted and the index advances (the
+#                  scheduler enqueues the artifact for first review next pass). A
+#                  unit that never started because the deadline expired is
+#                  counted as interrupted and the index stays at it. Dry runs
+#                  never advance the cursor and emit no receipt.
+#
+# Task 14 contract: on --clean the sweep emits one typed job receipt through the
+# existing scripts/job_receipt.py schema (job cleanup_codex_documents) carrying
+# candidates.removed_count / deferred_count / interrupted_count and a signed
+# postcondition.df_delta_bytes measured from df before and after the run.
 #   (default is DRY RUN)
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -360,7 +368,73 @@ REMOVED=""
 TOTAL_KB=0
 N_REMOVED=0
 N_KEPT=0
+N_DEFERRED=0
+N_INTERRUPTED=0
 keep() { log "KEEP [$1] $2"; N_KEPT=$(( N_KEPT + 1 )); }
+
+# --- Task 14 typed actuator receipt ----------------------------------------
+# Reuse the existing scripts/job_receipt.py schema; do not invent a second
+# format. Counters are incremented in THIS shell (process_task is called
+# directly), so removals/deferrals/interruptions are never lost to a
+# command-substitution subshell. Emitted only for a real (--clean) run: a dry
+# run must not consume receipt history.
+RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
+RECEIPT_JOB="cleanup_codex_documents"
+RECEIPT_RUN_ID=""
+FREE_BEFORE=""
+free_bytes() { df -kP "$ROOT" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}'; }
+receipt_begin() {
+  [[ "$DRY_RUN" == false ]] || return 0
+  [[ -f "$RECEIPT_HELPER" ]] || { log "ERROR: receipt helper missing: $RECEIPT_HELPER"; return 1; }
+  FREE_BEFORE="$(free_bytes)"
+  RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job "$RECEIPT_JOB" --trigger clean)" || return 1
+  return 0
+}
+# receipt_finish [forced-outcome] [forced-reason]
+receipt_finish() {
+  [[ -n "$RECEIPT_RUN_ID" ]] || return 0
+  local forced_outcome="${1:-}" forced_reason="${2:-}" after outcome reason candidates post
+  after="$(free_bytes)"
+  if [[ -n "$forced_outcome" ]]; then
+    outcome="$forced_outcome"
+  elif (( N_INTERRUPTED > 0 )); then
+    outcome=partial
+    (( N_REMOVED > 0 || N_DEFERRED > 0 )) || outcome=timeout
+  elif (( N_REMOVED > 0 )); then
+    outcome=success
+  elif (( N_DEFERRED > 0 )); then
+    outcome=partial
+  else
+    outcome=success_noop
+  fi
+  reason="${forced_reason:-removed=$N_REMOVED deferred=$N_DEFERRED interrupted=$N_INTERRUPTED kept=$N_KEPT}"
+  candidates="$(python3 - "$N_REMOVED" "$N_DEFERRED" "$N_INTERRUPTED" "$N_KEPT" <<'PY'
+import json, sys
+removed, deferred, interrupted, kept = map(int, sys.argv[1:])
+print(json.dumps({"removed_count": removed, "deferred_count": deferred,
+                  "interrupted_count": interrupted, "kept_count": kept}))
+PY
+)"
+  post="$(python3 - "$FREE_BEFORE" "$after" <<'PY'
+import json, sys
+before, after = sys.argv[1:]
+before = int(before) if before.isdigit() else None
+after = int(after) if after.isdigit() else None
+delta = (after - before) if (before is not None and after is not None) else None
+print(json.dumps({"freed_bytes": max(0, delta) if delta is not None else None,
+                  "df_delta_bytes": delta,
+                  "free_bytes_before": before, "free_bytes_after": after}))
+PY
+)"
+  if ! python3 "$RECEIPT_HELPER" finish --job "$RECEIPT_JOB" \
+      --run-id "$RECEIPT_RUN_ID" --outcome "$outcome" --reason "$reason" \
+      --candidates "$candidates" --postcondition "$post"; then
+    log "ERROR: failed to record receipt finish"
+    return 1
+  fi
+  RECEIPT_RUN_ID=""
+  return 0
+}
 
 # quarantine_remove_available: the C14/quarantine gate is the only root-removal path.
 quarantine_remove_available() { declare -F quarantine_remove >/dev/null 2>&1; }
@@ -434,9 +508,11 @@ process_task() {
         deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
         ;;
       deferred:*)
-        # Never lose the unit: leave the index pointing at it so the next run
-        # restarts this unit through a fresh C14 decision (no cached verdict).
+        # C14 deferral is a COMPLETED visit (Task 14 contract): count it and let
+        # the cursor advance. The scheduler enqueues the artifact for first
+        # review next pass via govern_sched.json; it is not an interruption.
         DEFERRED=true
+        N_DEFERRED=$(( N_DEFERRED + 1 ))
         deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
         keep "deferred:${qout#deferred:}" "$task"; return
         ;;
@@ -456,6 +532,11 @@ process_task() {
 log "$(dry_prefix)cleanup_codex_documents.sh starting (root: $ROOT, floor: ${MIN_DAYS}d)"
 snapshot_live_paths
 
+if ! receipt_begin; then
+  log "ERROR: failed to record receipt begin — failing closed"
+  exit 1
+fi
+
 # Process the frozen candidate list from the resumed index. The unit budget is
 # only an estimate of one unit; the deadline is cooperative, so a unit that has
 # started may still overrun it — the next unit is what gets deferred.
@@ -465,18 +546,20 @@ while (( _i < ${#CANDIDATES[@]} )); do
   if [[ -n "$DEADLINE" ]]; then
     _frc=0; act_unit_fits "$UNIT_BUDGET" || _frc=$?
     if (( _frc == 1 )); then
-      log "deadline reached before unit index ${_i}: $task — deferring"
+      # Not started: not a completed visit, so keep the cursor at this unit.
+      N_INTERRUPTED=$(( N_INTERRUPTED + 1 ))
+      log "deadline reached before unit index ${_i}: $task — not started (interrupted)"
       break
     elif (( _frc != 0 )); then
       log "ERROR: invalid unit budget '$UNIT_BUDGET' — failing closed"
+      receipt_finish error "invalid unit budget" || true
       exit 2
     fi
   fi
   DEFERRED=false
   process_task "$task"
   if [[ "$DEFERRED" == true ]]; then
-    log "unit index ${_i} deferred — restarting it on the next run"
-    break
+    log "unit index ${_i} deferred — counted, advancing to the next unit"
   fi
   _i=$(( _i + 1 ))
   if ! cursor_checkpoint "$_i"; then
@@ -502,4 +585,5 @@ for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
   fi
 done
 
+receipt_finish || true
 log "$(dry_prefix)Done. Task dirs removed: ${N_REMOVED}  kept: ${N_KEPT}  total: ${TOTAL_KB} KB (~$(( TOTAL_KB / 1024 )) MB)"
