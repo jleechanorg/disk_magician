@@ -152,7 +152,7 @@ check '0755 qdir: untouched, qdir empty' bash -c '[[ -f "$1/report.md" && -z "$(
 fixture; STUB_VERDICT=kept:unproven-content run X=1
 check 'kept verdict passes through' [ "$OUT" = kept:unproven-content ]
 check 'kept verdict: untouched, no quarantine dir' bash -c '[[ -f "$1/report.md" && ! -e "$2" ]]' _ "$A" "$Q"
-fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; quarantine_remove '$A'")"
+fixture; OUT="$(bash -c "source '$ROOT/scripts/lib/quarantine.sh'; unset -f artifact_removal_verdict; quarantine_remove '$A'")"
 check 'no verdict function: kept:check-failed' [ "$OUT" = kept:check-failed ]
 check 'no verdict function: untouched' intact AAAA
 fixture; STUB_VERDICT=remove run X=1

@@ -176,16 +176,26 @@ wrh_removal_verdict() {
     return 0
 }
 
-# wrh_remove_now <real_path> <display_path> — run the actual removal: plain
-# `git worktree remove` (never --force), worktree-* branch deletion when not
-# checked out elsewhere, and lease-file cleanup when the lease lib is loaded.
+# wrh_remove_now <real_path> <display_path> [--quarantine <inventory.json>] —
+# remove an approved worktree. The historical path remains the default. The
+# opt-in quarantine path is intentionally not wired to any production caller.
 # rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch
+    local real="$1" display="$2" main branch result qid
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
-    git -C "$main" worktree remove "$real" >&2 || return 1
+    if [[ ${3:-} == --quarantine ]]; then
+        [[ $# == 4 && -f $4 ]] || return 1
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" phase1 "$main" "$real" "$4")" || return 1
+        [[ $result == quarantined:* ]] || { wrh_log "kept $display: $result"; return 1; }
+        qid="${result#quarantined:}"
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" phase2 "$qid")" || result=kept:quarantine_partial_kept
+        [[ $result == removed ]] || { wrh_log "kept $display: $result"; return 1; }
+    else
+        [[ $# == 2 ]] || return 1
+        git -C "$main" worktree remove "$real" >&2 || return 1
+    fi
     wrh_log "removed $display"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
