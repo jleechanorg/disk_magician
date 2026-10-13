@@ -11,6 +11,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SWEEPER="$REPO_ROOT/scripts/cleanup_codex_documents.sh"
 # shellcheck source=tests/lib/sandbox_env.sh
 source "$SCRIPT_DIR/lib/sandbox_env.sh"
+# shellcheck source=scripts/lib/actuator_deadline.sh
+source "$REPO_ROOT/scripts/lib/actuator_deadline.sh"
 
 TMP_ROOT=$(mktemp -d -t cleanup_codex_documents.XXXXXX)
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
@@ -377,6 +379,107 @@ HOME="$RC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" \
 assert_exists "T14: raced replacement kept" "$RC_TASK"
 assert_contains "T14: reports recent activity" "recent-activity" "$(cat "$O14")"
 unset DISK_MAGICIAN_QUARANTINE_LIB
+
+# --- T15-T17: shared cursor resume + cooperative deadline -----------------
+# A recording quarantine double: records every invocation, can keep or defer a
+# named unit. Used to observe exactly which candidates the resumed run touches.
+CUR_DIR="$TMP_ROOT/cursor-fixtures"; mkdir -p "$CUR_DIR"
+CUR_STUB="$CUR_DIR/quarantine_record.sh"
+cat >"$CUR_STUB" <<'STUB'
+quarantine_remove() {
+  local p="${1:-}"; shift || true
+  [[ -n "${STUB_LOG:-}" ]] && printf '%s\n' "$p" >>"$STUB_LOG"
+  if [[ -n "${STUB_KEEP_PATH:-}" && "$p" == "$STUB_KEEP_PATH" ]]; then printf 'kept:stub-keep\n'; return 0; fi
+  if [[ -n "${STUB_DEFER_PATH:-}" && "$p" == "$STUB_DEFER_PATH" ]]; then printf 'deferred:stub\n'; return 0; fi
+  if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then printf 'removed:stub\n'; else printf 'kept:rm-failed\n'; fi
+}
+STUB
+cursor_next_index() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$1" 2>/dev/null || echo missing; }
+
+echo "T15: cursor resume restarts at the deferred unit with no repeat and no skip"
+CUR_HOME="$TMP_ROOT/cursor-home"; CUR_CODEX="$CUR_HOME/Documents/Codex"; CUR_DATE="$CUR_CODEX/$D_OLD"
+mkdir -p "$CUR_CODEX"
+for n in 00 01 02 03; do mkdir -p "$CUR_DATE/t-r$n"; printf 'x' >"$CUR_DATE/t-r$n/payload.bin"; done
+age "$CUR_DATE"
+CUR_FILE="$CUR_DIR/cursor.json"; R1="$CUR_DIR/run1.log"; R2="$CUR_DIR/run2.log"
+O15a="$TMP_ROOT/o15a"; RC=0
+HOME="$CUR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" \
+  STUB_LOG="$R1" STUB_KEEP_PATH="$CUR_DATE/t-r00" STUB_DEFER_PATH="$CUR_DATE/t-r01" \
+  run_sweeper "$O15a" --clean --cursor "$CUR_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T15: first (interrupted) run exits 0" || { record_fail "T15: first run exits 0" "rc=$RC"; cat "$O15a"; }
+assert_contains "T15: first run reports deferral" "deferred" "$(cat "$O15a")"
+NEXT15="$(cursor_next_index "$CUR_FILE")"
+[[ "$NEXT15" == 1 ]] && record_pass "T15: cursor next_index stops at the deferred unit" || record_fail "T15: cursor next_index stops at the deferred unit" "got '$NEXT15'"
+assert_exists "T15: kept unit still present" "$CUR_DATE/t-r00"
+assert_exists "T15: deferred unit still present" "$CUR_DATE/t-r01"
+O15b="$TMP_ROOT/o15b"; RC=0
+HOME="$CUR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$R2" \
+  run_sweeper "$O15b" --clean --cursor "$CUR_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T15: resumed run exits 0" || { record_fail "T15: resumed run exits 0" "rc=$RC"; cat "$O15b"; }
+assert_missing "T15: deferred unit completed on resume" "$CUR_DATE/t-r01"
+assert_missing "T15: middle unit completed on resume" "$CUR_DATE/t-r02"
+assert_missing "T15: last unit completed on resume" "$CUR_DATE/t-r03"
+assert_exists  "T15: pre-defer kept unit reprocessed? (expect kept, no repeat)" "$CUR_DATE/t-r00"
+if grep -qxF "$CUR_DATE/t-r00" "$R2" 2>/dev/null; then
+  record_fail "T15: resumed run did not re-invoke the pre-defer unit" "r00 present in run2 log"
+else record_pass "T15: resumed run did not re-invoke the pre-defer unit (no repeat)"; fi
+for n in 01 02 03; do
+  c="$(grep -cxF "$CUR_DATE/t-r$n" "$R2" 2>/dev/null || true)"
+  [[ "$c" == 1 ]] && record_pass "T15: t-r$n processed exactly once (no skip)" || record_fail "T15: t-r$n processed exactly once (no skip)" "count=$c"
+done
+
+echo "T16: an expired deadline stops before the first unit and preserves content"
+DL_HOME="$TMP_ROOT/dl-home"; DL_CODEX="$DL_HOME/Documents/Codex"; DL_DATE="$DL_CODEX/$D_OLD"
+mkdir -p "$DL_DATE/t-dl0" "$DL_DATE/t-dl1"
+printf 'x' >"$DL_DATE/t-dl0/payload.bin"; printf 'x' >"$DL_DATE/t-dl1/payload.bin"
+age "$DL_DATE"
+DL_FILE="$CUR_DIR/dl-cursor.json"; DL_LOG="$CUR_DIR/dl-stub.log"
+O16="$TMP_ROOT/o16"; RC=0
+HOME="$DL_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$DL_LOG" \
+  run_sweeper "$O16" --clean --cursor "$DL_FILE" --deadline-at 1 || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T16: expired-deadline run exits 0" || { record_fail "T16: expired-deadline run exits 0" "rc=$RC"; cat "$O16"; }
+assert_contains "T16: reports deadline deferral" "deadline reached before unit" "$(cat "$O16")"
+assert_exists "T16: first unit preserved" "$DL_DATE/t-dl0"
+assert_exists "T16: second unit preserved" "$DL_DATE/t-dl1"
+[[ ! -s "$DL_LOG" ]] && record_pass "T16: no unit was started before the deadline" || record_fail "T16: no unit was started before the deadline" "stub log: $(cat "$DL_LOG" 2>/dev/null || true)"
+NEXT16="$(cursor_next_index "$DL_FILE")"
+[[ "$NEXT16" == 0 ]] && record_pass "T16: cursor stays at index 0" || record_fail "T16: cursor stays at index 0" "got '$NEXT16'"
+
+# T17: a cursor bound to different scope/order options must fail closed.
+MM_HOME="$TMP_ROOT/mm-home"; MM_CODEX="$MM_HOME/Documents/Codex"; MM_DATE="$MM_CODEX/$D_OLD"
+mkdir -p "$MM_CODEX"
+for n in 0 1; do mkdir -p "$MM_DATE/t-mm$n"; printf 'x' >"$MM_DATE/t-mm$n/payload.bin"; done
+age "$MM_DATE"
+echo "T17: stale-scope cursor fails closed and preserves content"
+MM_FILE="$CUR_DIR/mm-cursor.json"; MM_STUB_LOG="$CUR_DIR/mm-stub.log"
+act_cursor_save "$MM_FILE" "cleanup_codex_documents.v1|root=elsewhere|floor=7|kind=|order=lexicographic" \
+  "[\"$MM_DATE/t-mm0\",\"$MM_DATE/t-mm1\"]" 0
+O17="$TMP_ROOT/o17"; RC=0
+HOME="$MM_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$MM_STUB_LOG" \
+  run_sweeper "$O17" --clean --cursor "$MM_FILE" || RC=$?
+[[ "$RC" -eq 2 ]] && record_pass "T17: scope-mismatched cursor exits 2 (fail closed)" || record_fail "T17: scope-mismatched cursor exits 2" "rc=$RC"
+assert_exists "T17: first task preserved on scope mismatch" "$MM_DATE/t-mm0"
+assert_exists "T17: second task preserved on scope mismatch" "$MM_DATE/t-mm1"
+assert_contains "T17: reports fail-closed scope mismatch" "failing closed" "$(cat "$O17")"
+[[ ! -s "$MM_STUB_LOG" ]] && record_pass "T17: no removal attempted on scope mismatch" || record_fail "T17: no removal attempted on scope mismatch" "stub invoked"
+
+echo "T18: a completed cursor re-enumerates so later tasks are not starved"
+CN_HOME="$TMP_ROOT/cn-home"; CN_CODEX="$CN_HOME/Documents/Codex"; CN_DATE="$CN_CODEX/$D_OLD"
+mkdir -p "$CN_CODEX/$D_OLD/t-c0"; printf 'x' >"$CN_DATE/t-c0/payload.bin"; age "$CN_DATE"
+CN_FILE="$CUR_DIR/cn-cursor.json"; CN_LOG1="$CUR_DIR/cn1.log"; CN_LOG2="$CUR_DIR/cn2.log"
+O18a="$TMP_ROOT/o18a"; RC=0
+HOME="$CN_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$CN_LOG1" \
+  run_sweeper "$O18a" --clean --cursor "$CN_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T18: first pass exits 0" || { record_fail "T18: first pass exits 0" "rc=$RC"; cat "$O18a"; }
+assert_missing "T18: first task removed" "$CN_DATE/t-c0"
+# A new old task appears after the cursor was fully consumed.
+mkdir -p "$CN_DATE/t-c1"; printf 'x' >"$CN_DATE/t-c1/payload.bin"; age "$CN_DATE"
+O18b="$TMP_ROOT/o18b"; RC=0
+HOME="$CN_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" STUB_LOG="$CN_LOG2" \
+  run_sweeper "$O18b" --clean --cursor "$CN_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T18: second pass exits 0" || { record_fail "T18: second pass exits 0" "rc=$RC"; cat "$O18b"; }
+assert_contains "T18: completed cursor starts a fresh pass" "starting a fresh pass" "$(cat "$O18b")"
+assert_missing "T18: new task not starved by completed cursor" "$CN_DATE/t-c1"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

@@ -22,11 +22,19 @@
 # deferred:<step> or kept:<reason>. A provenance-less document is therefore kept
 # even when it is old and idle. The pre-existing safety/age/live-cwd gates remain.
 #
-# Usage: cleanup_codex_documents.sh [--clean] [--deadline-at SECONDS] [--cursor FILE]
-#   --deadline-at  cooperative soft deadline forwarded to C14 (Task 14 helper
-#                  actuator_deadline.sh, when committed, will gate unit starts)
-#   --cursor       enumeration cursor checkpoint file (reserved: exact integration
-#                  lands with the committed actuator_deadline.sh helper)
+# Usage: cleanup_codex_documents.sh [--clean] [--deadline-at MONOTONIC] [--cursor FILE]
+#   --deadline-at  cooperative soft deadline (monotonic seconds, from the shared
+#                  actuator_deadline.sh helper). Before each unit the sweep asks
+#                  act_unit_fits; when a unit would not finish in time it stops
+#                  BEFORE that unit and records the index for the next run.
+#   --cursor       resumable-enumeration checkpoint file (actuator_deadline.sh
+#                  cursor format). The stored "source" binds the checkpoint to the
+#                  normalized scope/order options (root, floor, kind, order); a
+#                  stale or different-scope cursor fails closed and preserves
+#                  content. The candidate list and next index are checkpointed
+#                  after every completed unit, so an interrupted run restarts at
+#                  the deferred unit with no repeat and no skip. A deferred C14
+#                  verdict never advances the index. Dry runs never advance it.
 #   (default is DRY RUN)
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -39,6 +47,8 @@ source "$SCRIPT_DIR/safety_lib.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$SCRIPT_DIR/lib/worktree_ignored.sh"
+# shellcheck source=scripts/lib/actuator_deadline.sh
+source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 
 # C14/quarantine removal gate (spec §7.2). The library is owned by the C14 /
 # quarantine tasks; DISK_MAGICIAN_QUARANTINE_LIB is a test/override seam, the
@@ -51,28 +61,104 @@ if [[ -f "$QUARANTINE_LIB" ]]; then
   source "$QUARANTINE_LIB"
 fi
 
+# Deadline/cursor parsing is owned by the shared helper (no parallel parser).
+# It fills ACT_DEADLINE_AT / ACT_CURSOR and leaves other flags in ACT_ARGS.
+ACT_DEADLINE_AT=""
+ACT_CURSOR=""
+ACT_ARGS=()
+act_parse_deadline_args "$@" || exit 2
 DRY_RUN=true
-DEADLINE=""
-CURSOR=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --clean) DRY_RUN=false; shift ;;
-    --deadline-at)
-      [[ $# -ge 2 ]] || { echo "--deadline-at needs a value" >&2; exit 2; }
-      DEADLINE="$2"
-      [[ "$DEADLINE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "invalid --deadline-at: $DEADLINE" >&2; exit 2; }
-      shift 2 ;;
-    --cursor)
-      [[ $# -ge 2 ]] || { echo "--cursor needs a value" >&2; exit 2; }
-      CURSOR="$2"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
+for _arg in ${ACT_ARGS[@]+"${ACT_ARGS[@]}"}; do
+  case "$_arg" in
+    --clean) DRY_RUN=false ;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $_arg" >&2; exit 2 ;;
   esac
 done
+DEADLINE="${ACT_DEADLINE_AT:-}"
+CURSOR="${ACT_CURSOR:-}"
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
-[[ -z "$CURSOR" ]] || log "note: --cursor '$CURSOR' accepted; actuator_deadline.sh cursor checkpointing integration pending"
 dry_prefix() { if [[ "$DRY_RUN" == true ]]; then echo "DRY RUN: "; fi; }
+
+# --- resumable enumeration + cooperative deadline (shared helper) ----------
+# Candidate list and next index are checkpointed in the actuator_deadline.sh
+# cursor ({"schema":1,"source":K,"items":[...],"next_index":N}); no second format.
+UNIT_BUDGET="${DISK_MAGICIAN_CODEX_UNIT_BUDGET_SECONDS:-60}"
+CURSOR_SOURCE=""
+CANDIDATES=()
+DATE_DIRS=()
+NEXT_INDEX=0
+DEFERRED=false
+
+# cursor_source: normalized effective options that decide which tasks are in
+# scope and their order. Any change makes an existing cursor stale (fail closed).
+cursor_source() {
+  printf 'cleanup_codex_documents.v1|root=%s|floor=%s|kind=%s|order=lexicographic' \
+    "$ROOT" "$MIN_DAYS" "${QUARANTINE_KIND:-}"
+}
+
+enumerate_date_dirs() {
+  DATE_DIRS=()
+  local d
+  while IFS= read -r -d '' d; do
+    case "$(basename "$d")" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) DATE_DIRS+=("$d") ;;
+    esac
+  done < <(/usr/bin/find "$ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
+enumerate_candidates() {
+  CANDIDATES=()
+  local dd t
+  for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
+    while IFS= read -r -d '' t; do
+      CANDIDATES+=("$t")
+    done < <(/usr/bin/find "$dd" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | LC_ALL=C sort -z)
+  done
+}
+
+cursor_items_json() {
+  python3 -c '
+import json, sys
+data = sys.stdin.buffer.read().split(b"\0")
+items = [x.decode("utf-8") for x in data if x]
+sys.stdout.write(json.dumps(items, separators=(",", ":")))
+' < <(printf '%s\0' ${CANDIDATES[@]+"${CANDIDATES[@]}"})
+}
+
+# cursor_restore: 0 resumed, 1 no cursor file, 2 invalid/stale -> caller fails closed.
+cursor_restore() {
+  [[ -n "$CURSOR" ]] || return 1
+  [[ -e "$CURSOR" ]] || return 1
+  local loaded idx item c
+  loaded="$(act_cursor_load "$CURSOR" "$CURSOR_SOURCE")" || return 2
+  idx="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_index"])' "$loaded" 2>/dev/null)" || return 2
+  [[ "$idx" =~ ^[0-9]+$ ]] || return 2
+  CANDIDATES=()
+  while IFS= read -r -d '' item; do
+    CANDIDATES+=("$item")
+  done < <(python3 -c 'import json,sys; sys.stdout.write("\0".join(json.loads(sys.argv[1])["items"]) + "\0")' "$loaded" 2>/dev/null)
+  for c in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
+    case "$c" in
+      "$ROOT"/*) ;;
+      *) return 2 ;;   # stored candidate escaped the current scope
+    esac
+  done
+  NEXT_INDEX="$idx"
+  return 0
+}
+
+# cursor_checkpoint <next-index>: persist the frozen candidate list + index.
+# Dry runs never advance a cursor (a preview must not consume real progress).
+cursor_checkpoint() {
+  [[ -n "$CURSOR" ]] || return 0
+  [[ "$DRY_RUN" == false ]] || return 0
+  local items_json
+  items_json="$(cursor_items_json)" || { log "ERROR: cursor item serialization failed"; return 1; }
+  act_cursor_save "$CURSOR" "$CURSOR_SOURCE" "$items_json" "$1" || { log "ERROR: cursor save failed"; return 1; }
+  return 0
+}
 
 ROOT_LOGICAL="$HOME/Documents/Codex"
 if [[ ! -d "$ROOT_LOGICAL" ]]; then
@@ -84,6 +170,46 @@ ROOT="$(cd "$ROOT_LOGICAL" && pwd -P)"
 MIN_DAYS="$(safety_min_stale_days)"
 [[ "$MIN_DAYS" =~ ^[0-9]+$ ]] || MIN_DAYS=7
 (( MIN_DAYS >= 7 )) || MIN_DAYS=7
+
+# QUARANTINE_KIND is empty by default: codex task scratch must prove positive
+# provenance. A caller that has declared its row (spec §7.2 E1-E7) may set it.
+# It participates in the cursor source because it changes which removal path is
+# eligible (scope), so a changed kind invalidates an existing cursor.
+QUARANTINE_KIND="${DISK_MAGICIAN_CODEX_KIND:-}"
+
+# Resolve the resumable candidate set before any deletion. A cursor whose source
+# does not match the current normalized options is stale -> fail closed, content
+# preserved, nothing silently advanced.
+CURSOR_SOURCE="$(cursor_source)"
+enumerate_date_dirs
+if [[ -n "$CURSOR" ]]; then
+  _crc=0; cursor_restore || _crc=$?
+  case "$_crc" in
+    0)
+      if (( NEXT_INDEX >= ${#CANDIDATES[@]} )); then
+        # A fully-consumed cursor must not starve later runs (new date dirs and
+        # newly-aged tasks): re-enumerate and start a fresh pass.
+        log "Cursor '$CURSOR' is complete (${NEXT_INDEX}/${#CANDIDATES[@]}); starting a fresh pass"
+        enumerate_candidates
+        NEXT_INDEX=0
+        cursor_checkpoint 0 || exit 1
+      else
+        log "Resuming cursor '$CURSOR' at index ${NEXT_INDEX} of ${#CANDIDATES[@]} (source: $CURSOR_SOURCE)"
+      fi
+      ;;
+    2)
+      log "ERROR: cursor '$CURSOR' is corrupt or bound to different scope/options — failing closed, no deletions."
+      exit 2
+      ;;
+    *)
+      enumerate_candidates
+      cursor_checkpoint 0 || exit 1
+      log "Cursor '$CURSOR' initialized with ${#CANDIDATES[@]} candidate(s) (source: $CURSOR_SOURCE)"
+      ;;
+  esac
+else
+  enumerate_candidates
+fi
 
 if [[ "$DRY_RUN" == false ]]; then
   sandbox_guard_roots "$ROOT"
@@ -242,6 +368,9 @@ quarantine_remove_available() { declare -F quarantine_remove >/dev/null 2>&1; }
 # (`wrh_remove_now <real> <display> --quarantine`). Until the committed adapter
 # lands, no wrh_remove_now accepts it, so linked worktrees fail closed instead of
 # falling back to the old unguarded `git worktree remove`.
+# TODO(final WRH, parent-owned): the adapter will expose a direct capability API;
+# this transitional body probe must be replaced by that API, never treated as the
+# final capability contract.
 wrh_quarantine_available() {
   declare -F wrh_remove_now >/dev/null 2>&1 || return 1
   declare -f wrh_remove_now | grep -q -- '--quarantine'
@@ -255,10 +384,6 @@ quarantine_gate() {
   [[ -n "$DEADLINE" ]] && args+=(--deadline-at "$DEADLINE")
   quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
 }
-# QUARANTINE_KIND is empty by default: codex task scratch must prove positive
-# provenance. A caller that has declared its row (spec §7.2 E1-E7) may set it.
-QUARANTINE_KIND="${DISK_MAGICIAN_CODEX_KIND:-}"
-
 process_task() {
   local task="$1" rc reason kb main wt removed_worktrees=0 qout
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
@@ -309,6 +434,9 @@ process_task() {
         deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
         ;;
       deferred:*)
+        # Never lose the unit: leave the index pointing at it so the next run
+        # restarts this unit through a fresh C14 decision (no cached verdict).
+        DEFERRED=true
         deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
         keep "deferred:${qout#deferred:}" "$task"; return
         ;;
@@ -328,18 +456,33 @@ process_task() {
 log "$(dry_prefix)cleanup_codex_documents.sh starting (root: $ROOT, floor: ${MIN_DAYS}d)"
 snapshot_live_paths
 
-DATE_DIRS=()
-while IFS= read -r -d '' d; do
-  case "$(basename "$d")" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) DATE_DIRS+=("$d") ;;
-  esac
-done < <(/usr/bin/find "$ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null) \
-  || { log "Listing $ROOT failed — fail-closed, aborting without deletions."; exit 1; }
-
-for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
-  while IFS= read -r -d '' task; do
-    process_task "$task"
-  done < <(/usr/bin/find "$dd" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+# Process the frozen candidate list from the resumed index. The unit budget is
+# only an estimate of one unit; the deadline is cooperative, so a unit that has
+# started may still overrun it — the next unit is what gets deferred.
+_i="$NEXT_INDEX"
+while (( _i < ${#CANDIDATES[@]} )); do
+  task="${CANDIDATES[$_i]}"
+  if [[ -n "$DEADLINE" ]]; then
+    _frc=0; act_unit_fits "$UNIT_BUDGET" || _frc=$?
+    if (( _frc == 1 )); then
+      log "deadline reached before unit index ${_i}: $task — deferring"
+      break
+    elif (( _frc != 0 )); then
+      log "ERROR: invalid unit budget '$UNIT_BUDGET' — failing closed"
+      exit 2
+    fi
+  fi
+  DEFERRED=false
+  process_task "$task"
+  if [[ "$DEFERRED" == true ]]; then
+    log "unit index ${_i} deferred — restarting it on the next run"
+    break
+  fi
+  _i=$(( _i + 1 ))
+  if ! cursor_checkpoint "$_i"; then
+    log "cursor checkpoint failed — stopping before losing progress"
+    break
+  fi
 done
 
 # Date dirs left with nothing but already-removed tasks (and .DS_Store).
