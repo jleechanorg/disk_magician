@@ -68,6 +68,8 @@ Commands:
   worktree-release <path> Release the caller's lease without deleting the worktree.
   lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
                          Session-exit release of that session's leases (deletes nothing).
+  quarantine restore <id> Restore one identity-checked kept quarantine entry.
+  quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
@@ -428,6 +430,14 @@ case "$CMD" in
     ;;
   worktree_reap|worktree-reap)
     exec bash "$SCRIPT_DIR/scripts/worktree_reap.sh" "$@"
+    ;;
+  quarantine)
+    subcommand="${1:-}"; shift || true
+    case "$subcommand" in
+      restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
+      reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
+      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
+    esac
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
