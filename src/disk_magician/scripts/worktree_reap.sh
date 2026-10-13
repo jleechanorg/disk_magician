@@ -227,7 +227,8 @@ for file in "$(lease_dir)"/*.json; do
     case "$owner" in
         none|alive|unknown) continue ;;
         unreadable) record "$file" "$real" kept:lease-unreadable; continue ;;
-        alive-expired) record "$file" "$real" kept:owner-alive-expired; continue ;;
+        # TTL only reports: an expired lease with a live owner is parked, never T1.
+        alive-expired) record "$file" "$real" kept:expired_owner_alive; continue ;;
         dead) update "$file" dead || continue; quiet="$QUIET"; since=owner_dead_seen_at ;;
         released) quiet="$RELEASE_QUIET"; since=released_at ;;
         *) continue ;;

@@ -79,7 +79,7 @@ guard_state_repo_push() {
     local owner_repo visibility
     owner_repo="$(printf '%s' "$remote_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
     if command -v gh >/dev/null 2>&1; then
-      visibility="$(gh repo view "$owner_repo" --json visibility --jq .visibility 2>/dev/null || echo "")"
+      visibility="$(gh api "repos/$owner_repo" --jq .visibility 2>/dev/null)" || visibility=""
       case "$visibility" in
         PRIVATE|INTERNAL|private|internal) : ;;
         "")

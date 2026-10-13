@@ -14,6 +14,8 @@ source "$_WTN_DIR/lib/layout_standard.sh"
 # fail because the lease lib is missing or unreadable.
 # shellcheck source=scripts/lib/worktree_lease.sh
 [[ -f "$_WTN_DIR/lib/worktree_lease.sh" ]] && source "$_WTN_DIR/lib/worktree_lease.sh"
+# shellcheck source=scripts/lib/admit_caller.sh
+[[ -f "$_WTN_DIR/lib/admit_caller.sh" ]] && source "$_WTN_DIR/lib/admit_caller.sh"
 
 # wtn_main_repo <path> — the repo that owns <path>'s worktrees: the main
 # checkout for a linked worktree, the submodule checkout for a submodule
@@ -96,7 +98,8 @@ wtn_registered() {
 }
 
 # wtn_create <repo> <branch> <path> <base> [new] — worktree add, git output to
-# stderr, ${WTN_ADD_TIMEOUT:-30} s cap; prints <path> on success. Existing
+# stderr, ${WTN_ADD_TIMEOUT:-30} s cap; prints <path> on success; a failed
+# add leaves git's own rc in WTN_ADD_RC (worktree-new's exit, spec §7.1). Existing
 # local branch: checked out as is. Branch only on origin: local branch
 # tracking origin/<branch>. Otherwise: new untracked branch from <base>.
 # With "new", the branch must be created by this call: an existing local or
@@ -138,7 +141,9 @@ wtn_create() {
             return 1
         fi
     fi
-    if ! wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2; then
+    WTN_ADD_RC=0
+    wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2 || WTN_ADD_RC=$?
+    if [[ "$WTN_ADD_RC" != 0 ]]; then
         echo "worktree-new: git worktree add failed: $path" >&2
         if wtn_registered "$repo" "$path"; then
             # The add got as far as registering (e.g. killed by the timeout
@@ -176,14 +181,25 @@ wtn_free_gb() {
     return 1
 }
 
-# wtn_admit <path> — free-space admission gate, run before wtn_create so a
-# refusal never creates a directory or a branch. Warn below
+# wtn_admit <path> <repo> — admission gate, run before wtn_create so a
+# refusal never creates a directory or a branch. First `diskm admit --class
+# worktrees` per the caller contract (lib/admit_caller.sh; estimate
+# WORKTREE_ADMIT_EST_GB, default 2). Admit is observe-only until D2 is
+# recorded, so the legacy floor below stays as the live backstop: warn below
 # WORKTREE_ADMIT_WARN_GB (default 25), refuse with rc 75 below
 # WORKTREE_ADMIT_MIN_GB (default 10; 0 disables the refusal). Unmeasurable
 # free space fails OPEN — the gate must not block work because it cannot read
 # df. All output goes to stderr; stdout stays exactly the path.
 wtn_admit() {
     local warn="${WORKTREE_ADMIT_WARN_GB:-25}" min="${WORKTREE_ADMIT_MIN_GB:-10}" free
+    local est="${WORKTREE_ADMIT_EST_GB:-2}"
+    [[ "$est" =~ ^[0-9]+(\.[0-9]+)?$ ]] || est=2
+    if ! declare -F admit_gate >/dev/null; then
+        echo "admission_degraded:caller admit missing" >&2
+    elif ! admit_gate worktrees "$est" "worktree-new:$(wtn_repo_name "$2")" "$1" worktree-new; then
+        echo "worktree-new: disk admission refused: reuse an existing worktree" >&2
+        return 75
+    fi
     [[ "$warn" =~ ^[0-9]+$ ]] || warn=25
     [[ "$min" =~ ^[0-9]+$ ]] || min=10
     if ! free="$(wtn_free_gb)"; then
@@ -192,6 +208,7 @@ wtn_admit() {
     fi
     if [[ "$min" != 0 ]] && (( free < min )); then
         echo "worktree-new: disk low ($free GiB free): reuse an existing worktree" >&2
+        echo "disk-admission: refused class=worktrees rc=75" >&2
         return 75
     fi
     if (( free < warn )); then
@@ -232,8 +249,9 @@ wtn_main() {
     fi
     path="$(standard_worktree_path "$(wtn_repo_name "$repo")" "$name")" || { echo "worktree-new: bad name: $name" >&2; return 1; }
     [[ -n "$base" ]] || base="$(wtn_default_base "$repo")"
-    wtn_admit "$path" || return $?
-    wtn_create "$repo" "$branch" "$path" "$base" || return 1
+    wtn_admit "$path" "$repo" || return $?
+    WTN_ADD_RC=1
+    wtn_create "$repo" "$branch" "$path" "$base" || return "$WTN_ADD_RC"
     # Record the owner lease; a failure is logged but never blocks creation
     # (stdout must stay exactly the path).
     if declare -F lease_write >/dev/null 2>&1; then
