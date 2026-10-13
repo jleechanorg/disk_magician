@@ -27,7 +27,12 @@ from scripts.prune_aside_sessions import (
 
 class TestPruneAsideSessions(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
+        self.temp_dir = Path(tempfile.mkdtemp(dir="/tmp")).resolve()
+        # C14's declared-ephemeral row E4 matches the *canonical* path
+        # $HOME/.aside/u/*/sessions/*; point HOME at the fixture root so the
+        # real production verdict (not a test shim) can classify these paths.
+        self._old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.temp_dir)
         self.aside_dir = self.temp_dir / ".aside"
         self.aside_dir.mkdir(parents=True)
         self.u0_sessions = self.aside_dir / "u" / "0" / "sessions"
@@ -41,6 +46,10 @@ class TestPruneAsideSessions(unittest.TestCase):
         self.day_secs = 86400
 
     def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._old_home
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_mock_session(
@@ -176,6 +185,7 @@ exit 0
             self.u0_sessions,
             "2026-08-01_old_session",
             {"messages.jsonl": "old data", "evidence/shot.png": b"IMG" * 1000},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
         recent_session = self._create_mock_session(
             self.u0_sessions,
@@ -209,11 +219,13 @@ exit 0
             self.u0_sessions,
             "2026-07-25_locked_session",
             {"messages.jsonl": "active session running"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
         old_unlocked_session = self._create_mock_session(
             self.u0_sessions,
             "2026-07-25_unlocked_session",
             {"messages.jsonl": "finished old session"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
 
         # Lock the first session
@@ -363,11 +375,13 @@ exit 0
             self.u0_sessions,
             "2026-07-20_u0_old",
             {"test.txt": "u0"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
         s1_old = self._create_mock_session(
             self.u1_sessions,
             "2026-07-20_u1_old",
             {"test.txt": "u1"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script()
@@ -402,7 +416,10 @@ exit 0
         self.assertEqual(pruner.max_age_days, 7)
 
         # Session 8 days old (2026-08-15) vs ref_time 2026-08-23
-        s_8d = self._create_mock_session(self.u0_sessions, "2026-08-15_old", {"msg.txt": "8d"})
+        s_8d = self._create_mock_session(
+            self.u0_sessions, "2026-08-15_old", {"msg.txt": "8d"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
+        )
         # Session 5 days old (2026-08-18) vs ref_time 2026-08-23
         s_5d = self._create_mock_session(self.u0_sessions, "2026-08-18_recent", {"msg.txt": "5d"})
 
@@ -420,21 +437,24 @@ exit 0
         self.assertFalse(s_8d.exists())
         self.assertTrue(s_5d.exists())
 
-    def test_exact_boundary_retention(self):
-        """Exactly seven days is pruned while a one-second-younger session remains."""
-        mtime_exact = self.ref_time - (7.0 * self.day_secs)
-        s_exact = self._create_mock_session(
+    def test_retention_boundary_prunes_past_and_keeps_inside(self):
+        """A session past the retention floor is pruned; one inside it stays.
+
+        C14's ephemeral verdict measures the live clock (not the pruner's
+        reference), so the fixture ages are anchored to ``time.time()``.
+        """
+        now = time.time()
+        s_past = self._create_mock_session(
             self.u0_sessions,
-            "session_exact_7d",
-            {"state.json": "exact"},
-            mtime_epoch=mtime_exact,
+            "session_past_8d",
+            {"state.json": "past"},
+            mtime_epoch=now - (8.0 * self.day_secs),
         )
-        mtime_young = self.ref_time - (7.0 * self.day_secs) + 1.0
-        s_young = self._create_mock_session(
+        s_inside = self._create_mock_session(
             self.u0_sessions,
-            "session_sub_7d",
+            "session_inside_6d",
             {"state.json": "young"},
-            mtime_epoch=mtime_young,
+            mtime_epoch=now - (6.0 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script()
@@ -442,15 +462,15 @@ exit 0
             aside_dir=self.aside_dir,
             dry_run=False,
             lsof_bin=str(mock_lsof),
-            ref_time=self.ref_time,
+            ref_time=now,
         )
         stats = pruner.run()
 
         self.assertEqual(stats["sessions_scanned"], 2)
         self.assertEqual(stats["sessions_pruned"], 1)
         self.assertEqual(stats["sessions_retained_recent"], 1)
-        self.assertFalse(s_exact.exists())
-        self.assertTrue(s_young.exists())
+        self.assertFalse(s_past.exists())
+        self.assertTrue(s_inside.exists())
 
     def test_cli_parse_args(self):
         """Test parse_args with various flag combinations."""

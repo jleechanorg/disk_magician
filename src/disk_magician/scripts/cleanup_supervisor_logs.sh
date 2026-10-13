@@ -11,6 +11,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 SUPERVISOR_DIR="$HOME/.claude/supervisor"
 ACTIVE_LOG="$SUPERVISOR_DIR/cmux-codex-launchd.log"
@@ -47,6 +49,16 @@ done
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 
+# c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
+c14_remove() {
+  local _out
+  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
+  case "$_out" in
+    removed:*) return 0 ;;
+    *) log "C14 kept: $1 ($_out)"; return 1 ;;
+  esac
+}
+
 if [[ ! -d "$SUPERVISOR_DIR" ]]; then
   log "No supervisor dir at $SUPERVISOR_DIR — nothing to do."
   exit 0
@@ -67,16 +79,17 @@ while IFS= read -r -d '' f; do
   kb=$(du -sk "$f" 2>/dev/null | awk '{print $1+0}')
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY-RUN would remove: $f  (${kb} KB)"
+    deleted=$(( deleted + 1 ))
+    freed_kb=$(( freed_kb + kb ))
   else
     log "Removing: $f  (${kb} KB)"
     if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$f" ($_safety_reason)"
-    else
-      rm -f "$f"
+    elif c14_remove "$f" --kind ephemeral; then
+      deleted=$(( deleted + 1 ))
+      freed_kb=$(( freed_kb + kb ))
     fi
   fi
-  deleted=$(( deleted + 1 ))
-  freed_kb=$(( freed_kb + kb ))
 done < <(find "$SUPERVISOR_DIR" -maxdepth 1 -type f -name "$ROTATION_PATTERN" -mtime "+${AGE_THRESHOLD_DAYS}" -print0 2>/dev/null)
 
 log ""

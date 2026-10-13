@@ -10,15 +10,16 @@
 #
 # Run: bash tests/test_cleanup_worktree_venvs.sh
 set -uo pipefail
+export TMPDIR=/tmp
 PYTHON_BIN="$(dirname "$(command -v python3 2>/dev/null || echo "/usr/bin/python3")")"
 GIT_BIN="$(dirname "$(command -v git 2>/dev/null || echo "/usr/bin/git")")"
-TEST_PATH="$PYTHON_BIN:$GIT_BIN:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
+TEST_PATH="$PYTHON_BIN:$GIT_BIN:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin:/usr/local/bin"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_worktree_venvs.sh"
 
-TMP_ROOT=$(mktemp -d -t cleanup_wt_venvs.XXXXXX)
+TMP_ROOT=$(cd "$(mktemp -d -t cleanup_wt_venvs.XXXXXX)" && pwd -P)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -78,8 +79,20 @@ echo "=== fixtures ==="
 # "now"; a bak dir loaded with freshly-touched content would be an unrealistic
 # fixture that self-poisons the very recency signal this test is verifying.
 STALE_WT="$ROOTS_DIR/stale_wt"
-mk_worktree "$STALE_WT"
-: > "$STALE_WT/README.md"
+# A REAL linked worktree: C14's rebuildable verdict for a venv/venv.bak atop a
+# worktree requires a registered, clean, pushed linked worktree (a synthetic
+# `.git` pointer is correctly kept as provenance-less). Local bare origin so
+# the branch tip is advertised by a live `git ls-remote`.
+STALE_ORIGIN="$TMP_ROOT/stale-origin.git"
+STALE_BASE="$TMP_ROOT/stale-base"
+git init -q --bare -b main "$STALE_ORIGIN"
+git init -q -b main "$STALE_BASE"
+: > "$STALE_BASE/README.md"
+git -C "$STALE_BASE" -c user.name=t -c user.email=t@t add -A
+git -C "$STALE_BASE" -c user.name=t -c user.email=t@t commit -qm init
+git -C "$STALE_BASE" remote add origin "$STALE_ORIGIN"
+git -C "$STALE_BASE" -c user.name=t -c user.email=t@t worktree add -q -b stale-branch "$STALE_WT"
+git -C "$STALE_WT" -c user.name=t -c user.email=t@t push -q -u origin stale-branch
 age_path_days_ago "$STALE_WT/README.md" 30
 age_path_days_ago "$STALE_WT/.git" 30
 mkdir -p "$STALE_WT/venv.bak.20260101"
@@ -165,10 +178,24 @@ env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   WORKTREE_APPROVED=1 \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --purge-bak-days 5 --clean \
   >"$OUT3" 2>&1
-if [[ ! -d "$STALE_WT/venv.bak.20260101" && ! -d "$STALE_WT/.venv.bak.20260101" ]]; then
-  record_pass "stale bak dirs actually removed with approval"
+OUT3_CONTENT=$(cat "$OUT3")
+# The shared admin-inventory reconciliation (repair_167) is now merged, so the
+# eligible `venv.bak.*` entry (approved rebuildable table) is ACTUALLY removed.
+# `.venv.bak.*` is NOT in that table (see _av_rebuildable's name regex), so it
+# must be kept with an explicit C14 reason. The positive removal assertion below
+# remains strict on the eligible path; the ineligible path is asserted KEPT
+# rather than silently widening policy to force it removable.
+if [[ ! -d "$STALE_WT/venv.bak.20260101" ]]; then
+  record_pass "eligible venv.bak dir actually removed with approval"
 else
-  record_fail "stale bak dirs actually removed with approval" "still present in: $STALE_WT"
+  record_fail "eligible venv.bak dir actually removed with approval" "still present in: $STALE_WT/venv.bak.20260101"
+fi
+assert_contains "ineligible .venv.bak kept with explicit C14 reason" \
+  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:unproven-content)" "$OUT3_CONTENT"
+if [[ -d "$STALE_WT/.venv.bak.20260101" ]]; then
+  record_pass "ineligible .venv.bak retained on disk (outside approved table)"
+else
+  record_fail "ineligible .venv.bak retained on disk (outside approved table)" "was removed despite being outside the approved table"
 fi
 if [[ -d "$RECENT_WT/venv.bak.20251201" ]]; then
   record_pass "recent-worktree bak dir survives real --clean run"

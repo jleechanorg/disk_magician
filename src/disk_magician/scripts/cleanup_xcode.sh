@@ -4,6 +4,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
@@ -42,6 +44,16 @@ fi
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
 
+# c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
+c14_remove() {
+  local _out
+  _out="$(quarantine_remove "$@" 2>/dev/null)" || _out=kept:check-failed
+  case "$_out" in
+    removed:*) return 0 ;;
+    *) log "C14 kept: $1 ($_out)"; return 1 ;;
+  esac
+}
+
 size_kb() {
   local path="$1"
   [[ -e "$path" ]] || { echo 0; return; }
@@ -73,7 +85,13 @@ clear_contents() {
       echo "SAFETY-SKIP $path ($_safety_reason)"
       return 0
     fi
-    find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    # Per-entry so every cache entry gets the same C14 rebuildable verdict and
+    # a kept entry does not stop the rest of the sweep.
+    local entry
+    while IFS= read -r -d '' entry; do
+      [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
+      c14_remove "$entry" --kind rebuildable || true
+    done < <(find "$path" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   fi
 }
 
