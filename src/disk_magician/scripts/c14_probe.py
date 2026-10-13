@@ -75,6 +75,102 @@ def gitmeta(gd, lease=None):
     base = json.load(open(lease)).get("git_meta") if os.path.isfile(lease) else None
     print("kept:git-unbaselined" if not isinstance(base, dict) else "ok" if base == m else "kept:git-metadata")
 
+def outer_certificate(root, receipt_path):
+    """Validate the advice runner's exact-SHA clone receipt and declared overlay."""
+    try:
+        root = os.path.realpath(root)
+        with open(receipt_path, encoding="utf-8") as stream:
+            receipt = json.load(stream)
+        sha = receipt.get("sha")
+        source = receipt.get("source_repo")
+        manifest = receipt.get("overlay_manifest")
+        baseline = receipt.get("git_meta")
+        receipt_ref = receipt.get("receipt_path")
+        pid, started, created = receipt.get("pid"), receipt.get("start_epoch"), receipt.get("created_epoch")
+        if (receipt.get("clone_kind") != "independent_exact_sha_fetch" or
+                not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) or
+                not isinstance(source, str) or not isinstance(manifest, list) or
+                not isinstance(baseline, dict) or not isinstance(receipt_ref, str) or
+                os.path.realpath(receipt_ref) != os.path.realpath(receipt_path) or
+                isinstance(pid, bool) or not isinstance(pid, int) or pid < 1 or
+                isinstance(started, bool) or not isinstance(started, (int, float)) or started <= 0 or
+                isinstance(created, bool) or not isinstance(created, int) or created <= 0):
+            return "kept:check-failed"
+        source = os.path.realpath(source)
+        if source == root or source.startswith(root.rstrip("/") + "/") or root.startswith(source.rstrip("/") + "/"):
+            return "kept:check-failed"
+        if not os.path.isdir(source):
+            return "kept:source-missing"
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        def git(*args):
+            return subprocess.run(["git", "-C", root, *args], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, check=False, timeout=10, env=env).stdout.decode().strip()
+        if git("rev-parse", "--show-toplevel") != root or git("rev-parse", "HEAD") != sha:
+            return "kept:check-failed"
+        if git("symbolic-ref", "-q", "HEAD"):
+            return "kept:check-failed"
+        if subprocess.run(["git", "-C", source, "cat-file", "-e", sha + "^{commit}"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10,
+                          env=env).returncode:
+            return "kept:source-missing"
+        gitdir = git("rev-parse", "--absolute-git-dir")
+        if not gitdir or os.path.realpath(gitdir) != os.path.join(root, ".git"):
+            return "kept:check-failed"
+        actual_meta = json.loads(subprocess.run([sys.executable, __file__, "gitmeta", gitdir],
+                                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                check=True, timeout=30, text=True, env=env).stdout)
+        if actual_meta != baseline:
+            return "kept:git-metadata"
+        allowed = {}
+        for row in manifest:
+            if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+                return "kept:check-failed"
+            rel, digest = row["path"], row["sha256"]
+            if (not isinstance(rel, str) or not rel.startswith(".advice-review-documents/") or
+                    not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or
+                    rel in allowed or ".." in rel.split("/") or "\\" in rel):
+                return "kept:check-failed"
+            allowed[rel] = digest
+        overlay_root = os.path.join(root, ".advice-review-documents")
+        actual = {}
+        if os.path.lexists(overlay_root):
+            if not os.path.isdir(overlay_root) or os.path.islink(overlay_root):
+                return "kept:dirty"
+            for dp, dirs, files in os.walk(overlay_root, followlinks=False):
+                for name in list(dirs):
+                    p = os.path.join(dp, name)
+                    if os.path.islink(p):
+                        return "kept:dirty"
+                for name in files:
+                    p = os.path.join(dp, name)
+                    rel = os.path.relpath(p, root).replace(os.sep, "/")
+                    if os.path.islink(p) or not os.path.isfile(p):
+                        return "kept:dirty"
+                    with open(p, "rb") as stream:
+                        actual[rel] = hashlib.sha256(stream.read()).hexdigest()
+        if actual != allowed:
+            return "kept:dirty"
+        if git("remote"):
+            return "kept:check-failed"
+        status = subprocess.run(["git", "-C", root, "status", "--porcelain=v1", "--untracked-files=all",
+                                 "--ignore-submodules=none", "-z"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, check=False, timeout=30, env=env)
+        if status.returncode:
+            return "kept:check-failed"
+        records = status.stdout.split(b"\0")
+        i = 0
+        while i < len(records) and records[i]:
+            record = records[i]
+            i += 1
+            if len(record) < 4 or record[:3] != b"?? ":
+                return "kept:dirty"
+            rel = os.fsdecode(record[3:]).replace(os.sep, "/")
+            if rel not in allowed:
+                return "kept:dirty"
+        return "ok"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return "kept:check-failed"
+
 ADMIN = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "AUTO_MERGE", "index", "commondir", "gitdir", "config.worktree", "COMMIT_EDITMSG"}
 OID, HEX = re.compile(r"^(?!0+$)([0-9a-f]{40}|[0-9a-f]{64})$"), rb"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 REF, LOG = re.compile(HEX + rb"\n?"), re.compile(HEX + b" " + HEX + rb" [^\n]*> \d+ [+-]\d{4}(?:\t[^\n]*)?\n?")
@@ -220,14 +316,16 @@ def inventory(root, out, deadline=None):
                         if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                             raise OSError("file changed")
                         entries.append({"path": ".", "type": "file", "dev": before.st_dev, "ino": before.st_ino,
-                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns})
+                                        "size": before.st_size, "sha256": h.hexdigest(), "mtime_ns": before.st_mtime_ns,
+                                        "name": os.path.basename(root.rstrip(os.sep))})
                     finally: os.close(ffd)
                 elif stat.S_ISLNK(st.st_mode):
                     target = os.readlink(name, dir_fd=pfd)
                     now = os.stat(name, dir_fd=pfd, follow_symlinks=False)
                     if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino): raise OSError("symlink replaced")
                     entries.append({"path": ".", "type": "symlink", "dev": st.st_dev, "ino": st.st_ino,
-                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns})
+                                    "size": st.st_size, "target": target, "mtime_ns": st.st_mtime_ns,
+                                    "name": os.path.basename(root.rstrip(os.sep))})
                 else:
                     raise OSError("unsupported entry type")
             finally: os.close(pfd)
@@ -240,7 +338,8 @@ def inventory(root, out, deadline=None):
             if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
                 raise OSError("directory replaced")
             entries.append({"path": rel, "type": "dir", "dev": opened.st_dev, "ino": opened.st_ino,
-                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns})
+                            "size": opened.st_size, "mtime_ns": opened.st_mtime_ns,
+                            **({"name": os.path.basename(root.rstrip(os.sep))} if rel == "." else {})})
             names = sorted(os.listdir(fd))
             for name in names:
                 left = _remaining(deadline, "tree-walk")
@@ -412,27 +511,47 @@ def repos(inv_file):
         entries = json.load(open(inv_file, encoding="utf-8"))
         if not isinstance(entries, list): raise ValueError("inventory must be a list")
         by_path = {e["path"]: e for e in entries}
+        root = os.path.realpath(os.environ.get("C14_ROOT", os.path.dirname(os.path.abspath(inv_file))))
         roots = set()
+        gitdir_targets = set()
+        for rel, e in by_path.items():
+            if rel == ".": parent, name = ".", "."
+            else: parent, _, name = rel.rpartition("/"); parent = parent or "."
+            if name != ".git" or e.get("type") != "symlink":
+                continue
+            link_parent = root if parent == "." else os.path.join(root, parent)
+            target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
+            if not target.startswith(root.rstrip(os.sep) + os.sep) or not os.path.isdir(target):
+                sys.stdout.write("kept:gitdir-invalid\0")
+                return 1
+            gitdir_targets.add(os.path.relpath(target, root))
         for rel, e in by_path.items():
             if rel == ".": parent, name = ".", "."
             else: parent, _, name = rel.rpartition("/"); parent = parent or "."
             if name == ".git" and e.get("type") in ("dir", "file"):
                 roots.add(parent)
+            elif name == ".git" and e.get("type") == "symlink":
+                link_parent = root if parent == "." else os.path.join(root, parent)
+                target = os.path.realpath(os.path.join(link_parent, e.get("target", "")))
+                if not target.startswith(root.rstrip(os.sep) + os.sep) or not os.path.isdir(target):
+                    sys.stdout.write("kept:gitdir-invalid\0")
+                    return 1
+                roots.add(parent)
             if rel == "." and e.get("type") == "dir" and all(
                     by_path.get(name, {}).get("type") == kind for name, kind in
                     (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                 roots.add(".")
-            if e.get("type") == "dir" and rel != ".git" and not rel.endswith("/.git"):
+            if e.get("type") == "dir" and rel not in gitdir_targets and rel != ".git" and not rel.endswith("/.git"):
                 if all(by_path.get(rel + "/" + name, {}).get("type") == kind for name, kind in
                        (("HEAD", "file"), ("objects", "dir"), ("refs", "dir"))):
                     roots.add(rel)
-        root = os.path.dirname(os.path.abspath(inv_file))
         # Caller supplies C14_ROOT to bind relative inventory paths to its candidate.
-        root = os.path.realpath(os.environ["C14_ROOT"])
         for rel in sorted(roots):
             print(os.path.join(root, rel) if rel != "." else root, end="\0")
+        return 0
     except Exception:
         print("kept:check-failed")
+        return 1
 
 def newest_mtime(inv_file):
     try:
@@ -447,7 +566,8 @@ def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        print("yes" if any(pattern.fullmatch(e["path"].rsplit("/", 1)[-1]) for e in entries) else "no")
+        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
+                            for e in entries) else "no")
     except Exception:
         print("kept:check-failed")
 
@@ -473,12 +593,21 @@ def open_file(root, deadline=None):
         cmd += ["+D", root]
     else:
         cmd += [root]
-    result = _run_bounded(cmd, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+    try:
+        result = _run_bounded(cmd, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+    except OSError:
+        print("kept:check-failed")
+        return
     if result is None:
         print("deferred:tree-walk")
     else:
         rc, out = result
-        print("yes" if out else "no")
+        if out:
+            print("yes")
+        elif rc == 1:
+            print("no")
+        else:
+            print("kept:check-failed")
 
 if __name__ == "__main__":
     a = sys.argv[1:]
@@ -489,6 +618,10 @@ if __name__ == "__main__":
             sys.exit(lsremote(a[1], a[2], a[3]))
         if len(a) in (2, 3) and a[0] == "gitmeta":
             sys.exit(gitmeta(*a[1:]))
+        if len(a) == 3 and a[0] == "outer-certificate":
+            result = outer_certificate(a[1], a[2])
+            print(result)
+            sys.exit(0 if result == "ok" else 1)
         if len(a) in (2, 3) and a[0] == "admin":
             sys.exit(admin(*a[1:]))
         if len(a) in (3, 4) and a[0] == "provenance":
