@@ -41,8 +41,10 @@
 #
 # Task 14 contract: on --clean the sweep emits one typed job receipt through the
 # existing scripts/job_receipt.py schema (job cleanup_codex_documents) carrying
-# candidates.removed_count / deferred_count / interrupted_count and a signed
-# postcondition.df_delta_bytes measured from df before and after the run.
+# candidates.removed_count / deferred_count / interrupted_count / retained_count
+# and a signed postcondition.df_delta_bytes measured from df before and after the
+# run. Only C14 removed:* is reclaimed bytes; quarantined:*/quarantine_conflict:*
+# is retained recovery state, reported as partial with a kept reason.
 #   (default is DRY RUN)
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -370,6 +372,7 @@ N_REMOVED=0
 N_KEPT=0
 N_DEFERRED=0
 N_INTERRUPTED=0
+N_RETAINED=0
 keep() { log "KEEP [$1] $2"; N_KEPT=$(( N_KEPT + 1 )); }
 
 # --- Task 14 typed actuator receipt ----------------------------------------
@@ -399,7 +402,11 @@ receipt_finish() {
     outcome="$forced_outcome"
   elif (( N_INTERRUPTED > 0 )); then
     outcome=partial
-    (( N_REMOVED > 0 || N_DEFERRED > 0 )) || outcome=timeout
+    (( N_REMOVED > 0 || N_DEFERRED > 0 || N_RETAINED > 0 )) || outcome=timeout
+  elif (( N_RETAINED > 0 )); then
+    # A quarantined/conflicted tree is retained recovery state, not reclaimed;
+    # the run must never terminate as a clean removal success.
+    outcome=partial
   elif (( N_REMOVED > 0 )); then
     outcome=success
   elif (( N_DEFERRED > 0 )); then
@@ -407,12 +414,13 @@ receipt_finish() {
   else
     outcome=success_noop
   fi
-  reason="${forced_reason:-removed=$N_REMOVED deferred=$N_DEFERRED interrupted=$N_INTERRUPTED kept=$N_KEPT}"
-  candidates="$(python3 - "$N_REMOVED" "$N_DEFERRED" "$N_INTERRUPTED" "$N_KEPT" <<'PY'
+  reason="${forced_reason:-removed=$N_REMOVED deferred=$N_DEFERRED interrupted=$N_INTERRUPTED retained=$N_RETAINED kept=$N_KEPT}"
+  candidates="$(python3 - "$N_REMOVED" "$N_DEFERRED" "$N_INTERRUPTED" "$N_RETAINED" "$N_KEPT" <<'PY'
 import json, sys
-removed, deferred, interrupted, kept = map(int, sys.argv[1:])
+removed, deferred, interrupted, retained, kept = map(int, sys.argv[1:])
 print(json.dumps({"removed_count": removed, "deferred_count": deferred,
-                  "interrupted_count": interrupted, "kept_count": kept}))
+                  "interrupted_count": interrupted, "retained_count": retained,
+                  "kept_count": kept}))
 PY
 )"
   post="$(python3 - "$FREE_BEFORE" "$after" <<'PY'
@@ -459,7 +467,7 @@ quarantine_gate() {
   quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
 }
 process_task() {
-  local task="$1" rc reason kb main wt removed_worktrees=0 qout
+  local task="$1" rc reason kb main wt removed_worktrees=0 qout wrh_out wrh_rc
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
@@ -489,12 +497,26 @@ process_task() {
       fi
       while IFS=$'\t' read -r main wt; do
         [[ -n "$main" ]] || continue
-        if ! wrh_remove_now "$wt" "$wt" --quarantine; then
+        # Current WRH contract: rc 0 only when the worktree was actually
+        # removed; a quarantined-but-retained (or partial) worktree returns
+        # non-zero. Capture stdout so a future contract that reports a
+        # quarantined:<id>/quarantine_conflict:<id> verdict on success is never
+        # counted as removed: only a real removal increments removed_worktrees.
+        wrh_rc=0
+        wrh_out="$(wrh_remove_now "$wt" "$wt" --quarantine 2>/dev/null)" || wrh_rc=$?
+        if (( wrh_rc != 0 )); then
           if (( removed_worktrees > 0 )); then
             deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
           fi
           keep "wrh-quarantine-failed:$wt" "$task"; return
         fi
+        case "$wrh_out" in
+          quarantined:*|quarantine_conflict:*|quarantine_partial_kept*)
+            N_RETAINED=$(( N_RETAINED + 1 ))
+            deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+            keep "wrh-retained:${wrh_out%%:*}:$wt" "$task"; return
+            ;;
+        esac
         removed_worktrees=$(( removed_worktrees + 1 ))
       done <<<"$WT_REMOVALS"
     fi
@@ -504,8 +526,24 @@ process_task() {
     log "Removing $task (${kb} KB) via C14/quarantine"
     qout="$(quarantine_gate "$task")"
     case "$qout" in
-      removed:*|quarantined:*|quarantine_conflict:*)
+      removed:*)
+        # Only a completed C14 removal is reclaimed bytes. Include this target
+        # in REMOVED/TOTAL_KB/N_REMOVED below.
         deletion_log cleanup_codex_documents.sh removed "$kb" "$task"
+        ;;
+      quarantined:*)
+        # Phase 1 moved the tree into quarantine but phase 2 did not delete it:
+        # retained, recoverable recovery state, never counted as removed.
+        N_RETAINED=$(( N_RETAINED + 1 ))
+        deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+        keep "quarantined:${qout#quarantined:}" "$task"; return
+        ;;
+      quarantine_conflict:*)
+        # Original path recreated / exclusive rename unavailable: the tree is
+        # retained (possibly in quarantine) and must not count as removed.
+        N_RETAINED=$(( N_RETAINED + 1 ))
+        deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
+        keep "quarantine-conflict:${qout#quarantine_conflict:}" "$task"; return
         ;;
       deferred:*)
         # C14 deferral is a COMPLETED visit (Task 14 contract): count it and let

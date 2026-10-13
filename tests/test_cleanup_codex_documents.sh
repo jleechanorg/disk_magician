@@ -390,6 +390,8 @@ quarantine_remove() {
   local p="${1:-}"; shift || true
   [[ -n "${STUB_LOG:-}" ]] && printf '%s\n' "$p" >>"$STUB_LOG"
   if [[ -n "${STUB_KEEP_PATH:-}" && "$p" == "$STUB_KEEP_PATH" ]]; then printf 'kept:stub-keep\n'; return 0; fi
+  if [[ -n "${STUB_QUARANTINE_PATH:-}" && "$p" == "$STUB_QUARANTINE_PATH" ]]; then printf 'quarantined:stubq\n'; return 0; fi
+  if [[ -n "${STUB_CONFLICT_PATH:-}" && "$p" == "$STUB_CONFLICT_PATH" ]]; then printf 'quarantine_conflict:stubc\n'; return 0; fi
   if [[ -n "${STUB_DEFER_PATH:-}" && "$p" == "$STUB_DEFER_PATH" ]]; then printf 'deferred:stub\n'; return 0; fi
   if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then printf 'removed:stub\n'; else printf 'kept:rm-failed\n'; fi
 }
@@ -519,6 +521,54 @@ DELTA19="$(receipt_get "$AG_HOME" postcondition.df_delta_bytes)"
 [[ "$DELTA19" =~ ^-?[0-9]+$ ]] && record_pass "T19: receipt df_delta_bytes is a signed integer" || record_fail "T19: receipt df_delta_bytes is a signed integer" "got '$DELTA19'"
 FREED19="$(receipt_get "$AG_HOME" postcondition.freed_bytes)"
 { [[ "$FREED19" == null ]] || [[ "$FREED19" =~ ^[0-9]+$ ]]; } && record_pass "T19: receipt freed_bytes non-negative or null" || record_fail "T19: receipt freed_bytes non-negative or null" "got '$FREED19'"
+
+echo "T20: quarantined/conflicting trees are retained recovery state, never counted removed"
+QT_HOME="$TMP_ROOT/qret-home"; QT_CODEX="$QT_HOME/Documents/Codex"; QT_DATE="$QT_CODEX/$D_OLD"
+mkdir -p "$QT_CODEX"
+for n in 0 1; do mkdir -p "$QT_DATE/t-q$n"; printf 'x%.0s' {1..1024} >"$QT_DATE/t-q$n/payload.bin"; done
+age "$QT_DATE"
+QT_FILE="$CUR_DIR/qt-cursor.json"
+O20="$TMP_ROOT/o20"; RC=0
+HOME="$QT_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$CUR_STUB" \
+  STUB_QUARANTINE_PATH="$QT_DATE/t-q0" STUB_CONFLICT_PATH="$QT_DATE/t-q1" \
+  run_sweeper "$O20" --clean --cursor "$QT_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T20: retained run exits 0" || { record_fail "T20: retained run exits 0" "rc=$RC"; cat "$O20"; }
+assert_exists "T20: quarantined tree bytes retained on disk" "$QT_DATE/t-q0/payload.bin"
+assert_exists "T20: conflicted tree bytes retained on disk" "$QT_DATE/t-q1/payload.bin"
+assert_exists "T20: date dir retained" "$QT_DATE"
+assert_contains "T20: quarantined reason reported" "KEEP [quarantined:" "$(cat "$O20")"
+assert_contains "T20: conflict reason reported" "KEEP [quarantine-conflict:" "$(cat "$O20")"
+assert_contains "T20: summary claims zero removed" "Task dirs removed: 0" "$(cat "$O20")"
+[[ "$(receipt_get "$QT_HOME" candidates.removed_count)" == 0 ]] && record_pass "T20: receipt removed_count=0" || record_fail "T20: receipt removed_count=0" "got '$(receipt_get "$QT_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$QT_HOME" candidates.retained_count)" == 2 ]] && record_pass "T20: receipt retained_count=2" || record_fail "T20: receipt retained_count=2" "got '$(receipt_get "$QT_HOME" candidates.retained_count)'"
+[[ "$(receipt_get "$QT_HOME" candidates.interrupted_count)" == 0 ]] && record_pass "T20: receipt interrupted_count=0" || record_fail "T20: receipt interrupted_count=0" "got '$(receipt_get "$QT_HOME" candidates.interrupted_count)'"
+[[ "$(receipt_get "$QT_HOME" outcome)" == partial ]] && record_pass "T20: retained-only run reports partial" || record_fail "T20: retained-only run reports partial" "got '$(receipt_get "$QT_HOME" outcome)'"
+
+echo "T21: a nested WRH success that only quarantined is retained, never counted removed"
+WR_HOME="$TMP_ROOT/wr-home"; WR_CODEX="$WR_HOME/Documents/Codex"; WR_DATE="$WR_CODEX/$D_OLD"
+WR_MAIN="$TMP_ROOT/wr-main"
+git clone -q "$ORIGIN" "$WR_MAIN"
+mkdir -p "$WR_DATE/t-wr"
+git -C "$WR_MAIN" worktree add -q -b wr-retain "$WR_DATE/t-wr/wt" origin/main
+git -C "$WR_MAIN" push -q origin wr-retain
+git -C "$WR_DATE/t-wr/wt" branch -q -u origin/wr-retain
+printf 'x' >"$WR_DATE/t-wr/payload.bin"
+age "$WR_DATE"
+WR_STUB="$CUR_DIR/wrh_retain_stub.sh"
+cat >"$WR_STUB" <<'STUB'
+quarantine_remove() { local p="${1:-}"; rm -rf -- "$p" 2>/dev/null && printf 'removed:stub\n' || printf 'kept:rm-failed\n'; }
+wrh_remove_now() { local _q='--quarantine'; printf 'quarantined:wrstub\n'; return 0; }
+STUB
+WR_FILE="$CUR_DIR/wr-cursor.json"
+O21="$TMP_ROOT/o21"; RC=0
+HOME="$WR_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$WR_STUB" \
+  run_sweeper "$O21" --clean --cursor "$WR_FILE" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T21: WRH-retained run exits 0" || { record_fail "T21: WRH-retained run exits 0" "rc=$RC"; cat "$O21"; }
+assert_exists "T21: task retained when nested WRH only quarantined" "$WR_DATE/t-wr/payload.bin"
+assert_contains "T21: WRH retained reason reported" "wrh-retained" "$(cat "$O21")"
+[[ "$(receipt_get "$WR_HOME" candidates.removed_count)" == 0 ]] && record_pass "T21: receipt removed_count=0" || record_fail "T21: receipt removed_count=0" "got '$(receipt_get "$WR_HOME" candidates.removed_count)'"
+[[ "$(receipt_get "$WR_HOME" candidates.retained_count)" == 1 ]] && record_pass "T21: receipt retained_count=1" || record_fail "T21: receipt retained_count=1" "got '$(receipt_get "$WR_HOME" candidates.retained_count)'"
+[[ "$(receipt_get "$WR_HOME" outcome)" == partial ]] && record_pass "T21: WRH-retained run reports partial" || record_fail "T21: WRH-retained run reports partial" "got '$(receipt_get "$WR_HOME" outcome)'"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
