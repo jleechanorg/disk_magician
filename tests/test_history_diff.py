@@ -680,5 +680,41 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn("accounting_equation must be an object", str(ctx.exception))
 
 
+class TestDeltaOvercountNote(unittest.TestCase):
+    """Per-path rows overcount when clone/hardlink shared space is counted per
+    path; the diff must say so instead of presenting the rows as exact."""
+
+    def test_matching_sum_produces_no_note(self):
+        base = {"disk_used_kb": 100 * hd.GIB_KB}
+        target = {"disk_used_kb": 110 * hd.GIB_KB}
+        deltas = [("/a", 6 * hd.GIB_KB), ("/b", 4 * hd.GIB_KB)]
+        self.assertEqual(hd.delta_overcount_note(base, target, deltas), "")
+
+    def test_overcount_names_clone_sharing(self):
+        base = {"disk_used_kb": 100 * hd.GIB_KB}
+        target = {"disk_used_kb": 91 * hd.GIB_KB}
+        deltas = [("/a", -33 * hd.GIB_KB), ("/b", -132 * hd.GIB_KB)]
+        note = hd.delta_overcount_note(base, target, deltas)
+        self.assertIn("clone/hardlink", note)
+        self.assertIn("directional", note)
+
+    def test_comparable_ledgers_suppress_the_note(self):
+        base = {
+            "disk_used_kb": 100 * hd.GIB_KB,
+            "accounting_equation": {"per_path_comparable": True},
+        }
+        target = {
+            "disk_used_kb": 91 * hd.GIB_KB,
+            "accounting_equation": {"per_path_comparable": True},
+        }
+        deltas = [("/a", -40 * hd.GIB_KB)]
+        self.assertEqual(hd.delta_overcount_note(base, target, deltas), "")
+
+    def test_format_diff_appends_the_note(self):
+        out = hd.format_diff([("/a", 2 * hd.GIB_KB)], 0, "note: example")
+        self.assertIn("+2.00 GiB  /a", out)
+        self.assertTrue(out.rstrip().endswith("note: example"))
+
+
 if __name__ == "__main__":
     unittest.main()

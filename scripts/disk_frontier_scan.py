@@ -2015,6 +2015,13 @@ def build_report(
         "residual_label": "protected_or_apfs_allocation_not_attributable_by_this_session",
         "residual_reclaimable": False,
     }
+    # Per-root measured_kb is raw (shared clone/hardlink blocks counted once per
+    # root). Record the overcount so no consumer derives per-path deltas from
+    # non-comparable numbers (2026-10-13: raw sums 1057.9 vs 892.1 GiB while
+    # disk_used was 856.2 vs 847.1 GiB).
+    accounting_equation.update(
+        per_path_accounting(top_level_ledger, disk_stats["used_kb"])
+    )
     reasons = collections.defaultdict(list)
     for item in operational_unfinished:
         reasons[item.get("reason") or "unknown"].append(item.get("path"))
@@ -2173,6 +2180,56 @@ def build_report(
         "top_level_ledger": top_level_ledger,
     }
     return report
+
+
+# Largest per-root overcount (as a fraction of disk_used_kb) still treated as
+# comparable for per-path deltas. Above it the ledger reports the overcount and
+# marks per_path_comparable false instead of presenting the numbers as usable.
+PER_PATH_TOLERANCE_RATIO = 0.01
+
+
+def per_path_accounting(top_level_ledger, data_used_kb):
+    """Comparability metadata for the per-root ledger.
+
+    The ``measured_kb`` values in ``top_level_ledger`` are RAW: shared blocks
+    (clones/hardlinks) are counted once per root, so their sum exceeds
+    ``disk_used_kb`` by ``clone_shared_adjustment_kb``. A consumer that subtracts
+    two runs' per-root values to derive a per-path delta is therefore comparing
+    numbers that do not account for that sharing, and can report movement that
+    never happened (observed 2026-10-13: raw per-root sums 1057.9 vs 892.1 GiB
+    while disk_used was 856.2 vs 847.1 GiB).
+
+    Report the overcount explicitly and mark whether per-path deltas are safe to
+    compute rather than inventing a per-root attribution for shared blocks.
+    Fail closed: an unreadable ledger is NOT comparable.
+    """
+    try:
+        raw_total = sum(
+            int(item.get("measured_kb") or 0)
+            for item in (top_level_ledger or [])
+            if isinstance(item, dict)
+        )
+        used = int(data_used_kb or 0)
+    except (TypeError, ValueError):
+        return {
+            "per_path_raw_total_kb": None,
+            "per_path_overcount_kb": None,
+            "per_path_comparable": False,
+            "per_path_incomparable_reason": "per-root measurements unreadable",
+        }
+    overcount = raw_total - used
+    tolerance = max(1, int(used * PER_PATH_TOLERANCE_RATIO))
+    comparable = overcount <= tolerance
+    return {
+        "per_path_raw_total_kb": raw_total,
+        "per_path_overcount_kb": max(0, overcount),
+        "per_path_comparable": comparable,
+        "per_path_incomparable_reason": None if comparable else (
+            f"per-root measured_kb overcounts disk_used_kb by {overcount} KiB "
+            "(clone/hardlink shared blocks counted per root); per-path deltas "
+            "are not comparable"
+        ),
+    }
 
 
 def parse_args(argv):
