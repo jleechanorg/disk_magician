@@ -18,6 +18,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
+# shellcheck source=scripts/lib/actuator_deadline.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
 dylib_candidate_file=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,7 +111,6 @@ if [[ ${#PROTECTED_TMP_ROOTS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
-SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 INCLUDE_LARGE=false
 INCLUDE_OPENCODE_DYLIBS=false
 LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
@@ -119,6 +120,11 @@ BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
 # Hard floor (minutes): never evict anything younger than this, regardless
 # of budget pressure. Default 2h; clamped to a 1h minimum in scratch_budget.sh.
 BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+# The lock helper re-execs this script with its original arguments, including
+# governor flags, so preserve the complete argv before stripping those flags.
+SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
+act_parse_deadline_args "$@" || exit 2
+set -- "${ACT_ARGS[@]}"
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
@@ -215,6 +221,16 @@ USER_TMP="$(scratch_roots_get_user_tmp)"
 # `find /private/tmp` (bead disk_magician-ka4).
 PRIVATE_TMP_ROOT="$(scratch_roots_get_private_tmp)"
 
+# Candidate scope/order is part of the resume contract. A cursor created for
+# different effective thresholds, modes, budgets, or roots fails closed.
+ACT_CURSOR_SOURCE="cleanup_tmp:v1:dry=${DRY_RUN}:large=${INCLUDE_LARGE}:dylibs=${INCLUDE_OPENCODE_DYLIBS}:budget=${BUDGET_GB}:floor=${BUDGET_FLOOR_MINUTES}:git=${GIT_CLONE_MIN}:prompt=${AGENT_PROMPT_MIN}:cli=${CLI_VALIDATION_MIN}:pointer=${WORKTREE_POINTER_MIN}:${WORKTREE_POINTER_MIN_KB}:large_min=${LARGE_TMP_MIN_KB}:active=${LARGE_TMP_ACTIVE_HOURS}:retention=${LARGE_TMP_ARCHIVE_RETENTION_HOURS}:max=${LARGE_TMP_ARCHIVE_MAX_HOURS}:archive=${ARCHIVE_ROOT}:tmp=${TMP_DIRS[*]}:user_tmp=${USER_TMP}:private_tmp=${PRIVATE_TMP_ROOT}:protected=${PROTECTED_TMP_ROOTS[*]}"
+if [[ -n "$ACT_CURSOR" ]]; then
+  if ! act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null; then
+    echo "cleanup_tmp: cursor invalid or options changed; preserving candidates" >&2
+    exit 2
+  fi
+fi
+
 # Hard production guard (bead disk_magician-ka4): abort before any deletion
 # if DISK_MAGICIAN_TEST_SANDBOX is set and any resolved root falls outside
 # it. No-op in production (env unset).
@@ -222,6 +238,89 @@ sandbox_guard_roots "${TMP_DIRS[@]:-}" "$ARCHIVE_ROOT" "${USER_TMP:-}" "${PRIVAT
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >&2; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
+
+CANDIDATE_REMOVED_COUNT=0
+CANDIDATE_DEFERRED_COUNT=0
+CANDIDATE_INTERRUPTED_COUNT=0
+cleanup_tmp_count_candidate_result() {
+  case "$1" in
+    removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
+    deferred:deadline-before-unit) CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)) ;;
+    deferred:*) CANDIDATE_DEFERRED_COUNT=$((CANDIDATE_DEFERRED_COUNT + 1)) ;;
+  esac
+}
+RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
+cleanup_tmp_df_free_bytes() {
+  df -kP "$REPO_ROOT" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4 * 1024}'
+}
+RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
+[[ "$RECEIPT_FREE_BEFORE" =~ ^[0-9]+$ ]] || RECEIPT_FREE_BEFORE=""
+RECEIPT_PRECONDITION='{}'
+[[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
+RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
+RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
+  log "ERROR: failed to record cleanup_tmp receipt begin"
+  exit 1
+}
+RECEIPT_FINISHED=false
+cleanup_tmp_finish_receipt() {
+  local rc="${1:-0}" sig="${2:-0}" free_after="" delta="null" freed="null" outcome reason safety
+  [[ "$RECEIPT_FINISHED" == true ]] && return 0
+  RECEIPT_FINISHED=true
+  free_after="$(cleanup_tmp_df_free_bytes)"
+  [[ "$free_after" =~ ^[0-9]+$ ]] || free_after=""
+  if [[ -n "$RECEIPT_FREE_BEFORE" && -n "$free_after" ]]; then
+    delta=$(( free_after - RECEIPT_FREE_BEFORE ))
+    freed=$(( delta > 0 ? delta : 0 ))
+  fi
+  if [[ "$sig" != 0 || "$rc" == 124 || "$rc" == 137 ]]; then
+    outcome=timeout
+    reason="interrupted; signal=${sig}; exit=${rc}"
+    CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
+  elif (( rc != 0 )); then
+    outcome=error
+    reason="cleanup_tmp exited ${rc}"
+  elif [[ "$delta" == null ]]; then
+    outcome=error
+    reason="df postcondition unavailable"
+  elif [[ "$DRY_RUN" == true && "$CANDIDATE_REMOVED_COUNT" == 0 ]]; then
+    outcome=success_noop
+    reason="dry-run completed"
+  elif [[ "$CANDIDATE_INTERRUPTED_COUNT" -gt 0 || "$CANDIDATE_DEFERRED_COUNT" -gt 0 ]]; then
+    outcome=partial
+    reason="completed with candidate deferrals or interruptions"
+  elif [[ "$CANDIDATE_REMOVED_COUNT" -gt 0 ]]; then
+    outcome=success
+    reason="C14 removals completed"
+  else
+    outcome=success_noop
+    reason="no eligible removals"
+  fi
+  safety='{"status":"guarded","reason":"C14 verdict required for destructive paths","delegated":false}'
+  python3 "$RECEIPT_HELPER" finish --job cleanup_tmp --run-id "$RECEIPT_RUN_ID" \
+    --outcome "$outcome" --reason "$reason" --safety "$safety" \
+    --candidates "{\"count\":null,\"bytes\":null,\"removed_count\":${CANDIDATE_REMOVED_COUNT},\"deferred_count\":${CANDIDATE_DEFERRED_COUNT},\"interrupted_count\":${CANDIDATE_INTERRUPTED_COUNT}}" \
+    --postcondition "{\"free_bytes_before\":${RECEIPT_FREE_BEFORE:-null},\"free_bytes_after\":${free_after:-null},\"df_delta_bytes\":${delta},\"freed_bytes\":${freed}}" >/dev/null || {
+      log "ERROR: failed to record cleanup_tmp receipt finish"
+      return 1
+    }
+}
+cleanup_tmp_exit_trap() {
+  local rc=$? sig="${1:-0}"
+  trap - EXIT HUP INT TERM
+  cleanup_tmp_finish_receipt "$rc" "$sig" || rc=1
+  if [[ "$sig" != 0 ]]; then
+    [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
+    kill -"$sig" "$$" 2>/dev/null || exit "$((128 + sig))"
+  fi
+  if [[ -n "${dylib_candidate_file:-}" ]]; then rm -f "$dylib_candidate_file"; fi
+  return "$rc"
+}
+scratch_lock_set_traps
+trap 'cleanup_tmp_exit_trap 0' EXIT
+trap 'cleanup_tmp_exit_trap 1' HUP
+trap 'cleanup_tmp_exit_trap 2' INT
+trap 'cleanup_tmp_exit_trap 15' TERM
 
 # Per-probe bound (seconds) for du / recency find / lsof snapshot on a single
 # entry. Exceeding it fails closed for that entry only.
@@ -299,7 +398,8 @@ path_size_kb() {
 
 remove_path() {
   local path="$1"
-  local kb
+  local kb result
+  REMOVE_PATH_COMPLETED=false
   kb=$(path_size_kb "$path")
   if (( kb < 0 )); then
     log "Preserving (size unknown, not removing): $path"
@@ -309,13 +409,21 @@ remove_path() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would remove: $path  (${kb} KB)"
+    REMOVE_PATH_COMPLETED=true
   else
-    log "Removing: $path  (${kb} KB)"
+    log "Requesting C14 removal: $path  (${kb} KB)"
     if ! _safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$path" ($_safety_reason)"
     else
-      rm -rf "$path"
-      deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
+      result="$(scratch_budget_quarantine_remove "$path")"
+      cleanup_tmp_count_candidate_result "$result"
+      if [[ "$result" == removed:* ]]; then
+        deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
+        REMOVE_PATH_COMPLETED=true
+      else
+        log "Preserving (C14 $result): $path"
+        kb=0
+      fi
     fi
   fi
   echo "$kb"
@@ -631,13 +739,11 @@ archive_path() {
     receipt="$entry.c14-origin.json"
     retention="$(c14_ephemeral_retention "$path")" || retention=0
     if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$path" "$receipt" "" "$retention"; then
-      rm -f "$receipt"
       log "ERROR: could not write archive origin receipt: $receipt"
       return 2
     fi
     log "Archiving: $path -> $dest/  (${kb} KB)"
     if ! mv "$path" "$dest/"; then
-      rm -f "$receipt"
       log "ERROR: could not archive: $path -> $dest/"
       return 2
     fi
@@ -658,14 +764,17 @@ warn_if_long_lived() {
   fi
 }
 
-# purge_aged_archives — permanently rm -rf inactive archive entries older than
+# purge_aged_archives — permanently remove C14-approved inactive archive entries older than
 # LARGE_TMP_ARCHIVE_RETENTION_HOURS. Safety checks run again at purge time
 # because quarantined content can become active during its recovery window.
-# Entries older than LARGE_TMP_ARCHIVE_MAX_HOURS are purged unconditionally.
+# The former age-only hard cap now reports a kept entry instead of bypassing
+# C14 activity, ownership, provenance, and quarantine checks.
 purge_aged_archives() {
   [[ -d "$ARCHIVE_ROOT" ]] || return 0
-  local mins=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 60 ))
-  local now_epoch d kb entry_mtime age_hours
+  local scan_hours="$LARGE_TMP_ARCHIVE_RETENTION_HOURS"
+  (( LARGE_TMP_ARCHIVE_MAX_HOURS < scan_hours )) && scan_hours="$LARGE_TMP_ARCHIVE_MAX_HOURS"
+  local mins=$(( scan_hours * 60 ))
+  local now_epoch d kb entry_mtime age_hours result
   now_epoch="$(date +%s)"
   while IFS= read -r -d '' d; do
     # Size first because du can be slow. All safety probes follow it, with the
@@ -680,47 +789,75 @@ purge_aged_archives() {
     # (fail closed toward keeping data, not toward the cap).
     entry_mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now_epoch")"
     age_hours=$(( (now_epoch - entry_mtime) / 3600 ))
+    if [[ "$size_unknown" == true ]]; then
+      log "Skipping aged archive (size unknown): $d"
+      if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+        log "archive_overcap_kept path=$d reason=size-unknown"
+      fi
+      continue
+    fi
+    if has_active_marker "$d"; then
+      log "Skipping marked-active aged archive: $d"
+      if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+        log "archive_overcap_kept path=$d reason=active-marker"
+      else
+        warn_if_long_lived "$d" "$age_hours"
+      fi
+      continue
+    fi
+    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+      log "Skipping recently-active aged archive: $d"
+      if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+        log "archive_overcap_kept path=$d reason=recent-activity"
+      else
+        warn_if_long_lived "$d" "$age_hours"
+      fi
+      continue
+    fi
+    if has_open_files "$d"; then
+      log "Skipping in-use aged archive: $d"
+      if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+        log "archive_overcap_kept path=$d reason=open-file"
+      else
+        warn_if_long_lived "$d" "$age_hours"
+      fi
+      continue
+    fi
     if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
       if [[ "$DRY_RUN" == true ]]; then
-        log "DRY RUN: would purge over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h, activity guards bypassed): $d  (${kb} KB)"
+        log "DRY RUN: would request C14 purge for over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
       else
-        log "Purging over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h, activity guards bypassed): $d  (${kb} KB)"
-        rm -rf "$d"
-        deletion_log "cleanup_tmp.sh" "purge_archive_overcap" "$kb" "$d"
+        result="$(scratch_budget_quarantine_remove "$d")"
+        cleanup_tmp_count_candidate_result "$result"
+        if [[ "$result" == removed:* ]]; then
+          log "Purged over-cap archive after C14 approval (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
+          deletion_log "cleanup_tmp.sh" "purge_archive_overcap" "$kb" "$d"
+        else
+          log "archive_overcap_kept path=$d reason=$result"
+          continue
+        fi
       fi
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
       continue
     fi
-    if [[ "$size_unknown" == true ]]; then
-      log "Skipping aged archive (size unknown): $d"
-      continue
-    fi
-    if has_active_marker "$d"; then
-      log "Skipping marked-active aged archive: $d"
-      warn_if_long_lived "$d" "$age_hours"
-      continue
-    fi
-    if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-      log "Skipping recently-active aged archive: $d"
-      warn_if_long_lived "$d" "$age_hours"
-      continue
-    fi
-    if has_open_files "$d"; then
-      log "Skipping in-use aged archive: $d"
-      warn_if_long_lived "$d" "$age_hours"
-      continue
-    fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
     else
-      log "Purging aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
-      rm -rf "$d"
-      deletion_log "cleanup_tmp.sh" "purge_archive" "$kb" "$d"
+      result="$(scratch_budget_quarantine_remove "$d")"
+      cleanup_tmp_count_candidate_result "$result"
+      if [[ "$result" == removed:* ]]; then
+        log "Purged aged archive after C14 approval (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
+        deletion_log "cleanup_tmp.sh" "purge_archive" "$kb" "$d"
+      else
+        log "Skipping aged archive (C14 $result): $d"
+        warn_if_long_lived "$d" "$age_hours"
+        continue
+      fi
     fi
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 2 -maxdepth 2 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
 }
 
 log "$(dry_prefix)cleanup_tmp.sh starting"
@@ -749,13 +886,16 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     esac
 
     kb=$(remove_path "$subdir")
-    TOTAL_KB=$(( TOTAL_KB + kb ))
-    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+      DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    fi
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 2 -type d \
               -mmin "+${GIT_CLONE_MIN}" -print0 2>/dev/null || true)
 
   # 2. agent_prompt_*.txt files older than AGENT_PROMPT_MIN
   while IFS= read -r -d '' f; do
+    files_completed=0
     local_kb=$(path_size_kb "$f")
     if (( local_kb < 0 )); then
       log "Skipping (size unknown): $f"
@@ -763,17 +903,26 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would remove: $f  (${local_kb} KB)"
+      files_completed=1
     else
-      log "Removing: $f  (${local_kb} KB)"
+      log "Requesting C14 removal: $f  (${local_kb} KB)"
       if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$f" ($_safety_reason)"
       else
-        rm -f "$f"
-        deletion_log "cleanup_tmp.sh" "remove" "$local_kb" "$f"
+        result="$(scratch_budget_quarantine_remove "$f")"
+        cleanup_tmp_count_candidate_result "$result"
+        if [[ "$result" == removed:* ]]; then
+          deletion_log "cleanup_tmp.sh" "remove" "$local_kb" "$f"
+          files_completed=1
+        else
+          log "Preserving (C14 $result): $f"
+        fi
       fi
     fi
-    TOTAL_KB=$(( TOTAL_KB + local_kb ))
-    FILES_DELETED=$(( FILES_DELETED + 1 ))
+    if [[ "${files_completed:-0}" == 1 ]]; then
+      TOTAL_KB=$(( TOTAL_KB + local_kb ))
+      FILES_DELETED=$(( FILES_DELETED + 1 ))
+    fi
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type f \
               -name "agent_prompt_*.txt" \
               -mmin "+${AGENT_PROMPT_MIN}" -print0 2>/dev/null || true)
@@ -785,8 +934,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
     kb=$(remove_path "$d")
-    TOTAL_KB=$(( TOTAL_KB + kb ))
-    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+      DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    fi
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
               -name "cli_validation_gemini_*" \
               -mmin "+${CLI_VALIDATION_MIN}" -print0 2>/dev/null || true)
@@ -874,8 +1025,10 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
 
     kb=$(remove_path "$subdir")
-    TOTAL_KB=$(( TOTAL_KB + kb ))
-    DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+      DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+    fi
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
               -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
 done
@@ -890,7 +1043,6 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
     log "Skipping OpenCode dylibs: lsof is unavailable, cannot prove files are closed"
   else
     dylib_candidate_file=$(mktemp -t disk-magician-opencode-dylibs.XXXXXX)
-    scratch_lock_set_traps
     find "$USER_TMP" -mindepth 1 -maxdepth 1 -type f \
       -name '.*.dylib' -print0 2>/dev/null > "$dylib_candidate_file" || true
 
@@ -920,13 +1072,19 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
         if [[ "$DRY_RUN" == true ]]; then
           log "DRY RUN: would remove closed OpenCode dylib: $f"
         else
+          dylib_remove_result=kept:check-failed
           if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
             echo "SAFETY-SKIP "$f" ($_safety_reason)"
           else
-            rm -f "$f"
-            deletion_log "cleanup_tmp.sh" "remove_dylib" 0 "$f"
+            dylib_remove_result="$(scratch_budget_quarantine_remove "$f")"
+            cleanup_tmp_count_candidate_result "$dylib_remove_result"
+            if [[ "$dylib_remove_result" == removed:* ]]; then
+              deletion_log "cleanup_tmp.sh" "remove_dylib" 0 "$f"
+              dylib_deleted=$(( dylib_deleted + 1 ))
+            else
+              log "Preserving OpenCode dylib (C14 $dylib_remove_result): $f"
+            fi
           fi
-          dylib_deleted=$(( dylib_deleted + 1 ))
         fi
       done < "$dylib_candidate_file"
       log "$(dry_prefix)OpenCode dylibs: candidates ${dylib_candidates}, deleted ${dylib_deleted}"

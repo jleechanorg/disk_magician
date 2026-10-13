@@ -33,7 +33,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/sandbox_env.sh"
 
-TMP_TEST_ROOT="$(mktemp -d -t test_scratch_budget.XXXXXX)"
+TEST_FIXTURE_ROOT="${TMPDIR:-/tmp}/disk_magician/fixtures"
+mkdir -p "$TEST_FIXTURE_ROOT"
+export TMPDIR="$TEST_FIXTURE_ROOT"
+TMP_TEST_ROOT="$(mktemp -d "$TEST_FIXTURE_ROOT/test_scratch_budget.XXXXXX")"
 trap 'chmod -R u+w "$TMP_TEST_ROOT" 2>/dev/null || true; rm -rf "$TMP_TEST_ROOT"' EXIT
 
 # Persistent-deletion-log fixture (bead disk_magician-ka4): every real test
@@ -97,7 +100,7 @@ set_age_minutes() {
   touch -t "$stamp" "$path"
 }
 
-# run_budget <root> <budget_kb> <floor_minutes> <open_pred_basename|-> <protected_root_basename|-> <lsof_fails|0/1> <dry_run|true/false> [test_sandbox_dir]
+# run_budget <root> <budget_kb> <floor_minutes> <open_pred_basename|-> <protected_root_basename|-> <lsof_fails|0/1> <dry_run|true/false> [test_sandbox_dir] [c14_keep_basename]
 # Prints "dirs=<n> files=<n> kb=<n>" then the remaining root listing.
 # DISK_MAGICIAN_DELETION_LOG always points at the fixture log (never the
 # real ~/Library/Logs path). Every call carries DISK_MAGICIAN_TEST_CONTEXT
@@ -112,7 +115,7 @@ run_budget() {
   local sandbox_dir="${8:-$TMP_TEST_ROOT}"
   DM_ROOT="$root" DM_BUDGET_KB="$budget_kb" DM_FLOOR_MIN="$floor_minutes" \
   DM_OPEN_BASE="$open_base" DM_PROTECTED_BASE="$protected_base" DM_LSOF_FAILS="$lsof_fails" \
-  DM_DRY_RUN="$dry_run" \
+  DM_DRY_RUN="$dry_run" DM_C14_KEEP="${9:-}" \
   DISK_MAGICIAN_DELETION_LOG="$DELETION_LOG_FIXTURE" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   DISK_MAGICIAN_TEST_SANDBOX="$sandbox_dir" DISK_MAGICIAN_LSOF_BIN=/usr/bin/true bash -c '
@@ -129,6 +132,12 @@ run_budget() {
     has_open_files() {
       [[ "$DM_LSOF_FAILS" == "1" ]] && return 0
       [[ -n "$DM_OPEN_BASE" && "$(basename "$1")" == "$DM_OPEN_BASE" ]]
+    }
+    quarantine_remove() {
+      [[ "${2:-}" == --kind && "${3:-}" == ephemeral ]] || { echo kept:check-failed; return 0; }
+      [[ -z "$DM_C14_KEEP" || "$(basename "$1")" != "$DM_C14_KEEP" ]] || { echo kept:fixture; return 0; }
+      if [[ -d "$1" && ! -L "$1" ]]; then rm -rf "$1"; else rm -f "$1"; fi
+      echo removed:fixture
     }
 
     BUDGET_DIRS_DELETED=0
@@ -308,6 +317,10 @@ result12="$(
     is_protected_root() { return 1; }
     is_protected_tmp_path() { return 1; }
     has_open_files() { return 1; }
+    quarantine_remove() {
+      if [[ -d "$1" && ! -L "$1" ]]; then rm -rf "$1"; else rm -f "$1"; fi
+      echo removed:fixture
+    }
     # Override the real content-mtime probe: "unmeasurable" always fails to
     # measure (mirrors an unreadable subtree / a stat race), everything else
     # measures normally. Emits the empty-string sentinel the fixed
@@ -424,6 +437,30 @@ stamp17="$(date -v-240H +%Y%m%d%H%M)"
 find "$R17/old-repo" -type f -exec touch -t "$stamp17" {} +
 run_budget "$R17" 1024 120 - - 0 false >/dev/null
 assert_exists "Test17: old uncommitted repository is preserved" "$R17/old-repo/uncommitted"
+
+# ===================== Test 19: C14 keep status =====================
+R18="$TMP_TEST_ROOT/t19"
+make_kb_file "$R18/protected/f" 2048
+set_age_hours "$R18/protected/f" 10
+result="$(run_budget "$R18" 1024 120 - - 0 false "$TMP_TEST_ROOT" protected)"
+assert_eq "Test19: C14-kept candidate does not count as freed" "dirs=0 files=0 kb=0" "$result"
+assert_exists "Test19: C14-kept candidate survives" "$R18/protected"
+
+# A completed C14 deferred verdict is a visited unit; it queues the item and
+# advances the shared cursor, unlike a preflight deadline stop before C14.
+R20="$TMP_TEST_ROOT/t20/deferred-candidate"
+mkdir -p "$R20"
+CURSOR20="$TMP_TEST_ROOT/t20.cursor.json"
+result20="$(bash -c '
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+  ACT_CURSOR="'"$CURSOR20"'"; ACT_CURSOR_SOURCE=cleanup_tmp-test; DRY_RUN=false
+  act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0
+  quarantine_remove() { echo deferred:tree-walk; }
+  scratch_budget_quarantine_remove "'"$R20"'"
+')"
+assert_eq "Test20: completed C14 deferral is reported" "deferred:tree-walk" "$result20"
+assert_eq "Test20: completed C14 deferral advances cursor" 1 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$CURSOR20")"
 
 if bash -c '
   source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
