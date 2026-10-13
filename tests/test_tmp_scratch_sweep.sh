@@ -157,6 +157,30 @@ else
 fi
 assert_receipt_field "state failure receipt outcome error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
 
+echo "Test 9: no-argument entrypoint survives Bash 3.2 nounset and defaults to dry-run"
+: > "$INVOCATION_LOG"
+NOARG_OUT="$TMP_ROOT/noarg.out"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" >"$NOARG_OUT" 2>&1
+NOARG_RC=$?
+set -e
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+if [[ "$NOARG_RC" -eq 0 ]]; then
+  echo "  PASS  no-argument entrypoint exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  no-argument entrypoint exited $NOARG_RC: $(cat "$NOARG_OUT")"
+  FAIL=$(( FAIL + 1 ))
+fi
+if ! grep -q "unbound variable" "$NOARG_OUT"; then
+  echo "  PASS  no-argument entrypoint has no nounset abort"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  no-argument entrypoint aborted under nounset"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

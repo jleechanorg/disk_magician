@@ -124,7 +124,9 @@ BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
 # governor flags, so preserve the complete argv before stripping those flags.
 SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 act_parse_deadline_args "$@" || exit 2
-set -- "${ACT_ARGS[@]}"
+# Bash 3.2 with nounset treats an empty array expansion as an unbound
+# variable; keep the no-argument caller contract portable.
+if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
@@ -200,7 +202,7 @@ fi
 
 # Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
 # Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" "${SCRATCH_LOCK_ORIGINAL_ARGS[@]}" || exit 1; }
+[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" ${SCRATCH_LOCK_ORIGINAL_ARGS[@]+"${SCRATCH_LOCK_ORIGINAL_ARGS[@]}"} || exit 1; }
 
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
@@ -396,14 +398,20 @@ path_size_kb() {
   echo "${total:-0}"
 }
 
+# remove_path <path> — requests canonical C14 removal and records the outcome
+# in the caller's scope. A command substitution would run this in a subshell and
+# discard both the completion flag and the CANDIDATE_* counters, so callers call
+# it directly and then read REMOVE_PATH_KB / REMOVE_PATH_COMPLETED.
+REMOVE_PATH_KB=0
+REMOVE_PATH_COMPLETED=false
 remove_path() {
   local path="$1"
   local kb result
+  REMOVE_PATH_KB=0
   REMOVE_PATH_COMPLETED=false
   kb=$(path_size_kb "$path")
   if (( kb < 0 )); then
     log "Preserving (size unknown, not removing): $path"
-    echo 0
     return 0
   fi
 
@@ -414,19 +422,20 @@ remove_path() {
     log "Requesting C14 removal: $path  (${kb} KB)"
     if ! _safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$path" ($_safety_reason)"
+      return 0
+    fi
+    result="$(scratch_budget_quarantine_remove "$path")"
+    cleanup_tmp_count_candidate_result "$result"
+    if [[ "$result" == removed:* ]]; then
+      deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
+      REMOVE_PATH_COMPLETED=true
     else
-      result="$(scratch_budget_quarantine_remove "$path")"
-      cleanup_tmp_count_candidate_result "$result"
-      if [[ "$result" == removed:* ]]; then
-        deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
-        REMOVE_PATH_COMPLETED=true
-      else
-        log "Preserving (C14 $result): $path"
-        kb=0
-      fi
+      log "Preserving (C14 $result): $path"
+      kb=0
     fi
   fi
-  echo "$kb"
+  REMOVE_PATH_KB="$kb"
+  return 0
 }
 
 # is_protected_root <basename> — true if the top-level /private/tmp dir
@@ -885,7 +894,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       claude-*|system-*|com.apple.*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
     esac
 
-    kb=$(remove_path "$subdir")
+    remove_path "$subdir"
+    kb="$REMOVE_PATH_KB"
     if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -933,7 +943,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
       continue
     fi
-    kb=$(remove_path "$d")
+    remove_path "$d"
+    kb="$REMOVE_PATH_KB"
     if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
@@ -1024,7 +1035,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
 
-    kb=$(remove_path "$subdir")
+    remove_path "$subdir"
+    kb="$REMOVE_PATH_KB"
     if [[ "$REMOVE_PATH_COMPLETED" == true ]]; then
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
