@@ -47,16 +47,16 @@ echo "── isolated low run does not escalate ──"
 reset; snap "$(ts 1)" 40; rc=$(alert)
 [[ "$rc" == 0 ]] && ! escalated && ok "test_no_escalation_for_isolated_low_run" || bad "isolated low run escalated (rc=$rc: $(head -c 200 "$WORK/err"))"
 
-echo "── six consecutive effective < 60 ──"
+echo "── six consecutive fresh < 70 ──"
 reset; esc_at=0
 for i in 1 2 3 4 5 6 7; do snap "$(ts $i)" 50; rc=$(alert); [[ "$rc" != 0 && $esc_at == 0 ]] && esc_at=$i; done
-[[ "$esc_at" == 6 ]] && ok "test_escalates_after_6_consecutive_effective_below_60 (first at run 6)" || bad "escalation started at run $esc_at, expected 6"
+[[ "$esc_at" == 6 ]] && ok "test_escalates_after_6_consecutive_fresh_below_70 (first at run 6)" || bad "escalation started at run $esc_at, expected 6"
 
 echo "── a healthy run breaks the streak ──"
 reset
 for i in 1 2 3 4 5; do snap "$(ts $i)" 50; alert >/dev/null; done
 snap "$(ts 6)" 80; alert >/dev/null; snap "$(ts 7)" 50; rc=$(alert)
-[[ "$rc" == 0 ]] && ok "streak resets after an effective >= 60 run" || bad "streak did not reset"
+[[ "$rc" == 0 ]] && ok "streak resets after an fresh >= 70 run" || bad "streak did not reset"
 
 echo "── stale carry > 48h ──"
 reset; snap "$(ts 1)" 80 '[{"key":"projects","kb":900,"age_hours":49.0}]'; rc=$(alert)
@@ -83,6 +83,22 @@ echo "── legacy field fallback ──"
 reset; esc=0
 for i in 1 2 3 4 5 6; do snap "$(ts $i)" 50 '[]' '[]' legacy; rc=$(alert); [[ "$rc" != 0 ]] && esc=1; done
 [[ "$esc" == 1 ]] && ok "test_falls_back_to_legacy_field_when_effective_missing" || bad "legacy-only snapshots never escalated"
+
+echo "── fresh coverage gate: carried coverage cannot hide six low captures ──"
+for pair in "65 85 1" "69.9 85 1" "70 85 0"; do
+  read -r fresh effective expected <<<"$pair"
+  reset; escalated_any=0
+  for i in 1 2 3 4 5 6; do
+    snap "$(ts "$i")" "$effective"
+    python3 - "$SNAP" "$fresh" <<'PYTHON'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["snapshot_coverage_pct"] = float(sys.argv[2])
+json.dump(d, open(p, "w"))
+PYTHON
+    rc=$(alert); [[ "$rc" != 0 ]] && escalated_any=1
+  done
+  [[ "$escalated_any" == "$expected" ]] && ok "fresh=$fresh effective=$effective alert=$expected" || bad "fresh coverage gate mismatch at $fresh"
+done
 
 echo "── silence file ──"
 reset; touch "$H/.disk_magician_alert.silenced"; snap "$(ts 1)" 80 '[{"key":"projects","kb":900,"age_hours":60.0}]'; rc=$(alert)

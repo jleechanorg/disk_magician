@@ -556,7 +556,7 @@ def select_floor_ref(
     state_dir: pathlib.Path,
     days: int,
     *,
-    filter_capture_window: bool = False,
+    filter_capture_window: bool = True,
     now: datetime.datetime = None,
 ) -> "tuple[str, dict]":
     """Return the lowest-used valid ledger committed within the requested window."""
@@ -597,6 +597,33 @@ def select_floor_ref(
         raise LedgerError(f"no valid ledger snapshots in the last {days} days")
     _, ref, ledger = min(candidates, key=lambda item: (item[0], item[1]))
     return ref, ledger
+
+
+def describe_capture_window(state_dir, days):
+    """Report observed captures without claiming an unobserved daily window."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    result = subprocess.run(["git", "-C", str(state_dir), "log", f"--since={days}.days.ago", "--format=%H", "--", LEDGER_REL_PATH], capture_output=True, text=True)
+    if result.returncode:
+        raise LedgerError("cannot inspect capture history")
+    captures = set()
+    for ref in result.stdout.splitlines():
+        try:
+            ledger = load_ledger_from_git(state_dir, ref)
+            validate_ledger(ledger, label=ref)
+            validate_full_attribution_ledger(ledger, label=ref)
+            ts = datetime.datetime.strptime(ledger["captured_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            if 0 <= (now - ts).total_seconds() <= days * 86400:
+                captures.add(ts)
+        except (LedgerError, KeyError, TypeError, ValueError):
+            continue
+    ordered = sorted(captures)
+    dates = sorted({ts.date().isoformat() for ts in ordered})
+    span = (ordered[-1] - ordered[0]).total_seconds() / 86400 if ordered else 0
+    required_dates = {(now.date() - datetime.timedelta(days=offset)).isoformat() for offset in range(days)}
+    status = "complete" if required_dates.issubset(dates) else "partial"
+    return (f"history window: requested_days={days} observed_span_days={span:.2f} "
+            f"samples={len(ordered)} observed_dates={len(dates)} coverage_status={status} "
+            f"capture_dates={','.join(dates) or 'none'}; floor is observed samples only")
 
 
 def resolve_state_dir(explicit) -> pathlib.Path:
@@ -668,6 +695,7 @@ def main(argv) -> int:
     deltas, residual_delta = compute_deltas(base, target)
     note = delta_overcount_note(base, target, deltas)
     if args.days is not None:
+        print(describe_capture_window(state_dir, args.days))
         captured_at = base.get("captured_at", "unknown")
         print(
             f"floor ({args.days}d): {base['disk_used_kb'] / GIB_KB:.2f} GiB used "

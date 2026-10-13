@@ -231,13 +231,13 @@ PY
 )"
 
 if [[ "$c_valid" == "yes" ]]; then
-  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\n" \
+  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\tcanonical_publication=fresh\n" \
     "${c_age_hours:-0}" "$last_iso" "$pub_status" "$pub_reason"
   exit 0
 fi
 
 if [[ "$p_valid" == "yes" ]]; then
-  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=PARTIAL\tpartial_age_hours=%s\tpartial_captured_at=%s\tpartial_mode=%s\tpartial_roots=%s/%s\n" \
+  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=PARTIAL\tpartial_age_hours=%s\tpartial_captured_at=%s\tpartial_mode=%s\tpartial_roots=%s/%s\tcanonical_publication=stale\n" \
     "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" \
     "${p_age_hours:-0}" "${p_captured_at:-unknown}" "${p_mode:-unknown}" \
     "${p_measured:-?}" "${p_reachable:-?}"

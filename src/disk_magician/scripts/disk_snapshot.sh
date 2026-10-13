@@ -1574,7 +1574,8 @@ try:
     data["total_keys_count"] = len(dirs)
     # Same convention as the frontier ledger's partial artifact: a snapshot whose
     # fresh+carried coverage is below 70% is non-canonical and says so.
-    partial = os.environ.get("SNAP_WARNING") == "low_coverage"
+    effective = data["coverage_effective_pct"]
+    partial = not (0.0 <= effective <= 100.0 and effective >= 70.0)
     data["publication_kind"] = "partial" if partial else "complete"
     data["canonical"] = not partial
     print(json.dumps(data, indent=4))

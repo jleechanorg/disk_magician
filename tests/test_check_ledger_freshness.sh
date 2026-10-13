@@ -127,6 +127,16 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$
 [[ "$rc" -eq 0 && "$out" == OK* && "$out" == *label=PARTIAL* ]] \
   && ok "accepts fresh valid partial when canonical stale (label=PARTIAL)" \
   || bad "expected OK rc=0 label=PARTIAL got rc=$rc out=$out"
+[[ "$out" == *canonical_publication=stale* ]] && ok "partial availability does not hide canonical publication failure" || bad "missing canonical publication health"
+BIN3="$WORK3/bin"; mkdir -p "$BIN3"
+cat >"$BIN3/df" <<'SH'
+#!/usr/bin/env bash
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted'
+echo '/dev/x 1000000000 100000000 900000000 10% /'
+SH
+chmod +x "$BIN3/df"
+alert_out="$(HOME="$WORK3/home" PATH="$BIN3:$PATH" DISK_MAGICIAN_STATE_DIR="$WORK3/alert-state" DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_SNAPSHOT_FILE="$WORK3/absent.json" bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)" && alert_rc=0 || alert_rc=$?
+[[ "$alert_rc" -eq 1 && "$alert_out" == *Published*ledger*stale* ]] && ok "alert escalates stale canonical despite fresh partial" || bad "fresh partial masked canonical publication alert"
 rm -rf "$WORK3"
 
 # --- Case 4: canonical stale, partial.json structurally invalid -> STALE ---

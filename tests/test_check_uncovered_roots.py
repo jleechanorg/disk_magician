@@ -82,6 +82,17 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         for e in result["uncovered"]:
             self.assertGreaterEqual(e["size_kb"], result["threshold_gib"] * GIB_KB)
 
+    def test_decision_registry_routes_data_without_claiming_sweeper_coverage(self):
+        path = os.path.join(self.home, "Documents", "Codex")
+        write_json(self.snapshot, {"granularity_buckets": [{"path": path, "measured_kb": 6 * GIB_KB}]})
+        with open(self.registry, "w") as f:
+            f.write("$HOME/Documents/Codex\tdecision:check_uncovered_roots.py\tNo established cleanup owner; report-only\n")
+        result = self._run_json()
+        self.assertEqual([item["path"] for item in result["needs_decision"]], [path])
+        self.assertEqual(result["uncovered"], [])
+        roots = cur_module.load_registry(self.registry, home=self.home)
+        self.assertFalse(cur_module.is_covered(path, roots))
+
     def test_below_threshold_not_flagged(self):
         small_dir = os.path.join(self.home, "small")
         write_json(self.snapshot, {

@@ -130,3 +130,26 @@ $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dorm
 
 # agent_scratch.sh (scripts/lib/agent_scratch.sh) — Task 7 managed scratch for disk_diagnostic
 /private/tmp/agent-scratch/disk_diagnostic	scripts/lib/agent_scratch.sh	agent_scratch_create / agent_scratch_trap_cleanup
+
+# decision:<script> entries are report-only routes, never sweeper coverage.
+# They do not grant deletion authority or imply an installed cleanup schedule.
+# The original measured 17-root list is not present in the supplied grouped evidence.
+$HOME/Library/Application Support/Cursor/snapshots	decision:check_uncovered_roots.py	No current snapshot cleanup owner; review retention before reclaim
+$HOME/.cache	decision:check_uncovered_roots.py	Mixed parent: only registered narrow cache children are swept; memory-backup-repo requires preservation review
+$HOME/.gemini/antigravity-cli	decision:check_uncovered_roots.py	Mixed state parent; preserve conversations and credentials; only brain has an established sweeper
+$HOME/Documents/Codex	decision:check_uncovered_roots.py	No established owner; preserve task WIP and evidence pending an explicit decision
+$HOME/Library/CloudStorage/Dropbox/conversation-backups	decision:check_uncovered_roots.py	Conversation archive has no established cleanup owner; preserve pending retention decision
+$HOME/Library/Logs	decision:check_uncovered_roots.py	Mixed log parent; no disk-magician log rotation owner here; .local/state rotation does not cover it
+/Library/Developer	decision:check_uncovered_roots.py	System scope is not covered by user Xcode cache cleanup; explicit decision required
+$HOME/Library/Developer/CoreSimulator/Devices	decision:cleanup_xcode.sh	Conditional owner only with --all-simulators and SIMULATORS_APPROVED=1; not routine coverage
+$HOME/Library/Caches/Google	decision:check_uncovered_roots.py	Cache-only proposal; no current owner, preserve other Google user data
+$HOME/Library/Application Support/Google/Chrome/*/Cache	decision:check_uncovered_roots.py	Cache-only proposal; preserve profiles, cookies and account state
+$HOME/Library/Application Support/Google/Chrome/*/Code Cache	decision:check_uncovered_roots.py	Cache-only proposal; no broad profile deletion
+$HOME/Library/Application Support/Google/Chrome/*/GPUCache	decision:check_uncovered_roots.py	Cache-only proposal; no broad profile deletion
+$HOME/Library/Caches/Aside	decision:check_uncovered_roots.py	Cache-only proposal; current session sweeper does not cover this root
+$HOME/Library/Application Support/Aside/*Cache*	decision:check_uncovered_roots.py	Cache-only proposal; preserve sessions and account state
+$HOME/Library/Caches/com.openai.codex	decision:check_uncovered_roots.py	Cache-only proposal; no Codex state/session deletion authority
+$HOME/Library/Caches/cmux	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
+$HOME/Library/Caches/CodexBar	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
+$HOME/Library/Caches/Codex	decision:check_uncovered_roots.py	Cache-only proposal; no Codex state/session deletion authority
+$HOME/Library/Caches/com.cmuxterm.app	decision:check_uncovered_roots.py	Cache-only proposal; no current owner

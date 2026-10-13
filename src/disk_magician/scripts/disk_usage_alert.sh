@@ -41,10 +41,10 @@ unset_silenced() { rm -f "$SILENCE_FILE"; echo "Alerts unsilenced."; }
 # Reads the latest snapshot and scores it once (keyed by snapshot timestamp)
 # into a ring of the last 12 runs in coverage_streak.json. Prints
 # "streak<TAB>coverage_pct<TAB>reasons"; reasons is "none" or a comma list of
-# low_effective | stale_carry:<key>@<hours>h | carry_expired:<key>. Escalation is
-# sustained-degradation only: 6 consecutive effective < 60, a key carried > 48 h,
-# or a previously carried key that is now unmeasured. Snapshots without
-# coverage_effective_pct fall back to snapshot_coverage_pct. A missing/unreadable
+# low_fresh | stale_carry:<key>@<hours>h | carry_expired:<key>. Escalation is
+# sustained-degradation only: 6 consecutive fresh < 70, a key carried > 48 h,
+# or a previously carried key that is now unmeasured. Fresh coverage uses
+# snapshot_coverage_pct (or snapshot_metadata.coverage_pct). A missing/unreadable
 # snapshot is tolerated ("unknown"), this script must keep doing its free-space check.
 update_coverage_streak() {
   [[ -f "$SNAPSHOT_FILE" ]] || { printf 'unknown\tunknown\tnone\n'; return; }
@@ -55,7 +55,7 @@ import json, sys
 snapshot_file, streak_file, escalate_at = sys.argv[1], sys.argv[2], int(sys.argv[3])
 RING = 12
 STALE_CARRY_HOURS = 48
-LOW_EFFECTIVE = 60
+LOW_FRESH = 70
 
 try:
     snap = json.load(open(snapshot_file))
@@ -63,9 +63,7 @@ except Exception:
     print("unknown\tunknown\tnone")
     sys.exit(0)
 
-pct = snap.get("coverage_effective_pct")
-if pct is None:
-    pct = snap.get("snapshot_coverage_pct")
+pct = snap.get("snapshot_coverage_pct")
 if pct is None:
     pct = (snap.get("snapshot_metadata") or {}).get("coverage_pct")
 snap_ts = snap.get("timestamp", "")
@@ -74,32 +72,32 @@ unmeasured = list(snap.get("unmeasured_keys") or [])
 
 try:
     state = json.load(open(streak_file))
-    if not isinstance(state, dict) or "ring" not in state:
+    if not isinstance(state, dict) or "ring" not in state or state.get("metric") != "fresh_70":
         raise ValueError("old schema")
 except FileNotFoundError:
-    state = {"ring": []}
+    state = {"ring": [], "metric": "fresh_70"}
 except Exception:
     print("coverage_streak.json: old or unreadable schema, resetting", file=sys.stderr)
-    state = {"ring": []}
+    state = {"ring": [], "metric": "fresh_70"}
 ring = state["ring"]
 
 if snap_ts and not any(r.get("snapshot_ts") == snap_ts for r in ring):
-    ring.append({"snapshot_ts": snap_ts, "effective_pct": pct, "carried": carried, "unmeasured": unmeasured})
+    ring.append({"snapshot_ts": snap_ts, "fresh_pct": pct, "carried": carried, "unmeasured": unmeasured})
     del ring[:-RING]
     with open(streak_file, "w") as f:
         json.dump(state, f, indent=2)
 
 streak = 0
 for r in reversed(ring):
-    v = r.get("effective_pct")
-    if v is not None and float(v) < LOW_EFFECTIVE:
+    v = r.get("fresh_pct")
+    if v is not None and float(v) < LOW_FRESH:
         streak += 1
     else:
         break
 
 reasons = []
 if streak >= escalate_at:
-    reasons.append("low_effective")
+    reasons.append("low_fresh")
 for key, age in carried.items():
     if float(age) > STALE_CARRY_HOURS:
         reasons.append(f"stale_carry:{key}@{age}h")
@@ -203,14 +201,14 @@ if [[ "${coverage_reasons:-none}" != "none" ]]; then
 else
   # Isolated low-coverage runs are normal under host load: INFO, never an alert.
   [[ "$coverage_streak" != "unknown" && "$coverage_streak" -gt 0 ]] && \
-    echo "INFO: low coverage run ${coverage_streak}/${STREAK_ESCALATE_AT} (effective_pct=${coverage_pct}); not escalating." >&2
+    echo "INFO: low coverage run ${coverage_streak}/${STREAK_ESCALATE_AT} (fresh_pct=${coverage_pct}); not escalating." >&2
 fi
 
 ledger_alert=false
 ledger_detail=""
 if [[ -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
   ledger_detail="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1 || true)"
-  [[ "$ledger_detail" == STALE* ]] && ledger_alert=true
+  [[ "$ledger_detail" == STALE* || "$ledger_detail" == *canonical_publication=stale* ]] && ledger_alert=true
 fi
 
 space_alert=false
@@ -234,7 +232,7 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
       fi
     fi
     if [[ "$streak_alert" == true ]]; then
-      echo "🚨 WARNING: Snapshot coverage degraded (effective_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}." >&2
+      echo "🚨 WARNING: Snapshot coverage degraded (fresh_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}." >&2
       echo "Run 'scripts/residual_drilldown.sh' or check ~/.disk_magician_state/config.d/auto-candidates.json for untracked-growth proposals." >&2
     fi
     if [[ "$ledger_alert" == true ]]; then
