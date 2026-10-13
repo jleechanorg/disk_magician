@@ -37,12 +37,23 @@ PY
 source "$ROOT/scripts/lib/quarantine.sh" || { echo "FAIL: source quarantine.sh"; exit 1; }
 STUB_VERDICT=""
 artifact_removal_verdict() {
+  local candidate="$1" inventory_out="${3:-}"
   [[ -n "$STUB_VERDICT" ]] && { echo "$STUB_VERDICT"; return 0; }
   [[ -n "${VERDICT_ARG_FILE:-}" ]] && printf '%s\n' "$1" > "$VERDICT_ARG_FILE"
+  [[ -n "${VERDICT_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$VERDICT_ARGS_FILE"
   [[ -z "${EXPECTED_VERDICT_PATH:-}" || "$1" == "$EXPECTED_VERDICT_PATH" ]] || { echo kept:wrong-verdict-path; return 0; }
   if [[ "$2" == --inventory-out ]]; then
+    shift 3
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --kind) [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }; case "$2" in ephemeral|rebuildable|os_clone) ;; *) echo kept:check-failed; return 0 ;; esac; shift 2 ;;
+        --frozen-identity|--frozen-parent-identity|--frozen-root-identity) [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }; shift 2 ;;
+        --deadline-at) [[ $# -ge 2 && "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo kept:check-failed; return 0; }; shift 2 ;;
+        *) echo kept:check-failed; return 0 ;;
+      esac
+    done
     [[ -z "${DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY:-}" ]] || bash -c "$DISK_MAGICIAN_TEST_VERDICT_BEFORE_INVENTORY"
-    python3 "$TMP/inv.py" "$1" > "$3" || return 1
+    python3 "$TMP/inv.py" "$candidate" > "$inventory_out" || return 1
     [[ -z "${DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY:-}" ]] || bash -c "$DISK_MAGICIAN_TEST_VERDICT_AFTER_INVENTORY"
     echo remove
   fi
@@ -56,6 +67,13 @@ fixture() {  # fresh parent/art with a published report.md (version A), a subdir
 }
 OUT=""
 run() { OUT="$(env TMPDIR="$TMP" "$@" bash -c "source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT='$STUB_VERDICT' TMP='$TMP' quarantine_remove '$A'")"; }
+run_contract() {
+  local qpath qtmp qverdict arg qarg command
+  printf -v qpath '%q' "$A"; printf -v qtmp '%q' "$TMP"; printf -v qverdict '%q' "$STUB_VERDICT"
+  command="source '$ROOT/scripts/lib/quarantine.sh'; $(declare -f artifact_removal_verdict); STUB_VERDICT=$qverdict TMP=$qtmp; quarantine_remove $qpath"
+  for arg in "$@"; do printf -v qarg '%q' "$arg"; command+=" $qarg"; done
+  OUT="$(env TMPDIR="$TMP" VERDICT_ARGS_FILE="$TMP/verdict-args" bash -c "$command")"
+}
 intact() { [[ "$(cat "$A/report.md")" == "$1" && -f "$A/sub/x.txt" && -L "$A/link" ]]; }
 qcount() { local n=0 f; for f in "$Q"/*; do [[ -e "$f" ]] && n=$((n+1)); done; echo "$n"; }
 qid() { local value="${OUT#*:}"; echo "${value%%:*}"; }
@@ -80,6 +98,16 @@ check 'proven root: original and quarantine candidate are gone' [ ! -e "$A" ] &&
 check 'proven root: sidecar is dropped after candidate' [ ! -e "$Q/$(qid).json" ]
 check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
 
+# Removal-site options are explicit and preserved to the C14 dispatcher.
+fixture; run_contract --kind os_clone --frozen-identity 1:2:501 --frozen-parent-identity 3:4:501 --frozen-root-identity 5:6:501 --deadline-at 123.5
+OPTION_QID="$(sidecar_id)"
+check 'caller options: path reaches artifact_removal_verdict' grep -Fx "$A" "$TMP/verdict-args"
+check 'caller options: kind and deadline values are preserved' bash -c 'grep -Fx -- --kind "$1" >/dev/null && grep -Fx os_clone "$1" >/dev/null && grep -Fx -- --deadline-at "$1" >/dev/null && grep -Fx 123.5 "$1" >/dev/null' _ "$TMP/verdict-args"
+check 'caller options: frozen identity proof is preserved' bash -c 'grep -Fx -- --frozen-identity "$1" >/dev/null && grep -Fx 1:2:501 "$1" >/dev/null && grep -Fx -- --frozen-parent-identity "$1" >/dev/null && grep -Fx 3:4:501 "$1" >/dev/null && grep -Fx -- --frozen-root-identity "$1" >/dev/null && grep -Fx 5:6:501 "$1" >/dev/null' _ "$TMP/verdict-args"
+check 'caller options: expired deadline keeps deleting sidecar and index' [ "$OUT" = kept:quarantine_partial_kept ] && [ -f "$Q/$OPTION_QID.json" ] && [ -f "$DISK_MAGICIAN_STATE_DIR/quarantine-index/$OPTION_QID.json" ]
+fixture; run_contract --unknown-option value
+check 'caller options: unknown option fails closed' [ "$OUT" = kept:check-failed ] && [ -e "$A" ]
+
 # A write after the deleting state is durable invalidates the hash and remains quarantined.
 fixture; run DISK_MAGICIAN_TEST_BEFORE_UNLINK='printf BBBB > "$DM_Q_PATH/report.md"'
 QID="$(sidecar_id)"
@@ -101,6 +129,16 @@ check 'crash before sidecar drop: deleting sidecar remains, root is gone' bash -
 BINDING="$TMP/resume-binding.json"; python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
 RESUME="$(quarantine_phase2 "$BINDING" "$CRASH_ID")"
 check 'crash before sidecar drop: retry drops the final sidecar' [ "$RESUME" = removed ] && [ ! -e "$CRASH_SIDE" ]
+
+# A missing frozen root does not prove deletion: it may have moved elsewhere.
+prepare_quarantine; MOVED="$TMP/moved-root-$QID"; mv "$Q/$QID" "$MOVED"
+PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'missing quarantine root: preserve recovery records and moved payload' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2" && -f "$3/quarantine-index/$4.json" && -f "$5/report.md" ]]' _ "$PHASE2" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR" "$QID" "$MOVED"
+
+# Moving the root after phase 2 observes it is also ambiguous, so no completion marker is written.
+prepare_quarantine; MOVED="$TMP/moved-during-delete-$QID"
+PHASE2="$(env DISK_MAGICIAN_TEST_BEFORE_UNLINK="mv '$Q/$QID' '$MOVED'" python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID")"
+check 'root moved during delete: preserve recovery records and moved payload' bash -c '[[ "$1" == kept:quarantine_partial_kept && -f "$2" && -f "$3/quarantine-index/$4.json" && -f "$5/report.md" ]]' _ "$PHASE2" "$Q/$QID.json" "$DISK_MAGICIAN_STATE_DIR" "$QID" "$MOVED"
 
 # An existing .dm-quarantine must be a real 0700 dir owned by us; a symlink or 0755 dir keeps the artifact.
 fixture; mkdir -p "$TMP/outside$N"; chmod 755 "$TMP/outside$N"; ln -s "$TMP/outside$N" "$Q"; run X=1
@@ -270,6 +308,11 @@ prepare_quarantine; printf '{malformed' > "$Q/$QID.json"; RECON="$(quarantine_re
 check 'malformed sidecar: alert and keep indexed payload' bash -c '[[ "$1" == *"alert:$2:"* && -f "$3/$2/report.md" && -f "$4/quarantine-index/$2.json" ]]' _ "$RECON" "$QID" "$Q" "$DISK_MAGICIAN_STATE_DIR"
 prepare_quarantine; RESTORE="$(bash "$ROOT/disk_magician.sh" quarantine restore "$QID")"
 check 'restore: exact kept artifact returns when original path is free' bash -c '[[ "$1" == "restored:$2" && -f "$3/report.md" && ! -e "$4/$2" && ! -e "$5/quarantine-index/$2.json" ]]' _ "$RESTORE" "$QID" "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+# A same-length replacement inserted after the pre-rename inventory must not be reported as restored.
+prepare_quarantine; MOVED="$TMP/restore-original-$QID"; REPLACEMENT="$TMP/restore-replacement-$QID"
+mkdir -p "$REPLACEMENT"; printf EVIL > "$REPLACEMENT/report.md"
+RESTORE="$(env DISK_MAGICIAN_TEST_BEFORE_RESTORE_RENAME="mv '$Q/$QID' '$MOVED'; mv '$REPLACEMENT' '$Q/$QID'" python3 "$ROOT/scripts/quarantine_rename.py" restore "$QID")"
+check 'restore replacement race: conflict keeps recovery records and does not claim replacement' bash -c '[[ "$1" == kept:restore-identity-mismatch && -f "$2/report.md" && "$(cat "$2/report.md")" == EVIL && -f "$4/$3.json" && "$(python3 -c '\''import json,sys; print(json.load(open(sys.argv[1]))["phase"])'\'' "$4/$3.json")" == restore_conflict && -f "$5/quarantine-index/$3.json" && -f "$6/report.md" ]]' _ "$RESTORE" "$A" "$QID" "$Q" "$DISK_MAGICIAN_STATE_DIR" "$MOVED"
 check 'restore unknown id: kept' [ "$(bash "$ROOT/disk_magician.sh" quarantine restore ffffffffffffffff)" = kept:unknown-quarantine-id ]
 
 # An expired absolute monotonic deadline leaves a cursor which the next call resumes.

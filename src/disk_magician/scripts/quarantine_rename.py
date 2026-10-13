@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, hashlib, json, os, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, hashlib, json, math, os, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
@@ -321,10 +321,11 @@ def fsync_sidecar(qfd, side, record):
     finally: os.close(fd)
     os.fsync(qfd)
 
-def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
+def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
+    if deadline is not None and time.monotonic() >= deadline: return False
     try: st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError: return True  # idempotent resume after an earlier unlink
+    except FileNotFoundError: return rel != "."  # the root's absence is ambiguous until root_removed is durable
     kind = entry_kind(st)
     if (kind != expected.get("type") or st.st_dev != expected.get("dev") or
             st.st_ino != expected.get("ino")):
@@ -338,7 +339,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
                 return False
             ok = True
             for child_name, child_rel in children.get(rel, []):
-                if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children):
+                if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children, deadline):
                     ok = False
             if not ok: return False
         finally: os.close(child_fd)
@@ -346,6 +347,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if (entry_kind(current), current.st_dev, current.st_ino) != ("dir", expected.get("dev"), expected.get("ino")):
                 return False
+            if deadline is not None and time.monotonic() >= deadline: return False
             os.rmdir(name, dir_fd=parent_fd)
             os.fsync(parent_fd)
             return True
@@ -377,13 +379,14 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children):
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (entry_kind(current), current.st_dev, current.st_ino) != (kind, expected.get("dev"), expected.get("ino")):
             return False
+        if deadline is not None and time.monotonic() >= deadline: return False
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
         kill_at("mid_delete")
         return True
     except OSError: return False
 
-def phase2(binding_file, qid):
+def phase2(binding_file, qid, deadline=None):
     """Finish deleting one quarantined tree; every unlink is fd-relative."""
     pfd = qfd = -1
     side = qid + ".json"
@@ -426,16 +429,30 @@ def phase2(binding_file, qid):
         except FileNotFoundError: candidate = None
         if candidate is not None and (candidate.st_dev, candidate.st_ino) != (record.get("dev"), record.get("ino")):
             return "kept:quarantine_partial_kept"
+        if candidate is None:
+            # A missing name does not prove deletion: it may have been moved.
+            # Only the durable marker written after our inventory walk proves
+            # that this operation removed the frozen root.
+            if record.get("phase") != "deleting" or record.get("root_removed") is not True:
+                return "kept:quarantine_partial_kept"
+            os.fsync(qfd)
+            if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
+            if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
+            os.unlink(side, dir_fd=qfd)
+            os.fsync(qfd)
+            if not index_drop(qid): return "kept:quarantine_partial_kept"
+            return "removed"
         if record.get("phase") != "deleting":
             record["phase"] = "deleting"
             fsync_sidecar(qfd, side, record)
-        if candidate is not None:
-            hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, ".dm-quarantine", qid), "")
-            if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
-            if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children):
-                return "kept:quarantine_partial_kept"
+        hook("DISK_MAGICIAN_TEST_BEFORE_UNLINK", os.path.join(parent, ".dm-quarantine", qid), "")
+        if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
+        if not unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline):
+            return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
+        record["root_removed"] = True
+        fsync_sidecar(qfd, side, record)
         if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "before_sidecar_drop": os.kill(os.getpid(), 9)
         os.unlink(side, dir_fd=qfd)
         os.fsync(qfd)
@@ -481,7 +498,7 @@ def indexed_item(qid):
 def finish_sidecar(qfd, qid):
     os.unlink(qid + ".json", dir_fd=qfd); os.fsync(qfd)
     if not index_drop(qid): raise OSError("quarantine index cleanup failed")
-def reconcile_one(qid):
+def reconcile_one(qid, deadline=None):
     pfd = qfd = -1
     try:
         index, pfd, qfd, record = indexed_item(qid)
@@ -498,7 +515,7 @@ def reconcile_one(qid):
             binding = {"parent_path": index["parent_path"], "parent_dev": index["parent_dev"], "parent_ino": index["parent_ino"]}
             with tempfile.NamedTemporaryFile("w", dir=index_dir(), prefix=".reconcile.", delete=False) as f:
                 json.dump(binding, f); binding_path = f.name
-            try: result = phase2(binding_path, qid)
+            try: result = phase2(binding_path, qid, deadline)
             finally:
                 try: os.unlink(binding_path)
                 except OSError: pass
@@ -556,14 +573,14 @@ def quarantine_reconcile(args):
     for qid in ids:
         if deadline is not None and time.monotonic() >= deadline:
             cursor_write(cursor, completed); print(f"deferred:{qid}"); return 0
-        result = reconcile_one(qid); print(result)
+        result = reconcile_one(qid, deadline); print(result)
         if result.startswith("alert:"): print(f"ALERT: {result}")
         completed = qid; cursor_write(cursor, completed)
     try: os.unlink(cursor)
     except FileNotFoundError: pass
     return 0
 def quarantine_restore(qid):
-    pfd = qfd = -1
+    pfd = qfd = restored_fd = -1
     try:
         if len(qid) != 16 or any(c not in "0123456789abcdef" for c in qid): return "kept:unknown-quarantine-id"
         index, pfd, qfd, record = indexed_item(qid)
@@ -574,12 +591,30 @@ def quarantine_restore(qid):
         current = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (root.get("dev"), root.get("ino")): return "kept:identity-mismatch"
         if canon_inventory(visit(qfd, qid, ".", [])) != canon_inventory(record["inventory"]): return "kept:quarantine_partial_kept"
+        hook("DISK_MAGICIAN_TEST_BEFORE_RESTORE_RENAME", os.path.join(index["parent_path"], ".dm-quarantine", qid), os.path.join(index["parent_path"], base))
         renamex(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
+        restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        root_flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if root.get("type") == "dir" else 0)
+        restored_fd = os.open(base, root_flags, dir_fd=pfd)
+        opened = os.fstat(restored_fd)
+        if ((opened.st_dev, opened.st_ino) != (root.get("dev"), root.get("ino")) or
+                (restored.st_dev, restored.st_ino) != (opened.st_dev, opened.st_ino) or
+                not same_entry(pfd, base, opened)):
+            record["phase"] = "restore_conflict"
+            record["restore_conflict"] = {
+                "expected": {"dev": root.get("dev"), "ino": root.get("ino")},
+                "observed": {"dev": restored.st_dev, "ino": restored.st_ino},
+                "original_path": record["original"],
+            }
+            try: update_sidecar(qfd, qid + ".json", record)
+            except OSError: pass
+            return "kept:restore-identity-mismatch"
         finish_sidecar(qfd, qid)
         return f"restored:{qid}"
     except FileNotFoundError: return "kept:unknown-quarantine-id"
     except Exception: return "kept:quarantine_restore_failed"
     finally:
+        if restored_fd >= 0: os.close(restored_fd)
         if qfd >= 0: os.close(qfd)
         if pfd >= 0: os.close(pfd)
 def canon_inventory(entries):
@@ -589,7 +624,14 @@ if __name__ == "__main__":
     if args[:1] == ["bind"] and len(args) == 3: print(bind_parent(args[1], args[2]))
     elif args[:1] == ["candidate"] and len(args) == 2: print(bound_candidate(args[1]))
     elif args[:1] == ["phase1"] and len(args) == 4: print(phase1(*args[1:]))
-    elif args[:1] == ["phase2"] and len(args) == 3: print(phase2(*args[1:]))
+    elif args[:1] == ["phase2"] and len(args) in (3, 5):
+        if len(args) == 5 and args[3] == "--deadline-at":
+            try:
+                value = float(args[4])
+                print(phase2(args[1], args[2], value if math.isfinite(value) and value >= 0 else -1))
+            except ValueError: print("kept:quarantine_partial_kept")
+        elif len(args) == 3: print(phase2(*args[1:]))
+        else: print("kept:quarantine_partial_kept")
     elif args[:1] == ["restore"] and len(args) == 2: print(quarantine_restore(args[1]))
     elif args[:1] == ["reconcile"]: sys.exit(quarantine_reconcile(args[1:]))
     else: print("kept:check-failed")
