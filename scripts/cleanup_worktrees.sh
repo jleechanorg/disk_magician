@@ -112,10 +112,17 @@ fi
 if [[ -n "$ACT_DEADLINE_AT" ]] && ! act_unit_fits "${DISK_MAGICIAN_UNIT_BUDGET_S:-60}"; then
     echo "deferred:deadline-before-unit"
     if [[ -n "$GOVERN_RUN_ID" ]]; then
+        GOVERN_FREE_AFTER="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
+        GOVERN_DELTA=""
+        if [[ "$GOVERN_FREE_BEFORE" =~ ^[0-9]+$ && "$GOVERN_FREE_AFTER" =~ ^[0-9]+$ ]]; then
+            GOVERN_DELTA=$((GOVERN_FREE_AFTER - GOVERN_FREE_BEFORE))
+        fi
+        GOVERN_FREED="null"
+        [[ "$GOVERN_DELTA" =~ ^-?[0-9]+$ ]] && GOVERN_FREED=$(( GOVERN_DELTA > 0 ? GOVERN_DELTA : 0 ))
         python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
           --outcome partial --reason deadline_before_unit \
           --candidates '{"removed_count":0,"deferred_count":1,"interrupted_count":1}' \
-          --postcondition "{\"df_delta_bytes\":0,\"freed_bytes\":0,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_BEFORE:-null}}" || exit 3
+          --postcondition "{\"df_delta_bytes\":${GOVERN_DELTA:-null},\"freed_bytes\":$GOVERN_FREED,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_AFTER:-null}}" || exit 3
     fi
     exit 0
 fi
