@@ -918,7 +918,12 @@ process_repo_local_worktrees() {
                 local cw_c14_inv cw_c14_verdict
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
                 if [[ -n "$cw_c14_inv" ]]; then
-                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --inventory-out "$cw_c14_inv")"
+                    # T3 context: this is the sanctioned cleanup_worktrees.sh
+                    # 3-day path. --t3-owner-null lets C14 free EXACTLY this
+                    # candidate's own owner-null lease (never an
+                    # ancestor/descendant), after all other C14 checks and the
+                    # recency/policy/remote proof above.
+                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
                     if [[ "$cw_c14_verdict" == remove ]] && wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]]; then
                         rm -f "$cw_c14_inv"
                         ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"

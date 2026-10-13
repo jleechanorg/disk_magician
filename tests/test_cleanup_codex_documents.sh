@@ -63,17 +63,41 @@ mkdir -p "$CODEX"
 # C14/quarantine is a dependency owned by other tasks. The caller suite exercises
 # its gates and routing against a minimal double (DISK_MAGICIAN_QUARANTINE_LIB);
 # the T11-T14 regressions below use the real scripts/lib/quarantine.sh instead.
+# The double mirrors the production WRH seam: artifact_removal_verdict writes a
+# same-target inventory receipt and wrh_remove_now only accepts that exact 4-arg
+# receipt (real_path, display_path, --quarantine, inventory). A call without the
+# preceding guard or with a different receipt fails closed, so the suite proves
+# the guard ran before each removal with the matching receipt path.
 QUARANTINE_STUB="$TMP_ROOT/quarantine_stub.sh"
 cat >"$QUARANTINE_STUB" <<'STUB'
+STUB_C14_LOG="${STUB_C14_LOG:-${DISK_MAGICIAN_TEST_SANDBOX:-/tmp}/c14-wrh.log}"
+artifact_removal_verdict() {
+  local target="${1:-}"; shift || true
+  local inv=""
+  while (( $# )); do
+    case "$1" in
+      --inventory-out) inv="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$target" && -n "$inv" ]] || { printf 'kept:stub-c14-args\n'; return 0; }
+  printf 'stub-c14\t%s\n' "$target" >"$inv"
+  [[ -n "$STUB_C14_LOG" ]] && printf 'c14\t%s\t%s\n' "$inv" "$target" >>"$STUB_C14_LOG"
+  printf 'remove\n'
+}
 quarantine_remove() {
   local p="${1:-}"; shift || true
   if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then printf 'removed:stub\n'; else printf 'kept:rm-failed\n'; fi
 }
 wrh_remove_now() {
-  local real="$1"
-  [[ "${3:-}" == --quarantine ]] || return 1
-  real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
-  local common main
+  local raw="$1" display="$2"
+  [[ "${3:-}" == --quarantine && $# == 4 && -f "${4:-}" ]] || { printf 'kept:wrh-contract-violation\n'; return 1; }
+  local receipt
+  receipt="$(cat "$4" 2>/dev/null)" || return 1
+  [[ "$receipt" == $'stub-c14\t'"$raw" || "$receipt" == $'stub-c14\t'"$display" ]] || { printf 'kept:wrh-receipt-mismatch\n'; return 1; }
+  [[ -n "$STUB_C14_LOG" ]] && printf 'wrh\t%s\t%s\n' "$4" "$raw" >>"$STUB_C14_LOG"
+  local real common main
+  real="$(cd "$raw" 2>/dev/null && pwd -P)" || return 1
   common="$(git -C "$real" rev-parse --git-common-dir 2>/dev/null)" || return 1
   case "$common" in /*) ;; *) common="$real/$common" ;; esac
   main="$(dirname "$common")"
@@ -102,6 +126,11 @@ clone_into() { git clone -q "$ORIGIN" "$CODEX/$1/$2/repo"; }
 run_sweeper() {
   local out="$1"; shift
   local rc=0
+  # Bind the receipt/state root to the CURRENT fixture HOME on every call. The
+  # suite overrides HOME per case, but DISK_MAGICIAN_STATE_DIR is expanded once
+  # at the top of the file, so without this a per-case run writes its receipt to
+  # the first fixture's state tree while receipt_get reads the per-case one.
+  DISK_MAGICIAN_STATE_DIR="${HOME}/.disk_magician_state" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
     bash "$SWEEPER" "$@" >"$out" 2>&1 || rc=$?
@@ -180,6 +209,7 @@ assert_exists "T1: old pushed clone still present" "$CODEX/$D_OLD/t-old-pushed"
 assert_exists "T1: scratch still present" "$CODEX/$D_OLD/t-scratch"
 
 echo "T2: --clean removes/keeps per policy"
+C14_WRH_LOG="$TMP_ROOT/c14-wrh.log"; : >"$C14_WRH_LOG"
 O2="$TMP_ROOT/o2"; RC=0; run_sweeper "$O2" --clean || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T2: exits 0" || { record_fail "T2: exits 0" "rc=$RC"; cat "$O2"; }
 assert_missing "old clean pushed clone removed" "$CODEX/$D_OLD/t-old-pushed"
@@ -210,6 +240,18 @@ assert_exists  "repo with external worktree kept" "$C/t-extwt"
 assert_exists  "locked linked worktree kept" "$C/t-locked"
 assert_missing "multi linked-worktree task removed" "$C/t-multiwt"
 if git -C "$MAIN" worktree list --porcelain | grep -q "t-multiwt"; then record_fail "multi worktrees all unregistered" "still listed"; else record_pass "multi worktrees all unregistered"; fi
+# Precise WRH-seam assertion: every actual removal was preceded by an
+# artifact_removal_verdict for the same target, and the exact receipt path it
+# wrote is the one handed to wrh_remove_now (3 linked worktrees removed here).
+C14_WRH_CONTENT="$(cat "$C14_WRH_LOG" 2>/dev/null || true)"
+C14_WRH_CALLS="$(grep -c $'^c14\t' <<<"$C14_WRH_CONTENT" || true)"
+C14_WRH_REMOVES="$(grep -c $'^wrh\t' <<<"$C14_WRH_CONTENT" || true)"
+if [[ "$C14_WRH_CALLS" == 3 && "$C14_WRH_REMOVES" == 3 ]] && \
+   awk -F'\t' '$1=="c14"{inv=$2; tgt=$3} $1=="wrh"{if($2!=inv || $3!=tgt) bad=1} END{exit bad?1:0}' <<<"$C14_WRH_CONTENT"; then
+  record_pass "T2: WRH guard ran before each removal with its receipt"
+else
+  record_fail "T2: WRH guard ran before each removal with its receipt" "c14=$C14_WRH_CALLS wrh=$C14_WRH_REMOVES log=$C14_WRH_CONTENT"
+fi
 assert_exists  "symlink task kept" "$C/t-symlink"
 assert_exists  "symlink target untouched" "$TMP_ROOT/symtarget/f"
 assert_exists  "file open by process kept" "$C/t-fileopen"
@@ -596,8 +638,28 @@ printf 'x' >"$WR_DATE/t-wr/payload.bin"
 age "$WR_DATE"
 WR_STUB="$CUR_DIR/wrh_retain_stub.sh"
 cat >"$WR_STUB" <<'STUB'
+artifact_removal_verdict() {
+  local target="${1:-}"; shift || true
+  local inv=""
+  while (( $# )); do
+    case "$1" in
+      --inventory-out) inv="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$target" && -n "$inv" ]] || { printf 'kept:stub-c14-args\n'; return 0; }
+  printf 'stub-c14\t%s\n' "$target" >"$inv"
+  printf 'remove\n'
+}
 quarantine_remove() { local p="${1:-}"; rm -rf -- "$p" 2>/dev/null && printf 'removed:stub\n' || printf 'kept:rm-failed\n'; }
-wrh_remove_now() { local _q='--quarantine'; printf 'quarantined:wrstub\n'; return 0; }
+wrh_remove_now() {
+  local raw="$1" display="$2"
+  [[ "${3:-}" == --quarantine && $# == 4 && -f "${4:-}" ]] || return 1
+  local receipt
+  receipt="$(cat "$4" 2>/dev/null)" || return 1
+  [[ "$receipt" == $'stub-c14\t'"$raw" || "$receipt" == $'stub-c14\t'"$display" ]] || return 1
+  printf 'quarantined:wrstub\n'; return 0
+}
 STUB
 WR_FILE="$CUR_DIR/wr-cursor.json"
 O21="$TMP_ROOT/o21"; RC=0

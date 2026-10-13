@@ -346,10 +346,11 @@ _av_os_clone_proof() {
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --t3-owner-null) t3_owner_null=1; shift ;;
             --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
@@ -375,7 +376,11 @@ _av_artifact_removal_verdict() (
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
-    while IFS= read -r st; do [[ "/$p/" != *"/$st/"* ]] || { echo kept:protected; return 0; }; done < <(scratch_roots_protected "$q")
+    # Anchored protection: only a configured protected basename directly under a
+    # real scratch root (and its descendants) is protected. A same-named
+    # component elsewhere (e.g. ~/.worktrees/worldarchitect.ai/foo or an
+    # archive copy) must fall through to the ordinary C14 checks.
+    scratch_roots_is_protected_path "$p" "$q" && { echo kept:protected; return 0; }
     if [[ -n "${DISK_MAGICIAN_TEST_AFTER_NOMINATE:-}" ]]; then
         [[ "${DISK_MAGICIAN_TEST_CONTEXT:-}" == 1 ]] || { echo kept:check-failed; return 0; }
         printf 'race fixture\n' >"$DISK_MAGICIAN_TEST_AFTER_NOMINATE" || { echo kept:check-failed; return 0; }
@@ -384,6 +389,9 @@ _av_artifact_removal_verdict() (
     [[ -n "$inv" ]] || { echo kept:check-failed; return 0; }
     st="$(python3 "$_AV_DIR/../c14_probe.py" inventory "$p" "$inv" ${deadline:+"$deadline"})"
     if [[ "$st" != ok ]]; then echo "${st:-kept:check-failed}"; return 0; fi
+    # The one lease file whose owner-null state T3 may free. Never an ancestor
+    # or descendant: only this exact path's own lease can match $q below.
+    candidate_lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
@@ -403,7 +411,20 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         else
             _av_owner_state="$(lease_owner_state "$q")"
         fi
-        case "$_av_owner_state" in dead|released|own-live) ;; alive*) echo kept:live-owner; return 0 ;; *) echo kept:owner-unknown; return 0 ;; esac
+        # Owner-null leases are never globally disposable. The T3 context
+        # (--t3-owner-null, set only by cleanup_worktrees.sh's sanctioned
+        # 3-day path) may free EXACTLY the candidate worktree's own null lease
+        # after every other check; an ancestor/descendant null lease, T1, and
+        # live/unknown/malformed owners all still keep.
+        case "$_av_owner_state" in
+            dead|released|own-live) ;;
+            none)
+                if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
+                    echo kept:owner-unknown; return 0
+                fi ;;
+            alive*) echo kept:live-owner; return 0 ;;
+            *) echo kept:owner-unknown; return 0 ;;
+        esac
     done < <(_av_lease_scope "$p" "$inv" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
     wrh_live_cwd_reason "$p"

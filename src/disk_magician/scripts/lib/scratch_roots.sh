@@ -86,3 +86,38 @@ for r in json.load(open(sys.argv[1])).get("protected_tmp_roots") or []: print(r)
   [[ ${#out[@]} -gt 0 ]] || out=(worldarchitect.ai worldai_claw wa-missions)
   printf '%s\n' "${out[@]}"
 }
+
+# scratch_roots_protected_paths [config.json] — the concrete protected roots,
+# one canonical path per line: each configured protected basename joined onto
+# each real scratch root. A basename is only protected as a TOP-LEVEL entry of
+# a configured scratch root, never as an arbitrary path component, so
+# ~/.worktrees/worldarchitect.ai/foo is not protected while
+# /private/tmp/worldarchitect.ai/foo is. Aliases (/tmp -> /private/tmp) and
+# symlinked scratch roots are canonicalized here so both spellings match.
+scratch_roots_protected_paths() {
+  local root root_canon base
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    root_canon="$(cd "$root" 2>/dev/null && pwd -P)" || root_canon="$root"
+    [[ -n "$root_canon" ]] || continue
+    while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
+      printf '%s/%s\n' "${root_canon%/}" "$base"
+    done < <(scratch_roots_protected "${1:-}")
+  done < <(scratch_roots_get_unique)
+}
+
+# scratch_roots_is_protected_path <path> [config.json] — rc 0 when <path> is a
+# configured protected root or a descendant of one, using the anchored table
+# above. Fail closed: an unresolvable path is compared in its raw form, never
+# silently dropped.
+scratch_roots_is_protected_path() {
+  local p="$1" cfg="${2:-}" canon prot
+  canon="$(cd "$p" 2>/dev/null && pwd -P)" || canon="$p"
+  [[ -n "$canon" ]] || canon="$p"
+  while IFS= read -r prot; do
+    [[ -n "$prot" ]] || continue
+    [[ "$canon" == "$prot" || "$canon" == "$prot"/* ]] && return 0
+  done < <(scratch_roots_protected_paths "$cfg")
+  return 1
+}
