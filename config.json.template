@@ -320,10 +320,10 @@
   "gc_worktree_repos": [],
   "downloads_evidence_patterns": [],
   "budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": {
-      "worktrees": {"budget_gb": 35, "measure": "du", "trigger": "overage", "act": "worktree_reap_remove"},
-      "tmp_containers": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "always"},
-      "tmpdir_scratch": {"budget_gb": 10, "measure": "df_delta_only", "trigger": "zone", "act": "always"},
-      "codex_documents": {"budget_gb": 3, "measure": "df_delta_only", "trigger": "zone", "act": "always"},
-      "claude_codex_state": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "claude_state_cleanup"},
-      "colima": {"budget_gb": 30, "measure": "observer", "trigger": "overage", "act": "always"}}}
+      "worktrees": {"budget_gb": 35, "measure": "du", "trigger": "overage", "act": "worktree_reap_remove", "unit_budget_s": 60},
+      "tmp_containers": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "tmp_containers", "unit_budget_s": 30},
+      "tmpdir_scratch": {"budget_gb": 10, "measure": "df_delta_only", "trigger": "zone", "act": "tmpdir_scratch", "unit_budget_s": 30},
+      "codex_documents": {"budget_gb": 3, "measure": "df_delta_only", "trigger": "zone", "act": "codex_documents", "unit_budget_s": 30},
+      "claude_codex_state": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "codex_db", "unit_budget_s": 30, "max_runtime_s": 180},
+      "colima": {"budget_gb": 30, "measure": "observer", "trigger": "overage", "act": "colima", "unit_budget_s": 30, "max_runtime_s": 360}}}
 }

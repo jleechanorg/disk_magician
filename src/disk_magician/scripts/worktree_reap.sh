@@ -2,6 +2,9 @@
 # Lease-driven worktree reaper. Nomination is the default; removal is opt-in.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/actuator_deadline.sh"
+act_parse_deadline_args "$@" || exit $?
+set -- "${ACT_ARGS[@]}"
 source "$SCRIPT_DIR/worktree_remove_hook.sh"
 source "$SCRIPT_DIR/lib/worktree_merged_pr.sh"
 STATE="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
@@ -10,15 +13,17 @@ MODE="${DISK_MAGICIAN_REAP_MODE:-nominate}"
 DEADLINE=1500
 QUIET="${REAP_QUIET_MINUTES:-30}"
 RELEASE_QUIET="${REAP_RELEASED_QUIET_MINUTES:-30}"
+ACT_UNIT_BUDGET_S="${DISK_MAGICIAN_UNIT_BUDGET_S:-60}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) MODE="${2:-}"; [[ $# -ge 2 ]] || exit 2; shift 2 ;;
         --deadline-seconds) DEADLINE="${2:-}"; [[ $# -ge 2 ]] || exit 2; shift 2 ;;
-        *) echo "Usage: worktree_reap.sh [--mode nominate|remove] [--deadline-seconds N]" >&2; exit 2 ;;
+        *) echo "Usage: worktree_reap.sh [--mode nominate|remove] [--deadline-seconds N] [--deadline-at T --cursor F]" >&2; exit 2 ;;
     esac
 done
 [[ "$MODE" == nominate || "$MODE" == remove ]] || exit 2
 [[ "$DEADLINE" =~ ^[0-9]+$ && "$QUIET" =~ ^[0-9]+$ && "$RELEASE_QUIET" =~ ^[0-9]+$ ]] || exit 2
+[[ -z "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]] || { echo "--deadline-at requires --cursor" >&2; exit 2; }
 log() { printf 'worktree_reap: %s\n' "$*"; }
 # The shared removal helper otherwise logs to HOME rather than the state override.
 wrh_log() { log "$*"; }
@@ -101,6 +106,10 @@ if [[ "$MODE" == remove ]] && ! { [[ -f "$STATE/worktree_reap.remove_approved" ]
 fi
 expired() {
     if (( STOP || $(date +%s)-START >= DEADLINE )); then OUTCOME=partial; return 0; fi
+    if [[ -n "$ACT_DEADLINE_AT" ]] && ! act_unit_fits 0; then
+        OUTCOME=partial
+        return 0
+    fi
     return 1
 }
 record() {
@@ -207,53 +216,87 @@ verdict_for() {
     fi
     printf '%s\n' "$verdict"
 }
-for file in "$(lease_dir)"/*.json; do
-    [[ -e "$file" ]] || continue
-    expired && break
+process_lease() {
+    local file="$1" real owner repo branch since quiet verdict
+    [[ -e "$file" ]] || return 0
+    expired && return 1
     real="$(_lease_get "$file" path)"
-    if [[ -z "$real" ]]; then log "kept:lease-unreadable $file"; echo kept:lease-unreadable >> "$EVENTS"; continue; fi
-    [[ -e "$real" ]] || continue
+    if [[ -z "$real" ]]; then log "kept:lease-unreadable $file"; echo kept:lease-unreadable >> "$EVENTS"; return 0; fi
+    [[ -e "$real" ]] || return 0
     # Even malicious or misplaced leases cannot nominate outside the root.
     real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real")"
-    case "$real" in "$ROOT_REAL"/*) ;; *) continue;; esac
+    case "$real" in "$ROOT_REAL"/*) ;; *) return 0;; esac
     owner="$(lease_owner_state "$file")"
     if [[ "$owner" != unreadable ]] && ! lease_matches_incarnation "$file"; then
-        repo="$(wtn_main_repo "$real")" || continue
-        registered "$real" "$repo" || continue
+        repo="$(wtn_main_repo "$real")" || return 0
+        registered "$real" "$repo" || return 0
         branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
         adopt "$real" "$repo" "$branch"
-        continue
+        return 0
     fi
     case "$owner" in
-        none|alive|unknown) continue ;;
-        unreadable) record "$file" "$real" kept:lease-unreadable; continue ;;
+        none|alive|unknown) return 0 ;;
+        unreadable) record "$file" "$real" kept:lease-unreadable; return 0 ;;
         # TTL only reports: an expired lease with a live owner is parked, never T1.
-        alive-expired) record "$file" "$real" kept:expired_owner_alive; continue ;;
-        dead) update "$file" dead || continue; quiet="$QUIET"; since=owner_dead_seen_at ;;
+        alive-expired) record "$file" "$real" kept:expired_owner_alive; return 0 ;;
+        dead) update "$file" dead || return 0; quiet="$QUIET"; since=owner_dead_seen_at ;;
         released) quiet="$RELEASE_QUIET"; since=released_at ;;
-        *) continue ;;
+        *) return 0 ;;
     esac
     if [[ -n "${DISK_MAGICIAN_REAP_CANDIDATE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_CANDIDATE_HOOK" "$real"; fi
-    (( STOP )) && break
+    (( STOP )) && return 1
     if ! quiet_since "$file" "$since" "$quiet" || worktree_is_recently_active_minutes "$real" "$quiet"; then
-        record "$file" "$real" kept:recent-activity; continue
+        record "$file" "$real" kept:recent-activity; return 0
     fi
-    repo="$(wtn_main_repo "$real")" || { record "$file" "$real" kept:not-registered; continue; }
-    if ! fetch_repo "$repo"; then record "$file" "$real" kept:remote-unverified; continue; fi
+    repo="$(wtn_main_repo "$real")" || { record "$file" "$real" kept:not-registered; return 0; }
+    if ! fetch_repo "$repo"; then record "$file" "$real" kept:remote-unverified; return 0; fi
     verdict="$(verdict_for "$real" "$repo" "$quiet")"
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
         if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK" "$real"; fi
-        (( STOP )) && break
+        (( STOP )) && return 1
         verdict="$(verdict_for "$real" "$repo" "$quiet")"
         if [[ "$verdict" == remove ]]; then
-            if wrh_remove_now "$real" "$real"; then
-                echo remove >> "$EVENTS"; continue
-            fi
+            if wrh_remove_now "$real" "$real"; then echo remove >> "$EVENTS"; return 0; fi
             verdict=kept:remove-failed
         fi
     fi
     record "$file" "$real" "$verdict"
-done
+    return 0
+}
+
+CURSOR_SOURCE="worktree_reap|mode=$MODE|quiet=$QUIET|released_quiet=$RELEASE_QUIET|root=$ROOT_REAL"
+if [[ -n "$ACT_CURSOR" ]]; then
+    CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$CURSOR_SOURCE")" || { log cursor-invalid; OUTCOME=error; exit 3; }
+    CURSOR_ITEMS="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$CURSOR_STATE")"
+    CURSOR_INDEX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_index"])' "$CURSOR_STATE")"
+    CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
+    if [[ "$CURSOR_ITEMS" == '[]' ]] || (( CURSOR_INDEX >= CURSOR_LEN )); then
+        CURSOR_ITEMS="$(python3 - "$(lease_dir)" <<'PY'
+import glob,json,sys
+print(json.dumps(sorted(glob.glob(sys.argv[1]+"/*.json")),separators=(",",":")))
+PY
+)"
+        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" 0 || { log cursor-save-failed; OUTCOME=error; exit 3; }
+        CURSOR_INDEX=0
+    fi
+    CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
+    while (( CURSOR_INDEX < CURSOR_LEN )); do
+        if ! act_unit_fits "$ACT_UNIT_BUDGET_S"; then
+            OUTCOME=partial; log deferred:deadline-before-unit; echo deadline_before_unit >> "$EVENTS"; break
+        fi
+        file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[int(sys.argv[2])])' "$CURSOR_ITEMS" "$CURSOR_INDEX")"
+        process_lease "$file" || { OUTCOME=partial; break; }
+        CURSOR_INDEX=$((CURSOR_INDEX + 1))
+        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" "$CURSOR_INDEX" || { log cursor-save-failed; OUTCOME=error; break; }
+        expired && break
+    done
+else
+    for file in "$(lease_dir)"/*.json; do
+        [[ -e "$file" ]] || continue
+        process_lease "$file" || { OUTCOME=partial; break; }
+        expired && break
+    done
+fi
 # Prune nonexistent leases, retaining fresh pending guards for one hour.
 for file in "$(lease_dir)"/*.json; do
     [[ -f "$file" ]] || continue
@@ -271,7 +314,13 @@ AFTER="$(free_bytes)"
 COUNTS="$(python3 - "$EVENTS" <<'PY'
 import collections,json,sys
 c=collections.Counter({'fetch_ok':0,'fetch_failed':0,'gh_ok':0,'gh_failed':0})
-with open(sys.argv[1]) as f: c.update(line.strip() for line in f if line.strip())
+events=[]
+with open(sys.argv[1]) as f:
+    events=[line.strip() for line in f if line.strip()]
+c.update(events)
+c['removed_count']=events.count('remove')
+c['deferred_count']=sum(x.startswith('deferred:') for x in events)
+c['interrupted_count']=events.count('deadline_before_unit')
 print(json.dumps(dict(c)))
 PY
 )"

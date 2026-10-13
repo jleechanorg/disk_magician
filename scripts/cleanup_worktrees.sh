@@ -7,6 +7,7 @@
 #
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
@@ -21,6 +22,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_merged_pr.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_ignored.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
+act_parse_deadline_args "$@" || exit $?
+set -- "${ACT_ARGS[@]}"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
@@ -81,6 +85,40 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# Governed callers provide one bounded cleanup pass as a resumable unit. The
+# cursor advances only after the complete invocation; an expired slice leaves
+# it at the same unit for the next tick.
+ACT_CURSOR_SOURCE="cleanup_worktrees|root=${HOME}/.gemini/antigravity/worktrees|repos=${CLAUDE_WORKTREE_REPOS:-}"
+ACT_CURSOR_INDEX=0
+if [[ -n "$ACT_CURSOR" ]]; then
+    ACT_CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || {
+        echo "invalid cleanup_worktrees cursor" >&2; exit 3;
+    }
+    ACT_CURSOR_ITEMS="$(python3 -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$ACT_CURSOR_STATE")"
+    ACT_CURSOR_INDEX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["next_index"])' "$ACT_CURSOR_STATE")"
+    if [[ "$ACT_CURSOR_ITEMS" != '["cleanup"]' || "$ACT_CURSOR_INDEX" -ge 1 ]]; then
+        ACT_CURSOR_ITEMS='["cleanup"]'
+        ACT_CURSOR_INDEX=0
+        act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || exit 3
+    fi
+fi
+GOVERN_RUN_ID=""
+GOVERN_FREE_BEFORE=""
+if [[ -n "$ACT_CURSOR" ]]; then
+    GOVERN_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
+    GOVERN_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job cleanup_worktrees --trigger govern)" || exit 3
+fi
+if [[ -n "$ACT_DEADLINE_AT" ]] && ! act_unit_fits "${DISK_MAGICIAN_UNIT_BUDGET_S:-60}"; then
+    echo "deferred:deadline-before-unit"
+    if [[ -n "$GOVERN_RUN_ID" ]]; then
+        python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+          --outcome partial --reason deadline_before_unit \
+          --candidates '{"removed_count":0,"deferred_count":1,"interrupted_count":1}' \
+          --postcondition "{\"df_delta_bytes\":0,\"freed_bytes\":0,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_BEFORE:-null}}" || exit 3
+    fi
+    exit 0
+fi
 
 if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
@@ -913,6 +951,24 @@ std_root_skip_reason() {
 for repo in "${REPO_LOCAL_REPOS[@]}"; do
     process_repo_local_worktrees "$repo"
 done
+
+if [[ -n "$ACT_CURSOR" ]]; then
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" '["cleanup"]' 1 || {
+        echo "failed to checkpoint cleanup_worktrees" >&2; exit 3;
+    }
+    GOVERN_FREE_AFTER="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
+    GOVERN_DELTA=""
+    if [[ "$GOVERN_FREE_BEFORE" =~ ^[0-9]+$ && "$GOVERN_FREE_AFTER" =~ ^[0-9]+$ ]]; then
+        GOVERN_DELTA=$((GOVERN_FREE_AFTER - GOVERN_FREE_BEFORE))
+    fi
+    GOVERN_REMOVED=0
+    [[ "$DRY_RUN" == true ]] || GOVERN_REMOVED=$((ANTIGRAVITY_DELETED + REPO_LOCAL_ELIGIBLE))
+    GOVERN_FREED="null"
+    [[ "$GOVERN_DELTA" =~ ^-?[0-9]+$ ]] && GOVERN_FREED=$(( GOVERN_DELTA > 0 ? GOVERN_DELTA : 0 ))
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome success --candidates "{\"removed_count\":$GOVERN_REMOVED,\"deferred_count\":0,\"interrupted_count\":0}" \
+      --postcondition "{\"df_delta_bytes\":${GOVERN_DELTA:-null},\"freed_bytes\":$GOVERN_FREED,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_AFTER:-null}}" || exit 3
+fi
 
 total_gb=$(awk "BEGIN {printf \"%.2f\", $TOTAL_RECLAIMED_KB / 1048576}")
 
