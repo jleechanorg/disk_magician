@@ -26,7 +26,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/cleanup_colima.sh"
 TMP=$(mktemp -d /tmp/dm-colima-stopped.XXXXXX)
-trap 'kill "${LIVE_PID:-0}" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'if [[ -n "${LIVE_PID:-}" ]]; then kill "$LIVE_PID" 2>/dev/null || true; fi; rm -rf "$TMP"' EXIT
 BIN="$TMP/bin"; HOME_D="$TMP/home"; ST="$TMP/state"; INV="$TMP/inv.log"
 mkdir -p "$BIN" "$ST" "$HOME_D/.colima/default" "$HOME_D/.colima/_lima/colima" "$HOME_D/.colima/_lima/_disks/colima"
 python3 - "$HOME_D/.colima/default/docker.sock" <<'PY'
