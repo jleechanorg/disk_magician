@@ -317,6 +317,7 @@
     "large_tmp_archive_max_hours": 168
   },
   "protected_tmp_roots": [],
+  "scratch_container_roots": ["agent-scratch"],
   "gc_worktree_repos": [],
   "downloads_evidence_patterns": [],
   "budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": {
