@@ -8,12 +8,14 @@ checkout has been removed through quarantine_rename's fd-relative walker.
 """
 import hashlib
 import json
+import math
 import os
 import secrets
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -174,7 +176,8 @@ def phase1(main, worktree, inventory_file):
                     "original_gitdir_sha256": old_gitdir.get("sha256"),
                     "original_gitdir_hex": Path(os.path.join(admin, "gitdir")).read_bytes().hex(),
                 }
-                qr.index_write(qid, qr.index_record(qid, parent, pstat, qst))
+                qr.index_write(qid, qr.index_record(qid, parent, pstat, qst, worktree, st))
+                if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_index": os.kill(os.getpid(), 9)
                 fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd)
                 try:
                     data = json.dumps(record, separators=(",", ":")).encode()
@@ -246,16 +249,13 @@ def rollback(pfd, qfd, qid, record):
         restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
         if (restored.st_dev, restored.st_ino) != (record["dev"], record["ino"]):
             return "quarantine_conflict:" + qid
-        side = qid + ".json"
-        try: os.unlink(side, dir_fd=qfd); os.fsync(qfd)
-        except FileNotFoundError: pass
-        if not qr.index_drop(qid): return "quarantine_conflict:" + qid
+        if not qr.finish_sidecar(qfd, qid, "rolled-back"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
         return "kept:admin-changed"
     except Exception:
         return "quarantine_conflict:" + qid
 
 
-def phase2(qid):
+def phase2(qid, deadline=None):
     try:
         index, pfd, qfd, record = qr.indexed_item(qid)
     except Exception:
@@ -269,7 +269,7 @@ def phase2(qid):
         fd, bind = tempfile.mkstemp(prefix=".wrh-bind-")
         try:
             with os.fdopen(fd, "w") as f: json.dump(binding, f)
-            result = qr.phase2(bind, qid)
+            result = qr.phase2(bind, qid, deadline)
         finally:
             try: os.unlink(bind)
             except OSError: pass
@@ -294,6 +294,7 @@ def phase2(qid):
                 admin_record["journal_key"] = "admin_removed_paths"
                 admin_record["admin_removed_paths"] = list(record.get("admin_removed_paths", []))
                 if not qr.unlink_inventory_entry(afd, os.path.basename(admin), ".", admin_inv["."], admin_inv, children,
+                                                 deadline=deadline,
                                                  qfd=qfd, side=qid + ".json", record=admin_record,
                                                  removed_paths=set(record.get("admin_removed_paths", []))):
                     return "kept:quarantine_partial_kept"
@@ -303,8 +304,7 @@ def phase2(qid):
         qpath = os.path.join(index["parent_path"], ".dm-quarantine", qid)
         if "worktree " + qpath in listing or os.path.exists(admin):
             return "kept:quarantine_partial_kept"
-        os.unlink(qid + ".json", dir_fd=qfd); os.fsync(qfd)
-        if not qr.index_drop(qid): return "kept:quarantine_partial_kept"
+        if not qr.finish_sidecar(qfd, qid, "removed"): return "kept:quarantine_partial_kept"
         return "removed"
     except Exception:
         return "kept:quarantine_partial_kept"
@@ -338,8 +338,7 @@ def restore(qid):
             run("git", "-C", record["worktree_main"], "worktree", "unlock", original)
         if canonical(record["worktree_admin_inventory"]) != canonical(inventory(record["worktree_admin_path"])):
             return "kept:admin-changed"
-        os.unlink(qid + ".json", dir_fd=qfd); os.fsync(qfd)
-        if not qr.index_drop(qid): return "kept:quarantine_partial_kept"
+        if not qr.finish_sidecar(qfd, qid, "restored"): return "kept:quarantine_partial_kept"
         return "restored:" + qid
     except Exception:
         return "kept:quarantine_partial_kept"
@@ -347,19 +346,25 @@ def restore(qid):
         os.close(qfd); os.close(pfd)
 
 
-def reconcile():
+def reconcile(deadline=None):
     try:
         directory = qr.index_dir()
         ids = sorted(n[:-5] for n in os.listdir(directory) if len(n) == 21 and n.endswith(".json") and
                      all(c in "0123456789abcdef" for c in n[:-5]))
         for qid in ids:
+            if deadline is not None and time.monotonic() >= deadline:
+                print("deferred:" + qid); return 0
             try: _, pfd, qfd, record = qr.indexed_item(qid)
             except Exception: continue
+            if record is None:
+                os.close(qfd); os.close(pfd)
+                print(qid + ":" + qr.reconcile_one(qid, deadline))
+                continue
             try:
                 if record.get("worktree_admin") is not True: continue
                 phase = record.get("wrh_phase")
                 if phase == "checkout_removed" or record.get("phase") == "deleting":
-                    print(qid + ":" + phase2(qid)); continue
+                    print(qid + ":" + phase2(qid, deadline)); continue
                 print(qid + ":" + rollback(pfd, qfd, qid, record))
             finally:
                 os.close(qfd); os.close(pfd)
@@ -368,10 +373,40 @@ def reconcile():
         return 1
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    if len(args) == 4 and args[0] == "phase1": print(phase1(*args[1:]))
-    elif len(args) == 2 and args[0] == "phase2": print(phase2(args[1]))
-    elif len(args) == 2 and args[0] == "restore": print(restore(args[1]))
-    elif args == ["reconcile"]: sys.exit(reconcile())
+def main(argv):
+    args = list(argv)
+    deadline = None
+    if "--deadline-at" in args:
+        i = args.index("--deadline-at")
+        if i + 1 >= len(args): print("kept:check-failed"); return 0
+        try: deadline = float(args[i + 1])
+        except ValueError: print("kept:check-failed"); return 0
+        if not math.isfinite(deadline) or deadline < 0:
+            print("kept:check-failed"); return 0
+        del args[i:i + 2]
+    if len(args) == 4 and args[0] == "phase1":
+        lock = qr.operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); return 0
+        try: print(phase1(*args[1:]))
+        finally: qr.operation_unlock(lock)
+    elif len(args) == 2 and args[0] == "phase2":
+        lock = qr.operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); return 0
+        try: print(phase2(args[1], deadline))
+        finally: qr.operation_unlock(lock)
+    elif len(args) == 2 and args[0] == "restore":
+        lock = qr.operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); return 0
+        try: print(restore(args[1]))
+        finally: qr.operation_unlock(lock)
+    elif args == ["reconcile"]:
+        lock = qr.operation_lock(deadline)
+        if lock is None: print("deferred:operation-lock"); return 0
+        try: return reconcile(deadline)
+        finally: qr.operation_unlock(lock)
     else: print("kept:check-failed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

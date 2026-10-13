@@ -182,5 +182,56 @@ for point in mid_delete; do
   if git -C "$TMPROOT/main" worktree list --porcelain | grep -qxF "worktree $TMPROOT/$name"; then bad "$point reconciled worktree remains registered"; else ok "$point reconciled worktree absent from registry"; fi
 done
 
+echo '== every WRH external entrypoint takes the canonical operation lock =='
+git -C "$TMPROOT/main" worktree add -q -b wrh-lock "$TMPROOT/wrh-lock"
+python3 "$REPO_ROOT/scripts/c14_probe.py" inventory "$TMPROOT/wrh-lock" "$TMPROOT/wrh-lock.inventory.json" >/dev/null
+LOCK_READY="$TMPROOT/lock-ready"; LOCK_RELEASE="$TMPROOT/lock-release"
+python3 -c 'import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600); fcntl.flock(fd,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); exec("while not os.path.exists(sys.argv[3]): time.sleep(.01)")' "$DISK_MAGICIAN_STATE_DIR/quarantine-index/operations.lock" "$LOCK_READY" "$LOCK_RELEASE" & HOLDER_PID=$!
+for _ in $(seq 1 250); do [[ -e "$LOCK_READY" ]] && break; sleep 0.02; done
+NOW="$(python3 -c 'import time; print(time.monotonic()+0.2)')"
+R1="$(python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-lock" "$TMPROOT/wrh-lock.inventory.json" --deadline-at "$NOW")"
+R2="$(python3 "$HELPER" phase2 ffffffffffffffff --deadline-at "$NOW")"
+R3="$(python3 "$HELPER" restore ffffffffffffffff --deadline-at "$NOW")"
+R4="$(python3 "$HELPER" reconcile --deadline-at "$NOW")"
+touch "$LOCK_RELEASE"; wait "$HOLDER_PID"
+assert_eq "$R1" deferred:operation-lock 'phase1 defers on held operation lock'
+assert_eq "$R2" deferred:operation-lock 'phase2 defers on held operation lock'
+assert_eq "$R3" deferred:operation-lock 'restore defers on held operation lock'
+assert_eq "$R4" deferred:operation-lock 'reconcile defers on held operation lock'
+[[ -d "$TMPROOT/wrh-lock" ]] && ok 'deferred phase1 left the worktree untouched' || bad 'deferred phase1 moved the worktree'
+
+echo '== WRH index crash reconciles through the canonical index =='
+STATE_IDX="$TMPROOT/state-index"
+git -C "$TMPROOT/main" worktree add -q -b wrh-index "$TMPROOT/wrh-index"
+ADMIN_WRH_INDEX="$(git -C "$TMPROOT/wrh-index" rev-parse --absolute-git-dir)"
+GITDIR_WRH_INDEX="$(cat "$ADMIN_WRH_INDEX/gitdir")"
+python3 "$REPO_ROOT/scripts/c14_probe.py" inventory "$TMPROOT/wrh-index" "$TMPROOT/wrh-index.inventory.json" >/dev/null
+DISK_MAGICIAN_STATE_DIR="$STATE_IDX" DISK_MAGICIAN_TEST_WRH_KILL_AT=after_index python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-index" "$TMPROOT/wrh-index.inventory.json" >/dev/null 2>&1
+assert_eq "$?" 137 'WRH after-index crash injected'
+WRH_IDX_QID="$(python3 -c 'import os,sys; d=os.path.join(sys.argv[1],"quarantine-index"); print([n[:-5] for n in os.listdir(d) if n.endswith(".json") and len(n)==21][0])' "$STATE_IDX")"
+DISK_MAGICIAN_STATE_DIR="$STATE_IDX" python3 "$HELPER" reconcile >/dev/null
+[[ -d "$TMPROOT/wrh-index" ]] && ok 'after-index reconcile retained the original checkout' || bad 'after-index reconcile lost the checkout'
+[[ ! -e "$STATE_IDX/quarantine-index/$WRH_IDX_QID.json" ]] && ok 'after-index reconcile cleared the preparing index' || bad 'after-index reconcile left the index'
+[[ "$(cat "$ADMIN_WRH_INDEX/gitdir")" == "$GITDIR_WRH_INDEX" ]] && ok 'after-index reconcile left gitdir unchanged' || bad 'after-index reconcile changed gitdir'
+git -C "$TMPROOT/wrh-index" status --porcelain >/dev/null && ok 'after-index worktree remains usable' || bad 'after-index worktree unusable'
+
+echo '== WRH rollback publishes a terminal marker before dropping recovery state =='
+STATE_RB="$TMPROOT/state-rollback"
+git -C "$TMPROOT/main" worktree add -q -b wrh-rollback "$TMPROOT/wrh-rollback"
+ADMIN_WRH_RB="$(git -C "$TMPROOT/wrh-rollback" rev-parse --absolute-git-dir)"
+python3 "$REPO_ROOT/scripts/c14_probe.py" inventory "$TMPROOT/wrh-rollback" "$TMPROOT/wrh-rollback.inventory.json" >/dev/null
+DISK_MAGICIAN_STATE_DIR="$STATE_RB" DISK_MAGICIAN_TEST_INDEX_DROP_FAIL=1 \
+  DISK_MAGICIAN_TEST_AFTER_VERDICT='admin=$(git -C "$DM_Q_PATH" rev-parse --absolute-git-dir); printf keep > "$admin/extra-admin-file"' \
+  python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-rollback" "$TMPROOT/wrh-rollback.inventory.json" >"$TMPROOT/rb-out"
+RB_OUT="$(cat "$TMPROOT/rb-out")"
+WRH_RB_QID="$(python3 -c 'import os,sys; d=os.path.join(sys.argv[1],"quarantine-index"); print([n[:-5] for n in os.listdir(d) if n.endswith(".json") and len(n)==21][0])' "$STATE_RB")"
+[[ "$RB_OUT" == quarantine_conflict:*:index-cleanup-failed ]] && ok 'rollback reports index cleanup failure' || bad "rollback result was '$RB_OUT'"
+[[ -f "$ADMIN_WRH_RB/extra-admin-file" ]] && ok 'rollback preserved changed admin data' || bad 'rollback lost changed admin data'
+[[ ! -e "$TMPROOT/.dm-quarantine/$WRH_RB_QID.json" ]] && ok 'terminal rollback dropped the sidecar' || bad 'rollback kept the sidecar'
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("terminal")=="rolled-back"' "$STATE_RB/quarantine-index/$WRH_RB_QID.json" && ok 'rollback index holds the durable terminal marker' || bad 'rollback index lacks terminal marker'
+DISK_MAGICIAN_STATE_DIR="$STATE_RB" python3 "$HELPER" reconcile >/dev/null
+[[ ! -e "$STATE_RB/quarantine-index/$WRH_RB_QID.json" ]] && ok 'reconcile cleared the terminal rollback index' || bad 'reconcile left the rollback index'
+git -C "$TMPROOT/wrh-rollback" status --porcelain >/dev/null && ok 'rolled-back worktree remains usable' || bad 'rolled-back worktree unusable'
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
