@@ -13,6 +13,7 @@
 #  13. VZ holds the disk with no colima token in cmdline -> never unlock (PR #150).
 #  14. lsof holder probe fails -> never unlock, fail closed.
 #  15. No proven holder -> stale lock still unlocks once.
+#  16. A holder appearing after the first stale check -> recheck blocks unlock.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/cleanup_colima.sh"
@@ -74,6 +75,17 @@ cat > "$BIN/lsof" <<EOF
 #!/bin/bash
 echo "lsof \$*" >> "$INV"
 if [[ -e "$ST/lsof_fail" ]]; then exit 2; fi
+if [[ -e "$ST/lsof_live_after_first" ]]; then
+  count=0
+  [[ -f "$ST/lsof_count" ]] && count=\$(cat "$ST/lsof_count")
+  count=\$((count + 1))
+  echo "\$count" > "$ST/lsof_count"
+  if [[ "\$count" -ge 2 ]]; then
+    echo "qemu-syst 4242 jleechan 5u REG 1,18 107374182400 1 $HOME_D/.colima/_lima/_disks/colima/datadisk"
+    exit 0
+  fi
+  exit 1
+fi
 if [[ -e "$ST/lsof_out" ]]; then cat "$ST/lsof_out"; else exit 1; fi
 exit 0
 EOF
@@ -99,7 +111,7 @@ cnt() { grep -c "$1" "$INV" || true; }
 # $1 list_mode  $2 lock(0/1)  $3 approval(0/1)  rest: extra args
 run() {
   local mode="$1" lock="$2" appr="$3"; shift 3
-  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out" "$ST/lsof_fail"
+  : > "$INV"; rm -f "$ST/started" "$ST/lock" "$ST/ps_out" "$ST/ps_fail" "$ST/startfail" "$ST/lsof_out" "$ST/lsof_fail" "$ST/lsof_live_after_first" "$ST/lsof_count"
   echo "$mode" > "$ST/list_mode"
   [[ "$lock" == 1 ]] && touch "$ST/lock"
   RC=0
@@ -226,6 +238,18 @@ if [[ $(cnt '^limactl disk unlock colima') -eq 1 && -e "$ST/started" ]]; then
   ok "no holders (lsof clean): unlock still allowed"
 else bad "no holders unlock"; fi
 rm -f "$ST/lsof_out"
+
+# 16. The lock becomes live after the first stale determination. The immediate
+# pre-unlock recheck must observe the holder and refuse the named unlock.
+: > "$INV"
+rm -f "$ST/started" "$ST/ps_out" "$ST/lsof_out" "$ST/lsof_fail" "$ST/lsof_count"
+touch "$ST/lock" "$ST/lsof_live_after_first"
+echo stopped > "$ST/list_mode"
+RC=0; env -i HOME="$HOME_D" PATH="$BIN:/usr/bin:/bin" DOCKER_PROBE_DEADLINE_SECONDS=2 VACATE_CI_RUNNERS_APPROVED=1 /bin/bash "$SCRIPT" --clean > "$TMP/out" 2>&1 || RC=$?
+if [[ $(cnt '^lsof ') -eq 2 && $(cnt '^limactl disk unlock') -eq 0 && $(cnt '^colima start') -eq 1 ]] && grep -q 'changed before unlock' "$TMP/out"; then
+  ok "holder appears before unlock: recheck fails closed"
+else bad "holder appears before unlock"; fi
+rm -f "$ST/lsof_live_after_first" "$ST/lsof_count"
 
 echo "passed=$PASS failed=$FAIL"
 [[ $FAIL -eq 0 ]]

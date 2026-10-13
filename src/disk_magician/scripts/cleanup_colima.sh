@@ -262,6 +262,13 @@ colima_start_with_stale_lock_retry() {
     log "WARNING: no provably stale Lima disk lock (live hostagent/pid, lock absent, or probe failed) — failing closed, not unlocking."
     return 1
   fi
+  # Re-probe immediately before the named unlock. Another Colima/Lima process
+  # may have acquired the datadisk after the first check; never unlock if the
+  # holder state changed or can no longer be proven stale.
+  if ! colima_disk_lock_is_stale; then
+    log "WARNING: Lima disk lock state changed before unlock (live holder appeared or probe failed) — failing closed, not unlocking."
+    return 1
+  fi
   log "Stale Lima disk lock on 'colima' (in-use-by self, no live hostagent/limactl/VZ process) — unlocking and retrying start once."
   if ! LIMA_HOME="$COLIMA_LIMA" bounded 30 limactl disk unlock colima >/dev/null 2>&1; then
     log "WARNING: limactl disk unlock colima failed — failing closed."
