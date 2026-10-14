@@ -1101,6 +1101,10 @@ class FrontierScanner:
         self.tracker = ConcurrencyTracker()
         self.sem = AdjustableSemaphore(args.workers)
         self.measured = {}
+        self.hardlink_seen = {}
+        self.hardlink_duplicates = []
+        self.hardlink_duplicate_kb = 0
+        self.hardlink_lock = threading.Lock()
         # Every successful du result, including parents later subdivided for
         # the granularity report. `measured` remains the non-overlapping byte
         # ledger; `observed` is only for selecting useful display buckets.
@@ -1508,6 +1512,26 @@ class FrontierScanner:
             self.deduped.append({"path": path, "realpath_of": covering})
             return
 
+        hardlink_identity = None
+        if stat.S_ISREG(st.st_mode) and getattr(st, "st_nlink", 1) > 1:
+            hardlink_identity = (st.st_dev, st.st_ino)
+            with self.hardlink_lock:
+                first = self.hardlink_seen.get(hardlink_identity)
+                if first is not None:
+                    first_path, first_kb = first
+                    self.hardlink_duplicates.append({
+                        "path": path, "duplicate_of": first_path,
+                        "measured_kb": first_kb,
+                    })
+                    self.hardlink_duplicate_kb += first_kb
+                    return
+                # Regular-file measurements use lstat's allocated blocks, so
+                # reserve the inode and its exact size before another worker
+                # can reach this same inode through a sibling path.
+                self.hardlink_seen[hardlink_identity] = (
+                    path, (st.st_blocks * 512 + 1023) // 1024
+                )
+
         # Symlinks are always measured as leaves (du -P never follows them,
         # so this is O(1) and cannot double-count or recurse).
         if is_symlink:
@@ -1596,6 +1620,9 @@ class FrontierScanner:
                     )
                     return
             self.measured[path] = kb
+            if hardlink_identity is not None:
+                with self.hardlink_lock:
+                    self.hardlink_seen.setdefault(hardlink_identity, (path, kb))
             self.trie.add(path)
             return
 
@@ -1984,16 +2011,18 @@ def build_report(
             f"{-granularity_tail_raw_kb} KiB; displayed equation rejected"
         )
 
-    clone_shared_adjustment_kb = min(0, residual_raw_kb)
+    clone_shared_kb = min(0, residual_raw_kb)
+    hardlink_duplicate_kb = int(getattr(scanner, "hardlink_duplicate_kb", 0))
     accounting_equation = {
         "data_used_kb": disk_stats["used_kb"],
         "measured_kb": measured_total_kb,
         "purgeable_kb": purgeable_info["purgeable_kb"],
         "residual_kb": residual_kb,
-        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
+        "hardlink_duplicate_kb": hardlink_duplicate_kb,
+        "clone_shared_kb": clone_shared_kb,
         "balanced": (
             measured_total_kb + purgeable_info["purgeable_kb"] + residual_kb
-            + clone_shared_adjustment_kb
+            + clone_shared_kb
             == disk_stats["used_kb"]
         ),
         "displayed_buckets_kb": granularity_bucket_total_kb,
@@ -2008,15 +2037,16 @@ def build_report(
             + granularity_tail_kb
             + purgeable_info["purgeable_kb"]
             + residual_kb
-            + clone_shared_adjustment_kb
+            + clone_shared_kb
             == disk_stats["used_kb"]
         ),
         "measurement_non_atomic": used_before_kb != used_after_kb,
         "residual_label": "protected_or_apfs_allocation_not_attributable_by_this_session",
         "residual_reclaimable": False,
     }
-    # Per-root measured_kb is raw (shared clone/hardlink blocks counted once per
-    # root). Record the overcount so no consumer derives per-path deltas from
+    # Per-root measured_kb excludes repeated hardlink inodes; clone extents
+    # remain unattributable and are represented by clone_shared_kb. Record
+    # remaining per-root overcount so no consumer derives per-path deltas from
     # non-comparable numbers (2026-10-13: raw sums 1057.9 vs 892.1 GiB while
     # disk_used was 856.2 vs 847.1 GiB).
     accounting_equation.update(
@@ -2163,7 +2193,9 @@ def build_report(
         "local_snapshots_count": purgeable_info["local_snapshots_count"],
         "residual_kb": residual_kb,
         "residual_raw_kb": residual_raw_kb,
-        "clone_shared_adjustment_kb": clone_shared_adjustment_kb,
+        "hardlink_duplicate_kb": hardlink_duplicate_kb,
+        "hardlink_duplicates": list(getattr(scanner, "hardlink_duplicates", [])),
+        "clone_shared_kb": clone_shared_kb,
         "residual_negative_clamped": residual_negative_clamped,
         "clones_suspected": residual_negative_clamped,
         "accounting_equation": accounting_equation,
@@ -2191,9 +2223,8 @@ PER_PATH_TOLERANCE_RATIO = 0.01
 def per_path_accounting(top_level_ledger, data_used_kb):
     """Comparability metadata for the per-root ledger.
 
-    The ``measured_kb`` values in ``top_level_ledger`` are RAW: shared blocks
-    (clones/hardlinks) are counted once per root, so their sum exceeds
-    ``disk_used_kb`` by ``clone_shared_adjustment_kb``. A consumer that subtracts
+    The ``measured_kb`` values in ``top_level_ledger`` exclude repeat hardlink
+    inodes; clone extents may still make their sum exceed ``disk_used_kb``. A consumer that subtracts
     two runs' per-root values to derive a per-path delta is therefore comparing
     numbers that do not account for that sharing, and can report movement that
     never happened (observed 2026-10-13: raw per-root sums 1057.9 vs 892.1 GiB
@@ -2226,7 +2257,7 @@ def per_path_accounting(top_level_ledger, data_used_kb):
         "per_path_comparable": comparable,
         "per_path_incomparable_reason": None if comparable else (
             f"per-root measured_kb overcounts disk_used_kb by {overcount} KiB "
-            "(clone/hardlink shared blocks counted per root); per-path deltas "
+            "(clone/hardlink shared blocks counted per root before inode dedup); per-path deltas "
             "are not comparable"
         ),
     }
