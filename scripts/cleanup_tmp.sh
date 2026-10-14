@@ -867,6 +867,13 @@ archive_path() {
       log "SAFETY-SKIP $path ($safety_reason)"
       return 1
     fi
+    # Archival relocates the source just like a cleanup unit. Check after
+    # eligibility probes, before starting either archive metadata or the move.
+    if ! act_unit_fits 0; then
+      log "Archive deferred:deadline-before-unit $path"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+      return 1
+    fi
     if ! mkdir -p "$dest"; then
       log "ERROR: could not create archive destination: $dest"
       return 2
@@ -877,6 +884,13 @@ archive_path() {
     if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$path" "$receipt" "" "$retention"; then
       log "ERROR: could not write archive origin receipt: $receipt"
       return 2
+    fi
+    # Receipt preparation can consume the remaining budget. Keep its evidence
+    # (as on a failed mv), but never relocate the source after that expiry.
+    if ! act_unit_fits 0; then
+      log "Archive deferred:deadline-before-unit $path"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+      return 1
     fi
     log "Archiving: $path -> $dest/  (${kb} KB)"
     if ! mv "$path" "$dest/"; then

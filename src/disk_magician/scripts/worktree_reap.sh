@@ -82,16 +82,31 @@ acquire_lock() {
 mkdir -p "$STATE" "$(lease_dir)"
 if ! acquire_lock; then
     log skipped_lock
-    receipt finish --job worktree_reap --outcome skipped_lock --reason 'lock held' --lock '{"held":true}'
+    receipt finish --job worktree_reap --outcome skipped_lock --reason 'lock held' --lock '{"held":true}' || exit 3
     exit 0
 fi
 RUN_TMP=""
+RUN_ID=""
+RECEIPT_ATTEMPTED=0
+RECEIPT_REASON=""
 cleanup() {
     rm -f "$LOCK/pid" "$LOCK/acquired_at"
     rmdir "$LOCK" 2>/dev/null || true
     [[ -z "$RUN_TMP" ]] || rm -rf "$RUN_TMP"
 }
-trap cleanup EXIT
+reap_exit() {
+    local rc="$1"
+    trap - EXIT
+    if [[ -n "$RUN_ID" && "$RECEIPT_ATTEMPTED" == 0 ]]; then
+        [[ "$OUTCOME" != success ]] || OUTCOME=error
+        RECEIPT_REASON="${RECEIPT_REASON:-early_exit}"
+        finish_receipt || rc=3
+        [[ "$OUTCOME" != error || "$rc" != 0 ]] || rc=3
+    fi
+    cleanup
+    exit "$rc"
+}
+trap 'reap_exit "$?"' EXIT
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/worktree-reap.XXXXXX")" || exit 1
 EVENTS="$RUN_TMP/events"
 : > "$EVENTS"
@@ -100,6 +115,38 @@ STOP=0
 trap 'STOP=1; OUTCOME=partial' TERM INT
 START="$(date +%s)"
 free_bytes() { df -kP "$STATE" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}'; }
+# Finalize before temporary evidence and lock ownership are released. The
+# attempt guard prevents duplicate terminal writes, including a failed write.
+finish_receipt() {
+    [[ "$RECEIPT_ATTEMPTED" == 0 ]] || return 0
+    RECEIPT_ATTEMPTED=1
+    local AFTER COUNTS POST
+    AFTER="$(free_bytes)"
+    COUNTS="$(python3 - "$EVENTS" <<'PY'
+import collections,json,sys
+c=collections.Counter({'fetch_ok':0,'fetch_failed':0,'gh_ok':0,'gh_failed':0})
+events=[]
+with open(sys.argv[1]) as f:
+    events=[line.strip() for line in f if line.strip()]
+c.update(events)
+c['removed_count']=events.count('remove')
+c['deferred_count']=sum(x.startswith('deferred:') for x in events)
+c['interrupted_count']=events.count('deadline_before_unit')
+print(json.dumps(dict(c)))
+PY
+)" || return 1
+    POST="$(python3 - "$BEFORE" "$AFTER" <<'PY'
+import json,sys
+before,after=sys.argv[1:]
+delta=int(after)-int(before) if before.isdigit() and after.isdigit() else None
+print(json.dumps({'freed_bytes':max(0,delta) if delta is not None else None,
+                  'df_delta_bytes':delta,
+                  'free_bytes_before':int(before) if before.isdigit() else None,
+                  'free_bytes_after':int(after) if after.isdigit() else None}))
+PY
+)" || return 1
+    receipt finish --job worktree_reap --run-id "$RUN_ID" --outcome "$OUTCOME" --reason "$RECEIPT_REASON" --candidates "$COUNTS" --postcondition "$POST"
+}
 BEFORE="$(free_bytes)"
 RUN_ID="$(receipt begin --job worktree_reap --trigger "$MODE")" || exit 1
 for tool in git timeout gh; do
@@ -386,7 +433,7 @@ process_lease() {
 
 CURSOR_SOURCE="worktree_reap|mode=$MODE|quiet=$QUIET|released_quiet=$RELEASE_QUIET|root=$ROOT_REAL"
 if [[ -n "$ACT_CURSOR" ]]; then
-    CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$CURSOR_SOURCE")" || { log cursor-invalid; OUTCOME=error; exit 3; }
+    CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$CURSOR_SOURCE")" || { log cursor-invalid; OUTCOME=error; RECEIPT_REASON=cursor-invalid; exit 3; }
     CURSOR_ITEMS="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$CURSOR_STATE")"
     CURSOR_INDEX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_index"])' "$CURSOR_STATE")"
     CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
@@ -396,7 +443,7 @@ import glob,json,sys
 print(json.dumps(sorted(glob.glob(sys.argv[1]+"/*.json")),separators=(",",":")))
 PY
 )"
-        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" 0 || { log cursor-save-failed; OUTCOME=error; exit 3; }
+        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" 0 || { log cursor-save-failed; OUTCOME=error; RECEIPT_REASON=cursor-save-failed; exit 3; }
         CURSOR_INDEX=0
     fi
     CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
@@ -407,7 +454,7 @@ PY
         file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[int(sys.argv[2])])' "$CURSOR_ITEMS" "$CURSOR_INDEX")"
         process_lease "$file" || { OUTCOME=partial; break; }
         CURSOR_INDEX=$((CURSOR_INDEX + 1))
-        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" "$CURSOR_INDEX" || { log cursor-save-failed; OUTCOME=error; break; }
+        act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" "$CURSOR_INDEX" || { log cursor-save-failed; OUTCOME=error; RECEIPT_REASON=cursor-save-failed; break; }
         expired && break
     done
 else
@@ -419,6 +466,7 @@ else
 fi
 # Prune nonexistent leases, retaining fresh pending guards for one hour.
 for file in "$(lease_dir)"/*.json; do
+    [[ "$OUTCOME" != error ]] || break
     [[ -f "$file" ]] || continue
     python3 - "$file" <<'PY'
 import json,os,sys,time
@@ -431,28 +479,5 @@ try:
 except (OSError,ValueError,TypeError,AttributeError): pass
 PY
 done
-AFTER="$(free_bytes)"
-COUNTS="$(python3 - "$EVENTS" <<'PY'
-import collections,json,sys
-c=collections.Counter({'fetch_ok':0,'fetch_failed':0,'gh_ok':0,'gh_failed':0})
-events=[]
-with open(sys.argv[1]) as f:
-    events=[line.strip() for line in f if line.strip()]
-c.update(events)
-c['removed_count']=events.count('remove')
-c['deferred_count']=sum(x.startswith('deferred:') for x in events)
-c['interrupted_count']=events.count('deadline_before_unit')
-print(json.dumps(dict(c)))
-PY
-)"
-POST="$(python3 - "$BEFORE" "$AFTER" <<'PY'
-import json,sys
-before,after=sys.argv[1:]
-delta=int(after)-int(before) if before.isdigit() and after.isdigit() else None
-print(json.dumps({'freed_bytes':max(0,delta) if delta is not None else None,
-                  'df_delta_bytes':delta,
-                  'free_bytes_before':int(before) if before.isdigit() else None,
-                  'free_bytes_after':int(after) if after.isdigit() else None}))
-PY
-)"
-receipt finish --job worktree_reap --run-id "$RUN_ID" --outcome "$OUTCOME" --candidates "$COUNTS" --postcondition "$POST"
+finish_receipt || exit 3
+[[ "$OUTCOME" != error ]] || exit 3

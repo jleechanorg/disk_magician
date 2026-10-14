@@ -295,12 +295,15 @@ class GovernReconcileMeasureTest(unittest.TestCase):
     def test_daily_measure_respects_measure_lock(self):
         cfg, roots = self.budgets_config({"worktrees": [str(self.tmp / "none")]})
         budgets = json.loads(cfg.read_text())["budgets"]
-        (self.state / "budget.json").write_text(json.dumps({"classes": {"worktrees": {"used_gb": 4}}}))
+        (self.state / "budget.json").write_text(json.dumps({"classes": {"worktrees": {"used_gb": 4}},
+                                                         "daily_measure_pending": "pending-fixture"}))
         fd = os.open(self.state / "measure.lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             before = (self.state / "budget.json").read_text()
-            self.assertEqual(disk_budget.daily_measure(self.state, budgets), 0)
+            # A held measurement lock is deferred work, never successful daily
+            # completion. The govern entrypoint must retain its pending token.
+            self.assertEqual(disk_budget.daily_measure(self.state, budgets), 3)
             self.assertEqual((self.state / "budget.json").read_text(), before)
         finally:
             os.close(fd)

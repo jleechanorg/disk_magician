@@ -247,12 +247,19 @@ def _safe_read(path):
     except OSError: return ""
 
 def alerts(state, now, margin_gb=None):
-    if margin_gb is None:
-        try: margin_gb = json.loads(Path(__import__("resolve_config").resolve()).read_text())["budgets"]["concurrency_margin_gb"]
-        except (OSError, ValueError, KeyError, TypeError): margin_gb = 10
     s, evs, out = samples(state), events(state, now - DAY, now), []
     try: budget = parse((state / "budget.json").read_text())
     except OSError: budget = None
+    if margin_gb is None:
+        import budget_controls
+        try: config = json.loads(Path(__import__("resolve_config").resolve()).read_text()).get("budgets")
+        except (OSError, ValueError, TypeError, AttributeError): config = None
+        # Preserve status's documented 10 GiB default when neither source sets
+        # a margin, but never conceal a malformed explicit override/config.
+        explicit = (isinstance(budget, dict) and "margin_gb" in budget) or \
+                   (isinstance(config, dict) and "concurrency_margin_gb" in config)
+        try: margin_gb = budget_controls.effective_margin(budget, config, strict=explicit)
+        except ValueError: out.append("ALERT:margin_invalid effective admission margin unavailable")
     if any(e.get("event") == "floor_breach" for e in evs) or (s and now - s[-1][0] <= 900 and s[-1][2] < 15 * GIB):
         out += ["ALERT:floor_breach free under 15 GiB (df)", *RUNBOOK]
     if (state / "budget.json").exists():
@@ -261,7 +268,7 @@ def alerts(state, now, margin_gb=None):
     if any(e.get("degraded") for e in evs): out.append("ALERT:admission_degraded within 24 h")
     if any(str(e.get("event", "")).split(":", 1)[0] == "kickstart_blocked" for e in evs): out.append("ALERT:kickstart_blocked within 24 h")
     burst = window_max([(e["at"], e.get("est_bytes") or 0) for e in evs if e.get("event") == "admit" and type(e.get("decision")) is int and e["decision"] in (0, 10)])
-    if burst > margin_gb * GIB: out.append(f"ALERT:burst_over_margin admit_burst_bytes={burst}B margin={margin_gb}GiB")
+    if margin_gb is not None and burst > margin_gb * GIB: out.append(f"ALERT:burst_over_margin admit_burst_bytes={burst}B margin={margin_gb}GiB")
     week, month = daily_mins(budget, now, 7), daily_mins(budget, now, 30)  # C12: 7-day trough (max of daily minimums) > 15 GiB above the 30-day low
     if len(week) < 0.9 * 7 or len(month) < 0.9 * 30: out.append(f"trough_rise:insufficient_history days_7d={len(week)}/7 days_30d={len(month)}/30")
     elif max(week) - min(month) > 15 * GIB: out.append(f"ALERT:trough_rise trough_7d={max(week)}B trough_30d={min(month)}B")

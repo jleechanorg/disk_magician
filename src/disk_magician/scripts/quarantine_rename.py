@@ -196,7 +196,6 @@ def index_mark_terminal(qid, outcome):
     finally: os.close(dfd)
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
-    canon = lambda es: sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k) for k in KEYS]) for e in es)
     try:
         if deadline_passed(deadline): return "deferred:deadline"
         d = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
@@ -212,7 +211,7 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
         if lsof.stdout or lsof.returncode != 1 or lsof.stderr.strip(): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
-        return "" if canon(visit(qfd, qid, ".", [], deadline)) == canon(rec["inventory"]) else "rehash-mismatch"
+        return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
     except DeadlineExceeded: return "deferred:deadline"
     except Exception: return "check-failed"
 def phase1(path, inv_file, binding_file, deadline=None):
@@ -479,6 +478,9 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
         kill_at("entry_removed_before_journal")
+        # Root completion is journaled by phase2, consistently with directory
+        # roots. A child-path progress entry must never stand in for that proof.
+        if rel == ".": return True
         if not record_removed_path(qfd, side, record, rel): return False
         removed_paths.add(rel)
         hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
@@ -522,17 +524,24 @@ def phase2(binding_file, qid, deadline=None):
         if not isinstance(original, str) or os.path.dirname(original) != parent:
             return "kept:quarantine_partial_kept"
         inventory, children = inventory_children(record["inventory"])
+        root = inventory["."]
         removed_paths = record.get("removed_paths", [])
+        # Older versions journaled a single-file/symlink root as a child. Only
+        # accept that legacy shape with durable completion and an absent root;
+        # a missing name or a child journal by itself is not deletion proof.
+        legacy_root_journal = (root.get("type") in ("file", "symlink") and
+                               record.get("phase") == "deleting" and record.get("root_removed") is True)
         if (not isinstance(removed_paths, list) or any(not isinstance(rel, str) for rel in removed_paths) or
                 len(set(removed_paths)) != len(removed_paths) or
-                any(rel == "." or rel not in inventory for rel in removed_paths)):
+                any((rel == "." and not legacy_root_journal) or rel not in inventory for rel in removed_paths)):
             return "kept:quarantine_partial_kept"
         removed_paths = set(removed_paths)
-        root = inventory["."]
         if (root.get("dev"), root.get("ino")) != (record.get("dev"), record.get("ino")):
             return "kept:quarantine_partial_kept"
         try: candidate = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
         except FileNotFoundError: candidate = None
+        if candidate is not None and "." in removed_paths:
+            return "kept:quarantine_partial_kept"
         if candidate is not None and (candidate.st_dev, candidate.st_ino) != (record.get("dev"), record.get("ino")):
             return "kept:quarantine_partial_kept"
         if candidate is None:
@@ -751,6 +760,12 @@ def quarantine_restore(qid, deadline=None):
         if deadline_passed(deadline): return "deferred:deadline"
         if len(qid) != 16 or any(c not in "0123456789abcdef" for c in qid): return "kept:unknown-quarantine-id"
         index, pfd, qfd, record = indexed_item(qid)
+        # Public restore shares reconcile's worktree dispatch. Its caller owns
+        # the operation lock; the worktree helper must not acquire it again.
+        if record is not None and record.get("worktree_admin") is True:
+            os.close(qfd); os.close(pfd); pfd = qfd = -1
+            import worktree_quarantine
+            return worktree_quarantine.restore(qid, deadline)
         if record.get("phase") == "deleting": return "kept:quarantine_partial_kept"
         base = os.path.basename(record["original"]); root = next(e for e in record["inventory"] if e.get("path") == ".")
         try: os.stat(base, dir_fd=pfd, follow_symlinks=False); return "kept:restore-target-exists"
@@ -787,7 +802,10 @@ def quarantine_restore(qid, deadline=None):
         if qfd >= 0: os.close(qfd)
         if pfd >= 0: os.close(pfd)
 def canon_inventory(entries):
-    return sorted(json.dumps([e.get(k) for k in KEYS]) for e in entries)
+    # C14 records filesystem-dependent directory/symlink sizes; visit does not.
+    # Only regular-file size is content proof, alongside its hash and identity.
+    return sorted(json.dumps([None if k == "size" and e.get("type") != "file" else e.get(k)
+                              for k in KEYS]) for e in entries)
 def parse_deadline(raw):
     """Finite nonnegative monotonic deadline or None when invalid."""
     try: value = float(raw)

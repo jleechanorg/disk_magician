@@ -417,9 +417,18 @@ def pilot_check(state, now, record=True):
     budget = read_json(state / "budget.json")
     if not isinstance(budget, dict):
         return ["insufficient_data:budget"], 1
+    import budget_controls as controls
     start = budget.get("pilot_start")
-    if not (isinstance(start, (int, float)) and not isinstance(start, bool)):
+    if not controls.finite_nonneg(start):
         return ["insufficient_data:no_pilot"], 1
+    if "estimates_promoted_at" in budget:
+        promoted = budget["estimates_promoted_at"]
+        if not controls.finite_nonneg(promoted):
+            return ["insufficient_data:estimates_promotion"], 1
+        # Old releases bumped the epoch/hash without restarting the clock.
+        # Those saved pilots must not certify pre-promotion observations.
+        if promoted > start:
+            return ["pilot_invalid:estimates_changed"], 1
     end = start + WEEK
     if now < end:
         return [f"insufficient_data:pilot_week_incomplete elapsed_s={now - start:.0f}"], 1
@@ -429,7 +438,6 @@ def pilot_check(state, now, record=True):
     def invalid(rule):
         return [f"pilot_invalid:{rule}"], 1
 
-    import budget_controls as controls
     if not controls._d2_approved():
         return invalid("d2_not_approved")
     config_budget = _config_budget()
@@ -509,9 +517,11 @@ def pilot_check(state, now, record=True):
     lines.append(f"qualifying_days={qualifying}/7")
     count = budget.get("pilot_floor_fail_epochs", 0)
     if record:
-        import budget_controls as controls
         epoch_id = f"{start}:{budget.get('pilot_epoch')}"
-        count = controls.record_floor_epoch(state, not pilot_floor_ok, epoch_id, now)
+        count = controls.record_floor_epoch(state, not pilot_floor_ok, epoch_id, now,
+                                           pilot=budget, window=(start, end))
+        if count is None:
+            return invalid("pilot_changed")
     if count >= 2:
         lines.append("ALERT:v2_trigger")
     return lines, 0

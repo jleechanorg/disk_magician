@@ -714,13 +714,21 @@ echo "== case 36: ignored bytes created after checkout survive rollback =="
 ROLLBACK_WT="$WTROOT/reuse-rollback-ignored"
 git -C "$REPO" config --add core.excludesFile "$TMPROOT/global-excludes"
 echo ignored-target.txt >> "$TMPROOT/global-excludes"
-git -C "$REPO" checkout -q main
-git -C "$REPO" branch reuse/rollback-ignored HEAD
+git -C "$REPO" checkout -q -b reuse/rollback-ignored main
 echo original-tracked > "$REPO/ignored-target.txt"
 git -C "$REPO" add -f ignored-target.txt
 git -C "$REPO" commit -q -m old-branch-tracked-file
 git -C "$REPO" push -q origin reuse/rollback-ignored
+git -C "$REPO" checkout -q main
 git -C "$REPO" update-ref refs/remotes/origin/main "$(git -C "$REPO" rev-parse main)"
+# The old branch must own the tracked path; the new base must not. Otherwise
+# the hook edits a tracked file and the test misses ignored-file rollback.
+assert_eq "$(git -C "$REPO" show reuse/rollback-ignored:ignored-target.txt)" "original-tracked" "rollback old branch tracks the collision path"
+if git -C "$REPO" cat-file -e origin/main:ignored-target.txt 2>/dev/null; then
+    bad "rollback new base unexpectedly tracks the collision path"
+else
+    ok "rollback new base leaves the collision path untracked"
+fi
 git -C "$REPO" worktree add -q "$ROLLBACK_WT" reuse/rollback-ignored
 cat > "$TMPROOT/add-ignored-after-switch" <<'EOF'
 #!/usr/bin/env bash

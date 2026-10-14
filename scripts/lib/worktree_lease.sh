@@ -301,32 +301,33 @@ PY
 # lease must record `path` == expected_candidate (when supplied) and retain a
 # dict `reuse.previous_lease` for rollback. Exact pid+start_epoch; any other
 # live owner, any other candidate (e.g. an ancestor) and any missing/invalid
-# claim proof stays "alive" (kept). Never a universal owner bypass.
+# claim proof retains its live state (kept). Expired TTLs never revoke a
+# verified live owner, including this exact claimant. Never a universal bypass.
 lease_owner_state_for() {
     local lease="$1" own="${2:-}" candidate="${3:-}" base
     base="$(lease_owner_state "$lease")"
-    [[ "$base" == alive ]] || { printf '%s\n' "$base"; return 0; }
-    python3 - "$lease" "$own" "$candidate" <<'PY'
+    [[ "$base" == alive || "$base" == alive-expired ]] || { printf '%s\n' "$base"; return 0; }
+    python3 - "$lease" "$own" "$candidate" "$base" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    print("alive"); sys.exit(0)
+    print(sys.argv[4]); sys.exit(0)
 own = sys.argv[2].split("\t")
 candidate = sys.argv[3]
 reuse = d.get("reuse")
 if d.get("released_at") or not isinstance(reuse, dict) or reuse.get("state") != "pending":
-    print("alive"); sys.exit(0)
+    print(sys.argv[4]); sys.exit(0)
 if not isinstance(reuse.get("previous_lease"), dict):
-    print("alive"); sys.exit(0)
+    print(sys.argv[4]); sys.exit(0)
 if candidate and d.get("path") != candidate:
-    print("alive"); sys.exit(0)
+    print(sys.argv[4]); sys.exit(0)
 o = d.get("owner")
 if not (isinstance(o, dict) and len(own) >= 2 and own[0].isdigit()):
-    print("alive"); sys.exit(0)
+    print(sys.argv[4]); sys.exit(0)
 if str(o.get("pid")) == own[0] and str(o.get("start_epoch", "")) == own[1]:
     print("own-live"); sys.exit(0)
-print("alive")
+print(sys.argv[4])
 PY
 }
 

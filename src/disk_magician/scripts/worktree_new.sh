@@ -426,11 +426,13 @@ PY
             lease_mark_reuse_incomplete "$file"
             continue
         fi
-        if [[ "$switch_rc" == 0 ]] && ! git -C "$repo" update-ref -d "refs/heads/$branch" "$base_tip"; then
-            # The branch moved or another worktree claimed it during recovery.
-            echo "worktree-new: could not remove failed new branch $branch at $base_tip" >&2
-            lease_mark_reuse_incomplete "$file"
-            continue
+        if [[ "$switch_rc" == 0 ]]; then
+            # We have vacated the new branch. Another checkout may now own it,
+            # even while its tip still equals base_tip. Git has no atomic
+            # occupancy-and-tip delete, so retain the ref rather than race a
+            # second worktree into a dangling HEAD. Fresh allocation can use
+            # the retained branch if Git verifies that it is still unoccupied.
+            echo "worktree-new: retained failed new branch $branch for recovery" >&2
         fi
         if ! lease_restore_reuse_claim "$file"; then
             lease_mark_reuse_incomplete "$file"

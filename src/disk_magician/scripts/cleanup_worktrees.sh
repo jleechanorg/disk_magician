@@ -1010,7 +1010,12 @@ process_repo_local_worktrees() {
                 ;;
         esac
     done <<<"$porcelain"
-    [[ "$ACT_STOP" == 0 ]] && flush_block
+    if [[ "$ACT_STOP" == 0 ]]; then
+        flush_block
+    else
+        # A cooperative deadline stop is a normal partial pass, not an error.
+        return 0
+    fi
 }
 
 # Standard root (spec D6): governed like other agent roots, except worktrees

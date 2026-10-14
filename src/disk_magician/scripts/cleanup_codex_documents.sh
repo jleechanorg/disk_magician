@@ -660,5 +660,5 @@ for dd in ${DATE_DIRS[@]+"${DATE_DIRS[@]}"}; do
   fi
 done
 
-receipt_finish || true
+receipt_finish || exit 1
 log "$(dry_prefix)Done. Task dirs removed: ${N_REMOVED}  kept: ${N_KEPT}  total: ${TOTAL_KB} KB (~$(( TOTAL_KB / 1024 )) MB)"

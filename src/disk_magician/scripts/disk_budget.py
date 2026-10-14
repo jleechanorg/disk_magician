@@ -721,7 +721,7 @@ def daily_measure(state, budgets, tick_seconds=900):
     lock = _measure_lock(state)
     if lock is None:
         print("skipped_measure_lock")
-        return 0
+        return 3  # deferred, not completed: govern must retain its pending request
     updates, events, snapshot, carried = {}, [], {}, []
     try:
         data = _read_json(state / "budget.json")
@@ -776,13 +776,12 @@ def daily_measure(state, budgets, tick_seconds=900):
             except OSError:
                 pass
         merge_classes(state, updates, events)
-        producer = budget_history
-        if producer is not None:
-            try:
-                producer.record_measurement(state, now=time.time(), classes=snapshot, carried=carried)
-                state_update(state, {"parked_measurement": producer.measure_parked(state, deadline)})
-            except (OSError, ValueError, TypeError):
-                pass
+        # A failed snapshot write must propagate so govern retains the request.
+        budget_history.record_measurement(state, now=time.time(), classes=snapshot, carried=carried)
+        try:
+            state_update(state, {"parked_measurement": budget_history.measure_parked(state, deadline)})
+        except (OSError, ValueError, TypeError):
+            pass
     finally:
         _measure_unlock(lock)
     return 0
@@ -843,6 +842,29 @@ def _record_govern_tick(state, budgets, now, deadline, zone_name):
     except (OSError, ValueError, TypeError):
         pass
 
+DAILY_LOCK_WAIT_S = 600.0  # ordinary ticks have a 540 s budget and run every 600 s
+
+def _consume_daily_request(state, budgets, tick_seconds, zone_name=None):
+    """Serve pending work under govern.lock, without borrowing a tick's deadline."""
+    pending = _read_json(state / "budget.json").get("daily_measure_pending")
+    if not pending:
+        return 0
+    if zone_name in EMERGENCY or tick_seconds <= 1:
+        reason = "emergency" if zone_name in EMERGENCY else "deadline"
+        return print(f"daily_measure_deferred:{reason}", file=sys.stderr) or 3
+    try:
+        rc = daily_measure(state, budgets, tick_seconds)
+        if rc == 0:
+            def complete(data):
+                # A newer request may arrive while du runs. Clear only the
+                # token this snapshot served, under the existing state.lock.
+                if data.get("daily_measure_pending") == pending:
+                    data.pop("daily_measure_pending")
+            budget_controls.locked_mutate(state, complete)
+        return rc
+    except (OSError, ValueError, TypeError, budget_controls.MalformedState) as e:
+        return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
+
 def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
     p = argparse.ArgumentParser(prog="diskm govern")
     p.add_argument("--mode", choices=["observe", "act"], default="observe")
@@ -863,17 +885,31 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
     if args.daily_measure:
         if args.tick_seconds == 540.0:
             args.tick_seconds = 900.0
-        with open(state / "govern.lock", "a+") as lock:
-            try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError: return print("skipped_tick_lock") or 0
-            try:
-                return daily_measure(state, budgets, args.tick_seconds)
-            except (OSError, ValueError, TypeError) as e:
-                return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
+        # launchd's 03:00 calendar job does not retry a skipped invocation. Save
+        # the request before waiting so a timeout or process restart cannot lose
+        # it; the existing 600 s govern job will service it under the same lock.
+        try:
+            state_update(state, {"daily_measure_pending": uuid.uuid4().hex})
+        except (OSError, ValueError, TypeError, budget_controls.MalformedState) as e:
+            return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     with open(state / "govern.lock", "a+") as lock:
-        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError: return print("skipped_tick_lock") or 0
+        wait_until = time.monotonic() + min(DAILY_LOCK_WAIT_S, args.tick_seconds)
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not args.daily_measure:
+                    return print("skipped_tick_lock") or 0
+                remaining = wait_until - time.monotonic()
+                if remaining <= 0:
+                    return print("daily_measure_deferred:govern_lock", file=sys.stderr) or 3
+                time.sleep(min(0.05, remaining))
+            except OSError as e:
+                return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
         lock.truncate(0); lock.write(str(os.getpid())); lock.flush()
+        if args.daily_measure:
+            return _consume_daily_request(state, budgets, args.tick_seconds)
         tick_start = time.monotonic()
         tick_deadline = tick_start + max(1.0, args.tick_seconds)
         try:
@@ -916,9 +952,13 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
                     dispatch_actuators(Path(__file__).resolve().parent, state, budgets,
                                        budget_state, z, now, tick_deadline, schedule)
             _record_govern_tick(state, budgets, now, tick_deadline, z)
+            # Retrying daily accounting never preempts ordinary df/emergency,
+            # reconciliation, actuation or tick history. Defer if the normal
+            # work used the deadline, or if emergency pressure forbids scans.
+            daily_rc = _consume_daily_request(state, budgets, tick_deadline - time.monotonic(), z)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
-    return print(f"zone={z}") or 0
+    return print(f"zone={z}") or daily_rc
 def admit(a, budgets, state, now, d2):
     estimate_degraded = None
     if a.est_gb is None:

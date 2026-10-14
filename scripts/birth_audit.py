@@ -209,6 +209,8 @@ def measure_births(gens, budgets, now, budget_s, deadline_at):
         if g.get("charge") == "measured" and _as_int(g.get("bytes")) is not None:
             continue
         if not _same_birth(g):
+            if g.get("charge") is None:
+                _charge_estimate(g, budgets, largest)
             continue
         retries = _as_int(g.get("unknown_retries")) or 0
         if g.get("charge") == "estimate" and retries >= UNKNOWN_RETRY_LIMIT + 1:
@@ -223,6 +225,8 @@ def measure_births(gens, budgets, now, budget_s, deadline_at):
             continue
         size = _du_bytes(g["path"], min(MAX_DU_TIMEOUT_S, remaining))
         if not _same_birth(g):
+            if g.get("charge") is None:
+                _charge_estimate(g, budgets, largest)
             continue  # preserve historical unknown/estimate; these bytes are unbound
         g["measured_at"] = now
         if size is None:

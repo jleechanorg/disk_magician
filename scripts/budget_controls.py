@@ -266,6 +266,8 @@ def promote_estimates(state, now=None, config_budget=None):
     `state.lock` as promotion, so an audit that replaces the pending file
     between a pre-lock read and the digest read can no longer attribute
     different bytes. A missing or malformed pending file changes nothing.
+    An active pilot restarts its observation window, retaining its proof
+    snapshots and floor history; promotion cannot certify a changed deploy.
     """
     state = Path(state)
     stamp = time.time() if now is None else now
@@ -287,6 +289,10 @@ def promote_estimates(state, now=None, config_budget=None):
                     raise MalformedState(str(budget_path))
             else:
                 data = {}
+            start = data.get("pilot_start")
+            if not finite_nonneg(stamp) or (start is not None and
+                    (not finite_nonneg(start) or stamp < start)):
+                raise MalformedState("invalid pilot start or promotion time")
             effective_path = state / ADMISSION_SUBDIR / EFFECTIVE_FILE
             atomic_write(effective_path, pending)
             digest = hashlib.sha256(effective_path.read_bytes()).hexdigest()
@@ -294,6 +300,8 @@ def promote_estimates(state, now=None, config_budget=None):
             data["estimates_source_sha256"] = hashlib.sha256(pending_bytes).hexdigest()
             data["estimates_promoted_at"] = stamp
             _bump_pilot_epoch(data)
+            if start is not None:
+                data["pilot_start"] = stamp
             atomic_write(budget_path, data)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -324,18 +332,53 @@ def _d2_approved():
         return False
 
 
-def record_floor_epoch(state, floor_failed, epoch_id, now=None):
-    """Count distinct validated pilot epochs; repeated reads cannot advance it."""
+def record_floor_epoch(state, floor_failed, epoch_id, now=None, *, pilot=None, window=None):
+    """Count a validated observation window once, against its evaluated pilot.
+
+    Return None if promotion changed that pilot before this locked write, or
+    the proposed window overlaps previously counted evidence. Legacy callers
+    without a pilot/window retain epoch-id deduplication.
+    """
     stamp = time.time() if now is None else now
     result = {}
 
     def mutate(data):
         prior = data.get("pilot_floor_fail_epochs", 0)
         prior = prior if type(prior) is int and prior >= 0 else 0
+        result["count"] = None
+        if pilot is not None:
+            keys = ("pilot_start", "pilot_epoch", "estimates_hash", "estimates_promoted_at")
+            if any(data.get(key) != pilot.get(key) for key in keys):
+                return
+            if (not isinstance(window, (tuple, list)) or len(window) != 2 or
+                    not all(finite_nonneg(value) for value in window) or
+                    window[0] != pilot.get("pilot_start") or window[1] <= window[0]):
+                return
+            previous = data.get("pilot_floor_checked_window")
+            if previous is None and data.get("pilot_floor_checked_epoch") is not None:
+                # Existing receipts used '<start>:<epoch>'; preserve their
+                # counted week when upgrading instead of counting it again.
+                try:
+                    start = float(data["pilot_floor_checked_epoch"].split(":", 1)[0])
+                    previous = [start, start + (window[1] - window[0])]
+                except (AttributeError, TypeError, ValueError):
+                    return
+            if previous is not None:
+                if (not isinstance(previous, list) or len(previous) != 2 or
+                        not all(finite_nonneg(value) for value in previous) or
+                        previous[1] <= previous[0]):
+                    return
+                if list(window) == previous:
+                    result["count"] = prior
+                    return
+                if window[0] < previous[1]:
+                    return
         if data.get("pilot_floor_checked_epoch") != epoch_id:
             data["pilot_floor_fail_epochs"] = prior + 1 if floor_failed else 0
             data["pilot_floor_checked_epoch"] = epoch_id
             data["pilot_floor_checked_at"] = stamp
+            if pilot is not None:
+                data["pilot_floor_checked_window"] = list(window)
         result["count"] = data.get("pilot_floor_fail_epochs", prior)
 
     locked_mutate(state, mutate)

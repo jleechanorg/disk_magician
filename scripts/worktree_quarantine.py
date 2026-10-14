@@ -121,13 +121,7 @@ def admin_path(wt, deadline=None):
 
 
 def canonical(entries, exclude=()):
-    normalized = []
-    for entry in entries:
-        if entry.get("path") in exclude:
-            continue
-        normalized.append({k: entry.get(k) for k in ("path", "type", "dev", "ino", "size", "sha256", "target")
-                           if k in entry and not (entry.get("type") == "dir" and k == "size")})
-    return sorted(json.dumps(e, sort_keys=True, separators=(",", ":")) for e in normalized)
+    return qr.canon_inventory(e for e in entries if e.get("path") not in exclude)
 
 
 def admin_entries(rows):
@@ -317,10 +311,41 @@ def phase1(main, worktree, inventory_file, deadline=None):
         return "kept:check-failed"
 
 
+def bind_restored_checkout(pfd, qfd, qid, record):
+    """Pin the restored generation before Git writes; caller closes the fd."""
+    base = os.path.basename(record["original"])
+    restored_fd = -1
+    restored = None
+    matches = False
+    try:
+        restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        restored_fd = os.open(base, DIR, dir_fd=pfd)
+        opened = os.fstat(restored_fd)
+        matches = ((opened.st_dev, opened.st_ino) == (record["dev"], record["ino"]) and
+                   (restored.st_dev, restored.st_ino) == (opened.st_dev, opened.st_ino) and
+                   qr.same_entry(pfd, base, opened))
+    except OSError:
+        pass
+    if matches:
+        return restored_fd, ""
+    if restored_fd >= 0:
+        os.close(restored_fd)
+    record["phase"] = record["wrh_phase"] = "restore_conflict"
+    record["restore_conflict"] = {
+        "expected": {"dev": record["dev"], "ino": record["ino"]},
+        "observed": None if restored is None else {"dev": restored.st_dev, "ino": restored.st_ino},
+        "original_path": record["original"],
+    }
+    try: qr.update_sidecar(qfd, qid + ".json", record)
+    except OSError: return -1, f"quarantine_conflict:{qid}:restore-state-update-failed"
+    return -1, "kept:restore-identity-mismatch"
+
+
 def rollback(pfd, qfd, qid, record, reason="admin-changed"):
     parent = record["original"].rsplit("/", 1)[0]
     base = os.path.basename(record["original"])
     admin = record["worktree_admin_path"]
+    restored_fd = -1
     try:
         os.close(open_admin(record))
         try: original_st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
@@ -338,7 +363,14 @@ def rollback(pfd, qfd, qid, record, reason="admin-changed"):
             os.close(open_admin(record))
             run("git", "-C", record["worktree_main"], "worktree", "repair", qpath)
             os.close(open_admin(record))
+            if not qr.same_entry(qfd, qid, qst): return "quarantine_conflict:" + qid
             safe_rename(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
+        # A replacement can arrive at the rename boundary. Bind the resulting
+        # checkout before repairing its registration or unlocking by pathname.
+        restored_fd, conflict = bind_restored_checkout(pfd, qfd, qid, record)
+        if conflict:
+            return conflict if conflict.startswith("quarantine_conflict:") else "quarantine_conflict:" + qid
+        if qst is not None:
             os.close(open_admin(record))
             run("git", "-C", record["worktree_main"], "worktree", "repair", record["original"])
         locked = os.path.join(admin, "locked")
@@ -355,6 +387,8 @@ def rollback(pfd, qfd, qid, record, reason="admin-changed"):
         return "kept:" + reason
     except Exception:
         return "quarantine_conflict:" + qid
+    finally:
+        if restored_fd >= 0: os.close(restored_fd)
 
 
 def phase2(qid, deadline=None):
@@ -379,6 +413,20 @@ def phase2(qid, deadline=None):
             return "deferred:phase2"
         if result not in ("checkout_removed", "removed"):
             return "kept:quarantine_partial_kept"
+        # phase2 loaded its own record and committed checkout completion. Never
+        # journal admin progress from our pre-call snapshot: that would erase
+        # root_removed and strand a crash/deadline in the first admin teardown.
+        committed_index, committed_pfd, committed_qfd, committed = qr.indexed_item(qid)
+        try:
+            progress_keys = {"phase", "removed_paths", "root_removed", "wrh_phase"}
+            if (committed_index != index or not isinstance(committed, dict) or
+                    any(committed.get(k) != v for k, v in record.items() if k not in progress_keys) or
+                    committed.get("phase") != "deleting" or committed.get("root_removed") is not True or
+                    committed.get("wrh_phase") != "checkout_removed"):
+                return "kept:quarantine_partial_kept"
+            record = committed
+        finally:
+            os.close(committed_qfd); os.close(committed_pfd)
         if os.environ.get("DISK_MAGICIAN_TEST_WRH_KILL_AT") == "after_checkout_removed":
             os.kill(os.getpid(), 9)
         # The checkout is gone. The only remaining deletion is this worktree's
@@ -434,6 +482,7 @@ def combined_remove(main, worktree, inventory_file, deadline=None):
 
 def restore(qid, deadline=None):
     if qr.deadline_passed(deadline): return "deferred:deadline"
+    restored_fd = -1
     try:
         index, pfd, qfd, record = qr.indexed_item(qid)
     except Exception:
@@ -453,7 +502,13 @@ def restore(qid, deadline=None):
         if not payload_matches:
             return "deferred:deadline" if qr.deadline_passed(deadline) else "kept:quarantine_partial_kept"
         os.close(open_admin(record))
+        if not qr.same_entry(qfd, qid, qst): return "kept:identity-mismatch"
         safe_rename(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
+        # The quarantine name can be replaced between inventory verification
+        # and rename. Bind the restored directory before any Git repair/write
+        # or terminal cleanup, just as the generic restore binds its payload.
+        restored_fd, conflict = bind_restored_checkout(pfd, qfd, qid, record)
+        if conflict: return conflict
         original = record["original"]
         os.close(open_admin(record))
         run("git", "-C", record["worktree_main"], "worktree", "repair", original)
@@ -473,6 +528,7 @@ def restore(qid, deadline=None):
     except Exception:
         return "kept:quarantine_partial_kept"
     finally:
+        if restored_fd >= 0: os.close(restored_fd)
         os.close(qfd); os.close(pfd)
 
 
