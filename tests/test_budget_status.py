@@ -123,7 +123,7 @@ class CliTest(IsolatedConfigTest):
     def test_diskm_budget_status_alerts_and_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = write_state(tmp, budget=dict(zone="RED", zone_at=1))
-            for tree in (ROOT, ROOT / "src" / "disk_magician"):
+            for tree in [t for t in (ROOT, ROOT / "src" / "disk_magician") if (t / "disk_magician.sh").exists()]:
                 out = subprocess.run(["bash", str(tree / "disk_magician.sh"), "budget", "status"],
                                      env={**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)},
                                      capture_output=True, text=True)

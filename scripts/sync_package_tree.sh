@@ -18,7 +18,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEST_ROOT="$REPO_ROOT/src/disk_magician"
 
 CHECK_ONLY=false
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=true
+STAGE_DIR=""
+if [[ "${1:-}" == "--check" ]]; then
+  CHECK_ONLY=true
+elif [[ "${1:-}" == "--stage" ]]; then
+  STAGE_DIR="${2:-}"
+  [[ -n "$STAGE_DIR" ]] || { echo "Usage: $0 [--check | --stage <dest_dir>]" >&2; exit 2; }
+fi
 
 # Canonical file set, expressed as glob patterns relative to REPO_ROOT.
 PATTERNS=(
@@ -33,7 +39,48 @@ PATTERNS=(
   "launchd/*.c"
 )
 
+if [[ -n "$STAGE_DIR" ]]; then
+  mkdir -p "$STAGE_DIR"
+  for pkg_file in "__init__.py" "cli.py"; do
+    if [[ -f "$DEST_ROOT/$pkg_file" ]]; then
+      cp -p "$DEST_ROOT/$pkg_file" "$STAGE_DIR/$pkg_file"
+    fi
+  done
+  for pattern in "${PATTERNS[@]}"; do
+    for src in "$REPO_ROOT"/$pattern; do
+      [[ -f "$src" ]] || continue
+      rel="${src#"$REPO_ROOT"/}"
+      mkdir -p "$(dirname "$STAGE_DIR/$rel")"
+      cp -p "$src" "$STAGE_DIR/$rel"
+    done
+  done
+  exit 0
+fi
+
 drift=()
+
+if [[ "$CHECK_ONLY" == true && ! -f "$DEST_ROOT/disk_magician.sh" && ! -d "$DEST_ROOT/scripts" && ! -d "$DEST_ROOT/launchd" && ! -d "$DEST_ROOT/config" && ! -f "$DEST_ROOT/config.json.template" ]]; then
+  [[ -f "$REPO_ROOT/setup.py" ]] || drift+=("MISSING setup.py")
+  [[ -f "$DEST_ROOT/__init__.py" ]] || drift+=("MISSING src/disk_magician/__init__.py")
+  [[ -f "$DEST_ROOT/cli.py" ]] || drift+=("MISSING src/disk_magician/cli.py")
+  for pattern in "${PATTERNS[@]}"; do
+    matched=false
+    for src in "$REPO_ROOT"/$pattern; do
+      if [[ -f "$src" ]]; then
+        matched=true
+        break
+      fi
+    done
+    [[ "$matched" == true ]] || drift+=("MISSING $pattern")
+  done
+  if [[ ${#drift[@]} -eq 0 ]]; then
+    echo "sync_package_tree: single-source package layout verified (0 drifted files)"
+    exit 0
+  fi
+  echo "sync_package_tree --check: ${#drift[@]} drifted file(s):"
+  printf '  %s\n' "${drift[@]}"
+  exit 1
+fi
 
 sync_file() {
   local rel="$1" src="$REPO_ROOT/$1" dest="$DEST_ROOT/$1"
@@ -78,3 +125,4 @@ fi
 
 echo "sync_package_tree: synced ${#drift[@]} file(s):"
 printf '  %s\n' "${drift[@]}"
+

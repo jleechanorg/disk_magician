@@ -22,7 +22,7 @@ def run(args, env, expected=0):
     assert result.returncode == expected, (args, result.returncode, result.stdout, result.stderr)
     return result
 
-for tree in (root, root / 'src/disk_magician'):
+for tree in [t for t in (root, root / 'src/disk_magician') if (t / 'disk_magician.sh').exists()]:
     with tempfile.TemporaryDirectory(prefix='reap-dispatch-', dir='/tmp') as tmp:
         home = Path(tmp).resolve()
         state = home / '.disk_magician_state'

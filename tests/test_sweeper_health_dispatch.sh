@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 root = pathlib.Path(sys.argv[1])
-for tree in (root, root / "src/disk_magician"):
+for tree in [t for t in (root, root / "src/disk_magician") if (t / "disk_magician.sh").exists()]:
     with tempfile.TemporaryDirectory(prefix="sweeper-health-dispatch-") as tmp:
         fixture = pathlib.Path(tmp)
         shutil.copy2(tree / "disk_magician.sh", fixture / "disk_magician.sh")
@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix="packaged-health-repair-") as tmp:
         (layout / "launchd").mkdir()
         shutil.copy2(root / "scripts/install_launchd_sweepers.sh", layout / "scripts")
         shutil.copy2(root / ("launchd/" + label + ".plist"), layout / "launchd")
-    shutil.copy2(root / "src/disk_magician/scripts/sweeper_health_check.sh", package / "scripts")
+    shutil.copy2(root / "scripts/sweeper_health_check.sh", package / "scripts")
     broken = dest / (label + ".plist")
     broken.write_text("corrupt fixture\n")
     template = (root / "launchd/com.disk-magician.sweeper-health.plist").read_text()

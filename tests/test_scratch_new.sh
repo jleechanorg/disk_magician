@@ -8,7 +8,7 @@ set -uo pipefail
 export DISK_MAGICIAN_ADMIT_RETRY_S=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DISKM="$REPO_ROOT/src/disk_magician/disk_magician.sh"
+DISKM="$REPO_ROOT/disk_magician.sh"
 PASS=0 FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }

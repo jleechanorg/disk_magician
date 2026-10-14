@@ -40,3 +40,10 @@ docs/.disk-report-scratch/
 venv/
 .worktrees/
 uv.lock
+
+# Package mirror paths (materialized at build time via setup.py, never committed)
+/src/disk_magician/disk_magician.sh
+/src/disk_magician/config.json.template
+/src/disk_magician/config/
+/src/disk_magician/scripts/
+/src/disk_magician/launchd/

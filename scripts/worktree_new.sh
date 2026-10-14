@@ -295,7 +295,7 @@ wtn_reuse() {
     base_tip="$(git -C "$repo" rev-parse -q --verify "$base^{commit}" 2>/dev/null)" || return 1
     declare -F lease_claim_reuse >/dev/null && declare -F worktree_is_recently_active_minutes >/dev/null &&
         declare -F artifact_removal_verdict >/dev/null || return 1
-    [[ "$(artifact_removal_verdict --self-test 2>/dev/null)" == ok ]] || return 1
+    local selftest_checked=""
     for file in "$(lease_dir)"/*.json; do
         [[ -f "$file" ]] || continue
         # Bind all eligibility checks to the exact lease read before owner
@@ -332,6 +332,10 @@ PY
             remote_tip="$(wtn_timeout 30 git -C "$repo" ls-remote origin "refs/heads/$old" 2>/dev/null | awk 'NR==1{print $1}')"
             [[ -n "$remote_tip" && "$remote_tip" == "$tip" ]] || continue
         }
+        if [[ -z "$selftest_checked" ]]; then
+            [[ "$(artifact_removal_verdict --self-test 2>/dev/null)" == ok ]] || return 1
+            selftest_checked=1
+        fi
         verdict="$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)"
         [[ "$verdict" == remove ]] || continue
         # Reclaim a provably-dead stale .reuse-lock left by a killed holder

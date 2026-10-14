@@ -1256,7 +1256,7 @@ check() {
   fi
 }
 echo "=== mirror parity ==="
-check "cleanup_tmp package mirror matches" "cmp -s '$ROOT/scripts/cleanup_tmp.sh' '$ROOT/src/disk_magician/scripts/cleanup_tmp.sh'"
-check "scratch_budget package mirror matches" "cmp -s '$ROOT/scripts/lib/scratch_budget.sh' '$ROOT/src/disk_magician/scripts/lib/scratch_budget.sh'"
+check "cleanup_tmp package mirror matches" "[[ ! -f '$ROOT/src/disk_magician/scripts/cleanup_tmp.sh' ]] && bash '$ROOT/scripts/sync_package_tree.sh' --check >/dev/null 2>&1 || cmp -s '$ROOT/scripts/cleanup_tmp.sh' '$ROOT/src/disk_magician/scripts/cleanup_tmp.sh'"
+check "scratch_budget package mirror matches" "[[ ! -f '$ROOT/src/disk_magician/scripts/lib/scratch_budget.sh' ]] && bash '$ROOT/scripts/sync_package_tree.sh' --check >/dev/null 2>&1 || cmp -s '$ROOT/scripts/lib/scratch_budget.sh' '$ROOT/src/disk_magician/scripts/lib/scratch_budget.sh'"
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

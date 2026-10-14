@@ -37,10 +37,10 @@ jobs:
           command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
 
       - name: Verify package-tree synchronization
-        run: bash scripts/sync_package_tree.sh --check
+        run: bash ./disk_magician.sh sync-package-tree --check
 
       - name: Verify pyproject version monotonicity
-        run: python3 scripts/check_version_monotonic.py
+        run: bash ./disk_magician.sh check-version
 
       - name: Check shell syntax and ShellCheck errors
         run: |
@@ -57,15 +57,4 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Run shell tests
-        run: |
-          set -euo pipefail
-          for test_file in tests/test_*.sh; do
-            echo "::group::$test_file"
-            test_timeout=300
-            case "$test_file" in
-              tests/test_artifact_verdict.sh) test_timeout=900 ;;
-              tests/test_worktree_new.sh) test_timeout=1500 ;;
-            esac
-            timeout "$test_timeout" /bin/bash "$test_file"
-            echo "::endgroup::"
-          done
+        run: bash ./disk_magician.sh test-shell

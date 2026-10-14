@@ -70,6 +70,7 @@ Commands:
                          Session-exit release of that session's leases (deletes nothing).
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
+  worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
@@ -78,6 +79,11 @@ Commands:
   ci-admit               ezgha job-started hook: admit the CI workspace (class colima).
   govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
   budget                 status: governor alerts (ALERT:<code> lines, rc 1 when any).
+  birth-audit            Verify receipt accounting against live du across cleanup scripts.
+  sync-package-tree      Verify or sync packaged tree with repo-root scripts (--check).
+  check-version          Verify pyproject.toml version monotonicity against base ref.
+  test-shell             Run shell test suites in parallel with isolated TMPDIR.
+  deploy                 Deploy packaged diskm / disk-magician uv tool from clean origin/main.
 
 Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
@@ -439,6 +445,14 @@ case "$CMD" in
       *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
     esac
     ;;
+  worktree_quarantine|worktree-quarantine)
+    subcommand="${1:-}"; shift || true
+    case "$subcommand" in
+      restore) [[ $# -eq 1 ]] || { echo "Usage: diskm worktree-quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/worktree_quarantine.py" restore "$1" ;;
+      reconcile) exec python3 "$SCRIPT_DIR/scripts/worktree_quarantine.py" reconcile "$@" ;;
+      *) echo "Usage: diskm worktree-quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
+    esac
+    ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
     ;;
@@ -463,6 +477,21 @@ case "$CMD" in
     ;;
   worktree_remove_hook|worktree-remove-hook)
     DISK_MAGICIAN_LIFECYCLE_PARENT_PID="$PPID" "$SCRIPT_DIR/scripts/worktree_remove_hook.sh" "$@"
+    ;;
+  birth_audit|birth-audit)
+    exec bash "$SCRIPT_DIR/scripts/birth_audit.sh" "$@"
+    ;;
+  sync_package_tree|sync-package-tree)
+    exec bash "$SCRIPT_DIR/scripts/sync_package_tree.sh" "$@"
+    ;;
+  check_version|check-version)
+    exec python3 "$SCRIPT_DIR/scripts/check_version_monotonic.py" "$@"
+    ;;
+  test_shell|test-shell)
+    exec python3 "$SCRIPT_DIR/scripts/run_shell_tests_parallel.py" "$@"
+    ;;
+  deploy)
+    exec bash "$SCRIPT_DIR/tools/deploy_uv_tool.sh" "$@"
     ;;
   -h|--help)
     usage
