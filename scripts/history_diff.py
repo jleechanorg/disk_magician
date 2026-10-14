@@ -381,11 +381,15 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
     if type(sub_granularity_tail) is not int or sub_granularity_tail < 0:
         raise LedgerError(f"{label}: invalid sub-granularity tail")
     total += sub_granularity_tail
-    clone_adjustment = accounting.get("clone_shared_adjustment_kb", 0)
+    clone_adjustment = accounting.get(
+        "clone_shared_kb", accounting.get("clone_shared_adjustment_kb", 0)
+    )
     if type(clone_adjustment) is not int or clone_adjustment > 0:
         raise LedgerError(f"{label}: invalid clone_shared_adjustment_kb (must be signed <= 0)")
-    if ledger.get("accounting_equation") is not None and "clone_shared_adjustment_kb" not in accounting:
-        raise LedgerError(f"{label}: missing required accounting field 'clone_shared_adjustment_kb'")
+    if ledger.get("accounting_equation") is not None and not (
+        {"clone_shared_kb", "clone_shared_adjustment_kb"} & set(accounting)
+    ):
+        raise LedgerError(f"{label}: missing required clone shared accounting field")
     total += clone_adjustment
     residual = ledger["residual_kb"]
     used = ledger["disk_used_kb"]
@@ -438,7 +442,9 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
     keys = ("data_used_kb", "displayed_buckets_kb", "oversize_indivisible_files_kb",
             "sub_granularity_tail_kb", "purgeable_kb", "residual_kb")
     values = [accounting.get(key) for key in keys]
-    clone_adjustment = accounting.get("clone_shared_adjustment_kb")
+    clone_adjustment = accounting.get(
+        "clone_shared_kb", accounting.get("clone_shared_adjustment_kb")
+    )
     buckets = ledger.get("granularity_buckets", ledger.get("buckets", []))
     oversize = ledger.get("oversize_indivisible_files", [])
     if (

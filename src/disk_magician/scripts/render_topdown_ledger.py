@@ -381,16 +381,19 @@ def complete_coverage_envelope(report):
         "sub_granularity_tail_kb", "purgeable_kb", "residual_kb",
     )
     equation_values = [accounting.get(key) for key in equation_keys] if isinstance(accounting, dict) else []
-    clone_adjustment = accounting.get("clone_shared_adjustment_kb") if isinstance(accounting, dict) else None
+    clone_shared = (
+        accounting.get("clone_shared_kb", accounting.get("clone_shared_adjustment_kb"))
+        if isinstance(accounting, dict) else None
+    )
     accounting_reconciles = (
         len(equation_values) == len(equation_keys)
         and all(type(value) is int and value >= 0 for value in equation_values)
-        and type(clone_adjustment) is int
-        and clone_adjustment <= 0
+        and type(clone_shared) is int
+        and clone_shared <= 0
         and accounting["displayed_buckets_kb"] == bucket_total
         and accounting["oversize_indivisible_files_kb"] == oversize_total
         and accounting["data_used_kb"] == report.get("disk_used_kb")
-        and accounting["data_used_kb"] == sum(equation_values[1:]) + clone_adjustment
+        and accounting["data_used_kb"] == sum(equation_values[1:]) + clone_shared
     )
     return (
         report.get("mode") == "complete"
