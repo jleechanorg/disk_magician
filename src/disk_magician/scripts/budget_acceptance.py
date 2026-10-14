@@ -347,10 +347,12 @@ def _week_rows(state, start, end, pts):
     return lines, passed
 
 
-def _qualifying_days(state, start, end, pts):
+def _qualifying_days(state, start, end, pts, config_budget=None):
     """Count days with >=95% observer, >=95% tick and >=80% fresh-du coverage."""
     ticks = _tick_records(state, start, end)
-    required = {name for name, row in _config_budget().get("classes", {}).items()
+    if config_budget is None:
+        config_budget = _config_budget()
+    required = {name for name, row in config_budget.get("classes", {}).items()
                 if isinstance(row, dict) and row.get("measure") == "du"}
     qualifying = 0
     day = start
@@ -400,8 +402,9 @@ def _config_budget():
     return budgets
 
 
-def config_hash():
-    budgets = _config_budget()
+def config_hash(budgets=None):
+    if budgets is None:
+        budgets = _config_budget()
     if not budgets:
         return None
     return hashlib.sha256(json.dumps(budgets, sort_keys=True,
@@ -429,16 +432,17 @@ def pilot_check(state, now, record=True):
     import budget_controls as controls
     if not controls._d2_approved():
         return invalid("d2_not_approved")
-    current_config = config_hash()
+    config_budget = _config_budget()
+    current_config = config_hash(config_budget)
     if current_config is None or budget.get("pilot_config_hash") is None:
         return ["insufficient_data:pilot_config"], 1
     if budget["pilot_config_hash"] != current_config:
         return invalid("budget_changed")
-    if controls.effective_stage(budget) != budget.get("pilot_stage"):
+    if controls.effective_stage(budget, config_budget) != budget.get("pilot_stage"):
         return invalid("stage_changed")
-    if controls.effective_margin(budget) != budget.get("pilot_margin_gb"):
+    if controls.effective_margin(budget, config_budget) != budget.get("pilot_margin_gb"):
         return invalid("margin_changed")
-    qualifying = _qualifying_days(state, start, end, pts)
+    qualifying = _qualifying_days(state, start, end, pts, config_budget)
     if qualifying < MIN_QUALIFYING_DAYS:
         return invalid(f"qualifying_days={qualifying}/7")
     if _births(state, start, end) is None:

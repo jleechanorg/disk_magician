@@ -106,6 +106,19 @@ def passing_pilot_state(tmp):
     return state
 
 
+def config_only_pilot_state(tmp, stage, margin):
+    config = Path(os.environ["DISK_MAGICIAN_CONFIG"])
+    data = json.loads(config.read_text())
+    data["budgets"].update(enforcement=stage, concurrency_margin_gb=margin)
+    config.write_text(json.dumps(data))
+    state = passing_pilot_state(tmp)
+    budget = json.loads((state / "budget.json").read_text())
+    del budget["stage"], budget["margin_gb"]
+    budget.update(pilot_stage=stage, pilot_margin_gb=margin)
+    (state / "budget.json").write_text(json.dumps(budget))
+    return state
+
+
 class IsolatedConfigTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -180,6 +193,46 @@ class PilotCheckTest(IsolatedConfigTest):
             for field in ("B_est=", "W_est=", "r_peak=", "admit_burst_bytes=", "floor_margin_ok=", "pilot_floor_ok="):
                 self.assertIn(field, joined, field)
             self.assertIn("label=estimate", joined)
+
+    def test_config_only_nondefaults_remain_valid_from_one_config_snapshot(self):
+        for stage, margin in (("warn", 10), ("observe", 20)):
+            with self.subTest(stage=stage, margin=margin), tempfile.TemporaryDirectory() as tmp:
+                state = config_only_pilot_state(tmp, stage, margin)
+                with patch.object(ba, "_config_budget", wraps=ba._config_budget) as resolve:
+                    lines, rc = ba.pilot_check(state, WEEK_END)
+                self.assertEqual((rc, lines[0]), (0, "pilot_valid"))
+                resolve.assert_called_once_with()
+
+    def test_config_only_changes_still_invalidate_pilot(self):
+        for key, changed in (("enforcement", "observe"), ("concurrency_margin_gb", 10)):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                state = config_only_pilot_state(tmp, "warn", 20)
+                config = Path(os.environ["DISK_MAGICIAN_CONFIG"])
+                data = json.loads(config.read_text())
+                data["budgets"][key] = changed
+                config.write_text(json.dumps(data))
+                lines, rc = ba.pilot_check(state, WEEK_END)
+                self.assertEqual((rc, lines[0]), (1, "pilot_invalid:budget_changed"))
+
+    def test_state_override_changes_still_invalidate_config_only_pilot(self):
+        for key, changed, reason in (("stage", "observe", "stage_changed"),
+                                     ("margin_gb", 10, "margin_changed")):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                state = config_only_pilot_state(tmp, "warn", 20)
+                budget = json.loads((state / "budget.json").read_text())
+                budget[key] = changed
+                (state / "budget.json").write_text(json.dumps(budget))
+                lines, rc = ba.pilot_check(state, WEEK_END)
+                self.assertEqual((rc, lines[0]), (1, f"pilot_invalid:{reason}"))
+
+    def test_unchanged_state_overrides_take_precedence_over_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = config_only_pilot_state(tmp, "warn", 20)
+            budget = json.loads((state / "budget.json").read_text())
+            budget.update(stage="observe", margin_gb=10, pilot_stage="observe", pilot_margin_gb=10)
+            (state / "budget.json").write_text(json.dumps(budget))
+            lines, rc = ba.pilot_check(state, WEEK_END)
+            self.assertEqual((rc, lines[0]), (0, "pilot_valid"))
 
     def test_fewer_than_six_qualifying_days_invalidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -333,6 +386,14 @@ class CliTest(IsolatedConfigTest):
     def test_bad_flag_is_rc2(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self.run_cli(Path(tmp), "status", "--nope").returncode, 2)
+
+    def test_config_only_nondefaults_pass_pilot_flag(self):
+        for stage, margin in (("warn", 10), ("observe", 20)):
+            with self.subTest(stage=stage, margin=margin), tempfile.TemporaryDirectory() as tmp:
+                state = config_only_pilot_state(tmp, stage, margin)
+                pilot = self.run_cli(state, "status", "--pilot-check", "--at", str(WEEK_END))
+                self.assertEqual(pilot.returncode, 0, pilot.stdout + pilot.stderr)
+                self.assertTrue(pilot.stdout.startswith("pilot_valid"))
 
 
 class CoverageRegressionTest(IsolatedConfigTest):
