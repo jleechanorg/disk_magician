@@ -317,6 +317,36 @@ class TestRunShellTestsParallel(unittest.TestCase):
             self.assertNotEqual(proc_outside.returncode, 0)
             self.assertIn("must be run from a disk_magician git checkout", proc_outside.stderr)
 
+            origin_dir = tmp_dir / "origin.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(origin_dir)], check=True)
+            checkout_dir = tmp_dir / "checkout"
+            checkout_dir.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(checkout_dir), check=True)
+            subprocess.run(["git", "config", "user.email", "test@disk-magician.local"], cwd=str(checkout_dir), check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=str(checkout_dir), check=True)
+            (checkout_dir / "pyproject.toml").write_text('name = "disk-magician"\nversion = "0.2.235"\n', encoding="utf-8")
+            (checkout_dir / "scripts").mkdir()
+            sync_stub = checkout_dir / "scripts" / "sync_package_tree.sh"
+            sync_stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            sync_stub.chmod(0o755)
+            subprocess.run(["git", "add", "pyproject.toml", "scripts/sync_package_tree.sh"], cwd=str(checkout_dir), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(checkout_dir), check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(origin_dir)], cwd=str(checkout_dir), check=True)
+            subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=str(checkout_dir), check=True)
+
+            subdir = checkout_dir / "sub"
+            subdir.mkdir()
+            proc_inside = subprocess.run(
+                ["/bin/bash", str(installed_dm), "deploy", "--check"],
+                cwd=str(subdir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_inside.returncode, 0, msg=proc_inside.stdout + proc_inside.stderr)
+            self.assertIn("deploy_uv_tool: ready head=", proc_inside.stdout)
+            self.assertIn("version=0.2.235", proc_inside.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

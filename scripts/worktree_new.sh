@@ -322,7 +322,7 @@ vals = [hashlib.sha256(raw).hexdigest()] + [
     "" if d.get(k) is None else str(d.get(k))
     for k in ("repo", "path", "branch", "admin_id", "admin_birth_epoch", "checkout_dev", "checkout_ino")
 ]
-sys.stdout.buffer.write(b"".join(v.encode("utf-8") + b"\0" for v in vals))
+sys.stdout.buffer.write(b"".join(v.encode("utf-8", "surrogateescape") + b"\0" for v in vals))
 PY
         ) || continue
         [[ "$lease_repo" == "$repo" ]] || continue

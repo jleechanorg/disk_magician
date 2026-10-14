@@ -210,7 +210,7 @@ def default_jobs() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return max(4, min((os.cpu_count() or 4) * 2, 8))
+    return max(1, min(os.cpu_count() or 4, 8))
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
