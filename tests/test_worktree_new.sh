@@ -386,8 +386,8 @@ mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 reuse_out="$(bash -c '
     source "$1"
     lease_write "$2" "$3" reuse/old reuse-test
-    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
-    lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == reuse/old ]] && echo dead || echo alive; }
+    DISK_MAGICIAN_TEST_OWNER_LEASE="$(lease_path_for "$2")"
+    lease_owner_state() { [[ "$1" == "$DISK_MAGICIAN_TEST_OWNER_LEASE" && "$(_lease_get "$1" branch)" == reuse/old ]] && echo dead || echo alive; }
     worktree_is_recently_active_minutes() { return 1; }
     artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
     wtn_main "$3" feat/recycled --base origin/main --name recycled
@@ -405,8 +405,8 @@ git -C "$REPO" worktree add -q "$NEG_WT" reuse/neg-c14
 bash -c 'source "$1"; lease_write "$2" "$3" reuse/neg-c14 reuse-test' _ "$SCRIPT" "$NEG_WT" "$REPO" >/dev/null 2>&1
 neg_out="$(bash -c '
     source "$1"
-    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
-    lease_owner_state() { echo dead; }
+    DISK_MAGICIAN_TEST_OWNER_LEASE="$(lease_path_for "$2")"
+    lease_owner_state() { [[ "$1" == "$DISK_MAGICIAN_TEST_OWNER_LEASE" ]] && echo dead || echo alive; }
     worktree_is_recently_active_minutes() { return 1; }
     artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }; echo remove; }
     wtn_main "$3" feat/neg-c14 --base origin/main --name neg-c14
@@ -421,9 +421,9 @@ run_reuse_attempt() {
     out="$(bash -c '
         source "$1"
         lease_write "$2" "$3" "$4" reuse-test
-        DISK_MAGICIAN_TEST_OWNER_PATH="$2"
+        DISK_MAGICIAN_TEST_OWNER_LEASE="$(lease_path_for "$2")"
         DISK_MAGICIAN_TEST_OWNER_BRANCH="$4"
-        lease_owner_state() { [[ "$(_lease_get "$1" path)" == "$DISK_MAGICIAN_TEST_OWNER_PATH" && "$(_lease_get "$1" branch)" == "$DISK_MAGICIAN_TEST_OWNER_BRANCH" ]] && echo dead || echo alive; }
+        lease_owner_state() { [[ "$1" == "$DISK_MAGICIAN_TEST_OWNER_LEASE" && "$(_lease_get "$1" branch)" == "$DISK_MAGICIAN_TEST_OWNER_BRANCH" ]] && echo dead || echo alive; }
         worktree_is_recently_active_minutes() { return 1; }
         artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
         [[ -z "$7" ]] || cd "$2"
@@ -479,8 +479,8 @@ git -C "$REPO" worktree add -q "$STALE_WT" reuse/stale-incarnation
 cp "$TMPROOT/stale-lease.json" "$STALE_LEASE"
 fresh="$(bash -c '
     source "$1"
-    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
-    lease_owner_state() { echo dead; }
+    DISK_MAGICIAN_TEST_OWNER_LEASE="$(lease_path_for "$2")"
+    lease_owner_state() { [[ "$1" == "$DISK_MAGICIAN_TEST_OWNER_LEASE" ]] && echo dead || echo alive; }
     worktree_is_recently_active_minutes() { return 1; }
     artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
     wtn_main "$3" feat/stale-incarnation --base origin/main --name stale-incarnation
@@ -502,8 +502,8 @@ json.dump(d,open(p,'w'))
 PY
 fresh="$(bash -c '
     source "$1"
-    DISK_MAGICIAN_TEST_OWNER_PATH="$2"
-    lease_owner_state() { echo dead; }
+    DISK_MAGICIAN_TEST_OWNER_LEASE="$(lease_path_for "$2")"
+    lease_owner_state() { [[ "$1" == "$DISK_MAGICIAN_TEST_OWNER_LEASE" ]] && echo dead || echo alive; }
     worktree_is_recently_active_minutes() { return 1; }
     artifact_removal_verdict() { [[ "${1:-}" == --self-test ]] && { echo ok; return 0; }; wrh_removal_verdict "$1" minutes:120 origin-or-merged-pr; }
     wtn_main "$3" feat/legacy-lease --base origin/main --name legacy-lease

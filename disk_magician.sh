@@ -491,7 +491,16 @@ case "$CMD" in
     exec python3 "$SCRIPT_DIR/scripts/run_shell_tests_parallel.py" "$@"
     ;;
   deploy)
-    exec bash "$SCRIPT_DIR/tools/deploy_uv_tool.sh" "$@"
+    deploy_script="$SCRIPT_DIR/tools/deploy_uv_tool.sh"
+    if [[ ! -x "$deploy_script" ]]; then
+      deploy_repo_root="${DISK_MAGICIAN_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+      deploy_script="$deploy_repo_root/tools/deploy_uv_tool.sh"
+    fi
+    [[ -n "$deploy_script" && -x "$deploy_script" ]] || {
+      echo "diskm deploy: must be run from a disk_magician source checkout containing tools/deploy_uv_tool.sh (or set DISK_MAGICIAN_REPO_ROOT)" >&2
+      exit 1
+    }
+    exec bash "$deploy_script" "$@"
     ;;
   -h|--help)
     usage

@@ -289,7 +289,7 @@ wtn_reuse_rollback() {
 
 
 wtn_reuse() {
-    local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
+    local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash lease_repo owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
     wtn_remote_branch_exists "$repo" "$branch" && return 1
     base_tip="$(git -C "$repo" rev-parse -q --verify "$base^{commit}" 2>/dev/null)" || return 1
@@ -300,19 +300,32 @@ wtn_reuse() {
         [[ -f "$file" ]] || continue
         # Bind all eligibility checks to the exact lease read before owner
         # liveness is evaluated; the claim rechecks this hash under the lock.
-        lease_hash="$(python3 - "$file" <<'PY'
-import hashlib,sys
-try: print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
-except OSError: sys.exit(1)
+        {
+            IFS= read -r -d '' lease_hash &&
+            IFS= read -r -d '' lease_repo &&
+            IFS= read -r -d '' candidate &&
+            IFS= read -r -d '' old &&
+            IFS= read -r -d '' admin_id &&
+            IFS= read -r -d '' admin_birth &&
+            IFS= read -r -d '' checkout_dev &&
+            IFS= read -r -d '' checkout_ino
+        } < <(python3 - "$file" <<'PY'
+import hashlib, json, sys
+try:
+    raw = open(sys.argv[1], "rb").read()
+    d = json.loads(raw)
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.exit(1)
+vals = [hashlib.sha256(raw).hexdigest()] + [
+    "" if d.get(k) is None else str(d.get(k))
+    for k in ("repo", "path", "branch", "admin_id", "admin_birth_epoch", "checkout_dev", "checkout_ino")
+]
+sys.stdout.buffer.write(b"".join(v.encode("utf-8") + b"\0" for v in vals))
 PY
-)" || continue
-        [[ "$(_lease_get "$file" repo)" == "$repo" ]] || continue
-        candidate="$(_lease_get "$file" path)"
-        old="$(_lease_get "$file" branch)"
-        admin_id="$(_lease_get "$file" admin_id)"
-        admin_birth="$(_lease_get "$file" admin_birth_epoch)"
-        checkout_dev="$(_lease_get "$file" checkout_dev)"
-        checkout_ino="$(_lease_get "$file" checkout_ino)"
+        ) || continue
+        [[ "$lease_repo" == "$repo" ]] || continue
         [[ -n "$candidate" && -n "$old" && -d "$candidate" && "$old" != "$branch" ]] || continue
         # Only recycle leases created under the canonical same-repository
         # worktree directory, and only when the lease filename is the one

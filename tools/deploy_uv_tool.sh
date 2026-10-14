@@ -3,7 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${DISK_MAGICIAN_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [[ ! -d "$REPO_ROOT/.git" && ! -f "$REPO_ROOT/.git" ]]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$REPO_ROOT" || ( ! -d "$REPO_ROOT/.git" && ! -f "$REPO_ROOT/.git" ) || ! -f "$REPO_ROOT/pyproject.toml" ]]; then
+  echo "deploy_uv_tool: must be run from a disk_magician git checkout (or set DISK_MAGICIAN_REPO_ROOT)" >&2
+  exit 1
+fi
 CHECK_ONLY=false
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=true
 if [[ $# -gt 0 && "$CHECK_ONLY" != true ]]; then

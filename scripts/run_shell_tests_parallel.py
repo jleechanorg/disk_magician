@@ -210,7 +210,7 @@ def default_jobs() -> int:
             return max(1, int(raw))
         except ValueError:
             pass
-    return max(1, min(os.cpu_count() or 4, 8))
+    return max(4, min((os.cpu_count() or 4) * 2, 8))
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -252,11 +252,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not specs:
         print(
-            "parallel-shell-tests: total=0 passed=0 failed=0 max_concurrent=0 "
-            "wall_s=0.0 serial_sum_s=0.0 speedup=1.00x",
+            "parallel-shell-tests: no test scripts matched",
+            file=sys.stderr,
             flush=True,
         )
-        return 0
+        return 1
 
     jobs = max(1, min(args.jobs, len(specs)))
     shard_root = Path(tempfile.mkdtemp(prefix="dm-ci-shard-", dir="/tmp"))

@@ -13,6 +13,7 @@ CANONICAL_PATTERNS = (
     "launchd/*.plist",
     "launchd/*.plist.template",
     "launchd/*.c",
+    "tools/*.sh",
 )
 
 

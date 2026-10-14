@@ -1,0 +1,7 @@
+include disk_magician.sh
+include config.json.template
+include README.md
+recursive-include config *.txt
+recursive-include scripts *.sh *.py
+recursive-include launchd *.plist *.template *.c
+recursive-include tools *.sh

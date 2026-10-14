@@ -269,6 +269,54 @@ class TestRunShellTestsParallel(unittest.TestCase):
             self.assertIn("dispatched-ok", proc.stdout)
             self.assertIn("parallel-shell-tests: total=1 passed=1 failed=0", proc.stdout)
 
+    def test_empty_test_list_exits_nonzero(self) -> None:
+        """When discovery finds zero test scripts, the runner fails closed (rc != 0)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER_PATH),
+                    "--repo-root",
+                    str(tmp),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no test scripts matched", proc.stderr)
+
+    def test_disk_magician_deploy_checkout_resolution(self) -> None:
+        """disk_magician.sh deploy works from an installed wheel path when run inside a git checkout and fails closed outside a checkout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            wheel_dir = tmp_dir / "installed_wheel"
+            (wheel_dir / "tools").mkdir(parents=True)
+            installed_dm = wheel_dir / "disk_magician.sh"
+            installed_dm.write_text(
+                (REPO_ROOT / "disk_magician.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            installed_dm.chmod(0o755)
+            installed_deploy = wheel_dir / "tools" / "deploy_uv_tool.sh"
+            installed_deploy.write_text(
+                (REPO_ROOT / "tools" / "deploy_uv_tool.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            installed_deploy.chmod(0o755)
+
+            outside_dir = tmp_dir / "outside"
+            outside_dir.mkdir()
+            proc_outside = subprocess.run(
+                ["/bin/bash", str(installed_dm), "deploy", "--check"],
+                cwd=str(outside_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_outside.returncode, 0)
+            self.assertIn("must be run from a disk_magician git checkout", proc_outside.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

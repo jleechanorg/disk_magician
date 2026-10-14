@@ -37,6 +37,7 @@ PATTERNS=(
   "launchd/*.plist"
   "launchd/*.plist.template"
   "launchd/*.c"
+  "tools/*.sh"
 )
 
 if [[ -n "$STAGE_DIR" ]]; then
