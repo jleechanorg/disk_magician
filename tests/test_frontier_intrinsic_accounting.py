@@ -462,8 +462,9 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
     @staticmethod
     def args():
         return SimpleNamespace(
-            workers=1, max_depth=6, max_nodes=100_000_000,
+            root="/fixture", workers=1, max_depth=6, max_nodes=100_000_000, resolve_root=False,
             wall_clock_cap=100, timeout_tiers=[10], granularity_gib=5,
+            no_sibling_volumes=True, no_purgeable=True, shallow_enumeration_depth=0,
         )
 
     @staticmethod
@@ -521,7 +522,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             {item["reason"] for item in report["opaque_intrinsic_gates"]},
             {"permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary"},
         )
-        self.assertEqual(report["accounting_equation"]["clone_shared_adjustment_kb"], -2 * GIB_KB)
+        self.assertEqual(report["accounting_equation"]["clone_shared_kb"], -2 * GIB_KB)
         self.assertTrue(report["accounting_equation"]["displayed_balanced"])
         self.assertTrue(report["coverage_envelope"]["complete"])
         self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
@@ -1059,6 +1060,48 @@ class TestPerPathAccounting(unittest.TestCase):
         self.assertFalse(result["per_path_comparable"])
         self.assertIsNone(result["per_path_raw_total_kb"])
         self.assertIn("unreadable", result["per_path_incomparable_reason"])
+
+    def test_clone_component_within_tolerance_stays_comparable_after_hardlink_split(self):
+        ledger = [{"path": "/a", "measured_kb": 1005 * GIB_KB}]
+        result = frontier.per_path_accounting(ledger, 1000 * GIB_KB)
+        self.assertTrue(result["per_path_comparable"])
+
+
+class TestHardlinkAttribution(unittest.TestCase):
+    def test_per_child_hardlink_duplicate_is_excluded_and_reported(self):
+        scanner = frontier.FrontierScanner(TestIntrinsicGateAccounting.args())
+        scanner.root = "/fixture"
+        scanner.root_dev = 1
+        scanner.start_time = frontier.time.time()
+        scanner.shallow_enumeration_depth = 0
+        scanner.granularity_kb = 0
+        first = "/fixture/a/payload"
+        duplicate = "/fixture/b/payload"
+        inode_stat = SimpleNamespace(
+            st_dev=1, st_ino=77, st_nlink=2, st_mode=stat.S_IFREG,
+            st_blocks=200 * 1024,
+        )
+        with mock.patch.object(frontier.os, "lstat", return_value=inode_stat):
+            scanner.process_node(first, 2, False)
+            scanner.process_node(duplicate, 2, False)
+
+        self.assertEqual(scanner.measured, {first: 100 * GIB_KB // 1024})
+        self.assertEqual(scanner.hardlink_duplicate_kb, 100 * GIB_KB // 1024)
+        self.assertEqual(scanner.hardlink_duplicates[0]["path"], duplicate)
+
+    def test_report_names_hardlink_and_clone_accounting_components(self):
+        report = TestIntrinsicGateAccounting().report(
+            TestIntrinsicGateAccounting().scanner()
+        )
+        equation = report["accounting_equation"]
+        self.assertIn("hardlink_duplicate_kb", equation)
+        self.assertIn("clone_shared_kb", equation)
+        self.assertNotIn("clone_shared_adjustment_kb", equation)
+        self.assertEqual(
+            equation["measured_kb"] + equation["clone_shared_kb"]
+            + equation["purgeable_kb"] + equation["residual_kb"],
+            equation["data_used_kb"],
+        )
 
 
 if __name__ == "__main__":
