@@ -225,6 +225,17 @@ class PilotCheckTest(IsolatedConfigTest):
                 lines, rc = ba.pilot_check(state, WEEK_END)
                 self.assertEqual((rc, lines[0]), (1, f"pilot_invalid:{reason}"))
 
+    def test_malformed_state_overrides_fail_closed(self):
+        for key, malformed, reason in (("stage", "not-a-stage", "stage_changed"),
+                                        ("margin_gb", "invalid-margin", "margin_changed")):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                state = config_only_pilot_state(tmp, "warn", 20)
+                budget = json.loads((state / "budget.json").read_text())
+                budget[key] = malformed
+                (state / "budget.json").write_text(json.dumps(budget))
+                lines, rc = ba.pilot_check(state, WEEK_END)
+                self.assertEqual((rc, lines[0]), (1, f"pilot_invalid:{reason}"))
+
     def test_unchanged_state_overrides_take_precedence_over_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = config_only_pilot_state(tmp, "warn", 20)

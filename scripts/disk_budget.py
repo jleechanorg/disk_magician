@@ -677,7 +677,7 @@ def measure_tick_class(state, budgets, now, deadline):
             merge_classes(state, {name: {"attempted_at": now, "stale_s": int(max(0, now - base))}})
         else:
             merge_classes(state, {name: {"used_gb": kb / 1024.0 / 1024.0, "measured_at": now,
-                                         "attempted_at": now, "stale_s": 0}})
+                                         "attempted_at": now, "stale_s": 0, "carried": False}})
         return name
     finally:
         _measure_unlock(lock)
@@ -701,7 +701,8 @@ def observer_refresh(state, budgets, now):
             and not isinstance(stats.get("measured_at"), bool) else None
         if seen is not None and seen["fresh"]:
             updates[name] = {"used_gb": seen["kb"] / 1024.0 / 1024.0,
-                             "measured_at": seen["observed_at"], "attempted_at": now, "stale_s": 0}
+                             "measured_at": seen["observed_at"], "attempted_at": now,
+                             "stale_s": 0, "carried": False}
         elif base is not None:
             # A stale observer row must not invent a first observation; only grow
             # the age of one already recorded.

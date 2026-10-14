@@ -179,6 +179,15 @@ def _charge_estimate(g, budgets, largest):
     g["estimate_bytes"] = max(_class_budget_bytes(budgets, g["cls"]), largest.get(g["cls"], 0))
 
 
+def _same_birth(g):
+    """A retry may measure only the recorded path's device/inode generation."""
+    try:
+        current = os.lstat(g["path"])
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (g.get("dev"), g.get("ino"))
+
+
 def measure_births(gens, budgets, now, budget_s, deadline_at):
     """Measure births with du, outside state.lock, inside the tick's audit budget.
 
@@ -199,7 +208,7 @@ def measure_births(gens, budgets, now, budget_s, deadline_at):
             continue
         if g.get("charge") == "measured" and _as_int(g.get("bytes")) is not None:
             continue
-        if not os.path.lexists(g["path"]):
+        if not _same_birth(g):
             continue
         retries = _as_int(g.get("unknown_retries")) or 0
         if g.get("charge") == "estimate" and retries >= UNKNOWN_RETRY_LIMIT + 1:
@@ -213,6 +222,8 @@ def measure_births(gens, budgets, now, budget_s, deadline_at):
             _charge_estimate(g, budgets, largest)
             continue
         size = _du_bytes(g["path"], min(MAX_DU_TIMEOUT_S, remaining))
+        if not _same_birth(g):
+            continue  # preserve historical unknown/estimate; these bytes are unbound
         g["measured_at"] = now
         if size is None:
             g["bytes"] = None

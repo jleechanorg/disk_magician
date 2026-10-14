@@ -43,13 +43,36 @@ def digest(path):
     return h.hexdigest()
 
 
-def restore_gitdir(admin, expected):
-    """Restore the captured gitdir bytes without following a retargeted path."""
-    dfd = os.open(admin, DIR)
+def open_admin(record):
+    """Open only the captured C14 admin and gitdir incarnations, or fail closed."""
+    entries, _ = qr.inventory_children(record["worktree_admin_inventory"])
+    root, gitdir = entries["."], entries["gitdir"]
+    if root["type"] != "dir" or gitdir["type"] != "file":
+        raise OSError("invalid admin identity")
+    dfd = os.open(record["worktree_admin_path"], DIR)
     try:
+        opened = os.fstat(dfd)
+        current = os.stat("gitdir", dir_fd=dfd, follow_symlinks=False)
+        if ((opened.st_dev, opened.st_ino) != (root["dev"], root["ino"]) or
+                not stat.S_ISREG(current.st_mode) or
+                (current.st_dev, current.st_ino) != (gitdir["dev"], gitdir["ino"])):
+            raise OSError("admin identity changed")
+        return dfd
+    except Exception:
+        os.close(dfd)
+        raise
+
+
+def restore_gitdir(record, expected):
+    """Restore the captured gitdir bytes without following a retargeted path."""
+    dfd = open_admin(record)
+    try:
+        entries, _ = qr.inventory_children(record["worktree_admin_inventory"])
+        captured = entries["gitdir"]
         before = os.stat("gitdir", dir_fd=dfd, follow_symlinks=False)
-        if not stat.S_ISREG(before.st_mode):
-            raise OSError("gitdir is not a regular file")
+        if (not stat.S_ISREG(before.st_mode) or
+                (before.st_dev, before.st_ino) != (captured["dev"], captured["ino"])):
+            raise OSError("gitdir identity changed")
         fd = os.open("gitdir", os.O_WRONLY | os.O_NOFOLLOW, dir_fd=dfd)
         try:
             opened = os.fstat(fd)
@@ -245,6 +268,7 @@ def phase1(main, worktree, inventory_file, deadline=None):
                     if qr.deadline_passed(deadline):
                         if not qr.finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
                         return "deferred:deadline"
+                    os.close(open_admin(record))
                     run("git", "-C", main, "worktree", "lock", "--reason", reason, worktree, deadline=deadline)
                     record["wrh_phase"] = "locked"
                     if not check_admin(record, lock=True, repaired=False, deadline=deadline):
@@ -266,6 +290,7 @@ def phase1(main, worktree, inventory_file, deadline=None):
                     if why in ("identity-mismatch", "quarantine-dir-changed"): return f"quarantine_conflict:{qid}"
                     if why: return rollback(pfd, qfd, qid, record, reason=why)
                     if qr.deadline_passed(deadline): raise qr.DeadlineExceeded()
+                    os.close(open_admin(record))
                     run("git", "-C", main, "worktree", "repair", qpath, deadline=deadline)
                     record["wrh_phase"] = "repaired"
                     record["repaired_gitdir_sha256"] = digest(os.path.join(admin, "gitdir"))
@@ -297,6 +322,7 @@ def rollback(pfd, qfd, qid, record, reason="admin-changed"):
     base = os.path.basename(record["original"])
     admin = record["worktree_admin_path"]
     try:
+        os.close(open_admin(record))
         try: original_st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
         except FileNotFoundError: original_st = None
         try: qst = os.stat(qid, dir_fd=qfd, follow_symlinks=False)
@@ -308,16 +334,20 @@ def rollback(pfd, qfd, qid, record, reason="admin-changed"):
         if qst is not None:
             if (qst.st_dev, qst.st_ino) != (record["dev"], record["ino"]): return "quarantine_conflict:" + qid
             qpath = os.path.join(parent, ".dm-quarantine", qid)
-            restore_gitdir(admin, (qpath + "/.git\n").encode())
+            restore_gitdir(record, (qpath + "/.git\n").encode())
+            os.close(open_admin(record))
             run("git", "-C", record["worktree_main"], "worktree", "repair", qpath)
+            os.close(open_admin(record))
             safe_rename(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
+            os.close(open_admin(record))
             run("git", "-C", record["worktree_main"], "worktree", "repair", record["original"])
         locked = os.path.join(admin, "locked")
         if os.path.exists(locked):
             if record.get("locked_sha256") and digest(locked) == record.get("locked_sha256"):
+                os.close(open_admin(record))
                 run("git", "-C", record["worktree_main"], "worktree", "unlock", record["original"])
         if record.get("original_gitdir_hex"):
-            restore_gitdir(admin, bytes.fromhex(record["original_gitdir_hex"]))
+            restore_gitdir(record, bytes.fromhex(record["original_gitdir_hex"]))
         restored = os.stat(base, dir_fd=pfd, follow_symlinks=False)
         if (restored.st_dev, restored.st_ino) != (record["dev"], record["ino"]):
             return "quarantine_conflict:" + qid
@@ -422,14 +452,17 @@ def restore(qid, deadline=None):
             return "deferred:deadline"
         if not payload_matches:
             return "deferred:deadline" if qr.deadline_passed(deadline) else "kept:quarantine_partial_kept"
+        os.close(open_admin(record))
         safe_rename(qfd, qid, pfd, base); os.fsync(qfd); os.fsync(pfd)
         original = record["original"]
+        os.close(open_admin(record))
         run("git", "-C", record["worktree_main"], "worktree", "repair", original)
         if record.get("original_gitdir_hex"):
-            restore_gitdir(record["worktree_admin_path"], bytes.fromhex(record["original_gitdir_hex"]))
+            restore_gitdir(record, bytes.fromhex(record["original_gitdir_hex"]))
         locked = os.path.join(record["worktree_admin_path"], "locked")
         if os.path.exists(locked):
             if digest(locked) != record.get("locked_sha256"): return "kept:lock-owner-mismatch"
+            os.close(open_admin(record))
             run("git", "-C", record["worktree_main"], "worktree", "unlock", original)
         if canonical(record["worktree_admin_inventory"]) != canonical(admin_current_inventory(record["worktree_admin_path"])):
             return "kept:admin-changed"

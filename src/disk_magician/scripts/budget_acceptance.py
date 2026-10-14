@@ -438,9 +438,17 @@ def pilot_check(state, now, record=True):
         return ["insufficient_data:pilot_config"], 1
     if budget["pilot_config_hash"] != current_config:
         return invalid("budget_changed")
-    if controls.effective_stage(budget, config_budget) != budget.get("pilot_stage"):
+    try:
+        current_stage = controls.effective_stage(budget, config_budget, strict=True)
+    except ValueError:
         return invalid("stage_changed")
-    if controls.effective_margin(budget, config_budget) != budget.get("pilot_margin_gb"):
+    if current_stage != budget.get("pilot_stage"):
+        return invalid("stage_changed")
+    try:
+        current_margin = controls.effective_margin(budget, config_budget, strict=True)
+    except ValueError:
+        return invalid("margin_changed")
+    if current_margin != budget.get("pilot_margin_gb"):
         return invalid("margin_changed")
     qualifying = _qualifying_days(state, start, end, pts, config_budget)
     if qualifying < MIN_QUALIFYING_DAYS:
