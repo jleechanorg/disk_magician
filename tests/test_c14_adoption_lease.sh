@@ -53,6 +53,10 @@ fixture pr-other "$(J null someone-else scratch)"
 assert_eq "$(eph "$PT/pr-other")" kept:owner-unknown "owner-null scratch lease from another creator still keeps"
 fixture pr-nokind '{"path":"%P","owner":null,"creator":"birth-audit"}'
 assert_eq "$(eph "$PT/pr-nokind")" kept:owner-unknown "owner-null lease with no kind still keeps"
+fixture pr-noowner '{"path":"%P","creator":"birth-audit","kind":"scratch"}'
+assert_eq "$(eph "$PT/pr-noowner")" kept:owner-unknown "lease with no owner field keeps"
+fixture pr-pending '{"path":"%P","owner":null,"pending":true,"creator":"birth-audit","kind":"scratch"}'
+assert_eq "$(eph "$PT/pr-pending")" kept:owner-unknown "pending owner-null lease keeps"
 fixture pr-corrupt 'RAW:{not json'
 case "$(eph "$PT/pr-corrupt")" in kept:*) ok "corrupt lease keeps" ;; *) bad "corrupt lease keeps" ;; esac
 fixture pr-live "$(J "{\"pid\":$$,\"start_epoch\":$(_lease_ps_lstart_epoch $$),\"comm\":\"$(_lease_full_comm $$)\"}" birth-audit scratch)"
