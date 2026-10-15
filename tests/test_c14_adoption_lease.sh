@@ -38,7 +38,7 @@ fixture() {
     if [[ "$2" == RAW:* ]]; then printf '%s' "${2#RAW:}" >"$f"
     else printf '%s\n' "${2//%P/$n}" >"$f"; fi
 }
-J() { printf '{"path":"%%P","owner":%s,"pending":false,"creator":"%s","kind":"%s","released_at":null}' "$1" "$2" "$3"; }
+J() { printf '{"path":"%%P","owner":%s,"pending":false,"creator":"%s","kind":"%s","created_epoch":%d,"ttl_hours":24,"released_at":null}' "$1" "$2" "$3" "$NOW"; }
 
 export DISK_MAGICIAN_STATE_DIR="$TMP/state-control"; mkdir -p "$PT/pr-control" && printf 'x\n' >"$PT/pr-control/f" && age "$PT/pr-control" 50000
 assert_eq "$(eph "$PT/pr-control")" remove "control: aged scratch dir with no lease"
@@ -61,7 +61,8 @@ fixture pr-pending '{"path":"%P","owner":null,"pending":true,"creator":"birth-au
 assert_eq "$(eph "$PT/pr-pending")" kept:owner-unknown "pending owner-null lease keeps"
 fixture pr-corrupt 'RAW:{not json'
 case "$(eph "$PT/pr-corrupt")" in kept:*) ok "corrupt lease keeps" ;; *) bad "corrupt lease keeps" ;; esac
-fixture pr-live "$(J "{\"pid\":$$,\"start_epoch\":$(_lease_ps_lstart_epoch $$),\"comm\":\"$(_lease_full_comm $$)\"}" birth-audit scratch)"
+OWNER_JSON="$(python3 -c 'import json,sys;print(json.dumps({"pid":int(sys.argv[1]),"start_epoch":int(sys.argv[2]),"comm":sys.argv[3]}))' "$$" "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)")"
+fixture pr-live "$(J "$OWNER_JSON" birth-audit scratch)"
 assert_eq "$(eph "$PT/pr-live")" kept:live-owner "live-owner lease keeps even with birth-audit scratch fields"
 fixture pr-mixed "$(J null birth-audit scratch)"
 printf 'y\n' >"$PT/pr-mixed/second.txt"; age "$PT/pr-mixed" 50000
