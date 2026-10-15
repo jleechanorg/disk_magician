@@ -56,6 +56,23 @@ MAX_ACTIVE_RETENTION = 2
 
 JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
+# C14 kept-byte ledger (producer: scripts/c14_probe.py `account`, pinned at
+# c768858e83b0410c47a3e85ac2f522392dcec6e0). The producer appends one compact
+# JSON object per line -- {"at": <epoch int>, "reason": <str>, "bytes": <int>}
+# -- where `bytes` is the sum of `size` for inventory entries of type "file".
+# receipt folding only sums those producer rows: it never infers reclaimed
+# bytes or removals, and an absent ledger leaves receipts byte-compatible.
+C14_LEDGER_ENV = "DISK_MAGICIAN_C14_LEDGER"
+# A shared per-run ledger is folded by exactly one owning receipt. The govern
+# wrapper and nested adapters inherit the path but are given a different owner,
+# so the same producer rows are never counted into two terminal receipts.
+C14_LEDGER_OWNER_ENV = "DISK_MAGICIAN_C14_LEDGER_OWNER"
+MAX_C14_LEDGER_BYTES = 1024 * 1024
+
+C14_LEDGER_STATUS_OK = "ok"
+C14_LEDGER_STATUS_INCOMPLETE = "incomplete"
+C14_LEDGER_STATUS_ERROR = "error"
+
 
 def validate_job_name(job: str) -> None:
     """Validate job name contains only alphanumeric, hyphen, underscore."""
@@ -116,6 +133,70 @@ def sha256_file(path: Path) -> str:
         while chunk := f.read(65536):
             h.update(chunk)
     return h.hexdigest()
+
+
+def fold_c14_ledger(
+    ledger_path: Optional[str],
+    max_bytes: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fold a C14 kept-bytes ledger into receipt postcondition fields.
+
+    Returns None when no ledger is configured or the file does not exist, so a
+    receipt written without C14 accounting keeps its previous shape exactly.
+    Otherwise returns postcondition fields ``c14_kept_bytes`` (reason -> summed
+    producer bytes) and ``c14_ledger_status`` (``ok`` / ``incomplete`` / ``error``).
+
+    Error policy: the ledger is auxiliary accounting, so a malformed, partial or
+    oversized row is never counted as valid data and never aborts the terminal
+    receipt (which would hide it) or an unrelated producer. Valid rows are still
+    folded, and the non-``ok`` status makes the undercount visible for later
+    integration. This mirrors the module's fail-closed store reads, but keeps the
+    failure at the auxiliary boundary rather than the terminal write.
+    """
+    if not ledger_path or not str(ledger_path).strip():
+        return None
+    path = Path(ledger_path).expanduser()
+    try:
+        if not path.exists():
+            return None
+    except OSError:
+        return {"c14_kept_bytes": {}, "c14_ledger_status": C14_LEDGER_STATUS_ERROR}
+
+    cap = MAX_C14_LEDGER_BYTES if max_bytes is None else max_bytes
+    by_reason: Dict[str, int] = {}
+    status = C14_LEDGER_STATUS_OK
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(cap + 1)
+        if len(raw) > cap:
+            status = C14_LEDGER_STATUS_INCOMPLETE
+            raw = raw[:cap]
+        text = raw.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                row = json.loads(stripped)
+            except Exception:
+                status = C14_LEDGER_STATUS_INCOMPLETE
+                continue
+            if not isinstance(row, dict):
+                status = C14_LEDGER_STATUS_INCOMPLETE
+                continue
+            reason = row.get("reason")
+            size = row.get("bytes")
+            if not isinstance(reason, str) or not reason:
+                status = C14_LEDGER_STATUS_INCOMPLETE
+                continue
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                status = C14_LEDGER_STATUS_INCOMPLETE
+                continue
+            by_reason[reason] = by_reason.get(reason, 0) + size
+    except Exception:
+        return {"c14_kept_bytes": {}, "c14_ledger_status": C14_LEDGER_STATUS_ERROR}
+
+    return {"c14_kept_bytes": by_reason, "c14_ledger_status": status}
 
 
 def resolve_identity(
@@ -508,6 +589,13 @@ class JobReceiptStore:
                         and post.get("df_delta_bytes") is None:
                     post["df_delta_bytes"] = None
                     outcome, reason = "error", "null_df_delta"
+
+                c14_env = os.environ.get(C14_LEDGER_ENV)
+                c14_owner = os.environ.get(C14_LEDGER_OWNER_ENV)
+                if c14_env and (not c14_owner or c14_owner == job):
+                    c14_post = fold_c14_ledger(c14_env)
+                    if c14_post is not None:
+                        post.update(c14_post)
 
                 identity_info = (
                     matching_active.get("identity")

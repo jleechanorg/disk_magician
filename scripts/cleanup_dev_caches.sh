@@ -6,6 +6,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 DRY_RUN=true
 usage() {
@@ -66,7 +68,7 @@ clean_dir_contents() {
     log "$1: SAFETY-SKIP ($_safety_reason)"
     return
   fi
-  local label="$1" path="$2" recreate="${3:-false}"
+  local label="$1" path="$2" recreate="${3:-false}" kind="${4:-}"
 
   if [[ ! -d "$path" ]]; then
     log "$label: directory not found, skipping"
@@ -82,7 +84,17 @@ clean_dir_contents() {
     return
   fi
 
-  find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  # Per-entry so each top-level cache entry gets its own C14 verdict; a kept
+  # entry (provenance-less) does not abort the rest of the sweep.
+  local entry
+  while IFS= read -r -d '' entry; do
+    [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
+    if [[ -n "$kind" ]]; then
+      c14_remove "$entry" --kind "$kind" || true
+    else
+      c14_remove "$entry" || true
+    fi
+  done < <(find "$path" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
 
   if [[ "$recreate" == true ]]; then
     mkdir -p "$path"
@@ -102,11 +114,11 @@ clean_dir_contents "gemini tmp" "$HOME/.gemini/tmp" true
 
 # 2. ~/.cache/uv/
 log "=== Section 2: ~/.cache/uv/ ==="
-clean_dir_contents "uv cache" "$HOME/.cache/uv" false
+clean_dir_contents "uv cache" "$HOME/.cache/uv" false rebuildable
 
 # 3. ~/.cache/pre-commit/
 log "=== Section 3: ~/.cache/pre-commit/ ==="
-clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false
+clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false rebuildable
 
 # 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches"). Apps that
 # are running (cmux, Aside, Chrome, Cursor) are left to their needs_decision gates.
@@ -118,7 +130,11 @@ for approved_cache in \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
   "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
-  clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false
+  approved_kind=rebuildable
+  # The ezgha recovery target is explicitly a non-cache target (spec §7.2):
+  # ordinary provenance, not the fixed cache-root table.
+  [[ "${approved_cache%%:*}" == "ezgha recovery target" ]] && approved_kind=""
+  clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false "$approved_kind"
 done
 
 # 4. opencode safe subdirs
@@ -135,6 +151,7 @@ else
     target="$OPENCODE_DIR/$subdir"
     [[ ! -d "$target" ]] && continue
     while IFS= read -r -d '' entry; do
+      [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
       if [[ "$DRY_RUN" == true ]]; then
         log "opencode $subdir/: [dry-run] would delete $entry"
       else
@@ -142,7 +159,7 @@ else
         if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
           echo "SAFETY-SKIP "$entry" ($_safety_reason)"
         else
-          rm -rf "$entry"
+          c14_remove "$entry" --kind rebuildable || true
         fi
       fi
     done < <(find "$target" -mindepth 1 -maxdepth 1 -mtime +14 -print0 2>/dev/null)
@@ -200,6 +217,7 @@ else
         log "cursor-agent versions: preserving active version $entry"
         continue
       fi
+      [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
       if [[ "$DRY_RUN" == true ]]; then
         log "cursor-agent versions: [dry-run] would delete $entry"
       else
@@ -207,7 +225,7 @@ else
         if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
           echo "SAFETY-SKIP "$entry" ($_safety_reason)"
         else
-          rm -rf "$entry"
+          c14_remove "$entry" --kind rebuildable || true
         fi
       fi
     done
@@ -224,7 +242,7 @@ fi
 
 # 6. ~/.npm/_cacache
 log "=== Section 6: ~/.npm/_cacache ==="
-clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false
+clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false rebuildable
 
 # 7. claude-cli-nodejs and go-build Library/Caches (Fix #8)
 #
@@ -262,6 +280,7 @@ for dev_cache_path in \
 
   found_old_entry=false
   while IFS= read -r -d '' entry; do
+    [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
     found_old_entry=true
     if [[ "$DRY_RUN" == true ]]; then
       log "$dev_cache_label: [dry-run] would delete $entry"
@@ -270,7 +289,7 @@ for dev_cache_path in \
       if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$entry" ($_safety_reason)"
       else
-        rm -rf "$entry"
+        c14_remove "$entry" --kind rebuildable || true
       fi
     fi
   done < <(find "$dev_cache_path" -mindepth 1 -maxdepth 1 -mtime +"$DEV_CACHE_DAYS" -print0 2>/dev/null)
@@ -300,7 +319,7 @@ elif pgrep -f "bazel" >/dev/null 2>&1; then
 elif [[ -n "$(lsof +D "$DEV_BAZEL_CACHE" 2>/dev/null | head -2 | tail -1)" ]]; then
   log "dev bazel cache: SKIP — open files in cache"
 else
-  clean_dir_contents "dev bazel cache" "$DEV_BAZEL_CACHE" false
+  clean_dir_contents "dev bazel cache" "$DEV_BAZEL_CACHE" false rebuildable
 fi
 
 # N. ~/.cache/wiki-publish — shadow and review-council test checkouts

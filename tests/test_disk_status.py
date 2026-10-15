@@ -37,9 +37,9 @@ import history_diff
 from job_receipt import JobReceiptStore
 
 USER_PROBE_PATHS = {
-    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
-    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
-    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+    "mobile_sync": os.path.join("/Users/test-user", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/test-user", "Library", "Mail"),
+    "messages": os.path.join("/Users/test-user", "Library", "Messages"),
 }
 
 

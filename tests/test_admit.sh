@@ -178,6 +178,18 @@ python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["budgets"]["concu
   "$REPO_ROOT/config.json.template" "$T/strmargin.json"
 DISK_MAGICIAN_CONFIG="$T/strmargin.json" check_blind 'string concurrency_margin_gb'
 
+# A present-but-malformed persisted stage/margin override is conservative too;
+# only an *absent* override may fall through to the configured value.
+config refuse_red; fake_df 150
+for bad in '{"stage": null}' '{"margin_gb": null}' '{"stage": "bogus"}' '{"stage": 5}' '{"margin_gb": "x"}' '{"margin_gb": true}'; do
+  printf '%s' "$bad" > "$T/state/budget.json"
+  "$DISKM" admit --class worktrees --est-gb 0 >/dev/null 2>"$T/err"; assert_eq "$?" 0 "rc: persisted override $bad"
+  assert_eq "$(last decision)" 10 "blind: persisted override $bad"
+  [[ "$(cat "$T/err")" == *admission_degraded:blind* && "$(cat "$T/err")" != *Traceback* ]] &&
+    ok "degraded, no traceback: $bad" || bad "stderr ($bad): $(cat "$T/err")"
+done
+rm -f "$T/state/budget.json"
+
 echo "── 10. a df_delta_only class never counts as over budget ──"
 fake_df 80; config refuse_orange
 python3 -c 'import json,sys,time; t=time.time(); json.dump({"zone":"ORANGE","zone_at":t,"free_bytes":80<<30,"classes":{"codex_documents":{"used_gb":99,"budget_gb":3,"measured_at":t}}}, open(sys.argv[1],"w"))' "$T/state/budget.json"

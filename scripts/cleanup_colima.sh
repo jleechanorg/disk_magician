@@ -16,6 +16,8 @@ while [[ -h "$SCRIPT_SOURCE" ]]; do
   [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+# shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 
 # shellcheck source=scripts/lib/docker_probe.sh
 if [[ -f "$SCRIPT_DIR/lib/docker_probe.sh" ]]; then
@@ -29,6 +31,7 @@ PRUNE_VOLUMES=false
 TRIM_ONLY=false
 TRIM_GB="${DISK_MAGICIAN_COLIMA_TRIM_GB:-8}"
 TRIM_TIMEOUT_SEC="${DISK_MAGICIAN_COLIMA_TRIM_TIMEOUT:-300}"
+ACTUATOR_REMOVED_COUNT=0
 
 usage() {
   cat <<EOF
@@ -56,6 +59,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+  ACTUATOR_RECEIPT_ENABLED=1
+  actuator_receipt_begin "$SCRIPT_DIR" cleanup_colima "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" || {
+    echo "ERROR: could not begin governed cleanup receipt" >&2; exit 3;
+  }
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -86,8 +96,44 @@ run_cmd() {
     log "[dry-run] $*"
   else
     log "+ $*"
-    "$@" || log "WARNING: command failed: $*"
+    local output rc=0 line
+    output="$("$@" 2>&1)" || rc=$?
+    while IFS= read -r line; do [[ -z "$line" ]] || log "$line"; done <<< "$output"
+    if [[ "$rc" == 0 ]]; then record_docker_prune_output "$output"; else
+      log "WARNING: command failed: $* (rc=$rc)"
+      report_status=1
+    fi
   fi
+}
+
+run_builder_prune() {
+  [[ "$DRY_RUN" == true ]] && { log "[dry-run] docker builder prune -af --reserved-space 5g"; return 0; }
+  local output rc=0 line
+  if output="$(docker builder prune -af --reserved-space 5g 2>&1)"; then :
+  else
+    if output="$(docker builder prune -af --keep-storage 5g 2>&1)"; then rc=0; else rc=$?; fi
+  fi
+  while IFS= read -r line; do [[ -z "$line" ]] || log "$line"; done <<< "$output"
+  if [[ "$rc" == 0 ]]; then record_docker_prune_output "$output"; else
+    log "WARNING: builder prune failed (rc=$rc)"
+    report_status=1
+  fi
+}
+
+record_docker_prune_output() {
+  local count
+  count="$(printf '%s\n' "$1" | awk '
+    /^Deleted Containers:$/ {section="items"; next}
+    /^Deleted Networks:$/ {section="items"; next}
+    /^Deleted Volumes:$/ {section="items"; next}
+    /^Deleted Images:$/ {section="images"; next}
+    /^Deleted build cache objects:/ {section="build"; next}
+    /^Total reclaimed space:/ {section=""; next}
+    section == "items" && NF {n++; next}
+    section == "images" && /^deleted:[[:space:]]+/ {n++; next}
+    section == "build" && NF {n++}
+    END {print n+0}' )"
+  ACTUATOR_REMOVED_COUNT=$((ACTUATOR_REMOVED_COUNT + count))
 }
 
 COLIMA_LIMA="$HOME/.colima/_lima"
@@ -129,7 +175,10 @@ prove_colima_docker_backend() {
   fi
   if ! colima_socket_is_trusted; then
     log "Expected Colima Docker socket is missing, not a socket, symlinked, or not user-owned — skipping: $COLIMA_DOCKER_SOCKET"
-    return 1
+    # Endpoint is provably the expected Colima socket but the socket is absent/
+    # untrusted — a Stopped VM has no socket, so signal 2 to let main route to
+    # the guarded recovery path instead of silently skipping.
+    return 2
   fi
   return 0
 }
@@ -138,6 +187,9 @@ select_colima_docker_backend() {
   local context endpoint
 
   if [[ -n "${DOCKER_CONTEXT:-}" || -n "${DOCKER_HOST:-}" ]]; then
+    # Explicit selection: an endpoint matching the expected Colima socket but
+    # with the socket absent/untrusted returns 2 (Stopped VM) from prove; an
+    # unrelated endpoint returns 1 and main stays refused.
     prove_colima_docker_backend
     return $?
   fi
@@ -152,6 +204,10 @@ select_colima_docker_backend() {
   fi
 
   if [[ "$endpoint" == "unix://$COLIMA_DOCKER_SOCKET" ]]; then
+    # Reuse the explicit-selection contract: prove re-inspects and returns its
+    # measured result (0 trusted, 2 expected socket absent/untrusted for a
+    # Stopped VM, 1 changed endpoint, 10 probe failure/timeout). Preserve that
+    # rc so main never treats a failed or changed second proof as Stopped.
     prove_colima_docker_backend
     return $?
   fi
@@ -198,6 +254,114 @@ fstrim_colima_disk() {
   fstrim_via_active_lima_mux
 }
 
+# True only when the status probe itself succeeds and reports the profile Stopped.
+# A Stopped VM has zero running containers; any probe failure stays not-proven.
+colima_vm_is_stopped() {
+  local out
+  command -v colima >/dev/null 2>&1 || return 1
+  # Lock paths/instance name/socket are pinned to the default profile.
+  [[ "${COLIMA_PROFILE:-default}" == "default" ]] || return 1
+  out=$(bounded 15 colima list 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk '$1=="default" && $2=="Stopped" {f=1} END {exit !f}'
+}
+
+# Inspect one candidate path with lsof and classify holder state:
+#   holder    -> a live process holds a file under the path (authoritative)
+#   clear     -> no holder and no diagnostics; path may be considered free
+#   unproven  -> lsof missing/errored/timed out, or exit 1 carried a stderr
+#                diagnostic (incomplete scan) -> caller must fail closed
+# $1 = dir|file, $2 = path. Mirrors the fail-closed inspection pattern in
+# cleanup_code_sign_clones.sh (lsof_state): keep stdout records separate from
+# stderr diagnostics, and trust a numeric PID column over the exit code because
+# macOS lsof returns 1 even when +D emitted valid matches.
+colima_lsof_holder_state() {
+  local mode="$1" target="$2" err_file out diagnostics rc=0
+  err_file=$(mktemp "${TMPDIR:-/tmp}/dm-colima-lsof.XXXXXX" 2>/dev/null) || { printf 'unproven\n'; return 0; }
+  if [[ "$mode" == "dir" ]]; then
+    out=$(bounded 15 lsof -nP +D "$target" 2>"$err_file") || rc=$?
+  else
+    # +D requires a directory; a bare path lists holders of that exact file.
+    out=$(bounded 15 lsof -nP "$target" 2>"$err_file") || rc=$?
+  fi
+  diagnostics=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+  if printf '%s\n' "$out" | awk '$2 ~ /^[0-9]+$/ {f=1} END {exit !f}'; then
+    printf 'holder\n'; return 0
+  fi
+  if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
+    printf 'unproven\n'; return 0
+  fi
+  if [[ -z "$out" && -z "$diagnostics" ]]; then
+    printf 'clear\n'; return 0
+  fi
+  printf 'unproven\n'
+}
+
+# Stale lima disk lock: disk "colima" IN-USE-BY the colima instance while no
+# hostagent/VZ/QEMU/unknown process or live pid file holds the datadisk.
+# lsof is authoritative: it lists ANY process (VZ's Virtualization VM has no
+# "colima" token in its cmdline). Missing/erroring lsof means holder state is
+# unproven -> fail closed. Live -> not stale.
+colima_disk_lock_is_stale() {
+  local lima_home="$COLIMA_LIMA" listing pidf pid psout spec mode cand state probed=0
+  [[ "${COLIMA_PROFILE:-default}" == "default" ]] || return 1
+  command -v limactl >/dev/null 2>&1 || return 1
+  listing=$(LIMA_HOME="$lima_home" bounded 15 limactl disk list colima 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | awk '$1=="colima" && NF==5 && $NF=="colima" {f=1} END {exit !f}' || return 1
+  for pidf in "$lima_home"/colima/*.pid; do
+    [[ -f "$pidf" ]] || continue
+    pid=$(tr -dc '0-9' < "$pidf" 2>/dev/null) || return 1
+    [[ -n "$pid" ]] || return 1   # unreadable/empty pid file: not proven stale
+    if kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+  done
+  # Any process holding the datadisk dir OR the live VZ diffdisk sibling keeps
+  # the lock live. A scan error or diagnostic is unproven -> fail closed.
+  for spec in "dir:$lima_home/_disks/colima" "file:$lima_home/colima/diffdisk"; do
+    mode="${spec%%:*}"; cand="${spec#*:}"
+    [[ -e "$cand" ]] || continue
+    probed=1
+    state=$(colima_lsof_holder_state "$mode" "$cand")
+    [[ "$state" == "clear" ]] || return 1   # holder OR unproven
+  done
+  [[ "$probed" -eq 1 ]] || return 1          # no disk path existed to prove absence
+  psout=$(ps -axo command 2>/dev/null) || return 1
+  [[ -n "$psout" ]] || return 1
+  if printf '%s\n' "$psout" | grep -E 'limactl.*hostagent|lima.*hostagent|qemu-system|qemu-kvm|Virtualization.*colima|limactl.*(start|hostagent).*colima' | grep -v grep >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+colima_start_with_stale_lock_retry() {
+  if colima start >/dev/null 2>&1; then
+    return 0
+  fi
+  log "WARNING: colima start failed"
+  if ! colima_disk_lock_is_stale; then
+    log "WARNING: no provably stale Lima disk lock (live hostagent/pid, lock absent, or probe failed) — failing closed, not unlocking."
+    return 1
+  fi
+  # Re-probe immediately before the named unlock. Another Colima/Lima process
+  # may have acquired the datadisk after the first check; never unlock if the
+  # holder state changed or can no longer be proven stale.
+  if ! colima_disk_lock_is_stale; then
+    log "WARNING: Lima disk lock state changed before unlock (live holder appeared or probe failed) — failing closed, not unlocking."
+    return 1
+  fi
+  log "Stale Lima disk lock on 'colima' (in-use-by self, no live hostagent/limactl/VZ process) — unlocking and retrying start once."
+  if ! LIMA_HOME="$COLIMA_LIMA" bounded 30 limactl disk unlock colima >/dev/null 2>&1; then
+    log "WARNING: limactl disk unlock colima failed — failing closed."
+    return 1
+  fi
+  if colima start >/dev/null 2>&1; then
+    return 0
+  fi
+  log "WARNING: colima start failed again after disk unlock"
+  return 1
+}
+
 recover_colima_wedge_once() {
   local running_containers
 
@@ -206,21 +370,26 @@ recover_colima_wedge_once() {
     return 1
   fi
 
-  if ! running_containers=$(docker_probe ps -q 2>/dev/null); then
-    log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
-    return 1
-  fi
-  if [[ -n "$running_containers" ]]; then
-    log "WARNING: refusing Colima restart because running containers remain."
-    return 1
+  local vm_stopped=false
+  if colima_vm_is_stopped; then
+    vm_stopped=true
+    log "Colima VM reports Stopped — zero running containers by definition; restart guard satisfied."
+  else
+    if ! running_containers=$(docker_probe ps -q 2>/dev/null); then
+      log "WARNING: refusing Colima restart because Docker could not prove that no containers are running."
+      return 1
+    fi
+    if [[ -n "$running_containers" ]]; then
+      log "WARNING: refusing Colima restart because running containers remain."
+      return 1
+    fi
   fi
 
   log "WARNING: trim failed; attempting approved Colima restart recovery"
-  if ! colima stop >/dev/null 2>&1; then
+  if [[ "$vm_stopped" != true ]] && ! colima stop >/dev/null 2>&1; then
     log "WARNING: colima stop failed"
   fi
-  if ! colima start >/dev/null 2>&1; then
-    log "WARNING: colima start failed"
+  if ! colima_start_with_stale_lock_retry; then
     return 1
   fi
   sleep 2
@@ -229,6 +398,24 @@ recover_colima_wedge_once() {
     return $?
   fi
   log "WARNING: Docker backend unhealthy after restart"
+  return 1
+}
+
+# Shared guarded-recovery entry point. Reached both when the Docker daemon is
+# unreachable on a proven Colima backend and when the Colima socket is simply
+# absent because the VM is Stopped. Approval + dry-run gates still apply.
+attempt_guarded_colima_recovery() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DEGRADED / SKIPPED: guarded Colima restart recovery was not attempted in dry-run."
+    return 1
+  fi
+  if command -v colima >/dev/null 2>&1; then
+    if recover_colima_wedge_once; then
+      log "Colima restart recovery succeeded."
+      return 0
+    fi
+    log "WARNING: initial Docker recovery failed"
+  fi
   return 1
 }
 
@@ -250,6 +437,10 @@ if [[ "$TRIM_ONLY" == true ]]; then
     log "trim-only: datadisk $(fmt_kb "$disk_kb") <= ${TRIM_GB}G — no trim."
     exit 0
   fi
+  if colima_vm_is_stopped; then
+    log "trim-only: Colima VM is Stopped — nothing to trim until it is started (guarded recovery: VACATE_CI_RUNNERS_APPROVED=1 cleanup_colima.sh --clean)."
+    exit 0
+  fi
   log "trim-only: datadisk $(fmt_kb "$disk_kb") > ${TRIM_GB}G — in-VM fstrim (timeout ${TRIM_TIMEOUT_SEC}s)."
   if ! command -v colima >/dev/null 2>&1 || ! fstrim_colima_disk; then
     log "DEGRADED: trim-only fstrim failed (Colima/ssh unreachable or timed out) — no restart from this path."
@@ -259,6 +450,9 @@ fi
 
 if ! command -v docker >/dev/null 2>&1; then
   log "docker CLI not found — skipping Colima cleanup."
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=docker_unavailable
+  fi
   exit 0
 fi
 
@@ -267,24 +461,25 @@ select_colima_docker_backend || backend_rc=$?
 if [[ "$backend_rc" -eq 10 ]]; then
   log "DEGRADED / SKIPPED: Docker backend identity probe failed or timed out."
   exit 1
+elif [[ "$backend_rc" -eq 2 ]] && colima_vm_is_stopped; then
+  # Colima socket absent/untrusted but the default profile is provably Stopped:
+  # a Stopped VM has no socket, so recovery must not depend on one.
+  log "DEGRADED / SKIPPED: Colima backend expected but socket absent; default profile is Stopped — checking guarded Colima recovery."
+  if attempt_guarded_colima_recovery; then
+    exit 0
+  fi
+  exit 1
 elif [[ "$backend_rc" -ne 0 ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=non_colima_docker_backend
+  fi
   exit 0
 fi
 
 if ! docker_probe info >/dev/null 2>&1; then
   log "DEGRADED / SKIPPED: Docker daemon unreachable or probe timed out — checking guarded Colima recovery."
-  if [[ "$DRY_RUN" == true ]]; then
-    log "DEGRADED / SKIPPED: guarded Colima restart recovery was not attempted in dry-run."
-    exit 1
-  fi
-  if command -v colima >/dev/null 2>&1; then
-    if recover_colima_wedge_once; then
-      log "Colima restart recovery succeeded."
-      exit 0
-    else
-      log "WARNING: initial Docker recovery failed"
-      exit 1
-    fi
+  if attempt_guarded_colima_recovery; then
+    exit 0
   fi
   exit 1
 fi
@@ -300,13 +495,7 @@ if ! docker_probe system df; then
 fi
 
 log "=== builder prune (cap 5g reserved) ==="
-if [[ "$DRY_RUN" == true ]]; then
-  log "[dry-run] docker builder prune -af --reserved-space 5g"
-else
-  docker builder prune -af --reserved-space 5g 2>/dev/null \
-    || docker builder prune -af --keep-storage 5g 2>/dev/null \
-    || log "WARNING: builder prune failed"
-fi
+run_builder_prune
 
 log "=== image prune (unused) ==="
 run_cmd docker image prune -af
@@ -329,7 +518,8 @@ prune_orphaned_volumes() {
     refs=$(printf "%s\n" "$ps_out" | grep -c . || true)
     [[ "$refs" -ne 0 ]] && continue
     log "+ docker volume rm $vol"
-    docker volume rm "$vol" 2>/dev/null || log "WARNING: could not remove $vol"
+    if docker volume rm "$vol" 2>/dev/null; then ACTUATOR_REMOVED_COUNT=$((ACTUATOR_REMOVED_COUNT + 1))
+    else log "WARNING: could not remove $vol"; fi
   done <<< "$vol_list"
 }
 
@@ -349,6 +539,9 @@ if [[ "$PRUNE_VOLUMES" == true ]]; then
 fi
 
 if [[ "$DRY_RUN" == true ]]; then
+  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+    ACTUATOR_OUTCOME=success_noop; ACTUATOR_REASON=dry_run
+  fi
   log "=== DRY-RUN complete — nothing pruned ==="
 else
   after_kb=$(size_kb "$COLIMA_LIMA")

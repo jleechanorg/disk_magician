@@ -17,7 +17,7 @@
 # 6. Policy gates:
 #    - normal under-cap archive is guarded and preserved when open
 #    - normal under-cap archive is purged when closed
-#    - over-cap archive (>168h) purges unconditionally (bypassing open-file check)
+#    - over-cap archive (>168h) remains subject to C14 activity and ownership checks
 # 7. --large guard placement:
 #    - open-file check runs after marker and mtime checks, directly before archive_path.
 #
@@ -81,6 +81,10 @@ run_capture() {
   "$@" >"$out_file" 2>&1
   local rc=$?
   set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "run_capture command failed with rc=$rc; captured output follows:" >&2
+    cat "$out_file" >&2
+  fi
   return "$rc"
 }
 make_find_shim() {
@@ -173,6 +177,14 @@ make_find_shim "$T1_BIN" "$T1_PRIVATE_TMP" "$T1_TMP"
 make_fake_timeout "$T1_BIN/timeout"
 cat > "$T1_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
+if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1234"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
 for arg in "$@"; do
   if [[ "$arg" == *"+D"* || "$arg" == "+D" ]]; then
     echo "ERROR: +D is forbidden: $*" >&2
@@ -207,8 +219,8 @@ T1_OUT_CONTENT=$(cat "$T1_OUT")
 assert_rc "Test 1: exits 0" 0 "$T1_RC"
 assert_not_contains "Test 1: fake lsof did not reject +D" "+D is forbidden" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpected flags" "$T1_OUT_CONTENT"
-assert_contains "Test 1: aged archive purged with targetless machine lsof" "Purging aged archive" "$T1_OUT_CONTENT"
-assert_missing "Test 1: archive dir purged" "$T1_ARCHIVE/20200101T000000Z"
+assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
+assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: Fresh authoritative scan at each guarded destructive decision
 # (closed on scan 1, then open on pre-mutation scan -> candidate preserved)
@@ -262,7 +274,8 @@ run_capture "$T2_OUT" env -i HOME="$TMP_ROOT/t2-home" \
 T2_RC=$?
 T2_OUT_CONTENT=$(cat "$T2_OUT")
 assert_rc "Test 2: exits 0" 0 "$T2_RC"
-assert_missing "Test 2: app1 (scanned closed) is purged" "$T2_ARCHIVE/20200101T000000Z"
+assert_exists "Test 2: closed app1 remains until it has C14 proof" "$T2_ARCHIVE/20200101T000000Z/app1"
+assert_contains "Test 2: closed app1 reaches C14" "C14 kept:cwd-unknown" "$T2_OUT_CONTENT"
 assert_exists "Test 2: app2 (scanned open on fresh scan) is preserved" "$T2_ARCHIVE/20200102T000000Z"
 assert_contains "Test 2: logs skipping in-use for app2" "Skipping in-use aged archive" "$T2_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,13 +337,32 @@ touch "$T4_ARCHIVE/20200101T000000Z/app/payload.bin"
 set_old_mtime "$T4_ARCHIVE/20200101T000000Z"
 make_find_shim "$T4_BIN" "$T4_PRIVATE_TMP" "$T4_TMP"
 make_fake_timeout "$T4_BIN/timeout"
-T4_CANON=$(cd "$T4_ARCHIVE/20200101T000000Z" && pwd -P)
+T4_CANON=$(cd "$T4_ARCHIVE/20200101T000000Z/app" && pwd -P)
 # 4a: Prefix collision: file in "${T4_CANON}_other/file.txt" must NOT match "${T4_CANON}"
 cat > "$T4_BIN/lsof" <<EOF
 #!/usr/bin/env bash
+# C14 open-file probe starts with -w: no matching descriptor => closed.
+if [[ "\${1:-}" == "-w" ]]; then exit 1; fi
+# Live-cwd probe must return a well-formed non-candidate cwd record.
+if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1234"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
+for arg in "\$@"; do
+  if [[ "\$arg" == *"+D"* || "\$arg" == "+D" ]]; then
+    echo "ERROR: +D is forbidden: \$*" >&2
+    exit 99
+  fi
+done
+if [[ "\$*" != "+w -n -P -F fnt" ]]; then
+  echo "ERROR: unexpected flags: \$*" >&2
+  exit 98
+fi
+# Prefix collision: candidate path is prefix but not slash-delimited
 echo "p3333"
 echo "f4"
-# Prefix collision: candidate path is prefix but not slash-delimited
 echo "n${T4_CANON}_collision_extra/sub/file.txt"
 exit 0
 EOF
@@ -348,14 +380,29 @@ run_capture "$T4_OUT" env -i HOME="$TMP_ROOT/t4-home" \
 T4_RC=$?
 T4_OUT_CONTENT=$(cat "$T4_OUT")
 assert_rc "Test 4a: exits 0" 0 "$T4_RC"
-assert_missing "Test 4a: prefix collision does NOT protect candidate; it is purged" "$T4_ARCHIVE/20200101T000000Z"
+assert_exists "Test 4a: prefix-collision candidate is not protected by the open-file check" "$T4_ARCHIVE/20200101T000000Z/app"
+assert_not_contains "Test 4a: prefix collision did not count as an open file" "Skipping in-use aged archive" "$T4_OUT_CONTENT"
+assert_not_contains "Test 4a: C14 open-file probe did not match the collision" "C14 kept:open-file" "$T4_OUT_CONTENT"
+assert_contains "Test 4a: candidate reaches C14 provenance (unproven receipt)" "C14 kept:unproven-content" "$T4_OUT_CONTENT"
 # 4b: Exact directory match protects candidate
 mkdir -p "$T4_ARCHIVE/20200102T000000Z/app"
 touch "$T4_ARCHIVE/20200102T000000Z/app/payload.bin"
 set_old_mtime "$T4_ARCHIVE/20200102T000000Z"
-T4B_CANON=$(cd "$T4_ARCHIVE/20200102T000000Z" && pwd -P)
+T4B_CANON=$(cd "$T4_ARCHIVE/20200102T000000Z/app" && pwd -P)
 cat > "$T4_BIN/lsof" <<EOF
 #!/usr/bin/env bash
+# C14 open-file probe starts with -w: no matching descriptor => closed.
+if [[ "\${1:-}" == "-w" ]]; then exit 1; fi
+for arg in "\$@"; do
+  if [[ "\$arg" == *"+D"* || "\$arg" == "+D" ]]; then
+    echo "ERROR: +D is forbidden: \$*" >&2
+    exit 99
+  fi
+done
+if [[ "\$*" != "+w -n -P -F fnt" ]]; then
+  echo "ERROR: unexpected flags: \$*" >&2
+  exit 98
+fi
 echo "p4444"
 echo "fcwd"
 # Exact directory match (e.g. cwd of process)
@@ -378,6 +425,7 @@ T4B_OUT_CONTENT=$(cat "$T4_OUT")
 assert_rc "Test 4b: exits 0" 0 "$T4B_RC"
 assert_exists "Test 4b: exact dir match preserves archive" "$T4_ARCHIVE/20200102T000000Z"
 assert_contains "Test 4b: logs skipping in-use" "Skipping in-use aged archive" "$T4B_OUT_CONTENT"
+assert_not_contains "Test 4b: lsof stub did not reject the targeted scan" "unexpected flags" "$T4B_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 5: Fail-closed matrix: timeout, nonzero, stderr, malformed, missing-lsof, missing-timeout
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,9 +583,9 @@ assert_rc "Test 5f (missing timeout): exits 0" 0 $?
 assert_exists "Test 5f: archive preserved on missing timeout" "$T5_ARCHIVE/20200101T000000Z"
 assert_contains "Test 5f: logs missing timeout" "Open-file check unavailable" "$(cat "$T5_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 6: Policy gates: normal under-cap vs over-cap bypass
+# Test 6: Policy gates: normal under-cap and over-cap both respect C14 guards
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 6: Policy gates: normal under-cap is guarded; over-cap bypasses activity guards"
+echo "Test 6: Policy gates: over-cap does not bypass activity guards"
 T6_PRIVATE_TMP="$TMP_ROOT/t6-private-tmp"
 T6_TMP="$TMP_ROOT/t6-tmp"
 T6_ARCHIVE="$TMP_ROOT/t6-archive"
@@ -572,7 +620,7 @@ run_capture "$T6_OUT" env -i HOME="$TMP_ROOT/t6-home" \
 assert_rc "Test 6a (under-cap guarded): exits 0" 0 $?
 assert_exists "Test 6a: open under-cap archive is preserved" "$T6_ARCHIVE/20200101T000000Z"
 assert_contains "Test 6a: logs skipping in-use" "Skipping in-use aged archive" "$(cat "$T6_OUT")"
-# 6b: Over-cap archive (>168h) purges unconditionally (bypassing open-file check)
+# 6b: Over-cap archive (>168h) remains guarded when an open file is reported
 # Re-create/ensure archive exists before 6b
 mkdir -p "$T6_ARCHIVE/20200101T000000Z/app"
 touch "$T6_ARCHIVE/20200101T000000Z/app/payload.bin"
@@ -589,8 +637,8 @@ run_capture "$T6_OUT" env -i HOME="$TMP_ROOT/t6-home" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T6_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 6b (over-cap purge): exits 0" 0 $?
-assert_missing "Test 6b: over-cap archive is purged despite open file" "$T6_ARCHIVE/20200101T000000Z"
-assert_contains "Test 6b: logs over-cap bypass" "Purging over-cap archive" "$(cat "$T6_OUT")"
+assert_exists "Test 6b: over-cap archive with an open file is preserved" "$T6_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 6b: over-cap keep is surfaced" "archive_overcap_kept" "$(cat "$T6_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 7: --large guard placement: open-file check runs after marker/mtime, directly before archive
 # ─────────────────────────────────────────────────────────────────────────────
@@ -732,6 +780,14 @@ reset_t9_archive() {
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
+if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p901"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
 echo "p901"
 echo "fcwd"
 echo "n"
@@ -753,7 +809,8 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 9a (empty n with non-empty path): exits 0" 0 $?
-assert_missing "Test 9a: candidate purged because stream valid and candidate is closed" "$T9_ARCHIVE/20200101T000000Z"
+assert_exists "Test 9a: closed stream reaches C14 provenance keep" "$T9_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 9a: valid stream is not rejected as malformed" "C14 kept:unproven-content" "$(cat "$T9_OUT")"
 # 9b: p-only stream is rejected as malformed -> fails closed, candidate preserved
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
@@ -829,6 +886,14 @@ assert_contains "Test 9d: logs malformed output" "Open-file check produced malfo
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
+if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p907"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
 echo "p907"
 echo "ffp."
 echo "tREG"
@@ -848,7 +913,8 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 9e (ffp. descriptor): exits 0" 0 $?
-assert_missing "Test 9e: candidate purged because ffp. descriptor parsed cleanly and candidate is closed" "$T9_ARCHIVE/20200101T000000Z"
+assert_exists "Test 9e: closed ffp descriptor reaches C14 provenance keep" "$T9_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 9e: valid ffp descriptor is not rejected as malformed" "C14 kept:unproven-content" "$(cat "$T9_OUT")"
 assert_not_contains "Test 9e: does not log malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 10: Candidate containing control characters/newlines fails closed before lsof
@@ -943,6 +1009,14 @@ assert_contains "Test 11a: logs in-use" "Skipping in-use aged archive" "$(cat "$
 reset_t11_archive
 cat > "$T11_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+# C14 targeted lsof: no matching descriptors is rc 1 with empty output.
+if [[ "${1:-}" == "-w" ]]; then exit 1; fi
+if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1102"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
 echo "p1102"
 echo "fcwd"
 echo "n/"
@@ -963,7 +1037,8 @@ run_capture "$T11_OUT" env -i HOME="$TMP_ROOT/t11-home" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T11_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 11b (ancestor n/ nonmatch): exits 0" 0 $?
-assert_missing "Test 11b: candidate purged because ancestor n/ does NOT match candidate" "$T11_ARCHIVE/20200101T000000Z"
+assert_exists "Test 11b: ancestor does not look open; C14 still requires proof" "$T11_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 11b: valid root record reaches C14 provenance keep" "C14 kept:unproven-content" "$(cat "$T11_OUT")"
 # 11c: Unknown path format (e.g. relative path) fails closed
 reset_t11_archive
 cat > "$T11_BIN/lsof" <<'EOF'

@@ -5,8 +5,17 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d -t cleanup_live_sem.XXXXXX)"
+PYTHON3_DIR="$(dirname "$(command -v python3)")"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+TMP="$(mktemp -d /tmp/cleanup_live_sem.XXXXXX)" || exit 1
+[[ "$TMP" == /tmp/cleanup_live_sem.* && -d "$TMP" && ! -L "$TMP" ]] || exit 1
+TMP="$(cd "$TMP" && pwd -P)" || exit 1
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 trap 'rm -rf "$TMP"' EXIT
+# lease_path_for builds the pushed fixture's released C14 git_meta baseline.
+# shellcheck source=scripts/lib/quarantine.sh
+source "$REPO_ROOT/scripts/lib/quarantine.sh"
 FAIL=0
 ok()  { echo "  PASS: $1"; }
 bad() { echo "  FAIL: $1"; FAIL=1; }
@@ -53,14 +62,17 @@ case "\$1" in
 esac
 EOS
 chmod +x "$BIN"/*
-# lsof is not installed on some Linux runners; return a complete harmless cwd
-# snapshot so fail-closed live-process checks can exercise stale fixtures.
+# C14's live-cwd probe runs `lsof -d cwd -Fn`; its open-file probe runs
+# `lsof ... +D <candidate>`. Answer only the former with a harmless cwd
+# snapshot. The open-file probe must report no open files (rc 1) or every
+# candidate is falsely kept as open-file.
 cat > "$BIN/lsof" <<'EOS'
 #!/usr/bin/env bash
+if [[ " $* " == *" +D "* ]]; then exit 1; fi
 printf "p1\nn/\n"
 EOS
 chmod +x "$BIN/lsof"
-export PATH="$BIN:/usr/bin:/bin"
+export PATH="$BIN:$PYTHON3_DIR:/usr/bin:/bin"
 
 echo "APFS: dry-run default does not delete"
 out="$(HOME="$TMP/home" bash "$REPO_ROOT/scripts/cleanup_apfs_snapshots.sh" 2>&1)"
@@ -87,33 +99,58 @@ has "TRIM ran" "docker/desktop-reclaim-space" "$calls"
 echo "Antigravity: IDE brain, eligible Git worktree, non-Git orphan, .backup semantics"
 H="$TMP/ag"; AG="$H/.gemini/antigravity"
 mkdir -p "$AG/brain/old" "$AG/brain/old_with_recent_log" "$AG/brain/new" \
-         "$AG/worktrees/proj/idle" "$AG/worktrees/proj/live" \
+         "$AG/worktrees/proj/idle" "$AG/worktrees/proj/unpushed" \
+         "$AG/worktrees/proj/live" \
          "$AG/worktrees/proj/non_git" "$AG/brain.backup" "$AG/conversations/keep"
 echo x > "$AG/worktrees/proj/live/f"; echo x > "$AG/worktrees/proj/non_git/f"; echo x > "$AG/conversations/keep/f"
 echo x > "$AG/brain/old/old_file"
 echo x > "$AG/brain/old_with_recent_log/task.log"
-# A real clean Git checkout on main is eligible when old; unlike a plain
-# non-Git orphan, it satisfies the production cleanup contract.
-git -C "$AG/worktrees/proj/idle" init -q -b main
-git -C "$AG/worktrees/proj/idle" config user.name "Cleanup Fixture"
-git -C "$AG/worktrees/proj/idle" config user.email "cleanup-fixture@example.invalid"
-echo tracked > "$AG/worktrees/proj/idle/tracked.txt"
-git -C "$AG/worktrees/proj/idle" add tracked.txt
-git -C "$AG/worktrees/proj/idle" commit -qm "fixture main commit"
+# A genuinely pushed standalone checkout is eligible: a bare origin lives
+# outside the worktree root and main is pushed to it, plus the released C14
+# git_meta baseline lease an ordinary (non-ephemeral) candidate needs. Fixture
+# git runs under HOME="$H" so host global hooks/LFS filters cannot fail the
+# push. A second clean checkout with NO remote is the unpushed negative.
+ORIGIN="$TMP/origin.git"
+HOME="$H" git init -q --bare -b main "$ORIGIN"
+for name in idle unpushed; do
+  d="$AG/worktrees/proj/$name"
+  HOME="$H" git -C "$d" init -q -b main
+  HOME="$H" git -C "$d" config user.name "Cleanup Fixture"
+  HOME="$H" git -C "$d" config user.email "cleanup-fixture@example.invalid"
+  echo tracked > "$d/tracked.txt"
+  HOME="$H" git -C "$d" add tracked.txt
+  HOME="$H" git -C "$d" commit -qm "fixture main commit"
+done
+HOME="$H" git -C "$AG/worktrees/proj/idle" remote add origin "$ORIGIN"
+HOME="$H" git -C "$AG/worktrees/proj/idle" push -q origin main
+idle_lease="$(lease_path_for "$AG/worktrees/proj/idle")"
+mkdir -p "${idle_lease%/*}"
+printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' \
+  "$AG/worktrees/proj/idle" \
+  "$(python3 "$REPO_ROOT/scripts/c14_probe.py" gitmeta "$(HOME="$H" git -C "$AG/worktrees/proj/idle" rev-parse --absolute-git-dir)")" \
+  > "$idle_lease"
 
+# Age the whole candidate including git admin. C14's inventory newest-mtime
+# gate covers .git, so touching only working files leaves a fresh index that
+# reads as recent-activity.
+find "$AG/worktrees/proj/idle" "$AG/worktrees/proj/unpushed" "$AG/worktrees/proj/non_git" \
+  -exec touch -h -t 202001010000 {} + 2>/dev/null
 touch -t 202001010000 "$AG/brain/old" "$AG/brain/old/old_file" \
-  "$AG/worktrees/proj/idle" "$AG/worktrees/proj/idle/tracked.txt" \
   "$AG/worktrees/proj/live" "$AG/worktrees/proj/live/f" \
   "$AG/worktrees/proj/non_git" "$AG/worktrees/proj/non_git/f" "$AG/brain.backup"
 touch -t 202001010000 "$AG/brain/old_with_recent_log"
 # task.log in old_with_recent_log is left with current mtime (descendant activity)
+
+# Probes must avoid index refresh even when the caller allows optional locks.
+export GIT_OPTIONAL_LOCKS=1
 
 out="$(HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" 2>&1)"
 has "dry-run reports old IDE brain" "would delete old" "$out"
 has "dry-run identifies a clean eligible Git worktree" "ELIGIBLE" "$out"
 [[ -d "$AG/brain/old" ]] && ok "dry-run keeps old brain" || bad "dry-run deleted old brain"
 
-# Clean without WORKTREE_APPROVED prunes old brain, but preserves worktree and old brain with recent descendant
+# Clean without WORKTREE_APPROVED prunes old brain, but preserves worktrees and
+# old brain with recent descendant
 HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
 [[ ! -e "$AG/brain/old" ]] && ok "old IDE brain pruned" || bad "old IDE brain kept"
 [[ -d "$AG/brain/old_with_recent_log" ]] && ok "old brain with recent descendant preserved" || bad "old brain with recent descendant deleted"
@@ -121,10 +158,15 @@ HOME="$H" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/n
 [[ -d "$AG/worktrees/proj/non_git" ]] && ok "non-Git orphan preserved without WORKTREE_APPROVED" || bad "non-Git orphan deleted without WORKTREE_APPROVED"
 [[ ! -e "$AG/brain.backup" ]] && ok ".backup leftover pruned" || bad ".backup kept"
 
-# Clean with WORKTREE_APPROVED=1 removes eligible clean Git worktree only
-HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >/dev/null 2>&1
-[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "eligible Git worktree pruned with WORKTREE_APPROVED" || bad "eligible Git worktree kept with WORKTREE_APPROVED"
+# Clean with WORKTREE_APPROVED=1 removes the pushed clean Git worktree, keeps
+# the unpushed one and the unknown non-Git orphan (bytes + reason)
+clean_out="$(HOME="$H" WORKTREE_APPROVED=1 bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean 2>&1)"
+[[ ! -e "$AG/worktrees/proj/idle" ]] && ok "pushed clean Git worktree pruned with WORKTREE_APPROVED" || bad "pushed clean Git worktree kept with WORKTREE_APPROVED"
+[[ -d "$AG/worktrees/proj/unpushed" ]] && ok "unpushed clean Git worktree preserved" || bad "unpushed clean Git worktree deleted"
+has "unpushed worktree keeps the not-pushed C14 reason" "not-pushed" "$clean_out"
 [[ -d "$AG/worktrees/proj/non_git" ]] && ok "non-Git orphan preserved with WORKTREE_APPROVED" || bad "non-Git orphan deleted with WORKTREE_APPROVED"
+[[ "$(cat "$AG/worktrees/proj/non_git/f" 2>/dev/null)" == "x" ]] && ok "non-Git orphan bytes preserved" || bad "non-Git orphan bytes lost"
+has "non-Git orphan keeps the not-git reason" "not-git" "$clean_out"
 [[ -d "$AG/brain/new" && -d "$AG/worktrees/proj/live" && -d "$AG/conversations/keep" ]] && ok "recent state + conversations kept" || bad "protected state deleted"
 
 # Verify symlinked candidates/parents are rejected and physical targets outside root are protected

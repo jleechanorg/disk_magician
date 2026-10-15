@@ -16,7 +16,8 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
   exit 0
 fi
 
-TMP_ROOT=$(mktemp -d -t dedup_hermes_prompts_test.XXXXXX)
+TMP_ROOT=$(mktemp -d /tmp/dedup_hermes_prompts_test.XXXXXX) || exit 1
+[[ "$TMP_ROOT" == /tmp/dedup_hermes_prompts_test.* && -d "$TMP_ROOT" && ! -L "$TMP_ROOT" ]] || exit 1
 trap 'chmod -R u+w "$TMP_ROOT" 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -102,7 +103,7 @@ echo "Test 2: --apply on a fixture reclaims bytes after VACUUM, keeps recent row
 DB2="$TMP_ROOT/t2.db"
 make_fixture "$DB2"
 before_size=$(stat -f%z "$DB2" 2>/dev/null || stat -c%s "$DB2")
-out2=$(HERMES_STATE_DB="$DB2" bash "$SOURCE_SCRIPT" --apply 2>&1)
+out2=$(HERMES_STATE_DB="$DB2" DISK_MAGICIAN_DEDUP_FREE_GB_OVERRIDE=100 bash "$SOURCE_SCRIPT" --apply 2>&1)
 after_size=$(stat -f%z "$DB2" 2>/dev/null || stat -c%s "$DB2")
 flags2=$(null_flags "$DB2")
 assert_contains "old1 nulled" "old1:1" "$flags2"

@@ -57,7 +57,7 @@ for s in segs:
     if src:
         try: est = max(est, int(subprocess.run(["du", "-sk", src], capture_output=True, text=True, timeout=5).stdout.split()[0]) / 2**20)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError): pass
-    found.append([*admit, "--class", g[1], "--est-gb", f"{est:g}", "--dest", g[0], "--producer", prod, "--source", "hook", "--tool-use-id", tid] + ["--compound"] * compound)
+    found.append([*admit, "--class", g[1], *(["--est-gb", f"{est:g}"] if src else []), "--dest", g[0], "--producer", prod, "--source", "hook", "--tool-use-id", tid] + ["--compound"] * compound)
 if not found: sys.exit()
 if ev.get("hook_event_name") != "PreToolUse":
     resp = ev.get("tool_response") if isinstance(ev.get("tool_response"), dict) else {}

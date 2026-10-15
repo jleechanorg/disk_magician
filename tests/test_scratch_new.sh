@@ -5,21 +5,23 @@
 # DISK_MAGICIAN_ADMIT_BIN except for one case that runs the real `diskm admit`
 # against a fake df.
 set -uo pipefail
+export DISK_MAGICIAN_ADMIT_RETRY_S=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DISKM="$REPO_ROOT/src/disk_magician/disk_magician.sh"
+DISKM="$REPO_ROOT/disk_magician.sh"
 PASS=0 FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 assert_contains() { if [[ "$1" == *"$2"* ]]; then ok "$3"; else bad "$3 — missing '$2' in: $1"; fi; }
 
-T="$(mktemp -d)"
-T="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$T")"
+T="$(mktemp -d /tmp/dm-scratch-new.XXXXXX)" || exit 1
+[[ "$T" == /tmp/dm-scratch-new.* && -d "$T" && ! -L "$T" ]] || exit 1
+T="$(cd -- "$T" && pwd -P)" || exit 1
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/bin" "$T/tmp" "$T/state" "$T/elsewhere"
+mkdir -p "$T/home" "$T/bin" "$T/tmp" "$T/bucket" "$T/state" "$T/elsewhere"
 export HOME="$T/home" STANDARD_WORKTREE_ROOT="$T/home/.worktrees" EVIDENCE_TMP_ROOT="$T/tmp"
-export DISK_MAGICIAN_STATE_DIR="$T/state"
+export DISK_MAGICIAN_STATE_DIR="$T/state" EVIDENCE_GCS_PREFIX="gs://bkt/ev"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 
 git init -q "$T/myrepo" && git -C "$T/myrepo" commit -q --allow-empty -m init
@@ -112,7 +114,88 @@ chmod +x "$T/bin/df"
 OUT="$(env -u DISK_MAGICIAN_ADMIT_BIN DISK_MAGICIAN_DF_BIN="$T/bin/df" bash "$DISKM" scratch-new "$T/myrepo" real --detach HEAD 2>"$T/err")"; RC=$?
 assert_eq "$RC" 0 "real admit: exit 0"
 [[ -d "$OUT" && "$(printf '%s' "$OUT" | wc -l | tr -d ' ')" == 0 ]] && ok "real admit: stdout is exactly the path" || bad "real admit: stdout '$OUT'"
-assert_eq "$(grep -c '"producer": "scratch-new:myrepo"' "$T/state/admission/events.jsonl")" 1 "one admit event"
+assert_eq "$(python3 -c 'import json,sys; print(sum(e.get("event") == "admit" and e.get("producer") == "scratch-new:myrepo" for e in map(json.loads, open(sys.argv[1]))))' "$T/state/admission/events.jsonl")" 1 "one admit event"
+
+echo "== evidence-push upload manifest =="
+# Fake gcloud rsync copies the tree into $T/bucket/<repo>/<slug>/; knobs:
+# SKIP=<file> not uploaded, PRE=<file> rewritten after hashing and before upload,
+# POST=<file> rewritten locally after upload.
+cat > "$T/bin/gcloud" <<EOF
+#!/usr/bin/env bash
+[[ "\$1 \$2" == "storage rsync" ]] || exit 9
+src="\$4" dst="$T/bucket/\${5#gs://bkt/ev/}"
+[[ -n "\${PRE:-}" ]] && echo changed > "\$src/\$PRE"
+mkdir -p "\$dst" && (cd "\$src" && find . -type f ! -name "\${SKIP:-/}" -exec sh -c 'mkdir -p "\$2/\$(dirname "\$1")" && cp "\$1" "\$2/\$1"' _ {} "\$dst" \;)
+[[ -n "\${POST:-}" ]] && echo later > "\$src/\$POST"
+exit 0
+EOF
+cat > "$T/bin/gcs-stat" <<EOF
+#!/usr/bin/env bash
+[[ -n "\${STAT_SLEEP:-}" ]] && sleep "\$STAT_SLEEP"
+[[ -n "\${STAT_FAIL:-}" ]] && exit 1
+python3 - "$T/bucket/\${1#gs://bkt/ev/}" <<'PY'
+import base64, hashlib, json, sys
+try: data = open(sys.argv[1], "rb").read()
+except OSError: sys.exit(1)
+print(json.dumps({"md5_hash": base64.b64encode(hashlib.md5(data).digest()).decode(), "generation": "1700", "size": len(data)}))
+PY
+EOF
+chmod +x "$T/bin/gcloud" "$T/bin/gcs-stat"
+export DISK_MAGICIAN_STAT_BIN="$T/bin/gcs-stat"
+# The cloud-object fake must never be reachable as `stat`: the lease library
+# shells out to the real `stat -f %B` for the git admin dir birth. Probe that
+# under the same PATH evidence-push uses. A shadowing `stat` loses the birth.
+echo "== lease birth uses the OS stat, not the cloud-object fake =="
+git -C "$T/myrepo" worktree add -q -b birth-probe "$T/birth-wt" HEAD 2>/dev/null || bad "admin-birth fixture setup"
+birth_info="$(PATH="$T/bin:/usr/bin:/bin" bash -c 'source "$1"; _lease_admin_info "$2"' _ "$REPO_ROOT/scripts/lib/worktree_lease.sh" "$T/birth-wt")"
+assert_contains "$birth_info" "birth-wt" "OS stat reaches the git admin dir"
+[[ "$(printf '%s' "$birth_info" | cut -f2)" =~ ^[1-9][0-9]*$ ]] && ok "admin birth is a positive epoch under the evidence PATH" || bad "admin birth lost to a PATH stat shadow: '$birth_info'"
+manifest() { (source "$REPO_ROOT/scripts/lib/worktree_lease.sh"; python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("upload_manifest")))' "$(lease_path_for "$1")"); }
+push() {  # push <dir> <slug> [ENV=V...]
+    local d="$1" s="$2"; shift 2
+    OUT="$(env "$@" PATH="$T/bin:/usr/bin:/bin" bash "$DISKM" evidence-push "$d" --repo myrepo --slug "$s" 2>"$T/err")"; RC=$?; ERR="$(cat "$T/err")"
+}
+mkev() { run 0 "$T/myrepo" "$1" --kind evidence; echo report > "$OUT/report.md"; mkdir -p "$OUT/sub"; echo shot > "$OUT/sub/a.png"; EV="$OUT"; }
+
+mkev full; push "$EV" full
+assert_eq "$RC" 0 "verified upload: exit 0"
+assert_eq "$(lease_field "$EV" published)" True "published"
+[[ -n "$(lease_field "$EV" published_at)" && -n "$(lease_field "$EV" verified_at)" ]] && ok "published_at + verified_at set" || bad "published_at/verified_at missing"
+assert_eq "$(lease_field "$EV" kind)" evidence "kind preserved"
+M="$(manifest "$EV")"
+assert_eq "$(python3 -c 'import json,sys; m=json.loads(sys.argv[1]); print(len(m), sorted(m[0]))' "$M")" \
+    "2 ['crc32c', 'generation', 'md5', 'object', 'path', 'sha256', 'size']" "one entry per file with every key"
+assert_contains "$M" '"object": "gs://bkt/ev/myrepo/full/sub/a.png"' "object name"
+assert_contains "$M" '"generation": "1700"' "generation"
+
+mkev subset; push "$EV" subset SKIP=report.md
+if [[ "$RC" != 0 ]]; then ok "subset upload: non-zero ($RC)"; else bad "subset upload exited 0"; fi
+assert_eq "$(lease_field "$EV" published_at)" "" "subset upload: no published_at"
+assert_contains "$ERR" "evidence_publish_unverified" "subset upload logged"
+
+mkev mutpre; push "$EV" mutpre PRE=report.md
+assert_eq "$(lease_field "$EV" published_at)" "" "rewritten before upload: not published"
+assert_contains "$ERR" "evidence_publish_unverified" "rewritten before upload logged"
+
+mkev mutpost; ORIG="$(shasum -a 256 "$EV/report.md" | cut -d' ' -f1)"; push "$EV" mutpost POST=report.md
+assert_eq "$RC" 0 "rewritten after upload: exit 0"
+M="$(manifest "$EV")"
+assert_contains "$M" "\"sha256\": \"$ORIG\"" "entry carries the uploaded hash"
+[[ "$(shasum -a 256 "$EV/report.md" | cut -d' ' -f1)" != "$ORIG" ]] && ok "local file no longer matches the manifest" || bad "local file unchanged"
+
+mkev statfail; push "$EV" statfail STAT_FAIL=1
+if [[ "$RC" != 0 ]]; then ok "stat failure: non-zero ($RC)"; else bad "stat failure exited 0"; fi
+assert_eq "$(lease_field "$EV" published_at)" "" "stat failure: no published_at"
+assert_contains "$ERR" "evidence_publish_unverified" "stat failure logged"
+
+mkev statslow; s=$SECONDS; push "$EV" statslow STAT_SLEEP=5 DISK_MAGICIAN_STAT_TIMEOUT=1
+if [[ "$RC" != 0 ]]; then ok "stat past timeout: non-zero ($RC)"; else bad "stat timeout exited 0"; fi
+(( SECONDS - s < 5 )) && ok "stat timeout bounded" || bad "stat timeout not enforced ($((SECONDS - s))s)"
+assert_eq "$(lease_field "$EV" published_at)" "" "stat timeout: no published_at"
+
+echo "== crc32c known vector =="
+mkdir -p "$T/vec" && printf 123456789 > "$T/vec/v"
+assert_eq "$(python3 "$REPO_ROOT/scripts/evidence_manifest.py" hash "$T/vec" 2>/dev/null | python3 -c 'import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)[0]["crc32c"]).hex())')" e3069283 "crc32c(123456789)"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

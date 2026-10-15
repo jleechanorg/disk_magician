@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # test_prune_aside_sessions.sh — End-to-end shell integration test for prune_aside_sessions.sh
 set -euo pipefail
+# /tmp-only fixtures (never default macOS var/folders scratch).
+export TMPDIR=/tmp
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -8,7 +10,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/test_aside_prune_XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
-MOCK_ASIDE="$TEST_TMP/.aside"
+# C14's declared-ephemeral row E4 matches $HOME/.aside/u/*/sessions/*, so point
+# HOME at the fixture root and run the real production verdict on these paths.
+export HOME="$TEST_TMP/home"
+mkdir -p "$HOME"
+# Resolve so HOME matches the canonical path the pruner's Path.resolve() uses
+# (/tmp is a symlink to /private/tmp), keeping the E4 prefix match exact.
+HOME="$(cd "$HOME" && pwd -P)"
+export HOME
+MOCK_ASIDE="$HOME/.aside"
 MOCK_SESSIONS="$MOCK_ASIDE/u/0/sessions"
 mkdir -p "$MOCK_SESSIONS"
 
@@ -25,6 +35,9 @@ OLD_SID="${OLD_DATE}_old123"
 mkdir -p "$MOCK_SESSIONS/$OLD_SID/tmp"
 echo '{"msg": "old"}' > "$MOCK_SESSIONS/$OLD_SID/messages.jsonl"
 echo "sample png data" > "$MOCK_SESSIONS/$OLD_SID/tmp/screenshot.png"
+# C14 measures the newest content mtime; backdate the stale session so the
+# real verdict matches the date-prefix age the pruner already sees.
+touch -t "$CUSTOM_OLD_STAMP" "$MOCK_SESSIONS/$OLD_SID/messages.jsonl" "$MOCK_SESSIONS/$OLD_SID/tmp/screenshot.png" "$MOCK_SESSIONS/$OLD_SID/tmp" "$MOCK_SESSIONS/$OLD_SID"
 
 # 2. Create recent session (well within 14 days)
 RECENT_SID="${RECENT_DATE}_recent456"
@@ -98,6 +111,7 @@ fi
 MOCK_APPLY_SID="${APPLY_TEST_DATE}_apply_test"
 mkdir -p "$MOCK_SESSIONS/$MOCK_APPLY_SID"
 echo "apply test data" > "$MOCK_SESSIONS/$MOCK_APPLY_SID/test.txt"
+touch -t "$CUSTOM_OLD_STAMP" "$MOCK_SESSIONS/$MOCK_APPLY_SID/test.txt" "$MOCK_SESSIONS/$MOCK_APPLY_SID"
 
 echo "Testing disk_magician.sh prune-aside-sessions --apply..."
 OUTPUT_DISPATCH=$("$REPO_ROOT/disk_magician.sh" prune-aside-sessions --apply --aside-dir "$MOCK_ASIDE")

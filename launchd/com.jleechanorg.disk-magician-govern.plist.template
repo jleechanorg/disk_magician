@@ -9,7 +9,7 @@
     <string>@HOME@/.local/bin/diskm</string>
     <string>govern</string>
     <string>--mode</string>
-    <string>observe</string>
+    <string>act</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

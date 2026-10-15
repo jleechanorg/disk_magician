@@ -8,7 +8,9 @@ export PATH="/bin:/usr/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TMP_ROOT=$(mktemp -d -t cleanup_safety.XXXXXX)
+TMP_ROOT=$(mktemp -d /tmp/cleanup_safety.XXXXXX) || exit 1
+[[ "$TMP_ROOT" == /tmp/cleanup_safety.* && -d "$TMP_ROOT" && ! -L "$TMP_ROOT" ]] || exit 1
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -244,10 +246,14 @@ do
 done
 
 echo "Test 7: cleanup_tmp.sh guards OpenCode dylib cleanup and preserves open/unrelated files"
-DYLIB_REAL="$TMP_ROOT/darwin-user-temp-real"
-DYLIB_TMP="$TMP_ROOT/darwin-user-temp-alias"
+DYLIB_SANDBOX="$TMP_ROOT/dylib-sandbox"
+DYLIB_REAL="$DYLIB_SANDBOX/darwin-user-temp-real"
+DYLIB_TMP="$DYLIB_SANDBOX/darwin-user-temp-alias"
+DYLIB_PRIVATE_TMP="$DYLIB_SANDBOX/private-tmp"
+DYLIB_TMP_ROOT="$DYLIB_SANDBOX/tmp"
 FAKE_BIN7="$TMP_ROOT/bin-dylib"
-mkdir -p "$DYLIB_REAL" "$FAKE_BIN7"
+C14_STALE_STAMP=202001010000
+mkdir -p "$DYLIB_REAL" "$DYLIB_PRIVATE_TMP" "$DYLIB_TMP_ROOT" "$FAKE_BIN7" "$TMP_ROOT/home-dylib"
 ln -s "$DYLIB_REAL" "$DYLIB_TMP"
 DYLIB_REAL=$(cd "$DYLIB_REAL" && pwd -P)
 CLOSED_DYLIB="$DYLIB_REAL/.bbc1111111111111-00000000.dylib"
@@ -258,6 +264,7 @@ FAIL_DYLIB="$DYLIB_REAL/.bbc5555555555555-00000000.dylib"
 printf 'closed' > "$CLOSED_DYLIB"
 printf 'open' > "$OPEN_DYLIB"
 printf 'unrelated' > "$UNRELATED_DYLIB"
+touch -t "$C14_STALE_STAMP" "$CLOSED_DYLIB" "$OPEN_DYLIB" "$UNRELATED_DYLIB"
 
 cat > "$FAKE_BIN7/getconf" <<'EOF'
 #!/usr/bin/env bash
@@ -272,11 +279,34 @@ cat > "$FAKE_BIN7/lsof" <<'EOF'
 if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
   exit 2
 fi
-if [[ -n "${FAKE_RACE_DYLIB:-}" ]]; then
+if [[ " $* " == *" -d cwd "* ]]; then
+  printf 'p999\nfcwd\nn/\n'
+  exit 0
+fi
+scope=""
+previous=""
+has_anchor=0
+for arg in "$@"; do
+  [[ "$arg" == "-a" ]] && has_anchor=1
+  if [[ "$previous" == "+D" ]]; then
+    scope="$arg"
+    break
+  fi
+  previous="$arg"
+done
+if [[ -z "$scope" && "$has_anchor" -eq 1 && "$#" -gt 0 ]]; then
+  scope="${!#}"
+fi
+if [[ -n "$scope" && -n "${FAKE_RACE_DYLIB:-}" \
+      && ( "$FAKE_RACE_DYLIB" == "$scope" || "$FAKE_RACE_DYLIB" == "$scope"/* ) ]]; then
   printf 'race' > "$FAKE_RACE_DYLIB"
 fi
-printf 'p123\n'
-printf 'n%s\n' "$FAKE_OPEN_DYLIB"
+if [[ -n "$scope" && -n "${FAKE_OPEN_DYLIB:-}" \
+      && ( "$FAKE_OPEN_DYLIB" == "$scope" || "$FAKE_OPEN_DYLIB" == "$scope"/* ) ]]; then
+  printf 'p123\n'
+  printf 'n%s\n' "$FAKE_OPEN_DYLIB"
+fi
+exit 1
 EOF
 cat > "$FAKE_BIN7/otool" <<'EOF'
 #!/usr/bin/env bash
@@ -290,6 +320,10 @@ chmod +x "$FAKE_BIN7/getconf" "$FAKE_BIN7/lsof" "$FAKE_BIN7/otool"
 
 OUT7_REFUSE="$TMP_ROOT/dylib-refuse.out"
 if run_capture "$OUT7_REFUSE" env -i HOME="$TMP_ROOT/home-dylib" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$DYLIB_SANDBOX" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$DYLIB_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$DYLIB_TMP_ROOT" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$DYLIB_REAL" \
   FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
   PATH="$FAKE_BIN7:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
   RC7_REFUSE=0
@@ -304,24 +338,34 @@ OUT7_CLEAN="$TMP_ROOT/dylib-clean.out"
 if run_capture "$OUT7_CLEAN" env -i HOME="$TMP_ROOT/home-dylib" \
   OPENCODE_DYLIBS_APPROVED=1 FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
   FAKE_RACE_DYLIB="$RACE_DYLIB" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$DYLIB_SANDBOX" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$DYLIB_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$DYLIB_TMP_ROOT" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$DYLIB_REAL" \
   PATH="$FAKE_BIN7:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
   RC7_CLEAN=0
 else
   RC7_CLEAN=$?
 fi
 assert_rc "approved OpenCode dylib cleanup exits 0" 0 "$RC7_CLEAN"
-assert_missing "closed libopentui dylib is deleted" "$CLOSED_DYLIB"
+assert_exists "closed libopentui dylib is preserved when C14 cannot prove content" "$CLOSED_DYLIB"
 assert_exists "open libopentui dylib is preserved" "$OPEN_DYLIB"
 assert_exists "unrelated dylib is preserved" "$UNRELATED_DYLIB"
 assert_exists "dylib created after candidate freeze is preserved" "$RACE_DYLIB"
 assert_contains "open libopentui dylib is reported skipped" \
   "Skipping in-use OpenCode dylib: $OPEN_DYLIB" "$(cat "$OUT7_CLEAN")"
+assert_contains "closed libopentui dylib reports C14 keep" \
+  "Preserving OpenCode dylib (C14 kept:unproven-content)" "$(cat "$OUT7_CLEAN")"
 
 printf 'closed' > "$FAIL_DYLIB"
 OUT7_LSOF_FAIL="$TMP_ROOT/dylib-lsof-fail.out"
 if run_capture "$OUT7_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-dylib" \
   OPENCODE_DYLIBS_APPROVED=1 FAKE_DYLIB_TMP="$DYLIB_TMP" FAKE_OPEN_DYLIB="$OPEN_DYLIB" \
   FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN7:/usr/bin:/bin" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$DYLIB_SANDBOX" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$DYLIB_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$DYLIB_TMP_ROOT" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$DYLIB_REAL" \
   bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --clean --opencode-dylibs; then
   RC7_LSOF_FAIL=0
 else
@@ -355,8 +399,26 @@ head -c 200000 /dev/zero > "$CSC_FOREIGN/blob"
 head -c 200000 /dev/zero > "$CSC_RACE/blob"
 printf 'protected' > "$CSC_SYMLINK_TARGET/blob"
 printf 'x' > "$CSC_X/com.tiny.code_sign_clone/x"
+find "$CSC_X" -type d \( -name '*.code_sign_clone' -o -name 'code_sign_clone.*' \) \
+  -exec touch -t "$C14_STALE_STAMP" {} +
+find "$CSC_X" -type f -name 'blob' -exec touch -t "$C14_STALE_STAMP" {} +
 FAKE_BIN8="$TMP_ROOT/bin-csc"
-mkdir -p "$FAKE_BIN8"
+CSC_HOME="$TMP_ROOT/home-csc"
+PYTHON3_PATH="$(command -v python3 2>/dev/null || true)"
+if [[ -z "$PYTHON3_PATH" || ! -x "$PYTHON3_PATH" ]]; then
+  for candidate in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    if [[ -x "$candidate" ]]; then
+      PYTHON3_PATH="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$PYTHON3_PATH" || ! -x "$PYTHON3_PATH" ]]; then
+  echo "FAIL: code_sign_clone fixture requires an available python3 executable" >&2
+  exit 1
+fi
+PYTHON3_DIR="$(dirname "$PYTHON3_PATH")"
+mkdir -p "$FAKE_BIN8" "$CSC_HOME"
 cat > "$FAKE_BIN8/getconf" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" ]]; then
@@ -371,6 +433,10 @@ cat > "$FAKE_BIN8/lsof" <<'EOF'
 if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
   echo "simulated lsof failure" >&2
   exit 2
+fi
+if [[ " $* " == *" -d cwd "* ]]; then
+  printf 'p999\nfcwd\nn/\n'
+  exit 0
 fi
 target="${!#}"
 if [[ -n "${FAKE_LSOF_DIAGNOSTIC_TARGET:-}" && "$target" == "$FAKE_LSOF_DIAGNOSTIC_TARGET" ]]; then
@@ -410,7 +476,7 @@ mkdir -p "$FAKE_BIN8_NO_LSOF"
 cp "$FAKE_BIN8/getconf" "$FAKE_BIN8/stat" "$FAKE_BIN8_NO_LSOF/"
 
 OUT8_REFUSE="$TMP_ROOT/csc-refuse.out"
-if run_capture "$OUT8_REFUSE" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
+if run_capture "$OUT8_REFUSE" env -i HOME="$CSC_HOME" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_REFUSE=0
 else RC8_REFUSE=$?; fi
 assert_rc "code_sign_clone clean requires approval" 0 "$RC8_REFUSE"
@@ -418,7 +484,7 @@ assert_contains "code_sign_clone refusal message" "Refusing code_sign_clone dele
 assert_exists "large clone preserved without approval" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
 OUT8_DRY="$TMP_ROOT/csc-dry.out"
-if run_capture "$OUT8_DRY" env -i HOME="$TMP_ROOT/home-csc" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
+if run_capture "$OUT8_DRY" env -i HOME="$CSC_HOME" FAKE_CSC_TMP="$CSC_PARENT/T"   CODE_SIGN_CLONE_MIN_KB=1 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_DRY=0
 else RC8_DRY=$?; fi
 assert_rc "code_sign_clone dry-run exits 0" 0 "$RC8_DRY"
@@ -426,9 +492,9 @@ assert_contains "code_sign_clone dry-run reports large clone" "AsideBrowser.code
 assert_exists "code_sign_clone dry-run does not delete" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
 OUT8_ACTIVE="$TMP_ROOT/csc-active.out"
-if run_capture "$OUT8_ACTIVE" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_ACTIVE" env -i HOME="$CSC_HOME" \
   FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_LSOF_ACTIVE="$CSC_ACTIVE" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_ACTIVE=0
 else RC8_ACTIVE=$?; fi
@@ -447,11 +513,16 @@ CSC_NESTED="$(cd "$CSC_NESTED" && pwd -P)"
 CSC_NESTED_PARENT="$CSC_NESTED/X/com.google.Chrome.code_sign_clone"
 head -c 200000 /dev/zero > "$CSC_NESTED_PARENT/code_sign_clone.INUSE/blob"
 head -c 200000 /dev/zero > "$CSC_NESTED_PARENT/code_sign_clone.STALE/blob"
+touch -t "$C14_STALE_STAMP" \
+  "$CSC_NESTED_PARENT" "$CSC_NESTED_PARENT/code_sign_clone.INUSE" \
+  "$CSC_NESTED_PARENT/code_sign_clone.INUSE/blob" \
+  "$CSC_NESTED_PARENT/code_sign_clone.STALE" \
+  "$CSC_NESTED_PARENT/code_sign_clone.STALE/blob"
 OUT8_NESTED="$TMP_ROOT/csc-nested.out"
-if run_capture "$OUT8_NESTED" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_NESTED" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_NESTED/T" \
   FAKE_LSOF_ACTIVE="$CSC_NESTED_PARENT/code_sign_clone.INUSE" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_NESTED=0
 else RC8_NESTED=$?; fi
@@ -471,6 +542,11 @@ CSC_SKIP="$(cd "$CSC_SKIP" && pwd -P)"
 CSC_SKIP_PARENT="$CSC_SKIP/X/com.google.Chrome.code_sign_clone"
 head -c 200000 /dev/zero > "$CSC_SKIP_PARENT/code_sign_clone.INUSE/blob"
 head -c 200000 /dev/zero > "$CSC_SKIP_PARENT/code_sign_clone.STALE/blob"
+touch -t "$C14_STALE_STAMP" \
+  "$CSC_SKIP_PARENT" "$CSC_SKIP_PARENT/code_sign_clone.INUSE" \
+  "$CSC_SKIP_PARENT/code_sign_clone.INUSE/blob" \
+  "$CSC_SKIP_PARENT/code_sign_clone.STALE" \
+  "$CSC_SKIP_PARENT/code_sign_clone.STALE/blob"
 cat > "$CSC_SKIP_HOME/.config/disk-magician/safety.local.json" <<EOF
 {
   "never_delete": [
@@ -482,7 +558,7 @@ OUT8_SKIP="$TMP_ROOT/csc-safety-skip.out"
 if run_capture "$OUT8_SKIP" env -i HOME="$CSC_SKIP_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_SKIP/T" \
   FAKE_LSOF_ACTIVE="$CSC_SKIP_PARENT/code_sign_clone.INUSE" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_SKIP=0
 else RC8_SKIP=$?; fi
@@ -495,9 +571,9 @@ assert_contains "SAFETY-SKIP is not counted toward dirs removed or freed" \
   "Done. Dirs removed: 0  Total freed: 0 KB" "$(cat "$OUT8_SKIP")"
 
 OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
-if run_capture "$OUT8_NO_LSOF" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_NO_LSOF" env -i HOME="$CSC_HOME" \
   FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 \
-  PATH="$FAKE_BIN8_NO_LSOF:/usr/bin:/bin" \
+  PATH="$FAKE_BIN8_NO_LSOF:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_NO_LSOF=0
 else RC8_NO_LSOF=$?; fi
@@ -507,9 +583,9 @@ assert_contains "missing lsof is reported as unknown, not removable" \
 assert_exists "clone is preserved without lsof" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
 OUT8_FOREIGN="$TMP_ROOT/csc-foreign-owner.out"
-if run_capture "$OUT8_FOREIGN" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_FOREIGN" env -i HOME="$CSC_HOME" \
   FAKE_CSC_TMP="$CSC_PARENT/T" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run; then
   RC8_FOREIGN=0
 else RC8_FOREIGN=$?; fi
@@ -520,8 +596,8 @@ assert_exists "foreign-owned candidate is preserved" "$CSC_FOREIGN"
 assert_exists "symlinked clone target is preserved" "$CSC_SYMLINK_TARGET/blob"
 
 OUT8_LSOF_FAIL="$TMP_ROOT/csc-lsof-fail.out"
-if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$TMP_ROOT/home-csc" \
-  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$CSC_HOME" \
+  CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 FAKE_LSOF_FAIL=1 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_LSOF_FAIL=0
 else RC8_LSOF_FAIL=$?; fi
@@ -536,13 +612,14 @@ CSC_DIAG="$TMP_ROOT/csc-lsof-diagnostic"
 CSC_DIAG_CLONE="$CSC_DIAG/X/com.example.PermissionDenied.code_sign_clone"
 mkdir -p "$CSC_DIAG/T" "$CSC_DIAG_CLONE"
 head -c 200000 /dev/zero > "$CSC_DIAG_CLONE/blob"
+touch -t "$C14_STALE_STAMP" "$CSC_DIAG_CLONE" "$CSC_DIAG_CLONE/blob"
 CSC_DIAG="$(cd "$CSC_DIAG" && pwd -P)"
 CSC_DIAG_CLONE="$CSC_DIAG/X/com.example.PermissionDenied.code_sign_clone"
 OUT8_LSOF_DIAG="$TMP_ROOT/csc-lsof-diagnostic.out"
-if run_capture "$OUT8_LSOF_DIAG" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_LSOF_DIAG" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_DIAG/T" \
   FAKE_LSOF_DIAGNOSTIC_TARGET="$CSC_DIAG_CLONE" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_LSOF_DIAG=0
 else RC8_LSOF_DIAG=$?; fi
@@ -551,11 +628,11 @@ assert_contains "diagnostic lsof failure is reported" "permission denied" "$(cat
 assert_exists "candidate with lsof diagnostic is preserved" "$CSC_DIAG_CLONE/blob"
 
 OUT8_RACE="$TMP_ROOT/csc-race.out"
-if run_capture "$OUT8_RACE" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_RACE" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
   FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
   FAKE_LSOF_RACE_TARGET="$CSC_RACE" FAKE_LSOF_STATE="$TMP_ROOT/csc-lsof-count" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_RACE=0
 else RC8_RACE=$?; fi
@@ -565,10 +642,10 @@ assert_contains "replacement candidate is reported and preserved" \
 assert_exists "replacement clone is preserved" "$CSC_RACE/replacement"
 
 OUT8_CLEAN="$TMP_ROOT/csc-clean.out"
-if run_capture "$OUT8_CLEAN" env -i HOME="$TMP_ROOT/home-csc" \
+if run_capture "$OUT8_CLEAN" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
   FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_CLEAN=0
 else RC8_CLEAN=$?; fi
@@ -589,7 +666,7 @@ head -c 200000 /dev/zero > "$CSC_FRESH_CLONE/blob"
 OUT8_FRESH="$TMP_ROOT/csc-fresh.out"
 if run_capture "$OUT8_FRESH" env -i HOME="$CSC_FRESH_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_FRESH/T" \
-  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_FRESH=0
 else RC8_FRESH=$?; fi
@@ -606,6 +683,7 @@ CSC_PSWAP_PARENT="$CSC_PSWAP/X/com.example.PSwap.code_sign_clone"
 CSC_PSWAP_CHILD="$CSC_PSWAP_PARENT/code_sign_clone.ORIG"
 mkdir -p "$CSC_PSWAP/T" "$CSC_PSWAP_CHILD" "$CSC_PSWAP_HOME"
 head -c 200000 /dev/zero > "$CSC_PSWAP_CHILD/blob"
+touch -t "$C14_STALE_STAMP" "$CSC_PSWAP_PARENT" "$CSC_PSWAP_CHILD" "$CSC_PSWAP_CHILD/blob"
 CSC_PSWAP="$(cd "$CSC_PSWAP" && pwd -P)"
 CSC_PSWAP_PARENT="$CSC_PSWAP/X/com.example.PSwap.code_sign_clone"
 CSC_PSWAP_CHILD="$CSC_PSWAP_PARENT/code_sign_clone.ORIG"
@@ -630,7 +708,7 @@ chmod +x "$FAKE_BIN8_PSWAP/lsof"
 OUT8_PSWAP="$TMP_ROOT/csc-pswap.out"
 if run_capture "$OUT8_PSWAP" env -i HOME="$CSC_PSWAP_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PSWAP/T" \
-  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8_PSWAP:/usr/bin:/bin" \
+  CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8_PSWAP:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_PSWAP=0
 else RC8_PSWAP=$?; fi
@@ -687,15 +765,15 @@ STALE_STAMP="$(date -v-10H +%Y%m%d%H%M 2>/dev/null || date -d '-10 hours' +%Y%m%
 # "recently active" regardless of the payload file's mtime).
 touch -t "$STALE_STAMP" "$PS_PRIVATE_TMP/stale_large_dir/payload" "$PS_PRIVATE_TMP/stale_large_dir"
 
-# Pre/post host-path snapshot (defense in depth on top of the sandbox
-# guard): proves this run never REMOVED anything from the REAL /private/tmp,
-# independent of any fixture wiring bug. Only the top-level NAME set is
-# compared (not full `ls -la`, which churns constantly from unrelated live
-# processes writing logs on a busy host) — a name disappearing is the
-# signal that matters; new names appearing is normal background activity.
-HOST_PRIVATE_TMP_NAMES_BEFORE="$TMP_ROOT/host-private-tmp-names-before.txt"
-HOST_PRIVATE_TMP_NAMES_AFTER="$TMP_ROOT/host-private-tmp-names-after.txt"
-ls -1 /private/tmp 2>/dev/null | sort > "$HOST_PRIVATE_TMP_NAMES_BEFORE" || true
+# Deliberate escape sentinel: it lives inside this test's temporary allocation
+# but outside every root allowed to the pressure sweep. If a root override
+# broadens unexpectedly, the stale oversized directory is eligible for the
+# --large archive path and this assertion catches the escape without comparing
+# against unrelated processes' live /private/tmp entries.
+PS_ESCAPE_SENTINEL="$PS_SANDBOX/escape-sentinel"
+mkdir -p "$PS_ESCAPE_SENTINEL"
+dd if=/dev/zero of="$PS_ESCAPE_SENTINEL/payload" bs=1024 count=200 status=none
+touch -t "$STALE_STAMP" "$PS_ESCAPE_SENTINEL/payload" "$PS_ESCAPE_SENTINEL"
 
 OUT9="$TMP_ROOT/pressure.out"
 if run_capture "$OUT9" env -i HOME="$TMP_ROOT/home-ps" \
@@ -721,13 +799,7 @@ assert_exists "stale large fixture dir landed in the fixture archive root" "$PS_
 assert_exists "persistent deletion log was written to the fixture path" "$PS_DELETION_LOG"
 assert_contains "deletion log records the archived fixture path" "$PS_PRIVATE_TMP/stale_large_dir" "$(cat "$PS_DELETION_LOG" 2>/dev/null || true)"
 
-ls -1 /private/tmp 2>/dev/null | sort > "$HOST_PRIVATE_TMP_NAMES_AFTER" || true
-REMOVED_HOST_ENTRIES="$(comm -23 "$HOST_PRIVATE_TMP_NAMES_BEFORE" "$HOST_PRIVATE_TMP_NAMES_AFTER" || true)"
-if [[ -z "$REMOVED_HOST_ENTRIES" ]]; then
-  record_pass "no real top-level /private/tmp entry disappeared during the confined pressure_sweep run"
-else
-  record_fail "no real top-level /private/tmp entry disappeared during the confined pressure_sweep run" "removed: $REMOVED_HOST_ENTRIES"
-fi
+assert_exists "outside-scope pressure sentinel remains untouched" "$PS_ESCAPE_SENTINEL/payload"
 
 echo "Test 9b: sandbox_guard_roots aborts cleanup_tmp.sh --clean --large before any deletion when a root is outside DISK_MAGICIAN_TEST_SANDBOX"
 UNRELATED_SANDBOX="$TMP_ROOT/pressure-unrelated-sandbox"

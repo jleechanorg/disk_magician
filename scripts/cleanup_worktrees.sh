@@ -7,6 +7,7 @@
 #
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
@@ -21,6 +22,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_merged_pr.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_ignored.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+# Brings artifact_removal_verdict (via artifact_verdict.sh) and, transitively,
+# wrh_remove_now (worktree_remove_hook.sh) for the C14 -> WRH removal route.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
+act_parse_deadline_args "$@" || exit $?
+if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
+[[ -z "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]] || { echo "--deadline-at requires --cursor" >&2; exit 2; }
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
@@ -145,6 +154,95 @@ ANTIGRAVITY_DELETED=0
 ANTIGRAVITY_KEPT=0
 REPO_LOCAL_ELIGIBLE=0
 REPO_LOCAL_PRESERVED=0
+ACT_STOP=0
+ACT_DEFERRED_COUNT=0
+ACT_INTERRUPTED_COUNT=0
+ACT_CURSOR_INDEX=0
+ACT_CURSOR_ITEMS='[]'
+ACT_REPO_SCOPE=""
+if ((${#REPO_LOCAL_REPOS[@]})); then ACT_REPO_SCOPE="$(printf '%s,' "${REPO_LOCAL_REPOS[@]}")"; fi
+ACT_CURSOR_SOURCE="cleanup_worktrees|root=${WORKTREE_ROOT}|repos=${ACT_REPO_SCOPE}"
+if [[ -n "$ACT_CURSOR" ]]; then
+    ACT_CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || {
+        echo "invalid cleanup_worktrees cursor" >&2; exit 3;
+    }
+    ACT_CURSOR_ITEMS="$(python3 -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$ACT_CURSOR_STATE")"
+    ACT_CURSOR_INDEX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["next_index"])' "$ACT_CURSOR_STATE")"
+    ACT_CURSOR_LEN="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
+    if (( ACT_CURSOR_INDEX >= ACT_CURSOR_LEN )); then
+        ACT_CURSOR_ITEMS='[]'
+        ACT_CURSOR_INDEX=0
+        act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" 0 || exit 3
+    fi
+fi
+GOVERN_RUN_ID=""
+GOVERN_FREE_BEFORE=""
+if [[ -n "$ACT_CURSOR" ]]; then
+    GOVERN_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
+    GOVERN_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job cleanup_worktrees --trigger govern)" || exit 3
+fi
+# A begun govern receipt must always reach a terminal state, including an early
+# checkpoint/cursor error (exit 3) that bypasses the normal finish block below.
+# Reuse the same job_receipt machinery rather than a second framework.
+GOVERN_RECEIPT_CLOSED=0
+govern_receipt_finish() {
+    [[ -n "$GOVERN_RUN_ID" && "$GOVERN_RECEIPT_CLOSED" == 0 ]] || return 0
+    GOVERN_RECEIPT_CLOSED=1
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
+      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
+      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
+}
+govern_temp_cleanup() { [[ -z "$RUN_TMP" ]] || rm -rf "$RUN_TMP"; }
+trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
+
+act_candidate_begin() {
+    local path="$1" index items_before
+    [[ -n "$ACT_CURSOR" ]] || return 0
+    index="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+import json,sys
+items=json.loads(sys.argv[1])
+try: print(items.index(sys.argv[2]))
+except ValueError: print(-1)
+PY
+)"
+    if [[ "$index" == -1 ]]; then
+        items_before="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
+        ACT_CURSOR_ITEMS="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+import json,sys
+items=json.loads(sys.argv[1]); items.append(sys.argv[2])
+print(json.dumps(items,separators=(",",":")))
+PY
+)"
+        index="$items_before"
+        act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || return 3
+        (( ACT_CURSOR_INDEX < items_before )) && return 1
+    fi
+    (( index < ACT_CURSOR_INDEX )) && return 1
+    if (( index > ACT_CURSOR_INDEX )); then
+        ACT_CURSOR_INDEX="$index"
+        act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || return 3
+    fi
+    if [[ -n "$ACT_DEADLINE_AT" ]] && ! act_unit_fits "${DISK_MAGICIAN_UNIT_BUDGET_S:-60}"; then
+        # A unit that never started is an interrupted/unfinished visit, not a
+        # completed C14 deferral: count interrupted only and leave the cursor here.
+        ACT_STOP=1
+        ACT_INTERRUPTED_COUNT=$((ACT_INTERRUPTED_COUNT + 1))
+        echo "deadline_before_unit:$path"
+        return 2
+    fi
+    ACT_CURRENT_INDEX="$index"
+    if [[ -n "${DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK:-}" ]]; then
+        "$DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK" "$path"
+    fi
+    return 0
+}
+
+act_candidate_done() {
+    [[ -n "$ACT_CURSOR" ]] || return 0
+    ACT_CURSOR_INDEX=$((ACT_CURRENT_INDEX + 1))
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX"
+}
 
 expand_path() {
     local p="$1"
@@ -322,34 +420,12 @@ classify_repo_local_worktree() {
     [[ -z "$verdict" ]] || echo "$verdict"
 }
 
-# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
-# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
-# probe fails/times out (fail closed).
-has_hidden_state() {
-    local out flags t=""
-    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
-    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
-    grep -q '^[a-zS]' <<<"$flags" && return 0
-    # shellcheck disable=SC2086
-    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
-        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
-        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
-        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
-        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
-        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
-        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
-    [[ -n "$out" ]]
-}
-
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
 # prints a PRESERVE reason, or nothing when the worktree is clean and merged.
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
-    status_porcelain="$(git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    status_porcelain="$(GIT_OPTIONAL_LOCKS=0 git -C "$wt_path" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || status_rc=$?
     if [[ "$status_rc" -ne 0 ]]; then
         echo "status-failed"
         return 0
@@ -528,7 +604,7 @@ process_antigravity_orphan() {
     fi
     if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
         local status_porcelain status_rc=0
-        status_porcelain="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+        status_porcelain="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
         if [[ "$status_rc" -ne 0 ]]; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "status-failed"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -666,15 +742,25 @@ process_antigravity_orphan() {
         fi
         local final_status final_status_rc=0
         if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]]; then
-            final_status="$(git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+            final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_subdir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
             if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                 ledger_line "antigravity" "PRESERVE" "$abs_subdir" "changed-after-size"
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 return 0
             fi
         fi
-        if ! rm -r -f "$abs_subdir" || [[ -e "$abs_subdir" || -L "$abs_subdir" ]]; then
-            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "remove-failed"
+        local ag_c14_result
+        if [[ -n "$ACT_DEADLINE_AT" ]]; then
+            ag_c14_result="$(quarantine_remove "$abs_subdir" --deadline-at "$ACT_DEADLINE_AT")"
+        else
+            ag_c14_result="$(quarantine_remove "$abs_subdir")"
+        fi
+        if [[ "$ag_c14_result" != removed:* || -e "$abs_subdir" || -L "$abs_subdir" ]]; then
+            # A deferred quarantine verdict is a completed visit for this pass
+            # (the candidate is left in place); count it and let the caller
+            # advance the cursor via act_candidate_done.
+            [[ "$ag_c14_result" == deferred:* ]] && ACT_DEFERRED_COUNT=$(( ACT_DEFERRED_COUNT + 1 ))
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "${ag_c14_result#kept:}"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
             return 0
         fi
@@ -689,6 +775,7 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
     echo "--- Antigravity orphans ($WORKTREE_ROOT) ---"
     real_worktree_root="$(cd "$WORKTREE_ROOT" 2>/dev/null && pwd -P || true)"
     for parent_dir in "$WORKTREE_ROOT"/*; do
+        [[ "$ACT_STOP" == 0 ]] || break
         [[ -e "$parent_dir" ]] || continue
         if [[ -L "$parent_dir" ]]; then
             ledger_line "antigravity" "PRESERVE" "$parent_dir" "symlink-parent"
@@ -697,6 +784,7 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
         fi
         [[ -d "$parent_dir" ]] || continue
         for subdir in "$parent_dir"/*; do
+            [[ "$ACT_STOP" == 0 ]] || break
             [[ -e "$subdir" ]] || continue
             if [[ -L "$subdir" ]]; then
                 ledger_line "antigravity" "PRESERVE" "$subdir" "symlink-candidate"
@@ -710,7 +798,14 @@ if [[ -d "$WORKTREE_ROOT" ]]; then
                 ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
                 continue
             fi
+            if act_candidate_begin "$abs_subdir"; then :; else
+                candidate_rc=$?
+                [[ "$candidate_rc" == 1 ]] && continue
+                [[ "$candidate_rc" == 2 ]] && break
+                exit "$candidate_rc"
+            fi
             process_antigravity_orphan "$abs_subdir"
+            act_candidate_done || exit 3
         done
     done
 else
@@ -774,12 +869,20 @@ process_repo_local_worktrees() {
             return 0
         fi
 
+        if act_candidate_begin "$abs_path"; then :; else
+            candidate_rc=$?
+            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+            [[ "$candidate_rc" == 1 || "$candidate_rc" == 2 ]] && return 0
+            return "$candidate_rc"
+        fi
+
         if [[ -n "$std_real" ]]; then
             local std_skip
             std_skip="$(std_root_skip_reason "$abs_path" "$std_real")"
             if [[ -n "$std_skip" ]]; then
                 ledger_line "repo-local" "PRESERVE" "$abs_path" "$std_skip"
                 REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                act_candidate_done || return 3
                 wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                 return 0
             fi
@@ -811,38 +914,76 @@ process_repo_local_worktrees() {
                 if has_hidden_state "$abs_path"; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "hidden-state" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    act_candidate_done || return 3
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
                 fi
                 if has_ignored_user_data "$abs_path"; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "ignored-data" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    act_candidate_done || return 3
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
                 fi
                 local final_status final_status_rc=0
-                final_status="$(git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+                final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
                 if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    act_candidate_done || return 3
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
                 fi
-                if git -C "$repo_abs" worktree remove --force --force "$abs_path" && [[ ! -e "$abs_path" ]]; then
-                    ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
-                    TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
-                    REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                # Same C14 -> WRH route as worktree_reap: the REAL verdict
+                # writes the single original receipt, and WRH consumes exactly
+                # that receipt. No fresh inventory may reauthorize removal.
+                local cw_c14_inv cw_c14_verdict cw_removed=0
+                cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
+                if [[ -n "$cw_c14_inv" ]]; then
+                    # T3 context: this is the sanctioned cleanup_worktrees.sh
+                    # 3-day path. --t3-owner-null lets C14 free EXACTLY this
+                    # candidate's own owner-null lease (never an
+                    # ancestor/descendant), after all other C14 checks and the
+                    # recency/policy/remote proof above.
+                    if [[ -n "$ACT_DEADLINE_AT" ]]; then
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
+                    else
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
+                    fi
+                    if [[ "$cw_c14_verdict" == remove ]]; then
+                        if [[ -n "$ACT_DEADLINE_AT" ]]; then
+                            wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT" && [[ ! -e "$abs_path" ]] && cw_removed=1
+                        else
+                            wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
+                        fi
+                    fi
+                    if [[ "$cw_removed" == 1 ]]; then
+                        rm -f "$cw_c14_inv"
+                        ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
+                        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                        REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                    else
+                        rm -f "$cw_c14_inv"
+                        # A deferred verdict is a completed visit for this pass
+                        # (the candidate stays put and the cursor advances via
+                        # act_candidate_done); a failed quarantine is kept.
+                        [[ "$cw_c14_verdict" == deferred:* ]] && ACT_DEFERRED_COUNT=$(( ACT_DEFERRED_COUNT + 1 ))
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "${cw_c14_verdict#kept:}" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    fi
                 else
-                    ledger_line "repo-local" "PRESERVE" "$abs_path" "remove-failed" "$extra"
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "check-failed" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                 fi
             fi
         fi
 
+        act_candidate_done || return 3
         wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
     }
 
     while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$ACT_STOP" == 0 ]] || break
         if [[ -z "$line" ]]; then
             flush_block
             continue
@@ -869,7 +1010,12 @@ process_repo_local_worktrees() {
                 ;;
         esac
     done <<<"$porcelain"
-    flush_block
+    if [[ "$ACT_STOP" == 0 ]]; then
+        flush_block
+    else
+        # A cooperative deadline stop is a normal partial pass, not an error.
+        return 0
+    fi
 }
 
 # Standard root (spec D6): governed like other agent roots, except worktrees
@@ -910,9 +1056,35 @@ std_root_skip_reason() {
     fi
 }
 
-for repo in "${REPO_LOCAL_REPOS[@]}"; do
-    process_repo_local_worktrees "$repo"
-done
+if ((${#REPO_LOCAL_REPOS[@]})); then
+    for repo in "${REPO_LOCAL_REPOS[@]}"; do
+        [[ "$ACT_STOP" == 0 ]] || break
+        process_repo_local_worktrees "$repo"
+    done
+fi
+
+if [[ -n "$ACT_CURSOR" ]]; then
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || {
+        echo "failed to checkpoint cleanup_worktrees" >&2; exit 3;
+    }
+    GOVERN_FREE_AFTER="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
+    GOVERN_DELTA=""
+    if [[ "$GOVERN_FREE_BEFORE" =~ ^[0-9]+$ && "$GOVERN_FREE_AFTER" =~ ^[0-9]+$ ]]; then
+        GOVERN_DELTA=$((GOVERN_FREE_AFTER - GOVERN_FREE_BEFORE))
+    fi
+    GOVERN_REMOVED=0
+    [[ "$DRY_RUN" == true ]] || GOVERN_REMOVED=$((ANTIGRAVITY_DELETED + REPO_LOCAL_ELIGIBLE))
+    GOVERN_FREED="null"
+    [[ "$GOVERN_DELTA" =~ ^-?[0-9]+$ ]] && GOVERN_FREED=$(( GOVERN_DELTA > 0 ? GOVERN_DELTA : 0 ))
+    GOVERN_OUTCOME=success
+    GOVERN_REASON=cleanup_pass_complete
+    [[ "$ACT_STOP" == 0 ]] || { GOVERN_OUTCOME=partial; GOVERN_REASON=deadline_before_candidate; }
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome "$GOVERN_OUTCOME" --reason "$GOVERN_REASON" \
+      --candidates "{\"removed_count\":$GOVERN_REMOVED,\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
+      --postcondition "{\"df_delta_bytes\":${GOVERN_DELTA:-null},\"freed_bytes\":$GOVERN_FREED,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":${GOVERN_FREE_AFTER:-null}}" || exit 3
+    GOVERN_RECEIPT_CLOSED=1
+fi
 
 total_gb=$(awk "BEGIN {printf \"%.2f\", $TOTAL_RECLAIMED_KB / 1048576}")
 

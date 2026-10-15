@@ -19,7 +19,10 @@ if [[ ! -x "$SCRIPT" ]]; then
   exit 2
 fi
 
-TMP_DIR=$(mktemp -d -t test_code_sign_clones.XXXXXX)
+TMP_DIR=$(mktemp -d /tmp/test_code_sign_clones.XXXXXX) || exit 1
+[[ "$TMP_DIR" == /tmp/test_code_sign_clones.* && -d "$TMP_DIR" && ! -L "$TMP_DIR" ]] || exit 1
+export HOME="$TMP_DIR/home" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state"
+mkdir -p "$HOME" "$DISK_MAGICIAN_STATE_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 MOCK_BIN="$TMP_DIR/bin"
@@ -29,15 +32,25 @@ mkdir -p "$MOCK_BIN" "$MOCK_X_DIR"
 # 1. Setup mock lsof that reports inactive (no matches) by default
 cat > "$MOCK_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
-if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
-  # Simulate active process holding handle inside candidate
-  echo "p12345"
-  echo "cGoogle Chrome"
-  echo "n$1/Contents/MacOS/Google Chrome"
-  exit 0
+# The C14 live-cwd probe runs `lsof -n -P -d cwd -Fpn` and needs a valid
+# record stream; the candidate open-file probe uses `+D <dir>`. Emit a
+# synthetic cwd of "/" (never inside the fixture) for the former, and the
+# inactive/active answer for the latter.
+if [[ " $* " == *" +D "* ]]; then
+  if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
+    # Simulate active process holding handle inside candidate
+    echo "p12345"
+    echo "cGoogle Chrome"
+    echo "n/Contents/MacOS/Google Chrome"
+    exit 0
+  fi
+  # Inactive: empty output and exit 1
+  exit 1
 fi
-# Inactive: empty output and exit 1
-exit 1
+echo "p$$"
+echo "fcwd"
+echo "n/"
+exit 0
 EOF
 chmod +x "$MOCK_BIN/lsof"
 
@@ -56,6 +69,7 @@ CLONE_DIR="$CLONE_PARENT/code_sign_clone.1234"
 create_candidate "$CLONE_DIR"
 
 # Age the file by touching with old timestamp (2000s ago)
+find "$CLONE_DIR" -exec touch -t 202610041200 {} + 2>/dev/null
 touch -t 202610041200 "$CLONE_PARENT" "$CLONE_DIR"
 
 echo "Test 1: Default dry-run mode does not delete files"
@@ -114,6 +128,7 @@ echo "  PASS  Test 4"
 
 # Remove the young clone so Test 5 cleanly operates on the stale candidate
 rm -rf "$YOUNG_CLONE"
+find "$CLONE_DIR" -exec touch -t 202610041200 {} + 2>/dev/null
 touch -t 202610041200 "$CLONE_PARENT" "$CLONE_DIR"
 
 echo "Test 5: Successfully cleans stale, inactive candidate with approval"

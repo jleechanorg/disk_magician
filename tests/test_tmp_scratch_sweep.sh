@@ -6,19 +6,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/tmp_scratch_sweep.sh"
 
-TMP_ROOT=$(mktemp -d -t tmp_scratch_sweep_test.XXXXXX)
+TMP_ROOT="$(mktemp -d /tmp/disk-magician-tmp-scratch-sweep.XXXXXX)" || {
+  echo "FATAL: could not allocate /tmp fixture root" >&2
+  exit 2
+}
+if [[ -z "$TMP_ROOT" || ! -d "$TMP_ROOT" || -L "$TMP_ROOT" ]]; then
+  echo "FATAL: invalid or symlinked fixture root '$TMP_ROOT'" >&2
+  exit 2
+fi
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || {
+  echo "FATAL: could not canonicalize fixture root" >&2
+  exit 2
+}
+case "$TMP_ROOT" in
+  /tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: fixture root not under /tmp: '$TMP_ROOT'" >&2; exit 2 ;;
+esac
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
 INVOCATION_LOG="$TMP_ROOT/invocations.log"
-mkdir -p "$MOCK_BIN" "$STATE_DIR"
+HOME_DIR="$TMP_ROOT/home"
+mkdir -p "$MOCK_BIN" "$STATE_DIR" "$HOME_DIR"
+export HOME="$HOME_DIR"
 : > "$INVOCATION_LOG"
 
 cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 #!/bin/bash
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
-[[ "${TMP_MOCK_EXIT:-0}" == "0" ]] && exit 0 || exit 1
+helper="${DISK_MAGICIAN_RECEIPT_HELPER:-$(cd "$(dirname "$0")" && pwd)/job_receipt.py}"
+rc="${TMP_MOCK_EXIT:-0}"
+if [[ "$rc" == 0 ]]; then outcome=success; else outcome=error; fi
+run_id="$(python3 "$helper" begin --job cleanup_tmp --trigger "${DISK_MAGICIAN_RECEIPT_TRIGGER:-mock}" --precondition '{}')"
+python3 "$helper" finish --job cleanup_tmp --run-id "$run_id" --outcome "$outcome" \
+  --reason "mock cleanup result" --safety '{}' \
+  --candidates '{"count":null,"bytes":null,"removed_count":0,"deferred_count":0,"interrupted_count":0}' \
+  --postcondition '{"df_delta_bytes":0,"freed_bytes":0}' >/dev/null
+exit "$rc"
 MOCK
 
 cat > "$MOCK_BIN/cleanup_claude_state.sh" <<'MOCK'
@@ -30,6 +55,9 @@ MOCK
 chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_claude_state.sh"
 cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
+mkdir -p "$MOCK_BIN/lib"
+cp "$REPO_ROOT/scripts/lib/actuator_deadline.sh" "$MOCK_BIN/lib/actuator_deadline.sh"
+cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/tmp_scratch_sweep.sh"
 chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 SCRIPT="$MOCK_BIN/tmp_scratch_sweep.sh"
@@ -97,7 +125,7 @@ INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "cleanup_tmp dry-run, no approval" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 assert_contains "cleanup_claude_state dry-run, no approval" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 assert_receipt_field "dry-run receipt outcome success_noop" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success_noop"
-assert_receipt_field "dry-run receipt freed_bytes null" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "None"
+assert_receipt_field "dry-run receipt reports zero reclaimed bytes" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "0"
 assert_receipt_field "dry-run receipt safety no_mutation" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "no_mutation"
 
 echo "Test 6: exit code — wrapper exits nonzero if a step failed"
@@ -143,6 +171,30 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 assert_receipt_field "state failure receipt outcome error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+
+echo "Test 9: no-argument entrypoint survives Bash 3.2 nounset and defaults to dry-run"
+: > "$INVOCATION_LOG"
+NOARG_OUT="$TMP_ROOT/noarg.out"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" >"$NOARG_OUT" 2>&1
+NOARG_RC=$?
+set -e
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+if [[ "$NOARG_RC" -eq 0 ]]; then
+  echo "  PASS  no-argument entrypoint exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  no-argument entrypoint exited $NOARG_RC: $(cat "$NOARG_OUT")"
+  FAIL=$(( FAIL + 1 ))
+fi
+if ! grep -q "unbound variable" "$NOARG_OUT"; then
+  echo "  PASS  no-argument entrypoint has no nounset abort"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  no-argument entrypoint aborted under nounset"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

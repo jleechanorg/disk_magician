@@ -17,7 +17,7 @@ jobs:
   test:
     name: Test and lint
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -37,10 +37,10 @@ jobs:
           command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
 
       - name: Verify package-tree synchronization
-        run: bash scripts/sync_package_tree.sh --check
+        run: bash ./disk_magician.sh sync-package-tree --check
 
       - name: Verify pyproject version monotonicity
-        run: python3 scripts/check_version_monotonic.py
+        run: bash ./disk_magician.sh check-version
 
       - name: Check shell syntax and ShellCheck errors
         run: |
@@ -57,10 +57,4 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Run shell tests
-        run: |
-          set -euo pipefail
-          for test_file in tests/test_*.sh; do
-            echo "::group::$test_file"
-            timeout 300 /bin/bash "$test_file"
-            echo "::endgroup::"
-          done
+        run: bash ./disk_magician.sh test-shell

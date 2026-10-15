@@ -276,6 +276,35 @@ mkdir -p "$TMPROOT/.gitadmin/wt_admin"
 NEW_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"
 if lease_matches_incarnation "$L9"; then bad "recreated admin dir still matches (stale lease undetected)"; else ok "recreated admin dir -> no match (rc 1)"; fi
 
+echo "== lease_matches_incarnation: legacy fallback and strict checkout identity =="
+WTL="$(mk_wt wt_legacy)"
+seed_comm "$TESTPID" 400 bash
+lease_write "$WTL" "myrepo" "fix/legacy" "worktree-new"
+LL="$(lease_path_for "$WTL")"
+if lease_matches_incarnation "$LL"; then ok "lease with checkout identity matches"; else bad "lease with checkout identity should match"; fi
+lease_field_drop() { python3 - "$1" "$2" <<'PY'
+import json,sys
+p,keys=sys.argv[1],sys.argv[2].split(',')
+d=json.load(open(p))
+for k in keys: d.pop(k,None)
+json.dump(d,open(p,'w'))
+PY
+}
+lease_field_drop "$LL" 'checkout_dev,checkout_ino'
+if lease_matches_incarnation "$LL"; then ok "legacy lease without dev/ino matches via admin/birth"; else bad "legacy lease should match via admin/birth"; fi
+# stale recorded identity must fail even when admin/birth still match
+python3 - "$LL" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["checkout_dev"]=1; d["checkout_ino"]=1
+json.dump(d,open(p,'w'))
+PY
+if lease_matches_incarnation "$LL"; then bad "stale checkout identity must not match"; else ok "stale checkout identity -> no match (rc 1)"; fi
+# a replacement checkout gets a new admin dir/birth -> no match even for legacy
+lease_field_drop "$LL" 'checkout_dev,checkout_ino'
+sleep 1
+rm -rf "$TMPROOT/.gitadmin/wt_legacy"; mkdir -p "$TMPROOT/.gitadmin/wt_legacy"; : > "$TMPROOT/.gitadmin/wt_legacy/HEAD"
+if lease_matches_incarnation "$LL"; then bad "replacement admin dir must not match a legacy lease"; else ok "replacement admin dir -> no match (rc 1)"; fi
+
 echo "== lease_write_pending =="
 PENDING_TARGET="$TMPROOT/wt/future_wt"
 PTSV="$(printf '400\t%s\tclaude' "$OWNER_EPOCH")"
@@ -368,6 +397,29 @@ assert_eq "$(lease_field "$LE" 'sorted(d["upload_manifest"][0])')" "['crc32c', '
 assert_eq "$(lease_field "$LE" 'd["git_meta"]["head"]')" "abc123" "git metadata baseline stored"
 lease_set_verdict "$LE" "kept:test"
 assert_eq "$(lease_field "$LE" 'd["kind"] + str(d["published"])')" "evidenceTrue" "provenance survives verdict update"
+
+echo "== atomic reuse lease claim and recovery =="
+REUSE_WT="$(mk_wt wt_reuse)"
+lease_write "$REUSE_WT" myrepo old-branch test
+REUSE_LEASE="$(lease_path_for "$REUSE_WT")"
+REUSE_HASH="$(python3 - "$REUSE_LEASE" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PY
+)"
+REUSE_OWNER="$(printf '500\t%s\tcodex' "$OWNER_EPOCH")"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then ok "exact lease claimed"; else bad "exact lease claim failed"; fi
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_branch"]')" "old-branch" "old branch preserved in claim"
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_tip"]')" "abc123" "old tip preserved in claim"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then bad "stale lease claim succeeded"; else ok "stale/concurrent lease claim refused"; fi
+if lease_restore_reuse_claim "$REUSE_LEASE"; then ok "claim rollback restored"; else bad "claim rollback failed"; fi
+assert_eq "$(python3 - "$REUSE_LEASE" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PY
+)" "$REUSE_HASH" "rollback restores exact original lease"
+if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER" && lease_mark_reuse_incomplete "$REUSE_LEASE"; then ok "incomplete reuse marked"; else bad "incomplete reuse marker failed"; fi
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["state"]')" "reuse_incomplete" "incomplete state retained"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

@@ -16,11 +16,15 @@ ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
-T="$(mktemp -d)"
+T="$(mktemp -d /tmp/dm-govern-test.XXXXXX)" || exit 1
+[[ -d "$T" && "$T" == /tmp/dm-govern-test.* ]] || exit 1
 trap 'chmod -R u+w "$T" 2>/dev/null; rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 export DISK_MAGICIAN_DF_BIN="$T/bin/df"
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl"
+export DISK_MAGICIAN_FLEET_BIN="$T/bin/fleet" DISK_MAGICIAN_COLIMA_BIN=/usr/bin/false
+printf '%s\n' '#!/bin/sh' 'echo '\''{"schema_version":1,"status":"healthy","records":[{"status":"healthy"}]}'\''' > "$T/bin/fleet"
+chmod +x "$T/bin/fleet"
 # Confine the tick's birth audit (Task 9) to empty temp roots.
 export HOME="$T/home" TMPDIR="$T/tdir" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T/ptmp"
 mkdir -p "$HOME" "$TMPDIR" "$T/ptmp"
@@ -49,6 +53,7 @@ kicks() { [[ -s "$KICKS" ]] && wc -l < "$KICKS" | tr -d ' ' || echo 0; }
 
 tree_with_verdict() {  # tree_with_verdict <dir> <self-test output>
   mkdir -p "$1"; cp -R "$REPO_ROOT/scripts" "$1/"
+  cp "$REPO_ROOT/config.json.template" "$1/"
   printf 'artifact_removal_verdict() { [ "$1" = --self-test ] && echo %s; }\n' "$2" > "$1/scripts/lib/artifact_verdict.sh"
 }
 
@@ -62,7 +67,9 @@ assert_eq "$(budget zone)" GREEN "zone"
 assert_eq "$(budget free_bytes)" "$((150 * 1024 * 1024 * 1024))" "free_bytes"
 python3 -c 'import json,os,sys;d=json.load(open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json"));sys.exit(0 if d["zone_at"]>=int(sys.argv[1]) else 1)' "$before" \
   && ok "zone_at fresh" || bad "zone_at not fresh"
-assert_eq "$(budget classes)" "{'worktrees': {'used_gb': 1}}" "existing classes key kept"
+# Configured du classes with an existing root are now bootstrapped on the first
+# tick (spec 7.1 step 3); the pre-existing worktrees entry must be preserved.
+assert_eq "$(python3 -c 'import json,os;c=json.load(open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json")).get("classes",{});print(c.get("worktrees"))')" "{'used_gb': 1}" "existing worktrees class kept"
 assert_eq "$(kicks)" 0 "GREEN never kickstarts"
 
 echo "== 1b. tick keeps a per-day minimum of used bytes (C12 trough baseline), 31 days max"
@@ -80,7 +87,9 @@ assert_eq "$(dm)" "31 1024" "higher same-day value replaced by the df used bytes
 
 echo "== 2. BLACK with no artifact_verdict.sh in the running tree: kickstart blocked"
 fresh_state black_missing; fake_df 25
-out=$("$DISKM" govern --mode observe 2>&1); rc=$?
+tree_with_verdict "$T/tree_missing" fail
+mv "$T/tree_missing/scripts/lib/artifact_verdict.sh" "$T/tree_missing/disabled-verdict.sh"
+out=$(python3 "$T/tree_missing/scripts/disk_budget.py" --govern --mode observe 2>&1); rc=$?
 assert_eq "$rc" 0 "BLACK tick rc"
 assert_eq "$(budget zone)" BLACK "zone BLACK written"
 assert_eq "$(kicks)" 0 "launchctl never called"
@@ -102,7 +111,7 @@ events | grep -q '"event": "govern_emergency"' && ok "govern_emergency recorded"
 
 echo "== 5. FLOOR (5 GiB free): floor_breach recorded, files valid"
 fresh_state floor; fake_df 5
-"$DISKM" govern --mode observe >/dev/null 2>&1; rc=$?
+python3 "$T/tree_missing/scripts/disk_budget.py" --govern --mode observe >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 0 "FLOOR tick rc"
 assert_eq "$(budget zone)" FLOOR "zone FLOOR"
 events | grep -q '"event": "floor_breach"' && ok "floor_breach event" || bad "no floor_breach event"
@@ -127,11 +136,22 @@ echo 999999 > "$DISK_MAGICIAN_STATE_DIR/govern.lock"
 assert_eq "$rc" 0 "tick after stale lock rc"
 assert_eq "$(budget zone)" GREEN "zone written after takeover"
 
-echo "== 8. Act mode is not implemented here: rc 2, nothing written"
+echo "== 8. Act mode writes its observation then blocks before dispatch until C14 is complete"
 fresh_state act; fake_df 25
-"$DISKM" govern --mode act >/dev/null 2>&1; rc=$?
-assert_eq "$rc" 2 "--mode act rc"
-[[ ! -e "$DISK_MAGICIAN_STATE_DIR/budget.json" ]] && ok "act wrote nothing" || bad "act wrote budget.json"
+act_output=$(python3 "$T/tree_fail/scripts/disk_budget.py" --govern --mode act 2>&1); rc=$?
+assert_eq "$rc" 0 "--mode act rc"
+[[ -e "$DISK_MAGICIAN_STATE_DIR/budget.json" ]] && ok "act records zone" || bad "act failed to record zone"
+[[ "$act_output" == *activation_blocked:c14_incomplete* ]] && ok "C14 gate blocks adapters" || bad "act did not report C14 gate: $act_output"
+[[ ! -e "$DISK_MAGICIAN_STATE_DIR/govern_sched.json" ]] && ok "blocked act starts no scheduler" || bad "blocked act wrote scheduler state"
+python3 - "$DISK_MAGICIAN_STATE_DIR/receipts" <<'PY' && ok "blocked act records skip receipts only" || bad "blocked act receipt state wrong"
+import json, pathlib, sys
+p=pathlib.Path(sys.argv[1])
+files=list(p.glob("govern_*.json"))
+assert files
+for f in files:
+ d=json.loads(f.read_text()); assert d["last_terminal"]["outcome"] == "blocked_safety", f
+assert not list(p.glob("cleanup_*.json"))
+PY
 
 echo "== 9. df failure: exit 3, previous budget.json kept"
 fresh_state dffail; fake_df 150
@@ -151,15 +171,32 @@ chmod 755 "$DISK_MAGICIAN_STATE_DIR"
 assert_eq "$rc" 3 "unwritable state dir rc"
 assert_eq "$(budget zone)" GREEN "previous budget.json intact"
 
-echo "== 11. Template: 600 s observe tick through packaged diskm"
+echo "== 11. Template: 600 s gated act tick through packaged diskm"
 P="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern.plist.template"
 if [[ -f "$P" ]] && plutil -lint "$P" >/dev/null 2>&1; then ok "template lints"; else bad "template missing or invalid"; fi
 python3 - "$P" <<'PY' && ok "template args and interval" || bad "template args/interval wrong"
 import plistlib, sys
 d = plistlib.load(open(sys.argv[1], "rb"))
-assert d["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "govern", "--mode", "observe"], d["ProgramArguments"]
+assert d["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "govern", "--mode", "act"], d["ProgramArguments"]
 assert d["StartInterval"] == 600 and d["Label"] == "com.jleechanorg.disk-magician-govern"
 PY
+
+echo "== 12. Template: daily 03:00 measure job through packaged diskm"
+M="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern-measure.plist.template"
+if [[ -f "$M" ]] && plutil -lint "$M" >/dev/null 2>&1; then ok "measure template lints"; else bad "measure template missing or invalid"; fi
+python3 - "$M" <<'PY' && ok "measure template args and 03:00 calendar" || bad "measure template args/calendar wrong"
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+assert d["Label"] == "com.jleechanorg.disk-magician-govern-measure", d["Label"]
+assert d["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "govern", "--daily-measure"], d["ProgramArguments"]
+assert d["StartCalendarInterval"] == {"Hour": 3, "Minute": 0}, d["StartCalendarInterval"]
+PY
+if grep -q 'com.jleechanorg.disk-magician-\*\.plist\.template' "$REPO_ROOT/scripts/install_launchd_sweepers.sh" \
+   || grep -q 'com.jleechanorg.disk-magician-\*.plist.template' "$REPO_ROOT/scripts/install_launchd_sweepers.sh"; then
+  ok "installer discovers govern-measure template"
+else
+  bad "installer does not auto-discover the govern-measure template"
+fi
 
 echo
 echo "test_govern.sh: $PASS passed, $FAIL failed"

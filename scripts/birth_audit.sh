@@ -6,7 +6,7 @@ _BA_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 source "$_BA_DIR/lib/worktree_lease.sh"; source "$_BA_DIR/lib/scratch_roots.sh"; source "$_BA_DIR/lib/layout_standard.sh"
 out="$(mktemp)"; trap 'rm -f "$out"' EXIT
 python3 "$_BA_DIR/birth_audit.py" "$(scratch_roots_get_private_tmp)" "${TMPDIR:-$(scratch_roots_get_user_tmp)}" \
-    "$HOME/Documents/Codex" "$STANDARD_WORKTREE_ROOT" > "$out" || exit $?
+    "$HOME/Documents/Codex" "$STANDARD_WORKTREE_ROOT" "$@" > "$out" || exit $?
 while IFS= read -r -d '' p; do
     f="$(lease_path_for "$p")"; [[ -e "$f" ]] && continue
     IFS=$'\t' read -r admin birth < <(_lease_admin_info "$p")

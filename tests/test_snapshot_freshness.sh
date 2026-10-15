@@ -24,9 +24,35 @@ SNAP_SCRIPT="$REPO_ROOT/scripts/disk_snapshot.sh"
 AUDIT_SCRIPT="$REPO_ROOT/scripts/disk_audit.sh"
 HISTORY_SCRIPT="$REPO_ROOT/scripts/disk_history.sh"
 
-# Temp work area — cleaned up on exit.
-WORK="$(mktemp -d -t disk_magician_freshness.XXXXXX)"
+# Temp work area — cleaned up on exit. Allocate explicitly under /tmp, reject
+# symlinked roots before installing the cleanup trap, then canonicalize it.
+WORK="$(mktemp -d /tmp/disk-magician-snapshot-freshness.XXXXXX)" || {
+    echo "FATAL: could not allocate /tmp fixture root" >&2
+    exit 2
+}
+if [[ -z "$WORK" || ! -d "$WORK" || -L "$WORK" ]]; then
+    echo "FATAL: invalid or symlinked fixture root '$WORK'" >&2
+    exit 2
+fi
+WORK="$(cd "$WORK" && pwd -P)" || {
+    echo "FATAL: could not canonicalize fixture root" >&2
+    exit 2
+}
+case "$WORK" in
+    /tmp/*|/private/tmp/*) ;;
+    *) echo "FATAL: fixture root not under /tmp: '$WORK'" >&2; exit 2 ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
+
+# The snapshot writer expands ~ through HOME. Keep that entire input surface
+# inside this fixture and seed several container directories so the lc_* check
+# observes deterministic entries without reading the live user HOME.
+export HOME="$WORK/home"
+mkdir -p "$HOME/Library/Containers"
+for container in com.example.alpha com.example.beta com.example.gamma; do
+    mkdir -p "$HOME/Library/Containers/$container/Data"
+    touch "$HOME/Library/Containers/$container/Data/fixture"
+done
 
 PASS=0
 FAIL=0
@@ -39,21 +65,7 @@ section() { echo; echo "── $1 ──"; }
 section "1. Live snapshot has snapshot_metadata block and lc_ keys"
 
 LIVE_SNAP="$WORK/live_snap.json"
-# A real snapshot is slow on big disks — bound it. If a pre-existing
-# recent snapshot exists (e.g. /tmp/test_snap.json from a prior run),
-# prefer that to avoid the 90s+ du pass.
-PRE_EXISTING=""
-for candidate in /tmp/test_snap.json "$HOME/.disk_magician_backup/backup"/*/disk_snapshot.json "$REPO_ROOT/backup"/*/disk_snapshot.json; do
-    if [[ -s "$candidate" ]]; then
-        PRE_EXISTING="$candidate"
-        break
-    fi
-done
-
-if [[ -n "$PRE_EXISTING" ]]; then
-    cp "$PRE_EXISTING" "$LIVE_SNAP"
-    ok "reusing existing snapshot $PRE_EXISTING (faster than re-measuring)"
-elif DISK_MAGICIAN_STATE_DIR="$WORK/state" timeout "${SNAPSHOT_TIMEOUT:-180}" "$SNAP_SCRIPT" --output "$LIVE_SNAP" > "$WORK/live_snap.log" 2>&1; then
+if DISK_MAGICIAN_STATE_DIR="$WORK/state" timeout "${SNAPSHOT_TIMEOUT:-180}" "$SNAP_SCRIPT" --output "$LIVE_SNAP" > "$WORK/live_snap.log" 2>&1; then
     if [[ -s "$LIVE_SNAP" ]]; then
         ok "live snapshot written to $LIVE_SNAP"
     else

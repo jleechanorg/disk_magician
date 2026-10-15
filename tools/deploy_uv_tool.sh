@@ -3,7 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${DISK_MAGICIAN_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [[ ! -d "$REPO_ROOT/.git" && ! -f "$REPO_ROOT/.git" ]]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$REPO_ROOT" || ( ! -d "$REPO_ROOT/.git" && ! -f "$REPO_ROOT/.git" ) || ! -f "$REPO_ROOT/pyproject.toml" ]]; then
+  echo "deploy_uv_tool: must be run from a disk_magician git checkout (or set DISK_MAGICIAN_REPO_ROOT)" >&2
+  exit 1
+fi
 CHECK_ONLY=false
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=true
 if [[ $# -gt 0 && "$CHECK_ONLY" != true ]]; then
@@ -54,8 +61,16 @@ for candidate in "$tool_root"/lib/python*/site-packages/disk_magician; do
 done
 [[ -n "$deployed_root" ]] || { echo "deploy_uv_tool: deployed package root not found" >&2; exit 1; }
 
+smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/deploy_uv_tool.XXXXXX")"
+trap 'rm -rf "$smoke_dir"' EXIT
+
+expected_pkg_root="$REPO_ROOT/src/disk_magician"
+if [[ ! -f "$expected_pkg_root/disk_magician.sh" ]] && "$REPO_ROOT/scripts/sync_package_tree.sh" --stage "$smoke_dir/expected_pkg" >/dev/null 2>&1; then
+  expected_pkg_root="$smoke_dir/expected_pkg"
+fi
+
 while IFS= read -r -d '' source_file; do
-  rel="${source_file#"$REPO_ROOT/src/disk_magician/"}"
+  rel="${source_file#"$expected_pkg_root/"}"
   case "$rel" in
     __pycache__/*|*/__pycache__/*|*.pyc) continue ;;
   esac
@@ -64,14 +79,14 @@ while IFS= read -r -d '' source_file; do
     echo "deploy_uv_tool: deployed file mismatch: $rel" >&2
     exit 1
   fi
-done < <(find "$REPO_ROOT/src/disk_magician" -type f -print0)
+done < <(find "$expected_pkg_root" -type f -print0)
 
 while IFS= read -r -d '' deployed_file; do
   rel="${deployed_file#"$deployed_root/"}"
   case "$rel" in
     __pycache__/*|*/__pycache__/*|*.pyc) continue ;;
   esac
-  source_file="$REPO_ROOT/src/disk_magician/$rel"
+  source_file="$expected_pkg_root/$rel"
   if [[ ! -f "$source_file" ]]; then
     echo "deploy_uv_tool: unexpected deployed file: $rel" >&2
     exit 1
@@ -81,8 +96,6 @@ done < <(find "$deployed_root" -type f -print0)
 # Post-deploy smoke: both names are production entrypoints. Capture their
 # actual help output and require the aliases to agree, rather than only
 # checking that one executable starts.
-smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/deploy_uv_tool.XXXXXX")"
-trap 'rm -rf "$smoke_dir"' EXIT
 for smoke_name in disk-magician diskm; do
   smoke_bin="$tool_root/bin/$smoke_name"
   if [[ ! -x "$smoke_bin" ]]; then
@@ -113,7 +126,7 @@ fi
 
 state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 mkdir -p "$state_dir"
-python3 - "$state_dir/deployed.json" "$REPO_ROOT" "$head_sha" "$installed_version" "$deployed_root" <<'PY'
+python3 - "$state_dir/deployed.json" "$REPO_ROOT" "$head_sha" "$installed_version" "$deployed_root" "$expected_pkg_root" <<'PY'
 import datetime
 import hashlib
 import json
@@ -122,7 +135,7 @@ import subprocess
 import sys
 import tempfile
 
-receipt_path, source_root, expected_sha, installed_version, package_root = sys.argv[1:]
+receipt_path, source_root, expected_sha, installed_version, package_root, expected_pkg_root = sys.argv[1:]
 
 def source_is_still_pinned():
     current_sha = subprocess.check_output(
@@ -162,7 +175,7 @@ def package_hashes(root):
     return hashes
 
 source_is_still_pinned()
-verified_hashes = package_hashes(os.path.join(source_root, "src", "disk_magician"))
+verified_hashes = package_hashes(expected_pkg_root)
 if not verified_hashes or package_hashes(package_root) != verified_hashes:
     raise RuntimeError("deployed package changed before receipt publication")
 source_is_still_pinned()

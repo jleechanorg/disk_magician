@@ -4,6 +4,9 @@
 # Defaults to dry-run (use --clean to actually delete).
 set -euo pipefail
 
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+
 CAPTURES_DIR="$HOME/.llm-inspector/captures"
 INSPECTOR_DIR="$HOME/.llm-inspector"
 
@@ -59,9 +62,10 @@ remove_file() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would remove: $f  (${kb} KB)"
+  elif c14_remove "$f" --kind ephemeral; then
+    log "Removed: $f  (${kb} KB)"
   else
-    log "Removing: $f  (${kb} KB)"
-    rm -f "$f"
+    return 1
   fi
   echo "$kb"
 }
@@ -69,13 +73,14 @@ remove_file() {
 log "$(dry_prefix)cleanup_llm_inspector.sh starting"
 
 FILES_DELETED=0
+FILES_KEPT=0
 TOTAL_KB=0
 
 if [[ -d "$CAPTURES_DIR" ]]; then
   log "Phase 1: removing files older than ${AGE_THRESHOLD_DAYS} days in ${CAPTURES_DIR} ..."
 
   while IFS= read -r -d '' f; do
-    kb=$(remove_file "$f")
+    kb=$(remove_file "$f") || { FILES_KEPT=$(( FILES_KEPT + 1 )); continue; }
     TOTAL_KB=$(( TOTAL_KB + kb ))
     FILES_DELETED=$(( FILES_DELETED + 1 ))
   done < <(find "$CAPTURES_DIR" -maxdepth 1 -type f               \( -name "capture-*.json" -o -name "*.summary.json" \)               -mtime "+${AGE_THRESHOLD_DAYS}" -print0 2>/dev/null || true)
@@ -101,7 +106,7 @@ if [[ -d "$CAPTURES_DIR" ]]; then
         break
       fi
 
-      kb=$(remove_file "$f")
+      kb=$(remove_file "$f") || { FILES_KEPT=$(( FILES_KEPT + 1 )); continue; }
       TOTAL_KB=$(( TOTAL_KB + kb ))
       FILES_DELETED=$(( FILES_DELETED + 1 ))
     done < <(find "$CAPTURES_DIR" -maxdepth 1 -type f                 \( -name "capture-*.json" -o -name "*.summary.json" \)                 -print0 2>/dev/null               | xargs -0 stat -f '%m %N' 2>/dev/null               | sort -n               | awk '{print $2}'               || true)
@@ -154,4 +159,4 @@ rotate_log() {
 rotate_log "$LAUNCHD_LOG"     "$LAUNCHD_LOG_MAX_MB"     "$LAUNCHD_LOG_KEEP_LINES"
 rotate_log "$LAUNCHD_ERR_LOG" "$LAUNCHD_ERR_LOG_MAX_MB" "$LAUNCHD_LOG_KEEP_LINES"
 
-log "$(dry_prefix)Done. Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"
+log "$(dry_prefix)Done. Files removed: ${FILES_DELETED}  Files kept: ${FILES_KEPT}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)"

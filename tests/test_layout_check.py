@@ -59,7 +59,8 @@ class LayoutCheckTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_check(self, *args):
-        env = dict(os.environ, HOME=str(self.home))
+        env = dict(os.environ, HOME=str(self.home),
+                   EVIDENCE_TMP_ROOT=str(self.outside))
         env.pop("STANDARD_WORKTREE_ROOT", None)
         start = time.monotonic()
         proc = subprocess.run(["python3", str(SCRIPT), *args], env=env,

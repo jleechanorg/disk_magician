@@ -8,7 +8,9 @@ export WORKTREE_MIN_AGE_DAYS=7
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_SHA=b0b5b9e4c713a5e9b9674cae9d81f563c37a69b1
-TMP_ROOT="$(cd "$(mktemp -d -t cleanup_wt_single_age.XXXXXX)" && pwd -P)"
+TMP_ROOT="$(mktemp -d /tmp/cleanup_wt_single_age.XXXXXX)" || exit 1
+[[ "$TMP_ROOT" == /tmp/cleanup_wt_single_age.* && -d "$TMP_ROOT" && ! -L "$TMP_ROOT" ]] || exit 1
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || exit 1
 trap 'chmod -R u+rwX "$TMP_ROOT"; rm -rf "$TMP_ROOT"' EXIT
 unset WORKTREE_APPROVED
 REAL_GIT="$(command -v git)"
@@ -84,7 +86,7 @@ init_fixture() {
   WT="$REPO/.claude/worktrees"
   AG="$HOME_FIX/.gemini/antigravity/worktrees/project"
   BIN="$F/bin"
-  mkdir -p "$WT" "$AG" "$BIN" "$HOME_FIX/.hermes"
+  mkdir -p "$WT" "$AG" "$BIN" "$HOME_FIX/.hermes" "$F/tmp" "$F/private-tmp" "$F/tmp-root"
   printf 'projects: {}\n' > "$HOME_FIX/.hermes/agent-orchestrator.yaml"
   : > "$F/ages.tsv"; : > "$F/calls.expected"; : > "$F/eligible.expected"
   printf 'n/\n' > "$F/lsof.out"
@@ -103,7 +105,38 @@ init_fixture() {
   "$REAL_GIT" -C "$REPO" remote add origin https://github.com/fixture/repo.git
   cat > "$BIN/lsof" <<'SH'
 #!/usr/bin/env bash
-cat "$FIXTURE/lsof.out"
+case " $* " in
+  *' -d cwd '*)
+    # The machine-wide CWD snapshot remains the fixture's scan source so the
+    # explicit live candidate keeps its historical coverage. Its records are
+    # separate from scoped non-CWD open-file probes below.
+    printf 'p1\nfcwd\nn/\n'
+    pid=1
+    while IFS= read -r record; do
+      if [[ "$record" == n/* && "$record" != n/ ]]; then
+        pid=$((pid + 1))
+        printf 'p%s\nfcwd\n%s\n' "$pid" "$record"
+      fi
+    done < "$FIXTURE/lsof.out"
+    exit 0
+    ;;
+  *' +D '*)
+    # C14's scoped open-file query is a no-match (rc=1) unless the fixture
+    # explicitly marks this candidate as open. A generic n/ record makes the
+    # C14 probe treat every otherwise closed candidate as open.
+    target="${!#}"
+    while IFS= read -r record; do
+      [[ "$record" == n/* ]] || continue
+      path="${record#n}"
+      if [[ "$path" == "$target" || "$path" == "$target"/* ]]; then
+        printf 'p1\nfn\n%s\n' "$record"
+        exit 0
+      fi
+    done < "$FIXTURE/lsof.out"
+    exit 1
+    ;;
+esac
+exit 1
 SH
   cat > "$BIN/gh" <<'SH'
 #!/usr/bin/env bash
@@ -161,6 +194,25 @@ add_orphan() {
   map_age "$AG/$1" "$2"
   expect_calls "$AG/$1" 1
 }
+write_released_lease() {
+  local path="$1" lease gitdir git_meta
+  lease="$(HOME="$HOME_FIX" DISK_MAGICIAN_STATE_DIR="$HOME_FIX/.disk_magician_state" \
+    bash -c 'source "$1"; lease_path_for "$2"' _ \
+    "$REPO_ROOT/scripts/lib/worktree_lease.sh" "$path")"
+  gitdir="$($REAL_GIT -C "$path" rev-parse --absolute-git-dir)"
+  git_meta="$(HOME="$HOME_FIX" python3 "$REPO_ROOT/scripts/c14_probe.py" gitmeta "$gitdir")"
+  mkdir -p "${lease%/*}"
+  printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' \
+    "$path" "$git_meta" > "$lease"
+}
+mark_stale() {
+  local path="$1" gitdir
+  find "$path" -exec touch -h -t 202001010000 {} + 2>/dev/null
+  gitdir="$($REAL_GIT -C "$path" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -n "$gitdir" && "$gitdir" != "$path/.git" && -d "$gitdir" ]]; then
+    find "$gitdir" -exec touch -h -t 202001010000 {} + 2>/dev/null
+  fi
+}
 expect_eligible() { printf '%s\n' "$1" >> "$F/eligible.expected"; }
 
 run_cleanup() {
@@ -172,7 +224,10 @@ run_cleanup() {
     [[ "$F" == "$TMP_ROOT/"* && "$REPO" == "$F/repo" && "$HOME_FIX" == "$F/home" ]]
     approval='WORKTREE_APPROVED=1'
   fi
-  env -i HOME="$HOME_FIX" PATH="$BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}" \
+  env -i HOME="$HOME_FIX" TMPDIR="$F/tmp" PATH="$BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}" \
+    DISK_MAGICIAN_TEST_SANDBOX="$F" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$F/private-tmp" \
+    DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$F/tmp-root" \
+    DISK_MAGICIAN_STATE_DIR="$HOME_FIX/.disk_magician_state" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 FIXTURE="$F" REAL_GIT="$REAL_GIT" REAL_DU="$REAL_DU" REAL_MKTEMP="$REAL_MKTEMP" \
     AHEAD_SHA="$AHEAD_SHA" AGE_MAP="$F/ages.tsv" AGE_COUNTER="$F/age.calls" \
     PREDICATE_COUNTER="$F/predicate.calls" \
@@ -416,6 +471,20 @@ case_t9() {
     map_age "$AG/$name" "$value" "$rc"
   done
   add_orphan young 2
+  # C14's repository/provenance checks use a real remote and released git_meta
+  # lease. Push every linked-worktree branch so only the explicit dirty/ahead/
+  # lock/live predicates below keep their candidates. The orphan gets its own
+  # remote ref because its history is independent of the linked-worktree repo.
+  local origin="$F/origin.git"
+  "$REAL_GIT" init -q --bare -b main "$origin"
+  "$REAL_GIT" -C "$REPO" remote set-url origin "$origin"
+  "$REAL_GIT" -C "$REPO" push -q origin --all
+  "$REAL_GIT" -C "$AG/old" remote add origin "$origin"
+  "$REAL_GIT" -C "$AG/old" push -q origin 'HEAD:refs/heads/orphan-old'
+  write_released_lease "$AG/old"
+  mark_stale "$WT/wt-old"
+  mark_stale "$WT/wt-merged4"
+  mark_stale "$AG/old"
   cut -f 1 "$F/ages.tsv" > "$F/before.paths"
   run_cleanup branch "$F/out" constant --clean
   while IFS= read -r path; do

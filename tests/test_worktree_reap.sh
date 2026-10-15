@@ -22,6 +22,13 @@ case "$spec" in lstart=) cat "$FAKE_PS_DIR/lstart/$pid" 2>/dev/null;; args=) cat
 MOCK
 cat > "$TMP/bin/lsof" <<'MOCK'
 #!/bin/bash
+# C14's open-file probe uses `-d ^cwd`; the quarantine verify probe uses `+D`.
+# The fixture is a cwd record, so both must see no live users. wrh_live_cwd_reason
+# uses `-d cwd` and must still see the fixture.
+for a in "$@"; do
+  [[ "$a" == ^cwd ]] && exit 1
+  [[ "$a" == +D ]] && exit 1
+done
 cat "$FAKE_LSOF_FIXTURE"
 MOCK
 cat > "$TMP/bin/git" <<'MOCK'
@@ -71,11 +78,13 @@ git -C "$TMP/repo" add .
 git -C "$TMP/repo" commit -qm base
 git -C "$TMP/repo" push -q origin HEAD:main
 N=0
-age() { python3 - "$WT" "${1:-2400}" <<'PY'
+age() { python3 - "$WT" "${1:-7200}" <<'PY'
 import os,sys,time
 old=time.time()-int(sys.argv[2])
 for base,dirs,files in os.walk(sys.argv[1]):
  for name in files: os.utime(os.path.join(base,name),(old,old))
+ for name in dirs: os.utime(os.path.join(base,name),(old,old))
+os.utime(sys.argv[1],(old,old))
 PY
 }
 new() {
@@ -127,33 +136,155 @@ if [[ ! -f "$SCRIPT" ]]; then bash "$SCRIPT"; echo 'RED: scripts/worktree_reap.s
 cp -R "$ROOT/scripts" "$TMP/root-scripts"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
 echo 'removal_activation_ok() { [[ -f "$DISK_MAGICIAN_STATE_DIR/test_gate_open" ]] || { echo activation_blocked:test; return 1; }; }' > "$TMP/root-scripts/lib/removal_activation.sh"
 new; rm "$LF"; run; check 'unleased adopts null owner' test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True
-new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive unchanged' sentinel; check 'alive present' test -d "$WT"; park
-new; run; verdict 'dead nominate' remove; check 'nominate retains' test -d "$WT"; park
+new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive recorded' kept:live-owner; check 'alive present' test -d "$WT"; park
+new; edit 'd["owner"]=None'; age 90000; run; verdict 'owner-null 25h parked' kept:owner-null; check 'parked retained' test -d "$WT"; park
+new; run; verdict 'dead nominate' remove; check 'nominate retains' test -d "$WT"; check 'nomination is not removal' test "$(receipt 'd["candidates"]["removed_count"]')" = 0; park
 new; run --mode remove; verdict 'unapproved records verdict' remove; check 'unapproved message' grep -q 'remove mode not approved' "$TMP/run.log"; check 'unapproved retains' test -d "$WT"; park
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"; touch "$DISK_MAGICIAN_STATE_DIR/worktree_reap.remove_approved"
 new; run --mode remove; check 'legacy marker, gate closed: nominate only' grep -q 'remove mode not approved' "$TMP/run.log"; check 'legacy marker alone retains' test -d "$WT"; park
 touch "$DISK_MAGICIAN_STATE_DIR/test_gate_open"
-new; run --mode remove; check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
+echo "== reuse lease claim cannot race reaper's dead-owner update =="
+new
+mkdir -p "$TMP/pythonhook"
+cat > "$TMP/pythonhook/sitecustomize.py" <<'PYHOOK'
+import os, time
+_replace = os.replace
+def replace(src, dst, *args, **kwargs):
+    if (os.path.basename(src).startswith('.reap-') and
+        os.path.realpath(dst) == os.path.realpath(os.environ.get('RACE_LEASE','')) and
+        os.path.exists(os.environ.get('RACE_ARM',''))):
+        open(os.environ['RACE_READY'],'w').write(str(src))
+        deadline=time.time()+20
+        while not os.path.exists(os.environ['RACE_RELEASE']):
+            if time.time()>deadline: raise TimeoutError('test release timeout')
+            time.sleep(.01)
+    return _replace(src,dst,*args,**kwargs)
+os.replace=replace
+PYHOOK
+RACE_ARM="$TMP/race-arm"; RACE_READY="$TMP/race-ready"; RACE_RELEASE="$TMP/race-release"
+export RACE_ARM RACE_READY RACE_RELEASE RACE_LEASE="$LF"
+touch "$RACE_ARM"
+PYTHONPATH="$TMP/pythonhook${PYTHONPATH:+:$PYTHONPATH}" bash "$SCRIPT" --mode nominate > "$TMP/race-reaper.log" 2>&1 & reaper_pid=$!
+for _ in $(seq 1 1000); do [[ -e "$RACE_READY" ]] && break; sleep .01; done
+check 'reaper update pauses at atomic replace' test -e "$RACE_READY"
+RACE_HASH="$(python3 - "$LF" <<'PYHASH'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PYHASH
+)"
+RACE_BRANCH="worktree-c$N"
+RACE_TIP="$(git -C "$TMP/repo" rev-parse "refs/heads/$RACE_BRANCH")"
+if lease_claim_reuse "$LF" "$RACE_HASH" "$RACE_BRANCH" "$RACE_TIP" $'401\t1760000000\tclaude'; then check 'claim must not enter during reaper mutation' false; else check 'claim waits/fails while reaper owns shared lease lock' true; fi
+touch "$RACE_RELEASE"
+wait "$reaper_pid"
+RACE_HASH="$(python3 - "$LF" <<'PYHASH'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PYHASH
+)"
+if lease_claim_reuse "$LF" "$RACE_HASH" "$RACE_BRANCH" "$RACE_TIP" $'401\t1760000000\tclaude'; then check 'claim succeeds after serialized reaper update' true; else check 'claim remains blocked after reaper completed' false; fi
+check 'pending claim survives the reaper update' test "$(field 'd.get("reuse",{}).get("state")')" = pending
+unset PYTHONPATH RACE_ARM RACE_READY RACE_RELEASE RACE_LEASE
+cat > "$TMP/reuse-lock-hook" <<'HOOK'
+#!/usr/bin/env bash
+source "$TEST_LEASE_LIB"
+file="$1"
+hash="$(shasum -a 256 "$file" | awk '{print $1}')"
+if lease_claim_reuse "$file" "$hash" hook/branch deadbeef $'401\t1760000000\tclaude'; then
+    echo raced > "$TEST_HOOK_RESULT"
+else
+    echo blocked > "$TEST_HOOK_RESULT"
+fi
+HOOK
+chmod +x "$TMP/reuse-lock-hook"
+export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" TEST_HOOK_RESULT="$TMP/reuse-lock-result"
+export DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK="$TMP/reuse-lock-hook"
+new; run --mode remove
+unset DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK
+check 'reuse claim cannot start inside final removal boundary' grep -qx blocked "$TEST_HOOK_RESULT"
+check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
+new; mkdir "$LF.reuse-lock"; run --mode remove
+check 'pre-existing reuse lock preserves candidate' test -d "$WT"
+check 'pre-existing reuse lock leaves lease untouched' test "$(field 'd.get("branch")')" = "worktree-c$N"
+rmdir "$LF.reuse-lock"
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
 for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-30*3600-86400'; age 25200; run --mode "$mode"; verdict "TTL expired 30h, owner alive $mode" kept:expired_owner_alive; check "TTL expired owner alive present $mode" test -d "$WT"; park; done
 for quiet in 2400 300; do new; edit "d['owner']['pid']=400; d['released_at']=datetime.datetime.fromtimestamp(time.time()-$quiet,datetime.timezone.utc).isoformat()"; age 7200; run; if [[ "$quiet" == 2400 ]]; then verdict 'released quiet' remove; else verdict 'released recent' kept:recent-activity; fi; park; done
 new; edit 'd.pop("owner_dead_seen_at",None)'; age 7200; run; verdict 'first dead waits' kept:recent-activity; check 'first death recorded' test "$(field 'bool(d.get("owner_dead_seen_at"))')" = True; edit 'd["owner_dead_seen_at"]=time.time()-1860'; run; verdict 'next run after quiet' remove; park
 new; edit 'd["owner"]=None'; run --mode remove; check 'null owner never removed' test -d "$WT"
+new; edit 'd["pending"]=True; d["reuse"]={"state":"pending","old_branch":"old","old_tip":"abc"}'; run --mode remove; check 'pending reuse claim is skipped' grep -q 'kept:pending' "$TMP/run.log"; check 'pending reuse path preserved' test -d "$WT"; check 'pending reuse marker preserved' test "$(field 'd["reuse"]["state"]')" = pending; park
+new; edit 'd["reuse"]={"state":"reuse_incomplete","old_branch":"old","old_tip":"abc"}'; run --mode remove; check 'incomplete reuse is skipped' grep -q 'kept:reuse_incomplete' "$TMP/run.log"; check 'incomplete reuse path preserved' test -d "$WT"; park
+new; edit 'd["reuse"]={"state":"reuse_incomplete","old_branch":"old","old_tip":"abc"}'; git -C "$TMP/repo" worktree remove "$WT"; run; check 'missing incomplete claim remains available for recovery' test -f "$LF"; check 'missing incomplete claim state retained' test "$(field 'd["reuse"]["state"]')" = reuse_incomplete
 new; git -C "$WT" commit -q --allow-empty -m fork; git -C "$WT" update-ref refs/remotes/fork/test HEAD; age; run; verdict 'fork only not pushed' kept:not-pushed; park
 new; git -C "$WT" commit -q --allow-empty -m merged; age; export GH_HEAD="$(git -C "$WT" rev-parse HEAD)"; run; verdict 'merged PR deleted branch' remove; unset GH_HEAD; park
 for offset in 0 -30 -120 1; do new; edit "d['pending']=True; d['creator']='guard'; d['owner']['pid']=400; d['created_epoch']=d['admin_birth_epoch']+$offset; d['admin_id']=None; d['admin_birth_epoch']=None"; run; if [[ "$offset" == 0 || "$offset" == -30 ]]; then check "pending promotion offset $offset" test "$(field 'd["creator"] == "guard" and d["owner"]["pid"] == 400 and not d["pending"]')" = True; else check "pending stale offset $offset" test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True; fi; park; done
+# Review blocker regression: a real guard pending lease is written before the
+# checkout exists, so it has no dev/ino or admin id/birth. Promotion must
+# record the complete identity under the lock, and two passes must preserve the
+# original live owner instead of re-adopting it with owner: null.
+N=$((N+1)); PEND_WT="$STANDARD_WORKTREE_ROOT/repo/c$N"
+lease_write_pending "$PEND_WT" $'400\t1760000000\tclaude'
+LF="$(lease_path_for "$PEND_WT")"
+git -C "$TMP/repo" worktree add -qb "worktree-c$N" "$PEND_WT" origin/main
+WT="$PEND_WT"
+edit 'd["last_verdict"]="sentinel"'
+run
+check 'guard promote keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'guard promote clears pending' test "$(field 'd["pending"]')" = False
+check 'guard promote records checkout dev/ino' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
+verdict 'guard promote records live-owner verdict' kept:live-owner
+run
+check 'guard second pass keeps original live owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'guard second pass keeps complete identity' test "$(field 'd["checkout_dev"] is not None and d["checkout_ino"] is not None')" = True
+check 'guard not re-adopted on second pass' test "$(field 'd["creator"]=="guard"')" = True
+park
+# Legacy lease (written before checkout identity) keeps its owner through the
+# admin/birth proof instead of being adopted.
+new
+edit 'd.pop("checkout_dev",None); d.pop("checkout_ino",None); d["owner"]["pid"]=400; d["last_verdict"]="sentinel"'
+run
+check 'legacy lease keeps owner' test "$(field 'd["owner"]["pid"]')" = 400
+check 'legacy lease not adopted' test "$(field 'd["creator"]=="test"')" = True
+verdict 'legacy lease live-owner verdict' kept:live-owner
+park
+# The strict half: a lease that records identity must not be blessed when it
+# is stale, even though admin/birth still match.
+new
+edit 'd["checkout_dev"]=1; d["checkout_ino"]=1'
+run
+check 'stale checkout identity adopts null owner' test "$(field 'd["owner"] is None and d["creator"]=="adopt"')" = True
+park
 new; saved="$TMP/saved-lease"; cp "$LF" "$saved"; git -C "$TMP/repo" worktree remove "$WT"; git -C "$TMP/repo" worktree add -qb reuse "$WT" origin/main; cp "$saved" "$LF"; edit 'd["admin_id"]="old-incarnation"'; run --mode remove; check 'path reuse adopted' test "$(field 'd["owner"] is None and d["creator"] == "adopt"')" = True; check 'reuse preserved' test -d "$WT"
+new; edit 'd["admin_id"]="stale-incarnation"'
+cat > "$TMP/claim-before-adopt" <<'HOOK'
+#!/bin/bash
+source "$TEST_LEASE_LIB"
+file="$1"; branch="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["branch"])' "$file")"
+tip="$(git -C "$2" rev-parse "refs/heads/$branch")"
+hash="$(shasum -a 256 "$file" | awk '{print $1}')"
+lease_claim_reuse "$file" "$hash" "$branch" "$tip" $'401\t1760000000\tclaude'
+HOOK
+chmod +x "$TMP/claim-before-adopt"
+export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK="$TMP/claim-before-adopt"
+run --mode nominate
+unset TEST_LEASE_LIB DISK_MAGICIAN_REAP_BEFORE_ADOPT_HOOK
+check 'adoption race preserves pending reuse state' test "$(field 'd["reuse"]["state"]')" = pending
+check 'adoption race retains old tip' test "$(field 'bool(d["reuse"]["old_tip"])')" = True
 cat > "$TMP/inject" <<'HOOK'
 #!/bin/bash
-if [[ "$1" == "$INJECT_WT" ]]; then mkdir -p "$1/data"; touch "$1/$INJECT_FILE"; python3 - "$1/$INJECT_FILE" <<'PY'
+if [[ "$1" == "$INJECT_WT" ]]; then mkdir -p "$1/data"; touch "$1/$INJECT_FILE"; python3 - "$1" "$1/$INJECT_FILE" <<'PY'
 import os,sys,time
-os.utime(sys.argv[1],(time.time()-4000,)*2)
+old=time.time()-4000
+os.utime(sys.argv[2],(old,old))
+os.utime(os.path.dirname(sys.argv[2]),(old,old))
+if os.path.isdir(os.path.join(sys.argv[1],"data")): os.utime(os.path.join(sys.argv[1],"data"),(old,old))
+os.utime(sys.argv[1],(old,old))
 PY
 fi
 HOOK
 chmod +x "$TMP/inject"
-for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:hidden-state; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
+for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:secret-like; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
 mkdir "$TMP/minbin"
 for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
 new; before="$(wc -l < "$FAKE_FETCH_LOG")"; PATH="$TMP/minbin" run; verdict 'missing timeout blocks fetch' kept:remote-unverified; check 'no unbounded fetch' test "$(wc -l < "$FAKE_FETCH_LOG")" = "$before"; check 'missing gh logged' grep -q 'missing tool: gh' "$TMP/run.log"; check 'missing gh counted' test "$(receipt 'd["candidates"]["gh_failed"] > 0')" = True; park
@@ -164,9 +295,9 @@ sleep 300 & stopped=$!
 for ((i=0;i<100;i++)); do [[ "$(/bin/ps -p "$stopped" -o comm=)" == *sleep ]] && break; sleep .05; done; kill -STOP "$stopped"
 LC_ALL=C TZ=UTC /bin/ps -p "$stopped" -o lstart= > "$FAKE_PS_DIR/lstart/$stopped"; printf 'sleep 300\n' > "$FAKE_PS_DIR/args/$stopped"
 stopped_ep="$(_lease_lstart_to_epoch "$(cat "$FAKE_PS_DIR/lstart/$stopped")")"
-new; edit "d['owner']={'pid':$stopped,'start_epoch':$stopped_ep,'comm':'sleep'}; d['last_verdict']='sentinel'"; age 7200; run --mode remove; verdict 'SIGSTOPped owner kept' sentinel; check 'SIGSTOPped owner present' test -d "$WT"; kill -CONT "$stopped"; kill "$stopped"; wait "$stopped" 2>/dev/null; park
+new; edit "d['owner']={'pid':$stopped,'start_epoch':$stopped_ep,'comm':'sleep'}; d['last_verdict']='sentinel'"; age 7200; run --mode remove; verdict 'SIGSTOPped owner kept' kept:live-owner; check 'SIGSTOPped owner present' test -d "$WT"; kill -CONT "$stopped"; kill "$stopped"; wait "$stopped" 2>/dev/null; park
 new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; run; verdict 'pid reused (other start epoch) reads dead' remove; park
-new; edit 'd["owner"]["pid"]=402; d["last_verdict"]="sentinel"'; run --mode remove; verdict 'ps error is unknown, kept' sentinel; check 'ps error present' test -d "$WT"; park
+new; edit 'd["owner"]["pid"]=402; d["last_verdict"]="sentinel"'; run --mode remove; verdict 'ps error is unknown, kept' kept:owner-unknown; check 'ps error present' test -d "$WT"; park
 new; edit 'd["owner"]={"pid":400,"start_epoch":1760000000-3600,"comm":"claude"}'; (cd "$WT" && sleep 30) & child=$!; printf 'p%s\nfcwd\nn%s\n' "$child" "$WT" > "$FAKE_LSOF_FIXTURE"; run --mode remove; verdict 'dead owner, live child cwd kept' kept:live-cwd; check 'child cwd present' test -d "$WT"; kill "$child"; wait "$child" 2>/dev/null; printf 'p999999\nfcwd\nn/\n' > "$FAKE_LSOF_FIXTURE"; park
 new; git -C "$TMP/repo" worktree lock "$WT"; run; verdict 'locked' kept:locked; park
 new; export FAIL_FETCH=1; run; verdict 'fetch failure' kept:remote-unverified; unset FAIL_FETCH; park
@@ -202,11 +333,26 @@ rm -f "$HOOK_SEEN"
 export DISK_MAGICIAN_REAP_CANDIDATE_HOOK="$TMP/pause"
 run --deadline-seconds 1
 check 'deadline partial' test "$(receipt 'd["outcome"]')" = partial
-check 'deadline processed a candidate' test "$(receipt 'd["candidates"].get("remove",0)')" = 1
+check 'deadline nominated a candidate' test "$(receipt 'd["candidates"].get("nominated",0)')" = 1
+check 'deadline nomination removed nothing' test "$(receipt 'd["candidates"]["removed_count"]')" = 0
 check 'deadline releases lock' test ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_reap.lock"
 unset DISK_MAGICIAN_REAP_CANDIDATE_HOOK REAP_CLOCK
 run; check 'receipt success' test "$(receipt 'd["outcome"]')" = success; check 'receipt counters' test "$(receipt 'all(k in d["candidates"] for k in ("fetch_ok","fetch_failed","gh_ok","gh_failed"))')" = True; check 'receipt freed bytes' test "$(receipt 'isinstance(d["postcondition"]["freed_bytes"],int)')" = True
 check 'one fetch per repository for three candidates' test "$RUN_FETCHES" = 1
+OLD_STATE="$DISK_MAGICIAN_STATE_DIR"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state.cursor"
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+new
+cursor="$TMP/reap-cursor.json"
+run --mode nominate --deadline-at 0 --cursor "$cursor"
+check 'deadline before unit leaves cursor on candidate' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["next_index"])' "$cursor")" = 0
+check 'deadline cursor contains pending lease' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["items"][0])' "$cursor")" = "$LF"
+deadline="$(python3 -c 'import time;print(time.monotonic()+500)')"
+run --mode nominate --deadline-at "$deadline" --cursor "$cursor"
+check 'completed unit advances cursor' test "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["next_index"])' "$cursor")" = 1
+check 'deadline metrics have explicit count fields' test "$(receipt 'all(k in d["candidates"] for k in ("removed_count","deferred_count","interrupted_count"))')" = True
+park
+export DISK_MAGICIAN_STATE_DIR="$OLD_STATE"
 export FAKE_DF_DELTA_KB=128
 run
 check 'freed bytes measured from df delta' test "$(receipt 'd["postcondition"]["freed_bytes"]')" = 131072

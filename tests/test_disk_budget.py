@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """tests/test_disk_budget.py — admission zones and the policy table (plan Task 3, spec §7.1)."""
+import os
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import disk_budget  # noqa: E402
@@ -67,6 +71,63 @@ class DiskBudgetTest(unittest.TestCase):
         # projected = 105 - 95 = 10 < 15 -> FLOOR whatever the margin; oversized est likewise.
         self.assertEqual(disk_budget.decide("observe", 105, 95, 0, False, True), ("FLOOR", 75))
         self.assertEqual(disk_budget.decide("observe", 105, 200, 10, False, True), ("FLOOR", 75))
+
+
+class WorktreeApprovalScopeTest(unittest.TestCase):
+    """Synthetic WORKTREE_APPROVED must be scoped to the supervised child."""
+
+    def _run_dispatch(self, tmp, supervise):
+        state = Path(tmp)
+        row = {"act": "worktree_cleanup", "class": "worktrees", "job": "cleanup_worktrees",
+               "kind": "unit", "unit_budget_s": 20}
+        metrics = {"outcome": "success_noop", "reason": "test", "df_delta_bytes": 0,
+                   "removed_count": 0, "deferred_count": 0, "interrupted_count": 0}
+        for started in (
+            patch.object(disk_budget, "eligible_actuators", return_value=([row], [])),
+            patch.object(disk_budget, "_c14_complete", return_value=True),
+            patch.object(disk_budget, "_adapter_command", return_value=["/bin/true"]),
+            patch.object(disk_budget, "_activation_ok", return_value=True),
+            patch.object(disk_budget, "supervise_actuator", side_effect=supervise),
+            patch.object(disk_budget, "_df_free_bytes", return_value=0),
+            patch.object(disk_budget, "_receipt_data", return_value={}),
+            patch.object(disk_budget, "_write_govern_receipt", return_value=metrics),
+        ):
+            started.start()
+            self.addCleanup(started.stop)
+        disk_budget.dispatch_actuators(Path("/tmp/dm-unit-unused-scripts"), state, {"classes": {}},
+                                       {}, "ORANGE", time.time(), time.monotonic() + 200, {"classes": {}})
+
+    def test_absent_approval_is_scoped_then_absent_again(self):
+        seen = []
+        os.environ.pop("WORKTREE_APPROVED", None)
+        self.addCleanup(os.environ.pop, "WORKTREE_APPROVED", None)
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            self._run_dispatch(tmp, lambda command, slice_end: (
+                seen.append(os.environ.get("WORKTREE_APPROVED")),
+                {"rc": 0, "output": "", "hard_stop": False, "orphan_survivors": []})[1])
+        self.assertEqual(seen, ["1"])
+        self.assertNotIn("WORKTREE_APPROVED", os.environ)
+
+    def test_original_value_is_restored_not_leaked(self):
+        seen = []
+        os.environ["WORKTREE_APPROVED"] = "operator-set"
+        self.addCleanup(os.environ.pop, "WORKTREE_APPROVED", None)
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            self._run_dispatch(tmp, lambda command, slice_end: (
+                seen.append(os.environ.get("WORKTREE_APPROVED")),
+                {"rc": 0, "output": "", "hard_stop": False, "orphan_survivors": []})[1])
+        self.assertEqual(seen, ["1"])
+        self.assertEqual(os.environ.get("WORKTREE_APPROVED"), "operator-set")
+
+    def test_raised_supervision_still_restores_absent_approval(self):
+        def supervise(command, slice_end):
+            raise RuntimeError("supervision failed")
+        os.environ.pop("WORKTREE_APPROVED", None)
+        self.addCleanup(os.environ.pop, "WORKTREE_APPROVED", None)
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            with self.assertRaises(RuntimeError):
+                self._run_dispatch(tmp, supervise)
+        self.assertNotIn("WORKTREE_APPROVED", os.environ)
 
 
 if __name__ == "__main__":

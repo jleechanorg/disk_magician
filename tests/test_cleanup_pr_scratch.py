@@ -15,7 +15,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "cleanup_pr_scratch.sh"
 
 class TestCleanupPrScratch(unittest.TestCase):
     def setUp(self):
-        self.test_root = Path(tempfile.mkdtemp(prefix="test_pr_scratch_py_"))
+        self.test_root = Path(tempfile.mkdtemp(prefix="test_pr_scratch_py_", dir="/tmp"))
         self.tmp_dir = self.test_root / "tmp"
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         self.now = time.time()
@@ -40,7 +40,11 @@ class TestCleanupPrScratch(unittest.TestCase):
             pass
 
     def _run_script(self, args, env_extra=None):
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("DISK_MAGICIAN_", "C14_", "GIT_"))}
+        home = self.test_root / "home"
+        home.mkdir(exist_ok=True)
+        env["HOME"] = str(home)
         env.setdefault("DISK_MAGICIAN_SKIP_LSOF_CHECK", "1")
         # /advice review of PR #78 (Codex, PR #71 follow-up): every real
         # destructive invocation must carry both mandatory sandbox env vars,
@@ -51,6 +55,9 @@ class TestCleanupPrScratch(unittest.TestCase):
         # also required for that bypass to keep working here.
         env.setdefault("DISK_MAGICIAN_TEST_CONTEXT", "1")
         env.setdefault("DISK_MAGICIAN_TEST_SANDBOX", str(self.tmp_dir))
+        # Declare the nested fixture as its own scratch root so real C14
+        # retention checks see immediate pr*/claude* entries.
+        env.setdefault("DISK_MAGICIAN_TMP_ROOT_OVERRIDE", str(self.tmp_dir))
         # Bead disk_magician-ka4: never let a real deletion during this test
         # append to the developer's real ~/Library/Logs/disk-magician-deletions.log.
         env.setdefault("DISK_MAGICIAN_DELETION_LOG", str(self.test_root / "deletions.log"))
@@ -241,14 +248,24 @@ class TestCleanupPrScratch(unittest.TestCase):
         self.assertIn("fail-closed, treating as active", res.stderr)
 
     def test_custom_pattern_and_min_age_days(self):
-        """--pattern and --min-age-days flags configure matching and thresholds."""
-        d1 = self.tmp_dir / "custom-branch-scratch"
+        """--pattern and --min-age-days flags configure matching and thresholds.
+
+        The candidate must also be a declared C14 ephemeral shape (a bare
+        `custom-*` name has no E2-E7 retention row and is correctly kept as
+        unproven), so a pr-named candidate plus a same-shape decoy prove the
+        custom pattern is what selects the deleted entry."""
+        d1 = self.tmp_dir / "pr-custom-scratch"
         d1.mkdir()
         self._backdate(d1)
 
-        res = self._run_script(["--clean", "--pattern", "custom-*", "--min-age-days", "2"])
+        decoy = self.tmp_dir / "pr-other-scratch"
+        decoy.mkdir()
+        self._backdate(decoy)
+
+        res = self._run_script(["--clean", "--pattern", "pr-custom-*", "--min-age-days", "2"])
         self.assertEqual(res.returncode, 0)
         self.assertFalse(d1.exists())
+        self.assertTrue(decoy.exists(), "custom --pattern must not match pr-other-scratch")
 
     def test_argument_validation(self):
         """Invalid flags or argument types return exit code 2."""

@@ -20,7 +20,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$REPO_ROOT/scripts/cleanup_pr_scratch.sh"
 source "$SCRIPT_DIR/lib/sandbox_env.sh"
 
-TMP_ROOT=$(mktemp -d -t test_lsof_skip_guard.XXXXXX)
+TMP_ROOT="$(mktemp -d /tmp/test_lsof_skip_guard.XXXXXX)" || exit 1
+if [[ ! -d "$TMP_ROOT" || -L "$TMP_ROOT" || "$TMP_ROOT" != /tmp/test_lsof_skip_guard.* ]]; then
+  echo "FATAL: invalid fixture root: $TMP_ROOT" >&2
+  exit 1
+fi
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || exit 1
+case "$TMP_ROOT" in
+  /tmp/test_lsof_skip_guard.*|/private/tmp/test_lsof_skip_guard.*) ;;
+  *) echo "FATAL: fixture root escaped /tmp: $TMP_ROOT" >&2; exit 1 ;;
+esac
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PASS=0
@@ -49,23 +58,38 @@ assert_contains() {
   fi
 }
 
-# make_always_open_lsof <path> — an lsof stub that reports EVERY target as
-# having an open file handle (any non-empty stdout makes has_open_files()
-# return true), regardless of arguments.
-make_always_open_lsof() {
+# make_scoped_lsof <path> — an lsof stub with records matching the query.
+# C14's open-file probe needs an open-file record, while cwd-oriented callers
+# need a complete p/f/n record. Returning only a PID is too permissive: it can
+# make a test pass without exercising the production parser's query boundary.
+make_scoped_lsof() {
   local path="$1"
   cat > "$path" <<'EOF'
 #!/usr/bin/env bash
-echo "p99999"
+target="${@: -1}"
+case " $* " in
+  *" +D "*)
+    printf 'p99999\nf3\nn%s/file.txt\n' "$target"
+    ;;
+  *" -d cwd "*)
+    printf 'p99999\nfcwd\nn%s\n' "$target"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 EOF
   chmod +x "$path"
 }
 
-FAKE_LSOF="$TMP_ROOT/fake-lsof-always-open"
-make_always_open_lsof "$FAKE_LSOF"
+FAKE_LSOF="$TMP_ROOT/fake-lsof-open"
+make_scoped_lsof "$FAKE_LSOF"
 
 echo "Test 1: outside a sandbox, DISK_MAGICIAN_SKIP_LSOF_CHECK=1 is IGNORED -- the real (stubbed) lsof check still runs"
 T1_DIR="$TMP_ROOT/t1_tmp"
+T1_HOME="$TMP_ROOT/t1_home"
+T1_STATE="$TMP_ROOT/t1_state"
+mkdir -p "$T1_HOME" "$T1_STATE"
 mkdir -p "$T1_DIR/pr-open-target"
 touch "$T1_DIR/pr-open-target/file.txt"
 /usr/bin/find "$T1_DIR" -exec touch -t 202001010000 {} +
@@ -75,23 +99,29 @@ touch "$T1_DIR/pr-open-target/file.txt"
 # replaces its whole root list with exactly this fixture dir when --tmp-dir is
 # given), matching the pattern already used by the script's own dry-run/help
 # invocations elsewhere in this test suite.
-T1_OUT=$(DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_SKIP_LSOF_CHECK=1 \
+T1_OUT=$(env -u DISK_MAGICIAN_TEST_CONTEXT -u DISK_MAGICIAN_TEST_SANDBOX \
+  HOME="$T1_HOME" DISK_MAGICIAN_STATE_DIR="$T1_STATE" \
+  DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_SKIP_LSOF_CHECK=1 \
   bash "$TARGET_SCRIPT" --clean --tmp-dir "$T1_DIR" 2>&1)
 assert_exists "T1: open-marked target is preserved (lsof bypass ignored outside sandbox)" "$T1_DIR/pr-open-target"
 assert_contains "T1: logs that the skip flag was ignored outside a sandbox" \
   "DISK_MAGICIAN_SKIP_LSOF_CHECK=1 ignored" "$T1_OUT"
 
-echo "Test 2: inside a sandbox, DISK_MAGICIAN_SKIP_LSOF_CHECK=1 still bypasses the lsof check (existing test-only behavior preserved)"
+echo "Test 2: inside a sandbox, the legacy skip bypasses has_open_files but C14 still preserves open files"
 T2_DIR="$TMP_ROOT/t2_tmp"
+T2_HOME="$TMP_ROOT/t2_home"
+T2_STATE="$TMP_ROOT/t2_state"
+mkdir -p "$T2_HOME" "$T2_STATE"
 mkdir -p "$T2_DIR/pr-open-target"
 touch "$T2_DIR/pr-open-target/file.txt"
 /usr/bin/find "$T2_DIR" -exec touch -t 202001010000 {} +
 
-T2_OUT=$(DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_SKIP_LSOF_CHECK=1 \
+T2_OUT=$(HOME="$T2_HOME" DISK_MAGICIAN_STATE_DIR="$T2_STATE" \
+  DISK_MAGICIAN_LSOF_BIN="$FAKE_LSOF" DISK_MAGICIAN_SKIP_LSOF_CHECK=1 \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" DISK_MAGICIAN_TEST_SANDBOX="$T2_DIR" \
   bash "$TARGET_SCRIPT" --clean --tmp-dir "$T2_DIR" 2>&1)
-assert_missing "T2: target removed (skip flag honored inside a sandbox)" "$T2_DIR/pr-open-target"
-assert_contains "T2: logs actual removal" "Removing:" "$T2_OUT"
+assert_exists "T2: C14 preserves the open target despite the legacy skip flag" "$T2_DIR/pr-open-target"
+assert_contains "T2: C14 reports the open-file keep reason" "kept:open-file" "$T2_OUT"
 
 echo
 echo "===================================="

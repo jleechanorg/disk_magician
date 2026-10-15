@@ -13,16 +13,23 @@ _WTH_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
 source "$_WTH_DIR/worktree_new.sh"
 
 wth_main() {
-    local fields name cwd repo path branch n k p rc tries=0
+    local fields name cwd session repo path branch n k p rc tries=0
     fields="$(python3 -c '
-import json, sys
+import json, re, sys
 d = json.load(sys.stdin)
 n, c = d["name"], d["cwd"]
 if not (isinstance(n, str) and isinstance(c, str)) or "\n" in n + c: sys.exit(1)
-print(n); print(c)
+s = d.get("session_id")
+# Optional event session. Only a safe token binds owner.session: a missing,
+# non-string, newline-bearing or otherwise malformed value is dropped, never
+# invented and never allowed to become another field/identity. Absent means
+# creation stays fully compatible with a lease that has no session binding.
+if not (isinstance(s, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", s)): s = ""
+print(n); print(c); print(s)
 ' 2>/dev/null)" || { echo "worktree-create-hook: bad stdin JSON" >&2; return 1; }
     name="$(sed -n 1p <<<"$fields")"
     cwd="$(sed -n 2p <<<"$fields")"
+    session="$(sed -n 3p <<<"$fields")"
     { _layout_valid_component "$name" && git check-ref-format --branch "worktree-$name" >/dev/null 2>&1; } ||
         { echo "worktree-create-hook: bad name: $name" >&2; return 1; }
     repo="$(wtn_main_repo "$cwd")" || { echo "worktree-create-hook: not a git repo: $cwd" >&2; return 1; }
@@ -47,9 +54,14 @@ print(n); print(c)
             p="$path-$k"; k=$((k + 1)); continue
         fi
         tries=$((tries + 1))
-        wtn_create "$repo" "$branch" "$p" "$(wtn_default_base "$repo")" new; rc=$?
+        # Prefix assignment (not export) scopes the event session to exactly the
+        # lease creation here: an ambient DISK_MAGICIAN_OWNER_SESSION cannot
+        # override it, and a sourced wth_main leaks nothing to its caller.
+        DISK_MAGICIAN_OWNER_SESSION="$session" \
+            wtn_create "$repo" "$branch" "$p" "$(wtn_default_base "$repo")" new; rc=$?
         if [[ "$rc" == 0 ]] && declare -F lease_write >/dev/null 2>&1; then
-            lease_write "$p" "$repo" "$branch" "worktree-create-hook" >/dev/null 2>&1 ||
+            DISK_MAGICIAN_OWNER_SESSION="$session" \
+                lease_write "$p" "$repo" "$branch" "worktree-create-hook" >/dev/null 2>&1 ||
                 echo "worktree-create-hook: lease write failed: $p" >&2
         fi
         case "$rc" in

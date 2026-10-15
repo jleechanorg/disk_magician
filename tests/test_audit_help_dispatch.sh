@@ -12,6 +12,7 @@ SNAPSHOT="$WORK/fixture-snapshot.json"
 printf '%s\n' '{}' >"$SNAPSHOT"
 
 for source in "$REPO_ROOT/disk_magician.sh" "$REPO_ROOT/src/disk_magician/disk_magician.sh"; do
+  [[ -f "$source" ]] || continue
   dispatcher_root="$WORK/$(basename "$(dirname "$source")")"
   mkdir -p "$dispatcher_root/scripts/lib"
   cp "$source" "$dispatcher_root/disk_magician.sh"

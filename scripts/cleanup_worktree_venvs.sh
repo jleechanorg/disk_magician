@@ -49,6 +49,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -536,11 +538,11 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
         echo "SAFETY-SKIP $venv_path ($_safety_reason)"
-      elif rm -rf "$venv_path" 2>/dev/null; then
+      elif c14_remove "$venv_path" --kind rebuildable; then
         TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
         STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
       else
-        log "    FAILED to remove $venv_path"
+        log "    Preserved (C14 kept) $venv_path"
       fi
     fi
   done
@@ -611,11 +613,11 @@ purge_bak_dirs() {
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
           echo "SAFETY-SKIP $bak_path ($_safety_reason)"
-        elif rm -rf "$bak_path" 2>/dev/null; then
+        elif c14_remove "$bak_path" --kind rebuildable; then
           bak_freed_kb=$(( bak_freed_kb + bak_kb ))
           bak_count=$(( bak_count + 1 ))
         else
-          log "    FAILED to purge $bak_path"
+          log "    Preserved (C14 kept) $bak_path"
         fi
       fi
     done

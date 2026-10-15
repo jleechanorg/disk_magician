@@ -10,11 +10,29 @@
 # spec retry_after_s) and refuses if not cleared; a missing admit or any other
 # rc is admission_degraded:caller and proceeds like 10 (counted as bypass).
 # DISK_MAGICIAN_ADMIT_BIN replaces the admit command (test hook).
+#
+# Estimate resolution: an empty or `-` <est-gb> omits `--est-gb` and lets the
+# admit side resolve the calibrated producer estimate (spec C2); a numeric
+# value is an explicit caller override and is always passed through.
 
 _ADMIT_CALLER_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 
+# admit_available — rc 0 when the admit command actually exists. Callers use
+# this to decide whether the shared admission gate or the legacy fallback owns
+# the decision (plan Task 4: legacy thresholds remain only when admit is
+# missing).
+admit_available() {
+    local file
+    if [[ -n "${DISK_MAGICIAN_ADMIT_BIN:-}" ]]; then file="$DISK_MAGICIAN_ADMIT_BIN"
+    else file="$_ADMIT_CALLER_DIR/../disk_budget.py"; fi
+    [[ -f "$file" ]]
+}
+
 admit_gate() {
-    local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd
+    local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd output line
+    ADMIT_ID=""
+    local -a est_arg=()
+    if [[ -n "$est" && "$est" != - ]]; then est_arg=(--est-gb "$est"); fi
     if [[ -n "${DISK_MAGICIAN_ADMIT_BIN:-}" ]]; then cmd=("$DISK_MAGICIAN_ADMIT_BIN")
     else cmd=(python3 "$_ADMIT_CALLER_DIR/../disk_budget.py"); fi
     if [[ ! -f "${cmd[${#cmd[@]}-1]}" ]]; then
@@ -22,17 +40,36 @@ admit_gate() {
         return 0
     fi
     for try in 1 2; do
-        "${cmd[@]}" --class "$cls" --est-gb "$est" --producer "$producer" \
-            --dest "$dest" --source "$source" "${@:6}" >/dev/null
-        rc=$?
+        if output="$("${cmd[@]}" --class "$cls" ${est_arg[@]+"${est_arg[@]}"} --producer "$producer" \
+            --dest "$dest" --source "$source" "${@:6}")"; then
+            rc=0
+        else
+            rc=$?
+        fi
         [[ "$rc" == 76 && "$try" == 1 ]] || break
         echo "disk-admission: queued class=$cls, retrying once" >&2
         sleep "${DISK_MAGICIAN_ADMIT_RETRY_S:-600}"
     done
+    if [[ "$rc" == 0 || "$rc" == 10 ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^admit_id=([a-f0-9-]+)$ ]] && ADMIT_ID="${BASH_REMATCH[1]}"
+        done <<< "$output"
+    fi
     case "$rc" in
         0) return 0 ;;
         10) echo "disk-admission: warn class=$cls" >&2; return 0 ;;
         75|76) echo "disk-admission: refused class=$cls rc=$rc" >&2; return 75 ;;
         *) echo "admission_degraded:caller rc=$rc" >&2; return 0 ;;
     esac
+}
+
+# Confirm only the successful creator's exact admission attempt.
+admit_confirm_created() {
+    [[ -n "${ADMIT_ID:-}" ]] || return 0
+    local cmd
+    if [[ -n "${DISK_MAGICIAN_ADMIT_BIN:-}" ]]; then cmd=("$DISK_MAGICIAN_ADMIT_BIN")
+    else cmd=(python3 "$_ADMIT_CALLER_DIR/../disk_budget.py"); fi
+    "${cmd[@]}" --confirm "$ADMIT_ID" >/dev/null ||
+        echo 'admission_degraded:confirm' >&2
+    ADMIT_ID=""
 }

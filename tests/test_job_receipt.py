@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -618,6 +619,151 @@ class TestDfDelta(unittest.TestCase):
         r = self.last("snapshot_commit")
         self.assertEqual(r["outcome"], "success")
         self.assertNotIn("df_delta_bytes", r["postcondition"])
+
+
+class TestC14KeptBytes(unittest.TestCase):
+    """C14 kept-byte folding.
+
+    Producer contract read from scripts/c14_probe.py::account at the pinned
+    commit c768858e83b0410c47a3e85ac2f522392dcec6e0: one compact JSON object per
+    line, {"at": <epoch int>, "reason": <str>, "bytes": <int>}, appended with
+    O_APPEND, where bytes is the sum of size for inventory entries of type
+    "file". job_receipt sums only those producer rows; it never infers reclaimed
+    bytes or removals.
+    """
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="dm_receipt_c14_")
+        self.state_dir = os.path.join(self.test_dir, "state")
+        self.ledger = os.path.join(self.test_dir, "c14-ledger.jsonl")
+        self.store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        self._saved_ledger_env = os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+        self._saved_owner_env = os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+        os.environ["DISK_MAGICIAN_STATE_DIR"] = self.state_dir
+
+    def tearDown(self):
+        os.environ.pop("DISK_MAGICIAN_C14_LEDGER", None)
+        os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
+        if self._saved_ledger_env is not None:
+            os.environ["DISK_MAGICIAN_C14_LEDGER"] = self._saved_ledger_env
+        if self._saved_owner_env is not None:
+            os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = self._saved_owner_env
+        os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _write_rows(self, rows):
+        with open(self.ledger, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+    def _finish(self, outcome="success_noop"):
+        rid = self.store.begin("cleanup_tmp")
+        return self.store.finish("cleanup_tmp", rid, outcome)
+
+    def test_absent_ledger_is_backward_compatible(self):
+        rec = self._finish()
+        self.assertNotIn("c14_kept_bytes", rec["postcondition"])
+        self.assertNotIn("c14_ledger_status", rec["postcondition"])
+
+    def test_configured_but_missing_ledger_is_backward_compatible(self):
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger  # never created
+        rec = self._finish()
+        self.assertNotIn("c14_kept_bytes", rec["postcondition"])
+        self.assertNotIn("c14_ledger_status", rec["postcondition"])
+
+    def test_producer_rows_fold_per_reason_and_preserve_typed_fields(self):
+        now = int(time.time())
+        self._write_rows(
+            [
+                {"at": now, "reason": "unproven-content", "bytes": 1234},
+                {"at": now + 1, "reason": "unproven-content", "bytes": 66},
+                {"at": now + 2, "reason": "not-pushed", "bytes": 4096},
+                {"at": now + 3, "reason": "secret-like", "bytes": 0},
+            ]
+        )
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+        rid = self.store.begin("cleanup_tmp")
+        rec = self.store.finish(
+            "cleanup_tmp", rid, "success", candidates={"count": 3, "bytes": None}
+        )
+
+        self.assertEqual(
+            rec["postcondition"]["c14_kept_bytes"],
+            {"unproven-content": 1300, "not-pushed": 4096, "secret-like": 0},
+        )
+        self.assertEqual(rec["postcondition"]["c14_ledger_status"], "ok")
+        # Terminal outcome and candidate fields are untouched by folding.
+        self.assertEqual(rec["outcome"], "success")
+        self.assertEqual(rec["candidates"], {"count": 3, "bytes": None})
+
+        last = job_receipt.get_last_receipt("cleanup_tmp", state_dir=self.state_dir)
+        self.assertEqual(last["postcondition"]["c14_kept_bytes"]["not-pushed"], 4096)
+        self.assertEqual(last["id"], rid)
+
+    def test_malformed_and_partial_rows_are_not_counted(self):
+        with open(self.ledger, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"at": 1, "reason": "unproven-content", "bytes": 10}) + "\n")
+            f.write("not json at all\n")
+            f.write(json.dumps([1, 2, 3]) + "\n")
+            f.write(json.dumps({"at": 2, "bytes": 999}) + "\n")  # missing reason
+            f.write(json.dumps({"at": 3, "reason": "not-pushed", "bytes": -5}) + "\n")
+            f.write(json.dumps({"at": 4, "reason": "dirty", "bytes": 1.5}) + "\n")
+            f.write(json.dumps({"at": 5, "reason": "locked", "bytes": True}) + "\n")
+            f.write(json.dumps({"at": 6, "reason": "git-metadata", "bytes": "20"}) + "\n")
+            f.write('{"at": 7, "reason": "live-owner", "bytes": ')
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+
+        rec = self._finish()
+        self.assertEqual(rec["postcondition"]["c14_kept_bytes"], {"unproven-content": 10})
+        self.assertEqual(rec["postcondition"]["c14_ledger_status"], "incomplete")
+        # A malformed ledger must not hide or rewrite the terminal receipt.
+        data = self.store.read("cleanup_tmp")
+        self.assertIsNotNone(data["last_terminal"])
+        self.assertEqual(data["last_terminal"]["id"], rec["id"])
+        self.assertEqual(data["last_terminal"]["outcome"], "success_noop")
+
+    def test_oversized_ledger_is_bounded_and_incomplete(self):
+        self._write_rows(
+            [
+                {"at": 1, "reason": "unproven-content", "bytes": 10},
+                {"at": 2, "reason": "not-pushed", "bytes": 20},
+            ]
+        )
+        result = job_receipt.fold_c14_ledger(self.ledger, max_bytes=60)
+        self.assertEqual(result["c14_kept_bytes"], {"unproven-content": 10})
+        self.assertEqual(result["c14_ledger_status"], "incomplete")
+
+    def test_unreadable_ledger_records_error_without_hiding_terminal(self):
+        ledger_dir = os.path.join(self.test_dir, "ledger-dir")
+        os.makedirs(ledger_dir)
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = ledger_dir
+        rec = self._finish()
+        self.assertEqual(rec["postcondition"]["c14_kept_bytes"], {})
+        self.assertEqual(rec["postcondition"]["c14_ledger_status"], "error")
+        self.assertEqual(rec["outcome"], "success_noop")
+        self.assertIsNotNone(self.store.read("cleanup_tmp")["last_terminal"])
+
+    def test_owner_matching_job_folds_the_per_run_ledger(self):
+        self._write_rows([{"at": 1, "reason": "unproven-content", "bytes": 1300}])
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+        os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = "cleanup_tmp"
+        rec = self._finish()
+        self.assertEqual(rec["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
+        self.assertEqual(rec["postcondition"]["c14_ledger_status"], "ok")
+
+    def test_non_owning_nested_receipt_does_not_fold_the_shared_ledger(self):
+        # A tmp_scratch_sweep run owns the ledger; its nested cleanup_tmp receipt
+        # must not re-count the same producer rows.
+        self._write_rows([{"at": 1, "reason": "unproven-content", "bytes": 1300}])
+        os.environ["DISK_MAGICIAN_C14_LEDGER"] = self.ledger
+        os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = "tmp_scratch_sweep"
+        nested = self._finish()
+        self.assertNotIn("c14_kept_bytes", nested["postcondition"])
+        self.assertNotIn("c14_ledger_status", nested["postcondition"])
+        # The owner (same ledger) folds it exactly once.
+        rid = self.store.begin("tmp_scratch_sweep")
+        owned = self.store.finish("tmp_scratch_sweep", rid, "success_noop")
+        self.assertEqual(owned["postcondition"]["c14_kept_bytes"], {"unproven-content": 1300})
 
 
 if __name__ == "__main__":

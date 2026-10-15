@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DM="$REPO_ROOT/src/disk_magician/disk_magician.sh"
+DM="$REPO_ROOT/disk_magician.sh"
 
 set +e
 output=$(bash "$DM" frontier --help 2>&1)

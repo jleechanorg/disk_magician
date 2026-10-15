@@ -105,6 +105,18 @@ class FleetSourceRootTests(unittest.TestCase):
             "job_inventory.py",
             "budget_status.py",
             "disk_observer.py",
+            # Transitive CLI dependency closure of disk_status.py: budget_status
+            # imports budget_acceptance -> birth_audit -> disk_budget/c14_probe/
+            # budget_controls, plus budget_history/policy_provenance.  Without
+            # these the copied tree raises ModuleNotFoundError and prints no
+            # JSON, so the manifest source-root binding test cannot run.
+            "budget_acceptance.py",
+            "birth_audit.py",
+            "budget_controls.py",
+            "budget_history.py",
+            "disk_budget.py",
+            "c14_probe.py",
+            "policy_provenance.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         (scripts / "check_launchd_fleet.sh").chmod(0o755)

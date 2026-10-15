@@ -27,6 +27,9 @@
 #     installation_id, machineid, or any in-flight (recent-mtime) brain uuid.
 set -euo pipefail
 
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+
 DRY_RUN=true
 
 usage() {
@@ -91,9 +94,11 @@ delete_entry() {
   kb=$(size_kb "$entry")
   if [[ "$DRY_RUN" == true ]]; then
     log "$label: [dry-run] would delete $(basename "$entry") ($(fmt_kb "$kb"))"
+  elif c14_remove "$entry" --kind ephemeral; then
+    log "$label: deleted $(basename "$entry") ($(fmt_kb "$kb"))"
   else
-    log "$label: deleting $(basename "$entry") ($(fmt_kb "$kb"))"
-    rm -rf "$entry"
+    log "$label: preserved (C14 kept) $(basename "$entry") ($(fmt_kb "$kb"))"
+    return 0
   fi
   TOTAL_FREED_KB=$(( TOTAL_FREED_KB + kb ))
   DELETED_COUNT=$(( DELETED_COUNT + 1 ))
@@ -158,6 +163,9 @@ prune_old_children() {
   log "$label: scanning $base (before $(fmt_kb "$before_kb"), cutoff >${age_days}d)"
   local entry
   while IFS= read -r -d '' entry; do
+    if [[ "${entry##*/}" == ".dm-quarantine" ]]; then
+      continue
+    fi
     if [[ -L "$entry" ]]; then
       log "$label: skipping symlink $(basename "$entry") (symlink-candidate)"
       continue

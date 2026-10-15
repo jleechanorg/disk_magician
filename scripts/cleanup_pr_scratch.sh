@@ -16,6 +16,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
+# shellcheck source=scripts/lib/quarantine.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -441,7 +443,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
       fi
 
       case "$base" in
-        com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive) continue ;;
+        com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive|.dm-quarantine) continue ;;
       esac
 
       if has_active_marker "$item"; then
@@ -494,7 +496,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # symlink's own mode or its target's mode (found in /advice
           # review of PR #60 -- Opus, symlink-to-file case; symlink-to-dir
           # case hoisted here for the same reason before it ships).
-          if rm -f "$item" 2>/dev/null; then
+          if c14_remove "$item" --kind ephemeral; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
@@ -508,7 +510,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # sweep under `set -euo pipefail` instead of just skipping that
           # one item (bead disk_magician-qap).
           chmod -R u+w "$item" 2>/dev/null || true
-          if rm -rf "$item" 2>/dev/null; then
+          if c14_remove "$item" --kind ephemeral; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
@@ -518,7 +520,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           fi
         else
           chmod u+w "$item" 2>/dev/null || true
-          if rm -f "$item" 2>/dev/null; then
+          if c14_remove "$item" --kind ephemeral; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"

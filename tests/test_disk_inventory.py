@@ -460,6 +460,11 @@ class DiskInventoryTest(unittest.TestCase):
             for version in newest_versions:
                 version.mkdir()
 
+            # Installed tool versions are outside the approved C14 cache-root
+            # table. Even a stale version must retain unproven content.
+            old = int(time.time()) - 40 * 86400
+            os.utime(stale_version, (old, old))
+
             agent_link = home / ".local" / "bin" / "agent"
             agent_link.parent.mkdir(parents=True)
             agent_link.symlink_to(active_binary)
@@ -482,7 +487,8 @@ class DiskInventoryTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(active_binary.exists(), completed.stdout)
             self.assertTrue(agent_link.samefile(active_binary))
-            self.assertFalse(stale_version.exists(), completed.stdout)
+            self.assertTrue(stale_version.exists(), completed.stdout)
+            self.assertIn("kept:unproven-content", completed.stdout)
             for version in newest_versions:
                 self.assertTrue(version.exists(), completed.stdout)
 

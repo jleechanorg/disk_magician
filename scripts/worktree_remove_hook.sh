@@ -28,28 +28,6 @@ wrh_log() {
     return 0
 }
 
-# has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
-# (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
-# probe fails/times out (fail closed).
-has_hidden_state() {
-    local out flags t=""
-    command -v timeout >/dev/null 2>&1 && t="timeout 60s"
-    flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
-    grep -q '^[a-zS]' <<<"$flags" && return 0
-    # shellcheck disable=SC2086
-    out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
-        ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
-        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
-        ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
-        ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
-        ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
-        ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
-    [[ -n "$out" ]]
-}
-
 wrh_live_cwd_reason() {
     local target=$1 out err rc=0 line pid= seen=0 live=0 path path_seen=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
     WRH_LIVE_CWD_REASON=
@@ -176,16 +154,47 @@ wrh_removal_verdict() {
     return 0
 }
 
-# wrh_remove_now <real_path> <display_path> — run the actual removal: plain
-# `git worktree remove` (never --force), worktree-* branch deletion when not
-# checked out elsewhere, and lease-file cleanup when the lease lib is loaded.
-# rc 0 only when the worktree was removed.
+# wrh_quarantine_capable — explicit capability contract for callers that must
+# know whether this adapter implements `wrh_remove_now ... --quarantine <inv>`.
+# The canonical WRH adapter always provides quarantine mode; a consumer must
+# ask this function rather than infer support from the body text of
+# wrh_remove_now (a partial/older adapter can mention the flag without
+# implementing the contract). Returns 0 only when quarantine removal is
+# supported; any other adapter shape fails closed.
+wrh_quarantine_capable() { return 0; }
+
+# wrh_remove_now <real_path> <display_path> --quarantine <inventory.json>
+#   [--deadline-at <monotonic>] — remove an approved worktree. The inventory
+# MUST be the receipt produced by a same-target `artifact_removal_verdict`
+# (C14) immediately before this call; the quarantine remover re-validates
+# identity/locks against that exact receipt. `--deadline-at` is optional and
+# forwarded verbatim to the quarantine remover's own cooperative deadline; an
+# absent flag preserves today's unbounded behavior. There is no unguarded
+# `git worktree remove` fallback. rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch
+    local real="$1" display="$2" main branch result inv='' deadline=''
+    shift 2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quarantine)
+                [[ $# -ge 2 && -n ${2:-} && -f ${2:-} ]] || return 1
+                inv="$2"; shift 2 ;;
+            --deadline-at)
+                [[ $# -ge 2 && -n ${2:-} ]] || return 1
+                deadline="$2"; shift 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    [[ -n "$inv" ]] || return 1
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
-    git -C "$main" worktree remove "$real" >&2 || return 1
+    if [[ -n "$deadline" ]]; then
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv" --deadline-at "$deadline")" || return 1
+    else
+        result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv")" || return 1
+    fi
+    [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
@@ -203,7 +212,7 @@ wrh_remove_now() {
 }
 
 wrh_main() {
-    local p main real verdict
+    local p main real verdict inv wrh_c14_verdict
     p="$(python3 -c '
 import json, sys
 try:
@@ -236,10 +245,23 @@ print(v)
         *)                            wrh_log "kept $p: ${verdict#kept:}"; return 0 ;;
     esac
 
-    if ! wrh_remove_now "$real" "$p"; then
-        wrh_log "kept $p: git worktree remove failed"
+    # Canonical C14-before-removal: the shared WRH entry point produces the
+    # same-target inventory receipt and hands exactly it to the quarantine
+    # remover. No second verdict, no unguarded git removal.
+    declare -F artifact_removal_verdict >/dev/null 2>&1 || { wrh_log "kept $p: C14 unavailable"; return 0; }
+    inv="$(mktemp "${TMPDIR:-/tmp}/wrh-c14-inventory.XXXXXX")" || { wrh_log "kept $p: inventory allocation failed"; return 0; }
+    wrh_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
+    if [[ "$wrh_c14_verdict" != remove ]]; then
+        rm -f -- "$inv" 2>/dev/null
+        wrh_log "kept $p: ${wrh_c14_verdict#kept:}"
         return 0
     fi
+    if ! wrh_remove_now "$real" "$p" --quarantine "$inv"; then
+        rm -f -- "$inv" 2>/dev/null
+        wrh_log "kept $p: quarantine remove failed"
+        return 0
+    fi
+    rm -f -- "$inv" 2>/dev/null
     return 0
 }
 
