@@ -425,7 +425,7 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
             none)
                 # birth-audit's ownerless scratch adoption record is ledger, not a claim.
                 [[ "$(python3 -c 'import json,sys
-try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and not d.get("pending") and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
+try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
 except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
                     echo kept:owner-unknown; return 0

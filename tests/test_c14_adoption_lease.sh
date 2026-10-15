@@ -38,7 +38,7 @@ fixture() {
     if [[ "$2" == RAW:* ]]; then printf '%s' "${2#RAW:}" >"$f"
     else printf '%s\n' "${2//%P/$n}" >"$f"; fi
 }
-J() { printf '{"path":"%%P","owner":%s,"creator":"%s","kind":"%s","released_at":null}' "$1" "$2" "$3"; }
+J() { printf '{"path":"%%P","owner":%s,"pending":false,"creator":"%s","kind":"%s","released_at":null}' "$1" "$2" "$3"; }
 
 export DISK_MAGICIAN_STATE_DIR="$TMP/state-control"; mkdir -p "$PT/pr-control" && printf 'x\n' >"$PT/pr-control/f" && age "$PT/pr-control" 50000
 assert_eq "$(eph "$PT/pr-control")" remove "control: aged scratch dir with no lease"
@@ -55,6 +55,8 @@ fixture pr-nokind '{"path":"%P","owner":null,"creator":"birth-audit"}'
 assert_eq "$(eph "$PT/pr-nokind")" kept:owner-unknown "owner-null lease with no kind still keeps"
 fixture pr-noowner '{"path":"%P","creator":"birth-audit","kind":"scratch"}'
 assert_eq "$(eph "$PT/pr-noowner")" kept:owner-unknown "lease with no owner field keeps"
+fixture pr-nopending '{"path":"%P","owner":null,"creator":"birth-audit","kind":"scratch"}'
+assert_eq "$(eph "$PT/pr-nopending")" kept:owner-unknown "lease with no pending field keeps"
 fixture pr-pending '{"path":"%P","owner":null,"pending":true,"creator":"birth-audit","kind":"scratch"}'
 assert_eq "$(eph "$PT/pr-pending")" kept:owner-unknown "pending owner-null lease keeps"
 fixture pr-corrupt 'RAW:{not json'
