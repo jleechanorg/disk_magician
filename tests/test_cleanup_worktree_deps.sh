@@ -52,12 +52,25 @@ git -C "$T/base" worktree add -q -b "b-other-old" "$T/roots/other_repo/wt_old"
 mkdir -p "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules/m"
 echo '{}' > "$T/roots/other_repo/wt_old/packages/pkg-a/package.json"
 echo d > "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules/m/f"
-/usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+# Symlinked package ancestors must never expose external dependency dirs.
+mkdir -p "$T/external/pkg/node_modules/m"
+echo '{}' > "$T/external/pkg/package.json"
+echo external > "$T/external/pkg/node_modules/m/f"
+ln -s "$T/external/pkg" "$T/roots/other_repo/wt_old/packages/pkg-link"
+git -C "$T/base" worktree add -q -b "b-linked-packages" "$T/roots/other_repo/wt_linked_packages"
+ln -s "$T/external" "$T/roots/other_repo/wt_linked_packages/packages"
+# A regular root dependency forces the strip loop even when packages is a link.
+mkdir -p "$T/roots/other_repo/wt_linked_packages/node_modules/m"
+echo d > "$T/roots/other_repo/wt_linked_packages/node_modules/m/f"
+/usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" "$T/roots/other_repo/wt_linked_packages" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_AO_CONFIG="$T/ao_top.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 [[ "$OUT" != *"$T/roots/old/node_modules"* ]] && ok "direct child of top-level AO worktreeDir protected" || bad "direct child of top-level AO worktreeDir stripped"
 [[ "$OUT" != *"$T/roots/demo/wt1/node_modules"* && -d "$T/roots/demo/wt1/node_modules" ]] && ok "AO project worktree under top-level worktreeDir protected" || bad "AO project worktree stripped"
 check "non-AO repo worktree under top-level worktreeDir stripped" "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules" "$OUT"
 [[ ! -e "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules" ]] && ok "monorepo packages/*/node_modules removed" || bad "monorepo packages/*/node_modules remains"
+[[ "$OUT" != *"$T/roots/other_repo/wt_old/packages/pkg-link/node_modules"* && -f "$T/external/pkg/node_modules/m/f" ]] && ok "symlinked package ancestor protected" || bad "symlinked package ancestor traversed"
+[[ "$OUT" != *"$T/roots/other_repo/wt_linked_packages/packages/pkg/node_modules"* && -f "$T/external/pkg/node_modules/m/f" ]] && ok "symlinked packages ancestor protected" || bad "symlinked packages ancestor traversed"
+[[ ! -e "$T/roots/other_repo/wt_linked_packages/node_modules" ]] && ok "linked-packages worktree still strips regular root dependencies" || bad "linked-packages worktree not processed"
 
 # safety_gate: a never_delete rule protects the directory.
 mkdir -p "$T/cfg"; printf '{"never_delete": ["%s/roots/old/node_modules"]}' "$T" > "$T/cfg/safety.local.json"

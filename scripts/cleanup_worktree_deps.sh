@@ -146,8 +146,9 @@ strip_dir() {
 
 has_pkg_node_modules() {
   local wt="$1" pkg_nm
+  [[ ! -L "$wt/packages" ]] || return 1
   for pkg_nm in "$wt"/packages/*/node_modules; do
-    [[ -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
+    [[ ! -L "${pkg_nm%/node_modules}" && -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
   done
   return 1
 }
@@ -162,7 +163,8 @@ for root in "${ROOTS[@]}"; do
     if is_live "$wt"; then continue; fi
     strip_dir "$wt" "$wt/node_modules"
     for pkg_nm in "$wt"/packages/*/node_modules; do
-      [[ -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
+      # A real node_modules leaf may still escape through a symlinked ancestor.
+      [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
     done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
     strip_dir "$wt" "$wt/.mypy_cache"
