@@ -154,9 +154,14 @@ has_pkg_node_modules() {
 }
 
 for root in "${ROOTS[@]}"; do
-  [[ -d "$root" ]] || continue
+  while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
+  [[ -d "$root" && ! -L "$root" ]] || continue
+  real_root="$(cd "$root" 2>/dev/null && pwd -P)" || continue
   for wt in "$root"/* "$root"/*/*; do
     [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
+    # Resolve only the configured root's aliases; no descendant may redirect us.
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
+    [[ "$real_wt" == "${real_root%/}/${wt#"$root"/}" ]] || continue
     is_ao_owned "$wt" && continue
     [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt" || continue
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi

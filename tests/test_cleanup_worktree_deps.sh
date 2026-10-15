@@ -13,8 +13,11 @@ git init -q "$T/base"; echo src > "$T/base/src.txt"; git -C "$T/base" add src.tx
 mkdir -p "$T/roots"
 for n in old young linked; do git -C "$T/base" worktree add -q -b "b-$n" "$T/roots/$n"; mkdir -p "$T/roots/$n/node_modules/x"; echo d > "$T/roots/$n/node_modules/x/f"; done
 mkdir -p "$T/real_nm"; rm -rf "$T/roots/linked/node_modules"; ln -s "$T/real_nm" "$T/roots/linked/node_modules"
+git -C "$T/base" worktree add -q -b "b-external" "$T/external_repo/wt"
+mkdir -p "$T/external_repo/wt/node_modules/x"; echo external > "$T/external_repo/wt/node_modules/x/f"
+ln -s "$T/external_repo" "$T/roots/repo-link"
 # old: every file 10 days old; young: left fresh; linked: old but node_modules is a symlink
-/usr/bin/find "$T/roots/old" "$T/roots/linked" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+/usr/bin/find "$T/roots/old" "$T/roots/linked" "$T/external_repo/wt" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
 mkdir -p "$T/home"
 
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
@@ -22,6 +25,7 @@ check "dry-run lists old worktree node_modules" "WOULD-STRIP" "$OUT"
 check "dry-run names old worktree" "$T/roots/old/node_modules" "$OUT"
 [[ "$OUT" != *"$T/roots/young/node_modules"* ]] && ok "young worktree untouched" || bad "young worktree listed"
 [[ "$OUT" != *"$T/roots/linked/node_modules"* ]] && ok "symlinked node_modules untouched" || bad "symlink listed"
+[[ "$OUT" != *"$T/roots/repo-link/wt/node_modules"* ]] && ok "symlinked worktree ancestor untouched" || bad "external worktree dependency listed"
 [[ -d "$T/roots/old/node_modules" ]] && ok "dry-run deletes nothing" || bad "dry-run deleted"
 
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
@@ -33,6 +37,7 @@ check "approved clean strips" "STRIPPED" "$OUT"
 [[ ! -e "$T/roots/old/node_modules" ]] && ok "old node_modules removed" || bad "old node_modules remains"
 [[ -d "$T/roots/young/node_modules" ]] && ok "young node_modules kept" || bad "young node_modules removed"
 [[ -L "$T/roots/linked/node_modules" && -d "$T/real_nm" ]] && ok "symlink target kept" || bad "symlink target damaged"
+[[ -f "$T/external_repo/wt/node_modules/x/f" ]] && ok "external worktree dependencies kept" || bad "external worktree dependencies removed"
 [[ -f "$T/roots/old/.git" ]] && ok "worktree .git preserved" || bad ".git removed"
 
 # AO config worktreeDir: worktrees under a configured AO dir are never stripped.
