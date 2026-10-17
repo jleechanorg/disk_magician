@@ -175,6 +175,30 @@ rc_succ=$(DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" read --
 assert_contains "receipt records success outcome on clean run" '"outcome": "success"' "$rc_succ"
 assert_contains "receipt records zero errors on clean run" '"errors": 0' "$rc_succ"
 
+# Test 13: Scratch lock contention (rc=75) in cleanup_tmp / cleanup_pr_scratch is treated as a skip, not an error
+echo "Test 13: Scratch lock contention (rc=75) does not fail main_sweeper"
+rm -rf "$TMP_STATE/main_sweeper.lock" "$TMP_STATE/receipts" "$TMP_STATE/last_xcode_clean"
+cat > "$MOCK_REPO_T12/scripts/cleanup_tmp.sh" << 'EOF'
+#!/bin/sh
+exit 75
+EOF
+cat > "$MOCK_REPO_T12/scripts/cleanup_pr_scratch.sh" << 'EOF'
+#!/bin/sh
+exit 75
+EOF
+chmod +x "$MOCK_REPO_T12/scripts/cleanup_tmp.sh" "$MOCK_REPO_T12/scripts/cleanup_pr_scratch.sh"
+# Simulate stale active entry from a previously SIGKILLed run
+DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" begin --job main_sweeper --trigger stale_test >/dev/null
+
+set +e
+out_t13="$(DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO_T12" DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=100 DISK_MAGICIAN_STATE_DIR="$TMP_STATE" "$MAIN_SWEEPER" --clean --skip-snapshot --skip-health 2>&1)"
+rc_t13=$?
+set -e
+assert_eq "rc=75 lock-skip exits 0" "0" "$rc_t13"
+assert_contains "logs lock-held skip" "skipped (lock held, rc=75)" "$out_t13"
+active_t13=$(DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" read --job main_sweeper --active 2>/dev/null || echo "")
+assert_eq "stale active receipt entries cleared after exclusive run" "[]" "$active_t13"
+
 rm -rf "$MOCK_REPO_T12"
 
 rm -rf "$MOCK_REPO"

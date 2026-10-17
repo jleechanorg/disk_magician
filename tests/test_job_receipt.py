@@ -187,6 +187,28 @@ class TestJobReceipt(unittest.TestCase):
         self.assertEqual(len(data["completed"]), 64)
         self.assertEqual(data["completed"][-1]["reason"], "skip 69")
 
+    def test_clear_stale_active_on_begin_and_finish(self):
+        store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
+        stale_id = store.begin(job="exclusive_job", trigger="scheduled")
+        self.assertEqual(job_receipt.get_effective_outcome("exclusive_job", state_dir=self.state_dir), "unknown")
+
+        # Starting a new exclusive run with clear_stale_active=True drops orphaned active entries
+        fresh_id = store.begin(job="exclusive_job", trigger="scheduled", clear_stale_active=True)
+        data = store.read("exclusive_job")
+        self.assertEqual([a["id"] for a in data["active"]], [fresh_id])
+        self.assertNotIn(stale_id, [a["id"] for a in data["active"]])
+        store.finish(job="exclusive_job", run_id=fresh_id, outcome="success")
+        self.assertEqual(job_receipt.get_effective_outcome("exclusive_job", state_dir=self.state_dir), "success")
+
+        # Also verify finish(..., clear_stale_active=True) clears older orphaned active entries
+        orphan_id = store.begin(job="reap_job", trigger="scheduled")
+        holder_id = store.begin(job="reap_job", trigger="scheduled")
+        store.finish(job="reap_job", run_id=holder_id, outcome="success_noop", clear_stale_active=True)
+        reap_data = store.read("reap_job")
+        self.assertEqual(reap_data["active"], [])
+        self.assertNotIn(orphan_id, [a["id"] for a in reap_data["active"]])
+        self.assertEqual(job_receipt.get_effective_outcome("reap_job", state_dir=self.state_dir), "success_noop")
+
     def test_receipt_required_fields_and_types(self):
         store = job_receipt.JobReceiptStore(state_dir=self.state_dir)
         run_id = store.begin(

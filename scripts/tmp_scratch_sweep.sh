@@ -52,21 +52,36 @@ run_cleanup_tmp() {
 }
 
 rc=0
+tmp_rc=0
+TMP_LOCK_SKIPPED=false
 if [[ "$clean_flag" == "--clean" ]]; then
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
-    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large ${governor_args[@]+"${governor_args[@]}"} || rc=1
+    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large ${governor_args[@]+"${governor_args[@]}"} || tmp_rc=$?
   else
-    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large || rc=1
+    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large || tmp_rc=$?
+  fi
+  if [[ $tmp_rc -eq 75 ]]; then
+    TMP_LOCK_SKIPPED=true
+  elif [[ $tmp_rc -ne 0 ]]; then
+    rc=1
   fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 else
-  run_cleanup_tmp --dry-run --large || rc=1
+  run_cleanup_tmp --dry-run --large || tmp_rc=$?
+  if [[ $tmp_rc -eq 75 ]]; then
+    TMP_LOCK_SKIPPED=true
+  elif [[ $tmp_rc -ne 0 ]]; then
+    rc=1
+  fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 fi
 
 if [[ $rc -ne 0 ]]; then
   OUTCOME="error"
   REASON="one or more sweep steps failed"
+elif [[ "$TMP_LOCK_SKIPPED" == true ]]; then
+  OUTCOME="skipped_lock"
+  REASON="scratch lock held"
 elif [[ "$clean_flag" == "--dry-run" ]]; then
   OUTCOME="success_noop"
   REASON="dry-run sweep completed without deletions"
@@ -110,11 +125,15 @@ FREED_BYTES="null"
 if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   DF_DELTA=$(( FREE_AFTER - FREE_BEFORE ))
   FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
-  # A dry-run deletes nothing, so any positive df delta is unrelated system
-  # activity and must never be reported as reclaimed bytes.
-  [[ "$clean_flag" == "--dry-run" ]] && FREED_BYTES=0
+  # A dry-run or lock-skipped sweep deletes nothing, so any positive df delta is
+  # unrelated system activity and must never be reported as reclaimed bytes.
+  [[ "$clean_flag" == "--dry-run" || "$TMP_LOCK_SKIPPED" == true ]] && FREED_BYTES=0
 fi
-if [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
+if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+  REMOVED_COUNT=0
+  DEFERRED_COUNT=0
+  INTERRUPTED_COUNT=0
+elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
   REMOVED_COUNT="${REMOVED_COUNT/null/0}"
@@ -125,10 +144,16 @@ elif [[ "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 ]]; then
   REASON="sweep completed with candidate deferrals or interruptions"
 fi
 
-if [[ "$clean_flag" == "--dry-run" ]]; then
+if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+  SAFETY='{"status": "not_applicable", "reason": "scratch_lock_contention_no_mutation", "delegated": false}'
+elif [[ "$clean_flag" == "--dry-run" ]]; then
   SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
 else
   SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp and cleanup_claude_state", "delegated": true}'
+fi
+LOCK_ARGS=()
+if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+  LOCK_ARGS=(--lock '{"held": true, "acquired": false, "reason": "scratch lock held"}')
 fi
 CANDIDATES="{\"count\":null,\"bytes\":null,\"removed_count\":${REMOVED_COUNT},\"deferred_count\":${DEFERRED_COUNT},\"interrupted_count\":${INTERRUPTED_COUNT}}"
 POSTCONDITION="{\"free_bytes_before\":${FREE_BEFORE:-null},\"free_bytes_after\":${FREE_AFTER:-null},\"df_delta_bytes\":${DF_DELTA},\"freed_bytes\":${FREED_BYTES}}"
@@ -137,6 +162,7 @@ if ! python3 "$RECEIPT_HELPER" finish --job tmp_scratch_sweep \
   --run-id "$RECEIPT_RUN_ID" \
   --outcome "$OUTCOME" \
   --reason "$REASON" \
+  ${LOCK_ARGS[@]+"${LOCK_ARGS[@]}"} \
   --safety "$SAFETY" \
   --candidates "$CANDIDATES" \
   --postcondition "$POSTCONDITION"; then

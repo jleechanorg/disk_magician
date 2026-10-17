@@ -82,7 +82,7 @@ acquire_lock() {
 mkdir -p "$STATE" "$(lease_dir)"
 if ! acquire_lock; then
     log skipped_lock
-    receipt finish --job worktree_reap --outcome skipped_lock --reason 'lock held' --lock '{"held":true}' || exit 3
+    receipt finish --job worktree_reap --outcome skipped_lock --reason 'lock held' --lock '{"held":true}' --candidates '{"removed_count":0,"deferred_count":0,"interrupted_count":0}' || exit 3
     exit 0
 fi
 RUN_TMP=""
@@ -148,7 +148,7 @@ PY
     receipt finish --job worktree_reap --run-id "$RUN_ID" --outcome "$OUTCOME" --reason "$RECEIPT_REASON" --candidates "$COUNTS" --postcondition "$POST"
 }
 BEFORE="$(free_bytes)"
-RUN_ID="$(receipt begin --job worktree_reap --trigger "$MODE")" || exit 1
+RUN_ID="$(receipt begin --job worktree_reap --clear-stale-active --trigger "$MODE")" || exit 1
 for tool in git timeout gh; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         log "missing tool: $tool"
@@ -434,9 +434,9 @@ process_lease() {
 CURSOR_SOURCE="worktree_reap|mode=$MODE|quiet=$QUIET|released_quiet=$RELEASE_QUIET|root=$ROOT_REAL"
 if [[ -n "$ACT_CURSOR" ]]; then
     CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$CURSOR_SOURCE")" || { log cursor-invalid; OUTCOME=error; RECEIPT_REASON=cursor-invalid; exit 3; }
-    CURSOR_ITEMS="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$CURSOR_STATE")"
-    CURSOR_INDEX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_index"])' "$CURSOR_STATE")"
-    CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
+    CURSOR_ITEMS="$(printf '%s' "$CURSOR_STATE" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["items"],separators=(",",":")))')"
+    CURSOR_INDEX="$(printf '%s' "$CURSOR_STATE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_index"])')"
+    CURSOR_LEN="$(printf '%s' "$CURSOR_ITEMS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
     if [[ "$CURSOR_ITEMS" == '[]' ]] || (( CURSOR_INDEX >= CURSOR_LEN )); then
         CURSOR_ITEMS="$(python3 - "$(lease_dir)" <<'PY'
 import glob,json,sys
@@ -446,12 +446,12 @@ PY
         act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" 0 || { log cursor-save-failed; OUTCOME=error; RECEIPT_REASON=cursor-save-failed; exit 3; }
         CURSOR_INDEX=0
     fi
-    CURSOR_LEN="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$CURSOR_ITEMS")"
+    CURSOR_LEN="$(printf '%s' "$CURSOR_ITEMS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
     while (( CURSOR_INDEX < CURSOR_LEN )); do
         if ! act_unit_fits "$ACT_UNIT_BUDGET_S"; then
             OUTCOME=partial; log deadline_before_unit; echo deadline_before_unit >> "$EVENTS"; break
         fi
-        file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[int(sys.argv[2])])' "$CURSOR_ITEMS" "$CURSOR_INDEX")"
+        file="$(printf '%s' "$CURSOR_ITEMS" | python3 -c 'import json,sys; print(json.load(sys.stdin)[int(sys.argv[1])])' "$CURSOR_INDEX")"
         process_lease "$file" || { OUTCOME=partial; break; }
         CURSOR_INDEX=$((CURSOR_INDEX + 1))
         act_cursor_save "$ACT_CURSOR" "$CURSOR_SOURCE" "$CURSOR_ITEMS" "$CURSOR_INDEX" || { log cursor-save-failed; OUTCOME=error; RECEIPT_REASON=cursor-save-failed; break; }

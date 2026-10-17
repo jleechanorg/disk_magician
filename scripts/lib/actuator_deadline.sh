@@ -75,9 +75,10 @@ PY
 
 act_cursor_save() {
   local path="$1" source="$2" items_json="$3" next_index="$4"
-  python3 - "$path" "$source" "$items_json" "$next_index" <<'PY'
+  printf '%s' "$items_json" | python3 -c '
 import json, os, sys, tempfile
-path, source, raw_items, raw_index = sys.argv[1:]
+path, source, raw_index = sys.argv[1:]
+raw_items = sys.stdin.read()
 try:
     items, index = json.loads(raw_items), int(raw_index)
 except (ValueError, TypeError):
@@ -98,7 +99,7 @@ try:
     os.replace(tmp, path)
 finally:
     if os.path.exists(tmp): os.unlink(tmp)
-PY
+' "$path" "$source" "$next_index"
 }
 
 # act_cursor_reset_once <path> <source> — the ONE reset point at the START of a
@@ -112,7 +113,7 @@ PY
 act_cursor_reset_once() {
   local path="$1" source="$2" state complete
   state="$(act_cursor_load "$path" "$source")" || return 2
-  complete="$(python3 -c 'import json,sys; print(1 if json.loads(sys.argv[1])["next_index"] >= len(json.loads(sys.argv[1])["items"]) else 0)' "$state")" || return 2
+  complete="$(printf '%s' "$state" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(1 if d["next_index"] >= len(d["items"]) else 0)')" || return 2
   [[ "$complete" == 1 ]] || return 0
   act_cursor_save "$path" "$source" "[]" 0 || return 3
 }

@@ -166,9 +166,9 @@ if [[ -n "$ACT_CURSOR" ]]; then
     ACT_CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || {
         echo "invalid cleanup_worktrees cursor" >&2; exit 3;
     }
-    ACT_CURSOR_ITEMS="$(python3 -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$ACT_CURSOR_STATE")"
-    ACT_CURSOR_INDEX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["next_index"])' "$ACT_CURSOR_STATE")"
-    ACT_CURSOR_LEN="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
+    ACT_CURSOR_ITEMS="$(printf '%s' "$ACT_CURSOR_STATE" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["items"],separators=(",",":")))')"
+    ACT_CURSOR_INDEX="$(printf '%s' "$ACT_CURSOR_STATE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["next_index"])')"
+    ACT_CURSOR_LEN="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')"
     if (( ACT_CURSOR_INDEX >= ACT_CURSOR_LEN )); then
         ACT_CURSOR_ITEMS='[]'
         ACT_CURSOR_INDEX=0
@@ -199,21 +199,19 @@ trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
 act_candidate_begin() {
     local path="$1" index items_before
     [[ -n "$ACT_CURSOR" ]] || return 0
-    index="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+    index="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
-items=json.loads(sys.argv[1])
-try: print(items.index(sys.argv[2]))
+items=json.load(sys.stdin)
+try: print(items.index(sys.argv[1]))
 except ValueError: print(-1)
-PY
-)"
+' "$path")"
     if [[ "$index" == -1 ]]; then
-        items_before="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
-        ACT_CURSOR_ITEMS="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+        items_before="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')"
+        ACT_CURSOR_ITEMS="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
-items=json.loads(sys.argv[1]); items.append(sys.argv[2])
+items=json.load(sys.stdin); items.append(sys.argv[1])
 print(json.dumps(items,separators=(",",":")))
-PY
-)"
+' "$path")"
         index="$items_before"
         act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || return 3
         (( ACT_CURSOR_INDEX < items_before )) && return 1
