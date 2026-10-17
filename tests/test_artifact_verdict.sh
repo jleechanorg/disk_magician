@@ -730,12 +730,14 @@ echo "-- rebuildable (--kind rebuildable) and os_clone --"
 mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1" \
     "$HOME/Library/Caches/ms-playwright/chromium-1248" "$HOME/Library/Caches/CocoaPods/Pods" \
     "$HOME/Library/Caches/@granolaelectron-updater/pending" "$HOME/Library/Caches/claude-cli-nodejs/cache-a" \
-    "$HOME/Library/Caches/go-build/00" "$HOME/.cache/ezgha-recovery-target-20261004/sub"
+    "$HOME/Library/Caches/go-build/00" "$HOME/.cache/ezgha-recovery-target-20261004/sub" \
+    "$HOME/.local/share/cursor-agent/versions/2026.02-stale"
 for d in .cache/uv/archive-v0/x .cache/other/x Library/Developer/Xcode/DerivedData/App-1 \
     Library/Caches/ms-playwright/chromium-1248 Library/Caches/CocoaPods/Pods \
     Library/Caches/@granolaelectron-updater/pending Library/Caches/claude-cli-nodejs/cache-a \
-    Library/Caches/go-build/00 .cache/ezgha-recovery-target-20261004/sub; do printf 'b' >"$HOME/$d/f"; done
-age "$HOME/.cache" 43200 && age "$HOME/Library" 43200
+    Library/Caches/go-build/00 .cache/ezgha-recovery-target-20261004/sub \
+    .local/share/cursor-agent/versions/2026.02-stale; do printf 'b' >"$HOME/$d/f"; done
+age "$HOME/.cache" 43200 && age "$HOME/Library" 43200 && age "$HOME/.local" 43200
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x" --kind rebuildable)" remove "rebuildable ~/.cache/uv/archive-v0/x"
 assert_eq "$(av "$HOME/Library/Developer/Xcode/DerivedData/App-1" --kind rebuildable)" remove "rebuildable Xcode DerivedData entry"
 assert_eq "$(av "$HOME/Library/Caches/ms-playwright/chromium-1248" --kind rebuildable)" remove "rebuildable ms-playwright entry"
@@ -747,6 +749,7 @@ assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004/sub" --kind rebuild
 assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004" --kind rebuildable)" remove "rebuildable ezgha-recovery-target dir itself"
 assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
 assert_eq "$(av "$HOME/Library/Caches/ms-playwright" --kind rebuildable)" kept:unproven-content "ms-playwright cache root itself is not an entry"
+assert_eq "$(av "$HOME/.local/share/cursor-agent/versions/2026.02-stale" --kind rebuildable)" kept:unproven-content "installed cursor-agent versions stay outside rebuildable cache allowlist"
 assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
 # venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
