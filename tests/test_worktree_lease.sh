@@ -497,6 +497,10 @@ rm -rf "$P_OWNED"
 L_BADHASH="$(lease_dir)/0000000000000000.json"
 cp "$L_GONE" "$L_BADHASH"
 
+# 9. malformed path (embedded NUL byte) -> preserved and does not abort loop
+L_NULPATH="$(lease_dir)/0000000000000001.json"
+printf '{"schema_version":1,"path":"/tmp/bad\\u0000path","owner":null,"pending":false,"creator":"birth-audit","kind":"scratch","expires_at":1}\n' > "$L_NULPATH"
+
 if lease_prune_birth_audit_scratch; then ok "lease_prune_birth_audit_scratch rc 0"; else bad "lease_prune_birth_audit_scratch failed"; fi
 [[ ! -e "$L_GONE" ]] && ok "missing-path birth-audit scratch lease pruned" || bad "missing-path birth-audit scratch lease still exists"
 [[ ! -e "$L_EXP_AT" ]] && ok "expired (expires_at) birth-audit scratch lease pruned" || bad "expired (expires_at) birth-audit scratch lease still exists"
@@ -506,6 +510,7 @@ if lease_prune_birth_audit_scratch; then ok "lease_prune_birth_audit_scratch rc 
 [[ -f "$L_PEND" ]] && ok "pending:true lease preserved even when missing/expired" || bad "pending:true lease was pruned"
 [[ -f "$L_OWNED" ]] && ok "owned lease preserved even when missing/expired" || bad "owned lease was pruned"
 [[ -f "$L_BADHASH" ]] && ok "hash-mismatched lease filename preserved" || bad "hash-mismatched lease filename was pruned"
+[[ -f "$L_NULPATH" ]] && ok "embedded-NUL path lease preserved without aborting scan" || bad "embedded-NUL path lease was pruned"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

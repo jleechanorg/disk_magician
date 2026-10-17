@@ -807,10 +807,14 @@ for entry in entries:
         continue
     if d.get("kind") != "scratch":
         continue
-    real = os.path.realpath(p)
-    if n != hashlib.sha256(os.fsencode(real)).hexdigest()[:16] + ".json":
+    try:
+        real = os.path.realpath(p)
+        encoded = os.fsencode(real)
+        path_gone = not os.path.lexists(p) and not os.path.exists(real)
+    except (ValueError, UnicodeError, OSError):
         continue
-    path_gone = not os.path.lexists(p) and not os.path.exists(real)
+    if n != hashlib.sha256(encoded).hexdigest()[:16] + ".json":
+        continue
     exp = d.get("expires_at")
     ce = d.get("created_epoch")
     ttl = d.get("ttl_hours")
