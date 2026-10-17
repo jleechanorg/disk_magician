@@ -407,6 +407,51 @@ audit; rc=$?
 assert_eq "$rc" 0 "a negative bytes value is not treated as malformed"
 assert_eq "$(bg nb 'x["bytes"]'),$(bg nb 'x["charge"]')" "-5,measured" "negative file bytes preserved unchanged"
 
+echo "== 22. birth_audit.sh prunes expired and missing-path birth-audit scratch adoption leases =="
+fresh prune_adopt
+mkdir -p "$T/ptmp/r/gone_s" "$T/ptmp/r/exp_s" "$T/ptmp/r/live_s" "$T/home/.worktrees/repo/wt_adopt"
+printf 'gitdir: /tmp/fake\n' > "$T/home/.worktrees/repo/wt_adopt/.git"
+export STANDARD_WORKTREE_ROOT="$T/home/.worktrees"
+du_set gone_s 1 exp_s 1 live_s 1 wt_adopt 1
+audit
+assert_eq "$(leases)" "4" "initial audit adopts 3 scratch + 1 worktree"
+
+# Also seed a pending:true lease and an owned lease under $(lease_dir)
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+L_GONE_S="$(lease_path_for "$T/ptmp/r/gone_s")"
+L_EXP_S="$(lease_path_for "$T/ptmp/r/exp_s")"
+L_LIVE_S="$(lease_path_for "$T/ptmp/r/live_s")"
+L_WT_ADOPT="$(lease_path_for "$T/home/.worktrees/repo/wt_adopt")"
+L_PEND_S="$(lease_path_for "$T/ptmp/r/pend_s")"
+L_OWNED_S="$(lease_path_for "$T/ptmp/r/owned_s")"
+
+# Remove gone_s from disk; expire exp_s and wt_adopt; create pending & owned leases
+rm -rf "$T/ptmp/r/gone_s" "$T/home/.worktrees/repo/wt_adopt"
+python3 - "$L_EXP_S" "$L_WT_ADOPT" "$L_PEND_S" "$T/ptmp/r/pend_s" "$L_OWNED_S" "$T/ptmp/r/owned_s" <<'PY'
+import json, sys, time
+l_exp, l_wt, l_pend, p_pend, l_owned, p_owned = sys.argv[1:7]
+now = int(time.time())
+for p in (l_exp, l_wt):
+    d = json.load(open(p))
+    d["expires_at"] = now - 60
+    d["created_epoch"] = now - 25 * 3600
+    json.dump(d, open(p, "w"))
+base = json.load(open(l_exp))
+pend = dict(base, path=p_pend, pending=True, expires_at=now - 60)
+json.dump(pend, open(l_pend, "w"))
+owned = dict(base, path=p_owned, owner={"pid": 999, "start_epoch": 1760000000, "comm": "claude"}, expires_at=now - 60)
+json.dump(owned, open(l_owned, "w"))
+PY
+
+audit; rc=$?
+assert_eq "$rc" 0 "audit with lease prune rc"
+[[ ! -e "$L_GONE_S" ]] && ok "missing-path birth-audit scratch lease pruned by birth_audit.sh" || bad "missing-path birth-audit scratch lease not pruned"
+[[ ! -e "$L_EXP_S" ]] && ok "expired birth-audit scratch lease pruned by birth_audit.sh" || bad "expired birth-audit scratch lease not pruned"
+[[ -f "$L_LIVE_S" ]] && ok "live unexpired birth-audit scratch lease preserved" || bad "live unexpired birth-audit scratch lease was pruned"
+[[ -f "$L_WT_ADOPT" ]] && ok "worktree lease preserved even when missing and expired" || bad "worktree lease was pruned"
+[[ -f "$L_PEND_S" ]] && ok "pending:true lease preserved" || bad "pending:true lease was pruned"
+[[ -f "$L_OWNED_S" ]] && ok "owned lease preserved" || bad "owned lease was pruned"
+
 echo
 echo "test_birth_audit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

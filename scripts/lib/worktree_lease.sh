@@ -496,6 +496,7 @@ d = {
     "created_at": now.isoformat(),
     "created_epoch": int(now.timestamp()),
     "ttl_hours": int(ttl),
+    "expires_at": int(now.timestamp()) + int(ttl) * 3600,
     "owner": owner,
     "admin_id": None if admin_id in ("", "-") else admin_id,
     "admin_birth_epoch": None if admin_birth in ("", "-") else int(admin_birth),
@@ -751,4 +752,85 @@ except OSError: print("-\t-")
 PY
 )
     [[ "$live_dev" == "$dev" && "$live_ino" == "$ino" ]]
+}
+
+# lease_prune_birth_audit_scratch [now_epoch] — unlink expired or missing-path
+# ownerless scratch adoption leases written by birth-audit. Never touches
+# worktree/clone/evidence leases, pending leases, owned leases, non-birth-audit
+# leases, symlinks, or hash-mismatched files (fail closed on any ambiguity).
+lease_prune_birth_audit_scratch() {
+    local ld
+    ld="$(lease_dir)"
+    [[ -d "$ld" && ! -L "$ld" ]] || return 0
+    python3 - "$ld" "${1:-}" <<'PY'
+import hashlib, json, os, stat, sys, time
+
+ld = sys.argv[1]
+try:
+    now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
+except (TypeError, ValueError):
+    now = time.time()
+
+try:
+    entries = list(os.scandir(ld))
+except OSError:
+    sys.exit(0)
+
+for entry in entries:
+    n = entry.name
+    if not n.endswith(".json") or n.startswith("."):
+        continue
+    fp = entry.path
+    try:
+        st = os.lstat(fp)
+    except OSError:
+        continue
+    if not stat.S_ISREG(st.st_mode):
+        continue
+    if os.path.lexists(fp + ".reuse-lock"):
+        continue
+    try:
+        with open(fp, "rb") as f:
+            d = json.load(f)
+    except Exception:
+        continue
+    if not isinstance(d, dict):
+        continue
+    p = d.get("path")
+    if not (isinstance(p, str) and bool(p)):
+        continue
+    if not ("owner" in d and d["owner"] is None):
+        continue
+    if d.get("pending") is not False:
+        continue
+    if d.get("creator") != "birth-audit":
+        continue
+    if d.get("kind") != "scratch":
+        continue
+    real = os.path.realpath(p)
+    if n != hashlib.sha256(os.fsencode(real)).hexdigest()[:16] + ".json":
+        continue
+    path_gone = not os.path.lexists(p) and not os.path.exists(real)
+    exp = d.get("expires_at")
+    ce = d.get("created_epoch")
+    ttl = d.get("ttl_hours")
+    exp_ok = isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0
+    ce_ok = (
+        isinstance(ce, (int, float))
+        and not isinstance(ce, bool)
+        and ce > 0
+        and isinstance(ttl, (int, float))
+        and not isinstance(ttl, bool)
+        and ttl > 0
+    )
+    if "expires_at" in d and not exp_ok:
+        ttl_expired = False
+    else:
+        ttl_expired = (exp_ok and now >= exp) or (ce_ok and now >= ce + ttl * 3600)
+    if path_gone or ttl_expired:
+        try:
+            os.unlink(fp)
+        except OSError:
+            pass
+PY
 }
