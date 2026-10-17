@@ -36,6 +36,7 @@ Commands:
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
+  check-tmp-clones       Detect full git clones, oversize scratch, and advice dirs in /private/tmp.
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
   ledger-freshness       Print OK|STALE|UNKNOWN for the published ledger, accepting a fresh valid partial scan.
   sweeper-health        Check scheduled cleanup and ledger health.
@@ -334,6 +335,9 @@ case "$CMD" in
     ;;
   check_system_residual|check-system-residual)
     "$SCRIPT_DIR/scripts/check_system_residual.sh" "$@"
+    ;;
+  check_tmp_clones|check-tmp-clones)
+    "$SCRIPT_DIR/scripts/check_tmp_clones.sh" "$@"
     ;;
   check_launchd_fleet|check-launchd-fleet)
     "$SCRIPT_DIR/scripts/check_launchd_fleet.sh" "$@"
