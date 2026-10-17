@@ -899,6 +899,43 @@ assert_eq "$(git -C "$C14INC_WT" rev-parse --abbrev-ref HEAD)" "reuse/c14-inc" "
 grep -q -- "--own-reuse-claim" "$C14INC_VERDICT_LOG" && ok "content C14 gate reached (--own-reuse-claim)" || bad "content C14 gate not reached: $(cat "$C14INC_VERDICT_LOG")"
 unset C14INC_VERDICT_LOG C14INC_WT
 
+echo "== case 39: zero-LFS repo sets lfs.locksverify=false so push succeeds; LFS repos keep default =="
+git init -q --bare -b main "$TMPROOT/nolfs-origin.git"
+git clone -q "$TMPROOT/nolfs-origin.git" "$TMPROOT/nolfs" 2>/dev/null
+git -C "$TMPROOT/nolfs" commit -q --allow-empty -m base
+git -C "$TMPROOT/nolfs" push -q origin HEAD:main
+mkdir -p "$TMPROOT/nolfs/.git/hooks"
+cat > "$TMPROOT/nolfs/.git/hooks/pre-push" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$(git config --bool --get lfs.locksverify 2>/dev/null)" != "false" ]]; then
+    echo "Authentication required: You must have push access to verify locks" >&2
+    exit 1
+fi
+EOF
+chmod +x "$TMPROOT/nolfs/.git/hooks/pre-push"
+nolfs_wt="$(bash "$SCRIPT" "$TMPROOT/nolfs" feat/nolfs-push 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "zero-LFS worktree-new exit"
+assert_eq "$(git -C "$nolfs_wt" config --bool --get lfs.locksverify 2>/dev/null)" "false" "zero-LFS worktree sets lfs.locksverify=false"
+git -C "$nolfs_wt" commit -q --allow-empty -m "worktree change"
+git -C "$nolfs_wt" push -q origin HEAD:refs/heads/feat/nolfs-push 2>"$TMPROOT/nolfs-push.err"; rc=$?
+assert_eq "$rc" "0" "git push from zero-LFS worktree succeeds without GIT_LFS_SKIP_PUSH"
+
+git init -q -b main "$TMPROOT/withlfs"
+echo "*.bin filter=lfs diff=lfs merge=lfs -text" > "$TMPROOT/withlfs/.gitattributes"
+git -C "$TMPROOT/withlfs" add .gitattributes
+git -C "$TMPROOT/withlfs" commit -q -m "track lfs"
+withlfs_wt="$(bash "$SCRIPT" "$TMPROOT/withlfs" feat/withlfs 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "LFS-attributes worktree-new exit"
+assert_eq "$(git -C "$withlfs_wt" config --get lfs.locksverify 2>/dev/null || true)" "" "LFS-attributes repo does not force lfs.locksverify=false"
+
+git init -q -b main "$TMPROOT/withlfsobj"
+git -C "$TMPROOT/withlfsobj" commit -q --allow-empty -m base
+mkdir -p "$TMPROOT/withlfsobj/.git/lfs/objects/aa/bb"
+echo "lfs-blob" > "$TMPROOT/withlfsobj/.git/lfs/objects/aa/bb/0123456789"
+withlfsobj_wt="$(bash "$SCRIPT" "$TMPROOT/withlfsobj" feat/withlfsobj 2>/dev/null)"; rc=$?
+assert_eq "$rc" "0" "LFS-objects worktree-new exit"
+assert_eq "$(git -C "$withlfsobj_wt" config --get lfs.locksverify 2>/dev/null || true)" "" "LFS-objects repo does not force lfs.locksverify=false"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

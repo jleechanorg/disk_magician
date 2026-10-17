@@ -899,6 +899,83 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --push-wip --execute --preserve-wi
 assert_contains "$OUT" "ignored-file:data/" "ignored data/notes.db still blocks"
 assert_true "[[ -f '$W43C/data/notes.db' ]]" "notes.db intact"
 
+# ---------------------------------------------------------------------------
+echo "case 44: preserve-wip branches from captured orig_sha and verifies orig_sha is ancestor of wip_sha (disk_magician-xtsm)"
+R44="$(mk_repo r44)"
+W44="$(mk_wt "$R44" race44)"
+echo "ahead commit work" >>"$W44/tracked.txt"
+g -C "$W44" commit -q -am "ahead commit"
+ORIG44="$(git -C "$W44" rev-parse HEAD)"
+echo "dirty uncommitted edit" >>"$W44/tracked.txt"
+backdate_tree "$W44" 30
+REAL_GIT44="$(command -v git)"
+RACEBIN44="$TMPROOT/racebin44"
+mkdir -p "$RACEBIN44"
+cat >"$RACEBIN44/git" <<EOF
+#!/usr/bin/env bash
+# Simulate another actor deleting the named branch right before checkout -q -b creates the wip branch.
+if [[ " \$* " == *" checkout -q -b "* && ! -e "$TMPROOT/race44.deleted" ]]; then
+    touch "$TMPROOT/race44.deleted"
+    "$REAL_GIT44" -C "$R44" update-ref -d refs/heads/feat/race44
+fi
+exec "$REAL_GIT44" "\$@"
+EOF
+chmod +x "$RACEBIN44/git"
+OUT="$(PATH="$RACEBIN44:$PATH" WORKTREE_APPROVED=1 GIT_TERMINAL_PROMPT=0 run_hygiene "$R44" --push-wip --execute --preserve-wip)"
+B44="wip/worktree-hygiene/$TODAY/race44"
+assert_true "[[ -e '$TMPROOT/race44.deleted' ]]" "concurrent branch delete fired before checkout -b"
+assert_contains "$OUT" "PRESERVED-WIP" "wip branch still preserved from captured orig_sha"
+assert_true "git -C '$R44' merge-base --is-ancestor '$ORIG44' '$B44'" "captured orig_sha is an ancestor of preserved wip branch"
+assert_true "git -C '$R44' show '$B44:tracked.txt' | grep -q 'ahead commit work' && git -C '$R44' show '$B44:tracked.txt' | grep -q 'dirty uncommitted edit'" "both ahead commit and dirty edit preserved on wip branch"
+UNREL44="$(g -C "$R44" commit-tree -m unrelated "$(g -C "$R44" mktree </dev/null)")"
+ANC_BLOCKER="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set +e
+    wip_post_publication_blocker "$R44" "$R44" "main" "$(git -C "$R44" rev-parse main)" "$UNREL44"
+) 2>&1)"
+assert_contains "$ANC_BLOCKER" "orig-sha-not-ancestor" "wip_post_publication_blocker rejects non-ancestor orig_sha"
+
+# ---------------------------------------------------------------------------
+echo "case 45: SAFE path and preserve_wip_raw_bytes_dirty catch symlink-replaced and index-mismatched tracked files before --force --force removal (disk_magician-hdw)"
+R45="$(mk_repo r45)"
+printf '*.nb filter=strip\n' >"$R45/.gitattributes"
+g -C "$R45" config filter.strip.clean "grep -v OUTPUT"
+g -C "$R45" config filter.strip.smudge cat
+printf 'cell\n' >"$R45/analysis.nb"
+g -C "$R45" add -A; g -C "$R45" commit -q -m "nb"
+g -C "$R45" push -q origin main
+W45A="$(mk_wt "$R45" helper45a)"
+printf 'OUTPUT: hidden\n' >>"$W45A/analysis.nb"
+g -C "$W45A" add analysis.nb
+RAW_DIRTY45="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set +e
+    preserve_wip_raw_bytes_dirty "$W45A"
+) 2>&1)"
+assert_contains "$RAW_DIRTY45" "analysis.nb" "preserve_wip_raw_bytes_dirty detects clean-filtered edit"
+
+W45B="$(mk_wt "$R45" sym45b)"
+ln -sf /nonexistent/target "$W45B/tracked.txt"
+g -C "$W45B" update-index --assume-unchanged tracked.txt
+backdate_tree "$W45A" 30; backdate_tree "$W45B" 30
+assert_true "[[ -z \"\$(git -C '$W45B' status --porcelain)\" ]]" "precondition: assume-unchanged symlink replacement looks clean to git status"
+OUT="$(WORKTREE_APPROVED=1 GIT_TERMINAL_PROMPT=0 run_hygiene "$R45" --skip-push --execute)"
+assert_contains "$OUT" "NEEDS-REVIEW   $W45B | hidden-filtered-change:" "symlink-replaced tracked file downgraded from SAFE to NEEDS-REVIEW"
+assert_true "wt_registered '$R45' '$W45B' && [[ -L '$W45B/tracked.txt' ]]" "symlink-replaced worktree preserved (not --force --force deleted)"
+
+W45C="$(mk_wt "$R45" idx45c)"
+FAKE_BLOB45="$(printf 'staged-only-bytes\n' | git -C "$W45C" hash-object -w --stdin)"
+g -C "$W45C" update-index --cacheinfo "100644,$FAKE_BLOB45,tracked.txt"
+IDX_DIRTY45="$( (
+    # shellcheck disable=SC1090
+    source "$SCRIPT"
+    set +e
+    preserve_wip_raw_bytes_dirty "$W45C"
+) 2>&1)"
+assert_contains "$IDX_DIRTY45" "tracked.txt" "preserve_wip_raw_bytes_dirty catches index blob differing from disk/HEAD"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
