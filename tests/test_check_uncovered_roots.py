@@ -445,6 +445,7 @@ class TestCheckUncoveredRoots(unittest.TestCase):
             "$HOME/.cache/zig",
             "$HOME/.gemini/antigravity-cli",
             "$HOME/Documents/Codex",
+            "$HOME/Documents/Codex/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*",
             "$HOME/Library/CloudStorage/Dropbox/conversation-backups/codex_conversations/sessions",
             "$HOME/Library/Logs",
             "$HOME/Library/Logs/disk-magician-*.log",
@@ -469,7 +470,23 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         ]
         missing = [p for p in required_patterns if p not in rows]
         self.assertEqual(missing, [], f"Missing required tmv8 patterns in sweeper_roots.txt: {missing}")
-        self.assertEqual(rows["$HOME/Documents/Codex"][0], "cleanup_codex_documents.sh")
+        self.assertEqual(rows["$HOME/Documents/Codex"][0], "decision:cleanup_codex_documents.sh")
+        self.assertEqual(
+            rows["$HOME/Documents/Codex/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*"][0],
+            "cleanup_codex_documents.sh",
+        )
+
+        # Verify that unvisited siblings like ~/Documents/Codex/archive are not
+        # falsely claimed as sweeper-covered, while actual <YYYY-MM-DD>/<task>
+        # directories are covered.
+        codex_task_dir = os.path.join(self.home, "Documents", "Codex", "2026-10-03", "task-1")
+        codex_archive_dir = os.path.join(self.home, "Documents", "Codex", "archive")
+        os.makedirs(codex_task_dir, exist_ok=True)
+        os.makedirs(codex_archive_dir, exist_ok=True)
+        roots = cur_module.load_registry(registry_path, home=self.home, darwin_tmp="")
+        self.assertTrue(cur_module.is_covered(codex_task_dir, roots))
+        self.assertFalse(cur_module.is_covered(codex_archive_dir, roots))
+        self.assertFalse(cur_module.is_covered(os.path.join(self.home, "Documents", "Codex"), roots))
 
         covered_or_routed_buckets = [
             os.path.join(self.home, "Library", "Application Support", "Cursor", "snapshots"),
@@ -481,7 +498,8 @@ class TestCheckUncoveredRoots(unittest.TestCase):
             os.path.join(self.home, ".cache", "huggingface"),
             os.path.join(self.home, ".cache", "zig"),
             os.path.join(self.home, ".gemini", "antigravity-cli"),
-            os.path.join(self.home, "Documents", "Codex", "2026-10-03"),
+            codex_task_dir,
+            codex_archive_dir,
             os.path.join(
                 self.home, "Library", "CloudStorage", "Dropbox",
                 "conversation-backups", "codex_conversations", "sessions", "2026", "10",
@@ -527,6 +545,7 @@ class TestCheckUncoveredRoots(unittest.TestCase):
             self.assertNotIn(p, uncovered_paths, f"{p} must not be reported as UNCOVERED")
         for p in out_of_scope_buckets:
             self.assertIn(p, uncovered_paths, f"Out-of-scope {p} must remain UNCOVERED")
+
 
 
 if __name__ == "__main__":

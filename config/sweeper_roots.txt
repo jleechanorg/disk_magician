@@ -124,8 +124,9 @@ $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 # cleanup_claude_state.sh
 $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs); scheduled report-only, --clean needs approval
 
-# cleanup_codex_documents.sh
-$HOME/Documents/Codex	cleanup_codex_documents.sh	ROOT_LOGICAL default, line 178 (>=7d safety/live-cwd/git/C14-gated task scratch under ~/Documents/Codex/<YYYY-MM-DD>/<task-dir>)
+# cleanup_codex_documents.sh — narrowed to the <YYYY-MM-DD>/<task-dir> paths
+# it actually enumerates (leaving non-date siblings like archive/ unvisited).
+$HOME/Documents/Codex/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*	cleanup_codex_documents.sh	ROOT_LOGICAL/<YYYY-MM-DD>/<task-dir> task directories, line 116-144
 
 # NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
 # and $HOME/.claude/projects are intentionally NOT registered here as
@@ -153,6 +154,7 @@ $HOME/.cache/codex-runtimes	decision:check_uncovered_roots.py	Historical 2026-05
 $HOME/.cache/huggingface	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; review model cache retention before reclaim
 $HOME/.cache/zig	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; no active sweeper owner
 $HOME/.gemini/antigravity-cli	decision:check_uncovered_roots.py	Mixed state parent; preserve conversations and credentials; only brain has an established sweeper
+$HOME/Documents/Codex	decision:cleanup_codex_documents.sh	Report-only mixed parent; cleanup_codex_documents.sh visits only <YYYY-MM-DD>/<task-dir> date directories, leaving non-date children (e.g. archive) unvisited
 $HOME/Library/CloudStorage/Dropbox/conversation-backups	decision:check_uncovered_roots.py	Conversation archive has no established cleanup owner; preserve pending retention decision
 $HOME/Library/CloudStorage/Dropbox/conversation-backups/codex_conversations/sessions	decision:check_uncovered_roots.py	Conversation sessions archive has no established cleanup owner; preserve pending retention decision
 $HOME/Library/Logs	decision:check_uncovered_roots.py	Mixed log parent; no disk-magician log rotation owner here; .local/state rotation does not cover it
