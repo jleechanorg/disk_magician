@@ -410,6 +410,125 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         self.assertNotIn(covered_child, paths)
         self.assertNotIn(parent, paths)
 
+    def test_repo_registry_covers_tmv8_uncovered_roots(self):
+        # Bead disk_magician-sweeper-roots-add-uncovered-tmv8: verify that all
+        # required >=5 GiB roots and subpaths have explicit entries (with owner
+        # script and note) in config/sweeper_roots.txt, and that running
+        # check_uncovered_roots.py with the committed registry no longer reports
+        # any of them as UNCOVERED while keeping out-of-scope paths UNCOVERED.
+        registry_path = os.path.join(REPO_ROOT, "config", "sweeper_roots.txt")
+        rows = {}
+        with open(registry_path) as f:
+            for raw_line in f:
+                line = raw_line.rstrip("\n")
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                parts = line.split("\t")
+                self.assertGreaterEqual(
+                    len(parts), 3,
+                    f"Every sweeper_roots.txt row must have pattern, owner, and note: {line!r}",
+                )
+                pattern, owner, note = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                self.assertTrue(owner, f"Missing owner for {pattern}")
+                self.assertTrue(note, f"Missing note for {pattern}")
+                rows[pattern] = (owner, note)
+
+        required_patterns = [
+            "$HOME/Library/Application Support/Cursor/snapshots",
+            "$HOME/.cache",
+            "$HOME/.cache/whisper",
+            "$HOME/.cache/memory-backup-repo",
+            "$HOME/.cache/cmux",
+            "$HOME/.cache/gh",
+            "$HOME/.cache/codex-runtimes",
+            "$HOME/.cache/huggingface",
+            "$HOME/.cache/zig",
+            "$HOME/.gemini/antigravity-cli",
+            "$HOME/Documents/Codex",
+            "$HOME/Library/CloudStorage/Dropbox/conversation-backups/codex_conversations/sessions",
+            "$HOME/Library/Logs",
+            "$HOME/Library/Logs/disk-magician-*.log",
+            "$HOME/Library/Logs/dark-factory",
+            "$HOME/Library/Logs/cmux-focus.log",
+            "/Library/Developer",
+            "/Library/Developer/CoreSimulator",
+            "$HOME/Library/Developer/CoreSimulator/Devices",
+            "$HOME/Library/Caches/Google",
+            "$HOME/Library/Application Support/Google/Chrome",
+            "$HOME/Library/Application Support/Google/Chrome/*/Cache",
+            "$HOME/Library/Application Support/Google/Chrome/*/Code Cache",
+            "$HOME/Library/Application Support/Google/Chrome/*/GPUCache",
+            "$HOME/Library/Caches/Aside",
+            "$HOME/Library/Application Support/Aside",
+            "$HOME/Library/Application Support/Aside/*Cache*",
+            "$HOME/Library/Caches/com.openai.codex",
+            "$HOME/Library/Caches/cmux",
+            "$HOME/Library/Caches/CodexBar",
+            "$HOME/Library/Caches/Codex",
+            "$HOME/Library/Caches/com.cmuxterm.app",
+        ]
+        missing = [p for p in required_patterns if p not in rows]
+        self.assertEqual(missing, [], f"Missing required tmv8 patterns in sweeper_roots.txt: {missing}")
+        self.assertEqual(rows["$HOME/Documents/Codex"][0], "cleanup_codex_documents.sh")
+
+        covered_or_routed_buckets = [
+            os.path.join(self.home, "Library", "Application Support", "Cursor", "snapshots"),
+            os.path.join(self.home, ".cache", "whisper"),
+            os.path.join(self.home, ".cache", "memory-backup-repo"),
+            os.path.join(self.home, ".cache", "cmux"),
+            os.path.join(self.home, ".cache", "gh"),
+            os.path.join(self.home, ".cache", "codex-runtimes"),
+            os.path.join(self.home, ".cache", "huggingface"),
+            os.path.join(self.home, ".cache", "zig"),
+            os.path.join(self.home, ".gemini", "antigravity-cli"),
+            os.path.join(self.home, "Documents", "Codex", "2026-10-03"),
+            os.path.join(
+                self.home, "Library", "CloudStorage", "Dropbox",
+                "conversation-backups", "codex_conversations", "sessions", "2026", "10",
+            ),
+            os.path.join(self.home, "Library", "Logs", "disk-magician-fsevents.log"),
+            os.path.join(self.home, "Library", "Logs", "dark-factory"),
+            os.path.join(self.home, "Library", "Logs", "cmux-focus.log"),
+            "/Library/Developer/CoreSimulator",
+            os.path.join(self.home, "Library", "Developer", "CoreSimulator", "Devices"),
+            os.path.join(self.home, "Library", "Caches", "Google"),
+            os.path.join(self.home, "Library", "Application Support", "Google", "Chrome"),
+            os.path.join(self.home, "Library", "Caches", "Aside"),
+            os.path.join(self.home, "Library", "Application Support", "Aside"),
+            os.path.join(self.home, "Library", "Caches", "com.openai.codex"),
+            os.path.join(self.home, "Library", "Caches", "cmux"),
+            os.path.join(self.home, "Library", "Caches", "CodexBar"),
+            os.path.join(self.home, "Library", "Caches", "Codex"),
+            os.path.join(self.home, "Library", "Caches", "com.cmuxterm.app"),
+        ]
+        out_of_scope_buckets = [
+            "/Applications",
+            "/opt/homebrew/Cellar",
+            os.path.join(self.home, ".codex", "thread_history_1.sqlite"),
+        ]
+        write_json(self.snapshot, {
+            "granularity_buckets": [
+                {"path": p, "measured_kb": 6 * GIB_KB}
+                for p in covered_or_routed_buckets + out_of_scope_buckets
+            ],
+        })
+        proc = run([
+            "--snapshot", self.snapshot,
+            "--discover", self.discover,
+            "--registry", registry_path,
+            "--home", self.home,
+            "--darwin-tmp", "",
+            "--json",
+        ])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        uncovered_paths = [e["path"] for e in result["uncovered"]]
+        for p in covered_or_routed_buckets:
+            self.assertNotIn(p, uncovered_paths, f"{p} must not be reported as UNCOVERED")
+        for p in out_of_scope_buckets:
+            self.assertIn(p, uncovered_paths, f"Out-of-scope {p} must remain UNCOVERED")
+
 
 if __name__ == "__main__":
     unittest.main()
+
