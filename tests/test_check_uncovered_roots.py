@@ -6,6 +6,7 @@ frontier/discover fixture data only — it must never shell out to du.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -417,6 +418,14 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         # check_uncovered_roots.py with the committed registry no longer reports
         # any of them as UNCOVERED while keeping out-of-scope paths UNCOVERED.
         registry_path = os.path.join(REPO_ROOT, "config", "sweeper_roots.txt")
+        # Keep this full-registry fixture outside /tmp. The production registry
+        # intentionally marks /tmp as cleanup-owned, so a TemporaryDirectory
+        # created there would make every fixture path look covered on Linux and
+        # mask the narrower Codex ownership assertions below.
+        fixture_root = tempfile.mkdtemp(prefix=".dm_uncovered_registry_", dir=REPO_ROOT)
+        self.addCleanup(shutil.rmtree, fixture_root)
+        fixture_home = os.path.join(fixture_root, "home")
+        os.makedirs(fixture_home)
         rows = {}
         with open(registry_path) as f:
             for raw_line in f:
@@ -479,50 +488,50 @@ class TestCheckUncoveredRoots(unittest.TestCase):
         # Verify that unvisited siblings like ~/Documents/Codex/archive are not
         # falsely claimed as sweeper-covered, while actual <YYYY-MM-DD>/<task>
         # directories are covered.
-        codex_task_dir = os.path.join(self.home, "Documents", "Codex", "2026-10-03", "task-1")
-        codex_archive_dir = os.path.join(self.home, "Documents", "Codex", "archive")
+        codex_task_dir = os.path.join(fixture_home, "Documents", "Codex", "2026-10-03", "task-1")
+        codex_archive_dir = os.path.join(fixture_home, "Documents", "Codex", "archive")
         os.makedirs(codex_task_dir, exist_ok=True)
         os.makedirs(codex_archive_dir, exist_ok=True)
-        roots = cur_module.load_registry(registry_path, home=self.home, darwin_tmp="")
+        roots = cur_module.load_registry(registry_path, home=fixture_home, darwin_tmp="")
         self.assertTrue(cur_module.is_covered(codex_task_dir, roots))
         self.assertFalse(cur_module.is_covered(codex_archive_dir, roots))
-        self.assertFalse(cur_module.is_covered(os.path.join(self.home, "Documents", "Codex"), roots))
+        self.assertFalse(cur_module.is_covered(os.path.join(fixture_home, "Documents", "Codex"), roots))
 
         covered_or_routed_buckets = [
-            os.path.join(self.home, "Library", "Application Support", "Cursor", "snapshots"),
-            os.path.join(self.home, ".cache", "whisper"),
-            os.path.join(self.home, ".cache", "memory-backup-repo"),
-            os.path.join(self.home, ".cache", "cmux"),
-            os.path.join(self.home, ".cache", "gh"),
-            os.path.join(self.home, ".cache", "codex-runtimes"),
-            os.path.join(self.home, ".cache", "huggingface"),
-            os.path.join(self.home, ".cache", "zig"),
-            os.path.join(self.home, ".gemini", "antigravity-cli"),
+            os.path.join(fixture_home, "Library", "Application Support", "Cursor", "snapshots"),
+            os.path.join(fixture_home, ".cache", "whisper"),
+            os.path.join(fixture_home, ".cache", "memory-backup-repo"),
+            os.path.join(fixture_home, ".cache", "cmux"),
+            os.path.join(fixture_home, ".cache", "gh"),
+            os.path.join(fixture_home, ".cache", "codex-runtimes"),
+            os.path.join(fixture_home, ".cache", "huggingface"),
+            os.path.join(fixture_home, ".cache", "zig"),
+            os.path.join(fixture_home, ".gemini", "antigravity-cli"),
             codex_task_dir,
             codex_archive_dir,
             os.path.join(
-                self.home, "Library", "CloudStorage", "Dropbox",
+                fixture_home, "Library", "CloudStorage", "Dropbox",
                 "conversation-backups", "codex_conversations", "sessions", "2026", "10",
             ),
-            os.path.join(self.home, "Library", "Logs", "disk-magician-fsevents.log"),
-            os.path.join(self.home, "Library", "Logs", "dark-factory"),
-            os.path.join(self.home, "Library", "Logs", "cmux-focus.log"),
+            os.path.join(fixture_home, "Library", "Logs", "disk-magician-fsevents.log"),
+            os.path.join(fixture_home, "Library", "Logs", "dark-factory"),
+            os.path.join(fixture_home, "Library", "Logs", "cmux-focus.log"),
             "/Library/Developer/CoreSimulator",
-            os.path.join(self.home, "Library", "Developer", "CoreSimulator", "Devices"),
-            os.path.join(self.home, "Library", "Caches", "Google"),
-            os.path.join(self.home, "Library", "Application Support", "Google", "Chrome"),
-            os.path.join(self.home, "Library", "Caches", "Aside"),
-            os.path.join(self.home, "Library", "Application Support", "Aside"),
-            os.path.join(self.home, "Library", "Caches", "com.openai.codex"),
-            os.path.join(self.home, "Library", "Caches", "cmux"),
-            os.path.join(self.home, "Library", "Caches", "CodexBar"),
-            os.path.join(self.home, "Library", "Caches", "Codex"),
-            os.path.join(self.home, "Library", "Caches", "com.cmuxterm.app"),
+            os.path.join(fixture_home, "Library", "Developer", "CoreSimulator", "Devices"),
+            os.path.join(fixture_home, "Library", "Caches", "Google"),
+            os.path.join(fixture_home, "Library", "Application Support", "Google", "Chrome"),
+            os.path.join(fixture_home, "Library", "Caches", "Aside"),
+            os.path.join(fixture_home, "Library", "Application Support", "Aside"),
+            os.path.join(fixture_home, "Library", "Caches", "com.openai.codex"),
+            os.path.join(fixture_home, "Library", "Caches", "cmux"),
+            os.path.join(fixture_home, "Library", "Caches", "CodexBar"),
+            os.path.join(fixture_home, "Library", "Caches", "Codex"),
+            os.path.join(fixture_home, "Library", "Caches", "com.cmuxterm.app"),
         ]
         out_of_scope_buckets = [
             "/Applications",
             "/opt/homebrew/Cellar",
-            os.path.join(self.home, ".codex", "thread_history_1.sqlite"),
+            os.path.join(fixture_home, ".codex", "thread_history_1.sqlite"),
         ]
         write_json(self.snapshot, {
             "granularity_buckets": [
@@ -534,7 +543,7 @@ class TestCheckUncoveredRoots(unittest.TestCase):
             "--snapshot", self.snapshot,
             "--discover", self.discover,
             "--registry", registry_path,
-            "--home", self.home,
+            "--home", fixture_home,
             "--darwin-tmp", "",
             "--json",
         ])
@@ -550,4 +559,3 @@ class TestCheckUncoveredRoots(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
