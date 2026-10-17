@@ -865,6 +865,19 @@ def _consume_daily_request(state, budgets, tick_seconds, zone_name=None):
     except (OSError, ValueError, TypeError, budget_controls.MalformedState) as e:
         return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
 
+def _kickstart_targets():
+    agents = Path(os.environ.get("DISK_MAGICIAN_LAUNCHAGENTS_DIR")
+                  or (Path(os.environ.get("HOME") or str(Path.home())) / "Library" / "LaunchAgents"))
+    pressure = "com.jleechanorg.disk-magician-pressure-sweep"
+    main_sweeper = "com.jleechanorg.disk-magician-main-sweeper"
+    has_pressure = (agents / f"{pressure}.plist").is_file()
+    has_main = (agents / f"{main_sweeper}.plist").is_file() or (agents / ".consolidated" / f"{pressure}.plist").is_file()
+    if has_main and not has_pressure:
+        return [main_sweeper]
+    if has_main and has_pressure:
+        return [pressure, main_sweeper]
+    return [pressure]
+
 def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
     p = argparse.ArgumentParser(prog="diskm govern")
     p.add_argument("--mode", choices=["observe", "act"], default="observe")
@@ -924,10 +937,15 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
                 check_rc, check_out, _ = _run_group(["bash", "-c", 'source "$1" && artifact_removal_verdict --self-test', "-", str(lib)], cap) if lib.is_file() and cap > 0 else (1, "", "")
                 c14 = check_rc == 0 and check_out.strip() == "ok"
                 kick = None
-                cap = min(30.0, max(0.0, tick_deadline - time.monotonic()))
-                if c14 and cap > 0:
-                    kick, _, _ = _run_group([os.environ.get("DISK_MAGICIAN_LAUNCHCTL_BIN", "launchctl"), "kickstart",
-                                            f"gui/{os.getuid()}/com.jleechanorg.disk-magician-pressure-sweep"], cap)
+                if c14:
+                    for target in _kickstart_targets():
+                        cap = min(30.0, max(0.0, tick_deadline - time.monotonic()))
+                        if cap <= 0:
+                            break
+                        kick, _, _ = _run_group([os.environ.get("DISK_MAGICIAN_LAUNCHCTL_BIN", "launchctl"), "kickstart",
+                                                f"gui/{os.getuid()}/{target}"], cap)
+                        if kick == 0:
+                            break
                 state_update(state, {}, [dict(event=(ev := "govern_emergency" if c14 and kick == 0 else "kickstart_blocked:c14_missing" if not c14 else "kickstart_blocked:launchctl"),
                                               at=time.time(), zone=z, rc=kick if c14 else None)])
                 print(ev)
@@ -967,12 +985,35 @@ def admit(a, budgets, state, now, d2):
             a.est_gb, estimate_degraded = 0.0, "producer_estimate"
     try:  # a corrupt or wrong-typed budget.json, or a partial budgets block, degrades to the blind decision
         last, degraded = json.loads((state / "budget.json").read_text()) if (state / "budget.json").is_file() else {}, estimate_degraded
-        cls, age = last.get("classes", {}).get(a.cls, {}), now - last.get("zone_at", 0)
+        if not isinstance(last, dict) or not isinstance(budgets, dict) or not isinstance(budgets.get("classes"), dict):
+            raise TypeError("budget container type")
+        cls_cfg = budgets["classes"].get(a.cls)
+        if not isinstance(cls_cfg, dict):
+            raise TypeError("class config type")
+        classes = last.get("classes", {})
+        if not isinstance(classes, dict) or not isinstance(classes.get(a.cls, {}), dict):
+            raise TypeError("classes state type")
+        cls = classes.get(a.cls, {})
+        for k in ("zone_at", "free_bytes"):
+            if k in last and not budget_controls.finite_nonneg(last[k]):
+                raise TypeError(f"budget {k} type")
+        if "zone" in last and last["zone"] not in {name for _, name in ZONES} | set(EMERGENCY):
+            raise TypeError("budget zone value")
+        for k in ("measured_at", "used_gb"):
+            if k in cls and not budget_controls.finite_nonneg(cls[k]):
+                raise TypeError(f"class {k} type")
+        if "measure" in cls_cfg and cls_cfg["measure"] not in ("du", "observer", "df_delta_only"):
+            raise TypeError("class measure type")
+        if cls_cfg.get("measure") != "df_delta_only" and not budget_controls.finite_nonneg(cls_cfg.get("budget_gb", 1e9)):
+            raise TypeError("class budget_gb type")
+        age = now - last["zone_at"] if "zone_at" in last else float("inf")
         stage = budget_controls.effective_stage(last, budgets, strict=True)
         margin = budget_controls.effective_margin(last, budgets, strict=True)
-        over = budgets["classes"][a.cls].get("measure") != "df_delta_only" and now - cls.get("measured_at", 0) <= 3 * 3600 and cls.get("used_gb", 0) > budgets["classes"][a.cls].get("budget_gb", 1e9)
-        if stage not in STAGES or not all(isinstance(v, (int, float)) for v in (margin, last.get("free_bytes", 0))) \
-                or not isinstance(last.get("zone") or "", str): raise TypeError("budget value type")
+        over = (cls_cfg.get("measure") != "df_delta_only"
+                and "measured_at" in cls and now - cls["measured_at"] <= 3 * 3600
+                and cls.get("used_gb", 0) > cls_cfg.get("budget_gb", 1e9))
+        if stage not in STAGES or not budget_controls.finite_nonneg(margin):
+            raise TypeError("budget value type")
         try:
             out = subprocess.run([os.environ.get("DISK_MAGICIAN_DF_BIN", "df"), "-k", str(Path.home())],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
@@ -980,14 +1021,14 @@ def admit(a, budgets, state, now, d2):
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             free = last.get("free_bytes") if age <= 900 else None
             degraded = "stale_df" if free is not None else "blind"
+        if free is not None:
+            z, decision = decide(stage, free / GIB, a.est_gb, margin, over, d2)
+        else:  # blind -> 10, unless the last zone within 60 min was BLACK/FLOOR
+            z = last.get("zone") if last.get("zone") in EMERGENCY and age <= 3600 else None
+            decision = EMERGENCY[z] if z and d2 else 10
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        last, free, degraded = {}, None, "blind"
+        last, free, degraded, z, decision = {}, None, "blind", None, 10
     if degraded: print(f"admission_degraded:{degraded}", file=sys.stderr)
-    if free is not None:
-        z, decision = decide(stage, free / GIB, a.est_gb, margin, over, d2)
-    else:  # blind -> 10, unless the last zone within 60 min was BLACK/FLOOR
-        z = last.get("zone") if last.get("zone") in EMERGENCY and age <= 3600 else None
-        decision = EMERGENCY[z] if z and d2 else 10
     if estimate_degraded and z not in EMERGENCY:
         decision = 10
     event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
@@ -1020,9 +1061,16 @@ def main():
     if sys.argv[1:2] == ["--govern"]:
         return govern(sys.argv[2:], Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")))
     tmpl = json.loads((Path(__file__).resolve().parents[1] / "config.json.template").read_text())["budgets"]
-    p, budgets = argparse.ArgumentParser(prog="diskm admit"), json.loads(Path(resolve_config.resolve()).read_text()).get("budgets") or tmpl
+    try:
+        cfg = json.loads(Path(resolve_config.resolve()).read_text())
+        budgets = cfg["budgets"] if isinstance(cfg, dict) and "budgets" in cfg else tmpl if isinstance(cfg, dict) else None
+    except (OSError, ValueError, TypeError):
+        budgets = None
+    classes_cfg = budgets.get("classes") if isinstance(budgets, dict) else None
+    valid_classes = classes_cfg if isinstance(classes_cfg, dict) and classes_cfg and all(isinstance(k, str) for k in classes_cfg) else tmpl["classes"]
+    p = argparse.ArgumentParser(prog="diskm admit")
     for flag in ("--producer", "--dest", "--source", "--ci-job", "--tool-use-id"): p.add_argument(flag)
-    p.add_argument("--class", dest="cls", choices=sorted((budgets if isinstance(budgets, dict) else {}).get("classes") or tmpl["classes"]))
+    p.add_argument("--class", dest="cls", choices=sorted(valid_classes))
     p.add_argument("--est-gb", type=est_gb); p.add_argument("--compound", action="store_true")
     mode = p.add_mutually_exclusive_group()
     for flag in ("--dry-run", "--probe"): mode.add_argument(flag, action="store_true")
