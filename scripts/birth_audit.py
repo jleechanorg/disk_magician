@@ -40,6 +40,10 @@ BIRTH_STATUSES = ("preexisting", "foreign", "admitted", "bypass")
 SLO_BIRTH_STATUSES = ("admitted", "bypass")
 IDENTITY_SEP = "\x1f"
 QUALITY_RC = 3  # nonzero quality error; the original registry is never overwritten
+DEFAULT_PROTECTED_TMP_ROOTS = ("worldarchitect.ai", "worldai_claw", "wa-missions")
+DEFAULT_SCRATCH_CONTAINER_ROOTS = ("agent-scratch",)
+_SKIP_TMP_NAMES = ("_disk_magician_archive", ".dm-quarantine")
+_SKIP_TMP_PREFIXES = ("com.apple.", "system-", "PowerlogHelperd")
 
 
 class QualityError(Exception):
@@ -63,9 +67,65 @@ def ls(d, dirs_only=False):  # never follows symlinks; sorted for reproducible b
     return sorted(out, key=lambda e: e.name)
 
 
-def entries(ptmp, tmpdir, codex, wt):  # (path, class, foreign); /private/tmp/<repo>/evidence is a container
-    for e in (e for repo in ls(ptmp, True) for e in ls(repo.path)):
-        yield from ((c.path, "tmp_containers", False) for c in ls(e.path)) if e.name == "evidence" and e.is_dir() else [(e.path, "tmp_containers", False)]
+def _load_config():
+    try:
+        import resolve_config
+        path = resolve_config.resolve()
+        if path:
+            data = json.loads(Path(path).read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    try:
+        data = json.loads((Path(__file__).resolve().parents[1] / "config.json.template").read_text())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _root_names(env_key, cfg_key, defaults, cfg):
+    env_val = os.environ.get(env_key, "").strip()
+    if env_val:
+        return {tok for tok in env_val.split() if tok}
+    raw = cfg.get(cfg_key) if isinstance(cfg, dict) else None
+    if isinstance(raw, list):
+        names = {str(x).strip() for x in raw if isinstance(x, str) and x.strip()}
+        if names:
+            return names
+    return set(defaults)
+
+
+def _tmp_container_roots(cfg=None):
+    cfg = _load_config() if cfg is None else cfg
+    return (
+        _root_names("DISK_MAGICIAN_PROTECTED_TMP_ROOTS", "protected_tmp_roots", DEFAULT_PROTECTED_TMP_ROOTS, cfg)
+        | _root_names("DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS", "scratch_container_roots", DEFAULT_SCRATCH_CONTAINER_ROOTS, cfg)
+    )
+
+
+def _is_evidence_only_container(dir_path):
+    children = ls(dir_path)
+    return len(children) == 1 and children[0].name == "evidence" and children[0].is_dir()
+
+
+def entries(ptmp, tmpdir, codex, wt, container_parents=()):  # (path, class, foreign)
+    container_roots = _tmp_container_roots()
+    parent_set = set(container_parents or ())
+    for d in ls(ptmp, True):
+        if d.name in _SKIP_TMP_NAMES or d.name.startswith(_SKIP_TMP_PREFIXES):
+            continue
+        has_git = os.path.lexists(os.path.join(d.path, ".git"))
+        if not has_git and (d.name in container_roots or canon(d.path) in parent_set or _is_evidence_only_container(d.path)):
+            for e in ls(d.path, True):
+                if e.name == "evidence":
+                    yield from ((c.path, "tmp_containers", False) for c in ls(e.path, True))
+                else:
+                    yield e.path, "tmp_containers", False
+        else:
+            yield d.path, "tmp_containers", False
     for e in ls(tmpdir):  # fixed producer-prefix table: advice-*, tmp* clones with a .git; anything else is foreign
         yield e.path, "tmpdir_scratch", not (e.name.startswith("advice-") or e.name.startswith("tmp") and os.path.lexists(os.path.join(e.path, ".git")))
     for root, cls in ((codex, "codex_documents"), (wt, "worktrees")):
@@ -139,17 +199,7 @@ def read_registry(state):
 
 
 def load_budgets():
-    try:
-        import resolve_config
-        path = resolve_config.resolve()
-        if path:
-            return json.loads(Path(path).read_text()).get("budgets") or {}
-    except Exception:
-        pass
-    try:
-        return json.loads((Path(__file__).resolve().parents[1] / "config.json.template").read_text())["budgets"]
-    except Exception:
-        return {}
+    return _load_config().get("budgets") or {}
 
 
 def _class_budget_bytes(budgets, cls):
@@ -355,8 +405,18 @@ def audit(state, roots, now, budget_s=DEFAULT_BUDGET_S, deadline_at=None):
         elif kind == "admit_confirm" and e.get("admit_id") in attempts:
             confirms[(e.get("dev"), e.get("inode"))] = e
     by_dest = {canon(a["dest"]) for a in attempts.values() if isinstance(a.get("dest"), str)}
+    ptmp_real = os.path.realpath(roots[0]) if roots and roots[0] else ""
+    container_parents = {
+        os.path.dirname(dest) if os.path.dirname(os.path.dirname(dest)) == ptmp_real else os.path.dirname(os.path.dirname(dest))
+        for dest in by_dest
+        if os.path.dirname(dest) != ptmp_real and (
+            os.path.dirname(os.path.dirname(dest)) == ptmp_real
+            or (os.path.basename(os.path.dirname(dest)) == "evidence"
+                and os.path.dirname(os.path.dirname(os.path.dirname(dest))) == ptmp_real)
+        )
+    }
     adoptees = []
-    for path, cls, foreign in entries(*roots):
+    for path, cls, foreign in entries(*roots, container_parents=container_parents):
         try:
             st = os.lstat(path)
         except OSError:

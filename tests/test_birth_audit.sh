@@ -71,7 +71,7 @@ PY
 # dispatched by basename from $DU_SIZES (<base> <kb>|FAIL|SLEEP).
 export DISK_MAGICIAN_CONFIG="$T/config.json" DU_SIZES="$T/du_sizes" DISK_MAGICIAN_DU_BIN="$T/bin/du"
 cat > "$DISK_MAGICIAN_CONFIG" <<'JSON'
-{"budgets":{"enforcement":"observe","concurrency_margin_gb":10,"classes":{
+{"scratch_container_roots":["agent-scratch","r"],"budgets":{"enforcement":"observe","concurrency_margin_gb":10,"classes":{
   "tmp_containers":{"budget_gb":15,"measure":"du","trigger":"overage","act":"tmp_containers","unit_budget_s":30},
   "tmpdir_scratch":{"budget_gb":10,"measure":"df_delta_only","trigger":"zone","act":"tmpdir_scratch","unit_budget_s":30},
   "codex_documents":{"budget_gb":3,"measure":"df_delta_only","trigger":"zone","act":"codex_documents","unit_budget_s":30},
@@ -406,6 +406,62 @@ PY
 audit; rc=$?
 assert_eq "$rc" 0 "a negative bytes value is not treated as malformed"
 assert_eq "$(bg nb 'x["bytes"]'),$(bg nb 'x["charge"]')" "-5,measured" "negative file bytes preserved unchanged"
+
+echo "== 22. non-container /private/tmp scratch dirs adopt only top-level entry; container roots adopt child dirs"
+cat > "$T/default_config.json" <<'JSON'
+{"budgets":{"enforcement":"observe","concurrency_margin_gb":10,"classes":{
+  "tmp_containers":{"budget_gb":15,"measure":"du","trigger":"overage","act":"tmp_containers","unit_budget_s":30},
+  "tmpdir_scratch":{"budget_gb":10,"measure":"df_delta_only","trigger":"zone","act":"tmpdir_scratch","unit_budget_s":30},
+  "codex_documents":{"budget_gb":3,"measure":"df_delta_only","trigger":"zone","act":"codex_documents","unit_budget_s":30},
+  "worktrees":{"budget_gb":35,"measure":"du","trigger":"overage","act":"worktree_reap_remove","unit_budget_s":60}}}}
+JSON
+fresh toplevel_noncontainer
+mkdir -p "$T/ptmp/spicyllm/.git" "$T/ptmp/spicyllm/src" "$T/ptmp/admitted-top/sub" "$T/ptmp/_disk_magician_archive/old" "$T/ptmp/com.apple.launchd.abc"
+echo policy > "$T/ptmp/spicyllm/USAGE_POLICY.md"
+echo readme > "$T/ptmp/spicyllm/README.md"
+echo main > "$T/ptmp/spicyllm/src/main.py"
+echo child > "$T/ptmp/admitted-top/f"
+ev admit top1 "$T/ptmp/admitted-top"; ev confirm top1 "$T/ptmp/admitted-top"
+du_set spicyllm 1024 admitted-top 1024
+DISK_MAGICIAN_CONFIG="$T/default_config.json" audit; rc=$?
+assert_eq "$rc" 0 "top-level non-container audit rc"
+assert_eq "$(b 'd["admitted"]')" "1" "top-level admitted scratch dir counted as 1 admitted birth"
+assert_eq "$(b 'd["bypass"]["tmp_containers"]["births"]')" "1" "non-container /private/tmp/spicyllm counted as 1 top-level bypass birth (not per-child)"
+assert_eq "$(leases)" "1" "at most one adoption lease created for /private/tmp/spicyllm"
+lease_paths="$(python3 - "$DISK_MAGICIAN_STATE_DIR" <<'PY'
+import glob, json, os, sys
+paths = sorted(json.load(open(p))["path"] for p in glob.glob(os.path.join(sys.argv[1], "worktree_leases", "*.json")))
+print(",".join(os.path.basename(p) for p in paths))
+PY
+)"
+assert_eq "$lease_paths" "spicyllm" "adoption lease targets top-level /private/tmp/spicyllm, not USAGE_POLICY.md or children"
+
+fresh container_roots
+mkdir -p "$T/ptmp/worldarchitect.ai/task-1/sub" "$T/ptmp/agent-scratch/run-1" "$T/ptmp/proj-ev/evidence/ev-20261017T000000Z"
+echo policy > "$T/ptmp/worldarchitect.ai/task-1/USAGE_POLICY.md"
+echo stray > "$T/ptmp/worldarchitect.ai/stray.txt"
+echo nested > "$T/ptmp/agent-scratch/run-1/nested.txt"
+du_set task-1 512 run-1 512 ev-20261017T000000Z 512
+DISK_MAGICIAN_CONFIG="$T/default_config.json" audit; rc=$?
+assert_eq "$rc" 0 "container roots audit rc"
+assert_eq "$(b 'd["bypass"]["tmp_containers"]["births"]')" "3" "container roots yield child dirs (task-1, run-1, ev-20261017T000000Z), not container roots or files"
+assert_eq "$(leases)" "3" "three adoption leases for container child dirs"
+container_lease_names="$(python3 - "$DISK_MAGICIAN_STATE_DIR" <<'PY'
+import glob, json, os, sys
+paths = sorted(os.path.basename(json.load(open(p))["path"]) for p in glob.glob(os.path.join(sys.argv[1], "worktree_leases", "*.json")))
+print(",".join(paths))
+PY
+)"
+assert_eq "$container_lease_names" "ev-20261017T000000Z,run-1,task-1" "container child dirs adopted; container roots and child files not adopted"
+
+fresh git_at_container_name
+mkdir -p "$T/ptmp/agent-scratch/.git" "$T/ptmp/agent-scratch/sub"
+echo code > "$T/ptmp/agent-scratch/README.md"
+du_set agent-scratch 512
+DISK_MAGICIAN_CONFIG="$T/default_config.json" audit; rc=$?
+assert_eq "$rc" 0 "git checkout at container name audit rc"
+assert_eq "$(b 'd["bypass"]["tmp_containers"]["births"]')" "1" "git checkout at container-root name treated as single top-level entry"
+assert_eq "$(leases)" "1" "single adoption lease for git checkout at container-root name"
 
 echo
 echo "test_birth_audit: $PASS passed, $FAIL failed"
