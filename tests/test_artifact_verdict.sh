@@ -727,12 +727,26 @@ assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed cle
 printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
 assert_eq "$(av "$PT/nm")" kept:unproven-content "the same clone beside a unique non-git file"
 echo "-- rebuildable (--kind rebuildable) and os_clone --"
-mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1"
-for d in .cache/uv/archive-v0/x .cache/other/x Library/Developer/Xcode/DerivedData/App-1; do printf 'b' >"$HOME/$d/f"; done
+mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1" \
+    "$HOME/Library/Caches/ms-playwright/chromium-1248" "$HOME/Library/Caches/CocoaPods/Pods" \
+    "$HOME/Library/Caches/@granolaelectron-updater/pending" "$HOME/Library/Caches/claude-cli-nodejs/cache-a" \
+    "$HOME/Library/Caches/go-build/00" "$HOME/.cache/ezgha-recovery-target-20261004/sub"
+for d in .cache/uv/archive-v0/x .cache/other/x Library/Developer/Xcode/DerivedData/App-1 \
+    Library/Caches/ms-playwright/chromium-1248 Library/Caches/CocoaPods/Pods \
+    Library/Caches/@granolaelectron-updater/pending Library/Caches/claude-cli-nodejs/cache-a \
+    Library/Caches/go-build/00 .cache/ezgha-recovery-target-20261004/sub; do printf 'b' >"$HOME/$d/f"; done
 age "$HOME/.cache" 43200 && age "$HOME/Library" 43200
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x" --kind rebuildable)" remove "rebuildable ~/.cache/uv/archive-v0/x"
 assert_eq "$(av "$HOME/Library/Developer/Xcode/DerivedData/App-1" --kind rebuildable)" remove "rebuildable Xcode DerivedData entry"
+assert_eq "$(av "$HOME/Library/Caches/ms-playwright/chromium-1248" --kind rebuildable)" remove "rebuildable ms-playwright entry"
+assert_eq "$(av "$HOME/Library/Caches/CocoaPods/Pods" --kind rebuildable)" remove "rebuildable CocoaPods entry"
+assert_eq "$(av "$HOME/Library/Caches/@granolaelectron-updater/pending" --kind rebuildable)" remove "rebuildable @granolaelectron-updater entry"
+assert_eq "$(av "$HOME/Library/Caches/claude-cli-nodejs/cache-a" --kind rebuildable)" remove "rebuildable claude-cli-nodejs entry"
+assert_eq "$(av "$HOME/Library/Caches/go-build/00" --kind rebuildable)" remove "rebuildable go-build entry"
+assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004/sub" --kind rebuildable)" remove "rebuildable ezgha-recovery-target subpath"
+assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004" --kind rebuildable)" remove "rebuildable ezgha-recovery-target dir itself"
 assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
+assert_eq "$(av "$HOME/Library/Caches/ms-playwright" --kind rebuildable)" kept:unproven-content "ms-playwright cache root itself is not an entry"
 assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
 # venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
@@ -949,6 +963,25 @@ assert_eq "$(eph "$PT/pr-lease-scan")" remove "canonical released child lease le
 lease "$PT/pr-lease-scan/child" null
 assert_eq "$(DISK_MAGICIAN_PS_BIN="$TMPROOT/stub/ps-dead" eph "$PT/pr-lease-scan")" remove "canonical dead child lease leaves candidate eligible (control)"
 own "$PT/pr-lease-scan/child" '"2026-10-01T00:00:00Z"'
+mkdir -p "$TMPROOT/vanish-hook"
+cat >"$TMPROOT/vanish-hook/sitecustomize.py" <<'PY'
+import os
+_orig_listdir = os.listdir
+def _racelistdir(p="."):
+    res = _orig_listdir(p)
+    v = os.environ.get("DISK_MAGICIAN_VANISH_LEASE")
+    if v and os.path.basename(v) in res and os.path.realpath(p) == os.path.realpath(os.path.dirname(v)):
+        try:
+            os.unlink(v)
+        except OSError:
+            pass
+    return res
+os.listdir = _racelistdir
+PY
+vanished_lease="$(lease_dir)/0000000000000000.json"
+printf '{"path":"%s/vanished","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z"}\n' "$PT" >"$vanished_lease"
+assert_eq "$(PYTHONPATH="$TMPROOT/vanish-hook${PYTHONPATH:+:$PYTHONPATH}" DISK_MAGICIAN_VANISH_LEASE="$vanished_lease" eph "$PT/pr-lease-scan")" remove "vanished lease file during _av_lease_record_paths does not cause kept:check-failed"
+rm -f "$vanished_lease"
 
 echo "== fd-bound inventory, deadline and nomination race =="
 inv_case="$TMPROOT/inventory-case"
