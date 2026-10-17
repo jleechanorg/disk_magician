@@ -374,6 +374,10 @@ out="$(HOME="$WORK16/home" DISK_MAGICIAN_STATE_REPO="$STATE16" DISK_MAGICIAN_LED
   && ok "surfaces FDA-denied partial scan with remediation hint" \
   || bad "expected fda_preflight=partial + fda_hint got rc=$rc out=$out"
 [[ "$out" == *scan_complete=false* ]] && ok "surfaces incomplete-scan root counts" || bad "missing scan_complete=false"
+line_count="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+[[ "$line_count" -eq 1 && "$out" != *$'\n'* && "$out" == *canonical_publication=stale$'\t'fda_preflight=partial* ]] \
+  && ok "partial-valid output prints a single OK line with FDA_FIELDS appended" \
+  || bad "expected single OK line with FDA_FIELDS on same line, got line_count=$line_count out=$out"
 rm -rf "$WORK16"
 
 echo "PASS=$PASS FAIL=$FAIL"

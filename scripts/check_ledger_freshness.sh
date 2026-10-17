@@ -275,19 +275,19 @@ if [[ -n "${FDA_STATUS:-}" && "$FDA_STATUS" != "unknown" ]]; then
 fi
 
 if [[ "$c_valid" == "yes" ]]; then
-  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\tcanonical_publication=fresh${FDA_FIELDS}\n" \
-    "${c_age_hours:-0}" "$last_iso" "$pub_status" "$pub_reason"
+  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\tcanonical_publication=fresh%s\n" \
+    "${c_age_hours:-0}" "$last_iso" "$pub_status" "$pub_reason" "$FDA_FIELDS"
   exit 0
 fi
 
 if [[ "$p_valid" == "yes" ]]; then
-  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=PARTIAL\tpartial_age_hours=%s\tpartial_captured_at=%s\tpartial_mode=%s\tpartial_roots=%s/%s\tcanonical_publication=stale\n" \
+  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=PARTIAL\tpartial_age_hours=%s\tpartial_captured_at=%s\tpartial_mode=%s\tpartial_roots=%s/%s\tcanonical_publication=stale%s\n" \
     "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" \
     "${p_age_hours:-0}" "${p_captured_at:-unknown}" "${p_mode:-unknown}" \
     "${p_measured:-?}" "${p_reachable:-?}" "$FDA_FIELDS"
   exit 0
 fi
 
-printf "STALE\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tpartial_status=%s${FDA_FIELDS}\n" \
-  "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" "${p_reason:-missing}"
+printf "STALE\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tpartial_status=%s%s\n" \
+  "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" "${p_reason:-missing}" "$FDA_FIELDS"
 exit 1
