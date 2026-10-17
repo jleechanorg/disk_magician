@@ -230,8 +230,52 @@ print("\x1f".join(fields))
 PY
 )"
 
+# FDA/coverage-envelope surfacing (bead disk_magician-ledger-coverage-incomplete-gzvc):
+# a scan incomplete because the scheduled run lacks Full Disk Access reports a bare
+# reason=coverage_incomplete, hiding the remediation. Read the partial ledger's
+# embedded coverage_envelope (fallback: frontier_last.json) and append additive
+# trailing fields so consumers keying off the leading token/existing fields are safe.
+read -r FDA_STATUS FDA_USER FDA_COMPLETE FDA_MEAS FDA_REACH FRONTIER_FDA <<< "$(python3 - "$STATE_DIR" <<'PY' 2>/dev/null || echo "unknown unknown unknown ? ? unknown"
+import json, os, sys
+state = sys.argv[1]
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+def env_of(d):
+    return d.get("coverage_envelope") if isinstance(d, dict) and isinstance(d.get("coverage_envelope"), dict) else None
+ce = env_of(load(os.path.join(state, "ledger", "topdown-5g.partial.json")))
+fr = env_of(load(os.path.expanduser("~/.disk_magician_state/frontier_last.json")))
+if ce is None and fr is None:
+    print("unknown unknown unknown ? ? unknown")
+    raise SystemExit
+ce = ce or {}
+meas = ce.get("measured_top_level_roots")
+reach = ce.get("reachable_top_level_roots")
+print(ce.get("fda_preflight_status", "unknown"), ce.get("fda_user_preflight_status", "unknown"),
+      ce.get("complete"), "" if meas is None else meas, "" if reach is None else reach,
+      (fr or {}).get("fda_preflight_status", "unknown"))
+PY
+)"
+
+FDA_FIELDS=""
+if [[ -n "${FDA_STATUS:-}" && "$FDA_STATUS" != "unknown" ]]; then
+  FDA_FIELDS=$'\tfda_preflight='"$FDA_STATUS"$'\tfda_user_preflight='"${FDA_USER:-unknown}"
+  [[ -n "${FRONTIER_FDA:-}" && "$FRONTIER_FDA" != "unknown" ]] && FDA_FIELDS+=$'\tfrontier_fda_preflight='"$FRONTIER_FDA"
+  case "${FDA_STATUS:-}:${FRONTIER_FDA:-}" in
+    *partial*|*denied*|*permission_denied*|*tcc_denied*)
+      FDA_FIELDS+=$'\tfda_hint=grant_full_disk_access_to_the_snapshot_frontier_executable'
+      ;;
+  esac
+  if [[ "${FDA_COMPLETE:-}" != "True" && "${FDA_COMPLETE:-}" != "true" ]]; then
+    FDA_FIELDS+=$'\tscan_complete=false'$'\tscan_measured_roots='"${FDA_MEAS:-?}"$'\tscan_reachable_roots='"${FDA_REACH:-?}"
+  fi
+fi
+
 if [[ "$c_valid" == "yes" ]]; then
-  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\tcanonical_publication=fresh\n" \
+  printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=CANONICAL\tcanonical_publication=fresh${FDA_FIELDS}\n" \
     "${c_age_hours:-0}" "$last_iso" "$pub_status" "$pub_reason"
   exit 0
 fi
@@ -240,10 +284,10 @@ if [[ "$p_valid" == "yes" ]]; then
   printf "OK\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tlabel=PARTIAL\tpartial_age_hours=%s\tpartial_captured_at=%s\tpartial_mode=%s\tpartial_roots=%s/%s\tcanonical_publication=stale\n" \
     "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" \
     "${p_age_hours:-0}" "${p_captured_at:-unknown}" "${p_mode:-unknown}" \
-    "${p_measured:-?}" "${p_reachable:-?}"
+    "${p_measured:-?}" "${p_reachable:-?}" "$FDA_FIELDS"
   exit 0
 fi
 
-printf "STALE\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tpartial_status=%s\n" \
+printf "STALE\tpublished_age_hours=%s\tlast_commit=%s\tstatus=%s\treason=%s\tpartial_status=%s${FDA_FIELDS}\n" \
   "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" "${p_reason:-missing}"
 exit 1

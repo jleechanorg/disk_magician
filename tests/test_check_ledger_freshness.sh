@@ -343,5 +343,38 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE15" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "
   || bad "expected STALE rc=1 got rc=$rc out=$out"
 rm -rf "$WORK15"
 
+# --- Case 16: FDA-denied partial scan surfaces the remediation hint ---
+WORK16="$(mktemp -d)"
+git init -q "$WORK16/repo"
+STATE16="$WORK16/repo"
+mkdir -p "$STATE16/ledger"
+echo '{"disk_used_kb":1}' > "$STATE16/ledger/topdown-5g.json"
+CAPTURED16="$(iso_offset_hours -1)"
+ENV16='{"measured_top_level_roots":5,"reachable_top_level_roots":10,"complete":false,"fda_preflight_status":"partial","fda_user_preflight_status":"granted"}'
+python3 - "$STATE16/ledger/topdown-5g.partial.json" "$CAPTURED16" <<'PY'
+import json, sys
+d = {
+    'schema_version': 2, 'mode': 'partial', 'captured_at': sys.argv[2],
+    'coverage_envelope': {'measured_top_level_roots': 5, 'reachable_top_level_roots': 10,
+                          'complete': False, 'fda_preflight_status': 'partial',
+                          'fda_user_preflight_status': 'granted'},
+    'disk_used_kb': 1000, 'residual_kb': 500,
+    'granularity_buckets': [{'path': '/a', 'measured_kb': 500}],
+    'oversize_indivisible_files': [], 'opaque_intrinsic_gates': [],
+}
+with open(sys.argv[1], 'w') as f:
+    json.dump(d, f)
+PY
+echo "{\"status\":\"partial\",\"reason\":\"coverage_incomplete\",\"captured_at\":\"$CAPTURED16\",\"mode\":\"partial\",\"coverage_envelope\":$ENV16}" > "$STATE16/ledger/topdown-5g.status.json"
+git -C "$STATE16" add ledger/topdown-5g.json ledger/topdown-5g.status.json
+GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
+  git -C "$STATE16" -c user.email=t@test -c user.name=t commit -q -m "ancient canonical commit"
+out="$(HOME="$WORK16/home" DISK_MAGICIAN_STATE_REPO="$STATE16" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 0 && "$out" == OK* && "$out" == *fda_preflight=partial* && "$out" == *fda_hint=* ]] \
+  && ok "surfaces FDA-denied partial scan with remediation hint" \
+  || bad "expected fda_preflight=partial + fda_hint got rc=$rc out=$out"
+[[ "$out" == *scan_complete=false* ]] && ok "surfaces incomplete-scan root counts" || bad "missing scan_complete=false"
+rm -rf "$WORK16"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
