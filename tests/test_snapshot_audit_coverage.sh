@@ -605,38 +605,76 @@ fi
 
 section "8. Library frontier names every direct child inside a bounded sub-budget"
 LIBRARY_HOME="$WORK/library_home"
-mkdir -p "$LIBRARY_HOME/Library/Alpha" "$LIBRARY_HOME/Library/Beta"
+LIBRARY_BIN="$WORK/library_bin"
+mkdir -p "$LIBRARY_HOME/Library/Alpha" "$LIBRARY_HOME/Library/Beta" "$LIBRARY_BIN"
 dd if=/dev/zero of="$LIBRARY_HOME/Library/Alpha/a.bin" bs=1024 count=16 >/dev/null 2>&1
 dd if=/dev/zero of="$LIBRARY_HOME/Library/Beta/b.bin" bs=1024 count=24 >/dev/null 2>&1
+# Stub host-wide diskutil/tmutil volume probes so they cannot consume the 12s
+# snapshot budget under parallel CI load, and stub taskpolicy so macOS does not
+# demote the 3s Library frontier child scanner to starved background QoS (-b).
+cat > "$LIBRARY_BIN/diskutil" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+cat > "$LIBRARY_BIN/tmutil" <<'SH'
+#!/usr/bin/env bash
+printf 'Snapshots for disk /:\n'
+SH
+cat > "$LIBRARY_BIN/taskpolicy" <<'SH'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -b) shift ;;
+    -c|-g|-p|-a|-x|-S|-t) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+SH
+chmod +x "$LIBRARY_BIN/diskutil" "$LIBRARY_BIN/tmutil" "$LIBRARY_BIN/taskpolicy"
 LIBRARY_CONFIG="$WORK/library_config.json"
 cat > "$LIBRARY_CONFIG" <<JSON
 {"library_frontier_enabled": true, "monitored_dirs": [{"key": "alpha", "path": "$LIBRARY_HOME/Library/Alpha", "timeout": 2}]}
 JSON
 LIBRARY_OUT="$WORK/library_snapshot.json"
+LIBRARY_LOG="$WORK/library_snapshot.log"
+LIBRARY_CHECK_LOG="$WORK/library_check.log"
 start=$(date +%s)
-HOME="$LIBRARY_HOME" DISK_MAGICIAN_CONFIG="$LIBRARY_CONFIG" \
+library_rc=0
+HOME="$LIBRARY_HOME" PATH="$LIBRARY_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
+  DISK_MAGICIAN_GDU_CMD="" \
+  DISK_MAGICIAN_STATE_DIR="$WORK/library_state" \
+  DISK_MAGICIAN_CONFIG="$LIBRARY_CONFIG" \
   DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=12 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=2 \
   DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS=5 \
-  timeout 15 "$SNAP_SCRIPT" --output "$LIBRARY_OUT" >/dev/null 2>&1 || true
+  timeout 15 "$SNAP_SCRIPT" --output "$LIBRARY_OUT" >"$LIBRARY_LOG" 2>&1 || library_rc=$?
 library_elapsed=$(( $(date +%s) - start ))
-if [[ "$library_elapsed" -le 12 ]] && python3 - "$LIBRARY_OUT" "$LIBRARY_HOME/Library" <<'PY' 2>/dev/null
+if [[ "$library_rc" -eq 0 && "$library_elapsed" -le 12 ]] && python3 - "$LIBRARY_OUT" "$LIBRARY_HOME/Library" >"$LIBRARY_CHECK_LOG" 2>&1 <<'PY'
 import json, os, sys
 d = json.load(open(sys.argv[1]))
 root = sys.argv[2]
-coverage = d["library_coverage"]
-ledger = {os.path.basename(item["path"]): item for item in coverage["top_level_ledger"]}
-assert coverage["root"] == os.path.realpath(root)
-assert set(ledger) == {"Alpha", "Beta"}
-assert all(item["status"] == "measured" for item in ledger.values())
-assert coverage["top_level_children_total"] == 2
-assert coverage["top_level_children_accounted"] == 2
-assert coverage["wall_clock_cap_seconds"] == 5
+coverage = d.get("library_coverage")
+assert isinstance(coverage, dict), f"missing library_coverage: {d.get('snapshot_metadata')}"
+ledger = {os.path.basename(item["path"]): item for item in coverage.get("top_level_ledger", [])}
+assert coverage.get("root") == os.path.realpath(root), f"root mismatch: {coverage.get('root')} != {os.path.realpath(root)}"
+assert set(ledger) == {"Alpha", "Beta"}, f"unexpected ledger keys: {sorted(ledger)}"
+assert all(item.get("status") == "measured" for item in ledger.values()), f"non-measured ledger items: {ledger}"
+assert coverage.get("top_level_children_total") == 2, f"total={coverage.get('top_level_children_total')}"
+assert coverage.get("top_level_children_accounted") == 2, f"accounted={coverage.get('top_level_children_accounted')}"
+assert coverage.get("wall_clock_cap_seconds") == 5, f"wall_clock_cap_seconds={coverage.get('wall_clock_cap_seconds')}"
 PY
 then
   ok "Library frontier accounts for every direct child and respects its 5s sub-budget"
 else
-  bad "Library frontier ledger missing, incomplete, or exceeded its bounded sub-budget"
+  bad "Library frontier ledger missing, incomplete, or exceeded its bounded sub-budget (rc=$library_rc, elapsed=${library_elapsed}s)"
+  [[ -s "$LIBRARY_CHECK_LOG" ]] && sed 's/^/      [assertion] /' "$LIBRARY_CHECK_LOG"
+  [[ -s "$LIBRARY_LOG" ]] && sed 's/^/      [snap_log] /' "$LIBRARY_LOG"
+  if [[ -s "$LIBRARY_OUT" ]]; then
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({"library_coverage": d.get("library_coverage"), "metadata": d.get("snapshot_metadata")}, indent=2))' "$LIBRARY_OUT" 2>/dev/null | sed 's/^/      [snap_out] /' || true
+  fi
 fi
 
 section "Summary"

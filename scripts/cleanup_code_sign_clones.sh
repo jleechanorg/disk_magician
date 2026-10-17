@@ -57,7 +57,7 @@ dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 # rc 0 only when quarantine_remove reports removed:*; a kept verdict prints
 # the reason and returns 1 so the caller does not count freed bytes.
 path_size_kb() {
-  du -sk "$1" 2>/dev/null | awk '{print $1+0}' || echo 0
+  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 path_identity() {
