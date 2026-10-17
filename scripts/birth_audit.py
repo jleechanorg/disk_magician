@@ -16,7 +16,7 @@ same estimate but does **not** consume a failed retry. Calibration is written on
 here. A structurally malformed existing registry fails closed (nonzero, original
 preserved); a missing registry is an allowed bootstrap. Nothing is deleted.
 """
-import fcntl, json, math, os, sys, time
+import fcntl, json, math, os, stat, sys, time
 from pathlib import Path
 from disk_budget import state_update
 from c14_probe import _run_bounded
@@ -106,26 +106,52 @@ def _tmp_container_roots(cfg=None):
     )
 
 
-def _is_evidence_only_container(dir_path):
-    children = ls(dir_path)
-    return len(children) == 1 and children[0].name == "evidence" and children[0].is_dir()
+def _tmp_path_is_safe(path, root, require_dir=False):
+    """Require in-root resolution and, when requested, a no-follow directory leaf."""
+    if not root:
+        return False
+    try:
+        resolved = os.path.realpath(path)
+        if os.path.commonpath((root, resolved)) != root:
+            return False
+        return not require_dir or stat.S_ISDIR(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _safe_tmp_entries(dir_path, root, dirs_only=False):
+    """List a real in-root directory and discard entries raced outside root."""
+    if not _tmp_path_is_safe(dir_path, root, require_dir=True):
+        return []
+    return [e for e in ls(dir_path, dirs_only)
+            if _tmp_path_is_safe(e.path, root, require_dir=dirs_only)]
+
+
+def _is_evidence_only_container(dir_path, root):
+    children = _safe_tmp_entries(dir_path, root)
+    return (len(children) == 1 and children[0].name == "evidence"
+            and _tmp_path_is_safe(children[0].path, root, require_dir=True))
 
 
 def entries(ptmp, tmpdir, codex, wt, container_parents=()):  # (path, class, foreign)
     container_roots = _tmp_container_roots()
     parent_set = set(container_parents or ())
-    for d in ls(ptmp, True):
+    ptmp_real = os.path.realpath(ptmp) if ptmp else ""
+    for d in _safe_tmp_entries(ptmp, ptmp_real, dirs_only=True):
         if d.name in _SKIP_TMP_NAMES or d.name.startswith(_SKIP_TMP_PREFIXES):
             continue
         has_git = os.path.lexists(os.path.join(d.path, ".git"))
-        if not has_git and (d.name in container_roots or canon(d.path) in parent_set or _is_evidence_only_container(d.path)):
-            for e in ls(d.path, True):
+        if not has_git and (d.name in container_roots or canon(d.path) in parent_set
+                            or _is_evidence_only_container(d.path, ptmp_real)):
+            for e in _safe_tmp_entries(d.path, ptmp_real, dirs_only=True):
                 if e.name == "evidence":
-                    yield from ((c.path, "tmp_containers", False) for c in ls(e.path, True))
+                    yield from ((c.path, "tmp_containers", False)
+                                for c in _safe_tmp_entries(e.path, ptmp_real, dirs_only=True))
                 else:
                     yield e.path, "tmp_containers", False
         else:
-            yield d.path, "tmp_containers", False
+            if _tmp_path_is_safe(d.path, ptmp_real, require_dir=True):
+                yield d.path, "tmp_containers", False
     for e in ls(tmpdir):  # fixed producer-prefix table: advice-*, tmp* clones with a .git; anything else is foreign
         yield e.path, "tmpdir_scratch", not (e.name.startswith("advice-") or e.name.startswith("tmp") and os.path.lexists(os.path.join(e.path, ".git")))
     for root, cls in ((codex, "codex_documents"), (wt, "worktrees")):
@@ -417,11 +443,15 @@ def audit(state, roots, now, budget_s=DEFAULT_BUDGET_S, deadline_at=None):
     }
     adoptees = []
     for path, cls, foreign in entries(*roots, container_parents=container_parents):
+        if cls == "tmp_containers" and not _tmp_path_is_safe(path, ptmp_real, require_dir=True):
+            continue
         try:
             st = os.lstat(path)
         except OSError:
             continue
         cp = canon(path)
+        if cls == "tmp_containers" and not _tmp_path_is_safe(cp, ptmp_real, require_dir=True):
+            continue
         key = birth_key(cp, st.st_dev, st.st_ino)
         if key in gens:
             continue

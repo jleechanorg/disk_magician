@@ -463,6 +463,43 @@ assert_eq "$rc" 0 "git checkout at container name audit rc"
 assert_eq "$(b 'd["bypass"]["tmp_containers"]["births"]')" "1" "git checkout at container-root name treated as single top-level entry"
 assert_eq "$(leases)" "1" "single adoption lease for git checkout at container-root name"
 
+race_result="$(python3 - "$REPO_ROOT/scripts" "$T" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import birth_audit as b
+
+fixture = Path(sys.argv[2]) / "container-race"
+ptmp = fixture / "ptmp"
+outside = fixture / "outside"
+container = ptmp / "worldarchitect.ai"
+for path in (container / "original", outside / "escaped", fixture / "tmpdir", fixture / "codex", fixture / "worktrees"):
+    path.mkdir(parents=True, exist_ok=True)
+
+real_ls = b.ls
+swapped = False
+
+def racing_ls(path, dirs_only=False):
+    global swapped
+    found = real_ls(path, dirs_only)
+    if os.path.realpath(path) == os.path.realpath(ptmp) and not swapped:
+        shutil.rmtree(container)
+        container.symlink_to(outside, target_is_directory=True)
+        swapped = True
+    return found
+
+b.ls = racing_ls
+items = list(b.entries(str(ptmp), str(fixture / "tmpdir"), str(fixture / "codex"),
+                       str(fixture / "worktrees")))
+assert not items, items
+print("safe")
+PY
+)"
+assert_eq "$race_result" "safe" "container swapped to an out-of-root symlink is not descended or recorded"
+
 echo
 echo "test_birth_audit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
