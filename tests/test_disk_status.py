@@ -976,6 +976,181 @@ class TestDiskStatus(unittest.TestCase):
         rc = disk_status.main(["--now", "invalid-timestamp"])
         self.assertEqual(rc, disk_status.EXIT_INVALID)
 
+    def _commit_snapshot(self, snap_payload: dict, dt: datetime, msg: str = "commit snapshot") -> None:
+        snap_path = self.state_repo / "snapshots" / "disk_snapshot.json"
+        with open(snap_path, "w", encoding="utf-8") as f:
+            json.dump(snap_payload, f)
+        ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        c_env = {
+            **os.environ,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "HERMES_SKIP_EXAMPLE_COM_GUARD": "1",
+            "GIT_AUTHOR_DATE": ts,
+            "GIT_COMMITTER_DATE": ts,
+        }
+        subprocess.run(["git", "-C", str(self.state_repo), "add", "snapshots/disk_snapshot.json"], check=True, env=c_env)
+        subprocess.run(["git", "-C", str(self.state_repo), "commit", "-m", msg], check=True, env=c_env)
+
+    def _commit_ledger(self, ledger_payload: dict, dt: datetime, msg: str = "commit ledger") -> None:
+        strict_path = self.state_repo / "ledger" / "topdown-5g.json"
+        with open(strict_path, "w", encoding="utf-8") as f:
+            json.dump(ledger_payload, f)
+        ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        c_env = {
+            **os.environ,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "HERMES_SKIP_EXAMPLE_COM_GUARD": "1",
+            "GIT_AUTHOR_DATE": ts,
+            "GIT_COMMITTER_DATE": ts,
+        }
+        subprocess.run(["git", "-C", str(self.state_repo), "add", "ledger/topdown-5g.json"], check=True, env=c_env)
+        subprocess.run(["git", "-C", str(self.state_repo), "commit", "-m", msg], check=True, env=c_env)
+
+    def test_snapshot_coverage_streak_below_gate(self):
+        import contextlib
+        import io
+
+        # Commit 1 high-coverage snapshot then 2 low-coverage snapshots (< default threshold 3)
+        high_snap = copy.deepcopy(self.snapshot_data)
+        high_snap["coverage_fresh_pct"] = 82.0
+        high_snap["snapshot_coverage_pct"] = 82.0
+        high_snap["snapshot_metadata"]["coverage_pct"] = 82.0
+        self._commit_snapshot(high_snap, self.now - timedelta(hours=4), "snap high")
+
+        low_snap_1 = copy.deepcopy(self.snapshot_data)
+        low_snap_1.pop("coverage_fresh_pct", None)
+        low_snap_1["snapshot_coverage_pct"] = 39.1
+        low_snap_1["snapshot_metadata"].pop("coverage_pct", None)
+        self._commit_snapshot(low_snap_1, self.now - timedelta(hours=3), "snap low 1")
+
+        low_snap_2 = copy.deepcopy(self.snapshot_data)
+        low_snap_2["coverage_fresh_pct"] = 41.9
+        low_snap_2["snapshot_metadata"]["coverage_pct"] = 41.9
+        self._commit_snapshot(low_snap_2, self.now - timedelta(hours=2), "snap low 2")
+
+        evaluator = self.get_evaluator()
+        res_2 = evaluator.evaluate()
+        streak_2 = res_2["snapshot_coverage_streak_below_gate"]
+        self.assertEqual(streak_2["consecutive_below_70"], 2)
+        self.assertEqual(streak_2["status"], "ok")
+
+        # Custom env threshold = 2 -> warn on 2 consecutive sub-70% commits
+        with mock.patch.dict(os.environ, {"DISK_MAGICIAN_SNAPSHOT_LOW_COVERAGE_STREAK_WARN": "2"}):
+            res_env2 = self.get_evaluator().evaluate()
+            self.assertEqual(res_env2["snapshot_coverage_streak_below_gate"]["status"], "warn")
+            self.assertEqual(res_env2["snapshot_coverage_streak_below_gate"]["consecutive_below_70"], 2)
+
+        # Commit 3rd consecutive low-coverage snapshot -> hits default threshold 3
+        low_snap_3 = copy.deepcopy(self.snapshot_data)
+        low_snap_3["coverage_fresh_pct"] = 24.5
+        low_snap_3["snapshot_coverage_pct"] = 24.5
+        low_snap_3["snapshot_metadata"]["coverage_pct"] = 24.5
+        self._commit_snapshot(low_snap_3, self.now - timedelta(hours=1), "snap low 3")
+
+        res_3 = self.get_evaluator().evaluate()
+        streak_3 = res_3["snapshot_coverage_streak_below_gate"]
+        self.assertEqual(streak_3["status"], "warn")
+        self.assertEqual(streak_3["consecutive_below_70"], 3)
+        self.assertEqual(
+            res_3["dimensions"]["measurement"]["details"]["snapshot_coverage_streak_below_gate"]["status"],
+            "warn",
+        )
+        self.assertEqual(res_3["dimensions"]["measurement"]["status"], "degraded")
+        self.assertIn("snapshot_coverage_streak_below_gate", res_3["dimensions"]["measurement"]["reason"])
+
+        buf_json = io.StringIO()
+        with contextlib.redirect_stdout(buf_json):
+            rc_json = disk_status.main([
+                "--json",
+                "--state-dir", str(self.state_dir),
+                "--state-repo", str(self.state_repo),
+                "--fleet-json", str(self.fleet_file),
+                "--now", self.now_str,
+            ])
+        self.assertEqual(rc_json, disk_status.EXIT_DEGRADED_OR_UNKNOWN)
+        payload = json.loads(buf_json.getvalue())
+        self.assertEqual(payload["snapshot_coverage_streak_below_gate"]["status"], "warn")
+        self.assertEqual(payload["snapshot_coverage_streak_below_gate"]["consecutive_below_70"], 3)
+        self.assertTrue(any("snapshot_coverage_streak_below_gate" in a for a in payload["alerts"]))
+
+        buf_txt = io.StringIO()
+        with contextlib.redirect_stdout(buf_txt):
+            disk_status.main([
+                "--state-dir", str(self.state_dir),
+                "--state-repo", str(self.state_repo),
+                "--fleet-json", str(self.fleet_file),
+                "--now", self.now_str,
+            ])
+        self.assertIn("snapshot_coverage_streak_below_gate", buf_txt.getvalue())
+
+        # Commit a fresh >= 70% snapshot -> resets consecutive streak to 0
+        self._commit_snapshot(high_snap, self.now - timedelta(minutes=15), "snap recovered")
+        res_rec = self.get_evaluator().evaluate()
+        self.assertEqual(res_rec["snapshot_coverage_streak_below_gate"]["consecutive_below_70"], 0)
+        self.assertEqual(res_rec["snapshot_coverage_streak_below_gate"]["status"], "ok")
+
+    def test_ledger_30d_window_degraded(self):
+        import contextlib
+        import io
+
+        # 1. Initial setUp has only 1 commit in last 30 days (2h ago) -> degraded 30d window
+        res_single = self.get_evaluator().evaluate()
+        win_single = res_single["ledger_30d_window_degraded"]
+        self.assertEqual(win_single["status"], "warn")
+        self.assertEqual(win_single["commits_30d"], 1)
+        self.assertEqual(win_single["span_hours_30d"], 0.0)
+        self.assertAlmostEqual(win_single["newest_age_hours"], 2.0, places=1)
+        self.assertEqual(
+            res_single["dimensions"]["publication"]["details"]["ledger_30d_window_degraded"]["status"],
+            "warn",
+        )
+
+        buf_txt = io.StringIO()
+        with contextlib.redirect_stdout(buf_txt):
+            disk_status.main([
+                "--state-dir", str(self.state_dir),
+                "--state-repo", str(self.state_repo),
+                "--fleet-json", str(self.fleet_file),
+                "--now", self.now_str,
+            ])
+        self.assertIn("ledger_30d_window_degraded", buf_txt.getvalue())
+
+        # 2. Second commit within < 24h (e.g. 1h ago, span = 1.0h < 24h) -> still warn
+        dt_1h = self.now - timedelta(hours=1)
+        self._commit_ledger(
+            make_valid_strict_ledger(captured_at=dt_1h.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            dt_1h,
+            "commit 1h ago",
+        )
+        res_short = self.get_evaluator().evaluate()
+        win_short = res_short["ledger_30d_window_degraded"]
+        self.assertEqual(win_short["status"], "warn")
+        self.assertEqual(win_short["commits_30d"], 2)
+        self.assertAlmostEqual(win_short["span_hours_30d"], 1.0, places=1)
+
+        # 3. Commit spanning >= 24h (e.g. evaluation time advanced 5 days with fresh commit) -> healthy window
+        future_now = self.now + timedelta(days=5)
+        dt_fresh = future_now - timedelta(hours=1)
+        self._commit_ledger(
+            make_valid_strict_ledger(captured_at=dt_fresh.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            dt_fresh,
+            "commit 5d later",
+        )
+        res_ok = self.get_evaluator(now=future_now).evaluate()
+        win_ok = res_ok["ledger_30d_window_degraded"]
+        self.assertEqual(win_ok["status"], "ok")
+        self.assertFalse(win_ok["degraded"])
+        self.assertEqual(win_ok["commits_30d"], 3)
+        self.assertGreaterEqual(win_ok["span_hours_30d"], 24.0)
+        self.assertAlmostEqual(win_ok["newest_age_hours"], 1.0, places=1)
+
+        # 4. Newest canonical commit > 48h old -> warn
+        stale_eval_now = future_now + timedelta(hours=55)
+        res_stale = self.get_evaluator(now=stale_eval_now).evaluate()
+        win_stale = res_stale["ledger_30d_window_degraded"]
+        self.assertEqual(win_stale["status"], "warn")
+        self.assertGreater(win_stale["newest_age_hours"], 48.0)
+
 
 if __name__ == "__main__":
     unittest.main()

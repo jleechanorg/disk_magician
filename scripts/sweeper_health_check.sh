@@ -295,6 +295,25 @@ if [[ "$HAS_DISK_MAGICIAN_PLISTS" == true ]]; then
     log "DEGRADED: disk-magician publication check failed (rc=$PUB_RC)."
     vlog "Publication output: $PUB_JSON"
   fi
+  LEDGER_WINDOW_WARN=$(python3 - "$PUB_JSON" <<'PY_WINDOW' 2>/dev/null || true
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    w = d.get("ledger_30d_window_degraded") or {}
+    if isinstance(w, dict) and w.get("status") == "warn":
+        print(
+            f"commits_30d={w.get('commits_30d')} "
+            f"span_hours_30d={w.get('span_hours_30d')} "
+            f"newest_age_hours={w.get('newest_age_hours')} "
+            f"reason={w.get('reason')}"
+        )
+except Exception:
+    pass
+PY_WINDOW
+)
+  if [[ -n "$LEDGER_WINDOW_WARN" ]]; then
+    log "WARN: ledger_30d_window_degraded ($LEDGER_WINDOW_WARN)"
+  fi
 fi
 
 echo
