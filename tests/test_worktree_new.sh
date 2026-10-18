@@ -16,7 +16,7 @@ assert_eq() {
 }
 
 TMPROOT="$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)"
-trap 'rm -rf "$TMPROOT"' EXIT
+trap 'rm -rf "${TMPROOT:?}"' EXIT
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
 unset STANDARD_WORKTREE_ROOT
@@ -189,7 +189,7 @@ if git -C "$REPO" show-ref -q --verify refs/heads/feat/race2; then ok "winner br
 
 echo "== case 15: failed create leaves other worktrees' admin entries alone (no repo-wide prune) =="
 git -C "$REPO" worktree add -q "$TMPROOT/stale-wt" -b stale-br 2>/dev/null
-rm -rf "$TMPROOT/stale-wt"
+rm -rf "${TMPROOT:?}/stale-wt"
 rm -f "$TMPROOT/nohang"
 PATH="$TMPROOT/hangbin:$PATH" WTN_ADD_TIMEOUT=1 bash "$SCRIPT" "$REPO" feat/hang2 >/dev/null 2>&1
 [[ -d "$REPO/.git/worktrees/stale-wt" ]] && ok "unrelated stale admin entry kept" || bad "unrelated admin entry pruned"

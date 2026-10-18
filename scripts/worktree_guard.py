@@ -19,7 +19,7 @@ LEASE_LIB = os.path.join(SCRIPT_DIR, "lib", "worktree_lease.sh")
 
 DENY_REASON = ("Worktrees go under ~/.worktrees/<repo>/<name>. "
                "Use: diskm worktree-new <repo> <branch>")
-SHELL_TOOLS = {"Bash", "bash", "shell", "exec_command"}
+SHELL_TOOLS = {"Bash", "bash", "shell", "exec_command", "run_command"}
 VALUE_OPTS = {"-b", "-B", "--reason"}
 
 
@@ -230,10 +230,10 @@ def decide(payload, home, root):
     if payload.get("tool_name") not in SHELL_TOOLS:
         return None
     ti = payload.get("tool_input") or {}
-    command = _command_text(ti.get("command"))
+    command = _command_text(ti.get("command") or ti.get("CommandLine"))
     if "worktree" not in command:
         return None
-    cwd = ti.get("workdir") or payload.get("cwd") or os.getcwd()
+    cwd = ti.get("workdir") or ti.get("Cwd") or payload.get("cwd") or os.getcwd()
     shown_root, root = root, _resolve(root)
     reason = None
     for target, raw, git_cwd, branch in _targets(command, cwd, home):
