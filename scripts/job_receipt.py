@@ -455,6 +455,7 @@ class JobReceiptStore:
         precondition: Optional[Dict[str, Any]] = None,
         lock: Optional[Dict[str, Any]] = None,
         safety: Optional[Dict[str, Any]] = None,
+        clear_stale_active: bool = False,
     ) -> str:
         """Record the start of a job run. Returns run_id."""
         validate_job_name(job)
@@ -496,7 +497,7 @@ class JobReceiptStore:
                     "publication": {"committed": None, "pushed": None, "status": None},
                     "reason": None,
                 }
-                active_list = data.get("active", [])
+                active_list = [] if clear_stale_active else data.get("active", [])
                 active_list.append(active_record)
                 if len(active_list) > MAX_ACTIVE_RETENTION:
                     active_list = active_list[-MAX_ACTIVE_RETENTION:]
@@ -523,6 +524,7 @@ class JobReceiptStore:
         publication: Optional[Dict[str, Any]] = None,
         revision: Optional[str] = None,
         trigger: Optional[str] = None,
+        clear_stale_active: bool = False,
     ) -> Dict[str, Any]:
         """Record a terminal receipt for a job run."""
         validate_job_name(job)
@@ -664,7 +666,9 @@ class JobReceiptStore:
 
                 validate_receipt_dict(rec_out, context="terminal receipt")
 
-                if matching_active:
+                if clear_stale_active:
+                    data["active"] = []
+                elif matching_active:
                     data["active"] = remaining_active
 
                 data["last_terminal"] = rec_out
@@ -784,6 +788,7 @@ def main() -> int:
     p_begin.add_argument("--precondition", help="Precondition JSON string")
     p_begin.add_argument("--lock", help="Lock JSON string")
     p_begin.add_argument("--safety", help="Safety JSON string")
+    p_begin.add_argument("--clear-stale-active", action="store_true", help="Clear stale active runs when exclusive job lock is held")
 
     # Subcommand: finish
     p_finish = subparsers.add_parser("finish", help="Record terminal receipt")
@@ -800,6 +805,7 @@ def main() -> int:
     p_finish.add_argument("--revision", help="Installed source revision")
     p_finish.add_argument("--trigger", help="Trigger kind")
     p_finish.add_argument("--freed-bytes", type=int, help="Bytes freed (omitted/null if unknown)")
+    p_finish.add_argument("--clear-stale-active", action="store_true", help="Clear stale active runs when exclusive job lock is held")
 
     # Subcommand: skip
     p_skip = subparsers.add_parser("skip", help="Record skip or blocked outcome")
@@ -831,6 +837,7 @@ def main() -> int:
                 precondition=_parse_json_arg(args.precondition),
                 lock=_parse_json_arg(args.lock),
                 safety=_parse_json_arg(args.safety),
+                clear_stale_active=args.clear_stale_active,
             )
             print(run_id)
             return 0
@@ -852,6 +859,7 @@ def main() -> int:
                 publication=_parse_json_arg(args.publication),
                 revision=args.revision,
                 trigger=args.trigger,
+                clear_stale_active=args.clear_stale_active,
             )
             print(json.dumps(rec))
             return 0

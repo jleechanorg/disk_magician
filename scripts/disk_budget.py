@@ -325,7 +325,7 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
                         "timeout", "partial", "success_noop", "success"}
     source_outcome = actuator_receipt.get("outcome") if isinstance(actuator_receipt, dict) else None
     source_reason = actuator_receipt.get("reason") if isinstance(actuator_receipt, dict) else None
-    typed_outcome = source_outcome in allowed_outcomes and valid_counts
+    typed_outcome = source_outcome in allowed_outcomes
     if typed_outcome:
         # The adapter is the authority for its semantic result. In particular,
         # a completed safety skip is not a successful cleanup.
@@ -340,9 +340,11 @@ def _write_govern_receipt(state, class_name, result, before, after, actuator_rec
     if delta is None or not valid_counts:
         # Keep typed safety/error outcomes and their reason visible even if
         # measurement fields are incomplete; success cannot claim valid work.
-        if outcome in {"success", "success_noop"}:
+        if outcome in {"success", "success_noop", "partial"}:
             outcome, reason = "error", "adapter_metrics_unavailable"
-        removed = removed if isinstance(removed, int) and not isinstance(removed, bool) and removed >= 0 else None
+        removed = removed if isinstance(removed, int) and not isinstance(removed, bool) and removed >= 0 else (
+            0 if outcome in {"skipped_lock", "skipped_threshold"} else None
+        )
         deferred = deferred if isinstance(deferred, int) and not isinstance(deferred, bool) and deferred >= 0 else 0
         interrupted = interrupted if isinstance(interrupted, int) and not isinstance(interrupted, bool) and interrupted >= 0 else 0
     post = {"df_delta_bytes": delta, "freed_bytes": max(0, delta) if delta is not None else None,
@@ -861,6 +863,7 @@ def _consume_daily_request(state, budgets, tick_seconds, zone_name=None):
                 if data.get("daily_measure_pending") == pending:
                     data.pop("daily_measure_pending")
             budget_controls.locked_mutate(state, complete)
+            print(f"daily_measure_completed:at={int(time.time())}")
         return rc
     except (OSError, ValueError, TypeError, budget_controls.MalformedState) as e:
         return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3

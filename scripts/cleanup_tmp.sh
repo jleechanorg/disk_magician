@@ -316,7 +316,9 @@ RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
 RECEIPT_PRECONDITION='{}'
 [[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
 RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
-RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
+RECEIPT_CLEAR_STALE_ARGS=()
+[[ "$DRY_RUN" == false ]] && RECEIPT_CLEAR_STALE_ARGS=(--clear-stale-active)
+RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp ${RECEIPT_CLEAR_STALE_ARGS[@]+"${RECEIPT_CLEAR_STALE_ARGS[@]}"} --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
   log "ERROR: failed to record cleanup_tmp receipt begin"
   exit 1
 }

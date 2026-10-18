@@ -37,6 +37,10 @@ cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
 helper="${DISK_MAGICIAN_RECEIPT_HELPER:-$(cd "$(dirname "$0")" && pwd)/job_receipt.py}"
 rc="${TMP_MOCK_EXIT:-0}"
+if [[ "$rc" == 75 ]]; then
+  echo "[cleanup_tmp] skipped, scratch lock held after waiting 20s" >&2
+  exit 75
+fi
 if [[ "$rc" == 0 ]]; then outcome=success; else outcome=error; fi
 run_id="$(python3 "$helper" begin --job cleanup_tmp --trigger "${DISK_MAGICIAN_RECEIPT_TRIGGER:-mock}" --precondition '{}')"
 python3 "$helper" finish --job cleanup_tmp --run-id "$run_id" --outcome "$outcome" \
@@ -195,6 +199,22 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
+
+echo "Test 10: cleanup_tmp exit 75 (scratch lock held) records skipped_lock and exits 0"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_EXIT=75 /bin/bash "$SCRIPT" --clean
+LOCK_SKIP_RC=$?
+set -e
+if [[ "$LOCK_SKIP_RC" -eq 0 ]]; then
+  echo "  PASS  wrapper exits 0 when cleanup_tmp skips on scratch lock (rc=75)"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  wrapper exited $LOCK_SKIP_RC on scratch lock contention (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "scratch lock contention records skipped_lock" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
+assert_receipt_field "scratch lock contention records removed_count 0" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "0"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
