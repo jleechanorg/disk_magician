@@ -264,7 +264,7 @@ scratch_budget_evict_root() {
       continue
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
-    kb=$(path_size_kb "$item")
+    kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
     if (( kb < 0 )); then
       log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."
       continue

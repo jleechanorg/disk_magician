@@ -288,7 +288,7 @@ path_size_kb() {
   # default to 0 when there is no line at all. `du`'s own exit status is
   # neutralized with `|| true` so a `du` failure never aborts the caller
   # under `set -eo pipefail`.
-  { du -sk "$1" 2>/dev/null || true; } | awk '{f=$1} END{print f+0}'
+  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 is_protected_root() {
