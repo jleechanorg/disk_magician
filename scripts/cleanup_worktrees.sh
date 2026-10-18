@@ -1090,6 +1090,13 @@ std_root_skip_reason() {
     fi
 }
 
+is_live_cwd() {
+    local wt="$1" real_wt
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    [[ -n "$GLOBAL_CWD_BLOCKED" ]] && return 0
+    list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt" "$GLOBAL_LIVE_CWDS"
+}
+
 is_ao_managed_worktree() {
     local wt="$1"
     local real_wt

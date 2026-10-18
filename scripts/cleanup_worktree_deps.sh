@@ -32,7 +32,7 @@ MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/mirror/projects")
+  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/.codex-worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/mirror/projects")
   for _wf in "$HOME"/wf_*; do
     [[ -d "$_wf" && ! -L "$_wf" ]] && ROOTS+=("$_wf")
   done

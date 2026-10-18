@@ -127,6 +127,8 @@ for approved_cache in \
   "worldai:$HOME/.cache/worldai" \
   "swiftpm:$HOME/Library/Caches/org.swift.swiftpm" \
   "ms-playwright:$HOME/Library/Caches/ms-playwright" \
+  "ms-playwright linux:$HOME/.cache/ms-playwright" \
+  "camoufox:$HOME/.cache/camoufox" \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
   "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004" \
@@ -271,7 +273,9 @@ clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false rebuildable
 DEV_CACHE_DAYS=30
 for dev_cache_path in \
   "$HOME/Library/Caches/claude-cli-nodejs" \
-  "$HOME/Library/Caches/go-build"; do
+  "$HOME/Library/Caches/go-build" \
+  "$HOME/.cache/claude-cli-nodejs" \
+  "$HOME/.cache/go-build"; do
   dev_cache_label=$(basename "$dev_cache_path")
   log "=== Section: $dev_cache_path (${DEV_CACHE_DAYS}d mtime) ==="
   if [[ ! -d "$dev_cache_path" ]]; then
