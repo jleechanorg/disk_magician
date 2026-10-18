@@ -858,15 +858,17 @@ archive_path() {
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
-  # Every refusal gate runs for BOTH dry-run and clean so a preview reports
-  # exactly what a clean run would do (CodeRabbit #207).
+  # Eligibility gates run for BOTH dry-run and clean so a preview reports
+  # only candidates a clean run may archive (CodeRabbit #207). The execution
+  # deadline remains clean-only: previews are non-mutating inventory and must
+  # still describe eligible work after the mutation budget expires.
   # 1) safety.local.json on the original path (relocating stops the rule matching).
   if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
     log "SAFETY-SKIP $path ($safety_reason)"
     return 1
   fi
-  # 2) deadline budget.
-  if ! act_unit_fits 0; then
+  # 2) clean-mode deadline budget.
+  if [[ "$DRY_RUN" != true ]] && ! act_unit_fits 0; then
     log "Archive deferred:deadline-before-unit $path"
     cleanup_tmp_count_candidate_result deferred:deadline-before-unit
     return 1
