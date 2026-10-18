@@ -421,6 +421,97 @@ PY
 if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER" && lease_mark_reuse_incomplete "$REUSE_LEASE"; then ok "incomplete reuse marked"; else bad "incomplete reuse marker failed"; fi
 assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["state"]')" "reuse_incomplete" "incomplete state retained"
 
+echo "== lease_prune_birth_audit_scratch =="
+PRUNE_STATE="$TMPROOT/prune_state"
+export DISK_MAGICIAN_STATE_DIR="$PRUNE_STATE"
+mkdir -p "$(lease_dir)" "$TMPROOT/prune_paths"
+NOW_PRUNE="$(date +%s)"
+
+write_raw_lease() { # write_raw_lease <target_path> <json_override_py>
+    local p="$1" py="$2" lf
+    lf="$(lease_path_for "$p")"
+    python3 - "$lf" "$p" "$NOW_PRUNE" "$py" <<'PY'
+import json, os, sys
+lf, p, now_s, py = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+d = {
+    "schema_version": 1,
+    "path": p,
+    "repo": None,
+    "branch": None,
+    "creator": "birth-audit",
+    "pending": False,
+    "created_at": "2026-10-17T00:00:00+00:00",
+    "created_epoch": now_s,
+    "ttl_hours": 24,
+    "owner": None,
+    "kind": "scratch",
+    "producer": "birth-audit",
+}
+exec(py, {"d": d, "now": now_s})
+with open(lf, "w") as f:
+    json.dump(d, f)
+print(lf)
+PY
+}
+
+# 1. Missing path birth-audit scratch lease -> pruned
+P_GONE="$TMPROOT/prune_paths/gone_scratch"
+mkdir -p "$P_GONE"
+L_GONE="$(write_raw_lease "$P_GONE" "")"
+rm -rf "$P_GONE"
+
+# 2. Existing path birth-audit scratch lease with expires_at in the past -> pruned
+P_EXP_AT="$TMPROOT/prune_paths/exp_at_scratch"
+mkdir -p "$P_EXP_AT"
+L_EXP_AT="$(write_raw_lease "$P_EXP_AT" 'd["expires_at"] = now - 60')"
+
+# 3. Existing path birth-audit scratch lease with created_epoch+ttl_hours in the past -> pruned
+P_EXP_CE="$TMPROOT/prune_paths/exp_ce_scratch"
+mkdir -p "$P_EXP_CE"
+L_EXP_CE="$(write_raw_lease "$P_EXP_CE" 'd["created_epoch"] = now - 25 * 3600')"
+
+# 4. Live unexpired birth-audit scratch lease -> preserved
+P_LIVE="$TMPROOT/prune_paths/live_scratch"
+mkdir -p "$P_LIVE"
+L_LIVE="$(write_raw_lease "$P_LIVE" 'd["expires_at"] = now + 3600')"
+
+# 5. kind=worktree lease (even if missing and expired) -> preserved
+P_WT="$TMPROOT/prune_paths/gone_wt"
+mkdir -p "$P_WT"
+L_WT="$(write_raw_lease "$P_WT" 'd["kind"] = "worktree"; d["expires_at"] = now - 60')"
+rm -rf "$P_WT"
+
+# 6. pending=true lease (even if missing and expired) -> preserved
+P_PEND="$TMPROOT/prune_paths/gone_pending"
+mkdir -p "$P_PEND"
+L_PEND="$(write_raw_lease "$P_PEND" 'd["pending"] = True; d["expires_at"] = now - 60')"
+rm -rf "$P_PEND"
+
+# 7. owned lease (owner != null, even if missing and expired) -> preserved
+P_OWNED="$TMPROOT/prune_paths/gone_owned"
+mkdir -p "$P_OWNED"
+L_OWNED="$(write_raw_lease "$P_OWNED" 'd["owner"] = {"pid": 400, "start_epoch": 1760000000, "comm": "claude"}; d["expires_at"] = now - 60')"
+rm -rf "$P_OWNED"
+
+# 8. hash-mismatched filename -> preserved
+L_BADHASH="$(lease_dir)/0000000000000000.json"
+cp "$L_GONE" "$L_BADHASH"
+
+# 9. malformed path (embedded NUL byte) -> preserved and does not abort loop
+L_NULPATH="$(lease_dir)/0000000000000001.json"
+printf '{"schema_version":1,"path":"/tmp/bad\\u0000path","owner":null,"pending":false,"creator":"birth-audit","kind":"scratch","expires_at":1}\n' > "$L_NULPATH"
+
+if lease_prune_birth_audit_scratch; then ok "lease_prune_birth_audit_scratch rc 0"; else bad "lease_prune_birth_audit_scratch failed"; fi
+[[ ! -e "$L_GONE" ]] && ok "missing-path birth-audit scratch lease pruned" || bad "missing-path birth-audit scratch lease still exists"
+[[ ! -e "$L_EXP_AT" ]] && ok "expired (expires_at) birth-audit scratch lease pruned" || bad "expired (expires_at) birth-audit scratch lease still exists"
+[[ ! -e "$L_EXP_CE" ]] && ok "expired (created_epoch+ttl) birth-audit scratch lease pruned" || bad "expired (created_epoch+ttl) birth-audit scratch lease still exists"
+[[ -f "$L_LIVE" ]] && ok "live unexpired birth-audit scratch lease preserved" || bad "live unexpired birth-audit scratch lease was pruned"
+[[ -f "$L_WT" ]] && ok "worktree kind lease preserved even when missing/expired" || bad "worktree kind lease was pruned"
+[[ -f "$L_PEND" ]] && ok "pending:true lease preserved even when missing/expired" || bad "pending:true lease was pruned"
+[[ -f "$L_OWNED" ]] && ok "owned lease preserved even when missing/expired" || bad "owned lease was pruned"
+[[ -f "$L_BADHASH" ]] && ok "hash-mismatched lease filename preserved" || bad "hash-mismatched lease filename was pruned"
+[[ -f "$L_NULPATH" ]] && ok "embedded-NUL path lease preserved without aborting scan" || bad "embedded-NUL path lease was pruned"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
