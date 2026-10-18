@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, fcntl, hashlib, json, math, os, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
-def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol raises LookupError
-    try: fn = ctypes.CDLL(None, use_errno=True)[ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL", "renameatx_np")]
-    except (AttributeError, OSError): raise LookupError
-    if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(4)): raise OSError(ctypes.get_errno(), "renameatx_np")
+def renamex(srcfd, src, dstfd, dst):  # exclusive rename; no supported symbol raises LookupError
+    # macOS renameatx_np(RENAME_EXCL=0x4); Linux renameat2(RENAME_NOREPLACE=0x1).
+    libc, forced = ctypes.CDLL(None, use_errno=True), ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL")
+    for name, flag in ((forced, 4),) if forced else (("renameatx_np", 4), ("renameat2", 1)):
+        try: fn = libc[name]
+        except (AttributeError, OSError): continue
+        if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(flag)): raise OSError(ctypes.get_errno(), name)
+        return
+    raise LookupError
 def hook(name, path, dest):
     if ENV.get(name): subprocess.run(["bash", "-c", ENV[name]], env=dict(ENV, DM_Q_PATH=path, DM_Q_DEST=dest), stdout=subprocess.DEVNULL)
 def kill_at(point):
@@ -195,6 +200,11 @@ def index_mark_terminal(qid, outcome):
         raise
     finally: os.close(dfd)
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
+# Linux lsof always warns about mounts it cannot stat() (tracefs, snapd); that
+# cannot hide a user of the queried path. Any other stderr line is incomplete.
+LSOF_MOUNT_WARNING = re.compile(rb"^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$")
+def lsof_stderr_incomplete(err):
+    return any(line and not LSOF_MOUNT_WARNING.match(line) for line in err.splitlines())
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     try:
         if deadline_passed(deadline): return "deferred:deadline"
@@ -208,7 +218,7 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
             lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
         except subprocess.TimeoutExpired:
             return "deferred:deadline"
-        if lsof.stdout or lsof.returncode != 1 or lsof.stderr.strip(): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
+        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
