@@ -57,16 +57,21 @@ EOF
 chmod +x "$BIN/du" "$BIN/lsof"
 ln -s "$NATIVE_TIMEOUT" "$BIN/timeout"
 
-mk_fixture() {  # <private_tmp> [extra old dirs...] — old_big (old) + recent_big (fresh)
+# mk_fixture <private_tmp> [extra old dirs...] — pr_old_big (old) + recent_big (fresh).
+# The archived assertion fixtures must carry a declared-ephemeral name
+# (E2 `pr_*` row, 2880 min): cleanup_tmp.sh only quarantines candidates with a
+# declared retention row (bead disk_magician-archive-same-volume-regrowth-03bn),
+# so a generic name would be preserved instead of archived.
+mk_fixture() {
   local root="$1" d
   rm -rf "$root"
   mkdir -p "$root" "$TMP_ROOT/home"
   chmod 755 "$TMP_ROOT/home"
-  for d in old_big recent_big "${@:2}"; do
+  for d in pr_old_big recent_big "${@:2}"; do
     mkdir -p "$root/$d"
     head -c 4096 /dev/zero > "$root/$d/payload.bin"
   done
-  for d in old_big "${@:2}"; do /usr/bin/find "$root/$d" -exec touch -t 202001010000 {} +; done
+  for d in pr_old_big "${@:2}"; do /usr/bin/find "$root/$d" -exec touch -t 202001010000 {} +; done
   : > "$TMP_ROOT/du.log"; : > "$TMP_ROOT/lsof.log"
 }
 run_tmp() {  # <private_tmp> [VAR=val ...] — sets RC and OUT
@@ -89,7 +94,7 @@ run_tmp "$P1" LARGE_TMP_ARCHIVE_RETENTION_HOURS=876000 LARGE_TMP_ARCHIVE_MAX_HOU
 check "rc 0" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
 check "recent dir skipped" 'grep -q "recently active dir.*recent_big" <<<"$OUT"' "$OUT"
 check "du never run on recent dir" '! grep -q recent_big "$TMP_ROOT/du.log"'
-check "old dir archived" '[[ ! -e "$P1/old_big" ]]'
+check "old dir archived" '[[ ! -e "$P1/pr_old_big" ]]'
 check "recent dir preserved" '[[ -e "$P1/recent_big" ]]'
 check "lsof only for the eligible dir (1 call)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 1 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
 
@@ -99,7 +104,7 @@ start=$SECONDS
 run_tmp "$P2" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=1
 check "finished fast (<20s)" '(( SECONDS - start < 20 ))' "took $((SECONDS - start))s"
 check "slow dir preserved" '[[ -e "$P2/slow_big" ]]'
-check "other eligible dir still archived" '[[ ! -e "$P2/old_big" ]]'
+check "other eligible dir still archived" '[[ ! -e "$P2/pr_old_big" ]]'
 
 mkdir -p "$TMP_ROOT/home/.disk_magician_locks"; chmod 700 "$TMP_ROOT/home/.disk_magician_locks"
 hold_lock() {  # <seconds>
@@ -120,7 +125,7 @@ hold_lock 2
 run_tmp "$P3" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=15
 wait "$HOLDER_PID" 2>/dev/null || true; HOLDER_PID=""
 check "waited then ran (rc 0)" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
-check "eligible dir archived after wait" '[[ ! -e "$P3/old_big" ]]'
+check "eligible dir archived after wait" '[[ ! -e "$P3/pr_old_big" ]]'
 
 echo "Test 4: lock held past the wait budget - distinct skip rc 75, nothing touched"
 P4="$TMP_ROOT/p4"; mk_fixture "$P4"
@@ -130,7 +135,7 @@ printf "%s" "$OUT" > "$TMP_ROOT/wait4.out"
 kill "$HOLDER_PID" 2>/dev/null || true; wait "$HOLDER_PID" 2>/dev/null || true; HOLDER_PID=""
 check "rc 75 (skip, not failure)" '[[ $RC -eq 75 ]]' "rc=$RC"
 check "skip message" 'grep -q "skipped, scratch lock held" <<<"$OUT"' "$OUT"
-check "fixture untouched" '[[ -e "$P4/old_big" ]]'
+check "fixture untouched" '[[ -e "$P4/pr_old_big" ]]'
 
 echo "Test 5: budget mode - timeout and unproven entries stay preserved"
 R5="$TMP_ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5"
@@ -166,7 +171,7 @@ EOF
 chmod +x "$BIN/find_timeout"
 P6="$TMP_ROOT/p6"; mk_fixture "$P6"
 run_tmp "$P6" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/find_timeout"
-check "old dir preserved when find times out" '[[ -e "$P6/old_big" ]]' "$OUT"
+check "old dir preserved when find times out" '[[ -e "$P6/pr_old_big" ]]' "$OUT"
 check "logged fail-closed" 'grep -q "Active-use check failed" <<<"$OUT"'
 
 echo "Test 7: budget lsof snapshot timeout -> no prefilter, run continues"
@@ -193,7 +198,7 @@ echo "Test 8: no usable timeout binary -> one-time unbounded warning"
 P8="$TMP_ROOT/p8"; mk_fixture "$P8"
 run_tmp "$P8" DISK_MAGICIAN_PROBE_TIMEOUT_BIN=/nonexistent
 check "warns once" '[[ "$(grep -c "probes are unbounded" <<<"$OUT")" == 1 ]]' "$OUT"
-check "still archives eligible dir" '[[ ! -e "$P8/old_big" ]]'
+check "still archives eligible dir" '[[ ! -e "$P8/pr_old_big" ]]'
 
 echo "Test 9: probe timeout parsing"
 P9="$TMP_ROOT/p9"; mk_fixture "$P9"
@@ -247,7 +252,7 @@ check "logged wrapper failure" 'grep -q "du wrapper failed rc=125" <<<"$OUT"'
 
 echo "Test 13: du rc 1 WITH numeric total (Permission denied) -> lower bound used"
 R13="$TMP_ROOT/r13"; mk_budget_root "$R13" perm_1
-rm -rf "$R13/claude_big_1"
+rm -rf "${R13:?}/claude_big_1"
 budget_run "$R13"
 check "partial-size entry evicted as 1258291 KB" '[[ ! -e "$R13/claude_perm_1" ]]' "$OUT"
 check "second-oldest evicted, newest kept" '[[ ! -e "$R13/claude_big_2" && -e "$R13/claude_big_3" ]]' "$OUT"

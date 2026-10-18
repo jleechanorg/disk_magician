@@ -763,16 +763,18 @@ chmod +x "$PS_BIN/lsof"
 # A stale, oversized top-level fixture dir so the --large branch has real
 # work to do (proves the archive path runs end-to-end against the fixture,
 # not just a no-op scan). LARGE_TMP_MIN_KB is lowered so a small fixture
-# file qualifies as "large" without a slow multi-hundred-MB dd.
-mkdir -p "$PS_PRIVATE_TMP/stale_large_dir"
-dd if=/dev/zero of="$PS_PRIVATE_TMP/stale_large_dir/payload" bs=1024 count=200 status=none
+# file qualifies as "large" without a slow multi-hundred-MB dd. The name needs
+# a declared-ephemeral E2 `pr_` row: cleanup_tmp.sh quarantines only candidates
+# with a declared retention (bead disk_magician-archive-same-volume-regrowth-03bn).
+mkdir -p "$PS_PRIVATE_TMP/pr_stale_large_dir"
+dd if=/dev/zero of="$PS_PRIVATE_TMP/pr_stale_large_dir/payload" bs=1024 count=200 status=none
 STALE_STAMP="$(date -v-10H +%Y%m%d%H%M 2>/dev/null || date -d '-10 hours' +%Y%m%d%H%M)"
 # Stamp the directory entry itself, not just the file inside it —
 # has_recent_activity() / the --large scan's mtime check looks at every
 # entry under the candidate dir including the dir node itself, and mkdir -p
 # above left it at "now" (would otherwise always be skipped as
 # "recently active" regardless of the payload file's mtime).
-touch -t "$STALE_STAMP" "$PS_PRIVATE_TMP/stale_large_dir/payload" "$PS_PRIVATE_TMP/stale_large_dir"
+touch -t "$STALE_STAMP" "$PS_PRIVATE_TMP/pr_stale_large_dir/payload" "$PS_PRIVATE_TMP/pr_stale_large_dir"
 
 # Deliberate escape sentinel: it lives inside this test's temporary allocation
 # but outside every root allowed to the pressure sweep. If a root override
@@ -811,10 +813,10 @@ assert_rc "pressure_sweep triggered path exits 0" 0 "$RC9"
 OUT9_CONTENT=$(cat "$OUT9")
 assert_contains "pressure_sweep logs --large" "cleanup_tmp.sh --clean --large" "$OUT9_CONTENT"
 assert_contains "pressure_sweep invokes cleanup_tmp step" "cleanup_tmp.sh" "$OUT9_CONTENT"
-assert_missing "stale large fixture dir archived out of the private-tmp fixture" "$PS_PRIVATE_TMP/stale_large_dir"
+assert_missing "stale large fixture dir archived out of the private-tmp fixture" "$PS_PRIVATE_TMP/pr_stale_large_dir"
 assert_exists "stale large fixture dir landed in the fixture archive root" "$PS_ARCHIVE_ROOT"
 assert_exists "persistent deletion log was written to the fixture path" "$PS_DELETION_LOG"
-assert_contains "deletion log records the archived fixture path" "$PS_PRIVATE_TMP/stale_large_dir" "$(cat "$PS_DELETION_LOG" 2>/dev/null || true)"
+assert_contains "deletion log records the archived fixture path" "$PS_PRIVATE_TMP/pr_stale_large_dir" "$(cat "$PS_DELETION_LOG" 2>/dev/null || true)"
 
 assert_exists "outside-scope pressure sentinel remains untouched" "$PS_ESCAPE_SENTINEL/payload"
 assert_exists "owned /private/tmp canary remains untouched (no ambient /private/tmp diff)" "$PS_HOST_TMP_CANARY/payload"

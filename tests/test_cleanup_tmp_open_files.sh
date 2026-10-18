@@ -682,7 +682,7 @@ assert_rc "Test 7: exits 0" 0 "$T7_RC"
 assert_contains "Test 7: logs active-use marker skip" "Skipping active-use marker (.in-use present)" "$T7_OUT_CONTENT"
 assert_missing "Test 7: lsof was NOT called because marker skipped it first" "$T7_LSOF_INVOCATION_FILE"
 # Now test an unmarked, stale candidate: lsof IS called directly before archive_path
-rm -rf "$T7_PRIVATE_TMP/marked_large_dir"
+rm -rf "${T7_PRIVATE_TMP:?}/marked_large_dir"
 make_large_dir "$T7_PRIVATE_TMP/stale_large_dir"
 set_old_mtime "$T7_PRIVATE_TMP/stale_large_dir"
 T7_STALE_CANON=$(cd "$T7_PRIVATE_TMP/stale_large_dir" && pwd -P)

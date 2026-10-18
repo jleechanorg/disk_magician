@@ -86,7 +86,11 @@ class CleanupReviewTests(unittest.TestCase):
         self.assertEqual(Path(executable).resolve(), Path(sys.executable).resolve())
         self.assertEqual(self.env["PATH"].split(os.pathsep)[0], str(self.bin))
 
-    def make_large_candidate(self, relative="review-large-artifact"):
+    def make_large_candidate(self, relative="pr_review-large-artifact"):
+        # The `pr_` prefix gives the fixture a declared-ephemeral E2 row (2880
+        # min). cleanup_tmp.sh only quarantines candidates with a declared
+        # retention (bead disk_magician-archive-same-volume-regrowth-03bn), and
+        # these tests exercise the archive/deadline machinery itself.
         path = self.root / "private-tmp" / relative
         path.mkdir(parents=True)
         (path / "payload.bin").write_bytes(b"fixture payload\n" * 1024)
