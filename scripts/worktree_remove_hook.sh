@@ -13,6 +13,8 @@ _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
 source "$_WRH_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$_WRH_DIR/lib/lsof_linux.sh"
 source "$_WRH_DIR/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$_WRH_DIR/lib/worktree_ignored.sh"
@@ -46,10 +48,7 @@ wrh_live_cwd_reason() {
     err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
     out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
-    # Linux lsof always warns about mounts it cannot stat() (tracefs, snapd
-    # namespaces); that cannot hide a process cwd. Any other stderr line still
-    # marks the scan incomplete.
-    if [[ -s $err ]] && grep -qvE "^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$" "$err"; then rc=1; fi
+    lsof_stderr_incomplete "$(cat "$err" 2>/dev/null)" && rc=1
     [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
     [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     while IFS= read -r line; do case $line in

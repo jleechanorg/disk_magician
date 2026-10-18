@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
@@ -74,9 +76,10 @@ lsof_rc=0
 LIVE_CWDS_RAW="$("$lsof_bin" -d cwd -Fn 2>"$lsof_err")" || lsof_rc=$?
 lsof_msg="$(cat "$lsof_err" 2>/dev/null || true)"; rm -f "$lsof_err"
 if [[ "$lsof_rc" -ne 0 || -z "$LIVE_CWDS_RAW" ]] \
-    || grep -qiE 'warning|permission denied|cannot|error' <<<"$lsof_msg"; then
+    || lsof_stderr_incomplete "$lsof_msg"; then
   echo "lsof output incomplete: cwd unknown, refusing."; exit 0
 fi
+LIVE_CWDS_RAW="$(lsof_drop_foreign_denied <<<"$LIVE_CWDS_RAW")"
 if grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied' <<<"$LIVE_CWDS_RAW" \
     || grep -qE '^n[^/]' <<<"$LIVE_CWDS_RAW"; then
   echo "lsof output unparseable: cwd unknown, refusing."; exit 0

@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
@@ -324,7 +326,9 @@ else
             rm -f "$_lsof_tmp"
             if [[ "$_lsof_rc" -ne 0 ]]; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
+            elif lsof_stderr_incomplete "$_lsof_err"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif ! _lsof_out="$(lsof_drop_foreign_denied <<<"$_lsof_out")"; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
             elif [[ -z "$_lsof_out" ]]; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
