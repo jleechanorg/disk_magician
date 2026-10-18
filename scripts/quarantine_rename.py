@@ -216,7 +216,7 @@ def lsof_stderr_incomplete(err, query):
             continue
         m = LSOF_CANT_STAT.match(line)
         if m:
-            fs = os.fsdecode(m.group(1)).strip()
+            fs = os.fsdecode(m.group(1))  # lsof prints the mount path verbatim; do not strip it
             fs_norm = os.path.realpath(fs).rstrip("/") or "/"
             if fs_norm == "/" or query_real == fs_norm or query_real.startswith(fs_norm + "/"):
                 return True

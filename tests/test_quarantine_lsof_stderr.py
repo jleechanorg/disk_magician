@@ -38,6 +38,11 @@ class LsofStderrIncompleteTest(unittest.TestCase):
         err = b"lsof: WARNING: can't stat() fuse file system /mnt/my disk\n"
         self.assertTrue(q.lsof_stderr_incomplete(err, "/mnt/my disk/sub/.dm-quarantine/abc"))
 
+    def test_mount_path_with_trailing_space_is_relevant(self):
+        # lsof prints the mount path verbatim; a trailing space is part of it.
+        err = b"lsof: WARNING: can't stat() fuse file system /mnt/my disk \n"
+        self.assertTrue(q.lsof_stderr_incomplete(err, "/mnt/my disk /sub/.dm-quarantine/abc"))
+
     def test_unknown_stderr_is_incomplete(self):
         self.assertTrue(q.lsof_stderr_incomplete(b"lsof: some other error\n", self.QUERY))
 
