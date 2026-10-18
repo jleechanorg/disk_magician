@@ -3,15 +3,18 @@
 #
 # Removes node_modules, Rust target/ (only beside a Cargo.toml) and .mypy_cache
 # from linked git worktrees (a `.git` FILE pointer) whose content saw no activity
-# within the worktree floor (safety_worktree_floor_days, default 3). The worktree
-# source and .git are preserved; reinstall with npm ci / cargo build.
+# within the worktree floor (safety_worktree_floor_days, default 3). Nested build
+# caches (e.g. daemon/target in a multi-crate tree) are stripped only when the
+# dir that owns them holds the manifest that produces them. The worktree source
+# and .git are preserved; reinstall with npm ci / cargo build.
 #
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 #
 # Safety: fail-closed recency via worktree_is_recently_active; fail-closed live-cwd
-# (lsof failure aborts the run); skips symlinked dirs, base repos (.git
-# directory), AO-owned worktrees (path or AO config worktreeDir), and anything
-# machine-local safety rules protect (safety_gate).
+# (lsof failure aborts the run); skips symlinked dirs (find never follows a link,
+# so a symlinked parent is not traversed), base repos (.git directory), AO-owned
+# worktrees (path or AO config worktreeDir), and anything machine-local safety
+# rules protect (safety_gate).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: cleanup_worktree_deps.sh [--clean] [--dry-run] [--min-age N] [--roots A,B]"
       echo "Strips node_modules, target (with Cargo.toml) and .mypy_cache from worktrees idle >= floor days."
+      echo "Nested caches are stripped only beside the manifest that builds them (Cargo.toml / package.json)."
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -126,9 +130,13 @@ is_live() {
   return 1
 }
 
+stripped_paths="|"
 strip_dir() {
   local wt="$1" dir="$2" kb
   [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  # A worktree can be reached twice (root rules and the nested scan); report once.
+  [[ "$stripped_paths" == *"|$dir|"* ]] && return 0
+  stripped_paths+="$dir|"
   if ! _reason="$(safety_gate "$dir" 2>/dev/null)"; then
     echo "  SAFETY-SKIP $dir ($_reason)"
     return 0
@@ -153,6 +161,31 @@ has_pkg_node_modules() {
   return 1
 }
 
+# Build output is proven by the manifest, never by the directory name alone:
+# cargo writes <crate>/target beside <crate>/Cargo.toml, npm writes
+# <pkg>/node_modules beside <pkg>/package.json. Anything else keeps the name but
+# is not rebuildable, so it is preserved.
+is_build_output_dir() {
+  local dir="$1" parent name
+  name="${dir##*/}"
+  parent="${dir%/*}"
+  [[ -d "$dir" && ! -L "$dir" && -n "$parent" ]] || return 1
+  case "$name" in
+    target) [[ -f "$parent/Cargo.toml" ]] ;;
+    node_modules) [[ -f "$parent/package.json" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Every target/ and node_modules/ below <wt>, at any depth. find does not follow
+# symlinks and -type d rejects a symlinked leaf, so a linked parent is never
+# traversed. Matched dirs are pruned, never descended into.
+nested_cache_dirs() {
+  find "$1" \( -name .git -o -name venv -o -name .venv -o -name __pycache__ \
+    -o -name .pytest_cache -o -name .ruff_cache \) -prune -o \
+    -type d \( -name node_modules -o -name target \) -prune -print 2>/dev/null
+}
+
 for root in "${ROOTS[@]}"; do
   while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
   [[ -d "$root" && ! -L "$root" ]] || continue
@@ -163,9 +196,18 @@ for root in "${ROOTS[@]}"; do
     real_wt="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
     [[ "$real_wt" == "${real_root%/}/${wt#"$root"/}" ]] || continue
     is_ao_owned "$wt" && continue
-    [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt" || continue
+    # Nested build caches are only discoverable by walking; skip that walk when
+    # root caches already make this worktree a candidate. Only nested caches can
+    # make a worktree with no root caches a candidate at all.
+    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt"; then
+      nested_dirs=""
+    else
+      nested_dirs="$(nested_cache_dirs "$wt")"
+      [[ -n "$nested_dirs" ]] || continue
+    fi
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
     if is_live "$wt"; then continue; fi
+    [[ -n "$nested_dirs" ]] || nested_dirs="$(nested_cache_dirs "$wt")"
     strip_dir "$wt" "$wt/node_modules"
     for pkg_nm in "$wt"/packages/*/node_modules; do
       # A real node_modules leaf may still escape through a symlinked ancestor.
@@ -173,6 +215,9 @@ for root in "${ROOTS[@]}"; do
     done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
     strip_dir "$wt" "$wt/.mypy_cache"
+    while IFS= read -r nested; do
+      [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
+    done <<< "$nested_dirs"
   done
 done
 
