@@ -853,28 +853,8 @@ has_open_files() {
 # mv is a rename (near-zero cost, frees no space immediately) so a later
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
-archive_path() {
-  local path="$1" kb="$2" sub="${3:-}" ts dest entry receipt retention safety_reason canon
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
-
-  # Every refusal gate runs for BOTH dry-run and clean so a preview reports
-  # exactly what a clean run would do (CodeRabbit #207).
-  # 1) safety.local.json on the original path (relocating stops the rule matching).
-  if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
-    log "SAFETY-SKIP $path ($safety_reason)"
-    return 1
-  fi
-  # 2) deadline budget.
-  if ! act_unit_fits 0; then
-    log "Archive deferred:deadline-before-unit $path"
-    cleanup_tmp_count_candidate_result deferred:deadline-before-unit
-    return 1
-  fi
-  # 3) C14 verdict: secret-like files or repositories failing
-  # content/push/baseline verification must stay in place rather than
-  # accumulating indefinitely inside _disk_magician_archive.
-  local c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
+archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusal (logged)
+  local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
   secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
     -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
     -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
@@ -891,20 +871,44 @@ archive_path() {
     cleanup_tmp_count_candidate_result "$c14_verdict"
     return 1
   fi
-  # 4) declared-ephemeral retention: without a row the receipt says 0 minutes and
+  # Declared-ephemeral retention: without a row the receipt says 0 minutes and
   # C14 never purges, so same-volume archiving would grow forever.
-  canon="$(cd "$path" 2>/dev/null && pwd -P)" || canon="$path"
-  if ! retention="$(c14_ephemeral_retention "$canon")"; then
+  _ARCH_CANON="$(cd "$path" 2>/dev/null && pwd -P)" || _ARCH_CANON="$path"
+  if ! _ARCH_RETENTION="$(c14_ephemeral_retention "$_ARCH_CANON")"; then
     log "Skipping archive candidate (C14 kept:unproven-content): $path"
     cleanup_tmp_count_candidate_result kept:unproven-content
     return 1
   fi
+  return 0
+}
+
+archive_path() {
+  local path="$1" kb="$2" sub="${3:-}" ts dest entry receipt safety_reason canon="" retention=""
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
+
+  # Every refusal gate runs for BOTH dry-run and clean so a preview reports
+  # exactly what a clean run would do (CodeRabbit #207). The safety gate is
+  # shared; the clean path also enforces the deadline budget before classifying.
+  if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
+    log "SAFETY-SKIP $path ($safety_reason)"
+    return 1
+  fi
 
   if [[ "$DRY_RUN" == true ]]; then
+    archive_classify "$path" || return 1
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
   else
-    # The E1 origin receipt carries the retention that bounds this entry's
-    # quarantine life (computed above for both dry-run and clean).
+    # Clean path keeps the historical gate order: safety -> deadline ->
+    # verdict -> retention.
+    if ! act_unit_fits 0; then
+      log "Archive deferred:deadline-before-unit $path"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+      return 1
+    fi
+    archive_classify "$path" || return 1
+    canon="$_ARCH_CANON"
+    retention="$_ARCH_RETENTION"
     if ! mkdir -p "$dest"; then
       log "ERROR: could not create archive destination: $dest"
       return 2
