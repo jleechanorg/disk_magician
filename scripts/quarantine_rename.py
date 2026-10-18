@@ -202,9 +202,29 @@ def index_mark_terminal(qid, outcome):
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
 # Linux lsof always warns about mounts it cannot stat() (tracefs, snapd); that
 # cannot hide a user of the queried path. Any other stderr line is incomplete.
-LSOF_MOUNT_WARNING = re.compile(rb"^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$")
-def lsof_stderr_incomplete(err):
-    return any(line and not LSOF_MOUNT_WARNING.match(line) for line in err.splitlines())
+LSOF_CANT_STAT = re.compile(rb"^lsof: WARNING: can't stat\(\) [^ ]+ file system (\S+)")
+LSOF_INCOMPLETE = re.compile(rb"^\s*Output information may be incomplete\.$")
+def lsof_stderr_incomplete(err, query):
+    # A warning about a mount that COULD contain the queried path means the scan
+    # is incomplete for our purposes (fail closed). Warnings about unrelated
+    # mounts (tracefs, snapd, ...) cannot hide a user of this path and are
+    # ignorable; the trailing "Output information may be incomplete." line is
+    # only meaningful together with a relevant warning (Codex #209 review).
+    query_real = os.path.realpath(query)
+    for line in err.splitlines():
+        if not line:
+            continue
+        m = LSOF_CANT_STAT.match(line)
+        if m:
+            fs = os.fsdecode(m.group(1))
+            fs_norm = fs.rstrip("/") or "/"
+            if fs_norm == "/" or query_real == fs_norm or query_real.startswith(fs_norm + "/"):
+                return True
+            continue
+        if LSOF_INCOMPLETE.match(line):
+            continue
+        return True
+    return False
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     try:
         if deadline_passed(deadline): return "deferred:deadline"
@@ -218,7 +238,7 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
             lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
         except subprocess.TimeoutExpired:
             return "deferred:deadline"
-        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
+        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr, os.path.join(qdir, qid)): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
