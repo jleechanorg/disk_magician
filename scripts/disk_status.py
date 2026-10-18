@@ -422,15 +422,118 @@ class DiskStatusEvaluator:
             records=[],
         )
 
+    @staticmethod
+    def _extract_snapshot_coverage_pct(data: Any) -> Optional[float]:
+        """Extract snapshot coverage percentage across schema variants."""
+        if not isinstance(data, dict):
+            return None
+        meta = data.get("snapshot_metadata")
+        meta_dict = meta if isinstance(meta, dict) else {}
+        for candidate in (
+            data.get("snapshot_coverage_pct"),
+            meta_dict.get("coverage_pct") if "coverage_pct" in meta_dict else None,
+            data.get("coverage_fresh_pct"),
+            data.get("coverage_pct"),
+        ):
+            if (
+                candidate is not None
+                and not isinstance(candidate, bool)
+                and isinstance(candidate, (int, float))
+                and math.isfinite(candidate)
+                and 0.0 <= float(candidate) <= 100.0
+            ):
+                return float(candidate)
+        return None
+
+    @staticmethod
+    def _snapshot_streak_warn_threshold() -> int:
+        raw = os.environ.get("DISK_MAGICIAN_SNAPSHOT_LOW_COVERAGE_STREAK_WARN", "3").strip()
+        try:
+            val = int(raw)
+            return val if val >= 1 else 3
+        except ValueError:
+            return 3
+
+    def _evaluate_snapshot_coverage_streak(self) -> Dict[str, Any]:
+        """Count consecutive committed snapshots in snapshots/disk_snapshot.json with coverage < 70%."""
+        threshold = self._snapshot_streak_warn_threshold()
+        consecutive_below_70 = 0
+        if (self.state_repo / ".git").exists():
+            limit = max(20, threshold * 2)
+            try:
+                proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(self.state_repo),
+                        "log",
+                        f"-n{limit}",
+                        "--format=%H",
+                        "--",
+                        "snapshots/disk_snapshot.json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    for sha in proc.stdout.strip().splitlines():
+                        sha = sha.strip()
+                        if not sha:
+                            continue
+                        show_proc = subprocess.run(
+                            [
+                                "git",
+                                "-C",
+                                str(self.state_repo),
+                                "show",
+                                f"{sha}:snapshots/disk_snapshot.json",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                        )
+                        if show_proc.returncode != 0 or not show_proc.stdout.strip():
+                            break
+                        try:
+                            snap_obj = json.loads(show_proc.stdout)
+                        except ValueError:
+                            break
+                        cov = self._extract_snapshot_coverage_pct(snap_obj)
+                        if cov is not None and cov < 70.0:
+                            consecutive_below_70 += 1
+                        else:
+                            break
+            except Exception:
+                pass
+
+        streak_degraded = consecutive_below_70 >= threshold
+        return {
+            "status": "warn" if streak_degraded else "ok",
+            "degraded": streak_degraded,
+            "consecutive_below_70": consecutive_below_70,
+            "threshold": threshold,
+            "gate_pct": 70.0,
+            "reason": (
+                f"consecutive_snapshots_below_70_gate ({consecutive_below_70} >= {threshold})"
+                if streak_degraded
+                else "snapshot_coverage_streak_healthy"
+            ),
+        }
+
     def evaluate_measurement(self) -> Dict[str, Any]:
         """Evaluate disk_snapshot.json measurement freshness, coverage, and completeness."""
         snapshot_file = self.state_repo / "snapshots" / "disk_snapshot.json"
+        streak_info = self._evaluate_snapshot_coverage_streak()
         if not snapshot_file.exists():
             return make_result(
                 status=STATUS_UNKNOWN,
                 reason="disk_snapshot_missing",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         data, err = read_json_file(snapshot_file)
@@ -440,6 +543,7 @@ class DiskStatusEvaluator:
                 reason=f"disk_snapshot_malformed: {err}",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         if not isinstance(data, dict):
@@ -448,6 +552,7 @@ class DiskStatusEvaluator:
                 reason="disk_snapshot_not_object",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         if data.get("schema_version") not in (None, 1, 2):
@@ -456,6 +561,7 @@ class DiskStatusEvaluator:
                 reason=f"unsupported_snapshot_schema_version: {data.get('schema_version')}",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         meta = data.get("snapshot_metadata")
@@ -465,6 +571,7 @@ class DiskStatusEvaluator:
                 reason="snapshot_metadata_not_object",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
         meta_dict = meta if isinstance(meta, dict) else {}
 
@@ -477,6 +584,7 @@ class DiskStatusEvaluator:
                 reason="snapshot_timestamp_missing_or_invalid",
                 owner="disk_snapshot",
                 source=str(snapshot_file),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         if captured_dt > self.now + timedelta(minutes=5):
@@ -486,6 +594,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         # Check coverage
@@ -507,7 +616,10 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                details={"coverage_fresh_pct": cov_fresh},
+                details={
+                    "coverage_fresh_pct": cov_fresh,
+                    "snapshot_coverage_streak_below_gate": streak_info,
+                },
             )
 
         # Measurement status: authoritative nested field in snapshot_metadata
@@ -522,6 +634,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         if not isinstance(raw_status, str) or raw_status not in ("complete", "partial", "timeout", "empty"):
@@ -531,6 +644,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
 
         # Budget exhausted: authoritative nested field in snapshot_metadata
@@ -545,6 +659,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
         budget_exhausted = bool(raw_budget)
 
@@ -556,6 +671,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
         carried_keys = carried_keys or []
 
@@ -567,6 +683,7 @@ class DiskStatusEvaluator:
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"snapshot_coverage_streak_below_gate": streak_info},
             )
         unmeasured_keys = unmeasured_keys or []
 
@@ -577,6 +694,7 @@ class DiskStatusEvaluator:
             "carried_keys_count": len(carried_keys),
             "unmeasured_keys_count": len(unmeasured_keys),
             "measurement_budget_exhausted": budget_exhausted,
+            "snapshot_coverage_streak_below_gate": streak_info,
         }
 
         # Age check (max 48 hours for measurement snapshot)
@@ -591,9 +709,28 @@ class DiskStatusEvaluator:
             )
 
         if cov_fresh < 70.0:
+            reason = f"coverage_below_floor ({cov_fresh:.1f}% < 70.0%)"
+            if streak_info["degraded"]:
+                reason += (
+                    f"; snapshot_coverage_streak_below_gate "
+                    f"(consecutive_below_70={streak_info['consecutive_below_70']} >= {streak_info['threshold']})"
+                )
             return make_result(
                 status=STATUS_DEGRADED,
-                reason=f"coverage_below_floor ({cov_fresh:.1f}% < 70.0%)",
+                reason=reason,
+                owner="disk_snapshot",
+                source=str(snapshot_file),
+                time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details=details,
+            )
+
+        if streak_info["degraded"]:
+            return make_result(
+                status=STATUS_DEGRADED,
+                reason=(
+                    f"snapshot_coverage_streak_below_gate "
+                    f"(consecutive_below_70={streak_info['consecutive_below_70']} >= {streak_info['threshold']})"
+                ),
                 owner="disk_snapshot",
                 source=str(snapshot_file),
                 time=captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -803,6 +940,7 @@ class DiskStatusEvaluator:
             partial_data = data
 
         if not strict_data:
+            window_info_missing = self._evaluate_ledger_30d_window(None, None)
             if partial_data:
                 return make_result(
                     status=STATUS_DEGRADED,
@@ -811,7 +949,11 @@ class DiskStatusEvaluator:
                     source=str(partial_file),
                     paths=paths,
                     time=partial_data.get("captured_at"),
-                    details={"canonical": False, "publication_kind": "partial"},
+                    details={
+                        "canonical": False,
+                        "publication_kind": "partial",
+                        "ledger_30d_window_degraded": window_info_missing,
+                    },
                 )
             return make_result(
                 status=STATUS_UNKNOWN,
@@ -819,7 +961,10 @@ class DiskStatusEvaluator:
                 owner="topdown_ledger",
                 source=str(strict_ledger_file),
                 paths=paths,
-                details={"canonical": False},
+                details={
+                    "canonical": False,
+                    "ledger_30d_window_degraded": window_info_missing,
+                },
             )
 
         # Parse timestamps for comparison
@@ -831,6 +976,7 @@ class DiskStatusEvaluator:
                 owner="topdown_ledger",
                 source=str(strict_ledger_file),
                 paths=paths,
+                details={"ledger_30d_window_degraded": self._evaluate_ledger_30d_window(None, None)},
             )
 
         if strict_artifact_dt > self.now + timedelta(minutes=5):
@@ -841,6 +987,7 @@ class DiskStatusEvaluator:
                 source=str(strict_ledger_file),
                 paths=paths,
                 time=strict_artifact_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                details={"ledger_30d_window_degraded": self._evaluate_ledger_30d_window(strict_artifact_dt, None)},
             )
 
         sidecar_status = sidecar_data.get("status") if sidecar_data else None
@@ -864,6 +1011,8 @@ class DiskStatusEvaluator:
             except Exception:
                 pass
 
+        window_info = self._evaluate_ledger_30d_window(strict_artifact_dt, git_commit_dt)
+
         details = {
             "canonical": True,
             "schema_version": 2,
@@ -871,6 +1020,7 @@ class DiskStatusEvaluator:
             "git_commit_time": git_commit_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if git_commit_dt else None,
             "sidecar_status": sidecar_status,
             "partial_time": partial_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if partial_dt else None,
+            "ledger_30d_window_degraded": window_info,
         }
 
         if git_commit_dt is None:
@@ -933,6 +1083,86 @@ class DiskStatusEvaluator:
             time=effective_strict.strftime("%Y-%m-%dT%H:%M:%SZ"),
             details=details,
         )
+
+    def _evaluate_ledger_30d_window(
+        self,
+        strict_artifact_dt: Optional[datetime],
+        git_commit_dt: Optional[datetime],
+    ) -> Dict[str, Any]:
+        """Evaluate 30-day commit density, time span, and freshness for ledger/topdown-5g.json."""
+        commits_30d = 0
+        span_hours_30d = 0.0
+        cutoff_30d = self.now - timedelta(days=30)
+        upper_bound = self.now + timedelta(minutes=5)
+
+        if (self.state_repo / ".git").exists():
+            try:
+                proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(self.state_repo),
+                        "log",
+                        "-n100",
+                        "--format=%H:%ct",
+                        "--",
+                        "ledger/topdown-5g.json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    window_dts: List[datetime] = []
+                    for line in proc.stdout.strip().splitlines():
+                        if ":" not in line:
+                            continue
+                        _, ct_str = line.split(":", 1)
+                        try:
+                            dt = datetime.fromtimestamp(int(ct_str.strip()), tz=timezone.utc)
+                        except (ValueError, OSError):
+                            continue
+                        if cutoff_30d <= dt <= upper_bound:
+                            window_dts.append(dt)
+                    commits_30d = len(window_dts)
+                    if len(window_dts) >= 2:
+                        span_hours_30d = max(
+                            0.0,
+                            (max(window_dts) - min(window_dts)).total_seconds() / 3600.0,
+                        )
+            except Exception:
+                pass
+
+        newest_age_hours: Optional[float] = None
+        if git_commit_dt is not None:
+            head_dt = min(strict_artifact_dt, git_commit_dt) if strict_artifact_dt else git_commit_dt
+            newest_age_hours = round(max(0.0, (self.now - head_dt).total_seconds() / 3600.0), 2)
+
+        floor_30d_is_head = bool(commits_30d < 2 or span_hours_30d < 24.0)
+        stale_newest = newest_age_hours is None or newest_age_hours > self.strict_ledger_max_age_hours
+        window_degraded = bool(floor_30d_is_head or stale_newest)
+
+        if newest_age_hours is None:
+            reason = "no_committed_ledger_history"
+        elif newest_age_hours > self.strict_ledger_max_age_hours:
+            reason = f"newest_commit_stale ({newest_age_hours:.1f}h > {self.strict_ledger_max_age_hours:.1f}h)"
+        elif commits_30d < 2:
+            reason = f"insufficient_commits_30d ({commits_30d} < 2)"
+        elif span_hours_30d < 24.0:
+            reason = f"window_span_under_24h ({span_hours_30d:.1f}h < 24.0h)"
+        else:
+            reason = "ledger_30d_window_healthy"
+
+        return {
+            "status": "warn" if window_degraded else "ok",
+            "degraded": window_degraded,
+            "commits_30d": commits_30d,
+            "span_hours_30d": round(span_hours_30d, 2),
+            "newest_age_hours": newest_age_hours,
+            "floor_30d_is_head": floor_30d_is_head,
+            "reason": reason,
+        }
 
     def evaluate_action_outcome(self) -> Dict[str, Any]:
         """Evaluate action outcomes across snapshot_commit, pressure_sweep, and tmp_scratch_sweep."""
@@ -1856,10 +2086,15 @@ class DiskStatusEvaluator:
 
         if publication_only:
             pub = self.evaluate_publication()
+            pub_window = (
+                (pub.get("details") or {}).get("ledger_30d_window_degraded")
+                or self._evaluate_ledger_30d_window(None, None)
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "checked_at": checked_at,
                 "status": pub["status"],
+                "ledger_30d_window_degraded": pub_window,
                 "dimensions": {
                     "publication": pub,
                 },
@@ -1889,6 +2124,15 @@ class DiskStatusEvaluator:
             source=str(self.state_dir / "worktree_leases"),
         )
 
+        streak_info = (
+            (measurement.get("details") or {}).get("snapshot_coverage_streak_below_gate")
+            or self._evaluate_snapshot_coverage_streak()
+        )
+        window_info = (
+            (pub.get("details") or {}).get("ledger_30d_window_degraded")
+            or self._evaluate_ledger_30d_window(None, None)
+        )
+
         # Overall rollup:
         # Any invalid -> invalid
         # Else any degraded -> degraded
@@ -1908,6 +2152,8 @@ class DiskStatusEvaluator:
             "schema_version": SCHEMA_VERSION,
             "checked_at": checked_at,
             "status": overall,
+            "snapshot_coverage_streak_below_gate": streak_info,
+            "ledger_30d_window_degraded": window_info,
             "dimensions": dimensions,
             "worktrees": worktrees,
         }
@@ -1949,7 +2195,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     result = evaluator.evaluate(publication_only=args.publication_only)
     import budget_status  # governor alerts (plan Task 10) print before any accounting
-    alerts = [] if args.publication_only else budget_status.alerts(evaluator.state_dir, evaluator.now.timestamp())
+    alerts = [] if args.publication_only else list(budget_status.alerts(evaluator.state_dir, evaluator.now.timestamp()))
+
+    streak_info = result.get("snapshot_coverage_streak_below_gate")
+    if isinstance(streak_info, dict) and streak_info.get("status") == "warn":
+        alerts.append(
+            f"ALERT:snapshot_coverage_streak_below_gate status=warn "
+            f"consecutive_below_70={streak_info.get('consecutive_below_70')} "
+            f"threshold={streak_info.get('threshold')}"
+        )
+
+    window_info = result.get("ledger_30d_window_degraded")
+    if isinstance(window_info, dict) and window_info.get("status") == "warn":
+        alerts.append(
+            f"WARN:ledger_30d_window_degraded status=warn "
+            f"commits_30d={window_info.get('commits_30d')} "
+            f"span_hours_30d={window_info.get('span_hours_30d')} "
+            f"newest_age_hours={window_info.get('newest_age_hours')} "
+            f"reason={window_info.get('reason')}"
+        )
+
     result["alerts"] = alerts
 
     if args.json:
