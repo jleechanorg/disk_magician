@@ -33,6 +33,11 @@ class LsofStderrIncompleteTest(unittest.TestCase):
         err = b"lsof: WARNING: can't stat() fuse file system /private/tmp\n"
         self.assertTrue(q.lsof_stderr_incomplete(err, self.QUERY))
 
+    def test_mount_path_with_spaces_is_relevant(self):
+        # A mount path may contain spaces; the parser must capture the whole path.
+        err = b"lsof: WARNING: can't stat() fuse file system /mnt/my disk\n"
+        self.assertTrue(q.lsof_stderr_incomplete(err, "/mnt/my disk/sub/.dm-quarantine/abc"))
+
     def test_unknown_stderr_is_incomplete(self):
         self.assertTrue(q.lsof_stderr_incomplete(b"lsof: some other error\n", self.QUERY))
 

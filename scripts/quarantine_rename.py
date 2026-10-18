@@ -202,7 +202,7 @@ def index_mark_terminal(qid, outcome):
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
 # Linux lsof always warns about mounts it cannot stat() (tracefs, snapd); that
 # cannot hide a user of the queried path. Any other stderr line is incomplete.
-LSOF_CANT_STAT = re.compile(rb"^lsof: WARNING: can't stat\(\) [^ ]+ file system (\S+)")
+LSOF_CANT_STAT = re.compile(rb"^lsof: WARNING: can't stat\(\) \S+ file system (.+)$")
 LSOF_INCOMPLETE = re.compile(rb"^\s*Output information may be incomplete\.$")
 def lsof_stderr_incomplete(err, query):
     # A warning about a mount that COULD contain the queried path means the scan
@@ -216,8 +216,8 @@ def lsof_stderr_incomplete(err, query):
             continue
         m = LSOF_CANT_STAT.match(line)
         if m:
-            fs = os.fsdecode(m.group(1))
-            fs_norm = fs.rstrip("/") or "/"
+            fs = os.fsdecode(m.group(1)).strip()
+            fs_norm = os.path.realpath(fs).rstrip("/") or "/"
             if fs_norm == "/" or query_real == fs_norm or query_real.startswith(fs_norm + "/"):
                 return True
             continue
