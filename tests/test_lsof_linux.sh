@@ -21,14 +21,13 @@ if [[ -d /proc/self ]]; then
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   input=$(printf 'n/proc/1/cwd (readlink: Permission denied)\nn/proc/%s/cwd (readlink: Permission denied)\nn/proc/%s/cwd (readlink: Permission denied)\nn/home/x\n' "$dead" "$own")
   out=$(lsof_drop_foreign_denied <<<"$input" 2>/dev/null)
-  if [[ "$(stat -c %u /proc/1)" != "$(id -u)" ]]; then
-    grep -q '^n/proc/1/cwd' <<<"$out" && bad "foreign (pid 1) denied line kept" || ok "foreign denied line dropped"
-  fi
+  grep -q '^n/proc/1/cwd' <<<"$out" && ok "live other-user denied line kept (fail closed)" || bad "live other-user denied line dropped without approval"
   grep -q "^n/proc/$dead/cwd" <<<"$out" && bad "exited pid line kept" || ok "exited pid line dropped"
   grep -q "^n/proc/$own/cwd" <<<"$out" && ok "own denied line kept (fail closed)" || bad "own denied line dropped without approval"
   grep -qx 'n/home/x' <<<"$out" && ok "normal cwd record passes through" || bad "normal cwd record lost"
   out=$(DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 lsof_drop_foreign_denied <<<"$input" 2>/dev/null)
   grep -q "^n/proc/$own/cwd" <<<"$out" && bad "approved own denied line kept" || ok "explicit approval drops own denied line"
+  grep -q '^n/proc/1/cwd' <<<"$out" && bad "approved other-user denied line kept" || ok "explicit approval drops other-user denied line"
   kill "$own" 2>/dev/null
 fi
 

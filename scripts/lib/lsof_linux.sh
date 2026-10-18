@@ -2,10 +2,11 @@
 # lsof_linux.sh — Linux-aware interpretation of `lsof -d cwd` for live-cwd gates.
 #
 # On Linux an unprivileged lsof always (1) warns that it cannot stat() some
-# mounts (tracefs, snapd namespaces) and (2) reports other users' processes as
-# "/proc/<pid>/cwd (readlink: Permission denied)". Neither hides a cwd this
-# user could be removing, so treating them as an incomplete scan blocks every
-# cleanup forever. Everything else still fails closed.
+# mounts (tracefs, snapd namespaces), which cannot hide a cwd, and (2) reports
+# processes it cannot inspect as "/proc/<pid>/cwd (readlink: Permission
+# denied)". (1) is ignored; (2) stays unknown unless the process exited or an
+# operator explicitly approves uninspectable processes. Everything else still
+# fails closed.
 
 # lsof_stderr_incomplete <stderr text>: rc 0 when any line is not a mount-stat
 # warning or its "Output information may be incomplete." trailer.
@@ -27,18 +28,17 @@ lsof_drop_foreign_denied() {
 }
 
 # lsof_denied_ignorable "/proc/<pid>/cwd (readlink: Permission denied)": rc 0
-# when that hidden cwd cannot be this user's live use: the process exited,
-# belongs to another uid, or is an own process approved via
-# DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1. Own processes are reported on stderr.
+# only when that hidden cwd cannot be live: the process has exited, or the
+# operator approved uninspectable processes with
+# DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1. Any live process whose cwd cannot be
+# read (another user's, or this user's non-dumpable/setuid one) is otherwise
+# unknown, and is reported on stderr. Without procfs nothing can be classified.
 lsof_denied_ignorable() {
-  local pid owner
+  local pid
   [[ "$1" =~ ^/proc/([0-9]+)/cwd\ \(readlink:\ Permission\ denied\)$ ]] || return 1
   pid="${BASH_REMATCH[1]}"
-  [[ -d /proc/self ]] || return 1  # no procfs (macOS): cannot classify, keep
+  [[ -d /proc/self ]] || return 1
   [[ -e "/proc/$pid" ]] || return 0
-  owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
-  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
-  [[ "$owner" != "$(id -u)" ]] && return 0
-  echo "lsof: own process $pid hides its cwd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
+  echo "lsof: process $pid hides its cwd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
   [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED:-}" == 1 ]]
 }
