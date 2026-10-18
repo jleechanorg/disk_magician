@@ -91,4 +91,40 @@ printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/lsof"
 OUT="$(env -i HOME="$T/home" PATH="$T/fakebin:/usr/bin:/bin:/usr/sbin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 check "failing lsof refuses" "cwd unknown, refusing" "$OUT"
 
+# Nested rebuildable caches (depth >= 2): a target/ or node_modules/ is stripped
+# only when its parent dir holds the manifest that produces it (Cargo.toml or
+# package.json). A dir that merely shares the name is preserved.
+git -C "$T/base" worktree add -q -b "b-nested" "$T/roots/nested"
+mkdir -p "$T/roots/nested/daemon/target/debug"
+echo 'fn main() {}' > "$T/roots/nested/daemon/Cargo.toml"
+echo bin > "$T/roots/nested/daemon/target/debug/app"
+mkdir -p "$T/roots/nested/not_build/target/debug"
+echo bin > "$T/roots/nested/not_build/target/debug/app"
+# A workspace-root manifest does not authorize nested targets; only the sibling
+# manifest beside the dir proves it is cargo build output.
+echo '[workspace]' > "$T/roots/nested/Cargo.toml"
+mkdir -p "$T/roots/nested/target/debug"
+echo bin > "$T/roots/nested/target/debug/app"
+mkdir -p "$T/roots/nested/app/node_modules/left-pad"
+echo '{}' > "$T/roots/nested/app/package.json"
+echo dep > "$T/roots/nested/app/node_modules/left-pad/index.js"
+# A symlinked parent is not traversed, even though the external tree has a manifest.
+mkdir -p "$T/external_daemon/target/debug"
+echo 'fn main() {}' > "$T/external_daemon/Cargo.toml"
+echo bin > "$T/external_daemon/target/debug/app"
+ln -s "$T/external_daemon" "$T/roots/nested/linked_daemon"
+/usr/bin/find "$T/roots/nested" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
+check "nested daemon/target (Cargo.toml sibling) listed" "$T/roots/nested/daemon/target" "$OUT"
+check "nested node_modules (package.json sibling) listed" "$T/roots/nested/app/node_modules" "$OUT"
+[[ "$OUT" != *"$T/roots/nested/not_build/target"* ]] && ok "nested target without a Cargo.toml sibling preserved" || bad "manifest-less nested target listed"
+check "root target with Cargo.toml still listed" "$T/roots/nested/target" "$OUT"
+[[ "$OUT" != *"linked_daemon"* && "$OUT" != *"$T/external_daemon/target"* ]] && ok "symlinked nested parent not traversed" || bad "symlinked nested parent traversed"
+OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+[[ ! -e "$T/roots/nested/daemon/target" && -f "$T/roots/nested/daemon/Cargo.toml" ]] && ok "nested daemon/target removed, manifest kept" || bad "nested daemon/target not removed"
+[[ ! -e "$T/roots/nested/app/node_modules" && -f "$T/roots/nested/app/package.json" ]] && ok "nested node_modules removed, package.json kept" || bad "nested node_modules not removed"
+[[ -f "$T/roots/nested/not_build/target/debug/app" ]] && ok "manifest-less nested target survives --clean" || bad "manifest-less nested target removed"
+[[ ! -e "$T/roots/nested/target" && -f "$T/roots/nested/Cargo.toml" ]] && ok "root target removed beside its Cargo.toml" || bad "root target not removed"
+[[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
+
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]
