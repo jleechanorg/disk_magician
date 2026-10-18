@@ -41,13 +41,201 @@ def _run_bounded(argv, *, cwd=None, env=None, cap=None, deadline=None, step="che
         return None
     return p.returncode, out
 
+def _touches_root(path, root_real):
+    if not path:
+        return True
+    queue, seen = [os.path.abspath(path)], set()
+    prefix = root_real.rstrip(os.sep) + os.sep
+    while queue:
+        curr = queue.pop()
+        if curr in seen:
+            continue
+        seen.add(curr)
+        real = os.path.realpath(curr)
+        if real == root_real or real.startswith(prefix):
+            return True
+        if os.path.islink(curr):
+            try:
+                target = os.readlink(curr)
+            except OSError:
+                return True
+            queue.append(os.path.abspath(os.path.join(os.path.dirname(curr), target)))
+        parent = os.path.dirname(curr)
+        if parent != curr:
+            queue.append(parent)
+    return False
+
+def _unquote_alt_line(line):
+    if not line.startswith(b'"'):
+        return line
+    if len(line) < 2 or not line.endswith(b'"'):
+        return None
+    body, out, i = line[1:-1], bytearray(), 0
+    escapes = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10,
+               ord("r"): 13, ord("t"): 9, ord("v"): 11, ord("\\"): 92, ord('"'): 34}
+    while i < len(body):
+        ch = body[i]
+        if ch != 92:
+            out.append(ch)
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            return None
+        esc = body[i]
+        if esc in escapes:
+            out.append(escapes[esc])
+            i += 1
+        elif 48 <= esc <= 55:
+            oct_digits = bytes([esc])
+            i += 1
+            for _ in range(2):
+                if i < len(body) and 48 <= body[i] <= 55:
+                    oct_digits += bytes([body[i]])
+                    i += 1
+                else:
+                    break
+            val = int(oct_digits, 8)
+            if val > 255:
+                return None
+            out.append(val)
+        else:
+            return None
+    return bytes(out)
+
+def _resolve_gitdir(lp, root_real):
+    cand = lp
+    if not os.path.lexists(cand) and not cand.endswith(".git") and os.path.lexists(cand + ".git"):
+        cand = cand + ".git"
+    if _touches_root(cand, root_real) or not os.path.exists(cand):
+        return None, None
+    if os.path.isfile(cand):
+        try:
+            raw = open(cand, "rb").read().splitlines()
+        except OSError:
+            return None, None
+        if not raw or not raw[0].startswith(b"gitdir: "):
+            return None, None
+        target = os.fsdecode(raw[0][8:].rstrip(b"\r"))
+        if not target:
+            return None, None
+        gitdir = os.path.join(os.path.dirname(cand), target)
+    elif os.path.isdir(cand):
+        dotgit = os.path.join(cand, ".git")
+        if os.path.lexists(dotgit):
+            if _touches_root(dotgit, root_real):
+                return None, None
+            if os.path.isdir(dotgit):
+                gitdir = dotgit
+            elif os.path.isfile(dotgit):
+                try:
+                    raw = open(dotgit, "rb").read().splitlines()
+                except OSError:
+                    return None, None
+                if not raw or not raw[0].startswith(b"gitdir: "):
+                    return None, None
+                target = os.fsdecode(raw[0][8:].rstrip(b"\r"))
+                if not target:
+                    return None, None
+                gitdir = os.path.join(cand, target)
+            else:
+                return None, None
+        else:
+            gitdir = cand
+    else:
+        return None, None
+    if _touches_root(gitdir, root_real) or not os.path.isdir(gitdir):
+        return None, None
+    cfile = os.path.join(gitdir, "commondir")
+    if os.path.lexists(cfile):
+        if _touches_root(cfile, root_real) or not os.path.isfile(cfile):
+            return None, None
+        try:
+            raw_cd = open(cfile, "rb").read().rstrip(b"\r\n")
+        except OSError:
+            return None, None
+        if not raw_cd:
+            return None, None
+        commondir = os.path.join(gitdir, os.fsdecode(raw_cd))
+        if _touches_root(commondir, root_real) or not os.path.isdir(commondir):
+            return None, None
+    else:
+        commondir = gitdir
+    return gitdir, commondir
+
+def _local_remote_ok(lp, root):
+    if not root or not lp or not lp.startswith("/"):
+        return False
+    root_real = os.path.realpath(root)
+    gitdir, commondir = _resolve_gitdir(lp, root_real)
+    if not gitdir or not commondir:
+        return False
+    for base in (gitdir, commondir):
+        for entry in ("HEAD", "refs", "packed-refs", "objects"):
+            p = os.path.join(base, entry)
+            if os.path.lexists(p) and _touches_root(p, root_real):
+                return False
+    obj_queue = [os.path.join(commondir, "objects")]
+    if os.path.lexists(os.path.join(gitdir, "objects")):
+        obj_queue.append(os.path.join(gitdir, "objects"))
+    seen_obj = set()
+    while obj_queue:
+        obj_dir = obj_queue.pop()
+        if _touches_root(obj_dir, root_real) or not os.path.isdir(obj_dir):
+            return False
+        for enc in (os.path.dirname(os.path.abspath(obj_dir)), os.path.dirname(os.path.realpath(obj_dir))):
+            cf = os.path.join(enc, "commondir")
+            if os.path.lexists(cf):
+                if _touches_root(cf, root_real) or not os.path.isfile(cf):
+                    return False
+                try:
+                    rcd = open(cf, "rb").read().rstrip(b"\r\n")
+                except OSError:
+                    return False
+                if not rcd:
+                    return False
+                cd_target = os.path.join(enc, os.fsdecode(rcd))
+                if _touches_root(cd_target, root_real) or not os.path.isdir(cd_target):
+                    return False
+                cd_objs = os.path.join(cd_target, "objects")
+                if os.path.lexists(cd_objs):
+                    obj_queue.append(cd_objs)
+        real_obj = os.path.realpath(obj_dir)
+        if real_obj in seen_obj:
+            continue
+        seen_obj.add(real_obj)
+        info_dir = os.path.join(obj_dir, "info")
+        if os.path.lexists(info_dir) and _touches_root(info_dir, root_real):
+            return False
+        alt_file = os.path.join(obj_dir, "info", "alternates")
+        if not os.path.lexists(alt_file):
+            continue
+        if _touches_root(alt_file, root_real) or not os.path.isfile(alt_file):
+            return False
+        try:
+            raw_alt = open(alt_file, "rb").read()
+        except OSError:
+            return False
+        for raw_line in raw_alt.split(b"\n"):
+            line = raw_line[:-1] if raw_line.endswith(b"\r") else raw_line
+            if not line or line.startswith(b"#"):
+                continue
+            parsed = _unquote_alt_line(line)
+            if parsed is None or not parsed:
+                return False
+            alt_path = os.fsdecode(parsed)
+            if os.path.isabs(alt_path):
+                obj_queue.append(alt_path)
+            else:
+                if _touches_root(os.path.join(obj_dir, alt_path), root_real):
+                    return False
+                obj_queue.append(os.path.join(real_obj, alt_path))
+    return True
+
 def lsremote(url, root, deadline=None):
     lp = local_path(url)
-    if lp is not None:
-        r = os.path.realpath(root)
-        p = os.path.realpath(lp) if lp.startswith("/") else r
-        if p == r or p.startswith(r.rstrip("/") + "/"):
-            return 1
+    if lp is not None and not _local_remote_ok(lp, root):
+        return 1
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/usr/bin/false", SSH_ASKPASS="/usr/bin/false")
     result = _run_bounded(["git", "ls-remote", url], cwd="/", env=env, cap=30,
