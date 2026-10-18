@@ -46,7 +46,10 @@ wrh_live_cwd_reason() {
     err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
     out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
-    [[ ! -s $err ]] || rc=1
+    # Linux lsof always warns about mounts it cannot stat() (tracefs, snapd
+    # namespaces); that cannot hide a process cwd. Any other stderr line still
+    # marks the scan incomplete.
+    if [[ -s $err ]] && grep -qvE "^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$" "$err"; then rc=1; fi
     [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
     [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     while IFS= read -r line; do case $line in

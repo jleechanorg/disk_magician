@@ -537,6 +537,25 @@ tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "descriptor before pid unknown re
 
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
+echo "== case 36b: Linux lsof mount-stat warnings alone do not make cwd unknown =="
+add_wt linux-mount-warn worktree-linux-mount-warn
+printf 'p100\nfcwd\nn/\np200\nfcwd\nn/tmp\n' >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can\'t stat() tmpfs file system /run/snapd/ns\n      Output information may be incomplete.'
+run_hook "$(json "$WTROOT/linux-mount-warn")"; rc=$?
+assert_eq "$rc" "0" "linux mount-warning exit code"
+[[ ! -e "$WTROOT/linux-mount-warn" ]] && ok "linux mount-warning worktree removed" || bad "linux mount-warning worktree kept"
+tail -n 2 "$LOG" | grep -q "cwd-unknown" && bad "linux mount-warning logged cwd-unknown" || ok "linux mount-warning did not log cwd-unknown"
+
+echo "== case 36c: a mount-stat warning plus any other warning still fails closed =="
+add_wt linux-mixed-warn worktree-linux-mixed-warn
+printf 'p100\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can\'t open /proc/4242/fd: Permission denied'
+run_hook "$(json "$WTROOT/linux-mixed-warn")"; rc=$?
+[[ -d "$WTROOT/linux-mixed-warn" ]] && ok "mixed-warning worktree kept" || bad "mixed-warning worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "mixed-warning visibility remains unknown" || bad "mixed-warning visibility was trusted"
+unset FAKE_LSOF_STDERR
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
 echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
 add_wt verdict-clean worktree-verdict-clean
 V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7' _ "$SCRIPT" "$WTROOT/verdict-clean")"
