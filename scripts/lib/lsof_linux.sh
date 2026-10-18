@@ -34,6 +34,7 @@ lsof_denied_ignorable() {
   local pid owner
   [[ "$1" =~ ^/proc/([0-9]+)/cwd\ \(readlink:\ Permission\ denied\)$ ]] || return 1
   pid="${BASH_REMATCH[1]}"
+  [[ -d /proc/self ]] || return 1  # no procfs (macOS): cannot classify, keep
   [[ -e "/proc/$pid" ]] || return 0
   owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
   [[ "$owner" =~ ^[0-9]+$ ]] || return 1

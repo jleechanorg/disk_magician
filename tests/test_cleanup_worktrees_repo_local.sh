@@ -345,11 +345,14 @@ assert_contains "lsof warning on stderr preserved" ".worktrees/r/old | cwd-unkno
 assert_not_contains "lsof warning: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_WARNING" || true)"
 
 # Regression: Zero-status lsof with large output (>64KB pipe buffer) and unresolved record near start
+# The unresolved record names this test's own live pid so it stays unresolvable
+# on Linux too (an exited or other-uid pid is legitimately ignorable there).
+export FAKE_OWN_PID=$$
 cat > "$FAKE_BIN/lsof" <<'SH'
 #!/bin/sh
-echo "p999"
+echo "p$FAKE_OWN_PID"
 echo "fcwd"
-echo "n/proc/999/cwd (readlink: Permission denied)"
+echo "n/proc/$FAKE_OWN_PID/cwd (readlink: Permission denied)"
 for i in $(seq 1 1000); do
   echo "p$i"
   echo "fcwd"
