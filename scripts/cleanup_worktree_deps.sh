@@ -19,13 +19,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/ao_worktree_config.sh
+source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/projects_other")
+  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other")
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -78,21 +80,37 @@ fi
 LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$LIVE_CWDS_RAW")"
 [[ -n "$LIVE_CWDS" ]] || { echo "lsof reported no cwd paths: cwd unknown, refusing."; exit 0; }
 
-# AO-owned worktrees: any directory named by worktreeDir in the AO config.
+# AO-owned worktrees: parsed via ao_worktree_dirs (P = project worktreeDir, C = container/default root).
 AO_DIRS=()
+AO_PARENTS=()
 ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
-if [[ -e "$ao_cfg" ]]; then
-  [[ -r "$ao_cfg" ]] || { echo "AO config unreadable: refusing."; exit 0; }
-  while IFS= read -r d; do
-    d="${d//\"/}"; d="${d//\'/}"; d="${d/#\~/$HOME}"; d="${d//\$HOME/$HOME}"; d="${d%/}"
-    [[ -n "$d" ]] && AO_DIRS+=("$d")
-  done < <(sed -n 's/^[[:space:]]*worktreeDir:[[:space:]]*//p' "$ao_cfg")
+if [[ -e "$ao_cfg" || -L "$ao_cfg" ]]; then
+  if [[ ! -f "$ao_cfg" || ! -r "$ao_cfg" ]] || ! ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+    echo "AO config unreadable or invalid: refusing."
+    exit 0
+  fi
+  while read -r kind d; do
+    [[ -n "$d" ]] || continue
+    d="${d/#\~/$HOME}"; d="${d//\$HOME/$HOME}"; d="${d%/}"
+    real_d="$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"
+    if [[ "$kind" == "C" ]]; then
+      AO_PARENTS+=("$d")
+      [[ "$real_d" != "$d" ]] && AO_PARENTS+=("$real_d")
+    else
+      AO_DIRS+=("$d")
+      [[ "$real_d" != "$d" ]] && AO_DIRS+=("$real_d")
+    fi
+  done <<< "$ao_lines"
 fi
 is_ao_owned() {
-  local wt="$1" d
-  [[ "$wt" == *"ao/data/worktrees/"* ]] && return 0
+  local wt="$1" real_wt d
+  real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+  [[ "$wt" == *"ao/data/worktrees/"* || "$real_wt" == *"ao/data/worktrees/"* ]] && return 0
   for d in ${AO_DIRS[@]+"${AO_DIRS[@]}"}; do
-    [[ "$wt" == "$d"/* ]] && return 0
+    [[ "$wt" == "$d" || "$wt" == "$d"/* || "$real_wt" == "$d" || "$real_wt" == "$d"/* ]] && return 0
+  done
+  for d in ${AO_PARENTS[@]+"${AO_PARENTS[@]}"}; do
+    [[ "${wt%/*}" == "$d" || "${real_wt%/*}" == "$d" ]] && return 0
   done
   return 1
 }
@@ -126,15 +144,33 @@ strip_dir() {
   count=$((count + 1))
 }
 
+has_pkg_node_modules() {
+  local wt="$1" pkg_nm
+  [[ ! -L "$wt/packages" ]] || return 1
+  for pkg_nm in "$wt"/packages/*/node_modules; do
+    [[ ! -L "${pkg_nm%/node_modules}" && -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
+  done
+  return 1
+}
+
 for root in "${ROOTS[@]}"; do
-  [[ -d "$root" ]] || continue
+  while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
+  [[ -d "$root" && ! -L "$root" ]] || continue
+  real_root="$(cd "$root" 2>/dev/null && pwd -P)" || continue
   for wt in "$root"/* "$root"/*/*; do
     [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
+    # Resolve only the configured root's aliases; no descendant may redirect us.
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
+    [[ "$real_wt" == "${real_root%/}/${wt#"$root"/}" ]] || continue
     is_ao_owned "$wt" && continue
-    [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || continue
+    [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt" || continue
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
     if is_live "$wt"; then continue; fi
     strip_dir "$wt" "$wt/node_modules"
+    for pkg_nm in "$wt"/packages/*/node_modules; do
+      # A real node_modules leaf may still escape through a symlinked ancestor.
+      [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
+    done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
     strip_dir "$wt" "$wt/.mypy_cache"
   done
