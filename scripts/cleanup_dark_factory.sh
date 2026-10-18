@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cleanup_dark_factory.sh — Retention for dark-factory artifacts, which have
-# no upstream pruning: installed releases, per-run dirs, and df-* AO session
-# homes. Defaults to dry-run; pass --clean to delete.
+# no upstream pruning: installed releases, per-run dirs, df-* AO session
+# homes, and per-run log dirs. Defaults to dry-run; pass --clean to delete.
 #
 # Never deleted: releases referenced by ~/.local/bin symlinks, systemd user
 # units/drop-ins, or a live process; the newest --keep-releases releases;
@@ -19,6 +19,7 @@ DAYS=30
 KEEP_RELEASES=3
 RELEASES_DIR="${HOME}/.local/share/dark-factory/releases"
 RUNS_DIR="${HOME}/.dark-factory/runs"
+LOGS_DIR="${HOME}/Library/Logs/dark-factory"
 SESSIONS_DIR="${HOME}/.ao-sessions"
 BIN_DIR="${HOME}/.local/bin"
 UNIT_DIR="${HOME}/.config/systemd/user"
@@ -28,7 +29,7 @@ usage() {
 Usage: $(basename "$0") [--clean] [--dry-run] [--days N] [--keep-releases N] [-h|--help]
 
   --clean            Actually delete (default: dry-run preview)
-  --days N           Staleness threshold for runs/sessions/releases (default: 30, min 7)
+  --days N           Staleness threshold for runs/logs/sessions/releases (default: 30, min 7)
   --keep-releases N  Always keep the N newest releases (default: 3)
 
 On Linux, --clean refuses while any of your processes hides its cwd/env/open
@@ -55,7 +56,7 @@ DAYS=$((10#$DAYS)); KEEP_RELEASES=$((10#$KEEP_RELEASES))  # leading zeros are no
 
 floor="$(safety_min_stale_days)"
 (( DAYS < floor )) && DAYS="$floor"
-sandbox_guard_roots "$RELEASES_DIR" "$RUNS_DIR" "$SESSIONS_DIR"
+sandbox_guard_roots "$RELEASES_DIR" "$RUNS_DIR" "$SESSIONS_DIR" "$LOGS_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -295,6 +296,23 @@ if root_ok "$RUNS_DIR"; then
     is_stale "$run" || continue
     remove "$run" run "$runs_logical/${run##*/}"
   done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" -print0)
+fi
+
+# --- per-run log dirs (~/Library/Logs/dark-factory/<run>) ---
+# The logs root is everything a run left behind outside its run dir; one child
+# of goal-completion-20260914 alone held a 602 MB .git from a regenerable
+# clone. Same 30d policy as runs/: a run dir with any file modified
+# inside --days is kept, a live process referencing it keeps it, and safety
+# rules keep it. Top-level files in the logs root are not candidates.
+if root_ok "$LOGS_DIR"; then
+  logs_logical="$LOGS_DIR"
+  LOGS_DIR="$(phys "$LOGS_DIR")"
+  while IFS= read -r -d '' run_log; do
+    [[ -L "$run_log" ]] && continue
+    is_live "$run_log" "$logs_logical/${run_log##*/}" && { log "SKIP run log dir (live process): $run_log"; continue; }
+    is_stale "$run_log" || continue
+    remove "$run_log" run_log "$logs_logical/${run_log##*/}"
+  done < <(find "$LOGS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" -print0)
 fi
 
 # --- df-* AO session homes ---

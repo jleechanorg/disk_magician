@@ -319,5 +319,26 @@ E="$T/empty"; mkdir -p "$E/.local/share/dark-factory/releases" "$E/.dark-factory
 check "empty install exits 0" 'HOME="$E" DISK_MAGICIAN_TEST_SANDBOX="$E" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_dark_factory \
   DISK_MAGICIAN_DELETION_LOG="$E/deletions.log" bash "$SCRIPT" --dry-run >/dev/null 2>&1'
 
+echo "Test 19: per-run log dirs under ~/Library/Logs/dark-factory follow the 30d policy"
+H19="$T/h19"; mk7 "$H19"
+LOGS="$H19/Library/Logs/dark-factory"
+mkdir -p "$LOGS/old-run/source/.git" "$LOGS/recent-run" "$LOGS/held-run"
+echo x >"$LOGS/old-run/source/.git/pack"; age "$LOGS/old-run" 60
+echo x >"$LOGS/recent-run/run.log"; age "$LOGS/recent-run" 60; touch "$LOGS/recent-run/run.log"
+echo x >"$LOGS/held-run/run.log"; age "$LOGS/held-run" 60
+echo x >"$LOGS/daemon.jsonl"; age "$LOGS/daemon.jsonl" 60
+run7 "$H19" --dry-run >"$T/t19dry.out" 2>&1 || true
+check "dry-run keeps a stale log run dir" '[[ -d "$LOGS/old-run" ]]'
+check "dry-run reports the log run dir" 'grep -qF "would remove run_log: $(cd -P "$LOGS" && pwd)/old-run" "$T/t19dry.out"'
+sleep 120 <"$LOGS/held-run/run.log" & HOLDER19=$!
+wait_exec "$HOLDER19" "sleep 120"
+run7 "$H19" --clean >"$T/t19.out" 2>&1 || true
+check "stale log run dir removed as a whole (regenerable .git included)" '[[ ! -e "$LOGS/old-run" ]]'
+check "log run dir with a recent file kept" '[[ -d "$LOGS/recent-run" ]]'
+check "log run dir held open by a live process kept" '[[ -d "$LOGS/held-run" ]]'
+check "top-level file in the logs root untouched" '[[ -f "$LOGS/daemon.jsonl" ]]'
+check "log run dir removal is logged" 'grep -q "remove_run_log" "$H19/del.log"'
+kill "$HOLDER19" 2>/dev/null || true
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
