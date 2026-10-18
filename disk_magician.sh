@@ -41,6 +41,7 @@ Commands:
   sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
+  cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
@@ -349,6 +350,9 @@ case "$CMD" in
     ;;
   cleanup_pr_scratch|cleanup-pr-scratch)
     "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
+    ;;
+  cleanup_task_scratch|cleanup-task-scratch)
+    "$SCRIPT_DIR/scripts/cleanup_task_scratch.sh" "$@"
     ;;
   cleanup_codex_documents|cleanup-codex-documents)
     "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"
