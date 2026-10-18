@@ -103,6 +103,20 @@ exit 0
 SH
 check "no cwd records -> unknown" 0
 
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/somewhere-else\np2\nfcwd\n'
+exit 0
+SH
+check "block with no cwd record -> unknown" 0
+
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/x (readlink: Operation not permitted)\n'
+exit 0
+SH
+check "non-permission-denied diagnostic -> unknown" 0
+
 if [[ -d /proc/self ]]; then
     dead=999999; while [[ -e "/proc/$dead" ]]; do dead=$((dead - 1)); done
     cat > "$FB/lsof" <<SH
