@@ -634,7 +634,7 @@ assert_rc "Test 7: exits 0" 0 "$T7_RC"
 assert_contains "Test 7: logs active-use marker skip" "Skipping active-use marker (.in-use present)" "$T7_OUT_CONTENT"
 assert_missing "Test 7: lsof was NOT called because marker skipped it first" "$T7_LSOF_INVOCATION_FILE"
 # Now test an unmarked, stale candidate: lsof IS called directly before archive_path
-rm -rf "$T7_PRIVATE_TMP/marked_large_dir"
+rm -rf "${T7_PRIVATE_TMP:?}/marked_large_dir"
 make_large_dir "$T7_PRIVATE_TMP/stale_large_dir"
 set_old_mtime "$T7_PRIVATE_TMP/stale_large_dir"
 T7_STALE_CANON=$(cd "$T7_PRIVATE_TMP/stale_large_dir" && pwd -P)
@@ -850,6 +850,32 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
 assert_rc "Test 9e (ffp. descriptor): exits 0" 0 $?
 assert_missing "Test 9e: candidate purged because ffp. descriptor parsed cleanly and candidate is closed" "$T9_ARCHIVE/20200101T000000Z"
 assert_not_contains "Test 9e: does not log malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
+
+# 9f: macOS lsof descriptor with leading asterisk (f*000) is accepted and candidate is purged when closed (bead 8lsf)
+reset_t9_archive
+cat > "$T9_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+echo "p908"
+echo "f*000"
+echo "tREG"
+echo "n/some/unrelated/path"
+exit 0
+EOF
+chmod +x "$T9_BIN/lsof"
+run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
+  PATH="$T9_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T9_BIN/lsof" \
+  DISK_MAGICIAN_TIMEOUT_BIN="$T9_BIN/timeout" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T9_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T9_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 9f (f*000 descriptor): exits 0" 0 $?
+assert_missing "Test 9f: candidate purged because f*000 descriptor parsed cleanly and candidate is closed" "$T9_ARCHIVE/20200101T000000Z"
+assert_not_contains "Test 9f: does not log malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 10: Candidate containing control characters/newlines fails closed before lsof
 # ─────────────────────────────────────────────────────────────────────────────

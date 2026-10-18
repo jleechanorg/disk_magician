@@ -281,6 +281,311 @@
       "key": "library_cloudstorage",
       "path": "~/Library/CloudStorage",
       "timeout": 180
+    },
+    {
+      "key": "worktrees_hub",
+      "path": "~/worktrees",
+      "timeout": 180
+    },
+    {
+      "key": "openclaw_prod_bak",
+      "path": "~/.openclaw_prod_bak",
+      "timeout": 120
+    },
+    {
+      "key": "ezgha_operations",
+      "path": "~/.local/state/ezgha-operations",
+      "timeout": 60
+    },
+    {
+      "key": "system_data_volume",
+      "path": "/System/Volumes/Data/System",
+      "timeout": 120
+    },
+    {
+      "key": "library_metadata",
+      "path": "~/Library/Metadata",
+      "timeout": 60
+    },
+    {
+      "key": "library_logs",
+      "path": "~/Library/Logs",
+      "timeout": 60
+    },
+    {
+      "key": "library_webkit",
+      "path": "~/Library/WebKit",
+      "timeout": 60
+    },
+    {
+      "key": "library_pnpm",
+      "path": "~/Library/pnpm",
+      "timeout": 60
+    },
+    {
+      "key": "config_dir",
+      "path": "~/.config",
+      "timeout": 60
+    },
+    {
+      "key": "cmuxterm",
+      "path": "~/.cmuxterm",
+      "timeout": 60
+    },
+    {
+      "key": "gradle",
+      "path": "~/.gradle",
+      "timeout": 60
+    },
+    {
+      "key": "android_dot",
+      "path": "~/.android",
+      "timeout": 60
+    },
+    {
+      "key": "cursor_dot",
+      "path": "~/.cursor",
+      "timeout": 60
+    },
+    {
+      "key": "aside",
+      "path": "~/.aside",
+      "timeout": 60
+    },
+    {
+      "key": "home_applications",
+      "path": "~/Applications",
+      "timeout": 60
+    },
+    {
+      "key": "worldarchitect_root",
+      "path": "~/worldarchitect.ai",
+      "timeout": 60
+    },
+    {
+      "key": "cb_demo",
+      "path": "~/cb-demo",
+      "timeout": 60
+    },
+    {
+      "key": "llm_wiki",
+      "path": "~/llm_wiki",
+      "timeout": 60
+    },
+    {
+      "key": "roadmap",
+      "path": "~/roadmap",
+      "timeout": 60
+    },
+    {
+      "key": "worldarchitect_main_origin",
+      "path": "~/worldarchitect-main-origin",
+      "timeout": 60
+    },
+    {
+      "key": "agent_work",
+      "path": "~/agent-work",
+      "timeout": 60
+    },
+    {
+      "key": "claude_codex_usage",
+      "path": "~/claude-codex-usage",
+      "timeout": 60
+    },
+    {
+      "key": "jleechanorg",
+      "path": "~/jleechanorg",
+      "timeout": 60
+    },
+    {
+      "key": "experiments",
+      "path": "~/experiments",
+      "timeout": 60
+    },
+    {
+      "key": "conductor",
+      "path": "~/conductor",
+      "timeout": 60
+    },
+    {
+      "key": "ez_gh_actions_workdir",
+      "path": "~/ez-gh-actions-workdir",
+      "timeout": 60
+    },
+    {
+      "key": "work_dir",
+      "path": "~/work",
+      "timeout": 60
+    },
+    {
+      "key": "library_biome",
+      "path": "~/Library/Biome",
+      "timeout": 60
+    },
+    {
+      "key": "library_daemon_containers",
+      "path": "~/Library/Daemon Containers",
+      "timeout": 60
+    },
+    {
+      "key": "library_photos",
+      "path": "~/Library/Photos",
+      "timeout": 60
+    },
+    {
+      "key": "library_duet_expert_center",
+      "path": "~/Library/DuetExpertCenter",
+      "timeout": 60
+    },
+    {
+      "key": "cmux_backups",
+      "path": "~/cmux-backups",
+      "timeout": 60
+    },
+    {
+      "key": "worldai_claw_evidence",
+      "path": "~/worldai_claw_evidence",
+      "timeout": 60
+    },
+    {
+      "key": "peekaboo",
+      "path": "~/.peekaboo",
+      "timeout": 60
+    },
+    {
+      "key": "autoresearch_workspace",
+      "path": "~/autoresearch-main-workspace",
+      "timeout": 60
+    },
+    {
+      "key": "home_tmp",
+      "path": "~/tmp",
+      "timeout": 60
+    },
+    {
+      "key": "codex_astra",
+      "path": "~/.codex-astra",
+      "timeout": 60
+    },
+    {
+      "key": "reward_gate_mirrors",
+      "path": "~/reward-gate-mirrors-wz7_rme9",
+      "timeout": 60
+    },
+    {
+      "key": "pi_dot",
+      "path": "~/.pi",
+      "timeout": 60
+    },
+    {
+      "key": "antigravity_dot",
+      "path": "~/.antigravity",
+      "timeout": 60
+    },
+    {
+      "key": "apps_home",
+      "path": "~/Apps",
+      "timeout": 60
+    },
+    {
+      "key": "pw_browsers",
+      "path": "~/.pw-browsers",
+      "timeout": 60
+    },
+    {
+      "key": "openclaw_repo",
+      "path": "~/openclaw-repo",
+      "timeout": 60
+    },
+    {
+      "key": "jleechan_bench",
+      "path": "~/jleechan_bench_workspace",
+      "timeout": 60
+    },
+    {
+      "key": "llm_wiki_autor",
+      "path": "~/llm-wiki-autor-phase3",
+      "timeout": 60
+    },
+    {
+      "key": "agent_orchestrator",
+      "path": "~/.agent-orchestrator",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_agent_fork_backup",
+      "path": "~/hermes-agent-fork-backup-2026-06-28",
+      "timeout": 60
+    },
+    {
+      "key": "claude_skills_archive",
+      "path": "~/.claude_skills_archive_20260827",
+      "timeout": 60
+    },
+    {
+      "key": "agent_browser",
+      "path": "~/.agent-browser",
+      "timeout": 60
+    },
+    {
+      "key": "serena",
+      "path": "~/.serena",
+      "timeout": 60
+    },
+    {
+      "key": "thinclaw",
+      "path": "~/thinclaw",
+      "timeout": 60
+    },
+    {
+      "key": "ios_evidence_realauth",
+      "path": "~/ios_evidence_realauth_20260719",
+      "timeout": 60
+    },
+    {
+      "key": "chrome_codex_automation",
+      "path": "~/.chrome-codex-automation",
+      "timeout": 60
+    },
+    {
+      "key": "fixaudit_frames",
+      "path": "~/fixaudit_frames",
+      "timeout": 60
+    },
+    {
+      "key": "maestro",
+      "path": "~/.maestro",
+      "timeout": 60
+    },
+    {
+      "key": "django_temp",
+      "path": "~/django_temp",
+      "timeout": 60
+    },
+    {
+      "key": "minimax_coding_agent",
+      "path": "~/minimax-coding-agent",
+      "timeout": 60
+    },
+    {
+      "key": "expo",
+      "path": "~/.expo",
+      "timeout": 60
+    },
+    {
+      "key": "cargo",
+      "path": "~/.cargo",
+      "timeout": 60
+    },
+    {
+      "key": "workspaces",
+      "path": "~/workspaces",
+      "timeout": 60
+    },
+    {
+      "key": "luma_scrape",
+      "path": "~/luma-scrape",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
@@ -301,6 +606,66 @@
     {
       "key": "hf_hub_cache",
       "pattern": "~/.cache/huggingface/hub/models--*"
+    },
+    {
+      "key": "wf_checkouts",
+      "pattern": "~/wf_*"
+    },
+    {
+      "key": "wf_derived_data",
+      "pattern": "~/wf*_dd"
+    },
+    {
+      "key": "project_roots",
+      "pattern": "~/project_*"
+    },
+    {
+      "key": "worktrees_dot_dirs",
+      "pattern": "~/*.worktrees"
+    },
+    {
+      "key": "worktrees_dot_prefixes",
+      "pattern": "~/.worktrees-*"
+    },
+    {
+      "key": "cb_wa_checkouts",
+      "pattern": "~/cb-wa-*"
+    },
+    {
+      "key": "worldarchitect_clones",
+      "pattern": "~/worldarchitect*"
+    },
+    {
+      "key": "wa_hyphen_checkouts",
+      "pattern": "~/wa-*"
+    },
+    {
+      "key": "wa_underscore_checkouts",
+      "pattern": "~/wa_*"
+    },
+    {
+      "key": "cb_checkouts",
+      "pattern": "~/cb-*"
+    },
+    {
+      "key": "wt_checkouts",
+      "pattern": "~/wt-*"
+    },
+    {
+      "key": "beads_backups",
+      "pattern": "~/.beads*"
+    },
+    {
+      "key": "openclaw_instances",
+      "pattern": "~/.openclaw*"
+    },
+    {
+      "key": "ao_branches",
+      "pattern": "~/.ao-*"
+    },
+    {
+      "key": "mcp_mail_dirs",
+      "pattern": "~/mcp_mail*"
     }
   ],
   "cleanup_thresholds": {

@@ -117,7 +117,14 @@ for approved_cache in \
   "ms-playwright:$HOME/Library/Caches/ms-playwright" \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
-  "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
+  "codex sparkle updater:$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle" \
+  "bun install cache:$HOME/.bun/install/cache" \
+  "speech model cache:/private/var/tmp/SpeechModelCache" \
+  "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004" \
+  "gradle caches:$HOME/.gradle/caches" \
+  "npm _npx:$HOME/.npm/_npx" \
+  "cargo registry cache:$HOME/.cargo/registry/cache" \
+  "cargo registry src:$HOME/.cargo/registry/src"; do
   clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false
 done
 
@@ -159,9 +166,11 @@ fi
 
 # 5. cursor-agent old versions
 log "=== Section 5: cursor-agent old versions ==="
-CURSOR_VERSIONS_DIR="$HOME/.local/share/cursor-agent/versions"
+for CURSOR_VERSIONS_DIR in \
+  "$HOME/.local/share/cursor-agent/versions" \
+  "$HOME/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/share/cursor-agent/versions"; do
 if [[ ! -d "$CURSOR_VERSIONS_DIR" ]]; then
-  log "cursor-agent versions: directory not found, skipping"
+  log "cursor-agent versions: directory not found ($CURSOR_VERSIONS_DIR), skipping"
 else
   before_kb=$(size_kb "$CURSOR_VERSIONS_DIR")
   log "cursor-agent versions: before $(fmt_kb "$before_kb") ($CURSOR_VERSIONS_DIR)"
@@ -175,12 +184,17 @@ else
   TOTAL_VERSIONS=${#ALL_VERSIONS[@]}
   ACTIVE_AGENT_TARGET=""
   CURSOR_VERSION_CLEANUP_BLOCKED=false
-  if [[ -L "$HOME/.local/bin/agent" ]]; then
-    if ! ACTIVE_AGENT_TARGET="$(resolve_existing_path "$HOME/.local/bin/agent")"; then
-      log "cursor-agent versions: SAFETY-SKIP active agent target could not be resolved"
-      CURSOR_VERSION_CLEANUP_BLOCKED=true
+  CURSOR_BIN_SYMLINK="$(dirname "$(dirname "$(dirname "$CURSOR_VERSIONS_DIR")")")/bin/agent"
+  for agent_link in "$HOME/.local/bin/agent" "$CURSOR_BIN_SYMLINK"; do
+    if [[ -L "$agent_link" ]]; then
+      if ! resolved_target="$(resolve_existing_path "$agent_link")"; then
+        log "cursor-agent versions: SAFETY-SKIP active agent target could not be resolved ($agent_link)"
+        CURSOR_VERSION_CLEANUP_BLOCKED=true
+      else
+        ACTIVE_AGENT_TARGET="$resolved_target"
+      fi
     fi
-  fi
+  done
 
   if [[ "$CURSOR_VERSION_CLEANUP_BLOCKED" == true ]]; then
     log "cursor-agent versions: preserving all $TOTAL_VERSIONS version(s)"
@@ -221,6 +235,7 @@ else
     fi
   fi
 fi
+done
 
 # 6. ~/.npm/_cacache
 log "=== Section 6: ~/.npm/_cacache ==="
@@ -313,6 +328,128 @@ else
   log "wiki-publish cache: $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE) — retained; automatic deletion disabled until lifecycle provenance is known"
 fi
 
+# N. Darwin user clang cache (/private/var/folders/*/*/C/clang/ModuleCache*)
+log "=== Section: Darwin user clang ModuleCache ==="
+for clang_cache in /private/var/folders/*/*/C/clang/ModuleCache*; do
+  [[ -d "$clang_cache" ]] || continue
+  clean_dir_contents "clang module cache" "$clang_cache" false
+done
+
+# N. ~/.peekaboo/snapshots entries older than 30 days
+log "=== Section: ~/.peekaboo/snapshots (entries older than 30d) ==="
+PEEKABOO_SNAPSHOTS="$HOME/.peekaboo/snapshots"
+if [[ ! -d "$PEEKABOO_SNAPSHOTS" ]]; then
+  log "peekaboo snapshots: directory not found, skipping"
+else
+  before_kb=$(size_kb "$PEEKABOO_SNAPSHOTS")
+  log "peekaboo snapshots: before $(fmt_kb "$before_kb") ($PEEKABOO_SNAPSHOTS)"
+  peek_deleted=0
+  peek_freed_kb=0
+
+  while IFS= read -r -d '' entry; do
+    [[ -e "$entry" ]] || continue
+    [[ -n "$entry" && "$entry" == "$PEEKABOO_SNAPSHOTS/"* ]] || continue
+
+    kb=$(size_kb "$entry")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "peekaboo snapshots: [dry-run] would delete $entry ($(fmt_kb "$kb"))"
+      peek_deleted=$(( peek_deleted + 1 ))
+      peek_freed_kb=$(( peek_freed_kb + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+        continue
+      fi
+      log "peekaboo snapshots: deleting $entry ($(fmt_kb "$kb"))"
+      chmod -R u+w "$entry" 2>/dev/null || true
+      if rm -rf "$entry" 2>/dev/null; then
+        peek_deleted=$(( peek_deleted + 1 ))
+        peek_freed_kb=$(( peek_freed_kb + kb ))
+        deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$entry"
+      else
+        echo "SKIP (rm failed): $entry"
+      fi
+    fi
+  done < <(find "$PEEKABOO_SNAPSHOTS" -mindepth 1 -maxdepth 1 -mtime +30 -print0 2>/dev/null)
+
+  if [[ "$DRY_RUN" != true ]]; then
+    after_kb=$(size_kb "$PEEKABOO_SNAPSHOTS")
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + peek_freed_kb ))
+    log "peekaboo snapshots: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$peek_freed_kb") ($peek_deleted items)"
+  else
+    log "peekaboo snapshots: [dry-run] would remove $peek_deleted items, freeing $(fmt_kb "$peek_freed_kb")"
+  fi
+fi
+
+# N. Stale .beads/.br_recovery bundles (>= 7d)
+log "=== Section: Stale .beads/.br_recovery bundles (>= 7d) ==="
+BR_RECOVERY_GLOBS=(
+  "$HOME"/projects/*/.beads/.br_recovery
+  "$HOME"/.worktrees/*/*/.beads/.br_recovery
+  "$HOME"/project_worldaiclaw/*/.beads/.br_recovery
+  "$HOME"/projects_other/*/.beads/.br_recovery
+)
+
+br_deleted=0
+br_freed_kb=0
+
+for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
+  [[ -d "$rec_dir" ]] || continue
+
+  br_candidates=()
+  while IFS= read -r -d '' item; do
+    [[ -e "$item" ]] || continue
+    if [[ "$(basename "$item")" == "schema-migrations" ]]; then
+      continue
+    fi
+    br_candidates+=("$item")
+  done < <(find "$rec_dir" -mindepth 1 -maxdepth 1 -mtime +7 -print0 2>/dev/null || true)
+
+  if [[ -d "$rec_dir/schema-migrations" ]]; then
+    while IFS= read -r -d '' sm_item; do
+      [[ -e "$sm_item" ]] || continue
+      br_candidates+=("$sm_item")
+    done < <(find "$rec_dir/schema-migrations" -mindepth 1 -maxdepth 1 -mtime +7 -print0 2>/dev/null || true)
+  fi
+
+  for candidate in "${br_candidates[@]}"; do
+    [[ -e "$candidate" ]] || continue
+    [[ -n "$candidate" && "$candidate" == "$rec_dir/"* ]] || continue
+
+    kb=$(size_kb "$candidate")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "br_recovery: [dry-run] would delete $candidate ($(fmt_kb "$kb"))"
+      br_deleted=$(( br_deleted + 1 ))
+      br_freed_kb=$(( br_freed_kb + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$candidate" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$candidate" ($_safety_reason)"
+        continue
+      fi
+      log "br_recovery: deleting $candidate ($(fmt_kb "$kb"))"
+      chmod -R u+w "$candidate" 2>/dev/null || true
+      if rm -rf "$candidate" 2>/dev/null; then
+        br_deleted=$(( br_deleted + 1 ))
+        br_freed_kb=$(( br_freed_kb + kb ))
+        deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$candidate"
+      else
+        echo "SKIP (rm failed): $candidate"
+      fi
+    fi
+  done
+
+  # Prune schema-migrations dir if empty
+  if [[ -d "$rec_dir/schema-migrations" && "$DRY_RUN" == false ]]; then
+    rmdir "$rec_dir/schema-migrations" 2>/dev/null || true
+  fi
+done
+
+if [[ "$DRY_RUN" != true ]]; then
+  TOTAL_FREED_KB=$(( TOTAL_FREED_KB + br_freed_kb ))
+  log "br_recovery: freed $(fmt_kb "$br_freed_kb") across $br_deleted items"
+else
+  log "br_recovery: [dry-run] would remove $br_deleted items, freeing $(fmt_kb "$br_freed_kb")"
+fi
 
 echo
 if [[ "$DRY_RUN" == true ]]; then

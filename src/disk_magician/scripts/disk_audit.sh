@@ -410,7 +410,7 @@ fi
 # ── 3c. Worktree/evidence layout (spec 2026-10-05 D5, report only) ──────────
 if [[ -f "$SCRIPT_DIR/layout_check.py" ]]; then
     section "Worktree & Evidence Layout"
-    python3 "$SCRIPT_DIR/layout_check.py" || true
+    python3 "$SCRIPT_DIR/layout_check.py" --max-seconds "${LAYOUT_CHECK_MAX_SECONDS:-10}" || true
 fi
 
 # ── 4. Actionable Cleanup Candidates ─────────────────────────────────────────
@@ -583,6 +583,16 @@ if [[ "$MODE" == "clean" ]]; then
         fi
     fi
 
+    # Worktree dependency dirs (node_modules/target/.mypy_cache, >=3d dormant) — run before
+    # Worktrees so package files like @firebase/auth/.../credentials/*.d.ts do not trip has_hidden_state.
+    if [[ -f "$SCRIPT_DIR/cleanup_worktree_deps.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+            echo "  Worktree deps: skipped (requires WORKTREE_APPROVED=1)"
+        else
+            run_category "Worktree deps (>=3d dormant)" "$SCRIPT_DIR/cleanup_worktree_deps.sh" $clean_arg
+        fi
+    fi
+
     # Run Worktree Cleanup only after explicit approval (Tier 6: Worktrees)
     if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$SCRIPT_DIR/cleanup_worktrees.sh" ]]; then
         run_category "Worktrees" "$SCRIPT_DIR/cleanup_worktrees.sh" $clean_arg
@@ -596,15 +606,6 @@ if [[ "$MODE" == "clean" ]]; then
             echo "  Worktree venvs: skipped (requires WORKTREE_APPROVED=1)"
         else
             run_category "Worktree venvs (>=7d dormant)" "$SCRIPT_DIR/cleanup_worktree_venvs.sh" $clean_arg
-        fi
-    fi
-
-    # Worktree dependency dirs (node_modules/target/.mypy_cache, >=3d dormant)
-    if [[ -f "$SCRIPT_DIR/cleanup_worktree_deps.sh" ]]; then
-        if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
-            echo "  Worktree deps: skipped (requires WORKTREE_APPROVED=1)"
-        else
-            run_category "Worktree deps (>=3d dormant)" "$SCRIPT_DIR/cleanup_worktree_deps.sh" $clean_arg
         fi
     fi
 

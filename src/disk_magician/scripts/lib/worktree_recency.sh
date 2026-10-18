@@ -39,7 +39,7 @@
 # because -not -path still descends into every excluded dir and filters after
 # the fact — on a worktree with a venv/ that is tens of thousands of wasted
 # stat calls.
-_WT_RECENCY_PRUNE_NAMES=(.git node_modules venv .venv __pycache__ .pytest_cache .ruff_cache)
+_WT_RECENCY_PRUNE_NAMES=(.git node_modules venv .venv __pycache__ .pytest_cache .ruff_cache .beads .husky)
 
 # Fill the caller's local prune_expr array (also supported by macOS Bash 3.2).
 _worktree_recency_build_prune_expr() {

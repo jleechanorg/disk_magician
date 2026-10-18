@@ -207,15 +207,68 @@ verdict_for() {
     fi
     printf '%s\n' "$verdict"
 }
-for file in "$(lease_dir)"/*.json; do
+prune_nonexistent_leases() {
+    python3 - "$(lease_dir)" <<'PY'
+import json,os,sys,time
+ldir=sys.argv[1]
+now=time.time()
+try:
+    entries=list(os.scandir(ldir))
+except OSError:
+    sys.exit(0)
+for e in entries:
+    if e.name.startswith('.') or not e.name.endswith('.json') or not e.is_file(follow_symlinks=False):
+        continue
+    p=e.path
+    try:
+        with open(p) as f: d=json.load(f)
+        if not isinstance(d,dict): continue
+        target=d.get('path')
+        if not isinstance(target,str) or not target or os.path.lexists(target):
+            continue
+        if d.get('pending') and now-d.get('created_epoch',now)<3600:
+            continue
+        os.unlink(p)
+    except (OSError,ValueError,TypeError,AttributeError):
+        pass
+PY
+}
+# Prune nonexistent leases up front so accumulated stale leases do not exhaust the deadline.
+prune_nonexistent_leases
+# Emit only unreadable leases or existing paths under ROOT_REAL in one Python pass.
+python3 - "$(lease_dir)" "$ROOT_REAL" > "$RUN_TMP/leases" <<'PY'
+import json,os,sys
+ldir,root_real=sys.argv[1],sys.argv[2]
+prefix=root_real.rstrip('/')+'/'
+try:
+    entries=sorted(os.scandir(ldir),key=lambda e:e.name)
+except OSError:
+    sys.exit(0)
+out=sys.stdout.buffer
+for e in entries:
+    if e.name.startswith('.') or not e.name.endswith('.json') or not e.is_file(follow_symlinks=False):
+        continue
+    p=e.path
+    try:
+        with open(p) as f: d=json.load(f)
+        target=d.get('path') if isinstance(d,dict) else None
+        if not isinstance(target,str) or not target:
+            out.write(os.fsencode(p)+b'\0\0')
+            continue
+    except Exception:
+        out.write(os.fsencode(p)+b'\0\0')
+        continue
+    if not os.path.exists(target):
+        continue
+    real=os.path.realpath(target)
+    if real.startswith(prefix):
+        out.write(os.fsencode(p)+b'\0'+os.fsencode(real)+b'\0')
+PY
+while IFS= read -r -d '' file && IFS= read -r -d '' real; do
     [[ -e "$file" ]] || continue
     expired && break
-    real="$(_lease_get "$file" path)"
     if [[ -z "$real" ]]; then log "kept:lease-unreadable $file"; echo kept:lease-unreadable >> "$EVENTS"; continue; fi
     [[ -e "$real" ]] || continue
-    # Even malicious or misplaced leases cannot nominate outside the root.
-    real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real")"
-    case "$real" in "$ROOT_REAL"/*) ;; *) continue;; esac
     owner="$(lease_owner_state "$file")"
     if [[ "$owner" != unreadable ]] && ! lease_matches_incarnation "$file"; then
         repo="$(wtn_main_repo "$real")" || continue
@@ -252,20 +305,9 @@ for file in "$(lease_dir)"/*.json; do
         fi
     fi
     record "$file" "$real" "$verdict"
-done
+done < "$RUN_TMP/leases"
 # Prune nonexistent leases, retaining fresh pending guards for one hour.
-for file in "$(lease_dir)"/*.json; do
-    [[ -f "$file" ]] || continue
-    python3 - "$file" <<'PY'
-import json,os,sys,time
-try:
-    p=sys.argv[1]; d=json.load(open(p)); target=d.get('path')
-    if not isinstance(target,str) or not target or os.path.lexists(target): sys.exit(0)
-    if d.get('pending') and time.time()-d.get('created_epoch',time.time())<3600: sys.exit(0)
-    os.unlink(p)
-except (OSError,ValueError,TypeError,AttributeError): pass
-PY
-done
+prune_nonexistent_leases
 AFTER="$(free_bytes)"
 COUNTS="$(python3 - "$EVENTS" <<'PY'
 import collections,json,sys

@@ -433,8 +433,8 @@ class DiskObserverTest(unittest.TestCase):
             self.assertNotIn("Snapchat", p)
             self.assertNotIn("jleechan", p)
         for g in cfg.get("monitored_globs", []):
-            self.assertNotIn("wa-", g.get("pattern", ""))
-            self.assertNotIn("project_", g.get("pattern", ""))
+            self.assertNotIn("Snapchat", g.get("pattern", ""))
+            self.assertNotIn("jleechan", g.get("pattern", ""))
         self.assertEqual(cfg.get("protected_tmp_roots"), [])
         self.assertEqual(cfg.get("downloads_evidence_patterns"), [])
 

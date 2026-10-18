@@ -532,6 +532,132 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   done
 fi
 
+# Scan ~/.local/state for stale PR scratch directories and evidence bundles:
+# - ~/.local/state/pr*-merge-*
+# - ~/.local/state/pr*-review-*
+# - ~/.local/state/worldarchitect-evidence/*
+LOCAL_STATE_DIR="$HOME/.local/state"
+if [[ -d "$LOCAL_STATE_DIR" ]]; then
+  log "Scanning $LOCAL_STATE_DIR for stale PR scratch & evidence entries (>=14d) ..."
+  local_state_candidates=()
+  for p in "$LOCAL_STATE_DIR"/pr*-merge-* "$LOCAL_STATE_DIR"/pr*-review-*; do
+    [[ -e "$p" ]] || continue
+    local_state_candidates+=("$p")
+  done
+  if [[ -d "$LOCAL_STATE_DIR/worldarchitect-evidence" ]]; then
+    while IFS= read -r -d '' p; do
+      [[ -e "$p" ]] || continue
+      local_state_candidates+=("$p")
+    done < <(find "$LOCAL_STATE_DIR/worldarchitect-evidence" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true)
+  fi
+
+  for item in "${local_state_candidates[@]}"; do
+    [[ -e "$item" ]] || continue
+    base="$(basename "$item")"
+
+    # Age check: >= 14 days old
+    age_days=0
+    if [[ -d "$item" ]]; then
+      age_days="$(worktree_age_days "$item")"
+    else
+      now_sec="$(date +%s)"
+      mtime_sec="$(stat -f '%m' "$item" 2>/dev/null || stat -c '%Y' "$item" 2>/dev/null || echo "$now_sec")"
+      age_days=$(( (now_sec - mtime_sec) / 86400 ))
+    fi
+
+    if (( age_days < 14 )); then
+      log "Skipping recently active path (<14d, age=${age_days}d): $item"
+      continue
+    fi
+
+    if has_active_marker "$item"; then
+      log "Skipping active-use marker (.in-use/.keep present): $item"
+      continue
+    fi
+
+    if has_open_files "$item"; then
+      log "Skipping in-use path (open files): $item"
+      continue
+    fi
+
+    # Live cwd check
+    is_cwd=false
+    if command -v lsof >/dev/null 2>&1; then
+      target_real="$(cd "$item" 2>/dev/null && pwd -P)" || target_real="$item"
+      while IFS= read -r cwd_line; do
+        cwd_line="${cwd_line#n}"
+        if [[ "$cwd_line" == "$item" || "$cwd_line" == "$item"/* || "$cwd_line" == "$target_real" || "$cwd_line" == "$target_real"/* ]]; then
+          is_cwd=true
+          break
+        fi
+      done < <(lsof -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
+    fi
+    if [[ "$is_cwd" == true ]]; then
+      log "Skipping live cwd: $item"
+      continue
+    fi
+
+    if [[ -d "$item/.git" || -f "$item/.git" ]]; then
+      if worktree_has_unsaved_work "$item"; then
+        log "Skipping scratch worktree with unsaved work (uncommitted/unpushed/no-upstream): $item"
+        continue
+      fi
+    fi
+
+    kb=$(path_size_kb "$item")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "DRY RUN: would remove: $item  (${kb} KB)"
+      if [[ -d "$item" ]]; then
+        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+      else
+        FILES_DELETED=$(( FILES_DELETED + 1 ))
+      fi
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$item" 2>/dev/null)"; then
+        echo "SAFETY-SKIP $item ($_safety_reason)"
+        continue
+      fi
+      log "Removing: $item  (${kb} KB)"
+      if [[ -L "$item" ]]; then
+        if rm -f "$item" 2>/dev/null; then
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
+        else
+          echo "SKIP (rm failed): $item"
+          RM_FAILED=$(( RM_FAILED + 1 ))
+        fi
+      elif [[ -d "$item" ]]; then
+        chmod -R u+w "$item" 2>/dev/null || true
+        if rm -rf "$item" 2>/dev/null; then
+          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
+        else
+          echo "SKIP (rm failed): $item"
+          RM_FAILED=$(( RM_FAILED + 1 ))
+        fi
+      else
+        chmod u+w "$item" 2>/dev/null || true
+        if rm -f "$item" 2>/dev/null; then
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
+        else
+          echo "SKIP (rm failed): $item"
+          RM_FAILED=$(( RM_FAILED + 1 ))
+        fi
+      fi
+    fi
+  done
+
+  # Prune empty worldarchitect-evidence dir if empty
+  if [[ -d "$LOCAL_STATE_DIR/worldarchitect-evidence" && "$DRY_RUN" == false ]]; then
+    rmdir "$LOCAL_STATE_DIR/worldarchitect-evidence" 2>/dev/null || true
+  fi
+fi
+
 BUDGET_DIRS_DELETED=0
 BUDGET_FILES_DELETED=0
 BUDGET_KB_FREED=0

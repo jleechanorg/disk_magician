@@ -39,11 +39,24 @@ LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
 LARGE_TMP_ARCHIVE_RETENTION_HOURS="${LARGE_TMP_ARCHIVE_RETENTION_HOURS:-24}"
+# Stale children of a protected root (bead ekm1).
+PROTECTED_ROOT_CHILD_MIN_AGE_HOURS="${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS:-48}"
+# Basenames, relative to any protected root, that are never reclaimed.
+DEFAULT_PROTECTED_ROOT_CHILDREN=(evidence private-evidence)
+PROTECTED_ROOT_CHILDREN=()
+if [[ -n "${DISK_MAGICIAN_PROTECTED_ROOT_CHILDREN:-}" ]]; then
+  read -r -a PROTECTED_ROOT_CHILDREN <<<"$DISK_MAGICIAN_PROTECTED_ROOT_CHILDREN"
+fi
+if [[ ${#PROTECTED_ROOT_CHILDREN[@]} -eq 0 ]]; then
+  PROTECTED_ROOT_CHILDREN=("${DEFAULT_PROTECTED_ROOT_CHILDREN[@]}")
+fi
 # Hard cap (bead jleechan-mtow): an archive entry older than this is purged
 # even if it still looks active (marker/mtime/open files). Without a cap, a
 # process holding fds into an archived dir keeps it alive forever and the
 # quarantine grows unboundedly — the leak class this repo exists to prevent.
 LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
+# Maximum size in MB for the archive quarantine (bead 03bn). 0 disables.
+LARGE_TMP_ARCHIVE_MAX_MB="${LARGE_TMP_ARCHIVE_MAX_MB:-0}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
 ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
@@ -330,6 +343,62 @@ is_protected_root() {
   return 1
 }
 
+# is_protected_root_child <basename> -- true for a child of a protected root
+# that must never be reclaimed even when stale (the canonical evidence dirs).
+is_protected_root_child() {
+  local base="$1" child
+  for child in "${PROTECTED_ROOT_CHILDREN[@]}"; do
+    [[ "$base" == "$child" ]] && return 0
+  done
+  case "$base" in
+    *evidence*) return 0 ;;
+  esac
+  return 1
+}
+
+# scan_protected_root_children <protected_root_path> -- evaluate the DIRECT
+# children of a protected root so stale scratch inside it is still reclaimable
+# while the root and its canonical children (evidence/) are never touched.
+# Uses the same guards as the large-dir class (marker, recency, size, open
+# files, unsaved work) on a stricter recency clock.
+scan_protected_root_children() {
+  local root="$1" child base rel kb
+  while IFS= read -r -d '' child; do
+    base="$(basename "$child")"
+    if is_protected_root_child "$base"; then
+      log "Skipping protected child of a protected root: $child"
+      continue
+    fi
+    if [[ -e "$child/.in-use" ]]; then
+      log "Skipping active-use marker (.in-use present): $child"
+      continue
+    fi
+    if has_recent_activity "$child" "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"; then
+      log "Skipping recently active protected-root child (mtime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
+      continue
+    fi
+    kb=$(path_size_kb "$child")
+    if [[ "$kb" -lt 0 ]]; then
+      log "Skipping protected-root child (size unknown): $child"
+      continue
+    fi
+    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+      continue
+    fi
+    if [[ "$DRY_RUN" != true ]] && has_open_files "$child"; then
+      log "Skipping in-use protected-root child: $child  (${kb} KB)"
+      continue
+    fi
+    if declare -F worktree_has_unsaved_work >/dev/null 2>&1 && worktree_has_unsaved_work "$child"; then
+      log "Skipping protected-root child with unsaved work (uncommitted/unpushed/no-upstream): $child"
+      continue
+    fi
+    archive_path "$child" "$kb" >/dev/null
+    ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
+    DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+}
+
 # is_protected_tmp_path <path> — true for a configured protected root and
 # everything below it, regardless of which cleanup class discovered it first.
 is_protected_tmp_path() {
@@ -528,7 +597,7 @@ has_open_files() {
           break
         fi
         val="${line#f}"
-        if ! [[ "$val" =~ ^[a-zA-Z0-9.]+$ ]]; then
+        if ! [[ "$val" =~ ^\*?[a-zA-Z0-9.]+$ ]]; then
           malformed=1
           break
         fi
@@ -708,6 +777,35 @@ purge_aged_archives() {
     TOTAL_KB=$(( TOTAL_KB + kb ))
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
   done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin "+${mins}" -print0 2>/dev/null || true)
+
+  if (( LARGE_TMP_ARCHIVE_MAX_MB > 0 )); then
+    local max_kb=$(( LARGE_TMP_ARCHIVE_MAX_MB * 1024 ))
+    local total_archive_kb
+    total_archive_kb=$(path_size_kb "$ARCHIVE_ROOT")
+    if (( total_archive_kb > max_kb )); then
+      log "Archive size (${total_archive_kb} KB) exceeds cap (${max_kb} KB) — evicting oldest archive entries"
+      while IFS= read -r d; do
+        [[ -d "$d" ]] || continue
+        (( total_archive_kb <= max_kb )) && break
+        kb=$(path_size_kb "$d")
+        (( kb <= 0 )) && continue
+        if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
+          log "Skipping in-use archive during cap eviction: $d"
+          continue
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+          log "DRY RUN: would evict archive entry exceeding cap (${LARGE_TMP_ARCHIVE_MAX_MB} MB): $d  (${kb} KB)"
+        else
+          log "Evicting archive entry exceeding cap (${LARGE_TMP_ARCHIVE_MAX_MB} MB): $d  (${kb} KB)"
+          rm -rf "$d"
+          deletion_log "cleanup_tmp.sh" "purge_archive_cap" "$kb" "$d"
+        fi
+        TOTAL_KB=$(( TOTAL_KB + kb ))
+        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+        total_archive_kb=$(( total_archive_kb - kb ))
+      done < <(find "$ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
+    fi
+  fi
 }
 
 log "$(dry_prefix)cleanup_tmp.sh starting"
@@ -865,6 +963,16 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     DIRS_DELETED=$(( DIRS_DELETED + 1 ))
   done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
               -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
+
+  # 5. Direct children of configured protected roots (bead ekm1)
+  # The protected root itself is never touched and canonical children (evidence/)
+  # are permanently guarded, but stale scratch directories inside them are
+  # evaluated if older than PROTECTED_ROOT_CHILD_MIN_AGE_HOURS.
+  for root_base in "${PROTECTED_TMP_ROOTS[@]}"; do
+    if [[ -d "$tmp_dir/$root_base" ]]; then
+      scan_protected_root_children "$tmp_dir/$root_base"
+    fi
+  done
 done
 
 if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
@@ -970,6 +1078,9 @@ elif [[ "$INCLUDE_LARGE" == true ]]; then
 
     if is_protected_root "$base"; then
       log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
+      # The root itself is never removed, but its stale scratch children must
+      # not become invisible just because the parent is protected (bead ekm1).
+      scan_protected_root_children "$d"
       continue
     fi
 

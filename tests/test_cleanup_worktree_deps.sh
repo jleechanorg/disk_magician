@@ -42,6 +42,23 @@ mkdir -p "$T/roots/old/node_modules/y"; echo d > "$T/roots/old/node_modules/y/f"
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_AO_CONFIG="$T/ao.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 [[ "$OUT" != *"WOULD-STRIP"* ]] && ok "AO config worktreeDir worktree untouched" || bad "AO-owned worktree listed"
 
+# Top-level AO worktreeDir protects direct children and configured project subtrees,
+# while non-AO repo worktrees (<default>/<other_repo>/<wt>) ARE stripped (including packages/*/node_modules).
+printf 'worktreeDir: %s\nprojects:\n  demo:\n    path: /tmp/demo\n' "$T/roots" > "$T/ao_top.yaml"
+mkdir -p "$T/roots/demo" "$T/roots/other_repo"
+git -C "$T/base" worktree add -q -b "b-demo-wt1" "$T/roots/demo/wt1"
+mkdir -p "$T/roots/demo/wt1/node_modules/z"; echo d > "$T/roots/demo/wt1/node_modules/z/f"
+git -C "$T/base" worktree add -q -b "b-other-old" "$T/roots/other_repo/wt_old"
+mkdir -p "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules/m"
+echo '{}' > "$T/roots/other_repo/wt_old/packages/pkg-a/package.json"
+echo d > "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules/m/f"
+/usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_AO_CONFIG="$T/ao_top.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+[[ "$OUT" != *"$T/roots/old/node_modules"* ]] && ok "direct child of top-level AO worktreeDir protected" || bad "direct child of top-level AO worktreeDir stripped"
+[[ "$OUT" != *"$T/roots/demo/wt1/node_modules"* && -d "$T/roots/demo/wt1/node_modules" ]] && ok "AO project worktree under top-level worktreeDir protected" || bad "AO project worktree stripped"
+check "non-AO repo worktree under top-level worktreeDir stripped" "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules" "$OUT"
+[[ ! -e "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules" ]] && ok "monorepo packages/*/node_modules removed" || bad "monorepo packages/*/node_modules remains"
+
 # safety_gate: a never_delete rule protects the directory.
 mkdir -p "$T/cfg"; printf '{"never_delete": ["%s/roots/old/node_modules"]}' "$T" > "$T/cfg/safety.local.json"
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_SAFETY_FILE="$T/cfg/safety.local.json" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"

@@ -18,6 +18,7 @@ WORK="$(mktemp -d -t disk_audit_cov.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 # Hermetic: never read the machine's root frontier report (/var/db/disk-magician).
 export DISK_MAGICIAN_FRONTIER_ROOT_JSON="$WORK/no-root-frontier.json"
+export LAYOUT_CHECK_MAX_SECONDS=1
 
 PASS=0
 FAIL=0

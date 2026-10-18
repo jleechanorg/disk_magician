@@ -113,8 +113,9 @@ if [[ ! -f "$STATE_DIR/MACHINE" || ! -d "$STATE_DIR/.git" ]]; then
 fi
 mkdir -p "$STATE_DIR/snapshots" "$STATE_DIR/ledger" "$STATE_DIR/config" "$STATE_DIR/evidence"
 
-# 2. Write the snapshot.
-if ! bash "$SNAP_BIN" --output "$STATE_DIR/snapshots/disk_snapshot.json"; then
+# 2. Write the snapshot using the resolved config.
+CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
+if ! DISK_MAGICIAN_CONFIG="${DISK_MAGICIAN_CONFIG:-$CFG}" bash "$SNAP_BIN" --output "$STATE_DIR/snapshots/disk_snapshot.json"; then
   log "ERROR: snapshot writer failed"
   python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
     --outcome error --reason "snapshot writer failed" >/dev/null 2>&1 || log "ERROR: failed to record error receipt"
@@ -146,7 +147,6 @@ python3 "$SCRIPT_DIR/retain_evidence.py" --frontier "$FRONTIER" \
   --evidence-dir "$STATE_DIR/evidence" --keep "$KEEP" 2>/dev/null || true
 
 # 4. Write back the resolved config.
-CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 [[ -n "$CFG" && -f "$CFG" ]] && cp "$CFG" "$STATE_DIR/config/config.json"
 
 # Capture actual snapshot and renderer publication status

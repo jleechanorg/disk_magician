@@ -244,6 +244,17 @@ else
     fi
 fi
 
+is_live_cwd() {
+    local target="$1"
+    [[ -n "$GLOBAL_CWD_BLOCKED" ]] && return 0
+    local real_target
+    real_target="$(cd "$target" 2>/dev/null && pwd -P || printf '%s' "$target")"
+    if list_has_child_of "$real_target" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$target" "$GLOBAL_LIVE_CWDS"; then
+        return 0
+    fi
+    return 1
+}
+
 classify_repo_local_worktree() {
     local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
 
@@ -256,7 +267,7 @@ classify_repo_local_worktree() {
         echo "$GLOBAL_CWD_BLOCKED"
         return 0
     fi
-    if list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt_path" "$GLOBAL_LIVE_CWDS"; then
+    if is_live_cwd "$wt_path"; then
         echo "live-cwd"
         return 0
     fi
@@ -336,9 +347,10 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc),
+    # public CA bundles in venv/node_modules (certifi/cacert.pem), and test-results logs
+    # are rebuildable/generated, not user secrets.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|(^|/)(venv|\.venv|node_modules)/.*cacert\.pem$|(^|/)test-results/.*\.log$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }
 
@@ -350,8 +362,27 @@ has_hidden_state() {
 has_ignored_user_data() {
     local out entry comp rest ok t=""
     command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    local git_args=(-C "$1")
+    if [[ -f "$1/.git" ]]; then
+        local gd_line gd_target
+        gd_line=$(grep '^gitdir: ' "$1/.git" 2>/dev/null || true)
+        gd_target=$(echo "$gd_line" | cut -d' ' -f2-)
+        if [[ -n "$gd_target" && ! -e "$gd_target" ]]; then
+            local mr="${gd_target%/.git/worktrees/*}"
+            if [[ -d "$mr/.git" ]]; then
+                git_args=(--git-dir="$mr/.git" --work-tree="$1")
+            else
+                if [[ -f "$1/.gitignore" ]]; then
+                    if /usr/bin/find "$1" -maxdepth 3 \( -name '.env*' -o -name '*credentials*' -o -name '*secrets*' \) -print -quit 2>/dev/null | grep -q .; then
+                        return 0
+                    fi
+                fi
+                return 1
+            fi
+        fi
+    fi
     # shellcheck disable=SC2086
-    out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
+    out="$($t git "${git_args[@]}" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         ok=false
@@ -365,20 +396,58 @@ has_ignored_user_data() {
                 # build, dist, env, target, coverage and .cache can hold hand-made
                 # files, so they count as user data and preserve the worktree.
                 node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-                .next|.turbo|.gradle|.tox|.eggs|htmlcov|venv.bak.*|test-results)
+                .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|venv.bak.*|test-results|\
+                .beads|.husky|.doctor|.codex-worktrees|Pods|xcuserdata|xcshareddata|project.xcworkspace|.expo|dist-export|\
+                .venv_bootstrap.lock|evidence|.superpowers|.dark-factory|.tmp|logs|.br_recovery)
                     ok=true; break ;;
                 # File-oriented patterns are rebuildable only when the matched
                 # path is not a directory containing user data.
-                *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+                *.pyc|.DS_Store|.coverage|*.tsbuildinfo|.testmondata|.testmondata-shm|.testmondata-wal|\
+                scheduled_tasks.lock|validate_imports.log|daemon.lock|.xcode.env.local|Podfile.lock|*.log|*.tmp|*.exit|\
+                .br-db-openers-*.lock*)
                     [[ ! -d "$1/$rest" ]] && { ok=true; break; }
                     ;;
             esac
             [[ "$rest" == */* ]] || break
             rest="${rest%/*}"
         done
+        if [[ "$ok" == false ]]; then
+            case "${entry%/}" in
+                .gemini/tmp|.codex/tmp|.codex/agy_*|roadmap/logs|roadmap/ci-metrics/evidence*|testing_ui/realistic/runs*|docs/superpowers/experiments*|tmp/wa*|artifacts|artifacts/wa_upload*|\
+                .beads/.br_recovery|.beads/.br_recovery/*|.beads/.br-db-openers-*.lock*)
+                    ok=true
+                    ;;
+            esac
+        fi
+        if [[ "$ok" == false && -d "$1/${entry%/}" ]]; then
+            if [[ -z "$(/usr/bin/find "$1/${entry%/}" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' -print -quit 2>/dev/null)" ]]; then
+                ok=true
+            fi
+        fi
         [[ "$ok" == true ]] || return 0
     done <<<"$out"
     return 1
+}
+
+worktree_cached_origin_oid() {
+    local repo="$1" branch_clean="$2"
+    [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]] || return 1
+    local key cache_file
+    key="$(printf '%s\n%s' "$repo" "$(git -C "$repo" remote get-url origin 2>/dev/null || true)" | cksum | awk '{print $1"_"$2}')"
+    cache_file="$RUN_TMP/ls_remote_${key}"
+    if [[ ! -f "$cache_file" ]]; then
+        local t=""
+        command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+        # shellcheck disable=SC2086
+        if ! env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote --heads origin >"${cache_file}.tmp" 2>/dev/null; then
+            rm -f "${cache_file}.tmp"
+            : > "$cache_file"
+            return 1
+        fi
+        mv -f "${cache_file}.tmp" "$cache_file"
+    fi
+    [[ -s "$cache_file" ]] || return 1
+    awk -v ref="refs/heads/$branch_clean" '$2 == ref {print $1; exit}' "$cache_file"
 }
 
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
@@ -421,6 +490,18 @@ classify_content_and_merge() {
     fi
     if (( ahead_count > 0 )); then
         local branch_clean="${branch#refs/heads/}"
+        # Fast path: check cached ls-remote --heads origin first before per-branch gh pr list
+        if [[ -n "$branch_clean" && "$branch_clean" != "detached" && -n "$head_sha" ]]; then
+            local cached_oid=""
+            cached_oid="$(worktree_cached_origin_oid "$repo" "$branch_clean" 2>/dev/null || true)"
+            if [[ -n "$cached_oid" && "$cached_oid" == "$head_sha" ]]; then
+                if has_ignored_user_data "$wt_path"; then
+                    echo "ignored-data"
+                    return 0
+                fi
+                return 0
+            fi
+        fi
         if [[ -n "$branch_clean" && "$branch_clean" != "detached" ]] && command -v gh >/dev/null 2>&1; then
             local origin_url owner_repo
             origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
@@ -440,22 +521,6 @@ classify_content_and_merge() {
                         fi
                     fi
                 fi
-            fi
-        fi
-        # A clean worktree whose branch tip is already on origin loses nothing
-        # when removed (the branch ref and the remote copy both survive). The
-        # remote is queried live; any failure keeps it "ahead-of-main".
-        if [[ -n "$branch_clean" && "$branch_clean" != "detached" && -n "$head_sha" ]]; then
-            local remote_oid="" t=""
-            command -v timeout >/dev/null 2>&1 && t="timeout 30s"
-            # shellcheck disable=SC2086
-            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
-            if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
-                if has_ignored_user_data "$wt_path"; then
-                    echo "ignored-data"
-                    return 0
-                fi
-                return 0
             fi
         fi
         echo "ahead-of-main"
@@ -802,11 +867,25 @@ process_repo_local_worktrees() {
             std_real="$(cd "$abs_path" 2>/dev/null && pwd -P || printf '%s' "$abs_path")"
         fi
 
+        case "$abs_path" in
+            "$HOME"/projects/*| \
+            "$HOME"/wc-wt/*| \
+            "$HOME"/project_*/*| \
+            "$HOME"/projects_other/*| \
+            "$HOME"/worktrees/*| \
+            "$HOME"/*.worktrees/*| \
+            "$HOME"/.worktrees-*/*| \
+            "$HOME"/.dark-factory/*| \
+            "$HOME"/wf_*)
+                match=true
+                ;;
+        esac
+
         if [[ "$match" == false ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
             return 0
         fi
-        if [[ "$abs_path" == "$main_wt_path" ]]; then
+        if [[ "$abs_path" == "$main_wt_path" || -d "$abs_path/.git" ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
             return 0
         fi
@@ -947,8 +1026,161 @@ std_root_skip_reason() {
     fi
 }
 
+is_ao_managed_worktree() {
+    local wt="$1"
+    local real_wt
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    if [[ -n "$STD_BLOCKED" || "$AO_CONFIG_STATE" == "invalid" ]]; then
+        return 0
+    fi
+    if [[ "$wt" == *"ao/data/worktrees/"* || "$real_wt" == *"ao/data/worktrees/"* ]]; then
+        return 0
+    fi
+    if antigravity_ao_owned "$wt" || antigravity_ao_owned "$real_wt"; then
+        return 0
+    fi
+    local skip_reason
+    skip_reason="$(std_root_skip_reason "$wt" "$real_wt" 2>/dev/null || true)"
+    if [[ "$skip_reason" == "ao-owned" || "$skip_reason" == "ao-config-unreadable" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 for repo in "${REPO_LOCAL_REPOS[@]}"; do
     process_repo_local_worktrees "$repo"
+done
+
+# Safe cleanup pass: Broken-gitdir orphan worktrees & Ephemeral task clones
+echo ""
+echo "--- Broken-gitdir orphans & ephemeral task clones ---"
+
+# 1. Broken-gitdir orphan worktrees in $HOME/projects/* and $HOME/.worktrees/*/*
+orphan_candidates=()
+for pattern in "$HOME/projects"/* "$HOME/.worktrees"/*/*; do
+    [[ -e "$pattern" ]] && orphan_candidates+=("$pattern")
+done
+
+for wt in ${orphan_candidates[@]+"${orphan_candidates[@]}"}; do
+    [[ -d "$wt" ]] || continue
+    [[ -L "$wt" ]] && continue
+    [[ -f "$wt/.git" ]] || continue
+
+    gd_line=$(grep '^gitdir: ' "$wt/.git" 2>/dev/null || true)
+    [[ -n "$gd_line" ]] || continue
+    target=$(echo "$gd_line" | cut -d' ' -f2-)
+    if [[ "$target" != /* ]]; then
+        target="$(cd "$wt" 2>/dev/null && cd "$target" 2>/dev/null && pwd -P || echo "$target")"
+    fi
+    # Must be broken (target does NOT exist on disk)
+    [[ ! -e "$target" ]] || continue
+
+    if worktree_is_recently_active "$wt" 7; then
+        ledger_line "orphan-gitdir" "PRESERVE" "$wt" "young" " (< 7 days)"
+        continue
+    fi
+    if is_live_cwd "$wt"; then
+        ledger_line "orphan-gitdir" "PRESERVE" "$wt" "live-cwd"
+        continue
+    fi
+    if is_ao_managed_worktree "$wt"; then
+        ledger_line "orphan-gitdir" "PRESERVE" "$wt" "ao-owned"
+        continue
+    fi
+    if has_ignored_user_data "$wt"; then
+        ledger_line "orphan-gitdir" "PRESERVE" "$wt" "ignored-data"
+        continue
+    fi
+    if ! safety_gate "$wt" >/dev/null 2>&1; then
+        ledger_line "orphan-gitdir" "PRESERVE" "$wt" "safety-gate"
+        continue
+    fi
+
+    wt_kb=$(size_kb "$wt")
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "[DRY-RUN] Would remove broken-gitdir orphan worktree: $wt"
+        ledger_line "orphan-gitdir" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf orphan)"
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+    else
+        [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || continue
+        echo "[CLEAN] Removing broken-gitdir orphan worktree: $wt"
+        if rm -rf "${wt:?unset}" && [[ ! -e "$wt" ]]; then
+            ledger_line "orphan-gitdir" "DELETE" "$wt" "" " (~$(( wt_kb / 1024 ))M)"
+            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+        else
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "remove-failed"
+        fi
+    fi
+done
+
+# 2. Ephemeral task clones in $HOME/projects/*, $HOME/project_worldaiclaw/*, and $HOME/.worktrees/*/*
+ephemeral_candidates=()
+for pattern in "$HOME/projects"/* "$HOME/project_worldaiclaw"/* "$HOME/.worktrees"/*/*; do
+    [[ -e "$pattern" ]] && ephemeral_candidates+=("$pattern")
+done
+
+for wt in ${ephemeral_candidates[@]+"${ephemeral_candidates[@]}"}; do
+    [[ -d "$wt" ]] || continue
+    [[ -L "$wt" ]] && continue
+    [[ -d "$wt/.git" ]] || continue
+
+    bn="$(basename "$wt")"
+    case "$bn" in
+        advice_src_*|advice*_src|advice_clone_*|advice-*|pr*_green|pr*_fullclone|dark-factory-*-clone|dark_factory_*_clone|wt-gist-*)
+            ;;
+        *)
+            continue
+            ;;
+    esac
+
+    if worktree_is_recently_active "$wt" 7; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "young" " (< 7 days)"
+        continue
+    fi
+    if is_live_cwd "$wt"; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "live-cwd"
+        continue
+    fi
+    if is_ao_managed_worktree "$wt"; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "ao-owned"
+        continue
+    fi
+    if has_hidden_state "$wt"; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "hidden-state"
+        continue
+    fi
+
+    wt_status="$(git -C "$wt" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || continue
+    if [[ -n "$wt_status" ]]; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "dirty-or-untracked"
+        continue
+    fi
+
+    if ! git -C "$wt" branch -r --contains HEAD 2>/dev/null | grep -q 'origin/'; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "head-not-on-origin"
+        continue
+    fi
+
+    if ! safety_gate "$wt" >/dev/null 2>&1; then
+        ledger_line "ephemeral-clone" "PRESERVE" "$wt" "safety-gate"
+        continue
+    fi
+
+    wt_kb=$(size_kb "$wt")
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "[DRY-RUN] Would remove ephemeral task clone: $wt"
+        ledger_line "ephemeral-clone" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf clone)"
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+    else
+        [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || continue
+        echo "[CLEAN] Removing ephemeral task clone: $wt"
+        if rm -rf "${wt:?unset}" && [[ ! -e "$wt" ]]; then
+            ledger_line "ephemeral-clone" "DELETE" "$wt" "" " (~$(( wt_kb / 1024 ))M)"
+            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+        else
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "remove-failed"
+        fi
+    fi
 done
 
 total_gb=$(awk "BEGIN {printf \"%.2f\", $TOTAL_RECLAIMED_KB / 1048576}")

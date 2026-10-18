@@ -170,14 +170,20 @@ dir_size_kb() {
   # that exit 1 with ONLY Permission denied / No such file or directory stderr
   # (root-owned or vanishing entries) is a valid lower bound (flagged).
   local du_stdout du_stderr du_rc du_value lower_bound=""
+  local du_flags="-sk"
+  local lb_pattern='Permission denied$|No such file or directory$'
+  if [[ "$path" != "$HOME" && "$path" != "$HOME"/* ]]; then
+    du_flags="-skx"
+    lb_pattern='Permission denied$|No such file or directory$|Operation not permitted$'
+  fi
   du_stdout=$(mktemp -t disk_magician_du.XXXXXX)
   du_stderr=$(mktemp -t disk_magician_du_err.XXXXXX)
-  if "$TIMEOUT_CMD" "$path_budget" du -sk "$path" >"$du_stdout" 2>"$du_stderr"; then
+  if "$TIMEOUT_CMD" "$path_budget" du "$du_flags" "$path" >"$du_stdout" 2>"$du_stderr"; then
     du_rc=0
   else
     du_rc=$?
   fi
-  if [[ "$du_rc" -eq 1 && -s "$du_stderr" ]] && ! grep -qvE 'Permission denied$|No such file or directory$' "$du_stderr"; then
+  if [[ "$du_rc" -eq 1 && -s "$du_stderr" ]] && ! grep -qvE "$lb_pattern" "$du_stderr"; then
     lower_bound=1
   fi
   if [[ "$du_rc" -eq 0 || -n "$lower_bound" ]]; then
@@ -214,6 +220,12 @@ glob_size_kb() {
   local total=0
   for d in $pattern; do
     [[ -e "$d" ]] || continue
+    if [[ -n "${DIRS_TEMP_FILE:-}" && -f "$DIRS_TEMP_FILE" ]]; then
+      local d_tilde="${d/#$HOME/\~}"
+      if awk -F'\t' -v p1="$d" -v p2="$d_tilde" '$3 == p1 || $3 == p2 {found=1; exit} END{exit !found}' "$DIRS_TEMP_FILE" 2>/dev/null; then
+        continue
+      fi
+    fi
     local s
     s=$(dir_size_kb "$d" "$DU_TIMEOUT")
     [[ -n "$s" ]] || { echo ""; return; }

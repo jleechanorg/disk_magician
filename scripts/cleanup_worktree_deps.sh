@@ -19,14 +19,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/ao_worktree_config.sh
+source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/projects_other")
+  raw_roots=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/repos" "$HOME/.dark-factory")
+  for pat in "$HOME"/project_* "$HOME"/wf_* "$HOME"/*.worktrees "$HOME"/.worktrees-* "$HOME"/Documents/Codex/*; do
+    [[ -d "$pat" ]] && raw_roots+=("$pat")
+  done
+  ROOTS=()
+  for r in "${raw_roots[@]}"; do
+    [[ -d "$r" ]] || continue
+    duplicate=false
+    for existing in "${ROOTS[@]}"; do
+      if [[ "$existing" == "$r" ]]; then duplicate=true; break; fi
+    done
+    [[ "$duplicate" == false ]] && ROOTS+=("$r")
+  done
 fi
+
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -78,21 +93,37 @@ fi
 LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$LIVE_CWDS_RAW")"
 [[ -n "$LIVE_CWDS" ]] || { echo "lsof reported no cwd paths: cwd unknown, refusing."; exit 0; }
 
-# AO-owned worktrees: any directory named by worktreeDir in the AO config.
+# AO-owned worktrees: parsed via ao_worktree_dirs (P = project worktreeDir, C = container/default root).
 AO_DIRS=()
+AO_PARENTS=()
 ao_cfg="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
-if [[ -e "$ao_cfg" ]]; then
-  [[ -r "$ao_cfg" ]] || { echo "AO config unreadable: refusing."; exit 0; }
-  while IFS= read -r d; do
-    d="${d//\"/}"; d="${d//\'/}"; d="${d/#\~/$HOME}"; d="${d//\$HOME/$HOME}"; d="${d%/}"
-    [[ -n "$d" ]] && AO_DIRS+=("$d")
-  done < <(sed -n 's/^[[:space:]]*worktreeDir:[[:space:]]*//p' "$ao_cfg")
+if [[ -e "$ao_cfg" || -L "$ao_cfg" ]]; then
+  if [[ ! -f "$ao_cfg" || ! -r "$ao_cfg" ]] || ! ao_lines="$(ao_worktree_dirs "$ao_cfg" 2>/dev/null)"; then
+    echo "AO config unreadable or invalid: refusing."
+    exit 0
+  fi
+  while read -r kind d; do
+    [[ -n "$d" ]] || continue
+    d="${d/#\~/$HOME}"; d="${d//\$HOME/$HOME}"; d="${d%/}"
+    real_d="$(cd "$d" 2>/dev/null && pwd -P || printf '%s' "$d")"
+    if [[ "$kind" == "C" ]]; then
+      AO_PARENTS+=("$d")
+      [[ "$real_d" != "$d" ]] && AO_PARENTS+=("$real_d")
+    else
+      AO_DIRS+=("$d")
+      [[ "$real_d" != "$d" ]] && AO_DIRS+=("$real_d")
+    fi
+  done <<< "$ao_lines"
 fi
 is_ao_owned() {
-  local wt="$1" d
-  [[ "$wt" == *"ao/data/worktrees/"* ]] && return 0
+  local wt="$1" real_wt d
+  real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+  [[ "$wt" == *"ao/data/worktrees/"* || "$real_wt" == *"ao/data/worktrees/"* ]] && return 0
   for d in ${AO_DIRS[@]+"${AO_DIRS[@]}"}; do
-    [[ "$wt" == "$d"/* ]] && return 0
+    [[ "$wt" == "$d" || "$wt" == "$d"/* || "$real_wt" == "$d" || "$real_wt" == "$d"/* ]] && return 0
+  done
+  for d in ${AO_PARENTS[@]+"${AO_PARENTS[@]}"}; do
+    [[ "${wt%/*}" == "$d" || "${real_wt%/*}" == "$d" ]] && return 0
   done
   return 1
 }
@@ -126,15 +157,67 @@ strip_dir() {
   count=$((count + 1))
 }
 
+has_pkg_node_modules() {
+  local wt="$1" pkg_nm
+  for pkg_nm in "$wt"/packages/*/node_modules; do
+    [[ -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
+  done
+  return 1
+}
+
+has_ios_pods_or_build() {
+  local wt="$1" p
+  [[ ( -e "$wt/ios/Pods" || -e "$wt/ios/build" ) && -f "$wt/ios/Podfile" ]] && return 0
+  for p in "$wt"/packages/*/ios; do
+    [[ ( -e "$p/Pods" || -e "$p/build" ) && -f "$p/Podfile" ]] && return 0
+  done
+  return 1
+}
+
+is_allowed_worktree_or_clone() {
+  local cand="$1"
+  [[ -L "$cand" ]] && return 1
+  # Linked git worktree (.git is a file pointer)
+  if [[ -f "$cand/.git" ]]; then
+    return 0
+  fi
+  # Standalone non-primary clone (.git is a directory) under specific scratch roots
+  if [[ -d "$cand/.git" ]]; then
+    case "$cand" in
+      "$HOME/Documents/Codex"/*/*|"$HOME/Documents/Codex"/*/*/*| \
+      "$HOME/wc-wt"/*|"$HOME/wc-wt"/*/*| \
+      "$HOME/project_worldaiclaw"/advice*|"$HOME/project_worldaiclaw"/worktree_*|"$HOME/project_worldaiclaw"/worldai_claw_*| \
+      "$HOME"/wf_*| \
+      "$HOME/.dark-factory"/*|"$HOME/.dark-factory"/*/*)
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
 for root in "${ROOTS[@]}"; do
   [[ -d "$root" ]] || continue
-  for wt in "$root"/* "$root"/*/*; do
-    [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
+  for wt in "$root" "$root"/* "$root"/*/*; do
+    is_allowed_worktree_or_clone "$wt" || continue
     is_ao_owned "$wt" && continue
-    [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || continue
+    [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt" || has_ios_pods_or_build "$wt" || continue
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
     if is_live "$wt"; then continue; fi
     strip_dir "$wt" "$wt/node_modules"
+    for pkg_nm in "$wt"/packages/*/node_modules; do
+      [[ -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
+    done
+    if [[ -f "$wt/ios/Podfile" ]]; then
+      strip_dir "$wt" "$wt/ios/Pods"
+      strip_dir "$wt" "$wt/ios/build"
+    fi
+    for pkg_ios in "$wt"/packages/*/ios; do
+      if [[ -f "$pkg_ios/Podfile" ]]; then
+        strip_dir "$wt" "$pkg_ios/Pods"
+        strip_dir "$wt" "$pkg_ios/build"
+      fi
+    done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
     strip_dir "$wt" "$wt/.mypy_cache"
   done
