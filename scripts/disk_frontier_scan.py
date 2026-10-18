@@ -813,36 +813,53 @@ def list_children(path, unfinished=None, remaining_budget=None):
     optional collector preserves the two-value return contract for callers
     that only need the child list.
     """
-    children = []
-    try:
-        with os.scandir(path) as it:
-            for entry in it:
-                # A directory with millions of children can otherwise keep an
-                # already-expired scan walking well past its wall-clock cap.
-                if remaining_budget is not None and remaining_budget() <= 0:
-                    return None, "time_budget_exhausted"
-                try:
-                    is_symlink = entry.is_symlink()
-                except OSError as exc:
-                    if unfinished is not None:
-                        item = {
-                            "path": entry.path,
-                            "reason": "is_symlink_failed",
-                        }
-                        if exc.errno is not None:
-                            item["errno"] = exc.errno
-                        unfinished.append(item)
-                    continue
-                children.append((entry.path, is_symlink))
-    except PermissionError:
-        return None, "permission_denied_or_tcc"
-    except FileNotFoundError:
-        return None, "path_disappeared"
-    except NotADirectoryError:
-        return None, "not_a_directory"
-    except OSError as exc:
-        return None, f"enumeration_errno_{exc.errno}"
-    return children, None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        children = []
+        attempt_unfinished = []
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    # A directory with millions of children can otherwise keep an
+                    # already-expired scan walking well past its wall-clock cap.
+                    if remaining_budget is not None and remaining_budget() <= 0:
+                        return None, "time_budget_exhausted"
+                    is_symlink = None
+                    symlink_exc = None
+                    for sym_attempt in range(max_attempts):
+                        try:
+                            is_symlink = entry.is_symlink()
+                            symlink_exc = None
+                            break
+                        except OSError as exc:
+                            symlink_exc = exc
+                            if exc.errno == errno.EINTR and sym_attempt + 1 < max_attempts:
+                                continue
+                            break
+                    if symlink_exc is not None:
+                        if unfinished is not None:
+                            item = {
+                                "path": entry.path,
+                                "reason": "is_symlink_failed",
+                            }
+                            if symlink_exc.errno is not None:
+                                item["errno"] = symlink_exc.errno
+                            attempt_unfinished.append(item)
+                        continue
+                    children.append((entry.path, is_symlink))
+            if unfinished is not None and attempt_unfinished:
+                unfinished.extend(attempt_unfinished)
+            return children, None
+        except PermissionError:
+            return None, "permission_denied_or_tcc"
+        except FileNotFoundError:
+            return None, "path_disappeared"
+        except NotADirectoryError:
+            return None, "not_a_directory"
+        except OSError as exc:
+            if exc.errno == errno.EINTR and attempt + 1 < max_attempts:
+                continue
+            return None, f"enumeration_errno_{exc.errno}"
 
 
 DATA_ROOT_PRIORITY = {

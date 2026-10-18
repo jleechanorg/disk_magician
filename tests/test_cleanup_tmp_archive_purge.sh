@@ -471,6 +471,99 @@ v=json.load(open(sys.argv[1])); raise SystemExit(0 if v["next_index"]==1 else 1)
 PY
 then record_pass "Test 8: cursor advances after unit completion"; else record_fail "Test 8: cursor advances after unit completion" "cursor index did not advance"; fi
 
+echo "Test 9: --large --clean refuses to archive secret-like or non-purgeable repo candidates (bead disk_magician-archive-same-volume-regrowth-03bn)"
+T9_PRIVATE_TMP="$TMP_ROOT/t9-private-tmp"
+T9_TMP="$TMP_ROOT/t9-tmp"
+T9_ARCHIVE="$TMP_ROOT/t9-archive"
+T9_BIN="$TMP_ROOT/t9-bin"
+mkdir -p "$T9_PRIVATE_TMP/secret_candidate" "$T9_PRIVATE_TMP/unpushed_repo_candidate" "$T9_PRIVATE_TMP/clean_candidate" "$T9_TMP"
+printf 'secret=1\n' >"$T9_PRIVATE_TMP/secret_candidate/.env.local"
+printf 'payload\n' >"$T9_PRIVATE_TMP/secret_candidate/payload.bin"
+set_old_mtime "$T9_PRIVATE_TMP/secret_candidate"
+git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" init -q
+git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" config user.name test
+git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" config user.email jleechan2015@users.noreply.github.com
+printf 'repo payload\n' >"$T9_PRIVATE_TMP/unpushed_repo_candidate/payload.bin"
+git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" add payload.bin
+git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" commit -q -m init
+set_old_mtime "$T9_PRIVATE_TMP/unpushed_repo_candidate"
+printf 'clean payload\n' >"$T9_PRIVATE_TMP/clean_candidate/payload.bin"
+set_old_mtime "$T9_PRIVATE_TMP/clean_candidate"
+make_find_shim "$T9_BIN" "$T9_PRIVATE_TMP" "$T9_TMP"
+
+T9_OUT="$TMP_ROOT/t9.out"
+if run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
+  PATH="$T9_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" \
+  LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_MIN_KB=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T9_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T9_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  T9_RC=0
+else
+  T9_RC=$?
+fi
+T9_OUT_CONTENT=$(cat "$T9_OUT")
+assert_rc "Test 9: exits 0" 0 "$T9_RC"
+assert_contains "Test 9: logs C14 secret-like skip before archiving" \
+  "Skipping archive candidate (C14 kept:secret-like): $T9_PRIVATE_TMP/secret_candidate" "$T9_OUT_CONTENT"
+assert_contains "Test 9: logs C14 repo skip before archiving" \
+  "Skipping archive candidate (C14 kept:not-pushed): $T9_PRIVATE_TMP/unpushed_repo_candidate" "$T9_OUT_CONTENT"
+assert_exists "Test 9: secret-like candidate stays at original path" "$T9_PRIVATE_TMP/secret_candidate/.env.local"
+assert_exists "Test 9: unpushed repo candidate stays at original path" "$T9_PRIVATE_TMP/unpushed_repo_candidate/payload.bin"
+assert_missing "Test 9: clean candidate is archived" "$T9_PRIVATE_TMP/clean_candidate"
+assert_contains "Test 9: only the clean candidate is counted as archived" "Dirs archived: 1" "$T9_OUT_CONTENT"
+
+echo "Test 10: aged descended container archive entry is purged at depth 3 without false depth-2 container evaluation"
+T10_PRIVATE_TMP="$TMP_ROOT/t10-private-tmp"
+T10_TMP="$TMP_ROOT/t10-tmp"
+T10_ARCHIVE="$TMP_ROOT/t10-archive"
+T10_BIN="$TMP_ROOT/t10-bin"
+mkdir -p "$T10_PRIVATE_TMP" "$T10_TMP"
+T10_PRIVATE_TMP="$(cd "$T10_PRIVATE_TMP" && pwd -P)"
+T10_TMP="$(cd "$T10_TMP" && pwd -P)"
+T10_SOURCE="$T10_TMP/cli_validation_gemini_depth3"
+T10_CONTAINER="$T10_ARCHIVE/20200101T000000Z/agent-scratch"
+T10_ENTRY="$T10_CONTAINER/cli_validation_gemini_depth3"
+mkdir -p "$T10_SOURCE" "$T10_CONTAINER"
+printf 'depth3 payload\n' >"$T10_SOURCE/payload.bin"
+T10_ARCHIVED_AT="$(python3 -c 'import time; print(int(time.time())-96*3600)')"
+python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt "$T10_SOURCE" "$T10_ENTRY.c14-origin.json" "$T10_ARCHIVED_AT" 60 >/dev/null
+mv "$T10_SOURCE" "$T10_ENTRY"
+set_old_mtime "$T10_ARCHIVE/20200101T000000Z"
+make_find_shim "$T10_BIN" "$T10_PRIVATE_TMP" "$T10_TMP"
+
+T10_OUT="$TMP_ROOT/t10.out"
+if run_capture "$T10_OUT" env -i HOME="$TMP_ROOT/t10-home" \
+  PATH="$T10_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" \
+  LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T10_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T10_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T10_TMP" \
+  bash "$SOURCE_SCRIPT" --clean; then
+  T10_RC=0
+else
+  T10_RC=$?
+fi
+T10_OUT_CONTENT=$(cat "$T10_OUT")
+assert_rc "Test 10: exits 0" 0 "$T10_RC"
+assert_contains "Test 10: purges depth-3 receipted entry" "Purged aged archive after C14 approval" "$T10_OUT_CONTENT"
+assert_missing "Test 10: depth-3 entry is removed" "$T10_ENTRY"
+if grep -qF "Skipping aged archive (C14 kept:unproven-content): $T10_CONTAINER" <<<"$T10_OUT_CONTENT"; then
+  record_fail "Test 10: depth-2 container is not falsely evaluated as an unreceipted unit" "found false depth-2 skip on $T10_CONTAINER"
+else
+  record_pass "Test 10: depth-2 container is not falsely evaluated as an unreceipted unit"
+fi
+assert_contains "Test 10: reports 1 dir removed" "Dirs removed: 1" "$T10_OUT_CONTENT"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

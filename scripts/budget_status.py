@@ -246,10 +246,18 @@ def _safe_read(path):
     try: return path.read_text()
     except OSError: return ""
 
+def _valid_num(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf")
+
+def _est_bytes(value):
+    return value if _valid_num(value) else 0
+
 def alerts(state, now, margin_gb=None):
     s, evs, out = samples(state), events(state, now - DAY, now), []
     try: budget = parse((state / "budget.json").read_text())
     except OSError: budget = None
+    if margin_gb is not None and not _valid_num(margin_gb):
+        margin_gb = 10
     if margin_gb is None:
         import budget_controls
         try: config = json.loads(Path(__import__("resolve_config").resolve()).read_text()).get("budgets")
@@ -260,14 +268,23 @@ def alerts(state, now, margin_gb=None):
                    (isinstance(config, dict) and "concurrency_margin_gb" in config)
         try: margin_gb = budget_controls.effective_margin(budget, config, strict=explicit)
         except ValueError: out.append("ALERT:margin_invalid effective admission margin unavailable")
-    if any(e.get("event") == "floor_breach" for e in evs) or (s and now - s[-1][0] <= 900 and s[-1][2] < 15 * GIB):
+    breach_times = [e["at"] for e in evs if e.get("event") == "floor_breach"]
+    fresh_sample = s[-1] if (s and 0 <= now - s[-1][0] <= 900) else None
+    if fresh_sample is not None and fresh_sample[2] < 15 * GIB:
         out += ["ALERT:floor_breach free under 15 GiB (df)", *RUNBOOK]
+    elif breach_times:
+        last_breach = max(breach_times)
+        if fresh_sample is not None and fresh_sample[2] >= 15 * GIB and fresh_sample[0] >= last_breach:
+            breach_ts = datetime.datetime.fromtimestamp(last_breach, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            out.append(f"ALERT:floor_breach_recovered (historical at {breach_ts}; current free {fresh_sample[2] / GIB:.1f} GiB)")
+        else:
+            out += ["ALERT:floor_breach free under 15 GiB (df)", *RUNBOOK]
     if (state / "budget.json").exists():
         age = now - budget["zone_at"] if isinstance(budget, dict) and type(budget.get("zone_at")) in (int, float) else float("inf")
         if age > 1800: out.append(f"ALERT:govern_stale last_tick_age={age:.0f}s")
     if any(e.get("degraded") for e in evs): out.append("ALERT:admission_degraded within 24 h")
     if any(str(e.get("event", "")).split(":", 1)[0] == "kickstart_blocked" for e in evs): out.append("ALERT:kickstart_blocked within 24 h")
-    burst = window_max([(e["at"], e.get("est_bytes") or 0) for e in evs if e.get("event") == "admit" and type(e.get("decision")) is int and e["decision"] in (0, 10)])
+    burst = window_max([(e["at"], _est_bytes(e.get("est_bytes"))) for e in evs if e.get("event") == "admit" and type(e.get("decision")) is int and e["decision"] in (0, 10)])
     if margin_gb is not None and burst > margin_gb * GIB: out.append(f"ALERT:burst_over_margin admit_burst_bytes={burst}B margin={margin_gb}GiB")
     week, month = daily_mins(budget, now, 7), daily_mins(budget, now, 30)  # C12: 7-day trough (max of daily minimums) > 15 GiB above the 30-day low
     if len(week) < 0.9 * 7 or len(month) < 0.9 * 30: out.append(f"trough_rise:insufficient_history days_7d={len(week)}/7 days_30d={len(month)}/30")

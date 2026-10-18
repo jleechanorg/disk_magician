@@ -354,9 +354,35 @@ if ! acquire_lock; then
   fi
   exit 0
 fi
-trap 'rm -rf "$LOCK_DIR"' EXIT
+RECEIPT_RUN_ID=""
+RECEIPT_FINISHED=false
+cleanup_pressure_lock() {
+  local sig="${1:-0}"
+  trap - EXIT HUP INT TERM
+  if [[ -n "${RECEIPT_RUN_ID:-}" && "${RECEIPT_FINISHED:-false}" != true && -f "$RECEIPT_HELPER" ]]; then
+    local term_outcome="error"
+    local term_reason="aborted before completion"
+    if [[ "$sig" -ne 0 ]]; then
+      term_outcome="timeout"
+      term_reason="terminated by signal ${sig}"
+    fi
+    python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
+      --run-id "$RECEIPT_RUN_ID" \
+      --outcome "$term_outcome" \
+      --reason "$term_reason" >/dev/null 2>&1 || true
+    RECEIPT_FINISHED=true
+  fi
+  rm -rf "$LOCK_DIR"
+  if [[ "$sig" -ne 0 ]]; then
+    exit "$((128 + sig))"
+  fi
+}
+trap 'cleanup_pressure_lock 0' EXIT
+trap 'cleanup_pressure_lock 1' HUP
+trap 'cleanup_pressure_lock 2' INT
+trap 'cleanup_pressure_lock 15' TERM
 
-RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job pressure_sweep --trigger "$SWEEP_MODE" --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}") || {
+RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job pressure_sweep --clear-stale-active --trigger "$SWEEP_MODE" --precondition "{\"free_gb\": ${current_free_gb}, \"threshold_gb\": ${THRESHOLD_GB}}") || {
   log "ERROR: failed to record receipt begin"
   exit 1
 }
@@ -482,6 +508,7 @@ else
   SAFETY="{\"status\": \"delegated\", \"reason\": \"delegated to cleanup_tmp, cleanup_colima, and cleanup_code_sign_clones (${STEP_STATUS})\", \"delegated\": true, \"steps\": {\"step1_rc\": ${STEP1_RC}, \"step1_timeout\": ${STEP1_TIMEOUT}, \"step2_rc\": ${STEP2_RC}, \"step2_timeout\": ${STEP2_TIMEOUT}, \"step3_rc\": ${STEP3_RC}, \"step3_timeout\": ${STEP3_TIMEOUT}}}"
 fi
 
+RECEIPT_FINISHED=true
 if ! python3 "$RECEIPT_HELPER" finish --job pressure_sweep \
   --run-id "$RECEIPT_RUN_ID" \
   --outcome "$OUTCOME" \
