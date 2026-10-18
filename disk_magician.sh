@@ -57,6 +57,7 @@ Commands:
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
+  cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
@@ -399,6 +400,9 @@ case "$CMD" in
     ;;
   cleanup_uv_cache|cleanup-uv-cache)
     "$SCRIPT_DIR/scripts/cleanup_uv_cache.sh" "$@"
+    ;;
+  cleanup_supervisor_logs|cleanup-supervisor-logs)
+    "$SCRIPT_DIR/scripts/cleanup_supervisor_logs.sh" "$@"
     ;;
   cleanup_dark_factory|cleanup-dark-factory)
     "$SCRIPT_DIR/scripts/cleanup_dark_factory.sh" "$@"

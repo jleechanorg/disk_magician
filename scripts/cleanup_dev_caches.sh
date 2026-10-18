@@ -308,6 +308,63 @@ for dev_cache_path in \
   fi
 done
 
+# 8. ~/.local/state/fsevents-projects.state.json — the polling-fallback snapshot
+# of scripts/watch_projects_fsevents.sh. Its rotated logs are bounded by that
+# script's own KEEP_DAYS/MAX_BYTES, but the state cache is explicitly excluded
+# from rotation and nothing else bounds it, so it is a pure accumulator
+# (measured 634 MiB on 2026-10-17 — findings_wiki/2026-10-17-fsevents-state-
+# cache-unbounded-growth.md). The watcher re-opens the path on every write and
+# rebuilds the snapshot on its next poll, so dropping the file is safe.
+#
+# Two gates, both from the watcher's own constants: the file is dropped when it
+# has not been written for KEEP_DAYS (dead watcher) OR when it exceeds the
+# MAX_BYTES cap (a live watcher rewrites its mtime continuously, so an
+# age-only gate would never fire on the file that actually grows). An
+# unresolvable path, a non-regular file, or a safety rule keeps it.
+FSEVENTS_STATE_DAYS=7
+FSEVENTS_STATE_MAX_BYTES=16777216
+
+# fsevents_state_is_stale <path>: rc 0 when the watcher has not written the
+# cache for FSEVENTS_STATE_DAYS. A probe that cannot run keeps the file.
+fsevents_state_is_stale() {
+  local hit
+  hit="$(find "$1" -maxdepth 0 -mtime +"$FSEVENTS_STATE_DAYS" -print 2>/dev/null)" || return 1
+  [[ -n "$hit" ]]
+}
+
+log "=== Section: ~/.local/state/fsevents-projects.state.json (${FSEVENTS_STATE_DAYS}d or $(( FSEVENTS_STATE_MAX_BYTES / 1048576 ))M cap) ==="
+FSEVENTS_STATE="$HOME/.local/state/fsevents-projects.state.json"
+if [[ ! -d "${FSEVENTS_STATE%/*}" ]]; then
+  log "fsevents state cache: directory not found, skipping"
+elif [[ ! -e "$FSEVENTS_STATE" && ! -L "$FSEVENTS_STATE" ]]; then
+  log "fsevents state cache: not found, skipping"
+elif ! fsevents_state_resolved="$(resolve_existing_path "$FSEVENTS_STATE")"; then
+  log "fsevents state cache: SAFETY-SKIP (path could not be resolved)"
+elif [[ ! -f "$fsevents_state_resolved" ]]; then
+  log "fsevents state cache: SAFETY-SKIP (not a regular file)"
+else
+  fsevents_state_kb=$(size_kb "$fsevents_state_resolved")
+  fsevents_state_reason=""
+  if fsevents_state_is_stale "$fsevents_state_resolved"; then
+    fsevents_state_reason="untouched for ${FSEVENTS_STATE_DAYS}d"
+  elif (( fsevents_state_kb * 1024 > FSEVENTS_STATE_MAX_BYTES )); then
+    fsevents_state_reason="over the $(( FSEVENTS_STATE_MAX_BYTES / 1048576 ))M cap"
+  fi
+  if [[ -z "$fsevents_state_reason" ]]; then
+    log "fsevents state cache: $(fmt_kb "$fsevents_state_kb") — retained (recent and under the cap)"
+  elif [[ "$DRY_RUN" == true ]]; then
+    log "fsevents state cache: [dry-run] would drop $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason): $fsevents_state_resolved"
+  elif ! _safety_reason="$(safety_gate "$fsevents_state_resolved" 2>/dev/null)"; then
+    log "fsevents state cache: SAFETY-SKIP ($_safety_reason)"
+  elif rm -f "$fsevents_state_resolved"; then
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + fsevents_state_kb ))
+    deletion_log "cleanup_dev_caches" "drop_fsevents_state_cache" "$fsevents_state_kb" "$fsevents_state_resolved"
+    log "fsevents state cache: dropped $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason); rebuilt on the next poll"
+  else
+    log "fsevents state cache: WARN failed to remove $fsevents_state_resolved"
+  fi
+fi
+
 # N. ~/Snapchat/Dev/.cache/bazel — bazel output bases (hit 452.6G unnoticed;
 # dot-dir invisible to Dev/* globs; regrows within hours of any bazel build).
 log "=== Section: Dev/.cache/bazel (bazel output bases) ==="
