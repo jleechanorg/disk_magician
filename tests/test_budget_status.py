@@ -76,6 +76,64 @@ class AlertsTest(IsolatedConfigTest):
     def test_floor_breach_event_within_24h(self):
         self.assertIn("floor_breach", codes(self.run_alerts(events=[dict(event="floor_breach", at=self.NOW - 3600)])))
 
+    def test_floor_breach_recovered_when_fresh_sample_above_floor(self):
+        breach_at = self.NOW - 3600
+        lines = self.run_alerts(
+            samples=[(self.NOW - 60, 840 * GIB, int(41.5 * GIB))],
+            events=[dict(event="floor_breach", at=breach_at)],
+        )
+        self.assertEqual(codes(lines), ["floor_breach_recovered"])
+        self.assertTrue(bs.raised(lines))
+        expected_ts = datetime.fromtimestamp(breach_at, tz=datetime.now().astimezone().tzinfo).astimezone(
+            __import__("datetime").timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertIn(expected_ts, lines[0])
+        self.assertIn("41.5 GiB", lines[0])
+        self.assertNotIn("free under 15 GiB", lines[0])
+
+    def test_floor_breach_active_when_observer_stale_or_older_than_breach_or_currently_low(self):
+        breach_at = self.NOW - 3600
+        # Stale observer (>900s old) must not imply recovery
+        stale_lines = self.run_alerts(
+            samples=[(self.NOW - 901, 840 * GIB, 40 * GIB)],
+            events=[dict(event="floor_breach", at=breach_at)],
+        )
+        self.assertEqual(codes(stale_lines), ["floor_breach"])
+        self.assertIn("free under 15 GiB (df)", stale_lines[0])
+        # Observer sample older than the breach event must not imply recovery
+        pre_breach_lines = self.run_alerts(
+            samples=[(self.NOW - 120, 840 * GIB, 40 * GIB)],
+            events=[dict(event="floor_breach", at=self.NOW - 60)],
+        )
+        self.assertEqual(codes(pre_breach_lines), ["floor_breach"])
+        # Fresh sample currently <15 GiB with historical breach remains active floor_breach
+        active_lines = self.run_alerts(
+            samples=[(self.NOW - 60, 880 * GIB, 14 * GIB)],
+            events=[dict(event="floor_breach", at=breach_at)],
+        )
+        self.assertEqual(codes(active_lines), ["floor_breach"])
+
+    def test_non_numeric_est_bytes_and_margin_do_not_crash(self):
+        ev = [
+            dict(event="admit", at=self.NOW - 300, est_bytes="x", decision=0),
+            dict(event="admit", at=self.NOW - 200, est_bytes=True, decision=0),
+            dict(event="admit", at=self.NOW - 100, est_bytes=12 * GIB, decision=0),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state = write_state(tmp, events=ev)
+            lines = bs.alerts(state, self.NOW, "x")
+            self.assertEqual(codes(lines), ["burst_over_margin"])
+            self.assertIn("admit_burst_bytes=" + str(12 * GIB) + "B margin=10GiB", lines[0])
+            # Also verify non-numericest_bytes alone with no burst produces []
+            state_zero = write_state(tmp, events=[dict(event="admit", at=self.NOW - 300, est_bytes="x", decision=0)])
+            self.assertEqual(codes(bs.alerts(state_zero, self.NOW, "x")), [])
+            # And non-numeric concurrency_margin_gb in config.json does not crash when margin_gb=None
+            cfg = state / "bad_config.json"
+            cfg.write_text(json.dumps({"budgets": {"concurrency_margin_gb": "x"}}))
+            with patch.dict(os.environ, {"DISK_MAGICIAN_CONFIG": str(cfg)}):
+                cfg_lines = bs.alerts(state_zero, self.NOW)
+                self.assertIn("margin_invalid", codes(cfg_lines))
+
     def test_govern_stale(self):
         self.assertEqual(codes(self.run_alerts(budget=dict(zone="RED", zone_at=self.NOW - 1801))), ["govern_stale"])
         self.assertEqual(codes(self.run_alerts(budget=dict(zone="RED", zone_at=self.NOW - 1700))), [])

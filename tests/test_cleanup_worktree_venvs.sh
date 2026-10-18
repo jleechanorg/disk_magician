@@ -469,5 +469,160 @@ OUT10_NORMAL=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
 assert_contains "normal load per core proceeds to scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT10_NORMAL"
 
 echo
+echo "=== Test 11 (kxz): AO worktreeDir + corrupt AO config + live-cwd exclusions ==="
+KXZ_HOME="$TMP_ROOT/kxz_home"
+mkdir -p "$KXZ_HOME/.worktrees" "$KXZ_HOME/ao/data/worktrees"
+KXZ_ORIGIN="$TMP_ROOT/kxz-origin.git"
+KXZ_BASE="$TMP_ROOT/kxz-base"
+git init -q --bare -b main "$KXZ_ORIGIN"
+git init -q -b main "$KXZ_BASE"
+: > "$KXZ_BASE/README.md"
+git -C "$KXZ_BASE" -c user.name=t -c user.email=t@t add -A
+git -C "$KXZ_BASE" -c user.name=t -c user.email=t@t commit -qm init
+git -C "$KXZ_BASE" remote add origin "$KXZ_ORIGIN"
+git -C "$KXZ_BASE" push -q -u origin main
+
+AO_WT="$KXZ_HOME/.worktrees/ao_proj/wt-ao"
+AO_IMPLICIT_WT="$KXZ_HOME/ao/data/worktrees/wt-implicit"
+NON_AO_WT="$KXZ_HOME/.worktrees/other_repo/wt-non-ao"
+LIVE_WT="$KXZ_HOME/.worktrees/other_repo/wt-live"
+
+for wt in "$AO_WT" "$AO_IMPLICIT_WT" "$NON_AO_WT" "$LIVE_WT"; do
+  git -C "$KXZ_BASE" -c user.name=t -c user.email=t@t worktree add -q -b "kxz-$(basename "$wt")" "$wt"
+  git -C "$wt" -c user.name=t -c user.email=t@t push -q -u origin "kxz-$(basename "$wt")"
+  mkdir -p "$wt/.venv" "$wt/venv.bak.20260101"
+  for p in "$wt/README.md" "$wt/.git" "$wt/.venv" "$wt/venv.bak.20260101"; do
+    age_path_days_ago "$p" 15
+  done
+done
+
+AO_VALID_CFG="$TMP_ROOT/ao_valid.yaml"
+cat > "$AO_VALID_CFG" <<EOF
+worktreeDir: ~/.worktrees
+projects:
+  ao_proj:
+    path: /tmp/ao_proj
+    worktreeDir: ~/.worktrees/ao_proj
+EOF
+
+KXZ_ROOTS="$KXZ_HOME/.worktrees,$KXZ_HOME/ao/data/worktrees"
+
+# Start a background process with cwd inside LIVE_WT
+(cd "$LIVE_WT" && sleep 30) &
+LIVE_PID=$!
+
+OUT11_DRY=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
+  DISK_MAGICIAN_AO_CONFIG="$AO_VALID_CFG" \
+  bash "$TARGET_SCRIPT" --roots "$KXZ_ROOTS" --purge-bak-days 5 --dry-run 2>&1)
+
+assert_contains "dry-run: AO worktreeDir venv skipped as ao-owned" \
+  "skip (ao-owned): $AO_WT/.venv" "$OUT11_DRY"
+assert_not_contains "dry-run: AO worktreeDir venv NOT flagged" \
+  "would strip $AO_WT/.venv" "$OUT11_DRY"
+assert_not_contains "dry-run: AO worktreeDir venv.bak NOT flagged" \
+  "would purge $AO_WT/venv.bak.20260101" "$OUT11_DRY"
+assert_contains "dry-run: implicit ao/data/worktrees venv skipped as ao-owned" \
+  "skip (ao-owned): $AO_IMPLICIT_WT/.venv" "$OUT11_DRY"
+assert_not_contains "dry-run: implicit ao/data/worktrees venv NOT flagged" \
+  "would strip $AO_IMPLICIT_WT/.venv" "$OUT11_DRY"
+assert_contains "dry-run: live-cwd worktree venv skipped as live-cwd" \
+  "skip (live-cwd): $LIVE_WT/.venv" "$OUT11_DRY"
+assert_not_contains "dry-run: live-cwd worktree venv NOT flagged" \
+  "would strip $LIVE_WT/.venv" "$OUT11_DRY"
+assert_not_contains "dry-run: live-cwd worktree venv.bak NOT flagged" \
+  "would purge $LIVE_WT/venv.bak.20260101" "$OUT11_DRY"
+assert_contains "dry-run: non-AO dormant worktree venv flagged" \
+  "would strip $NON_AO_WT/.venv" "$OUT11_DRY"
+
+OUT11_AO=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
+  DISK_MAGICIAN_AO_CONFIG="$AO_VALID_CFG" \
+  WORKTREE_APPROVED=1 \
+  bash "$TARGET_SCRIPT" --roots "$KXZ_ROOTS" --purge-bak-days 5 --clean 2>&1)
+kill "$LIVE_PID" 2>/dev/null || true
+wait "$LIVE_PID" 2>/dev/null || true
+
+assert_contains "clean: AO worktreeDir venv skipped as ao-owned" \
+  "skip (ao-owned): $AO_WT/.venv" "$OUT11_AO"
+assert_not_contains "clean: AO worktreeDir venv NOT stripped" \
+  "stripping $AO_WT/.venv" "$OUT11_AO"
+if [[ -d "$AO_WT/.venv" && -d "$AO_WT/venv.bak.20260101" ]]; then
+  record_pass "AO worktreeDir .venv and venv.bak preserved on disk"
+else
+  record_fail "AO worktreeDir .venv and venv.bak preserved on disk" "AO worktree venv or bak was removed"
+fi
+
+assert_contains "clean: implicit ao/data/worktrees venv skipped as ao-owned" \
+  "skip (ao-owned): $AO_IMPLICIT_WT/.venv" "$OUT11_AO"
+if [[ -d "$AO_IMPLICIT_WT/.venv" ]]; then
+  record_pass "implicit ao/data/worktrees .venv preserved on disk"
+else
+  record_fail "implicit ao/data/worktrees .venv preserved on disk" "implicit AO worktree venv was removed"
+fi
+
+assert_contains "clean: live-cwd worktree venv skipped as live-cwd" \
+  "skip (live-cwd): $LIVE_WT/.venv" "$OUT11_AO"
+assert_not_contains "clean: live-cwd worktree venv NOT stripped" \
+  "stripping $LIVE_WT/.venv" "$OUT11_AO"
+if [[ -d "$LIVE_WT/.venv" && -d "$LIVE_WT/venv.bak.20260101" ]]; then
+  record_pass "live-cwd worktree .venv and venv.bak preserved on disk"
+else
+  record_fail "live-cwd worktree .venv and venv.bak preserved on disk" "live-cwd worktree venv or bak was removed"
+fi
+
+if [[ ! -d "$NON_AO_WT/.venv" ]]; then
+  record_pass "non-AO dormant worktree .venv was stripped"
+else
+  record_fail "non-AO dormant worktree .venv was stripped" "still present at $NON_AO_WT/.venv"
+fi
+
+# Recreate NON_AO_WT/.venv to test corrupt and unreadable AO config fail-closed behavior
+mkdir -p "$NON_AO_WT/.venv"
+for p in "$NON_AO_WT/README.md" "$NON_AO_WT/.git" "$NON_AO_WT/.venv"; do
+  age_path_days_ago "$p" 15
+done
+
+AO_CORRUPT_CFG="$TMP_ROOT/ao_corrupt.yaml"
+printf 'projects: [unclosed\n' > "$AO_CORRUPT_CFG"
+OUT11_CORRUPT=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
+  DISK_MAGICIAN_AO_CONFIG="$AO_CORRUPT_CFG" \
+  WORKTREE_APPROVED=1 \
+  bash "$TARGET_SCRIPT" --roots "$KXZ_ROOTS" --clean 2>&1)
+assert_contains "corrupt AO config skips with ao-config-unreadable" \
+  "skip (ao-config-unreadable): $NON_AO_WT/.venv" "$OUT11_CORRUPT"
+assert_not_contains "corrupt AO config does not attempt strip" \
+  "stripping $NON_AO_WT/.venv" "$OUT11_CORRUPT"
+if [[ -d "$NON_AO_WT/.venv" ]]; then
+  record_pass "corrupt AO config fails closed and preserves .venv"
+else
+  record_fail "corrupt AO config fails closed and preserves .venv" "removed .venv despite corrupt AO config"
+fi
+
+AO_UNREADABLE_CFG="$TMP_ROOT/ao_unreadable.yaml"
+cp "$AO_VALID_CFG" "$AO_UNREADABLE_CFG"
+chmod 000 "$AO_UNREADABLE_CFG"
+OUT11_UNREADABLE=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
+  DISK_MAGICIAN_AO_CONFIG="$AO_UNREADABLE_CFG" \
+  WORKTREE_APPROVED=1 \
+  bash "$TARGET_SCRIPT" --roots "$KXZ_ROOTS" --clean 2>&1)
+chmod 644 "$AO_UNREADABLE_CFG"
+assert_contains "unreadable AO config skips with ao-config-unreadable" \
+  "skip (ao-config-unreadable): $NON_AO_WT/.venv" "$OUT11_UNREADABLE"
+assert_not_contains "unreadable AO config does not attempt strip" \
+  "stripping $NON_AO_WT/.venv" "$OUT11_UNREADABLE"
+if [[ -d "$NON_AO_WT/.venv" ]]; then
+  record_pass "unreadable AO config fails closed and preserves .venv"
+else
+  record_fail "unreadable AO config fails closed and preserves .venv" "removed .venv despite unreadable AO config"
+fi
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

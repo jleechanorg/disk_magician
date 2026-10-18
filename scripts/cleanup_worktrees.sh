@@ -166,9 +166,9 @@ if [[ -n "$ACT_CURSOR" ]]; then
     ACT_CURSOR_STATE="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || {
         echo "invalid cleanup_worktrees cursor" >&2; exit 3;
     }
-    ACT_CURSOR_ITEMS="$(python3 -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["items"],separators=(",",":")))' "$ACT_CURSOR_STATE")"
-    ACT_CURSOR_INDEX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["next_index"])' "$ACT_CURSOR_STATE")"
-    ACT_CURSOR_LEN="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
+    ACT_CURSOR_ITEMS="$(printf '%s' "$ACT_CURSOR_STATE" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["items"],separators=(",",":")))')"
+    ACT_CURSOR_INDEX="$(printf '%s' "$ACT_CURSOR_STATE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["next_index"])')"
+    ACT_CURSOR_LEN="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')"
     if (( ACT_CURSOR_INDEX >= ACT_CURSOR_LEN )); then
         ACT_CURSOR_ITEMS='[]'
         ACT_CURSOR_INDEX=0
@@ -199,21 +199,19 @@ trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
 act_candidate_begin() {
     local path="$1" index items_before
     [[ -n "$ACT_CURSOR" ]] || return 0
-    index="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+    index="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
-items=json.loads(sys.argv[1])
-try: print(items.index(sys.argv[2]))
+items=json.load(sys.stdin)
+try: print(items.index(sys.argv[1]))
 except ValueError: print(-1)
-PY
-)"
+' "$path")"
     if [[ "$index" == -1 ]]; then
-        items_before="$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$ACT_CURSOR_ITEMS")"
-        ACT_CURSOR_ITEMS="$(python3 - "$ACT_CURSOR_ITEMS" "$path" <<'PY'
+        items_before="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')"
+        ACT_CURSOR_ITEMS="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
-items=json.loads(sys.argv[1]); items.append(sys.argv[2])
+items=json.load(sys.stdin); items.append(sys.argv[1])
 print(json.dumps(items,separators=(",",":")))
-PY
-)"
+' "$path")"
         index="$items_before"
         act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || return 3
         (( ACT_CURSOR_INDEX < items_before )) && return 1
@@ -422,6 +420,29 @@ classify_repo_local_worktree() {
 
 # classify_content_and_merge <repo> <wt> <head> <branch>: dirty/merge checks;
 # prints a PRESERVE reason, or nothing when the worktree is clean and merged.
+# worktree_head_reachable_from_main <repo> <head_sha> <main_ref> — rc 0 when the
+# commit is an ancestor of main (merge-base --is-ancestor). Fail closed.
+worktree_head_reachable_from_main() {
+    local repo="$1" head_sha="$2" main_ref="$3"
+    [[ -n "$head_sha" && -n "$main_ref" ]] || return 1
+    git -C "$repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null && return 0
+    return 1
+}
+
+# worktree_head_on_origin_branch <repo> <branch> <head_sha> — rc 0 when the exact
+# HEAD is the live tip of that branch on origin (git ls-remote). Fail closed on
+# any error (no timeout available, remote unreachable, mismatch).
+worktree_head_on_origin_branch() {
+    local repo="$1" branch="$2" head_sha="$3" t=""
+    [[ -n "$branch" && "$branch" != "detached" && -n "$head_sha" ]] || return 1
+    command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+    local remote_oid
+    # shellcheck disable=SC2086
+    remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}')" || return 1
+    [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]] && return 0
+    return 1
+}
+
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
@@ -473,10 +494,19 @@ classify_content_and_merge() {
                     if [[ "$gh_rc" -eq 0 && -n "$pr_heads" && -n "$head_sha" ]]; then
                         if grep -qFx "$head_sha" <<<"$pr_heads"; then
                             return 0
-                        else
-                            echo "merged-differing-head"
+                        fi
+                        # Bead disk_magician-archive-same-volume-regrowth-03bn
+                        # follow-up: this branch has a MERGED PR but the worktree
+                        # HEAD differs from the merged PR head. Removal is still
+                        # data-loss-safe when HEAD itself is already reachable from
+                        # main OR is the exact live tip on origin (the commits
+                        # exist elsewhere). Fail closed to PRESERVE otherwise.
+                        if worktree_head_reachable_from_main "$repo" "$head_sha" "$main_ref" \
+                           || worktree_head_on_origin_branch "$repo" "$branch_clean" "$head_sha"; then
                             return 0
                         fi
+                        echo "merged-differing-head"
+                        return 0
                     fi
                 fi
             fi

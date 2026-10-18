@@ -751,6 +751,15 @@ fi
 exec /usr/bin/getconf "$@"
 EOF
 chmod +x "$PS_BIN/getconf"
+cat > "$PS_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "+D" || "${1:-}" == "-w" ]]; then
+  exit 1
+fi
+printf 'p100\nfcwd\ntDIR\nn/\n'
+exit 0
+EOF
+chmod +x "$PS_BIN/lsof"
 # A stale, oversized top-level fixture dir so the --large branch has real
 # work to do (proves the archive path runs end-to-end against the fixture,
 # not just a no-op scan). LARGE_TMP_MIN_KB is lowered so a small fixture
@@ -774,6 +783,14 @@ PS_ESCAPE_SENTINEL="$PS_SANDBOX/escape-sentinel"
 mkdir -p "$PS_ESCAPE_SENTINEL"
 dd if=/dev/zero of="$PS_ESCAPE_SENTINEL/payload" bs=1024 count=200 status=none
 touch -t "$STALE_STAMP" "$PS_ESCAPE_SENTINEL/payload" "$PS_ESCAPE_SENTINEL"
+
+# Owned /private/tmp canary (bead disk_magician-m1t): proves a fixture-confined
+# pressure sweep never reaches real /private/tmp without globally diffing
+# ambient /private/tmp entries owned by concurrent processes.
+PS_HOST_TMP_CANARY="$(mktemp -d /private/tmp/dm-ps-canary.XXXXXX)"
+trap 'rm -rf "$TMP_ROOT" "$PS_HOST_TMP_CANARY"' EXIT
+dd if=/dev/zero of="$PS_HOST_TMP_CANARY/payload" bs=1024 count=200 status=none
+touch -t "$STALE_STAMP" "$PS_HOST_TMP_CANARY/payload" "$PS_HOST_TMP_CANARY"
 
 OUT9="$TMP_ROOT/pressure.out"
 if run_capture "$OUT9" env -i HOME="$TMP_ROOT/home-ps" \
@@ -800,6 +817,8 @@ assert_exists "persistent deletion log was written to the fixture path" "$PS_DEL
 assert_contains "deletion log records the archived fixture path" "$PS_PRIVATE_TMP/stale_large_dir" "$(cat "$PS_DELETION_LOG" 2>/dev/null || true)"
 
 assert_exists "outside-scope pressure sentinel remains untouched" "$PS_ESCAPE_SENTINEL/payload"
+assert_exists "owned /private/tmp canary remains untouched (no ambient /private/tmp diff)" "$PS_HOST_TMP_CANARY/payload"
+rm -rf "$PS_HOST_TMP_CANARY"
 
 echo "Test 9b: sandbox_guard_roots aborts cleanup_tmp.sh --clean --large before any deletion when a root is outside DISK_MAGICIAN_TEST_SANDBOX"
 UNRELATED_SANDBOX="$TMP_ROOT/pressure-unrelated-sandbox"

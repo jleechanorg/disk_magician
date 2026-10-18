@@ -124,10 +124,26 @@ free_gb() {
 }
 
 RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
+RECEIPT_RUN_ID=""
+RECEIPT_FINISHED=false
 
 cleanup_lock() {
   local sig="${1:-0}"
   trap - EXIT HUP INT TERM
+  if [[ -n "${RECEIPT_RUN_ID:-}" && "${RECEIPT_FINISHED:-false}" != true && -f "$RECEIPT_HELPER" ]]; then
+    local term_outcome="error"
+    local term_reason="aborted before completion"
+    if [[ "$sig" -ne 0 ]]; then
+      term_outcome="timeout"
+      term_reason="terminated by signal ${sig}"
+    fi
+    python3 "$RECEIPT_HELPER" finish --job main_sweeper \
+      --run-id "$RECEIPT_RUN_ID" \
+      --outcome "$term_outcome" \
+      --reason "$term_reason" \
+      --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' >/dev/null 2>&1 || true
+    RECEIPT_FINISHED=true
+  fi
   rm -rf "$LOCK_DIR"
   if [[ "$sig" -ne 0 ]]; then
     exit "$((128 + sig))"
@@ -242,8 +258,9 @@ main() {
   acquire_lock || exit 0
 
   RECEIPT_RUN_ID=""
+  RECEIPT_FINISHED=false
   if [[ -f "$RECEIPT_HELPER" ]]; then
-    RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job main_sweeper \
+    RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job main_sweeper --clear-stale-active \
       --trigger "${DISK_MAGICIAN_TRIGGER:-scheduled}" \
       --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' 2>/dev/null || echo "")
     # Aggregate Tier keeps into this wrapper's terminal receipt; owner=main_sweeper
@@ -262,12 +279,19 @@ main() {
   run_job_step() {
     local desc="$1"
     shift
-    if ! run_step_timeout "$@"; then
-      log "WARN: $desc failed"
-      ERRORS=$((ERRORS + 1))
-      return 1
+    local step_rc=0
+    if run_step_timeout "$@"; then
+      return 0
+    else
+      step_rc=$?
     fi
-    return 0
+    if [[ "$step_rc" -eq 75 ]]; then
+      log "INFO: $desc skipped (lock held, rc=75)"
+      return 0
+    fi
+    log "WARN: $desc failed (rc=${step_rc})"
+    ERRORS=$((ERRORS + 1))
+    return 1
   }
 
   # Phase 1: Snapshot & Topdown Ledger
@@ -424,6 +448,7 @@ main() {
   fi
 
   if [[ -n "$RECEIPT_RUN_ID" && -f "$RECEIPT_HELPER" ]]; then
+    RECEIPT_FINISHED=true
     if python3 "$RECEIPT_HELPER" finish --job main_sweeper \
       --run-id "$RECEIPT_RUN_ID" \
       --outcome "$outcome" \

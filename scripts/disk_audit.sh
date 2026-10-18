@@ -508,6 +508,11 @@ if [[ -d "$aside_dir/u" ]]; then
     fi
 fi
 
+# /private/tmp full-clone & advice scratch anomalies (bead disk_magician-tmp-full-clones-still-produced-tjkb)
+if [[ -x "$SCRIPT_DIR/check_tmp_clones.sh" ]]; then
+    "$SCRIPT_DIR/check_tmp_clones.sh" || true
+fi
+
 # ── 5. Cleanup Execution ─────────────────────────────────────────────────────
 if [[ "$MODE" == "audit" ]]; then
     echo

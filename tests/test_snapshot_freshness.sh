@@ -44,15 +44,56 @@ case "$WORK" in
 esac
 trap 'rm -rf "$WORK"' EXIT
 
-# The snapshot writer expands ~ through HOME. Keep that entire input surface
-# inside this fixture and seed several container directories so the lc_* check
-# observes deterministic entries without reading the live user HOME.
+# The snapshot writer expands ~ through HOME, while config.json.template also
+# lists absolute host paths (/Applications, /Library, /private/var, /opt, etc.).
+# Keep the ENTIRE input surface inside $WORK (bead disk_magician-4gd) so hosted
+# runners never traverse 40+ GiB of /Applications or /Library during metadata
+# and lc_* verification.
 export HOME="$WORK/home"
-mkdir -p "$HOME/Library/Containers"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$WORK/user_tmp/T"
+export DISK_MAGICIAN_FRONTIER_ROOT_JSON="$WORK/no-root-frontier.json"
+export DISK_MAGICIAN_GDU_CMD=""
+mkdir -p "$HOME/Library/Containers" "$WORK/user_tmp/T" "$WORK/user_tmp/X" "$WORK/host_root" "$WORK/bin"
 for container in com.example.alpha com.example.beta com.example.gamma; do
     mkdir -p "$HOME/Library/Containers/$container/Data"
     touch "$HOME/Library/Containers/$container/Data/fixture"
 done
+cat > "$WORK/bin/diskutil" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+cat > "$WORK/bin/tmutil" <<'SH'
+#!/usr/bin/env bash
+printf 'Snapshots for disk /:\n'
+SH
+cat > "$WORK/bin/taskpolicy" <<'SH'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -b) shift ;;
+    -c|-g|-p|-a|-x|-S|-t) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+SH
+chmod +x "$WORK/bin/diskutil" "$WORK/bin/tmutil" "$WORK/bin/taskpolicy"
+export PATH="$WORK/bin:$PATH"
+export DISK_MAGICIAN_CONFIG="$WORK/config.json"
+python3 - "$REPO_ROOT/config.json.template" "$DISK_MAGICIAN_CONFIG" "$WORK/host_root" <<'PY'
+import json, os, sys
+template_path, out_path, host_root = sys.argv[1:4]
+cfg = json.load(open(template_path))
+for item in cfg.get("monitored_dirs", []):
+    p = item.get("path", "")
+    if p.startswith("/"):
+        relocated = os.path.join(host_root, p.lstrip("/"))
+        os.makedirs(relocated, exist_ok=True)
+        item["path"] = relocated
+json.dump(cfg, open(out_path, "w"), indent=2)
+PY
 
 PASS=0
 FAIL=0
@@ -65,15 +106,18 @@ section() { echo; echo "── $1 ──"; }
 section "1. Live snapshot has snapshot_metadata block and lc_ keys"
 
 LIVE_SNAP="$WORK/live_snap.json"
-if DISK_MAGICIAN_STATE_DIR="$WORK/state" timeout "${SNAPSHOT_TIMEOUT:-180}" "$SNAP_SCRIPT" --output "$LIVE_SNAP" > "$WORK/live_snap.log" 2>&1; then
+live_rc=0
+DISK_MAGICIAN_STATE_DIR="$WORK/state" timeout "${SNAPSHOT_TIMEOUT:-180}" "$SNAP_SCRIPT" --output "$LIVE_SNAP" > "$WORK/live_snap.log" 2>&1 || live_rc=$?
+if [[ "$live_rc" -eq 0 ]]; then
     if [[ -s "$LIVE_SNAP" ]]; then
         ok "live snapshot written to $LIVE_SNAP"
     else
         bad "live snapshot file is empty"
+        cat "$WORK/live_snap.log" 2>/dev/null | sed 's/^/      /' || true
     fi
 else
-    bad "live snapshot run timed out or failed (${SNAPSHOT_TIMEOUT:-180}s budget)"
-    tail -n 20 "$WORK/live_snap.log" 2>/dev/null || true
+    bad "live snapshot run timed out or failed (rc=$live_rc, ${SNAPSHOT_TIMEOUT:-180}s budget)"
+    tail -n 40 "$WORK/live_snap.log" 2>/dev/null | sed 's/^/      /' || true
     echo "  (skipping live assertions — using synthetic snapshots for the rest)"
     LIVE_SNAP=""
 fi

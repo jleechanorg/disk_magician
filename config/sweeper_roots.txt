@@ -27,15 +27,20 @@
 # via scratch_roots_get_unique (guarded 15 GiB ceiling; safety/age/open/repo guards).
 
 # cleanup_dev_caches.sh
-$HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
-$HOME/.cache/uv	cleanup_dev_caches.sh	line 105
-$HOME/.cache/pre-commit	cleanup_dev_caches.sh	line 109
-$HOME/.local/share/opencode	cleanup_dev_caches.sh	line 113
-$HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 149
-$HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
-$HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
-$HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
-$HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
+$HOME/.gemini/tmp	cleanup_dev_caches.sh	line 113
+$HOME/.cache/uv	cleanup_dev_caches.sh	line 117
+$HOME/.cache/pre-commit	cleanup_dev_caches.sh	line 121
+$HOME/.cache/worldai	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 127
+$HOME/Library/Caches/org.swift.swiftpm	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 128
+$HOME/Library/Caches/CocoaPods	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 130
+$HOME/Library/Caches/@granolaelectron-updater	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 131
+$HOME/.cache/ezgha-recovery-target-20261004	cleanup_dev_caches.sh	Section 3b non-cache recovery target, line 132
+$HOME/.local/share/opencode	cleanup_dev_caches.sh	line 142
+$HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 179
+$HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6, line 245
+$HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section, line 269
+$HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section, line 270
+$HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section, line 314
 # wiki-publish cache retained: lifecycle unknown; no automatic deletion.
 
 # cleanup_tmp.sh / cleanup_pr_scratch.sh
@@ -109,6 +114,7 @@ $HOME/.gemini/antigravity-ide	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.gemini/antigravity-browser-profile	cleanup_agent_artifacts.sh	TARGETS array
 $HOME/.dark-factory/runs	cleanup_dark_factory.sh	canonical 30-day retention; per-candidate recency/liveness/safety guards; routine opt-in AGENT_ARTIFACTS_APPROVED
 $HOME/.dark-factory	cleanup_dark_factory.sh	state root for dark-factory runs, controller-snapshots, logs
+$HOME/.local/share/dark-factory/releases	cleanup_dark_factory.sh	RELEASES_DIR default, line 20
 $HOME/.local/state/fsevents-projects.log	watch_projects_fsevents.sh	log rotation
 $HOME/.local/state/fsevents-projects.state.json	watch_projects_fsevents.sh	state file
 
@@ -117,6 +123,10 @@ $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 
 # cleanup_claude_state.sh
 $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs); scheduled report-only, --clean needs approval
+
+# cleanup_codex_documents.sh — narrowed to the <YYYY-MM-DD>/<task-dir> paths
+# it actually enumerates (leaving non-date siblings like archive/ unvisited).
+$HOME/Documents/Codex/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*	cleanup_codex_documents.sh	ROOT_LOGICAL/<YYYY-MM-DD>/<task-dir> task directories, line 116-144
 
 # NOTE: $HOME/.codex/sessions, $HOME/.codex/state*.sqlite, $HOME/.codex/log,
 # and $HOME/.claude/projects are intentionally NOT registered here as
@@ -136,20 +146,35 @@ $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dorm
 # The original measured 17-root list is not present in the supplied grouped evidence.
 $HOME/Library/Application Support/Cursor/snapshots	decision:check_uncovered_roots.py	No current snapshot cleanup owner; review retention before reclaim
 $HOME/.cache	decision:check_uncovered_roots.py	Mixed parent: only registered narrow cache children are swept; memory-backup-repo requires preservation review
+$HOME/.cache/whisper	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; review model/cache retention before reclaim
+$HOME/.cache/memory-backup-repo	decision:check_uncovered_roots.py	Historical 2026-05-09 target; requires preservation review before reclaim
+$HOME/.cache/cmux	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; no active sweeper owner
+$HOME/.cache/gh	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; no active sweeper owner
+$HOME/.cache/codex-runtimes	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; no active sweeper owner
+$HOME/.cache/huggingface	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; review model cache retention before reclaim
+$HOME/.cache/zig	decision:check_uncovered_roots.py	Historical 2026-05-09 cache target; no active sweeper owner
 $HOME/.gemini/antigravity-cli	decision:check_uncovered_roots.py	Mixed state parent; preserve conversations and credentials; only brain has an established sweeper
-$HOME/Documents/Codex	decision:check_uncovered_roots.py	No established owner; preserve task WIP and evidence pending an explicit decision
+$HOME/Documents/Codex	decision:cleanup_codex_documents.sh	Report-only mixed parent; cleanup_codex_documents.sh visits only <YYYY-MM-DD>/<task-dir> date directories, leaving non-date children (e.g. archive) unvisited
 $HOME/Library/CloudStorage/Dropbox/conversation-backups	decision:check_uncovered_roots.py	Conversation archive has no established cleanup owner; preserve pending retention decision
+$HOME/Library/CloudStorage/Dropbox/conversation-backups/codex_conversations/sessions	decision:check_uncovered_roots.py	Conversation sessions archive has no established cleanup owner; preserve pending retention decision
 $HOME/Library/Logs	decision:check_uncovered_roots.py	Mixed log parent; no disk-magician log rotation owner here; .local/state rotation does not cover it
+$HOME/Library/Logs/disk-magician-*.log	decision:check_uncovered_roots.py	Unrotated disk-magician launchd logs (e.g. fsevents.log); no log rotation sweeper owner yet
+$HOME/Library/Logs/dark-factory	decision:check_uncovered_roots.py	Stale dark-factory log directory; no log rotation sweeper owner yet
+$HOME/Library/Logs/cmux-focus.log	decision:check_uncovered_roots.py	Unbounded cmux focus log; no log rotation sweeper owner yet
 /Library/Developer	decision:check_uncovered_roots.py	System scope is not covered by user Xcode cache cleanup; explicit decision required
+/Library/Developer/CoreSimulator	decision:check_uncovered_roots.py	System CoreSimulator scope is not covered by user Xcode cache cleanup; explicit decision required
 $HOME/Library/Developer/CoreSimulator/Devices	decision:cleanup_xcode.sh	Conditional owner only with --all-simulators and SIMULATORS_APPROVED=1; not routine coverage
 $HOME/Library/Caches/Google	decision:check_uncovered_roots.py	Cache-only proposal; no current owner, preserve other Google user data
+$HOME/Library/Application Support/Google/Chrome	decision:check_uncovered_roots.py	Cache-only proposal (*/Cache, */Code Cache, */GPUCache); preserve profiles, cookies and account state
 $HOME/Library/Application Support/Google/Chrome/*/Cache	decision:check_uncovered_roots.py	Cache-only proposal; preserve profiles, cookies and account state
 $HOME/Library/Application Support/Google/Chrome/*/Code Cache	decision:check_uncovered_roots.py	Cache-only proposal; no broad profile deletion
 $HOME/Library/Application Support/Google/Chrome/*/GPUCache	decision:check_uncovered_roots.py	Cache-only proposal; no broad profile deletion
 $HOME/Library/Caches/Aside	decision:check_uncovered_roots.py	Cache-only proposal; current session sweeper does not cover this root
+$HOME/Library/Application Support/Aside	decision:check_uncovered_roots.py	Cache-only proposal (*Cache*); preserve sessions and account state
 $HOME/Library/Application Support/Aside/*Cache*	decision:check_uncovered_roots.py	Cache-only proposal; preserve sessions and account state
 $HOME/Library/Caches/com.openai.codex	decision:check_uncovered_roots.py	Cache-only proposal; no Codex state/session deletion authority
 $HOME/Library/Caches/cmux	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
 $HOME/Library/Caches/CodexBar	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
 $HOME/Library/Caches/Codex	decision:check_uncovered_roots.py	Cache-only proposal; no Codex state/session deletion authority
 $HOME/Library/Caches/com.cmuxterm.app	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
+

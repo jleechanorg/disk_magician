@@ -117,15 +117,24 @@ BINDING="$TMP/binding-deadline$N.json"; INV="$TMP/inventory-deadline$N.json"
 python3 "$ROOT/scripts/quarantine_rename.py" bind "$A" "$BINDING" >/dev/null
 python3 "$TMP/inv.py" "$A" > "$INV"
 SLOWBIN="$TMP/slowbin$N"; mkdir -p "$SLOWBIN"
-printf '#!/bin/bash\nsleep 0.5\nexit 1\n' > "$SLOWBIN/lsof"; chmod +x "$SLOWBIN/lsof"
-DEADLINE="$(python3 -c 'import time; print(time.monotonic()+0.12)')"
-START="$(python3 -c 'import time; print(time.monotonic())')"
-OUT="$(PATH="$SLOWBIN:$PATH" python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$DEADLINE")"
-END="$(python3 -c 'import time; print(time.monotonic())')"
+printf '#!/bin/bash\nsleep 2.5\nexit 1\n' > "$SLOWBIN/lsof"; chmod +x "$SLOWBIN/lsof"
+read -r OUT ELAPSED <<<"$(PATH="$SLOWBIN:$PATH" python3 - "$ROOT/scripts/quarantine_rename.py" "$A" "$INV" "$BINDING" <<'PY'
+import subprocess, sys, time
+script, a, inv, binding = sys.argv[1:5]
+start = time.monotonic()
+deadline = start + 0.8
+proc = subprocess.run(
+    [sys.executable, script, "phase1", a, inv, binding, "--deadline-at", f"{deadline:.6f}"],
+    capture_output=True, text=True, check=True,
+)
+elapsed = time.monotonic() - start
+print(f"{proc.stdout.strip()} {elapsed:.6f}")
+PY
+)"
 check 'phase1 deadline bounds the lsof probe and defers' [ "$OUT" = "deferred:deadline" ]
 check 'deferred phase1 retains the original artifact' bash -c '[[ -f "$1/report.md" && -f "$1/sub/deep/y.txt" && -L "$1/link" ]]' _ "$A"
 check 'deferred phase1 leaves no quarantine payload' [ -z "$(find "$Q" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
-check 'phase1 deadline returns before the 0.5s probe completes' python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 0.4 else 1)"
+check 'phase1 deadline returns before the 2.5s probe completes' python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)" "$ELAPSED"
 for bad in nan inf -1; do
   check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
 done

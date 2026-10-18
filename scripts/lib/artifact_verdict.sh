@@ -219,7 +219,7 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^(\.cache/(uv|pre-commit)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/]' deadline=${2:-} pushed
+    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
@@ -270,9 +270,14 @@ out = []
 for n in names:
     if not n.endswith(".json") or n.startswith("."):
         continue
+    p = os.path.join(ld, n)
     try:
-        with open(os.path.join(ld, n)) as f:
+        with open(p) as f:
             d = json.load(f)
+    except FileNotFoundError:
+        if os.path.islink(p):
+            sys.exit(1)
+        continue
     except (OSError, ValueError):
         sys.exit(1)
     rec = d.get("path") if isinstance(d, dict) else None
@@ -423,6 +428,10 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         case "$_av_owner_state" in
             dead|released|own-live) ;;
             none)
+                # birth-audit's ownerless scratch adoption record is ledger, not a claim.
+                [[ "$(python3 -c 'import json,sys
+try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
+except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
                     echo kept:owner-unknown; return 0
                 fi ;;

@@ -124,6 +124,7 @@ assert_not_contains "Test 1: does not report the bogus first-line value" "(999 K
 echo "Test 2: cleanup_pr_scratch.sh --clean tolerates multi-line du output, takes the LAST line"
 T2_DIR="$TMP_ROOT/t2-tmp"
 mkdir -p "$T2_DIR/pr8888-scratch"
+mkdir -m 0700 -p "$TMP_ROOT/t2-home"
 head -c 2048 </dev/urandom > "$T2_DIR/pr8888-scratch/payload.bin" 2>/dev/null \
   || printf 'x%.0s' {1..2048} > "$T2_DIR/pr8888-scratch/payload.bin"
 /usr/bin/find "$T2_DIR/pr8888-scratch" -exec touch -t 202001010000 {} +
@@ -132,7 +133,8 @@ make_multiline_du_stub "$T2_BIN" "pr8888-scratch" 6789
 
 T2_OUT="$TMP_ROOT/t2.out"
 set +e
-PATH="$T2_BIN:$PATH" \
+HOME="$TMP_ROOT/t2-home" \
+  PATH="$T2_BIN:$PATH" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   DISK_MAGICIAN_TEST_SANDBOX="$T2_DIR" \
   DISK_MAGICIAN_DELETION_LOG="$TMP_ROOT/t2-deletions.log" \
@@ -193,6 +195,110 @@ assert_not_contains "Test 3: no integer-expression-expected crash from an empty 
   "integer expression expected" "$T3_OUT_CONTENT"
 assert_not_contains "Test 3: pr7777-scratch is not wrongly archived despite unmeasurable size" \
   "Archiving: $T3_PRIVATE_TMP/pr7777-scratch" "$T3_OUT_CONTENT"
+
+echo "Test 4: scratch_budget_evict_root tolerates multi-line path_size_kb / du output"
+T4_ROOT="$TMP_ROOT/t4-budget"
+mkdir -p "$T4_ROOT/old-cand"
+printf 'x%.0s' {1..2048} > "$T4_ROOT/old-cand/payload.bin"
+/usr/bin/find "$T4_ROOT/old-cand" -exec touch -t 202001010000 {} +
+T4_OUT="$TMP_ROOT/t4.out"
+set +e
+DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+DISK_MAGICIAN_LSOF_BIN=/usr/bin/true \
+bash -c '
+  set -euo pipefail
+  source "'"$REPO_ROOT"'/scripts/safety_lib.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/worktree_recency.sh"
+  source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+  DRY_RUN=true
+  log() { echo "$*"; }
+  path_size_kb() { printf "0\n2048\n"; }
+  is_protected_root() { return 1; }
+  is_protected_tmp_path() { return 1; }
+  has_open_files() { return 1; }
+  BUDGET_DIRS_DELETED=0
+  BUDGET_FILES_DELETED=0
+  BUDGET_KB_FREED=0
+  scratch_budget_evict_root "'"$T4_ROOT"'" 1024 120
+  echo "summary: dirs=$BUDGET_DIRS_DELETED files=$BUDGET_FILES_DELETED kb=$BUDGET_KB_FREED"
+' >"$T4_OUT" 2>&1
+T4_RC=$?
+set -e
+T4_OUT_CONTENT="$(cat "$T4_OUT")"
+assert_rc "Test 4: scratch_budget_evict_root exits 0 on multi-line path_size_kb" 0 "$T4_RC"
+assert_not_contains "Test 4: no arithmetic syntax error" "arithmetic syntax error" "$T4_OUT_CONTENT"
+assert_contains "Test 4: evicts using the last numeric line (2048 KB)" "summary: dirs=1 files=0 kb=2048" "$T4_OUT_CONTENT"
+
+echo "Test 5: cleanup_code_sign_clones.sh tolerates multi-line du output"
+T5_X="$TMP_ROOT/t5-x/X"
+T5_CLONE="$T5_X/com.example.App.code_sign_clone"
+T5_BIN="$TMP_ROOT/t5-bin"
+mkdir -p "$T5_CLONE" "$T5_BIN"
+printf 'x%.0s' {1..2048} > "$T5_CLONE/blob"
+/usr/bin/find "$T5_CLONE" -exec touch -t 202001010000 {} +
+make_multiline_du_stub "$T5_BIN" "com.example.App.code_sign_clone" 4096
+cat > "$T5_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$T5_BIN/lsof"
+T5_OUT="$TMP_ROOT/t5.out"
+set +e
+PATH="$T5_BIN:/usr/bin:/bin" \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$T5_X" \
+  CODE_SIGN_CLONE_MIN_KB=1024 \
+  CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --dry-run >"$T5_OUT" 2>&1
+T5_RC=$?
+set -e
+T5_OUT_CONTENT="$(cat "$T5_OUT")"
+assert_rc "Test 5: cleanup_code_sign_clones.sh exits 0 on multi-line du" 0 "$T5_RC"
+assert_not_contains "Test 5: no syntax error in expression" "syntax error in expression" "$T5_OUT_CONTENT"
+assert_contains "Test 5: reports last-line kb (4096 KB)" "(4096 KB" "$T5_OUT_CONTENT"
+
+echo "Test 6: cleanup_llm_inspector.sh tolerates multi-line du output"
+T6_HOME="$TMP_ROOT/t6-home"
+T6_CAP="$T6_HOME/.llm-inspector/captures"
+T6_BIN="$TMP_ROOT/t6-bin"
+mkdir -p "$T6_CAP" "$T6_BIN"
+printf 'x%.0s' {1..2048} > "$T6_CAP/capture-old.json"
+touch -t 202001010000 "$T6_CAP/capture-old.json"
+make_multiline_du_stub "$T6_BIN" "capture-old.json" 2048
+T6_OUT="$TMP_ROOT/t6.out"
+set +e
+HOME="$T6_HOME" PATH="$T6_BIN:/usr/bin:/bin" \
+  bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" --dry-run >"$T6_OUT" 2>&1
+T6_RC=$?
+set -e
+T6_OUT_CONTENT="$(cat "$T6_OUT")"
+assert_rc "Test 6: cleanup_llm_inspector.sh exits 0 on multi-line du" 0 "$T6_RC"
+assert_not_contains "Test 6: no syntax error in expression" "syntax error in expression" "$T6_OUT_CONTENT"
+assert_contains "Test 6: reports last-line kb (2048 KB)" "(2048 KB)" "$T6_OUT_CONTENT"
+
+echo "Test 7: cleanup_downloads_evidence.sh tolerates multi-line du output"
+T7_ROOT="$TMP_ROOT/t7-downloads"
+T7_BIN="$TMP_ROOT/t7-bin"
+mkdir -p "$T7_ROOT/ev-new-1" "$T7_ROOT/ev-new-2" "$T7_ROOT/ev-old-3" "$T7_BIN"
+touch -t 202601030000 "$T7_ROOT/ev-new-1"
+touch -t 202601020000 "$T7_ROOT/ev-new-2"
+touch -t 202001010000 "$T7_ROOT/ev-old-3"
+make_multiline_du_stub "$T7_BIN" "ev-old-3" 3072
+T7_OUT="$TMP_ROOT/t7.out"
+set +e
+PATH="$T7_BIN:/usr/bin:/bin" \
+  DISK_MAGICIAN_LSOF_BIN=/usr/bin/false \
+  DISK_MAGICIAN_EVIDENCE_ROOT="$T7_ROOT" \
+  DISK_MAGICIAN_EVIDENCE_PATTERNS="ev-*" \
+  DISK_MAGICIAN_EVIDENCE_KEEP_COUNT=2 \
+  DISK_MAGICIAN_EVIDENCE_RETENTION_HOURS=24 \
+  bash "$REPO_ROOT/scripts/cleanup_downloads_evidence.sh" >"$T7_OUT" 2>&1
+T7_RC=$?
+set -e
+T7_OUT_CONTENT="$(cat "$T7_OUT")"
+assert_rc "Test 7: cleanup_downloads_evidence.sh exits 0 on multi-line du" 0 "$T7_RC"
+assert_not_contains "Test 7: no syntax error in expression" "syntax error in expression" "$T7_OUT_CONTENT"
+assert_contains "Test 7: reports last-line kb (3072 KB)" "(3072 KB)" "$T7_OUT_CONTENT"
 
 echo
 echo "===================================="

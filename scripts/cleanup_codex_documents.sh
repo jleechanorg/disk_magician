@@ -148,12 +148,12 @@ cursor_restore() {
   [[ -e "$CURSOR" ]] || return 1
   local loaded idx item c
   loaded="$(act_cursor_load "$CURSOR" "$CURSOR_SOURCE")" || return 2
-  idx="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_index"])' "$loaded" 2>/dev/null)" || return 2
+  idx="$(printf '%s' "$loaded" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_index"])' 2>/dev/null)" || return 2
   [[ "$idx" =~ ^[0-9]+$ ]] || return 2
   CANDIDATES=()
   while IFS= read -r -d '' item; do
     CANDIDATES+=("$item")
-  done < <(python3 -c 'import json,sys; sys.stdout.write("\0".join(json.loads(sys.argv[1])["items"]) + "\0")' "$loaded" 2>/dev/null)
+  done < <(printf '%s' "$loaded" | python3 -c 'import json,sys; sys.stdout.write("\0".join(json.load(sys.stdin)["items"]) + "\0")' 2>/dev/null)
   for c in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
     case "$c" in
       "$ROOT"/*) ;;

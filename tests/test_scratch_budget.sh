@@ -126,7 +126,7 @@ run_budget() {
 
     DRY_RUN="$DM_DRY_RUN"
     log() { :; }
-    path_size_kb() { du -sk "$1" 2>/dev/null | awk "{print \$1+0}"; }
+    path_size_kb() { { du -sk "$1" 2>/dev/null || true; } | awk "\$1 ~ /^[0-9]+\$/ {f=\$1} END{print f+0}"; }
     is_protected_root() { [[ -n "$DM_PROTECTED_BASE" && "$1" == "$DM_PROTECTED_BASE" ]]; }
     is_protected_tmp_path() { return 1; }
     has_open_files() {
@@ -313,7 +313,7 @@ result12="$(
 
     DRY_RUN=false
     log() { echo "LOG: $*" >&2; }
-    path_size_kb() { du -sk "$1" 2>/dev/null | awk "{print \$1+0}"; }
+    path_size_kb() { { du -sk "$1" 2>/dev/null || true; } | awk "\$1 ~ /^[0-9]+\$/ {f=\$1} END{print f+0}"; }
     is_protected_root() { return 1; }
     is_protected_tmp_path() { return 1; }
     has_open_files() { return 1; }

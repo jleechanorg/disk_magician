@@ -49,6 +49,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/layout_standard.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/layout_standard.sh"
+# shellcheck source=scripts/lib/ao_worktree_config.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
@@ -172,6 +174,27 @@ fi
 [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+expand_path() {
+  local p="$1"
+  if [[ "$p" == "~/"* ]]; then
+    printf '%s\n' "${HOME}/${p:2}"
+  elif [[ "$p" == "~" ]]; then
+    printf '%s\n' "$HOME"
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+list_has_parent_of() {
+  P="$1" awk 'length($0) && (ENVIRON["P"] == $0 || index(ENVIRON["P"], $0 "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_line() {
+  P="$1" awk 'length($0) && $0 == ENVIRON["P"] {f=1; exit} END {exit !f}' <<<"$2"
+}
+list_has_child_of() {
+  P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
+}
 
 size_kb() {
   local path="$1"
@@ -450,6 +473,103 @@ fi
 
 acquire_cleanup_venvs_lock || exit 0
 
+# AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz, matching
+# cleanup_worktrees.sh). Parse the AO config once; invalid/unreadable config
+# fails closed because AO ownership cannot be determined with confidence.
+AO_CONFIG_PATH="${DISK_MAGICIAN_AO_CONFIG:-$HOME/.hermes/agent-orchestrator.yaml}"
+AO_CONFIG_STATE="missing"
+AO_CONFIG_LINES=""
+if [[ -n "${DISK_MAGICIAN_AO_CONFIG:-}" || -e "$AO_CONFIG_PATH" || -L "$AO_CONFIG_PATH" ]]; then
+  if [[ -f "$AO_CONFIG_PATH" && -r "$AO_CONFIG_PATH" ]] \
+      && AO_CONFIG_LINES="$(ao_worktree_dirs "$AO_CONFIG_PATH" 2>/dev/null)"; then
+    AO_CONFIG_STATE="valid"
+  else
+    AO_CONFIG_STATE="invalid"
+  fi
+fi
+
+STD_AO_DIRS=""
+STD_AO_PARENTS=""
+STD_BLOCKED=""
+if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then
+  STD_BLOCKED="ao-config-unreadable"
+elif [[ "$AO_CONFIG_STATE" == "valid" ]]; then
+  while IFS= read -r _ao_line; do
+    [[ -n "$_ao_line" ]] || continue
+    _ao_kind="${_ao_line%% *}"
+    _ao_dir="${_ao_line#? }"
+    [[ -n "$_ao_dir" ]] || continue
+    _ao_dir="$(expand_path "$_ao_dir")"
+    _ao_real="$(cd "$_ao_dir" 2>/dev/null && pwd -P || printf '%s' "$_ao_dir")"
+    _ao_entry="$_ao_dir"$'\n'"$_ao_real"$'\n'
+    if [[ "$_ao_kind" == C ]]; then
+      STD_AO_PARENTS+="$_ao_entry"
+    else
+      STD_AO_DIRS+="$_ao_entry"
+    fi
+  done <<<"$AO_CONFIG_LINES"
+fi
+
+GLOBAL_LIVE_CWDS=""
+GLOBAL_CWD_BLOCKED=""
+GLOBAL_LIVE_CWDS_LOADED=0
+ensure_live_cwds_loaded() {
+  [[ "$GLOBAL_LIVE_CWDS_LOADED" -eq 1 ]] && return 0
+  GLOBAL_LIVE_CWDS_LOADED=1
+  local _lsof_bin _lsof_tmp _lsof_rc=0 _lsof_out _lsof_err
+  _lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+  if [[ ! -x "$_lsof_bin" ]]; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+    return 0
+  fi
+  _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
+  if [[ -z "$_lsof_tmp" || ! -f "$_lsof_tmp" ]]; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+    return 0
+  fi
+  _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
+  if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
+    rm -f "$_lsof_tmp"
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+    return 0
+  fi
+  rm -f "$_lsof_tmp"
+  if [[ "$_lsof_rc" -ne 0 ]]; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  elif [[ -z "$_lsof_out" ]]; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  elif grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd' <<<"$_lsof_out"; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  else
+    GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
+    if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
+      GLOBAL_CWD_BLOCKED="cwd-unknown"
+    fi
+  fi
+}
+
+std_root_skip_reason() {
+  if [[ -n "$STD_BLOCKED" ]]; then
+    echo "$STD_BLOCKED"
+  elif [[ "$1" == *"/.ao/data/worktrees/"* || "$1" == *"/ao/data/worktrees/"* \
+      || "$2" == *"/.ao/data/worktrees/"* || "$2" == *"/ao/data/worktrees/"* ]] \
+      || list_has_parent_of "$1" "$STD_AO_DIRS" || list_has_parent_of "$2" "$STD_AO_DIRS" \
+      || list_has_line "${1%/*}" "$STD_AO_PARENTS" || list_has_line "${2%/*}" "$STD_AO_PARENTS"; then
+    echo "ao-owned"
+  else
+    ensure_live_cwds_loaded
+    if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+      echo "$GLOBAL_CWD_BLOCKED"
+    elif list_has_child_of "$2" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$1" "$GLOBAL_LIVE_CWDS"; then
+      echo "live-cwd"
+    fi
+  fi
+}
+
 # Expand configured roots to also cover each repo's <repo>/.claude/worktrees/*
 # agent working copies (see expand_roots_with_agent_worktrees above).
 # Portable read loop, not `mapfile` (macOS /bin/bash 3.2 doesn't have it).
@@ -489,6 +609,7 @@ STRIPPED_COUNT=0
 SKIPPED_NOT_WORKTREE=0
 SKIPPED_TOO_YOUNG=0
 SKIPPED_ALREADY_CENTRALIZED=0
+SKIPPED_EXCLUDED=0
 SKIPPED_NO_VENV=0
 INSPECTED=0
 
@@ -527,6 +648,15 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       continue
     fi
 
+    # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
+    real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
+    _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
+    if [[ -n "$_skip_reason" ]]; then
+      SKIPPED_EXCLUDED=$(( SKIPPED_EXCLUDED + 1 ))
+      log "  skip ($_skip_reason): $venv_path"
+      continue
+    fi
+
     venv_kb=$(size_kb "$venv_path")
     venv_pretty=$(fmt_kb "$venv_kb")
 
@@ -555,6 +685,7 @@ log "  Stripped:               $STRIPPED_COUNT  ($(fmt_kb "$TOTAL_FREED_KB"))"
 log "  Skipped (not worktree): $SKIPPED_NOT_WORKTREE"
 log "  Skipped (too young):    $SKIPPED_TOO_YOUNG  (< ${MIN_AGE_DAYS} days old)"
 log "  Skipped (centralized):  $SKIPPED_ALREADY_CENTRALIZED  (symlink / broken)"
+log "  Skipped (excluded):     $SKIPPED_EXCLUDED  (ao-owned / live-cwd / unknown)"
 if [[ "$DRY_RUN" == true ]]; then
   log ""
   log "This was a DRY-RUN. Re-run with WORKTREE_APPROVED=1 $0 --clean to apply."
@@ -571,8 +702,8 @@ purge_bak_dirs() {
   log ""
   log "=== PURGE STALE venv.bak.* DIRS (older than ${purge_days}d, parent worktree >= ${MIN_AGE_DAYS}d) ==="
 
-  local bak_freed_kb=0 bak_count=0 skipped_young_wt=0 skipped_young_bak=0 skipped_not_wt=0
-  local wt bak_path parent bak_age_days bak_kb bak_pretty _safety_reason
+  local bak_freed_kb=0 bak_count=0 skipped_young_wt=0 skipped_young_bak=0 skipped_not_wt=0 skipped_excluded=0
+  local wt bak_path parent real_parent _skip_reason bak_age_days bak_kb bak_pretty _safety_reason
 
   for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     for bak_path in "$wt/venv.bak" "$wt"/venv.bak.* "$wt/.venv.bak" "$wt"/.venv.bak.*; do
@@ -592,6 +723,15 @@ purge_bak_dirs() {
       if worktree_is_recently_active "$parent" "$MIN_AGE_DAYS"; then
         skipped_young_wt=$(( skipped_young_wt + 1 ))
         log "  skip (parent worktree < ${MIN_AGE_DAYS}d, protected): $bak_path"
+        continue
+      fi
+
+      # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
+      real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
+      _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
+      if [[ -n "$_skip_reason" ]]; then
+        skipped_excluded=$(( skipped_excluded + 1 ))
+        log "  skip ($_skip_reason): $bak_path"
         continue
       fi
 
@@ -628,6 +768,7 @@ purge_bak_dirs() {
   log "  Purged:                    $bak_count  ($(fmt_kb "$bak_freed_kb"))"
   log "  Skipped (not worktree):    $skipped_not_wt"
   log "  Skipped (parent < ${MIN_AGE_DAYS}d):    $skipped_young_wt"
+  log "  Skipped (excluded):        $skipped_excluded"
   log "  Skipped (bak dir < ${purge_days}d): $skipped_young_bak"
   if [[ "$DRY_RUN" == true ]]; then
     log ""

@@ -115,7 +115,9 @@ has_open_files() {
   return 1
 }
 
-path_size_kb() { du -sk "$1" 2>/dev/null | cut -f1; }
+path_size_kb() {
+  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+}
 
 log "$(dry_prefix)cleanup_downloads_evidence.sh starting (root: $EVIDENCE_ROOT, patterns: ${PATTERNS[*]}, keep: $KEEP_COUNT, retention: ${RETENTION_HOURS}h)"
 

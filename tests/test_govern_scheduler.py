@@ -177,6 +177,54 @@ class GovernSchedulerTest(unittest.TestCase):
             self.assertEqual(wrapped["outcome"], "blocked_safety")
             self.assertEqual(wrapped["reason"], "live-owner")
 
+    def test_skipped_lock_adapter_outcome_without_counts_survives_govern_wrapping(self):
+        import job_receipt
+        with tempfile.TemporaryDirectory(prefix="govern-skipped-lock-receipt-") as tmp:
+            store = job_receipt.JobReceiptStore(state_dir=tmp)
+            run_id = store.begin("worktree_reap", trigger="govern")
+            adapter = store.finish(
+                "worktree_reap", run_id=run_id, outcome="skipped_lock",
+                reason="lock held",
+                lock={"held": True},
+            )
+            metrics = disk_budget._write_govern_receipt(
+                Path(tmp), "worktrees",
+                {"rc": 0, "hard_stop": False, "orphan_survivors": False},
+                100, 100, adapter,
+            )
+            wrapped = disk_budget._receipt_data(tmp, "govern_worktrees")
+            self.assertEqual(metrics["outcome"], "skipped_lock")
+            self.assertEqual(metrics["reason"], "lock held")
+            self.assertEqual(wrapped["outcome"], "skipped_lock")
+            self.assertEqual(wrapped["reason"], "lock held")
+
+    def test_large_cursor_exceeding_arg_max_saves_and_loads_via_stdin(self):
+        import subprocess
+        root = Path(__file__).resolve().parent.parent
+        helper = root / "scripts" / "lib" / "actuator_deadline.sh"
+        with tempfile.TemporaryDirectory(prefix="govern-large-cursor-") as tmp:
+            cursor_file = Path(tmp) / "cursor_worktrees.json"
+            items = [f"/Users/test/.disk_magician_state/worktree_leases/{i:064x}.json" for i in range(17000)]
+            items_json = json.dumps(items, separators=(",", ":"))
+            self.assertGreater(len(items_json), 1_200_000)
+            items_file = Path(tmp) / "items.json"
+            items_file.write_text(items_json, encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'source "$1"; items="$(cat "$2")"; act_cursor_save "$3" "worktree_reap:remove" "$items" 42 && loaded="$(act_cursor_load "$3" "worktree_reap:remove")" && printf "%s" "$loaded" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d[\'next_index\']==42 and len(d[\'items\'])==17000"',
+                    "_",
+                    str(helper),
+                    str(items_file),
+                    str(cursor_file),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_govern_wrapper_copies_adapter_c14_bytes_without_double_counting(self):
         import subprocess
         import job_receipt

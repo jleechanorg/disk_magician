@@ -58,9 +58,9 @@ scratch_budget_quarantine_remove() {
   if [[ -n "${ACT_CURSOR:-}" && -n "${ACT_CURSOR_SOURCE:-}" ]]; then
     local _cursor_state _cursor_plan _cursor_rest
     _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { echo 'kept:cursor-invalid'; return 0; }
-    _cursor_plan="$(python3 - "$_cursor_state" "$1" <<'PY'
+    _cursor_plan="$(printf '%s' "$_cursor_state" | python3 -c '
 import json, os, sys
-state, item = json.loads(sys.argv[1]), sys.argv[2]
+state, item = json.load(sys.stdin), sys.argv[1]
 items = list(state["items"])
 i = state["next_index"]
 # Skip candidates that vanished since the cursor was written.
@@ -79,8 +79,7 @@ if idx < i:
 # FINISHES, so an interrupted unit (idx > i) keeps the cursor on the earlier
 # unfinished unit instead of being stepped over.
 print("ready\t" + str(i) + "\t" + str(idx) + "\t" + json.dumps(items, separators=(",", ":")))
-PY
-)" || { echo 'kept:cursor-invalid'; return 0; }
+' "$1")" || { echo 'kept:cursor-invalid'; return 0; }
     case "$_cursor_plan" in
       complete) echo 'kept:cursor-complete'; return 0 ;;
       invalid) echo 'kept:cursor-invalid'; return 0 ;;
@@ -265,7 +264,7 @@ scratch_budget_evict_root() {
       continue
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
-    kb=$(path_size_kb "$item")
+    kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
     if (( kb < 0 )); then
       log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."
       continue
