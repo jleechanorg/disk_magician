@@ -487,37 +487,42 @@ preserve_wip_reason_eligible() {
 }
 
 # worktree_has_live_cwd <wt_path> — true if any process's cwd is inside it.
-# Fails closed: no lsof, an incomplete scan, or a live process whose cwd cannot
-# be inspected all count as "live" so the caller never removes an occupied tree.
+# Fails closed. "Cannot prove idle" includes: no lsof, an incomplete scan,
+# an unexpected exit status, no usable cwd records, and any live or malformed
+# uninspectable record. Only a complete scan whose records are all either
+# resolved absolute paths or provably harmless uninspectable ones is idle.
 worktree_has_live_cwd() {
-    local wt="$1" wt_real cwd out err errf rc=0
+    local wt="$1" wt_real cwd out err errf rc=0 saw_cwd=0
     command -v lsof >/dev/null 2>&1 || return 0
     wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
     errf="$(mktemp "${TMPDIR:-/tmp}/dm-hyg-lsof.XXXXXX")" || return 0
-    out="$(lsof -n -P -d cwd -Fn 2>"$errf")" || rc=$?
+    out="$(lsof -n -P -d cwd -Fn 2>"$errf")" || { rc=$?; out=""; }
     err="$(cat "$errf" 2>/dev/null || true)"
     rm -f "$errf"
-    # Unexpected stderr means the scan may have missed a user. (The Linux mount
+    # Unexpected stderr means the scan may have missed a user. (Linux mount
     # warnings are expected and cleared by lsof_stderr_incomplete.)
     if declare -F lsof_stderr_incomplete >/dev/null 2>&1; then
         lsof_stderr_incomplete "$err" && return 0
     elif [[ -n "$err" ]]; then
         return 0
     fi
-    (( rc <= 1 )) || return 0   # 0 = matches, 1 = none; anything else is unexpected
+    (( rc == 0 )) || return 0   # no complete result set -> unknown
     while IFS= read -r cwd; do
+        [[ "$cwd" == n* ]] || continue
         cwd="${cwd#n}"
-        # An uninspectable pid could hold any cwd, including this worktree.
-        if [[ "$cwd" =~ ^/proc/[0-9]+/cwd\ \(readlink:\ Permission\ denied\)$ ]]; then
-            if declare -F lsof_denied_ignorable >/dev/null 2>&1; then
-                lsof_denied_ignorable "$cwd" || return 0
-            else
-                return 0
+        if [[ "$cwd" != /* || "$cwd" == *"Permission denied)"* ]]; then
+            # Uninspectable or malformed: unknown, unless provably harmless.
+            if [[ "$cwd" =~ ^/proc/[0-9]+/cwd\ \(readlink:\ Permission\ denied\)$ ]] \
+               && declare -F lsof_denied_ignorable >/dev/null 2>&1 \
+               && lsof_denied_ignorable "$cwd"; then
+                continue
             fi
-            continue
+            return 0
         fi
+        saw_cwd=1
         [[ "$cwd" == "$wt" || "$cwd" == "$wt"/* || "$cwd" == "$wt_real" || "$cwd" == "$wt_real"/* ]] && return 0
     done <<<"$out"
+    (( saw_cwd == 1 )) || return 0   # nothing usable -> unknown
     return 1
 }
 
@@ -1133,6 +1138,9 @@ main() {
                     pre_remove_hidden="$(preserve_wip_raw_bytes_dirty "$wt_path")" || pre_remove_hidden="byte-check-failed"
                     if [[ -n "$pre_remove_hidden" ]]; then
                         ledger_line "NEEDS-REVIEW" "$wt_path" "hidden-filtered-change:$pre_remove_hidden"
+                        review_count=$(( review_count + 1 ))
+                    elif worktree_has_live_cwd "$wt_path"; then
+                        ledger_line "NEEDS-REVIEW" "$wt_path" "live-cwd at removal"
                         review_count=$(( review_count + 1 ))
                     else
                         ledger_line "SAFE" "$wt_path" "$reason"

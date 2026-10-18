@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Regression: worktree_has_live_cwd must fail closed. An incomplete lsof scan, a
-# live process that hides its cwd, or an unexpected lsof exit status must all be
-# reported as "live" so hygiene never removes an occupied worktree.
+# Regression: worktree_has_live_cwd must fail closed. "Cannot prove idle"
+# includes an incomplete scan, an unexpected exit status, no usable cwd records,
+# and any live or malformed uninspectable record.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,14 +19,8 @@ trap 'rm -rf "${TMP:?}"' EXIT
 WT="$TMP/wt"; mkdir -p "$WT/sub"
 FB="$TMP/fakebin"; mkdir -p "$FB"
 
-mk_lsof() { printf '#!/bin/sh\n%s\n' "$1" > "$FB/lsof"; chmod +x "$FB/lsof"; }
-
-mk_lsof_mount_warning() {
-    cat > "$FB/lsof" <<'SH'
-#!/bin/sh
-printf "lsof: WARNING: can't stat() tracefs file system /sys/kernel/tracing\n      Output information may be incomplete.\n" >&2
-exit 1
-SH
+mk_lsof() {  # mk_lsof <heredoc body>
+    cat > "$FB/lsof"
     chmod +x "$FB/lsof"
 }
 
@@ -38,27 +32,85 @@ check() {  # check <name> <want-rc>
 
 echo "== worktree_has_live_cwd fail-closed contracts =="
 
-mk_lsof 'exit 1'
-check "clean scan, no matches -> idle" 1
+mk_lsof <<'SH'
+#!/bin/sh
+exit 1
+SH
+check "no result set (lsof rc=1) -> unknown" 0
 
-mk_lsof 'printf "p1\nfcwd\nn%s\n" "'"$WT"'/sub"; exit 0'
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/somewhere-else\n'
+exit 0
+SH
+check "complete scan, cwd elsewhere -> idle" 1
+
+mk_lsof <<SH
+#!/bin/sh
+printf 'p1\\nfcwd\\nn$WT/sub\\n'
+exit 0
+SH
 check "cwd inside the worktree -> live" 0
 
-mk_lsof 'echo "lsof: totally unexpected diagnostic" >&2; exit 1'
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/somewhere-else\n'
+printf 'lsof: totally unexpected diagnostic\n' >&2
+exit 0
+SH
 check "unexpected stderr -> unknown (fail closed)" 0
 
-mk_lsof_mount_warning
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/somewhere-else\n'
+printf "lsof: WARNING: can't stat() tracefs file system /sys/kernel/tracing\n      Output information may be incomplete.\n" >&2
+exit 0
+SH
 check "unrelated mount warning -> idle" 1
 
-mk_lsof 'exit 3'
-check "unexpected lsof exit status -> unknown (fail closed)" 0
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/somewhere-else\n'
+exit 3
+SH
+check "unexpected lsof exit status -> unknown" 0
 
-mk_lsof 'printf "p1\nfcwd\nn/proc/1/cwd (readlink: Permission denied)\n"; exit 0'
-check "live uninspectable process -> unknown (fail closed)" 0
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/proc/1/cwd (readlink: Permission denied)\n'
+exit 0
+SH
+check "live uninspectable process -> unknown" 0
+
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nn/tmp/x (stat: Permission denied)\n'
+exit 0
+SH
+check "stat-denied record -> unknown" 0
+
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\nnrelative/path\n'
+exit 0
+SH
+check "malformed non-absolute record -> unknown" 0
+
+mk_lsof <<'SH'
+#!/bin/sh
+printf 'p1\nfcwd\np2\nfcwd\n'
+exit 0
+SH
+check "no cwd records -> unknown" 0
 
 if [[ -d /proc/self ]]; then
     dead=999999; while [[ -e "/proc/$dead" ]]; do dead=$((dead - 1)); done
-    mk_lsof 'printf "p1\nfcwd\nn/proc/'"$dead"'/cwd (readlink: Permission denied)\n"; exit 0'
+    cat > "$FB/lsof" <<SH
+#!/bin/sh
+printf 'p1\\nfcwd\\nn/tmp/somewhere-else\\nn/proc/$dead/cwd (readlink: Permission denied)\\n'
+exit 0
+SH
+    chmod +x "$FB/lsof"
     check "exited pid denied record -> idle" 1
 fi
 
