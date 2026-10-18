@@ -44,13 +44,31 @@ add_wt pcache "$WT/wt-pcache" "$AHEAD_SHA";   git -C "$REPO" push -q origin pcac
 add_wt pbuild "$WT/wt-pbuild" "$AHEAD_SHA";   git -C "$REPO" push -q origin pbuild; mkdir -p "$WT/wt-pbuild/build"; printf 'hand-made\n' > "$WT/wt-pbuild/build/manual-evidence.db"
 add_wt ppyc "$WT/wt-ppyc" "$AHEAD_SHA"; git -C "$REPO" push -q origin ppyc; mkdir -p "$WT/wt-ppyc/data.pyc"; printf 'only copy\n' > "$WT/wt-ppyc/data.pyc/notes.db"
 add_wt pyoung "$WT/wt-pyoung" "$AHEAD_SHA";   git -C "$REPO" push -q origin pyoung
+# merged-differing-head carve-out: gh reports a MERGED PR with a differing head.
+# sqdiffreach: the exact worktree HEAD is the live tip on origin -> removable.
+# sqdiffunreach: no origin copy of that HEAD -> must stay preserved.
+add_wt sqdiffreach "$WT/wt-sqdiffreach" "$AHEAD_SHA"; git -C "$REPO" push -q origin sqdiffreach
+add_wt sqdiffunreach "$WT/wt-sqdiffunreach" "$AHEAD_SHA"
 for n in pushed unpushed diverged pdirty psecret pdata pdeps pcache pbuild ppyc; do age_days_ago "$WT/wt-$n" 4; done
+age_days_ago "$WT/wt-sqdiffreach" 4
+age_days_ago "$WT/wt-sqdiffunreach" 8
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/bin"
 cat > "$TMP_ROOT/bin/lsof" <<'SH'
 #!/bin/sh
 printf 'p1\nn/\n'
 SH
-chmod +x "$TMP_ROOT/bin/lsof"
+cat > "$TMP_ROOT/bin/gh" <<'SH'
+#!/bin/sh
+# Only the sqdiff* branches report a MERGED PR whose head differs from the
+# worktree HEAD (the merged-differing-head class); everything else fails closed.
+case "$*" in
+  *sqdiffreach*)   echo "differing000000000000000000000000000000000"; exit 0 ;;
+  *sqdiffunreach*) echo "differing000000000000000000000000000000000"; exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+printf '#!/bin/sh\nshift\nexec "$@"\n' > "$TMP_ROOT/bin/timeout"
+chmod +x "$TMP_ROOT/bin/lsof" "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/timeout"
 run() { env -i HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=3 HERMES_SKIP_EXAMPLE_COM_GUARD=1 bash "$CLEANUP_SCRIPT" --dry-run --repos "$REPO" 2>&1; }
 OUT="$(run)"
 check "clean pushed-equal worktree is ELIGIBLE" "ELIGIBLE  $WT/wt-pushed |" "$OUT"
@@ -64,6 +82,8 @@ check "pushed worktree with only nested cache/test-results ignored is ELIGIBLE" 
 check "user data under an ambiguous build/ dir is preserved" "wt-pbuild | ignored-data" "$OUT"
 check "directory named *.pyc stays preserved" "wt-ppyc | ignored-data" "$OUT"
 check "young pushed worktree is preserved" "wt-pyoung | young" "$OUT"
+check "merged-differing-head with HEAD on origin is ELIGIBLE (carve-out)" "ELIGIBLE  $WT/wt-sqdiffreach |" "$OUT"
+check "merged-differing-head without an origin copy is preserved" "wt-sqdiffunreach | merged-differing-head" "$OUT"
 git -C "$REPO" remote set-url origin "$TMP_ROOT/missing.git"
 OUT="$(run)"
 check "unreachable origin fails closed" "wt-pushed | ahead-of-main" "$OUT"
