@@ -211,6 +211,7 @@ def lsof_stderr_incomplete(err, query):
     # ignorable; the trailing "Output information may be incomplete." line is
     # only meaningful together with a relevant warning (Codex #209 review).
     query_real = os.path.realpath(query)
+    ignored_warning = False
     for line in err.splitlines():
         if not line:
             continue
@@ -220,8 +221,11 @@ def lsof_stderr_incomplete(err, query):
             fs_norm = os.path.realpath(fs).rstrip("/") or "/"
             if fs_norm == "/" or query_real == fs_norm or query_real.startswith(fs_norm + "/"):
                 return True
+            ignored_warning = True
             continue
         if LSOF_INCOMPLETE.match(line):
+            if not ignored_warning:
+                return True
             continue
         return True
     return False

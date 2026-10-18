@@ -49,6 +49,10 @@ class LsofStderrIncompleteTest(unittest.TestCase):
     def test_fsless_cant_stat_warning_is_incomplete(self):
         self.assertTrue(q.lsof_stderr_incomplete(b"lsof: WARNING: can't stat()\n", self.QUERY))
 
+    def test_standalone_incomplete_marker_is_incomplete(self):
+        # No preceding warning justifies ignoring the incompleteness marker.
+        self.assertTrue(q.lsof_stderr_incomplete(b"Output information may be incomplete.\n", self.QUERY))
+
     def test_empty_stderr_is_complete(self):
         self.assertFalse(q.lsof_stderr_incomplete(b"", self.QUERY))
 
