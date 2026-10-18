@@ -36,11 +36,13 @@ Commands:
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
+  check-tmp-clones       Detect full git clones, oversize scratch, and advice dirs in /private/tmp.
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
   ledger-freshness       Print OK|STALE|UNKNOWN for the published ledger, accepting a fresh valid partial scan.
   sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
+  cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
@@ -335,6 +337,9 @@ case "$CMD" in
   check_system_residual|check-system-residual)
     "$SCRIPT_DIR/scripts/check_system_residual.sh" "$@"
     ;;
+  check_tmp_clones|check-tmp-clones)
+    "$SCRIPT_DIR/scripts/check_tmp_clones.sh" "$@"
+    ;;
   check_launchd_fleet|check-launchd-fleet)
     "$SCRIPT_DIR/scripts/check_launchd_fleet.sh" "$@"
     ;;
@@ -349,6 +354,9 @@ case "$CMD" in
     ;;
   cleanup_pr_scratch|cleanup-pr-scratch)
     "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
+    ;;
+  cleanup_task_scratch|cleanup-task-scratch)
+    "$SCRIPT_DIR/scripts/cleanup_task_scratch.sh" "$@"
     ;;
   cleanup_codex_documents|cleanup-codex-documents)
     "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"

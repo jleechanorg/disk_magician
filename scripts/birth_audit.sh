@@ -14,3 +14,4 @@ while IFS= read -r -d '' p; do
         "${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}" "$([[ -f "$p/.git" ]] && echo worktree || echo scratch)" birth-audit ||
         echo "birth-audit: lease write failed: $p" >&2
 done < "$out"
+lease_prune_birth_audit_scratch

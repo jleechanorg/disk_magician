@@ -47,7 +47,7 @@ dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 
 path_size_kb() {
   local path="$1"
-  du -sk "$path" 2>/dev/null | awk '{print $1+0}' || echo 0
+  { du -sk "$path" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 file_size_bytes() {

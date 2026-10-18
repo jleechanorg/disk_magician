@@ -35,6 +35,7 @@ def main():
         sys.exit(1)
 
     args = sys.argv[1:]
+    # Dispatches all diskm subcommands (including cleanup-task-scratch) via disk_magician.sh.
     
     # Handle environment variables
     # DISK_MAGICIAN_AUTO_CLEAN or DISK_MAGICIAN_SAFE_AUTO

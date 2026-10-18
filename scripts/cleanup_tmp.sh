@@ -316,7 +316,9 @@ RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
 RECEIPT_PRECONDITION='{}'
 [[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
 RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
-RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
+RECEIPT_CLEAR_STALE_ARGS=()
+[[ "$DRY_RUN" == false ]] && RECEIPT_CLEAR_STALE_ARGS=(--clear-stale-active)
+RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp ${RECEIPT_CLEAR_STALE_ARGS[@]+"${RECEIPT_CLEAR_STALE_ARGS[@]}"} --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
   log "ERROR: failed to record cleanup_tmp receipt begin"
   exit 1
 }
@@ -762,7 +764,7 @@ has_open_files() {
           break
         fi
         val="${line#f}"
-        if ! [[ "$val" =~ ^[a-zA-Z0-9.]+$ ]]; then
+        if ! [[ "$val" =~ ^\*?[a-zA-Z0-9.]+$ ]]; then
           malformed=1
           break
         fi
@@ -872,6 +874,27 @@ archive_path() {
     if ! act_unit_fits 0; then
       log "Archive deferred:deadline-before-unit $path"
       cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+      return 1
+    fi
+    # Archival relocates the source onto the same volume: candidates that C14
+    # will permanently refuse to purge (secret-like files or repositories failing
+    # content/push/baseline verification) must stay in place rather than
+    # accumulating indefinitely inside _disk_magician_archive.
+    local c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
+    secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+      -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
+      -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+      -print -quit 2>/dev/null)" || secret_rc=$?
+    if (( secret_rc != 0 )); then
+      c14_verdict="kept:check-failed"
+    elif [[ -n "$secret_out" ]]; then
+      c14_verdict="kept:secret-like"
+    else
+      repo_verdict="$(c14_repos_ok "$path" "" "${ACT_DEADLINE_AT:-}")" || c14_verdict="${repo_verdict:-kept:check-failed}"
+    fi
+    if [[ -n "$c14_verdict" ]]; then
+      log "Skipping archive candidate (C14 $c14_verdict): $path"
+      cleanup_tmp_count_candidate_result "$c14_verdict"
       return 1
     fi
     if ! mkdir -p "$dest"; then
@@ -1032,8 +1055,13 @@ purge_aged_archives() {
   mins=$(( scan_hours * 60 ))
   # Depth-2 units: top-level archives at "$ARCHIVE_ROOT/<ts>/<unit>". Raw
   # (unreceipted) directories stay visible here so their keep/over-cap reason
-  # is still reported; C14 refuses to remove them.
+  # is still reported; C14 refuses to remove them. Skip depth-2 container
+  # directories whose children carry depth-3 origin receipts below.
   while IFS= read -r -d '' d; do
+    if [[ ! -e "$d.c14-origin.json" && ! -L "$d.c14-origin.json" ]] &&
+       [[ -n "$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type f -name '*.c14-origin.json' -print -quit 2>/dev/null || true)" ]]; then
+      continue
+    fi
     purge_archive_entry "$d" "$mins"
   done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null || true)
   # Descended container children live at "$ARCHIVE_ROOT/<ts>/<container>/<unit>"
