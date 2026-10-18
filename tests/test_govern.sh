@@ -109,6 +109,49 @@ assert_eq "$(kicks)" 1 "launchctl called exactly once"
 assert_eq "$(cat "$KICKS")" "kickstart gui/$(id -u)/com.jleechanorg.disk-magician-pressure-sweep zone=BLACK" "kickstart target, zone already BLACK"
 events | grep -q '"event": "govern_emergency"' && ok "govern_emergency recorded" || bad "no govern_emergency event"
 
+echo "== 4b. BLACK on a consolidated install kickstarts main-sweeper (kept by --consolidate)"
+fresh_state black_consolidated; fake_df 25
+mkdir -p "$HOME/Library/LaunchAgents/.consolidated"
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template" "$HOME/Library/LaunchAgents/com.jleechanorg.disk-magician-main-sweeper.plist"
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-pressure-sweep.plist.template" "$HOME/Library/LaunchAgents/.consolidated/com.jleechanorg.disk-magician-pressure-sweep.plist"
+cat > "$T/bin/launchctl" <<SH
+#!/bin/sh
+z=\$(python3 -c 'import json,os;print(json.load(open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json"))["zone"])' 2>/dev/null)
+echo "\$* zone=\$z" >> "$KICKS"
+case "\$*" in
+  *com.jleechanorg.disk-magician-main-sweeper*) exit 0 ;;
+  *) exit 3 ;;
+esac
+SH
+chmod +x "$T/bin/launchctl"
+out=$(python3 "$T/tree_ok/scripts/disk_budget.py" --govern --mode observe 2>&1); rc=$?
+assert_eq "$rc" 0 "consolidated BLACK tick rc"
+assert_eq "$(kicks)" 1 "consolidated launchctl called once"
+assert_eq "$(cat "$KICKS")" "kickstart gui/$(id -u)/com.jleechanorg.disk-magician-main-sweeper zone=BLACK" "consolidated kickstart targets main-sweeper"
+[[ "$out" == *govern_emergency* ]] && ok "consolidated stdout says govern_emergency" || bad "consolidated stdout: $out"
+events | grep -q '"event": "govern_emergency"' && ok "consolidated govern_emergency recorded" || bad "no consolidated govern_emergency"
+
+echo "== 4c. BLACK with nonzero launchctl kickstart rc records visible kickstart_blocked:launchctl"
+fresh_state black_kickfail; fake_df 25
+rm -rf "$HOME/Library/LaunchAgents"
+cat > "$T/bin/launchctl" <<SH
+#!/bin/sh
+echo "\$*" >> "$KICKS"
+exit 3
+SH
+chmod +x "$T/bin/launchctl"
+out=$(python3 "$T/tree_ok/scripts/disk_budget.py" --govern --mode observe 2>&1); rc=$?
+assert_eq "$rc" 0 "kickfail tick rc"
+[[ "$out" == *kickstart_blocked:launchctl* ]] && ok "stdout says kickstart_blocked:launchctl" || bad "missing kickstart_blocked:launchctl: $out"
+events | grep -q '"event": "kickstart_blocked:launchctl"' && ok "kickstart_blocked:launchctl recorded" || bad "no kickstart_blocked:launchctl event"
+assert_eq "$(events | python3 -c 'import json,sys;print([json.loads(l).get("rc") for l in sys.stdin if "kickstart_blocked" in l][-1])')" 3 "nonzero kickstart rc recorded"
+cat > "$T/bin/launchctl" <<SH
+#!/bin/sh
+z=\$(python3 -c 'import json,os;print(json.load(open(os.environ["DISK_MAGICIAN_STATE_DIR"]+"/budget.json"))["zone"])' 2>/dev/null)
+echo "\$* zone=\$z" >> "$KICKS"
+SH
+chmod +x "$T/bin/launchctl"
+
 echo "== 5. FLOOR (5 GiB free): floor_breach recorded, files valid"
 fresh_state floor; fake_df 5
 python3 "$T/tree_missing/scripts/disk_budget.py" --govern --mode observe >/dev/null 2>&1; rc=$?
@@ -131,10 +174,13 @@ assert_eq "$rc" 0 "overlapping tick rc"
 
 echo "== 7. Stale lock from a dead pid is taken over"
 fresh_state stale; fake_df 150
-echo 999999 > "$DISK_MAGICIAN_STATE_DIR/govern.lock"
+dead_pid=$(python3 -c 'import fcntl,os,sys;f=open(sys.argv[1],"w");fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);f.write(str(os.getpid()));f.flush();print(os.getpid())' \
+  "$DISK_MAGICIAN_STATE_DIR/govern.lock")
 "$DISKM" govern --mode observe >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 0 "tick after stale lock rc"
 assert_eq "$(budget zone)" GREEN "zone written after takeover"
+new_pid=$(cat "$DISK_MAGICIAN_STATE_DIR/govern.lock" 2>/dev/null)
+[[ "$new_pid" =~ ^[0-9]+$ && "$new_pid" != "$dead_pid" ]] && ok "govern.lock pid replaced after flock takeover ($dead_pid -> $new_pid)" || bad "govern.lock pid not replaced: '$new_pid' (was '$dead_pid')"
 
 echo "== 8. Act mode writes its observation then blocks before dispatch until C14 is complete"
 fresh_state act; fake_df 25
@@ -161,7 +207,7 @@ fake_df fail
 assert_eq "$rc" 3 "df failure rc"
 assert_eq "$(budget zone)" GREEN "previous zone kept"
 
-echo "== 10. Write error: exit 3, previous budget.json parseable"
+echo "== 10. Write error: exit 3, previous budget.json parseable, no tmp leak, fsync before replace"
 fresh_state werr; fake_df 150
 "$DISKM" govern --mode observe >/dev/null 2>&1
 fake_df 25
@@ -170,6 +216,25 @@ chmod 555 "$DISK_MAGICIAN_STATE_DIR"
 chmod 755 "$DISK_MAGICIAN_STATE_DIR"
 assert_eq "$rc" 3 "unwritable state dir rc"
 assert_eq "$(budget zone)" GREEN "previous budget.json intact"
+python3 - "$REPO_ROOT/scripts" "$DISK_MAGICIAN_STATE_DIR" <<'PY' && ok "atomic_write fsyncs before replace and unlinks tmp on failure" || bad "atomic_write fsync/tmp cleanup failed"
+import pathlib, sys
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import budget_controls
+state = pathlib.Path(sys.argv[2])
+order = []
+real_fsync, real_replace = budget_controls.os.fsync, budget_controls.os.replace
+with mock.patch.object(budget_controls.os, "fsync", side_effect=lambda fd: (order.append("fsync"), real_fsync(fd))[1]), \
+     mock.patch.object(budget_controls.os, "replace", side_effect=lambda a, b: (order.append("replace"), real_replace(a, b))[1]):
+    budget_controls.atomic_write(state / "budget.json", {"zone": "GREEN", "free_bytes": 1, "zone_at": 1})
+assert order[:2] == ["fsync", "replace"], order
+with mock.patch.object(budget_controls.os, "replace", side_effect=OSError("boom")):
+    try:
+        budget_controls.atomic_write(state / "budget.json", {"zone": "BLACK"})
+    except OSError:
+        pass
+assert not list(state.glob(".*budget*.tmp")), list(state.glob(".*budget*.tmp"))
+PY
 
 echo "== 11. Template: 600 s gated act tick through packaged diskm"
 P="$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern.plist.template"

@@ -173,10 +173,28 @@ python3 -c 'import json,sys,time; json.dump({"zone":"RED","zone_at":time.time()-
 check_blind 'free_bytes "x" on the stale_df path'
 python3 -c 'import json,sys,time; json.dump({"zone":[1],"zone_at":time.time()-1800,"free_bytes":1}, open(sys.argv[1],"w"))' "$T/state/budget.json"
 check_blind 'zone [1] on the blind path'
+for zbad in '[]' '{}' '0' 'false' 'null' '"BOGUS"'; do
+  python3 -c "import json,sys,time; json.dump({'zone':json.loads(sys.argv[2]),'zone_at':time.time()-1800,'free_bytes':1}, open(sys.argv[1],'w'))" "$T/state/budget.json" "$zbad"
+  check_blind "zone $zbad on the blind path"
+done
 rm -f "$T/state/budget.json"; fake_df 150
+for sbad in '{"zone": "BOGUS"}' '{"zone_at": true}' '{"free_bytes": true}' '{"free_bytes": -1}' \
+            '{"classes": {"worktrees": {"used_gb": "x"}}}' '{"classes": {"worktrees": {"measured_at": true}}}' \
+            '{"classes": {"worktrees": {"used_gb": true}}}'; do
+  printf '%s' "$sbad" > "$T/state/budget.json"
+  check_blind "state field $sbad"
+done
+rm -f "$T/state/budget.json"
 python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["budgets"]["concurrency_margin_gb"]="10"; json.dump(c, open(sys.argv[2],"w"))' \
   "$REPO_ROOT/config.json.template" "$T/strmargin.json"
 DISK_MAGICIAN_CONFIG="$T/strmargin.json" check_blind 'string concurrency_margin_gb'
+for cbad in '[]' '{bad' '{"budgets": {}}' '{"budgets": []}' '{"budgets": null}' \
+            '{"budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": [1, "a"]}}' \
+            '{"budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": {"worktrees": {"measure": "du", "budget_gb": "x"}}}}' \
+            '{"budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": {"worktrees": {"measure": 123, "budget_gb": 10}}}}'; do
+  printf '%s' "$cbad" > "$T/badcfg.json"
+  DISK_MAGICIAN_CONFIG="$T/badcfg.json" check_blind "config $cbad"
+done
 
 # A present-but-malformed persisted stage/margin override is conservative too;
 # only an *absent* override may fall through to the configured value.
