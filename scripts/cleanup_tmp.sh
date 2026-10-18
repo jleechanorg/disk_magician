@@ -854,7 +854,7 @@ has_open_files() {
 # --large run can still purge_aged_archives() once the retention window
 # passes, giving a real recovery window before space is reclaimed.
 archive_path() {
-  local path="$1" kb="$2" sub="${3:-}" ts dest entry receipt retention safety_reason
+  local path="$1" kb="$2" sub="${3:-}" ts dest entry receipt retention safety_reason canon
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
@@ -897,14 +897,26 @@ archive_path() {
       cleanup_tmp_count_candidate_result "$c14_verdict"
       return 1
     fi
+    # The E1 origin receipt carries the retention that bounds this entry's
+    # quarantine life. Without a declared-ephemeral row (E2/E3) there is no
+    # retention to record: the receipt would say 0 minutes, C14 would refuse
+    # every purge (`kept:archive-identity`), and the same-volume move would grow
+    # _disk_magician_archive forever without reclaiming a byte. Unproven content
+    # stays in place, where its age still surfaces and nothing is quarantined
+    # beyond recovery (bead disk_magician-archive-same-volume-regrowth-03bn).
+    canon="$(cd "$path" 2>/dev/null && pwd -P)" || canon="$path"
+    if ! retention="$(c14_ephemeral_retention "$canon")"; then
+      log "Skipping archive candidate (C14 kept:unproven-content): $path"
+      cleanup_tmp_count_candidate_result kept:unproven-content
+      return 1
+    fi
     if ! mkdir -p "$dest"; then
       log "ERROR: could not create archive destination: $dest"
       return 2
     fi
     entry="$dest/${path##*/}"
     receipt="$entry.c14-origin.json"
-    retention="$(c14_ephemeral_retention "$path")" || retention=0
-    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$path" "$receipt" "" "$retention"; then
+    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$canon" "$receipt" "" "$retention"; then
       log "ERROR: could not write archive origin receipt: $receipt"
       return 2
     fi
