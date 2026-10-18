@@ -180,3 +180,30 @@ $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dorm
 
 # agent_scratch.sh (scripts/lib/agent_scratch.sh) — Task 7 managed scratch for disk_diagnostic
 /private/tmp/agent-scratch/disk_diagnostic	scripts/lib/agent_scratch.sh	agent_scratch_create / agent_scratch_trap_cleanup
+
+# Linux host / shared sweeper additions (jeff-ubuntu audit)
+/var/lib/docker	cleanup_docker.sh	docker container and image storage on Linux host
+$HOME/mirror	cleanup_worktrees.sh	mirror git repositories
+$HOME/candidates	cleanup_worktrees.sh	candidate checkouts
+$HOME/canonical-code-repos	cleanup_worktrees.sh	canonical code repositories
+$HOME/auth112_causal	cleanup_worktrees.sh	worktree checkout
+$HOME/reward-driver-fix.gdHuox	cleanup_worktrees.sh	worktree checkout
+$HOME/qdrant-evidence-20261004	cleanup_agent_artifacts.sh	agent evidence staging
+$HOME/hermes-agent-pc	cleanup_agent_artifacts.sh	hermes agent scratch
+$HOME/.agents	cleanup_agent_artifacts.sh	agents root
+$HOME/.antigravity-ide	cleanup_agent_artifacts.sh	antigravity IDE assets
+$HOME/.claude-backup-*	cleanup_claude_state.sh	claude backup snapshots
+$HOME/.codex-dark-factory	cleanup_dark_factory.sh	codex dark factory workspace
+$HOME/.codex-worktrees	cleanup_worktrees.sh	codex worktrees
+$HOME/.dark-factory*	cleanup_dark_factory.sh	dark factory runs and e2e
+$HOME/.df-*	cleanup_dark_factory.sh	dark factory test runs
+$HOME/.hermes.*backup*	cleanup_agent_artifacts.sh	hermes pre-claw backup
+$HOME/.npm-global	cleanup_dev_caches.sh	npm global packages
+$HOME/.pnpm-store	cleanup_dev_caches.sh	pnpm store cache
+$HOME/.smartclaw	cleanup_agent_artifacts.sh	smartclaw agent state
+$HOME/.venvs	cleanup_worktree_venvs.sh	shared virtualenvs
+/tmp/pr*	cleanup_pr_scratch.sh	PR scratch directories in /tmp
+/tmp/task*	cleanup_pr_scratch.sh	Task scratch directories in /tmp
+/tmp/wa-*	cleanup_pr_scratch.sh	Worktree advice scratch directories in /tmp
+
+

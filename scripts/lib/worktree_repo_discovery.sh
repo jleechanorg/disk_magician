@@ -180,6 +180,10 @@ except Exception:
     # Discover worktrees in additional pools
     _dwr_find_repos_from_worktrees "$HOME/worktrees" 3
     _dwr_find_repos_from_worktrees "$HOME/.hermes.worktrees" 3
+    _dwr_find_repos_from_worktrees "$HOME/.codex-worktrees" 3
+    _dwr_find_repos_from_worktrees "$HOME/candidates" 3
+    _dwr_find_repos_from_worktrees "$HOME/canonical-code-repos" 3
+    _dwr_find_repos_from_worktrees "$HOME/mirror" 3
     for wt_pool in "$HOME"/*.worktrees "$HOME"/.worktrees-*; do
         [[ -d "$wt_pool" ]] || continue
         _dwr_find_repos_from_worktrees "$wt_pool" 3

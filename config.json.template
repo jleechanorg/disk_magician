@@ -586,6 +586,161 @@
       "key": "luma_scrape",
       "path": "~/luma-scrape",
       "timeout": 60
+    },
+    {
+      "key": "tmp",
+      "path": "/tmp",
+      "timeout": 120
+    },
+    {
+      "key": "var_root",
+      "path": "/var",
+      "timeout": 180
+    },
+    {
+      "key": "var_log",
+      "path": "/var/log",
+      "timeout": 60
+    },
+    {
+      "key": "var_lib",
+      "path": "/var/lib",
+      "timeout": 180
+    },
+    {
+      "key": "var_lib_docker",
+      "path": "/var/lib/docker",
+      "timeout": 120
+    },
+    {
+      "key": "opt_root",
+      "path": "/opt",
+      "timeout": 60
+    },
+    {
+      "key": "opt_google",
+      "path": "/opt/google",
+      "timeout": 60
+    },
+    {
+      "key": "opt_warpdotdev",
+      "path": "/opt/warpdotdev",
+      "timeout": 60
+    },
+    {
+      "key": "comfyui",
+      "path": "~/ComfyUI",
+      "timeout": 120
+    },
+    {
+      "key": "dropbox",
+      "path": "~/Dropbox",
+      "timeout": 180
+    },
+    {
+      "key": "mirror",
+      "path": "~/mirror",
+      "timeout": 300
+    },
+    {
+      "key": "candidates",
+      "path": "~/candidates",
+      "timeout": 120
+    },
+    {
+      "key": "canonical_code_repos",
+      "path": "~/canonical-code-repos",
+      "timeout": 60
+    },
+    {
+      "key": "auth112_causal",
+      "path": "~/auth112_causal",
+      "timeout": 60
+    },
+    {
+      "key": "google_cloud_sdk",
+      "path": "~/google-cloud-sdk",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_agent_pc",
+      "path": "~/hermes-agent-pc",
+      "timeout": 60
+    },
+    {
+      "key": "library_home",
+      "path": "~/Library",
+      "timeout": 60
+    },
+    {
+      "key": "qdrant_evidence",
+      "path": "~/qdrant-evidence-20261004",
+      "timeout": 60
+    },
+    {
+      "key": "reward_driver_fix",
+      "path": "~/reward-driver-fix.gdHuox",
+      "timeout": 60
+    },
+    {
+      "key": "agents_dot",
+      "path": "~/.agents",
+      "timeout": 60
+    },
+    {
+      "key": "antigravity_ide_dot",
+      "path": "~/.antigravity-ide",
+      "timeout": 60
+    },
+    {
+      "key": "claude_backup_20260918",
+      "path": "~/.claude-backup-20260918_154321",
+      "timeout": 60
+    },
+    {
+      "key": "codex_dark_factory",
+      "path": "~/.codex-dark-factory",
+      "timeout": 120
+    },
+    {
+      "key": "codex_worktrees",
+      "path": "~/.codex-worktrees",
+      "timeout": 120
+    },
+    {
+      "key": "dark_factory_e2e",
+      "path": "~/.dark-factory-e2e",
+      "timeout": 60
+    },
+    {
+      "key": "df_pr771_final",
+      "path": "~/.df-pr771-final-sozq0U",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_pre_claw_backup",
+      "path": "~/.hermes.pre-claw-backup",
+      "timeout": 120
+    },
+    {
+      "key": "npm_global",
+      "path": "~/.npm-global",
+      "timeout": 60
+    },
+    {
+      "key": "pnpm_store",
+      "path": "~/.pnpm-store",
+      "timeout": 60
+    },
+    {
+      "key": "smartclaw",
+      "path": "~/.smartclaw",
+      "timeout": 60
+    },
+    {
+      "key": "venvs_home",
+      "path": "~/.venvs",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
@@ -666,6 +821,38 @@
     {
       "key": "mcp_mail_dirs",
       "pattern": "~/mcp_mail*"
+    },
+    {
+      "key": "df_runs",
+      "pattern": "~/.df-*"
+    },
+    {
+      "key": "claude_backups",
+      "pattern": "~/.claude*backup*"
+    },
+    {
+      "key": "dark_factory_runs",
+      "pattern": "~/.dark-factory*"
+    },
+    {
+      "key": "hermes_backups",
+      "pattern": "~/.hermes.*backup*"
+    },
+    {
+      "key": "tmp_pr_scratch",
+      "pattern": "/tmp/pr*"
+    },
+    {
+      "key": "tmp_task_scratch",
+      "pattern": "/tmp/task*"
+    },
+    {
+      "key": "tmp_wa_scratch",
+      "pattern": "/tmp/wa-*"
+    },
+    {
+      "key": "skills_repos",
+      "pattern": "~/*-skills*"
     }
   ],
   "cleanup_thresholds": {

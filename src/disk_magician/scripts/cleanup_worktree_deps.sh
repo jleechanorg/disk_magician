@@ -27,7 +27,7 @@ MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  raw_roots=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/repos" "$HOME/.dark-factory")
+  raw_roots=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/repos" "$HOME/.dark-factory" "$HOME/.codex-worktrees" "$HOME/candidates" "$HOME/canonical-code-repos" "$HOME/mirror")
   for pat in "$HOME"/project_* "$HOME"/wf_* "$HOME"/*.worktrees "$HOME"/.worktrees-* "$HOME"/Documents/Codex/*; do
     [[ -d "$pat" ]] && raw_roots+=("$pat")
   done
@@ -80,7 +80,7 @@ lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
 [[ -x "$lsof_bin" ]] || { echo "lsof unavailable: cwd unknown, refusing."; exit 0; }
 lsof_err="$(mktemp)"
 lsof_rc=0
-LIVE_CWDS_RAW="$("$lsof_bin" -d cwd -Fn 2>"$lsof_err")" || lsof_rc=$?
+LIVE_CWDS_RAW="$("$lsof_bin" -w -d cwd -Fn 2>"$lsof_err")" || lsof_rc=$?
 lsof_msg="$(cat "$lsof_err" 2>/dev/null || true)"; rm -f "$lsof_err"
 if [[ "$lsof_rc" -ne 0 || -z "$LIVE_CWDS_RAW" ]] \
     || grep -qiE 'warning|permission denied|cannot|error' <<<"$lsof_msg"; then

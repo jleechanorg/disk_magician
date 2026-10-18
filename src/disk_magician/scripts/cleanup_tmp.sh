@@ -734,7 +734,7 @@ purge_aged_archives() {
     # process holding fds into the archive keeps it alive unboundedly. If
     # the entry's mtime can't be read, fall through to the guarded path
     # (fail closed toward keeping data, not toward the cap).
-    entry_mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now_epoch")"
+    entry_mtime="$(stat -c '%Y' "$d" 2>/dev/null || stat -f '%m' "$d" 2>/dev/null || echo "$now_epoch")"
     age_hours=$(( (now_epoch - entry_mtime) / 3600 ))
     if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
       if [[ "$DRY_RUN" == true ]]; then

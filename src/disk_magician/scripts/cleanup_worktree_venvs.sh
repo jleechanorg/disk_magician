@@ -369,7 +369,7 @@ acquire_cleanup_venvs_lock() {
   fi
   local held_pid age now lock_mtime is_alive=0
   held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-  lock_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s)
+  lock_mtime=$(stat -c '%Y' "$LOCK_DIR" 2>/dev/null || stat -f '%m' "$LOCK_DIR" 2>/dev/null || date +%s)
   now=$(date +%s)
   age=$(( now - lock_mtime ))
   if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
@@ -382,7 +382,7 @@ acquire_cleanup_venvs_lock() {
     if mkdir "$reclaim_gate" 2>/dev/null; then
       local recheck_pid recheck_mtime recheck_alive=0
       recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-      recheck_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0)
+      recheck_mtime=$(stat -c '%Y' "$LOCK_DIR" 2>/dev/null || stat -f '%m' "$LOCK_DIR" 2>/dev/null || echo 0)
       if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
         if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
           recheck_alive=1
@@ -594,7 +594,7 @@ purge_bak_dirs() {
       fi
 
       # The bak dir's own age: its rename/creation mtime, not the worktree's.
-      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
+      bak_age_days=$(( ( $(date +%s) - $(stat -c '%Y' "$bak_path" 2>/dev/null || stat -f '%m' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
       if (( bak_age_days < purge_days )); then
         skipped_young_bak=$(( skipped_young_bak + 1 ))
         continue

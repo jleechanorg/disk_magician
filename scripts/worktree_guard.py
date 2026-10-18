@@ -42,7 +42,7 @@ def _expand(word, home, variables):
     def sub(m):
         val = names.get(m.group(1) or m.group(2))
         return "\0" if val is None else val
-    word = re.sub(r"\$\{(\w+)\}|\$(\w+)", sub, word)
+    word = re.sub(r"\$\{(\w+)(?::?[?+\-][^}]*)?\}|\$(\w+)", sub, word)
     if "\0" in word or "$" in word or "`" in word:
         return None
     return word
@@ -93,6 +93,29 @@ def _add_target(args):
     return None, branch
 
 
+def _strip_wrappers(words):
+    """Strip transparent command prefixes (rtk, timeout, env, command, nohup, nice)."""
+    k = 0
+    while k < len(words):
+        w = os.path.basename(words[k])
+        if w in ("rtk", "command", "nohup", "env"):
+            k += 1
+            while k < len(words) and "=" in words[k] and words[k].split("=", 1)[0].isidentifier():
+                k += 1
+        elif w == "timeout":
+            k += 1
+            while k < len(words) and words[k].startswith("-"):
+                if words[k] in ("-k", "-s", "--kill-after", "--signal") and k + 1 < len(words):
+                    k += 2
+                else:
+                    k += 1
+            if k < len(words):
+                k += 1  # duration
+        else:
+            break
+    return words[k:]
+
+
 def _targets(command, cwd, home):
     """Yield absolute target path (or None if unresolvable, with raw word)."""
     variables = {}
@@ -103,7 +126,7 @@ def _targets(command, cwd, home):
             if len(seg) == 1 or all("=" in s for s in seg):
                 variables[name] = _expand(val, home, variables)
             i += 1
-        words = seg[i:]
+        words = _strip_wrappers(seg[i:])
         if not words:
             continue
         if words[0] == "cd":

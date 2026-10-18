@@ -103,7 +103,7 @@ wrh_live_cwd_reason() {
     fi
     err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
-    out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
+    out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -w -n -P -d cwd -Fpn 2>"$err") || rc=$?
     [[ ! -s $err ]] || rc=1
     [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
     [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }

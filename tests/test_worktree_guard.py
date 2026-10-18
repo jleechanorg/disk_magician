@@ -148,6 +148,14 @@ class TestWorktreeGuard(unittest.TestCase):
     def test_literal_assignment_denied(self):
         self.assertDeny(self.run_cmd("WT=/tmp/y; git worktree add $WT"))
 
+    def test_parameter_modifier_assignment_denied(self):
+        self.assertDeny(self.run_cmd('W=$(mktemp -d /tmp/wa-main-XXXX) && git worktree add -q --detach "${W:?}" origin/main'))
+
+    def test_rtk_and_timeout_wrappers_denied(self):
+        self.assertDeny(self.run_cmd("rtk git worktree add /tmp/bad-wt main"))
+        self.assertDeny(self.run_cmd("timeout 30s git worktree add /tmp/bad-wt main"))
+        self.assertDeny(self.run_cmd("timeout -k 5s 30s rtk git worktree add /tmp/bad-wt main"))
+
     def test_unresolvable_allows_and_logs(self):
         self.assertAllow(self.run_cmd('git worktree add "$WT"'))
         self.assertAllow(self.run_cmd('git worktree add "$(mktemp -d)"'))

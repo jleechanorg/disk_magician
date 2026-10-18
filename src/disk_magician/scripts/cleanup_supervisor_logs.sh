@@ -115,7 +115,7 @@ if [[ -d "$DARK_FACTORY_LOGS_DIR" ]]; then
       fi
     else
       now_sec="$(date +%s)"
-      mtime_sec="$(stat -f '%m' "$item" 2>/dev/null || stat -c '%Y' "$item" 2>/dev/null || echo "$now_sec")"
+      mtime_sec="$(stat -c '%Y' "$item" 2>/dev/null || stat -f '%m' "$item" 2>/dev/null || echo "$now_sec")"
       age_d=$(( (now_sec - mtime_sec) / 86400 ))
       if (( age_d < DF_AGE_DAYS )); then
         log "Skipping recent dark-factory log file (<${DF_AGE_DAYS}d): $item"

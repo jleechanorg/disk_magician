@@ -218,7 +218,7 @@ else
         GLOBAL_CWD_BLOCKED="cwd-unknown"
     else
         _lsof_rc=0
-        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
+        _lsof_out="$("$_lsof_bin" -w -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
         if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
             rm -f "$_lsof_tmp"
             GLOBAL_CWD_BLOCKED="cwd-unknown"

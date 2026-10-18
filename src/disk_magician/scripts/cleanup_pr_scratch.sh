@@ -561,7 +561,7 @@ if [[ -d "$LOCAL_STATE_DIR" ]]; then
       age_days="$(worktree_age_days "$item")"
     else
       now_sec="$(date +%s)"
-      mtime_sec="$(stat -f '%m' "$item" 2>/dev/null || stat -c '%Y' "$item" 2>/dev/null || echo "$now_sec")"
+      mtime_sec="$(stat -c '%Y' "$item" 2>/dev/null || stat -f '%m' "$item" 2>/dev/null || echo "$now_sec")"
       age_days=$(( (now_sec - mtime_sec) / 86400 ))
     fi
 
