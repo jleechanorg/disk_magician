@@ -36,6 +36,8 @@ source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$SCRIPT_DIR/lib/worktree_ignored.sh"
+# shellcheck source=lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=scripts/safety_lib.sh
 source "$SCRIPT_DIR/safety_lib.sh"
 
@@ -485,15 +487,37 @@ preserve_wip_reason_eligible() {
 }
 
 # worktree_has_live_cwd <wt_path> — true if any process's cwd is inside it.
-# Fails closed: no lsof means we cannot prove the worktree is idle.
+# Fails closed: no lsof, an incomplete scan, or a live process whose cwd cannot
+# be inspected all count as "live" so the caller never removes an occupied tree.
 worktree_has_live_cwd() {
-    local wt="$1" wt_real cwd
+    local wt="$1" wt_real cwd out err errf rc=0
     command -v lsof >/dev/null 2>&1 || return 0
     wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
+    errf="$(mktemp "${TMPDIR:-/tmp}/dm-hyg-lsof.XXXXXX")" || return 0
+    out="$(lsof -n -P -d cwd -Fn 2>"$errf")" || rc=$?
+    err="$(cat "$errf" 2>/dev/null || true)"
+    rm -f "$errf"
+    # Unexpected stderr means the scan may have missed a user. (The Linux mount
+    # warnings are expected and cleared by lsof_stderr_incomplete.)
+    if declare -F lsof_stderr_incomplete >/dev/null 2>&1; then
+        lsof_stderr_incomplete "$err" && return 0
+    elif [[ -n "$err" ]]; then
+        return 0
+    fi
+    (( rc <= 1 )) || return 0   # 0 = matches, 1 = none; anything else is unexpected
     while IFS= read -r cwd; do
         cwd="${cwd#n}"
+        # An uninspectable pid could hold any cwd, including this worktree.
+        if [[ "$cwd" =~ ^/proc/[0-9]+/cwd\ \(readlink:\ Permission\ denied\)$ ]]; then
+            if declare -F lsof_denied_ignorable >/dev/null 2>&1; then
+                lsof_denied_ignorable "$cwd" || return 0
+            else
+                return 0
+            fi
+            continue
+        fi
         [[ "$cwd" == "$wt" || "$cwd" == "$wt"/* || "$cwd" == "$wt_real" || "$cwd" == "$wt_real"/* ]] && return 0
-    done < <(lsof -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
+    done <<<"$out"
     return 1
 }
 
