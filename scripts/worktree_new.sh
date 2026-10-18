@@ -121,6 +121,30 @@ wtn_registered() {
     grep -qxF "worktree $2" <<<"$list" || grep -qxF "worktree $real" <<<"$list"
 }
 
+# wtn_configure_lfs <wt> — disable Git LFS pre-push lock verification when the
+# checkout has no filter=lfs attributes and no local LFS objects, so `git push`
+# from a fresh worktree does not fail with an LFS locks API auth error on
+# repositories that do not use Git LFS.
+wtn_configure_lfs() {
+    local wt="$1" common
+    if [[ -f "$wt/.gitattributes" ]] && grep -q 'filter=lfs' "$wt/.gitattributes" 2>/dev/null; then
+        return 0
+    fi
+    if git -C "$wt" grep -q 'filter=lfs' -- .gitattributes '**/.gitattributes' 2>/dev/null; then
+        return 0
+    fi
+    common="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$common" ]]; then
+        if [[ -f "$common/info/attributes" ]] && grep -q 'filter=lfs' "$common/info/attributes" 2>/dev/null; then
+            return 0
+        fi
+        if [[ -d "$common/lfs/objects" ]] && [[ -n "$(find "$common/lfs/objects" -type f -print -quit 2>/dev/null)" ]]; then
+            return 0
+        fi
+    fi
+    git -C "$wt" config lfs.locksverify false >/dev/null 2>&1 || true
+}
+
 # wtn_create <repo> <branch> <path> <base> [new] — worktree add, git output to
 # stderr, ${WTN_ADD_TIMEOUT:-30} s cap; prints <path> on success; a failed
 # add leaves git's own rc in WTN_ADD_RC (worktree-new's exit, spec §7.1). Existing
@@ -181,6 +205,7 @@ wtn_create() {
         fi
         return 1
     fi
+    wtn_configure_lfs "$path"
     printf '%s\n' "$path"
 }
 
@@ -430,6 +455,7 @@ PY
             lease_write "$candidate" "$repo" "$branch" worktree-new >/dev/null 2>&1 || lease_rc=$?
         fi
         if [[ "$switch_rc" == 0 && "$lease_rc" == 0 ]]; then
+            wtn_configure_lfs "$candidate"
             printf '%s\n' "$candidate"
             return 0
         fi
