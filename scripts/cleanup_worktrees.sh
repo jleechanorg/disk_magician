@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
@@ -324,7 +326,9 @@ else
             rm -f "$_lsof_tmp"
             if [[ "$_lsof_rc" -ne 0 ]]; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
+            elif lsof_stderr_incomplete "$_lsof_err"; then
+                GLOBAL_CWD_BLOCKED="cwd-unknown"
+            elif ! _lsof_out="$(lsof_drop_foreign_denied <<<"$_lsof_out")"; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
             elif [[ -z "$_lsof_out" ]]; then
                 GLOBAL_CWD_BLOCKED="cwd-unknown"
@@ -1086,10 +1090,165 @@ std_root_skip_reason() {
     fi
 }
 
+is_ao_managed_worktree() {
+    local wt="$1"
+    local real_wt
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    if [[ -n "$STD_BLOCKED" || "$AO_CONFIG_STATE" == "invalid" ]]; then
+        return 0
+    fi
+    if [[ "$wt" == *"ao/data/worktrees/"* || "$real_wt" == *"ao/data/worktrees/"* ]]; then
+        return 0
+    fi
+    if antigravity_ao_owned "$wt" || antigravity_ao_owned "$real_wt"; then
+        return 0
+    fi
+    local skip_reason
+    skip_reason="$(std_root_skip_reason "$wt" "$real_wt" 2>/dev/null || true)"
+    if [[ "$skip_reason" == "ao-owned" || "$skip_reason" == "ao-config-unreadable" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 if ((${#REPO_LOCAL_REPOS[@]})); then
     for repo in "${REPO_LOCAL_REPOS[@]}"; do
         [[ "$ACT_STOP" == 0 ]] || break
         process_repo_local_worktrees "$repo"
+    done
+fi
+
+# Safe cleanup pass: Broken-gitdir orphan worktrees & Ephemeral task clones (when not in cursor-scoped govern mode)
+if [[ -z "$ACT_CURSOR" && "$ACT_STOP" == 0 ]]; then
+    echo ""
+    echo "--- Broken-gitdir orphans & ephemeral task clones ---"
+
+    # 1. Broken-gitdir orphan worktrees in $HOME/projects/* and $HOME/.worktrees/*/*
+    orphan_candidates=()
+    for pattern in "$HOME/projects"/* "$HOME/.worktrees"/*/*; do
+        [[ -e "$pattern" ]] && orphan_candidates+=("$pattern")
+    done
+
+    for wt in ${orphan_candidates[@]+"${orphan_candidates[@]}"}; do
+        [[ -d "$wt" ]] || continue
+        [[ -L "$wt" ]] && continue
+        [[ -f "$wt/.git" ]] || continue
+
+        gd_line=$(grep '^gitdir: ' "$wt/.git" 2>/dev/null || true)
+        [[ -n "$gd_line" ]] || continue
+        target=$(echo "$gd_line" | cut -d' ' -f2-)
+        if [[ "$target" != /* ]]; then
+            target="$(cd "$wt" 2>/dev/null && cd "$target" 2>/dev/null && pwd -P || echo "$target")"
+        fi
+        # Must be broken (target does NOT exist on disk)
+        [[ ! -e "$target" ]] || continue
+
+        if worktree_is_recently_active "$wt" 7; then
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "young" " (< 7 days)"
+            continue
+        fi
+        if is_live_cwd "$wt"; then
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "live-cwd"
+            continue
+        fi
+        if is_ao_managed_worktree "$wt"; then
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "ao-owned"
+            continue
+        fi
+        if has_ignored_user_data "$wt"; then
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "ignored-data"
+            continue
+        fi
+        if ! safety_gate "$wt" >/dev/null 2>&1; then
+            ledger_line "orphan-gitdir" "PRESERVE" "$wt" "safety-gate"
+            continue
+        fi
+
+        wt_kb=$(size_kb "$wt")
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "[DRY-RUN] Would remove broken-gitdir orphan worktree: $wt"
+            ledger_line "orphan-gitdir" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf orphan)"
+            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+        else
+            [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || continue
+            echo "[CLEAN] Removing broken-gitdir orphan worktree: $wt"
+            if rm -rf "${wt:?unset}" && [[ ! -e "$wt" ]]; then
+                ledger_line "orphan-gitdir" "DELETE" "$wt" "" " (~$(( wt_kb / 1024 ))M)"
+                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+            else
+                ledger_line "orphan-gitdir" "PRESERVE" "$wt" "remove-failed"
+            fi
+        fi
+    done
+
+    # 2. Ephemeral task clones in $HOME/projects/*, $HOME/project_worldaiclaw/*, $HOME/.worktrees/*/*, $HOME/cb-*, $HOME/cb-wa-*
+    ephemeral_candidates=()
+    for pattern in "$HOME/projects"/* "$HOME/project_worldaiclaw"/* "$HOME/.worktrees"/*/* "$HOME"/cb-* "$HOME"/cb-wa-*; do
+        [[ -e "$pattern" ]] && ephemeral_candidates+=("$pattern")
+    done
+
+    for wt in ${ephemeral_candidates[@]+"${ephemeral_candidates[@]}"}; do
+        [[ -d "$wt" ]] || continue
+        [[ -L "$wt" ]] && continue
+        [[ -d "$wt/.git" ]] || continue
+
+        bn="$(basename "$wt")"
+        case "$bn" in
+            advice_src_*|advice*_src|advice_clone_*|advice-*|pr*_green|pr*_fullclone|dark-factory-*-clone|dark_factory_*_clone|wt-gist-*|cb-*|cb-wa-*)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+
+        if worktree_is_recently_active "$wt" 7; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "young" " (< 7 days)"
+            continue
+        fi
+        if is_live_cwd "$wt"; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "live-cwd"
+            continue
+        fi
+        if is_ao_managed_worktree "$wt"; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "ao-owned"
+            continue
+        fi
+        if has_hidden_state "$wt"; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "hidden-state"
+            continue
+        fi
+
+        wt_status="$(git -C "$wt" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || continue
+        if [[ -n "$wt_status" ]]; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "dirty-or-untracked"
+            continue
+        fi
+
+        if ! git -C "$wt" branch -r --contains HEAD 2>/dev/null | grep -q 'origin/'; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "head-not-on-origin"
+            continue
+        fi
+
+        if ! safety_gate "$wt" >/dev/null 2>&1; then
+            ledger_line "ephemeral-clone" "PRESERVE" "$wt" "safety-gate"
+            continue
+        fi
+
+        wt_kb=$(size_kb "$wt")
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "[DRY-RUN] Would remove ephemeral task clone: $wt"
+            ledger_line "ephemeral-clone" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf clone)"
+            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+        else
+            [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || continue
+            echo "[CLEAN] Removing ephemeral task clone: $wt"
+            if rm -rf "${wt:?unset}" && [[ ! -e "$wt" ]]; then
+                ledger_line "ephemeral-clone" "DELETE" "$wt" "" " (~$(( wt_kb / 1024 ))M)"
+                TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
+            else
+                ledger_line "ephemeral-clone" "PRESERVE" "$wt" "remove-failed"
+            fi
+        fi
     done
 fi
 

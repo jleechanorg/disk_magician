@@ -546,5 +546,109 @@ if [[ "$BUDGET_GB" -gt 0 && ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   log "$(dry_prefix)Budget mode done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Total freed: ${BUDGET_KB_FREED} KB"
 fi
 
+# Scan ~/.local/state for stale PR scratch directories and evidence bundles (>=14d):
+LOCAL_STATE_DIR="$HOME/.local/state"
+if [[ -d "$LOCAL_STATE_DIR" ]]; then
+  log "Scanning $LOCAL_STATE_DIR for stale PR scratch & evidence entries (>=14d) ..."
+  local_state_candidates=()
+  for p in "$LOCAL_STATE_DIR"/pr*-merge-* "$LOCAL_STATE_DIR"/pr*-review-*; do
+    [[ -e "$p" ]] || continue
+    local_state_candidates+=("$p")
+  done
+  if [[ -d "$LOCAL_STATE_DIR/worldarchitect-evidence" ]]; then
+    while IFS= read -r -d '' p; do
+      [[ -e "$p" ]] || continue
+      local_state_candidates+=("$p")
+    done < <(find "$LOCAL_STATE_DIR/worldarchitect-evidence" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true)
+  fi
+  for item in "${local_state_candidates[@]}"; do
+    [[ -e "$item" ]] || continue
+    age_days=0
+    if [[ -d "$item" ]]; then
+      age_days="$(worktree_age_days "$item")"
+    else
+      now_sec="$(date +%s)"
+      mtime_sec="$(stat -c '%Y' "$item" 2>/dev/null || stat -f '%m' "$item" 2>/dev/null || echo "$now_sec")"
+      age_days=$(( (now_sec - mtime_sec) / 86400 ))
+    fi
+    if (( age_days < 14 )); then
+      log "Skipping recently active path (<14d, age=${age_days}d): $item"
+      continue
+    fi
+    if has_active_marker "$item"; then
+      log "Skipping active-use marker (.in-use/.keep present): $item"
+      continue
+    fi
+    if has_open_files "$item"; then
+      log "Skipping in-use path (open files): $item"
+      continue
+    fi
+    is_cwd=false
+    if command -v lsof >/dev/null 2>&1; then
+      target_real="$(cd "$item" 2>/dev/null && pwd -P)" || target_real="$item"
+      while IFS= read -r cwd_line; do
+        cwd_line="${cwd_line#n}"
+        if [[ "$cwd_line" == "$item" || "$cwd_line" == "$item"/* || "$cwd_line" == "$target_real" || "$cwd_line" == "$target_real"/* ]]; then
+          is_cwd=true
+          break
+        fi
+      done < <(lsof -w -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
+    fi
+    if [[ "$is_cwd" == true ]]; then
+      log "Skipping live cwd: $item"
+      continue
+    fi
+    if [[ -d "$item/.git" || -f "$item/.git" ]]; then
+      if worktree_has_unsaved_work "$item"; then
+        log "Skipping scratch worktree with unsaved work (uncommitted/unpushed/no-upstream): $item"
+        continue
+      fi
+    fi
+    kb=$(path_size_kb "$item")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "DRY RUN: would remove: $item  (${kb} KB)"
+      if [[ -d "$item" ]]; then
+        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+      else
+        FILES_DELETED=$(( FILES_DELETED + 1 ))
+      fi
+      TOTAL_KB=$(( TOTAL_KB + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$item" 2>/dev/null)"; then
+        echo "SAFETY-SKIP $item ($_safety_reason)"
+        continue
+      fi
+      log "Removing: $item  (${kb} KB)"
+      if [[ -L "$item" ]]; then
+        if c14_remove "$item" --kind ephemeral; then
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
+        else
+          log "WARN: failed to remove symlink $item"
+        fi
+      elif [[ -d "$item" ]]; then
+        chmod -R u+w "$item" 2>/dev/null || true
+        if c14_remove "$item" --kind ephemeral; then
+          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
+        else
+          log "WARN: failed to remove directory $item"
+        fi
+      elif [[ -f "$item" ]]; then
+        chmod u+w "$item" 2>/dev/null || true
+        if c14_remove "$item" --kind ephemeral; then
+          FILES_DELETED=$(( FILES_DELETED + 1 ))
+          TOTAL_KB=$(( TOTAL_KB + kb ))
+          deletion_log "cleanup_pr_scratch.sh" "remove_file" "$kb" "$item"
+        else
+          log "WARN: failed to remove file $item"
+        fi
+      fi
+    fi
+  done
+fi
+
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"
 

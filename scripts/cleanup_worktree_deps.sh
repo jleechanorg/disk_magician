@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
@@ -30,7 +32,10 @@ MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other")
+  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/mirror/projects")
+  for _wf in "$HOME"/wf_*; do
+    [[ -d "$_wf" && ! -L "$_wf" ]] && ROOTS+=("$_wf")
+  done
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -74,9 +79,10 @@ lsof_rc=0
 LIVE_CWDS_RAW="$("$lsof_bin" -d cwd -Fn 2>"$lsof_err")" || lsof_rc=$?
 lsof_msg="$(cat "$lsof_err" 2>/dev/null || true)"; rm -f "$lsof_err"
 if [[ "$lsof_rc" -ne 0 || -z "$LIVE_CWDS_RAW" ]] \
-    || grep -qiE 'warning|permission denied|cannot|error' <<<"$lsof_msg"; then
+    || lsof_stderr_incomplete "$lsof_msg"; then
   echo "lsof output incomplete: cwd unknown, refusing."; exit 0
 fi
+LIVE_CWDS_RAW="$(lsof_drop_foreign_denied <<<"$LIVE_CWDS_RAW")"
 if grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied' <<<"$LIVE_CWDS_RAW" \
     || grep -qE '^n[^/]' <<<"$LIVE_CWDS_RAW"; then
   echo "lsof output unparseable: cwd unknown, refusing."; exit 0
@@ -199,7 +205,7 @@ for root in "${ROOTS[@]}"; do
     # Nested build caches are only discoverable by walking; skip that walk when
     # root caches already make this worktree a candidate. Only nested caches can
     # make a worktree with no root caches a candidate at all.
-    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt"; then
+    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" || ( -f "$wt/ios/Podfile" && ( -d "$wt/ios/Pods" || -d "$wt/ios/build" ) ) ]] || has_pkg_node_modules "$wt"; then
       nested_dirs=""
     else
       nested_dirs="$(nested_cache_dirs "$wt")"
@@ -214,6 +220,10 @@ for root in "${ROOTS[@]}"; do
       [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
     done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
+    if [[ ! -L "$wt/ios" && -f "$wt/ios/Podfile" ]]; then
+      strip_dir "$wt" "$wt/ios/Pods"
+      strip_dir "$wt" "$wt/ios/build"
+    fi
     strip_dir "$wt" "$wt/.mypy_cache"
     while IFS= read -r nested; do
       [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"

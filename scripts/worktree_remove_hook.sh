@@ -13,6 +13,8 @@ _WRH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/worktree_new.sh
 source "$_WRH_DIR/worktree_new.sh"
 source "$_WRH_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$_WRH_DIR/lib/lsof_linux.sh"
 source "$_WRH_DIR/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$_WRH_DIR/lib/worktree_ignored.sh"
@@ -46,7 +48,7 @@ wrh_live_cwd_reason() {
     err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
     out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
-    [[ ! -s $err ]] || rc=1
+    lsof_stderr_incomplete "$(cat "$err" 2>/dev/null)" && rc=1
     [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
     [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     while IFS= read -r line; do case $line in
@@ -61,6 +63,10 @@ wrh_live_cwd_reason() {
         n*)
             [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
             path=${line#n}; [[ $path == /* ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            if [[ $path == /proc/*/cwd\ \(readlink:* ]]; then
+                lsof_denied_ignorable "$path" || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+                path_seen=1; seen=1; continue
+            fi
             path_seen=1; seen=1
             case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
         *) [[ -z $line ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; } ;;

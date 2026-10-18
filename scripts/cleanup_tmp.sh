@@ -68,7 +68,7 @@ fi
 LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
-ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
+ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-$(scratch_roots_get_private_tmp || echo /private/tmp)/_disk_magician_archive}"
 # Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
 # / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
 # this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
@@ -705,7 +705,7 @@ has_open_files() {
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
-  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
+  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" -w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
   local diagnostic=""
   if [[ -s "$err_file" ]]; then
@@ -1402,10 +1402,10 @@ large_consider_entry() {
   base="$(basename "$d")"
 
   case "$base" in
-    com.apple.*|system-*|PowerlogHelperd*) return 0 ;;
+    com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
     # Our own quarantine root — never re-archive/delete it here;
     # purge_aged_archives() below is the only thing that touches it.
-    _disk_magician_archive) return 0 ;;
+    _disk_magician_archive|.dm-quarantine) return 0 ;;
   esac
   case "$base" in
     wt_*|worktree_*)

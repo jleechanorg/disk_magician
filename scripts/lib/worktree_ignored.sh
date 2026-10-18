@@ -15,11 +15,14 @@ ignored_entry_rebuildable() {
             # build, dist, env, target, coverage and .cache can hold hand-made
             # files, so they count as user data and preserve the worktree.
             node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
-            .next|.turbo|.gradle|.tox|.eggs|htmlcov|venv.bak.*|test-results)
+            .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|venv.bak.*|test-results|\
+            .beads|.husky|.doctor|.codex-worktrees|Pods|xcuserdata|xcshareddata|project.xcworkspace|.expo|dist-export|\
+            .venv_bootstrap.lock|evidence|.superpowers|.dark-factory|.tmp|logs|.br_recovery)
                 return 0 ;;
             # File-oriented patterns are rebuildable only when the matched
             # path is not a directory containing user data.
-            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|.testmondata|.claude.json*|*.log|*.sqlite-shm|*.sqlite-wal|\
+            .playwright-cli-*|coverage.json|coverage*.xml|test_output*.txt|pytest*.xml)
                 [[ ! -d "$1/$rest" ]] && return 0
                 ;;
         esac
@@ -36,8 +39,27 @@ ignored_entry_rebuildable() {
 has_ignored_user_data() {
     local out entry t=""
     command -v timeout >/dev/null 2>&1 && t="timeout 60s"
+    local git_args=(-C "$1")
+    if [[ -f "$1/.git" ]]; then
+        local gd_line gd_target
+        gd_line=$(grep '^gitdir: ' "$1/.git" 2>/dev/null || true)
+        gd_target=$(echo "$gd_line" | cut -d' ' -f2-)
+        if [[ -n "$gd_target" && ! -e "$gd_target" ]]; then
+            local mr="${gd_target%/.git/worktrees/*}"
+            if [[ -d "$mr/.git" ]]; then
+                git_args=(--git-dir="$mr/.git" --work-tree="$1")
+            else
+                if [[ -f "$1/.gitignore" ]]; then
+                    if /usr/bin/find "$1" -maxdepth 3 \( -name '.env*' -o -name '*credentials*' -o -name '*secrets*' \) -print -quit 2>/dev/null | grep -q .; then
+                        return 0
+                    fi
+                fi
+                return 1
+            fi
+        fi
+    fi
     # shellcheck disable=SC2086
-    out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
+    out="$($t git "${git_args[@]}" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         ignored_entry_rebuildable "$1" "$entry" || return 0
@@ -61,8 +83,9 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc),
+    # public CA bundles in venv/node_modules (certifi/cacert.pem), and test-results logs
+    # are rebuildable/generated, not user secrets.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|(^|/)(venv|\.venv|node_modules)/.*cacert\.pem$|(^|/)test-results/.*\.log$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }
