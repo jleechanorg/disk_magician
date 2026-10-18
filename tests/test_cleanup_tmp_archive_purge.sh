@@ -653,6 +653,51 @@ else
   record_fail "Test 11: receipt binds the canonical path and carries the declared retention" "receipt retention or identity differs from the declared row"
 fi
 
+echo "Test 12: --dry-run --large does not preview-archive an unproven dir (retention gate applies to dry runs, CodeRabbit #207)"
+T12_PRIVATE_TMP="$TMP_ROOT/t12-private-tmp"
+T12_TMP="$TMP_ROOT/t12-tmp"
+T12_ARCHIVE="$TMP_ROOT/t12-archive"
+T12_BIN="$TMP_ROOT/t12-bin"
+mkdir -p "$T12_PRIVATE_TMP" "$T12_TMP"
+T12_PRIVATE_TMP="$(cd "$T12_PRIVATE_TMP" && pwd -P)"
+T12_TMP="$(cd "$T12_TMP" && pwd -P)"
+T12_UNPROVEN="$T12_PRIVATE_TMP/unproven_dry_dir"
+T12_DECLARED="$T12_PRIVATE_TMP/pr_declared_dry_dir"
+mkdir -p "$T12_UNPROVEN" "$T12_DECLARED"
+printf 'x\n' >"$T12_UNPROVEN/payload.bin"
+printf 'x\n' >"$T12_DECLARED/payload.bin"
+set_old_mtime "$T12_UNPROVEN"
+set_old_mtime "$T12_DECLARED"
+make_find_shim "$T12_BIN" "$T12_PRIVATE_TMP" "$T12_TMP"
+T12_OUT="$TMP_ROOT/t12.out"
+if run_capture "$T12_OUT" env -i HOME="$TMP_ROOT/t12-home" \
+  PATH="$T12_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" \
+  LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_MIN_KB=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T12_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T12_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T12_TMP" \
+  bash "$SOURCE_SCRIPT" --dry-run --large; then
+  T12_RC=0
+else
+  T12_RC=$?
+fi
+T12_OUT_CONTENT=$(cat "$T12_OUT")
+assert_rc "Test 12: exits 0" 0 "$T12_RC"
+assert_contains "Test 12: dry run logs the unproven skip" \
+  "Skipping archive candidate (C14 kept:unproven-content): $T12_UNPROVEN" "$T12_OUT_CONTENT"
+if grep -qF "would archive: $T12_UNPROVEN" <<<"$T12_OUT_CONTENT"; then
+  record_fail "Test 12: dry run must not preview-archive the unproven dir" "found would-archive for unproven"
+else
+  record_pass "Test 12: dry run must not preview-archive the unproven dir"
+fi
+assert_contains "Test 12: dry run still previews the declared-ephemeral dir" \
+  "would archive: $T12_DECLARED" "$T12_OUT_CONTENT"
+assert_exists "Test 12: dry run deletes nothing" "$T12_UNPROVEN/payload.bin"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

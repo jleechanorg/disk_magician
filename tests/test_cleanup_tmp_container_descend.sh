@@ -171,16 +171,16 @@ assert_exists "t1 fresh child kept" "$PT/agent-scratch/fresh-child"
 assert_exists "t1 container kept" "$PT/agent-scratch"
 assert_contains "t1 unproven child is not counted as archived" "Dirs archived: 0" "$OUT"
 
-echo "Test 2: dry-run reports child, changes nothing, counts child KB"
+echo "Test 2: dry-run reports the unproven child skip, changes nothing, counts nothing"
 make_env t2
 mkdir -p "$PT/agent-scratch"
 mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t2 --dry-run
 assert_exists "t2 old child untouched" "$PT/agent-scratch/old-child"
-assert_contains "t2 dry-run names child" "would archive: $PT/agent-scratch/old-child" "$OUT"
-KB=$(du -sk "$PT/agent-scratch/old-child" | awk '{print $1}')
-assert_contains "t2 archived KB equals child size" "Total archived: ${KB} KB" "$OUT"
+assert_contains "t2 dry-run reports the unproven child skip" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-child" "$OUT"
+assert_contains "t2 unproven child is not counted as archived" "Dirs archived: 0" "$OUT"
 
 echo "Test 3: idle child with a live open file is kept"
 make_env t3

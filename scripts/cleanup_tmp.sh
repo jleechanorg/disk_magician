@@ -858,58 +858,53 @@ archive_path() {
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
+  # Every refusal gate runs for BOTH dry-run and clean so a preview reports
+  # exactly what a clean run would do (CodeRabbit #207).
+  # 1) safety.local.json on the original path (relocating stops the rule matching).
+  if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
+    log "SAFETY-SKIP $path ($safety_reason)"
+    return 1
+  fi
+  # 2) deadline budget.
+  if ! act_unit_fits 0; then
+    log "Archive deferred:deadline-before-unit $path"
+    cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    return 1
+  fi
+  # 3) C14 verdict: secret-like files or repositories failing
+  # content/push/baseline verification must stay in place rather than
+  # accumulating indefinitely inside _disk_magician_archive.
+  local c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
+  secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
+    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+    -print -quit 2>/dev/null)" || secret_rc=$?
+  if (( secret_rc != 0 )); then
+    c14_verdict="kept:check-failed"
+  elif [[ -n "$secret_out" ]]; then
+    c14_verdict="kept:secret-like"
+  else
+    repo_verdict="$(c14_repos_ok "$path" "" "${ACT_DEADLINE_AT:-}")" || c14_verdict="${repo_verdict:-kept:check-failed}"
+  fi
+  if [[ -n "$c14_verdict" ]]; then
+    log "Skipping archive candidate (C14 $c14_verdict): $path"
+    cleanup_tmp_count_candidate_result "$c14_verdict"
+    return 1
+  fi
+  # 4) declared-ephemeral retention: without a row the receipt says 0 minutes and
+  # C14 never purges, so same-volume archiving would grow forever.
+  canon="$(cd "$path" 2>/dev/null && pwd -P)" || canon="$path"
+  if ! retention="$(c14_ephemeral_retention "$canon")"; then
+    log "Skipping archive candidate (C14 kept:unproven-content): $path"
+    cleanup_tmp_count_candidate_result kept:unproven-content
+    return 1
+  fi
+
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would archive: $path -> $dest/  (${kb} KB)"
   else
-    # Quarantine is still a destructive relocation: once moved, an
-    # original-path safety.local.json rule would no longer match and a later
-    # archive purge could delete the content. Gate the source immediately
-    # before mutation and fail closed on unreadable policy.
-    if ! safety_reason="$(safety_gate "$path" 2>/dev/null)"; then
-      log "SAFETY-SKIP $path ($safety_reason)"
-      return 1
-    fi
-    # Archival relocates the source just like a cleanup unit. Check after
-    # eligibility probes, before starting either archive metadata or the move.
-    if ! act_unit_fits 0; then
-      log "Archive deferred:deadline-before-unit $path"
-      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
-      return 1
-    fi
-    # Archival relocates the source onto the same volume: candidates that C14
-    # will permanently refuse to purge (secret-like files or repositories failing
-    # content/push/baseline verification) must stay in place rather than
-    # accumulating indefinitely inside _disk_magician_archive.
-    local c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
-    secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
-      -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-      -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-      -print -quit 2>/dev/null)" || secret_rc=$?
-    if (( secret_rc != 0 )); then
-      c14_verdict="kept:check-failed"
-    elif [[ -n "$secret_out" ]]; then
-      c14_verdict="kept:secret-like"
-    else
-      repo_verdict="$(c14_repos_ok "$path" "" "${ACT_DEADLINE_AT:-}")" || c14_verdict="${repo_verdict:-kept:check-failed}"
-    fi
-    if [[ -n "$c14_verdict" ]]; then
-      log "Skipping archive candidate (C14 $c14_verdict): $path"
-      cleanup_tmp_count_candidate_result "$c14_verdict"
-      return 1
-    fi
     # The E1 origin receipt carries the retention that bounds this entry's
-    # quarantine life. Without a declared-ephemeral row (E2/E3) there is no
-    # retention to record: the receipt would say 0 minutes, C14 would refuse
-    # every purge (`kept:archive-identity`), and the same-volume move would grow
-    # _disk_magician_archive forever without reclaiming a byte. Unproven content
-    # stays in place, where its age still surfaces and nothing is quarantined
-    # beyond recovery (bead disk_magician-archive-same-volume-regrowth-03bn).
-    canon="$(cd "$path" 2>/dev/null && pwd -P)" || canon="$path"
-    if ! retention="$(c14_ephemeral_retention "$canon")"; then
-      log "Skipping archive candidate (C14 kept:unproven-content): $path"
-      cleanup_tmp_count_candidate_result kept:unproven-content
-      return 1
-    fi
+    # quarantine life (computed above for both dry-run and clean).
     if ! mkdir -p "$dest"; then
       log "ERROR: could not create archive destination: $dest"
       return 2
