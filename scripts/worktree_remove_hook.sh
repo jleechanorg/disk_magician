@@ -63,6 +63,10 @@ wrh_live_cwd_reason() {
         n*)
             [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
             path=${line#n}; [[ $path == /* ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+            if [[ $path == /proc/*/cwd\ \(readlink:* ]]; then
+                lsof_denied_ignorable "$path" || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+                path_seen=1; seen=1; continue
+            fi
             path_seen=1; seen=1
             case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
         *) [[ -z $line ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; } ;;

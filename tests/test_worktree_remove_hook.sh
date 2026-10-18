@@ -556,6 +556,18 @@ tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "mixed-warning visibility remains
 unset FAKE_LSOF_STDERR
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
+if [[ -d /proc/self ]]; then
+echo "== case 36d: own-uid hidden cwd fails closed unless explicitly approved =="
+add_wt own-hidden worktree-own-hidden
+printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
+run_hook "$(json "$WTROOT/own-hidden")"; rc=$?
+[[ -d "$WTROOT/own-hidden" ]] && ok "own hidden cwd worktree kept" || bad "own hidden cwd worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "own hidden cwd is cwd-unknown" || bad "own hidden cwd was trusted without approval"
+DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 run_hook "$(json "$WTROOT/own-hidden")"; rc=$?
+tail -n 2 "$LOG" | grep -q "cwd-unknown" && bad "approved own hidden cwd still cwd-unknown" || ok "approval clears own hidden cwd"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+fi
+
 echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
 add_wt verdict-clean worktree-verdict-clean
 V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7' _ "$SCRIPT" "$WTROOT/verdict-clean")"
