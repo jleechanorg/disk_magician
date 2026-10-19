@@ -570,6 +570,21 @@ DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 run_hook_strict "$(json "$WTROOT/own-hi
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 fi
 
+echo "== case 36e: an unreadable stderr capture is cwd-unknown, not empty =="
+add_wt err-unreadable worktree-err-unreadable
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+cat > "$MOCK_BIN/cat" <<'SH'
+#!/bin/sh
+case "$*" in *disk-magician-worktree-remove*) exit 1 ;; esac
+exec /bin/cat "$@"
+SH
+chmod +x "$MOCK_BIN/cat"
+run_hook_strict "$(json "$WTROOT/err-unreadable")"; rc=$?
+[[ -d "$WTROOT/err-unreadable" ]] && ok "unreadable stderr keeps the worktree" || bad "unreadable stderr allowed removal"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unreadable stderr is cwd-unknown" || bad "unreadable stderr was trusted"
+rm -f "$MOCK_BIN/cat"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
 echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
 add_wt verdict-clean worktree-verdict-clean
 V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" days:7' _ "$SCRIPT" "$WTROOT/verdict-clean")"
