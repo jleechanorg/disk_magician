@@ -78,7 +78,7 @@ lsof_cwd_blocks() {
                 pid = substr($0, 2); if (pid == "") bad = 1
                 next
             }
-            /^f/ { if (!started) { pre = 1; next } havef = 1; next }
+            /^f/ { if (!started) { pre = 1; next } if (havef) bad = 1; havef = 1; next }
             /^n/ {
                 if (!started) { pre = 1; next }
                 if (haven) bad = 1
