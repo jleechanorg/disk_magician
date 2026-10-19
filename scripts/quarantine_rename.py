@@ -231,7 +231,12 @@ def lsof_stderr_incomplete(err, query):
         if m:
             fs = os.fsdecode(m.group(1))  # lsof prints the mount path verbatim; do not strip it
             fs_norm = os.path.realpath(fs).rstrip("/") or "/"
-            if fs_norm == "/" or query_real == fs_norm or query_real.startswith(fs_norm + "/"):
+            # Relevant when the warned mount is /, the query itself, an ancestor
+            # of the query, or nested INSIDE it (`lsof +D` scans the subtree, so
+            # an unreadable child mount can hide a user below the query).
+            if (fs_norm == "/" or query_real == fs_norm
+                    or query_real.startswith(fs_norm + "/")
+                    or fs_norm.startswith(query_real + "/")):
                 return True
             ignored_warning = True
             continue
