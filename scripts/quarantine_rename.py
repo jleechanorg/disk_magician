@@ -4,10 +4,19 @@ import ctypes, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sy
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
+# Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
+# Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
+# RENAME_WHITEOUT, which is not an exclusive rename.
+RENAME_FLAGS = {"renameatx_np": 4, "renameat2": 1}
+
+def renamex_candidates(forced=None):  # (name, flag) pairs in attempt order
+    if forced:
+        return ((forced, RENAME_FLAGS.get(forced, 4)),)
+    return tuple(RENAME_FLAGS.items())
+
 def renamex(srcfd, src, dstfd, dst):  # exclusive rename; no supported symbol raises LookupError
-    # macOS renameatx_np(RENAME_EXCL=0x4); Linux renameat2(RENAME_NOREPLACE=0x1).
     libc, forced = ctypes.CDLL(None, use_errno=True), ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL")
-    for name, flag in ((forced, 4),) if forced else (("renameatx_np", 4), ("renameat2", 1)):
+    for name, flag in renamex_candidates(forced):
         try: fn = libc[name]
         except (AttributeError, OSError): continue
         if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(flag)): raise OSError(ctypes.get_errno(), name)
