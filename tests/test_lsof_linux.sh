@@ -42,6 +42,8 @@ if [[ -d /proc/self ]]; then
   eq "own unreadable pid unknown by default" "$(lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" unknown
   eq "approved unreadable pid ignorable" \
      "$(DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" ignorable
+  eq "strict overrides approval" \
+     "$(DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" unknown
   kill "$own_pid" 2>/dev/null
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   eq "exited pid ignorable" "$(lsof_cwd_value_verdict "/proc/$dead/cwd (readlink: Permission denied)" 2>/dev/null)" ignorable

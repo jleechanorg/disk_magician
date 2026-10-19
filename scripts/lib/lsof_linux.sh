@@ -50,10 +50,14 @@ lsof_denied_ignorable() {
   [[ -d /proc/self ]] || return 1
   # Exited: cannot hold anything.
   [[ -e "/proc/$pid" ]] || return 0
-  # A foreign-uid process cannot read THIS user's live use, but it could still
-  # hold a candidate; only the operator can waive that, so this stays unknown
-  # unless they do. Approving uninspectable processes is the documented opt-in
-  # for running cleanups on a box where an unprivileged lsof can never see them.
+  # A live unreadable cwd could hold the candidate and no unprivileged scan can
+  # rule that out, so it stays unknown. Two operator switches, strict wins:
+  #   DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1   -> never waivable (hard block)
+  #   DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 -> waive uninspectable processes
+  if [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT:-}" == 1 ]]; then
+    echo "lsof: process $pid hides its cwd (strict mode)" >&2
+    return 1
+  fi
   owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
   if [[ "$owner" =~ ^[0-9]+$ ]] && [[ "$owner" != "$(id -u)" ]]; then
     echo "lsof: foreign process $pid hides its cwd" >&2
