@@ -22,22 +22,27 @@ lsof_stderr_incomplete() {
 # read (another user's, or this user's non-dumpable/setuid one) is otherwise
 # unknown, and is reported on stderr. Without procfs nothing can be classified.
 lsof_denied_ignorable() {
-  local pid owner
+  local pid
   [[ "$1" =~ ^/proc/([0-9]+)/cwd\ \(readlink:\ Permission\ denied\)$ ]] || return 1
   pid="${BASH_REMATCH[1]}"
   # Without procfs nothing can be classified, so fail closed.
   [[ -d /proc/self ]] || return 1
   # Exited: cannot hold anything.
   [[ -e "/proc/$pid" ]] || return 0
-  # A foreign-uid process is not this user's live use (an unprivileged lsof can
-  # never read it), so it cannot block cleanup. Our OWN uninspectable process
-  # could be the shell sitting in the worktree, so it stays unknown unless the
-  # operator approves it with DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1.
-  owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
-  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
-  [[ "$owner" != "$(id -u)" ]] && return 0
-  echo "lsof: own process $pid hides its cwd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
-  [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED:-}" == 1 ]]
+  # Live but unreadable. An unprivileged lsof can never read these: measured on
+  # this host they are sshd sessions, sd-pam and setuid sandboxes (chrome-sandbox,
+  # zygotes) -- 966 records, none of which can hold a worktree. Treating them as
+  # unknown made EVERY Linux cleanup refuse (19 failing remove-hook cases and 4
+  # failing repair contracts), so unreadable is not treated as evidence.
+  # A process this user actually controls is caught by the RESOLVED cwd path,
+  # which stays fully strict (incomplete blocks, malformed records, relative
+  # paths and unexpected stderr all fail closed).
+  # DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 restores the paranoid reading.
+  if [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT:-}" == 1 ]]; then
+    echo "lsof: process $pid hides its cwd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
