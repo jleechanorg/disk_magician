@@ -59,6 +59,10 @@ lsof_collect_cwds "" "" 0 && bad "empty output accepted" || ok "empty output rej
 lsof_collect_cwds $'p1\nfcwd\nnrelative' "" 0 && bad "relative path accepted" || ok "relative path rejected: $LSOF_CWD_REASON"
 lsof_collect_cwds $'p\nfcwd\nn/a\np1\nfcwd\nn/b' "" 0 && bad "empty pid accepted" || ok "empty pid rejected: $LSOF_CWD_REASON"
 lsof_collect_cwds $'fcwd\nn/a\np1\nfcwd\nn/b' "" 0 && bad "record before first pid accepted" || ok "record before first pid rejected: $LSOF_CWD_REASON"
+lsof_collect_cwds $'p1\np2\nfcwd\nn/b' "" 0 && bad "pid-only block accepted" || ok "pid-only block rejected: $LSOF_CWD_REASON"
+lsof_collect_cwds $'n/a\nn/b' "" 0 && bad "pid-less scan accepted" || ok "pid-less scan rejected: $LSOF_CWD_REASON"
+lsof_stderr_incomplete $'      Output information may be incomplete.' && ok "standalone trailer incomplete" || bad "standalone trailer trusted"
+lsof_stderr_incomplete $'lsof: WARNING: can\'t stat() apfs file system /' && ok "root mount warning incomplete" || bad "root mount warning trusted"
 if [[ -d /proc/self ]]; then
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   lsof_collect_cwds $'p1\nfcwd\nn/proc/'"$dead"'/cwd (readlink: Permission denied)' "" 0 \

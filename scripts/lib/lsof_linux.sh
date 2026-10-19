@@ -11,16 +11,37 @@
 # lsof_stderr_incomplete <stderr text>: rc 0 when any line is not a mount-stat
 # warning or its "Output information may be incomplete." trailer.
 lsof_stderr_incomplete() {
+  # rc 0 => the scan may be incomplete. Glob matching, not regex: the warning
+  # contains an apostrophe, and mount paths may hold any character.
+  local line trimmed fs warned=0
   [[ -n "$1" ]] || return 1
-  grep -qvE "^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$" <<<"$1"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      "lsof: WARNING: can"*" stat() "*" file system "*)
+        fs="${line##* file system }"
+        while [[ "$fs" == */ ]]; do fs="${fs%/}"; done
+        [[ -z "$fs" ]] && fs="/"
+        [[ "$fs" == "/" ]] && return 0
+        warned=1
+        continue ;;
+    esac
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$trimmed" == "Output information may be incomplete." ]]; then
+      (( warned )) && { warned=0; continue; }
+      return 0
+    fi
+    return 0
+  done <<<"$1"
+  return 1
 }
 
 # lsof_denied_ignorable "/proc/<pid>/cwd (readlink: Permission denied)": rc 0
-# only when that hidden cwd cannot be live: the process has exited, or the
-# operator approved uninspectable processes with
-# DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1. Any live process whose cwd cannot be
-# read (another user's, or this user's non-dumpable/setuid one) is otherwise
-# unknown, and is reported on stderr. Without procfs nothing can be classified.
+# when that hidden cwd cannot be this user's live use -- the process exited, it
+# belongs to another uid, or nothing can be read from it at all. Without procfs
+# nothing can be classified, so it fails closed. Set
+# DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 to treat every live unreadable cwd as
+# unknown instead (the paranoid reading).
 lsof_denied_ignorable() {
   local pid
   [[ "$1" =~ ^/proc/([0-9]+)/cwd\ \(readlink:\ Permission\ denied\)$ ]] || return 1
@@ -63,53 +84,40 @@ lsof_denied_ignorable() {
 lsof_cwd_blocks() {
     local out
     out="$(cat)"
-    if grep -q '^p' <<<"$out"; then
-        # Block mode: pid-delimited (`lsof -Fpn`).
-        awk '
-            function emit() {
-                if (bad) print pid "|bad|"
-                else if (havef && !haven) print pid "|incomplete|"
-                else if (!havef && !haven) print pid "|nofd|"  # kernel thread: reports no cwd
-                else print pid "|ok|" val                     # `p`+`n` (-Fpn) or `p`+`f`+`n`
-            }
-            /^p/ {
-                if (started) emit()
-                started = 1; bad = 0; havef = 0; haven = 0; val = ""
-                pid = substr($0, 2); if (pid == "") bad = 1
-                next
-            }
-            /^f/ { if (!started) { pre = 1; next } if (havef) bad = 1; havef = 1; next }
-            /^n/ {
-                if (!started) { pre = 1; next }
-                if (haven) bad = 1
-                haven = 1; val = substr($0, 2); next
-            }
-            { if (!started) pre = 1; else bad = 1 }
-            END { if (started) emit(); if (pre) print "-|bad|" }
-        ' <<<"$out"
-    else
-        # Flat mode: no pid records. `lsof -Fn` (name fields only) legitimately
-        # emits bare `n` records, while `-Ffn` pairs each fd with a name; both
-        # shapes are accepted, but a missing partner or a stray record is not.
-        awk '
-            /^f/ { if (havef) bad = 1; havef = 1; anyf = 1; next }
-            /^n/ {
-                if (havef) havef = 0
-                else if (anyf) bad = 1
-                count++; val = substr($0, 2)
-                if (!bad) print "-|ok|" val
-                next
-            }
-            { bad = 1 }
-            END { if (bad || havef || count == 0) print "-|bad|" }
-        ' <<<"$out"
+    if ! grep -q '^p' <<<"$out"; then
+        # No pid records: output is not `-Fpn` and its block boundaries are
+        # unknowable, so it cannot establish idle.
+        printf -- '-|nopid|\n'
+        return 0
     fi
+    awk '
+        function emit() {
+            if (bad) print pid "|bad|"
+            else if (!f && !n) print pid "|nofd|"     # resolved below: fails closed
+            else if (f && !n) print pid "|incomplete|"
+            else print pid "|ok|" val                  # `p`+`n` (-Fpn) or `p`+`f`+`n`
+        }
+        /^p/ {
+            if (started) emit()
+            started = 1; bad = 0; f = 0; n = 0; val = ""
+            pid = substr($0, 2); if (pid == "") bad = 1
+            next
+        }
+        /^f/ { if (!started) { pre = 1; next } if (f) bad = 1; f = 1; next }
+        /^n/ {
+            if (!started) { pre = 1; next }
+            if (n) bad = 1
+            n = 1; val = substr($0, 2); next
+        }
+        { if (!started) pre = 1; else bad = 1 }
+        END { if (started) emit(); if (pre) print "-|bad|" }
+    ' <<<"$out"
 }
 
 # lsof_cwd_value_verdict <n-record value>: echoes resolved | ignorable | unknown.
 #   resolved  -> an absolute path this user could match against
-#   ignorable -> an uninspectable record proven harmless (process gone, or
-#                DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1)
+#   ignorable -> an uninspectable record proven harmless (exited, foreign uid,
+#                or an unreadable /proc cwd; see lsof_denied_ignorable)
 #   unknown   -> anything else; the caller must fail closed
 lsof_cwd_value_verdict() {
     local cwd="$1"
@@ -136,7 +144,6 @@ lsof_collect_cwds() {
         # An empty pid is a malformed block (or a record before any `p`); skipping
         # it would hide the very record that makes the scan incomplete.
         [[ -n "$pid" ]] || { LSOF_CWD_REASON="empty-pid"; return 1; }
-        [[ "$status" == nofd ]] && continue   # no cwd fd reported -> cannot occupy the tree
         if [[ "$status" != ok ]]; then LSOF_CWD_REASON="block-$status"; return 1; fi
         verdict="$(lsof_cwd_value_verdict "$val")"
         case "$verdict" in
