@@ -18,11 +18,11 @@ class RenamexFlagsTest(unittest.TestCase):
     def test_forced_renameatx_np_uses_excl(self):
         self.assertEqual(q.renamex_candidates("renameatx_np"), (("renameatx_np", 4),))
 
-    def test_unknown_forced_symbol_keeps_lookup_failure(self):
-        # The symbol lookup fails first; the flag only has to be sane.
-        ((name, flag),) = q.renamex_candidates("no_such_symbol")
-        self.assertEqual(name, "no_such_symbol")
-        self.assertIn(flag, (1, 4))
+    def test_unknown_forced_symbol_yields_no_candidate(self):
+        # Fail closed: an arbitrary libc symbol (e.g. non-exclusive `renameat`)
+        # must never be attempted with an exclusive flag.
+        self.assertEqual(q.renamex_candidates("renameat"), ())
+        self.assertEqual(q.renamex_candidates("no_such_symbol"), ())
 
     def test_default_order_prefers_macos_then_linux(self):
         self.assertEqual(

@@ -11,7 +11,10 @@ RENAME_FLAGS = {"renameatx_np": 4, "renameat2": 1}
 
 def renamex_candidates(forced=None):  # (name, flag) pairs in attempt order
     if forced:
-        return ((forced, RENAME_FLAGS.get(forced, 4)),)
+        # Only the two whitelisted exclusive symbols are legal. Any other name
+        # (including the non-exclusive `renameat`) yields no candidate, so
+        # renamex raises LookupError and the caller keeps the artifact.
+        return ((forced, RENAME_FLAGS[forced]),) if forced in RENAME_FLAGS else ()
     return tuple(RENAME_FLAGS.items())
 
 def renamex(srcfd, src, dstfd, dst):  # exclusive rename; no supported symbol raises LookupError
