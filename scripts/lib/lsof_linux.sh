@@ -50,21 +50,20 @@ lsof_denied_ignorable() {
   [[ -d /proc/self ]] || return 1
   # Exited: cannot hold anything.
   [[ -e "/proc/$pid" ]] || return 0
-  # A live unreadable cwd could hold the candidate and no unprivileged scan can
-  # rule that out, so it stays unknown. Two operator switches, strict wins:
-  #   DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1   -> never waivable (hard block)
-  #   DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 -> waive uninspectable processes
-  if [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT:-}" == 1 ]]; then
-    echo "lsof: process $pid hides its cwd (strict mode)" >&2
-    return 1
-  fi
+  # BLOCK ALWAYS (decided 2026-10-19). A live process whose cwd an unprivileged
+  # lsof cannot read could hold the candidate, and no unprivileged scan can rule
+  # that out, so it is never treated as harmless and there is deliberately no
+  # waiver switch. Consequence: on a host where unprivileged lsof cannot inspect
+  # live cwds (sshd, sd-pam, setuid sandboxes), cleanups fail closed instead of
+  # proceeding. The remedy is a scan that can actually see them (e.g. a
+  # privileged run), not a flag that pretends.
   owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
   if [[ "$owner" =~ ^[0-9]+$ ]] && [[ "$owner" != "$(id -u)" ]]; then
     echo "lsof: foreign process $pid hides its cwd" >&2
   else
     echo "lsof: own process $pid hides its cwd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
   fi
-  [[ "${DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED:-}" == 1 ]]
+  return 1
 }
 
 # ---------------------------------------------------------------------------

@@ -559,14 +559,14 @@ unset FAKE_LSOF_STDERR
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 if [[ -d /proc/self ]]; then
-echo "== case 36d: own hidden cwd blocks unless the operator approves =="
+echo "== case 36d: an unreadable live cwd always blocks (no waiver) =="
 add_wt own-hidden worktree-own-hidden
 printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
 run_hook_strict "$(json "$WTROOT/own-hidden")"; rc=$?
-[[ -d "$WTROOT/own-hidden" ]] && ok "own hidden cwd worktree kept without approval" || bad "own hidden cwd removed without approval"
-tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "own hidden cwd is cwd-unknown" || bad "own hidden cwd was trusted without approval"
-run_hook "$(json "$WTROOT/own-hidden")"; rc=$?
-[[ ! -e "$WTROOT/own-hidden" ]] && ok "approval clears own hidden cwd" || bad "approval did not clear own hidden cwd"
+[[ -d "$WTROOT/own-hidden" ]] && ok "unreadable live cwd worktree kept" || bad "unreadable live cwd worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unreadable live cwd is cwd-unknown" || bad "unreadable live cwd was trusted"
+DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 run_hook_strict "$(json "$WTROOT/own-hidden")"; rc=$?
+[[ -d "$WTROOT/own-hidden" ]] && ok "an approval flag cannot clear an unreadable live cwd" || bad "approval flag cleared an unreadable live cwd"
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 fi
 
