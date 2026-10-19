@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, fcntl, hashlib, json, math, os, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
-def renamex(srcfd, src, dstfd, dst):  # flag 0x4 = RENAME_EXCL; a missing symbol raises LookupError
-    try: fn = ctypes.CDLL(None, use_errno=True)[ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL", "renameatx_np")]
-    except (AttributeError, OSError): raise LookupError
-    if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(4)): raise OSError(ctypes.get_errno(), "renameatx_np")
+# Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
+# Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
+# RENAME_WHITEOUT, which is not an exclusive rename.
+RENAME_FLAGS = {"renameatx_np": 4, "renameat2": 1}
+
+def renamex_candidates(forced=None):  # (name, flag) pairs in attempt order
+    if forced:
+        # Only the two whitelisted exclusive symbols are legal. Any other name
+        # (including the non-exclusive `renameat`) yields no candidate, so
+        # renamex raises LookupError and the caller keeps the artifact.
+        return ((forced, RENAME_FLAGS[forced]),) if forced in RENAME_FLAGS else ()
+    return tuple(RENAME_FLAGS.items())
+
+def renamex(srcfd, src, dstfd, dst):  # exclusive rename; no supported symbol raises LookupError
+    libc, forced = ctypes.CDLL(None, use_errno=True), ENV.get("DISK_MAGICIAN_TEST_RENAMEX_SYMBOL")
+    for name, flag in renamex_candidates(forced):
+        try: fn = libc[name]
+        except (AttributeError, OSError): continue
+        if fn(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), ctypes.c_uint(flag)): raise OSError(ctypes.get_errno(), name)
+        return
+    raise LookupError
 def hook(name, path, dest):
     if ENV.get(name): subprocess.run(["bash", "-c", ENV[name]], env=dict(ENV, DM_Q_PATH=path, DM_Q_DEST=dest), stdout=subprocess.DEVNULL)
 def kill_at(point):
@@ -195,6 +212,40 @@ def index_mark_terminal(qid, outcome):
         raise
     finally: os.close(dfd)
     if ENV.get("DISK_MAGICIAN_TEST_KILL_AT") == "after_terminal_index": os.kill(os.getpid(), 9)
+# Linux lsof always warns about mounts it cannot stat() (tracefs, snapd); that
+# cannot hide a user of the queried path. Any other stderr line is incomplete.
+LSOF_CANT_STAT = re.compile(rb"^lsof: WARNING: can't stat\(\) \S+ file system (.+)$")
+LSOF_INCOMPLETE = re.compile(rb"^\s*Output information may be incomplete\.$")
+def lsof_stderr_incomplete(err, query):
+    # A warning about a mount that COULD contain the queried path means the scan
+    # is incomplete for our purposes (fail closed). Warnings about unrelated
+    # mounts (tracefs, snapd, ...) cannot hide a user of this path and are
+    # ignorable; the trailing "Output information may be incomplete." line is
+    # only meaningful together with a relevant warning (Codex #209 review).
+    query_real = os.path.realpath(query)
+    ignored_warning = False
+    for line in err.splitlines():
+        if not line:
+            continue
+        m = LSOF_CANT_STAT.match(line)
+        if m:
+            fs = os.fsdecode(m.group(1))  # lsof prints the mount path verbatim; do not strip it
+            fs_norm = os.path.realpath(fs).rstrip("/") or "/"
+            # Relevant when the warned mount is /, the query itself, an ancestor
+            # of the query, or nested INSIDE it (`lsof +D` scans the subtree, so
+            # an unreadable child mount can hide a user below the query).
+            if (fs_norm == "/" or query_real == fs_norm
+                    or query_real.startswith(fs_norm + "/")
+                    or fs_norm.startswith(query_real + "/")):
+                return True
+            ignored_warning = True
+            continue
+        if LSOF_INCOMPLETE.match(line):
+            if not ignored_warning:
+                return True
+            continue
+        return True
+    return False
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     try:
         if deadline_passed(deadline): return "deferred:deadline"
@@ -208,7 +259,7 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
             lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
         except subprocess.TimeoutExpired:
             return "deferred:deadline"
-        if lsof.stdout or lsof.returncode != 1 or lsof.stderr.strip(): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
+        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr, os.path.join(qdir, qid)): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"

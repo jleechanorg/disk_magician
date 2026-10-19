@@ -102,7 +102,7 @@ fixture; run X=1
 check 'proven root: phase 1 + phase 2 report removed' [ "$OUT" = "removed:$(qid)" ]
 check 'proven root: original and quarantine candidate are gone' bash -c '[[ ! -e "$1" && ! -e "$2" ]]' _ "$A" "$Q/$(qid)"
 check 'proven root: sidecar is dropped after candidate' [ ! -e "$Q/$(qid).json" ]
-check 'proven root: .dm-quarantine is 0700' [ "$(stat -f %Lp "$Q")" = 700 ]
+check 'proven root: .dm-quarantine is 0700' [ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$Q")" = 700 ]
 
 # Removal-site options are explicit and preserved to the C14 dispatcher.
 fixture; run_contract --kind os_clone --frozen-identity 1:2:501 --frozen-parent-identity 3:4:501 --frozen-root-identity 5:6:501 --deadline-at 123.5

@@ -483,16 +483,23 @@ assert_contains "GREEN 3d: logs env-selected active window" \
 assert_exists "GREEN 3d: env-selected active window preserves candidate" \
   "$G3D_PRIVATE_TMP/env_active_window"
 
-echo "GREEN 4: old + unmarked large dir is archived (moved, not rm -rf'd)"
+echo "GREEN 4: old + unmarked large dir with a declared-ephemeral name is archived (moved, not rm -rf'd)"
 G4_PRIVATE_TMP="$TMP_ROOT/g4-private-tmp"
 G4_TMP="$TMP_ROOT/g4-tmp"
 G4_ARCHIVE="$TMP_ROOT/g4-archive"
 G4_BIN="$TMP_ROOT/g4-bin"
 mkdir -p "$G4_PRIVATE_TMP" "$G4_TMP"
+# Canonicalize the E2 scratch roots (c14_ephemeral_retention resolves them with
+# `cd && pwd -P`) so the `pr_` candidate has a declared-ephemeral row: cleanup_tmp
+# only quarantines candidates with a declared retention (bead
+# disk_magician-archive-same-volume-regrowth-03bn).
+G4_PRIVATE_TMP="$(cd "$G4_PRIVATE_TMP" && pwd -P)"
+G4_TMP="$(cd "$G4_TMP" && pwd -P)"
 make_find_shim "$G4_BIN" "$G4_PRIVATE_TMP" "$G4_TMP"
 make_du_probe "$G4_BIN"
-make_large_dir "$G4_PRIVATE_TMP/stale_scratch_dir"
-set_old_mtime "$G4_PRIVATE_TMP/stale_scratch_dir"
+make_large_dir "$G4_PRIVATE_TMP/pr_stale_scratch_dir"
+set_old_mtime "$G4_PRIVATE_TMP/pr_stale_scratch_dir"
+G4_CANDIDATE_CANON="$(cd "$G4_PRIVATE_TMP/pr_stale_scratch_dir" && pwd -P)"
 G4_DU_LOG="$TMP_ROOT/g4-du.log"
 : > "$G4_DU_LOG"
 
@@ -514,9 +521,9 @@ fi
 G4_OUT_CONTENT=$(cat "$G4_OUT")
 assert_rc "GREEN 4: exits 0" 0 "$G4_RC"
 assert_contains "GREEN 4: logs archiving (not 'Removing:')" \
-  "Archiving: $G4_PRIVATE_TMP/stale_scratch_dir ->" "$G4_OUT_CONTENT"
-assert_missing "GREEN 4: original path is gone (moved)" "$G4_PRIVATE_TMP/stale_scratch_dir"
-G4_ARCHIVED_COUNT=$(/usr/bin/find "$G4_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name stale_scratch_dir 2>/dev/null | wc -l | tr -d ' ')
+  "Archiving: $G4_PRIVATE_TMP/pr_stale_scratch_dir ->" "$G4_OUT_CONTENT"
+assert_missing "GREEN 4: original path is gone (moved)" "$G4_PRIVATE_TMP/pr_stale_scratch_dir"
+G4_ARCHIVED_COUNT=$(/usr/bin/find "$G4_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name pr_stale_scratch_dir 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$G4_ARCHIVED_COUNT" -eq 1 ]]; then
   record_pass "GREEN 4: exactly one archived copy exists under DISK_MAGICIAN_ARCHIVE_ROOT"
 else
@@ -524,24 +531,25 @@ else
     "found $G4_ARCHIVED_COUNT under $G4_ARCHIVE"
 fi
 assert_exists "GREEN 4: archived payload is still readable (data preserved, not lost)" \
-  "$G4_ARCHIVE"/*/stale_scratch_dir/payload.bin
+  "$G4_ARCHIVE"/*/pr_stale_scratch_dir/payload.bin
 G4_ENTRY=$(/usr/bin/find "$G4_ARCHIVE" -mindepth 2 -maxdepth 2 \
-  -type d -name stale_scratch_dir -print -quit 2>/dev/null || true)
-if python3 - "$G4_ENTRY" "$G4_ENTRY.c14-origin.json" "$G4_PRIVATE_TMP/stale_scratch_dir" <<'PY'
+  -type d -name pr_stale_scratch_dir -print -quit 2>/dev/null || true)
+if python3 - "$G4_ENTRY" "$G4_ENTRY.c14-origin.json" "$G4_CANDIDATE_CANON" <<'PY'
 import json, os, sys
 entry, receipt, original = sys.argv[1:]
 st = os.lstat(entry)
 data = json.load(open(receipt, encoding="utf-8"))
 assert data["original_path"] == original
+assert data["retention_minutes"] == 2880
 assert (data["dev"], data["ino"], data["size"]) == (st.st_dev, st.st_ino, st.st_size)
 assert type(data["archived_at"]) is int and data["archived_at"] > 0
 PY
 then
-  record_pass "GREEN 4: archive origin receipt binds the moved directory"
+  record_pass "GREEN 4: archive origin receipt binds the canonical path with the declared retention"
 else
-  record_fail "GREEN 4: archive origin receipt binds the moved directory" "receipt missing or identity differs"
+  record_fail "GREEN 4: archive origin receipt binds the canonical path with the declared retention" "receipt missing, identity differs, or retention is not the declared 2880"
 fi
-G4_TARGET_DU_COUNT=$(grep -cFx "$G4_PRIVATE_TMP/stale_scratch_dir" "$G4_DU_LOG" || true)
+G4_TARGET_DU_COUNT=$(grep -cFx "$G4_PRIVATE_TMP/pr_stale_scratch_dir" "$G4_DU_LOG" || true)
 assert_rc "GREEN 4: candidate size is measured once" 1 "$G4_TARGET_DU_COUNT"
 assert_contains "GREEN 4: archive move is not counted as a removed dir" \
   "Dirs removed: 0" "$G4_OUT_CONTENT"
@@ -556,12 +564,16 @@ G4B_TMP="$TMP_ROOT/g4b-tmp"
 G4B_ARCHIVE="$TMP_ROOT/g4b-archive"
 G4B_BIN="$TMP_ROOT/g4b-bin"
 mkdir -p "$G4B_PRIVATE_TMP" "$G4B_TMP" "$TMP_ROOT/g4b-home"
+# Canonicalize the E2 scratch roots so both candidates carry a declared
+# ephemeral `pr_` row (required before cleanup_tmp quarantines a candidate).
+G4B_PRIVATE_TMP="$(cd "$G4B_PRIVATE_TMP" && pwd -P)"
+G4B_TMP="$(cd "$G4B_TMP" && pwd -P)"
 make_c14_archive_entry "$G4B_TMP/cli_validation_gemini_continue"   "$G4B_ARCHIVE/20200101T000000Z/cli_validation_gemini_continue" 60 "$G4B_PRIVATE_TMP" "$G4B_TMP"
 make_find_shim "$G4B_BIN" "$G4B_PRIVATE_TMP" "$G4B_TMP"
-make_large_dir "$G4B_PRIVATE_TMP/fail_candidate"
-make_large_dir "$G4B_PRIVATE_TMP/ok_candidate"
-set_old_mtime "$G4B_PRIVATE_TMP/fail_candidate"
-set_old_mtime "$G4B_PRIVATE_TMP/ok_candidate"
+make_large_dir "$G4B_PRIVATE_TMP/pr_fail_candidate"
+make_large_dir "$G4B_PRIVATE_TMP/pr_ok_candidate"
+set_old_mtime "$G4B_PRIVATE_TMP/pr_fail_candidate"
+set_old_mtime "$G4B_PRIVATE_TMP/pr_ok_candidate"
 REAL_PYTHON3="$(command -v python3)"
 cat > "$G4B_BIN/python3" <<EOF
 #!/usr/bin/env bash
@@ -588,10 +600,10 @@ else
 fi
 G4B_OUT_CONTENT=$(cat "$G4B_OUT")
 assert_rc "GREEN 4b: exits 0 after a receipt failure (no set -e abort)" 0 "$G4B_RC"
-assert_exists "GREEN 4b: failed candidate path is intact" "$G4B_PRIVATE_TMP/fail_candidate/payload.bin"
-G4B_FAIL_ARCHIVED=$(/usr/bin/find "$G4B_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name fail_candidate 2>/dev/null | wc -l | tr -d ' ')
+assert_exists "GREEN 4b: failed candidate path is intact" "$G4B_PRIVATE_TMP/pr_fail_candidate/payload.bin"
+G4B_FAIL_ARCHIVED=$(/usr/bin/find "$G4B_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name pr_fail_candidate 2>/dev/null | wc -l | tr -d ' ')
 assert_rc "GREEN 4b: failed candidate was not moved" 0 "$G4B_FAIL_ARCHIVED"
-assert_exists "GREEN 4b: later eligible candidate archived" "$G4B_ARCHIVE"/*/ok_candidate/payload.bin
+assert_exists "GREEN 4b: later eligible candidate archived" "$G4B_ARCHIVE"/*/pr_ok_candidate/payload.bin
 assert_contains "GREEN 4b: archive failure is logged honestly" "could not archive" "$G4B_OUT_CONTENT"
 assert_contains "GREEN 4b: only the successful archive is counted" "Dirs archived: 1" "$G4B_OUT_CONTENT"
 assert_missing "GREEN 4b: run continued to purge_aged_archives (valid E2 entry reclaimed)" \
@@ -981,7 +993,7 @@ else
 fi
 assert_exists "GREEN 8a: dir untouched at original path" "$G8A_PRIVATE_TMP/worktree_stale_dir"
 
-echo "GREEN 8b: worktree dir WITH TMP_WORKTREES_APPROVED logs the approved line, not Skipping, and is evaluated"
+echo "GREEN 8b: worktree dir WITH TMP_WORKTREES_APPROVED logs the approved line, not Skipping, and reaches the archive gate"
 G8B_PRIVATE_TMP="$TMP_ROOT/g8b-private-tmp"
 G8B_TMP="$TMP_ROOT/g8b-tmp"
 G8B_ARCHIVE="$TMP_ROOT/g8b-archive"
@@ -1015,8 +1027,17 @@ if [[ "$G8B_OUT_CONTENT" == *"Skipping temp worktree dir"* ]]; then
 else
   record_pass "GREEN 8b: does not log the misleading 'Skipping' line when approved"
 fi
-assert_contains "GREEN 8b: approved dir is actually archived (evaluation proceeded)" \
-  "Archiving: $G8B_PRIVATE_TMP/worktree_stale_dir ->" "$G8B_OUT_CONTENT"
+assert_contains "GREEN 8b: approved dir reaches the archive gate (evaluation proceeded)" \
+  "Skipping archive candidate (C14 kept:unproven-content): $G8B_PRIVATE_TMP/worktree_stale_dir" \
+  "$G8B_OUT_CONTENT"
+# A worktree_*-named candidate cannot carry a declared-ephemeral E2 row (the
+# E2 `pr_`/`claude-` rows and the .git rules do not cover this name), so the
+# archive gate keeps it in place instead of quarantining it with an
+# unpurgeable retention-0 receipt (bead disk_magician-archive-same-volume-regrowth-03bn).
+assert_exists "GREEN 8b: approved dir stays at its original path (no unpurgeable quarantine)" \
+  "$G8B_PRIVATE_TMP/worktree_stale_dir/payload.bin"
+assert_contains "GREEN 8b: approved but unproven dir is not counted as archived" \
+  "Dirs archived: 0" "$G8B_OUT_CONTENT"
 
 echo "GREEN 9a: an aged E2 archive entry with a matching receipt is purged without --large"
 G9A_PRIVATE_TMP="$TMP_ROOT/g9a-private-tmp"
@@ -1142,9 +1163,21 @@ G10_OUT_CONTENT=$(cat "$G10_OUT")
 assert_rc "GREEN 10: exits 0" 0 "$G10_RC"
 assert_exists "GREEN 10: protected root itself preserved" "$G10_PRIVATE_TMP/worldarchitect.ai"
 assert_exists "GREEN 10: canonical evidence child preserved" "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
-assert_missing "GREEN 10: stale non-evidence child reclaimed" "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
+assert_exists "GREEN 10: stale non-evidence child stays at its original path" "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
 assert_contains "GREEN 10: logs the protected-child skip" \
   "Skipping protected child of a protected root: $G10_PRIVATE_TMP/worldarchitect.ai/evidence" "$G10_OUT_CONTENT"
+# A child of a protected root is nested one level below a scratch root, so no
+# E2/E3 declared-ephemeral row can match it: the archive gate keeps it in place
+# rather than quarantining it with an unpurgeable retention-0 receipt (bead
+# disk_magician-archive-same-volume-regrowth-03bn). Nothing is deleted and
+# nothing is hidden.
+assert_exists "GREEN 10: stale non-evidence child stays visible inside the protected root" \
+  "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child/payload.bin"
+assert_contains "GREEN 10: nested child is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $G10_PRIVATE_TMP/worldarchitect.ai/stale_child" \
+  "$G10_OUT_CONTENT"
+assert_contains "GREEN 10: nested unproven child is not counted as archived" \
+  "Dirs archived: 0" "$G10_OUT_CONTENT"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
