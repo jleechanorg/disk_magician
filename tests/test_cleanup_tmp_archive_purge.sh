@@ -358,10 +358,15 @@ T7_TMP="$TMP_ROOT/t7-tmp"
 T7_ARCHIVE="$TMP_ROOT/t7-archive"
 T7_BIN="$TMP_ROOT/t7-bin"
 T7_STAMP="20990101T000000Z"
-mkdir -p "$T7_PRIVATE_TMP/collision_candidate" "$T7_TMP" "$T7_ARCHIVE/$T7_STAMP"
-printf 'payload\n' >"$T7_PRIVATE_TMP/collision_candidate/payload.bin"
-touch -t 202001010000 "$T7_PRIVATE_TMP/collision_candidate" "$T7_PRIVATE_TMP/collision_candidate/payload.bin"
-T7_RECEIPT="$T7_ARCHIVE/$T7_STAMP/collision_candidate.c14-origin.json"
+mkdir -p "$T7_PRIVATE_TMP" "$T7_TMP"
+# Canonicalize the E2 scratch roots so the `pr_` candidate has a declared
+# ephemeral row (archive_path now requires one before it will quarantine).
+T7_PRIVATE_TMP="$(cd "$T7_PRIVATE_TMP" && pwd -P)"
+T7_TMP="$(cd "$T7_TMP" && pwd -P)"
+mkdir -p "$T7_PRIVATE_TMP/pr_collision_candidate" "$T7_ARCHIVE/$T7_STAMP"
+printf 'payload\n' >"$T7_PRIVATE_TMP/pr_collision_candidate/payload.bin"
+touch -t 202001010000 "$T7_PRIVATE_TMP/pr_collision_candidate" "$T7_PRIVATE_TMP/pr_collision_candidate/payload.bin"
+T7_RECEIPT="$T7_ARCHIVE/$T7_STAMP/pr_collision_candidate.c14-origin.json"
 printf '{"sentinel":"preexisting receipt"}\n' >"$T7_RECEIPT"
 cp "$T7_RECEIPT" "$TMP_ROOT/t7-receipt.expected"
 make_find_shim "$T7_BIN" "$T7_PRIVATE_TMP" "$T7_TMP"
@@ -394,7 +399,7 @@ fi
 assert_rc "Test 7: receipt collision continues the run" 0 "$T7_RC"
 assert_contains "Test 7: receipt collision fails closed" "could not write archive origin receipt" "$(cat "$T7_OUT")"
 if cmp -s "$T7_RECEIPT" "$TMP_ROOT/t7-receipt.expected"; then record_pass "Test 7: preexisting receipt bytes are preserved"; else record_fail "Test 7: preexisting receipt bytes are preserved" "receipt changed or disappeared"; fi
-assert_exists "Test 7: candidate remains unmoved" "$T7_PRIVATE_TMP/collision_candidate/payload.bin"
+assert_exists "Test 7: candidate remains unmoved" "$T7_PRIVATE_TMP/pr_collision_candidate/payload.bin"
 
 echo "Test 8: deadline cursor resumes the same archive unit"
 T8_PRIVATE_TMP="$TMP_ROOT/t8-private-tmp"
@@ -476,7 +481,12 @@ T9_PRIVATE_TMP="$TMP_ROOT/t9-private-tmp"
 T9_TMP="$TMP_ROOT/t9-tmp"
 T9_ARCHIVE="$TMP_ROOT/t9-archive"
 T9_BIN="$TMP_ROOT/t9-bin"
-mkdir -p "$T9_PRIVATE_TMP/secret_candidate" "$T9_PRIVATE_TMP/unpushed_repo_candidate" "$T9_PRIVATE_TMP/clean_candidate" "$T9_TMP"
+mkdir -p "$T9_PRIVATE_TMP" "$T9_TMP"
+# Canonicalize the E2 scratch roots: archive_path now requires a declared
+# ephemeral row (found via the canonical path) before it will quarantine.
+T9_PRIVATE_TMP="$(cd "$T9_PRIVATE_TMP" && pwd -P)"
+T9_TMP="$(cd "$T9_TMP" && pwd -P)"
+mkdir -p "$T9_PRIVATE_TMP/secret_candidate" "$T9_PRIVATE_TMP/unpushed_repo_candidate" "$T9_PRIVATE_TMP/pr_clean_candidate"
 printf 'secret=1\n' >"$T9_PRIVATE_TMP/secret_candidate/.env.local"
 printf 'payload\n' >"$T9_PRIVATE_TMP/secret_candidate/payload.bin"
 set_old_mtime "$T9_PRIVATE_TMP/secret_candidate"
@@ -487,8 +497,8 @@ printf 'repo payload\n' >"$T9_PRIVATE_TMP/unpushed_repo_candidate/payload.bin"
 git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" add payload.bin
 git -C "$T9_PRIVATE_TMP/unpushed_repo_candidate" commit -q -m init
 set_old_mtime "$T9_PRIVATE_TMP/unpushed_repo_candidate"
-printf 'clean payload\n' >"$T9_PRIVATE_TMP/clean_candidate/payload.bin"
-set_old_mtime "$T9_PRIVATE_TMP/clean_candidate"
+printf 'clean payload\n' >"$T9_PRIVATE_TMP/pr_clean_candidate/payload.bin"
+set_old_mtime "$T9_PRIVATE_TMP/pr_clean_candidate"
 make_find_shim "$T9_BIN" "$T9_PRIVATE_TMP" "$T9_TMP"
 
 T9_OUT="$TMP_ROOT/t9.out"
@@ -515,8 +525,8 @@ assert_contains "Test 9: logs C14 repo skip before archiving" \
   "Skipping archive candidate (C14 kept:not-pushed): $T9_PRIVATE_TMP/unpushed_repo_candidate" "$T9_OUT_CONTENT"
 assert_exists "Test 9: secret-like candidate stays at original path" "$T9_PRIVATE_TMP/secret_candidate/.env.local"
 assert_exists "Test 9: unpushed repo candidate stays at original path" "$T9_PRIVATE_TMP/unpushed_repo_candidate/payload.bin"
-assert_missing "Test 9: clean candidate is archived" "$T9_PRIVATE_TMP/clean_candidate"
-assert_contains "Test 9: only the clean candidate is counted as archived" "Dirs archived: 1" "$T9_OUT_CONTENT"
+assert_missing "Test 9: declared-ephemeral (pr_) candidate is archived" "$T9_PRIVATE_TMP/pr_clean_candidate"
+assert_contains "Test 9: only the declared-ephemeral candidate is counted as archived" "Dirs archived: 1" "$T9_OUT_CONTENT"
 
 echo "Test 10: aged descended container archive entry is purged at depth 3 without false depth-2 container evaluation"
 T10_PRIVATE_TMP="$TMP_ROOT/t10-private-tmp"
@@ -563,6 +573,130 @@ else
   record_pass "Test 10: depth-2 container is not falsely evaluated as an unreceipted unit"
 fi
 assert_contains "Test 10: reports 1 dir removed" "Dirs removed: 1" "$T10_OUT_CONTENT"
+
+echo "Test 11: an unproven large dir is not archived (no declared-ephemeral row); a declared-ephemeral dir is archived with its declared retention (bead disk_magician-archive-same-volume-regrowth-03bn)"
+T11_PRIVATE_TMP="$TMP_ROOT/t11-private-tmp"
+T11_TMP="$TMP_ROOT/t11-tmp"
+T11_ARCHIVE="$TMP_ROOT/t11-archive"
+T11_BIN="$TMP_ROOT/t11-bin"
+mkdir -p "$T11_PRIVATE_TMP" "$T11_TMP"
+# Canonicalize the E2 scratch roots (as c14_ephemeral_retention resolves them)
+# before deriving the candidates, so the declared-ephemeral row is matchable.
+T11_PRIVATE_TMP="$(cd "$T11_PRIVATE_TMP" && pwd -P)"
+T11_TMP="$(cd "$T11_TMP" && pwd -P)"
+T11_UNPROVEN="$T11_PRIVATE_TMP/unproven_large_dir"
+T11_DECLARED="$T11_PRIVATE_TMP/pr_declared_large_dir"
+mkdir -p "$T11_UNPROVEN" "$T11_DECLARED"
+printf 'unproven payload\n' >"$T11_UNPROVEN/payload.bin"
+printf 'declared payload\n' >"$T11_DECLARED/payload.bin"
+T11_DECLARED_CANON="$(cd "$T11_DECLARED" && pwd -P)"
+set_old_mtime "$T11_UNPROVEN"
+set_old_mtime "$T11_DECLARED"
+T11_DECLARED_RETENTION="$(DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T11_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T11_TMP" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2"' _ "$REPO_ROOT" "$T11_DECLARED")"
+if [[ "$T11_DECLARED_RETENTION" == 2880 ]]; then
+  record_pass "Test 11: fixture pr_ dir resolves to the declared-ephemeral retention 2880"
+else
+  record_fail "Test 11: fixture pr_ dir resolves to the declared-ephemeral retention 2880" "got '$T11_DECLARED_RETENTION'"
+fi
+make_find_shim "$T11_BIN" "$T11_PRIVATE_TMP" "$T11_TMP"
+
+T11_OUT="$TMP_ROOT/t11.out"
+if run_capture "$T11_OUT" env -i HOME="$TMP_ROOT/t11-home" \
+  PATH="$T11_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" \
+  LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_MIN_KB=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T11_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T11_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T11_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  T11_RC=0
+else
+  T11_RC=$?
+fi
+T11_OUT_CONTENT=$(cat "$T11_OUT")
+assert_rc "Test 11: exits 0" 0 "$T11_RC"
+assert_contains "Test 11: unproven dir is reported as kept:unproven-content" \
+  "Skipping archive candidate (C14 kept:unproven-content): $T11_UNPROVEN" "$T11_OUT_CONTENT"
+assert_exists "Test 11: unproven dir stays at its original path" "$T11_UNPROVEN/payload.bin"
+T11_UNPROVEN_ARCHIVED=$(/usr/bin/find "$T11_ARCHIVE" -name unproven_large_dir -print -quit 2>/dev/null || true)
+if [[ -z "$T11_UNPROVEN_ARCHIVED" ]]; then
+  record_pass "Test 11: unproven dir never lands in the quarantine"
+else
+  record_fail "Test 11: unproven dir never lands in the quarantine" "found $T11_UNPROVEN_ARCHIVED"
+fi
+assert_contains "Test 11: only the declared-ephemeral dir is counted as archived" "Dirs archived: 1" "$T11_OUT_CONTENT"
+assert_missing "Test 11: declared-ephemeral dir is moved out of its original path" "$T11_DECLARED"
+T11_ENTRY=$(/usr/bin/find "$T11_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name pr_declared_large_dir -print -quit 2>/dev/null || true)
+if [[ -n "$T11_ENTRY" ]]; then
+  record_pass "Test 11: declared-ephemeral dir is archived with a receipt"
+else
+  record_fail "Test 11: declared-ephemeral dir is archived with a receipt" "no archived copy under $T11_ARCHIVE"
+fi
+if python3 - "$T11_ENTRY" "$T11_ENTRY.c14-origin.json" "$T11_DECLARED_CANON" "$T11_DECLARED_RETENTION" <<'PY'
+import json, os, sys
+entry, receipt, canon, retention = sys.argv[1:]
+data = json.load(open(receipt, encoding="utf-8"))
+st = os.lstat(entry)
+ok = (data["original_path"] == canon and
+      data["retention_minutes"] == int(retention) and
+      (data["dev"], data["ino"]) == (st.st_dev, st.st_ino))
+if not ok:
+    print(json.dumps(data, sort_keys=True) + " canon=" + canon + " retention=" + retention)
+raise SystemExit(0 if ok else 1)
+PY
+then
+  record_pass "Test 11: receipt binds the canonical path and carries the declared retention"
+else
+  record_fail "Test 11: receipt binds the canonical path and carries the declared retention" "receipt retention or identity differs from the declared row"
+fi
+
+echo "Test 12: --dry-run --large does not preview-archive an unproven dir (retention gate applies to dry runs, CodeRabbit #207)"
+T12_PRIVATE_TMP="$TMP_ROOT/t12-private-tmp"
+T12_TMP="$TMP_ROOT/t12-tmp"
+T12_ARCHIVE="$TMP_ROOT/t12-archive"
+T12_BIN="$TMP_ROOT/t12-bin"
+mkdir -p "$T12_PRIVATE_TMP" "$T12_TMP"
+T12_PRIVATE_TMP="$(cd "$T12_PRIVATE_TMP" && pwd -P)"
+T12_TMP="$(cd "$T12_TMP" && pwd -P)"
+T12_UNPROVEN="$T12_PRIVATE_TMP/unproven_dry_dir"
+T12_DECLARED="$T12_PRIVATE_TMP/pr_declared_dry_dir"
+mkdir -p "$T12_UNPROVEN" "$T12_DECLARED"
+printf 'x\n' >"$T12_UNPROVEN/payload.bin"
+printf 'x\n' >"$T12_DECLARED/payload.bin"
+set_old_mtime "$T12_UNPROVEN"
+set_old_mtime "$T12_DECLARED"
+make_find_shim "$T12_BIN" "$T12_PRIVATE_TMP" "$T12_TMP"
+T12_OUT="$TMP_ROOT/t12.out"
+if run_capture "$T12_OUT" env -i HOME="$TMP_ROOT/t12-home" \
+  PATH="$T12_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" \
+  LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_MIN_KB=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T12_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T12_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T12_TMP" \
+  bash "$SOURCE_SCRIPT" --dry-run --large; then
+  T12_RC=0
+else
+  T12_RC=$?
+fi
+T12_OUT_CONTENT=$(cat "$T12_OUT")
+assert_rc "Test 12: exits 0" 0 "$T12_RC"
+assert_contains "Test 12: dry run logs the unproven skip" \
+  "Skipping archive candidate (C14 kept:unproven-content): $T12_UNPROVEN" "$T12_OUT_CONTENT"
+if grep -qF "would archive: $T12_UNPROVEN" <<<"$T12_OUT_CONTENT"; then
+  record_fail "Test 12: dry run must not preview-archive the unproven dir" "found would-archive for unproven"
+else
+  record_pass "Test 12: dry run must not preview-archive the unproven dir"
+fi
+assert_contains "Test 12: dry run still previews the declared-ephemeral dir" \
+  "would archive: $T12_DECLARED" "$T12_OUT_CONTENT"
+assert_exists "Test 12: dry run deletes nothing" "$T12_UNPROVEN/payload.bin"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="

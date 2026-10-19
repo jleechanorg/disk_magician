@@ -3,6 +3,17 @@
 # explicitly known active container dirs (e.g. /private/tmp/agent-scratch) so
 # idle children are reclaimed while the container and live children are kept.
 # RED: run against a script lacking the descent (CLEANUP_TMP_SCRIPT=<old copy>).
+#
+# Archive gate (bead disk_magician-archive-same-volume-regrowth-03bn): a
+# quarantine move is only allowed for candidates with a declared-ephemeral
+# retention row (E2/E3). Rows name DIRECT children of a scratch root, so a
+# descended child (`<root>/<container>/<child>`) is unproven: C14 refuses every
+# purge of a retention-0 receipt, and archiving it would grow
+# _disk_magician_archive without ever reclaiming a byte. The descend tests
+# below therefore assert the candidate stays at its original path, logs
+# "Skipping archive candidate (C14 kept:unproven-content)", and is not counted
+# as archived. The only nested row is the `.git`-directory shape (240 min),
+# which also needs a C14 repo baseline and therefore has no fixture here.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,28 +154,33 @@ run_sweep() {
 mkchild() { mkdir -p "$1"; head -c 20000 /dev/zero > "$1/payload.bin"; }
 archived() { /usr/bin/find "$AR" -mindepth 3 -maxdepth 3 -name "$1" 2>/dev/null | head -n1; }
 
-echo "Test 1: active container -> idle child archived; fresh child and container kept"
+echo "Test 1: active container -> idle child evaluated and kept (no declared-ephemeral row); fresh child and container kept"
 make_env t1
 mkdir -p "$PT/agent-scratch"
 mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t1 --clean
-assert_missing "t1 old child moved out" "$PT/agent-scratch/old-child"
-[[ -n "$(archived old-child)" ]] && pass "t1 old child present in archive" || fail "t1 old child present in archive"
+# A descended child is one level below the scratch root, so no E2/E3
+# declared-ephemeral row can match it: cleanup_tmp evaluates it, then keeps it
+# visible at its original path instead of quarantining it with an unpurgeable
+# retention-0 receipt (bead disk_magician-archive-same-volume-regrowth-03bn).
+assert_exists "t1 idle child kept at its original path" "$PT/agent-scratch/old-child"
+assert_contains "t1 idle child is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-child" "$OUT"
 assert_exists "t1 fresh child kept" "$PT/agent-scratch/fresh-child"
 assert_exists "t1 container kept" "$PT/agent-scratch"
-assert_contains "t1 archived total counts child size only" "Dirs archived: 1" "$OUT"
+assert_contains "t1 unproven child is not counted as archived" "Dirs archived: 0" "$OUT"
 
-echo "Test 2: dry-run reports child, changes nothing, counts child KB"
+echo "Test 2: dry-run reports the unproven child skip, changes nothing, counts nothing"
 make_env t2
 mkdir -p "$PT/agent-scratch"
 mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t2 --dry-run
 assert_exists "t2 old child untouched" "$PT/agent-scratch/old-child"
-assert_contains "t2 dry-run names child" "would archive: $PT/agent-scratch/old-child" "$OUT"
-KB=$(du -sk "$PT/agent-scratch/old-child" | awk '{print $1}')
-assert_contains "t2 archived KB equals child size" "Total archived: ${KB} KB" "$OUT"
+assert_contains "t2 dry-run reports the unproven child skip" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-child" "$OUT"
+assert_contains "t2 unproven child is not counted as archived" "Dirs archived: 0" "$OUT"
 
 echo "Test 3: idle child with a live open file is kept"
 make_env t3
@@ -211,25 +227,28 @@ mkchild "$PT/marked/old-child"; set_old "$PT/marked/old-child"; touch "$PT/marke
 run_sweep t6 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS="agent-scratch marked"
 assert_exists "t6 marked child kept" "$PT/agent-scratch/old-marked"
 assert_exists "t6 child with nested marker kept" "$PT/agent-scratch/old-nested-marked"
-assert_missing "t6 eligible sibling of marked children moved out" "$PT/agent-scratch/old-unmarked"
-[[ -n "$(archived old-unmarked)" ]] && pass "t6 eligible sibling archived" || fail "t6 eligible sibling archived"
+assert_exists "t6 eligible sibling of marked children kept at its original path" "$PT/agent-scratch/old-unmarked"
+assert_contains "t6 eligible sibling still reaches the archive gate" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-unmarked" "$OUT"
 assert_exists "t6 child under marked container kept" "$PT/marked/old-child"
 
-echo "Test 7: protected root keeps itself and canonical evidence; stale scratch children archived"
+echo "Test 7: protected root keeps itself, its canonical evidence child, and its unproven stale children"
 make_env t7
 mkdir -p "$PT/keepme"
 mkchild "$PT/keepme/old-child"; set_old "$PT/keepme/old-child"
 mkchild "$PT/keepme/fresh-child"
 # Canonical `evidence` child of a protected root is never touched, even when
-# stale, while the root itself is preserved and other stale children are
-# reclaimable (origin/main protected-root descent).
+# stale, while the root itself is preserved. A stale non-evidence child is
+# evaluated but stays in place: nested content has no declared-ephemeral row
+# (bead disk_magician-archive-same-volume-regrowth-03bn).
 mkchild "$PT/keepme/evidence"; set_old "$PT/keepme/evidence"
 run_sweep t7 --clean DISK_MAGICIAN_PROTECTED_TMP_ROOTS=keepme DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=keepme
 assert_exists "t7 protected root kept" "$PT/keepme"
 assert_exists "t7 canonical evidence child kept" "$PT/keepme/evidence"
 assert_exists "t7 fresh child kept" "$PT/keepme/fresh-child"
-assert_missing "t7 stale scratch child archived out" "$PT/keepme/old-child"
-[[ -n "$(archived old-child)" ]] && pass "t7 stale scratch child present in archive" || fail "t7 stale scratch child present in archive"
+assert_exists "t7 stale scratch child kept at its original path" "$PT/keepme/old-child"
+assert_contains "t7 stale scratch child is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/keepme/old-child" "$OUT"
 
 echo "Test 8: nested grandchildren are not descended (one level only)"
 make_env t8
@@ -238,8 +257,11 @@ head -c 20000 /dev/zero > "$PT/agent-scratch/mid/deep/payload.bin"
 set_old "$PT/agent-scratch/mid"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t8 --clean
-# mid is idle (child level) so it goes whole; deep is never archived separately.
-assert_missing "t8 idle mid archived as a unit" "$PT/agent-scratch/mid"
+# mid is the only descended unit (kept: no declared-ephemeral row); deep is
+# never evaluated or archived separately.
+assert_exists "t8 idle mid kept as a unit" "$PT/agent-scratch/mid"
+assert_contains "t8 idle mid is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/mid" "$OUT"
 if grep -qE "archive.*/deep|evaluat.*/deep" <<<"$OUT"; then fail "t8 grandchild not separately evaluated"; else pass "t8 grandchild not separately evaluated"; fi
 
 echo "Test 9: unknown active workspace is atomic even when one child is idle"
@@ -280,15 +302,20 @@ assert_exists "t11 unmeasurable clean pushed worktree kept" "$PT/agent-scratch/o
 assert_contains "t11 fail-closed recency protection reported" \
   "recently active nested repository/worktree (<7d)" "$OUT"
 
-echo "Test 12: clean pushed worktree older than seven days remains eligible"
+echo "Test 12: clean pushed linked worktree older than seven days reaches the archive gate but stays unproven"
 make_env t12
 mkdir -p "$PT/agent-scratch"
 make_clean_pushed_worktree "$TMP_ROOT/t12-main" "$PT/agent-scratch/old-wt" t12wt
 set_old "$PT/agent-scratch/old-wt"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t12 --clean
-assert_missing "t12 old clean pushed worktree moved out" "$PT/agent-scratch/old-wt"
-[[ -n "$(archived old-wt)" ]] && pass "t12 old clean pushed worktree archived" || fail "t12 old clean pushed worktree archived"
+# A linked worktree's .git is a FILE and the nested path is two components, so
+# no E2/E3 declared-ephemeral row matches: the candidate stays in place instead
+# of being quarantined with an unpurgeable retention-0 receipt (bead
+# disk_magician-archive-same-volume-regrowth-03bn).
+assert_exists "t12 old clean pushed worktree kept at its original path" "$PT/agent-scratch/old-wt"
+assert_contains "t12 worktree child is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-wt" "$OUT"
 
 echo "Test 13: machine safety policy blocks child quarantine without counting it"
 make_env t13
@@ -355,15 +382,16 @@ assert_exists "t16 child containing 25h-old clean nested worktree kept" "$PT/age
 assert_contains "t16 nested worktree recency protection reported" \
   "recently active nested repository/worktree (<7d)" "$OUT"
 
-echo "Test 17: old clean pushed nested worktree leaves its container child eligible"
+echo "Test 17: old clean pushed nested worktree reaches the archive gate but stays unproven"
 make_env t17
 mkdir -p "$PT/agent-scratch/runtime/run-id"
 make_clean_pushed_worktree "$TMP_ROOT/t17-main" "$PT/agent-scratch/runtime/run-id/repo" t17wt
 set_old "$PT/agent-scratch/runtime"
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t17 --clean
-assert_missing "t17 old clean nested worktree child moved out" "$PT/agent-scratch/runtime"
-[[ -n "$(archived runtime)" ]] && pass "t17 old clean nested worktree child archived" || fail "t17 old clean nested worktree child archived"
+assert_exists "t17 old clean nested worktree child kept at its original path" "$PT/agent-scratch/runtime"
+assert_contains "t17 nested worktree child is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/runtime" "$OUT"
 
 echo "Test 18: idle scratch container with a dirty nested repository stays in place"
 make_env t18
@@ -375,19 +403,22 @@ set_old "$PT/agent-scratch"
 run_sweep t18 --clean
 assert_exists "t18 idle container with dirty nested repository kept" "$PT/agent-scratch"
 assert_exists "t18 child containing dirty nested repository kept" "$PT/agent-scratch/runtime"
-assert_missing "t18 eligible sibling of dirty repository moved out" "$PT/agent-scratch/old-sibling"
-[[ -n "$(archived old-sibling)" ]] && pass "t18 eligible sibling archived" || fail "t18 eligible sibling archived"
+assert_exists "t18 eligible sibling of dirty repository kept at its original path" "$PT/agent-scratch/old-sibling"
+assert_contains "t18 eligible sibling still reaches the archive gate" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-sibling" "$OUT"
 assert_contains "t18 depth-zero nested unsaved-work protection reported" \
   "nested repository unsaved work" "$OUT"
 
-echo "Test 19: idle scratch container with only an old clean repository stays eligible"
+echo "Test 19: idle scratch container with only an old clean repository stays in place (no declared row)"
 make_env t19
 mkdir -p "$PT/agent-scratch/runtime/run-id"
 make_clean_pushed_worktree "$TMP_ROOT/t19-main" "$PT/agent-scratch/runtime/run-id/repo" t19wt
 set_old "$PT/agent-scratch"
 run_sweep t19 --clean
-assert_missing "t19 idle container with old clean repository moved out" "$PT/agent-scratch"
-assert_contains "t19 idle safe container archived" "Dirs archived: 1" "$OUT"
+assert_exists "t19 idle container kept at its original path" "$PT/agent-scratch"
+assert_contains "t19 idle container is rejected as unproven content before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch" "$OUT"
+assert_contains "t19 unproven container is not counted as archived" "Dirs archived: 0" "$OUT"
 
 echo "Test 20: depth-3 receipt traversal reclaims valid entries and preserves unknown bytes"
 # Cursor review 6 / bead cuea.12: a child archived under a container lands at
@@ -397,17 +428,26 @@ echo "Test 20: depth-3 receipt traversal reclaims valid entries and preserves un
 # container, and the receipt sidecar untouched.
 make_env t20
 
-# 20a: a real swept descended child with no declared-ephemeral row is
-# discovered but preserved as unknown archive content.
+# 20a: a descended child with no declared-ephemeral row is never archived by the
+# sweep; a legacy depth-3 entry of that shape (retention 0, written by older
+# builds) is still discovered and preserved as unknown archive content.
 mkdir -p "$PT/agent-scratch"
 mkchild "$PT/agent-scratch/old-child"; set_old "$PT/agent-scratch/old-child"
 run_sweep t20 --clean
-UNKNOWN_ENTRY="$(archived old-child)"
-if [[ -n "$UNKNOWN_ENTRY" ]]; then pass "t20a descended child archived under container"; else fail "t20a descended child archived under container"; fi
-assert_exists "t20a descended origin receipt written" "$UNKNOWN_ENTRY.c14-origin.json"
+assert_exists "t20a unproven descended child stays at its original path" "$PT/agent-scratch/old-child"
+assert_contains "t20a unproven descended child is rejected before the move" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/old-child" "$OUT"
+if [[ -z "$(archived old-child)" ]]; then pass "t20a nothing was quarantined for the unproven child"; else fail "t20a nothing was quarantined for the unproven child"; fi
+# Build the legacy entry by hand: a retention-0 origin receipt is what older
+# builds wrote for undeclared content, and it must never be purged.
+UNKNOWN_ENTRY="$AR/20200101T000000Z/agent-scratch/old-child"
+mkdir -p "${UNKNOWN_ENTRY%/*}"
+python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt \
+  "$PT/agent-scratch/old-child" "$UNKNOWN_ENTRY.c14-origin.json" "" 0 >/dev/null
+mv "$PT/agent-scratch/old-child" "$UNKNOWN_ENTRY"
 set_old "$UNKNOWN_ENTRY"
 run_sweep t20 --clean LARGE_TMP_ARCHIVE_RETENTION_HOURS=1
-assert_exists "t20a unknown descended child preserved (same archive guard)" "$UNKNOWN_ENTRY"
+assert_exists "t20a legacy unknown descended child preserved (same archive guard)" "$UNKNOWN_ENTRY"
 assert_exists "t20a origin receipt sidecar preserved" "$UNKNOWN_ENTRY.c14-origin.json"
 assert_exists "t20a container itself never removed" "$PT/agent-scratch"
 assert_contains "t20a unknown descended child is discovered and evaluated" \
@@ -422,6 +462,8 @@ make_depth3_c14_entry "$TMP_ROOT/t20-tmp/cli_validation_gemini_depth3" "$D3_ENTR
 run_sweep t20 --clean LARGE_TMP_ARCHIVE_RETENTION_HOURS=1
 assert_missing "t20b valid depth-3 receipted entry reclaimed" "$D3_ENTRY"
 assert_contains "t20b depth-3 purge is logged" "Purged aged archive after C14 approval" "$OUT"
+
+
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"
