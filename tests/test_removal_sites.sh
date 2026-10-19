@@ -97,6 +97,7 @@ LOG_FUNCS = {"ledger_line", "log", "echo", "printf", "warn",
 # tool.  Keep this list to literal, fully-named commands.
 DELEGATED_CMDS = {
     "uv cache prune --force": "delegated uv reference-tracking prune; uv owns the artifact identity",
+    "pnpm store prune": "delegated pnpm content-addressable store prune; pnpm owns unreferenced blob GC",
 }
 
 # Bounded exact-site exemptions: (file, function, kind) or (file, function, var).
@@ -199,6 +200,7 @@ FIND_EXEC_RM = re.compile(r"\bfind\b(.*?)\s-exec\s+rm\b")
 GIT_PRUNE = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+worktree\s+prune\b")
 GIT_REMOVE = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+worktree\s+remove\b([^\n]*)")
 UV_PRUNE = re.compile(r"\buv\s+cache\s+prune(?:\s+--force)?\b")
+PNPM_PRUNE = re.compile(r"\bpnpm\s+store\s+prune\b")
 WRH_REMOVE = re.compile(r"\bwrh_remove_now\b(.*)")
 # rm must not match --rm / -exec rm (handled separately) or identifiers.
 RM_RE = re.compile(r"(?<![\w-])rm\s+((?:-[A-Za-z-]+\s+)*)([^;|&}\n]*)")
@@ -236,6 +238,10 @@ def detect(line, is_python=False):
     out = []
     if UV_PRUNE.search(line):
         out.append({"kind": "delegated-uv", "expr": "uv cache prune --force",
+                    "vars": []})
+        return out
+    if PNPM_PRUNE.search(line):
+        out.append({"kind": "delegated-pnpm", "expr": "pnpm store prune",
                     "vars": []})
         return out
     if GIT_PRUNE.search(line):
@@ -553,6 +559,9 @@ def classify(file_name, func_name, line, body_before, body, src_ref=None):
             continue
         if d["kind"] == "delegated-uv":
             results.append(_site("DELEGATED", "uv cache prune --force", d, line))
+            continue
+        if d["kind"] == "delegated-pnpm":
+            results.append(_site("DELEGATED", "pnpm store prune", d, line))
             continue
         # .DS_Store metadata cleanup (never artifact content)
         if d["expr"].strip().strip("\"'").endswith(".DS_Store"):

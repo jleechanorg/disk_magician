@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # cleanup_worktree_deps.sh — Strip rebuildable dependency dirs from dormant worktrees.
 #
-# Removes node_modules, Rust target/ (only beside a Cargo.toml) and .mypy_cache
+# Removes node_modules, Rust target/ (only beside a Cargo.toml), Next.js
+# .next / .next/cache (only beside a package.json) and .mypy_cache
 # from linked git worktrees (a `.git` FILE pointer) whose content saw no activity
 # within the worktree floor (safety_worktree_floor_days, default 3). Nested build
-# caches (e.g. daemon/target in a multi-crate tree) are stripped only when the
-# dir that owns them holds the manifest that produces them. The worktree source
-# and .git are preserved; reinstall with npm ci / cargo build.
+# caches (e.g. daemon/target in a multi-crate tree, or mvp_site/.next/cache in a
+# Next.js app) are stripped only when the dir that owns them holds the manifest
+# that produces them. The worktree source and .git are preserved; reinstall with
+# npm ci / cargo build.
 #
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 #
@@ -48,7 +50,7 @@ while [[ $# -gt 0 ]]; do
     --include-repos) INCLUDE_REPOS=true; shift ;;
     -h|--help)
       echo "Usage: cleanup_worktree_deps.sh [--clean] [--dry-run] [--min-age N] [--roots A,B] [--include-repos]"
-      echo "Strips node_modules, target (with Cargo.toml) and .mypy_cache from worktrees idle >= floor days."
+      echo "Strips node_modules, target (with Cargo.toml), .next / .next/cache (with package.json) and .mypy_cache from worktrees idle >= floor days."
       echo "Nested caches are stripped only beside the manifest that builds them (Cargo.toml / package.json)."
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -161,10 +163,13 @@ strip_dir() {
 }
 
 has_pkg_node_modules() {
-  local wt="$1" pkg_nm pkg_ios
+  local wt="$1" pkg_nm pkg_next pkg_ios
   [[ ! -L "$wt/packages" ]] || return 1
   for pkg_nm in "$wt"/packages/*/node_modules; do
     [[ ! -L "${pkg_nm%/node_modules}" && -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
+  done
+  for pkg_next in "$wt"/packages/*/.next; do
+    [[ ! -L "${pkg_next%/.next}" && ! -L "$pkg_next" && -e "$pkg_next" && -f "${pkg_next%/.next}/package.json" ]] && return 0
   done
   for pkg_ios in "$wt"/packages/*/ios; do
     [[ ! -L "${pkg_ios%/ios}" && ! -L "$pkg_ios" && -f "$pkg_ios/Podfile" && ( -d "$pkg_ios/Pods" || -d "$pkg_ios/build" ) ]] && return 0
@@ -173,29 +178,38 @@ has_pkg_node_modules() {
 }
 
 # Build output is proven by the manifest, never by the directory name alone:
-# cargo writes <crate>/target beside <crate>/Cargo.toml, npm writes
-# <pkg>/node_modules beside <pkg>/package.json. Anything else keeps the name but
-# is not rebuildable, so it is preserved.
+# cargo writes <crate>/target beside <crate>/Cargo.toml, npm/Next.js writes
+# <pkg>/node_modules, <pkg>/.next, and <pkg>/.next/cache beside <pkg>/package.json.
+# Anything else keeps the name but is not rebuildable, so it is preserved.
 is_build_output_dir() {
-  local dir="$1" parent name
+  local dir="$1" parent grandparent name
   name="${dir##*/}"
   parent="${dir%/*}"
-  [[ -d "$dir" && ! -L "$dir" && -n "$parent" ]] || return 1
+  [[ -d "$dir" && ! -L "$dir" && -n "$parent" && ! -L "$parent" ]] || return 1
   case "$name" in
     target) [[ -f "$parent/Cargo.toml" ]] ;;
-    node_modules) [[ -f "$parent/package.json" ]] ;;
+    node_modules|.next) [[ -f "$parent/package.json" ]] ;;
+    cache)
+      [[ "${parent##*/}" == ".next" ]] || return 1
+      grandparent="${parent%/*}"
+      [[ -n "$grandparent" && ! -L "$grandparent" && -f "$grandparent/package.json" ]]
+      ;;
     *) return 1 ;;
   esac
 }
 
-# Every target/ and node_modules/ below <wt>, at any depth. find does not follow
-# symlinks and -type d rejects a symlinked leaf, so a linked parent is never
-# traversed. Matched dirs are pruned, never descended into.
+# Every target/, node_modules/, .next/, and .next/cache/ below <wt>, up to depth 4.
+# find does not follow symlinks and -type d rejects a symlinked leaf, so a linked
+# parent is never traversed. Matched cache dirs and non-cache .next/* subtrees are
+# pruned, never descended into.
 nested_cache_dirs() {
   find "$1" -maxdepth 4 \( -name .git -o -name venv -o -name .venv -o -name __pycache__ \
     -o -name .pytest_cache -o -name .ruff_cache -o -name .mypy_cache -o -name Pods \
-    -o -name DerivedData -o -name .beads -o -name .husky -o -name .next \) -prune -o \
-    -type d \( -name node_modules -o -name target \) -prune -print 2>/dev/null
+    -o -name DerivedData -o -name .beads -o -name .husky \) -prune -o \
+    -type d -path '*/.next/cache' -prune -print -o \
+    -path '*/.next/*' -prune -o \
+    -type d \( -name node_modules -o -name target \) -prune -print -o \
+    -type d -name .next -print 2>/dev/null
 }
 
 for root in "${ROOTS[@]}"; do
@@ -233,6 +247,12 @@ for root in "${ROOTS[@]}"; do
       # A real node_modules leaf may still escape through a symlinked ancestor.
       [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
     done
+    for pkg_next in "$wt"/packages/*/.next; do
+      if [[ ! -L "$wt/packages" && ! -L "${pkg_next%/.next}" && ! -L "$pkg_next" && -f "${pkg_next%/.next}/package.json" ]]; then
+        strip_dir "$wt" "$pkg_next/cache"
+        strip_dir "$wt" "$pkg_next"
+      fi
+    done
     for pkg_ios in "$wt"/packages/*/ios; do
       if [[ ! -L "$wt/packages" && ! -L "${pkg_ios%/ios}" && ! -L "$pkg_ios" && -f "$pkg_ios/Podfile" ]]; then
         strip_dir "$wt" "$pkg_ios/Pods"
@@ -240,7 +260,10 @@ for root in "${ROOTS[@]}"; do
       fi
     done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
-    [[ -f "$wt/package.json" ]] && strip_dir "$wt" "$wt/.next"
+    if [[ -f "$wt/package.json" && ! -L "$wt/.next" ]]; then
+      strip_dir "$wt" "$wt/.next/cache"
+      strip_dir "$wt" "$wt/.next"
+    fi
     [[ -d "$wt/.ci-source-packages" ]] && strip_dir "$wt" "$wt/.ci-source-packages"
     if [[ ! -L "$wt/ios" && -f "$wt/ios/Podfile" ]]; then
       strip_dir "$wt" "$wt/ios/Pods"
@@ -250,7 +273,10 @@ for root in "${ROOTS[@]}"; do
     strip_dir "$wt" "$wt/.pytest_cache"
     strip_dir "$wt" "$wt/.ruff_cache"
     while IFS= read -r nested; do
-      [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
+      [[ -n "$nested" && "${nested##*/}" != ".next" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
+    done <<< "$nested_dirs"
+    while IFS= read -r nested; do
+      [[ -n "$nested" && "${nested##*/}" == ".next" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
     done <<< "$nested_dirs"
   done
 done
