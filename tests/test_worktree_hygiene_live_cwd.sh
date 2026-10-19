@@ -121,7 +121,7 @@ if [[ -d /proc/self ]]; then
     dead=999999; while [[ -e "/proc/$dead" ]]; do dead=$((dead - 1)); done
     cat > "$FB/lsof" <<SH
 #!/bin/sh
-printf 'p1\\nfcwd\\nn/tmp/somewhere-else\\nn/proc/$dead/cwd (readlink: Permission denied)\\n'
+printf 'p1\\nfcwd\\nn/tmp/somewhere-else\\np2\\nfcwd\\nn/proc/$dead/cwd (readlink: Permission denied)\\n'
 exit 0
 SH
     chmod +x "$FB/lsof"

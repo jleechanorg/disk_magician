@@ -486,75 +486,14 @@ preserve_wip_reason_eligible() {
     return 1
 }
 
-# _hyg_cwd_verdict <wt> <wt_real> <value> — echoes live|idle|unknown for one
-# resolved `n` cwd value, failing closed on diagnostics and malformed paths.
-_hyg_cwd_verdict() {
-    local wt="$1" wt_real="$2" cwd="$3"
-    if [[ "$cwd" != /* || "$cwd" =~ \([A-Za-z]+:\ .*\)$ ]]; then
-        # Uninspectable or malformed: unknown, unless provably harmless.
-        if [[ "$cwd" =~ ^/proc/[0-9]+/cwd\ \(readlink:\ Permission\ denied\)$ ]] \
-           && declare -F lsof_denied_ignorable >/dev/null 2>&1 \
-           && lsof_denied_ignorable "$cwd"; then
-            echo idle
-        else
-            echo unknown
-        fi
-        return 0
-    fi
-    if [[ "$cwd" == "$wt" || "$cwd" == "$wt"/* || "$cwd" == "$wt_real" || "$cwd" == "$wt_real"/* ]]; then
-        echo live
-    else
-        echo idle
-    fi
-}
-
 # worktree_has_live_cwd <wt_path> — true if any process's cwd is inside it.
-# Fails closed. Each `lsof -d cwd -Fn` process block must be complete (fcwd plus
-# an `n` record); any incomplete block, diagnostic record, malformed path,
-# unexpected exit status, unexpected stderr, or empty result set counts as
-# "cannot prove idle" and is reported as live.
+# Fails closed through the shared strict parser (scripts/lib/lsof_linux.sh): a
+# missing lsof, an incomplete or unparseable scan, a live uninspectable process,
+# or zero resolved cwds all count as "cannot prove idle" and return true.
 worktree_has_live_cwd() {
-    local wt="$1" wt_real out err errf rc=0 parsed pid status val verdict saw_cwd=0
-    command -v lsof >/dev/null 2>&1 || return 0
-    wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
-    errf="$(mktemp "${TMPDIR:-/tmp}/dm-hyg-lsof.XXXXXX")" || return 0
-    out="$(lsof -n -P -d cwd -Fn 2>"$errf")" || { rc=$?; out=""; }
-    err="$(cat "$errf" 2>/dev/null || true)"
-    rm -f "$errf"
-    if declare -F lsof_stderr_incomplete >/dev/null 2>&1; then
-        lsof_stderr_incomplete "$err" && return 0
-    elif [[ -n "$err" ]]; then
-        return 0
-    fi
-    (( rc == 0 )) || return 0   # no complete result set -> unknown
-    parsed="$(printf '%s\n' "$out" | awk '
-        function emit() {
-            if (bad) { print pid "|bad|" }
-            else if (!havef || !haven) { print pid "|incomplete|" }
-            else { print pid "|ok|" val }
-        }
-        /^p/ {
-            if (started) emit()
-            started = 1; bad = 0; havef = 0; haven = 0; val = ""
-            pid = substr($0, 2); next
-        }
-        /^f/ { havef = 1; next }
-        /^n/ { haven = 1; val = substr($0, 2); next }
-        { bad = 1 }
-        END { if (started) emit() }
-    ')" || return 0
-    while IFS='|' read -r pid status val; do
-        [[ -n "$pid" ]] || continue
-        [[ "$status" == ok ]] || return 0   # incomplete or malformed block -> unknown
-        verdict="$(_hyg_cwd_verdict "$wt" "$wt_real" "$val")"
-        case "$verdict" in
-            live) return 0 ;;
-            idle) saw_cwd=1 ;;
-            *) return 0 ;;
-        esac
-    done <<<"$parsed"
-    (( saw_cwd == 1 )) || return 0   # nothing usable -> unknown
-    return 1
+    local wt="$1"
+    lsof_snapshot_cwds || return 0
+    cwd_list_has_path "$wt" "$LSOF_CWDS"
 }
 
 # preserve_wip_blocker <repo_abs> <wt_path> — echoes a skip reason and

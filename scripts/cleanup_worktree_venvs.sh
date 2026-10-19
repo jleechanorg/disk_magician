@@ -518,41 +518,10 @@ GLOBAL_LIVE_CWDS_LOADED=0
 ensure_live_cwds_loaded() {
   [[ "$GLOBAL_LIVE_CWDS_LOADED" -eq 1 ]] && return 0
   GLOBAL_LIVE_CWDS_LOADED=1
-  local _lsof_bin _lsof_tmp _lsof_rc=0 _lsof_out _lsof_err
-  _lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-  if [[ ! -x "$_lsof_bin" ]]; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-    return 0
-  fi
-  _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
-  if [[ -z "$_lsof_tmp" || ! -f "$_lsof_tmp" ]]; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-    return 0
-  fi
-  _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
-  if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
-    rm -f "$_lsof_tmp"
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-    return 0
-  fi
-  rm -f "$_lsof_tmp"
-  if [[ "$_lsof_rc" -ne 0 ]]; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-  elif lsof_stderr_incomplete "$_lsof_err"; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-  elif ! _lsof_out="$(lsof_drop_foreign_denied <<<"$_lsof_out")"; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-  elif [[ -z "$_lsof_out" ]]; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-  elif grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd' <<<"$_lsof_out"; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
-  elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
+  if lsof_snapshot_cwds; then
+    GLOBAL_LIVE_CWDS="$LSOF_CWDS"
   else
-    GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
-    if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
-      GLOBAL_CWD_BLOCKED="cwd-unknown"
-    fi
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
   fi
 }
 

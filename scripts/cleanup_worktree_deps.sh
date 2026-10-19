@@ -68,24 +68,12 @@ else
   fi
 fi
 
-# Live-cwd evidence must be complete; otherwise refuse to delete anything.
-lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-[[ -x "$lsof_bin" ]] || { echo "lsof unavailable: cwd unknown, refusing."; exit 0; }
-lsof_err="$(mktemp)"
-lsof_rc=0
-LIVE_CWDS_RAW="$("$lsof_bin" -d cwd -Fn 2>"$lsof_err")" || lsof_rc=$?
-lsof_msg="$(cat "$lsof_err" 2>/dev/null || true)"; rm -f "$lsof_err"
-if [[ "$lsof_rc" -ne 0 || -z "$LIVE_CWDS_RAW" ]] \
-    || lsof_stderr_incomplete "$lsof_msg"; then
-  echo "lsof output incomplete: cwd unknown, refusing."; exit 0
+# Live-cwd evidence must be complete; otherwise refuse to delete anything. The
+# shared strict parser is the only place that interprets lsof output.
+if ! lsof_snapshot_cwds; then
+  echo "lsof output incomplete ($LSOF_CWD_REASON): cwd unknown, refusing."; exit 0
 fi
-LIVE_CWDS_RAW="$(lsof_drop_foreign_denied <<<"$LIVE_CWDS_RAW")"
-if grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied' <<<"$LIVE_CWDS_RAW" \
-    || grep -qE '^n[^/]' <<<"$LIVE_CWDS_RAW"; then
-  echo "lsof output unparseable: cwd unknown, refusing."; exit 0
-fi
-LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$LIVE_CWDS_RAW")"
-[[ -n "$LIVE_CWDS" ]] || { echo "lsof reported no cwd paths: cwd unknown, refusing."; exit 0; }
+LIVE_CWDS="$LSOF_CWDS"
 
 # AO-owned worktrees: parsed via ao_worktree_dirs (P = project worktreeDir, C = container/default root).
 AO_DIRS=()
