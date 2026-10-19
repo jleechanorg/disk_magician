@@ -559,11 +559,11 @@ printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 if [[ -d /proc/self ]]; then
 echo "== case 36d: own hidden cwd is not evidence; strict opt-in still blocks =="
 add_wt own-hidden worktree-own-hidden
-printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
+printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
 run_hook "$(json "$WTROOT/own-hidden")"; rc=$?
 [[ ! -e "$WTROOT/own-hidden" ]] && ok "own hidden cwd does not block removal" || bad "own hidden cwd blocked removal"
 add_wt own-hidden-strict worktree-own-hidden-strict
-printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
+printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
 DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 run_hook "$(json "$WTROOT/own-hidden-strict")"; rc=$?
 [[ -d "$WTROOT/own-hidden-strict" ]] && ok "strict opt-in keeps own hidden cwd worktree" || bad "strict opt-in removed own hidden cwd worktree"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "strict opt-in reports cwd-unknown" || bad "strict opt-in reason missing"
