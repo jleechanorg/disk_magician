@@ -120,8 +120,7 @@ clean_dir_contents "uv cache" "$HOME/.cache/uv" false rebuildable
 log "=== Section 3: ~/.cache/pre-commit/ ==="
 clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false rebuildable
 
-# 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches"). Apps that
-# are running (cmux, Aside, Chrome, Cursor) are left to their needs_decision gates.
+# 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches").
 log "=== Section 3b: rebuildable user caches ==="
 for approved_cache in \
   "worldai:$HOME/.cache/worldai" \
@@ -133,14 +132,41 @@ for approved_cache in \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
   "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004" \
   "gradle caches:$HOME/.gradle/caches" \
+  "gradle daemon:$HOME/.gradle/daemon" \
+  "gradle wrapper dists:$HOME/.gradle/wrapper/dists" \
   "npm _npx:$HOME/.npm/_npx" \
   "cargo registry cache:$HOME/.cargo/registry/cache" \
-  "cargo registry src:$HOME/.cargo/registry/src"; do
+  "cargo registry src:$HOME/.cargo/registry/src" \
+  "Google caches:$HOME/Library/Caches/Google" \
+  "Homebrew caches:$HOME/Library/Caches/Homebrew" \
+  "pip caches:$HOME/Library/Caches/pip" \
+  "pip linux caches:$HOME/.cache/pip" \
+  "puppeteer caches:$HOME/.cache/puppeteer" \
+  "Xcode caches:$HOME/Library/Caches/com.apple.dt.Xcode" \
+  "SentryCrash caches:$HOME/Library/Caches/SentryCrash" \
+  "SiriTTS caches:$HOME/Library/Caches/SiriTTS" \
+  "Cursor Cache:$HOME/Library/Application Support/Cursor/Cache" \
+  "Cursor CachedData:$HOME/Library/Application Support/Cursor/CachedData" \
+  "Cursor CachedExtensionVSIXs:$HOME/Library/Application Support/Cursor/CachedExtensionVSIXs" \
+  "Cursor Code Cache:$HOME/Library/Application Support/Cursor/Code Cache" \
+  "Cursor GPUCache:$HOME/Library/Application Support/Cursor/GPUCache" \
+  "discord Cache:$HOME/Library/Application Support/discord/Cache" \
+  "discord Code Cache:$HOME/Library/Application Support/discord/Code Cache" \
+  "discord GPUCache:$HOME/Library/Application Support/discord/GPUCache" \
+  "Chrome Default Cache:$HOME/Library/Application Support/Google/Chrome/Default/Cache" \
+  "Chrome Default Code Cache:$HOME/Library/Application Support/Google/Chrome/Default/Code Cache" \
+  "Chrome Default SW CacheStorage:$HOME/Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage"; do
   approved_kind=rebuildable
   # The ezgha recovery target is explicitly a non-cache target (spec §7.2):
   # ordinary provenance, not the fixed cache-root table.
   [[ "${approved_cache%%:*}" == "ezgha recovery target" ]] && approved_kind=""
   clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false "$approved_kind"
+done
+for chrome_prof in "$HOME/Library/Application Support/Google/Chrome"/Profile\ *; do
+  [[ -d "$chrome_prof" ]] || continue
+  clean_dir_contents "Chrome $(basename "$chrome_prof") Cache" "$chrome_prof/Cache" false rebuildable
+  clean_dir_contents "Chrome $(basename "$chrome_prof") Code Cache" "$chrome_prof/Code Cache" false rebuildable
+  clean_dir_contents "Chrome $(basename "$chrome_prof") SW CacheStorage" "$chrome_prof/Service Worker/CacheStorage" false rebuildable
 done
 
 # 4. opencode safe subdirs
@@ -364,7 +390,7 @@ else
     log "fsevents state cache: [dry-run] would drop $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason): $fsevents_state_resolved"
   elif ! _safety_reason="$(safety_gate "$fsevents_state_resolved" 2>/dev/null)"; then
     log "fsevents state cache: SAFETY-SKIP ($_safety_reason)"
-  elif rm -f "$fsevents_state_resolved"; then
+  elif c14_remove "$fsevents_state_resolved" --kind rebuildable; then
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + fsevents_state_kb ))
     deletion_log "cleanup_dev_caches" "drop_fsevents_state_cache" "$fsevents_state_kb" "$fsevents_state_resolved"
     log "fsevents state cache: dropped $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason); rebuilt on the next poll"
@@ -402,7 +428,7 @@ fi
 log "=== Section: Darwin user clang ModuleCache ==="
 for clang_cache in /private/var/folders/*/*/C/clang/ModuleCache*; do
   [[ -d "$clang_cache" ]] || continue
-  clean_dir_contents "clang module cache" "$clang_cache" false
+  clean_dir_contents "clang module cache" "$clang_cache" false rebuildable
 done
 
 # N. ~/.peekaboo/snapshots entries older than 30 days
@@ -418,6 +444,7 @@ else
 
   while IFS= read -r -d '' entry; do
     [[ -e "$entry" ]] || continue
+    [[ "${entry##*/}" == ".dm-quarantine" ]] && continue
     [[ -n "$entry" && "$entry" == "$PEEKABOO_SNAPSHOTS/"* ]] || continue
 
     kb=$(size_kb "$entry")
@@ -432,12 +459,12 @@ else
       fi
       log "peekaboo snapshots: deleting $entry ($(fmt_kb "$kb"))"
       chmod -R u+w "$entry" 2>/dev/null || true
-      if rm -rf "$entry" 2>/dev/null; then
+      if c14_remove "$entry" --kind rebuildable; then
         peek_deleted=$(( peek_deleted + 1 ))
         peek_freed_kb=$(( peek_freed_kb + kb ))
         deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$entry"
       else
-        echo "SKIP (rm failed): $entry"
+        echo "SKIP (c14 kept): $entry"
       fi
     fi
   done < <(find "$PEEKABOO_SNAPSHOTS" -mindepth 1 -maxdepth 1 -mtime +30 -print0 2>/dev/null)
@@ -469,6 +496,7 @@ for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
   br_candidates=()
   while IFS= read -r -d '' item; do
     [[ -e "$item" ]] || continue
+    [[ "${item##*/}" == ".dm-quarantine" ]] && continue
     if [[ "$(basename "$item")" == "schema-migrations" ]]; then
       continue
     fi
@@ -478,6 +506,7 @@ for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
   if [[ -d "$rec_dir/schema-migrations" ]]; then
     while IFS= read -r -d '' sm_item; do
       [[ -e "$sm_item" ]] || continue
+      [[ "${sm_item##*/}" == ".dm-quarantine" ]] && continue
       br_candidates+=("$sm_item")
     done < <(find "$rec_dir/schema-migrations" -mindepth 1 -maxdepth 1 -mtime +7 -print0 2>/dev/null || true)
   fi
@@ -498,12 +527,12 @@ for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
       fi
       log "br_recovery: deleting $candidate ($(fmt_kb "$kb"))"
       chmod -R u+w "$candidate" 2>/dev/null || true
-      if rm -rf "$candidate" 2>/dev/null; then
+      if c14_remove "$candidate" --kind rebuildable; then
         br_deleted=$(( br_deleted + 1 ))
         br_freed_kb=$(( br_freed_kb + kb ))
         deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$candidate"
       else
-        echo "SKIP (rm failed): $candidate"
+        echo "SKIP (c14 kept): $candidate"
       fi
     fi
   done
@@ -519,6 +548,48 @@ if [[ "$DRY_RUN" != true ]]; then
   log "br_recovery: freed $(fmt_kb "$br_freed_kb") across $br_deleted items"
 else
   log "br_recovery: [dry-run] would remove $br_deleted items, freeing $(fmt_kb "$br_freed_kb")"
+fi
+
+# ---------------------------------------------------------------------------
+# 16. Non-default Rustup toolchains (~/.rustup/toolchains/*)
+# ---------------------------------------------------------------------------
+echo
+log "--- 16. Non-default Rustup toolchains ---"
+if [[ -d "$HOME/.rustup/toolchains" ]]; then
+  default_tc=""
+  rustup_bin="$(PATH="$HOME/.cargo/bin:$PATH" command -v rustup 2>/dev/null || true)"
+  if [[ -n "$rustup_bin" ]]; then
+    default_tc="$("$rustup_bin" toolchain list 2>/dev/null | awk '/\(default\)/ {print $1; exit}')"
+  fi
+  if [[ -z "$default_tc" && -f "$HOME/.rustup/settings.toml" ]]; then
+    default_tc="$(sed -n 's/^default_toolchain *= *"\([^"]*\)".*/\1/p' "$HOME/.rustup/settings.toml" 2>/dev/null | head -n 1)"
+  fi
+  if [[ -n "$default_tc" && -d "$HOME/.rustup/toolchains/$default_tc" ]]; then
+    for tc_dir in "$HOME/.rustup/toolchains"/*; do
+      [[ -d "$tc_dir" && ! -L "$tc_dir" ]] || continue
+      tc_name="$(basename "$tc_dir")"
+      [[ "$tc_name" == "$default_tc" ]] && continue
+      clean_dir_contents "Rustup non-default toolchain ($tc_name)" "$tc_dir" false rebuildable
+      [[ "$DRY_RUN" == false ]] && rmdir "$tc_dir" 2>/dev/null || true
+    done
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 17. Idle Android SDK system-images / emulator / ndk
+# ---------------------------------------------------------------------------
+echo
+log "--- 17. Idle Android SDK system-images / emulator / ndk ---"
+if [[ -d "/opt/homebrew/share/android-commandlinetools" ]]; then
+  # shellcheck disable=SC2009
+  if ! ps aux | grep -E '(qemu-system|android.*emulator)' | grep -v grep >/dev/null 2>&1; then
+    for android_sub in /opt/homebrew/share/android-commandlinetools/system-images /opt/homebrew/share/android-commandlinetools/emulator /opt/homebrew/share/android-commandlinetools/ndk; do
+      [[ -d "$android_sub" && ! -L "$android_sub" ]] || continue
+      clean_dir_contents "Android SDK ($(basename "$android_sub"))" "$android_sub" false rebuildable
+    done
+  else
+    log "Android SDK: active emulator detected, skipping"
+  fi
 fi
 
 echo

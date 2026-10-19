@@ -27,7 +27,7 @@ CONFIG_FILE="$REPO_ROOT/config.json"
 
 # Default configuration
 DEFAULT_MIN_AGE_HOURS=48
-DEFAULT_PATTERNS=("pr[0-9]*" "pr-*" "pr_*" "pr9*" "claude-*" "claude_*")
+DEFAULT_PATTERNS=("pr[0-9]*" "pr-*" "pr_*" "pr9*" "claude-*" "claude_*" "advice*" "adv[0-9]*" "adv-*" "adv_*" "adv*" "frozen*" "*-full*")
 DEFAULT_PROTECTED_TMP_ROOTS=(worldarchitect.ai worldai_claw wa-missions)
 
 MIN_AGE_HOURS="${DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS:-}"

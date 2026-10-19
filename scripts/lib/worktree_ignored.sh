@@ -83,9 +83,9 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc),
-    # public CA bundles in venv/node_modules (certifi/cacert.pem), and test-results logs
-    # are rebuildable/generated, not user secrets.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|(^|/)(venv|\.venv|node_modules)/.*cacert\.pem$|(^|/)test-results/.*\.log$' <<<"$out" || true)"
+    # Rebuildable dependency trees (venv, node_modules), python bytecode,
+    # compiler intermediates (.o, .dia, .swiftdeps), public CA bundles, test logs,
+    # and non-secret template/example files (.env.example) are not user secrets.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|\.o$|\.dia$|\.swiftdeps$|\.swiftconstvalues$|\.example$|\.template$|\.sample$|\.test$|\.dist$|(^|/)(venv|\.venv|node_modules)/|(^|/)test-results/.*\.log$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }

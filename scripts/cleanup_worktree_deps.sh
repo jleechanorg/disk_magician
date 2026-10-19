@@ -28,11 +28,12 @@ source "$SCRIPT_DIR/lib/lsof_linux.sh"
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
 DRY_RUN=true
+INCLUDE_REPOS=false
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/.codex-worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/worktrees" "$HOME/mirror/projects")
+  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/.codex-worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other" "$HOME/Documents/Codex" "$HOME/worktrees" "$HOME/mirror/projects" "$HOME/agent-f" "$HOME/worldarchitect.ai.worktrees")
   for _wf in "$HOME"/wf_*; do
     [[ -d "$_wf" && ! -L "$_wf" ]] && ROOTS+=("$_wf")
   done
@@ -44,8 +45,9 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true; shift ;;
     --min-age|--days) MIN_AGE_DAYS="$2"; shift 2 ;;
     --roots) IFS=',' read -r -a ROOTS <<< "$2"; shift 2 ;;
+    --include-repos) INCLUDE_REPOS=true; shift ;;
     -h|--help)
-      echo "Usage: cleanup_worktree_deps.sh [--clean] [--dry-run] [--min-age N] [--roots A,B]"
+      echo "Usage: cleanup_worktree_deps.sh [--clean] [--dry-run] [--min-age N] [--roots A,B] [--include-repos]"
       echo "Strips node_modules, target (with Cargo.toml) and .mypy_cache from worktrees idle >= floor days."
       echo "Nested caches are stripped only beside the manifest that builds them (Cargo.toml / package.json)."
       exit 0 ;;
@@ -159,10 +161,13 @@ strip_dir() {
 }
 
 has_pkg_node_modules() {
-  local wt="$1" pkg_nm
+  local wt="$1" pkg_nm pkg_ios
   [[ ! -L "$wt/packages" ]] || return 1
   for pkg_nm in "$wt"/packages/*/node_modules; do
     [[ ! -L "${pkg_nm%/node_modules}" && -e "$pkg_nm" && -f "${pkg_nm%/node_modules}/package.json" ]] && return 0
+  done
+  for pkg_ios in "$wt"/packages/*/ios; do
+    [[ ! -L "${pkg_ios%/ios}" && ! -L "$pkg_ios" && -f "$pkg_ios/Podfile" && ( -d "$pkg_ios/Pods" || -d "$pkg_ios/build" ) ]] && return 0
   done
   return 1
 }
@@ -187,8 +192,9 @@ is_build_output_dir() {
 # symlinks and -type d rejects a symlinked leaf, so a linked parent is never
 # traversed. Matched dirs are pruned, never descended into.
 nested_cache_dirs() {
-  find "$1" \( -name .git -o -name venv -o -name .venv -o -name __pycache__ \
-    -o -name .pytest_cache -o -name .ruff_cache \) -prune -o \
+  find "$1" -maxdepth 4 \( -name .git -o -name venv -o -name .venv -o -name __pycache__ \
+    -o -name .pytest_cache -o -name .ruff_cache -o -name .mypy_cache -o -name Pods \
+    -o -name DerivedData -o -name .beads -o -name .husky -o -name .next \) -prune -o \
     -type d \( -name node_modules -o -name target \) -prune -print 2>/dev/null
 }
 
@@ -196,16 +202,24 @@ for root in "${ROOTS[@]}"; do
   while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
   [[ -d "$root" && ! -L "$root" ]] || continue
   real_root="$(cd "$root" 2>/dev/null && pwd -P)" || continue
-  for wt in "$root"/* "$root"/*/*; do
-    [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
+  for wt in "$root" "$root"/* "$root"/*/*; do
+    if [[ "$INCLUDE_REPOS" == true ]]; then
+      [[ ( -f "$wt/.git" || -d "$wt/.git" ) && ! -L "$wt" ]] || continue
+    else
+      [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
+    fi
     # Resolve only the configured root's aliases; no descendant may redirect us.
     real_wt="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
-    [[ "$real_wt" == "${real_root%/}/${wt#"$root"/}" ]] || continue
+    if [[ "$wt" == "$root" ]]; then
+      [[ "$real_wt" == "$real_root" ]] || continue
+    else
+      [[ "$real_wt" == "${real_root%/}/${wt#"$root"/}" ]] || continue
+    fi
     is_ao_owned "$wt" && continue
     # Nested build caches are only discoverable by walking; skip that walk when
     # root caches already make this worktree a candidate. Only nested caches can
     # make a worktree with no root caches a candidate at all.
-    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" || ( -f "$wt/ios/Podfile" && ( -d "$wt/ios/Pods" || -d "$wt/ios/build" ) ) ]] || has_pkg_node_modules "$wt"; then
+    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" || -e "$wt/.pytest_cache" || -e "$wt/.ruff_cache" || -e "$wt/.next" || -e "$wt/.ci-source-packages" || ( -f "$wt/ios/Podfile" && ( -d "$wt/ios/Pods" || -d "$wt/ios/build" ) ) ]] || has_pkg_node_modules "$wt"; then
       nested_dirs=""
     else
       nested_dirs="$(nested_cache_dirs "$wt")"
@@ -219,12 +233,22 @@ for root in "${ROOTS[@]}"; do
       # A real node_modules leaf may still escape through a symlinked ancestor.
       [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
     done
+    for pkg_ios in "$wt"/packages/*/ios; do
+      if [[ ! -L "$wt/packages" && ! -L "${pkg_ios%/ios}" && ! -L "$pkg_ios" && -f "$pkg_ios/Podfile" ]]; then
+        strip_dir "$wt" "$pkg_ios/Pods"
+        strip_dir "$wt" "$pkg_ios/build"
+      fi
+    done
     [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
+    [[ -f "$wt/package.json" ]] && strip_dir "$wt" "$wt/.next"
+    [[ -d "$wt/.ci-source-packages" ]] && strip_dir "$wt" "$wt/.ci-source-packages"
     if [[ ! -L "$wt/ios" && -f "$wt/ios/Podfile" ]]; then
       strip_dir "$wt" "$wt/ios/Pods"
       strip_dir "$wt" "$wt/ios/build"
     fi
     strip_dir "$wt" "$wt/.mypy_cache"
+    strip_dir "$wt" "$wt/.pytest_cache"
+    strip_dir "$wt" "$wt/.ruff_cache"
     while IFS= read -r nested; do
       [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
     done <<< "$nested_dirs"

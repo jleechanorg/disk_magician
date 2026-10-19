@@ -10,6 +10,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
 DELETE_SHUTDOWN_PR_SIMULATORS=false
+PRUNE_SUPERSEDED_RUNTIMES=false
 
 DERIVED_DATA="$HOME/Library/Developer/Xcode/DerivedData"
 SIM_TEMP="$HOME/Library/Developer/CoreSimulator/Temp"
@@ -17,30 +18,32 @@ SIM_CACHES="$HOME/Library/Developer/CoreSimulator/Caches"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--all-simulators] [--shutdown-pr-simulators] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--all-simulators] [--shutdown-pr-simulators] [--prune-superseded-runtimes] [-h|--help]
 
 Options:
-  --clean                    Actually clear rebuildable Xcode data.
-  --dry-run                  Preview cleanup without deleting.
-  --all-simulators           Also erase all simulator devices. Requires SIMULATORS_APPROVED=1 with --clean.
-  --shutdown-pr-simulators   Delete Shutdown custom/PR simulator clones (preserves Booted and stock Apple devices). Requires SIMULATORS_APPROVED=1 with --clean.
-  -h, --help                 Show this help.
+  --clean                       Actually clear rebuildable Xcode data.
+  --dry-run                     Preview cleanup without deleting.
+  --all-simulators              Also erase all simulator devices. Requires SIMULATORS_APPROVED=1 with --clean.
+  --shutdown-pr-simulators      Delete Shutdown custom/PR simulator clones (and idle >=2h Booted PR simulators with no active test runner). Requires SIMULATORS_APPROVED=1 with --clean.
+  --prune-superseded-runtimes   Delete older deletable Simulator runtimes when a newer Ready runtime for the same platform is installed and 0 devices use the older runtime. Requires SIMULATORS_APPROVED=1 with --clean.
+  -h, --help                    Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
-    --clean)                    DRY_RUN=false ;;
-    --dry-run)                  DRY_RUN=true ;;
-    --all-simulators)           DELETE_ALL_SIMULATORS=true ;;
-    --shutdown-pr-simulators)   DELETE_SHUTDOWN_PR_SIMULATORS=true ;;
-    -h|--help)                  usage; exit 0 ;;
+    --clean)                       DRY_RUN=false ;;
+    --dry-run)                     DRY_RUN=true ;;
+    --all-simulators)              DELETE_ALL_SIMULATORS=true ;;
+    --shutdown-pr-simulators)      DELETE_SHUTDOWN_PR_SIMULATORS=true ;;
+    --prune-superseded-runtimes)   PRUNE_SUPERSEDED_RUNTIMES=true ;;
+    -h|--help)                     usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
-if [[ "$DRY_RUN" != true && ( "$DELETE_ALL_SIMULATORS" == true || "$DELETE_SHUTDOWN_PR_SIMULATORS" == true ) && "${SIMULATORS_APPROVED:-0}" != "1" ]]; then
+if [[ "$DRY_RUN" != true && ( "$DELETE_ALL_SIMULATORS" == true || "$DELETE_SHUTDOWN_PR_SIMULATORS" == true || "$PRUNE_SUPERSEDED_RUNTIMES" == true ) && "${SIMULATORS_APPROVED:-0}" != "1" ]]; then
   echo "Refusing simulator deletion: set SIMULATORS_APPROVED=1 after reviewing dry-run output." >&2
   exit 0
 fi
@@ -91,7 +94,7 @@ clear_contents() {
 clean_custom_derived_data() {
   local cand
   local candidates=()
-  for cand in "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* /private/tmp/*_dd* /private/tmp/pr* /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* /private/tmp/worldai_claw/*/* /private/tmp/ipad*/*; do
+  for cand in "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* /private/tmp/*_dd* /private/tmp/dd_* /private/tmp/pr* /private/tmp/pr*/dd /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* /private/tmp/worldai_claw/*/* /private/tmp/ipad*/*; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
     local dup=false
     local c
@@ -170,42 +173,151 @@ clean_shutdown_pr_simulators() {
   sim_json="$(xcrun simctl list devices -j 2>/dev/null || true)"
   [[ -n "$sim_json" ]] || return 0
 
-  while IFS=$'\t' read -r udid name; do
+  while IFS=$'\t' read -r udid name state; do
     [[ -n "$udid" ]] || continue
     local dev_path="$devices_dir/$udid"
     local _safety_reason
     if [[ -d "$dev_path" ]] && ! _safety_reason="$(safety_gate "$dev_path" 2>/dev/null)"; then
-      log "Shutdown PR Simulators: SAFETY-SKIP $name ($udid) ($_safety_reason)"
+      log "PR Simulators: SAFETY-SKIP $name ($udid) ($_safety_reason)"
       continue
+    fi
+    if [[ "$state" == "Booted" ]]; then
+      # Only shut down Booted non-stock PR simulator if no active xcodebuild/simctl/idb test runner references it
+      # and its device plist / lastBootedAt is >= 2 hours old.
+      # shellcheck disable=SC2009
+      if ps aux | grep -E "(xcodebuild|simctl|xctest|maestro|detox).*($udid|$name)" | grep -v grep >/dev/null 2>&1; then
+        log "PR Simulators: active test runner referencing Booted $name ($udid), skipping"
+        continue
+      fi
     fi
     local before_kb=0
     [[ -d "$dev_path" ]] && before_kb=$(size_kb "$dev_path")
     if [[ "$DRY_RUN" == true ]]; then
-      log "Shutdown PR Simulators: [dry-run] would delete $name ($udid) ($(fmt_kb "$before_kb"))"
+      log "PR Simulators: [dry-run] would delete $name ($udid, state=$state) ($(fmt_kb "$before_kb"))"
     else
-      log "Shutdown PR Simulators: deleting $name ($udid) ($(fmt_kb "$before_kb"))"
+      if [[ "$state" == "Booted" ]]; then
+        log "PR Simulators: shutting down idle Booted PR simulator $name ($udid)"
+        xcrun simctl shutdown "$udid" 2>/dev/null || true
+      fi
+      log "PR Simulators: deleting $name ($udid) ($(fmt_kb "$before_kb"))"
       xcrun simctl delete "$udid" 2>/dev/null || true
       if declare -f deletion_log >/dev/null 2>&1; then
         deletion_log "cleanup_xcode.sh" "simctl-delete" "$before_kb" "$dev_path ($name)" 2>/dev/null || true
       fi
     fi
-  done < <(python3 -c '
-import json, re, sys
+  done < <(python3 - "$devices_dir" "$sim_json" <<'PY'
+import json, os, re, sys, time
+devices_dir = sys.argv[1]
 stock_re = re.compile(r"^(iPhone|iPad|iPod|Apple Watch|Apple TV|Apple Vision)\b")
+now = time.time()
 try:
-    d = json.loads(sys.stdin.read())
+    d = json.loads(sys.argv[2])
     for runtime, devs in (d.get("devices") or {}).items():
         for dev in devs:
-            if dev.get("state") != "Shutdown":
-                continue
+            state = dev.get("state") or ""
             name = (dev.get("name") or "").strip()
             udid = (dev.get("udid") or "").strip()
             if not udid or not name or stock_re.match(name):
                 continue
-            print(f"{udid}\t{name}")
+            if state == "Shutdown":
+                print(f"{udid}\t{name}\tShutdown")
+            elif state == "Booted":
+                plist_path = os.path.join(devices_dir, udid, "device.plist")
+                try:
+                    st = os.stat(plist_path)
+                    if now - st.st_mtime >= 7200:
+                        print(f"{udid}\t{name}\tBooted")
+                except Exception:
+                    pass
 except Exception:
     pass
-' <<<"$sim_json")
+PY
+  )
+
+  # If no simulators remain Booted, clean stale /private/tmp/idb* staging directories
+  local any_booted
+  any_booted="$(xcrun simctl list devices -j 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    booted = [dev.get("udid") for devs in (d.get("devices") or {}).values() for dev in devs if dev.get("state") == "Booted"]
+    print(len(booted))
+except Exception:
+    print(1)
+')"
+  if [[ "$any_booted" == "0" ]]; then
+    local idb_dir
+    for idb_dir in /private/tmp/idb /private/tmp/idb_*; do
+      [[ -d "$idb_dir" && ! -L "$idb_dir" ]] || continue
+      local idb_kb
+      idb_kb=$(size_kb "$idb_dir")
+      if [[ "$DRY_RUN" == true ]]; then
+        log "Simulator IDB staging: [dry-run] would remove $idb_dir ($(fmt_kb "$idb_kb"))"
+      else
+        log "Simulator IDB staging: removing $idb_dir ($(fmt_kb "$idb_kb"))"
+        c14_remove "$idb_dir" --kind rebuildable || true
+      fi
+    done
+  fi
+}
+
+clean_superseded_runtimes() {
+  local rt_json dev_json
+  rt_json="$(xcrun simctl runtime list -j 2>/dev/null || true)"
+  dev_json="$(xcrun simctl list devices -j 2>/dev/null || true)"
+  [[ -n "$rt_json" && -n "$dev_json" ]] || return 0
+
+  while IFS=$'\t' read -r rt_uuid rt_id version build size_bytes; do
+    [[ -n "$rt_uuid" ]] || continue
+    local size_kb_val=$(( size_bytes / 1024 ))
+    if [[ "$DRY_RUN" == true ]]; then
+      log "Superseded Simulator Runtimes: [dry-run] would delete $rt_id ($version / $build, uuid=$rt_uuid) ($(fmt_kb "$size_kb_val"))"
+    else
+      log "Superseded Simulator Runtimes: deleting $rt_id ($version / $build, uuid=$rt_uuid) ($(fmt_kb "$size_kb_val"))"
+      xcrun simctl runtime delete "$rt_uuid" 2>/dev/null || true
+      if declare -f deletion_log >/dev/null 2>&1; then
+        deletion_log "cleanup_xcode.sh" "simctl-runtime-delete" "$size_kb_val" "$rt_id ($rt_uuid)" 2>/dev/null || true
+      fi
+    fi
+  done < <(python3 - "$rt_json" "$dev_json" <<'PY'
+import json, sys
+
+def ver_tuple(v):
+    parts = []
+    for p in str(v or "").split("."):
+        try:
+            parts.append(int(p))
+        except Exception:
+            parts.append(0)
+    return tuple(parts)
+
+try:
+    rts = json.loads(sys.argv[1])
+    devs = json.loads(sys.argv[2]).get("devices") or {}
+    by_plat = {}
+    for uuid, info in (rts or {}).items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("state") != "Ready" or not info.get("deletable"):
+            continue
+        plat = info.get("platformIdentifier") or ""
+        if not plat:
+            continue
+        by_plat.setdefault(plat, []).append(info)
+    for plat, items in by_plat.items():
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda x: ver_tuple(x.get("version")), reverse=True)
+        # Keep the newest Ready runtime for each platform; prune older ones if 0 devices remain on them
+        for old in items[1:]:
+            rt_id = old.get("runtimeIdentifier") or ""
+            rt_devs = devs.get(rt_id) or []
+            if len(rt_devs) == 0:
+                print(f"{old.get('identifier')}\t{rt_id}\t{old.get('version')}\t{old.get('build')}\t{int(old.get('sizeBytes') or 0)}")
+except Exception:
+    pass
+PY
+  )
 }
 
 if command -v xcrun >/dev/null 2>&1; then
@@ -228,6 +340,9 @@ if command -v xcrun >/dev/null 2>&1; then
     fi
     if [[ "$DELETE_SHUTDOWN_PR_SIMULATORS" == true ]]; then
       clean_shutdown_pr_simulators
+    fi
+    if [[ "$PRUNE_SUPERSEDED_RUNTIMES" == true ]]; then
+      clean_superseded_runtimes
     fi
   fi
 else

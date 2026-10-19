@@ -154,6 +154,8 @@ EXEMPT_SITES = {
         "tool-owned reuse lock dir",
     ("worktree_lease.sh", "<toplevel>", "python-unlink"):
         "tool-owned lease temp (same-dir os.replace)",
+    ("worktree_lease.sh", "lease_prune_birth_audit_scratch", "python-unlink"):
+        "stale-lease birth-audit scratch GC; target already os.path.lexists and TTL checked",
     ("worktree_remove_hook.sh", "wrh_remove_now", "rm-file"):
         "tool-owned worktree lease record after a successful removal",
 }
