@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/worktree_repo_discovery.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_repo_discovery.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ao_worktree_config.sh"
@@ -301,45 +303,17 @@ list_has_child_of() {
     P="$1" awk 'length($0) && ($0 == ENVIRON["P"] || index($0, ENVIRON["P"] "/") == 1) {f=1; exit} END {exit !f}' <<<"$2"
 }
 
-# Machine-wide live process CWD snapshot (fail-closed): if lsof fails, or returns
-# an incomplete, unparseable, or unresolved observation (e.g. readlink/stat permission
-# errors in /proc), or if stderr cannot be captured via temp file, cwd is unknown
-# and live-process protection preserves candidates across all worktree roots.
+# Machine-wide live process CWD snapshot (fail-closed): the one strict parser in
+# scripts/lib/lsof_linux.sh decides whether the observation is complete. Any
+# failure (a missing lsof, an incomplete/unparseable scan, a live uninspectable
+# pid, or zero resolved cwds) leaves cwd unknown, which preserves candidates
+# across all worktree roots.
 GLOBAL_LIVE_CWDS=""
 GLOBAL_CWD_BLOCKED=""
-_lsof_bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
-if [[ ! -x "$_lsof_bin" ]]; then
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
+if lsof_snapshot_cwds; then
+    GLOBAL_LIVE_CWDS="$LSOF_CWDS"
 else
-    _lsof_tmp="$(mktemp -t lsof_err.XXXXXX 2>/dev/null || echo "")"
-    if [[ -z "$_lsof_tmp" || ! -f "$_lsof_tmp" ]]; then
-        GLOBAL_CWD_BLOCKED="cwd-unknown"
-    else
-        _lsof_rc=0
-        _lsof_out="$("$_lsof_bin" -d cwd -Fn 2>"$_lsof_tmp")" || _lsof_rc=$?
-        if ! _lsof_err="$(cat "$_lsof_tmp" 2>/dev/null)"; then
-            rm -f "$_lsof_tmp"
-            GLOBAL_CWD_BLOCKED="cwd-unknown"
-        else
-            rm -f "$_lsof_tmp"
-            if [[ "$_lsof_rc" -ne 0 ]]; then
-                GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif [[ -n "$_lsof_err" ]] && grep -qiE 'warning|permission denied|cannot|error' <<<"$_lsof_err"; then
-                GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif [[ -z "$_lsof_out" ]]; then
-                GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif grep -qiE '\(readlink:|\(stat:|\(lstat:|permission denied|/proc/[0-9]+/cwd' <<<"$_lsof_out"; then
-                GLOBAL_CWD_BLOCKED="cwd-unknown"
-            elif grep -qE '^n[^/]' <<<"$_lsof_out"; then
-                GLOBAL_CWD_BLOCKED="cwd-unknown"
-            else
-                GLOBAL_LIVE_CWDS="$(sed -n 's/^n\(\/.*\)$/\1/p' <<<"$_lsof_out")"
-                if [[ -z "$GLOBAL_LIVE_CWDS" ]]; then
-                    GLOBAL_CWD_BLOCKED="cwd-unknown"
-                fi
-            fi
-        fi
-    fi
+    GLOBAL_CWD_BLOCKED="cwd-unknown"
 fi
 
 classify_repo_local_worktree() {

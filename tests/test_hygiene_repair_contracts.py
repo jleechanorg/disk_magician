@@ -16,6 +16,21 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _complete_lsof_env():
+    """Return a PATH whose `lsof` reports one complete, resolved cwd observation.
+
+    The live-cwd gate is block-always: on a host where unprivileged lsof cannot
+    read every live cwd (sshd, sd-pam, setuid sandboxes) the gate refuses, which
+    is correct but makes these contracts depend on the host. They are about
+    preservation logic, so they inject a complete observation instead.
+    """
+    d = Path(tempfile.mkdtemp(prefix="dm-fakelsof-"))
+    p = d / "lsof"
+    p.write_text('#!/bin/sh\nprintf "p1\\nn/\\n"\n')
+    p.chmod(0o755)
+    return str(d) + os.pathsep + os.environ.get("PATH", "")
+
+
 class RepairContracts(unittest.TestCase):
     def test_combined_warning_and_invalid_coverage_do_not_publish(self):
         source = (ROOT / "scripts/disk_snapshot.sh").read_text()
@@ -130,6 +145,7 @@ class RepairContracts(unittest.TestCase):
             )
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -202,6 +218,7 @@ class RepairContracts(unittest.TestCase):
             os.utime(wt / "file", (old, old))
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(home),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
                 "PYTHONPATH": str(ROOT / "src"),
@@ -287,6 +304,7 @@ class RepairContracts(unittest.TestCase):
             os.utime(wt / "file", (old, old))
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -350,6 +368,7 @@ class RepairContracts(unittest.TestCase):
             )
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -432,6 +451,7 @@ class RepairContracts(unittest.TestCase):
                 hook.chmod(0o755)
                 env = {
                     **os.environ,
+                "PATH": _complete_lsof_env(),
                     "HOME": str(root),
                     "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
                     "FIXTURE_WT": str(wt),
@@ -506,6 +526,7 @@ class RepairContracts(unittest.TestCase):
             scanner.chmod(0o755)
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "PATH": str(fakebin) + ":" + os.environ["PATH"],
                 "FIXTURE_REPO": str(repo),
@@ -547,6 +568,7 @@ class RepairContracts(unittest.TestCase):
             state.write_text("owned regular file blocks a state directory")
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(state),
             }
@@ -677,6 +699,7 @@ class RepairContracts(unittest.TestCase):
             state.write_text("owned regular file")
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(state),
             }
@@ -716,6 +739,7 @@ class RepairContracts(unittest.TestCase):
             root = Path(tmp).resolve()
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -749,6 +773,7 @@ class RepairContracts(unittest.TestCase):
             script = 'source "$1"; discover_worktree_repos(){ echo "$2"; }; identify_candidates(){ kill -TERM "$$"; sleep 1; }; main --repos "$2" --skip-push --skip-gh'
             env = {
                 **os.environ,
+                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }

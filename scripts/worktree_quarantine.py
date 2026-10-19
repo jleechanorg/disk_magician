@@ -299,8 +299,11 @@ def phase1(main, worktree, inventory_file, deadline=None):
                     return "quarantined:" + qid
                 except qr.DeadlineExceeded:
                     return rollback(pfd, qfd, qid, record, reason="deferred:deadline")
-                except Exception:
-                    return rollback(pfd, qfd, qid, record)
+                except Exception as e:
+                    # Was defaulting to rollback(..., reason="admin-changed"),
+                    # which mislabelled an exclusive-rename LookupError on Linux
+                    # as an admin-inventory change. Name the real failure.
+                    return rollback(pfd, qfd, qid, record, reason="quarantine-error:%s" % type(e).__name__)
             finally:
                 os.close(qfd)
         finally:

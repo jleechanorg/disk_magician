@@ -223,7 +223,7 @@ OUT4_CONTENT=$(cat "$OUT4")
 if [[ "$RC4" -eq 0 ]]; then record_pass "held-lock run exits 0 (skip, not error)"; else record_fail "held-lock run exits 0 (skip, not error)" "rc=$RC4"; fi
 assert_contains "held-lock run logs skip message" "skipped, lock held" "$OUT4_CONTENT"
 assert_not_contains "held-lock run does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT4_CONTENT"
-rm -rf "$STATE_DIR/cleanup_worktree_venvs.lock"
+rm -rf "${STATE_DIR:?}/cleanup_worktree_venvs.lock"
 
 echo
 echo "=== Test 5 (w7m): lock is released after a normal run, so a second run proceeds ==="

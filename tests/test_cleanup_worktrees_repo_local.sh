@@ -273,6 +273,7 @@ sleep 0.5
 
 run_std() {  # run_std <out_file> <PATH> — no --repos: exercises discovery
   env -i HOME="$STD_HOME" PATH="$2" HERMES_SKIP_EXAMPLE_COM_GUARD=1 \
+    ${DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT:+DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=$DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT} \
     DISK_MAGICIAN_AO_CONFIG="$AO_CFG" \
     bash "$CLEANUP_SCRIPT" --dry-run >"$1" 2>&1
 }
@@ -345,11 +346,14 @@ assert_contains "lsof warning on stderr preserved" ".worktrees/r/old | cwd-unkno
 assert_not_contains "lsof warning: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_WARNING" || true)"
 
 # Regression: Zero-status lsof with large output (>64KB pipe buffer) and unresolved record near start
+# The unresolved record names this test's own live pid so it stays unresolvable
+# on Linux too (an exited or other-uid pid is legitimately ignorable there).
+export FAKE_OWN_PID=$$
 cat > "$FAKE_BIN/lsof" <<'SH'
 #!/bin/sh
-echo "p999"
+echo "p$FAKE_OWN_PID"
 echo "fcwd"
-echo "n/proc/999/cwd (readlink: Permission denied)"
+echo "n/proc/$FAKE_OWN_PID/cwd (readlink: Permission denied)"
 for i in $(seq 1 1000); do
   echo "p$i"
   echo "fcwd"
@@ -358,7 +362,7 @@ done
 exit 0
 SH
 chmod +x "$FAKE_BIN/lsof"
-run_std "$TMP_ROOT/std-pipebuf.out" "$FAKE_BIN:/usr/bin:/bin"
+DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 run_std "$TMP_ROOT/std-pipebuf.out" "$FAKE_BIN:/usr/bin:/bin"
 STD_PIPEBUF=$(cat "$TMP_ROOT/std-pipebuf.out")
 assert_contains "lsof large output pipe buffer preserved" ".worktrees/r/old | cwd-unknown" "$STD_PIPEBUF"
 assert_not_contains "lsof large output: nothing in std root eligible" "ELIGIBLE  " "$(grep -F "/.worktrees/" <<<"$STD_PIPEBUF" || true)"
@@ -518,6 +522,7 @@ age_worktree_days_ago "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 30
 WT_F_REAL="$(cd "$SQUASH_REPO/.claude/worktrees/wt-squash-f" 2>/dev/null && pwd -P || printf '%s' "$SQUASH_REPO/.claude/worktrees/wt-squash-f")"
 cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
+echo "p1"
 echo "n$WT_F_REAL"
 SH
 chmod +x "$FAKE_BIN/lsof"

@@ -97,7 +97,9 @@ try: os.utime(root, (old, old))
 except OSError: pass
 AGEWT2
 }
-run_hook() { printf '%s' "$1" | bash "$SCRIPT" >/dev/null 2>&1; }
+run_hook() { printf '%s' "$1" | DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1; }
+# Same, but with the operator opt-in absent: unreadable live cwds must block.
+run_hook_strict() { printf '%s' "$1" | env -u DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED bash "$SCRIPT" >/dev/null 2>&1; }
 json() { python3 -c 'import json,sys; print(json.dumps({"worktree_path": sys.argv[1]}))' "$1"; }
 branch_exists() { git -C "$REPO" show-ref -q --verify "refs/heads/$1"; }
 log_lines() { [[ -f "$LOG" ]] && wc -l <"$LOG" | tr -d ' ' || echo 0; }
@@ -535,6 +537,52 @@ run_hook "$(json "$WTROOT/malformed-fcwd")"; rc=$?
 [[ -d "$WTROOT/malformed-fcwd" ]] && ok "descriptor before pid worktree kept" || bad "descriptor before pid worktree removed"
 tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "descriptor before pid unknown reason logged" || bad "descriptor before pid unknown reason missing"
 
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+echo "== case 36b: Linux lsof mount-stat warnings alone do not make cwd unknown =="
+add_wt linux-mount-warn worktree-linux-mount-warn
+printf 'p100\nfcwd\nn/\np200\nfcwd\nn/tmp\n' >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can\'t stat() tmpfs file system /run/snapd/ns\n      Output information may be incomplete.'
+run_hook "$(json "$WTROOT/linux-mount-warn")"; rc=$?
+assert_eq "$rc" "0" "linux mount-warning exit code"
+[[ ! -e "$WTROOT/linux-mount-warn" ]] && ok "linux mount-warning worktree removed" || bad "linux mount-warning worktree kept"
+tail -n 2 "$LOG" | grep -q "cwd-unknown" && bad "linux mount-warning logged cwd-unknown" || ok "linux mount-warning did not log cwd-unknown"
+
+echo "== case 36c: a mount-stat warning plus any other warning still fails closed =="
+add_wt linux-mixed-warn worktree-linux-mixed-warn
+printf 'p100\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+export FAKE_LSOF_STDERR=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can\'t open /proc/4242/fd: Permission denied'
+run_hook "$(json "$WTROOT/linux-mixed-warn")"; rc=$?
+[[ -d "$WTROOT/linux-mixed-warn" ]] && ok "mixed-warning worktree kept" || bad "mixed-warning worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "mixed-warning visibility remains unknown" || bad "mixed-warning visibility was trusted"
+unset FAKE_LSOF_STDERR
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+
+if [[ -d /proc/self ]]; then
+echo "== case 36d: an unreadable live cwd always blocks (no waiver) =="
+add_wt own-hidden worktree-own-hidden
+printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
+run_hook_strict "$(json "$WTROOT/own-hidden")"; rc=$?
+[[ -d "$WTROOT/own-hidden" ]] && ok "unreadable live cwd worktree kept" || bad "unreadable live cwd worktree removed"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unreadable live cwd is cwd-unknown" || bad "unreadable live cwd was trusted"
+DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 run_hook_strict "$(json "$WTROOT/own-hidden")"; rc=$?
+[[ -d "$WTROOT/own-hidden" ]] && ok "an approval flag cannot clear an unreadable live cwd" || bad "approval flag cleared an unreadable live cwd"
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+fi
+
+echo "== case 36e: an unreadable stderr capture is cwd-unknown, not empty =="
+add_wt err-unreadable worktree-err-unreadable
+printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
+cat > "$MOCK_BIN/cat" <<'SH'
+#!/bin/sh
+case "$*" in *disk-magician-worktree-remove*) exit 1 ;; esac
+exec /bin/cat "$@"
+SH
+chmod +x "$MOCK_BIN/cat"
+run_hook_strict "$(json "$WTROOT/err-unreadable")"; rc=$?
+[[ -d "$WTROOT/err-unreadable" ]] && ok "unreadable stderr keeps the worktree" || bad "unreadable stderr allowed removal"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "unreadable stderr is cwd-unknown" || bad "unreadable stderr was trusted"
+rm -f "$MOCK_BIN/cat"
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 echo "== case 37: extracted wrh_removal_verdict (plan Task 3) =="
