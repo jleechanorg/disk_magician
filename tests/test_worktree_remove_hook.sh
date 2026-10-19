@@ -97,7 +97,9 @@ try: os.utime(root, (old, old))
 except OSError: pass
 AGEWT2
 }
-run_hook() { printf '%s' "$1" | bash "$SCRIPT" >/dev/null 2>&1; }
+run_hook() { printf '%s' "$1" | DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1; }
+# Same, but with the operator opt-in absent: unreadable live cwds must block.
+run_hook_strict() { printf '%s' "$1" | env -u DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED bash "$SCRIPT" >/dev/null 2>&1; }
 json() { python3 -c 'import json,sys; print(json.dumps({"worktree_path": sys.argv[1]}))' "$1"; }
 branch_exists() { git -C "$REPO" show-ref -q --verify "refs/heads/$1"; }
 log_lines() { [[ -f "$LOG" ]] && wc -l <"$LOG" | tr -d ' ' || echo 0; }
@@ -557,16 +559,14 @@ unset FAKE_LSOF_STDERR
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 
 if [[ -d /proc/self ]]; then
-echo "== case 36d: own hidden cwd is not evidence; strict opt-in still blocks =="
+echo "== case 36d: own hidden cwd blocks unless the operator approves =="
 add_wt own-hidden worktree-own-hidden
 printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
+run_hook_strict "$(json "$WTROOT/own-hidden")"; rc=$?
+[[ -d "$WTROOT/own-hidden" ]] && ok "own hidden cwd worktree kept without approval" || bad "own hidden cwd removed without approval"
+tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "own hidden cwd is cwd-unknown" || bad "own hidden cwd was trusted without approval"
 run_hook "$(json "$WTROOT/own-hidden")"; rc=$?
-[[ ! -e "$WTROOT/own-hidden" ]] && ok "own hidden cwd does not block removal" || bad "own hidden cwd blocked removal"
-add_wt own-hidden-strict worktree-own-hidden-strict
-printf 'p%s\nfcwd\nn/proc/%s/cwd (readlink: Permission denied)\np1\nfcwd\nn/\n' "$$" "$$" >"$FAKE_LSOF_FIXTURE"
-DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 run_hook "$(json "$WTROOT/own-hidden-strict")"; rc=$?
-[[ -d "$WTROOT/own-hidden-strict" ]] && ok "strict opt-in keeps own hidden cwd worktree" || bad "strict opt-in removed own hidden cwd worktree"
-tail -n 1 "$LOG" | grep -q "cwd-unknown" && ok "strict opt-in reports cwd-unknown" || bad "strict opt-in reason missing"
+[[ ! -e "$WTROOT/own-hidden" ]] && ok "approval clears own hidden cwd" || bad "approval did not clear own hidden cwd"
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
 fi
 

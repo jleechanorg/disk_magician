@@ -37,11 +37,11 @@ eq "stat diagnostic unknown" "$(lsof_cwd_value_verdict '/mnt/x (stat: Permission
 eq "lstat diagnostic unknown" "$(lsof_cwd_value_verdict '/mnt/x (lstat: Permission denied)')" unknown
 eq "other readlink diagnostic unknown" "$(lsof_cwd_value_verdict '/proc/7/cwd (readlink: Operation not permitted)')" unknown
 if [[ -d /proc/self ]]; then
-  eq "foreign denied pid ignorable" "$(lsof_cwd_value_verdict '/proc/1/cwd (readlink: Permission denied)' 2>/dev/null)" ignorable
+  eq "foreign denied pid unknown by default" "$(lsof_cwd_value_verdict '/proc/1/cwd (readlink: Permission denied)' 2>/dev/null)" unknown
   sleep 30 & own_pid=$!
-  eq "own unreadable pid ignorable by default" "$(lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" ignorable
-  eq "strict opt-in keeps own unreadable pid unknown" \
-     "$(DISK_MAGICIAN_UNSCANNABLE_CWD_STRICT=1 lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" unknown
+  eq "own unreadable pid unknown by default" "$(lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" unknown
+  eq "approved unreadable pid ignorable" \
+     "$(DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 lsof_cwd_value_verdict "/proc/$own_pid/cwd (readlink: Permission denied)" 2>/dev/null)" ignorable
   kill "$own_pid" 2>/dev/null
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   eq "exited pid ignorable" "$(lsof_cwd_value_verdict "/proc/$dead/cwd (readlink: Permission denied)" 2>/dev/null)" ignorable
@@ -68,7 +68,7 @@ if [[ -d /proc/self ]]; then
   lsof_collect_cwds $'p1\nfcwd\nn/proc/'"$dead"'/cwd (readlink: Permission denied)' "" 0 \
     && bad "only-exited-denied accepted" || ok "only-exited-denied rejected: $LSOF_CWD_REASON"
   lsof_collect_cwds $'p1\nfcwd\nn/proc/1/cwd (readlink: Permission denied)' "" 0 \
-    && bad "denied-only scan accepted as complete" || ok "denied-only scan rejected (no resolved cwd): $LSOF_CWD_REASON"
+    && bad "denied-only scan accepted as complete" || ok "denied-only scan rejected: $LSOF_CWD_REASON"
 fi
 
 echo "== cwd_list_has_path =="

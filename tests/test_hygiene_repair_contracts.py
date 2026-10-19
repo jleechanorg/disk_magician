@@ -130,6 +130,7 @@ class RepairContracts(unittest.TestCase):
             )
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -202,6 +203,7 @@ class RepairContracts(unittest.TestCase):
             os.utime(wt / "file", (old, old))
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(home),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
                 "PYTHONPATH": str(ROOT / "src"),
@@ -287,6 +289,7 @@ class RepairContracts(unittest.TestCase):
             os.utime(wt / "file", (old, old))
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -350,6 +353,7 @@ class RepairContracts(unittest.TestCase):
             )
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -432,6 +436,7 @@ class RepairContracts(unittest.TestCase):
                 hook.chmod(0o755)
                 env = {
                     **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                     "HOME": str(root),
                     "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
                     "FIXTURE_WT": str(wt),
@@ -506,6 +511,7 @@ class RepairContracts(unittest.TestCase):
             scanner.chmod(0o755)
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "PATH": str(fakebin) + ":" + os.environ["PATH"],
                 "FIXTURE_REPO": str(repo),
@@ -547,6 +553,7 @@ class RepairContracts(unittest.TestCase):
             state.write_text("owned regular file blocks a state directory")
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(state),
             }
@@ -677,6 +684,7 @@ class RepairContracts(unittest.TestCase):
             state.write_text("owned regular file")
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(state),
             }
@@ -716,6 +724,7 @@ class RepairContracts(unittest.TestCase):
             root = Path(tmp).resolve()
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
@@ -749,6 +758,7 @@ class RepairContracts(unittest.TestCase):
             script = 'source "$1"; discover_worktree_repos(){ echo "$2"; }; identify_candidates(){ kill -TERM "$$"; sleep 1; }; main --repos "$2" --skip-push --skip-gh'
             env = {
                 **os.environ,
+                "DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED": "1",
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
             }
