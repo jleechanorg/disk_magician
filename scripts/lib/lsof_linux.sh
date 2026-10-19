@@ -12,7 +12,7 @@
 # warning or its "Output information may be incomplete." trailer.
 lsof_stderr_incomplete() {
   [[ -n "$1" ]] || return 1
-  grep -qvE "^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$" <<<"$1"
+  grep -qvE "^lsof: WARNING: can't stat\(\) [^ ]+ file system |^ +Output information may be incomplete\.$|^lsof: no pwd entry for UID [0-9]+$" <<<"$1"
 }
 
 # lsof_drop_foreign_denied: filter `-Fn` records on stdin, dropping hidden-cwd
