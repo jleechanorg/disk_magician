@@ -404,7 +404,10 @@ fi
 # that no registered cleanup sweeper owns — see config/sweeper_roots.txt.
 if [[ -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
     section "Uncovered Sweeper Roots (>=5 GiB, no registered cleanup owner)"
-    "$SCRIPT_DIR/check_uncovered_roots.sh" || true
+    # Opt-in: DISK_MAGICIAN_AUTO_REGISTER=1 registers safe-class roots.
+    uncovered_args=()
+    [[ "${DISK_MAGICIAN_AUTO_REGISTER:-}" == 1 ]] && uncovered_args+=(--register)
+    "$SCRIPT_DIR/check_uncovered_roots.sh" ${uncovered_args[@]+"${uncovered_args[@]}"} || true
 fi
 
 # ── 3c. Worktree/evidence layout (spec 2026-10-05 D5, report only) ──────────

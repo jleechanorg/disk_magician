@@ -42,6 +42,7 @@ import fnmatch
 import glob
 import json
 import os
+import datetime
 import subprocess
 import sys
 
@@ -410,6 +411,72 @@ def find_uncovered(node, roots, threshold_kb, rules, home, direct_kb,
     return uncovered_out, protected_out, needs_decision_out
 
 
+# Safe classes for --register: deterministic path invariants for rebuildable
+# caches and temp/scratch. fnmatch patterns over the path with $HOME folded
+# back to the literal token; '*' also spans '/'. Anything else is review-only.
+SAFE_CLASSES = (
+    ("rebuildable-cache", ("$HOME/.cache", "$HOME/.cache/*", "$HOME/Library/Caches/*",
+                           "*/DerivedData", "*/DerivedData/*",
+                           "*/node_modules/.cache", "*/node_modules/.cache/*",
+                           "*/.next/cache", "*/.next/cache/*",
+                           "$HOME/Library/pnpm/store*", "$HOME/.local/share/pnpm/store*",
+                           "$HOME/Library/Application Support/Cursor/CachedData*",
+                           "$HOME/Library/Application Support/Cursor/Cache*",
+                           "$HOME/Library/Application Support/Antigravity/CachedData*",
+                           "$HOME/Library/Application Support/Antigravity/Cache*")),
+    ("temp-scratch", ("/private/tmp/*", "/tmp/*", "$DARWIN_USER_TEMP_DIR/*")),
+)
+REGISTER_OWNER = "auto-register:check_uncovered_roots.py"
+
+
+def classify_safe(path, home, darwin_tmp):
+    """(safe class name or None, path with $HOME/$DARWIN_USER_TEMP_DIR folded)."""
+    folded = path
+    if folded == home or folded.startswith(home + "/"):
+        folded = "$HOME" + folded[len(home):]
+    elif darwin_tmp and folded.startswith(darwin_tmp + "/"):
+        folded = "$DARWIN_USER_TEMP_DIR" + folded[len(darwin_tmp):]
+    for name, patterns in SAFE_CLASSES:
+        if any(fnmatch.fnmatchcase(folded, pat) for pat in patterns):
+            return name, folded
+    return None, folded
+
+
+def register_uncovered(uncovered, registry_path, review_path, rules, home, darwin_tmp, source):
+    """Append safe-class uncovered roots to the registry (idempotent) and write
+    every other uncovered root to the review file. Returns (added, review)."""
+    try:
+        with open(registry_path) as f:
+            existing = f.read()
+    except OSError:
+        existing = ""
+    have = {line.split("\t", 1)[0] for line in existing.splitlines()
+            if line and not line.startswith("#")}
+    today = datetime.date.today().isoformat()
+    added, review, lines = [], [], []
+    for e in uncovered:
+        direct, descendant = classify_path_protection(e["path"], rules, home)
+        cls, folded = classify_safe(e["path"], home, darwin_tmp)
+        if direct or descendant or cls is None:
+            review.append({"path": e["path"], "size_gib": e["size_gib"],
+                           "reason": "protected" if direct or descendant else "not a safe class"})
+        elif folded not in have:
+            have.add(folded)
+            added.append(e["path"])
+            lines.append(f"# auto-registered {today}, {e['size_gib']} GiB, source: {source}\n"
+                         f"{folded}\t{REGISTER_OWNER}\t{cls}; size {e['size_gib']} GiB\n")
+    if lines:
+        with open(registry_path, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("".join(lines))
+    os.makedirs(os.path.dirname(os.path.abspath(review_path)), exist_ok=True)
+    review.sort(key=lambda r: r["path"])
+    with open(review_path, "w") as f:
+        json.dump({"review": review}, f, indent=2, sort_keys=True)
+    return added, review
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default_state_dir = os.path.expanduser(
@@ -437,6 +504,11 @@ def main(argv=None):
     parser.add_argument("--threshold-gib", type=float, default=DEFAULT_THRESHOLD_GIB)
     parser.add_argument("--max-age-hours", type=float, default=DEFAULT_MAX_AGE_HOURS)
     parser.add_argument("--json", action="store_true", help="Machine-readable output.")
+    parser.add_argument("--register", action="store_true",
+                        help="Append safe-class uncovered roots to the registry; "
+                             "route the rest to --review-file. Default: report only.")
+    parser.add_argument("--review-file", default=os.path.join(default_state_dir, "uncovered_review.json"),
+                        help="Review list written by --register (never inside the repo).")
     args = parser.parse_args(argv)
 
     threshold_kb = args.threshold_gib * GIB_KB
@@ -469,6 +541,12 @@ def main(argv=None):
     uncovered.sort(key=lambda e: e["size_kb"], reverse=True)
     protected.sort(key=lambda e: e["size_kb"], reverse=True)
     needs_decision.sort(key=lambda e: e["size_kb"], reverse=True)
+
+    if args.register:
+        added, review = register_uncovered(
+            uncovered, args.registry, args.review_file, rules, home, darwin_tmp, source)
+        print(f"check_uncovered_roots: registered {len(added)} root(s); "
+              f"{len(review)} routed to {args.review_file}", file=sys.stderr)
 
     if args.json:
         print(json.dumps(

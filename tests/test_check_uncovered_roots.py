@@ -557,5 +557,83 @@ class TestCheckUncoveredRoots(unittest.TestCase):
 
 
 
+class TestRegisterMode(unittest.TestCase):
+    """--register appends safe-class uncovered roots to the registry and
+    routes everything else to a review file; default stays report-only."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dm_register_")
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.snapshot = os.path.join(self.tmp, "frontier_last.json")
+        self.registry = os.path.join(self.tmp, "sweeper_roots.txt")
+        self.review = os.path.join(self.tmp, "uncovered_review.json")
+        self.cache = os.path.join(self.home, ".cache", "bigcache")
+        self.other = os.path.join(self.home, "mystery_data")
+        write_json(self.snapshot, {"granularity_buckets": [
+            {"path": self.cache, "measured_kb": 6 * GIB_KB},
+            {"path": self.other, "measured_kb": 7 * GIB_KB},
+        ]})
+        with open(self.registry, "w") as f:
+            f.write("$HOME/.cache/uv\tcleanup_dev_caches.sh\tline 117\n")
+        self.extra_rules = None
+
+    def _run(self, register):
+        args = ["--snapshot", self.snapshot, "--discover", os.path.join(self.tmp, "none.json"),
+                "--registry", self.registry, "--home", self.home, "--darwin-tmp", "",
+                "--review-file", self.review, "--json"]
+        if register:
+            args.append("--register")
+        proc = run(args)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def _rows(self):
+        with open(self.registry) as f:
+            return [l for l in f.read().splitlines() if l and not l.startswith("#")]
+
+    def test_default_is_report_only_writes_nothing(self):
+        before = open(self.registry).read()
+        self._run(register=False)
+        self.assertEqual(open(self.registry).read(), before)
+        self.assertFalse(os.path.exists(self.review))
+
+    def test_register_appends_safe_class_row_with_comment(self):
+        self._run(register=True)
+        text = open(self.registry).read()
+        self.assertIn("$HOME/.cache/bigcache\tauto-register:check_uncovered_roots.py\t", text)
+        self.assertIn("# auto-registered ", text)
+        self.assertIn("6.0 GiB", text)
+
+    def test_non_safe_goes_to_review_file_only(self):
+        self._run(register=True)
+        self.assertNotIn("mystery_data", open(self.registry).read())
+        review = json.load(open(self.review))
+        self.assertIn(self.other, [e["path"] for e in review["review"]])
+        self.assertNotIn(self.cache, [e["path"] for e in review["review"]])
+
+    def test_protected_path_never_appended(self):
+        os.makedirs(os.path.join(self.home, ".config", "disk-magician"))
+        write_json(os.path.join(self.home, ".config", "disk-magician", "safety.local.json"),
+                   {"never_delete": [{"path": "~/.cache/bigcache", "reason": "fixture"}]})
+        self._run(register=True)
+        self.assertNotIn("bigcache", open(self.registry).read())
+
+    def test_second_run_is_idempotent(self):
+        self._run(register=True)
+        first_text = open(self.registry).read()
+        first_review = open(self.review).read()
+        self._run(register=True)
+        self.assertEqual(open(self.registry).read(), first_text)
+        self.assertEqual(open(self.review).read(), first_review)
+        self.assertEqual(sum("bigcache" in r for r in self._rows()), 1)
+
+    def test_tmp_scratch_class_registered(self):
+        write_json(self.snapshot, {"granularity_buckets": [
+            {"path": "/private/tmp/agent_scratch_xyz", "measured_kb": 6 * GIB_KB}]})
+        self._run(register=True)
+        self.assertIn("/private/tmp/agent_scratch_xyz\tauto-register", open(self.registry).read())
+
+
 if __name__ == "__main__":
     unittest.main()
