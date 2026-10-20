@@ -578,12 +578,20 @@ is_protected_tmp_path() {
   return 1
 }
 
-# has_recent_activity <dir> <hours> — true if any file/dir under <dir> has an
-# mtime within the last <hours>. Fails CLOSED: any error reading the tree
-# (permission denied, vanished path, etc.) is treated as "active" so the
-# caller skips deletion rather than risking a false-negative on a directory
-# it can't actually inspect. Uses /usr/bin/find explicitly — some shells in
-# this fleet alias `find` to an incompatible wrapper that rejects -mmin.
+# has_recent_activity <dir> <hours> — true if any entry UNDER <dir> (never
+# <dir> itself) has an mtime within the last <hours>. Fails CLOSED: any error
+# reading the tree (permission denied, vanished path, etc.) is treated as
+# "active" so the caller skips deletion rather than risking a false-negative on
+# a directory it can't actually inspect. Uses /usr/bin/find explicitly — some
+# shells in this fleet alias `find` to an incompatible wrapper that rejects
+# -mmin.
+#
+# -mindepth 1 is load-bearing (bead disk_magician-7871): without it the probe's
+# first hit is frequently <dir> itself, whose mtime moves on any child
+# create/delete/rename even when no content changed. That made touched-but-stale
+# trees permanently "active": /private/tmp/worldai_frontend sat at 20+ GiB with
+# 8.7h-old content and a fresh dir mtime, so every pass skipped it and /tmp
+# doubled while the sweeper correctly reported "Dirs removed: 0".
 has_recent_activity() {
   local dir="$1" hours="$2" mins hit_file rc=0
   mins=$(( hours * 60 ))
@@ -591,10 +599,10 @@ has_recent_activity() {
   local tbin
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mindepth 1 -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
   else
     warn_unbounded_probes_once
-    /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+    /usr/bin/find "$dir" -mindepth 1 -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
   fi
   if (( rc != 0 )); then
     rm -f "$hit_file"
@@ -1469,17 +1477,22 @@ large_consider_entry() {
     return 0
   fi
 
+  # A declared scratch container is NEVER judged (or archived) as a unit: it is
+  # a long-lived parent of per-task dirs, so every immediate child is evaluated
+  # on its own (one level only). This must not depend on the container's own
+  # mtime: with the -mindepth 1 recency probe (bead disk_magician-7871) a
+  # container whose children are all stale no longer looks "recent", and
+  # falling through would archive the container wholesale -- bypassing the
+  # per-child C14 verdicts that tests/test_cleanup_tmp_container_descend.sh
+  # t20a pins. Descend unconditionally, then let each child decide.
+  if [[ "$scratch_container" == true ]]; then
+    log "Descending into scratch container (children evaluated individually): $d"
+    while IFS= read -r -d '' child; do
+      large_consider_entry "$child" 1
+    done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+    return 0
+  fi
   if [[ "$descend_for_child_safety" == true ]] || has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-    # Long-lived agent container (non-git dir of per-task dirs): its newest
-    # mtime is refreshed by whichever child is live, so judge each immediate
-    # child on its own. One level only; the container is never removed here.
-    if [[ "$scratch_container" == true ]]; then
-      log "Descending into active container (children evaluated individually): $d"
-      while IFS= read -r -d '' child; do
-        large_consider_entry "$child" 1
-      done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-      return 0
-    fi
     log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
     return 0
   fi

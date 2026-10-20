@@ -68,6 +68,15 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local name="$1" needle="$2" haystack="$3"
+  if grep -qF -- "$needle" <<<"$haystack"; then
+    record_fail "$name" "unexpected output contained: $needle"
+  else
+    record_pass "$name"
+  fi
+}
+
 assert_exists() {
   local name="$1" path="$2"
   if [[ -e "$path" ]]; then
@@ -1178,6 +1187,74 @@ assert_contains "GREEN 10: nested child is rejected as unproven content before t
   "$G10_OUT_CONTENT"
 assert_contains "GREEN 10: nested unproven child is not counted as archived" \
   "Dirs archived: 0" "$G10_OUT_CONTENT"
+
+echo "GREEN 11: dir-mtime-only touch is STALE, not active (bead disk_magician-7871)"
+# The recency probe used to be satisfied by the directory's OWN mtime, so any
+# touch (child create/delete/rename) kept a stale multi-GB tree protected
+# forever: /private/tmp/worldai_frontend sat at 20+ GiB with 8.7h-old content
+# and a fresh dir mtime and was skipped every pass. The probe must measure
+# entry mtimes UNDER the dir (-mindepth 1).
+G11_PRIVATE_TMP="$TMP_ROOT/g11-private-tmp"
+G11_TMP="$TMP_ROOT/g11-tmp"
+G11_ARCHIVE="$TMP_ROOT/g11-archive"
+G11_BIN="$TMP_ROOT/g11-bin"
+mkdir -p "$G11_PRIVATE_TMP" "$G11_TMP"
+make_find_shim "$G11_BIN" "$G11_PRIVATE_TMP" "$G11_TMP"
+make_large_dir "$G11_PRIVATE_TMP/dir_mtime_only"
+set_old_mtime "$G11_PRIVATE_TMP/dir_mtime_only"
+# Re-touch ONLY the directory entry itself: content stays old, dir looks fresh.
+touch "$G11_PRIVATE_TMP/dir_mtime_only"
+
+G11_OUT="$TMP_ROOT/g11.out"
+if run_capture "$G11_OUT" env -i HOME="$TMP_ROOT/g11-home" \
+  PATH="$G11_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G11_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$G11_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$G11_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G11_RC=0
+else
+  G11_RC=$?
+fi
+G11_OUT_CONTENT=$(cat "$G11_OUT")
+assert_rc "GREEN 11: exits 0" 0 "$G11_RC"
+assert_not_contains "GREEN 11: dir-mtime-only tree is NOT reported active" \
+  "Skipping recently active dir (mtime within 24h): $G11_PRIVATE_TMP/dir_mtime_only" "$G11_OUT_CONTENT"
+
+echo "GREEN 12: genuinely recent CONTENT still protects the tree (other side of 7871)"
+G12_PRIVATE_TMP="$TMP_ROOT/g12-private-tmp"
+G12_TMP="$TMP_ROOT/g12-tmp"
+G12_ARCHIVE="$TMP_ROOT/g12-archive"
+G12_BIN="$TMP_ROOT/g12-bin"
+mkdir -p "$G12_PRIVATE_TMP" "$G12_TMP"
+make_find_shim "$G12_BIN" "$G12_PRIVATE_TMP" "$G12_TMP"
+make_large_dir "$G12_PRIVATE_TMP/recent_content"
+set_old_mtime "$G12_PRIVATE_TMP/recent_content"
+# A real write inside the tree: this is genuine activity and must still skip.
+printf 'fresh\n' > "$G12_PRIVATE_TMP/recent_content/written_now.txt"
+
+G12_OUT="$TMP_ROOT/g12.out"
+if run_capture "$G12_OUT" env -i HOME="$TMP_ROOT/g12-home" \
+  PATH="$G12_BIN:/usr/bin:/bin" \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$G12_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$G12_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$G12_TMP" \
+  bash "$SOURCE_SCRIPT" --clean --large; then
+  G12_RC=0
+else
+  G12_RC=$?
+fi
+G12_OUT_CONTENT=$(cat "$G12_OUT")
+assert_rc "GREEN 12: exits 0" 0 "$G12_RC"
+assert_contains "GREEN 12: recent content still logs the active skip" \
+  "Skipping recently active dir (mtime within 24h): $G12_PRIVATE_TMP/recent_content" "$G12_OUT_CONTENT"
+assert_exists "GREEN 12: recent-content tree untouched" "$G12_PRIVATE_TMP/recent_content/payload.bin"
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
