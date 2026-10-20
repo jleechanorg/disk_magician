@@ -158,6 +158,8 @@ assert_contains "$HTML_BODY" "4. System &amp; Residual" "HTML has Card 4: System
 
 # Rows with no diskm command acting on their path must not reach the generated script
 assert_contains "$HTML_BODY" "manual review (no diskm command reclaims this path)" "non-acting rows are labelled manual review"
+# Generated-script comments strip control characters from snapshot-supplied names/paths
+assert_contains "$HTML_BODY" 'replace(/[\u0000-\u001f\u007f]/g, " ")' "script comments sanitize control characters"
 # Canonical diskm commands
 for canonical_cmd in \
   "diskm cleanup-dev-caches --clean" \
@@ -166,7 +168,6 @@ for canonical_cmd in \
   "diskm cleanup-pr-scratch --clean" \
   "diskm cleanup-colima --clean" \
   "diskm prune-aside-sessions --clean" \
-  "diskm cleanup-uv-cache --clean" \
   "diskm cleanup-antigravity-brain --clean" \
   "WORKTREE_APPROVED=1 diskm cleanup-worktrees --clean" \
   "WORKTREE_APPROVED=1 diskm cleanup-worktree-deps --clean" \

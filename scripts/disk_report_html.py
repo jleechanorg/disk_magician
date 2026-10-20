@@ -354,7 +354,7 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "category": "Developer Caches",
         "name": "~/.local (mixed app data; only the uv cache is pruned)",
         "path": "~/.local",
-        "command": "diskm cleanup-uv-cache --clean",
+        "command": "manual review (no diskm command reclaims this path)",
         "explanation": "Mixed application data. cleanup-uv-cache prunes only orphaned uv cache entries, so most of this total is not reclaimable by it.",
         "checked": False,
     },
@@ -1557,7 +1557,9 @@ def render_html(model: Dict[str, Any]) -> str:
         const formattedCmd = formatCommandForMode(item.command, currentMode);
         if (!seenCommands.has(formattedCmd)) {{
           seenCommands.add(formattedCmd);
-          lines.push("# " + item.name + " (" + item.path + " — " + item.size_gb.toFixed(1) + " GiB)");
+          // Snapshot-supplied text: strip control characters so it cannot leave the comment.
+          const safeText = (v) => String(v).replace(/[\\u0000-\\u001f\\u007f]/g, " ");
+          lines.push("# " + safeText(item.name) + " (" + safeText(item.path) + " — " + item.size_gb.toFixed(1) + " GiB)");
           lines.push(formattedCmd);
         }}
       }}
