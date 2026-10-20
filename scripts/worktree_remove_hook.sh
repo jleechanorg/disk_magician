@@ -240,8 +240,8 @@ print(v)
     # Idle-floor override (operator decision 2026-10-20): DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N (N>=7)
     # or minutes:N (N>=60). Anything else, including a lower floor, falls back to days:7.
     local recency_spec=days:7 env_spec="${DISK_MAGICIAN_REMOVE_HOOK_RECENCY:-}"
-    if [[ "$env_spec" =~ ^days:([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 7 ]] ||
-       [[ "$env_spec" =~ ^minutes:([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
+    if [[ "$env_spec" =~ ^days:([0-9]{1,4})$ && "${BASH_REMATCH[1]}" -ge 7 ]] ||
+       [[ "$env_spec" =~ ^minutes:([0-9]{1,7})$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
         recency_spec="$env_spec"
     fi
     [[ "$recency_spec" == days:* ]] && min_idle=$(( ${recency_spec#days:} * 1440 )) || min_idle=${recency_spec#minutes:}

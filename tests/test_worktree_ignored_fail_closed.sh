@@ -47,7 +47,7 @@ for rel in node_modules/pkg/credentials.js node_modules/pkg/credentials.d.ts nod
 hh clean .env.example '.env.example'
 for rel in node_modules/pkg/.env node_modules/pkg/credentials.json node_modules/pkg/credentials \
     node_modules/pkg/deploy.pem __pycache__/id_rsa venv/secrets.toml; do hh hidden "$rel" "venv/"; done
-hh clean __pycache__/openrouter_credentials.cpython-312.pyc
+hh hidden __pycache__/openrouter_credentials.cpython-312.pyc "venv/"
 r="$(mktemp -d "$TMP/hh.XXXXXX")"; git init -q "$r"; printf 'a' >"$r/f"; git -C "$r" add f
 git -C "$r" -c user.name=t -c user.email=t@e commit -qm i; git -C "$r" update-index --skip-worktree f
 has_hidden_state "$r" && ok "skip-worktree -> hidden" || bad "skip-worktree not hidden"
