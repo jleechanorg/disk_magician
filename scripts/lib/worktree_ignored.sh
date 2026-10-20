@@ -17,7 +17,7 @@ ignored_entry_rebuildable() {
             node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
             .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|venv.bak.*|test-results|\
             .beads|.husky|.doctor|.codex-worktrees|Pods|xcuserdata|xcshareddata|project.xcworkspace|.expo|dist-export|\
-            .venv_bootstrap.lock|evidence|.superpowers|.dark-factory|.tmp|logs|.br_recovery)
+            .venv_bootstrap.lock|.superpowers|.dark-factory|.tmp|logs|.br_recovery)
                 return 0 ;;
             # File-oriented patterns are rebuildable only when the matched
             # path is not a directory containing user data.
