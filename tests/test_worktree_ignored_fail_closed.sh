@@ -73,7 +73,7 @@ cat "$TMP/av.out"
 PASS=$((PASS + $(grep -c '  PASS:' "$TMP/av.out"))); FAIL=$((FAIL + $(grep -c '  FAIL:' "$TMP/av.out")))
 [[ $(grep -c '  PASS:' "$TMP/av.out") -eq 5 ]] || { echo "  FAIL: artifact_verdict.sh did not load"; FAIL=$((FAIL + 1)); }
 
-for rel in node_modules/p/credentials.js node_modules/a/gcredentials.h x/credentials.d.ts.map .env.example; do
+for rel in node_modules/p/credentials.js node_modules/a/gcredentials.h node_modules/x/credentials.d.ts.map .env.example; do
   printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
   out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
   [[ "$out" == no ]] && ok "$rel is not secret-like (probe)" || bad "$rel -> $out (probe)"
