@@ -935,12 +935,19 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
-def secrets(inv_file):
+def secrets(inv_file, exts="", tmpl=""):
+    # exts/tmpl (caller-supplied, shared with worktree_ignored.sh) name source/derived-code
+    # extensions and .env templates that are not secrets; absent -> no exemption.
+    code, templates = set(exts.split()), set(tmpl.split())
+    def exempt(n):
+        n = n.lower()
+        stem, dot, ext = n.rpartition(".")
+        return n in templates or n.endswith(".json.schema") or bool(dot and stem and ext in code)
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
-                            for e in entries) else "no")
+        names = (e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1] for e in entries)
+        print("yes" if any(pattern.fullmatch(n) and not exempt(n) for n in names) else "no")
     except Exception:
         print("kept:check-failed")
 
@@ -1088,8 +1095,8 @@ if __name__ == "__main__":
             sys.exit(repos(a[1]))
         if len(a) == 2 and a[0] == "newest-mtime":
             sys.exit(newest_mtime(a[1]))
-        if len(a) == 2 and a[0] == "secrets":
-            sys.exit(secrets(a[1]))
+        if len(a) in (2, 4) and a[0] == "secrets":
+            sys.exit(secrets(*a[1:]))
         if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":

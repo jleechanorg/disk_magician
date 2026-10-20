@@ -504,7 +504,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
     newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv")"
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in

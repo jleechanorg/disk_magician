@@ -53,10 +53,10 @@ git -C "$r" -c user.name=t -c user.email=t@e commit -qm i; git -C "$r" update-in
 has_hidden_state "$r" && ok "skip-worktree -> hidden" || bad "skip-worktree not hidden"
 has_hidden_state "$TMP/not-a-repo-xyz" && ok "probe failure -> hidden" || bad "probe failure not hidden"
 
-echo "== c14_probe secrets(): suffix/segment exemptions removed =="
-for rel in credentials.txt secrets.md .env.test Build/credentials.json; do
+echo "== c14_probe secrets(): only source/template names exempt =="
+for rel in credentials.yaml secrets.toml .env.test Build/credentials.json node_modules/p/.env; do
   printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
-  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
+  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
   [[ "$out" == yes ]] && ok "$rel is secret-like" || bad "$rel -> $out"
 done
 
@@ -72,6 +72,12 @@ echo "== _av_secret_like: config/key names and dependency dirs are not exempt ==
 cat "$TMP/av.out"
 PASS=$((PASS + $(grep -c '  PASS:' "$TMP/av.out"))); FAIL=$((FAIL + $(grep -c '  FAIL:' "$TMP/av.out")))
 [[ $(grep -c '  PASS:' "$TMP/av.out") -eq 5 ]] || { echo "  FAIL: artifact_verdict.sh did not load"; FAIL=$((FAIL + 1)); }
+
+for rel in node_modules/p/credentials.js a/gcredentials.h x/credentials.d.ts.map .env.example; do
+  printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
+  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
+  [[ "$out" == no ]] && ok "$rel is not secret-like (probe)" || bad "$rel -> $out (probe)"
+done
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
