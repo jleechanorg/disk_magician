@@ -115,7 +115,7 @@ def load_entries(config_path):
     return entries
 
 
-SHARD_MIN_KB = int(os.environ.get("DISK_MAGICIAN_SHARD_MIN_KB") or 20 * 1024 * 1024)
+SHARD_MIN_KB = 20 * 1024 * 1024
 SHARD_DEFAULT_WORKERS = 4
 SHARD_DEFAULT_TIMEOUT = 30
 MAX_SHARDS = 64
@@ -385,6 +385,8 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
         return True
 
     def shardable(e):
+        if os.environ.get("DISK_MAGICIAN_SHARDING") == "0":  # escape hatch: whole-root probes only
+            return False
         p = os.path.expanduser(e["path"])
         return os.path.isdir(p) and not os.path.islink(p)
 

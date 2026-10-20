@@ -65,7 +65,7 @@ run_snap() { # out env...
   local out="$1"; shift
   env HOME="$H" PATH="$BIN:/opt/homebrew/bin:/usr/bin:/bin" DISK_MAGICIAN_CONFIG="$CFG" \
     DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_LOAD_FACTOR_OVERRIDE=1 \
-    DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 DISK_MAGICIAN_SHARD_MIN_KB=999999999999 "$@" \
+    DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=60 DISK_MAGICIAN_SHARDING=0 "$@" \
     timeout 50 bash "$SNAP" --output "$out" >"$WORK/stdout" 2>"$WORK/stderr"
 }
 py() { python3 - "$1" "$2" 2>"$WORK/pyerr"; }   # py file 'python expr block using d'
