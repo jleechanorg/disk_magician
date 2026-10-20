@@ -42,7 +42,7 @@ def _expand(word, home, variables):
     def sub(m):
         val = names.get(m.group(1) or m.group(2))
         return "\0" if val is None else val
-    word = re.sub(r"\$\{(\w+)(?::?[?+\-][^}]*)?\}|\$(\w+)", sub, word)
+    word = re.sub(r"\$\{(\w+)(?::?[?\-][^}]*)?\}|\$(\w+)", sub, word)
     if "\0" in word or "$" in word or "`" in word:
         return None
     return word

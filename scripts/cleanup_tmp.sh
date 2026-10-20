@@ -615,9 +615,7 @@ has_recent_activity() {
 has_active_marker() {
   local dir="$1" hit_file
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  /usr/bin/find "$dir" \
-    -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name Pods -o -name DerivedData -o -name target -o -name __pycache__ \) -prune \
-    -o -name .in-use -print -quit 2>/dev/null >"$hit_file" || true
+  /usr/bin/find "$dir" -name .in-use -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -707,12 +705,7 @@ has_open_files() {
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
-  local lsof_w_flag="+w"
-  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" && -z "${DISK_MAGICIAN_TEST_CONTEXT:-}" ]]; then
-    lsof_w_flag="-w"
-  fi
-
-  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" "$lsof_w_flag" -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
+  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
   local diagnostic=""
   if [[ -s "$err_file" ]]; then
@@ -862,17 +855,10 @@ has_open_files() {
 # passes, giving a real recovery window before space is reclaimed.
 archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusal (logged)
   local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
-  secret_out="$(/usr/bin/find "$path" \
-    -type d \( -name venv -o -name .venv -o -name node_modules -o -name Pods -o -name __pycache__ -o -name 'Index.noindex' -o -name Build -o -name DerivedData -o -name site-packages -o -name dist-packages -o -name test-results \) -prune \
-    -o \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+  secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
     -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
-    ! -name '*.pyc' ! -name '*.o' ! -name '*.dia' ! -name '*.swiftdeps' ! -name '*.swiftconstvalues' ! -name '*.d' \
-    ! -name '*.example' ! -name '*.template' ! -name '*.sample' ! -name '*.test' ! -name '*.dist' ! -name '*.default' ! -iname 'cacert.pem' \
-    -print 2>/dev/null)" || secret_rc=$?
-  secret_out="$(grep -Evi '(template|example|sample)' <<<"$secret_out" | \
-    grep -Ev '\.(sh|bash|zsh|md|rst|txt)$' | \
-    grep -Ev '/([a-zA-Z0-9_-]+_credentials|[a-zA-Z0-9_-]+_secrets|credentials_[a-zA-Z0-9_-]+|secrets_[a-zA-Z0-9_-]+)\.(py|swift|h|m|ts|js|jsx|tsx|pyi|go|rs|java|c|cpp)$' || true)"
+    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+    -print -quit 2>/dev/null)" || secret_rc=$?
   if (( secret_rc != 0 )); then
     c14_verdict="kept:check-failed"
   elif [[ -n "$secret_out" ]]; then
