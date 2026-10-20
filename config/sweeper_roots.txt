@@ -185,81 +185,20 @@ $HOME/.cache/pre-commit	cleanup_dev_caches.sh	line 109
 $HOME/.local/share/opencode	cleanup_dev_caches.sh	line 113
 $HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 165
 $HOME/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	Section 5
-$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle	cleanup_dev_caches.sh	Section 3b
 $HOME/.bun/install/cache	cleanup_dev_caches.sh	Section 3b
-/private/var/tmp/SpeechModelCache	cleanup_dev_caches.sh	Section 3b
 $HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
 $HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
 $HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
-$HOME/.cargo	cleanup_dev_caches.sh	cargo package cache
-$HOME/Library/Biome	cleanup_dev_caches.sh	system telemetry stream cache
-$HOME/Library/Daemon Containers	cleanup_dev_caches.sh	daemon container cache
-$HOME/Library/DuetExpertCenter	cleanup_dev_caches.sh	duet cache
-$HOME/cmux-backups	cleanup_dev_caches.sh	cmux terminal scrollback backups
 $HOME/tmp	cleanup_tmp.sh	user scratch tmp
-$HOME/django_temp	cleanup_tmp.sh	django temporary workspace
-$HOME/Library/Developer/CoreSimulator/Devices	cleanup_xcode.sh	clean_shutdown_pr_simulators (--shutdown-pr-simulators)
-$HOME/wf*_dd*	cleanup_xcode.sh	clean_custom_derived_data
-$HOME/.dd_*	cleanup_xcode.sh	clean_custom_derived_data
-$HOME/project_worldai_frontend	cleanup_worktree_deps.sh	ROOTS default
-$HOME/wf_*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
 $HOME/worldarchitect*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
 $HOME/wa-*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/wa_*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/cb-*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
 $HOME/wt-*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/mcp_mail*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/autoresearch-main-workspace	cleanup_worktrees.sh	standalone workspace clone
-$HOME/reward-gate-mirrors-wz7_rme9	cleanup_worktrees.sh	workspace mirror
-$HOME/jleechan_bench_workspace	cleanup_worktrees.sh	workspace benchmark root
-$HOME/llm-wiki-autor-phase3	cleanup_worktrees.sh	autor clone
-$HOME/minimax-coding-agent	cleanup_worktrees.sh	agent repo clone
-$HOME/workspaces	cleanup_worktrees.sh	workspace root
-$HOME/worldai_claw_evidence	cleanup_downloads_evidence.sh	evidence capture directory
-$HOME/ios_evidence_realauth_20260719	cleanup_downloads_evidence.sh	iOS auth evidence capture
-$HOME/fixaudit_frames	cleanup_downloads_evidence.sh	audit video frames capture
 $HOME/.antigravity	cleanup_agent_artifacts.sh	agent artifact cache
-$HOME/.pw-browsers	cleanup_agent_artifacts.sh	playwright browser binaries cache
-$HOME/.agent-browser	cleanup_agent_artifacts.sh	agent browser profiles
-$HOME/.agent-orchestrator	cleanup_sessions.sh	agent orchestrator run sessions
-$HOME/.serena	cleanup_agent_artifacts.sh	agent cache
-$HOME/.maestro	cleanup_agent_artifacts.sh	agent orchestrator state
-$HOME/.codex-astra	cleanup_agent_artifacts.sh	agent workspace
-$HOME/.beads*	cleanup_agent_artifacts.sh	beads backups
-$HOME/.openclaw*	cleanup_agent_artifacts.sh	openclaw instances
-$HOME/openclaw-repo	cleanup_agent_artifacts.sh	openclaw repo clone
-$HOME/thinclaw	cleanup_agent_artifacts.sh	thinclaw repo clone
-$HOME/.claude_skills_archive*	cleanup_agent_artifacts.sh	skills archive
-$HOME/.peekaboo	cleanup_agent_artifacts.sh	screen capture cache
-$HOME/.pi	cleanup_agent_artifacts.sh	pi agent state
-$HOME/.ao-*	cleanup_agent_artifacts.sh	ao branch state
-$HOME/.chrome-codex-automation	cleanup_agent_artifacts.sh	chrome codex automation state
-$HOME/.expo	cleanup_agent_artifacts.sh	expo build cache
-$HOME/luma-scrape	cleanup_agent_artifacts.sh	scrape workspace
-$HOME/Apps	cleanup_agent_artifacts.sh	application bundle staging
 /var/lib/docker	cleanup_docker.sh	docker container and image storage on Linux host
-$HOME/mirror	cleanup_worktrees.sh	mirror git repositories
 $HOME/candidates	cleanup_worktrees.sh	candidate checkouts
-$HOME/canonical-code-repos	cleanup_worktrees.sh	canonical code repositories
-$HOME/auth112_causal	cleanup_worktrees.sh	worktree checkout
-$HOME/reward-driver-fix.gdHuox	cleanup_worktrees.sh	worktree checkout
-$HOME/qdrant-evidence-20261004	cleanup_agent_artifacts.sh	agent evidence staging
-$HOME/hermes-agent-pc	cleanup_agent_artifacts.sh	hermes agent scratch
-$HOME/.agents	cleanup_agent_artifacts.sh	agents root
-$HOME/.antigravity-ide	cleanup_agent_artifacts.sh	antigravity IDE assets
-$HOME/.claude-backup-*	cleanup_claude_state.sh	claude backup snapshots
-$HOME/.codex-dark-factory	cleanup_dark_factory.sh	codex dark factory workspace
-$HOME/.codex-worktrees	cleanup_worktrees.sh	codex worktrees
 $HOME/.dark-factory*	cleanup_dark_factory.sh	dark factory runs and e2e
-$HOME/.df-*	cleanup_dark_factory.sh	dark factory test runs
-$HOME/.hermes.*backup*	cleanup_agent_artifacts.sh	hermes pre-claw backup
-$HOME/.npm-global	cleanup_dev_caches.sh	npm global packages
-$HOME/.pnpm-store	cleanup_dev_caches.sh	pnpm store cache
-$HOME/.smartclaw	cleanup_agent_artifacts.sh	smartclaw agent state
-$HOME/.venvs	cleanup_worktree_venvs.sh	shared virtualenvs
 /tmp/pr*	cleanup_pr_scratch.sh	PR scratch directories in /tmp
-/tmp/task*	cleanup_pr_scratch.sh	Task scratch directories in /tmp
 /tmp/wa-*	cleanup_pr_scratch.sh	Worktree advice scratch directories in /tmp
 # --- Registry pass 2026-10-19 (disk_magician scan of check_uncovered_roots) ---
 # Codex SQLite databases other than the never-delete state*.sqlite files are
