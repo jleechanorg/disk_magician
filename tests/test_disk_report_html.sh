@@ -152,7 +152,7 @@ assert_eq "50" "$JSON_FREE" "JSON output disk_free_gb is 50"
 # 4. Test HTML content for 4 summary cards, Treemap, Canonical diskm commands, Never-Delete locks, and NO raw rm/npkill
 HTML_BODY="$(cat "$OUT_HTML")"
 assert_contains "$HTML_BODY" "1. Free right now" "HTML has Card 1: Free right now"
-assert_contains "$HTML_BODY" "2. Safe to remove via diskm" "HTML has Card 2: Safe to remove via diskm"
+assert_contains "$HTML_BODY" "2. In safe-tier paths (upper bound)" "HTML has Card 2: safe-tier upper bound"
 assert_contains "$HTML_BODY" "3. Needs review &amp; Protected" "HTML has Card 3: Needs review & Protected"
 assert_contains "$HTML_BODY" "4. System &amp; Residual" "HTML has Card 4: System & Residual"
 
