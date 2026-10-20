@@ -160,6 +160,9 @@ assert_contains "$HTML_BODY" "4. System &amp; Residual" "HTML has Card 4: System
 assert_contains "$HTML_BODY" "manual review (no diskm command reclaims this path)" "non-acting rows are labelled manual review"
 # Generated-script comments strip control characters from snapshot-supplied names/paths
 assert_contains "$HTML_BODY" 'replace(/[\u0000-\u001f\u007f]/g, " ")' "script comments sanitize control characters"
+# System rows without a measurement carry no invented size
+assert_contains "$HTML_BODY" "Code-Sign Clones (size not measured)" "code-sign clone size is not invented"
+assert_contains "$HTML_BODY" "snapshots; size not measured)" "APFS snapshot size is not invented"
 # Canonical diskm commands
 for canonical_cmd in \
   "diskm cleanup-dev-caches --clean" \
