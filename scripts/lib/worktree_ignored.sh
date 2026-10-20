@@ -83,9 +83,8 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Rebuildable dependency trees (venv, node_modules), python bytecode,
-    # compiler intermediates (.o, .dia, .swiftdeps), public CA bundles, test logs,
+    # Python bytecode, compiler intermediates (.o, .dia, .swiftdeps), public CA bundles, test logs,
     # and non-secret template/example files (.env.example) are not user secrets.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|\.o$|\.dia$|\.swiftdeps$|\.swiftconstvalues$|\.example$|\.template$|\.sample$|\.test$|\.dist$|(^|/)(venv|\.venv|node_modules)/|(^|/)test-results/.*\.log$' <<<"$out" || true)"
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|\.o$|\.dia$|\.swiftdeps$|\.swiftconstvalues$|\.example$|\.template$|\.sample$|\.test$|\.dist$|(^|/)test-results/.*\.log$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }

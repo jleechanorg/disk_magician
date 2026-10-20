@@ -941,11 +941,11 @@ def secrets(inv_file):
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
         ignored_exts = (
             ".example", ".template", ".sample", ".test", ".dist", ".default",
-            ".pyc", ".o", ".dia", ".swiftdeps", ".swiftconstvalues", ".d",
+            ".o", ".dia", ".swiftdeps", ".swiftconstvalues", ".d",
             ".sh", ".bash", ".zsh", ".md", ".rst", ".txt"
         )
         ignored_segments = {
-            "venv", ".venv", "node_modules", "Pods", "__pycache__",
+            "venv", ".venv", "Pods",
             "Index.noindex", "Build", "DerivedData",
             "site-packages", "dist-packages", "test-results",
             "ndk", "emulator", "toolchains"
