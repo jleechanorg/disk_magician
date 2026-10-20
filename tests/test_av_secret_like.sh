@@ -37,6 +37,15 @@ expect clean .env.example
 expect clean credentials.json tracked
 expect clean .env.example tracked
 
+# Parity table shared with test_worktree_ignored_fail_closed.sh (plain untracked files).
+TABLE="$ROOT/tests/secret_name_table.tsv"
+while IFS=$'\t' read -r want rel; do
+    [[ -z "$want" || "$want" == \#* ]] && continue
+    d="$(mktemp -d "$TMP/t.XXXXXX")"; mkdir -p "$d/$(dirname "$rel")"; echo x >"$d/$rel"
+    if _av_secret_like "$d"; then got=secret; else got=clean; fi
+    if [[ "$got" == "$want" ]]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  FAIL: table $rel expected $want got $got"; fi
+done <"$TABLE"
+
 # git failure (corrupt .git) -> fail closed
 d="$(mktemp -d "$TMP/c.XXXXXX")"; mkdir "$d/.git"; echo garbage >"$d/.git/HEAD"; echo x >"$d/credentials.json"
 if _av_secret_like "$d"; then PASS=$((PASS + 1)); echo "  PASS: corrupt .git -> secret"

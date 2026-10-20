@@ -25,7 +25,7 @@ mkdir -p "$TMP/orphan"; printf 'gitdir: %s/gone/.git/worktrees/orphan\n' "$TMP" 
 has_ignored_user_data "$TMP/orphan" && ok "orphaned worktree preserved" || bad "orphaned worktree read as no user data"
 
 echo "== has_hidden_state: secret-like names with template-ish suffixes still count =="
-for name in credentials.test secrets.dist; do
+for name in credentials.test secrets.dst; do
   r="$TMP/repo-$name"; git init -q "$r"; printf '%s\n' "$name" >"$r/.gitignore"
   git -C "$r" add .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
   printf 'x' >"$r/$name"
@@ -56,7 +56,7 @@ has_hidden_state "$TMP/not-a-repo-xyz" && ok "probe failure -> hidden" || bad "p
 echo "== c14_probe secrets(): only source/template names exempt =="
 for rel in credentials.yaml secrets.toml .env.test Build/credentials.json node_modules/p/.env; do
   printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
-  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
+  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
   [[ "$out" == yes ]] && ok "$rel is secret-like" || bad "$rel -> $out"
 done
 
@@ -75,9 +75,27 @@ PASS=$((PASS + $(grep -c '  PASS:' "$TMP/av.out"))); FAIL=$((FAIL + $(grep -c ' 
 
 for rel in node_modules/p/credentials.js a/gcredentials.h x/credentials.d.ts.map .env.example; do
   printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
-  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
+  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
   [[ "$out" == no ]] && ok "$rel is not secret-like (probe)" || bad "$rel -> $out (probe)"
 done
+
+echo "== parity table: exempt-name, secrets, has_hidden_state (ignored file) agree on every row =="
+TABLE="$REPO_ROOT/tests/secret_name_table.tsv"
+while IFS=$'\t' read -r want rel; do
+  [[ -z "$want" || "$want" == \#* ]] && continue
+  exp_ex=no; [[ "$want" == clean ]] && exp_ex=yes
+  got_ex="$(python3 "$REPO_ROOT/scripts/c14_probe.py" exempt-name "$rel")"
+  [[ "$got_ex" == "$exp_ex" ]] || bad "exempt-name $rel expected $exp_ex got $got_ex"
+  printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
+  got_s="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
+  exp_s=yes; [[ "$want" == clean ]] && exp_s=no
+  [[ "$got_s" == "$exp_s" ]] || bad "secrets $rel expected $exp_s got $got_s"
+  r="$(mktemp -d "$TMP/tb.XXXXXX")"; git init -q "$r"; printf '*\n' >"$r/.gitignore"
+  git -C "$r" add -f .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
+  mkdir -p "$r/$(dirname "$rel")"; printf x >"$r/$rel"
+  if has_hidden_state "$r"; then got_h=secret; else got_h=clean; fi
+  [[ "$got_h" == "$want" ]] || bad "has_hidden_state $rel expected $want got $got_h"
+done <"$TABLE"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
