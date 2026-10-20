@@ -17,6 +17,7 @@ Commands:
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
   correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
+  report        Generate interactive HTML Treemap & canonical diskm cleanup report (--html, --output, --json).
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
   install-root-frontier-runner Install the immutable root-owned frontier runner.
@@ -259,6 +260,9 @@ case "$CMD" in
     DISK_SNAPSHOT_JSON="$(resolve_dispatch_snapshot_json)"
     export DISK_SNAPSHOT_JSON
     "$SCRIPT_DIR/scripts/disk_diagnostic.sh" "$@"
+    ;;
+  report)
+    exec python3 "$SCRIPT_DIR/scripts/disk_report_html.py" "$@"
     ;;
   frontier)
     exec python3 "$SCRIPT_DIR/scripts/disk_frontier_scan.py" "$@"

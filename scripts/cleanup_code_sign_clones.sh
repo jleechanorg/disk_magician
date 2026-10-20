@@ -92,6 +92,15 @@ lsof_state() {
   # process + file records are authoritative; rc=1 means inactive only when
   # the record stream and diagnostics are empty.
   if grep -q '^p' <<<"$output" && grep -q '^n' <<<"$output"; then
+    if [[ -z "$diagnostics" ]] && python3 - "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" "$candidate" "$output" <<'PY' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[1])
+import c14_probe
+sys.exit(0 if c14_probe._all_external_hardlinks(sys.argv[2], sys.argv[3].encode(), "lsof", None) else 1)
+PY
+    then
+      return 1
+    fi
     pid=$(awk '/^p/{sub(/^p/, ""); print; exit}' <<<"$output")
     command=$(awk '/^c/{sub(/^c/, ""); print; exit}' <<<"$output")
     LSOF_DETAIL="pid=${pid:-unknown} command=${command:-unknown}"

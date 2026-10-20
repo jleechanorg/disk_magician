@@ -120,21 +120,55 @@ clean_dir_contents "uv cache" "$HOME/.cache/uv" false rebuildable
 log "=== Section 3: ~/.cache/pre-commit/ ==="
 clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false rebuildable
 
-# 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches"). Apps that
-# are running (cmux, Aside, Chrome, Cursor) are left to their needs_decision gates.
+# 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches").
 log "=== Section 3b: rebuildable user caches ==="
 for approved_cache in \
   "worldai:$HOME/.cache/worldai" \
   "swiftpm:$HOME/Library/Caches/org.swift.swiftpm" \
   "ms-playwright:$HOME/Library/Caches/ms-playwright" \
+  "ms-playwright linux:$HOME/.cache/ms-playwright" \
+  "camoufox:$HOME/.cache/camoufox" \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
-  "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
+  "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004" \
+  "gradle caches:$HOME/.gradle/caches" \
+  "gradle daemon:$HOME/.gradle/daemon" \
+  "gradle wrapper dists:$HOME/.gradle/wrapper/dists" \
+  "npm _npx:$HOME/.npm/_npx" \
+  "pnpm cache:$HOME/Library/Caches/pnpm" \
+  "pnpm linux cache:$HOME/.cache/pnpm" \
+  "cargo registry cache:$HOME/.cargo/registry/cache" \
+  "cargo registry src:$HOME/.cargo/registry/src" \
+  "Google caches:$HOME/Library/Caches/Google" \
+  "Homebrew caches:$HOME/Library/Caches/Homebrew" \
+  "pip caches:$HOME/Library/Caches/pip" \
+  "pip linux caches:$HOME/.cache/pip" \
+  "puppeteer caches:$HOME/.cache/puppeteer" \
+  "Xcode caches:$HOME/Library/Caches/com.apple.dt.Xcode" \
+  "SentryCrash caches:$HOME/Library/Caches/SentryCrash" \
+  "SiriTTS caches:$HOME/Library/Caches/SiriTTS" \
+  "Cursor Cache:$HOME/Library/Application Support/Cursor/Cache" \
+  "Cursor CachedData:$HOME/Library/Application Support/Cursor/CachedData" \
+  "Cursor CachedExtensionVSIXs:$HOME/Library/Application Support/Cursor/CachedExtensionVSIXs" \
+  "Cursor Code Cache:$HOME/Library/Application Support/Cursor/Code Cache" \
+  "Cursor GPUCache:$HOME/Library/Application Support/Cursor/GPUCache" \
+  "discord Cache:$HOME/Library/Application Support/discord/Cache" \
+  "discord Code Cache:$HOME/Library/Application Support/discord/Code Cache" \
+  "discord GPUCache:$HOME/Library/Application Support/discord/GPUCache" \
+  "Chrome Default Cache:$HOME/Library/Application Support/Google/Chrome/Default/Cache" \
+  "Chrome Default Code Cache:$HOME/Library/Application Support/Google/Chrome/Default/Code Cache" \
+  "Chrome Default SW CacheStorage:$HOME/Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage"; do
   approved_kind=rebuildable
   # The ezgha recovery target is explicitly a non-cache target (spec §7.2):
   # ordinary provenance, not the fixed cache-root table.
   [[ "${approved_cache%%:*}" == "ezgha recovery target" ]] && approved_kind=""
   clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false "$approved_kind"
+done
+for chrome_prof in "$HOME/Library/Application Support/Google/Chrome"/Profile\ *; do
+  [[ -d "$chrome_prof" ]] || continue
+  clean_dir_contents "Chrome $(basename "$chrome_prof") Cache" "$chrome_prof/Cache" false rebuildable
+  clean_dir_contents "Chrome $(basename "$chrome_prof") Code Cache" "$chrome_prof/Code Cache" false rebuildable
+  clean_dir_contents "Chrome $(basename "$chrome_prof") SW CacheStorage" "$chrome_prof/Service Worker/CacheStorage" false rebuildable
 done
 
 # 4. opencode safe subdirs
@@ -244,6 +278,66 @@ fi
 log "=== Section 6: ~/.npm/_cacache ==="
 clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false rebuildable
 
+# 6b. pnpm content-addressable store (pnpm store prune)
+log "=== Section 6b: pnpm store prune ==="
+pnpm_bin="$(command -v pnpm 2>/dev/null || true)"
+if [[ -z "$pnpm_bin" ]]; then
+  for _pnpm_cand in "$HOME/.local/share/pnpm/pnpm" "/opt/homebrew/bin/pnpm"; do
+    if [[ -x "$_pnpm_cand" ]]; then
+      pnpm_bin="$_pnpm_cand"
+      break
+    fi
+  done
+fi
+pnpm_store_dir=""
+for _pnpm_store_cand in \
+  "${PNPM_STORE_DIR:-}" \
+  "${PNPM_HOME:+$PNPM_HOME/store}" \
+  "$HOME/Library/pnpm/store" \
+  "$HOME/.local/share/pnpm/store" \
+  "$HOME/.pnpm-store"; do
+  if [[ -n "$_pnpm_store_cand" && -d "$_pnpm_store_cand" ]]; then
+    pnpm_store_dir="$_pnpm_store_cand"
+    break
+  fi
+done
+if [[ -z "$pnpm_store_dir" && -n "$pnpm_bin" ]]; then
+  _probed_store="$(COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 "$pnpm_bin" store path </dev/null 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
+  if [[ "$_probed_store" == "$HOME/"* && -d "$_probed_store" ]]; then
+    pnpm_store_dir="$_probed_store"
+  fi
+fi
+if [[ -z "$pnpm_bin" ]]; then
+  log "pnpm store: pnpm not found, skipping"
+elif [[ -z "$pnpm_store_dir" || ! -d "$pnpm_store_dir" ]]; then
+  log "pnpm store: directory not found, skipping"
+elif ! _safety_reason="$(safety_gate "$pnpm_store_dir" 2>/dev/null)"; then
+  log "pnpm store: SAFETY-SKIP ($_safety_reason)"
+else
+  before_kb=$(size_kb "$pnpm_store_dir")
+  log "pnpm store: before $(fmt_kb "$before_kb") ($pnpm_store_dir)"
+  if [[ "$DRY_RUN" == true ]]; then
+    log "pnpm store: [dry-run] would run 'pnpm store prune' on $pnpm_store_dir ($(fmt_kb "$before_kb"))"
+  else
+    pnpm_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" timeout 60s pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" gtimeout 60s pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
+    else
+      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
+    fi
+    if [[ "$pnpm_rc" -ne 0 ]]; then
+      log "pnpm store: WARN 'pnpm store prune' exited with status $pnpm_rc"
+    fi
+    after_kb=$(size_kb "$pnpm_store_dir")
+    freed_kb=$(( before_kb - after_kb ))
+    [[ $freed_kb -lt 0 ]] && freed_kb=0
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
+    log "pnpm store: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
+  fi
+fi
+
 # 7. claude-cli-nodejs and go-build Library/Caches (Fix #8)
 #
 # Both dirs are build/transform caches that auto-rebuild on next use:
@@ -267,7 +361,9 @@ clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false rebuildable
 DEV_CACHE_DAYS=30
 for dev_cache_path in \
   "$HOME/Library/Caches/claude-cli-nodejs" \
-  "$HOME/Library/Caches/go-build"; do
+  "$HOME/Library/Caches/go-build" \
+  "$HOME/.cache/claude-cli-nodejs" \
+  "$HOME/.cache/go-build"; do
   dev_cache_label=$(basename "$dev_cache_path")
   log "=== Section: $dev_cache_path (${DEV_CACHE_DAYS}d mtime) ==="
   if [[ ! -d "$dev_cache_path" ]]; then
@@ -356,7 +452,7 @@ else
     log "fsevents state cache: [dry-run] would drop $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason): $fsevents_state_resolved"
   elif ! _safety_reason="$(safety_gate "$fsevents_state_resolved" 2>/dev/null)"; then
     log "fsevents state cache: SAFETY-SKIP ($_safety_reason)"
-  elif rm -f "$fsevents_state_resolved"; then
+  elif c14_remove "$fsevents_state_resolved" --kind rebuildable; then
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + fsevents_state_kb ))
     deletion_log "cleanup_dev_caches" "drop_fsevents_state_cache" "$fsevents_state_kb" "$fsevents_state_resolved"
     log "fsevents state cache: dropped $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason); rebuilt on the next poll"
@@ -389,6 +485,174 @@ else
   log "wiki-publish cache: $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE) — retained; automatic deletion disabled until lifecycle provenance is known"
 fi
 
+
+# N. Darwin user clang cache (/private/var/folders/*/*/C/clang/ModuleCache*)
+log "=== Section: Darwin user clang ModuleCache ==="
+for clang_cache in /private/var/folders/*/*/C/clang/ModuleCache*; do
+  [[ -d "$clang_cache" ]] || continue
+  clean_dir_contents "clang module cache" "$clang_cache" false rebuildable
+done
+
+# N. ~/.peekaboo/snapshots entries older than 30 days
+log "=== Section: ~/.peekaboo/snapshots (entries older than 30d) ==="
+PEEKABOO_SNAPSHOTS="$HOME/.peekaboo/snapshots"
+if [[ ! -d "$PEEKABOO_SNAPSHOTS" ]]; then
+  log "peekaboo snapshots: directory not found, skipping"
+else
+  before_kb=$(size_kb "$PEEKABOO_SNAPSHOTS")
+  log "peekaboo snapshots: before $(fmt_kb "$before_kb") ($PEEKABOO_SNAPSHOTS)"
+  peek_deleted=0
+  peek_freed_kb=0
+
+  while IFS= read -r -d '' entry; do
+    [[ -e "$entry" ]] || continue
+    [[ "${entry##*/}" == ".dm-quarantine" ]] && continue
+    [[ -n "$entry" && "$entry" == "$PEEKABOO_SNAPSHOTS/"* ]] || continue
+
+    kb=$(size_kb "$entry")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "peekaboo snapshots: [dry-run] would delete $entry ($(fmt_kb "$kb"))"
+      peek_deleted=$(( peek_deleted + 1 ))
+      peek_freed_kb=$(( peek_freed_kb + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$entry" ($_safety_reason)"
+        continue
+      fi
+      log "peekaboo snapshots: deleting $entry ($(fmt_kb "$kb"))"
+      chmod -R u+w "$entry" 2>/dev/null || true
+      if c14_remove "$entry" --kind rebuildable; then
+        peek_deleted=$(( peek_deleted + 1 ))
+        peek_freed_kb=$(( peek_freed_kb + kb ))
+        deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$entry"
+      else
+        echo "SKIP (c14 kept): $entry"
+      fi
+    fi
+  done < <(find "$PEEKABOO_SNAPSHOTS" -mindepth 1 -maxdepth 1 -mtime +30 -print0 2>/dev/null)
+
+  if [[ "$DRY_RUN" != true ]]; then
+    after_kb=$(size_kb "$PEEKABOO_SNAPSHOTS")
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + peek_freed_kb ))
+    log "peekaboo snapshots: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$peek_freed_kb") ($peek_deleted items)"
+  else
+    log "peekaboo snapshots: [dry-run] would remove $peek_deleted items, freeing $(fmt_kb "$peek_freed_kb")"
+  fi
+fi
+
+# N. Stale .beads/.br_recovery bundles (>= 7d)
+log "=== Section: Stale .beads/.br_recovery bundles (>= 7d) ==="
+BR_RECOVERY_GLOBS=(
+  "$HOME"/projects/*/.beads/.br_recovery
+  "$HOME"/.worktrees/*/*/.beads/.br_recovery
+  "$HOME"/project_worldaiclaw/*/.beads/.br_recovery
+  "$HOME"/projects_other/*/.beads/.br_recovery
+)
+
+br_deleted=0
+br_freed_kb=0
+
+for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
+  [[ -d "$rec_dir" ]] || continue
+
+  br_candidates=()
+  while IFS= read -r -d '' item; do
+    [[ -e "$item" ]] || continue
+    [[ "${item##*/}" == ".dm-quarantine" ]] && continue
+    if [[ "$(basename "$item")" == "schema-migrations" ]]; then
+      continue
+    fi
+    br_candidates+=("$item")
+  done < <(find "$rec_dir" -mindepth 1 -maxdepth 1 -mtime +7 -print0 2>/dev/null || true)
+
+  if [[ -d "$rec_dir/schema-migrations" ]]; then
+    while IFS= read -r -d '' sm_item; do
+      [[ -e "$sm_item" ]] || continue
+      [[ "${sm_item##*/}" == ".dm-quarantine" ]] && continue
+      br_candidates+=("$sm_item")
+    done < <(find "$rec_dir/schema-migrations" -mindepth 1 -maxdepth 1 -mtime +7 -print0 2>/dev/null || true)
+  fi
+
+  for candidate in "${br_candidates[@]}"; do
+    [[ -e "$candidate" ]] || continue
+    [[ -n "$candidate" && "$candidate" == "$rec_dir/"* ]] || continue
+
+    kb=$(size_kb "$candidate")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "br_recovery: [dry-run] would delete $candidate ($(fmt_kb "$kb"))"
+      br_deleted=$(( br_deleted + 1 ))
+      br_freed_kb=$(( br_freed_kb + kb ))
+    else
+      if ! _safety_reason="$(safety_gate "$candidate" 2>/dev/null)"; then
+        echo "SAFETY-SKIP "$candidate" ($_safety_reason)"
+        continue
+      fi
+      log "br_recovery: deleting $candidate ($(fmt_kb "$kb"))"
+      chmod -R u+w "$candidate" 2>/dev/null || true
+      if c14_remove "$candidate" --kind rebuildable; then
+        br_deleted=$(( br_deleted + 1 ))
+        br_freed_kb=$(( br_freed_kb + kb ))
+        deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$candidate"
+      else
+        echo "SKIP (c14 kept): $candidate"
+      fi
+    fi
+  done
+
+  # Prune schema-migrations dir if empty
+  if [[ -d "$rec_dir/schema-migrations" && "$DRY_RUN" == false ]]; then
+    rmdir "$rec_dir/schema-migrations" 2>/dev/null || true
+  fi
+done
+
+if [[ "$DRY_RUN" != true ]]; then
+  TOTAL_FREED_KB=$(( TOTAL_FREED_KB + br_freed_kb ))
+  log "br_recovery: freed $(fmt_kb "$br_freed_kb") across $br_deleted items"
+else
+  log "br_recovery: [dry-run] would remove $br_deleted items, freeing $(fmt_kb "$br_freed_kb")"
+fi
+
+# ---------------------------------------------------------------------------
+# 16. Non-default Rustup toolchains (~/.rustup/toolchains/*)
+# ---------------------------------------------------------------------------
+echo
+log "--- 16. Non-default Rustup toolchains ---"
+if [[ -d "$HOME/.rustup/toolchains" ]]; then
+  default_tc=""
+  rustup_bin="$(PATH="$HOME/.cargo/bin:$PATH" command -v rustup 2>/dev/null || true)"
+  if [[ -n "$rustup_bin" ]]; then
+    default_tc="$("$rustup_bin" toolchain list 2>/dev/null | awk '/\(default\)/ {print $1; exit}')"
+  fi
+  if [[ -z "$default_tc" && -f "$HOME/.rustup/settings.toml" ]]; then
+    default_tc="$(sed -n 's/^default_toolchain *= *"\([^"]*\)".*/\1/p' "$HOME/.rustup/settings.toml" 2>/dev/null | head -n 1)"
+  fi
+  if [[ -n "$default_tc" && -d "$HOME/.rustup/toolchains/$default_tc" ]]; then
+    for tc_dir in "$HOME/.rustup/toolchains"/*; do
+      [[ -d "$tc_dir" && ! -L "$tc_dir" ]] || continue
+      tc_name="$(basename "$tc_dir")"
+      [[ "$tc_name" == "$default_tc" ]] && continue
+      clean_dir_contents "Rustup non-default toolchain ($tc_name)" "$tc_dir" false rebuildable
+      [[ "$DRY_RUN" == false ]] && rmdir "$tc_dir" 2>/dev/null || true
+    done
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 17. Idle Android SDK system-images / emulator / ndk
+# ---------------------------------------------------------------------------
+echo
+log "--- 17. Idle Android SDK system-images / emulator / ndk ---"
+if [[ -d "/opt/homebrew/share/android-commandlinetools" ]]; then
+  # shellcheck disable=SC2009
+  if ! ps aux | grep -E '(qemu-system|android.*emulator)' | grep -v grep >/dev/null 2>&1; then
+    for android_sub in /opt/homebrew/share/android-commandlinetools/system-images /opt/homebrew/share/android-commandlinetools/emulator /opt/homebrew/share/android-commandlinetools/ndk; do
+      [[ -d "$android_sub" && ! -L "$android_sub" ]] || continue
+      clean_dir_contents "Android SDK ($(basename "$android_sub"))" "$android_sub" false rebuildable
+    done
+  else
+    log "Android SDK: active emulator detected, skipping"
+  fi
+fi
 
 echo
 if [[ "$DRY_RUN" == true ]]; then

@@ -101,7 +101,7 @@ size_of() {
 
 mtime_epoch_of() {
   local path="$1"
-  stat -f '%m' "$path" 2>/dev/null || echo 0
+  stat -c '%Y' "$path" 2>/dev/null || stat -f '%m' "$path" 2>/dev/null || echo 0
 }
 
 expand_path() {

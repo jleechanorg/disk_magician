@@ -1,0 +1,19 @@
+[Unit]
+Description=Disk Magician nightly routine clean (safe-tier stack)
+Documentation=https://github.com/jleechanorg/disk-magician
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Non-secret default only; anything credential-bearing stays out of the unit
+# (systemd Zero-Environment Unit Principle). The wrapper resolves GH_TOKEN
+# from the keyring at runtime when a tier needs gh.
+Environment=HOME=@HOME@
+Environment=DISK_MAGICIAN_AUTO_CLEAN=1
+UnsetEnvironment=GITHUB_TOKEN GH_TOKEN
+ExecStart=/bin/bash @HOME@/.hermes/scripts/systemd-wrapper.sh @HOME@/.local/bin/diskm clean --routine
+# Safe-tier stack can walk 500+ worktrees with lsof probes; cap a stuck pass.
+TimeoutStartSec=1800
+StandardOutput=append:@HOME@/.local/state/disk-magician/systemd-routine-clean.log
+StandardError=append:@HOME@/.local/state/disk-magician/systemd-routine-clean.log

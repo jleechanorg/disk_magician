@@ -148,6 +148,14 @@ class TestWorktreeGuard(unittest.TestCase):
     def test_literal_assignment_denied(self):
         self.assertDeny(self.run_cmd("WT=/tmp/y; git worktree add $WT"))
 
+    def test_parameter_modifier_assignment_denied(self):
+        self.assertDeny(self.run_cmd('W=$(mktemp -d /tmp/wa-main-XXXX) && git worktree add -q --detach "${W:?}" origin/main'))
+
+    def test_rtk_and_timeout_wrappers_denied(self):
+        self.assertDeny(self.run_cmd("rtk git worktree add /tmp/bad-wt main"))
+        self.assertDeny(self.run_cmd("timeout 30s git worktree add /tmp/bad-wt main"))
+        self.assertDeny(self.run_cmd("timeout -k 5s 30s rtk git worktree add /tmp/bad-wt main"))
+
     def test_unresolvable_allows_and_logs(self):
         self.assertAllow(self.run_cmd('git worktree add "$WT"'))
         self.assertAllow(self.run_cmd('git worktree add "$(mktemp -d)"'))
@@ -175,6 +183,12 @@ class TestWorktreeGuard(unittest.TestCase):
 
     def test_lowercase_bash_tool_denied(self):
         self.assertDeny(self.run_cmd("git worktree add /tmp/z", tool="bash"))
+
+    def test_gemini_run_command_denied(self):
+        payload = {"tool_name": "run_command",
+                   "tool_input": {"CommandLine": "git worktree add /tmp/gemini-wt -b b",
+                                  "Cwd": "/r"}}
+        self.assertDeny(self.run_raw(json.dumps(payload)))
 
     # --- pending leases on allowed adds (plan Task 4) -----------------------
     def _lease_path(self, target):

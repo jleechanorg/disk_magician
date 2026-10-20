@@ -1,0 +1,14 @@
+[Unit]
+Description=Schedule disk-magician-routine-clean.service daily at 03:00 local
+# Linux twin of the macOS launchd sweeper fleet (com.jleechanorg.disk-magician-*)
+# scoped to the nightly safe-tier routine stack the operator approved 2026-10-18.
+
+[Timer]
+# Explicit local time — OnCalendar=daily would mean 00:00 UTC.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=disk-magician-routine-clean.service
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
