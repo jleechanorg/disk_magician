@@ -47,6 +47,9 @@ assert_missing() { if [[ ! -e "$2" ]]; then record_pass "$1"; else record_fail "
 assert_contains() {
   if grep -qF -- "$2" <<<"$3"; then record_pass "$1"; else record_fail "$1" "expected output to contain: $2"; fi
 }
+assert_not_contains() {
+  if grep -qF -- "$2" <<<"$3"; then record_fail "$1" "expected output NOT to contain: $2"; else record_pass "$1"; fi
+}
 
 # Fixture HOME with a bare origin that holds a committed .gitignore.
 export HOME="$TMP_ROOT/home"
@@ -724,6 +727,62 @@ assert_exists "T23: quarantine recovery index record remains" "$P2_INDEX"
 [[ "$(receipt_get "$P2_HOME" outcome)" == partial ]] && record_pass "T23: phase-2 partial reports partial" || record_fail "T23: phase-2 partial reports partial" "got '$(receipt_get "$P2_HOME" outcome)'"
 # Restore perms so the fixture trap can clean the mutated quarantine dir.
 chmod -R u+rwx "$P2_DATE/.dm-quarantine" 2>/dev/null || true
+
+echo "T24: dry-run and --clean agree when C14 refuses a linked worktree (q9ry)"
+# Regression for bead disk_magician-q9ry: the dry run used to print
+# "would remove" for a task whose linked worktree C14 refuses (secret-like),
+# while --clean always kept it as wrh-quarantine-failed. A "would remove" line
+# must never promise a removal the clean path cannot perform.
+SEC_HOME="$TMP_ROOT/sec-home"; SEC_CODEX="$SEC_HOME/Documents/Codex"
+SEC_TASK="$SEC_CODEX/$D_OLD/t-wt-secret"; mkdir -p "$SEC_TASK"
+SEC_MAIN="$TMP_ROOT/sec-main"; git clone -q "$ORIGIN" "$SEC_MAIN"
+git -C "$SEC_MAIN" worktree add -q -b wt-secret "$SEC_TASK/wt" origin/main
+# .npmrc must be COMMITTED and pushed: an untracked one makes the tree dirty,
+# which the cleaner rejects (dirty:) before C14 is ever consulted.
+printf 'registry=https://example.invalid/\n' >"$SEC_TASK/wt/.npmrc"
+git -C "$SEC_TASK/wt" add .npmrc
+git -C "$SEC_TASK/wt" commit -qm secret-like-fixture
+git -C "$SEC_MAIN" push -q origin wt-secret
+git -C "$SEC_TASK/wt" branch -q -u origin/wt-secret
+age "$SEC_TASK"
+O24A="$TMP_ROOT/o24a"; RC=0
+HOME="$SEC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O24A" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T24: dry-run exits 0" || { record_fail "T24: dry-run exits 0" "rc=$RC"; cat "$O24A"; }
+O24B="$TMP_ROOT/o24b"; RC=0
+HOME="$SEC_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O24B" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T24: clean exits 0" || { record_fail "T24: clean exits 0" "rc=$RC"; cat "$O24B"; }
+assert_exists "T24: task kept in both modes" "$SEC_TASK"
+assert_not_contains "T24: dry run must not promise the removal" "would remove $SEC_TASK" "$(cat "$O24A")"
+assert_contains "T24: dry run reports the C14 refusal" "KEEP [wrh-c14-secret-like:" "$(cat "$O24A")"
+assert_contains "T24: clean reports the same C14 refusal" "KEEP [wrh-c14-secret-like:" "$(cat "$O24B")"
+
+echo "T25: dry-run and --clean agree on a ROOT C14 refusal with no linked worktrees (q9ry)"
+# Dot review of #212: the dry run must also evaluate the task root's own C14
+# verdict, not just per-worktree verdicts. A task with NO linked worktrees but a
+# root-level secret-like file used to print "would remove" while --clean
+# rejected its contents. Assert the two modes report the SAME reason.
+T25_HOME="$TMP_ROOT/t25-home"; T25_CODEX="$T25_HOME/Documents/Codex"
+T25_TASK="$T25_CODEX/$D_OLD/t-rootsecret"; mkdir -p "$T25_TASK"
+git clone -q "$ORIGIN" "$T25_TASK/repo"
+git -C "$T25_TASK/repo" checkout -q -b rootsecret
+printf 'registry=https://example.invalid/\n' >"$T25_TASK/repo/.npmrc"
+git -C "$T25_TASK/repo" add .npmrc
+git -C "$T25_TASK/repo" commit -qm root-secret-like
+git -C "$T25_TASK/repo" push -q origin rootsecret
+git -C "$T25_TASK/repo" branch -q -u origin/rootsecret
+age "$T25_TASK"
+O25A="$TMP_ROOT/o25a"; RC=0
+HOME="$T25_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O25A" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T25: dry-run exits 0" || { record_fail "T25: dry-run exits 0" "rc=$RC"; cat "$O25A"; }
+O25B="$TMP_ROOT/o25b"; RC=0
+HOME="$T25_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O25B" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T25: clean exits 0" || { record_fail "T25: clean exits 0" "rc=$RC"; cat "$O25B"; }
+assert_exists "T25: task kept in both modes" "$T25_TASK"
+assert_not_contains "T25: dry run must not promise the removal" "would remove $T25_TASK" "$(cat "$O25A")"
+R25A="$(grep -F "$T25_TASK" "$O25A" 2>/dev/null | grep -oE 'KEEP \[[^]]*\]' | head -1)"
+R25B="$(grep -F "$T25_TASK" "$O25B" 2>/dev/null | grep -oE 'KEEP \[[^]]*\]' | head -1)"
+if [[ -n "$R25A" && "$R25A" == "$R25B" ]]; then record_pass "T25: both modes report the same reason ($R25A)"
+else record_fail "T25: both modes report the same reason" "dry=[$R25A] clean=[$R25B]"; fi
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
