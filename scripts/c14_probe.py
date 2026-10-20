@@ -935,24 +935,37 @@ def newest_mtime(inv_file):
 
 SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
 _TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
-_GENERATED = (".d.ts", ".map", ".h", ".hpp", ".so", ".dylib", ".a", ".pyc", ".json.schema")
-_DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "vendor", "third-party", "build", "deriveddata", "dist"}
+_DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
+_NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
+
+def _never(n):
+    return n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc")
 
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
-    Exempt only: a template suffix; a generated/build-only suffix; or a source extension under a
-    dependency/vendor/build path component. .env*, id_*, *.pem/key/p12/pfx, .npmrc, .netrc are
-    exempt only as templates. Anything else, including repo-level .py/.sh/.txt/.md, stays secret."""
+    Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped name is not a
+    never-exempt name; .h/.hpp/.pyc/.so/.a/.dylib under a dependency dir (.pyc also in
+    __pycache__); or a source extension under a dependency dir. .env*, id_*, *.pem/key/p12/pfx,
+    .npmrc, .netrc are exempt only as templates. Everything else stays secret-like."""
     parts = path.split("/")
     n = parts[-1].lower()
     if n.endswith(_TEMPLATE):
         return True
-    if n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc"):
+    if _never(n):
         return False
-    if n.endswith(_GENERATED):
+    comps = {c.lower() for c in parts[:-1]}
+    stripped = n
+    while stripped.endswith((".map", ".d.ts")):
+        stripped = stripped[: -4 if stripped.endswith(".map") else -5]
+    if stripped != n:
+        return not _never(stripped)
+    if n.endswith(".json.schema"):
         return True
-    return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and "." in n and n.rpartition(".")[2] in _SRC_EXTS
+    dep = bool(_DEP_DIRS & comps)
+    if n.endswith(_NATIVE):
+        return dep or (n.endswith(".pyc") and "__pycache__" in comps)
+    return dep and "." in n and n.rpartition(".")[2] in _SRC_EXTS
 
 def secrets(inv_file):
     try:
@@ -962,9 +975,19 @@ def secrets(inv_file):
     except Exception:
         print("kept:check-failed")
 
-def any_secret(stream):
-    """rc 0 when any newline-listed relative path is secret-like and not exempt, 1 when none."""
-    return 0 if any(q and not exempt_name(q) for q in stream.read().split("\n")) else 1
+def any_secret(argv):
+    """Contract: rc 0 = a secret-like path remains; rc 1 + stdout "none" = explicit none found;
+    rc 3 = any error (callers must treat everything but rc 1 + "none" as secret-like)."""
+    try:
+        if argv:
+            return 3
+        names = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\n")
+        if any(q and not exempt_name(q) for q in names):
+            return 0
+        print("none")
+        return 1
+    except BaseException:
+        return 3
 
 def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     try:
@@ -1013,6 +1036,8 @@ def open_file(root, deadline=None):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
+    if a and a[0] == "any-secret":
+        sys.exit(any_secret(a[1:]))
     try:
         if len(a) == 3 and a[0] == "lsremote" and not a[1].startswith("-"):
             sys.exit(lsremote(a[1], a[2]))
@@ -1046,8 +1071,6 @@ if __name__ == "__main__":
             sys.exit(secrets(a[1]))
         if len(a) == 2 and a[0] == "exempt-name":
             print("yes" if exempt_name(a[1]) else "no"); sys.exit(0)
-        if len(a) == 1 and a[0] == "any-secret":
-            sys.exit(any_secret(sys.stdin))
         if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":

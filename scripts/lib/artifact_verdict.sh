@@ -248,31 +248,36 @@ _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # nothing (fail closed).
 _AV_SECRET_FILTER='
 import os, subprocess, sys
-root, probe_dir = sys.argv[1], sys.argv[2]
-sys.path.insert(0, probe_dir)
-from c14_probe import exempt_name
-cands = []
-for p in sys.stdin.buffer.read().split(b"\0"):
-    if p and not exempt_name(os.path.relpath(os.fsdecode(p), root)):
-        cands.append(os.fsdecode(p))
-if cands:
-    try:
-        r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
-        tracked = {os.path.normpath(os.path.join(root, t)) for t in os.fsdecode(r.stdout).split("\0") if t} if r.returncode == 0 else set()
-    except Exception:
-        tracked = set()
-    cands = [c for c in cands if os.path.normpath(c) not in tracked]
-sys.exit(0 if cands else 1)
+try:
+    root, probe_dir = sys.argv[1], sys.argv[2]
+    sys.path.insert(0, probe_dir)
+    from c14_probe import exempt_name
+    cands = []
+    for p in sys.stdin.buffer.read().split(b"\0"):
+        if p and not exempt_name(os.path.relpath(os.fsdecode(p), root)):
+            cands.append(os.fsdecode(p))
+    if cands:
+        try:
+            r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
+            tracked = {os.path.normpath(os.path.join(root, t)) for t in os.fsdecode(r.stdout).split("\0") if t} if r.returncode == 0 else set()
+        except Exception:
+            tracked = set()
+        cands = [c for c in cands if os.path.normpath(c) not in tracked]
+    if cands:
+        sys.exit(0)
+    print("none")
+    sys.exit(1)
+except Exception:
+    sys.exit(3)
 '
+# Only find rc 0 + filter rc 1 + stdout "none" means clean; every other outcome is secret-like.
 _av_secret_like() {
-    local rc
-    find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    local res
+    res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
-        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_AV_DIR/.."
-    rc=("${PIPESTATUS[@]}")
-    [[ "${rc[0]}" -ne 0 ]] && return 0
-    [[ "${rc[1]}" -eq 1 ]] && return 1
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_AV_DIR/.." 2>/dev/null; echo " ${PIPESTATUS[*]}")"
+    [[ "$res" == $'none\n 0 1' ]] && return 1
     return 0
 }
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose

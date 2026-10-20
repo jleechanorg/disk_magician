@@ -63,10 +63,11 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Every hit counts unless c14_probe.py exempt-name (the single owner of the rule) clears it:
-    # templates, generated/build-only suffixes (.d.ts .map .h .pyc ...), or source files under
-    # dependency/vendor/build dirs. rc 0 = a secret-like hit remains; any other rc fails closed.
-    local rc=0
-    printf '%s\n' "$out" | python3 -I "$_WI_DIR/../c14_probe.py" any-secret || rc=$?
-    [[ "$rc" -ne 1 ]]
+    # Every hit counts unless c14_probe.py exempt_name (the single owner of the rule) clears it.
+    # Only an explicit rc 1 + "none" means no secret; any other result (secret found, probe
+    # crash, missing module, bad input) is hidden state.
+    local res rc=0
+    res="$(printf '%s\n' "$out" | python3 -I "$_WI_DIR/../c14_probe.py" any-secret 2>/dev/null)" || rc=$?
+    [[ "$rc" -eq 1 && "$res" == none ]] && return 1
+    return 0
 }
