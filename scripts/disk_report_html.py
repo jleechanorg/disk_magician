@@ -981,7 +981,7 @@ def render_html(model: Dict[str, Any]) -> str:
       <span class="card-meta">{used_gb:.1f} GiB used ({used_pct:.1f}%) &bull; Coverage: {cov_pct:.1f}% (effective {eff_cov_pct:.1f}%)</span>
     </div>
     <div class="summary-card card-safe" id="card-safe-to-remove">
-      <span class="card-label">2. Safe to remove via diskm</span>
+      <span class="card-label">2. In safe-tier paths (upper bound)</span>
       <span class="card-value" style="color:var(--safe);">{safe_gb:.1f} GiB</span>
       <span class="card-meta">Rebuildable caches, temp scratch, Xcode, Colima sparse trim, rotated logs</span>
     </div>
@@ -1040,7 +1040,7 @@ def render_html(model: Dict[str, Any]) -> str:
 
       <div class="bucket-section">
         <h3 class="bucket-section-title" style="color:var(--safe);">
-          <span>Safe to remove (via diskm) — Checked by default</span>
+          <span>Safe tier (via diskm; commands prune selected contents, so this is an upper bound) — Checked by default</span>
           <span>{safe_gb:.1f} GiB</span>
         </h3>
         <div class="rec-list" id="list-safe"></div>
@@ -1406,7 +1406,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"  Snapshot: {snapshot_path} ({model['timestamp']})\n"
             f"  Free right now: {model['disk_free_gb']:.1f} GiB / {model['disk_total_gb']:.0f} GiB "
             f"({model['disk_used_pct']:.1f}% used, coverage {model['snapshot_coverage_pct']:.1f}%)\n"
-            f"  Safe to remove (via diskm): {sb['safe_to_remove_gb']:.1f} GiB\n"
+            f"  In safe-tier paths (upper bound): {sb['safe_to_remove_gb']:.1f} GiB\n"
             f"  Needs review & Protected:   {sb['needs_review_and_protected_gb']:.1f} GiB "
             f"(Gated: {sb['gated_review_gb']:.1f} GiB, Protected: {sb['protected_never_delete_gb']:.1f} GiB)\n"
             f"  System & Residual:          {sb['system_and_residual_gb']:.1f} GiB"
