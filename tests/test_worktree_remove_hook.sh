@@ -516,9 +516,9 @@ tail -n 3 "$LOG" | grep -q "recency override active: minutes:60" && ok "override
 echo "== case 29d: unwritable state dir -> override falls back to days:7 (61-minute-old worktree kept) =="
 add_wt ovr3 worktree-ovr3
 age_wt_minutes "$WTROOT/ovr3" 61
-mkdir -p "$HOME/.disk_magician_state/worktree_guard.log"  # a directory: the audit append must fail
+mv "$LOG" "$LOG.keep"; mkdir "$LOG"  # a directory: the audit append must fail
 errout="$(printf '%s' "$(json "$WTROOT/ovr3")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:60 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" 2>&1 >/dev/null)"
-rmdir "$HOME/.disk_magician_state/worktree_guard.log"
+rmdir "$LOG"; mv "$LOG.keep" "$LOG"
 [[ -d "$WTROOT/ovr3" ]] && ok "unrecordable override leaves the 61-minute-old worktree" || bad "override applied without an audit record"
 [[ "$errout" == *"cannot record recency override"* ]] && ok "fallback reported on stderr" || bad "no stderr fallback notice: $errout"
 
