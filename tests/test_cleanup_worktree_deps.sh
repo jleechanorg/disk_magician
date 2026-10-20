@@ -174,9 +174,9 @@ for d in node_modules ios/Pods ios/build build .venv .next pkg/__pycache__; do c
 [[ "$OUT" != *"$T/iroots/symlinked/node_modules"* ]] && ok "symlinked node_modules not listed" || bad "symlinked node_modules listed"
 for w in dirty unpushed live fresh locked; do [[ "$OUT" != *"$T/iroots/$w/"* ]] && ok "override=120 skips $w worktree" || bad "override=120 listed $w"; done
 check "tracked worktree node_modules listed" "$T/iroots/tracked/node_modules" "$OUT"
-[[ "$OUT" != *"WOULD-STRIP"*"$T/iroots/tracked/build"* ]] && ok "tracked build/ never listed" || bad "tracked build/ listed"
+! grep -q "WOULD-STRIP [0-9]*KB $T/iroots/tracked/build\$" <<<"$OUT" && ok "tracked build/ never listed" || bad "tracked build/ listed"
 check "secret-bearing dir reported" "SECRET-SKIP $T/iroots/secret/node_modules" "$OUT"
-[[ "$OUT" != *"WOULD-STRIP"*"$T/iroots/secret/node_modules"* ]] && ok "secret-bearing dir not stripped" || bad "secret dir listed"
+! grep -q "WOULD-STRIP [0-9]*KB $T/iroots/secret/node_modules\$" <<<"$OUT" && ok "secret-bearing dir not stripped" || bad "secret dir listed"
 [[ -d "$T/iroots/ok/node_modules" ]] && ok "override dry-run deletes nothing" || bad "override dry-run deleted"
 OUT="$(MODE=--clean irun WORKTREE_APPROVED=1 DISK_MAGICIAN_DEPS_IDLE_MINUTES=120)"
 for d in node_modules ios/Pods ios/build build .venv .next pkg/__pycache__; do [[ ! -e "$T/iroots/ok/$d" ]] && ok "clean removed ok/$d" || bad "ok/$d remains"; done
