@@ -62,6 +62,24 @@ has_ignored_user_data() {
     return 1
 }
 
+# Shared by has_hidden_state and artifact_verdict.sh _av_secret_like: a name that
+# matches a secret pattern is NOT a secret when it is a source/derived-code file
+# (credentials.js, *.d.ts, *.js.map, *.h ...) or an .env template. Config, key and
+# extensionless names (.json/.yaml/.pem/credentials ...) are never exempt.
+_WI_CODE_EXTS="js mjs cjs jsx ts tsx map h hpp c cc cpp m mm swift py pyi go rs java kt rb php cs rst md txt sh html css so dylib a"
+_WI_TEMPLATES=".env.example .env.template .env.sample .env.dist .env.default"
+# secret_name_exempt <path>: rc 0 when the basename is exempt.
+secret_name_exempt() {
+    local n ext
+    n="$(printf '%s' "${1##*/}" | tr 'A-Z' 'a-z')"
+    case " $_WI_TEMPLATES " in *" $n "*) return 0 ;; esac
+    [[ "$n" == *.json.schema ]] && return 0
+    ext="${n##*.}"
+    [[ "$n" == *.* && "$n" != ".$ext" ]] || return 1
+    case " $_WI_CODE_EXTS " in *" $ext "*) return 0 ;; esac
+    return 1
+}
+
 # has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
 # (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
 # probe fails/times out (fail closed).
@@ -78,8 +96,13 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
-    [[ -n "$out" ]]
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc) is
+    # rebuildable. Other hits count unless they are source/derived-code or
+    # template names; secret-named files in dependency dirs stay hidden state.
+    out="$(grep -Ev '\.pyc$' <<<"$out" || true)"
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && ! secret_name_exempt "$line" && return 0
+    done <<<"$out"
+    return 1
 }

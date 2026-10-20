@@ -268,8 +268,8 @@ _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 _AV_SECRET_FILTER='
 import os, subprocess, sys
 root = sys.argv[1]
-code = set("js mjs cjs jsx ts tsx map h hpp c cc cpp m mm swift py pyi go rs java kt rb php cs rst md txt sh html css so dylib a".split())
-tmpl = (".env.example", ".env.template", ".env.sample", ".env.dist", ".env.default")
+code = set(sys.argv[2].split())
+tmpl = tuple(sys.argv[3].split())
 cands = []
 for p in sys.stdin.buffer.read().split(b"\0"):
     if not p:
@@ -293,7 +293,7 @@ _av_secret_like() {
     find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1"
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_WI_CODE_EXTS" "$_WI_TEMPLATES"
     rc=("${PIPESTATUS[@]}")
     [[ "${rc[0]}" -ne 0 ]] && return 0
     [[ "${rc[1]}" -eq 1 ]] && return 1

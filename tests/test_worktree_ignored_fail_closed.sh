@@ -60,11 +60,11 @@ for rel in credentials.txt secrets.md .env.test Build/credentials.json; do
   [[ "$out" == yes ]] && ok "$rel is secret-like" || bad "$rel -> $out"
 done
 
-echo "== _av_secret_like: no suffix, keyword or dependency-dir exemptions =="
+echo "== _av_secret_like: config/key names and dependency dirs are not exempt =="
 (
   # shellcheck source=scripts/lib/artifact_verdict.sh
   source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
-  for rel in credentials.txt example/.env node_modules/pkg/.env Build/secrets.json app_credentials.py; do
+  for rel in credentials.json example/.env node_modules/pkg/.env Build/secrets.json app_credentials.toml; do
     d="$TMP/av-${rel//\//_}"; mkdir -p "$d/$(dirname "$rel")"; printf 'x' >"$d/$rel"
     _av_secret_like "$d" && echo "  PASS: $rel is secret-like" || echo "  FAIL: $rel not secret-like"
   done
