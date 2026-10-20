@@ -94,7 +94,15 @@ clear_contents() {
 clean_custom_derived_data() {
   local cand
   local candidates=()
-  for cand in "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* /private/tmp/*_dd* /private/tmp/dd_* /private/tmp/pr* /private/tmp/pr*/dd /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* /private/tmp/worldai_claw/*/* /private/tmp/ipad*/*; do
+  local darwin_tmp=""
+  if command -v getconf >/dev/null 2>&1; then
+    darwin_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+    darwin_tmp="${darwin_tmp%/}"
+    if [[ -n "$darwin_tmp" && -d "$darwin_tmp" ]]; then
+      darwin_tmp="$(cd "$darwin_tmp" 2>/dev/null && pwd -P || printf '%s' "$darwin_tmp")"
+    fi
+  fi
+  for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* /private/tmp/*_dd* /private/tmp/dd_* /private/tmp/pr* /private/tmp/pr*/dd /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* /private/tmp/worldai_claw/*/* /private/tmp/ipad*/* ${darwin_tmp:+"$darwin_tmp"/tmp.* "$darwin_tmp"/*_dd* "$darwin_tmp"/dd_*}; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
     local dup=false
     local c

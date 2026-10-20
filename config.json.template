@@ -853,6 +853,10 @@
     {
       "key": "skills_repos",
       "pattern": "~/*-skills*"
+    },
+    {
+      "key": "home_derived_data",
+      "pattern": "~/dd_*"
     }
   ],
   "cleanup_thresholds": {

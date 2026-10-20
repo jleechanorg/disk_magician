@@ -6,6 +6,7 @@ set -euo pipefail
 
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+export GIT_OPTIONAL_LOCKS=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -31,7 +32,15 @@ source "$SCRIPT_DIR/lib/quarantine.sh"
 
 DRY_RUN=true
 TASK_SCRATCH_MIN_AGE_HOURS="${DISK_MAGICIAN_TASK_SCRATCH_MIN_AGE_HOURS:-12}"
-TASK_SCRATCH_ROOTS_RAW="${DISK_MAGICIAN_TASK_SCRATCH_ROOTS:-$HOME/projects:$HOME/projects_other}"
+DEFAULT_TASK_SCRATCH_ROOTS="$HOME/projects:$HOME/projects_other"
+if [[ -z "${DISK_MAGICIAN_TEST_SANDBOX:-}" && "${DISK_MAGICIAN_TEST_CONTEXT:-0}" != "1" ]]; then
+  DEFAULT_TASK_SCRATCH_ROOTS="$DEFAULT_TASK_SCRATCH_ROOTS:/private/tmp:/tmp"
+  _darwin_user_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+  if [[ -n "$_darwin_user_tmp" && -d "$_darwin_user_tmp" ]]; then
+    DEFAULT_TASK_SCRATCH_ROOTS="$DEFAULT_TASK_SCRATCH_ROOTS:${_darwin_user_tmp%/}"
+  fi
+fi
+TASK_SCRATCH_ROOTS_RAW="${DISK_MAGICIAN_TASK_SCRATCH_ROOTS:-$DEFAULT_TASK_SCRATCH_ROOTS}"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 MANIFEST_FILE="$STATE_DIR/task_scratch_cleanup_manifest.txt"
 
@@ -136,12 +145,22 @@ append_manifest() {
 }
 
 matches_task_scratch_pattern() {
-  local base="$1"
+  local base="$1" root="${2:-}"
   case "$base" in
+    pip-*|pytest-of-*|uv-*|v8-compile-cache*|yarn--*|tsx-*|node-compile-cache*|cargo-install*)
+      return 1
+      ;;
     pr[0-9]*|pr-[0-9]*|pr_*|adv*|advice*|ready-*|router-eval|worktree_graveyard_*|rv[0-9]*|frozen*|lane_*|wa-*|wf*|scan[0-9]*|auth[0-9]*|worldai-*|worldarchitect-*|worldarchitect.*|worldarchitectai|codex_*|er-*|er[0-9]*|npm-cache*|spicy-*|jls[0-9]*|idb|unknown|openrouter-*|push-release-context-*|backend-push-cloud-packet-*|base208*|pi_*)
       return 0
       ;;
   esac
+  if [[ -n "$root" && "$root" != "$HOME" && "$root" != "$HOME"/* ]]; then
+    case "$base" in
+      tmp.*|c14-selftest.*|dm-*|cleanup_wt_*|ipad-*)
+        return 0
+        ;;
+    esac
+  fi
   if [[ "$base" =~ ^.+-[a-z0-9_]{8}$ ]]; then
     return 0
   fi
@@ -150,8 +169,9 @@ matches_task_scratch_pattern() {
 
 # dir_newest_mtime_epoch <dir>: walks <dir> without following symlinks and
 # prints the maximum integer mtime across non-directory entries in <dir>
-# (falling back to directory mtimes only if <dir> contains no files/symlinks,
-# and clamping directory mtimes bumped by prior venv/cache strips).
+# (ignoring .git metadata rewrites from git status/lfs probes, falling back to
+# directory mtimes only if <dir> contains no files/symlinks, and clamping
+# directory mtimes bumped by prior venv/cache strips).
 # Fails closed (returns 1) on any unreadable directory or stat failure.
 dir_newest_mtime_epoch() {
   local target="$1"
@@ -166,6 +186,8 @@ try:
     def on_err(err):
         raise err
     for dp, dns, fns in os.walk(root, topdown=True, onerror=on_err, followlinks=False):
+        if ".git" in dns:
+            dns.remove(".git")
         for name in dns:
             p = os.path.join(dp, name)
             st = os.lstat(p)
@@ -178,6 +200,8 @@ try:
                 if mt > max_file:
                     max_file = mt
         for name in fns:
+            if name == ".git":
+                continue
             p = os.path.join(dp, name)
             st = os.lstat(p)
             mt = int(st.st_mtime)
@@ -319,6 +343,9 @@ PY
     }
     if [[ -n "$st" ]]; then
       st="$(grep -vE '^\?\? (\.advice-review-documents|\.husky/_)(/.*)?$' <<<"$st" || true)"
+    fi
+    if [[ -n "$st" ]] && [[ -z "$(/usr/bin/find "$repo" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null || true)" ]]; then
+      st="$(grep -vE '^(D | D) ' <<<"$st" || true)"
     fi
     if [[ -n "$st" ]]; then
       CONTAINER_REPO_REASON="dirty:$repo"
@@ -546,6 +573,18 @@ if declare -F _av_age_days >/dev/null 2>&1; then
   }
 fi
 
+CURRENT_APPROVED_SCRATCH_MTIME=""
+if declare -F _av_newest_mtime >/dev/null 2>&1; then
+  eval "_orig_$(declare -f _av_newest_mtime)"
+  _av_newest_mtime() {
+    if [[ -n "$CURRENT_APPROVED_SCRATCH_DIR" && -n "$CURRENT_APPROVED_SCRATCH_MTIME" ]]; then
+      echo "$CURRENT_APPROVED_SCRATCH_MTIME"
+      return 0
+    fi
+    _orig__av_newest_mtime "$@"
+  }
+fi
+
 # Resolve and deduplicate roots
 IFS=':' read -r -a RAW_ROOTS <<<"$TASK_SCRATCH_ROOTS_RAW"
 CANONICAL_ROOTS=()
@@ -609,12 +648,12 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
       continue
     fi
 
-    # Candidate must NOT itself be a git repo or linked worktree (except under /private/tmp or /tmp outside $HOME)
+    # Candidate must NOT itself be a git repo or linked worktree (except under temp roots outside $HOME)
     if [[ -L "$dir/.git" ]]; then
       continue
     fi
     if [[ -e "$dir/.git" ]]; then
-      if [[ "$root" == "$HOME" || "$root" == "$HOME"/* ]] || [[ "$root" != /private/tmp && "$root" != /private/tmp/* && "$root" != /tmp && "$root" != /tmp/* ]]; then
+      if [[ "$root" == "$HOME" || "$root" == "$HOME"/* ]] || [[ "$root" != /private/tmp && "$root" != /private/tmp/* && "$root" != /tmp && "$root" != /tmp/* && "$root" != /private/var/folders/* && "$root" != /var/folders/* ]]; then
         continue
       fi
     fi
@@ -623,7 +662,7 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     fi
 
     # Candidate basename must match task-scratch container patterns
-    if ! matches_task_scratch_pattern "$base"; then
+    if ! matches_task_scratch_pattern "$base" "$root"; then
       continue
     fi
 
@@ -706,6 +745,7 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 
     # Execute removals (--clean)
     CURRENT_APPROVED_SCRATCH_DIR="$dir"
+    CURRENT_APPROVED_SCRATCH_MTIME="$newest_epoch"
     container_abort=false
 
     # 1. Remove clean, pushed linked worktrees via 'git worktree remove' (without --force)
@@ -733,59 +773,57 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 
     if [[ "$container_abort" == true ]]; then
       CURRENT_APPROVED_SCRATCH_DIR=""
+      CURRENT_APPROVED_SCRATCH_MTIME=""
       CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))
       continue
     fi
 
     if [[ ! -d "$dir" ]]; then
       CURRENT_APPROVED_SCRATCH_DIR=""
+      CURRENT_APPROVED_SCRATCH_MTIME=""
       CONTAINERS_REMOVED=$(( CONTAINERS_REMOVED + 1 ))
       continue
     fi
 
-    # 2. Remove remaining scratch files/dirs inside $dir that pass artifact_removal_verdict --kind ephemeral
+    # 2. Verify container-level C14 ephemeral verdict once, then remove remaining entries
+    set_dir_mtime_epoch "$dir" "$newest_epoch"
+    dir_verdict="$(artifact_removal_verdict "$dir" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
+    if [[ "$dir_verdict" != "remove" ]]; then
+      log "KEEP [c14: $dir_verdict] $dir"
+      CURRENT_APPROVED_SCRATCH_DIR=""
+      CURRENT_APPROVED_SCRATCH_MTIME=""
+      CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))
+      continue
+    fi
+
+    remaining_kb="$(path_size_kb "$dir")"
     while IFS= read -r -d '' entry; do
-      if [[ -L "$entry" ]]; then
-        set_dir_mtime_epoch "$dir" "$newest_epoch"
-        verdict="$(artifact_removal_verdict "$dir" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
-      else
-        verdict="$(artifact_removal_verdict "$entry" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
-      fi
-      if [[ "$verdict" != "remove" ]]; then
-        log "KEEP [c14: $verdict] $entry"
-        container_abort=true
-        continue
-      fi
-      entry_kb="$(path_size_kb "$entry")"
       if [[ ! -L "$entry" && -d "$entry" ]]; then
         chmod -R u+w "$entry" 2>/dev/null || true
       elif [[ ! -L "$entry" ]]; then
         chmod u+w "$entry" 2>/dev/null || true
       fi
-      if rm -rf -- "$entry" 2>/dev/null && [[ ! -e "$entry" && ! -L "$entry" ]]; then
+      if /bin/rm -rf -- "$entry" 2>/dev/null && [[ ! -e "$entry" && ! -L "$entry" ]]; then
         append_manifest "rm" "$entry"
-        deletion_log "cleanup_task_scratch.sh" "rm" "$entry_kb" "$entry"
-        log "rm $entry (${entry_kb} KB)"
+        deletion_log "cleanup_task_scratch.sh" "rm" "0" "$entry"
+        log "rm $entry"
         ENTRIES_REMOVED=$(( ENTRIES_REMOVED + 1 ))
-        TOTAL_KB=$(( TOTAL_KB + entry_kb ))
       else
         log "KEEP [rm-failed: $entry] $dir"
         container_abort=true
       fi
     done < <(/usr/bin/find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
 
-    [[ -d "$dir" ]] && set_dir_mtime_epoch "$dir" "$newest_epoch"
-
     # 3. Remove the emptied container directory itself
     if [[ "$container_abort" == false ]]; then
-      dir_verdict="$(artifact_removal_verdict "$dir" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
-      if [[ "$dir_verdict" == "remove" ]] && rmdir "$dir" 2>/dev/null; then
+      if rmdir "$dir" 2>/dev/null; then
         append_manifest "rmdir" "$dir"
-        deletion_log "cleanup_task_scratch.sh" "rmdir" "0" "$dir"
-        log "rmdir $dir"
+        deletion_log "cleanup_task_scratch.sh" "rmdir" "$remaining_kb" "$dir"
+        log "rmdir $dir (${remaining_kb} KB)"
         CONTAINERS_REMOVED=$(( CONTAINERS_REMOVED + 1 ))
+        TOTAL_KB=$(( TOTAL_KB + remaining_kb ))
       else
-        log "KEEP [rmdir-or-c14-kept: $dir_verdict] $dir"
+        log "KEEP [rmdir-failed] $dir"
         CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))
       fi
     else
@@ -793,6 +831,7 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     fi
 
     CURRENT_APPROVED_SCRATCH_DIR=""
+    CURRENT_APPROVED_SCRATCH_MTIME=""
   done < <(/usr/bin/find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | LC_ALL=C sort -z)
 done
 

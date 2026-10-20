@@ -615,7 +615,9 @@ has_recent_activity() {
 has_active_marker() {
   local dir="$1" hit_file
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  /usr/bin/find "$dir" -name .in-use -print 2>/dev/null | head -n 1 >"$hit_file" || true
+  /usr/bin/find "$dir" \
+    -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name Pods -o -name DerivedData -o -name target -o -name __pycache__ \) -prune \
+    -o -name .in-use -print -quit 2>/dev/null >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0

@@ -331,7 +331,7 @@ has_recent_activity() {
   local target="$1" hours="$2" mins hit_file
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  find_cmd "$target" -mmin "-${mins}" -print 2>/dev/null | head -n 1 >"$hit_file" || true
+  find_cmd "$target" -mmin "-${mins}" -print -quit 2>/dev/null >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -346,7 +346,9 @@ has_active_marker() {
     return 1
   fi
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  find_cmd "$target" \( -name .in-use -o -name .keep \) -print 2>/dev/null | head -n 1 >"$hit_file" || true
+  find_cmd "$target" \
+    -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name Pods -o -name DerivedData -o -name target -o -name __pycache__ \) -prune \
+    -o \( -name .in-use -o -name .keep \) -print -quit 2>/dev/null >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -446,13 +448,13 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive|.dm-quarantine) continue ;;
       esac
 
-      if has_active_marker "$item"; then
-        log "Skipping active-use marker (.in-use/.keep present): $item"
+      if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
+        log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
         continue
       fi
 
-      if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
-        log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
+      if has_active_marker "$item"; then
+        log "Skipping active-use marker (.in-use/.keep present): $item"
         continue
       fi
 
