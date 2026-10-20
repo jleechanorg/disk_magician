@@ -139,25 +139,28 @@ r="$(PATH="$T/shim:$PATH" DM_DELETION_SIZE_TIMEOUT=1 bash -c 'source "$1/scripts
 
 echo "== strip_dir (cleanup_worktree_deps.sh) =="
 mkdir -p "$T/wt/node_modules/x" && head -c 8192 /dev/zero >"$T/wt/node_modules/x/f"
+# Extract in this shell with single quotes: bash 3.2 mangles nested double quotes around braces in a -c string.
+sed -n '/^strip_dir() {/,/^}/p' "$ROOT/scripts/cleanup_worktree_deps.sh" >"$T/strip_dir.fn"
 reset; bash -c '
   source "$1/scripts/safety_lib.sh"
   safety_gate() { return 0; }
   DRY_RUN=false; total_kb=0; count=0
   stripped_paths="|"
-  eval "$(sed -n "/^strip_dir() {/,/^}/p" "$1/scripts/cleanup_worktree_deps.sh")"
+  source "$3"
   strip_dir "$2" "$2/node_modules"
-' _ "$ROOT" "$T/wt" >/dev/null 2>&1
+' _ "$ROOT" "$T/wt" "$T/strip_dir.fn" >/dev/null 2>&1
 [[ ! -e "$T/wt/node_modules" ]] && ok "node_modules stripped" || bad "node_modules still present"
 expect "strip_dir success -> one strip line" 1 strip "$T/wt/node_modules"
 
 echo "== clear_dir_contents (cleanup_agent_artifacts.sh) =="
 mkdir -p "$T/aa/sub" && head -c 4096 /dev/zero >"$T/aa/sub/f"
+sed -n '/^clear_dir_contents() {/,/^}/p' "$ROOT/scripts/cleanup_agent_artifacts.sh" >"$T/clear_dir.fn"
 reset; bash -c '
   source "$1/scripts/safety_lib.sh"
   DRY_RUN=false
-  eval "$(sed -n "/^clear_dir_contents() {/,/^}/p" "$1/scripts/cleanup_agent_artifacts.sh")"
+  source "$3"
   clear_dir_contents "$2"
-' _ "$ROOT" "$T/aa" >/dev/null 2>&1
+' _ "$ROOT" "$T/aa" "$T/clear_dir.fn" >/dev/null 2>&1
 expect "clear_dir_contents -> one empty line" 1 empty "$T/aa"
 
 echo "== script coverage allow-list =="

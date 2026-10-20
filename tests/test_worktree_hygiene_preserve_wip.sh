@@ -577,18 +577,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "case 31: credential-named bytecode under __pycache__ is not a secret"
+echo "case 31: credential-named bytecode under __pycache__ is secret-like; plain bytecode is not"
 R31="$(mk_repo r31)"
 printf '__pycache__/\n*.pyc\n.env\n' >"$R31/.gitignore"
 mkdir -p "$R31/pkg"; echo "x = 1" >"$R31/pkg/mod.py"
 g -C "$R31" add -A; g -C "$R31" commit -q -m ign
 W31="$(mk_wt "$R31" pyc31)"
 mkdir -p "$W31/pkg/__pycache__"
-echo "x" >"$W31/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
+echo "x" >"$W31/pkg/__pycache__/mod.cpython-312.pyc"
 echo "edit" >>"$W31/tracked.txt"
 backdate_tree "$W31" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
-assert_not_contains "$OUT" "ignored-secret" "bytecode name does not block"
+assert_not_contains "$OUT" "ignored-secret" "plain bytecode does not block"
 assert_true "! [[ -d '$W31' ]]" "worktree preserved+removed"
 W31B="$(mk_wt "$R31" pyc31b)"
 echo "TOKEN=1" >"$W31B/pkg_credentials.pyc"
@@ -597,6 +597,13 @@ echo "edit" >>"$W31B/tracked.txt"
 backdate_tree "$W31B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
+W31C="$(mk_wt "$R31" pyc31c)"
+mkdir -p "$W31C/pkg/__pycache__"; echo "x" >"$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
+echo "edit" >>"$W31C/tracked.txt"
+backdate_tree "$W31C" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret" "credential-named bytecode under __pycache__ blocks"
+assert_true "[[ -f '$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc' ]]" "credential bytecode kept"
 assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
 
 # ---------------------------------------------------------------------------

@@ -566,15 +566,23 @@ preserve_wip_blocker() {
         if [[ "$name" == */ ]]; then
             echo "nested-repo:$name"; return 0
         fi
+        # A credentials-named .pyc outside a dependency dir is secret-like (C14 exempt_name rule),
+        # even though ignored_entry_rebuildable treats *.pyc as regenerable.
+        case "$name" in
+            node_modules/*|*/node_modules/*|venv/*|*/venv/*|.venv/*|*/.venv/*|site-packages/*|*/site-packages/*) ;;
+            *) case "${name##*/}" in *credentials*.py[co]|secrets*.py[co]) echo "ignored-secret:$name"; return 0 ;; esac ;;
+        esac
         # Only ignored, known-rebuildable outputs bypass credential-name matching.
         if git -C "$wt" check-ignore -q -- "$name" \
             && ignored_entry_rebuildable "$wt" "$name"; then
             continue
         fi
         base="${name##*/}"
-        # Compiled bytecode (e.g. __pycache__/clock_skew_credentials.*.pyc) is
-        # regenerated from its source; its name is not a credential.
-        case "$name" in __pycache__/*.py[co]|*/__pycache__/*.py[co]) continue ;; esac
+        # Bytecode is exempt only under dependency dirs (same rule as C14 exempt_name);
+        # a credentials-named .pyc elsewhere (e.g. __pycache__/x_credentials.pyc) can embed secrets.
+        case "$name" in
+            node_modules/*.py[co]|*/node_modules/*.py[co]|venv/*.py[co]|*/venv/*.py[co]|.venv/*.py[co]|*/.venv/*.py[co]|site-packages/*.py[co]|*/site-packages/*.py[co]) continue ;;
+        esac
         case "$base" in
             .env|.env.*|.envrc|*.pem|*.key|*.keystore|id_rsa*|id_ed25519*|*credentials*|secrets*|service-account*.json|.netrc|*.p12)
                 echo "ignored-secret:$name"; return 0 ;;

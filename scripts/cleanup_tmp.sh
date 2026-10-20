@@ -857,7 +857,7 @@ archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusa
   local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
   secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
     -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! \( -name '*.pyc' \( -path '*/node_modules/*' -o -path '*/site-packages/*' -o -path '*/venv/*' -o -path '*/.venv/*' \) \) \
     -print -quit 2>/dev/null)" || secret_rc=$?
   if (( secret_rc != 0 )); then
     c14_verdict="kept:check-failed"
