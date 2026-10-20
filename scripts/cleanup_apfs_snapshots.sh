@@ -11,6 +11,8 @@
 #
 # Non-fatal: exits 0 if tmutil is unavailable or returns no snapshots.
 set -euo pipefail
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 
 DRY_RUN=true
 
@@ -129,6 +131,7 @@ else
       log "  Deleting snapshot: $date_str"
       if tmutil deletelocalsnapshots "$date_str" 2>/dev/null; then
         log "  Deleted: $date_str"
+        deletion_log_removal "apfs-snapshot:$date_str" -1 delete_snapshot
         DELETED_COUNT=$(( DELETED_COUNT + 1 ))
       else
         log "  WARNING: deletion failed for $date_str (may have already been purged)"

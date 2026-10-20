@@ -185,6 +185,41 @@ deletion_log() {
     >>"$log_path" 2>/dev/null || true
 }
 
+# --- Central deletion logging (bead: deletion-log-is-the-reclaim-list) -------
+# Removal PRIMITIVES (quarantine_remove, wrh_remove_now, strip_dir, rm_logged,
+# ...) call these after a SUCCESSFUL removal so every deleter feeds the same
+# log. Actuator name: ${DM_ACTUATOR:-$(basename "$0")}. A caller that already
+# logs the same path itself with richer detail sets DM_DELETION_LOGGED=1 on
+# that one call (`DM_DELETION_LOGGED=1 c14_remove ...`) so the line appears once.
+
+# deletion_size_kb <path> — size probe taken BEFORE removal; prints 0 when the
+# caller logs (no probe needed), -1 when unknown or du exceeds the cap
+# (DM_DELETION_SIZE_TIMEOUT seconds, default 20; never an unbounded du).
+deletion_size_kb() {
+  [[ "${DM_DELETION_LOGGED:-}" == 1 ]] && { echo 0; return 0; }
+  local out
+  out="$(perl -e 'alarm shift; exec @ARGV' "${DM_DELETION_SIZE_TIMEOUT:-20}" du -sk "$1" 2>/dev/null | awk '{print $1; exit}')" || out=""
+  [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo -1
+}
+
+# deletion_log_removal <path> <kb> [action] — one deletion_log line, honoring
+# the DM_DELETION_LOGGED=1 caller guard.
+deletion_log_removal() {
+  [[ "${DM_DELETION_LOGGED:-}" == 1 ]] && return 0
+  deletion_log "${DM_ACTUATOR:-$(basename "$0")}" "${3:-remove}" "$2" "$1"
+}
+
+# rm_logged <path> — `rm -rf` one path (callers keep their own safety gates);
+# logs only when the path is actually gone. rc follows rm.
+rm_logged() {
+  local kb rc=0
+  [[ -e "$1" || -L "$1" ]] || return 0
+  kb="$(deletion_size_kb "$1")"
+  rm -rf -- "$1" || rc=$?
+  [[ -e "$1" || -L "$1" ]] || deletion_log_removal "$1" "$kb"
+  return "$rc"
+}
+
 # findings_wiki_docs — list machine-local finding docs (fork-tracked knowledge
 # layer; see findings_wiki/README.md). Prints one path per line; rc 1 if none.
 findings_wiki_docs() {

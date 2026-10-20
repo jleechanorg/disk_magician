@@ -334,6 +334,7 @@ else
     freed_kb=$(( before_kb - after_kb ))
     [[ $freed_kb -lt 0 ]] && freed_kb=0
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
+    deletion_log_removal "$pnpm_store_dir" "$freed_kb" prune
     log "pnpm store: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
   fi
 fi
@@ -452,7 +453,7 @@ else
     log "fsevents state cache: [dry-run] would drop $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason): $fsevents_state_resolved"
   elif ! _safety_reason="$(safety_gate "$fsevents_state_resolved" 2>/dev/null)"; then
     log "fsevents state cache: SAFETY-SKIP ($_safety_reason)"
-  elif c14_remove "$fsevents_state_resolved" --kind rebuildable; then
+  elif DM_DELETION_LOGGED=1 c14_remove "$fsevents_state_resolved" --kind rebuildable; then
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + fsevents_state_kb ))
     deletion_log "cleanup_dev_caches" "drop_fsevents_state_cache" "$fsevents_state_kb" "$fsevents_state_resolved"
     log "fsevents state cache: dropped $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason); rebuilt on the next poll"
@@ -521,7 +522,7 @@ else
       fi
       log "peekaboo snapshots: deleting $entry ($(fmt_kb "$kb"))"
       chmod -R u+w "$entry" 2>/dev/null || true
-      if c14_remove "$entry" --kind rebuildable; then
+      if DM_DELETION_LOGGED=1 c14_remove "$entry" --kind rebuildable; then
         peek_deleted=$(( peek_deleted + 1 ))
         peek_freed_kb=$(( peek_freed_kb + kb ))
         deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$entry"
@@ -589,7 +590,7 @@ for rec_dir in "${BR_RECOVERY_GLOBS[@]}"; do
       fi
       log "br_recovery: deleting $candidate ($(fmt_kb "$kb"))"
       chmod -R u+w "$candidate" 2>/dev/null || true
-      if c14_remove "$candidate" --kind rebuildable; then
+      if DM_DELETION_LOGGED=1 c14_remove "$candidate" --kind rebuildable; then
         br_deleted=$(( br_deleted + 1 ))
         br_freed_kb=$(( br_freed_kb + kb ))
         deletion_log "cleanup_dev_caches.sh" "remove" "$kb" "$candidate"

@@ -100,5 +100,6 @@ fi
 after_kb=$(du -sk "$UV_CACHE_DIR" 2>/dev/null | awk '{print $1+0}')
 freed_kb=$(( before_kb - after_kb ))
 [[ "$freed_kb" -lt 0 ]] && freed_kb=0
+deletion_log_removal "$UV_CACHE_DIR" "$freed_kb" prune
 log ""
 log "Done. uv cache: $(( before_kb / 1024 )) MB -> $(( after_kb / 1024 )) MB (freed ~$(( freed_kb / 1024 )) MB)"

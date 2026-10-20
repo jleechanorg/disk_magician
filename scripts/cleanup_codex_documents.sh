@@ -542,7 +542,7 @@ quarantine_gate() {
   [[ -n "$QUARANTINE_KIND" ]] && args+=(--kind "$QUARANTINE_KIND")
   [[ -n "$DEADLINE" ]] && args+=(--deadline-at "$DEADLINE")
   CURRENT_APPROVED_CODEX_TASK="$task"
-  quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
+  DM_DELETION_LOGGED=1 quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
   CURRENT_APPROVED_CODEX_TASK=""
 }
 clamp_task_dir_mtimes() {
@@ -668,7 +668,7 @@ process_task() {
         fi
         wrh_rc=0
         wrh_errfile="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-err.XXXXXX")" || wrh_errfile=""
-        wrh_out="$(wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>"${wrh_errfile:-/dev/null}")" || wrh_rc=$?
+        wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>"${wrh_errfile:-/dev/null}")" || wrh_rc=$?
         rm -f -- "$wrh_inv" 2>/dev/null
         if (( wrh_rc != 0 )); then
           local wrh_why=""

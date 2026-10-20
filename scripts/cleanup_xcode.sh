@@ -160,7 +160,7 @@ clean_custom_derived_data() {
       log "Custom Xcode DerivedData: [dry-run] would remove $cand ($(fmt_kb "$before_kb"))"
     else
       log "Custom Xcode DerivedData: removing $cand ($(fmt_kb "$before_kb"))"
-      c14_remove "$cand" --kind rebuildable || true
+      DM_DELETION_LOGGED=1 c14_remove "$cand" --kind rebuildable || true
       if declare -f deletion_log >/dev/null 2>&1; then
         deletion_log "cleanup_xcode.sh" "remove" "$before_kb" "$cand" 2>/dev/null || true
       fi

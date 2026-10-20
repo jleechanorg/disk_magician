@@ -22,6 +22,7 @@ source "$_WRH_DIR/lib/worktree_ignored.sh"
 # it just cannot delete the lease after removing the worktree.
 # shellcheck source=scripts/lib/worktree_lease.sh
 [[ -f "$_WRH_DIR/lib/worktree_lease.sh" ]] && source "$_WRH_DIR/lib/worktree_lease.sh"
+declare -F deletion_log_removal >/dev/null || source "$_WRH_DIR/safety_lib.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -181,7 +182,7 @@ wrh_quarantine_capable() { return 0; }
 # absent flag preserves today's unbounded behavior. There is no unguarded
 # `git worktree remove` fallback. rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch result inv='' deadline=''
+    local real="$1" display="$2" main branch result inv='' deadline='' dkb
     shift 2
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -198,6 +199,7 @@ wrh_remove_now() {
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
+    dkb="$(deletion_size_kb "$real")"
     if [[ -n "$deadline" ]]; then
         result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv" --deadline-at "$deadline")" || return 1
     else
@@ -205,6 +207,7 @@ wrh_remove_now() {
     fi
     [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
+    deletion_log_removal "$real" "$dkb" remove_worktree
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
             wrh_log "kept branch $branch: checked out elsewhere"

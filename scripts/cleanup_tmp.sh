@@ -482,7 +482,7 @@ remove_path() {
       echo "SAFETY-SKIP "$path" ($_safety_reason)"
       return 0
     fi
-    result="$(scratch_budget_quarantine_remove "$path")"
+    result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$path")"
     cleanup_tmp_count_candidate_result "$result"
     if [[ "$result" == removed:* ]]; then
       deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
@@ -1034,7 +1034,7 @@ purge_archive_entry() {
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would request C14 purge for over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
     else
-      result="$(scratch_budget_quarantine_remove "$d")"
+      result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
       cleanup_tmp_count_candidate_result "$result"
       if [[ "$result" == removed:* ]]; then
         log "Purged over-cap archive after C14 approval (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
@@ -1051,7 +1051,7 @@ purge_archive_entry() {
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
   else
-    result="$(scratch_budget_quarantine_remove "$d")"
+    result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
     cleanup_tmp_count_candidate_result "$result"
     if [[ "$result" == removed:* ]]; then
       log "Purged aged archive after C14 approval (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
@@ -1163,7 +1163,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$f" ($_safety_reason)"
       else
-        result="$(scratch_budget_quarantine_remove "$f")"
+        result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$f")"
         cleanup_tmp_count_candidate_result "$result"
         if [[ "$result" == removed:* ]]; then
           deletion_log "cleanup_tmp.sh" "remove" "$local_kb" "$f"
@@ -1332,7 +1332,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
           if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
             echo "SAFETY-SKIP "$f" ($_safety_reason)"
           else
-            dylib_remove_result="$(scratch_budget_quarantine_remove "$f")"
+            dylib_remove_result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$f")"
             cleanup_tmp_count_candidate_result "$dylib_remove_result"
             if [[ "$dylib_remove_result" == removed:* ]]; then
               deletion_log "cleanup_tmp.sh" "remove_dylib" 0 "$f"

@@ -500,7 +500,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # symlink's own mode or its target's mode (found in /advice
           # review of PR #60 -- Opus, symlink-to-file case; symlink-to-dir
           # case hoisted here for the same reason before it ships).
-          if c14_remove "$item" --kind ephemeral; then
+          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
@@ -514,7 +514,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # sweep under `set -euo pipefail` instead of just skipping that
           # one item (bead disk_magician-qap).
           chmod -R u+w "$item" 2>/dev/null || true
-          if c14_remove "$item" --kind ephemeral; then
+          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
@@ -524,7 +524,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           fi
         else
           chmod u+w "$item" 2>/dev/null || true
-          if c14_remove "$item" --kind ephemeral; then
+          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
             deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
@@ -618,7 +618,7 @@ if [[ -d "$LOCAL_STATE_DIR" ]]; then
       fi
       log "Removing: $item  (${kb} KB)"
       if [[ -L "$item" ]]; then
-        if c14_remove "$item" --kind ephemeral; then
+        if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
           FILES_DELETED=$(( FILES_DELETED + 1 ))
           TOTAL_KB=$(( TOTAL_KB + kb ))
           deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
@@ -627,7 +627,7 @@ if [[ -d "$LOCAL_STATE_DIR" ]]; then
         fi
       elif [[ -d "$item" ]]; then
         chmod -R u+w "$item" 2>/dev/null || true
-        if c14_remove "$item" --kind ephemeral; then
+        if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
           DIRS_DELETED=$(( DIRS_DELETED + 1 ))
           TOTAL_KB=$(( TOTAL_KB + kb ))
           deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
@@ -636,7 +636,7 @@ if [[ -d "$LOCAL_STATE_DIR" ]]; then
         fi
       elif [[ -f "$item" ]]; then
         chmod u+w "$item" 2>/dev/null || true
-        if c14_remove "$item" --kind ephemeral; then
+        if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
           FILES_DELETED=$(( FILES_DELETED + 1 ))
           TOTAL_KB=$(( TOTAL_KB + kb ))
           deletion_log "cleanup_pr_scratch.sh" "remove_file" "$kb" "$item"

@@ -310,6 +310,15 @@ production ran v1).
   `archive/pre-reset-20260711` — do not `git gc --prune` there casually.
 - `~/.hermes_prod` and `~/.openclaw.bak` are symlinks to `~/.hermes` —
   naive `du` over home-dir args triple-counts them.
+- **Deletion log is the reclaim list.** Every deletion path must log to
+  `~/Library/Logs/disk-magician-deletions.log` via `deletion_log`; before any
+  disk investigation or cleanup, read `docs/known-reclaim-dirs.md` and the last
+  7 days of that log: those directories are the known growers; re-clean them
+  first. Log from a removal primitive (`quarantine_remove`, `wrh_remove_now`,
+  `strip_dir`, `rm_logged`), not per script; a caller that already logs the
+  same path sets `DM_DELETION_LOGGED=1` on that one call.
+  `tests/test_deletion_log_coverage.sh` and T18 in `tests/test_removal_sites.sh`
+  fail when a deleter has no logging route.
 
 ## Design doc
 

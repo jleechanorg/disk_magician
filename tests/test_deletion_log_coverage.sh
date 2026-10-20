@@ -166,6 +166,7 @@ marker='deletion_log|deletion_log_removal|rm_logged|c14_remove|quarantine_remove
 allow_reason() {
   case "$1" in
     cleanup_colima.sh) echo "docker/builder prune + fstrim: no filesystem path; effect is the datadisk df delta" ;;
+    prune_aside_sessions.sh) echo "thin exec wrapper of prune_aside_sessions.py, whose removals go through quarantine_remove" ;;
     cleanup_codex_db.sh) echo "VACUUM only; database files are never deleted" ;;
     reclaim_worktree_venvs.sh) echo "mv to .bak rename, nothing freed; the .bak is reaped by cleanup_worktree_venvs.sh (c14_remove)" ;;
     *) return 1 ;;
