@@ -594,14 +594,10 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
       continue
     fi
 
-    # Candidate must NOT itself be a git repo or linked worktree (except under temp roots outside $HOME)
-    if [[ -L "$dir/.git" ]]; then
+    # Candidate must NOT itself be a git repo or linked worktree: container
+    # inspection starts at depth 2 and would never see its root .git.
+    if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
       continue
-    fi
-    if [[ -e "$dir/.git" ]]; then
-      if [[ "$root" == "$HOME" || "$root" == "$HOME"/* ]] || [[ "$root" != /private/tmp && "$root" != /private/tmp/* && "$root" != /tmp && "$root" != /tmp/* && "$root" != /private/var/folders/* && "$root" != /var/folders/* ]]; then
-        continue
-      fi
     fi
     if [[ -f "$dir/HEAD" && -d "$dir/objects" && -d "$dir/refs" ]]; then
       continue
