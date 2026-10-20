@@ -356,7 +356,7 @@ else
     log "fsevents state cache: [dry-run] would drop $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason): $fsevents_state_resolved"
   elif ! _safety_reason="$(safety_gate "$fsevents_state_resolved" 2>/dev/null)"; then
     log "fsevents state cache: SAFETY-SKIP ($_safety_reason)"
-  elif c14_remove "$fsevents_state_resolved" --kind rebuildable; then
+  elif rm -f "$fsevents_state_resolved"; then
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + fsevents_state_kb ))
     deletion_log "cleanup_dev_caches" "drop_fsevents_state_cache" "$fsevents_state_kb" "$fsevents_state_resolved"
     log "fsevents state cache: dropped $(fmt_kb "$fsevents_state_kb") ($fsevents_state_reason); rebuilt on the next poll"
