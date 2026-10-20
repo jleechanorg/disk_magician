@@ -234,7 +234,14 @@ print(v)
     real="$(cd "$p" 2>/dev/null && pwd -P)" || { wrh_log "kept $p: not a directory"; return 0; }
     main="$(wtn_main_repo "$real")" || { wrh_log "kept $p: not a git repo"; return 0; }
 
-    verdict="$(wrh_removal_verdict "$real" days:7)"
+    # Idle-floor override (operator decision 2026-10-20): DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N (N>=7)
+    # or minutes:N (N>=60). Anything else, including a lower floor, falls back to days:7.
+    local recency_spec=days:7 env_spec="${DISK_MAGICIAN_REMOVE_HOOK_RECENCY:-}"
+    if [[ "$env_spec" =~ ^days:([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 7 ]] ||
+       [[ "$env_spec" =~ ^minutes:([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
+        recency_spec="$env_spec"
+    fi
+    verdict="$(wrh_removal_verdict "$real" "$recency_spec")"
     case "$verdict" in
         remove) ;;
         kept:not-registered)         wrh_log "kept $p: not a registered linked worktree"; return 0 ;;

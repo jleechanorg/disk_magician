@@ -482,6 +482,16 @@ run_hook "$(json "$WTROOT/recent")"; rc=$?
 [[ -d "$WTROOT/recent" ]] && ok "recent worktree kept" || bad "recent worktree removed"
 tail -n 1 "$LOG" | grep -q "recent-activity" && ok "recent reason logged" || bad "recent reason missing"
 
+echo "== case 29b: recency override: minutes:120 keeps a just-touched worktree, minutes:5 (below the 60 floor) falls back to 7 days =="
+add_wt ovr1 worktree-ovr1
+touch "$WTROOT/ovr1/README.md"
+printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:120 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
+[[ -d "$WTROOT/ovr1" ]] && ok "override minutes:120 still keeps a just-touched worktree" || bad "override removed a just-touched worktree"
+printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:5 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
+[[ -d "$WTROOT/ovr1" ]] && ok "sub-60-minute override ignored (default floor kept)" || bad "sub-60-minute override lowered the floor"
+printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:1 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
+[[ -d "$WTROOT/ovr1" ]] && ok "days:1 override ignored (below 7)" || bad "days:1 override lowered the floor"
+
 echo "== case 30: unmeasurable recency fails closed =="
 add_wt unknown worktree-unknown
 cat >"$MOCK_BIN/find" <<'FINDFAIL'
