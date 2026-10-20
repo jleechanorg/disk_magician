@@ -18,8 +18,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
-# shellcheck source=scripts/lib/lsof_linux.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -333,7 +331,7 @@ has_recent_activity() {
   local target="$1" hours="$2" mins hit_file
   mins=$(( hours * 60 ))
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  find_cmd "$target" -mmin "-${mins}" -print -quit 2>/dev/null >"$hit_file" || true
+  find_cmd "$target" -mmin "-${mins}" -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -348,7 +346,7 @@ has_active_marker() {
     return 1
   fi
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  find_cmd "$target" \( -name .in-use -o -name .keep \) -print -quit 2>/dev/null >"$hit_file" || true
+  find_cmd "$target" \( -name .in-use -o -name .keep \) -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -448,13 +446,13 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         com.apple.*|system-*|PowerlogHelperd*|_disk_magician_archive|.dm-quarantine) continue ;;
       esac
 
-      if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
-        log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
+      if has_active_marker "$item"; then
+        log "Skipping active-use marker (.in-use/.keep present): $item"
         continue
       fi
 
-      if has_active_marker "$item"; then
-        log "Skipping active-use marker (.in-use/.keep present): $item"
+      if has_recent_activity "$item" "$MIN_AGE_HOURS"; then
+        log "Skipping recently active path (mtime within ${MIN_AGE_HOURS}h): $item"
         continue
       fi
 
@@ -546,104 +544,6 @@ if [[ "$BUDGET_GB" -gt 0 && ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
     scratch_budget_evict_root "$tmp_dir" "$BUDGET_KB" "$BUDGET_FLOOR_MINUTES"
   done
   log "$(dry_prefix)Budget mode done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Total freed: ${BUDGET_KB_FREED} KB"
-fi
-
-# Scan ~/.local/state for stale PR scratch directories and evidence bundles (>=14d):
-LOCAL_STATE_DIR="$HOME/.local/state"
-if [[ -d "$LOCAL_STATE_DIR" ]]; then
-  log "Scanning $LOCAL_STATE_DIR for stale PR scratch & evidence entries (>=14d) ..."
-  local_state_candidates=()
-  for p in "$LOCAL_STATE_DIR"/pr*-merge-* "$LOCAL_STATE_DIR"/pr*-review-*; do
-    [[ -e "$p" ]] || continue
-    local_state_candidates+=("$p")
-  done
-  if [[ -d "$LOCAL_STATE_DIR/worldarchitect-evidence" ]]; then
-    while IFS= read -r -d '' p; do
-      [[ -e "$p" ]] || continue
-      local_state_candidates+=("$p")
-    done < <(find "$LOCAL_STATE_DIR/worldarchitect-evidence" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true)
-  fi
-  for item in "${local_state_candidates[@]}"; do
-    [[ -e "$item" ]] || continue
-    age_days=0
-    if [[ -d "$item" ]]; then
-      age_days="$(worktree_age_days "$item")"
-    else
-      now_sec="$(date +%s)"
-      mtime_sec="$(stat -c '%Y' "$item" 2>/dev/null || stat -f '%m' "$item" 2>/dev/null || echo "$now_sec")"
-      age_days=$(( (now_sec - mtime_sec) / 86400 ))
-    fi
-    if (( age_days < 14 )); then
-      log "Skipping recently active path (<14d, age=${age_days}d): $item"
-      continue
-    fi
-    if has_active_marker "$item"; then
-      log "Skipping active-use marker (.in-use/.keep present): $item"
-      continue
-    fi
-    if has_open_files "$item"; then
-      log "Skipping in-use path (open files): $item"
-      continue
-    fi
-    # Shared strict parser; an incomplete scan counts as a live cwd (fail closed).
-    is_cwd=false
-    if ! lsof_snapshot_cwds || cwd_list_has_path "$item" "$LSOF_CWDS"; then
-      is_cwd=true
-    fi
-    if [[ "$is_cwd" == true ]]; then
-      log "Skipping live cwd: $item"
-      continue
-    fi
-    if [[ -d "$item/.git" || -f "$item/.git" ]]; then
-      if worktree_has_unsaved_work "$item"; then
-        log "Skipping scratch worktree with unsaved work (uncommitted/unpushed/no-upstream): $item"
-        continue
-      fi
-    fi
-    kb=$(path_size_kb "$item")
-    if [[ "$DRY_RUN" == true ]]; then
-      log "DRY RUN: would remove: $item  (${kb} KB)"
-      if [[ -d "$item" ]]; then
-        DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-      else
-        FILES_DELETED=$(( FILES_DELETED + 1 ))
-      fi
-      TOTAL_KB=$(( TOTAL_KB + kb ))
-    else
-      if ! _safety_reason="$(safety_gate "$item" 2>/dev/null)"; then
-        echo "SAFETY-SKIP $item ($_safety_reason)"
-        continue
-      fi
-      log "Removing: $item  (${kb} KB)"
-      if [[ -L "$item" ]]; then
-        if c14_remove "$item" --kind ephemeral; then
-          FILES_DELETED=$(( FILES_DELETED + 1 ))
-          TOTAL_KB=$(( TOTAL_KB + kb ))
-          deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
-        else
-          log "WARN: failed to remove symlink $item"
-        fi
-      elif [[ -d "$item" ]]; then
-        chmod -R u+w "$item" 2>/dev/null || true
-        if c14_remove "$item" --kind ephemeral; then
-          DIRS_DELETED=$(( DIRS_DELETED + 1 ))
-          TOTAL_KB=$(( TOTAL_KB + kb ))
-          deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
-        else
-          log "WARN: failed to remove directory $item"
-        fi
-      elif [[ -f "$item" ]]; then
-        chmod u+w "$item" 2>/dev/null || true
-        if c14_remove "$item" --kind ephemeral; then
-          FILES_DELETED=$(( FILES_DELETED + 1 ))
-          TOTAL_KB=$(( TOTAL_KB + kb ))
-          deletion_log "cleanup_pr_scratch.sh" "remove_file" "$kb" "$item"
-        else
-          log "WARN: failed to remove file $item"
-        fi
-      fi
-    fi
-  done
 fi
 
 log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"

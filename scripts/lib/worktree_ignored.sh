@@ -36,22 +36,8 @@ ignored_entry_rebuildable() {
 has_ignored_user_data() {
     local out entry t=""
     command -v timeout >/dev/null 2>&1 && t="timeout 60s"
-    local git_args=(-C "$1")
-    if [[ -f "$1/.git" ]]; then
-        local gd_line gd_target
-        gd_line=$(grep '^gitdir: ' "$1/.git" 2>/dev/null || true)
-        gd_target=$(echo "$gd_line" | cut -d' ' -f2-)
-        if [[ -n "$gd_target" && ! -e "$gd_target" ]]; then
-            local mr="${gd_target%/.git/worktrees/*}"
-            if [[ -d "$mr/.git" ]]; then
-                git_args=(--git-dir="$mr/.git" --work-tree="$1")
-            else
-                return 0  # ignored files cannot be enumerated: fail closed
-            fi
-        fi
-    fi
     # shellcheck disable=SC2086
-    out="$($t git "${git_args[@]}" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
+    out="$($t git -C "$1" ls-files -o -i --exclude-standard --directory 2>/dev/null)" || return 0
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         ignored_entry_rebuildable "$1" "$entry" || return 0
