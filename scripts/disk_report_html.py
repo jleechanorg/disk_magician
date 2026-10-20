@@ -1184,7 +1184,9 @@ def render_html(model: Dict[str, Any]) -> str:
         const formattedCmd = formatCommandForMode(item.command, currentMode);
         if (!seenCommands.has(formattedCmd)) {{
           seenCommands.add(formattedCmd);
-          lines.push("# " + item.name + " (" + item.path + " — " + item.size_gb.toFixed(1) + " GiB)");
+          // Snapshot-supplied text: strip control characters so it cannot leave the comment.
+          const safeText = (v) => String(v).replace(/[\\u0000-\\u001f\\u007f]/g, " ");
+          lines.push("# " + safeText(item.name) + " (" + safeText(item.path) + " — " + item.size_gb.toFixed(1) + " GiB)");
           lines.push(formattedCmd);
         }}
       }}

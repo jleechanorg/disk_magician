@@ -251,7 +251,7 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "category": "Developer Caches",
         "name": "~/.local (mixed app data; only the uv cache is pruned)",
         "path": "~/.local",
-        "command": "diskm cleanup-uv-cache --clean",
+        "command": "manual review (no diskm command reclaims this path)",
         "explanation": "Mixed application data. cleanup-uv-cache prunes only orphaned uv cache entries, so most of this total is not reclaimable by it.",
         "checked": False,
         "actuator": "uv_cache",
