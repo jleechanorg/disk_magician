@@ -24,7 +24,7 @@ HEAVY_PRIORITY: dict[str, tuple[int, int]] = {
     "tests/test_worktree_new.sh": (0, 1500),
     "tests/test_worktree_reap.sh": (1, 600),
     "tests/test_artifact_verdict.sh": (2, 900),
-    "tests/test_worktree_hygiene_preserve_wip.sh": (3, 600),
+    "tests/test_worktree_hygiene_preserve_wip.sh": (3, 300),
     "tests/test_cleanup_worktrees_single_age_walk.sh": (4, 300),
     "tests/test_cleanup_tmp_pressure_budget.sh": (5, 300),
     "tests/test_cleanup_codex_documents.sh": (6, 300),
