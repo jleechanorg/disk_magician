@@ -432,6 +432,12 @@ main() {
     fi
   fi
 
+  # Last cleanup step: record parent roots of what was just cleaned (default on).
+  if [[ "$DRY_RUN" == false && "${DISK_MAGICIAN_RECORD_CLEANED:-1}" != 0 \
+        && -x "$REPO_ROOT/scripts/check_uncovered_roots.sh" ]]; then
+    run_job_step "record cleaned roots" "$REPO_ROOT/scripts/check_uncovered_roots.sh" --record-cleaned || true
+  fi
+
   local end_free_gb
   end_free_gb="$(free_gb || echo "")"
   log "=== Unified Main Sweeper Complete ==="

@@ -442,9 +442,12 @@ def classify_safe(path, home, darwin_tmp):
     return None, folded
 
 
-def register_uncovered(uncovered, registry_path, review_path, rules, home, darwin_tmp, source):
-    """Append safe-class uncovered roots to the registry (idempotent) and write
-    every other uncovered root to the review file. Returns (added, review)."""
+def register_uncovered(uncovered, registry_path, review_path, rules, home, darwin_tmp, source,
+                       review_key="review", roots=()):
+    """Append roots to the registry (idempotent) and write rejects to the review
+    file. Plain entries must be safe-class; entries with "trusted" (already
+    removed by a canonical cleaner) skip that filter but never the protection
+    check, and may carry their own "owner"/"note". Returns (added, review)."""
     try:
         with open(registry_path) as f:
             existing = f.read()
@@ -457,24 +460,145 @@ def register_uncovered(uncovered, registry_path, review_path, rules, home, darwi
     for e in uncovered:
         direct, descendant = classify_path_protection(e["path"], rules, home)
         cls, folded = classify_safe(e["path"], home, darwin_tmp)
-        if direct or descendant or cls is None:
+        folded = e.get("folded", folded)
+        if direct or descendant or (cls is None and not e.get("trusted")):
             review.append({"path": e["path"], "size_gib": e["size_gib"],
                            "reason": "protected" if direct or descendant else "not a safe class"})
-        elif folded not in have:
+        elif folded not in have and not is_covered(e["path"], roots):
             have.add(folded)
             added.append(e["path"])
-            lines.append(f"# auto-registered {today}, {e['size_gib']} GiB, source: {source}\n"
-                         f"{folded}\t{REGISTER_OWNER}\t{cls}; size {e['size_gib']} GiB\n")
-    if lines:
+            if e.get("trusted"):
+                lines.append(f"{folded}\t{e['owner']}\t{e['note']}\n")
+            else:
+                lines.append(f"# auto-registered {today}, {e['size_gib']} GiB, source: {source}\n"
+                             f"{folded}\t{REGISTER_OWNER}\t{cls}; size {e['size_gib']} GiB\n")
+    if lines and registry_path:
         with open(registry_path, "a") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write("".join(lines))
-    os.makedirs(os.path.dirname(os.path.abspath(review_path)), exist_ok=True)
     review.sort(key=lambda r: r["path"])
+    try:
+        with open(review_path) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        doc = {}
+    doc[review_key] = review
+    os.makedirs(os.path.dirname(os.path.abspath(review_path)), exist_ok=True)
     with open(review_path, "w") as f:
-        json.dump({"review": review}, f, indent=2, sort_keys=True)
+        json.dump(doc, f, indent=2, sort_keys=True)
     return added, review
+
+
+# Top-level $HOME dirs that hold many unrelated children: root = this many
+# path components below $HOME (default 1). Mirrors the registry's own rows.
+HOME_ROOT_DEPTH = {"Library": 3, ".cache": 2, ".config": 2, ".local": 3, ".npm": 2, ".gemini": 2}
+ALIAS_PREFIXES = (("/tmp", "/private/tmp"), ("/var", "/private/var"),
+                  (drb.DATA_VOLUME_PREFIX, ""))
+
+
+def normalize_alias(path):
+    for old, new in ALIAS_PREFIXES:
+        if path == old or path.startswith(old + "/"):
+            return new + path[len(old):]
+    return path
+
+
+def parent_root(path, home):
+    """(root, folded_token_form) for a cleaned path, or (None, None) when the
+    path is outside the recognized $HOME / tmp / var-folders classes."""
+    parts = path.split("/")
+    if path.startswith(home + "/"):
+        rel = path[len(home) + 1:].split("/")
+        depth = min(HOME_ROOT_DEPTH.get(rel[0], 1), len(rel))
+        root = home + "/" + "/".join(rel[:depth])
+        return root, "$HOME/" + "/".join(rel[:depth])
+    if path.startswith("/private/tmp/") and len(parts) > 3:
+        root = "/".join(parts[:4])
+        return root, root
+    if path.startswith("/private/var/folders/") and len(parts) > 7:
+        base = "/".join(parts[:6])
+        if parts[6] == "T":
+            return base + "/T", "$DARWIN_USER_TEMP_DIR"
+        if parts[6] == "X":
+            return base + "/X", "$DARWIN_USER_TEMP_DIR/../X"
+        return None, None
+    return None, None
+
+
+def collect_cleaned(log_path, home, roots):
+    """Aggregate uncovered cleaned paths from the deletions log per parent root:
+    {root: {"folded", "kb", "n", "by_script": {script: kb}}} plus the list of
+    paths whose root class is unrecognized."""
+    agg, unknown = {}, set()
+    try:
+        fh = open(log_path, errors="replace")
+    except OSError:
+        return agg, unknown
+    with fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 5 or f[2] not in ("remove", "archive"):
+                continue
+            path = normalize_alias(f[4].split(" -> ", 1)[0].strip().rstrip("/"))
+            if not path.startswith("/") or is_covered(path, roots):
+                continue
+            root, folded = parent_root(path, home)
+            if root is None:
+                unknown.add(path)
+                continue
+            try:
+                kb = int(float(f[3]))
+            except ValueError:
+                kb = 0
+            ent = agg.setdefault(root, {"folded": folded, "kb": 0, "n": 0, "by_script": {}})
+            ent["kb"] += kb
+            ent["n"] += 1
+            ent["by_script"][f[1]] = ent["by_script"].get(f[1], 0) + kb
+    return agg, unknown
+
+
+def registry_write_target(registry_path, recorded_file):
+    """The checkout registry when it is writable and git-tracked, else the
+    state-dir recorded file."""
+    try:
+        if os.access(registry_path, os.W_OK) and subprocess.run(
+                ["git", "ls-files", "--error-unmatch", os.path.basename(registry_path)],
+                cwd=os.path.dirname(os.path.abspath(registry_path)),
+                capture_output=True, timeout=10, check=False).returncode == 0:
+            return registry_path
+    except Exception:
+        pass
+    return recorded_file
+
+
+def record_cleaned(args, roots, rules, home, darwin_tmp):
+    home = normalize_alias(home)
+    agg, unknown = collect_cleaned(args.deletions_log, home, roots)
+    today = datetime.date.today().isoformat()
+    entries = []
+    for root, ent in sorted(agg.items()):
+        gib = round(ent["kb"] / GIB_KB, 2)
+        owner = max(ent["by_script"], key=ent["by_script"].get)
+        entries.append({"path": root, "folded": ent["folded"], "size_gib": gib, "trusted": True,
+                        "owner": owner,
+                        "note": f"recorded-cleaned {today}, {gib} GiB, {ent['n']} deletions"})
+    target = registry_write_target(args.registry, args.recorded_file)
+    if args.dry_run:
+        for e in entries:
+            direct, descendant = classify_path_protection(e["path"], rules, home)
+            tag = "REVIEW" if direct or descendant else "ADD"
+            print(f"{tag}\t{e['folded']}\t{e['owner']}\t{e['note']}")
+        for p in sorted(unknown):
+            print(f"REVIEW\t{p}\t-\tunrecognized root class")
+        return 0
+    if target != args.registry:
+        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    added, review = register_uncovered(entries, target, args.review_file, rules, home, darwin_tmp,
+                                       "deletions-log", review_key="cleaned_review", roots=roots)
+    print(f"check_uncovered_roots: recorded {len(added)} cleaned root(s) to {target}; "
+          f"{len(review)} to review", file=sys.stderr)
+    return 0
 
 
 def main(argv=None):
@@ -507,6 +631,14 @@ def main(argv=None):
     parser.add_argument("--register", action="store_true",
                         help="Append safe-class uncovered roots to the registry; "
                              "route the rest to --review-file. Default: report only.")
+    parser.add_argument("--record-cleaned", action="store_true",
+                        help="Record parent roots of paths in the deletions log as registry rows.")
+    parser.add_argument("--deletions-log",
+                        default=os.path.expanduser("~/Library/Logs/disk-magician-deletions.log"))
+    parser.add_argument("--recorded-file",
+                        default=os.path.join(default_state_dir, "sweeper_roots_recorded.txt"),
+                        help="Fallback target for --record-cleaned; also read as registry.")
+    parser.add_argument("--dry-run", action="store_true", help="With --record-cleaned: print rows, write nothing.")
     parser.add_argument("--review-file", default=os.path.join(default_state_dir, "uncovered_review.json"),
                         help="Review list written by --register (never inside the repo).")
     args = parser.parse_args(argv)
@@ -516,10 +648,13 @@ def main(argv=None):
     home = args.home or os.path.expanduser("~")
 
     roots = load_registry(args.registry, home=home, darwin_tmp=darwin_tmp)
+    roots += load_registry(args.recorded_file, home=home, darwin_tmp=darwin_tmp)
     rules = load_safety_rules(repo_root, home)
     for root, owner in roots:
         if owner.startswith("decision:"):
             rules["needs_decision"].append((root, "report-only registry route: " + owner.split(":", 1)[1] + "; no automatic cleanup authority"))
+    if args.record_cleaned:
+        return record_cleaned(args, roots, rules, home, darwin_tmp)
     direct_kb, source = pick_direct_kb(args.snapshot, args.discover, args.max_age_hours)
 
     empty_result = {"source": source, "threshold_gib": args.threshold_gib,

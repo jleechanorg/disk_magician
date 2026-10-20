@@ -741,6 +741,13 @@ else
     df -h / 2>/dev/null | tail -1 | awk '{printf "  Free space: %s\n", $4}'
 fi
 
+# Last step of every cleanup: record the parent roots of what was just cleaned
+# (default on; DISK_MAGICIAN_RECORD_CLEANED=0 disables).
+if [[ "$MODE" != "audit" && "$DRY_RUN" != true && "${DISK_MAGICIAN_RECORD_CLEANED:-1}" != 0 \
+      && -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
+    "$SCRIPT_DIR/check_uncovered_roots.sh" --record-cleaned || true
+fi
+
 if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 )); then
     exit 1
 fi

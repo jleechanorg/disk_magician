@@ -635,5 +635,97 @@ class TestRegisterMode(unittest.TestCase):
         self.assertIn("/private/tmp/agent_scratch_xyz\tauto-register", open(self.registry).read())
 
 
+class TestRecordCleaned(unittest.TestCase):
+    """--record-cleaned turns deletion-log paths into parent-root registry rows."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dm_recclean_")
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.log = os.path.join(self.tmp, "deletions.log")
+        self.registry = os.path.join(self.tmp, "sweeper_roots.txt")
+        self.recorded = os.path.join(self.tmp, "sweeper_roots_recorded.txt")
+        self.review = os.path.join(self.tmp, "uncovered_review.json")
+        open(self.registry, "w").close()
+
+    def _log(self, *rows):
+        with open(self.log, "w") as f:
+            for script, action, kb, path in rows:
+                f.write(f"2026-10-20T00:00:00Z\t{script}\t{action}\t{kb}\t{path}\n")
+
+    def _run(self, extra=()):
+        proc = run(["--record-cleaned", "--deletions-log", self.log,
+                    "--registry", self.registry, "--recorded-file", self.recorded,
+                    "--review-file", self.review, "--home", self.home,
+                    "--darwin-tmp", "", *extra])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def _recorded(self):
+        if not os.path.exists(self.recorded):
+            return []
+        return [l.split("\t") for l in open(self.recorded).read().splitlines()
+                if l and not l.startswith("#")]
+
+    def test_home_root_derivedata_recorded(self):
+        self._log(("cleanup_xcode.sh", "remove", 5 * GIB_KB, f"{self.home}/dd_pr115_rel"),
+                  ("cleanup_xcode.sh", "archive", GIB_KB, f"{self.home}/dd_pr115_mock -> /arch/x"))
+        self._run()
+        rows = {r[0]: r for r in self._recorded()}
+        self.assertEqual(set(rows), {"$HOME/dd_pr115_rel", "$HOME/dd_pr115_mock"})
+        self.assertEqual(rows["$HOME/dd_pr115_rel"][1], "cleanup_xcode.sh")
+        self.assertIn("recorded-cleaned", rows["$HOME/dd_pr115_rel"][2])
+        self.assertIn("5.0 GiB, 1 deletions", rows["$HOME/dd_pr115_rel"][2])
+
+    def test_var_folders_collapse_to_tmpdir_roots(self):
+        self._log(("cleanup_tmp.sh", "remove", 10, "/private/var/folders/ab/cdef/T/foo"),
+                  ("cleanup_tmp.sh", "remove", 10, "/var/folders/ab/cdef/T/bar/baz"),
+                  ("cleanup_code_sign_clones.sh", "remove", 10, "/private/var/folders/ab/cdef/X/clone1"))
+        self._run()
+        self.assertEqual(sorted(r[0] for r in self._recorded()),
+                         ["$DARWIN_USER_TEMP_DIR", "$DARWIN_USER_TEMP_DIR/../X"])
+
+    def test_tmp_alias_dedup(self):
+        self._log(("cleanup_tmp.sh", "remove", 10, "/tmp/scratch1"),
+                  ("cleanup_tmp.sh", "remove", 10, "/private/tmp/scratch1/sub"))
+        self._run()
+        rows = self._recorded()
+        self.assertEqual([r[0] for r in rows], ["/private/tmp/scratch1"])
+        self.assertIn("2 deletions", rows[0][2])
+
+    def test_already_covered_not_duplicated(self):
+        with open(self.registry, "w") as f:
+            f.write("/private/tmp\tcleanup_tmp.sh\tcovered\n")
+        self._log(("cleanup_tmp.sh", "remove", 10, "/tmp/scratch1"))
+        self._run()
+        self.assertEqual(self._recorded(), [])
+
+    def test_protected_goes_to_review_only(self):
+        os.makedirs(os.path.join(self.home, ".config", "disk-magician"))
+        write_json(os.path.join(self.home, ".config", "disk-magician", "safety.local.json"),
+                   {"never_delete": [{"path": "~/precious", "reason": "fixture"}]})
+        self._log(("cleanup_x.sh", "remove", 10, f"{self.home}/precious/sub"))
+        self._run()
+        self.assertEqual(self._recorded(), [])
+        review = json.load(open(self.review))
+        self.assertIn(cur_module.normalize_alias(f"{self.home}/precious"), [e["path"] for e in review["cleaned_review"]])
+
+    def test_second_run_is_noop(self):
+        self._log(("cleanup_xcode.sh", "remove", GIB_KB, f"{self.home}/dd_pr115_rel"))
+        self._run()
+        first = open(self.recorded).read()
+        self._run()
+        self.assertEqual(open(self.recorded).read(), first)
+
+    def test_dry_run_writes_nothing_and_loader_honors_recorded(self):
+        self._log(("cleanup_xcode.sh", "remove", GIB_KB, f"{self.home}/dd_pr115_rel"))
+        proc = self._run(["--dry-run"])
+        self.assertIn("$HOME/dd_pr115_rel", proc.stdout)
+        self.assertFalse(os.path.exists(self.recorded))
+        self._run()
+        roots = cur_module.load_registry(self.recorded, home=self.home)
+        self.assertEqual(roots[0][0], f"{self.home}/dd_pr115_rel")
+
+
 if __name__ == "__main__":
     unittest.main()
