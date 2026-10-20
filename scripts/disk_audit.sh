@@ -544,11 +544,6 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
     fi
 
-    # Run Task Scratch & Ephemeral Clone Cleanup (Tier 1: Scratch)
-    if [[ -f "$SCRIPT_DIR/cleanup_task_scratch.sh" ]]; then
-        run_category "Task scratch & clones" "$SCRIPT_DIR/cleanup_task_scratch.sh" $clean_arg
-    fi
-
     # Rebuildable Xcode DerivedData & simulator caches (Tier 2: Xcode, bead disk_magician-wgo)
     if [[ -f "$SCRIPT_DIR/cleanup_xcode.sh" ]]; then
         run_category "Xcode DerivedData & simulator caches" "$SCRIPT_DIR/cleanup_xcode.sh" $clean_arg
