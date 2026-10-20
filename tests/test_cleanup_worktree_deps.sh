@@ -5,6 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktree_deps.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
+# Unprivileged Linux lsof fails closed on other users' processes (by design), so
+# tests on Linux use a shim that reports every cwd this user can read from /proc.
+LSOF_SHIM=""
+if [[ "$(uname)" == Linux ]]; then
+  mkdir -p "$T/linuxbin"; LSOF_SHIM="$T/linuxbin:"
+  printf '#!/bin/sh\nfor d in /proc/[0-9]*; do c=$(readlink "$d/cwd" 2>/dev/null) && printf "p%%s\\nn%%s\\n" "${d#/proc/}" "$c"; done\n' > "$T/linuxbin/lsof"; chmod +x "$T/linuxbin/lsof"
+fi
 ok() { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
 old_ts() { date -v-10d +%Y%m%d%H%M 2>/dev/null || date -d "10 days ago" +%Y%m%d%H%M; }
@@ -22,7 +29,7 @@ ln -s "$T/external_repo" "$T/roots/repo-link"
 /usr/bin/find "$T/roots/old" "$T/roots/linked" "$T/external_repo/wt" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
 mkdir -p "$T/home"
 
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "dry-run lists old worktree node_modules" "WOULD-STRIP" "$OUT"
 check "dry-run names old worktree" "$T/roots/old/node_modules" "$OUT"
 [[ "$OUT" != *"$T/roots/young/node_modules"* ]] && ok "young worktree untouched" || bad "young worktree listed"
@@ -30,11 +37,11 @@ check "dry-run names old worktree" "$T/roots/old/node_modules" "$OUT"
 [[ "$OUT" != *"$T/roots/repo-link/wt/node_modules"* ]] && ok "symlinked worktree ancestor untouched" || bad "external worktree dependency listed"
 [[ -d "$T/roots/old/node_modules" ]] && ok "dry-run deletes nothing" || bad "dry-run deleted"
 
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 check "--clean without approval refuses" "Refusing to delete" "$OUT"
 [[ -d "$T/roots/old/node_modules" ]] && ok "unapproved clean deletes nothing" || bad "unapproved clean deleted"
 
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 check "approved clean strips" "STRIPPED" "$OUT"
 [[ ! -e "$T/roots/old/node_modules" ]] && ok "old node_modules removed" || bad "old node_modules remains"
 [[ -d "$T/roots/young/node_modules" ]] && ok "young node_modules kept" || bad "young node_modules removed"
@@ -46,7 +53,7 @@ check "approved clean strips" "STRIPPED" "$OUT"
 printf 'projects:\n  demo:\n    worktreeDir: %s\n' "$T/roots" > "$T/ao.yaml"
 mkdir -p "$T/roots/old/node_modules/y"; echo d > "$T/roots/old/node_modules/y/f"
 /usr/bin/find "$T/roots/old" -exec touch -h -t "$(old_ts)" {} +
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_AO_CONFIG="$T/ao.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_AO_CONFIG="$T/ao.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 [[ "$OUT" != *"WOULD-STRIP"* ]] && ok "AO config worktreeDir worktree untouched" || bad "AO-owned worktree listed"
 
 # Top-level AO worktreeDir protects direct children and configured project subtrees,
@@ -70,7 +77,7 @@ ln -s "$T/external" "$T/roots/other_repo/wt_linked_packages/packages"
 mkdir -p "$T/roots/other_repo/wt_linked_packages/node_modules/m"
 echo d > "$T/roots/other_repo/wt_linked_packages/node_modules/m/f"
 /usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" "$T/roots/other_repo/wt_linked_packages" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_AO_CONFIG="$T/ao_top.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_AO_CONFIG="$T/ao_top.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 [[ "$OUT" != *"$T/roots/old/node_modules"* ]] && ok "direct child of top-level AO worktreeDir protected" || bad "direct child of top-level AO worktreeDir stripped"
 [[ "$OUT" != *"$T/roots/demo/wt1/node_modules"* && -d "$T/roots/demo/wt1/node_modules" ]] && ok "AO project worktree under top-level worktreeDir protected" || bad "AO project worktree stripped"
 check "non-AO repo worktree under top-level worktreeDir stripped" "$T/roots/other_repo/wt_old/packages/pkg-a/node_modules" "$OUT"
@@ -81,7 +88,7 @@ check "non-AO repo worktree under top-level worktreeDir stripped" "$T/roots/othe
 
 # safety_gate: a never_delete rule protects the directory.
 mkdir -p "$T/cfg"; printf '{"never_delete": ["%s/roots/old/node_modules"]}' "$T" > "$T/cfg/safety.local.json"
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_SAFETY_FILE="$T/cfg/safety.local.json" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_SAFETY_FILE="$T/cfg/safety.local.json" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "never_delete rule blocks the strip" "SAFETY-SKIP" "$OUT"
 
 # Fail closed when lsof output is unparseable: nothing may be stripped.
@@ -116,13 +123,13 @@ echo 'fn main() {}' > "$T/external_daemon/Cargo.toml"
 echo bin > "$T/external_daemon/target/debug/app"
 ln -s "$T/external_daemon" "$T/roots/nested/linked_daemon"
 /usr/bin/find "$T/roots/nested" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "nested daemon/target (Cargo.toml sibling) listed" "$T/roots/nested/daemon/target" "$OUT"
 check "nested node_modules (package.json sibling) listed" "$T/roots/nested/app/node_modules" "$OUT"
 [[ "$OUT" != *"$T/roots/nested/not_build/target"* ]] && ok "nested target without a Cargo.toml sibling preserved" || bad "manifest-less nested target listed"
 check "root target with Cargo.toml still listed" "$T/roots/nested/target" "$OUT"
 [[ "$OUT" != *"linked_daemon"* && "$OUT" != *"$T/external_daemon/target"* ]] && ok "symlinked nested parent not traversed" || bad "symlinked nested parent traversed"
-OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
+OUT="$(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$T/roots/nested/daemon/target" && -f "$T/roots/nested/daemon/Cargo.toml" ]] && ok "nested daemon/target removed, manifest kept" || bad "nested daemon/target not removed"
 [[ ! -e "$T/roots/nested/app/node_modules" && -f "$T/roots/nested/app/package.json" ]] && ok "nested node_modules removed, package.json kept" || bad "nested node_modules not removed"
 [[ -f "$T/roots/nested/not_build/target/debug/app" ]] && ok "manifest-less nested target survives --clean" || bad "manifest-less nested target removed"
@@ -130,7 +137,7 @@ OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WO
 [[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
 
 # ---- DISK_MAGICIAN_DEPS_IDLE_MINUTES: guarded short-idle override --------------
-ENVBASE=(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin")
+ENVBASE=(env -i HOME="$T/home" PATH="${LSOF_SHIM}/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin")
 G=(git -c user.email=t@t -c user.name=t)
 git init -q --bare "$T/origin.git"
 git init -q "$T/ibase"; printf 'node_modules/\nios/Pods/\nios/build/\nbuild/\n.venv/\n.next/\n__pycache__/\n.env*\n' > "$T/ibase/.gitignore"
