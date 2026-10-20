@@ -7,6 +7,8 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+old_ts() { date -v-10d +%Y%m%d%H%M 2>/dev/null || date -d "10 days ago" +%Y%m%d%H%M; }
+hours_ts() { date -v-"$1"H +%Y%m%d%H%M 2>/dev/null || date -d "$1 hours ago" +%Y%m%d%H%M; }
 check() { [[ "$3" == *"$2"* ]] && ok "$1" || bad "$1 (missing: $2)"; }
 
 git init -q "$T/base"; echo src > "$T/base/src.txt"; git -C "$T/base" add src.txt; git -C "$T/base" -c user.email=t@t -c user.name=t commit -q -m init
@@ -17,7 +19,7 @@ git -C "$T/base" worktree add -q -b "b-external" "$T/external_repo/wt"
 mkdir -p "$T/external_repo/wt/node_modules/x"; echo external > "$T/external_repo/wt/node_modules/x/f"
 ln -s "$T/external_repo" "$T/roots/repo-link"
 # old: every file 10 days old; young: left fresh; linked: old but node_modules is a symlink
-/usr/bin/find "$T/roots/old" "$T/roots/linked" "$T/external_repo/wt" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+/usr/bin/find "$T/roots/old" "$T/roots/linked" "$T/external_repo/wt" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
 mkdir -p "$T/home"
 
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
@@ -43,7 +45,7 @@ check "approved clean strips" "STRIPPED" "$OUT"
 # AO config worktreeDir: worktrees under a configured AO dir are never stripped.
 printf 'projects:\n  demo:\n    worktreeDir: %s\n' "$T/roots" > "$T/ao.yaml"
 mkdir -p "$T/roots/old/node_modules/y"; echo d > "$T/roots/old/node_modules/y/f"
-/usr/bin/find "$T/roots/old" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} +
+/usr/bin/find "$T/roots/old" -exec touch -h -t "$(old_ts)" {} +
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_AO_CONFIG="$T/ao.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 [[ "$OUT" != *"WOULD-STRIP"* ]] && ok "AO config worktreeDir worktree untouched" || bad "AO-owned worktree listed"
 
@@ -67,7 +69,7 @@ ln -s "$T/external" "$T/roots/other_repo/wt_linked_packages/packages"
 # A regular root dependency forces the strip loop even when packages is a link.
 mkdir -p "$T/roots/other_repo/wt_linked_packages/node_modules/m"
 echo d > "$T/roots/other_repo/wt_linked_packages/node_modules/m/f"
-/usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" "$T/roots/other_repo/wt_linked_packages" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+/usr/bin/find "$T/roots/demo/wt1" "$T/roots/other_repo/wt_old" "$T/roots/other_repo/wt_linked_packages" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_AO_CONFIG="$T/ao_top.yaml" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 [[ "$OUT" != *"$T/roots/old/node_modules"* ]] && ok "direct child of top-level AO worktreeDir protected" || bad "direct child of top-level AO worktreeDir stripped"
 [[ "$OUT" != *"$T/roots/demo/wt1/node_modules"* && -d "$T/roots/demo/wt1/node_modules" ]] && ok "AO project worktree under top-level worktreeDir protected" || bad "AO project worktree stripped"
@@ -113,7 +115,7 @@ mkdir -p "$T/external_daemon/target/debug"
 echo 'fn main() {}' > "$T/external_daemon/Cargo.toml"
 echo bin > "$T/external_daemon/target/debug/app"
 ln -s "$T/external_daemon" "$T/roots/nested/linked_daemon"
-/usr/bin/find "$T/roots/nested" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+/usr/bin/find "$T/roots/nested" -exec touch -h -t "$(old_ts)" {} + 2>/dev/null
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "nested daemon/target (Cargo.toml sibling) listed" "$T/roots/nested/daemon/target" "$OUT"
 check "nested node_modules (package.json sibling) listed" "$T/roots/nested/app/node_modules" "$OUT"
@@ -126,5 +128,56 @@ OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WO
 [[ -f "$T/roots/nested/not_build/target/debug/app" ]] && ok "manifest-less nested target survives --clean" || bad "manifest-less nested target removed"
 [[ ! -e "$T/roots/nested/target" && -f "$T/roots/nested/Cargo.toml" ]] && ok "root target removed beside its Cargo.toml" || bad "root target not removed"
 [[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
+
+# ---- DISK_MAGICIAN_DEPS_IDLE_MINUTES: guarded short-idle override --------------
+ENVBASE=(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin")
+G=(git -c user.email=t@t -c user.name=t)
+git init -q --bare "$T/origin.git"
+git init -q "$T/ibase"; printf 'node_modules/\nios/Pods/\nios/build/\nbuild/\n.venv/\n.next/\n__pycache__/\n.env*\n' > "$T/ibase/.gitignore"
+echo src > "$T/ibase/src.txt"; git -C "$T/ibase" add .; "${G[@]}" -C "$T/ibase" commit -q -m init
+git -C "$T/ibase" remote add origin "$T/origin.git"; git -C "$T/ibase" push -q origin HEAD:refs/heads/main; git -C "$T/ibase" fetch -q origin
+mkdir -p "$T/iroots" "$T/real_nm2"; echo keep > "$T/real_nm2/f"
+for n in ok dirty unpushed live tracked symlinked secret fresh locked; do
+  git -C "$T/ibase" worktree add -q -b "i-$n" "$T/iroots/$n"
+  mkdir -p "$T/iroots/$n/node_modules/x" "$T/iroots/$n/ios/Pods/p" "$T/iroots/$n/ios/build" "$T/iroots/$n/build"
+  echo d > "$T/iroots/$n/node_modules/x/f"; echo d > "$T/iroots/$n/ios/Pods/p/f"; echo d > "$T/iroots/$n/ios/build/f"; echo d > "$T/iroots/$n/build/f"
+  echo SECRET > "$T/iroots/$n/.env.local"
+done
+mkdir -p "$T/iroots/ok/.venv/lib" "$T/iroots/ok/.next/c" "$T/iroots/ok/pkg/__pycache__"
+echo d > "$T/iroots/ok/.venv/lib/f"; echo d > "$T/iroots/ok/.next/c/f"; echo d > "$T/iroots/ok/pkg/__pycache__/m.pyc"
+echo new > "$T/iroots/dirty/new.txt"
+echo more > "$T/iroots/unpushed/more.txt"; git -C "$T/iroots/unpushed" add -f more.txt; "${G[@]}" -C "$T/iroots/unpushed" commit -q -m local
+rm -rf "$T/iroots/tracked/build"; mkdir -p "$T/iroots/tracked/build"; echo t > "$T/iroots/tracked/build/keep.txt"
+git -C "$T/iroots/tracked" add -f build/keep.txt; "${G[@]}" -C "$T/iroots/tracked" commit -q -m trackbuild; git -C "$T/iroots/tracked" push -q origin HEAD:refs/heads/tracked-b
+rm -rf "$T/iroots/symlinked/node_modules"; ln -s "$T/real_nm2" "$T/iroots/symlinked/node_modules"
+mkdir -p "$T/iroots/secret/node_modules/pkg"; echo SECRET > "$T/iroots/secret/node_modules/pkg/.env"
+git -C "$T/ibase" worktree lock "$T/iroots/locked"
+/usr/bin/find "$T/iroots" -mindepth 1 -not -path '*/fresh*' -not -path '*/.git' -not -path '*/.git/*' -exec touch -h -t "$(hours_ts 3)" {} + 2>/dev/null
+(cd "$T/iroots/live" && exec sleep 300) & LIVE_PID=$!
+sleep 1
+irun() { "${ENVBASE[@]}" "$@" DISK_MAGICIAN_WORKTREE_ROOTS="$T/iroots" bash "$SCRIPT" ${MODE:---dry-run} 2>&1; }
+OUT="$(irun)"
+[[ "$OUT" != *"WOULD-STRIP"* ]] && ok "override unset: 3h-idle clean pushed worktree kept" || bad "override unset stripped"
+OUT="$(irun DISK_MAGICIAN_DEPS_IDLE_MINUTES=30)"
+[[ "$OUT" != *"WOULD-STRIP"* ]] && ok "override=30 (<60) ignored" || bad "override=30 honored"
+OUT="$(irun DISK_MAGICIAN_DEPS_IDLE_MINUTES=abc)"
+[[ "$OUT" != *"WOULD-STRIP"* ]] && ok "override non-numeric ignored" || bad "override=abc honored"
+OUT="$(irun DISK_MAGICIAN_DEPS_IDLE_MINUTES=120)"
+for d in node_modules ios/Pods ios/build build .venv .next pkg/__pycache__; do check "override=120 lists ok/$d" "$T/iroots/ok/$d" "$OUT"; done
+[[ "$OUT" != *"$T/iroots/symlinked/node_modules"* ]] && ok "symlinked node_modules not listed" || bad "symlinked node_modules listed"
+for w in dirty unpushed live fresh locked; do [[ "$OUT" != *"$T/iroots/$w/"* ]] && ok "override=120 skips $w worktree" || bad "override=120 listed $w"; done
+check "tracked worktree node_modules listed" "$T/iroots/tracked/node_modules" "$OUT"
+[[ "$OUT" != *"WOULD-STRIP"*"$T/iroots/tracked/build"* ]] && ok "tracked build/ never listed" || bad "tracked build/ listed"
+check "secret-bearing dir reported" "SECRET-SKIP $T/iroots/secret/node_modules" "$OUT"
+[[ "$OUT" != *"WOULD-STRIP"*"$T/iroots/secret/node_modules"* ]] && ok "secret-bearing dir not stripped" || bad "secret dir listed"
+[[ -d "$T/iroots/ok/node_modules" ]] && ok "override dry-run deletes nothing" || bad "override dry-run deleted"
+OUT="$(MODE=--clean irun WORKTREE_APPROVED=1 DISK_MAGICIAN_DEPS_IDLE_MINUTES=120)"
+for d in node_modules ios/Pods ios/build build .venv .next pkg/__pycache__; do [[ ! -e "$T/iroots/ok/$d" ]] && ok "clean removed ok/$d" || bad "ok/$d remains"; done
+[[ -f "$T/iroots/ok/.env.local" && -f "$T/iroots/ok/src.txt" && -f "$T/iroots/ok/.git" ]] && ok ".env.local, tracked files, .git preserved" || bad "env/tracked/.git damaged"
+[[ -f "$T/iroots/tracked/build/keep.txt" ]] && ok "tracked build/keep.txt kept" || bad "tracked build removed"
+[[ -L "$T/iroots/symlinked/node_modules" && -f "$T/real_nm2/f" ]] && ok "symlinked node_modules not followed" || bad "symlink followed"
+[[ -f "$T/iroots/secret/node_modules/pkg/.env" ]] && ok "secret-bearing node_modules kept" || bad "secret node_modules removed"
+for w in dirty unpushed live fresh locked; do [[ -d "$T/iroots/$w/node_modules" ]] && ok "$w node_modules kept after clean" || bad "$w node_modules removed"; done
+kill "$LIVE_PID" 2>/dev/null || true
 
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]
