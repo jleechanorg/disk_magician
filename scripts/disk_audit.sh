@@ -404,7 +404,10 @@ fi
 # that no registered cleanup sweeper owns — see config/sweeper_roots.txt.
 if [[ -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
     section "Uncovered Sweeper Roots (>=5 GiB, no registered cleanup owner)"
-    "$SCRIPT_DIR/check_uncovered_roots.sh" || true
+    # Opt-in: DISK_MAGICIAN_AUTO_REGISTER=1 registers safe-class roots.
+    uncovered_args=()
+    [[ "${DISK_MAGICIAN_AUTO_REGISTER:-}" == 1 ]] && uncovered_args+=(--register)
+    "$SCRIPT_DIR/check_uncovered_roots.sh" ${uncovered_args[@]+"${uncovered_args[@]}"} || true
 fi
 
 # ── 3c. Worktree/evidence layout (spec 2026-10-05 D5, report only) ──────────
@@ -736,6 +739,13 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     df -h /System/Volumes/Data 2>/dev/null | tail -1 | awk '{printf "  Free space: %s\n", $4}' || df -h / 2>/dev/null | tail -1 | awk '{printf "  Free space: %s\n", $4}'
 else
     df -h / 2>/dev/null | tail -1 | awk '{printf "  Free space: %s\n", $4}'
+fi
+
+# Last step of every cleanup: record the parent roots of what was just cleaned
+# (default on; DISK_MAGICIAN_RECORD_CLEANED=0 disables).
+if [[ "$MODE" != "audit" && "$DRY_RUN" != true && "${DISK_MAGICIAN_RECORD_CLEANED:-1}" != 0 \
+      && -x "$SCRIPT_DIR/check_uncovered_roots.sh" ]]; then
+    "$SCRIPT_DIR/check_uncovered_roots.sh" --record-cleaned || true
 fi
 
 if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 )); then

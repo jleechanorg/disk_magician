@@ -755,7 +755,8 @@ add_entry() {
   if [[ -n "$raw_val" ]]; then
     val="$raw_val"
     tracked_total_kb=$(( tracked_total_kb + raw_val ))
-    MEASURED_OK=$(( MEASURED_OK + 1 ))
+    # partial sharded roots (timed-out/lower-bound shards) are reported but not counted as fully measured
+    [[ " $PARTIAL_KEYS " == *" $key "* ]] || MEASURED_OK=$(( MEASURED_OK + 1 ))
   else
     timeout_keys+=("$key")
   fi
@@ -768,6 +769,7 @@ MEASURE_MODE=serial
 MEASURE_WORKERS_USED=0
 MEASUREMENT_FAILURES_JSON='[]'
 LOWER_BOUND_KEYS_JSON='[]'
+PARTIAL_KEYS=""
 MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
 if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
   ORCH_SCRIPT="${DISK_MAGICIAN_MEASURE_ORCHESTRATOR:-$SCRIPT_DIR/snapshot_measure.py}"
@@ -781,6 +783,7 @@ if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
     MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
     MEASUREMENT_FAILURES_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('measurement_failures', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
     LOWER_BOUND_KEYS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('lower_bound_keys', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
+    PARTIAL_KEYS=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1])).get('partial_keys', [])))" "$ORCH_META" 2>/dev/null || echo '')
     while IFS= read -r orch_line; do
       orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
       orch_size="${orch_rest%%$'\t'*}"; orch_rest="${orch_rest#*$'\t'}"
