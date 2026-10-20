@@ -10,6 +10,7 @@ CANONICAL_PATTERNS = (
     "scripts/*.sh",
     "scripts/*.py",
     "scripts/lib/*.sh",
+    "scripts/lib/*.py",
     "launchd/*.plist",
     "launchd/*.plist.template",
     "launchd/*.c",
