@@ -8,6 +8,15 @@
 # dir that owns them holds the manifest that produces them. The worktree source
 # and .git are preserved; reinstall with npm ci / cargo build.
 #
+# DISK_MAGICIAN_DEPS_IDLE_MINUTES (integer >= 60) replaces the day floor for a
+# worktree that is clean, whose HEAD is contained in a refs/remotes/* ref, that is
+# not locked/AO-owned/live-cwd, and that was quiet for that many minutes. Then
+# the same dirs plus ios/Pods, ios/build, build, android/build, android/app/build,
+# .gradle, .venv, venv, .next and nested __pycache__ are stripped, each only when
+# gitignored and untracked, and never when it holds secret-like files. Unset,
+# non-numeric or < 60 keeps the day floor. Dirs only: the worktree, .env* and git
+# state are untouched.
+#
 # Defaults to dry-run. --clean requires WORKTREE_APPROVED=1.
 #
 # Safety: fail-closed recency via worktree_is_recently_active; fail-closed live-cwd
@@ -58,10 +67,19 @@ floor=$((10#$floor))
 MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
 [[ "$MIN_AGE_DAYS" -lt "$floor" ]] && MIN_AGE_DAYS="$floor"
 
+IDLE_MIN=0
+if [[ -n "${DISK_MAGICIAN_DEPS_IDLE_MINUTES:-}" ]]; then
+  if [[ "$DISK_MAGICIAN_DEPS_IDLE_MINUTES" =~ ^[0-9]{1,7}$ && "$((10#$DISK_MAGICIAN_DEPS_IDLE_MINUTES))" -ge 60 ]]; then
+    IDLE_MIN=$((10#$DISK_MAGICIAN_DEPS_IDLE_MINUTES))
+  else
+    echo "DISK_MAGICIAN_DEPS_IDLE_MINUTES=${DISK_MAGICIAN_DEPS_IDLE_MINUTES} ignored (need integer >= 60); day floor applies."
+  fi
+fi
+
 if [[ "$DRY_RUN" == true ]]; then
-  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${MIN_AGE_DAYS}d ==="
+  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${MIN_AGE_DAYS}d, idle override ${IDLE_MIN}m ==="
 else
-  echo "=== WORKTREE DEPS CLEANUP — floor ${MIN_AGE_DAYS}d ==="
+  echo "=== WORKTREE DEPS CLEANUP — floor ${MIN_AGE_DAYS}d, idle override ${IDLE_MIN}m ==="
   if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
     echo "Refusing to delete: set WORKTREE_APPROVED=1."
     exit 0
@@ -121,6 +139,55 @@ is_live() {
   return 1
 }
 
+# Idle-override extras beyond the day-floor set (which keeps its own manifest rules).
+IDLE_EXTRA_RELS=(ios/Pods ios/build build android/build android/app/build .gradle .venv venv .next)
+
+# idle_override_eligible <wt>: quiet for IDLE_MIN minutes, not locked, HEAD on a
+# remote ref, clean tree. Any unknown fails closed.
+idle_override_eligible() {
+  local wt="$1" admin st
+  worktree_is_recently_active_minutes "$wt" "$IDLE_MIN" && return 1
+  admin="$(git -C "$wt" rev-parse --git-dir 2>/dev/null)" || return 1
+  [[ "$admin" == /* ]] || admin="$wt/$admin"
+  [[ -e "$admin/locked" ]] && return 1
+  [[ -n "$(git -C "$wt" for-each-ref --count=1 --contains HEAD refs/remotes/ 2>/dev/null)" ]] || return 1
+  st="$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=normal 2>/dev/null)" || return 1
+  [[ -z "$st" ]]
+}
+
+# Extra dirs present in <wt>; find never follows symlinks.
+idle_candidate_dirs() {
+  local wt="$1" rel
+  for rel in "${IDLE_EXTRA_RELS[@]}"; do
+    [[ -d "$wt/$rel" && ! -L "$wt/$rel" ]] && echo "$wt/$rel"
+  done
+  find "$wt" \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name Pods -o -name build \) -prune -o \
+    -type d -name __pycache__ -prune -print 2>/dev/null
+}
+
+# idle_dir_ok <wt> <dir>: override-mode guard for one dir.
+idle_dir_ok() {
+  local wt="$1" dir="$2" rel part acc hit real_wt real_dir
+  rel="${dir#"$wt"/}"
+  [[ "$rel" != "$dir" && "$rel" != /* && "$rel" != *..* ]] || return 1
+  acc="$wt"
+  while [[ -n "$rel" ]]; do
+    part="${rel%%/*}"; acc="$acc/$part"
+    [[ ! -L "$acc" ]] || { echo "  IDLE-SKIP $dir (symlinked path component)"; return 1; }
+    [[ "$rel" == */* ]] && rel="${rel#*/}" || rel=""
+  done
+  rel="${dir#"$wt"/}"
+  real_wt="$(cd "$wt" && pwd -P)"; real_dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+  [[ "$real_dir" == "$real_wt"/* ]] || { echo "  IDLE-SKIP $dir (outside worktree)"; return 1; }
+  git -C "$wt" check-ignore -q -- "$rel" 2>/dev/null || { echo "  IDLE-SKIP $dir (not gitignored)"; return 1; }
+  [[ -z "$(git -C "$wt" ls-files -- "$rel" 2>/dev/null)" ]] || { echo "  IDLE-SKIP $dir (tracked files)"; return 1; }
+  hit="$(find "$dir" \( -name '.env*' -o -name '.xcode.env.local' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \
+    -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -name 'id_ecdsa*' -o -name 'id_dsa*' -o -name '.npmrc' -o -name '.netrc' \
+    -o -iname '*credentials*' -o -iname 'secrets*' \) -print -quit 2>/dev/null)"
+  [[ -z "$hit" ]] || { echo "  SECRET-SKIP $dir (holds $hit)"; return 1; }
+  return 0
+}
+
 stripped_paths="|"
 strip_dir() {
   local wt="$1" dir="$2" kb
@@ -128,6 +195,7 @@ strip_dir() {
   # A worktree can be reached twice (root rules and the nested scan); report once.
   [[ "$stripped_paths" == *"|$dir|"* ]] && return 0
   stripped_paths+="$dir|"
+  if [[ "$mode" == idle ]]; then idle_dir_ok "$wt" "$dir" || return 0; fi
   if ! _reason="$(safety_gate "$dir" 2>/dev/null)"; then
     echo "  SAFETY-SKIP $dir ($_reason)"
     return 0
@@ -190,13 +258,24 @@ for root in "${ROOTS[@]}"; do
     # Nested build caches are only discoverable by walking; skip that walk when
     # root caches already make this worktree a candidate. Only nested caches can
     # make a worktree with no root caches a candidate at all.
+    has_day_caches=1
     if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt"; then
       nested_dirs=""
     else
       nested_dirs="$(nested_cache_dirs "$wt")"
-      [[ -n "$nested_dirs" ]] || continue
+      [[ -n "$nested_dirs" ]] || has_day_caches=0
     fi
-    if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
+    idle_dirs=""
+    [[ "$IDLE_MIN" -gt 0 ]] && idle_dirs="$(idle_candidate_dirs "$wt")"
+    [[ "$has_day_caches" -eq 1 || -n "$idle_dirs" ]] || continue
+    mode=""
+    if [[ "$IDLE_MIN" -gt 0 ]] && idle_override_eligible "$wt"; then
+      mode=idle
+    elif [[ "$has_day_caches" -eq 1 ]] && ! worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then
+      mode=day
+    else
+      continue
+    fi
     if is_live "$wt"; then continue; fi
     [[ -n "$nested_dirs" ]] || nested_dirs="$(nested_cache_dirs "$wt")"
     strip_dir "$wt" "$wt/node_modules"
@@ -209,6 +288,11 @@ for root in "${ROOTS[@]}"; do
     while IFS= read -r nested; do
       [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
     done <<< "$nested_dirs"
+    if [[ "$mode" == idle ]]; then
+      while IFS= read -r nested; do
+        [[ -n "$nested" ]] && strip_dir "$wt" "$nested"
+      done <<< "$idle_dirs"
+    fi
   done
 done
 
