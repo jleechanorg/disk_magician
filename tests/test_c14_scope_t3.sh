@@ -67,7 +67,10 @@ if [[ ! -f "$LIB" ]]; then echo "FATAL: $LIB missing" >&2; exit 2; fi
 source "$LIB"
 
 NOW="$(date +%s)"
-age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} + 2>/dev/null; }
+age() { # BSD `date -r EPOCH`, GNU `date -d @EPOCH` fallback
+    local ts; ts="$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$((NOW - $2 * 60))" +%Y%m%d%H%M.%S)"
+    find "$1" -exec touch -h -t "$ts" {} + 2>/dev/null
+}
 
 make_remote() { # <name>
     git init -q --bare -b main "$TMP/remotes/$1.git" || return 1
