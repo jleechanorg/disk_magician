@@ -25,10 +25,6 @@ lsof_stderr_incomplete() {
         [[ "$fs" == "/" ]] && return 0
         warned=1
         continue ;;
-      # Passwd-less UID (container/namespace process): no cwd information lost.
-      "lsof: no pwd entry for UID "*)
-        [[ "${line#lsof: no pwd entry for UID }" =~ ^[0-9]+$ ]] && continue
-        return 0 ;;
     esac
     trimmed="${line#"${line%%[![:space:]]*}"}"
     if [[ "$trimmed" == "Output information may be incomplete." ]]; then

@@ -649,7 +649,8 @@ def build_report_model(
     codex_sessions_kb = kb_by_key.get("codex_sessions", 0.0)
     if codex_root_kb > 0 or codex_sessions_kb > 0:
         if codex_sessions_kb <= 0 and codex_root_kb > 0:
-            codex_sessions_kb = round(codex_root_kb * 0.65)
+            # Split not measured: count the whole root as never-delete rather than guess a split.
+            codex_sessions_kb = codex_root_kb
             kb_by_key["codex_sessions"] = codex_sessions_kb
         codex_db_kb = max(0.0, codex_root_kb - codex_sessions_kb)
         if codex_db_kb > 0:
@@ -660,7 +661,8 @@ def build_report_model(
     claude_projects_kb = kb_by_key.get("claude_projects", 0.0)
     if claude_root_kb > 0 or claude_projects_kb > 0:
         if claude_projects_kb <= 0 and claude_root_kb > 0:
-            claude_projects_kb = round(claude_root_kb * 0.85)
+            # Split not measured: count the whole root as never-delete rather than guess a split.
+            claude_projects_kb = claude_root_kb
             kb_by_key["claude_projects"] = claude_projects_kb
         claude_other_kb = max(0.0, claude_root_kb - claude_projects_kb)
         if claude_other_kb > 0:
@@ -798,28 +800,28 @@ def build_report_model(
     })
     items.append({
         "id": "apfs_local_snapshots",
-        "name": f"APFS Local Snapshots ({local_snapshots_count} snapshots)",
+        "name": f"APFS Local Snapshots ({local_snapshots_count} snapshots; size not measured)",
         "path": "/System/Volumes/Data (APFS snapshots)",
-        "size_gb": round(max(0.5, float(local_snapshots_count) * 1.2), 2) if local_snapshots_count > 0 else 0.0,
+        "size_gb": 0.0,
         "delta_gb": 0.0,
         "bucket": "system",
         "category": "System & Residual",
         "command": "diskm cleanup-apfs-snapshots --clean",
-        "explanation": "Deletes local APFS (Time Machine) snapshots older than 1 day to release retained blocks.",
+        "explanation": "Deletes local APFS (Time Machine) snapshots older than 1 day. Their retained size is not measured, so it is not counted here.",
         "checked": False,
         "never_delete": False,
         "carried": False,
     })
     items.append({
         "id": "code_sign_clones",
-        "name": "macOS Browser/App Code-Sign Clones",
+        "name": "macOS Browser/App Code-Sign Clones (size not measured)",
         "path": "/private/var/folders/.../X/*.code_sign_clone",
-        "size_gb": round(max(0.5, vm_volume_used_gb * 0.25), 2) if vm_volume_used_gb > 0 else 0.5,
+        "size_gb": 0.0,
         "delta_gb": 0.0,
         "bucket": "system",
         "category": "System & Residual",
         "command": "diskm cleanup-code-sign-clones --clean",
-        "explanation": "Cleans stale macOS app code_sign_clone bundles under /private/var/folders.",
+        "explanation": "Cleans stale macOS app code_sign_clone bundles under /private/var/folders. du over APFS clones is phantom, so no size is counted here.",
         "checked": False,
         "never_delete": False,
         "carried": False,

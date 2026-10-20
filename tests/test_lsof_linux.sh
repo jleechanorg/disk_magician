@@ -16,8 +16,6 @@ lsof_stderr_incomplete "" && bad "empty stderr flagged" || ok "empty stderr is c
 lsof_stderr_incomplete "$mount_warn" && bad "mount-stat warning flagged" || ok "mount-stat warning alone is complete"
 lsof_stderr_incomplete "$mount_warn"$'\nlsof: WARNING: can\'t open /proc/42/fd: Permission denied' && ok "other warning still incomplete" || bad "other warning ignored"
 lsof_stderr_incomplete $'      Output information may be incomplete.\nlsof: WARNING: can\'t stat() file /home/x/wt: No such file' && ok "non-mount stat warning still incomplete" || bad "non-mount stat warning ignored"
-lsof_stderr_incomplete $'lsof: no pwd entry for UID 100999' && bad "passwd-less UID warning flagged" || ok "passwd-less UID warning is complete"
-lsof_stderr_incomplete $'lsof: no pwd entry for UID x' && ok "malformed no-pwd line still incomplete" || bad "malformed no-pwd line ignored"
 
 echo "== lsof_cwd_blocks =="
 eq "two complete blocks" \
