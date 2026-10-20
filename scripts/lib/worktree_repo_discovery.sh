@@ -124,7 +124,6 @@ except Exception:
             fi
         done < <(printf '%s' "$git_files")
     }
-    find_repos_from_worktrees() { _dwr_find_repos_from_worktrees "$@"; }
 
     _dwr_find_repos_from_worktrees "$HOME/.ao/data/worktrees" 3
     _dwr_find_repos_from_worktrees "$HOME/.gemini/antigravity/worktrees" 3
@@ -133,32 +132,6 @@ except Exception:
     if [[ "$std_wt_root" != "$HOME/.worktrees" ]]; then
         _dwr_find_repos_from_worktrees "$HOME/.worktrees" 3
     fi
-
-    for wf_dir in "$HOME"/wf_*; do
-        [[ -d "$wf_dir" ]] || continue
-        _dwr_find_repos_from_worktrees "$wf_dir" 3
-    done
-
-    # Check $HOME/projects/*/.git and $HOME/projects_other/*/.git when .git is a regular file (-f),
-    # resolving its gitdir: parent repo (.../repo/.git/worktrees/name -> .../repo)
-    for git_file in "$HOME"/projects/*/.git "$HOME"/projects_other/*/.git; do
-        [[ -f "$git_file" ]] || continue
-        local gitdir_line
-        gitdir_line=$(grep '^gitdir: ' "$git_file" 2>/dev/null || true)
-        if [[ -n "$gitdir_line" ]]; then
-            local git_dir main_repo
-            git_dir=$(echo "$gitdir_line" | cut -d' ' -f2-)
-            if [[ "$git_dir" != /* ]]; then
-                local base_dir
-                base_dir="$(dirname "$git_file")"
-                git_dir="$(cd "$base_dir" 2>/dev/null && cd "$git_dir" 2>/dev/null && pwd -P || echo "$git_dir")"
-            fi
-            if [[ "$git_dir" == *"/.git/worktrees/"* ]]; then
-                main_repo="${git_dir%/.git/worktrees/*}"
-                _dwr_add_main_repo "$main_repo"
-            fi
-        fi
-    done
 
     if [[ -d "$HOME/projects" ]]; then
         for repo_dir in "$HOME/projects"/*; do
@@ -177,37 +150,10 @@ except Exception:
     _dwr_find_repos_from_worktrees "$HOME/project_worldaiclaw" 3
     _dwr_find_repos_from_worktrees "$HOME/wc-wt" 3
 
-    # Discover worktrees in additional pools
-    _dwr_find_repos_from_worktrees "$HOME/worktrees" 3
-    _dwr_find_repos_from_worktrees "$HOME/.hermes.worktrees" 3
-    _dwr_find_repos_from_worktrees "$HOME/.codex-worktrees" 3
-    _dwr_find_repos_from_worktrees "$HOME/candidates" 3
-    _dwr_find_repos_from_worktrees "$HOME/canonical-code-repos" 3
-    _dwr_find_repos_from_worktrees "$HOME/mirror" 3
-    for wt_pool in "$HOME"/*.worktrees "$HOME"/.worktrees-*; do
-        [[ -d "$wt_pool" ]] || continue
-        _dwr_find_repos_from_worktrees "$wt_pool" 3
-    done
-
-    # Discover main repos referenced by linked worktrees in project_*, projects_other, and repos
-    for pdir in "$HOME"/project_*; do
-        [[ -d "$pdir" ]] || continue
-        _dwr_find_repos_from_worktrees "$pdir" 3
-    done
-
-    if [[ -d "$HOME/projects_other" ]]; then
-        _dwr_find_repos_from_worktrees "$HOME/projects_other" 3
-    fi
-
-    if [[ -d "$HOME/repos" ]]; then
-        _dwr_find_repos_from_worktrees "$HOME/repos" 3
-    fi
-
     if [[ -n "$discovered_repos_str" ]]; then
         echo "$discovered_repos_str" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | sort -u
     fi
 
     unset -f _dwr_find_repos_from_worktrees
-    unset -f find_repos_from_worktrees
     unset -f _dwr_add_main_repo
 }
