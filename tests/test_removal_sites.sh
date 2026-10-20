@@ -159,6 +159,8 @@ EXEMPT_SITES = {
         "stale-lease birth-audit scratch GC; target already os.path.lexists and TTL checked",
     ("worktree_remove_hook.sh", "wrh_remove_now", "rm-file"):
         "tool-owned worktree lease record after a successful removal",
+    ("safety_lib.sh", "rm_logged", "rm-dir"):
+        "generic logging rm wrapper for the non-C14 sweepers (sessions, downloads evidence, agent artifacts); each caller runs its own safety gate and T18 asserts no SCOPE script uses it",
 }
 
 # Small set of tool-owned directory variables that are not mktemp-derived but
@@ -1263,6 +1265,9 @@ for cmd in DELEGATED_CMDS:
     rel = DELEGATED_LOG_FILES.get(cmd)
     if not rel or "deletion_log_removal" not in _read(rel):
         t18_fail.append(f"delegated '{cmd}': script does not log its reclaim")
+for rel in SCOPE:
+    if os.path.exists(os.path.join(ROOT, rel)) and "rm_logged" in _read(rel):
+        t18_fail.append(f"{rel}: C14-governed script must use a guarded primitive, not rm_logged")
 for key, why in EXEMPT_SITES.items():
     if not why.strip():
         t18_fail.append(f"exempt {key}: empty rationale")
