@@ -511,6 +511,23 @@ process_task() {
     if ! quarantine_remove_available; then
       keep "quarantine-unavailable" "$task"; return
     fi
+    # Root C14 verdict (dot review, bead disk_magician-q9ry): the clean path
+    # calls quarantine_gate -> quarantine_remove, whose FIRST act is the C14
+    # artifact_removal_verdict and which echoes kept:<reason> when it refuses.
+    # quarantine_remove is destructive, so the dry run evaluates the same
+    # read-only verdict primitive and reports the identical bare reason. Without
+    # this, a task with NO linked worktrees still printed "would remove" while
+    # --clean rejected its contents (e.g. a root secret-like file).
+    local rtinv rtverdict
+    local -a rargs
+    rtinv="$(mktemp "${TMPDIR:-/tmp}/cxd-c14-root.XXXXXX")" || { keep "c14-inventory-unavailable" "$task"; return; }
+    rargs=(--inventory-out "$rtinv")
+    [[ -n "$QUARANTINE_KIND" ]] && rargs+=(--kind "$QUARANTINE_KIND")
+    rtverdict="$(artifact_removal_verdict "$task" "${rargs[@]}" 2>/dev/null)" || rtverdict=kept:check-failed
+    rm -f -- "$rtinv" 2>/dev/null
+    if [[ "$rtverdict" != remove ]]; then
+      keep "${rtverdict#kept:}" "$task"; return
+    fi
     log "DRY RUN: would remove $task (${kb} KB, age $(worktree_age_days "$task")d)"
   else
     snapshot_live_paths

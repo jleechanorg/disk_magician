@@ -756,6 +756,34 @@ assert_not_contains "T24: dry run must not promise the removal" "would remove $S
 assert_contains "T24: dry run reports the C14 refusal" "KEEP [wrh-c14-secret-like:" "$(cat "$O24A")"
 assert_contains "T24: clean reports the same C14 refusal" "KEEP [wrh-c14-secret-like:" "$(cat "$O24B")"
 
+echo "T25: dry-run and --clean agree on a ROOT C14 refusal with no linked worktrees (q9ry)"
+# Dot review of #212: the dry run must also evaluate the task root's own C14
+# verdict, not just per-worktree verdicts. A task with NO linked worktrees but a
+# root-level secret-like file used to print "would remove" while --clean
+# rejected its contents. Assert the two modes report the SAME reason.
+T25_HOME="$TMP_ROOT/t25-home"; T25_CODEX="$T25_HOME/Documents/Codex"
+T25_TASK="$T25_CODEX/$D_OLD/t-rootsecret"; mkdir -p "$T25_TASK"
+git clone -q "$ORIGIN" "$T25_TASK/repo"
+git -C "$T25_TASK/repo" checkout -q -b rootsecret
+printf 'registry=https://example.invalid/\n' >"$T25_TASK/repo/.npmrc"
+git -C "$T25_TASK/repo" add .npmrc
+git -C "$T25_TASK/repo" commit -qm root-secret-like
+git -C "$T25_TASK/repo" push -q origin rootsecret
+git -C "$T25_TASK/repo" branch -q -u origin/rootsecret
+age "$T25_TASK"
+O25A="$TMP_ROOT/o25a"; RC=0
+HOME="$T25_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O25A" || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T25: dry-run exits 0" || { record_fail "T25: dry-run exits 0" "rc=$RC"; cat "$O25A"; }
+O25B="$TMP_ROOT/o25b"; RC=0
+HOME="$T25_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O25B" --clean || RC=$?
+[[ "$RC" -eq 0 ]] && record_pass "T25: clean exits 0" || { record_fail "T25: clean exits 0" "rc=$RC"; cat "$O25B"; }
+assert_exists "T25: task kept in both modes" "$T25_TASK"
+assert_not_contains "T25: dry run must not promise the removal" "would remove $T25_TASK" "$(cat "$O25A")"
+R25A="$(grep -F "$T25_TASK" "$O25A" 2>/dev/null | grep -oE 'KEEP \[[^]]*\]' | head -1)"
+R25B="$(grep -F "$T25_TASK" "$O25B" 2>/dev/null | grep -oE 'KEEP \[[^]]*\]' | head -1)"
+if [[ -n "$R25A" && "$R25A" == "$R25B" ]]; then record_pass "T25: both modes report the same reason ($R25A)"
+else record_fail "T25: both modes report the same reason" "dry=[$R25A] clean=[$R25B]"; fi
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
