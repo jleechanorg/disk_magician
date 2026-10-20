@@ -504,14 +504,6 @@ classify_content_and_merge() {
                 return 0
             fi
         fi
-        # Also accept HEAD commits that are already contained in an origin/* remote-tracking branch.
-        if [[ -n "$head_sha" ]] && git -C "$repo" branch -r --contains "$head_sha" 2>/dev/null | grep -qE '^[[:space:]]*origin/'; then
-            if has_ignored_user_data "$wt_path"; then
-                echo "ignored-data"
-                return 0
-            fi
-            return 0
-        fi
         echo "ahead-of-main"
         return 0
     fi
@@ -519,8 +511,17 @@ classify_content_and_merge() {
     echo ""
 }
 
+# A section header set here is printed just before the section's first row.
+PENDING_SECTION_HEADER=""
+flush_section_header() {
+    [[ -n "$PENDING_SECTION_HEADER" ]] || return 0
+    printf '\n%s\n' "$PENDING_SECTION_HEADER"
+    PENDING_SECTION_HEADER=""
+}
+
 ledger_line() {
     local scope="$1" action="$2" path="$3" reason="${4:-}" extra="${5:-}"
+    flush_section_header
     if [[ -n "$reason" ]]; then
         printf '  LEDGER %-12s %-9s %s | %s%s\n' "$scope" "$action" "$path" "$reason" "$extra"
     else
@@ -1252,12 +1253,12 @@ process_broken_gitdir_orphan() {
 
     wt_kb=$(size_kb "$wt")
     if [[ "$DRY_RUN" == true ]]; then
-        echo "[DRY-RUN] Would remove broken-gitdir orphan worktree: $wt"
+        flush_section_header; echo "[DRY-RUN] Would remove broken-gitdir orphan worktree: $wt"
         ledger_line "orphan-gitdir" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf orphan)"
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
     else
         [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || return 0
-        echo "[CLEAN] Removing broken-gitdir orphan worktree: $wt"
+        flush_section_header; echo "[CLEAN] Removing broken-gitdir orphan worktree: $wt"
         clamp_wt_mtimes_to_activity "$wt"
         CURRENT_APPROVED_ORPHAN_WT="$wt"
         qres="$(quarantine_remove "$wt" --t3-owner-null --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
@@ -1340,12 +1341,12 @@ process_ephemeral_task_clone() {
 
     wt_kb=$(size_kb "$wt")
     if [[ "$DRY_RUN" == true ]]; then
-        echo "[DRY-RUN] Would remove ephemeral task clone: $wt"
+        flush_section_header; echo "[DRY-RUN] Would remove ephemeral task clone: $wt"
         ledger_line "ephemeral-clone" "ELIGIBLE" "$wt" "" " (~$(( wt_kb / 1024 ))M, rm -rf clone)"
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + wt_kb ))
     else
         [ -n "$wt" ] && [ "$wt" != "/" ] && [ "$wt" != "$HOME" ] || return 0
-        echo "[CLEAN] Removing ephemeral task clone: $wt"
+        flush_section_header; echo "[CLEAN] Removing ephemeral task clone: $wt"
         clamp_wt_mtimes_to_activity "$wt"
         CURRENT_APPROVED_ORPHAN_WT="$wt"
         qres="$(quarantine_remove "$wt" --t3-owner-null --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
@@ -1361,25 +1362,24 @@ process_ephemeral_task_clone() {
 
 # Safe cleanup pass: Broken-gitdir orphan worktrees & Ephemeral task clones (when not in cursor-scoped govern mode)
 if [[ -z "$ACT_CURSOR" && "$ACT_STOP" == 0 ]]; then
-    echo ""
-    echo "--- Broken-gitdir orphans & ephemeral task clones ---"
-
     orphan_candidates=()
     for pattern in "$HOME/projects"/* "$HOME/.worktrees"/*/* "$HOME"/worldarchitect* "$HOME"/worktree_* "$HOME"/wt-* "$HOME"/wa-* "$HOME"/wa_* "$HOME"/autoresearch-* "$HOME"/minimax-* "$HOME"/llm_wiki_wt "$HOME"/roadmap-*; do
         [[ -e "$pattern" ]] && orphan_candidates+=("$pattern")
     done
-    for wt in ${orphan_candidates[@]+"${orphan_candidates[@]}"}; do
-        process_broken_gitdir_orphan "$wt"
-    done
-
     ephemeral_candidates=()
     for pattern in "$HOME/projects"/* "$HOME/project_worldaiclaw"/* "$HOME/.worktrees"/*/* "$HOME"/cb-* "$HOME"/cb-wa-*; do
         [[ -e "$pattern" ]] && ephemeral_candidates+=("$pattern")
+    done
+    PENDING_SECTION_HEADER="--- Broken-gitdir orphans & ephemeral task clones ---"
+    for wt in ${orphan_candidates[@]+"${orphan_candidates[@]}"}; do
+        process_broken_gitdir_orphan "$wt"
     done
     for wt in ${ephemeral_candidates[@]+"${ephemeral_candidates[@]}"}; do
         process_ephemeral_task_clone "$wt"
     done
 fi
+
+PENDING_SECTION_HEADER=""
 
 if [[ -n "$ACT_CURSOR" ]]; then
     act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$ACT_CURSOR_ITEMS" "$ACT_CURSOR_INDEX" || {
