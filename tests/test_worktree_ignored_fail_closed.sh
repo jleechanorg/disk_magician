@@ -25,12 +25,33 @@ mkdir -p "$TMP/orphan"; printf 'gitdir: %s/gone/.git/worktrees/orphan\n' "$TMP" 
 has_ignored_user_data "$TMP/orphan" && ok "orphaned worktree preserved" || bad "orphaned worktree read as no user data"
 
 echo "== has_hidden_state: secret-like names with template-ish suffixes still count =="
-for name in .env.example credentials.test secrets.dist; do
+for name in credentials.test secrets.dist; do
   r="$TMP/repo-$name"; git init -q "$r"; printf '%s\n' "$name" >"$r/.gitignore"
   git -C "$r" add .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
   printf 'x' >"$r/$name"
   has_hidden_state "$r" && ok "ignored $name keeps the worktree" || bad "ignored $name ignored"
 done
+
+echo "== has_hidden_state: vendored source names are not hidden state; real secrets stay (even in dependency dirs) =="
+hh() { # <hidden|clean> <relpath> [extra .gitignore line]
+  local want="$1" rel="$2" r got
+  r="$(mktemp -d "$TMP/hh.XXXXXX")"; git init -q "$r"
+  printf 'node_modules/\n__pycache__/\n%s\n' "${3:-}" >"$r/.gitignore"
+  git -C "$r" add .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
+  mkdir -p "$r/$(dirname "$rel")"; printf 'x' >"$r/$rel"
+  if has_hidden_state "$r"; then got=hidden; else got=clean; fi
+  [[ "$got" == "$want" ]] && ok "$rel -> $got" || bad "$rel expected $want got $got"
+}
+for rel in node_modules/pkg/credentials.js node_modules/pkg/credentials.d.ts node_modules/pkg/gcredentials.h \
+    node_modules/pkg/credentials.js.map node_modules/pkg/credentials.d.ts.map; do hh clean "$rel"; done
+hh clean .env.example '.env.example'
+for rel in node_modules/pkg/.env node_modules/pkg/credentials.json node_modules/pkg/credentials \
+    node_modules/pkg/deploy.pem __pycache__/id_rsa venv/secrets.toml; do hh hidden "$rel" "venv/"; done
+hh clean __pycache__/openrouter_credentials.cpython-312.pyc
+r="$(mktemp -d "$TMP/hh.XXXXXX")"; git init -q "$r"; printf 'a' >"$r/f"; git -C "$r" add f
+git -C "$r" -c user.name=t -c user.email=t@e commit -qm i; git -C "$r" update-index --skip-worktree f
+has_hidden_state "$r" && ok "skip-worktree -> hidden" || bad "skip-worktree not hidden"
+has_hidden_state "$TMP/not-a-repo-xyz" && ok "probe failure -> hidden" || bad "probe failure not hidden"
 
 echo "== c14_probe secrets(): suffix/segment exemptions removed =="
 for rel in credentials.txt secrets.md .env.test Build/credentials.json; do
