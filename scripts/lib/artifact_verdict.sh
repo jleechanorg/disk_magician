@@ -432,6 +432,13 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
                 [[ "$(python3 -c 'import json,sys
 try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
 except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
+                # 2026-10-20 operator decision: a linked worktree's own owner-null
+                # lease no longer needs the T3 flag. Every other gate below (clean,
+                # pushed, no live cwd/open file, secrets, recent activity) still
+                # runs; AO-managed trees stay kept here.
+                if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" && "$p" != *ao/data/worktrees/* ]]; then
+                    continue
+                fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
                     echo kept:owner-unknown; return 0
                 fi ;;
