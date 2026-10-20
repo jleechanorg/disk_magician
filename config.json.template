@@ -393,11 +393,6 @@
       "timeout": 60
     },
     {
-      "key": "jleechanorg",
-      "path": "~/jleechanorg",
-      "timeout": 60
-    },
-    {
       "key": "experiments",
       "path": "~/experiments",
       "timeout": 60
@@ -495,11 +490,6 @@
     {
       "key": "openclaw_repo",
       "path": "~/openclaw-repo",
-      "timeout": 60
-    },
-    {
-      "key": "jleechan_bench",
-      "path": "~/jleechan_bench_workspace",
       "timeout": 60
     },
     {
@@ -771,10 +761,6 @@
       "pattern": "~/wf*_dd"
     },
     {
-      "key": "project_roots",
-      "pattern": "~/project_*"
-    },
-    {
       "key": "worktrees_dot_dirs",
       "pattern": "~/*.worktrees"
     },
@@ -783,20 +769,8 @@
       "pattern": "~/.worktrees-*"
     },
     {
-      "key": "cb_wa_checkouts",
-      "pattern": "~/cb-wa-*"
-    },
-    {
       "key": "worldarchitect_clones",
       "pattern": "~/worldarchitect*"
-    },
-    {
-      "key": "wa_hyphen_checkouts",
-      "pattern": "~/wa-*"
-    },
-    {
-      "key": "wa_underscore_checkouts",
-      "pattern": "~/wa_*"
     },
     {
       "key": "cb_checkouts",
@@ -845,10 +819,6 @@
     {
       "key": "tmp_task_scratch",
       "pattern": "/tmp/task*"
-    },
-    {
-      "key": "tmp_wa_scratch",
-      "pattern": "/tmp/wa-*"
     },
     {
       "key": "skills_repos",
