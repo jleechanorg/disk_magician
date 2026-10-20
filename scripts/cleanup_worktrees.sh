@@ -1321,7 +1321,7 @@ process_ephemeral_task_clone() {
         head_oid="$(git -C "$wt" rev-parse --verify -q HEAD 2>/dev/null || true)"
         if [[ -n "$head_oid" ]]; then
             for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-                if [[ -d "$canon_repo/.git" ]] && git --no-lazy-fetch -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
+                if [[ -d "$canon_repo/.git" ]] && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
                     head_pushed=true
                     break
                 fi

@@ -333,7 +333,7 @@ check_repos() {
       [[ -z "$bare_oid" ]] && continue
       local oid_found=false
       for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-        if [[ -d "$canon_repo/.git" ]] && git --no-lazy-fetch -C "$canon_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
+        if [[ -d "$canon_repo/.git" ]] && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
           oid_found=true
           break
         fi
@@ -369,7 +369,7 @@ check_repos() {
       verified_via_canon=true
     elif [[ -n "$head_oid" ]]; then
       for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-        if [[ -d "$canon_repo/.git" ]] && git --no-lazy-fetch -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
+        if [[ -d "$canon_repo/.git" ]] && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
           verified_via_canon=true
           matched_canon_repo="$canon_repo"
           break
@@ -402,7 +402,7 @@ check_repos() {
         local ref_oid
         while IFS= read -r ref_oid; do
           [[ -z "$ref_oid" ]] && continue
-          if ! git --no-lazy-fetch -C "$matched_canon_repo" cat-file -e "${ref_oid}^{commit}" 2>/dev/null; then
+          if ! GIT_NO_LAZY_FETCH=1 git -C "$matched_canon_repo" cat-file -e "${ref_oid}^{commit}" 2>/dev/null; then
             REPO_REASON="unpushed-refs:$repo"
             return
           fi

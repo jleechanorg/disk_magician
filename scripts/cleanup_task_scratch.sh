@@ -291,7 +291,7 @@ inspect_container_repos() {
     local bare_ok=true bare_oid wa_repo="$HOME/projects/worldarchitect.ai"
     while IFS= read -r bare_oid; do
       [[ -z "$bare_oid" ]] && continue
-      if [[ ! -d "$wa_repo/.git" ]] || ! git --no-lazy-fetch -C "$wa_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
+      if [[ ! -d "$wa_repo/.git" ]] || ! GIT_NO_LAZY_FETCH=1 git -C "$wa_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
         bare_ok=false
         break
       fi
@@ -374,7 +374,7 @@ PY
       local canon_repo
       for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
         if [[ -d "$canon_repo/.git" ]] \
-           && git --no-lazy-fetch -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
+           && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
           verified_via_wa=true
           matched_canon_repo="$canon_repo"
           break
@@ -447,7 +447,7 @@ PY
           local b_oid
           while IFS= read -r b_oid; do
             [[ -z "$b_oid" ]] && continue
-            if [[ -z "$matched_canon_repo" ]] || ! git --no-lazy-fetch -C "$matched_canon_repo" cat-file -e "${b_oid}^{commit}" 2>/dev/null; then
+            if [[ -z "$matched_canon_repo" ]] || ! GIT_NO_LAZY_FETCH=1 git -C "$matched_canon_repo" cat-file -e "${b_oid}^{commit}" 2>/dev/null; then
               lb="$b_oid"
               break
             fi
