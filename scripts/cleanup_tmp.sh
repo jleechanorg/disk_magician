@@ -707,7 +707,12 @@ has_open_files() {
   hit_file="$(mktemp -t disk-magician-lsof.XXXXXX)"
   err_file="$(mktemp -t disk-magician-lsof-error.XXXXXX)"
 
-  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" -w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
+  local lsof_w_flag="+w"
+  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" && -z "${DISK_MAGICIAN_TEST_CONTEXT:-}" ]]; then
+    lsof_w_flag="-w"
+  fi
+
+  "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" "$lsof_w_flag" -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
   local diagnostic=""
   if [[ -s "$err_file" ]]; then
@@ -811,7 +816,7 @@ has_open_files() {
             fi
 
             # Exact or slash-delimited prefix compare against canonical dir
-            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* ]]; then
+            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* || "$val" == "$canon_dir" || "$val" == "$canon_dir/"* ]]; then
               has_open=0
               break
             fi

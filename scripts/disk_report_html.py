@@ -64,6 +64,8 @@ def resolve_default_snapshot_path(explicit: Optional[str] = None) -> Path:
             p = Path(os.path.expanduser(env_val)).resolve()
             if p.is_file():
                 return p
+    home = Path.home()
+    candidates: List[Path] = []
     # Try resolve_snapshot_json.sh helper
     helper = SCRIPTS_DIR / "lib" / "resolve_snapshot_json.sh"
     if helper.is_file():
@@ -79,18 +81,21 @@ def resolve_default_snapshot_path(explicit: Optional[str] = None) -> Path:
             if candidate_str:
                 p = Path(os.path.expanduser(candidate_str)).resolve()
                 if p.is_file():
-                    return p
+                    candidates.append(p)
         except Exception:
             pass
-    home = Path.home()
-    candidates = [
+    for c in (
         home / ".disk_magician_backup" / "snapshots" / "disk_snapshot.json",
         home / ".local" / "state" / "disk-magician" / "snapshots" / "disk_snapshot.json",
-    ]
-    for c in candidates:
+    ):
         if c.is_file():
-            return c.resolve()
-    return candidates[0].resolve()
+            rc = c.resolve()
+            if rc not in candidates:
+                candidates.append(rc)
+    if candidates:
+        candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        return candidates[0]
+    return (home / ".disk_magician_backup" / "snapshots" / "disk_snapshot.json").resolve()
 
 
 def resolve_default_frontier_path(explicit: Optional[str] = None, snapshot_path: Optional[Path] = None) -> Optional[Path]:
