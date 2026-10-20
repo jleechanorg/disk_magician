@@ -69,6 +69,9 @@ c14_repo_content_ok() (
         ! flags="$(git -C "$r" ls-files -v 2>/dev/null)"; then
         echo kept:check-failed; return 1
     fi
+    if [[ -n "$st" ]]; then
+        st="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$st" || true)"
+    fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
     if [[ -n "$st" && "$mode" != --overlay-manifest ]] || grep -q '^[a-zS]' <<<"$flags"; then
         echo kept:dirty; return 1
@@ -113,7 +116,7 @@ c14_repo_pushed_ok() (
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
-    have="$(cut -f1 <<<"$adv" | git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
+    have="$(cut -f1 <<<"$adv" | GIT_NO_LAZY_FETCH=1 git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
     unp="$(git -C "$r" rev-list ${scope[@]+"${scope[@]}"} --stdin -n1 < <(printf '%s\n' $tips $have) 2>/dev/null)" || { echo kept:check-failed; return 1; }
     [[ -z "$unp" ]] || { echo kept:not-pushed; return 1; }
     if [[ -n "$linked" ]]; then  # linked: unreachable objects stay in the common store
@@ -183,7 +186,7 @@ c14_ephemeral_retention() {
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
-    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ || "$rel" =~ ^Documents/Codex/[0-9]{4}-[0-9]{2}-[0-9]{2}(/[^/]+)?$ ]]; then echo 10080
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
@@ -219,9 +222,19 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t re='^((\.cache/(uv|pre-commit|worldai|ms-playwright|camoufox|claude-cli-nodejs|go-build|pip|puppeteer|huggingface|torch|triton|node-gyp|yarn|pnpm)|\.npm/(_cacache|_npx)|\.gradle/(caches|daemon|wrapper/dists)|\.cargo/registry/(cache|src)|\.rustup/toolchains/[^/]+|\.local/share/opencode/(repos|log|tool-output|snapshot)|\.local/state/fsevents-projects\.state\.json|\.peekaboo/snapshots|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm|Google|Homebrew|pip|com\.apple\.dt\.Xcode|SentryCrash|SiriTTS)|Library/Application Support/(Cursor|Code|Google/Chrome|BraveSoftware/Brave-Browser|discord)/(Cache|CachedData|CachedExtensionVSIXs|Code Cache|GPUCache|DawnGraphiteCache|DawnWebGPUCache|Default/Cache|Default/Code Cache|Default/Service Worker/CacheStorage|Profile [0-9]+/Cache|Profile [0-9]+/Code Cache|Profile [0-9]+/Service Worker/CacheStorage)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))($|/[^/]))' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
+        if [[ "${DISK_MAGICIAN_INCLUDE_REPOS:-0}" == "1" ]]; then
+            w="${1%/*}"
+            [[ -e "$w/.git" && ( -f "$1/pyvenv.cfg" || -f "$1/bin/activate" || -x "$1/bin/python" ) ]] || return 1
+            if git -C "$w" rev-parse --show-toplevel >/dev/null 2>&1; then
+                t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" || return 1
+                [[ -z "$t" ]] || return 1
+            fi
+            worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
+            return 0
+        fi
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
             [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
@@ -235,6 +248,12 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
+    if [[ ! -d "$1/.git" && ( -e "$1/Build/Products" || -e "$1/ModuleCache.noindex" || -e "$1/Index.noindex" || -e "$1/CompilationCache.noindex" ) ]]; then
+        return 0
+    fi
+    if [[ "$1" =~ ^/(private/)?tmp/idb(_[^/]*)?(/.*)?$ || "$1" =~ ^/(private/)?var/folders/[^/]+/[^/]+/C/clang/ModuleCache.*$ || "$1" =~ /\.beads/\.br_recovery/ || "$1" =~ ^/opt/homebrew/share/android-commandlinetools/(system-images|emulator|ndk)(/.*)?$ ]]; then
+        return 0
+    fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
 )
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
@@ -242,13 +261,43 @@ _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
+# A match is NOT secret-like when it is a source/derived-code name (credentials.js,
+# *.d.ts, *.js.map, *.h ...) or a .env template, or when git tracks it (it is already
+# in the repository history). Config/key/extensionless names and untracked .env* stay
+# secret-like; a failed git lookup tracks nothing (fail closed).
+_AV_SECRET_FILTER='
+import os, subprocess, sys
+root = sys.argv[1]
+code = set(sys.argv[2].split())
+tmpl = tuple(sys.argv[3].split())
+cands = []
+for p in sys.stdin.buffer.read().split(b"\0"):
+    if not p:
+        continue
+    n = os.path.basename(os.fsdecode(p)).lower()
+    stem, dot, ext = n.rpartition(".")
+    if n in tmpl or (dot and stem and ext in code) or n.endswith(".json.schema"):
+        continue
+    cands.append(os.fsdecode(p))
+if cands:
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
+        tracked = {os.path.normpath(os.path.join(root, t)) for t in os.fsdecode(r.stdout).split("\0") if t} if r.returncode == 0 else set()
+    except Exception:
+        tracked = set()
+    cands = [c for c in cands if os.path.normpath(c) not in tracked]
+sys.exit(0 if cands else 1)
+'
 _av_secret_like() {
-    local out
-    out="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    local rc
+    find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-        -print 2>/dev/null)" || return 0
-    [[ -n "$out" ]]
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_WI_CODE_EXTS" "$_WI_TEMPLATES"
+    rc=("${PIPESTATUS[@]}")
+    [[ "${rc[0]}" -ne 0 ]] && return 0
+    [[ "${rc[1]}" -eq 1 ]] && return 1
+    return 0
 }
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
 # canonical path is <path> or under it, for any filesystem kind (plain dir, plain
@@ -432,6 +481,13 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
                 [[ "$(python3 -c 'import json,sys
 try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
 except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
+                # 2026-10-20 operator decision: a linked worktree's own owner-null
+                # lease no longer needs the T3 flag. Every other gate below (clean,
+                # pushed, no live cwd/open file, secrets, recent activity) still
+                # runs; AO-managed trees stay kept here.
+                if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" && "$p" != *ao/data/worktrees/* ]]; then
+                    continue
+                fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
                     echo kept:owner-unknown; return 0
                 fi ;;
@@ -448,7 +504,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
     newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv")"
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in

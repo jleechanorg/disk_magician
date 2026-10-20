@@ -51,8 +51,16 @@ scratch_roots_get_user_tmp() {
 # directly with no override, so no test could confine it to a fixture
 # without PATH-shimming `find` itself.
 scratch_roots_get_private_tmp() {
-  local root="${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}"
-  if [[ -d "$root" ]]; then echo "$root"; fi
+  if [[ -n "${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE+x}" ]]; then
+    local root="$DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE"
+    if [[ -n "$root" && -d "$root" ]]; then echo "$root"; fi
+    return 0
+  fi
+  if [[ -d "/private/tmp" ]]; then
+    echo "/private/tmp"
+  elif [[ -d "/tmp" ]]; then
+    echo "/tmp"
+  fi
 }
 
 scratch_roots_get_tmp() {

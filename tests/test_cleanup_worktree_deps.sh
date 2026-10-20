@@ -91,9 +91,10 @@ printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/lsof"
 OUT="$(env -i HOME="$T/home" PATH="$T/fakebin:/usr/bin:/bin:/usr/sbin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 check "failing lsof refuses" "cwd unknown, refusing" "$OUT"
 
-# Nested rebuildable caches (depth >= 2): a target/ or node_modules/ is stripped
-# only when its parent dir holds the manifest that produces it (Cargo.toml or
-# package.json). A dir that merely shares the name is preserved.
+# Nested rebuildable caches (depth >= 2): a target/, node_modules/, .next/, or
+# .next/cache/ is stripped only when its owning dir holds the manifest that
+# produces it (Cargo.toml or package.json). A dir that merely shares the name is
+# preserved.
 git -C "$T/base" worktree add -q -b "b-nested" "$T/roots/nested"
 mkdir -p "$T/roots/nested/daemon/target/debug"
 echo 'fn main() {}' > "$T/roots/nested/daemon/Cargo.toml"
@@ -108,6 +109,20 @@ echo bin > "$T/roots/nested/target/debug/app"
 mkdir -p "$T/roots/nested/app/node_modules/left-pad"
 echo '{}' > "$T/roots/nested/app/package.json"
 echo dep > "$T/roots/nested/app/node_modules/left-pad/index.js"
+# Nested Next.js build caches (mvp_site/.next/cache and apps/web/.next/cache)
+# beside package.json are stripped; manifest-less .next/cache and young active
+# worktree .next/cache are preserved.
+mkdir -p "$T/roots/nested/mvp_site/.next/cache/webpack"
+echo '{}' > "$T/roots/nested/mvp_site/package.json"
+echo pack > "$T/roots/nested/mvp_site/.next/cache/webpack/0.pack"
+mkdir -p "$T/roots/nested/apps/web/.next/cache/webpack"
+echo '{}' > "$T/roots/nested/apps/web/package.json"
+echo pack > "$T/roots/nested/apps/web/.next/cache/webpack/0.pack"
+mkdir -p "$T/roots/nested/no_manifest_next/.next/cache/webpack"
+echo pack > "$T/roots/nested/no_manifest_next/.next/cache/webpack/0.pack"
+mkdir -p "$T/roots/young/mvp_site/.next/cache/webpack"
+echo '{}' > "$T/roots/young/mvp_site/package.json"
+echo pack > "$T/roots/young/mvp_site/.next/cache/webpack/0.pack"
 # A symlinked parent is not traversed, even though the external tree has a manifest.
 mkdir -p "$T/external_daemon/target/debug"
 echo 'fn main() {}' > "$T/external_daemon/Cargo.toml"
@@ -117,13 +132,21 @@ ln -s "$T/external_daemon" "$T/roots/nested/linked_daemon"
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "nested daemon/target (Cargo.toml sibling) listed" "$T/roots/nested/daemon/target" "$OUT"
 check "nested node_modules (package.json sibling) listed" "$T/roots/nested/app/node_modules" "$OUT"
+check "nested mvp_site/.next/cache (package.json sibling) listed" "$T/roots/nested/mvp_site/.next/cache" "$OUT"
+check "nested apps/web/.next/cache (package.json sibling) listed" "$T/roots/nested/apps/web/.next/cache" "$OUT"
 [[ "$OUT" != *"$T/roots/nested/not_build/target"* ]] && ok "nested target without a Cargo.toml sibling preserved" || bad "manifest-less nested target listed"
+[[ "$OUT" != *"$T/roots/nested/no_manifest_next/.next"* ]] && ok "nested .next/cache without a package.json sibling preserved" || bad "manifest-less nested .next/cache listed"
+[[ "$OUT" != *"$T/roots/young/mvp_site/.next"* ]] && ok "active worktree nested .next/cache preserved" || bad "active worktree nested .next/cache listed"
 check "root target with Cargo.toml still listed" "$T/roots/nested/target" "$OUT"
 [[ "$OUT" != *"linked_daemon"* && "$OUT" != *"$T/external_daemon/target"* ]] && ok "symlinked nested parent not traversed" || bad "symlinked nested parent traversed"
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$T/roots/nested/daemon/target" && -f "$T/roots/nested/daemon/Cargo.toml" ]] && ok "nested daemon/target removed, manifest kept" || bad "nested daemon/target not removed"
 [[ ! -e "$T/roots/nested/app/node_modules" && -f "$T/roots/nested/app/package.json" ]] && ok "nested node_modules removed, package.json kept" || bad "nested node_modules not removed"
+[[ ! -e "$T/roots/nested/mvp_site/.next/cache" && ! -e "$T/roots/nested/mvp_site/.next" && -f "$T/roots/nested/mvp_site/package.json" ]] && ok "nested mvp_site/.next/cache removed, package.json kept" || bad "nested mvp_site/.next/cache not removed"
+[[ ! -e "$T/roots/nested/apps/web/.next/cache" && ! -e "$T/roots/nested/apps/web/.next" && -f "$T/roots/nested/apps/web/package.json" ]] && ok "nested apps/web/.next/cache removed, package.json kept" || bad "nested apps/web/.next/cache not removed"
 [[ -f "$T/roots/nested/not_build/target/debug/app" ]] && ok "manifest-less nested target survives --clean" || bad "manifest-less nested target removed"
+[[ -f "$T/roots/nested/no_manifest_next/.next/cache/webpack/0.pack" ]] && ok "manifest-less nested .next/cache survives --clean" || bad "manifest-less nested .next/cache removed"
+[[ -f "$T/roots/young/mvp_site/.next/cache/webpack/0.pack" ]] && ok "active worktree nested .next/cache survives --clean" || bad "active worktree nested .next/cache removed"
 [[ ! -e "$T/roots/nested/target" && -f "$T/roots/nested/Cargo.toml" ]] && ok "root target removed beside its Cargo.toml" || bad "root target not removed"
 [[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
 

@@ -67,7 +67,10 @@ if [[ ! -f "$LIB" ]]; then echo "FATAL: $LIB missing" >&2; exit 2; fi
 source "$LIB"
 
 NOW="$(date +%s)"
-age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} + 2>/dev/null; }
+age() { # BSD `date -r EPOCH`, GNU `date -d @EPOCH` fallback
+    local ts; ts="$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$((NOW - $2 * 60))" +%Y%m%d%H%M.%S)"
+    find "$1" -exec touch -h -t "$ts" {} + 2>/dev/null
+}
 
 make_remote() { # <name>
     git init -q --bare -b main "$TMP/remotes/$1.git" || return 1
@@ -148,8 +151,8 @@ echo "== (2) T3 owner-null transport =="
 wt_add "$PT/parent-own/wt" wtown || { echo "FATAL: worktree add failed" >&2; exit 2; }
 null_lease "$PT/parent-own/wt"
 age "$PT/parent-own/wt" 120
-assert_eq "$(verdict "$PT/parent-own/wt")" kept:owner-unknown \
-    "default C14 keeps an owner-null worktree"
+assert_eq "$(verdict "$PT/parent-own/wt")" remove \
+    "default C14 frees an owner-null linked worktree (2026-10-20 relax)"
 assert_eq "$(verdict_t3 "$PT/parent-own/wt")" remove \
     "T3 frees the exact candidate worktree's own owner-null lease"
 # Consume the actual inventory through WRH; a verdict alone cannot prove removal.
@@ -203,7 +206,55 @@ assert_eq "$(verdict_t3 "$PT/parent-dirty/wt")" kept:dirty "T3 does not bypass c
 wt_add "$PT/parent-t1/wt" wtt1 || exit 2
 null_lease "$PT/parent-t1/wt"
 age "$PT/parent-t1/wt" 120
-assert_eq "$(verdict "$PT/parent-t1/wt")" kept:owner-unknown "no-flag C14 (T1 and others) keeps owner-null"
+assert_eq "$(verdict "$PT/parent-t1/wt")" remove "no-flag C14 frees owner-null linked worktree (2026-10-20 relax)"
+
+echo "== (3) owner-unknown relaxed for clean pushed linked worktrees (2026-10-20 operator decision) =="
+# No --t3-owner-null flag anywhere below: the default verdict must free a
+# clean, pushed, idle, non-AO linked worktree whose lease has no owner.
+wt_add "$PT/rx-null/wt" rxnull || exit 2
+null_lease "$PT/rx-null/wt"; age "$PT/rx-null/wt" 120
+assert_eq "$(verdict "$PT/rx-null/wt")" remove "relax: clean+pushed worktree with owner-null lease -> remove"
+
+wt_add "$PT/rx-nolease/wt" rxnolease || exit 2
+age "$PT/rx-nolease/wt" 120
+assert_eq "$(verdict "$PT/rx-nolease/wt")" remove "relax: clean+pushed worktree with no lease -> remove"
+
+wt_add "$PT/rx-cwd/wt" rxcwd || exit 2
+null_lease "$PT/rx-cwd/wt"; age "$PT/rx-cwd/wt" 120
+( cd "$PT/rx-cwd/wt" && exec sleep 120 ) & rx_pid=$!
+sleep 1
+rx_v="$(verdict "$PT/rx-cwd/wt")"
+kill "$rx_pid" 2>/dev/null; wait "$rx_pid" 2>/dev/null
+[[ "$rx_v" == kept:* ]] && ok "relax: live cwd inside worktree is still kept ($rx_v)" || bad "relax: live cwd verdict not kept:* ($rx_v)"
+
+wt_add "$PT/rx-live/wt" rxlive || exit 2
+f="$(lease_path_for "$PT/rx-live/wt")"; mkdir -p "${f%/*}"
+printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24}\n' \
+    "$PT/rx-live/wt" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" >"$f"
+age "$PT/rx-live/wt" 120
+assert_eq "$(verdict "$PT/rx-live/wt")" kept:live-owner "relax: live-owner lease still keeps"
+
+wt_add "$PT/rx-dirty/wt" rxdirty || exit 2
+printf 'edit\n' >>"$PT/rx-dirty/wt/tracked.txt"; null_lease "$PT/rx-dirty/wt"; age "$PT/rx-dirty/wt" 120
+assert_eq "$(verdict "$PT/rx-dirty/wt")" kept:dirty "relax: dirty worktree still keeps"
+
+wt_add "$PT/rx-sec/wt" rxsec || exit 2
+printf 'x\n' >"$PT/rx-sec/wt/deploy.pem"
+git -C "$PT/rx-sec/wt" add deploy.pem && git -C "$PT/rx-sec/wt" commit -qm sec && git -C "$PT/rx-sec/wt" push -q origin rxsec
+null_lease "$PT/rx-sec/wt"; age "$PT/rx-sec/wt" 120
+assert_eq "$(verdict "$PT/rx-sec/wt")" kept:secret-like "relax: secret-like file still keeps"
+
+wt_add "$PT/rx-unp/wt" rxunp || exit 2
+printf 'u\n' >"$PT/rx-unp/wt/new.txt"
+git -C "$PT/rx-unp/wt" add new.txt && git -C "$PT/rx-unp/wt" commit -qm unpushed
+null_lease "$PT/rx-unp/wt"; age "$PT/rx-unp/wt" 120
+rx_v="$(verdict "$PT/rx-unp/wt")"
+[[ "$rx_v" == kept:* ]] && ok "relax: unpushed commit still keeps ($rx_v)" || bad "relax: unpushed commit not kept ($rx_v)"
+
+wt_add "$PT/.ao/data/worktrees/rx-ao/wt" rxao || exit 2
+null_lease "$PT/.ao/data/worktrees/rx-ao/wt"; age "$PT/.ao/data/worktrees/rx-ao/wt" 120
+rx_v="$(verdict "$PT/.ao/data/worktrees/rx-ao/wt")"
+[[ "$rx_v" == kept:* ]] && ok "relax: AO-owned worktree still keeps ($rx_v)" || bad "relax: AO-owned not kept ($rx_v)"
 
 # Wiring: the flag is carried by the sanctioned T3 call site, and by exactly
 # that one call site in production scripts (no global/other removal site can

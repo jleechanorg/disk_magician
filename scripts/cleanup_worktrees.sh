@@ -426,6 +426,9 @@ classify_content_and_merge() {
         return 0
     fi
     if [[ -n "$status_porcelain" ]]; then
+        status_porcelain="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$status_porcelain" || true)"
+    fi
+    if [[ -n "$status_porcelain" ]]; then
         if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
             echo "untracked"
             return 0
@@ -848,7 +851,9 @@ process_repo_local_worktrees() {
         local match=false
         local base_name
         base_name="$(basename "$abs_path")"
-        if [[ "$abs_path" == *"/.claude/worktrees/"* || \
+        if [[ "$abs_path" != "$main_wt_path" && -f "$abs_path/.git" ]]; then
+            match=true
+        elif [[ "$abs_path" == *"/.claude/worktrees/"* || \
               "$abs_path" == *"/.ao/data/worktrees/"* || \
               "$abs_path" == *"/ao/data/worktrees/"* || \
               "$abs_path" == *"/antigravity/worktrees/"* || \
@@ -931,12 +936,32 @@ process_repo_local_worktrees() {
                 fi
                 local final_status final_status_rc=0
                 final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
+                if [[ -n "$final_status" ]]; then
+                    final_status="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$final_status" || true)"
+                fi
                 if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                     act_candidate_done || return 3
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
+                fi
+                # Restore directory mtimes bumped by prior venv/deps/cache strip passes
+                # back to the worktree's true last-activity epoch before C14 inventory.
+                local wt_act_epoch
+                wt_act_epoch="$(worktree_last_activity_epoch "$abs_path" 2>/dev/null || echo 0)"
+                if [[ "$wt_act_epoch" =~ ^[1-9][0-9]*$ ]]; then
+                    python3 - "$abs_path" "$wt_act_epoch" <<'PY' 2>/dev/null || true
+import os, sys
+root, cap = sys.argv[1], int(sys.argv[2])
+for dp, dns, _ in os.walk(root, topdown=False, followlinks=False):
+    try:
+        st = os.lstat(dp)
+        if int(st.st_mtime) > cap:
+            os.utime(dp, (cap, cap), follow_symlinks=False)
+    except Exception:
+        pass
+PY
                 fi
                 # Same C14 -> WRH route as worktree_reap: the REAL verdict
                 # writes the single original receipt, and WRH consumes exactly
@@ -1058,6 +1083,34 @@ std_root_skip_reason() {
     elif list_has_child_of "$2" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$1" "$GLOBAL_LIVE_CWDS"; then
         echo "live-cwd"
     fi
+}
+
+is_live_cwd() {
+    local wt="$1" real_wt
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    [[ -n "$GLOBAL_CWD_BLOCKED" ]] && return 0
+    list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt" "$GLOBAL_LIVE_CWDS"
+}
+
+is_ao_managed_worktree() {
+    local wt="$1"
+    local real_wt
+    real_wt="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
+    if [[ -n "$STD_BLOCKED" || "$AO_CONFIG_STATE" == "invalid" ]]; then
+        return 0
+    fi
+    if [[ "$wt" == *"ao/data/worktrees/"* || "$real_wt" == *"ao/data/worktrees/"* ]]; then
+        return 0
+    fi
+    if antigravity_ao_owned "$wt" || antigravity_ao_owned "$real_wt"; then
+        return 0
+    fi
+    local skip_reason
+    skip_reason="$(std_root_skip_reason "$wt" "$real_wt" 2>/dev/null || true)"
+    if [[ "$skip_reason" == "ao-owned" || "$skip_reason" == "ao-config-unreadable" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 if ((${#REPO_LOCAL_REPOS[@]})); then

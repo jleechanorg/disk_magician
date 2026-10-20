@@ -281,6 +281,466 @@
       "key": "library_cloudstorage",
       "path": "~/Library/CloudStorage",
       "timeout": 180
+    },
+    {
+      "key": "worktrees_hub",
+      "path": "~/worktrees",
+      "timeout": 180
+    },
+    {
+      "key": "openclaw_prod_bak",
+      "path": "~/.openclaw_prod_bak",
+      "timeout": 120
+    },
+    {
+      "key": "ezgha_operations",
+      "path": "~/.local/state/ezgha-operations",
+      "timeout": 60
+    },
+    {
+      "key": "system_data_volume",
+      "path": "/System/Volumes/Data/System",
+      "timeout": 120
+    },
+    {
+      "key": "library_metadata",
+      "path": "~/Library/Metadata",
+      "timeout": 60
+    },
+    {
+      "key": "library_logs",
+      "path": "~/Library/Logs",
+      "timeout": 60
+    },
+    {
+      "key": "library_webkit",
+      "path": "~/Library/WebKit",
+      "timeout": 60
+    },
+    {
+      "key": "library_pnpm",
+      "path": "~/Library/pnpm",
+      "timeout": 60
+    },
+    {
+      "key": "config_dir",
+      "path": "~/.config",
+      "timeout": 60
+    },
+    {
+      "key": "cmuxterm",
+      "path": "~/.cmuxterm",
+      "timeout": 60
+    },
+    {
+      "key": "gradle",
+      "path": "~/.gradle",
+      "timeout": 60
+    },
+    {
+      "key": "android_dot",
+      "path": "~/.android",
+      "timeout": 60
+    },
+    {
+      "key": "cursor_dot",
+      "path": "~/.cursor",
+      "timeout": 60
+    },
+    {
+      "key": "aside",
+      "path": "~/.aside",
+      "timeout": 60
+    },
+    {
+      "key": "home_applications",
+      "path": "~/Applications",
+      "timeout": 60
+    },
+    {
+      "key": "worldarchitect_root",
+      "path": "~/worldarchitect.ai",
+      "timeout": 60
+    },
+    {
+      "key": "cb_demo",
+      "path": "~/cb-demo",
+      "timeout": 60
+    },
+    {
+      "key": "llm_wiki",
+      "path": "~/llm_wiki",
+      "timeout": 60
+    },
+    {
+      "key": "roadmap",
+      "path": "~/roadmap",
+      "timeout": 60
+    },
+    {
+      "key": "worldarchitect_main_origin",
+      "path": "~/worldarchitect-main-origin",
+      "timeout": 60
+    },
+    {
+      "key": "agent_work",
+      "path": "~/agent-work",
+      "timeout": 60
+    },
+    {
+      "key": "claude_codex_usage",
+      "path": "~/claude-codex-usage",
+      "timeout": 60
+    },
+    {
+      "key": "jleechanorg",
+      "path": "~/jleechanorg",
+      "timeout": 60
+    },
+    {
+      "key": "experiments",
+      "path": "~/experiments",
+      "timeout": 60
+    },
+    {
+      "key": "conductor",
+      "path": "~/conductor",
+      "timeout": 60
+    },
+    {
+      "key": "ez_gh_actions_workdir",
+      "path": "~/ez-gh-actions-workdir",
+      "timeout": 60
+    },
+    {
+      "key": "work_dir",
+      "path": "~/work",
+      "timeout": 60
+    },
+    {
+      "key": "library_biome",
+      "path": "~/Library/Biome",
+      "timeout": 60
+    },
+    {
+      "key": "library_daemon_containers",
+      "path": "~/Library/Daemon Containers",
+      "timeout": 60
+    },
+    {
+      "key": "library_photos",
+      "path": "~/Library/Photos",
+      "timeout": 60
+    },
+    {
+      "key": "library_duet_expert_center",
+      "path": "~/Library/DuetExpertCenter",
+      "timeout": 60
+    },
+    {
+      "key": "cmux_backups",
+      "path": "~/cmux-backups",
+      "timeout": 60
+    },
+    {
+      "key": "worldai_claw_evidence",
+      "path": "~/worldai_claw_evidence",
+      "timeout": 60
+    },
+    {
+      "key": "peekaboo",
+      "path": "~/.peekaboo",
+      "timeout": 60
+    },
+    {
+      "key": "autoresearch_workspace",
+      "path": "~/autoresearch-main-workspace",
+      "timeout": 60
+    },
+    {
+      "key": "home_tmp",
+      "path": "~/tmp",
+      "timeout": 60
+    },
+    {
+      "key": "codex_astra",
+      "path": "~/.codex-astra",
+      "timeout": 60
+    },
+    {
+      "key": "reward_gate_mirrors",
+      "path": "~/reward-gate-mirrors-wz7_rme9",
+      "timeout": 60
+    },
+    {
+      "key": "pi_dot",
+      "path": "~/.pi",
+      "timeout": 60
+    },
+    {
+      "key": "antigravity_dot",
+      "path": "~/.antigravity",
+      "timeout": 60
+    },
+    {
+      "key": "apps_home",
+      "path": "~/Apps",
+      "timeout": 60
+    },
+    {
+      "key": "pw_browsers",
+      "path": "~/.pw-browsers",
+      "timeout": 60
+    },
+    {
+      "key": "openclaw_repo",
+      "path": "~/openclaw-repo",
+      "timeout": 60
+    },
+    {
+      "key": "jleechan_bench",
+      "path": "~/jleechan_bench_workspace",
+      "timeout": 60
+    },
+    {
+      "key": "llm_wiki_autor",
+      "path": "~/llm-wiki-autor-phase3",
+      "timeout": 60
+    },
+    {
+      "key": "agent_orchestrator",
+      "path": "~/.agent-orchestrator",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_agent_fork_backup",
+      "path": "~/hermes-agent-fork-backup-2026-06-28",
+      "timeout": 60
+    },
+    {
+      "key": "claude_skills_archive",
+      "path": "~/.claude_skills_archive_20260827",
+      "timeout": 60
+    },
+    {
+      "key": "agent_browser",
+      "path": "~/.agent-browser",
+      "timeout": 60
+    },
+    {
+      "key": "serena",
+      "path": "~/.serena",
+      "timeout": 60
+    },
+    {
+      "key": "thinclaw",
+      "path": "~/thinclaw",
+      "timeout": 60
+    },
+    {
+      "key": "ios_evidence_realauth",
+      "path": "~/ios_evidence_realauth_20260719",
+      "timeout": 60
+    },
+    {
+      "key": "chrome_codex_automation",
+      "path": "~/.chrome-codex-automation",
+      "timeout": 60
+    },
+    {
+      "key": "fixaudit_frames",
+      "path": "~/fixaudit_frames",
+      "timeout": 60
+    },
+    {
+      "key": "maestro",
+      "path": "~/.maestro",
+      "timeout": 60
+    },
+    {
+      "key": "django_temp",
+      "path": "~/django_temp",
+      "timeout": 60
+    },
+    {
+      "key": "minimax_coding_agent",
+      "path": "~/minimax-coding-agent",
+      "timeout": 60
+    },
+    {
+      "key": "expo",
+      "path": "~/.expo",
+      "timeout": 60
+    },
+    {
+      "key": "cargo",
+      "path": "~/.cargo",
+      "timeout": 60
+    },
+    {
+      "key": "workspaces",
+      "path": "~/workspaces",
+      "timeout": 60
+    },
+    {
+      "key": "luma_scrape",
+      "path": "~/luma-scrape",
+      "timeout": 60
+    },
+    {
+      "key": "tmp",
+      "path": "/tmp",
+      "timeout": 120
+    },
+    {
+      "key": "var_root",
+      "path": "/var",
+      "timeout": 180
+    },
+    {
+      "key": "var_log",
+      "path": "/var/log",
+      "timeout": 60
+    },
+    {
+      "key": "var_lib",
+      "path": "/var/lib",
+      "timeout": 180
+    },
+    {
+      "key": "var_lib_docker",
+      "path": "/var/lib/docker",
+      "timeout": 120
+    },
+    {
+      "key": "opt_root",
+      "path": "/opt",
+      "timeout": 60
+    },
+    {
+      "key": "opt_google",
+      "path": "/opt/google",
+      "timeout": 60
+    },
+    {
+      "key": "opt_warpdotdev",
+      "path": "/opt/warpdotdev",
+      "timeout": 60
+    },
+    {
+      "key": "comfyui",
+      "path": "~/ComfyUI",
+      "timeout": 120
+    },
+    {
+      "key": "dropbox",
+      "path": "~/Dropbox",
+      "timeout": 180
+    },
+    {
+      "key": "mirror",
+      "path": "~/mirror",
+      "timeout": 300
+    },
+    {
+      "key": "candidates",
+      "path": "~/candidates",
+      "timeout": 120
+    },
+    {
+      "key": "canonical_code_repos",
+      "path": "~/canonical-code-repos",
+      "timeout": 60
+    },
+    {
+      "key": "auth112_causal",
+      "path": "~/auth112_causal",
+      "timeout": 60
+    },
+    {
+      "key": "google_cloud_sdk",
+      "path": "~/google-cloud-sdk",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_agent_pc",
+      "path": "~/hermes-agent-pc",
+      "timeout": 60
+    },
+    {
+      "key": "library_home",
+      "path": "~/Library",
+      "timeout": 60
+    },
+    {
+      "key": "qdrant_evidence",
+      "path": "~/qdrant-evidence-20261004",
+      "timeout": 60
+    },
+    {
+      "key": "reward_driver_fix",
+      "path": "~/reward-driver-fix.gdHuox",
+      "timeout": 60
+    },
+    {
+      "key": "agents_dot",
+      "path": "~/.agents",
+      "timeout": 60
+    },
+    {
+      "key": "antigravity_ide_dot",
+      "path": "~/.antigravity-ide",
+      "timeout": 60
+    },
+    {
+      "key": "claude_backup_20260918",
+      "path": "~/.claude-backup-20260918_154321",
+      "timeout": 60
+    },
+    {
+      "key": "codex_dark_factory",
+      "path": "~/.codex-dark-factory",
+      "timeout": 120
+    },
+    {
+      "key": "codex_worktrees",
+      "path": "~/.codex-worktrees",
+      "timeout": 120
+    },
+    {
+      "key": "dark_factory_e2e",
+      "path": "~/.dark-factory-e2e",
+      "timeout": 60
+    },
+    {
+      "key": "df_pr771_final",
+      "path": "~/.df-pr771-final-sozq0U",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_pre_claw_backup",
+      "path": "~/.hermes.pre-claw-backup",
+      "timeout": 120
+    },
+    {
+      "key": "npm_global",
+      "path": "~/.npm-global",
+      "timeout": 60
+    },
+    {
+      "key": "pnpm_store",
+      "path": "~/.pnpm-store",
+      "timeout": 60
+    },
+    {
+      "key": "smartclaw",
+      "path": "~/.smartclaw",
+      "timeout": 60
+    },
+    {
+      "key": "venvs_home",
+      "path": "~/.venvs",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
@@ -301,6 +761,102 @@
     {
       "key": "hf_hub_cache",
       "pattern": "~/.cache/huggingface/hub/models--*"
+    },
+    {
+      "key": "wf_checkouts",
+      "pattern": "~/wf_*"
+    },
+    {
+      "key": "wf_derived_data",
+      "pattern": "~/wf*_dd"
+    },
+    {
+      "key": "project_roots",
+      "pattern": "~/project_*"
+    },
+    {
+      "key": "worktrees_dot_dirs",
+      "pattern": "~/*.worktrees"
+    },
+    {
+      "key": "worktrees_dot_prefixes",
+      "pattern": "~/.worktrees-*"
+    },
+    {
+      "key": "cb_wa_checkouts",
+      "pattern": "~/cb-wa-*"
+    },
+    {
+      "key": "worldarchitect_clones",
+      "pattern": "~/worldarchitect*"
+    },
+    {
+      "key": "wa_hyphen_checkouts",
+      "pattern": "~/wa-*"
+    },
+    {
+      "key": "wa_underscore_checkouts",
+      "pattern": "~/wa_*"
+    },
+    {
+      "key": "cb_checkouts",
+      "pattern": "~/cb-*"
+    },
+    {
+      "key": "wt_checkouts",
+      "pattern": "~/wt-*"
+    },
+    {
+      "key": "beads_backups",
+      "pattern": "~/.beads*"
+    },
+    {
+      "key": "openclaw_instances",
+      "pattern": "~/.openclaw*"
+    },
+    {
+      "key": "ao_branches",
+      "pattern": "~/.ao-*"
+    },
+    {
+      "key": "mcp_mail_dirs",
+      "pattern": "~/mcp_mail*"
+    },
+    {
+      "key": "df_runs",
+      "pattern": "~/.df-*"
+    },
+    {
+      "key": "claude_backups",
+      "pattern": "~/.claude*backup*"
+    },
+    {
+      "key": "dark_factory_runs",
+      "pattern": "~/.dark-factory*"
+    },
+    {
+      "key": "hermes_backups",
+      "pattern": "~/.hermes.*backup*"
+    },
+    {
+      "key": "tmp_pr_scratch",
+      "pattern": "/tmp/pr*"
+    },
+    {
+      "key": "tmp_task_scratch",
+      "pattern": "/tmp/task*"
+    },
+    {
+      "key": "tmp_wa_scratch",
+      "pattern": "/tmp/wa-*"
+    },
+    {
+      "key": "skills_repos",
+      "pattern": "~/*-skills*"
+    },
+    {
+      "key": "home_derived_data",
+      "pattern": "~/dd_*"
     },
     {
       "key": "tmp_advice_scratch",
@@ -341,14 +897,59 @@
     "large_tmp_archive_max_hours": 168
   },
   "protected_tmp_roots": [],
-  "scratch_container_roots": ["agent-scratch"],
+  "scratch_container_roots": [
+    "agent-scratch"
+  ],
   "gc_worktree_repos": [],
   "downloads_evidence_patterns": [],
-  "budgets": {"enforcement": "observe", "concurrency_margin_gb": 10, "classes": {
-      "worktrees": {"budget_gb": 35, "measure": "du", "trigger": "overage", "act": "worktree_reap_remove", "unit_budget_s": 60},
-      "tmp_containers": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "tmp_containers", "unit_budget_s": 30},
-      "tmpdir_scratch": {"budget_gb": 10, "measure": "df_delta_only", "trigger": "zone", "act": "tmpdir_scratch", "unit_budget_s": 30},
-      "codex_documents": {"budget_gb": 3, "measure": "df_delta_only", "trigger": "zone", "act": "codex_documents", "unit_budget_s": 30},
-      "claude_codex_state": {"budget_gb": 15, "measure": "du", "trigger": "overage", "act": "codex_db", "unit_budget_s": 30, "max_runtime_s": 180},
-      "colima": {"budget_gb": 30, "measure": "observer", "trigger": "overage", "act": "colima", "unit_budget_s": 30, "max_runtime_s": 360}}}
+  "budgets": {
+    "enforcement": "observe",
+    "concurrency_margin_gb": 10,
+    "classes": {
+      "worktrees": {
+        "budget_gb": 35,
+        "measure": "du",
+        "trigger": "overage",
+        "act": "worktree_reap_remove",
+        "unit_budget_s": 60
+      },
+      "tmp_containers": {
+        "budget_gb": 15,
+        "measure": "du",
+        "trigger": "overage",
+        "act": "tmp_containers",
+        "unit_budget_s": 30
+      },
+      "tmpdir_scratch": {
+        "budget_gb": 10,
+        "measure": "df_delta_only",
+        "trigger": "zone",
+        "act": "tmpdir_scratch",
+        "unit_budget_s": 30
+      },
+      "codex_documents": {
+        "budget_gb": 3,
+        "measure": "df_delta_only",
+        "trigger": "zone",
+        "act": "codex_documents",
+        "unit_budget_s": 30
+      },
+      "claude_codex_state": {
+        "budget_gb": 15,
+        "measure": "du",
+        "trigger": "overage",
+        "act": "codex_db",
+        "unit_budget_s": 30,
+        "max_runtime_s": 180
+      },
+      "colima": {
+        "budget_gb": 30,
+        "measure": "observer",
+        "trigger": "overage",
+        "act": "colima",
+        "unit_budget_s": 30,
+        "max_runtime_s": 360
+      }
+    }
+  }
 }
