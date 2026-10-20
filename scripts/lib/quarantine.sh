@@ -30,7 +30,6 @@ quarantine_remove() {
         python3 -c 'import math,sys; x=float(sys.argv[1]); sys.exit(0 if math.isfinite(x) and x >= 0 else 1)' "$2" >/dev/null 2>&1 || { echo kept:check-failed; return 0; }
         deadline="$2"; deadline_seen=1; caller_verdict_args+=("$1" "$2"); shift 2 ;;
       --inventory-out) echo kept:check-failed; return 0 ;;
-      --t3-owner-null) caller_verdict_args+=("$1"); shift ;;
       --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity)
         [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
         caller_verdict_args+=("$1" "$2"); shift 2 ;;
