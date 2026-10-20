@@ -8,7 +8,8 @@ an empty kb means "not measured" (never zero). Phase 1 attempts every key,
 shortest configured timeout first; phase 2 retries timed-out keys once with the
 time left before the deadline.
 Roots >= 20 GiB (or that timed out last run) are measured as parallel depth-1 shards and summed; a timed-out
-shard keeps its last-good value flagged stale and marks the parent partial. At the deadline every worker's whole descendant
+shard's last-good value is reported as stale (never summed, dropped after
+DISK_MAGICIAN_SHARD_CARRY_MAX_HOURS, default 48) and marks the parent partial/lower-bound. At the deadline every worker's whole descendant
 tree is killed (GNU timeout escapes process groups, so groups are not enough).
 """
 import argparse
@@ -118,6 +119,7 @@ SHARD_MIN_KB = 20 * 1024 * 1024
 SHARD_DEFAULT_WORKERS = 4
 SHARD_DEFAULT_TIMEOUT = 30
 MAX_SHARDS = 64
+SHARD_CARRY_MAX_HOURS = 48
 _BENIGN_DU_ERR = re.compile(r"(Permission denied|No such file or directory|Operation not permitted)$")
 
 
@@ -146,51 +148,80 @@ def list_shards(root, max_shards=MAX_SHARDS):
 
 
 def measure_shard(paths, timeout, deadline):
-    """One bounded `du -sk` over a shard. Returns kb, or None on timeout/error (never zero)."""
+    """One bounded `du -sk` over a shard. Returns (kb, lower_bound); (None, False) on timeout/error
+    (never zero). lower_bound is True when du exited 1 on permission/traversal errors only."""
     budget = min(timeout, deadline - time.time())
     if budget < 1:
-        return None
+        return None, False
     try:
         proc = subprocess.Popen(["du", "-sk", "--", *paths], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, start_new_session=True)
     except OSError:
-        return None
+        return None, False
     try:
         out, err = proc.communicate(timeout=budget)
     except subprocess.TimeoutExpired:
         kill_tree(proc.pid)
         proc.communicate()
-        return None
+        return None, False
     if proc.returncode not in (0, 1):
-        return None
+        return None, False
     if proc.returncode == 1 and any(l.strip() and not _BENIGN_DU_ERR.search(l.strip()) for l in err.splitlines()):
-        return None
+        return None, False
     sizes = [int(l.split()[0]) for l in out.splitlines() if l.split() and l.split()[0].isdigit()]
-    return sum(sizes) if sizes and len(sizes) == len(paths) else None
+    if not sizes or len(sizes) != len(paths):
+        return None, False
+    return sum(sizes), proc.returncode == 1
 
 
-def measure_sharded(root, workers, shard_timeout, deadline, prior):
-    """Measure root as independent depth-1 shards in parallel and sum. A timed-out shard keeps its
-    last-good value (prior) flagged stale; the parent is partial only if some shard timed out."""
+def shard_carry_max_seconds():
+    return float(os.environ.get("DISK_MAGICIAN_SHARD_CARRY_MAX_HOURS") or SHARD_CARRY_MAX_HOURS) * 3600
+
+
+def _prior_entry(v):
+    """(kb, ts) from a carried shard; legacy bare ints have no timestamp (age unknown)."""
+    if isinstance(v, dict):
+        return v.get("kb"), v.get("ts")
+    return v, None
+
+
+def measure_sharded(root, workers, shard_timeout, deadline, prior, now=None, carry_max_s=None):
+    """Measure root as independent depth-1 shards in parallel and sum. A timed-out shard may carry its
+    last-good value only as *stale*: reported separately, never summed into kb (so it cannot count toward
+    coverage), and dropped once older than carry_max_s (unknown age is expired). Any timed-out or
+    lower-bound shard makes the parent partial and a lower bound."""
+    now = time.time() if now is None else now
+    carry_max_s = shard_carry_max_seconds() if carry_max_s is None else carry_max_s
     listed = list_shards(root)
     if listed is None:
         return None
     shards, own_kb = listed
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         got = list(pool.map(lambda s: measure_shard(s[1], shard_timeout, deadline), shards))
-    fresh, stale, timed_out = {}, {}, []
-    for (name, _), kb in zip(shards, got):
+    fresh, lb_kb, stale, expired, timed_out, carry = {}, {}, {}, [], [], {}
+    for (name, _), (kb, lb) in zip(shards, got):
         if kb is not None:
-            fresh[name] = kb
+            if lb:  # partial du result: counted as a lower bound, never carried as a complete measurement
+                lb_kb[name] = kb
+            else:
+                fresh[name] = kb
+                carry[name] = {"kb": kb, "ts": now}
             continue
         timed_out.append(name)
-        if prior.get(name) is not None:
-            stale[name] = prior[name]
-    if not fresh:
+        pkb, pts = _prior_entry(prior.get(name))
+        if pkb is None:
+            continue
+        if pts is not None and 0 <= now - pts <= carry_max_s:
+            stale[name] = pkb
+            carry[name] = {"kb": pkb, "ts": pts}
+        else:
+            expired.append(name)
+    if not fresh and not lb_kb:
         return None
-    return {"kb": own_kb + sum(fresh.values()) + sum(stale.values()), "partial": bool(timed_out),
-            "timed_out_shards": timed_out, "stale_shards": stale, "fresh_shards": fresh,
-            "lower_bound": any(n not in stale for n in timed_out)}
+    return {"kb": own_kb + sum(fresh.values()) + sum(lb_kb.values()), "partial": bool(timed_out or lb_kb),
+            "timed_out_shards": timed_out, "stale_shards": stale, "expired_shards": expired,
+            "lower_bound_shards": sorted(lb_kb), "fresh_shards": fresh, "carry": carry,
+            "lower_bound": bool(timed_out or lb_kb)}
 
 
 def _load_shard_state(path):
@@ -349,7 +380,8 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
                                                        "reason": "success", "sharded": True})
         if r["partial"]:
             partials.append({"key": entry["key"], "path": entry["path"], "status": "partial",
-                             "timed_out_shards": r["timed_out_shards"], "stale_shards": r["stale_shards"]})
+                             "timed_out_shards": r["timed_out_shards"], "stale_shards": r["stale_shards"],
+                             "expired_shards": r["expired_shards"], "lower_bound_shards": r["lower_bound_shards"]})
         return True
 
     def shardable(e):
@@ -397,7 +429,7 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
             k = e["key"]
             if k in sharded:
                 r = sharded[k]
-                roots[k] = {"timed_out": r["partial"], "shards": {**r["stale_shards"], **r["fresh_shards"]}}
+                roots[k] = {"timed_out": r["partial"], "shards": r["carry"]}
             elif results.get(k) is None:
                 roots[k] = {**roots.get(k, {}), "timed_out": True}
             elif k in roots and not roots[k].get("shards"):
@@ -406,6 +438,7 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
     if diagnostics_out is not None:
         diagnostics_out["lower_bound_keys"] = sorted(set(lower_bound_keys(attempts)) | {
             k for k, r in sharded.items() if r["lower_bound"]})
+        diagnostics_out["partial_keys"] = sorted(k for k, r in sharded.items() if r["partial"])
         diagnostics_out["measurement_failures"] = summarize_attempts(
             {entry["key"]: attempts.get(entry["key"], []) for entry in entries}
         ) + partials
