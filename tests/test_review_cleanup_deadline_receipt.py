@@ -118,7 +118,10 @@ class CleanupReviewTests(unittest.TestCase):
         candidate = self.make_large_candidate("agent-scratch/review-large-artifact")
         result = self.run_cleanup("cleanup_tmp.sh", "--clean", "--large", "--deadline-at", "1")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Descending into active container", result.stderr)
+        # Message reflects the 7871 contract: a declared scratch container is
+        # always descended (children judged individually), not only when the
+        # container itself looked recently active.
+        self.assertIn("Descending into scratch container", result.stderr)
         self.assertTrue((candidate / "payload.bin").is_file())
         self.assertFalse((self.root / "archive").exists())
         self.assertIn("Dirs archived: 0", result.stderr)
