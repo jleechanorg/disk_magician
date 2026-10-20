@@ -162,7 +162,7 @@ for canonical_cmd in \
   "diskm cleanup-tmp --clean" \
   "diskm cleanup-task-scratch --clean" \
   "diskm cleanup-pr-scratch --clean" \
-  "diskm cleanup-xcode --clean" \
+  "diskm clean --routine" \
   "diskm cleanup-colima --clean" \
   "diskm prune-aside-sessions --clean" \
   "diskm cleanup-supervisor-logs --clean" \
