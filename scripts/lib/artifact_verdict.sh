@@ -242,13 +242,43 @@ _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
+# A match is NOT secret-like when it is a source/derived-code name (credentials.js,
+# *.d.ts, *.js.map, *.h ...) or a .env template, or when git tracks it (it is already
+# in the repository history). Config/key/extensionless names and untracked .env* stay
+# secret-like; a failed git lookup tracks nothing (fail closed).
+_AV_SECRET_FILTER='
+import os, subprocess, sys
+root = sys.argv[1]
+code = set("js mjs cjs jsx ts tsx map h hpp c cc cpp m mm swift py pyi go rs java kt rb php cs rst md txt sh html css so dylib a".split())
+tmpl = (".env.example", ".env.template", ".env.sample", ".env.dist", ".env.default")
+cands = []
+for p in sys.stdin.buffer.read().split(b"\0"):
+    if not p:
+        continue
+    n = os.path.basename(os.fsdecode(p)).lower()
+    stem, dot, ext = n.rpartition(".")
+    if n in tmpl or (dot and stem and ext in code) or n.endswith(".json.schema"):
+        continue
+    cands.append(os.fsdecode(p))
+if cands:
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
+        tracked = {os.path.normpath(os.path.join(root, t)) for t in os.fsdecode(r.stdout).split("\0") if t} if r.returncode == 0 else set()
+    except Exception:
+        tracked = set()
+    cands = [c for c in cands if os.path.normpath(c) not in tracked]
+sys.exit(0 if cands else 1)
+'
 _av_secret_like() {
-    local out
-    out="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    local rc
+    find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-        -print 2>/dev/null)" || return 0
-    [[ -n "$out" ]]
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1"
+    rc=("${PIPESTATUS[@]}")
+    [[ "${rc[0]}" -ne 0 ]] && return 0
+    [[ "${rc[1]}" -eq 1 ]] && return 1
+    return 0
 }
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
 # canonical path is <path> or under it, for any filesystem kind (plain dir, plain

@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0; FAIL=0
 TMP="$(mktemp -d /tmp/dm-av-secret.XXXXXX)" || exit 2
 case "$TMP" in /tmp/dm-av-secret.*|/private/tmp/dm-av-secret.*) ;; *) exit 2 ;; esac
-trap 'rm -rf "${TMP:?}"' EXIT
+trap '/bin/rm -rf "${TMP:?}"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME" "$TMP/state"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state" GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@invalid
