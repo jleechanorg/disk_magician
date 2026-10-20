@@ -450,9 +450,6 @@ def tree_ancestry_still_quarantined(location_guard, ancestors):
     if not tree_still_quarantined(location_guard): return False
     return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
 
-def _has_test_hooks():
-    return any(k.startswith("DISK_MAGICIAN_TEST_") and ENV.get(k) for k in ENV)
-
 def record_removed_path(qfd, side, record, rel, removed_set=None):
     key = record.get("journal_key", "removed_paths")
     removed = record.setdefault(key, [])
@@ -460,8 +457,6 @@ def record_removed_path(qfd, side, record, rel, removed_set=None):
         if rel in removed_set: return True
     elif rel in removed: return True
     removed.append(rel)
-    if not _has_test_hooks():
-        return True
     try: update_sidecar(qfd, side, record)
     except OSError:
         removed.pop()
@@ -510,7 +505,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                 return False
             if deadline_passed(deadline): raise DeadlineExceeded()
             os.rmdir(name, dir_fd=parent_fd)
-            if _has_test_hooks(): os.fsync(parent_fd)
+            os.fsync(parent_fd)
             kill_at("entry_removed_before_journal")
             if rel == ".": return True
             if not record_removed_path(qfd, side, record, rel, removed_paths): return False
@@ -550,7 +545,7 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             return False
         if deadline_passed(deadline): raise DeadlineExceeded()
         os.unlink(name, dir_fd=parent_fd)
-        if _has_test_hooks(): os.fsync(parent_fd)
+        os.fsync(parent_fd)
         kill_at("entry_removed_before_journal")
         # Root completion is journaled by phase2, consistently with directory
         # roots. A child-path progress entry must never stand in for that proof.
@@ -644,14 +639,8 @@ def phase2(binding_file, qid, deadline=None):
                                              location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
                                              qfd, side, record, removed_paths)
         except DeadlineExceeded:
-            if not _has_test_hooks():
-                try: update_sidecar(qfd, side, record)
-                except OSError: pass
             return "deferred:phase2"
         if not removed:
-            if not _has_test_hooks():
-                try: update_sidecar(qfd, side, record)
-                except OSError: pass
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"
