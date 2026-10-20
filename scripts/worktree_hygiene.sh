@@ -36,6 +36,8 @@ source "$SCRIPT_DIR/lib/worktree_repo_discovery.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$SCRIPT_DIR/lib/worktree_ignored.sh"
+# shellcheck source=lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=scripts/safety_lib.sh
 source "$SCRIPT_DIR/safety_lib.sh"
 
@@ -485,16 +487,13 @@ preserve_wip_reason_eligible() {
 }
 
 # worktree_has_live_cwd <wt_path> — true if any process's cwd is inside it.
-# Fails closed: no lsof means we cannot prove the worktree is idle.
+# Fails closed through the shared strict parser (scripts/lib/lsof_linux.sh): a
+# missing lsof, an incomplete or unparseable scan, a live uninspectable process,
+# or zero resolved cwds all count as "cannot prove idle" and return true.
 worktree_has_live_cwd() {
-    local wt="$1" wt_real cwd
-    command -v lsof >/dev/null 2>&1 || return 0
-    wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || return 0
-    while IFS= read -r cwd; do
-        cwd="${cwd#n}"
-        [[ "$cwd" == "$wt" || "$cwd" == "$wt"/* || "$cwd" == "$wt_real" || "$cwd" == "$wt_real"/* ]] && return 0
-    done < <(lsof -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
-    return 1
+    local wt="$1"
+    lsof_snapshot_cwds || return 0
+    cwd_list_has_path "$wt" "$LSOF_CWDS"
 }
 
 # preserve_wip_blocker <repo_abs> <wt_path> — echoes a skip reason and
@@ -1109,6 +1108,9 @@ main() {
                     pre_remove_hidden="$(preserve_wip_raw_bytes_dirty "$wt_path")" || pre_remove_hidden="byte-check-failed"
                     if [[ -n "$pre_remove_hidden" ]]; then
                         ledger_line "NEEDS-REVIEW" "$wt_path" "hidden-filtered-change:$pre_remove_hidden"
+                        review_count=$(( review_count + 1 ))
+                    elif worktree_has_live_cwd "$wt_path"; then
+                        ledger_line "NEEDS-REVIEW" "$wt_path" "live-cwd at removal"
                         review_count=$(( review_count + 1 ))
                     else
                         ledger_line "SAFE" "$wt_path" "$reason"

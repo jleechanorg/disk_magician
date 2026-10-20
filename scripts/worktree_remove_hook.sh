@@ -31,7 +31,7 @@ wrh_log() {
 }
 
 wrh_live_cwd_reason() {
-    local target=$1 out err rc=0 line pid= seen=0 live=0 path path_seen=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
+    local target=$1 out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
     WRH_LIVE_CWD_REASON=
     command -v lsof >/dev/null 2>&1 || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     if [[ ${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-} =~ ^[0-9]+$ ]]; then
@@ -47,31 +47,31 @@ wrh_live_cwd_reason() {
     fi
     err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
+    # -Fpn keeps the pid so this hook can exclude its own ancestry; the parsing
+    # itself is the shared strict parser, never a local reimplementation.
     out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
-    lsof_stderr_incomplete "$(cat "$err" 2>/dev/null)" && rc=1
+    # A failed stderr read is NOT an empty stderr: it means the diagnostics are
+    # unknown, which must fail closed just like a non-empty read would.
+    if ! err_text="$(cat "$err" 2>/dev/null)"; then
+        [[ -e $err ]] && rm -f "$err"
+        WRH_LIVE_CWD_REASON=cwd-unknown; return
+    fi
     [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
-    [[ $rc == 0 && -n $out ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-    while IFS= read -r line; do case $line in
-        p*)
-            [[ -z $pid || $path_seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-            pid=${line#p}; [[ $pid =~ ^[0-9]+$ ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-            path_seen=0 ;;
-        f*)
-            # Standard lsof -F descriptor record (e.g. fcwd). Valid only after a pid.
-            [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-            ;;
-        n*)
-            [[ -n $pid && $path_seen == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-            path=${line#n}; [[ $path == /* ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-            if [[ $path == /proc/*/cwd\ \(readlink:* ]]; then
-                lsof_denied_ignorable "$path" || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-                path_seen=1; seen=1; continue
-            fi
-            path_seen=1; seen=1
-            case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
-        *) [[ -z $line ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; } ;;
-    esac; done <<<"$out"
-    [[ $seen == 1 && $path_seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    [[ $rc == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    lsof_stderr_incomplete "$err_text" && { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    blocks="$(lsof_cwd_blocks <<<"$out")" || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    while IFS='|' read -r pid status path; do
+        [[ -n $pid ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+        [[ $status == ok ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+        case "$(lsof_cwd_value_verdict "$path")" in
+            resolved)
+                seen=1
+                case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
+            ignorable) ;;
+            *) WRH_LIVE_CWD_REASON=cwd-unknown; return ;;
+        esac
+    done <<<"$blocks"
+    [[ $seen == 1 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     [[ $live == 1 ]] && WRH_LIVE_CWD_REASON=live-cwd
 }
 wrh_expand_path() {

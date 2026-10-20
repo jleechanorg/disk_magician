@@ -133,6 +133,7 @@ cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
 echo "p1"
 echo "n/"
+echo "p2"
 echo "n$LIVE_REAL"
 SH
 # Fake gh: only the sq* branches resolve; everything else fails closed.
