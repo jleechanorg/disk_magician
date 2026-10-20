@@ -242,24 +242,19 @@ _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
-# A match is NOT secret-like when it is a source/derived-code name (credentials.js,
-# *.d.ts, *.js.map, *.h ...) or a .env template, or when git tracks it (it is already
-# in the repository history). Config/key/extensionless names and untracked .env* stay
-# secret-like; a failed git lookup tracks nothing (fail closed).
+# A match is NOT secret-like when c14_probe.py exempt_name (the single owner of the
+# exemption rule, shared with has_hidden_state and the inventory secrets gate) clears it,
+# or when git tracks it (already in repository history). A failed git lookup tracks
+# nothing (fail closed).
 _AV_SECRET_FILTER='
 import os, subprocess, sys
-root = sys.argv[1]
-code = set(sys.argv[2].split())
-tmpl = tuple(sys.argv[3].split())
+root, probe_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, probe_dir)
+from c14_probe import exempt_name
 cands = []
 for p in sys.stdin.buffer.read().split(b"\0"):
-    if not p:
-        continue
-    n = os.path.basename(os.fsdecode(p)).lower()
-    stem, dot, ext = n.rpartition(".")
-    if n in tmpl or (dot and stem and ext in code) or n.endswith(".json.schema"):
-        continue
-    cands.append(os.fsdecode(p))
+    if p and not exempt_name(os.path.relpath(os.fsdecode(p), root)):
+        cands.append(os.fsdecode(p))
 if cands:
     try:
         r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
@@ -273,8 +268,8 @@ _av_secret_like() {
     local rc
     find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_WI_CODE_EXTS" "$_WI_TEMPLATES"
+        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_AV_DIR/.."
     rc=("${PIPESTATUS[@]}")
     [[ "${rc[0]}" -ne 0 ]] && return 0
     [[ "${rc[1]}" -eq 1 ]] && return 1
@@ -450,11 +445,10 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         else
             _av_owner_state="$(lease_owner_state "$q")"
         fi
-        # Owner-null leases are never globally disposable. The T3 context
-        # (--t3-owner-null, set only by cleanup_worktrees.sh's sanctioned
-        # 3-day path) may free EXACTLY the candidate worktree's own null lease
-        # after every other check; an ancestor/descendant null lease, T1, and
-        # live/unknown/malformed owners all still keep.
+        # A clean, pushed linked worktree with its own owner-null lease is freed by
+        # every caller (no T3 flag needed); the remaining guards still apply: live
+        # cwd, open files, newest-mtime floor, secrets, pushed, and AO-managed paths.
+        # An ancestor/descendant null lease and live/unknown/malformed owners keep.
         case "$_av_owner_state" in
             dead|released|own-live) ;;
             none)
@@ -485,7 +479,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
     newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$_WI_CODE_EXTS" "$_WI_TEMPLATES")"
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv")"
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in

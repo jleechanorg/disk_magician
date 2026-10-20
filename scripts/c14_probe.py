@@ -933,21 +933,38 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
-def secrets(inv_file, exts="", tmpl=""):
-    # exts/tmpl (caller-supplied, shared with worktree_ignored.sh) name source/derived-code
-    # extensions and .env templates that are not secrets; absent -> no exemption.
-    code, templates = set(exts.split()), set(tmpl.split())
-    def exempt(n):
-        n = n.lower()
-        stem, dot, ext = n.rpartition(".")
-        return n in templates or n.endswith(".json.schema") or bool(dot and stem and ext in code)
+SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
+_TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
+_GENERATED = (".d.ts", ".map", ".h", ".hpp", ".so", ".dylib", ".a", ".pyc", ".json.schema")
+_DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "vendor", "third-party", "build", "deriveddata", "dist"}
+_SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
+
+def exempt_name(path):
+    """Single owner of the secret-name exemption (relative path; used by every secret gate).
+    Exempt only: a template suffix; a generated/build-only suffix; or a source extension under a
+    dependency/vendor/build path component. .env*, id_*, *.pem/key/p12/pfx, .npmrc, .netrc are
+    exempt only as templates. Anything else, including repo-level .py/.sh/.txt/.md, stays secret."""
+    parts = path.split("/")
+    n = parts[-1].lower()
+    if n.endswith(_TEMPLATE):
+        return True
+    if n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc"):
+        return False
+    if n.endswith(_GENERATED):
+        return True
+    return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and "." in n and n.rpartition(".")[2] in _SRC_EXTS
+
+def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
-        pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        names = (e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1] for e in entries)
-        print("yes" if any(pattern.fullmatch(n) and not exempt(n) for n in names) else "no")
+        paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
+        print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
+
+def any_secret(stream):
+    """rc 0 when any newline-listed relative path is secret-like and not exempt, 1 when none."""
+    return 0 if any(q and not exempt_name(q) for q in stream.read().split("\n")) else 1
 
 def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     try:
@@ -1025,8 +1042,12 @@ if __name__ == "__main__":
             sys.exit(repos(a[1]))
         if len(a) == 2 and a[0] == "newest-mtime":
             sys.exit(newest_mtime(a[1]))
-        if len(a) in (2, 4) and a[0] == "secrets":
-            sys.exit(secrets(*a[1:]))
+        if len(a) == 2 and a[0] == "secrets":
+            sys.exit(secrets(a[1]))
+        if len(a) == 2 and a[0] == "exempt-name":
+            print("yes" if exempt_name(a[1]) else "no"); sys.exit(0)
+        if len(a) == 1 and a[0] == "any-secret":
+            sys.exit(any_secret(sys.stdin))
         if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":
