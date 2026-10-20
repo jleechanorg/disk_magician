@@ -946,7 +946,6 @@ process_repo_local_worktrees() {
                     wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
                     return 0
                 fi
-                GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" reflog expire --expire-unreachable="${MIN_AGE_DAYS}.days.ago" --all 2>/dev/null || true
                 # Restore directory mtimes bumped by prior venv/deps/cache strip passes
                 # back to the worktree's true last-activity epoch before C14 inventory.
                 local wt_act_epoch

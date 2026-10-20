@@ -272,7 +272,8 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
                     cwd_lsof = subprocess.run(["lsof", "-n", "-P", "-Fn", "-a", "-d", "cwd", "+D", qtarget], capture_output=True, timeout=30)
                     no_cwd = (not cwd_lsof.stdout and cwd_lsof.returncode == 1
                               and not lsof_stderr_incomplete(cwd_lsof.stderr, qtarget))
-                    if no_cwd and fn_lsof.stdout and c14_probe._all_external_hardlinks(qtarget, fn_lsof.stdout, "lsof", deadline):
+                    fn_complete = fn_lsof.returncode == 0 and not lsof_stderr_incomplete(fn_lsof.stderr, qtarget)
+                    if no_cwd and fn_complete and fn_lsof.stdout and c14_probe._all_external_hardlinks(qtarget, fn_lsof.stdout, "lsof", deadline):
                         ext_ok = True
                 except Exception:
                     ext_ok = False
