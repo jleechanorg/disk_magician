@@ -178,28 +178,7 @@ $HOME/Library/Caches/CodexBar	decision:check_uncovered_roots.py	Cache-only propo
 $HOME/Library/Caches/Codex	decision:check_uncovered_roots.py	Cache-only proposal; no Codex state/session deletion authority
 $HOME/Library/Caches/com.cmuxterm.app	decision:check_uncovered_roots.py	Cache-only proposal; no current owner
 
-# Additional Mac + Linux monitored roots
-$HOME/.gemini/tmp	cleanup_dev_caches.sh	line 101
-$HOME/.cache/uv	cleanup_dev_caches.sh	line 105
-$HOME/.cache/pre-commit	cleanup_dev_caches.sh	line 109
-$HOME/.local/share/opencode	cleanup_dev_caches.sh	line 113
-$HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 165
-$HOME/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	Section 5
-$HOME/.bun/install/cache	cleanup_dev_caches.sh	Section 3b
-$HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6
-$HOME/Library/Caches/claude-cli-nodejs	cleanup_dev_caches.sh	dev-cache mtime-gated section
-$HOME/Library/Caches/go-build	cleanup_dev_caches.sh	dev-cache mtime-gated section
-$HOME/Snapchat/Dev/.cache/bazel	cleanup_dev_caches.sh	bazel output bases section
-$HOME/tmp	cleanup_tmp.sh	user scratch tmp
-$HOME/worldarchitect*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/wa-*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/wt-*	cleanup_worktrees.sh	worktree_repo_discovery.sh + cleanup_worktree_deps.sh
-$HOME/.antigravity	cleanup_agent_artifacts.sh	agent artifact cache
-/var/lib/docker	cleanup_docker.sh	docker container and image storage on Linux host
-$HOME/candidates	cleanup_worktrees.sh	candidate checkouts
-$HOME/.dark-factory*	cleanup_dark_factory.sh	dark factory runs and e2e
-/tmp/pr*	cleanup_pr_scratch.sh	PR scratch directories in /tmp
-/tmp/wa-*	cleanup_pr_scratch.sh	Worktree advice scratch directories in /tmp
+
 # --- Registry pass 2026-10-19 (disk_magician scan of check_uncovered_roots) ---
 # Codex SQLite databases other than the never-delete state*.sqlite files are
 # vacuumed (space reclaimed, no rows deleted) by cleanup_codex_db.sh. It skips
@@ -211,6 +190,7 @@ $HOME/.codex/memories_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a 
 $HOME/.codex/goals_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
 $HOME/.codex/queue_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
 $HOME/.codex/history.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+
 # Roots the 2026-10-19 check reported as UNCOVERED with no sweeper owner. They
 # are recorded as explicit decisions so they stay visible rather than silently
 # unowned; none of these grants deletion authority.
