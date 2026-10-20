@@ -486,6 +486,48 @@ process_task() {
   kb="$(du -sk "$task" 2>/dev/null | cut -f1)" || kb=0
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
   if [[ "$DRY_RUN" == true ]]; then
+    # Dry-run/clean parity: the clean path below additionally requires the WRH
+    # quarantine adapter, a C14 `remove` verdict for EVERY linked worktree, and
+    # the C14/quarantine gate. Evaluate those same gates here (all read-only:
+    # artifact_removal_verdict only writes a temp inventory) so a "would remove"
+    # line can never promise a removal the clean path will refuse. Regression:
+    # a worktree holding a secret-like file answers kept:secret-like and used to
+    # still print "would remove" (bead disk_magician-q9ry).
+    if [[ -n "$WT_REMOVALS" ]]; then
+      if ! wrh_quarantine_available; then
+        keep "wrh-quarantine-unavailable" "$task"; return
+      fi
+      local dmain dwt dinv dverdict
+      while IFS=$'\t' read -r dmain dwt; do
+        [[ -n "$dmain" ]] || continue
+        dinv="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-inventory.XXXXXX")" || { keep "wrh-inventory-unavailable" "$task"; return; }
+        dverdict="$(artifact_removal_verdict "$dwt" --inventory-out "$dinv" 2>/dev/null)" || dverdict=kept:check-failed
+        rm -f -- "$dinv" 2>/dev/null
+        if [[ "$dverdict" != remove ]]; then
+          keep "wrh-c14-${dverdict#kept:}:$dwt" "$task"; return
+        fi
+      done <<<"$WT_REMOVALS"
+    fi
+    if ! quarantine_remove_available; then
+      keep "quarantine-unavailable" "$task"; return
+    fi
+    # Root C14 verdict (dot review, bead disk_magician-q9ry): the clean path
+    # calls quarantine_gate -> quarantine_remove, whose FIRST act is the C14
+    # artifact_removal_verdict and which echoes kept:<reason> when it refuses.
+    # quarantine_remove is destructive, so the dry run evaluates the same
+    # read-only verdict primitive and reports the identical bare reason. Without
+    # this, a task with NO linked worktrees still printed "would remove" while
+    # --clean rejected its contents (e.g. a root secret-like file).
+    local rtinv rtverdict
+    local -a rargs
+    rtinv="$(mktemp "${TMPDIR:-/tmp}/cxd-c14-root.XXXXXX")" || { keep "c14-inventory-unavailable" "$task"; return; }
+    rargs=(--inventory-out "$rtinv")
+    [[ -n "$QUARANTINE_KIND" ]] && rargs+=(--kind "$QUARANTINE_KIND")
+    rtverdict="$(artifact_removal_verdict "$task" "${rargs[@]}" 2>/dev/null)" || rtverdict=kept:check-failed
+    rm -f -- "$rtinv" 2>/dev/null
+    if [[ "$rtverdict" != remove ]]; then
+      keep "${rtverdict#kept:}" "$task"; return
+    fi
     log "DRY RUN: would remove $task (${kb} KB, age $(worktree_age_days "$task")d)"
   else
     snapshot_live_paths
@@ -518,14 +560,21 @@ process_task() {
           keep "wrh-c14-${wrh_c14_verdict#kept:}:$wt" "$task"; return
         fi
         wrh_rc=0
-        wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>/dev/null)" || wrh_rc=$?
+        wrh_errfile="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-err.XXXXXX")" || wrh_errfile=""
+        wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>"${wrh_errfile:-/dev/null}")" || wrh_rc=$?
         rm -f -- "$wrh_inv" 2>/dev/null
         if (( wrh_rc != 0 )); then
+          local wrh_why=""
+          [[ -n "$wrh_errfile" && -s "$wrh_errfile" ]] && wrh_why="$(tail -1 "$wrh_errfile" 2>/dev/null | tr -d '\n')"
+          [[ -n "$wrh_errfile" ]] && rm -f -- "$wrh_errfile" 2>/dev/null
           if (( removed_worktrees > 0 )); then
             deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
           fi
-          keep "wrh-quarantine-failed:$wt" "$task"; return
+          # Carry the adapter's own reason so the KEEP line is actionable
+          # instead of an opaque "failed" (bead disk_magician-q9ry).
+          keep "wrh-quarantine-failed${wrh_why:+:${wrh_why}}:$wt" "$task"; return
         fi
+        [[ -n "$wrh_errfile" ]] && rm -f -- "$wrh_errfile" 2>/dev/null
         case "$wrh_out" in
           quarantined:*|quarantine_conflict:*|quarantine_partial_kept*)
             N_RETAINED=$(( N_RETAINED + 1 ))

@@ -513,6 +513,15 @@ printf '%s' "$(json "$WTROOT/ovr2")" | DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_M
 grep -q "remove_worktree.*ovr2.*recency=minutes:60" "$DLOG" 2>/dev/null && ok "deletion log records the effective recency spec" || bad "deletion log lacks recency=minutes:60"
 tail -n 3 "$LOG" | grep -q "recency override active: minutes:60" && ok "override logged to hook log" || bad "override not logged to hook log"
 
+echo "== case 29d: unwritable state dir -> override falls back to days:7 (61-minute-old worktree kept) =="
+add_wt ovr3 worktree-ovr3
+age_wt_minutes "$WTROOT/ovr3" 61
+SAVE_HOME="$HOME"; export HOME="$TMPROOT/ro-home"; mkdir -p "$HOME"; : >"$HOME/.disk_magician_state"
+errout="$(printf '%s' "$(json "$WTROOT/ovr3")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:60 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" 2>&1 >/dev/null)"
+export HOME="$SAVE_HOME"
+[[ -d "$WTROOT/ovr3" ]] && ok "unrecordable override leaves the 61-minute-old worktree" || bad "override applied without an audit record"
+[[ "$errout" == *"cannot record recency override"* ]] && ok "fallback reported on stderr" || bad "no stderr fallback notice: $errout"
+
 echo "== case 30: unmeasurable recency fails closed =="
 add_wt unknown worktree-unknown
 cat >"$MOCK_BIN/find" <<'FINDFAIL'

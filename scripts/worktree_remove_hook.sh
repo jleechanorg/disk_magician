@@ -244,9 +244,17 @@ print(v)
        [[ "$env_spec" =~ ^minutes:([0-9]{1,7})$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
         recency_spec="$env_spec"
     fi
+    if [[ "$recency_spec" != days:7 ]]; then
+        # Audit-first: a shorter floor is used only if its record was actually written.
+        local sdir="$HOME/.disk_magician_state"
+        if ! { mkdir -p "$sdir" && printf '%s worktree-remove-hook: recency override active: %s (%s)\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$recency_spec" "$p" >>"$sdir/worktree_guard.log"; } 2>/dev/null; then
+            echo "worktree-remove-hook: cannot record recency override $recency_spec; using days:7" >&2
+            recency_spec=days:7
+        fi
+    fi
     [[ "$recency_spec" == days:* ]] && min_idle=$(( ${recency_spec#days:} * 1440 )) || min_idle=${recency_spec#minutes:}
     WRH_RECENCY_SPEC=$recency_spec
-    [[ "$recency_spec" == days:7 ]] || wrh_log "recency override active: $recency_spec ($p)"
     verdict="$(wrh_removal_verdict "$real" "$recency_spec")"
     case "$verdict" in
         remove) ;;
