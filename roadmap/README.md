@@ -1,6 +1,7 @@
 # disk_magician roadmap
 
 ## Recent activity (by day)
+- [2026-10-20](activity/2026-10-20.md)
 - [2026-10-10](activity/2026-10-10.md) — PR #141 squash-merged & deployed (v0.2.191); fixed worktree_remove_hook lsof descriptor handling (fcwd); 12 worktrees pruned (~1.34 GB reclaimed); Mac capacity and CI disk-prevention handoff.
 - [2026-10-09](activity/2026-10-09.md) — PR #128 squash-merged & deployed (v0.2.173); 57 worktrees reclaimed (+14.17 GB); forensic root-cause analysis on ~/.worktrees growth (+77 GB).
 - [2026-10-06](activity/2026-10-06.md) — Emergency disk-fill recovery (+63 GiB reclaimed; 8.7 → 74 GiB available); PR #110 landed & deployed (v0.2.137); Colima VM un-wedged and trimmed (11.5 GiB in-VM); fast-fill root cause documented.
