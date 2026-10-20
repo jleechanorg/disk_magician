@@ -16,12 +16,12 @@ ignored_entry_rebuildable() {
             # files, so they count as user data and preserve the worktree.
             node_modules|venv|.venv|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|\
             .next|.turbo|.gradle|.tox|.eggs|*.egg-info|htmlcov|venv.bak.*|test-results|\
-            .beads|.husky|.doctor|.codex-worktrees|Pods|xcuserdata|xcshareddata|project.xcworkspace|.expo|dist-export|\
-            .venv_bootstrap.lock|.superpowers|.dark-factory|.tmp|logs|.br_recovery)
+            .husky|.doctor|Pods|xcuserdata|xcshareddata|project.xcworkspace|.expo|dist-export|\
+            .venv_bootstrap.lock)
                 return 0 ;;
             # File-oriented patterns are rebuildable only when the matched
             # path is not a directory containing user data.
-            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|.testmondata|.claude.json*|*.log|*.sqlite-shm|*.sqlite-wal|\
+            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|.testmondata|.claude.json*|*.sqlite-shm|*.sqlite-wal|\
             .playwright-cli-*|coverage.json|coverage*.xml|test_output*.txt|pytest*.xml)
                 [[ ! -d "$1/$rest" ]] && return 0
                 ;;
@@ -49,12 +49,7 @@ has_ignored_user_data() {
             if [[ -d "$mr/.git" ]]; then
                 git_args=(--git-dir="$mr/.git" --work-tree="$1")
             else
-                if [[ -f "$1/.gitignore" ]]; then
-                    if /usr/bin/find "$1" -maxdepth 3 \( -name '.env*' -o -name '*credentials*' -o -name '*secrets*' \) -print -quit 2>/dev/null | grep -q .; then
-                        return 0
-                    fi
-                fi
-                return 1
+                return 0  # ignored files cannot be enumerated: fail closed
             fi
         fi
     fi
@@ -83,8 +78,8 @@ has_hidden_state() {
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode, compiler intermediates (.o, .dia, .swiftdeps), public CA bundles, test logs,
-    # and non-secret template/example files (.env.example) are not user secrets.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$|\.o$|\.dia$|\.swiftdeps$|\.swiftconstvalues$|\.example$|\.template$|\.sample$|\.test$|\.dist$|(^|/)test-results/.*\.log$' <<<"$out" || true)"
+    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
+    # is rebuildable, not a secret; dependency dirs stay covered.
+    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
     [[ -n "$out" ]]
 }

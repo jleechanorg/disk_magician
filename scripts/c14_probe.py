@@ -939,52 +939,8 @@ def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        ignored_exts = (
-            ".example", ".template", ".sample", ".test", ".dist", ".default",
-            ".o", ".dia", ".swiftdeps", ".swiftconstvalues", ".d",
-            ".sh", ".bash", ".zsh", ".md", ".rst", ".txt"
-        )
-        ignored_segments = {
-            "venv", ".venv", "Pods",
-            "Index.noindex", "Build", "DerivedData",
-            "site-packages", "dist-packages", "test-results",
-            "ndk", "emulator", "toolchains"
-        }
-        code_exts = (
-            ".py", ".swift", ".h", ".m", ".ts", ".js", ".jsx", ".tsx",
-            ".pyi", ".go", ".rs", ".java", ".c", ".cpp"
-        )
-
-        def is_secret_entry(e):
-            rel = e.get("path", "")
-            name = e.get("name", "") if rel == "." else rel.rsplit("/", 1)[-1]
-            if not name:
-                return False
-            parts = rel.split("/")
-            for part in parts[:-1]:
-                if part in ignored_segments:
-                    return False
-            fname = name.lower()
-            if fname == "cacert.pem" or rel.endswith("/certifi/cacert.pem"):
-                return False
-            if rel == "testing_http/testing_full/.env" or rel.endswith("/testing_http/testing_full/.env"):
-                return False
-            if fname == ".npmrc" and type(e.get("size")) is int and e.get("size", 999) < 64:
-                return False
-            if any(k in fname for k in ("template", "example", "sample")):
-                return False
-            for ext in ignored_exts:
-                if fname.endswith(ext):
-                    return False
-            if not pattern.fullmatch(name):
-                return False
-            root, ext = os.path.splitext(fname)
-            if ext in code_exts:
-                if root not in ("credentials", "secrets", ".credentials", ".secrets"):
-                    return False
-            return True
-
-        print("yes" if any(is_secret_entry(e) for e in entries) else "no")
+        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
+                            for e in entries) else "no")
     except Exception:
         print("kept:check-failed")
 
