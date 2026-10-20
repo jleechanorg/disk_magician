@@ -426,9 +426,6 @@ classify_content_and_merge() {
         return 0
     fi
     if [[ -n "$status_porcelain" ]]; then
-        status_porcelain="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$status_porcelain" || true)"
-    fi
-    if [[ -n "$status_porcelain" ]]; then
         if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
             echo "untracked"
             return 0
@@ -936,9 +933,6 @@ process_repo_local_worktrees() {
                 fi
                 local final_status final_status_rc=0
                 final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
-                if [[ -n "$final_status" ]]; then
-                    final_status="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$final_status" || true)"
-                fi
                 if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))

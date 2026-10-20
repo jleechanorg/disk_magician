@@ -278,66 +278,6 @@ fi
 log "=== Section 6: ~/.npm/_cacache ==="
 clean_dir_contents "npm _cacache" "$HOME/.npm/_cacache" false rebuildable
 
-# 6b. pnpm content-addressable store (pnpm store prune)
-log "=== Section 6b: pnpm store prune ==="
-pnpm_bin="$(command -v pnpm 2>/dev/null || true)"
-if [[ -z "$pnpm_bin" ]]; then
-  for _pnpm_cand in "$HOME/.local/share/pnpm/pnpm" "/opt/homebrew/bin/pnpm"; do
-    if [[ -x "$_pnpm_cand" ]]; then
-      pnpm_bin="$_pnpm_cand"
-      break
-    fi
-  done
-fi
-pnpm_store_dir=""
-for _pnpm_store_cand in \
-  "${PNPM_STORE_DIR:-}" \
-  "${PNPM_HOME:+$PNPM_HOME/store}" \
-  "$HOME/Library/pnpm/store" \
-  "$HOME/.local/share/pnpm/store" \
-  "$HOME/.pnpm-store"; do
-  if [[ -n "$_pnpm_store_cand" && -d "$_pnpm_store_cand" ]]; then
-    pnpm_store_dir="$_pnpm_store_cand"
-    break
-  fi
-done
-if [[ -z "$pnpm_store_dir" && -n "$pnpm_bin" ]]; then
-  _probed_store="$(COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 "$pnpm_bin" store path </dev/null 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
-  if [[ "$_probed_store" == "$HOME/"* && -d "$_probed_store" ]]; then
-    pnpm_store_dir="$_probed_store"
-  fi
-fi
-if [[ -z "$pnpm_bin" ]]; then
-  log "pnpm store: pnpm not found, skipping"
-elif [[ -z "$pnpm_store_dir" || ! -d "$pnpm_store_dir" ]]; then
-  log "pnpm store: directory not found, skipping"
-elif ! _safety_reason="$(safety_gate "$pnpm_store_dir" 2>/dev/null)"; then
-  log "pnpm store: SAFETY-SKIP ($_safety_reason)"
-else
-  before_kb=$(size_kb "$pnpm_store_dir")
-  log "pnpm store: before $(fmt_kb "$before_kb") ($pnpm_store_dir)"
-  if [[ "$DRY_RUN" == true ]]; then
-    log "pnpm store: [dry-run] would run 'pnpm store prune' on $pnpm_store_dir ($(fmt_kb "$before_kb"))"
-  else
-    pnpm_rc=0
-    if command -v timeout >/dev/null 2>&1; then
-      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" timeout 60s pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
-    elif command -v gtimeout >/dev/null 2>&1; then
-      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" gtimeout 60s pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
-    else
-      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 CI=true PATH="$(dirname "$pnpm_bin"):$PATH" pnpm store prune </dev/null >/dev/null 2>&1 || pnpm_rc=$?
-    fi
-    if [[ "$pnpm_rc" -ne 0 ]]; then
-      log "pnpm store: WARN 'pnpm store prune' exited with status $pnpm_rc"
-    fi
-    after_kb=$(size_kb "$pnpm_store_dir")
-    freed_kb=$(( before_kb - after_kb ))
-    [[ $freed_kb -lt 0 ]] && freed_kb=0
-    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
-    log "pnpm store: after $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
-  fi
-fi
-
 # 7. claude-cli-nodejs and go-build Library/Caches (Fix #8)
 #
 # Both dirs are build/transform caches that auto-rebuild on next use:

@@ -528,9 +528,7 @@ def admin(ad, lease=None):
 
 def editmsg_ok(ad, oids, data):  # COMMIT_EDITMSG (beyond the spec list) is only comments or a checked tip's message
     git = lambda i, *a: subprocess.run(["git", "--git-dir", ad, *a], input=i, capture_output=True, check=True).stdout
-    head_oids = subprocess.run(["git", "--git-dir", ad, "rev-list", "-n", "20", "HEAD"], capture_output=True, text=True).stdout.splitlines()
-    check_oids = sorted(set(oids) | {o.strip() for o in head_oids if OID.match(o.strip())})
-    msgs = git("\n".join(check_oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""]
+    msgs = git("\n".join(oids).encode(), "log", "-z", "--no-walk=unsorted", "--stdin", "--format=%B").split(b"\0") + [b""]
     return any(git(data, "stripspace", *s) in msgs for s in ([], ["-s"]))
 
 def describe(obj, deadline=None):  # bounded removal-time object metadata read
@@ -967,73 +965,8 @@ def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     except Exception:
         print("kept:check-failed")
 
-def _all_external_hardlinks(root, out, lsof_bin, deadline=None):
-    """True only when every file matched by `lsof +D root` is a hardlink (st_nlink > 1)
-    sharing (st_dev, st_ino) with /Applications/<App>.app/..., and neither `ps -o comm=`
-    nor `lsof -p` shows a path inside root."""
-    import shutil
-    if os.environ.get("DISK_MAGICIAN_LSOF_BIN") or shutil.which(lsof_bin) not in ("/usr/sbin/lsof", "/usr/bin/lsof"):
-        return False
-    root_abs = os.path.abspath(root).rstrip(os.sep) + os.sep
-    root_real = os.path.realpath(root).rstrip(os.sep) + os.sep
-    pids, paths = set(), []
-    for raw in out.decode(errors="replace").splitlines():
-        if raw.startswith("p") and raw[1:].isdigit():
-            pids.add(raw[1:])
-        elif raw.startswith("n"):
-            paths.append(raw[1:])
-    if not pids or not paths:
-        return False
-    app_targets = []
-    for p in paths:
-        try:
-            st = os.lstat(p)
-        except OSError:
-            return False
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
-            return False
-        m = re.search(r"/([^/]+\.app)(?:\.bundle)?/(.+)$", p)
-        if not m:
-            return False
-        app_path = os.path.join("/Applications", m.group(1), m.group(2))
-        try:
-            ast = os.lstat(app_path)
-        except OSError:
-            return False
-        if (ast.st_dev, ast.st_ino) != (st.st_dev, st.st_ino):
-            return False
-        app_targets.append(app_path)
-    pid_arg = ",".join(sorted(pids))
-    ps_out = _run_bounded(["ps", "-o", "comm=", "-p", pid_arg], cap=5.0, deadline=deadline, step="tree-walk")
-    if ps_out is None:
-        return False
-    for line in ps_out[1].decode(errors="replace").splitlines():
-        comm = line.strip()
-        if comm.startswith(root_abs) or comm.startswith(root_real):
-            return False
-    for app_path in app_targets:
-        try:
-            os.stat(app_path)
-        except OSError:
-            return False
-    vcmd = [lsof_bin, "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd", "-p", pid_arg]
-    vout = _run_bounded(vcmd, cap=15.0, deadline=deadline, step="tree-walk", stderr=subprocess.DEVNULL)
-    if vout is None:
-        return False
-    vrc, vbytes = vout
-    if vrc not in (0, 1) or not vbytes:
-        return False
-    for raw in vbytes.decode(errors="replace").splitlines():
-        if not raw.startswith("n"):
-            continue
-        vp = raw[1:]
-        if vp.startswith(root_abs) or vp.startswith(root_real) or vp == root_abs[:-1] or vp == root_real[:-1]:
-            return False
-    return True
-
 def open_file(root, deadline=None):
-    lsof_bin = os.environ.get("DISK_MAGICIAN_LSOF_BIN", "lsof")
-    cmd = [lsof_bin, "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd"]
+    cmd = [os.environ.get("DISK_MAGICIAN_LSOF_BIN", "lsof"), "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd"]
     if os.path.isdir(root):
         cmd += ["+D", root]
     else:
@@ -1048,10 +981,7 @@ def open_file(root, deadline=None):
     else:
         rc, out = result
         if out:
-            if os.path.isdir(root) and _all_external_hardlinks(root, out, lsof_bin, deadline):
-                print("no")
-            else:
-                print("yes")
+            print("yes")
         elif rc == 1:
             print("no")
         else:
