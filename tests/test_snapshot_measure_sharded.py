@@ -94,10 +94,12 @@ class ShardedMeasureTests(unittest.TestCase):
         self.use_stub_du()
         os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
         r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=1,
-                               deadline=time.time() + 60, prior={"slow": 5000})
+                               deadline=time.time() + 60, prior={"slow": {"kb": 5000, "ts": time.time() - 60}})
         self.assertTrue(r["partial"])
         self.assertEqual(r["stale_shards"], {"slow": 5000})
-        self.assertEqual(r["kb"], 100 + 5000 + int(os.stat(self.root).st_blocks * 512 // 1024))
+        self.assertTrue(r["lower_bound"])
+        # stale value is reported, never summed: it must not count toward coverage
+        self.assertEqual(r["kb"], 100 + int(os.stat(self.root).st_blocks * 512 // 1024))
 
     def test_shards_run_concurrently(self):
         make_tree(self.root, ["a", "b"])
@@ -120,20 +122,57 @@ class ShardedMeasureTests(unittest.TestCase):
         self.use_stub_du()
         os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
         state = Path(self.tmp.name) / "shard_last_good.json"
-        state.write_text(json.dumps({"roots": {"big": {"timed_out": False, "shards": {"slow": 7000}}}}))
+        state.write_text(json.dumps({"roots": {"big": {"timed_out": False, "shards": {"slow": {"kb": 7000, "ts": time.time() - 60}}}}}))
         entries = [{"key": "big", "path": str(self.root), "timeout": 20, "retry_timeout": 0}]
         diag = {}
         res = sm.orchestrate(entries, "/nonexistent/disk_snapshot.sh", 2, time.time() + 60,
                              str(Path(self.tmp.name) / "out"), {"big": sm.SHARD_MIN_KB},
                              diagnostics_out=diag, shard_state_path=str(state), shard_timeout=1, shard_workers=2)
         own = int(os.stat(self.root).st_blocks * 512 // 1024)
-        self.assertEqual(res["big"], own + 100 + 7000)
+        self.assertEqual(res["big"], own + 100)
         part = [f for f in diag["measurement_failures"] if f["key"] == "big"][0]
         self.assertEqual((part["status"], part["timed_out_shards"], part["stale_shards"]),
                          ("partial", ["slow"], {"slow": 7000}))
         saved = json.loads(state.read_text())["roots"]["big"]
-        self.assertEqual(saved["shards"], {"fast": 100, "slow": 7000})
-        self.assertNotIn("big", diag["lower_bound_keys"])
+        self.assertEqual({k: v["kb"] for k, v in saved["shards"].items()}, {"fast": 100, "slow": 7000})
+        self.assertIn("big", diag["lower_bound_keys"])
+        self.assertIn("big", diag["partial_keys"])
+
+    def test_stale_carry_expires_after_max_age(self):
+        make_tree(self.root, ["fast1", "slow"])
+        self.use_stub_du()
+        os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
+        old = time.time() - 49 * 3600
+        r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=1, deadline=time.time() + 60,
+                               prior={"slow": {"kb": 5000, "ts": old}}, carry_max_s=48 * 3600)
+        self.assertEqual(r["stale_shards"], {})
+        self.assertEqual(r["expired_shards"], ["slow"])
+        self.assertNotIn("slow", r["carry"])
+        self.assertTrue(r["partial"] and r["lower_bound"])
+
+    def test_legacy_untimestamped_carry_is_expired(self):
+        make_tree(self.root, ["fast1", "slow"])
+        self.use_stub_du()
+        os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
+        r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=1, deadline=time.time() + 60,
+                               prior={"slow": 5000})
+        self.assertEqual((r["stale_shards"], r["expired_shards"]), ({}, ["slow"]))
+
+    def test_permission_errors_are_lower_bound_not_carried_complete(self):
+        make_tree(self.root, ["ok", "denied"])
+        (self.bin / "du").write_text(
+            "#!/usr/bin/env bash\n"
+            "for a in \"$@\"; do [[ \"$a\" == -* ]] && continue\n"
+            "  if [[ \"$a\" == */denied ]]; then echo \"du: $a/x: Permission denied\" >&2; rc=1; fi\n"
+            "  printf '100\\t%s\\n' \"$a\"; done\n"
+            "exit ${rc:-0}\n")
+        (self.bin / "du").chmod(0o755)
+        os.environ["PATH"] = f"{self.bin}:{self.old_path}"
+        r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=10, deadline=time.time() + 60, prior={})
+        self.assertEqual(r["lower_bound_shards"], ["denied"])
+        self.assertTrue(r["partial"] and r["lower_bound"])
+        self.assertEqual(r["carry"].keys(), {"ok"})  # partial result never persisted as a complete measurement
+        self.assertEqual(r["kb"], 200 + int(os.stat(self.root).st_blocks * 512 // 1024))
 
 
 if __name__ == "__main__":
