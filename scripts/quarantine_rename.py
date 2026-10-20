@@ -270,8 +270,6 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
                     fn_lsof = subprocess.run(["lsof", "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd", "+D", qtarget], capture_output=True, timeout=30)
                     if fn_lsof.stdout and c14_probe._all_external_hardlinks(qtarget, fn_lsof.stdout, "lsof", deadline):
                         ext_ok = True
-                    elif not fn_lsof.stdout and fn_lsof.returncode == 1 and not lsof_stderr_incomplete(fn_lsof.stderr, qtarget):
-                        ext_ok = True
                 except Exception:
                     ext_ok = False
             if not ext_ok:

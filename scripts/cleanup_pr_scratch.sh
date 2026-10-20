@@ -18,6 +18,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -585,16 +587,10 @@ if [[ -d "$LOCAL_STATE_DIR" ]]; then
       log "Skipping in-use path (open files): $item"
       continue
     fi
+    # Shared strict parser; an incomplete scan counts as a live cwd (fail closed).
     is_cwd=false
-    if command -v lsof >/dev/null 2>&1; then
-      target_real="$(cd "$item" 2>/dev/null && pwd -P)" || target_real="$item"
-      while IFS= read -r cwd_line; do
-        cwd_line="${cwd_line#n}"
-        if [[ "$cwd_line" == "$item" || "$cwd_line" == "$item"/* || "$cwd_line" == "$target_real" || "$cwd_line" == "$target_real"/* ]]; then
-          is_cwd=true
-          break
-        fi
-      done < <(lsof -w -n -P -d cwd -Fn 2>/dev/null | grep '^n' || true)
+    if ! lsof_snapshot_cwds || cwd_list_has_path "$item" "$LSOF_CWDS"; then
+      is_cwd=true
     fi
     if [[ "$is_cwd" == true ]]; then
       log "Skipping live cwd: $item"
