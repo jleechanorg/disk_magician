@@ -274,6 +274,7 @@ except Exception:
 _av_secret_like() {
     local res
     res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+        -o -iname '*.pem.map' -o -iname '*.key.map' -o -iname '*.p12.map' -o -iname '*.pfx.map' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
         -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_AV_DIR/.." 2>/dev/null; echo " ${PIPESTATUS[*]}")"

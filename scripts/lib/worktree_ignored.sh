@@ -58,7 +58,7 @@ has_hidden_state() {
     # shellcheck disable=SC2086
     out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
         ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
-        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)*.pem.map' ':(icase)*.key.map' ':(icase)*.p12.map' ':(icase)*.pfx.map' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
         ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \

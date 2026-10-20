@@ -933,7 +933,7 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
-SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
+SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
 _TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
 _DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
