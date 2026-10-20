@@ -268,7 +268,11 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
                 try:
                     import c14_probe
                     fn_lsof = subprocess.run(["lsof", "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd", "+D", qtarget], capture_output=True, timeout=30)
-                    if fn_lsof.stdout and c14_probe._all_external_hardlinks(qtarget, fn_lsof.stdout, "lsof", deadline):
+                    # The ^cwd pass cannot see cwd holders; require none separately.
+                    cwd_lsof = subprocess.run(["lsof", "-n", "-P", "-Fn", "-a", "-d", "cwd", "+D", qtarget], capture_output=True, timeout=30)
+                    no_cwd = (not cwd_lsof.stdout and cwd_lsof.returncode == 1
+                              and not lsof_stderr_incomplete(cwd_lsof.stderr, qtarget))
+                    if no_cwd and fn_lsof.stdout and c14_probe._all_external_hardlinks(qtarget, fn_lsof.stdout, "lsof", deadline):
                         ext_ok = True
                 except Exception:
                     ext_ok = False

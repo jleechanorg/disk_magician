@@ -263,19 +263,10 @@ _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
 _av_secret_like() {
     local out
-    out="$(find "$1" \
-        -type d \( -name venv -o -name .venv -o -name node_modules -o -name Pods -o -name __pycache__ -o -name 'Index.noindex' -o -name Build -o -name DerivedData \) -prune \
-        -o \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
-        -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' \
-        -o \( -iname .npmrc -size +63c \) \
-        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
-        ! -name '*.pyc' ! -name '*.o' ! -name '*.dia' ! -name '*.swiftdeps' ! -name '*.swiftconstvalues' ! -name '*.d' \
-        ! -name '*.example' ! -name '*.template' ! -name '*.sample' ! -name '*.test' ! -name '*.dist' ! -name '*.default' \
+    out="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+        -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
+        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
         -print 2>/dev/null)" || return 0
-    [[ -n "$out" ]] || return 1
-    out="$(grep -Evi '(template|example|sample|/certifi/cacert\.pem$|/cacert\.pem$|/testing_http/testing_full/\.env$)' <<<"$out" | \
-          grep -Ev '\.(sh|bash|zsh|md|rst|txt)$' | \
-          grep -Evi '/([a-zA-Z0-9_.-]*[a-zA-Z0-9_-]+_(credentials|secrets)(_[a-zA-Z0-9_.-]+)?|(credentials|secrets)_[a-zA-Z0-9_.-]+)\.(py|swift|h|m|ts|js|jsx|tsx|pyi|go|rs|java|c|cpp)$' || true)"
     [[ -n "$out" ]]
 }
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose

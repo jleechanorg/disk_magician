@@ -39,5 +39,18 @@ for rel in credentials.txt secrets.md .env.test Build/credentials.json; do
   [[ "$out" == yes ]] && ok "$rel is secret-like" || bad "$rel -> $out"
 done
 
+echo "== _av_secret_like: no suffix, keyword or dependency-dir exemptions =="
+(
+  # shellcheck source=scripts/lib/artifact_verdict.sh
+  source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
+  for rel in credentials.txt example/.env node_modules/pkg/.env Build/secrets.json app_credentials.py; do
+    d="$TMP/av-${rel//\//_}"; mkdir -p "$d/$(dirname "$rel")"; printf 'x' >"$d/$rel"
+    _av_secret_like "$d" && echo "  PASS: $rel is secret-like" || echo "  FAIL: $rel not secret-like"
+  done
+) >"$TMP/av.out" 2>&1
+cat "$TMP/av.out"
+PASS=$((PASS + $(grep -c '  PASS:' "$TMP/av.out"))); FAIL=$((FAIL + $(grep -c '  FAIL:' "$TMP/av.out")))
+[[ $(grep -c '  PASS:' "$TMP/av.out") -eq 5 ]] || { echo "  FAIL: artifact_verdict.sh did not load"; FAIL=$((FAIL + 1)); }
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
