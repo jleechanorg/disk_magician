@@ -68,7 +68,7 @@ fi
 LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 # Overridable so sandboxed tests can point archiving at a fixture tree
 # instead of the real /private/tmp; production always uses the default.
-ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-$(scratch_roots_get_private_tmp || echo /private/tmp)/_disk_magician_archive}"
+ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
 # Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
 # / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
 # this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
