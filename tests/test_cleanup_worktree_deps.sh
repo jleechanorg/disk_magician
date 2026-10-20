@@ -10,7 +10,7 @@ PASS=0; FAIL=0
 LSOF_SHIM=""
 if [[ "$(uname)" == Linux ]]; then
   mkdir -p "$T/linuxbin"; LSOF_SHIM="$T/linuxbin:"
-  printf '#!/bin/sh\nfor d in /proc/[0-9]*; do c=$(readlink "$d/cwd" 2>/dev/null) && printf "p%%s\\nn%%s\\n" "${d#/proc/}" "$c"; done\n' > "$T/linuxbin/lsof"; chmod +x "$T/linuxbin/lsof"
+  printf '#!/bin/sh\nfor d in /proc/[0-9]*; do c=$(readlink "$d/cwd" 2>/dev/null) && printf "p%%s\\nn%%s\\n" "${d#/proc/}" "$c"; done; exit 0\n' > "$T/linuxbin/lsof"; chmod +x "$T/linuxbin/lsof"
 fi
 ok() { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
