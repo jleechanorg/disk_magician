@@ -241,7 +241,7 @@ snapshot_live_paths() {
   if [[ -z "$lsof_bin" || ! -x "$lsof_bin" ]]; then LIVE_BLOCKED="lsof-unavailable"; return; fi
   command -v timeout >/dev/null 2>&1 && t="timeout 180s"
   # shellcheck disable=SC2086
-  out="$($t "$lsof_bin" -w -n -P -Fn 2>/dev/null)" || rc=$?
+  out="$($t "$lsof_bin" -n -P -Fn 2>/dev/null)" || rc=$?
   # rc 1 with output is lsof's normal "some items unreadable"; anything else is unknown.
   if (( rc > 1 )) || [[ -z "$out" ]]; then LIVE_BLOCKED="lsof-failed"; return; fi
   # Keep every absolute record. Filtering by only ROOT's physical spelling
@@ -308,14 +308,9 @@ find_bare_repo() {
   local task_for_bare="$1" o p
   while IFS= read -r -d '' o; do
     p="$(dirname "$o")"
-    case "$p/" in */.git/*|*/openclaw/checkpoints/*) continue ;; esac
-    if [[ -f "$p/HEAD" && -d "$p/refs" ]]; then
-      if git -C "$p" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ -n "$(git -C "$p" ls-files HEAD 2>/dev/null)" ]]; then
-        continue
-      fi
-      echo "$p"; return 0
-    fi
-  done < <(/usr/bin/find "$task_for_bare" \( -name .git -o -name .venv -o -name venv -o -name node_modules -o -name Pods -o -name DerivedData -o -name Build -o -name __pycache__ \) -prune -o -type d -name objects -print0 2>/dev/null)
+    case "$p/" in */.git/*) continue ;; esac
+    if [[ -f "$p/HEAD" && -d "$p/refs" ]]; then echo "$p"; return 0; fi
+  done < <(/usr/bin/find "$task_for_bare" -type d -name objects -print0 2>/dev/null)
   return 1
 }
 
@@ -470,118 +465,18 @@ wrh_quarantine_available() {
 }
 # quarantine_gate <task>: route one artifact through C14/quarantine and print
 # its verdict token. The caller interprets removed:/quarantined:/kept:/deferred:.
-CURRENT_APPROVED_CODEX_TASK=""
-if declare -F c14_ephemeral_retention >/dev/null 2>&1; then
-  eval "_orig_$(declare -f c14_ephemeral_retention)"
-  c14_ephemeral_retention() {
-    local p="${1:-}" archive_origin="${3:-}"
-    if [[ "$archive_origin" != "--archive-origin" && -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      echo 10079
-      return 0
-    fi
-    _orig_c14_ephemeral_retention "$@"
-  }
-fi
-if declare -F c14_repos_ok >/dev/null 2>&1; then
-  eval "_orig_$(declare -f c14_repos_ok)"
-  c14_repos_ok() {
-    local root="${1:-}"
-    if [[ -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$root" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$root" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      echo "ok"
-      return 0
-    fi
-    _orig_c14_repos_ok "$@"
-  }
-fi
-if declare -F _av_open_file >/dev/null 2>&1; then
-  eval "_orig_$(declare -f _av_open_file)"
-  _av_open_file() {
-    local p="${1:-}"
-    if [[ -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      echo "no"
-      return 0
-    fi
-    _orig__av_open_file "$@"
-  }
-fi
-if declare -F wrh_live_cwd_reason >/dev/null 2>&1; then
-  eval "_orig_$(declare -f wrh_live_cwd_reason)"
-  wrh_live_cwd_reason() {
-    local p="${1:-}"
-    if [[ -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      WRH_LIVE_CWD_REASON=""
-      return 0
-    fi
-    _orig_wrh_live_cwd_reason "$@"
-  }
-fi
-if declare -F _av_secret_like >/dev/null 2>&1; then
-  eval "_orig_$(declare -f _av_secret_like)"
-  _av_secret_like() {
-    local p="${1:-}"
-    if [[ -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      return 1
-    fi
-    _orig__av_secret_like "$@"
-  }
-fi
-if declare -F _av_age_days >/dev/null 2>&1; then
-  eval "_orig_$(declare -f _av_age_days)"
-  _av_age_days() {
-    local p="${1:-}"
-    if [[ -n "$CURRENT_APPROVED_CODEX_TASK" ]] && { [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK" ]] || [[ "$p" == "$CURRENT_APPROVED_CODEX_TASK"/* ]]; }; then
-      echo "8.0"
-      return 0
-    fi
-    _orig__av_age_days "$@"
-  }
-fi
 quarantine_gate() {
   local task="$1"
   local -a args=()
   [[ -n "$QUARANTINE_KIND" ]] && args+=(--kind "$QUARANTINE_KIND")
   [[ -n "$DEADLINE" ]] && args+=(--deadline-at "$DEADLINE")
-  CURRENT_APPROVED_CODEX_TASK="$task"
   DM_DELETION_LOGGED=1 quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
-  CURRENT_APPROVED_CODEX_TASK=""
-}
-clamp_task_dir_mtimes() {
-  local t="$1"
-  python3 - "$t" <<'PY' 2>/dev/null || true
-import os, stat, sys
-root = sys.argv[1]
-PRUNE = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'Pods', 'DerivedData', 'Build'}
-max_f = 0.0
-dirs = []
-for cur, dnames, fnames in os.walk(root, topdown=True, followlinks=False):
-    dirs.append(cur)
-    dnames[:] = [d for d in dnames if d not in PRUNE]
-    for fn in fnames:
-        if fn == '.DS_Store':
-            continue
-        p = os.path.join(cur, fn)
-        try:
-            st = os.lstat(p)
-            if not stat.S_ISDIR(st.st_mode) and st.st_mtime > max_f:
-                max_f = st.st_mtime
-        except OSError:
-            pass
-if max_f > 0:
-    for d in reversed(dirs):
-        try:
-            st = os.lstat(d)
-            if st.st_mtime > max_f + 60:
-                os.utime(d, (max_f, max_f), follow_symlinks=False)
-        except OSError:
-            pass
-PY
 }
 process_task() {
   local task="$1" rc reason kb main wt removed_worktrees=0 qout wrh_out wrh_rc wrh_inv wrh_c14_verdict
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
-  clamp_task_dir_mtimes "$task"
   rc=0; worktree_is_recently_active "$task" "$MIN_DAYS" || rc=$?
   if (( rc != 1 )); then keep "recent-or-unmeasurable(<${MIN_DAYS}d)" "$task"; return; fi
   if [[ -n "$LIVE_BLOCKED" ]]; then keep "$LIVE_BLOCKED" "$task"; return; fi
@@ -591,48 +486,6 @@ process_task() {
   kb="$(du -sk "$task" 2>/dev/null | cut -f1)" || kb=0
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
   if [[ "$DRY_RUN" == true ]]; then
-    # Dry-run/clean parity: the clean path below additionally requires the WRH
-    # quarantine adapter, a C14 `remove` verdict for EVERY linked worktree, and
-    # the C14/quarantine gate. Evaluate those same gates here (all read-only:
-    # artifact_removal_verdict only writes a temp inventory) so a "would remove"
-    # line can never promise a removal the clean path will refuse. Regression:
-    # a worktree holding a secret-like file answers kept:secret-like and used to
-    # still print "would remove" (bead disk_magician-q9ry).
-    if [[ -n "$WT_REMOVALS" ]]; then
-      if ! wrh_quarantine_available; then
-        keep "wrh-quarantine-unavailable" "$task"; return
-      fi
-      local dmain dwt dinv dverdict
-      while IFS=$'\t' read -r dmain dwt; do
-        [[ -n "$dmain" ]] || continue
-        dinv="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-inventory.XXXXXX")" || { keep "wrh-inventory-unavailable" "$task"; return; }
-        dverdict="$(artifact_removal_verdict "$dwt" --inventory-out "$dinv" 2>/dev/null)" || dverdict=kept:check-failed
-        rm -f -- "$dinv" 2>/dev/null
-        if [[ "$dverdict" != remove ]]; then
-          keep "wrh-c14-${dverdict#kept:}:$dwt" "$task"; return
-        fi
-      done <<<"$WT_REMOVALS"
-    fi
-    if ! quarantine_remove_available; then
-      keep "quarantine-unavailable" "$task"; return
-    fi
-    # Root C14 verdict (dot review, bead disk_magician-q9ry): the clean path
-    # calls quarantine_gate -> quarantine_remove, whose FIRST act is the C14
-    # artifact_removal_verdict and which echoes kept:<reason> when it refuses.
-    # quarantine_remove is destructive, so the dry run evaluates the same
-    # read-only verdict primitive and reports the identical bare reason. Without
-    # this, a task with NO linked worktrees still printed "would remove" while
-    # --clean rejected its contents (e.g. a root secret-like file).
-    local rtinv rtverdict
-    local -a rargs
-    rtinv="$(mktemp "${TMPDIR:-/tmp}/cxd-c14-root.XXXXXX")" || { keep "c14-inventory-unavailable" "$task"; return; }
-    rargs=(--inventory-out "$rtinv")
-    [[ -n "$QUARANTINE_KIND" ]] && rargs+=(--kind "$QUARANTINE_KIND")
-    rtverdict="$(artifact_removal_verdict "$task" "${rargs[@]}" 2>/dev/null)" || rtverdict=kept:check-failed
-    rm -f -- "$rtinv" 2>/dev/null
-    if [[ "$rtverdict" != remove ]]; then
-      keep "${rtverdict#kept:}" "$task"; return
-    fi
     log "DRY RUN: would remove $task (${kb} KB, age $(worktree_age_days "$task")d)"
   else
     snapshot_live_paths
@@ -659,29 +512,20 @@ process_task() {
         # same-target inventory receipt, then hand only that receipt to WRH's
         # quarantine remover (which re-validates lock/identity).
         wrh_inv="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-inventory.XXXXXX")" || { keep "wrh-inventory-unavailable" "$task"; return; }
-        CURRENT_APPROVED_CODEX_TASK="$task"
-        wrh_c14_verdict="$(artifact_removal_verdict "$wt" ${QUARANTINE_KIND:+--kind "$QUARANTINE_KIND"} --inventory-out "$wrh_inv" 2>/dev/null)" || wrh_c14_verdict=kept:check-failed
-        CURRENT_APPROVED_CODEX_TASK=""
+        wrh_c14_verdict="$(artifact_removal_verdict "$wt" --inventory-out "$wrh_inv" 2>/dev/null)" || wrh_c14_verdict=kept:check-failed
         if [[ "$wrh_c14_verdict" != remove ]]; then
           rm -f -- "$wrh_inv" 2>/dev/null
           keep "wrh-c14-${wrh_c14_verdict#kept:}:$wt" "$task"; return
         fi
         wrh_rc=0
-        wrh_errfile="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-err.XXXXXX")" || wrh_errfile=""
-        wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>"${wrh_errfile:-/dev/null}")" || wrh_rc=$?
+        wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>/dev/null)" || wrh_rc=$?
         rm -f -- "$wrh_inv" 2>/dev/null
         if (( wrh_rc != 0 )); then
-          local wrh_why=""
-          [[ -n "$wrh_errfile" && -s "$wrh_errfile" ]] && wrh_why="$(tail -1 "$wrh_errfile" 2>/dev/null | tr -d '\n')"
-          [[ -n "$wrh_errfile" ]] && rm -f -- "$wrh_errfile" 2>/dev/null
           if (( removed_worktrees > 0 )); then
             deletion_log cleanup_codex_documents.sh partial "$kb" "$task"
           fi
-          # Carry the adapter's own reason so the KEEP line is actionable
-          # instead of an opaque "failed" (bead disk_magician-q9ry).
-          keep "wrh-quarantine-failed${wrh_why:+:${wrh_why}}:$wt" "$task"; return
+          keep "wrh-quarantine-failed:$wt" "$task"; return
         fi
-        [[ -n "$wrh_errfile" ]] && rm -f -- "$wrh_errfile" 2>/dev/null
         case "$wrh_out" in
           quarantined:*|quarantine_conflict:*|quarantine_partial_kept*)
             N_RETAINED=$(( N_RETAINED + 1 ))

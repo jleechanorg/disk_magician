@@ -136,9 +136,6 @@ wrh_removal_verdict() {
     esac
     status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
         { printf 'kept:git-status-failed\n'; return 0; }
-    if [[ -n "$status" ]]; then
-        status="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$status" || true)"
-    fi
     [[ -z "$status" ]] || { printf 'kept:dirty\n'; return 0; }
     has_hidden_state "$real" && { printf 'kept:hidden-state\n'; return 0; }
     has_ignored_user_data "$real" && { printf 'kept:ignored-data\n'; return 0; }

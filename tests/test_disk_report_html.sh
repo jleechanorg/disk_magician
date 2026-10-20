@@ -152,21 +152,22 @@ assert_eq "50" "$JSON_FREE" "JSON output disk_free_gb is 50"
 # 4. Test HTML content for 4 summary cards, Treemap, Canonical diskm commands, Never-Delete locks, and NO raw rm/npkill
 HTML_BODY="$(cat "$OUT_HTML")"
 assert_contains "$HTML_BODY" "1. Free right now" "HTML has Card 1: Free right now"
-assert_contains "$HTML_BODY" "2. Safe to remove via diskm" "HTML has Card 2: Safe to remove via diskm"
+assert_contains "$HTML_BODY" "2. In safe-tier paths (upper bound)" "HTML has Card 2: safe-tier upper bound"
 assert_contains "$HTML_BODY" "3. Needs review &amp; Protected" "HTML has Card 3: Needs review & Protected"
 assert_contains "$HTML_BODY" "4. System &amp; Residual" "HTML has Card 4: System & Residual"
 
+# Rows with no diskm command acting on their path must not reach the generated script
+assert_contains "$HTML_BODY" "manual review (no diskm command reclaims this path)" "non-acting rows are labelled manual review"
+# Generated-script comments strip control characters from snapshot-supplied names/paths
+assert_contains "$HTML_BODY" 'replace(/[\u0000-\u001f\u007f]/g, " ")' "script comments sanitize control characters"
 # Canonical diskm commands
 for canonical_cmd in \
   "diskm cleanup-dev-caches --clean" \
   "diskm cleanup-tmp --clean" \
   "diskm cleanup-task-scratch --clean" \
   "diskm cleanup-pr-scratch --clean" \
-  "diskm cleanup-xcode --clean" \
   "diskm cleanup-colima --clean" \
   "diskm prune-aside-sessions --clean" \
-  "diskm cleanup-supervisor-logs --clean" \
-  "diskm cleanup-uv-cache --clean" \
   "diskm cleanup-antigravity-brain --clean" \
   "WORKTREE_APPROVED=1 diskm cleanup-worktrees --clean" \
   "WORKTREE_APPROVED=1 diskm cleanup-worktree-deps --clean" \

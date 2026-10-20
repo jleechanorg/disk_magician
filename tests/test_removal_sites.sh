@@ -1263,7 +1263,9 @@ for g in SANCTIONED + REMOVAL_ENTRY:
         t18_fail.append(f"{g}: body lacks {needle}")
 for cmd in DELEGATED_CMDS:
     rel = DELEGATED_LOG_FILES.get(cmd)
-    if not rel or "deletion_log_removal" not in _read(rel):
+    src = _read(rel) if rel else ""
+    # a delegated command that no longer appears in its script (removed upstream) needs no log
+    if not rel or (cmd in src and "deletion_log_removal" not in src):
         t18_fail.append(f"delegated '{cmd}': script does not log its reclaim")
 for rel in SCOPE:
     if os.path.exists(os.path.join(ROOT, rel)) and "rm_logged" in _read(rel):

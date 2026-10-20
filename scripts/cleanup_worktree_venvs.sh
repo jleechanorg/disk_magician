@@ -59,23 +59,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-INCLUDE_REPOS=false
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
   ROOTS=("$HOME/projects")
   [[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
-  [[ -d "$HOME/project_worldai_frontend" ]] && ROOTS+=("$HOME/project_worldai_frontend")
-  [[ -d "$HOME/projects_other" ]] && ROOTS+=("$HOME/projects_other")
-  [[ -d "$HOME/Documents/Codex" ]] && ROOTS+=("$HOME/Documents/Codex")
   [[ -d "$HOME/wc-wt" ]] && ROOTS+=("$HOME/wc-wt")
-  [[ -d "$HOME/agent-f" ]] && ROOTS+=("$HOME/agent-f")
-  [[ -d "$HOME/worldarchitect.ai.worktrees" ]] && ROOTS+=("$HOME/worldarchitect.ai.worktrees")
   [[ -d "$STANDARD_WORKTREE_ROOT" ]] && ROOTS+=("$STANDARD_WORKTREE_ROOT")
-  for _wf in "$HOME"/wf_*; do
-    [[ -d "$_wf" && ! -L "$_wf" ]] && ROOTS+=("$_wf")
-  done
 fi
 PURGE_BAK_DAYS=""
 
@@ -89,7 +80,7 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_worktree_venvs.sh [--clean] [--dry-run] [--min-age N] [--days N]
                                 [--roots PATH,...] [--purge-bak-days N]
-                                [--include-repos] [-h|--help]
+                                [-h|--help]
 
 Safely prunes Python virtual environments in stale git worktrees (>7 days old).
 
@@ -102,8 +93,6 @@ Options:
   --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
                          Each root's <repo>/.claude/worktrees/* agent working
                          copies are scanned automatically in addition.
-  --include-repos        Also include standalone git checkouts (.git directory)
-                         idle >= 7 days with clean, pushed HEAD.
   --purge-bak-days N     Also purge venv.bak.* dirs older than N days, but only
                          inside worktrees already past --min-age (default: dry-run;
                          requires --clean + WORKTREE_APPROVED=1 to actually delete).
@@ -142,11 +131,6 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "--roots requires a value" >&2; exit 2; }
       IFS=',' read -ra ROOTS <<<"$2"
       shift 2
-      ;;
-    --include-repos)
-      INCLUDE_REPOS=true
-      export DISK_MAGICIAN_INCLUDE_REPOS=1
-      shift
       ;;
     --purge-bak-days)
       [[ $# -ge 2 ]] || { echo "--purge-bak-days requires a value" >&2; exit 2; }
@@ -243,12 +227,8 @@ is_likely_worktree() {
   local p="$1"
   local git_path="$p/.git"
 
-  if [[ "${INCLUDE_REPOS:-false}" == true ]]; then
-    [[ -e "$git_path" ]] || return 1
-  else
-    # A regular repo has a .git directory; worktrees have a .git file.
-    [[ -f "$git_path" ]] || return 1
-  fi
+  # A regular repo has a .git directory; worktrees have a .git file.
+  [[ -f "$git_path" ]] || return 1
 
   return 0
 }

@@ -69,9 +69,6 @@ c14_repo_content_ok() (
         ! flags="$(git -C "$r" ls-files -v 2>/dev/null)"; then
         echo kept:check-failed; return 1
     fi
-    if [[ -n "$st" ]]; then
-        st="$(grep -vE '^\?\? \.husky/_(/.*)?$' <<<"$st" || true)"
-    fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
     if [[ -n "$st" && "$mode" != --overlay-manifest ]] || grep -q '^[a-zS]' <<<"$flags"; then
         echo kept:dirty; return 1
@@ -186,7 +183,7 @@ c14_ephemeral_retention() {
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
-    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ || "$rel" =~ ^Documents/Codex/[0-9]{4}-[0-9]{2}-[0-9]{2}(/[^/]+)?$ ]]; then echo 10080
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
     else return 1; fi
 }
@@ -222,19 +219,9 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai|ms-playwright|camoufox|claude-cli-nodejs|go-build|pip|puppeteer|huggingface|torch|triton|node-gyp|yarn|pnpm)|\.npm/(_cacache|_npx)|\.gradle/(caches|daemon|wrapper/dists)|\.cargo/registry/(cache|src)|\.rustup/toolchains/[^/]+|\.local/share/opencode/(repos|log|tool-output|snapshot)|\.local/state/fsevents-projects\.state\.json|\.peekaboo/snapshots|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm|Google|Homebrew|pip|com\.apple\.dt\.Xcode|SentryCrash|SiriTTS)|Library/Application Support/(Cursor|Code|Google/Chrome|BraveSoftware/Brave-Browser|discord)/(Cache|CachedData|CachedExtensionVSIXs|Code Cache|GPUCache|DawnGraphiteCache|DawnWebGPUCache|Default/Cache|Default/Code Cache|Default/Service Worker/CacheStorage|Profile [0-9]+/Cache|Profile [0-9]+/Code Cache|Profile [0-9]+/Service Worker/CacheStorage)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))($|/[^/]))' deadline=${2:-} pushed
+    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
-        if [[ "${DISK_MAGICIAN_INCLUDE_REPOS:-0}" == "1" ]]; then
-            w="${1%/*}"
-            [[ -e "$w/.git" && ( -f "$1/pyvenv.cfg" || -f "$1/bin/activate" || -x "$1/bin/python" ) ]] || return 1
-            if git -C "$w" rev-parse --show-toplevel >/dev/null 2>&1; then
-                t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" || return 1
-                [[ -z "$t" ]] || return 1
-            fi
-            worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
-            return 0
-        fi
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
             [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
@@ -246,12 +233,6 @@ _av_rebuildable() (
         # Canonical strict floor: no venv is stripped from a worktree touched
         # within 7 days, and unmeasurable recency fails closed as active.
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
-        return 0
-    fi
-    if [[ ! -d "$1/.git" && ( -e "$1/Build/Products" || -e "$1/ModuleCache.noindex" || -e "$1/Index.noindex" || -e "$1/CompilationCache.noindex" ) ]]; then
-        return 0
-    fi
-    if [[ "$1" =~ ^/(private/)?tmp/idb(_[^/]*)?(/.*)?$ || "$1" =~ ^/(private/)?var/folders/[^/]+/[^/]+/C/clang/ModuleCache.*$ || "$1" =~ /\.beads/\.br_recovery/ || "$1" =~ ^/opt/homebrew/share/android-commandlinetools/(system-images|emulator|ndk)(/.*)?$ ]]; then
         return 0
     fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]

@@ -188,13 +188,13 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "checked": True,
     },
     "docker_raw": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Containers & VMs",
         "name": "Docker Desktop VM Disk",
         "path": "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
-        "command": "diskm cleanup-colima --clean",
-        "explanation": "Prunes unused container images and reclaims VM sparse blocks.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "cleanup-colima prunes Colima, not Docker Desktop; reclaim Docker.raw from Docker Desktop.",
+        "checked": False,
     },
     "library_caches": {
         "bucket": "safe",
@@ -215,13 +215,13 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "checked": True,
     },
     "library_pnpm": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Developer Caches",
         "name": "pnpm Content-Addressable Store",
         "path": "~/Library/pnpm",
-        "command": "diskm cleanup-dev-caches --clean",
-        "explanation": "Prunes unreferenced packages from the rebuildable pnpm store.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Not pruned by cleanup-dev-caches; review manually (pnpm store prune).",
+        "checked": False,
     },
     "npm_cache": {
         "bucket": "safe",
@@ -233,31 +233,31 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "checked": True,
     },
     "cargo": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Developer Caches",
         "name": "Rust Cargo Registry & Git Cache",
         "path": "~/.cargo",
-        "command": "diskm cleanup-dev-caches --clean",
-        "explanation": "Cleans rebuildable Rust crate downloads and git checkouts in ~/.cargo.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Not pruned by cleanup-dev-caches; review manually (cargo cache tools).",
+        "checked": False,
     },
     "gradle": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Developer Caches",
         "name": "Gradle Build & Wrapper Cache",
         "path": "~/.gradle",
-        "command": "diskm cleanup-dev-caches --clean",
-        "explanation": "Cleans rebuildable Gradle caches and daemon logs in ~/.gradle.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Not pruned by cleanup-dev-caches; review manually.",
+        "checked": False,
     },
     "library_developer": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Xcode & Simulators",
         "name": "Xcode DerivedData & CoreSimulator Caches",
         "path": "~/Library/Developer",
-        "command": "diskm cleanup-xcode --clean",
-        "explanation": "Clears rebuildable Xcode DerivedData, CoreSimulator caches, and temporary simulator build artifacts.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "cleanup_xcode.sh has no diskm subcommand; it runs in the scheduled routine and prunes only DerivedData and simulator temp.",
+        "checked": False,
     },
     "tmp_private": {
         "bucket": "safe",
@@ -269,40 +269,40 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "checked": True,
     },
     "home_tmp": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Temp & Scratch",
         "name": "User Scratch Temp (~/tmp)",
         "path": "~/tmp",
-        "command": "diskm cleanup-tmp --clean",
-        "explanation": "Cleans aged temporary files and scratch artifacts under ~/tmp.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "cleanup-tmp scans /private/tmp, /tmp and the per-user temp dir, not ~/tmp; review manually.",
+        "checked": False,
     },
     "tmp_pr_scratch": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Temp & Scratch",
         "name": "Abandoned PR Analyzer Scratch",
         "path": "/tmp/pr*",
         "command": "diskm cleanup-pr-scratch --clean",
-        "explanation": "Safely cleans abandoned PR analyzer clones and scratch directories in /private/tmp.",
-        "checked": True,
+        "explanation": "Subset of /private/tmp (counted there); cleanup-pr-scratch prunes aged pr*/claude* dirs.",
+        "checked": False,
     },
     "llm_inspector": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Temp & Scratch",
         "name": "LLM Inspector Payload Traces",
         "path": "~/.llm-inspector",
-        "command": "diskm cleanup-pr-scratch --clean",
-        "explanation": "Prunes aged LLM inspector trace dumps older than retention.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Not scanned by cleanup-pr-scratch; review manually.",
+        "checked": False,
     },
     "tmp_task_scratch": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Temp & Scratch",
         "name": "Aged Task Scratch Containers",
         "path": "~/projects & /tmp/task*",
         "command": "diskm cleanup-task-scratch --clean",
-        "explanation": "Safely cleans aged task-scratch containers in ~/projects and ~/projects_other.",
-        "checked": True,
+        "explanation": "Overlaps /private/tmp and ~/projects; cleanup-task-scratch prunes aged scratch containers only.",
+        "checked": False,
     },
     "aside": {
         "bucket": "safe",
@@ -323,40 +323,40 @@ CATALOG_RULES: Dict[str, Dict[str, Any]] = {
         "checked": True,
     },
     "antigravity_dot": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Agent State Compaction",
         "name": "Antigravity Legacy State (~/.antigravity)",
         "path": "~/.antigravity",
-        "command": "diskm cleanup-antigravity-brain --clean",
-        "explanation": "Prunes idle Antigravity worktrees and old brain artifacts (>=7d).",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "cleanup-antigravity-brain compacts ~/.gemini, not ~/.antigravity; review manually.",
+        "checked": False,
     },
     "library_logs": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Logs & Diagnostics",
         "name": "Rotated Supervisor & User Logs",
         "path": "~/Library/Logs",
-        "command": "diskm cleanup-supervisor-logs --clean",
-        "explanation": "Prunes rotated cmux-codex-launchd and user diagnostic logs older than 7 days.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Not pruned by cleanup-supervisor-logs; review manually.",
+        "checked": False,
     },
     "var_log": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Logs & Diagnostics",
         "name": "System Rotated Logs (/var/log)",
         "path": "/var/log",
-        "command": "diskm cleanup-supervisor-logs --clean",
-        "explanation": "Prunes rotated supervisor logs older than retention.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "System logs; not pruned by cleanup-supervisor-logs.",
+        "checked": False,
     },
     "local_dir": {
-        "bucket": "safe",
+        "bucket": "gated",
         "category": "Developer Caches",
-        "name": "Local Share & Orphaned uv Tool Cache",
+        "name": "~/.local (mixed app data; only the uv cache is pruned)",
         "path": "~/.local",
-        "command": "diskm cleanup-uv-cache --clean",
-        "explanation": "Prunes orphaned uv-tool build wheels and stale local cache artifacts.",
-        "checked": True,
+        "command": "manual review (no diskm command reclaims this path)",
+        "explanation": "Mixed application data. cleanup-uv-cache prunes only orphaned uv cache entries, so most of this total is not reclaimable by it.",
+        "checked": False,
     },
     "dark_factory": {
         "bucket": "safe",
@@ -1354,7 +1354,7 @@ def render_html(model: Dict[str, Any]) -> str:
       <span class="card-meta">{used_gb:.1f} GiB used ({used_pct:.1f}%) &bull; Coverage: {cov_pct:.1f}% (effective {eff_cov_pct:.1f}%)</span>
     </div>
     <div class="summary-card card-safe" id="card-safe-to-remove">
-      <span class="card-label">2. Safe to remove via diskm</span>
+      <span class="card-label">2. In safe-tier paths (upper bound)</span>
       <span class="card-value" style="color:var(--safe);">{safe_gb:.1f} GiB</span>
       <span class="card-meta">Rebuildable caches, temp scratch, Xcode, Colima sparse trim, rotated logs</span>
     </div>
@@ -1413,7 +1413,7 @@ def render_html(model: Dict[str, Any]) -> str:
 
       <div class="bucket-section">
         <h3 class="bucket-section-title" style="color:var(--safe);">
-          <span>Safe to remove (via diskm) — Checked by default</span>
+          <span>Safe tier (via diskm; commands prune selected contents, so this is an upper bound) — Checked by default</span>
           <span>{safe_gb:.1f} GiB</span>
         </h3>
         <div class="rec-list" id="list-safe"></div>
@@ -1557,7 +1557,9 @@ def render_html(model: Dict[str, Any]) -> str:
         const formattedCmd = formatCommandForMode(item.command, currentMode);
         if (!seenCommands.has(formattedCmd)) {{
           seenCommands.add(formattedCmd);
-          lines.push("# " + item.name + " (" + item.path + " — " + item.size_gb.toFixed(1) + " GiB)");
+          // Snapshot-supplied text: strip control characters so it cannot leave the comment.
+          const safeText = (v) => String(v).replace(/[\\u0000-\\u001f\\u007f]/g, " ");
+          lines.push("# " + safeText(item.name) + " (" + safeText(item.path) + " — " + item.size_gb.toFixed(1) + " GiB)");
           lines.push(formattedCmd);
         }}
       }}
@@ -1779,7 +1781,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"  Snapshot: {snapshot_path} ({model['timestamp']})\n"
             f"  Free right now: {model['disk_free_gb']:.1f} GiB / {model['disk_total_gb']:.0f} GiB "
             f"({model['disk_used_pct']:.1f}% used, coverage {model['snapshot_coverage_pct']:.1f}%)\n"
-            f"  Safe to remove (via diskm): {sb['safe_to_remove_gb']:.1f} GiB\n"
+            f"  In safe-tier paths (upper bound): {sb['safe_to_remove_gb']:.1f} GiB\n"
             f"  Needs review & Protected:   {sb['needs_review_and_protected_gb']:.1f} GiB "
             f"(Gated: {sb['gated_review_gb']:.1f} GiB, Protected: {sb['protected_never_delete_gb']:.1f} GiB)\n"
             f"  System & Residual:          {sb['system_and_residual_gb']:.1f} GiB"
