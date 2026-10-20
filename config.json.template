@@ -857,6 +857,30 @@
     {
       "key": "home_derived_data",
       "pattern": "~/dd_*"
+    },
+    {
+      "key": "tmp_advice_scratch",
+      "pattern": "/tmp/advice-*"
+    },
+    {
+      "key": "tmp_frozen_scratch",
+      "pattern": "/tmp/frozen-*"
+    },
+    {
+      "key": "tmp_ipad_build",
+      "pattern": "/tmp/ipad*"
+    },
+    {
+      "key": "tmp_worldai_scratch",
+      "pattern": "/tmp/worldai-*"
+    },
+    {
+      "key": "tmp_dd_dirs",
+      "pattern": "/tmp/dd_*"
+    },
+    {
+      "key": "tmp_wf_derived_data",
+      "pattern": "/tmp/wf*_dd*"
     }
   ],
   "cleanup_thresholds": {

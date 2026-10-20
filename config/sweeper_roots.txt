@@ -261,3 +261,25 @@ $HOME/.venvs	cleanup_worktree_venvs.sh	shared virtualenvs
 /tmp/pr*	cleanup_pr_scratch.sh	PR scratch directories in /tmp
 /tmp/task*	cleanup_pr_scratch.sh	Task scratch directories in /tmp
 /tmp/wa-*	cleanup_pr_scratch.sh	Worktree advice scratch directories in /tmp
+# --- Registry pass 2026-10-19 (disk_magician scan of check_uncovered_roots) ---
+# Codex SQLite databases other than the never-delete state*.sqlite files are
+# vacuumed (space reclaimed, no rows deleted) by cleanup_codex_db.sh. It skips
+# any DB a live codex client holds open, so coverage is real but opportunistic.
+# Measured on 2026-10-19: ~/.codex/thread_history_1.sqlite was 17.1 GiB and
+# skipped because 8 live clients held it — the largest single reclaimable item.
+$HOME/.codex/logs_2.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+$HOME/.codex/memories_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+$HOME/.codex/goals_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+$HOME/.codex/queue_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+$HOME/.codex/history.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
+# Roots the 2026-10-19 check reported as UNCOVERED with no sweeper owner. They
+# are recorded as explicit decisions so they stay visible rather than silently
+# unowned; none of these grants deletion authority.
+/opt/homebrew/lib	decision:check_uncovered_roots.py	Homebrew-linked libraries; not a cleanup target
+$HOME/Library/Application Support/FileProvider/C565AFA3-62F4-41F2-9ABE-2C80BFE53167/wharf/wharf/ingest	decision:check_uncovered_roots.py	Dropbox FileProvider ingest staging; provider-managed, never sweep
+$HOME/Pictures/Photos Library.photoslibrary/resources/derivatives	decision:check_uncovered_roots.py	Photos library derivatives; rebuildable only by Photos, human decision
+$HOME/Pictures/Photos Library.photoslibrary/database	decision:check_uncovered_roots.py	Photos library database; never sweep
+$HOME/.config	decision:check_uncovered_roots.py	Mixed config parent; individual child caches only, with review
+$HOME/.local/share	decision:check_uncovered_roots.py	Mixed app-data parent; uv/uv-tool children already have sweepers
+$HOME/.nvm/versions/node/v22.22.0/lib/node_modules	decision:check_uncovered_roots.py	Active Node runtime modules; reclaim means changing the active NVM version
+$HOME/projects_other	decision:check_uncovered_roots.py	Mixed parent with never_delete children; per-repo review only

@@ -205,6 +205,25 @@ dir_size_kb() {
   echo "$result"
 }
 
+# Glob matches that live under an already-measured monitored_dir are dropped
+# from the glob total: the parent measurement already contains them, and adding
+# both double counts the bytes, inflating coverage_pct and (worse) suppressing
+# the <70% coverage warning. Only parents with a NON-NULL measurement cover
+# their children - a parent that timed out must not hide the child's only
+# measurement.
+_glob_match_covered() {
+  local real
+  [[ -n "${GLOB_COVER_REALS:-}" && -s "${GLOB_COVER_REALS:-/dev/null}" ]] || return 1
+  real="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null)" || return 1
+  [[ -n "$real" ]] || return 1
+  local parent
+  while IFS= read -r parent; do
+    [[ -n "$parent" ]] || continue
+    [[ "$real" == "$parent" || "$real" == "${parent%/}"/* ]] && return 0
+  done < "$GLOB_COVER_REALS"
+  return 1
+}
+
 glob_size_kb() {
   local raw_pattern="$1"
   local pattern
@@ -214,6 +233,7 @@ glob_size_kb() {
   local total=0
   for d in $pattern; do
     [[ -e "$d" ]] || continue
+    _glob_match_covered "$d" && continue
     local s
     s=$(dir_size_kb "$d" "$DU_TIMEOUT")
     [[ -n "$s" ]] || { echo ""; return; }
@@ -934,6 +954,29 @@ PY
 fi
 # Globs run after lc_* and the library frontier so those are never starved by
 # slow per-directory globs; the shared measurement deadline still bounds them.
+# Real paths of measured monitored_dirs, used by _glob_match_covered. Built
+# before the glob passes because dirs are measured first (globs run last so
+# slow globs never starve them).
+GLOB_COVER_REALS=$(mktemp -t dm_glob_cover.XXXXXX 2>/dev/null || echo "")
+if [[ -n "$GLOB_COVER_REALS" ]]; then
+  python3 -c '
+import os, sys
+t, h = sys.argv[1], sys.argv[2]
+for line in open(t):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 3:
+        continue
+    _key, val, src = parts
+    if not src or val in ("null", ""):
+        continue
+    if any(c in src for c in "*?["):
+        continue
+    if src.startswith("~"):
+        src = h + src[1:]
+    print(os.path.realpath(os.path.normpath(os.path.expandvars(src))))
+' "$DIRS_TEMP_FILE" "$HOME" > "$GLOB_COVER_REALS" 2>/dev/null || : > "$GLOB_COVER_REALS"
+fi
+
 # Run file glob checks
 while IFS=$'\t' read -r key pattern; do
   size=$(glob_size_kb "$pattern")
@@ -958,6 +1001,7 @@ for item in data.get("monitored_globs", []):
 PY
 )
 
+[[ -n "${GLOB_COVER_REALS:-}" ]] && rm -f "$GLOB_COVER_REALS"
 MEASUREMENT_ELAPSED_SECONDS=$(( $(date +%s) - MEASUREMENT_STARTED_EPOCH ))
 MEASUREMENT_BUDGET_EXHAUSTED=false
 if [[ "$(remaining_measurement_seconds)" -eq 0 ]]; then
