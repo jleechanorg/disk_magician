@@ -113,7 +113,7 @@ c14_repo_pushed_ok() (
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
-    have="$(cut -f1 <<<"$adv" | git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
+    have="$(cut -f1 <<<"$adv" | GIT_NO_LAZY_FETCH=1 git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
     unp="$(git -C "$r" rev-list ${scope[@]+"${scope[@]}"} --stdin -n1 < <(printf '%s\n' $tips $have) 2>/dev/null)" || { echo kept:check-failed; return 1; }
     [[ -z "$unp" ]] || { echo kept:not-pushed; return 1; }
     if [[ -n "$linked" ]]; then  # linked: unreachable objects stay in the common store

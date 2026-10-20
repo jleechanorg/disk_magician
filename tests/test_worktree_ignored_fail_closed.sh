@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fail-closed contracts for scripts/lib/worktree_ignored.sh and c14_probe
+# secrets(): names that can hold user data or secrets keep a worktree.
+set -uo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/worktree_ignored.sh
+source "$REPO_ROOT/scripts/lib/worktree_ignored.sh"
+PASS=0; FAIL=0
+ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+
+echo "== ignored_entry_rebuildable: user-data names are not rebuildable =="
+mkdir -p "$TMP/wt"
+for e in .beads/issues.db .br_recovery/x logs/run.txt .tmp/notes.md .superpowers/s.md .dark-factory/state .codex-worktrees/a/b debug.log; do
+  ignored_entry_rebuildable "$TMP/wt" "$e" && bad "$e treated as rebuildable" || ok "$e is user data"
+done
+for e in node_modules/x/index.js __pycache__/a.pyc .pytest_cache/v; do
+  ignored_entry_rebuildable "$TMP/wt" "$e" && ok "$e rebuildable" || bad "$e not rebuildable"
+done
+
+echo "== has_ignored_user_data: unresolvable gitdir fails closed =="
+mkdir -p "$TMP/orphan"; printf 'gitdir: %s/gone/.git/worktrees/orphan\n' "$TMP" >"$TMP/orphan/.git"
+has_ignored_user_data "$TMP/orphan" && ok "orphaned worktree preserved" || bad "orphaned worktree read as no user data"
+
+echo "== has_hidden_state: secret-like names with template-ish suffixes still count =="
+for name in .env.example credentials.test secrets.dist; do
+  r="$TMP/repo-$name"; git init -q "$r"; printf '%s\n' "$name" >"$r/.gitignore"
+  git -C "$r" add .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
+  printf 'x' >"$r/$name"
+  has_hidden_state "$r" && ok "ignored $name keeps the worktree" || bad "ignored $name ignored"
+done
+
+echo "== c14_probe secrets(): suffix/segment exemptions removed =="
+for rel in credentials.txt secrets.md .env.test Build/credentials.json; do
+  printf '[{"path":".","name":"wt"},{"path":"%s"}]' "$rel" >"$TMP/inv.json"
+  out="$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$TMP/inv.json")"
+  [[ "$out" == yes ]] && ok "$rel is secret-like" || bad "$rel -> $out"
+done
+
+echo "== _av_secret_like: no suffix, keyword or dependency-dir exemptions =="
+(
+  # shellcheck source=scripts/lib/artifact_verdict.sh
+  source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
+  for rel in credentials.txt example/.env node_modules/pkg/.env Build/secrets.json app_credentials.py; do
+    d="$TMP/av-${rel//\//_}"; mkdir -p "$d/$(dirname "$rel")"; printf 'x' >"$d/$rel"
+    _av_secret_like "$d" && echo "  PASS: $rel is secret-like" || echo "  FAIL: $rel not secret-like"
+  done
+) >"$TMP/av.out" 2>&1
+cat "$TMP/av.out"
+PASS=$((PASS + $(grep -c '  PASS:' "$TMP/av.out"))); FAIL=$((FAIL + $(grep -c '  FAIL:' "$TMP/av.out")))
+[[ $(grep -c '  PASS:' "$TMP/av.out") -eq 5 ]] || { echo "  FAIL: artifact_verdict.sh did not load"; FAIL=$((FAIL + 1)); }
+
+echo "PASS=$PASS FAIL=$FAIL"
+[[ "$FAIL" -eq 0 ]]

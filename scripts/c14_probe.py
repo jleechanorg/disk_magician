@@ -369,7 +369,7 @@ def outer_certificate(root, receipt_path):
             return "kept:check-failed"
         if subprocess.run(["git", "-C", source, "cat-file", "-e", sha + "^{commit}"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10,
-                          env=env).returncode:
+                          env={**env, "GIT_NO_LAZY_FETCH": "1"}).returncode:
             return "kept:source-missing"
         gitdir = git("rev-parse", "--absolute-git-dir")
         if not gitdir or os.path.realpath(gitdir) != os.path.join(root, ".git"):

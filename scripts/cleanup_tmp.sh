@@ -809,7 +809,7 @@ has_open_files() {
             fi
 
             # Exact or slash-delimited prefix compare against canonical dir
-            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* ]]; then
+            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* || "$val" == "$canon_dir" || "$val" == "$canon_dir/"* ]]; then
               has_open=0
               break
             fi
@@ -1116,6 +1116,13 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
     esac
+    if [[ "$DRY_RUN" != true && -n "$USER_TMP" && "$tmp_dir" == "$USER_TMP" && -z "${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-}" ]]; then
+      if ! repo_v="$(c14_repos_ok "$subdir" "" "${ACT_DEADLINE_AT:-}" 2>/dev/null)"; then
+        log "Preserving (C14 ${repo_v:-kept:check-failed}): $subdir"
+        cleanup_tmp_count_candidate_result "${repo_v:-kept:check-failed}"
+        continue
+      fi
+    fi
 
     remove_path "$subdir"
     kb="$REMOVE_PATH_KB"
@@ -1402,10 +1409,10 @@ large_consider_entry() {
   base="$(basename "$d")"
 
   case "$base" in
-    com.apple.*|system-*|PowerlogHelperd*) return 0 ;;
+    com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
     # Our own quarantine root — never re-archive/delete it here;
     # purge_aged_archives() below is the only thing that touches it.
-    _disk_magician_archive) return 0 ;;
+    _disk_magician_archive|.dm-quarantine) return 0 ;;
   esac
   case "$base" in
     wt_*|worktree_*)
