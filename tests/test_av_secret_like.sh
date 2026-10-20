@@ -46,6 +46,17 @@ while IFS=$'\t' read -r want rel; do
     if [[ "$got" == "$want" ]]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  FAIL: table $rel expected $want got $got"; fi
 done <"$TABLE"
 
+# Broken/absent probe module or a non-UTF8 name must read as secret-like (fail closed).
+for stub in 'raise RuntimeError("broken")' 'def exempt_name(p): raise RuntimeError("broken")' 'syntax error here'; do
+    sd="$(mktemp -d "$TMP/stub.XXXXXX")"; printf '%s\n' "$stub" >"$sd/c14_probe.py"
+    d="$(mktemp -d "$TMP/s.XXXXXX")"; echo x >"$d/credentials.js"
+    if ( _AV_DIR="$sd/lib"; _av_secret_like "$d" ); then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  FAIL: broken probe ($stub) read as clean"; fi
+done
+d="$(mktemp -d "$TMP/s.XXXXXX")"
+if echo x >"$d/$(printf 'secrets\377.txt')" 2>/dev/null; then
+    if _av_secret_like "$d"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "  FAIL: non-UTF8 secrets name read as clean"; fi
+fi
+
 # git failure (corrupt .git) -> fail closed
 d="$(mktemp -d "$TMP/c.XXXXXX")"; mkdir "$d/.git"; echo garbage >"$d/.git/HEAD"; echo x >"$d/credentials.json"
 if _av_secret_like "$d"; then PASS=$((PASS + 1)); echo "  PASS: corrupt .git -> secret"

@@ -97,5 +97,25 @@ while IFS=$'\t' read -r want rel; do
   [[ "$got_h" == "$want" ]] || bad "has_hidden_state $rel expected $want got $got_h"
 done <"$TABLE"
 
+echo "== fail closed: probe errors never read as 'no secret' =="
+printf 'secrets\377.txt\n' | python3 -I "$REPO_ROOT/scripts/c14_probe.py" any-secret; rc=$?
+[[ $rc -eq 0 ]] && ok "non-UTF8 secret name -> any-secret rc 0" || bad "non-UTF8 secret name -> any-secret rc $rc"
+printf '' | python3 -I "$REPO_ROOT/scripts/c14_probe.py" any-secret >"$TMP/none.out"; rc=$?
+[[ $rc -eq 1 && "$(cat "$TMP/none.out")" == none ]] && ok "explicit none -> rc 1 + 'none'" || bad "explicit none rc=$rc out=$(cat "$TMP/none.out")"
+python3 -I "$REPO_ROOT/scripts/c14_probe.py" any-secret extra </dev/null >/dev/null 2>&1; rc=$?
+[[ $rc -ne 1 ]] && ok "bad argv never reads as none (rc $rc)" || bad "bad argv rc 1"
+for stub in 'raise RuntimeError("broken")' 'def exempt_name(p): raise RuntimeError("broken")' 'syntax error here'; do
+  sd="$(mktemp -d "$TMP/stub.XXXXXX")"; mkdir "$sd/lib"; printf '%s\n' "$stub" >"$sd/c14_probe.py"
+  r="$(mktemp -d "$TMP/hs.XXXXXX")"; git init -q "$r"; printf '*\n' >"$r/.gitignore"
+  git -C "$r" add -f .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
+  printf x >"$r/credentials.js"
+  ( _WI_DIR="$sd/lib"; has_hidden_state "$r" ) && ok "broken probe ($stub) keeps worktree (has_hidden_state)" || bad "broken probe ($stub) read as no hidden state"
+done
+r="$(mktemp -d "$TMP/hs.XXXXXX")"; git init -q "$r"; printf '*\n' >"$r/.gitignore"
+git -C "$r" add -f .gitignore; git -C "$r" -c user.name=t -c user.email=t@e commit -qm i
+if printf x >"$r/$(printf 'secrets\377.txt')" 2>/dev/null; then
+  has_hidden_state "$r" && ok "non-UTF8 ignored secrets file -> hidden" || bad "non-UTF8 ignored secrets file not hidden"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
