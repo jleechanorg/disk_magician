@@ -156,16 +156,16 @@ assert_contains "$HTML_BODY" "2. In safe-tier paths (upper bound)" "HTML has Car
 assert_contains "$HTML_BODY" "3. Needs review &amp; Protected" "HTML has Card 3: Needs review & Protected"
 assert_contains "$HTML_BODY" "4. System &amp; Residual" "HTML has Card 4: System & Residual"
 
+# Rows with no diskm command acting on their path must not reach the generated script
+assert_contains "$HTML_BODY" "manual review (no diskm command reclaims this path)" "non-acting rows are labelled manual review"
 # Canonical diskm commands
 for canonical_cmd in \
   "diskm cleanup-dev-caches --clean" \
   "diskm cleanup-tmp --clean" \
   "diskm cleanup-task-scratch --clean" \
   "diskm cleanup-pr-scratch --clean" \
-  "diskm clean --routine" \
   "diskm cleanup-colima --clean" \
   "diskm prune-aside-sessions --clean" \
-  "diskm cleanup-supervisor-logs --clean" \
   "diskm cleanup-uv-cache --clean" \
   "diskm cleanup-antigravity-brain --clean" \
   "WORKTREE_APPROVED=1 diskm cleanup-worktrees --clean" \
