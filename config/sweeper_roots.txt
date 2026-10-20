@@ -185,7 +185,6 @@ $HOME/Library/Caches/com.cmuxterm.app	decision:check_uncovered_roots.py	Cache-on
 # any DB a live codex client holds open, so coverage is real but opportunistic.
 # Measured on 2026-10-19: ~/.codex/thread_history_1.sqlite was 17.1 GiB and
 # skipped because 8 live clients held it — the largest single reclaimable item.
-$HOME/.codex/thread_history_1.sqlite	cleanup_codex_db.sh	VACUUM only (no row deletion); skipped while a live client holds it
 $HOME/.codex/logs_2.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
 $HOME/.codex/memories_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
 $HOME/.codex/goals_1.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a live client holds it
@@ -195,8 +194,6 @@ $HOME/.codex/history.sqlite	cleanup_codex_db.sh	VACUUM only; skipped while a liv
 # Roots the 2026-10-19 check reported as UNCOVERED with no sweeper owner. They
 # are recorded as explicit decisions so they stay visible rather than silently
 # unowned; none of these grants deletion authority.
-/Applications	decision:check_uncovered_roots.py	Installed application bundles; reclaim means uninstalling, a human decision
-/opt/homebrew/Cellar	decision:check_uncovered_roots.py	Homebrew formulae; owner is `brew cleanup`, not this repo
 /opt/homebrew/lib	decision:check_uncovered_roots.py	Homebrew-linked libraries; not a cleanup target
 $HOME/Library/Application Support/FileProvider/C565AFA3-62F4-41F2-9ABE-2C80BFE53167/wharf/wharf/ingest	decision:check_uncovered_roots.py	Dropbox FileProvider ingest staging; provider-managed, never sweep
 $HOME/Pictures/Photos Library.photoslibrary/resources/derivatives	decision:check_uncovered_roots.py	Photos library derivatives; rebuildable only by Photos, human decision

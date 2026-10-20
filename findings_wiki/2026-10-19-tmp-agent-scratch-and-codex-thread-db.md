@@ -47,12 +47,18 @@ Registered in `config.json.template` `monitored_globs` (and the live
 `/tmp/dd_*` and `/tmp/wf*_dd*` because the broad glob matched ordinary Python
 files such as `nrs_10364_dd64.py`.
 
-`config/sweeper_roots.txt` now registers the six non-`state*.sqlite` Codex
+`config/sweeper_roots.txt` now registers the five non-`state*.sqlite` Codex
 databases against `cleanup_codex_db.sh` as **VACUUM-only** (no row deletion, and
-skipped while a client holds them), and records the ten roots that
-`check_uncovered_roots.py` still reports as UNCOVERED as explicit
-`decision:check_uncovered_roots.py` entries, so they are visibly owned by a
-human decision rather than silently unmonitored.
+skipped while a client holds them), and records the routable roots that
+`check_uncovered_roots.py` reported as UNCOVERED as explicit
+`decision:check_uncovered_roots.py` entries.
+
+Three roots are deliberately left UNCOVERED — `/Applications`,
+`/opt/homebrew/Cellar` and `~/.codex/thread_history_1.sqlite`.
+`tests/test_check_uncovered_roots.py` asserts exactly that: a visible gap is the
+honest state while nothing owns it, and a `decision:` entry would imply
+coverage. `thread_history_1.sqlite` is a vacuum-owner problem (the DB is held
+open by live clients), not a registry gap.
 
 `~/.codex/state*.sqlite`, `~/.codex/sessions`, `~/.codex/log` and
 `~/.claude/projects` remain **intentionally unregistered** — they are
