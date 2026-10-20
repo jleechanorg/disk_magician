@@ -288,18 +288,8 @@ inspect_container_repos() {
   CONTAINER_WT_REMOVALS=""
 
   if bare="$(find_bare_repo_in "$container")"; then
-    local bare_ok=true bare_oid wa_repo="$HOME/projects/worldarchitect.ai"
-    while IFS= read -r bare_oid; do
-      [[ -z "$bare_oid" ]] && continue
-      if [[ ! -d "$wa_repo/.git" ]] || ! GIT_NO_LAZY_FETCH=1 git -C "$wa_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
-        bare_ok=false
-        break
-      fi
-    done < <(git --git-dir="$bare" for-each-ref --format='%(objectname)' 2>/dev/null || echo "UNREADABLE")
-    if [[ "$bare_ok" != true ]]; then
-      CONTAINER_REPO_REASON="bare-repo:$bare"
-      return 0
-    fi
+    CONTAINER_REPO_REASON="bare-repo:$bare"
+    return 0
   fi
 
   local gits_tmp
@@ -307,7 +297,7 @@ inspect_container_repos() {
     CONTAINER_REPO_REASON="mktemp-failed"
     return 0
   }
-  if ! /usr/bin/find "$container" -mindepth 1 \( -name .venv -o -name venv -o -name node_modules -o -name Pods -o -name DerivedData -o -name Build -o -name __pycache__ \) -prune -o -mindepth 1 -name .git -prune -print0 >"$gits_tmp" 2>/dev/null; then
+  if ! /usr/bin/find "$container" -mindepth 2 -name .git -prune -print0 >"$gits_tmp" 2>/dev/null; then
     rm -f "$gits_tmp"
     CONTAINER_REPO_REASON="find-failed"
     return 0
@@ -342,12 +332,6 @@ PY
       return 0
     }
     if [[ -n "$st" ]]; then
-      st="$(grep -vE '^\?\? (\.advice-review-documents|\.husky/_)(/.*)?$' <<<"$st" || true)"
-    fi
-    if [[ -n "$st" ]] && [[ -z "$(/usr/bin/find "$repo" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null || true)" ]]; then
-      st="$(grep -vE '^(D | D) ' <<<"$st" || true)"
-    fi
-    if [[ -n "$st" ]]; then
       CONTAINER_REPO_REASON="dirty:$repo"
       return 0
     fi
@@ -364,40 +348,21 @@ PY
     while IFS= read -r line; do
       [[ -n "$line" ]] && rargs+=("$line")
     done < <(eligible_remote_args "$repo" "$container")
-    local verified_via_wa=false
-    local matched_canon_repo=""
-    local head_oid
-    head_oid="$(git -C "$repo" rev-parse --verify -q HEAD 2>/dev/null || true)"
-    if [[ -z "$head_oid" && -z "$(git -C "$repo" rev-list --all -n 1 2>/dev/null)" ]]; then
-      verified_via_wa=true
-    elif [[ -n "$head_oid" ]]; then
-      local canon_repo
-      for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-        if [[ -d "$canon_repo/.git" ]] \
-           && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
-          verified_via_wa=true
-          matched_canon_repo="$canon_repo"
-          break
-        fi
-      done
-    fi
-    if [[ ${#rargs[@]} -eq 0 && "$verified_via_wa" == false ]]; then
+    if [[ ${#rargs[@]} -eq 0 ]]; then
       CONTAINER_REPO_REASON="no-remote:$repo"
       return 0
     fi
-    if [[ "$verified_via_wa" == false ]]; then
-      if [[ -z "$(git -C "$repo" for-each-ref --count=1 --format='%(refname)' refs/remotes 2>/dev/null)" ]]; then
-        CONTAINER_REPO_REASON="no-remote-refs:$repo"
-        return 0
-      fi
-      unpushed="$(git -C "$repo" rev-list -n 1 HEAD --not "${rargs[@]}" 2>/dev/null)" || {
-        CONTAINER_REPO_REASON="rev-list-failed:$repo"
-        return 0
-      }
-      if [[ -n "$unpushed" ]]; then
-        CONTAINER_REPO_REASON="unpushed-head:$repo"
-        return 0
-      fi
+    if [[ -z "$(git -C "$repo" for-each-ref --count=1 --format='%(refname)' refs/remotes 2>/dev/null)" ]]; then
+      CONTAINER_REPO_REASON="no-remote-refs:$repo"
+      return 0
+    fi
+    unpushed="$(git -C "$repo" rev-list -n 1 HEAD --not "${rargs[@]}" 2>/dev/null)" || {
+      CONTAINER_REPO_REASON="rev-list-failed:$repo"
+      return 0
+    }
+    if [[ -n "$unpushed" ]]; then
+      CONTAINER_REPO_REASON="unpushed-head:$repo"
+      return 0
     fi
 
     gd="$(git_dir_of "$repo" --git-dir)" || {
@@ -436,29 +401,10 @@ PY
       CONTAINER_WT_REMOVALS="${CONTAINER_WT_REMOVALS}${common}"$'\t'"${self}"$'\n'
     else
       # Standalone git clone inside container
-      if [[ "$verified_via_wa" == true ]]; then
-        if [[ -z "$head_oid" ]]; then
-          lb="$(git -C "$repo" rev-list -n 1 --all 2>/dev/null)" || {
-            CONTAINER_REPO_REASON="branch-rev-list-failed:$repo"
-            return 0
-          }
-        else
-          lb=""
-          local b_oid
-          while IFS= read -r b_oid; do
-            [[ -z "$b_oid" ]] && continue
-            if [[ -z "$matched_canon_repo" ]] || ! GIT_NO_LAZY_FETCH=1 git -C "$matched_canon_repo" cat-file -e "${b_oid}^{commit}" 2>/dev/null; then
-              lb="$b_oid"
-              break
-            fi
-          done < <(git -C "$repo" for-each-ref --format='%(objectname)' refs/heads 2>/dev/null || echo "UNREADABLE")
-        fi
-      else
-        lb="$(git -C "$repo" rev-list -n 1 --branches --not "${rargs[@]}" 2>/dev/null)" || {
-          CONTAINER_REPO_REASON="branch-rev-list-failed:$repo"
-          return 0
-        }
-      fi
+      lb="$(git -C "$repo" rev-list -n 1 --branches --not "${rargs[@]}" 2>/dev/null)" || {
+        CONTAINER_REPO_REASON="branch-rev-list-failed:$repo"
+        return 0
+      }
       if [[ -n "$lb" ]]; then
         CONTAINER_REPO_REASON="unpushed-branches:$repo"
         return 0

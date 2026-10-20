@@ -327,60 +327,26 @@ check_repos() {
   local task="$1" g repo gd common wts self blk line gl
   REPO_REASON=""; WT_REMOVALS=""
   local bare
-  if bare="$(find_bare_repo "$task")"; then
-    local bare_ok=true bare_oid canon_repo
-    while IFS= read -r bare_oid; do
-      [[ -z "$bare_oid" ]] && continue
-      local oid_found=false
-      for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-        if [[ -d "$canon_repo/.git" ]] && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${bare_oid}^{commit}" 2>/dev/null; then
-          oid_found=true
-          break
-        fi
-      done
-      if [[ "$oid_found" != true ]]; then
-        bare_ok=false
-        break
-      fi
-    done < <(git --git-dir="$bare" for-each-ref --format='%(objectname)' 2>/dev/null || echo "UNREADABLE")
-    if [[ "$bare_ok" != true ]]; then REPO_REASON="bare-repo:$bare"; return; fi
-  fi
+  if bare="$(find_bare_repo "$task")"; then REPO_REASON="bare-repo:$bare"; return; fi
   local gits=() gl
   gl="$(mktemp -t dm-codexdocs.XXXXXX)" || { REPO_REASON="mktemp-failed"; return; }
-  /usr/bin/find "$task" \( -name .venv -o -name venv -o -name node_modules -o -name Pods -o -name DerivedData -o -name Build -o -name __pycache__ \) -prune -o -name .git -prune -print0 >"$gl" 2>/dev/null || { rm -f "$gl"; REPO_REASON="find-failed"; return; }
+  /usr/bin/find "$task" -name .git -prune -print0 >"$gl" 2>/dev/null || { rm -f "$gl"; REPO_REASON="find-failed"; return; }
   while IFS= read -r -d '' g; do gits+=("$g"); done <"$gl"
   rm -f "$gl"
   for g in ${gits[@]+"${gits[@]}"}; do
     repo="$(dirname "$g")"
     git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { REPO_REASON="git-unreadable:$repo"; return; }
     local st
-    st="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" \
+    st="$(git -C "$repo" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" \
       || { REPO_REASON="git-status-failed:$repo"; return; }
-    if [[ -n "$st" ]]; then
-      st="$(grep -vE '^\?\? (\.advice-review-documents|\.husky/_)(/.*)?$' <<<"$st" || true)"
-    fi
     [[ -z "$st" ]] || { REPO_REASON="dirty:$repo"; return; }
     if has_hidden_state "$repo"; then REPO_REASON="hidden-state:$repo"; return; fi
     if has_ignored_user_data "$repo"; then REPO_REASON="ignored-user-data:$repo"; return; fi
-    local unpushed rargs=() verified_via_canon=false matched_canon_repo="" head_oid canon_repo
+    local unpushed rargs=()
     while IFS= read -r line; do rargs+=("$line"); done < <(eligible_remote_args "$repo")
-    head_oid="$(git -C "$repo" rev-parse --verify -q HEAD 2>/dev/null || true)"
-    if [[ -z "$head_oid" && -z "$(git -C "$repo" rev-list --all -n 1 2>/dev/null)" ]]; then
-      verified_via_canon=true
-    elif [[ -n "$head_oid" ]]; then
-      for canon_repo in "$HOME/projects/worldarchitect.ai" "$HOME/project_worldai_frontend/worldai_frontend" "$HOME/project_worldaiclaw/worldai_claw" "$HOME/.hermes" "$HOME/roadmap" "$HOME/projects_other/worktree_dropbox" "$HOME/projects/user_scope" "$HOME/projects_other/user_scope" "$HOME/llm_wiki"; do
-        if [[ -d "$canon_repo/.git" ]] && GIT_NO_LAZY_FETCH=1 git -C "$canon_repo" cat-file -e "${head_oid}^{commit}" 2>/dev/null; then
-          verified_via_canon=true
-          matched_canon_repo="$canon_repo"
-          break
-        fi
-      done
-    fi
-    if [[ "$verified_via_canon" != true ]]; then
-      unpushed="$(git -C "$repo" rev-list -n1 HEAD --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
-        || { REPO_REASON="head-unreadable:$repo"; return; }
-      [[ -z "$unpushed" ]] || { REPO_REASON="unpushed-head:$repo"; return; }
-    fi
+    unpushed="$(git -C "$repo" rev-list -n1 HEAD --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
+      || { REPO_REASON="head-unreadable:$repo"; return; }
+    [[ -z "$unpushed" ]] || { REPO_REASON="unpushed-head:$repo"; return; }
     gd="$(git_dir_of "$repo" --git-dir)" || { REPO_REASON="git-dir-unreadable:$repo"; return; }
     common="$(git_dir_of "$repo" --git-common-dir)" || { REPO_REASON="git-dir-unreadable:$repo"; return; }
     if [[ "$gd" != "$common" ]]; then
@@ -398,20 +364,9 @@ check_repos() {
     else
       # Standalone repo (deleted whole): no local-only branch, stash, or outside worktree.
       local lb ext
-      if [[ "$verified_via_canon" == true && -n "$matched_canon_repo" ]]; then
-        local ref_oid
-        while IFS= read -r ref_oid; do
-          [[ -z "$ref_oid" ]] && continue
-          if ! GIT_NO_LAZY_FETCH=1 git -C "$matched_canon_repo" cat-file -e "${ref_oid}^{commit}" 2>/dev/null; then
-            REPO_REASON="unpushed-refs:$repo"
-            return
-          fi
-        done < <(git -C "$repo" for-each-ref --format='%(objectname)' refs/heads refs/stash 2>/dev/null)
-      elif [[ "$verified_via_canon" != true ]]; then
-        lb="$(git -C "$repo" rev-list -n1 --all --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
-          || { REPO_REASON="refs-unreadable:$repo"; return; }
-        [[ -z "$lb" ]] || { REPO_REASON="unpushed-refs:$repo"; return; }
-      fi
+      lb="$(git -C "$repo" rev-list -n1 --all --not ${rargs[@]+"${rargs[@]}"} 2>/dev/null)" \
+        || { REPO_REASON="refs-unreadable:$repo"; return; }
+      [[ -z "$lb" ]] || { REPO_REASON="unpushed-refs:$repo"; return; }
       if [[ -d "$g" ]]; then
         wts="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || { REPO_REASON="worktree-list-failed:$repo"; return; }
         ext="$(sed -n 's/^worktree //p' <<<"$wts" | tail -n +2 | R="$task" awk 'index($0, ENVIRON["R"] "/") != 1')"
