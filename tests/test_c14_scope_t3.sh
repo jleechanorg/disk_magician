@@ -155,6 +155,35 @@ assert_eq "$(verdict "$PT/parent-own/wt")" remove \
     "default C14 frees an owner-null linked worktree (2026-10-20 relax)"
 assert_eq "$(verdict_t3 "$PT/parent-own/wt")" remove \
     "T3 frees the exact candidate worktree's own owner-null lease"
+# 2026-10-20 relax guards: idle floor is max(caller floor, 60 min); AO paths and an
+# unreadable AO config fail closed; unpushed/dirty keep.
+assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 300)" kept:recent-activity \
+    "owner-null relax honors a caller idle floor above the tree's idle time"
+assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" remove \
+    "owner-null relax with a sub-60 caller floor still frees a 120-minute-idle tree"
+age "$PT/parent-own/wt" 45
+assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" kept:recent-activity \
+    "owner-null relax never goes below the 60-minute floor (45 min idle kept)"
+age "$PT/parent-own/wt" 120
+git -C "$PT/parent-own/wt" commit -q --allow-empty -m unpushed && age "$PT/parent-own/wt" 120
+assert_eq "$(verdict "$PT/parent-own/wt")" kept:not-pushed "owner-null relax keeps an unpushed worktree"
+git -C "$PT/parent-own/wt" push -q origin wtown && age "$PT/parent-own/wt" 120
+printf 'u\n' >"$PT/parent-own/wt/untracked.txt" && age "$PT/parent-own/wt" 120
+assert_eq "$(verdict "$PT/parent-own/wt")" kept:dirty "owner-null relax keeps a dirty worktree"
+rm -f "$PT/parent-own/wt/untracked.txt"; age "$PT/parent-own/wt" 120
+printf 'worktreeDir: [unterminated\n' >"$TMP/ao-bad.yaml"
+assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-bad.yaml" verdict "$PT/parent-own/wt")" kept:ao-config-unreadable \
+    "AO config present but unparseable: owner-null relax fails closed"
+assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-missing.yaml" verdict "$PT/parent-own/wt")" kept:ao-config-unreadable \
+    "AO config explicitly named but unreadable: owner-null relax fails closed"
+mkdir -p "$PT/aodir"
+printf 'projects:\n  proj:\n    path: /nonexistent/proj\n    worktreeDir: "%s/aodir"\n' "$PT" >"$TMP/ao-ok.yaml"
+wt_add "$PT/aodir/aowt" aowt || { echo "FATAL: ao worktree add failed" >&2; exit 2; }
+null_lease "$PT/aodir/aowt"; age "$PT/aodir/aowt" 120
+assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-ok.yaml" verdict "$PT/aodir/aowt")" kept:ao-owned \
+    "worktree under a configured AO worktreeDir stays protected from the owner-null relax"
+assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-ok.yaml" verdict "$PT/parent-own/wt")" remove \
+    "worktree outside the configured AO dir is still freed"
 # Consume the actual inventory through WRH; a verdict alone cannot prove removal.
 t3_inv="$TMP/t3-inventory.json"
 assert_eq "$(verdict_t3 "$PT/parent-own/wt" --inventory-out "$t3_inv")" remove "T3 publishes the removal inventory"

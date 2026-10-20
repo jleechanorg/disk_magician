@@ -204,7 +204,7 @@ wrh_remove_now() {
     fi
     [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
-    deletion_log_removal "$real" "$dkb" remove_worktree
+    deletion_log_removal "$real" "$dkb" remove_worktree "${WRH_RECENCY_SPEC:+recency=$WRH_RECENCY_SPEC}"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
             wrh_log "kept branch $branch: checked out elsewhere"
@@ -221,7 +221,7 @@ wrh_remove_now() {
 }
 
 wrh_main() {
-    local p main real verdict inv wrh_c14_verdict
+    local p main real verdict inv wrh_c14_verdict min_idle
     p="$(python3 -c '
 import json, sys
 try:
@@ -244,6 +244,9 @@ print(v)
        [[ "$env_spec" =~ ^minutes:([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
         recency_spec="$env_spec"
     fi
+    [[ "$recency_spec" == days:* ]] && min_idle=$(( ${recency_spec#days:} * 1440 )) || min_idle=${recency_spec#minutes:}
+    WRH_RECENCY_SPEC=$recency_spec
+    [[ "$recency_spec" == days:7 ]] || wrh_log "recency override active: $recency_spec ($p)"
     verdict="$(wrh_removal_verdict "$real" "$recency_spec")"
     case "$verdict" in
         remove) ;;
@@ -266,7 +269,7 @@ print(v)
     # remover. No second verdict, no unguarded git removal.
     declare -F artifact_removal_verdict >/dev/null 2>&1 || { wrh_log "kept $p: C14 unavailable"; return 0; }
     inv="$(mktemp "${TMPDIR:-/tmp}/wrh-c14-inventory.XXXXXX")" || { wrh_log "kept $p: inventory allocation failed"; return 0; }
-    wrh_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
+    wrh_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$min_idle" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
     if [[ "$wrh_c14_verdict" != remove ]]; then
         rm -f -- "$inv" 2>/dev/null
         wrh_log "kept $p: ${wrh_c14_verdict#kept:}"

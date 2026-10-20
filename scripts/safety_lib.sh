@@ -177,11 +177,11 @@ sandbox_guard_roots() {
 # inside their own fixture root) via DISK_MAGICIAN_DELETION_LOG. Best-effort:
 # a log-write failure never blocks or fails the caller's cleanup.
 deletion_log() {
-  local script="$1" action="$2" kb="$3" path="$4"
+  local script="$1" action="$2" kb="$3" path="$4" note="${5:-}"
   local log_path="${DISK_MAGICIAN_DELETION_LOG:-$HOME/Library/Logs/disk-magician-deletions.log}"
   mkdir -p "$(dirname "$log_path")" 2>/dev/null || true
   printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$script" "$action" "$kb" "$path" \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$script" "$action" "$kb" "$path${note:+$'\t'$note}" \
     >>"$log_path" 2>/dev/null || true
 }
 
@@ -202,11 +202,11 @@ deletion_size_kb() {
   [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo -1
 }
 
-# deletion_log_removal <path> <kb> [action] — one deletion_log line, honoring
-# the DM_DELETION_LOGGED=1 caller guard.
+# deletion_log_removal <path> <kb> [action] [note] — one deletion_log line
+# (optional note = extra tab field), honoring the DM_DELETION_LOGGED=1 guard.
 deletion_log_removal() {
   [[ "${DM_DELETION_LOGGED:-}" == 1 ]] && return 0
-  deletion_log "${DM_ACTUATOR:-$(basename "$0")}" "${3:-remove}" "$2" "$1"
+  deletion_log "${DM_ACTUATOR:-$(basename "$0")}" "${3:-remove}" "$2" "$1" "${4:-}"
 }
 
 # rm_logged <path> — `rm -rf` one path (callers keep their own safety gates);

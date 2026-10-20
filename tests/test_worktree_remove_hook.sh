@@ -492,6 +492,27 @@ printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes
 printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:1 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
 [[ -d "$WTROOT/ovr1" ]] && ok "days:1 override ignored (below 7)" || bad "days:1 override lowered the floor"
 
+echo "== case 29c: default (no env) protects a 61-minute-old worktree; minutes:60 override removes it and logs the spec =="
+add_wt ovr2 worktree-ovr2
+age_wt_minutes() { python3 - "$1" "$2" <<'AGEMIN'
+import os, sys, time
+old = time.time() - int(sys.argv[2]) * 60
+for base, dirs, files in os.walk(sys.argv[1]):
+    for name in dirs + files:
+        try: os.utime(os.path.join(base, name), (old, old), follow_symlinks=False)
+        except OSError: pass
+os.utime(sys.argv[1], (old, old))
+AGEMIN
+}
+age_wt_minutes "$WTROOT/ovr2" 61
+DLOG="$TMPROOT/ovr-deletions.log"
+printf '%s' "$(json "$WTROOT/ovr2")" | DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
+[[ -d "$WTROOT/ovr2" ]] && ok "default floor keeps a 61-minute-old worktree" || bad "default floor removed a 61-minute-old worktree"
+printf '%s' "$(json "$WTROOT/ovr2")" | DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:60 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
+[[ ! -e "$WTROOT/ovr2" ]] && ok "minutes:60 override removes a 61-minute-old clean pushed worktree" || bad "minutes:60 override did not remove it"
+grep -q "remove_worktree.*ovr2.*recency=minutes:60" "$DLOG" 2>/dev/null && ok "deletion log records the effective recency spec" || bad "deletion log lacks recency=minutes:60"
+tail -n 3 "$LOG" | grep -q "recency override active: minutes:60" && ok "override logged to hook log" || bad "override not logged to hook log"
+
 echo "== case 30: unmeasurable recency fails closed =="
 add_wt unknown worktree-unknown
 cat >"$MOCK_BIN/find" <<'FINDFAIL'

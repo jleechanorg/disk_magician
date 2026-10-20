@@ -382,16 +382,32 @@ _av_os_clone_proof() {
         "${parent_id##*:}" == "$uid" && "${root_id##*:}" == "$uid" ]]
 }
 
+# _av_owner_null_relax_reason <worktree> <inventory> <min_idle_minutes>
+# Prints nothing when a linked worktree's own owner-null lease may be freed
+# without the T3 flag; otherwise kept:<token>. The idle floor is never below 60.
+_av_owner_null_relax_reason() {
+    local p=$1 inv=$2 min=${3:-0} ao status newest
+    (( min >= 60 )) || min=60
+    declare -F wrh_ao_skip_reason >/dev/null 2>&1 || { echo kept:ao-config-unreadable; return; }
+    ao="$(wrh_ao_skip_reason "$p")"
+    [[ -z "$ao" ]] || { echo "kept:$ao"; return; }
+    status="$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null)" || { echo kept:git-status-failed; return; }
+    [[ -z "$status" ]] || { echo kept:dirty; return; }
+    [[ -n "$(git -C "$p" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] || { echo kept:not-pushed; return; }
+    newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return; }
+    (( $(date +%s) - newest >= min * 60 )) || echo kept:recent-activity
+}
+
 # artifact_removal_verdict <path> [...] | --self-test
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --t3-owner-null) t3_owner_null=1; shift ;;
-            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim)
+            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim|--min-idle-minutes)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
                     --kind) kind=$2 ;;
@@ -401,6 +417,7 @@ _av_artifact_removal_verdict() (
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
                     --own-reuse-claim) own_claim=$2 ;;
+                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
@@ -463,14 +480,17 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
 try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
 except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 # 2026-10-20 operator decision: a linked worktree's own owner-null
-                # lease no longer needs the T3 flag. Every other gate below (clean,
-                # pushed, no live cwd/open file, secrets, recent activity) still
-                # runs; AO-managed trees stay kept here.
-                if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" && "$p" != *ao/data/worktrees/* ]]; then
-                    continue
+                # lease no longer needs the T3 flag, but only when it is outside AO
+                # (configured dirs, fail closed on an unreadable config), clean,
+                # pushed, and idle >= max(caller floor, 60 min). Live cwd, open
+                # file, secret and mtime gates below still run.
+                relax_reason=kept:owner-unknown
+                if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" ]]; then
+                    relax_reason="$(_av_owner_null_relax_reason "$p" "$inv" "$min_idle")"
+                    [[ -n "$relax_reason" ]] || continue
                 fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
-                    echo kept:owner-unknown; return 0
+                    echo "$relax_reason"; return 0
                 fi ;;
             alive*) echo kept:live-owner; return 0 ;;
             *) echo kept:owner-unknown; return 0 ;;

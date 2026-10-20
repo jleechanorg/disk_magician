@@ -236,7 +236,17 @@ main or matches a gh-verified MERGED PR head (bead `ueh`); no live process has
 a cwd inside it; it is not locked; and it is not under an AO worktreeDir
 (`*ao/data/worktrees/*` or the AO config, which, if present, must be readable). Any
 unknown keeps it protected. `DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS` may
-raise the 3, clamped to [3,7]; nothing else may lower the 7-day floor.
+raise the 3, clamped to [3,7]; nothing else may lower the 7-day floor, apart from the override below.
+
+**Sole override to the floor (user decision 2026-10-20, "remove the overly strict
+gate"):** `scripts/worktree_remove_hook.sh` (and nothing else) accepts the env-only
+opt-in `DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N` (N >= 7) or `minutes:N` (N >= 60).
+Anything lower or malformed falls back to the default `days:7`. It applies only to a
+clean, pushed, non-live-cwd, non-AO linked worktree, and the owner-null lease relax in
+`artifact_removal_verdict` requires clean + pushed + non-AO + idle >= max(caller
+floor, 60 min), failing closed on an unreadable AO config. An active override is
+written to `worktree_guard.log` and to the deletion-log line (`recency=<spec>`).
+No config file, flag, or other script may lower the floor this way.
 
 **Measure recency, never proxy it.** The only sanctioned implementation is
 `worktree_age_days` / `worktree_is_recently_active` from

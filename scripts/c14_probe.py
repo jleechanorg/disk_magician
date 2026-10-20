@@ -944,8 +944,8 @@ def _never(n):
 
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
-    Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped name is not a
-    never-exempt name; .h/.hpp/.pyc/.so/.a/.dylib under a dependency dir (.pyc also in
+    Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped stem is not
+    secret-named (e.g. credentials.map: only under a dependency dir); .h/.hpp/.pyc/.so/.a/.dylib under a dependency dir (.pyc also in
     __pycache__); or a source extension under a dependency dir. .env*, id_*, *.pem/key/p12/pfx,
     .npmrc, .netrc are exempt only as templates. Everything else stays secret-like."""
     parts = path.split("/")
@@ -955,14 +955,15 @@ def exempt_name(path):
     if _never(n):
         return False
     comps = {c.lower() for c in parts[:-1]}
+    dep = bool(_DEP_DIRS & comps)
     stripped = n
     while stripped.endswith((".map", ".d.ts")):
         stripped = stripped[: -4 if stripped.endswith(".map") else -5]
+    if n.endswith(".json.schema") and stripped == n:
+        stripped = n[: -len(".json.schema")]
     if stripped != n:
-        return not _never(stripped)
-    if n.endswith(".json.schema"):
-        return True
-    dep = bool(_DEP_DIRS & comps)
+        # A stem that is itself secret-named (credentials, secrets, ...) is exempt only under a dependency dir.
+        return not _never(stripped) and (dep or not SECRET_RE.fullmatch(stripped))
     if n.endswith(_NATIVE):
         return dep or (n.endswith(".pyc") and "__pycache__" in comps)
     return dep and "." in n and n.rpartition(".")[2] in _SRC_EXTS
