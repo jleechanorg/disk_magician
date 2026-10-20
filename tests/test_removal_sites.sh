@@ -1231,6 +1231,48 @@ else:
     print("PASS T11-14 cleanup_tmp/scratch_budget route through C14")
 
 print()
+print("=== T18 deletion-log coverage ===")
+# Every sanctioned guard / removal entry point must log through deletion_log_removal
+# (directly, or by delegating to a primitive that does); every delegated command's
+# script must log; exemptions must carry a rationale. A new guard or delegated tool
+# without a logging route fails here.
+def _read(rel):
+    return open(os.path.join(ROOT, rel), encoding="utf-8").read()
+LOGGING_PRIMITIVES = {
+    "quarantine_remove": (_read("scripts/lib/quarantine.sh"), "deletion_log_removal"),
+    "wrh_remove_now": (_read("scripts/worktree_remove_hook.sh"), "deletion_log_removal"),
+    "scratch_budget_quarantine_remove": (budget_src, "quarantine_remove"),  # delegates
+}
+# artifact_removal_verdict only decides; it deletes nothing.
+VERDICT_ONLY = ("artifact_removal_verdict",)
+DELEGATED_LOG_FILES = {
+    "uv cache prune --force": "scripts/cleanup_uv_cache.sh",
+    "pnpm store prune": "scripts/cleanup_dev_caches.sh",
+}
+t18_fail = []
+for g in SANCTIONED + REMOVAL_ENTRY:
+    if g in VERDICT_ONLY:
+        continue
+    if g not in LOGGING_PRIMITIVES:
+        t18_fail.append(f"{g}: not a logging primitive and not allow-listed")
+        continue
+    src, needle = LOGGING_PRIMITIVES[g]
+    if needle not in _body(src, g):
+        t18_fail.append(f"{g}: body lacks {needle}")
+for cmd in DELEGATED_CMDS:
+    rel = DELEGATED_LOG_FILES.get(cmd)
+    if not rel or "deletion_log_removal" not in _read(rel):
+        t18_fail.append(f"delegated '{cmd}': script does not log its reclaim")
+for key, why in EXEMPT_SITES.items():
+    if not why.strip():
+        t18_fail.append(f"exempt {key}: empty rationale")
+if t18_fail:
+    failures += len(t18_fail)
+    print(f"FAIL T18 deletion-log coverage gaps: {t18_fail}")
+else:
+    print("PASS T18 every guard/entry/delegated site logs or is allow-listed with a reason")
+
+print()
 print(f"self-test failures: {failures}")
 print(f"closure files: {len(closure)}")
 print(f"dependency failures: {len(dep_failures)}")
