@@ -1,0 +1,37 @@
+#!/usr/bin/python3 -I
+"""diskm-cwd-scan: read-only root helper for the Linux live-cwd gate.
+
+Prints one NUL-terminated record per process, `<pid>\t<uid>\t<cwd>\0`, from
+/proc/<pid>/cwd. Takes no arguments and reads nothing else, so what it can do
+as root is exactly: readlink /proc/<pid>/cwd and stat /proc/<pid>. A process
+that exits mid-scan is skipped; any other error exits non-zero with no output.
+"""
+import os
+import sys
+
+
+def main():
+    if len(sys.argv) != 1:
+        sys.exit("diskm-cwd-scan: takes no arguments")
+    records = []
+    for name in os.listdir(b"/proc"):
+        if not name.isdigit():
+            continue
+        proc = b"/proc/" + name
+        try:
+            uid = os.stat(proc).st_uid
+            cwd = os.readlink(proc + b"/cwd")
+        except FileNotFoundError:
+            continue  # exited (or a zombie): holds no cwd
+        records.append(name + b"\t" + str(uid).encode() + b"\t" + cwd + b"\0")
+    if not records:
+        sys.exit("diskm-cwd-scan: no processes found")
+    sys.stdout.buffer.write(b"".join(records))
+    sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except OSError as exc:
+        sys.exit("diskm-cwd-scan: %s" % exc)

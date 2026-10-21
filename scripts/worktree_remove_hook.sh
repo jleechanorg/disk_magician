@@ -34,7 +34,6 @@ wrh_log() {
 wrh_live_cwd_reason() {
     local target=$1 out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
     WRH_LIVE_CWD_REASON=
-    command -v lsof >/dev/null 2>&1 || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     if [[ ${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-} =~ ^[0-9]+$ ]]; then
         ancestry=$(ps -Ao pid=,ppid= 2>/dev/null | awk -v start="$$" -v wanted="$DISK_MAGICIAN_LIFECYCLE_PARENT_PID" '
             { parent[$1] = $2 }
@@ -46,20 +45,29 @@ wrh_live_cwd_reason() {
         if [[ -n $ancestry ]]; then caller_chain=" $$ $ancestry "; caller_pid=$DISK_MAGICIAN_LIFECYCLE_PARENT_PID
         else caller_chain=" $$ $PPID "; fi
     fi
-    err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     cd / || { wrh_log "cwd-unknown: cannot change directory"; return; }
-    # -Fpn keeps the pid so this hook can exclude its own ancestry; the parsing
-    # itself is the shared strict parser, never a local reimplementation.
-    out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
-    # A failed stderr read is NOT an empty stderr: it means the diagnostics are
-    # unknown, which must fail closed just like a non-empty read would.
-    if ! err_text="$(cat "$err" 2>/dev/null)"; then
-        [[ -e $err ]] && rm -f "$err"
-        WRH_LIVE_CWD_REASON=cwd-unknown; return
+    local srv=0
+    lsof_scanner_fpn || srv=$?
+    [[ $srv != 2 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+    if [[ $srv == 0 ]]; then
+        # Root scanner gave a complete pid->cwd map (no lsof, no stderr to judge).
+        out=$LSOF_SCANNER_OUT
+    else
+        command -v lsof >/dev/null 2>&1 || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+        err=$(mktemp -t disk-magician-worktree-remove.XXXXXX 2>/dev/null) || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+        # -Fpn keeps the pid so this hook can exclude its own ancestry; the parsing
+        # itself is the shared strict parser, never a local reimplementation.
+        out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
+        # A failed stderr read is NOT an empty stderr: it means the diagnostics are
+        # unknown, which must fail closed just like a non-empty read would.
+        if ! err_text="$(cat "$err" 2>/dev/null)"; then
+            [[ -e $err ]] && rm -f "$err"
+            WRH_LIVE_CWD_REASON=cwd-unknown; return
+        fi
+        [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
+        [[ $rc == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
+        lsof_stderr_incomplete "$err_text" && { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     fi
-    [[ -z $err ]] || { [[ -e $err ]] && rm -f "$err"; }
-    [[ $rc == 0 ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
-    lsof_stderr_incomplete "$err_text" && { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     blocks="$(lsof_cwd_blocks <<<"$out")" || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
     while IFS='|' read -r pid status path; do
         [[ -n $pid ]] || { WRH_LIVE_CWD_REASON=cwd-unknown; return; }
