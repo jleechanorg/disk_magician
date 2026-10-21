@@ -125,6 +125,8 @@ echo "Test 2: disk_audit.sh clean --dry-run skips opt-in cleanup classes"
 AUDIT_FIXTURE="$TMP_ROOT/audit-fixture"
 mkdir -p "$AUDIT_FIXTURE/scripts"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE/scripts/disk_audit.sh"
+mkdir -p "$AUDIT_FIXTURE/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$AUDIT_FIXTURE/scripts/lib/degraded_gate.sh"
 chmod +x "$AUDIT_FIXTURE/scripts/disk_audit.sh"
 for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_llm_inspector.sh cleanup_supervisor_logs.sh; do
   cat > "$AUDIT_FIXTURE/scripts/$child" <<EOF
@@ -161,6 +163,8 @@ echo "Test 4: disk_audit.sh clean-all --dry-run skips sessions by default"
 AUDIT_FIXTURE_ALL="$TMP_ROOT/audit-fixture-clean-all"
 mkdir -p "$AUDIT_FIXTURE_ALL/scripts"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_ALL/scripts/disk_audit.sh"
+mkdir -p "$AUDIT_FIXTURE_ALL/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$AUDIT_FIXTURE_ALL/scripts/lib/degraded_gate.sh"
 chmod +x "$AUDIT_FIXTURE_ALL/scripts/disk_audit.sh"
 for child in cleanup_tmp.sh cleanup_apfs_snapshots.sh cleanup_docker.sh cleanup_ollama.sh cleanup_xcode.sh; do
   cat > "$AUDIT_FIXTURE_ALL/scripts/$child" <<EOF
@@ -1085,6 +1089,8 @@ echo "Test 11: disk_audit.sh clean --dry-run attempts and reports all non-gated 
 AUDIT_FIXTURE_A7="$TMP_ROOT/audit-fixture-all-categories"
 mkdir -p "$AUDIT_FIXTURE_A7/scripts"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_A7/scripts/disk_audit.sh"
+mkdir -p "$AUDIT_FIXTURE_A7/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$AUDIT_FIXTURE_A7/scripts/lib/degraded_gate.sh"
 chmod +x "$AUDIT_FIXTURE_A7/scripts/disk_audit.sh"
 for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_llm_inspector.sh cleanup_supervisor_logs.sh post_job_docker_prune.sh; do
   cat > "$AUDIT_FIXTURE_A7/scripts/$child" <<EOF
@@ -1121,6 +1127,8 @@ echo "Test 12: disk_audit.sh surfaces a failing category instead of silently swa
 AUDIT_FIXTURE_A8="$TMP_ROOT/audit-fixture-failing-category"
 mkdir -p "$AUDIT_FIXTURE_A8/scripts"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_A8/scripts/disk_audit.sh"
+mkdir -p "$AUDIT_FIXTURE_A8/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$AUDIT_FIXTURE_A8/scripts/lib/degraded_gate.sh"
 chmod +x "$AUDIT_FIXTURE_A8/scripts/disk_audit.sh"
 for child in cleanup_dev_caches.sh cleanup_tmp.sh cleanup_supervisor_logs.sh; do
   cat > "$AUDIT_FIXTURE_A8/scripts/$child" <<EOF
@@ -1232,6 +1240,8 @@ echo "Test 14: disk_audit.sh wires Dark Factory cleanup with AGENT_ARTIFACTS_APP
 AUDIT_FIXTURE_DF="$TMP_ROOT/audit-fixture-df"
 mkdir -p "$AUDIT_FIXTURE_DF/scripts"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh"
+mkdir -p "$AUDIT_FIXTURE_DF/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$AUDIT_FIXTURE_DF/scripts/lib/degraded_gate.sh"
 chmod +x "$AUDIT_FIXTURE_DF/scripts/disk_audit.sh"
 cat > "$AUDIT_FIXTURE_DF/scripts/cleanup_dark_factory.sh" <<'EOF'
 #!/usr/bin/env bash
