@@ -130,13 +130,13 @@ for session_dir in "${AO_SESSIONS_DIR}"/*/; do
     if ! _safety_reason="$(safety_gate "$session_dir" 2>/dev/null)"; then
       echo "SAFETY-SKIP "$session_dir" ($_safety_reason)"
     else
-      rm -rf "$session_dir"
+      rm_logged "$session_dir"
     fi
     if [[ -d "$session_tmp" ]]; then
       if ! _safety_reason="$(safety_gate "$session_tmp" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$session_tmp" ($_safety_reason)"
       else
-        rm -rf "$session_tmp"
+        rm_logged "$session_tmp"
       fi
     fi
     log "  DELETED $sid (freed ${total_session_gb} GB)"
@@ -188,7 +188,7 @@ else
       if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$entry" ($_safety_reason)"
       else
-        rm -rf "$entry"
+        rm_logged "$entry"
       fi
     fi
     cron_pruned=$(( cron_pruned + 1 ))
@@ -241,7 +241,7 @@ else
       if ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$entry" ($_safety_reason)"
       else
-        rm -f "$entry"
+        rm_logged "$entry"
       fi
     fi
     sess_pruned=$(( sess_pruned + 1 ))

@@ -101,7 +101,7 @@ size_of() {
 
 mtime_epoch_of() {
   local path="$1"
-  stat -f '%m' "$path" 2>/dev/null || echo 0
+  stat -c '%Y' "$path" 2>/dev/null || stat -f '%m' "$path" 2>/dev/null || echo 0
 }
 
 expand_path() {
@@ -129,13 +129,16 @@ clear_dir_contents() {
       if worktree_has_unsaved_work "$child"; then
         continue
       fi
-      rm -rf "$child" 2>/dev/null || true
+      rm_logged "$child" 2>/dev/null || true
     done
     rmdir "$path" 2>/dev/null || true
     return 0
   fi
+  local dkb; dkb="$(deletion_size_kb "$path")"
   find "$path" -depth -mindepth 1 -delete 2>/dev/null || true
   rmdir "$path" 2>/dev/null || true
+  [[ -z "$(ls -A "$path" 2>/dev/null)" ]] && deletion_log_removal "$path" "$dkb" empty
+  return 0
 }
 
 gate_check() {

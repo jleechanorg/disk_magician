@@ -202,3 +202,13 @@ $HOME/.config	decision:check_uncovered_roots.py	Mixed config parent; individual 
 $HOME/.local/share	decision:check_uncovered_roots.py	Mixed app-data parent; uv/uv-tool children already have sweepers
 $HOME/.nvm/versions/node/v22.22.0/lib/node_modules	decision:check_uncovered_roots.py	Active Node runtime modules; reclaim means changing the active NVM version
 $HOME/projects_other	decision:check_uncovered_roots.py	Mixed parent with never_delete children; per-repo review only
+$HOME/.dd_pr60	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 0.67 GiB, 1 deletions
+$HOME/.local/state/pr10045-review-61ioinyb	cleanup_pr_scratch.sh	recorded-cleaned 2026-10-20, 0.61 GiB, 1 deletions
+$HOME/.local/state/pr10053-merge-cgpg84ht	cleanup_pr_scratch.sh	recorded-cleaned 2026-10-20, 1.09 GiB, 1 deletions
+$HOME/.local/state/worldarchitect-evidence	cleanup_pr_scratch.sh	recorded-cleaned 2026-10-20, 0.68 GiB, 2 deletions
+$HOME/.peekaboo	cleanup_dev_caches.sh	recorded-cleaned 2026-10-20, 0.79 GiB, 2346 deletions
+$HOME/dd_pr115_mock	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.9 GiB, 1 deletions
+$HOME/dd_pr115_rel	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.93 GiB, 1 deletions
+$HOME/wf_cache_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.88 GiB, 1 deletions
+$HOME/wf_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.89 GiB, 1 deletions
+$HOME/wf_ipad_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.88 GiB, 1 deletions

@@ -177,12 +177,47 @@ sandbox_guard_roots() {
 # inside their own fixture root) via DISK_MAGICIAN_DELETION_LOG. Best-effort:
 # a log-write failure never blocks or fails the caller's cleanup.
 deletion_log() {
-  local script="$1" action="$2" kb="$3" path="$4"
+  local script="$1" action="$2" kb="$3" path="$4" note="${5:-}"
   local log_path="${DISK_MAGICIAN_DELETION_LOG:-$HOME/Library/Logs/disk-magician-deletions.log}"
   mkdir -p "$(dirname "$log_path")" 2>/dev/null || true
   printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$script" "$action" "$kb" "$path" \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$script" "$action" "$kb" "$path${note:+$'\t'$note}" \
     >>"$log_path" 2>/dev/null || true
+}
+
+# --- Central deletion logging (bead: deletion-log-is-the-reclaim-list) -------
+# Removal PRIMITIVES (quarantine_remove, wrh_remove_now, strip_dir, rm_logged,
+# ...) call these after a SUCCESSFUL removal so every deleter feeds the same
+# log. Actuator name: ${DM_ACTUATOR:-$(basename "$0")}. A caller that already
+# logs the same path itself with richer detail sets DM_DELETION_LOGGED=1 on
+# that one call (`DM_DELETION_LOGGED=1 c14_remove ...`) so the line appears once.
+
+# deletion_size_kb <path> — size probe taken BEFORE removal; prints 0 when the
+# caller logs (no probe needed), -1 when unknown or du exceeds the cap
+# (DM_DELETION_SIZE_TIMEOUT seconds, default 20; never an unbounded du).
+deletion_size_kb() {
+  [[ "${DM_DELETION_LOGGED:-}" == 1 ]] && { echo 0; return 0; }
+  local out
+  out="$(perl -e 'alarm shift; exec @ARGV' "${DM_DELETION_SIZE_TIMEOUT:-20}" du -sk "$1" 2>/dev/null | awk '{print $1; exit}')" || out=""
+  [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo -1
+}
+
+# deletion_log_removal <path> <kb> [action] [note] — one deletion_log line
+# (optional note = extra tab field), honoring the DM_DELETION_LOGGED=1 guard.
+deletion_log_removal() {
+  [[ "${DM_DELETION_LOGGED:-}" == 1 ]] && return 0
+  deletion_log "${DM_ACTUATOR:-$(basename "$0")}" "${3:-remove}" "$2" "$1" "${4:-}"
+}
+
+# rm_logged <path> — `rm -rf` one path (callers keep their own safety gates);
+# logs only when the path is actually gone. rc follows rm.
+rm_logged() {
+  local kb rc=0
+  [[ -e "$1" || -L "$1" ]] || return 0
+  kb="$(deletion_size_kb "$1")"
+  rm -rf -- "$1" || rc=$?
+  [[ -e "$1" || -L "$1" ]] || deletion_log_removal "$1" "$kb"
+  return "$rc"
 }
 
 # findings_wiki_docs — list machine-local finding docs (fork-tracked knowledge

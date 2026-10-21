@@ -482,7 +482,7 @@ remove_path() {
       echo "SAFETY-SKIP "$path" ($_safety_reason)"
       return 0
     fi
-    result="$(scratch_budget_quarantine_remove "$path")"
+    result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$path")"
     cleanup_tmp_count_candidate_result "$result"
     if [[ "$result" == removed:* ]]; then
       deletion_log "cleanup_tmp.sh" "remove" "$kb" "$path"
@@ -846,7 +846,7 @@ has_open_files() {
             fi
 
             # Exact or slash-delimited prefix compare against canonical dir
-            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* ]]; then
+            if [[ "$norm_val" == "$canon_dir" || "$norm_val" == "$canon_dir/"* || "$val" == "$canon_dir" || "$val" == "$canon_dir/"* ]]; then
               has_open=0
               break
             fi
@@ -894,7 +894,7 @@ archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusa
   local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
   secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
     -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
+    -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! \( -name '*.pyc' \( -path '*/node_modules/*' -o -path '*/site-packages/*' -o -path '*/venv/*' -o -path '*/.venv/*' \) \) \
     -print -quit 2>/dev/null)" || secret_rc=$?
   if (( secret_rc != 0 )); then
     c14_verdict="kept:check-failed"
@@ -1057,7 +1057,7 @@ purge_archive_entry() {
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would request C14 purge for over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
     else
-      result="$(scratch_budget_quarantine_remove "$d")"
+      result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
       cleanup_tmp_count_candidate_result "$result"
       if [[ "$result" == removed:* ]]; then
         log "Purged over-cap archive after C14 approval (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
@@ -1074,7 +1074,7 @@ purge_archive_entry() {
   if [[ "$DRY_RUN" == true ]]; then
     log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
   else
-    result="$(scratch_budget_quarantine_remove "$d")"
+    result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
     cleanup_tmp_count_candidate_result "$result"
     if [[ "$result" == removed:* ]]; then
       log "Purged aged archive after C14 approval (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
@@ -1153,6 +1153,13 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     case "$(basename "$subdir")" in
       claude-*|system-*|com.apple.*|PowerlogHelperd*|_disk_magician_archive*) continue ;;
     esac
+    if [[ "$DRY_RUN" != true && -n "$USER_TMP" && "$tmp_dir" == "$USER_TMP" && -z "${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-}" ]]; then
+      if ! repo_v="$(c14_repos_ok "$subdir" "" "${ACT_DEADLINE_AT:-}" 2>/dev/null)"; then
+        log "Preserving (C14 ${repo_v:-kept:check-failed}): $subdir"
+        cleanup_tmp_count_candidate_result "${repo_v:-kept:check-failed}"
+        continue
+      fi
+    fi
 
     remove_path "$subdir"
     kb="$REMOVE_PATH_KB"
@@ -1179,7 +1186,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$f" ($_safety_reason)"
       else
-        result="$(scratch_budget_quarantine_remove "$f")"
+        result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$f")"
         cleanup_tmp_count_candidate_result "$result"
         if [[ "$result" == removed:* ]]; then
           deletion_log "cleanup_tmp.sh" "remove" "$local_kb" "$f"
@@ -1348,7 +1355,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
           if ! _safety_reason="$(safety_gate "$f" 2>/dev/null)"; then
             echo "SAFETY-SKIP "$f" ($_safety_reason)"
           else
-            dylib_remove_result="$(scratch_budget_quarantine_remove "$f")"
+            dylib_remove_result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$f")"
             cleanup_tmp_count_candidate_result "$dylib_remove_result"
             if [[ "$dylib_remove_result" == removed:* ]]; then
               deletion_log "cleanup_tmp.sh" "remove_dylib" 0 "$f"
@@ -1439,10 +1446,10 @@ large_consider_entry() {
   base="$(basename "$d")"
 
   case "$base" in
-    com.apple.*|system-*|PowerlogHelperd*) return 0 ;;
+    com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
     # Our own quarantine root — never re-archive/delete it here;
     # purge_aged_archives() below is the only thing that touches it.
-    _disk_magician_archive) return 0 ;;
+    _disk_magician_archive|.dm-quarantine) return 0 ;;
   esac
   case "$base" in
     wt_*|worktree_*)

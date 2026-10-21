@@ -113,7 +113,7 @@ c14_repo_pushed_ok() (
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
-    have="$(cut -f1 <<<"$adv" | git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
+    have="$(cut -f1 <<<"$adv" | GIT_NO_LAZY_FETCH=1 git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
     unp="$(git -C "$r" rev-list ${scope[@]+"${scope[@]}"} --stdin -n1 < <(printf '%s\n' $tips $have) 2>/dev/null)" || { echo kept:check-failed; return 1; }
     [[ -z "$unp" ]] || { echo kept:not-pushed; return 1; }
     if [[ -n "$linked" ]]; then  # linked: unreachable objects stay in the common store
@@ -242,13 +242,44 @@ _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
 _av_open_file() { python3 "$_AV_DIR/../c14_probe.py" open-file "$1" "${2:-}"; }
 # _av_secret_like <path>: rc 0 when a secret-like name (wrh patterns) is under <path> or find fails.
+# A match is NOT secret-like when c14_probe.py exempt_name (the single owner of the
+# exemption rule, shared with has_hidden_state and the inventory secrets gate) clears it,
+# or when git tracks it (already in repository history). A failed git lookup tracks
+# nothing (fail closed).
+_AV_SECRET_FILTER='
+import os, subprocess, sys
+try:
+    root, probe_dir = sys.argv[1], sys.argv[2]
+    sys.path.insert(0, probe_dir)
+    from c14_probe import exempt_name
+    cands = []
+    for p in sys.stdin.buffer.read().split(b"\0"):
+        if p and not exempt_name(os.path.relpath(os.fsdecode(p), root)):
+            cands.append(os.fsdecode(p))
+    if cands:
+        try:
+            r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, timeout=60)
+            tracked = {os.path.normpath(os.path.join(root, t)) for t in os.fsdecode(r.stdout).split("\0") if t} if r.returncode == 0 else set()
+        except Exception:
+            tracked = set()
+        cands = [c for c in cands if os.path.normpath(c) not in tracked]
+    if cands:
+        sys.exit(0)
+    print("none")
+    sys.exit(1)
+except Exception:
+    sys.exit(3)
+'
+# Only find rc 0 + filter rc 1 + stdout "none" means clean; every other outcome is secret-like.
 _av_secret_like() {
-    local out
-    out="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    local res
+    res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+        -o -iname '*.pem.map' -o -iname '*.key.map' -o -iname '*.p12.map' -o -iname '*.pfx.map' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
-        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! -name '*.pyc' ! -path '*/__pycache__/*' \
-        -print 2>/dev/null)" || return 0
-    [[ -n "$out" ]]
+        -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
+        -print0 2>/dev/null | python3 -I -c "$_AV_SECRET_FILTER" "$1" "$_AV_DIR/.." 2>/dev/null; echo " ${PIPESTATUS[*]}")"
+    [[ "$res" == $'none\n 0 1' ]] && return 1
+    return 0
 }
 # _av_lease_record_paths <path>: NUL-list the recorded path of every lease whose
 # canonical path is <path> or under it, for any filesystem kind (plain dir, plain
@@ -351,16 +382,32 @@ _av_os_clone_proof() {
         "${parent_id##*:}" == "$uid" && "${root_id##*:}" == "$uid" ]]
 }
 
+# _av_owner_null_relax_reason <worktree> <inventory> <min_idle_minutes>
+# Prints nothing when a linked worktree's own owner-null lease may be freed
+# without the T3 flag; otherwise kept:<token>. The idle floor is never below 60.
+_av_owner_null_relax_reason() {
+    local p=$1 inv=$2 min=${3:-0} ao status newest
+    (( min >= 60 )) || min=60
+    declare -F wrh_ao_skip_reason >/dev/null 2>&1 || { echo kept:ao-config-unreadable; return; }
+    ao="$(wrh_ao_skip_reason "$p")"
+    [[ -z "$ao" ]] || { echo "kept:$ao"; return; }
+    status="$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null)" || { echo kept:git-status-failed; return; }
+    [[ -z "$status" ]] || { echo kept:dirty; return; }
+    [[ -n "$(git -C "$p" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] || { echo kept:not-pushed; return; }
+    newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return; }
+    (( $(date +%s) - newest >= min * 60 )) || echo kept:recent-activity
+}
+
 # artifact_removal_verdict <path> [...] | --self-test
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --t3-owner-null) t3_owner_null=1; shift ;;
-            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim)
+            --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim|--min-idle-minutes)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
                     --kind) kind=$2 ;;
@@ -370,6 +417,7 @@ _av_artifact_removal_verdict() (
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
                     --own-reuse-claim) own_claim=$2 ;;
+                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
@@ -420,11 +468,10 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         else
             _av_owner_state="$(lease_owner_state "$q")"
         fi
-        # Owner-null leases are never globally disposable. The T3 context
-        # (--t3-owner-null, set only by cleanup_worktrees.sh's sanctioned
-        # 3-day path) may free EXACTLY the candidate worktree's own null lease
-        # after every other check; an ancestor/descendant null lease, T1, and
-        # live/unknown/malformed owners all still keep.
+        # A clean, pushed linked worktree with its own owner-null lease is freed by
+        # every caller (no T3 flag needed); the remaining guards still apply: live
+        # cwd, open files, newest-mtime floor, secrets, pushed, and AO-managed paths.
+        # An ancestor/descendant null lease and live/unknown/malformed owners keep.
         case "$_av_owner_state" in
             dead|released|own-live) ;;
             none)
@@ -432,8 +479,18 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
                 [[ "$(python3 -c 'import json,sys
 try:d=json.load(open(sys.argv[1]));print("y" if "owner" in d and d["owner"] is None and d.get("pending") is False and d.get("kind")=="scratch" and d.get("creator")=="birth-audit" else "n")
 except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
+                # 2026-10-20 operator decision: a linked worktree's own owner-null
+                # lease no longer needs the T3 flag, but only when it is outside AO
+                # (configured dirs, fail closed on an unreadable config), clean,
+                # pushed, and idle >= max(caller floor, 60 min). Live cwd, open
+                # file, secret and mtime gates below still run.
+                relax_reason=kept:owner-unknown
+                if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" ]]; then
+                    relax_reason="$(_av_owner_null_relax_reason "$p" "$inv" "$min_idle")"
+                    [[ -n "$relax_reason" ]] || continue
+                fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
-                    echo kept:owner-unknown; return 0
+                    echo "$relax_reason"; return 0
                 fi ;;
             alive*) echo kept:live-owner; return 0 ;;
             *) echo kept:owner-unknown; return 0 ;;

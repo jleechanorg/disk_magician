@@ -577,18 +577,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "case 31: credential-named bytecode under __pycache__ is not a secret"
+echo "case 31: credential-named bytecode under __pycache__ is secret-like; plain bytecode is not"
 R31="$(mk_repo r31)"
 printf '__pycache__/\n*.pyc\n.env\n' >"$R31/.gitignore"
 mkdir -p "$R31/pkg"; echo "x = 1" >"$R31/pkg/mod.py"
 g -C "$R31" add -A; g -C "$R31" commit -q -m ign
 W31="$(mk_wt "$R31" pyc31)"
 mkdir -p "$W31/pkg/__pycache__"
-echo "x" >"$W31/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
+echo "x" >"$W31/pkg/__pycache__/mod.cpython-312.pyc"
 echo "edit" >>"$W31/tracked.txt"
 backdate_tree "$W31" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
-assert_not_contains "$OUT" "ignored-secret" "bytecode name does not block"
+assert_not_contains "$OUT" "ignored-secret" "plain bytecode does not block"
 assert_true "! [[ -d '$W31' ]]" "worktree preserved+removed"
 W31B="$(mk_wt "$R31" pyc31b)"
 echo "TOKEN=1" >"$W31B/pkg_credentials.pyc"
@@ -597,6 +597,25 @@ echo "edit" >>"$W31B/tracked.txt"
 backdate_tree "$W31B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
+W31C="$(mk_wt "$R31" pyc31c)"
+mkdir -p "$W31C/pkg/__pycache__"; echo "x" >"$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
+echo "edit" >>"$W31C/tracked.txt"
+backdate_tree "$W31C" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret" "credential-named bytecode under __pycache__ blocks"
+assert_true "[[ -f '$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc' ]]" "credential bytecode kept"
+W31D="$(mk_wt "$R31" pyc31d)"
+mkdir -p "$W31D/venv/lib"; echo "x" >"$W31D/venv/lib/x_credentials.pyo"
+echo "edit" >>"$W31D/tracked.txt"
+backdate_tree "$W31D" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret:venv/lib/x_credentials.pyo" "venv credentials .pyo blocks (.pyo is exempt nowhere)"
+W31E="$(mk_wt "$R31" pyc31e)"
+mkdir -p "$W31E/venv/lib"; echo "x" >"$W31E/venv/lib/x_credentials.pyc"
+echo "edit" >>"$W31E/tracked.txt"
+backdate_tree "$W31E" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_not_contains "$OUT" "ignored-secret:venv/lib/x_credentials.pyc" "venv credentials .pyc is exempt under a dependency dir"
 assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
 
 # ---------------------------------------------------------------------------
@@ -801,12 +820,19 @@ assert_not_contains "$REFS39" "refs/heads/backup/detached" "no backup/detached-*
 assert_contains "$OUT" "unpushed-ahead" "detached ahead worktree classified unpushed-ahead"
 
 # ---------------------------------------------------------------------------
-echo "case 40: large repo (3000 files) — early mismatch/flag must not SIGPIPE-abort the run"
+echo "case 40: large repo (1000 files) — early mismatch/flag must not SIGPIPE-abort the run"
+# 1000 files, not 3000 (bead disk_magician-em4c): the lossy clean filter spawns
+# one subprocess per file, so this case cost 88s of the suite's 328s at 3000
+# files (measured). The size was never what the case proves: a `git ls-files`
+# listing here is ~15KB -- BELOW the 64KB pipe buffer -- so no tree of this
+# shape reproduces SIGPIPE, and the byte-mismatch/index-flag assertions are
+# size-independent. 1000 keeps a genuinely "many files" fixture at ~1/3 the
+# runtime while exercising the same code paths.
 R40="$(mk_repo r40)"
 mkdir -p "$R40/many"
 python3 - "$R40/many" <<'PY'
 import sys,os
-for i in range(3000): open(os.path.join(sys.argv[1],f"f{i:05d}.nb"),"w").write("cell\n")
+for i in range(1000): open(os.path.join(sys.argv[1],f"f{i:05d}.nb"),"w").write("cell\n")
 PY
 printf '*.nb filter=lossy\n' >"$R40/.gitattributes"
 g -C "$R40" add -A; g -C "$R40" commit -q -m many

@@ -22,6 +22,7 @@ source "$_WRH_DIR/lib/worktree_ignored.sh"
 # it just cannot delete the lease after removing the worktree.
 # shellcheck source=scripts/lib/worktree_lease.sh
 [[ -f "$_WRH_DIR/lib/worktree_lease.sh" ]] && source "$_WRH_DIR/lib/worktree_lease.sh"
+declare -F deletion_log_removal >/dev/null || source "$_WRH_DIR/safety_lib.sh"
 
 wrh_log() {
     local dir="$HOME/.disk_magician_state"
@@ -178,7 +179,7 @@ wrh_quarantine_capable() { return 0; }
 # absent flag preserves today's unbounded behavior. There is no unguarded
 # `git worktree remove` fallback. rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch result inv='' deadline=''
+    local real="$1" display="$2" main branch result inv='' deadline='' dkb
     shift 2
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -195,6 +196,7 @@ wrh_remove_now() {
     real="$(cd "$real" 2>/dev/null && pwd -P)" || return 1
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
+    dkb="$(deletion_size_kb "$real")"
     if [[ -n "$deadline" ]]; then
         result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv" --deadline-at "$deadline")" || return 1
     else
@@ -202,6 +204,7 @@ wrh_remove_now() {
     fi
     [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
+    deletion_log_removal "$real" "$dkb" remove_worktree "${WRH_RECENCY_SPEC:+recency=$WRH_RECENCY_SPEC}"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
             wrh_log "kept branch $branch: checked out elsewhere"
@@ -218,7 +221,7 @@ wrh_remove_now() {
 }
 
 wrh_main() {
-    local p main real verdict inv wrh_c14_verdict
+    local p main real verdict inv wrh_c14_verdict min_idle
     p="$(python3 -c '
 import json, sys
 try:
@@ -234,7 +237,25 @@ print(v)
     real="$(cd "$p" 2>/dev/null && pwd -P)" || { wrh_log "kept $p: not a directory"; return 0; }
     main="$(wtn_main_repo "$real")" || { wrh_log "kept $p: not a git repo"; return 0; }
 
-    verdict="$(wrh_removal_verdict "$real" days:7)"
+    # Idle-floor override (operator decision 2026-10-20): DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N (N>=7)
+    # or minutes:N (N>=60). Anything else, including a lower floor, falls back to days:7.
+    local recency_spec=days:7 env_spec="${DISK_MAGICIAN_REMOVE_HOOK_RECENCY:-}"
+    if [[ "$env_spec" =~ ^days:([0-9]{1,4})$ && "${BASH_REMATCH[1]}" -ge 7 ]] ||
+       [[ "$env_spec" =~ ^minutes:([0-9]{1,7})$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
+        recency_spec="$env_spec"
+    fi
+    if [[ "$recency_spec" != days:7 ]]; then
+        # Audit-first: a shorter floor is used only if its record was actually written.
+        local sdir="$HOME/.disk_magician_state"
+        if ! { mkdir -p "$sdir" && printf '%s worktree-remove-hook: recency override active: %s (%s)\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$recency_spec" "$p" >>"$sdir/worktree_guard.log"; } 2>/dev/null; then
+            echo "worktree-remove-hook: cannot record recency override $recency_spec; using days:7" >&2
+            recency_spec=days:7
+        fi
+    fi
+    [[ "$recency_spec" == days:* ]] && min_idle=$(( ${recency_spec#days:} * 1440 )) || min_idle=${recency_spec#minutes:}
+    WRH_RECENCY_SPEC=$recency_spec
+    verdict="$(wrh_removal_verdict "$real" "$recency_spec")"
     case "$verdict" in
         remove) ;;
         kept:not-registered)         wrh_log "kept $p: not a registered linked worktree"; return 0 ;;
@@ -256,7 +277,7 @@ print(v)
     # remover. No second verdict, no unguarded git removal.
     declare -F artifact_removal_verdict >/dev/null 2>&1 || { wrh_log "kept $p: C14 unavailable"; return 0; }
     inv="$(mktemp "${TMPDIR:-/tmp}/wrh-c14-inventory.XXXXXX")" || { wrh_log "kept $p: inventory allocation failed"; return 0; }
-    wrh_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
+    wrh_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$min_idle" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
     if [[ "$wrh_c14_verdict" != remove ]]; then
         rm -f -- "$inv" 2>/dev/null
         wrh_log "kept $p: ${wrh_c14_verdict#kept:}"

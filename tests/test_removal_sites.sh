@@ -97,6 +97,7 @@ LOG_FUNCS = {"ledger_line", "log", "echo", "printf", "warn",
 # tool.  Keep this list to literal, fully-named commands.
 DELEGATED_CMDS = {
     "uv cache prune --force": "delegated uv reference-tracking prune; uv owns the artifact identity",
+    "pnpm store prune": "delegated pnpm content-addressable store prune; pnpm owns unreferenced blob GC",
 }
 
 # Bounded exact-site exemptions: (file, function, kind) or (file, function, var).
@@ -154,8 +155,12 @@ EXEMPT_SITES = {
         "tool-owned reuse lock dir",
     ("worktree_lease.sh", "<toplevel>", "python-unlink"):
         "tool-owned lease temp (same-dir os.replace)",
+    ("worktree_lease.sh", "lease_prune_birth_audit_scratch", "python-unlink"):
+        "stale-lease birth-audit scratch GC; target already os.path.lexists and TTL checked",
     ("worktree_remove_hook.sh", "wrh_remove_now", "rm-file"):
         "tool-owned worktree lease record after a successful removal",
+    ("safety_lib.sh", "rm_logged", "rm-dir"):
+        "generic logging rm wrapper for the non-C14 sweepers (sessions, downloads evidence, agent artifacts); each caller runs its own safety gate and T18 asserts no SCOPE script uses it",
 }
 
 # Small set of tool-owned directory variables that are not mktemp-derived but
@@ -197,6 +202,7 @@ FIND_EXEC_RM = re.compile(r"\bfind\b(.*?)\s-exec\s+rm\b")
 GIT_PRUNE = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+worktree\s+prune\b")
 GIT_REMOVE = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+worktree\s+remove\b([^\n]*)")
 UV_PRUNE = re.compile(r"\buv\s+cache\s+prune(?:\s+--force)?\b")
+PNPM_PRUNE = re.compile(r"\bpnpm\s+store\s+prune\b")
 WRH_REMOVE = re.compile(r"\bwrh_remove_now\b(.*)")
 # rm must not match --rm / -exec rm (handled separately) or identifiers.
 RM_RE = re.compile(r"(?<![\w-])rm\s+((?:-[A-Za-z-]+\s+)*)([^;|&}\n]*)")
@@ -234,6 +240,10 @@ def detect(line, is_python=False):
     out = []
     if UV_PRUNE.search(line):
         out.append({"kind": "delegated-uv", "expr": "uv cache prune --force",
+                    "vars": []})
+        return out
+    if PNPM_PRUNE.search(line):
+        out.append({"kind": "delegated-pnpm", "expr": "pnpm store prune",
                     "vars": []})
         return out
     if GIT_PRUNE.search(line):
@@ -551,6 +561,9 @@ def classify(file_name, func_name, line, body_before, body, src_ref=None):
             continue
         if d["kind"] == "delegated-uv":
             results.append(_site("DELEGATED", "uv cache prune --force", d, line))
+            continue
+        if d["kind"] == "delegated-pnpm":
+            results.append(_site("DELEGATED", "pnpm store prune", d, line))
             continue
         # .DS_Store metadata cleanup (never artifact content)
         if d["expr"].strip().strip("\"'").endswith(".DS_Store"):
@@ -1218,6 +1231,53 @@ if t11_fail:
     print(f"FAIL T11-14 positive wiring missing: {t11_fail}")
 else:
     print("PASS T11-14 cleanup_tmp/scratch_budget route through C14")
+
+print()
+print("=== T18 deletion-log coverage ===")
+# Every sanctioned guard / removal entry point must log through deletion_log_removal
+# (directly, or by delegating to a primitive that does); every delegated command's
+# script must log; exemptions must carry a rationale. A new guard or delegated tool
+# without a logging route fails here.
+def _read(rel):
+    return open(os.path.join(ROOT, rel), encoding="utf-8").read()
+LOGGING_PRIMITIVES = {
+    "quarantine_remove": (_read("scripts/lib/quarantine.sh"), "deletion_log_removal"),
+    "wrh_remove_now": (_read("scripts/worktree_remove_hook.sh"), "deletion_log_removal"),
+    "scratch_budget_quarantine_remove": (budget_src, "quarantine_remove"),  # delegates
+}
+# artifact_removal_verdict only decides; it deletes nothing.
+VERDICT_ONLY = ("artifact_removal_verdict",)
+DELEGATED_LOG_FILES = {
+    "uv cache prune --force": "scripts/cleanup_uv_cache.sh",
+    "pnpm store prune": "scripts/cleanup_dev_caches.sh",
+}
+t18_fail = []
+for g in SANCTIONED + REMOVAL_ENTRY:
+    if g in VERDICT_ONLY:
+        continue
+    if g not in LOGGING_PRIMITIVES:
+        t18_fail.append(f"{g}: not a logging primitive and not allow-listed")
+        continue
+    src, needle = LOGGING_PRIMITIVES[g]
+    if needle not in _body(src, g):
+        t18_fail.append(f"{g}: body lacks {needle}")
+for cmd in DELEGATED_CMDS:
+    rel = DELEGATED_LOG_FILES.get(cmd)
+    src = _read(rel) if rel else ""
+    # a delegated command that no longer appears in its script (removed upstream) needs no log
+    if not rel or (cmd in src and "deletion_log_removal" not in src):
+        t18_fail.append(f"delegated '{cmd}': script does not log its reclaim")
+for rel in SCOPE:
+    if os.path.exists(os.path.join(ROOT, rel)) and "rm_logged" in _read(rel):
+        t18_fail.append(f"{rel}: C14-governed script must use a guarded primitive, not rm_logged")
+for key, why in EXEMPT_SITES.items():
+    if not why.strip():
+        t18_fail.append(f"exempt {key}: empty rationale")
+if t18_fail:
+    failures += len(t18_fail)
+    print(f"FAIL T18 deletion-log coverage gaps: {t18_fail}")
+else:
+    print("PASS T18 every guard/entry/delegated site logs or is allow-listed with a reason")
 
 print()
 print(f"self-test failures: {failures}")
