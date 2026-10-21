@@ -14,6 +14,8 @@ CANONICAL_PATTERNS = (
     "launchd/*.plist.template",
     "launchd/*.c",
     "tools/*.sh",
+    "tools/guards/*",
+    "hooks/*.sh",
 )
 
 
