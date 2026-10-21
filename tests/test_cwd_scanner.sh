@@ -27,12 +27,20 @@ mk_lsof_marker() { printf '#!/bin/sh\ntouch %s/lsof-called\nprintf "p1\\nfcwd\\n
 echo "== helper script =="
 HELPER="$ROOT/scripts/diskm_cwd_scan.py"
 real="$TMP/real.out"
-if /usr/bin/python3 -I "$HELPER" >"$real"; then ok "helper exits 0 unprivileged"; else bad "helper failed"; fi
-[[ "$(tr -cd '\0' <"$real" | wc -c)" -gt 0 ]] && ok "helper emits NUL-terminated records" || bad "no records"
-grep -aq "^1"$'\t' "$real" && ok "helper reports pid 1" || bad "pid 1 missing from real scan"
+# Unprivileged, foreign-uid cwd links are unreadable: the helper must fail with no
+# partial output rather than print an incomplete map. A real map needs root.
+if /usr/bin/python3 -I "$HELPER" >"$real" 2>/dev/null; then ran_ok=1; else ran_ok=0; fi
+if [[ "$(id -u)" != 0 ]] && ! sudo -n true 2>/dev/null; then
+  [[ $ran_ok == 0 && ! -s "$real" ]] && ok "unprivileged helper fails closed with no output" || bad "unprivileged helper printed a partial map"
+else
+  [[ "$(id -u)" == 0 ]] || { sudo -n /usr/bin/python3 -I "$HELPER" >"$real"; ran_ok=$?; ran_ok=$((ran_ok == 0)); }
+  [[ $ran_ok == 1 ]] && ok "privileged helper exits 0" || bad "privileged helper failed"
+  grep -aq "^1"$'\t' "$real" && ok "helper reports pid 1" || bad "pid 1 missing from real scan"
+  DISK_MAGICIAN_CWD_SCAN_CMD="$TMP/real-replay"; printf '#!/bin/sh\ncat %s\n' "$real" >"$TMP/real-replay"; chmod +x "$TMP/real-replay"
+  lsof_scanner_fpn && ok "real helper output parses" || bad "real helper output rejected"
+fi
 /usr/bin/python3 -I "$HELPER" extra >/dev/null 2>&1 && bad "helper accepted an argument" || ok "helper rejects arguments"
 head -1 "$HELPER" | grep -q '^#!/usr/bin/python3 -I$' && ok "helper pins interpreter and isolated mode" || bad "helper shebang"
-DISK_MAGICIAN_CWD_SCAN_CMD="$HELPER"; lsof_scanner_fpn && ok "real helper output parses" || bad "real helper output rejected"
 export DISK_MAGICIAN_CWD_SCAN_CMD="$FAKE"
 
 echo "== complete map -> candidates decided from it =="
