@@ -4,7 +4,7 @@
 # base-sha256: 226ebfdf2cd2db23e35c064c17428fd8bcc2c55dd233b5e0d8140cf5a9e408c8
 --- a/git
 +++ b/git
-@@ -10,6 +10,25 @@
+@@ -10,6 +10,27 @@
    exec "$REAL" "$@"
  fi
  
@@ -14,13 +14,15 @@
 +# refuses (exit 75, the refusal line is already on stderr), a missing admit or any other rc runs
 +# as admission_degraded:caller. A missing caller library also runs.
 +DISK_MAGICIAN_ROOT="${DISK_MAGICIAN_ROOT:-@DISK_MAGICIAN_ROOT@}"
-+admit_exec() {  # $1=class $2=dest; never returns
++admit_exec() {  # $1=class (empty: admit_class_for $2; still empty: plain git) $2=dest; never returns
 +  if [[ ! -f "$DISK_MAGICIAN_ROOT/scripts/lib/admit_caller.sh" ]]; then
 +    echo "admission_degraded:caller admit_caller.sh missing under $DISK_MAGICIAN_ROOT" >&2
 +    exec "$REAL" "${args[@]}"
 +  fi
 +  . "$DISK_MAGICIAN_ROOT/scripts/lib/admit_caller.sh"
-+  if ! admit_gate "$1" - git-shim "$2" shim; then exit 75; fi
++  local cls="${1:-$(admit_class_for "$2")}"
++  [[ -n "$cls" ]] || exec "$REAL" "${args[@]}"
++  if ! admit_gate "$cls" - git-shim "$2" shim; then exit 75; fi
 +  local rc=0
 +  "$REAL" "${args[@]}" || rc=$?
 +  if [[ "$rc" == 0 ]]; then admit_confirm_created; fi
@@ -30,7 +32,7 @@
  # Fast pure-bash check: isolated unit-test harnesses where HOME is in temp space.
  case "${HOME:-}" in
    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
-@@ -43,6 +62,38 @@
+@@ -43,6 +64,32 @@
  done
  
  subcmd="${args[$idx]:-}"
@@ -56,20 +58,14 @@
 +      clone_dest="${clone_pos[0]%/}"; clone_dest="${clone_dest##*[/:]}"; clone_dest="${clone_dest%.git}"
 +    fi
 +    [[ "$clone_dest" == /* ]] || clone_dest="$git_cwd/$clone_dest"
-+    case "$clone_dest" in
-+      "$HOME/.worktrees/"?*) admit_exec worktrees "$clone_dest" ;;
-+      /tmp/?*|/private/tmp/?*) admit_exec tmp_containers "$clone_dest" ;;
-+    esac
-+    if [[ -n "${TMPDIR:-}" && "$clone_dest" == "${TMPDIR%/}/"?* ]]; then
-+      admit_exec tmpdir_scratch "$clone_dest"
-+    fi
++    admit_exec "" "$clone_dest"
 +  fi
 +  exec "$REAL" "$@"
 +fi
  if [[ "$subcmd" != "worktree" ]]; then
    exec "$REAL" "$@"
  fi
-@@ -112,7 +163,7 @@
+@@ -112,7 +159,7 @@
  
  if [[ "$resolved_target" == "$resolved_root/"* ]]; then
    guard_decide ALLOW git "worktree add under standard root '$resolved_target'"
@@ -78,7 +74,7 @@
  fi
  
  # Extra allowed worktree roots: one path prefix or glob per line ('#' comments),
-@@ -142,7 +193,7 @@
+@@ -142,7 +189,7 @@
          guard_is_protected "$resolved_allow" && continue
          if [[ "$resolved_target" == "$resolved_allow/"* ]]; then
            guard_decide ALLOW git "worktree add under allowlisted glob '$allow_line' -> '$resolved_allow'"
@@ -87,7 +83,7 @@
          fi
        done
        continue
-@@ -156,7 +207,7 @@
+@@ -156,7 +203,7 @@
      guard_is_protected "$resolved_allow" && continue
      if [[ "$resolved_target" == "$resolved_allow" || "$resolved_target" == "$resolved_allow/"* ]]; then
        guard_decide ALLOW git "worktree add under allowlisted root '$resolved_allow'"

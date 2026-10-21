@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ci_admit.sh — ezgha job-started hook (spec C13): admit the workspace once per <run>.<attempt>.<job> (caller
 # contract); in a fresh RED/BLACK/FLOOR zone print the runner pause command, and pause only if D4 is recorded.
-# The workspace is charged to the class of the host root it lives under (tmp_containers, tmpdir_scratch,
-# worktrees; colima when it is on no host root); CI_ADMIT_IMAGE_EST_GB additionally admits the image pull as
+# The workspace is charged to the class of the host root it lives under (admit_class_for; colima when it is
+# on no host root); CI_ADMIT_IMAGE_EST_GB additionally admits the image pull as
 # colima. admit_gate waits out one 76 inside the hook, so a job is delayed, never failed, by a single 76.
 _CI_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 source "$_CI_DIR/lib/admit_caller.sh"
@@ -13,11 +13,7 @@ else
     job="unknown-${RUNNER_NAME:-$(hostname -s)}-$(date +%s)"; echo "admission_degraded:ci_identity" >&2
 fi
 ws="${GITHUB_WORKSPACE:-$PWD}"
-case "$ws" in
-    /tmp/?*|/private/tmp/?*) cls=tmp_containers ;;
-    "$HOME/.worktrees/"?*) cls=worktrees ;;
-    *) if [[ -n "${TMPDIR:-}" && "$ws" == "${TMPDIR%/}/"?* ]]; then cls=tmpdir_scratch; else cls=colima; fi ;;
-esac
+cls="$(admit_class_for "$ws")"; cls="${cls:-colima}"
 rc=0
 admit_gate "$cls" "${CI_ADMIT_EST_GB:-}" ci "$ws" ci --ci-job "$job" || rc=$?
 if [[ "$rc" == 0 && "$cls" != colima && -n "${CI_ADMIT_IMAGE_EST_GB:-}" ]]; then
