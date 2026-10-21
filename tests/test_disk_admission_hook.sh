@@ -17,10 +17,11 @@ assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expec
 T="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state" "$T/home/.worktrees/r" "$T/tmpdir" && ln -s "$T" "$T/alias"
-export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit"
+export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit" DISK_MAGICIAN_ADMIT_RETRY_S=0
 cat >"$T/bin/admit" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$T/admit.log"
+if [[ -s "$T/rcs" ]]; then rc="\$(head -1 "$T/rcs")"; sed -i.bak 1d "$T/rcs"; exit "\$rc"; fi
 exit "\${STUB_RC:-0}"
 EOF
 chmod +x "$T/bin/admit"
@@ -90,6 +91,9 @@ assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "75: d
 STUB_RC=76 hook PreToolUse "git worktree add $W/r/n"
 assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "76: deny"
 [[ "$(field 'd["hookSpecificOutput"]["permissionDecisionReason"]')" == *retry_after_s* ]] && ok "76: names retry_after_s" || bad "76: $OUT"
+assert_eq "$ADMITS" 2 "76: one wait, one re-admit"
+printf '76\n0\n' >"$T/rcs"; STUB_RC=75 hook PreToolUse "git worktree add $W/r/n"
+assert_eq "$ADMITS/$OUT" "2/" "76 then 0: allowed silently after one wait"
 assert_eq "$RC" 0 "deny still exits 0"
 for rc in 0 3 10 75 76; do STUB_RC=$rc hook PreToolUse "git worktree add $W/r/n"
     [[ "$OUT" != *updatedInput* ]] && ok "rc $rc: no updatedInput" || bad "rc $rc: $OUT"; done
@@ -181,6 +185,9 @@ setup_hooks "$S/three.json"; assert_eq "$?" 0 "second run rc"
 cmp -s "$S/three.json" "$S/three.once" && ok "second run byte-identical" || bad "second run changed the file"
 echo '{"hooks": {}}' >"$S/empty.json"
 setup_hooks "$S/empty.json"; assert_eq "$(count_entries "$S/empty.json")" "1 1" "empty hooks object gets both arrays"
+echo '{"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "diskm admission-hook"}]}]}}' >"$S/other.json"
+setup_hooks "$S/other.json"; assert_eq "$(count_entries "$S/other.json")" "1 1" "a non-Bash matcher entry does not count as installed"
+setup_hooks "$S/no-such-dir/settings.json"; assert_eq "$?" 2 "unwritable settings dir rc 2"
 printf '{"hooks": [' >"$S/bad.json"; cp "$S/bad.json" "$S/bad.orig"
 setup_hooks "$S/bad.json"; assert_eq "$?" 2 "malformed JSON rc 2"
 cmp -s "$S/bad.json" "$S/bad.orig" && ok "malformed file untouched" || bad "malformed file changed"

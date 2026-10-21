@@ -13,6 +13,7 @@ Usage: $(basename "$0") <command> [options]
 Commands:
   setup         Configure local backup repository, create GitHub remote, and schedule jobs.
                 setup --hooks [--settings P]: install the admission hook (needs decision external_edits).
+                setup --git-shim [--shim P]: apply tools/guards/git.patch from this package (needs external_edits).
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
@@ -237,6 +238,7 @@ XML
 case "$CMD" in
   setup)
     if [[ " $* " == *" --hooks "* ]]; then exec python3 "$SCRIPT_DIR/scripts/install_claude_hooks.py" "$@"; fi
+    if [[ "${1:-}" == --git-shim ]]; then shift; exec bash "$SCRIPT_DIR/tools/guards/apply_git_admit.sh" "$@"; fi
     run_setup "$@"
     ;;
   snapshot)

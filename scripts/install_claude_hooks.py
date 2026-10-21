@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import policy_provenance
 
 COMMAND = "diskm admission-hook"
-ENTRY = {"type": "command", "command": COMMAND, "timeout": 90}
+ENTRY = {"type": "command", "command": COMMAND, "timeout": 780}  # one 600 s rc-76 wait + two admits
 
 
 def install(settings):
@@ -20,7 +20,8 @@ def install(settings):
         groups = hooks.setdefault(event, [])
         if not isinstance(groups, list) or not all(isinstance(g, dict) for g in groups):
             raise TypeError(f"hooks.{event} is not a list of objects")
-        if any(isinstance(h, dict) and h.get("command") == COMMAND for g in groups for h in g.get("hooks") or []):
+        if any(isinstance(h, dict) and h.get("command") == COMMAND
+               for g in groups if g.get("matcher") == "Bash" for h in g.get("hooks") or []):
             continue
         bash = next((g for g in groups if g.get("matcher") == "Bash" and isinstance(g.get("hooks"), list)), None)
         if bash is None: groups.append({"matcher": "Bash", "hooks": [dict(ENTRY)]})
@@ -47,10 +48,12 @@ def main(argv=None):
         return print("setup --hooks: refused: decision external_edits is not recorded "
                      "(diskm policy approve external_edits --from-transcript <session.jsonl>)", file=sys.stderr) or 75
     target = os.path.realpath(a.settings)  # a symlinked settings.json keeps its link
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".settings.", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
-    os.chmod(tmp, os.stat(target).st_mode & 0o7777 if os.path.exists(target) else 0o644)
-    os.replace(tmp, target)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".settings.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, os.stat(target).st_mode & 0o7777 if os.path.exists(target) else 0o644)
+        os.replace(tmp, target)
+    except OSError as e: return print(f"setup --hooks: cannot write {target}: {e}", file=sys.stderr) or 2
     print(f"setup --hooks: installed `{COMMAND}` (PreToolUse, PostToolUse Bash) in {a.settings}")
     return 0
 

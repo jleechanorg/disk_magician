@@ -38,7 +38,7 @@ echo '{"external_edits": {"id": "external_edits", "revoked_at": null}}' >"$DISK_
 cp "$R/bin/git" "$R/drifted"; echo "# local edit" >>"$R/drifted"
 bash "$APPLY" --shim "$R/drifted" >/dev/null 2>"$R/apply.err"; assert_eq "$?" 75 "hash mismatch refuses"
 grep -q "sha256" "$R/apply.err" && ok "hash mismatch names the reason" || bad "stderr: $(cat "$R/apply.err")"
-bash "$APPLY" --shim "$R/bin/git" >/dev/null 2>&1; assert_eq "$?" 0 "recorded decision + matching hash applies"
+bash "$REPO_ROOT/disk_magician.sh" setup --git-shim --shim "$R/bin/git" >/dev/null 2>&1; assert_eq "$?" 0 "diskm setup --git-shim: recorded decision + matching hash applies"
 cmp -s "$R/bin/git.pre-admit.bak" "$R/git.orig" && ok "backup kept" || bad "no backup"
 [[ -x "$R/bin/git" ]] && ok "patched shim executable" || bad "patched shim not executable"
 bash "$APPLY" --shim "$R/bin/git" 2>&1 | grep -q "already applied" && ok "second apply is a no-op" || bad "second apply did not detect the patch"
@@ -108,6 +108,13 @@ shim 75 clone -q "$R/home/src/repo" "$R/home/src/../.worktrees/repo/cdots"
 grep -q -- "--dest $(wt cdots) " "$R/admit.log" && ok "dest normalized past .." || bad "args: $(cat "$R/admit.log")"
 shim 75 clone -q "$R/home/src/repo" "$R/home/src/plain"
 assert_eq "$RC/$ADMITS" "0/0" "clone outside governed roots: no admit"
+
+echo "== admit_class_for =="
+cls() { (HOME=/h TMPDIR="$1" bash -c 'source "$1/scripts/lib/admit_caller.sh"; admit_class_for "$2"' _ "$REPO_ROOT" "$2"); }
+assert_eq "$(cls /var/folders/x/T/ /private/var/folders/x/T/clone)" tmpdir_scratch "resolved TMPDIR form"
+assert_eq "$(cls /var/folders/x/T/ /var/folders/x/T/clone)" tmpdir_scratch "literal TMPDIR form"
+assert_eq "$(cls "" /h/.worktrees/r/w)" worktrees "~/.worktrees"
+assert_eq "$(cls "" /h/projects/r)" "" "ungoverned path"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

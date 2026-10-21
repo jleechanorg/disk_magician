@@ -35,7 +35,9 @@ admit_class_for() {
         "$HOME/.worktrees/"?*) echo worktrees ;;
         "$HOME/Documents/Codex/"?*) echo codex_documents ;;
         /tmp/?*|/private/tmp/?*) echo tmp_containers ;;
-        *) if [[ -n "${TMPDIR:-}" && "$1" == "${TMPDIR%/}/"?* ]]; then echo tmpdir_scratch; fi ;;
+        *) if [[ -n "${TMPDIR:-}" && ( "$1" == "${TMPDIR%/}/"?* || "$1" == "/private${TMPDIR%/}/"?* ) ]]; then
+               echo tmpdir_scratch
+           fi ;;
     esac
 }
 
