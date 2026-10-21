@@ -51,8 +51,22 @@ scratch_roots_get_user_tmp() {
 # directly with no override, so no test could confine it to a fixture
 # without PATH-shimming `find` itself.
 scratch_roots_get_private_tmp() {
-  local root="${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}"
-  if [[ -d "$root" ]]; then echo "$root"; fi
+  local root="${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-}"
+  if [[ -z "$root" ]]; then
+    # Platform-aware default (bead disk_magician-ty62). /private/tmp is the
+    # macOS canonical path (/tmp is a symlink to it there), but Linux has no
+    # /private/tmp at all — so the old hardcoded default made cleanup_tmp's
+    # --large scan resolve to nothing and skip with "private-tmp root is
+    # unavailable", silently disabling the aggressive tier on every Linux host.
+    # Try the candidates in order and use the first that exists.
+    local cand
+    local -a cands=()
+    IFS=':' read -r -a cands <<<"${DISK_MAGICIAN_PRIVATE_TMP_CANDIDATES:-/private/tmp:/tmp}"
+    for cand in "${cands[@]}"; do
+      if [[ -n "$cand" && -d "$cand" ]]; then root="$cand"; break; fi
+    done
+  fi
+  if [[ -n "$root" && -d "$root" ]]; then echo "$root"; fi
 }
 
 scratch_roots_get_tmp() {
