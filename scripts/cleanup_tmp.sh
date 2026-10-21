@@ -578,6 +578,19 @@ is_protected_tmp_path() {
   return 1
 }
 
+# tmp_root_grace_minutes <window_mins> — root-grace minutes: env value read as
+# DECIMAL (08/09 are invalid octal in bare (( ))), non-numeric/empty/negative/
+# padded -> 30, floor 5, ceiling <window_mins>; digit strings over 6 chars use
+# the window so $((10#...)) cannot overflow.
+tmp_root_grace_minutes() {
+  local mins="$1" g="${DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES:-30}"
+  [[ "$g" =~ ^[0-9]+$ ]] || g=30
+  if (( ${#g} > 6 )); then g=$mins; else g=$((10#$g)); fi
+  if (( g < 5 )); then g=5; fi
+  if (( g > mins )); then g=$mins; fi
+  printf '%s\n' "$g"
+}
+
 # has_recent_activity <dir> <hours> — true if any entry UNDER <dir> (never
 # <dir> itself) has an mtime OR ctime within the last <hours>; the dir ITSELF
 # counts only within a short grace (DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES). ctime catches
@@ -601,10 +614,7 @@ has_recent_activity() {
   # The ROOT's own mtime/ctime counts only within a short grace (default 30m,
   # floor 5, clamped to the normal window): enough to protect a child that was
   # just deleted/renamed away, far too short to pin a quiet tree (7871).
-  grace="${DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES:-30}"
-  [[ "$grace" =~ ^[0-9]+$ ]] || grace=30
-  (( grace < 5 )) && grace=5
-  (( grace > mins )) && grace=$mins
+  grace="$(tmp_root_grace_minutes "$mins")"
   # Test seam: fixtures cannot backdate ctime (touch -t sets it to now), so a
   # test context judges mtime only unless a test opts into the ctime signal.
   local -a recent_expr=( \( -mmin "-${mins}" -o -cmin "-${mins}" \) )

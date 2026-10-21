@@ -1366,6 +1366,69 @@ run_root_grace_case "g15" 10 active
 echo "GREEN 16: root mtime 2h old, stale content -> archivable"
 run_root_grace_case "g16" 120 archived
 
+# Clamp table for DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES (production helper,
+# extracted from the script, no test seam). Leading-zero values must be read as
+# decimal (08/09 are invalid octal), junk falls back to 30, floor 5, ceiling =
+# the normal window, and over-long digit strings use the window.
+GRACE_FN_FILE="$TMP_ROOT/grace_fn.sh"
+/usr/bin/awk '/^tmp_root_grace_minutes\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SOURCE_SCRIPT" > "$GRACE_FN_FILE"
+echo "GREEN 17: DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES clamp table"
+if [[ ! -s "$GRACE_FN_FILE" ]]; then
+  record_fail "GREEN 17: tmp_root_grace_minutes helper exists" "not found in $SOURCE_SCRIPT"
+else
+  check_grace() {
+    # check_grace <label> <expected> <window_mins> [env-assign-or-UNSET]
+    local label="$1" want="$2" win="$3" val="${4-__UNSET__}" got
+    if [[ "$val" == __UNSET__ ]]; then
+      got=$(env -u DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES bash -c 'set -eu; source "$1"; tmp_root_grace_minutes "$2"' _ "$GRACE_FN_FILE" "$win" 2>&1)
+    else
+      got=$(DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES="$val" bash -c 'set -eu; source "$1"; tmp_root_grace_minutes "$2"' _ "$GRACE_FN_FILE" "$win" 2>&1)
+    fi
+    if [[ "$got" == "$want" ]]; then record_pass "GREEN 17: grace '$label' -> $want"; else record_fail "GREEN 17: grace '$label' -> $want" "got '$got'"; fi
+  }
+  check_grace unset 30 1440
+  check_grace 30 30 1440 30
+  check_grace 08 8 1440 08
+  check_grace 09 9 1440 09
+  check_grace 010 10 1440 010
+  check_grace 0600 600 1440 0600
+  check_grace 0 5 1440 0
+  check_grace 03 5 1440 03
+  check_grace 5 5 1440 5
+  check_grace 4 5 1440 4
+  check_grace 1440 1440 1440 1440
+  check_grace 99999999999999999999 1440 1440 99999999999999999999
+  check_grace abc 30 1440 abc
+  check_grace empty 30 1440 ""
+  check_grace -5 30 1440 -5
+  check_grace ' 7 ' 30 1440 ' 7 '
+  check_grace window-smaller-than-grace 20 20 30
+fi
+
+# Production path (NO test context): a root whose mtime is old but whose ctime
+# is fresh (touch -t re-stamps ctime) and that has no entries under it can only
+# be ACTIVE through the root -cmin clause. The same tree under the test seam is
+# mtime-only, so it reads stale.
+echo "GREEN 18: production-path root ctime clause marks a fresh-ctime root ACTIVE"
+HRA_FN_FILE="$TMP_ROOT/hra_fn.sh"
+/usr/bin/awk '/^tmp_root_grace_minutes\(\) \{/{f=1} f{print} f&&/^\}/{f=0} /^has_recent_activity\(\) \{/{g=1} g{print} g&&/^\}/{g=0}' "$SOURCE_SCRIPT" > "$HRA_FN_FILE"
+G18_ROOT="$TMP_ROOT/g18-root"
+mkdir -p "$G18_ROOT"
+touch -t 202001010000 "$G18_ROOT"
+g18_probe() {
+  # g18_probe <env-assign...>: prints active|stale
+  env -i PATH=/usr/bin:/bin "$@" bash -c '
+    set -u
+    log() { :; }; resolve_timeout_bin() { echo ""; }; warn_unbounded_probes_once() { :; }
+    PROBE_TIMEOUT_SEC=10
+    source "$1"
+    if has_recent_activity "$2" 24; then echo active; else echo stale; fi' _ "$HRA_FN_FILE" "$G18_ROOT"
+}
+G18_PROD=$(g18_probe X=1)
+G18_SEAM=$(g18_probe DISK_MAGICIAN_TEST_CONTEXT=1)
+if [[ "$G18_PROD" == active ]]; then record_pass "GREEN 18: production probe: old-mtime/fresh-ctime root is ACTIVE"; else record_fail "GREEN 18: production probe: old-mtime/fresh-ctime root is ACTIVE" "got '$G18_PROD'"; fi
+if [[ "$G18_SEAM" == stale ]]; then record_pass "GREEN 18: test-seam control is mtime-only (stale)"; else record_fail "GREEN 18: test-seam control is mtime-only (stale)" "got '$G18_SEAM'"; fi
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
