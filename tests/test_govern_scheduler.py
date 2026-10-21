@@ -522,6 +522,23 @@ class GovernSchedulerTest(unittest.TestCase):
         self.assertEqual(row["class"], "db")
         self.assertGreaterEqual(row["slice_s"], 180)
 
+    def test_shipped_colima_overage_row_runs_in_an_ordinary_tick(self):
+        # Plan Task B4 measured cause: the colima row (atomic, max_runtime_s 360) was eligible on
+        # 2026-10-19 but every tick deferred it (deferred:insufficient_slice) because slice_s was
+        # capped at 300 s, below its declared runtime.
+        template = json.loads((Path(__file__).resolve().parent.parent / "config.json.template").read_text())
+        budgets = template["budgets"]
+        now = 1_800_000_000.0
+        state = {"classes": {"colima": {"used_gb": budgets["classes"]["colima"]["budget_gb"] + 12,
+                                        "measured_at": now}}}
+        rows, _ = disk_budget.eligible_actuators(budgets, state, "RED", now)
+        colima = [r for r in rows if r["class"] == "colima"]
+        self.assertEqual(len(colima), 1)
+        row, deferred = disk_budget.next_actuator(colima, {"classes": {}}, now, 0, 540, "RED")
+        self.assertEqual(deferred, [])
+        self.assertEqual(row["class"], "colima")
+        self.assertGreaterEqual(row["slice_s"], budgets["classes"]["colima"]["max_runtime_s"])
+
     def test_atomic_adapter_reserves_term_grace_beyond_declared_runtime(self):
         eligible = [{"class": "db", "kind": "atomic", "unit_budget_s": 20,
                      "max_runtime_s": 180}]
