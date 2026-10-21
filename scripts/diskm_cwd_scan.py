@@ -4,19 +4,20 @@
 Prints one NUL-terminated record per process, `<pid>\t<uid>\t<cwd>\0`, from
 /proc/<pid>/cwd. Takes no arguments and reads nothing else, so what it can do
 as root is exactly: readlink /proc/<pid>/cwd and stat /proc/<pid>. A process
-that exits mid-scan is skipped; any other error exits non-zero with no output.
+that exits mid-scan is skipped, and the scan repeats if new pids appear
+mid-read; any other error exits non-zero with no output.
 """
 import os
 import sys
 
 
-def main():
-    if len(sys.argv) != 1:
-        sys.exit("diskm-cwd-scan: takes no arguments")
+def pids():
+    return {n for n in os.listdir(b"/proc") if n.isdigit()}
+
+
+def scan(names):
     records = []
-    for name in os.listdir(b"/proc"):
-        if not name.isdigit():
-            continue
+    for name in sorted(names, key=int):
         proc = b"/proc/" + name
         try:
             uid = os.stat(proc).st_uid
@@ -24,6 +25,21 @@ def main():
         except FileNotFoundError:
             continue  # exited (or a zombie): holds no cwd
         records.append(name + b"\t" + str(uid).encode() + b"\t" + cwd + b"\0")
+    return records
+
+
+def main():
+    if len(sys.argv) != 1:
+        sys.exit("diskm-cwd-scan: takes no arguments")
+    for _ in range(5):
+        names = pids()
+        records = scan(names)
+        # A process forked after the listing would be missing from the map:
+        # rescan until no new pid appeared while we were reading.
+        if pids() <= names:
+            break
+    else:
+        sys.exit("diskm-cwd-scan: process table kept changing")
     if not records:
         sys.exit("diskm-cwd-scan: no processes found")
     sys.stdout.buffer.write(b"".join(records))

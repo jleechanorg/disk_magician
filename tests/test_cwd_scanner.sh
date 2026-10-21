@@ -43,6 +43,22 @@ fi
 head -1 "$HELPER" | grep -q '^#!/usr/bin/python3 -I$' && ok "helper pins interpreter and isolated mode" || bad "helper shebang"
 export DISK_MAGICIAN_CWD_SCAN_CMD="$FAKE"
 
+cat >"$TMP/race.py" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", sys.argv[1]); h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+calls = []
+def listdir(_):
+    calls.append(1)
+    return [b"1", b"2"] if len(calls) <= 1 else [b"1", b"2", b"3"]   # pid 3 forks during the first scan
+os.listdir = listdir
+os.stat = lambda p: type("S", (), {"st_uid": 0})()
+os.readlink = lambda p: b"/w" + p[5:6]
+sys.argv = ["x"]; sys.stdout = type("O", (), {"buffer": sys.stdout.buffer, "flush": lambda s: None})()
+h.main()
+PY
+race="$(/usr/bin/python3 -I "$TMP/race.py" "$HELPER" | tr '\0' ' ')"
+[[ "$race" == *$'3\t0\t/w3'* ]] && ok "helper rescans when a pid appears mid-scan" || bad "race: '$race'"
+
 echo "== complete map -> candidates decided from it =="
 mk_lsof_marker
 cat >"$FAKE" <<'SH'

@@ -46,7 +46,8 @@ command -v visudo >/dev/null || { echo "Error: visudo not found" >&2; exit 1; }
 
 tmp_bin="$(mktemp /usr/local/sbin/.diskm-cwd-scan.XXXXXX)"
 tmp_rule="$(mktemp /etc/sudoers.d/.diskm-cwd-scan.XXXXXX)"
-trap 'rm -f "$tmp_bin" "$tmp_rule"' EXIT
+prev_rule=""
+trap 'rm -f "$tmp_bin" "$tmp_rule" "$prev_rule"' EXIT
 
 install -m 0755 -o root -g root "$SRC" "$tmp_bin"
 printf '%s\n' "$RULE" >"$tmp_rule"
@@ -55,9 +56,18 @@ chmod 0440 "$tmp_rule"
 visudo -cf "$tmp_rule" >/dev/null || { echo "Error: sudoers rule failed visudo" >&2; exit 1; }
 
 # Helper first: the rule never exists without its target. Both renames are atomic.
+# A previous rule is kept aside so a failed global check restores it, not deletes it.
+if [[ -f "$SUDOERS" ]]; then
+  prev_rule="$(mktemp /etc/sudoers.d/.diskm-cwd-scan.prev.XXXXXX)"
+  cp -p "$SUDOERS" "$prev_rule"
+fi
 mv -f "$tmp_bin" "$BIN"
 mv -f "$tmp_rule" "$SUDOERS"
-visudo -c >/dev/null || { rm -f "$SUDOERS"; echo "Error: sudoers failed global visudo -c; rule removed" >&2; exit 1; }
+if ! visudo -c >/dev/null; then
+  if [[ -n "$prev_rule" ]]; then mv -f "$prev_rule" "$SUDOERS"; else rm -f "$SUDOERS"; fi
+  echo "Error: sudoers failed global visudo -c; previous rule restored (or removed if none)" >&2
+  exit 1
+fi
 
 count="$(sudo -n -u "$TARGET_USER" sudo -n "$BIN" | tr -cd '\0' | wc -c)"
 [[ "$count" -gt 0 ]] || { echo "Error: verification as $TARGET_USER returned no records" >&2; exit 1; }
