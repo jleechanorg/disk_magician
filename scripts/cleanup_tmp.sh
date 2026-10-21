@@ -534,7 +534,7 @@ scan_protected_root_children() {
       continue
     fi
     if has_recent_activity "$child" "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"; then
-      log "Skipping recently active protected-root child (mtime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
+      log "Skipping recently active protected-root child (mtime/ctime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
       continue
     fi
     kb=$(path_size_kb "$child")
@@ -579,7 +579,8 @@ is_protected_tmp_path() {
 }
 
 # has_recent_activity <dir> <hours> — true if any entry UNDER <dir> (never
-# <dir> itself) has an mtime OR ctime within the last <hours>. ctime catches
+# <dir> itself) has an mtime OR ctime within the last <hours>; the dir ITSELF
+# counts only within a short grace (DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES). ctime catches
 # structural activity that leaves old mtimes: mv/tar -x/cp -p/rsync -a of old
 # content into the tree give the moved file a fresh ctime. Fails CLOSED: any
 # error reading the tree (permission denied, vanished path, etc.) is treated as
@@ -595,23 +596,43 @@ is_protected_tmp_path() {
 # 8.7h-old content and a fresh dir mtime, so every pass skipped it and /tmp
 # doubled while the sweeper correctly reported "Dirs removed: 0".
 has_recent_activity() {
-  local dir="$1" hours="$2" mins hit_file rc=0
+  local dir="$1" hours="$2" mins grace hit_file rc=0 tbin
   mins=$(( hours * 60 ))
+  # The ROOT's own mtime/ctime counts only within a short grace (default 30m,
+  # floor 5, clamped to the normal window): enough to protect a child that was
+  # just deleted/renamed away, far too short to pin a quiet tree (7871).
+  grace="${DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES:-30}"
+  [[ "$grace" =~ ^[0-9]+$ ]] || grace=30
+  (( grace < 5 )) && grace=5
+  (( grace > mins )) && grace=$mins
   # Test seam: fixtures cannot backdate ctime (touch -t sets it to now), so a
   # test context judges mtime only unless a test opts into the ctime signal.
   local -a recent_expr=( \( -mmin "-${mins}" -o -cmin "-${mins}" \) )
+  local -a root_expr=( \( -mmin "-${grace}" -o -cmin "-${grace}" \) )
   if [[ -n "${DISK_MAGICIAN_TEST_CONTEXT:-}" && "${DISK_MAGICIAN_TEST_CTIME_SIGNAL:-}" != 1 ]]; then
     recent_expr=( -mmin "-${mins}" )
+    root_expr=( -mmin "-${grace}" )
   fi
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  local tbin
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
-  if [[ -n "$tbin" ]]; then
-    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  else
-    warn_unbounded_probes_once
-    /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  fi
+  [[ -n "$tbin" ]] || warn_unbounded_probes_once
+  # Probe 1: entries under the dir. Probe 2: the dir itself, short grace.
+  local pass
+  for pass in under root; do
+    if [[ "$pass" == under ]]; then
+      if [[ -n "$tbin" ]]; then
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      else
+        /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      fi
+    elif [[ ! -s "$hit_file" ]] && (( rc == 0 )); then
+      if [[ -n "$tbin" ]]; then
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      else
+        /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      fi
+    fi
+  done
   if (( rc != 0 )); then
     rm -f "$hit_file"
     log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
@@ -1495,7 +1516,7 @@ large_consider_entry() {
     return 0
   fi
   if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-    log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+    log "Skipping recently active dir (mtime/ctime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
     return 0
   fi
 
