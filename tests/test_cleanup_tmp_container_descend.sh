@@ -464,6 +464,25 @@ assert_missing "t20b valid depth-3 receipted entry reclaimed" "$D3_ENTRY"
 assert_contains "t20b depth-3 purge is logged" "Purged aged archive after C14 approval" "$OUT"
 
 
+echo "Test 21: scratch container whose children are ALL stale: container survives, each child judged one by one"
+make_env t21
+mkdir -p "$PT/agent-scratch"
+mkchild "$PT/agent-scratch/stale-a"; mkchild "$PT/agent-scratch/stale-b"
+set_old "$PT/agent-scratch"
+# Fresh container mtime from a child create/delete must not make it a unit.
+touch "$PT/agent-scratch"
+run_sweep t21 --clean
+assert_exists "t21 container survives" "$PT/agent-scratch"
+assert_contains "t21 container is descended, not judged as a unit" \
+  "Descending into scratch container (children evaluated individually): $PT/agent-scratch" "$OUT"
+assert_contains "t21 child A gets its own C14 verdict" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/stale-a" "$OUT"
+assert_contains "t21 child B gets its own C14 verdict" \
+  "Skipping archive candidate (C14 kept:unproven-content): $PT/agent-scratch/stale-b" "$OUT"
+assert_exists "t21 child A kept" "$PT/agent-scratch/stale-a"
+assert_exists "t21 child B kept" "$PT/agent-scratch/stale-b"
+assert_contains "t21 container was not archived as a unit" "Dirs archived: 0" "$OUT"
+
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

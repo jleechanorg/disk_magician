@@ -534,7 +534,7 @@ scan_protected_root_children() {
       continue
     fi
     if has_recent_activity "$child" "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"; then
-      log "Skipping recently active protected-root child (mtime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
+      log "Skipping recently active protected-root child (mtime/ctime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
       continue
     fi
     kb=$(path_size_kb "$child")
@@ -578,24 +578,71 @@ is_protected_tmp_path() {
   return 1
 }
 
-# has_recent_activity <dir> <hours> — true if any file/dir under <dir> has an
-# mtime within the last <hours>. Fails CLOSED: any error reading the tree
-# (permission denied, vanished path, etc.) is treated as "active" so the
-# caller skips deletion rather than risking a false-negative on a directory
-# it can't actually inspect. Uses /usr/bin/find explicitly — some shells in
-# this fleet alias `find` to an incompatible wrapper that rejects -mmin.
+# tmp_root_grace_minutes <window_mins> — root-grace minutes: env value read as
+# DECIMAL (08/09 are invalid octal in bare (( ))), non-numeric/empty/negative/
+# padded -> 30, floor 5, ceiling <window_mins>; digit strings over 6 chars use
+# the window so $((10#...)) cannot overflow.
+tmp_root_grace_minutes() {
+  local mins="$1" g="${DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES:-30}"
+  [[ "$g" =~ ^[0-9]+$ ]] || g=30
+  if (( ${#g} > 6 )); then g=$mins; else g=$((10#$g)); fi
+  if (( g < 5 )); then g=5; fi
+  if (( g > mins )); then g=$mins; fi
+  printf '%s\n' "$g"
+}
+
+# has_recent_activity <dir> <hours> — true if any entry UNDER <dir> (never
+# <dir> itself) has an mtime OR ctime within the last <hours>; the dir ITSELF
+# counts only within a short grace (DISK_MAGICIAN_TMP_ROOT_GRACE_MINUTES). ctime catches
+# structural activity that leaves old mtimes: mv/tar -x/cp -p/rsync -a of old
+# content into the tree give the moved file a fresh ctime. Fails CLOSED: any
+# error reading the tree (permission denied, vanished path, etc.) is treated as
+# "active" so the caller skips deletion rather than risking a false-negative on
+# a directory it can't actually inspect. Uses /usr/bin/find explicitly — some
+# shells in this fleet alias `find` to an incompatible wrapper that rejects
+# -mmin. -mmin/-cmin exist in both BSD and GNU find.
+#
+# -mindepth 1 is load-bearing (bead disk_magician-7871): without it the probe's
+# first hit is frequently <dir> itself, whose mtime moves on any child
+# create/delete/rename even when no content changed. That made touched-but-stale
+# trees permanently "active": /private/tmp/worldai_frontend sat at 20+ GiB with
+# 8.7h-old content and a fresh dir mtime, so every pass skipped it and /tmp
+# doubled while the sweeper correctly reported "Dirs removed: 0".
 has_recent_activity() {
-  local dir="$1" hours="$2" mins hit_file rc=0
+  local dir="$1" hours="$2" mins grace hit_file rc=0 tbin
   mins=$(( hours * 60 ))
-  hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
-  local tbin
-  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
-  if [[ -n "$tbin" ]]; then
-    "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
-  else
-    warn_unbounded_probes_once
-    /usr/bin/find "$dir" -mmin "-${mins}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+  # The ROOT's own mtime/ctime counts only within a short grace (default 30m,
+  # floor 5, clamped to the normal window): enough to protect a child that was
+  # just deleted/renamed away, far too short to pin a quiet tree (7871).
+  grace="$(tmp_root_grace_minutes "$mins")"
+  # Test seam: fixtures cannot backdate ctime (touch -t sets it to now), so a
+  # test context judges mtime only unless a test opts into the ctime signal.
+  local -a recent_expr=( \( -mmin "-${mins}" -o -cmin "-${mins}" \) )
+  local -a root_expr=( \( -mmin "-${grace}" -o -cmin "-${grace}" \) )
+  if [[ -n "${DISK_MAGICIAN_TEST_CONTEXT:-}" && "${DISK_MAGICIAN_TEST_CTIME_SIGNAL:-}" != 1 ]]; then
+    recent_expr=( -mmin "-${mins}" )
+    root_expr=( -mmin "-${grace}" )
   fi
+  hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
+  tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  [[ -n "$tbin" ]] || warn_unbounded_probes_once
+  # Probe 1: entries under the dir. Probe 2: the dir itself, short grace.
+  local pass
+  for pass in under root; do
+    if [[ "$pass" == under ]]; then
+      if [[ -n "$tbin" ]]; then
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      else
+        /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      fi
+    elif [[ ! -s "$hit_file" ]] && (( rc == 0 )); then
+      if [[ -n "$tbin" ]]; then
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      else
+        /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+      fi
+    fi
+  done
   if (( rc != 0 )); then
     rm -f "$hit_file"
     log "Active-use check failed for $dir (find rc=${rc}) — fail-closed, treating as active."
@@ -1405,7 +1452,7 @@ container_child_has_protected_repository() {
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
   local d="$1" depth="$2" base kb archive_rc=0
-  local scratch_container=false descend_for_child_safety=false
+  local scratch_container=false
   base="$(basename "$d")"
 
   case "$base" in
@@ -1465,29 +1512,28 @@ large_consider_entry() {
     return 0
   fi
 
-  if [[ "$scratch_container" == true ]]; then
-    # A protected child must not veto eligible siblings. Descend so each
-    # immediate child applies the recursive marker and repository guards.
-    if has_active_marker "$d" || container_child_has_protected_repository "$d"; then
-      descend_for_child_safety=true
-    fi
-  elif has_active_marker "$d"; then
+  if [[ "$scratch_container" != true ]] && has_active_marker "$d"; then
     log "Skipping active-use marker (.in-use present): $d"
     return 0
   fi
 
-  if [[ "$descend_for_child_safety" == true ]] || has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-    # Long-lived agent container (non-git dir of per-task dirs): its newest
-    # mtime is refreshed by whichever child is live, so judge each immediate
-    # child on its own. One level only; the container is never removed here.
-    if [[ "$scratch_container" == true ]]; then
-      log "Descending into active container (children evaluated individually): $d"
-      while IFS= read -r -d '' child; do
-        large_consider_entry "$child" 1
-      done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-      return 0
-    fi
-    log "Skipping recently active dir (mtime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+  # A declared scratch container is NEVER judged (or archived) as a unit: it is
+  # a long-lived parent of per-task dirs, so every immediate child is evaluated
+  # on its own (one level only). This must not depend on the container's own
+  # mtime: with the -mindepth 1 recency probe (bead disk_magician-7871) a
+  # container whose children are all stale no longer looks "recent", and
+  # falling through would archive the container wholesale -- bypassing the
+  # per-child C14 verdicts that tests/test_cleanup_tmp_container_descend.sh
+  # t20a pins. Descend unconditionally, then let each child decide.
+  if [[ "$scratch_container" == true ]]; then
+    log "Descending into scratch container (children evaluated individually): $d"
+    while IFS= read -r -d '' child; do
+      large_consider_entry "$child" 1
+    done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+    return 0
+  fi
+  if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+    log "Skipping recently active dir (mtime/ctime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
     return 0
   fi
 
