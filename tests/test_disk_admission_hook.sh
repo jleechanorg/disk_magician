@@ -17,10 +17,11 @@ assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expec
 T="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state" "$T/home/.worktrees/r" "$T/tmpdir" && ln -s "$T" "$T/alias"
-export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit"
+export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit" DISK_MAGICIAN_ADMIT_RETRY_S=0
 cat >"$T/bin/admit" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$T/admit.log"
+if [[ -s "$T/rcs" ]]; then rc="\$(head -1 "$T/rcs")"; sed -i.bak 1d "$T/rcs"; exit "\$rc"; fi
 exit "\${STUB_RC:-0}"
 EOF
 chmod +x "$T/bin/admit"
@@ -90,6 +91,9 @@ assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "75: d
 STUB_RC=76 hook PreToolUse "git worktree add $W/r/n"
 assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "76: deny"
 [[ "$(field 'd["hookSpecificOutput"]["permissionDecisionReason"]')" == *retry_after_s* ]] && ok "76: names retry_after_s" || bad "76: $OUT"
+assert_eq "$ADMITS" 2 "76: one wait, one re-admit"
+printf '76\n0\n' >"$T/rcs"; STUB_RC=75 hook PreToolUse "git worktree add $W/r/n"
+assert_eq "$ADMITS/$OUT" "2/" "76 then 0: allowed silently after one wait"
 assert_eq "$RC" 0 "deny still exits 0"
 for rc in 0 3 10 75 76; do STUB_RC=$rc hook PreToolUse "git worktree add $W/r/n"
     [[ "$OUT" != *updatedInput* ]] && ok "rc $rc: no updatedInput" || bad "rc $rc: $OUT"; done
@@ -152,6 +156,46 @@ for f in "${forms5[@]}"; do
     assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "75 denies: $cmd"
 done
 rmdir "$R"
+
+echo "== diskm setup --hooks installer (plan Task B1) =="
+S="$T/settings"; mkdir -p "$S"
+setup_hooks() { bash "$REPO_ROOT/disk_magician.sh" setup --hooks --settings "$1" >/dev/null 2>"$T/setup.err"; }
+count_entries() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(*[sum(h.get("command")=="diskm admission-hook" for g in d.get(e,[]) if g.get("matcher")=="Bash" for h in g["hooks"]) for e in ("PreToolUse","PostToolUse")])' "$1"; }
+cat >"$S/three.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "diskm guard-worktree-add", "timeout": 10}]}],
+    "WorktreeCreate": [{"hooks": [{"type": "command", "command": "diskm worktree-create-hook"}]}],
+    "WorktreeRemove": [{"hooks": [{"type": "command", "command": "diskm worktree-remove-hook"}]}]
+  },
+  "model": "x"
+}
+JSON
+cp "$S/three.json" "$S/three.orig"
+export DISK_MAGICIAN_POLICY_FILE="$T/policy.json"; rm -f "$DISK_MAGICIAN_POLICY_FILE"
+setup_hooks "$S/three.json"; assert_eq "$?" 75 "unrecorded external_edits refuses"
+cmp -s "$S/three.json" "$S/three.orig" && ok "refusal leaves settings untouched" || bad "settings changed on refusal"
+echo '{"external_edits": {"id": "external_edits", "revoked_at": null}}' >"$DISK_MAGICIAN_POLICY_FILE"
+setup_hooks "$S/three.json"; assert_eq "$?" 0 "install rc"
+assert_eq "$(count_entries "$S/three.json")" "1 1" "one Pre and one Post Bash entry"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); g=d["hooks"]["PreToolUse"][0]["hooks"]; assert g[0]["command"]=="diskm guard-worktree-add" and len(d["hooks"]["PreToolUse"])==1 and d["model"]=="x" and "WorktreeCreate" in d["hooks"]' "$S/three.json" \
+    && ok "existing hooks and keys kept, entry joins the Bash group" || bad "existing content lost: $(cat "$S/three.json")"
+cp "$S/three.json" "$S/three.once"
+setup_hooks "$S/three.json"; assert_eq "$?" 0 "second run rc"
+cmp -s "$S/three.json" "$S/three.once" && ok "second run byte-identical" || bad "second run changed the file"
+echo '{"hooks": {}}' >"$S/empty.json"
+setup_hooks "$S/empty.json"; assert_eq "$(count_entries "$S/empty.json")" "1 1" "empty hooks object gets both arrays"
+echo '{"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "diskm admission-hook"}]}]}}' >"$S/other.json"
+setup_hooks "$S/other.json"; assert_eq "$(count_entries "$S/other.json")" "1 1" "a non-Bash matcher entry does not count as installed"
+setup_hooks "$S/no-such-dir/settings.json"; assert_eq "$?" 2 "unwritable settings dir rc 2"
+printf '{"hooks": [' >"$S/bad.json"; cp "$S/bad.json" "$S/bad.orig"
+setup_hooks "$S/bad.json"; assert_eq "$?" 2 "malformed JSON rc 2"
+cmp -s "$S/bad.json" "$S/bad.orig" && ok "malformed file untouched" || bad "malformed file changed"
+unset DISK_MAGICIAN_POLICY_FILE
+
+echo "== diskm admission-hook dispatches to hooks/disk-admission.sh =="
+OUT="$(printf '%s' '{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}' | bash "$REPO_ROOT/disk_magician.sh" admission-hook)"; RC=$?
+assert_eq "$RC/$OUT" "0/" "ungoverned command: rc 0, no output"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

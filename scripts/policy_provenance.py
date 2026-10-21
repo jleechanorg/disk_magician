@@ -2,7 +2,7 @@
 """Standing-decision record (C11). Recording activates nothing; see removal_activation_ok."""
 import datetime, glob, hashlib, json, os, pwd, re, subprocess, sys, tempfile, time
 IDS = {'worktree_reap_remove': 'D1', 'worktree_cleanup': 'D1b', 'admission_enforcement': 'D2', 'budgets': 'D3',
-       'ci_autopause': 'D4', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
+       'ci_autopause': 'D4', 'external_edits': 'D6', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
 PATH = os.environ.get('DISK_MAGICIAN_POLICY_FILE') or os.path.expanduser('~/.config/disk-magician/standing_decisions.json')
 MARK, phrase = 'policy:worktree_reap_remove', 'APPROVE {}'.format  # fixed per id; the caller never chooses it
 USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a typed user message is exactly "APPROVE <id>" (trimmed, case-sensitive); ids: ' + ' '.join(IDS)

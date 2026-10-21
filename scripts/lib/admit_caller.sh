@@ -28,6 +28,19 @@ admit_available() {
     [[ -f "$file" ]]
 }
 
+# admit_class_for <abs-path> — the governed class a birth at <path> is charged to (the host roots
+# hooks/disk-admission.sh governs); prints nothing when <path> is on no governed root.
+admit_class_for() {
+    case "$1" in
+        "$HOME/.worktrees/"?*) echo worktrees ;;
+        "$HOME/Documents/Codex/"?*) echo codex_documents ;;
+        /tmp/?*|/private/tmp/?*) echo tmp_containers ;;
+        *) if [[ -n "${TMPDIR:-}" && ( "$1" == "${TMPDIR%/}/"?* || "$1" == "/private${TMPDIR%/}/"?* ) ]]; then
+               echo tmpdir_scratch
+           fi ;;
+    esac
+}
+
 admit_gate() {
     local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd output line
     ADMIT_ID=""

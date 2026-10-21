@@ -80,7 +80,8 @@ def next_actuator(eligible, schedule, wall_now, mono_now, deadline, zone_name, r
             state["deferred_ticks"] = state.get("deferred_ticks", 0) + 1
             pending -= 1
             continue
-        slice_s = min(300.0, max(float(min_slice), usable / max(1, pending)))
+        # The 300 s cap never undercuts min_slice: an atomic row's declared runtime (colima 360 s) must fit.
+        slice_s = min(max(300.0, float(min_slice)), max(float(min_slice), usable / max(1, pending)))
         if row.get("kind") == "atomic" and slice_s < row["max_runtime_s"]:
             deferred.append(name)
             state["deferred_ticks"] = state.get("deferred_ticks", 0) + 1

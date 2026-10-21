@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # disk-admission.sh — Claude Code Bash hook (spec C6). PreToolUse: admit each governed `git worktree add`,
-# `git clone`, `cp -R` (`diskm admit --source hook`); 75/76 deny, 10 or another rc → systemMessage, 0 silent;
+# `git clone`, `cp -R` (`diskm admit --source hook`); 76 waits DISK_MAGICIAN_ADMIT_RETRY_S (600) once and re-admits;
+# 75 or a second 76 deny, 10 or another rc → systemMessage, 0 silent;
 # never updatedInput. PostToolUse confirms only a single simple command that exited 0. Newline, heredoc,
 # $( ), backticks, eval or a subshell → not parsed (hook_unparsed). Always exits 0. Test hook: DISK_MAGICIAN_ADMIT_BIN.
 read -r -d '' PY <<'EOF'
@@ -66,12 +67,14 @@ if ev.get("hook_event_name") != "PreToolUse":
         subprocess.run([*admit, "--confirm-tool-use", tid], capture_output=True, timeout=30)
     sys.exit()
 msgs, deny = [], None
+def run(a):
+    try: return subprocess.run(a, capture_output=True, timeout=60).returncode
+    except (OSError, subprocess.SubprocessError): return "missing"
 for a in found:
-    try: rc = subprocess.run(a, capture_output=True, timeout=60).returncode
-    except (OSError, subprocess.SubprocessError): rc = "missing"
+    if (rc := run(a)) == 76: time.sleep(float(os.environ.get("DISK_MAGICIAN_ADMIT_RETRY_S") or 600)); rc = run(a)
     cls, dest = a[a.index("--class") + 1], a[a.index("--dest") + 1]
     if rc == 75: deny = deny or f"disk-admission: refused class={cls} rc=75 for {dest}: disk is low; reuse an existing worktree or checkout instead of creating a new one"
-    elif rc == 76: deny = deny or f"disk-admission: refused class={cls} rc=76 for {dest}: BLACK zone; retry once after retry_after_s=600"
+    elif rc == 76: deny = deny or f"disk-admission: refused class={cls} rc=76 for {dest}: BLACK zone; still queued after one retry_after_s wait"
     elif rc == 10: msgs.append(f"disk-admission: warn class={cls} for {dest}")
     elif rc != 0: msgs.append(f"admission_degraded:caller rc={rc} for {dest}")
 out = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": deny}} if deny else {}

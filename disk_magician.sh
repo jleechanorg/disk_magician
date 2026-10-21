@@ -12,6 +12,8 @@ Usage: $(basename "$0") <command> [options]
 
 Commands:
   setup         Configure local backup repository, create GitHub remote, and schedule jobs.
+                setup --hooks [--settings P]: install the admission hook (needs decision external_edits).
+                setup --git-shim [--shim P]: apply tools/guards/git.patch from this package (needs external_edits).
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
@@ -80,7 +82,8 @@ Commands:
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
-  ci-admit               ezgha job-started hook: admit the CI workspace (class colima).
+  ci-admit               ezgha job-started hook: admit the CI workspace (class by workspace root; colima otherwise).
+  admission-hook         Claude Bash Pre/PostToolUse admission hook (hooks/disk-admission.sh); install: setup --hooks.
   govern                 Observe tick: df zone into budget.json; C14-gated pressure-sweep kickstart.
   budget                 status: governor alerts (ALERT:<code> lines, rc 1 when any).
   birth-audit            Verify receipt accounting against live du across cleanup scripts.
@@ -234,6 +237,8 @@ XML
 
 case "$CMD" in
   setup)
+    if [[ " $* " == *" --hooks "* ]]; then exec python3 "$SCRIPT_DIR/scripts/install_claude_hooks.py" "$@"; fi
+    if [[ "${1:-}" == --git-shim ]]; then shift; exec bash "$SCRIPT_DIR/tools/guards/apply_git_admit.sh" "$@"; fi
     run_setup "$@"
     ;;
   snapshot)
@@ -440,6 +445,9 @@ case "$CMD" in
     ;;
   ci_admit|ci-admit)
     exec bash "$SCRIPT_DIR/scripts/ci_admit.sh" "$@"
+    ;;
+  admission_hook|admission-hook)
+    exec bash "$SCRIPT_DIR/hooks/disk-admission.sh"
     ;;
   admit)
     exec python3 "$SCRIPT_DIR/scripts/disk_budget.py" "$@"
