@@ -25,6 +25,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 CONFIG_FILE="$REPO_ROOT/config.json"
 [[ -f "$CONFIG_FILE" ]] || CONFIG_FILE="$REPO_ROOT/config.json.template"
 
@@ -171,7 +173,7 @@ while IFS=$'\t' read -r mtime d; do
     log "DRY RUN: would remove expired evidence spool: $d  (${kb} KB)"
   else
     log "Removing expired evidence spool: $d  (${kb} KB)"
-    rm -rf "$d"
+    rm_logged "$d"
   fi
   TOTAL_KB=$(( TOTAL_KB + kb ))
   DIRS_DELETED=$(( DIRS_DELETED + 1 ))

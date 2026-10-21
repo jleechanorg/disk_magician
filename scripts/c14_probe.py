@@ -933,14 +933,61 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
+SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
+_TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
+_DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
+_SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
+_NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
+
+def _never(n):
+    return n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc")
+
+def exempt_name(path):
+    """Single owner of the secret-name exemption (relative path; used by every secret gate).
+    Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped stem is not
+    secret-named (e.g. credentials.map: only under a dependency dir); .h/.hpp/.pyc/.so/.a/.dylib under a dependency dir; or a source extension under a dependency dir. .env*, id_*, *.pem/key/p12/pfx,
+    .npmrc, .netrc are exempt only as templates. Everything else stays secret-like."""
+    parts = path.split("/")
+    n = parts[-1].lower()
+    if n.endswith(_TEMPLATE):
+        return True
+    if _never(n):
+        return False
+    comps = {c.lower() for c in parts[:-1]}
+    dep = bool(_DEP_DIRS & comps)
+    stripped = n
+    while stripped.endswith((".map", ".d.ts")):
+        stripped = stripped[: -4 if stripped.endswith(".map") else -5]
+    if n.endswith(".json.schema") and stripped == n:
+        stripped = n[: -len(".json.schema")]
+    if stripped != n:
+        # A stem that is itself secret-named (credentials, secrets, ...) is exempt only under a dependency dir.
+        return not _never(stripped) and (dep or not SECRET_RE.fullmatch(stripped))
+    if n.endswith(_NATIVE):
+        return dep
+    return dep and "." in n and n.rpartition(".")[2] in _SRC_EXTS
+
 def secrets(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
-        pattern = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
-        print("yes" if any(pattern.fullmatch(e.get("name", "") if e["path"] == "." else e["path"].rsplit("/", 1)[-1])
-                            for e in entries) else "no")
+        paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
+        print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
+
+def any_secret(argv):
+    """Contract: rc 0 = a secret-like path remains; rc 1 + stdout "none" = explicit none found;
+    rc 3 = any error (callers must treat everything but rc 1 + "none" as secret-like)."""
+    try:
+        if argv:
+            return 3
+        names = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\n")
+        if any(q and not exempt_name(q) for q in names):
+            return 0
+        print("none")
+        return 1
+    except BaseException:
+        return 3
 
 def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     try:
@@ -989,6 +1036,8 @@ def open_file(root, deadline=None):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
+    if a and a[0] == "any-secret":
+        sys.exit(any_secret(a[1:]))
     try:
         if len(a) == 3 and a[0] == "lsremote" and not a[1].startswith("-"):
             sys.exit(lsremote(a[1], a[2]))
@@ -1020,6 +1069,8 @@ if __name__ == "__main__":
             sys.exit(newest_mtime(a[1]))
         if len(a) == 2 and a[0] == "secrets":
             sys.exit(secrets(a[1]))
+        if len(a) == 2 and a[0] == "exempt-name":
+            print("yes" if exempt_name(a[1]) else "no"); sys.exit(0)
         if len(a) in (4, 5) and a[0] == "merge-inventory":
             sys.exit(merge_inventory(*a[1:]))
         if len(a) in (2, 3) and a[0] == "open-file":

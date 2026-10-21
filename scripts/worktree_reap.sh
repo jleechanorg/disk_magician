@@ -395,9 +395,9 @@ process_lease() {
         local reap_c14_inv reap_c14_verdict reap_removed=0
         reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { lease_reuse_lock_release "$file"; record "$file" "$real" kept:check-failed; return 0; }
         if [[ -n "$ACT_DEADLINE_AT" ]]; then
-            reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
         else
-            reap_c14_verdict="$(artifact_removal_verdict "$real" --inventory-out "$reap_c14_inv")"
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv")"
         fi
         if [[ "$reap_c14_verdict" == remove ]]; then
             if [[ -n "$ACT_DEADLINE_AT" ]]; then

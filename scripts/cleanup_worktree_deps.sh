@@ -137,7 +137,7 @@ strip_dir() {
   if [[ "$DRY_RUN" == true ]]; then
     echo "  WOULD-STRIP ${kb}KB $dir"
   else
-    rm -rf -- "$dir" && echo "  STRIPPED   ${kb}KB $dir" || { echo "  FAILED $dir"; return 0; }
+    rm -rf -- "$dir" && { echo "  STRIPPED   ${kb}KB $dir"; deletion_log_removal "$dir" "$kb" strip; } || { echo "  FAILED $dir"; return 0; }
   fi
   total_kb=$((total_kb + kb))
   count=$((count + 1))

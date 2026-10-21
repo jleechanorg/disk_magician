@@ -328,7 +328,7 @@ scratch_budget_evict_root() {
       log "DRY RUN: would evict (budget): $item_i  (${kb_i} KB)"
     else
       log "Requesting C14 eviction: $item_i  (${kb_i} KB)"
-      result="$(scratch_budget_quarantine_remove "$item_i")"
+      result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$item_i")"
       if [[ "${CANDIDATE_REMOVED_COUNT+x}" == x ]]; then
         case "$result" in
           removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;

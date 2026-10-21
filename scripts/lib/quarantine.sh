@@ -8,6 +8,7 @@
 # each caller re-validates identity before removal.
 _Q_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$_Q_LIB/artifact_verdict.sh" ]] && source "$_Q_LIB/artifact_verdict.sh"
+declare -F deletion_log_removal >/dev/null || source "$_Q_LIB/../safety_lib.sh"
 # c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
 c14_remove() {
   local _out
@@ -19,7 +20,7 @@ c14_remove() {
 }
 
 quarantine_remove() {
-  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0
+  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 dkb=0 dact=remove
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
   local -a caller_verdict_args=()
@@ -52,6 +53,8 @@ quarantine_remove() {
   if [[ -z "$verdict_path" ]]; then rm -f "$inv" "$binding"; echo kept:parent-identity-missing; return 0; fi
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
   if [[ "$v" == remove ]]; then
+    dkb="$(deletion_size_kb "$path_arg")"
+    if [[ -L "$path_arg" ]]; then dact=remove_symlink; elif [[ -f "$path_arg" ]]; then dact=remove_file; fi
     if [[ "$deadline_seen" == 1 ]]; then
       v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" --deadline-at "$deadline" 2>/dev/null)"
     else
@@ -59,6 +62,7 @@ quarantine_remove() {
     fi
   fi
   rm -f "$inv" "$binding"
+  [[ "$v" == removed:* ]] && deletion_log_removal "$path_arg" "$dkb" "$dact"
   echo "${v:-kept:check-failed}"
 }
 quarantine_phase2() {

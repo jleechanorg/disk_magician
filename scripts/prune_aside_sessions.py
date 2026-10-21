@@ -66,7 +66,8 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
     lib = Path(__file__).resolve().parent / "lib" / "quarantine.sh"
     cmd = ["bash", "-c", 'source "$1"; shift; quarantine_remove "$@"', "_", str(lib), str(path), *extra]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                              env={"DM_ACTUATOR": "prune_aside_sessions.py", **os.environ})
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"check-failed ({exc})"
     lines = [line for line in proc.stdout.strip().splitlines() if line]

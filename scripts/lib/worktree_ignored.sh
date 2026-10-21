@@ -45,6 +45,8 @@ has_ignored_user_data() {
     return 1
 }
 
+_WI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
 # (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
 # probe fails/times out (fail closed).
@@ -56,13 +58,16 @@ has_hidden_state() {
     # shellcheck disable=SC2086
     out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
         ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
-        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
+        ':(icase)*.p12' ':(icase)*.pfx' ':(icase)*.pem.map' ':(icase)*.key.map' ':(icase)*.p12.map' ':(icase)*.pfx.map' ':(icase)id_rsa*' ':(icase)*/id_rsa*' \
         ':(icase)id_ed25519*' ':(icase)*/id_ed25519*' ':(icase)id_ecdsa*' ':(icase)*/id_ecdsa*' \
         ':(icase)id_dsa*' ':(icase)*/id_dsa*' \
         ':(icase).npmrc' ':(icase)*/.npmrc' ':(icase).netrc' ':(icase)*/.netrc' \
         ':(icase)*credentials*' ':(icase)secrets*' ':(icase)*/secrets*' 2>/dev/null)" || return 0
-    # Python bytecode (e.g. __pycache__/openrouter_credentials.cpython-312.pyc)
-    # is rebuildable, not a secret; dependency dirs stay covered.
-    out="$(grep -Ev '(^|/)__pycache__/|\.pyc$' <<<"$out" || true)"
-    [[ -n "$out" ]]
+    # Every hit counts unless c14_probe.py exempt_name (the single owner of the rule) clears it.
+    # Only an explicit rc 1 + "none" means no secret; any other result (secret found, probe
+    # crash, missing module, bad input) is hidden state.
+    local res rc=0
+    res="$(printf '%s\n' "$out" | python3 -I "$_WI_DIR/../c14_probe.py" any-secret 2>/dev/null)" || rc=$?
+    [[ "$rc" -eq 1 && "$res" == none ]] && return 1
+    return 0
 }
