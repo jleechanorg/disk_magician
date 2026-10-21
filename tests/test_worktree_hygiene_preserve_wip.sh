@@ -820,12 +820,19 @@ assert_not_contains "$REFS39" "refs/heads/backup/detached" "no backup/detached-*
 assert_contains "$OUT" "unpushed-ahead" "detached ahead worktree classified unpushed-ahead"
 
 # ---------------------------------------------------------------------------
-echo "case 40: large repo (3000 files) — early mismatch/flag must not SIGPIPE-abort the run"
+echo "case 40: large repo (1000 files) — early mismatch/flag must not SIGPIPE-abort the run"
+# 1000 files, not 3000 (bead disk_magician-em4c): the lossy clean filter spawns
+# one subprocess per file, so this case cost 88s of the suite's 328s at 3000
+# files (measured). The size was never what the case proves: a `git ls-files`
+# listing here is ~15KB -- BELOW the 64KB pipe buffer -- so no tree of this
+# shape reproduces SIGPIPE, and the byte-mismatch/index-flag assertions are
+# size-independent. 1000 keeps a genuinely "many files" fixture at ~1/3 the
+# runtime while exercising the same code paths.
 R40="$(mk_repo r40)"
 mkdir -p "$R40/many"
 python3 - "$R40/many" <<'PY'
 import sys,os
-for i in range(3000): open(os.path.join(sys.argv[1],f"f{i:05d}.nb"),"w").write("cell\n")
+for i in range(1000): open(os.path.join(sys.argv[1],f"f{i:05d}.nb"),"w").write("cell\n")
 PY
 printf '*.nb filter=lossy\n' >"$R40/.gitattributes"
 g -C "$R40" add -A; g -C "$R40" commit -q -m many
