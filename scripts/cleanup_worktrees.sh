@@ -317,12 +317,6 @@ else
     GLOBAL_CWD_BLOCKED="cwd-unknown"
 fi
 
-# DEGRADED tally for the cwd gate (it runs before the age gate here): only a
-# candidate old enough to be eligible counts as refused by it.
-tally_cwd_refusal() {
-    worktree_is_recently_active "$1" "$MIN_AGE_DAYS" || vt_record "kept:$2"
-}
-
 classify_repo_local_worktree() {
     local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
 
@@ -332,12 +326,14 @@ classify_repo_local_worktree() {
     local real_wt
     real_wt="$(cd "$wt_path" 2>/dev/null && pwd -P || printf '%s' "$wt_path")"
     if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
-        tally_cwd_refusal "$wt_path" "$GLOBAL_CWD_BLOCKED"
+        # DEGRADED tally; this gate runs before the age gate, so every row counts
+        # (an unmeasurable cwd means no row can be proven idle). No age call here:
+        # tests pin the exact predicate calls per row.
+        vt_record "kept:$GLOBAL_CWD_BLOCKED"
         echo "$GLOBAL_CWD_BLOCKED"
         return 0
     fi
     if list_has_child_of "$real_wt" "$GLOBAL_LIVE_CWDS" || list_has_child_of "$wt_path" "$GLOBAL_LIVE_CWDS"; then
-        tally_cwd_refusal "$wt_path" live-cwd
         echo "live-cwd"
         return 0
     fi
@@ -895,7 +891,7 @@ process_repo_local_worktrees() {
             local std_skip
             std_skip="$(std_root_skip_reason "$abs_path" "$std_real")"
             if [[ -n "$std_skip" ]]; then
-                case "$std_skip" in cwd-unknown|live-cwd) tally_cwd_refusal "$abs_path" "$std_skip" ;; esac
+                [[ "$std_skip" != cwd-unknown ]] || vt_record kept:cwd-unknown
                 ledger_line "repo-local" "PRESERVE" "$abs_path" "$std_skip"
                 REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                 act_candidate_done || return 3
