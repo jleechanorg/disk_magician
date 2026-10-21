@@ -14,6 +14,8 @@ source "$_AV_DIR/worktree_ignored.sh"
 source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
 # shellcheck source=scripts/lib/scratch_roots.sh
 source "$_AV_DIR/scratch_roots.sh"
+# shellcheck source=scripts/lib/verdict_tally.sh
+source "$_AV_DIR/verdict_tally.sh"
 
 # c14_discover_repos <root>: print every repository under <root> (itself
 # included), NUL-terminated and absolute: a dir holding a `.git` dir or file,
@@ -652,7 +654,9 @@ artifact_removal_verdict() {
     fi
     rm -f "$inv" "$admin_inv"
     rmdir "$tmpdir" 2>/dev/null || true
-    echo "${result:-kept:check-failed}"
+    result="${result:-kept:check-failed}"
+    vt_record "$result"
+    echo "$result"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then artifact_removal_verdict "$@"; fi

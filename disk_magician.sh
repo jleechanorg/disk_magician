@@ -93,6 +93,12 @@ Options:
   --routine     Run unified 6-tier routine cleanup stack across all verified safe targets.
   --dry-run     Run clean/clean-all/setup in dry-run/preview mode.
   -h, --help    Show this help menu.
+
+Exit codes (clean / sweep):
+  0  success (including "nothing eligible")
+  1  a cleanup category failed
+  4  DEGRADED: every eligible candidate was refused by an unmeasurable gate
+     (e.g. cwd-unknown); nothing was proven safe to remove. Receipt outcome: degraded.
 EOF
 }
 

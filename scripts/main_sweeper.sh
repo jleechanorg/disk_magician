@@ -33,6 +33,8 @@ if [[ -f "$SCRIPT_DIR/safety_lib.sh" ]]; then
 fi
 # shellcheck source=scripts/lib/actuator_receipt.sh
 source "$SCRIPT_DIR/lib/actuator_receipt.sh"
+# shellcheck source=scripts/lib/verdict_tally.sh
+source "$SCRIPT_DIR/lib/verdict_tally.sh"
 
 DRY_RUN=false
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
@@ -275,16 +277,24 @@ main() {
   start_free_gb="$(free_gb || echo "")"
   log "Initial available space: ${start_free_gb:-unknown} GiB (mode: ${CLEAN_ARG})"
   local ERRORS=0
+  # Steps whose eligible candidates were all refused by an unmeasurable gate
+  # (bead disk_magician-kub3); reported as DEGRADED, never as a clean success.
+  local DEGRADED_STEPS=()
 
   run_job_step() {
     local desc="$1"
     shift
-    local step_rc=0
-    if run_step_timeout "$@"; then
-      return 0
-    else
-      step_rc=$?
+    local step_rc=0 vt_rc=0
+    vt_open
+    run_step_timeout "$@" || step_rc=$?
+    vt_close || vt_rc=$?
+    if [[ "$step_rc" -eq 0 && "$vt_rc" -eq "$DISK_MAGICIAN_DEGRADED_EXIT" ]]; then
+      DEGRADED_STEPS+=("$desc: $(vt_reason)")
+      log "WARN: $desc DEGRADED: $(vt_reason)"
+    elif [[ "$step_rc" -eq 0 && "$(vt_field refused_unmeasurable_count)" -gt 0 ]]; then
+      log "INFO: $desc: $(vt_reason)"
     fi
+    [[ "$step_rc" -ne 0 ]] || return 0
     if [[ "$step_rc" -eq 75 ]]; then
       log "INFO: $desc skipped (lock held, rc=75)"
       return 0
@@ -445,10 +455,16 @@ main() {
 
   local outcome="success"
   local exit_code=0
+  local outcome_reason=""
   if [[ "$ERRORS" -gt 0 ]]; then
     outcome="error"
     exit_code=1
     log "WARN: Main sweeper finished with $ERRORS failure(s)."
+  elif [[ "${#DEGRADED_STEPS[@]}" -gt 0 ]]; then
+    outcome="degraded"
+    exit_code="$DISK_MAGICIAN_DEGRADED_EXIT"
+    outcome_reason="${#DEGRADED_STEPS[@]} step(s) degraded: ${DEGRADED_STEPS[*]}"
+    log "WARN: Main sweeper DEGRADED: $outcome_reason"
   else
     log "Main sweeper completed successfully."
   fi
@@ -458,6 +474,7 @@ main() {
     if python3 "$RECEIPT_HELPER" finish --job main_sweeper \
       --run-id "$RECEIPT_RUN_ID" \
       --outcome "$outcome" \
+      ${outcome_reason:+--reason "$outcome_reason"} \
       --safety '{"status": "safe_routine_maintenance", "reason": "canonical_6_tier_stack", "delegated": true}' \
       --postcondition "{\"start_free_gb\": ${start_free_gb:-null}, \"end_free_gb\": ${end_free_gb:-null}, \"errors\": $ERRORS}" >/dev/null 2>&1; then
       c14_scope_release

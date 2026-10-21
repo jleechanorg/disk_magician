@@ -165,11 +165,15 @@ except ImportError:
     print("  [RECEIPT] unavailable: job_receipt module missing")
     sys.exit(0)
 store = JobReceiptStore()
-for job in ("snapshot_commit", "pressure_sweep", "tmp_scratch_sweep", "worktree_reap"):
+for job in ("snapshot_commit", "pressure_sweep", "tmp_scratch_sweep", "worktree_reap", "routine_clean", "main_sweeper"):
     try:
         data = store.read(job)
         terminal = data.get("last_terminal") or {}
-        print("  [RECEIPT] {}: {}".format(job, terminal.get("outcome", "unknown")))
+        outcome = terminal.get("outcome", "unknown")
+        if outcome == "degraded":
+            print("  [RECEIPT] {}: DEGRADED - {}".format(job, terminal.get("reason") or "gates refused every eligible candidate"))
+        else:
+            print("  [RECEIPT] {}: {}".format(job, outcome))
     except Exception as exc:
         print("  [RECEIPT] {}: invalid ({})".format(job, exc))
 PY_RECEIPTS

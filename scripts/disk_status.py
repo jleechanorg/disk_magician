@@ -138,7 +138,7 @@ def superseded_interrupted_records(
         or terminal_end < terminal_start
         or terminal.get("outcome") not in {
             "skipped_threshold", "blocked_safety", "error",
-            "timeout", "success_noop", "success",
+            "timeout", "degraded", "success_noop", "success",
         }
         or terminal.get("job") != job
     ):
@@ -1320,7 +1320,7 @@ class DiskStatusEvaluator:
                 degraded_reasons.append(f"{job}: stale")
                 continue
 
-            if term_outcome in ("error", "timeout", "blocked_safety"):
+            if term_outcome in ("error", "timeout", "blocked_safety", "degraded"):
                 job_statuses[job] = {
                     "status": STATUS_DEGRADED,
                     "reason": f"terminal_{term_outcome}",
@@ -1430,6 +1430,31 @@ class DiskStatusEvaluator:
             if overall_status not in (STATUS_INVALID, STATUS_DEGRADED):
                 overall_status = STATUS_UNKNOWN
             degraded_reasons.append(f"{job}: unhandled outcome {term_outcome}")
+
+        # Routine runners are not freshness-required here, but a DEGRADED terminal
+        # (every eligible candidate refused by an unmeasurable gate; bead
+        # disk_magician-kub3) must never read as healthy.
+        for job in ("routine_clean", "main_sweeper"):
+            try:
+                last_term = store.read(job).get("last_terminal") or {}
+            except Exception:
+                continue
+            if last_term.get("outcome") != "degraded":
+                continue
+            job_statuses[job] = {
+                "status": STATUS_DEGRADED,
+                "reason": "terminal_degraded",
+                "latest_outcome": "degraded",
+                "ended_at": (last_term.get("times") or {}).get("ended_at"),
+                "latest_attempt": last_term,
+                "active_records": [],
+                "last_terminal": last_term,
+                "last_success": None,
+                "last_skipped": None,
+            }
+            if overall_status != STATUS_INVALID:
+                overall_status = STATUS_DEGRADED
+            degraded_reasons.append(f"{job}: DEGRADED {last_term.get('reason') or ''}".strip())
 
         for job, detail in job_statuses.items():
             detail["superseded_interrupted"] = superseded_by_job.get(job, [])

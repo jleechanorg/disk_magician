@@ -287,18 +287,37 @@ section() {
 CATEGORY_TOTAL=0
 CATEGORY_FAILED=0
 FAILED_CATEGORIES=()
+# DEGRADED (bead disk_magician-kub3): a category whose eligible candidates were
+# all refused by an unmeasurable gate (cwd-unknown) did not run clean, it could
+# not run. Distinct from FAILED; the run exits $DISK_MAGICIAN_DEGRADED_EXIT.
+# shellcheck source=scripts/lib/verdict_tally.sh
+source "$SCRIPT_DIR/lib/verdict_tally.sh"
+DEGRADED_CATEGORIES=()
+ELIGIBLE_TOTAL=0
+REFUSED_UNMEASURABLE_TOTAL=0
 
 run_category() {
     local label="$1"
     shift
     CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
     echo "  ▶ Category: $label"
-    local rc=0
+    local rc=0 vt_rc=0
+    vt_open
     "$@" || rc=$?
+    vt_close || vt_rc=$?
     if [[ $rc -ne 0 ]]; then
         CATEGORY_FAILED=$(( CATEGORY_FAILED + 1 ))
         FAILED_CATEGORIES+=("$label (exit $rc)")
         echo "  ⚠️  CATEGORY FAILED: $label (exit $rc) — see output above"
+    else
+        ELIGIBLE_TOTAL=$(( ELIGIBLE_TOTAL + $(vt_field eligible_count) ))
+        REFUSED_UNMEASURABLE_TOTAL=$(( REFUSED_UNMEASURABLE_TOTAL + $(vt_field refused_unmeasurable_count) ))
+        if [[ $vt_rc -eq $DISK_MAGICIAN_DEGRADED_EXIT ]]; then
+            DEGRADED_CATEGORIES+=("$label: $(vt_reason)")
+            echo "  ⚠️  CATEGORY DEGRADED: $label — $(vt_reason)"
+        elif [[ $(vt_field refused_unmeasurable_count) -gt 0 ]]; then
+            echo "  ℹ️  $label: $(vt_reason)"
+        fi
     fi
     return 0
 }
@@ -312,8 +331,16 @@ print_category_summary() {
         for f in "${FAILED_CATEGORIES[@]}"; do
             echo "    - $f"
         done
-    else
+    elif [[ ${#DEGRADED_CATEGORIES[@]} -eq 0 ]]; then
         echo "  All attempted categories completed without error."
+    fi
+    echo "  Eligible candidates refused as unmeasurable: $REFUSED_UNMEASURABLE_TOTAL of $ELIGIBLE_TOTAL"
+    if [[ ${#DEGRADED_CATEGORIES[@]} -gt 0 ]]; then
+        echo "  ⚠️  DEGRADED: ${#DEGRADED_CATEGORIES[@]} of $CATEGORY_TOTAL categories could not run (gates refused every eligible candidate; nothing was proven safe to remove):"
+        local d
+        for d in "${DEGRADED_CATEGORIES[@]}"; do
+            echo "    - $d"
+        done
     fi
 }
 
@@ -521,6 +548,13 @@ if [[ "$MODE" == "audit" ]]; then
     echo
     echo "  Run with --clean to clean SAFE targets, or --clean-all for interactive cleanup."
     exit 0
+fi
+
+# Run-level receipt through the shared receipt helper; freed_bytes stays null
+# (this runner does not measure it), so a zero-reclaim run is never a fake 0.
+ROUTINE_RUN_ID=""
+if [[ "$MODE" != "audit" && "$DRY_RUN" == false ]]; then
+    ROUTINE_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job routine_clean --trigger "$MODE" --clear-stale-active 2>/dev/null || true)"
 fi
 
 # Safe Cleanups
@@ -748,6 +782,19 @@ if [[ "$MODE" != "audit" && "$DRY_RUN" != true && "${DISK_MAGICIAN_RECORD_CLEANE
     "$SCRIPT_DIR/check_uncovered_roots.sh" --record-cleaned || true
 fi
 
-if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 )); then
-    exit 1
+if [[ -n "$ROUTINE_RUN_ID" ]]; then
+    run_outcome=success run_reason="all $CATEGORY_TOTAL categories completed"
+    if (( CATEGORY_FAILED > 0 )); then
+        run_outcome=error run_reason="$CATEGORY_FAILED of $CATEGORY_TOTAL categories failed"
+    elif (( ${#DEGRADED_CATEGORIES[@]} > 0 )); then
+        run_outcome=degraded run_reason="${#DEGRADED_CATEGORIES[@]} of $CATEGORY_TOTAL categories degraded: ${DEGRADED_CATEGORIES[*]}"
+    fi
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job routine_clean --run-id "$ROUTINE_RUN_ID" \
+        --outcome "$run_outcome" --reason "$run_reason" \
+        --candidates "{\"categories\":$CATEGORY_TOTAL,\"failed_categories\":$CATEGORY_FAILED,\"degraded_categories\":${#DEGRADED_CATEGORIES[@]},\"eligible_count\":$ELIGIBLE_TOTAL,\"refused_unmeasurable_count\":$REFUSED_UNMEASURABLE_TOTAL}" >/dev/null 2>&1 || true
+fi
+
+if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]]; then
+    (( CATEGORY_FAILED == 0 )) || exit 1
+    (( ${#DEGRADED_CATEGORIES[@]} == 0 )) || exit "$DISK_MAGICIAN_DEGRADED_EXIT"
 fi

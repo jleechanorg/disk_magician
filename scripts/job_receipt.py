@@ -3,7 +3,8 @@
 
 Implements standard-library typed atomic receipt helper:
 - Fixed terminal outcomes: skipped_lock, skipped_threshold, blocked_safety, error,
-  timeout, partial, success_noop, success.
+  timeout, partial, degraded, success_noop, success. `degraded` means every
+  eligible candidate was refused for an unmeasurable-gate reason (see `tally`).
 - Started without terminal => outcome 'unknown', freed_bytes unknown/null never fake zero.
 - Retains <=64 completed summaries and <=2 active/started per job.
 - Preserves independent active, last_success, and last_skipped identities so contenders
@@ -39,6 +40,7 @@ TERMINAL_OUTCOMES = {
     "error",
     "timeout",
     "partial",
+    "degraded",
     "success_noop",
     "success",
 }
@@ -50,6 +52,12 @@ SKIP_OUTCOMES = {
 }
 
 ALL_ALLOWED_OUTCOMES = TERMINAL_OUTCOMES | {"unknown"}
+
+# Verdict reasons that mean a safety gate could not measure, as opposed to a
+# measured keep (live-cwd, young, locked). A run whose eligible candidates were
+# all refused for these is DEGRADED, not a success with zero bytes freed.
+UNMEASURABLE_REASONS = frozenset({"cwd-unknown", "mtime-unmeasurable"})
+DEGRADED_EXIT_CODE = 4
 
 MAX_COMPLETED_RETENTION = 64
 MAX_ACTIVE_RETENTION = 2
@@ -113,6 +121,41 @@ def compute_duration_seconds(start_iso: str, end_iso: str) -> float:
             f"ended_at ({end_iso}) is earlier than started_at ({start_iso}): negative duration"
         )
     return round(diff, 3)
+
+
+def summarize_verdict_tally(path: str) -> Dict[str, Any]:
+    """Fold a verdict tally (one `remove` / `kept:<why>` / `deferred:<why>` per line)
+    into receipt candidate fields; `degraded` is true only when at least one
+    candidate was eligible and every one was refused as unmeasurable."""
+    tokens = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tokens = [line.strip() for line in f if line.strip()]
+    except OSError:
+        pass
+    by_reason: Dict[str, int] = {}
+    removed = 0
+    for tok in tokens:
+        if tok == "remove":
+            removed += 1
+        else:
+            reason = tok.partition(":")[2] or tok
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+    unmeasurable = sum(n for r, n in by_reason.items() if r in UNMEASURABLE_REASONS)
+    degraded = bool(tokens) and unmeasurable == len(tokens)
+    shown = ", ".join(f"{r}={n}" for r, n in sorted(by_reason.items()))
+    return {
+        "eligible_count": len(tokens),
+        "removed_count": removed,
+        "refused_count": len(tokens) - removed,
+        "refused_unmeasurable_count": unmeasurable,
+        "refused_by_reason": by_reason,
+        "degraded": degraded,
+        "reason": (
+            f"all {len(tokens)} eligible candidates refused by an unmeasurable gate ({shown})"
+            if degraded else f"{len(tokens) - removed} of {len(tokens)} eligible refused ({shown or 'none'})"
+        ),
+    }
 
 
 def resolve_state_dir(override: Optional[str] = None) -> Path:
@@ -825,6 +868,11 @@ def main() -> int:
     p_read.add_argument("--last-skipped", action="store_true", help="Print last_skipped receipt only")
     p_read.add_argument("--active", action="store_true", help="Print active runs only")
 
+    # Subcommand: tally
+    p_tally = subparsers.add_parser(
+        "tally", help=f"Summarize a verdict tally; exit {DEGRADED_EXIT_CODE} when DEGRADED")
+    p_tally.add_argument("--file", required=True, help="Verdict tally file")
+
     args = parser.parse_args()
     store = JobReceiptStore()
 
@@ -876,6 +924,11 @@ def main() -> int:
             )
             print(json.dumps(rec))
             return 0
+
+        elif args.subcommand == "tally":
+            summary = summarize_verdict_tally(args.file)
+            print(json.dumps(summary))
+            return DEGRADED_EXIT_CODE if summary["degraded"] else 0
 
         elif args.subcommand == "read":
             data = store.read(args.job)
