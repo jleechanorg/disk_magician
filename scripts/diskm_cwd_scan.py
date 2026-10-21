@@ -15,16 +15,36 @@ def pids():
     return {n for n in os.listdir(b"/proc") if n.isdigit()}
 
 
+def thread_cwds(proc):
+    """cwds of a process whose leader's own cwd link is gone (leader called
+    pthread_exit while other threads run): read each thread's link instead."""
+    cwds = set()
+    try:
+        tids = os.listdir(proc + b"/task")
+    except FileNotFoundError:
+        return cwds
+    for tid in tids:
+        try:
+            cwds.add(os.readlink(proc + b"/task/" + tid + b"/cwd"))
+        except FileNotFoundError:
+            continue
+    return cwds
+
+
 def scan(names):
     records = []
     for name in sorted(names, key=int):
         proc = b"/proc/" + name
         try:
             uid = os.stat(proc).st_uid
-            cwd = os.readlink(proc + b"/cwd")
         except FileNotFoundError:
-            continue  # exited (or a zombie): holds no cwd
-        records.append(name + b"\t" + str(uid).encode() + b"\t" + cwd + b"\0")
+            continue  # exited
+        try:
+            cwds = {os.readlink(proc + b"/cwd")}
+        except FileNotFoundError:
+            cwds = thread_cwds(proc)  # empty for a zombie
+        for cwd in sorted(cwds):
+            records.append(name + b"\t" + str(uid).encode() + b"\t" + cwd + b"\0")
     return records
 
 

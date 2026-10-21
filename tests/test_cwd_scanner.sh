@@ -52,12 +52,27 @@ def listdir(_):
     return [b"1", b"2"] if len(calls) <= 1 else [b"1", b"2", b"3"]   # pid 3 forks during the first scan
 os.listdir = listdir
 os.stat = lambda p: type("S", (), {"st_uid": 0})()
-os.readlink = lambda p: b"/w" + p[5:6]
+os.readlink = lambda p: b"/w" + p[6:7]
 sys.argv = ["x"]; sys.stdout = type("O", (), {"buffer": sys.stdout.buffer, "flush": lambda s: None})()
 h.main()
 PY
 race="$(/usr/bin/python3 -I "$TMP/race.py" "$HELPER" | tr '\0' ' ')"
 [[ "$race" == *$'3\t0\t/w3'* ]] && ok "helper rescans when a pid appears mid-scan" || bad "race: '$race'"
+
+cat >"$TMP/leader.py" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", sys.argv[1]); h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+def listdir(p):
+    return {b"/proc": [b"4", b"6"], b"/proc/4/task": [b"4", b"5"], b"/proc/6/task": [b"6"]}[p]
+def readlink(p):
+    if p == b"/proc/4/task/5/cwd": return b"/t5"
+    raise FileNotFoundError(p)   # leader 4 exited its main thread; pid 6 is a zombie
+os.listdir = listdir; os.readlink = readlink; os.stat = lambda p: type("S", (), {"st_uid": 7})()
+sys.argv = ["x"]; sys.stdout = type("O", (), {"buffer": sys.stdout.buffer, "flush": lambda s: None})()
+h.main()
+PY
+leader="$(/usr/bin/python3 -I "$TMP/leader.py" "$HELPER" | tr '\0' ' ')"
+[[ "$leader" == $'4\t7\t/t5 ' ]] && ok "live threads of a leaderless process keep their cwd; zombie skipped" || bad "leader: '$leader'"
 
 echo "== complete map -> candidates decided from it =="
 mk_lsof_marker

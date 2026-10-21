@@ -31,6 +31,12 @@ done
 id "$TARGET_USER" >/dev/null 2>&1 || { echo "Error: no such user '$TARGET_USER'" >&2; exit 1; }
 [[ -f "$SRC" ]] || { echo "Error: missing $SRC" >&2; exit 1; }
 
+# Whoever can write these directories can swap the helper for a root shell.
+for d in /usr /usr/local /usr/local/sbin /etc/sudoers.d; do
+  [[ -d "$d" && "$(stat -c %u "$d")" == 0 && $(( 8#$(stat -c %a "$d") & 8#022 )) == 0 ]] \
+    || { echo "Error: $d must be a root-owned directory not writable by group or others" >&2; exit 1; }
+done
+
 # `""` forbids any argument, so the rule can only ever run the bare helper.
 RULE="$TARGET_USER ALL=(root) NOPASSWD: $BIN \"\""
 
@@ -44,10 +50,10 @@ fi
 [[ "$(id -u)" -eq 0 ]] || { echo "Error: run as root (sudo bash $0)" >&2; exit 1; }
 command -v visudo >/dev/null || { echo "Error: visudo not found" >&2; exit 1; }
 
+tmp_bin=""; tmp_rule=""; prev_rule=""
+trap 'rm -f "$tmp_bin" "$tmp_rule" "$prev_rule"' EXIT
 tmp_bin="$(mktemp /usr/local/sbin/.diskm-cwd-scan.XXXXXX)"
 tmp_rule="$(mktemp /etc/sudoers.d/.diskm-cwd-scan.XXXXXX)"
-prev_rule=""
-trap 'rm -f "$tmp_bin" "$tmp_rule" "$prev_rule"' EXIT
 
 install -m 0755 -o root -g root "$SRC" "$tmp_bin"
 printf '%s\n' "$RULE" >"$tmp_rule"
@@ -69,6 +75,7 @@ if ! visudo -c >/dev/null; then
   exit 1
 fi
 
-count="$(sudo -n -u "$TARGET_USER" sudo -n "$BIN" | tr -cd '\0' | wc -c)"
+count="$(sudo -n -u "$TARGET_USER" sudo -n "$BIN" | tr -cd '\0' | wc -c)" \
+  || { echo "Error: sudo -n $BIN failed as $TARGET_USER (rule left installed)" >&2; exit 1; }
 [[ "$count" -gt 0 ]] || { echo "Error: verification as $TARGET_USER returned no records" >&2; exit 1; }
 echo "Installed $BIN and $SUDOERS; verified passwordless scan as $TARGET_USER ($count processes)."
