@@ -18,4 +18,4 @@ diskm = "disk_magician.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-disk_magician = ["disk_magician.sh", "config.json.template", "config/*.txt", "scripts/*.sh", "scripts/*.py", "scripts/lib/*.sh", "launchd/*.plist", "launchd/*.plist.template", "launchd/*.c", "tools/*.sh"]
+disk_magician = ["disk_magician.sh", "config.json.template", "config/*.txt", "scripts/*.sh", "scripts/*.py", "scripts/lib/*.sh", "launchd/*.plist", "launchd/*.plist.template", "launchd/*.c", "tools/*.sh", "tools/guards/*", "hooks/*.sh"]
