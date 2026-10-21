@@ -604,6 +604,18 @@ backdate_tree "$W31C" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
 assert_contains "$OUT" "ignored-secret" "credential-named bytecode under __pycache__ blocks"
 assert_true "[[ -f '$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc' ]]" "credential bytecode kept"
+W31D="$(mk_wt "$R31" pyc31d)"
+mkdir -p "$W31D/venv/lib"; echo "x" >"$W31D/venv/lib/x_credentials.pyo"
+echo "edit" >>"$W31D/tracked.txt"
+backdate_tree "$W31D" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_contains "$OUT" "ignored-secret:venv/lib/x_credentials.pyo" "venv credentials .pyo blocks (.pyo is exempt nowhere)"
+W31E="$(mk_wt "$R31" pyc31e)"
+mkdir -p "$W31E/venv/lib"; echo "x" >"$W31E/venv/lib/x_credentials.pyc"
+echo "edit" >>"$W31E/tracked.txt"
+backdate_tree "$W31E" 30
+OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
+assert_not_contains "$OUT" "ignored-secret:venv/lib/x_credentials.pyc" "venv credentials .pyc is exempt under a dependency dir"
 assert_true "[[ -f '$W31B/pkg/.env' ]]" "secret kept"
 
 # ---------------------------------------------------------------------------

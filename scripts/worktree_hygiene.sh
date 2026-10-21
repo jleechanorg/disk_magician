@@ -578,10 +578,11 @@ preserve_wip_blocker() {
             continue
         fi
         base="${name##*/}"
-        # Bytecode is exempt only under dependency dirs (same rule as C14 exempt_name);
-        # a credentials-named .pyc elsewhere (e.g. __pycache__/x_credentials.pyc) can embed secrets.
+        # Mirrors C14 exempt_name: only `.pyc` (not `.pyo`) under a dependency dir is exempt, tracked or
+        # not, so an untracked node_modules/p/credentials.pyc no longer reports ignored-secret (it is
+        # exempt there); venv/x_credentials.pyo and any .pyc outside dependency dirs still block.
         case "$name" in
-            node_modules/*.py[co]|*/node_modules/*.py[co]|venv/*.py[co]|*/venv/*.py[co]|.venv/*.py[co]|*/.venv/*.py[co]|site-packages/*.py[co]|*/site-packages/*.py[co]) continue ;;
+            node_modules/*.pyc|*/node_modules/*.pyc|venv/*.pyc|*/venv/*.pyc|.venv/*.pyc|*/.venv/*.pyc|site-packages/*.pyc|*/site-packages/*.pyc) continue ;;
         esac
         case "$base" in
             .env|.env.*|.envrc|*.pem|*.key|*.keystore|id_rsa*|id_ed25519*|*credentials*|secrets*|service-account*.json|.netrc|*.p12)
