@@ -28,6 +28,10 @@ vt_close() {
     [[ -n "$f" && -f "$f" ]] || return 0
     VT_SUMMARY="$(python3 "$_VT_DIR/../job_receipt.py" tally --file "$f")" || rc=$?
     rm -f "$f"
+    if [[ "$rc" -ne 0 && "$rc" -ne "$DISK_MAGICIAN_DEGRADED_EXIT" ]]; then
+        echo "WARN: verdict tally lost (job_receipt tally rc=$rc); DEGRADED detection skipped" >&2
+        return 0
+    fi
     [[ "$rc" -eq "$DISK_MAGICIAN_DEGRADED_EXIT" ]] && return "$rc"
     return 0
 }

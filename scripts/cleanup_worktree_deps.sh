@@ -24,6 +24,7 @@ source "$SCRIPT_DIR/safety_lib.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/lsof_linux.sh
 source "$SCRIPT_DIR/lib/lsof_linux.sh"
+source "$SCRIPT_DIR/lib/verdict_tally.sh"
 # shellcheck source=scripts/lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
 
@@ -71,6 +72,7 @@ fi
 # Live-cwd evidence must be complete; otherwise refuse to delete anything. The
 # shared strict parser is the only place that interprets lsof output.
 if ! lsof_snapshot_cwds; then
+  vt_record kept:cwd-unknown # whole category refused: candidates cannot be proven idle
   echo "lsof output incomplete ($LSOF_CWD_REASON): cwd unknown, refusing."; exit 0
 fi
 LIVE_CWDS="$LSOF_CWDS"

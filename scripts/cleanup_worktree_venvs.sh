@@ -624,6 +624,7 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
     real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
     _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
+    case "$_skip_reason" in cwd-unknown|live-cwd) vt_record "kept:$_skip_reason" ;; esac # DEGRADED tally (post age gate)
     if [[ -n "$_skip_reason" ]]; then
       SKIPPED_EXCLUDED=$(( SKIPPED_EXCLUDED + 1 ))
       log "  skip ($_skip_reason): $venv_path"
@@ -702,6 +703,7 @@ purge_bak_dirs() {
       # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
       real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
       _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
+      case "$_skip_reason" in cwd-unknown|live-cwd) vt_record "kept:$_skip_reason" ;; esac # DEGRADED tally (post age gate)
       if [[ -n "$_skip_reason" ]]; then
         skipped_excluded=$(( skipped_excluded + 1 ))
         log "  skip ($_skip_reason): $bak_path"

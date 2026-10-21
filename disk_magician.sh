@@ -97,8 +97,9 @@ Options:
 Exit codes (clean / sweep):
   0  success (including "nothing eligible")
   1  a cleanup category failed
-  4  DEGRADED: every eligible candidate was refused by an unmeasurable gate
-     (e.g. cwd-unknown); nothing was proven safe to remove. Receipt outcome: degraded.
+  4  DEGRADED: in at least one category, every eligible candidate was refused by an
+     unmeasurable gate (e.g. cwd-unknown); nothing there was proven safe to remove.
+     Receipt outcome: degraded.
 EOF
 }
 

@@ -6,7 +6,6 @@ source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
 if (( ${#ACT_ARGS[@]} )); then set -- "${ACT_ARGS[@]}"; else set --; fi
 source "$SCRIPT_DIR/worktree_remove_hook.sh"
-source "$SCRIPT_DIR/lib/verdict_tally.sh"
 source "$SCRIPT_DIR/lib/quarantine.sh"
 source "$SCRIPT_DIR/lib/worktree_merged_pr.sh"
 STATE="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
@@ -364,7 +363,6 @@ process_lease() {
     repo="$(wtn_main_repo "$real")" || { record "$file" "$real" kept:not-registered; return 0; }
     if ! fetch_repo "$repo"; then record "$file" "$real" kept:remote-unverified; return 0; fi
     verdict="$(verdict_for "$real" "$repo" "$quiet")"
-    vt_record "$verdict"
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
         # Exclude reuse from the final lease/verdict check through the actual
         # removal. A fresh unlocked claim check would leave the same TOCTOU.
@@ -397,9 +395,9 @@ process_lease() {
         local reap_c14_inv reap_c14_verdict reap_removed=0
         reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { lease_reuse_lock_release "$file"; record "$file" "$real" kept:check-failed; return 0; }
         if [[ -n "$ACT_DEADLINE_AT" ]]; then
-            reap_c14_verdict="$(DISK_MAGICIAN_VERDICT_TALLY= artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
         else
-            reap_c14_verdict="$(DISK_MAGICIAN_VERDICT_TALLY= artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv")"
+            reap_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv")"
         fi
         if [[ "$reap_c14_verdict" == remove ]]; then
             if [[ -n "$ACT_DEADLINE_AT" ]]; then

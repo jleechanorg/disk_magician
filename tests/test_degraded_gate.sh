@@ -140,6 +140,13 @@ run_audit
 assert_eq "$RC" 1 "a failed category exits 1 even when another is degraded"
 assert_eq "$(routine_outcome)" error "failed+degraded receipt outcome is error"
 
+echo "== whole-category refusal: worktree deps with an unusable lsof =="
+printf '#!/bin/sh\necho "lsof: boom" >&2\nexit 2\n' >"$TMPROOT/bin/lsof"
+export DISK_MAGICIAN_VERDICT_TALLY="$TMPROOT/deps-tally"; : >"$DISK_MAGICIAN_VERDICT_TALLY"
+PATH="$TMPROOT/bin:$PATH" bash "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" --dry-run >"$TMPROOT/deps.log" 2>&1
+assert_eq "$(cat "$DISK_MAGICIAN_VERDICT_TALLY")" kept:cwd-unknown "deps lane records its wholesale cwd refusal"
+unset DISK_MAGICIAN_VERDICT_TALLY
+
 echo "== status / sweeper-health surface DEGRADED =="
 python3 "$RECEIPT" begin --job routine_clean --trigger test >"$TMPROOT/rid" && \
     python3 "$RECEIPT" finish --job routine_clean --run-id "$(cat "$TMPROOT/rid")" --outcome degraded --reason "1 of 12 categories degraded: Dev caches" >/dev/null
