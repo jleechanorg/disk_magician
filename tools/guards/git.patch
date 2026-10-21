@@ -32,7 +32,7 @@
  # Fast pure-bash check: isolated unit-test harnesses where HOME is in temp space.
  case "${HOME:-}" in
    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
-@@ -43,6 +64,32 @@
+@@ -43,6 +64,34 @@
  done
  
  subcmd="${args[$idx]:-}"
@@ -58,14 +58,16 @@
 +      clone_dest="${clone_pos[0]%/}"; clone_dest="${clone_dest##*[/:]}"; clone_dest="${clone_dest%.git}"
 +    fi
 +    [[ "$clone_dest" == /* ]] || clone_dest="$git_cwd/$clone_dest"
-+    admit_exec "" "$clone_dest"
++    # A relative -C or destination, `..` or a symlink must not hide a governed root.
++    . "$(dirname "${BASH_SOURCE[0]}")/_guard_lib.sh"
++    admit_exec "" "$(guard_resolve "$clone_dest")"
 +  fi
 +  exec "$REAL" "$@"
 +fi
  if [[ "$subcmd" != "worktree" ]]; then
    exec "$REAL" "$@"
  fi
-@@ -112,7 +159,7 @@
+@@ -112,7 +161,7 @@
  
  if [[ "$resolved_target" == "$resolved_root/"* ]]; then
    guard_decide ALLOW git "worktree add under standard root '$resolved_target'"
@@ -74,7 +76,7 @@
  fi
  
  # Extra allowed worktree roots: one path prefix or glob per line ('#' comments),
-@@ -142,7 +189,7 @@
+@@ -142,7 +191,7 @@
          guard_is_protected "$resolved_allow" && continue
          if [[ "$resolved_target" == "$resolved_allow/"* ]]; then
            guard_decide ALLOW git "worktree add under allowlisted glob '$allow_line' -> '$resolved_allow'"
@@ -83,7 +85,7 @@
          fi
        done
        continue
-@@ -156,7 +203,7 @@
+@@ -156,7 +205,7 @@
      guard_is_protected "$resolved_allow" && continue
      if [[ "$resolved_target" == "$resolved_allow" || "$resolved_target" == "$resolved_allow/"* ]]; then
        guard_decide ALLOW git "worktree add under allowlisted root '$resolved_allow'"

@@ -101,6 +101,11 @@ grep -q -- "--class worktrees .*--dest $(wt c0) " "$R/admit.log" && ok "clone de
 shim 75 clone -q "$R/home/src/repo" "/tmp/dm-shim-clone-$$"
 assert_eq "$RC/$ADMITS" "75/1" "clone into /tmp refused at 75"
 grep -q -- "--class tmp_containers" "$R/admit.log" && ok "/tmp clone charged to tmp_containers" || bad "args: $(cat "$R/admit.log")"
+shim 75 -C ../.. clone -q src/repo .worktrees/repo/crel
+assert_eq "$RC/$ADMITS" "75/1" "relative -C and destination still admitted (advice P0)"
+[[ ! -e "$(wt crel)" ]] && ok "relative clone refused, not created" || bad "relative clone created"
+shim 75 clone -q "$R/home/src/repo" "$R/home/src/../.worktrees/repo/cdots"
+grep -q -- "--dest $(wt cdots) " "$R/admit.log" && ok "dest normalized past .." || bad "args: $(cat "$R/admit.log")"
 shim 75 clone -q "$R/home/src/repo" "$R/home/src/plain"
 assert_eq "$RC/$ADMITS" "0/0" "clone outside governed roots: no admit"
 
