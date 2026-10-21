@@ -1199,11 +1199,14 @@ G11_TMP="$TMP_ROOT/g11-tmp"
 G11_ARCHIVE="$TMP_ROOT/g11-archive"
 G11_BIN="$TMP_ROOT/g11-bin"
 mkdir -p "$G11_PRIVATE_TMP" "$G11_TMP"
+# Canonicalize so the pr_ candidate has a declared-ephemeral E2 row (archivable).
+G11_PRIVATE_TMP="$(cd "$G11_PRIVATE_TMP" && pwd -P)"
+G11_TMP="$(cd "$G11_TMP" && pwd -P)"
 make_find_shim "$G11_BIN" "$G11_PRIVATE_TMP" "$G11_TMP"
-make_large_dir "$G11_PRIVATE_TMP/dir_mtime_only"
-set_old_mtime "$G11_PRIVATE_TMP/dir_mtime_only"
+make_large_dir "$G11_PRIVATE_TMP/pr_dir_mtime_only"
+set_old_mtime "$G11_PRIVATE_TMP/pr_dir_mtime_only"
 # Re-touch ONLY the directory entry itself: content stays old, dir looks fresh.
-touch "$G11_PRIVATE_TMP/dir_mtime_only"
+touch "$G11_PRIVATE_TMP/pr_dir_mtime_only"
 
 G11_OUT="$TMP_ROOT/g11.out"
 if run_capture "$G11_OUT" env -i HOME="$TMP_ROOT/g11-home" \
@@ -1222,7 +1225,17 @@ fi
 G11_OUT_CONTENT=$(cat "$G11_OUT")
 assert_rc "GREEN 11: exits 0" 0 "$G11_RC"
 assert_not_contains "GREEN 11: dir-mtime-only tree is NOT reported active" \
-  "Skipping recently active dir (mtime within 24h): $G11_PRIVATE_TMP/dir_mtime_only" "$G11_OUT_CONTENT"
+  "Skipping recently active dir (mtime within 24h): $G11_PRIVATE_TMP/pr_dir_mtime_only" "$G11_OUT_CONTENT"
+
+assert_contains "GREEN 11: dir-mtime-only tree is actually archived" \
+  "Archiving: $G11_PRIVATE_TMP/pr_dir_mtime_only ->" "$G11_OUT_CONTENT"
+assert_missing "GREEN 11: dir-mtime-only original path is gone (moved)" "$G11_PRIVATE_TMP/pr_dir_mtime_only"
+G11_ARCHIVED_COUNT=$(/usr/bin/find "$G11_ARCHIVE" -mindepth 2 -maxdepth 2 -type d -name pr_dir_mtime_only 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$G11_ARCHIVED_COUNT" -eq 1 ]]; then
+  record_pass "GREEN 11: exactly one archived copy exists"
+else
+  record_fail "GREEN 11: exactly one archived copy exists" "found $G11_ARCHIVED_COUNT under $G11_ARCHIVE"
+fi
 
 echo "GREEN 12: genuinely recent CONTENT still protects the tree (other side of 7871)"
 G12_PRIVATE_TMP="$TMP_ROOT/g12-private-tmp"
@@ -1255,6 +1268,55 @@ assert_rc "GREEN 12: exits 0" 0 "$G12_RC"
 assert_contains "GREEN 12: recent content still logs the active skip" \
   "Skipping recently active dir (mtime within 24h): $G12_PRIVATE_TMP/recent_content" "$G12_OUT_CONTENT"
 assert_exists "GREEN 12: recent-content tree untouched" "$G12_PRIVATE_TMP/recent_content/payload.bin"
+
+# Structural activity leaves OLD mtimes but a FRESH ctime on the moved file:
+# mv / cp -p / tar -x / rsync -a of old content into a stale dir. Fixtures
+# cannot backdate ctime, so these opt in to the real ctime signal
+# (DISK_MAGICIAN_TEST_CTIME_SIGNAL=1) and use a freshly moved/copied file.
+run_ctime_case() {
+  # run_ctime_case <id> <how: mv|cp-p>
+  local id="$1" how="$2" pt tm ar bin out rc content
+  pt="$TMP_ROOT/$id-private-tmp"; tm="$TMP_ROOT/$id-tmp"; ar="$TMP_ROOT/$id-archive"; bin="$TMP_ROOT/$id-bin"
+  mkdir -p "$pt" "$tm"
+  pt="$(cd "$pt" && pwd -P)"; tm="$(cd "$tm" && pwd -P)"
+  make_find_shim "$bin" "$pt" "$tm"
+  make_large_dir "$pt/pr_moved_in"
+  set_old_mtime "$pt/pr_moved_in"
+  # An old-mtime file created elsewhere, then structurally moved in AFTER the
+  # tree was backdated: mtime stays old (mv/cp -p preserve it), ctime is fresh.
+  mkdir -p "$TMP_ROOT/$id-src"
+  printf 'old content\n' > "$TMP_ROOT/$id-src/moved.txt"
+  touch -t 202001010000 "$TMP_ROOT/$id-src/moved.txt"
+  if [[ "$how" == mv ]]; then
+    mv "$TMP_ROOT/$id-src/moved.txt" "$pt/pr_moved_in/moved.txt"
+  else
+    cp -p "$TMP_ROOT/$id-src/moved.txt" "$pt/pr_moved_in/moved.txt"
+  fi
+  # The dir's own mtime is fresh from the insert; backdate it (keeps the tree
+  # looking stale by mtime everywhere, including the top-level entry).
+  touch -t 202001010000 "$pt/pr_moved_in"
+  out="$TMP_ROOT/$id.out"
+  if run_capture "$out" env -i HOME="$TMP_ROOT/$id-home" \
+    PATH="$bin:/usr/bin:/bin" \
+    LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+    DISK_MAGICIAN_TEST_CTIME_SIGNAL=1 \
+    DISK_MAGICIAN_ARCHIVE_ROOT="$ar" \
+    DISK_MAGICIAN_TEST_CONTEXT=1 \
+    DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$pt" \
+    DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$tm" \
+    bash "$SOURCE_SCRIPT" --clean --large; then rc=0; else rc=$?; fi
+  content=$(cat "$out")
+  assert_rc "$id: exits 0" 0 "$rc"
+  assert_contains "$id: old-mtime file ($how) into stale dir reads ACTIVE via ctime" \
+    "Skipping recently active dir (mtime within 24h): $pt/pr_moved_in" "$content"
+  assert_exists "$id: moved-in tree untouched" "$pt/pr_moved_in/moved.txt"
+}
+
+echo "GREEN 13: mv of old-mtime content into a stale dir is ACTIVE (ctime signal)"
+run_ctime_case "g13" mv
+echo "GREEN 14: cp -p of old-mtime content into a stale dir is ACTIVE (ctime signal)"
+run_ctime_case "g14" cp-p
 
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
