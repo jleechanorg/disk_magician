@@ -1,0 +1,98 @@
+# disk_magician git shim admission patch (plan Task B2, spec 7.6 door 1).
+# Apply only through tools/guards/apply_git_admit.sh: it requires the recorded decision
+# external_edits and a live shim whose SHA256 equals base-sha256 below.
+# base-sha256: 226ebfdf2cd2db23e35c064c17428fd8bcc2c55dd233b5e0d8140cf5a9e408c8
+--- a/git
++++ b/git
+@@ -10,6 +10,25 @@
+   exec "$REAL" "$@"
+ fi
+ 
++# Disk admission (disk_magician tools/guards/git.patch, spec 7.6 door 1): admit a governed
++# birth before git runs. admit_gate (scripts/lib/admit_caller.sh) branches the full exit-code
++# matrix: 0/10 run, 76 waits DISK_MAGICIAN_ADMIT_RETRY_S once and re-admits, 75 or a second 76
++# refuses (exit 75, the refusal line is already on stderr), a missing admit or any other rc runs
++# as admission_degraded:caller. A missing caller library also runs.
++DISK_MAGICIAN_ROOT="${DISK_MAGICIAN_ROOT:-@DISK_MAGICIAN_ROOT@}"
++admit_exec() {  # $1=class $2=dest; never returns
++  if [[ ! -f "$DISK_MAGICIAN_ROOT/scripts/lib/admit_caller.sh" ]]; then
++    echo "admission_degraded:caller admit_caller.sh missing under $DISK_MAGICIAN_ROOT" >&2
++    exec "$REAL" "${args[@]}"
++  fi
++  . "$DISK_MAGICIAN_ROOT/scripts/lib/admit_caller.sh"
++  if ! admit_gate "$1" - git-shim "$2" shim; then exit 75; fi
++  local rc=0
++  "$REAL" "${args[@]}" || rc=$?
++  if [[ "$rc" == 0 ]]; then admit_confirm_created; fi
++  exit "$rc"
++}
++
+ # Fast pure-bash check: isolated unit-test harnesses where HOME is in temp space.
+ case "${HOME:-}" in
+   /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
+@@ -43,6 +62,38 @@
+ done
+ 
+ subcmd="${args[$idx]:-}"
++# `git clone` into a governed root (spec 7.6 door 1); no placement rule applies to clones.
++if [[ "$subcmd" == "clone" ]]; then
++  clone_pos=()
++  j=$((idx + 1))
++  while (( j < n )); do
++    a="${args[$j]}"
++    case "$a" in
++      --) clone_pos+=("${args[@]:$((j + 1))}"); break ;;
++      -b|--branch|-o|--origin|-c|--config|-u|--upload-pack|--depth|--reference|--reference-if-able|\
++      --separate-git-dir|--template|--filter|-j|--jobs|--shallow-since|--shallow-exclude|--server-option|\
++      --bundle-uri|--revision) j=$((j + 1)) ;;
++      -*) ;;
++      *) clone_pos+=("$a") ;;
++    esac
++    j=$((j + 1))
++  done
++  if (( ${#clone_pos[@]} > 0 )); then
++    clone_dest="${clone_pos[1]:-}"
++    if [[ -z "$clone_dest" ]]; then
++      clone_dest="${clone_pos[0]%/}"; clone_dest="${clone_dest##*[/:]}"; clone_dest="${clone_dest%.git}"
++    fi
++    [[ "$clone_dest" == /* ]] || clone_dest="$git_cwd/$clone_dest"
++    case "$clone_dest" in
++      "$HOME/.worktrees/"?*) admit_exec worktrees "$clone_dest" ;;
++      /tmp/?*|/private/tmp/?*) admit_exec tmp_containers "$clone_dest" ;;
++    esac
++    if [[ -n "${TMPDIR:-}" && "$clone_dest" == "${TMPDIR%/}/"?* ]]; then
++      admit_exec tmpdir_scratch "$clone_dest"
++    fi
++  fi
++  exec "$REAL" "$@"
++fi
+ if [[ "$subcmd" != "worktree" ]]; then
+   exec "$REAL" "$@"
+ fi
+@@ -112,7 +163,7 @@
+ 
+ if [[ "$resolved_target" == "$resolved_root/"* ]]; then
+   guard_decide ALLOW git "worktree add under standard root '$resolved_target'"
+-  exec "$REAL" "$@"
++  admit_exec worktrees "$resolved_target"
+ fi
+ 
+ # Extra allowed worktree roots: one path prefix or glob per line ('#' comments),
+@@ -142,7 +193,7 @@
+         guard_is_protected "$resolved_allow" && continue
+         if [[ "$resolved_target" == "$resolved_allow/"* ]]; then
+           guard_decide ALLOW git "worktree add under allowlisted glob '$allow_line' -> '$resolved_allow'"
+-          exec "$REAL" "$@"
++          admit_exec worktrees "$resolved_target"
+         fi
+       done
+       continue
+@@ -156,7 +207,7 @@
+     guard_is_protected "$resolved_allow" && continue
+     if [[ "$resolved_target" == "$resolved_allow" || "$resolved_target" == "$resolved_allow/"* ]]; then
+       guard_decide ALLOW git "worktree add under allowlisted root '$resolved_allow'"
+-      exec "$REAL" "$@"
++      admit_exec worktrees "$resolved_target"
+     fi
+   done <"$allow_file"
+ fi

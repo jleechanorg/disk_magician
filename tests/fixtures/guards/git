@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Guard shim: enforce ~/.worktrees/<repo>/<name> for `git worktree add` across
+# all CLIs/subshells after variable expansion. Zero forks on fast paths.
+set -euo pipefail
+
+REAL=/opt/homebrew/bin/git
+[[ -x "$REAL" ]] || REAL=/usr/bin/git
+
+if [[ "${DISK_MAGICIAN_WORKTREE_GUARD:-}" == "off" ]]; then
+  exec "$REAL" "$@"
+fi
+
+# Fast pure-bash check: isolated unit-test harnesses where HOME is in temp space.
+case "${HOME:-}" in
+  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
+    exec "$REAL" "$@"
+    ;;
+esac
+
+git_cwd="$PWD"
+n=$#
+args=("$@")
+idx=0
+while (( idx < n )); do
+  a="${args[$idx]}"
+  case "$a" in
+    --) idx=$((idx + 1)); break ;;
+    -C)
+      idx=$((idx + 1))
+      (( idx < n )) && git_cwd="${args[$idx]}"
+      idx=$((idx + 1))
+      ;;
+    -c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env)
+      idx=$((idx + 2))
+      ;;
+    -*)
+      idx=$((idx + 1))
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+subcmd="${args[$idx]:-}"
+if [[ "$subcmd" != "worktree" ]]; then
+  exec "$REAL" "$@"
+fi
+
+wt_action="${args[$((idx + 1))]:-}"
+if [[ "$wt_action" != "add" ]]; then
+  exec "$REAL" "$@"
+fi
+
+# Fast pure-bash check: repo cwd in temp space (unit test fixtures).
+case "$git_cwd" in
+  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
+    exec "$REAL" "$@"
+    ;;
+esac
+
+. "$(dirname "${BASH_SOURCE[0]}")/_guard_lib.sh"
+
+common_dir="$("$REAL" -C "$git_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$common_dir" ]]; then
+  resolved_common="$(guard_resolve "$common_dir")"
+  case "$resolved_common" in
+    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
+      exec "$REAL" "$@"
+      ;;
+  esac
+fi
+
+# Parse `git worktree add` arguments to extract target path and optional -b/-B branch.
+target_raw=""
+branch=""
+j=$((idx + 2))
+while (( j < n )); do
+  a="${args[$j]}"
+  if [[ "$a" == "--" ]]; then
+    j=$((j + 1))
+    (( j < n )) && target_raw="${args[$j]}"
+    break
+  elif [[ "$a" == "-b" || "$a" == "-B" ]]; then
+    j=$((j + 1))
+    (( j < n )) && branch="${args[$j]}"
+    j=$((j + 1))
+  elif [[ "$a" == "--reason" ]]; then
+    j=$((j + 2))
+  elif [[ "$a" == -* ]]; then
+    j=$((j + 1))
+  else
+    if [[ -z "$target_raw" ]]; then
+      target_raw="$a"
+    fi
+    j=$((j + 1))
+  fi
+done
+
+if [[ -z "$target_raw" ]]; then
+  exec "$REAL" "$@"
+fi
+
+if [[ "$target_raw" != /* && "$target_raw" != "~"* ]]; then
+  target_abs="$git_cwd/$target_raw"
+else
+  target_abs="$target_raw"
+fi
+resolved_target="$(guard_resolve "$target_abs")"
+std_root="${STANDARD_WORKTREE_ROOT:-$HOME/.worktrees}"
+resolved_root="$(guard_resolve "$std_root")"
+
+if [[ "$resolved_target" == "$resolved_root/"* ]]; then
+  guard_decide ALLOW git "worktree add under standard root '$resolved_target'"
+  exec "$REAL" "$@"
+fi
+
+# Extra allowed worktree roots: one path prefix or glob per line ('#' comments),
+# e.g. a project root whose canonical worktree location is a sibling of the
+# primary checkout instead of ~/.worktrees/<repo>/<name>. Globs are expanded
+# against existing directories, so `~/project_?*` and `~/projects/*` allow every
+# project without enumerating them. The target must be strictly below a matched
+# root, so a glob that matches ~/projects itself cannot allow ~/projects/<name>.
+# Roots that are protected or too shallow (guard_is_protected) are ignored, so
+# this cannot re-open $HOME.
+allow_file="${WORKTREE_ALLOWLIST_FILE:-$HOME/.config/guards/worktree-allowlist}"
+if [[ -f "$allow_file" ]]; then
+  while IFS= read -r allow_line || [[ -n "$allow_line" ]]; do
+    allow_line="${allow_line%%#*}"
+    allow_line="${allow_line#"${allow_line%%[![:space:]]*}"}"
+    allow_line="${allow_line%"${allow_line##*[![:space:]]}"}"
+    [[ -n "$allow_line" ]] || continue
+    if [[ "$allow_line" != /* ]]; then
+      allow_line="$(guard_resolve "$allow_line")"
+    fi
+    if [[ "$allow_line" == *[\*\?\[]* ]]; then
+      shopt -s nullglob
+      allow_matches=( $allow_line )
+      shopt -u nullglob
+      for resolved_allow in "${allow_matches[@]}"; do
+        [[ -d "$resolved_allow" ]] || continue
+        guard_is_protected "$resolved_allow" && continue
+        if [[ "$resolved_target" == "$resolved_allow/"* ]]; then
+          guard_decide ALLOW git "worktree add under allowlisted glob '$allow_line' -> '$resolved_allow'"
+          exec "$REAL" "$@"
+        fi
+      done
+      continue
+    fi
+    # Cheap literal prefilter so long allowlists cost no forks per line.
+    if [[ "$target_abs" != "$allow_line" && "$target_abs" != "$allow_line/"* && \
+          "$resolved_target" != "$allow_line" && "$resolved_target" != "$allow_line/"* ]]; then
+      continue
+    fi
+    resolved_allow="$(guard_resolve "$allow_line")"
+    guard_is_protected "$resolved_allow" && continue
+    if [[ "$resolved_target" == "$resolved_allow" || "$resolved_target" == "$resolved_allow/"* ]]; then
+      guard_decide ALLOW git "worktree add under allowlisted root '$resolved_allow'"
+      exec "$REAL" "$@"
+    fi
+  done <"$allow_file"
+fi
+
+main_repo="$git_cwd"
+if [[ -n "$common_dir" ]]; then
+  if [[ "$common_dir" == */.git ]]; then
+    main_repo="${common_dir%/.git}"
+  else
+    main_repo="$(dirname "$common_dir")"
+  fi
+fi
+repo_name="$(basename "$main_repo")"
+repo_name="${repo_name%.git}"
+wt_name="$(basename "${resolved_target%/}")"
+dest="$std_root/$repo_name/$wt_name"
+
+if [[ "${GUARD_DRYRUN:-}" == 1 ]]; then
+  guard_decide DENY git "worktree add outside $std_root: '$target_raw' -> '$resolved_target' (use $dest)"
+fi
+
+{
+  echo "BLOCKED by git worktree guard: Worktrees must live under ~/.worktrees/<repo>/<name>."
+  echo "  Attempted path: $resolved_target"
+  echo "  Use instead:"
+  echo "    diskm worktree-new $main_repo ${branch:-<branch>} --name $wt_name"
+  if [[ -n "$branch" ]]; then
+    echo "  or: git worktree add -b $branch $dest"
+  else
+    echo "  or: git worktree add --detach $dest <ref>"
+  fi
+} >&2
+exit 2

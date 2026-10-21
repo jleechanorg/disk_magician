@@ -17,7 +17,7 @@ trap 'rm -rf "$T" "${CONTRACT_DIR:-}"' EXIT
 mkdir -p "$T/bin" "$T/state"
 export DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_POLICY_FILE="$T/policy.json"
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl" RUNNER_NAME=mac-1
-export GITHUB_RUN_ID=111 GITHUB_RUN_ATTEMPT=2 GITHUB_JOB=build GITHUB_WORKSPACE="$T/ws"
+export GITHUB_RUN_ID=111 GITHUB_RUN_ATTEMPT=2 GITHUB_JOB=build GITHUB_WORKSPACE=/ezgha-vm/_work/ws
 printf '#!/bin/sh\necho "$*" >>"%s/launchctl.log"\n' "$T" >"$T/bin/launchctl"; chmod +x "$T/bin/launchctl"
 
 echo "== caller contract (class colima) =="
@@ -29,7 +29,7 @@ run_admit_contract "cd '$T/repo' && bash '$CI' && git worktree add -q ../ci-{n}"
 echo "== admit args: producer ci, source ci, --ci-job, --dest workspace =="
 _contract_case a1 "76 0" "" "bash '$CI'"
 args="$(cat "$CONTRACT_DIR/admit.log")"
-[[ "$args" == *"--producer ci "* && "$args" == *"--source ci"* && "$args" == *"--dest $T/ws"* ]] && ok "admit args" || bad "args: $args"
+[[ "$args" == *"--producer ci "* && "$args" == *"--source ci"* && "$args" == *"--dest /ezgha-vm/_work/ws"* ]] && ok "admit args" || bad "args: $args"
 assert_eq "$(grep -o -- '--ci-job [^ ]*' "$CONTRACT_DIR/admit.log" | sort -u)" "--ci-job 111.2.build" "retry reuses the same --ci-job"
 _contract_case a2 "0" "" "bash '$CI'"; first="$(cat "$CONTRACT_DIR/admit.log")"
 _contract_case a3 "0" "" "bash '$CI'"
@@ -58,6 +58,24 @@ grep -q "admission_degraded:caller rc=3" <<<"$C_ERR" && ok "bash -e rc3 degrades
 _contract_case e76 "76 76" "" "bash -e '$CI'"
 assert_eq "$C_RC" 75 "bash -e rc76 refuses after retry"; assert_eq "$C_ADMITS" 2 "bash -e rc76 retries exactly once"
 grep -q "disk-admission: refused class=colima rc=76" <<<"$C_ERR" && ok "bash -e rc76 refusal logged" || bad "bash -e rc76 stderr: $C_ERR"
+
+echo "== workspace class follows its host root; colima only for the image pull (plan Task B3) =="
+for ws in /private/tmp/ezgha-job/ws /tmp/ezgha-job/ws; do
+    _contract_case "w$ws" "0" "" "GITHUB_WORKSPACE=$ws bash '$CI'"
+    assert_eq "$C_RC/$C_ADMITS" "0/1" "$ws: one admit, rc 0"
+    grep -q -- "--class tmp_containers" "$CONTRACT_DIR/admit.log" && ok "$ws charged to tmp_containers" || bad "$ws: $(cat "$CONTRACT_DIR/admit.log")"
+    grep -q -- "--est-gb" "$CONTRACT_DIR/admit.log" && bad "$ws: caller passed --est-gb" || ok "$ws: empty CI_ADMIT_EST_GB leaves the calibrated producer estimate"
+done
+_contract_case wimg "0" "" "GITHUB_WORKSPACE=/private/tmp/ezgha-job/ws CI_ADMIT_IMAGE_EST_GB=3 bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "0/2" "image estimate: a second admit"
+assert_eq "$(sed -n 2p "$CONTRACT_DIR/admit.log" | grep -o -- '--class colima --est-gb 3')" "--class colima --est-gb 3" "image pull charged to colima"
+_contract_case wq "76 0" "" "GITHUB_WORKSPACE=/private/tmp/ezgha-job/ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "0/2" "76 then 0: job proceeds after one wait"
+_contract_case wqq "76 76" "" "GITHUB_WORKSPACE=/private/tmp/ezgha-job/ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "75/2" "76 then 76: refused"
+grep -q "disk-admission: refused class=tmp_containers" <<<"$C_ERR" && ok "refusal names tmp_containers" || bad "stderr: $C_ERR"
+_contract_case wr "75" "" "GITHUB_WORKSPACE=/private/tmp/ezgha-job/ws CI_ADMIT_IMAGE_EST_GB=3 bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "75/1" "workspace refused: no image admit"
 
 echo "== RED/BLACK prints the pause command; auto-pause only with ci_autopause =="
 zone() { python3 -c 'import json,sys,time; json.dump({"zone":sys.argv[2],"zone_at":time.time()},open(sys.argv[1],"w"))' "$T/state/budget.json" "$1"; }

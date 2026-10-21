@@ -153,6 +153,43 @@ for f in "${forms5[@]}"; do
 done
 rmdir "$R"
 
+echo "== diskm setup --hooks installer (plan Task B1) =="
+S="$T/settings"; mkdir -p "$S"
+setup_hooks() { bash "$REPO_ROOT/disk_magician.sh" setup --hooks --settings "$1" >/dev/null 2>"$T/setup.err"; }
+count_entries() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(*[sum(h.get("command")=="diskm admission-hook" for g in d.get(e,[]) if g.get("matcher")=="Bash" for h in g["hooks"]) for e in ("PreToolUse","PostToolUse")])' "$1"; }
+cat >"$S/three.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "diskm guard-worktree-add", "timeout": 10}]}],
+    "WorktreeCreate": [{"hooks": [{"type": "command", "command": "diskm worktree-create-hook"}]}],
+    "WorktreeRemove": [{"hooks": [{"type": "command", "command": "diskm worktree-remove-hook"}]}]
+  },
+  "model": "x"
+}
+JSON
+cp "$S/three.json" "$S/three.orig"
+export DISK_MAGICIAN_POLICY_FILE="$T/policy.json"; rm -f "$DISK_MAGICIAN_POLICY_FILE"
+setup_hooks "$S/three.json"; assert_eq "$?" 75 "unrecorded external_edits refuses"
+cmp -s "$S/three.json" "$S/three.orig" && ok "refusal leaves settings untouched" || bad "settings changed on refusal"
+echo '{"external_edits": {"id": "external_edits", "revoked_at": null}}' >"$DISK_MAGICIAN_POLICY_FILE"
+setup_hooks "$S/three.json"; assert_eq "$?" 0 "install rc"
+assert_eq "$(count_entries "$S/three.json")" "1 1" "one Pre and one Post Bash entry"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); g=d["hooks"]["PreToolUse"][0]["hooks"]; assert g[0]["command"]=="diskm guard-worktree-add" and len(d["hooks"]["PreToolUse"])==1 and d["model"]=="x" and "WorktreeCreate" in d["hooks"]' "$S/three.json" \
+    && ok "existing hooks and keys kept, entry joins the Bash group" || bad "existing content lost: $(cat "$S/three.json")"
+cp "$S/three.json" "$S/three.once"
+setup_hooks "$S/three.json"; assert_eq "$?" 0 "second run rc"
+cmp -s "$S/three.json" "$S/three.once" && ok "second run byte-identical" || bad "second run changed the file"
+echo '{"hooks": {}}' >"$S/empty.json"
+setup_hooks "$S/empty.json"; assert_eq "$(count_entries "$S/empty.json")" "1 1" "empty hooks object gets both arrays"
+printf '{"hooks": [' >"$S/bad.json"; cp "$S/bad.json" "$S/bad.orig"
+setup_hooks "$S/bad.json"; assert_eq "$?" 2 "malformed JSON rc 2"
+cmp -s "$S/bad.json" "$S/bad.orig" && ok "malformed file untouched" || bad "malformed file changed"
+unset DISK_MAGICIAN_POLICY_FILE
+
+echo "== diskm admission-hook dispatches to hooks/disk-admission.sh =="
+OUT="$(printf '%s' '{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}' | bash "$REPO_ROOT/disk_magician.sh" admission-hook)"; RC=$?
+assert_eq "$RC/$OUT" "0/" "ungoverned command: rc 0, no output"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
