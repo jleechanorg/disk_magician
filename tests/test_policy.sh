@@ -53,6 +53,8 @@ check 'refusals leave no file' test ! -e "$DISK_MAGICIAN_POLICY_FILE"
 check 'help names the fixed phrase form' bash -c 'bash "$1/disk_magician.sh" policy 2>&1 | grep -q "APPROVE <id>"' _ "$ROOT"
 check 'list shows fixed phrases' bash -c 'bash "$1/disk_magician.sh" policy list | grep -q "APPROVE ci_autopause"' _ "$ROOT"
 check 'not approved before recording' test "$(rc_of approved worktree_reap_remove)" = 1
+check 'list includes external_edits (D6)' bash -c 'bash "$1/disk_magician.sh" policy list | grep -q "APPROVE external_edits"' _ "$ROOT"
+check 'external_edits unrecorded → approved rc 1' test "$(rc_of policy approved external_edits)" = 1
 check 'whole stripped user string approves' test "$(rc_of policy approve worktree_reap_remove --from-transcript "$POS")" = 0
 check 'text-block-only user message approves' test "$(rc_of policy approve worktree_cleanup --from-transcript "$POS")" = 0
 check 'decision_approved 0 after approve' test "$(rc_of approved worktree_reap_remove)" = 0

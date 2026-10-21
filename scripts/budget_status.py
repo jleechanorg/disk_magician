@@ -6,6 +6,25 @@ import disk_observer
 GIB, DAY = 1 << 30, 86400
 RUNBOOK = ("  runbook: identify the producer (top growing roots: admission/events.jsonl, birth audit, observer)", "  runbook: ask the user before pausing CI runners (launchctl bootout gui/$UID/<ezgha label>)",
            "  runbook: colima stop && colima start, then colima ssh -- sudo fstrim -av", "  runbook: list parked worktrees; never hand-rm")
+# Operator pause command per producer class (spec 7.5: the RED alert names it; the agent asks before pausing CI).
+PAUSE = {"colima": "launchctl bootout gui/$UID/org.jleechanorg.ezgha && colima stop",
+         "tmp_containers": "launchctl bootout gui/$UID/org.jleechanorg.ezgha"}
+def _budgets_config():
+    try: return json.loads(Path(__import__("resolve_config").resolve()).read_text()).get("budgets")
+    except (OSError, ValueError, TypeError, AttributeError): return None
+def pause_line(budget, config):  # top class by overage that has a pause command, as one runbook line
+    measured = budget.get("classes") if isinstance(budget, dict) else None
+    classes = config.get("classes") if isinstance(config, dict) else None
+    if not isinstance(measured, dict) or not isinstance(classes, dict): return None
+    over = []
+    for name, cmd in PAUSE.items():
+        row, cfg = measured.get(name), classes.get(name)
+        used = row.get("used_gb") if isinstance(row, dict) else None
+        cap = cfg.get("budget_gb") if isinstance(cfg, dict) else None
+        if all(type(v) in (int, float) for v in (used, cap)) and used > cap: over.append((used - cap, name, cmd))
+    if not over: return None
+    gb, name, cmd = max(over)
+    return f"  pause: {cmd} (top overage class={name} over={gb:.1f}GiB; ask the user before pausing CI runners)"
 def parse(text):  # one JSON value, or None when malformed
     try: return json.loads(text)
     except ValueError: return None
@@ -282,6 +301,8 @@ def alerts(state, now, margin_gb=None):
     if (state / "budget.json").exists():
         age = now - budget["zone_at"] if isinstance(budget, dict) and type(budget.get("zone_at")) in (int, float) else float("inf")
         if age > 1800: out.append(f"ALERT:govern_stale last_tick_age={age:.0f}s")
+        if age <= 900 and budget.get("zone") in ("RED", "BLACK", "FLOOR") and (line := pause_line(budget, _budgets_config())):
+            out.append(line)
     if any(e.get("degraded") for e in evs): out.append("ALERT:admission_degraded within 24 h")
     if any(str(e.get("event", "")).split(":", 1)[0] == "kickstart_blocked" for e in evs): out.append("ALERT:kickstart_blocked within 24 h")
     burst = window_max([(e["at"], _est_bytes(e.get("est_bytes"))) for e in evs if e.get("event") == "admit" and type(e.get("decision")) is int and e["decision"] in (0, 10)])

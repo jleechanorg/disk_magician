@@ -163,6 +163,27 @@ class ProducerAlertsTest(IsolatedConfigTest):
             bc.locked_mutate(state, lambda data: data.update(parked_measurement=measurement))
             self.assertIn("parked_large", codes(alerts(state)))
 
+    def test_red_alert_names_top_overage_pause_command(self):
+        # plan Task B5: the RED alert gains one line naming the top class by overage and its
+        # pause command; no new event type is written.
+        config = {"classes": {"colima": {"budget_gb": 30}, "tmp_containers": {"budget_gb": 20}}}
+        budget = {"zone": "RED", "zone_at": NOW - 60, "classes": {"colima": {"used_gb": 42.0, "measured_at": NOW},
+                                                                  "tmp_containers": {"used_gb": 25.0, "measured_at": NOW}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            state = state_with(tmp, budget=budget)
+            before = (state / "admission" / "events.jsonl").read_text()
+            with patch.object(bs, "_budgets_config", return_value=config):
+                lines = alerts(state)
+            pause = [line for line in lines if line.startswith("  pause: ")]
+            self.assertEqual(len(pause), 1)
+            self.assertIn("colima stop", pause[0])
+            self.assertIn("class=colima over=12.0GiB", pause[0])
+            self.assertEqual((state / "admission" / "events.jsonl").read_text(), before)
+            budget["zone"] = "ORANGE"
+            (state / "budget.json").write_text(json.dumps(budget))
+            with patch.object(bs, "_budgets_config", return_value=config):
+                self.assertFalse(any(line.startswith("  pause: ") for line in alerts(state)))
+
 
 if __name__ == "__main__":
     unittest.main()

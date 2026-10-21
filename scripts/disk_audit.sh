@@ -28,6 +28,8 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/degraded_gate.sh
+source "$SCRIPT_DIR/lib/degraded_gate.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Source snapshot_lib to find the correct snapshot file
@@ -287,18 +289,44 @@ section() {
 CATEGORY_TOTAL=0
 CATEGORY_FAILED=0
 FAILED_CATEGORIES=()
+# A category can exit 0, report "no error", and still have reclaimed nothing
+# because the cwd gate refused every candidate (see scripts/lib/degraded_gate.sh).
+CATEGORY_DEGRADED=0
+DEGRADED_CATEGORIES=()
 
 run_category() {
     local label="$1"
     shift
     CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
     echo "  ▶ Category: $label"
-    local rc=0
-    "$@" || rc=$?
+    local rc=0 out_file refusals=0
+    out_file="$(mktemp -t dm-category.XXXXXX 2>/dev/null || echo "")"
+    # Stream to the user AND capture, so a long category still shows progress.
+    # set -e is suspended for the pipeline so a failing category cannot abort the
+    # whole audit before rc is read (the original bug bd-y74 this file fixes).
+    local had_e=false
+    [[ $- == *e* ]] && had_e=true
+    set +e
+    if [[ -n "$out_file" ]]; then
+        "$@" 2>&1 | tee -- "$out_file"
+        rc=${PIPESTATUS[0]}
+    else
+        "$@" || rc=$?
+    fi
+    $had_e && set -e
     if [[ $rc -ne 0 ]]; then
         CATEGORY_FAILED=$(( CATEGORY_FAILED + 1 ))
         FAILED_CATEGORIES+=("$label (exit $rc)")
         echo "  ⚠️  CATEGORY FAILED: $label (exit $rc) — see output above"
+    fi
+    if [[ -n "$out_file" ]]; then
+        refusals="$(gate_refusal_count "$out_file")"
+        rm -f "$out_file"
+    fi
+    if gate_is_degraded "$refusals"; then
+        CATEGORY_DEGRADED=$(( CATEGORY_DEGRADED + 1 ))
+        DEGRADED_CATEGORIES+=("$label ($refusals candidate(s) refused by the cwd gate)")
+        echo "  ⚠️  CATEGORY DEGRADED: $label — $refusals candidate(s) refused by the cwd gate, nothing reclaimed"
     fi
     return 0
 }
@@ -312,8 +340,19 @@ print_category_summary() {
         for f in "${FAILED_CATEGORIES[@]}"; do
             echo "    - $f"
         done
-    else
+    elif (( CATEGORY_DEGRADED == 0 )); then
         echo "  All attempted categories completed without error."
+    else
+        echo "  No category errored, but $CATEGORY_DEGRADED completed without reclaiming (see DEGRADED below)."
+    fi
+    if (( CATEGORY_DEGRADED > 0 )); then
+        echo "  ⚠️  $CATEGORY_DEGRADED of $CATEGORY_TOTAL categories DEGRADED — eligible candidates refused, nothing reclaimed:"
+        local d
+        for d in "${DEGRADED_CATEGORIES[@]}"; do
+            echo "    - $d"
+        done
+        echo "  (a category that reclaims nothing because the cwd gate cannot prove a candidate idle is NOT a success;"
+        echo "   on Linux this is usually the unprivileged-lsof limitation tracked by bead disk_magician-kub3)"
     fi
 }
 
@@ -748,6 +787,6 @@ if [[ "$MODE" != "audit" && "$DRY_RUN" != true && "${DISK_MAGICIAN_RECORD_CLEANE
     "$SCRIPT_DIR/check_uncovered_roots.sh" --record-cleaned || true
 fi
 
-if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 )); then
+if [[ "$MODE" == "clean" || "$MODE" == "clean-all" ]] && (( CATEGORY_FAILED > 0 || CATEGORY_DEGRADED > 0 )); then
     exit 1
 fi
