@@ -23,6 +23,7 @@ Commands:
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
   install-root-frontier-runner Install the immutable root-owned frontier runner.
+  install-cwd-scanner Install the passwordless root cwd scanner for Linux live-cwd gates (run via sudo).
   residual-drilldown Run the scheduled residual and uncovered-root checks.
   pressure-sweep Run the existing free-space-gated maintenance job.
   tmp-scratch-sweep Run the existing scheduled scratch maintenance wrapper.
@@ -277,6 +278,9 @@ case "$CMD" in
     ;;
   install-root-frontier-runner|install_root_frontier_runner)
     exec bash "$SCRIPT_DIR/scripts/install_root_frontier_runner.sh" "$@"
+    ;;
+  install-cwd-scanner|install_cwd_scanner)
+    exec bash "$SCRIPT_DIR/scripts/install_cwd_scanner.sh" "$@"
     ;;
   residual-drilldown)
     exec bash "$SCRIPT_DIR/scripts/residual_drilldown.sh" "$@"

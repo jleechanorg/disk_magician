@@ -55,8 +55,8 @@ lsof_denied_ignorable() {
   # that out, so it is never treated as harmless and there is deliberately no
   # waiver switch. Consequence: on a host where unprivileged lsof cannot inspect
   # live cwds (sshd, sd-pam, setuid sandboxes), cleanups fail closed instead of
-  # proceeding. The remedy is a scan that can actually see them (e.g. a
-  # privileged run), not a flag that pretends.
+  # proceeding. The remedy is a scan that can actually see them: the root
+  # scanner (lsof_scanner_fpn, scripts/install_cwd_scanner.sh), not a flag.
   owner="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
   if [[ "$owner" =~ ^[0-9]+$ ]] && [[ "$owner" != "$(id -u)" ]]; then
     echo "lsof: foreign process $pid hides its cwd" >&2
@@ -157,11 +157,59 @@ lsof_collect_cwds() {
     return 0
 }
 
-# lsof_snapshot_cwds: run lsof once and populate LSOF_CWDS / LSOF_CWD_REASON.
+# lsof_scanner_fpn: complete pid->cwd map from the passwordless root helper
+# (scripts/install_cwd_scanner.sh), rendered as `p<pid>` / `n<cwd>` lines so the
+# strict parser above consumes it unchanged. Never prompts: always `sudo -n`.
+#   rc 0 -> LSOF_SCANNER_OUT holds the map
+#   rc 1 -> helper absent, not Linux, or the call failed: use unprivileged lsof
+#   rc 2 -> helper ran but its output is malformed: fail closed, no fallback
+# DISK_MAGICIAN_CWD_SCAN_CMD replaces the whole sudo call, honoured only under
+# DISK_MAGICIAN_TEST_SANDBOX.
+LSOF_SCANNER_BIN=/usr/local/sbin/diskm-cwd-scan
+lsof_scanner_fpn() {
+    local tmp rc=0 rec pid rest uid cwd out="" saw_init=0
+    local -a cmd
+    LSOF_SCANNER_OUT=""
+    [[ "$(uname -s)" == Linux ]] || return 1
+    if [[ -n "${DISK_MAGICIAN_TEST_SANDBOX:-}" && -n "${DISK_MAGICIAN_CWD_SCAN_CMD:-}" ]]; then
+        cmd=("$DISK_MAGICIAN_CWD_SCAN_CMD")
+    else
+        [[ -x "$LSOF_SCANNER_BIN" ]] || return 1
+        cmd=(sudo -n "$LSOF_SCANNER_BIN")
+    fi
+    command -v timeout >/dev/null 2>&1 && cmd=(timeout 30 "${cmd[@]}")
+    tmp="$(mktemp "${TMPDIR:-/tmp}/dm-cwdscan.XXXXXX" 2>/dev/null)" || return 1
+    "${cmd[@]}" >"$tmp" 2>/dev/null </dev/null || rc=$?
+    if (( rc != 0 )); then rm -f "$tmp"; return 1; fi
+    # Records are NUL-terminated; a missing final NUL means truncated output.
+    if [[ ! -s "$tmp" || -n "$(tail -c1 "$tmp" | tr -d '\0')" ]]; then rm -f "$tmp"; return 2; fi
+    while IFS= read -r -d '' rec; do
+        pid="${rec%%$'\t'*}"; rest="${rec#*$'\t'}"
+        uid="${rest%%$'\t'*}"; cwd="${rest#*$'\t'}"
+        if [[ "$rec" != *$'\t'*$'\t'* || ! "$pid" =~ ^[0-9]+$ || ! "$uid" =~ ^[0-9]+$ \
+              || "$cwd" != /* || "$cwd" == *$'\n'* ]]; then
+            rm -f "$tmp"; return 2
+        fi
+        [[ "$pid" == 1 ]] && saw_init=1
+        out+="p$pid"$'\n'"n$cwd"$'\n'
+    done <"$tmp"
+    rm -f "$tmp"
+    # pid 1 always exists; a map without it is not a complete scan.
+    (( saw_init )) || return 2
+    LSOF_SCANNER_OUT="$out"
+}
+
+# lsof_snapshot_cwds: take one cwd snapshot and populate LSOF_CWDS /
+# LSOF_CWD_REASON. Prefers the root scanner; otherwise runs unprivileged lsof.
 # rc 0 = complete observation, rc 1 = cannot prove idle.
 lsof_snapshot_cwds() {
-    local bin errf rc=0 out err
+    local bin errf rc=0 out err srv=0
     LSOF_CWDS=""; LSOF_CWD_REASON=""
+    lsof_scanner_fpn || srv=$?
+    case "$srv" in
+        0) lsof_collect_cwds "$LSOF_SCANNER_OUT" "" 0; return ;;
+        2) LSOF_CWD_REASON="scanner-malformed"; return 1 ;;
+    esac
     bin="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
     [[ -x "$bin" ]] || { LSOF_CWD_REASON="lsof-unavailable"; return 1; }
     errf="$(mktemp "${TMPDIR:-/tmp}/dm-lsof-err.XXXXXX" 2>/dev/null)" || { LSOF_CWD_REASON="stderr-capture-failed"; return 1; }
