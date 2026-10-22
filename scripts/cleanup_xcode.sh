@@ -6,6 +6,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
 
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
@@ -85,9 +87,58 @@ clear_contents() {
   fi
 }
 
+# Custom -derivedDataPath dirs sit outside DERIVED_DATA (~/dd_*, /private/tmp/pr*/dd,
+# worldai_frontend build dirs). Only a dir that is itself DerivedData-shaped (or whose
+# DerivedData/ child is) is a candidate; the removal goes through the C14 verdict
+# (kind xcode-derived-data: live cwd, open files, secrets, repos) and is logged by
+# quarantine_remove. Dirs written within CUSTOM_DD_IDLE_MINUTES, or whose recency
+# cannot be measured, are kept.
+CUSTOM_DD_IDLE_MINUTES=60
+
+clean_custom_derived_data() {
+  local darwin_tmp="" cand target seen=$'\n' before_kb
+  if command -v getconf >/dev/null 2>&1; then
+    darwin_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+    darwin_tmp="${darwin_tmp%/}"
+  fi
+  for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
+      /private/tmp/*_dd* /private/tmp/dd_* /private/tmp/pr* /private/tmp/pr*/dd \
+      /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* \
+      /private/tmp/worldai_claw/*/* /private/tmp/ipad*/* \
+      ${darwin_tmp:+"$darwin_tmp"/tmp.* "$darwin_tmp"/*_dd* "$darwin_tmp"/dd_*}; do
+    [[ -d "$cand" && ! -L "$cand" ]] || continue
+    if _av_derived_data_shape "$cand"; then
+      target="$cand"
+    elif _av_derived_data_shape "$cand/DerivedData"; then
+      target="$cand/DerivedData"
+    else
+      continue
+    fi
+    [[ "$seen" == *$'\n'"$target"$'\n'* ]] && continue
+    seen+="$target"$'\n'
+    local _safety_reason
+    if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
+      log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
+      continue
+    fi
+    if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
+      log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
+      continue
+    fi
+    before_kb=$(size_kb "$target")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+    else
+      log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
+      c14_remove "$target" --kind xcode-derived-data || true
+    fi
+  done
+}
+
 log "Cleanup mode: $( [[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo APPLY )"
 
 clear_contents "Xcode DerivedData" "$DERIVED_DATA"
+clean_custom_derived_data
 clear_contents "CoreSimulator Temp" "$SIM_TEMP"
 clear_contents "CoreSimulator Caches" "$SIM_CACHES"
 
