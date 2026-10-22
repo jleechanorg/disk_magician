@@ -267,6 +267,88 @@ class RestoreVerificationTests(unittest.TestCase):
         log = self.base / "home/.disk_magician_state/worktree_guard.log"
         self.assertIn("minute recency override requires durable restore receipt", log.read_text())
 
+    def remote_receipt_gate(self, receipt, sandbox=True, retire=False):
+        stat = self.base / "stat-object"
+        stat.write_text("#!/usr/bin/python3\nimport hashlib,json,pathlib,sys\n"
+                        "name,gen=sys.argv[1].rsplit('#',1)\n"
+                        "p=pathlib.Path(" + repr(str(self.store)) + ")/(name.rsplit('/',1)[1]+'.'+gen)\n"
+                        "data=p.read_bytes()\n"
+                        "print(json.dumps(dict(generation=gen,size=len(data),sha256=hashlib.sha256(data).hexdigest())))\n")
+        stat.chmod(0o700)
+        env = dict(os.environ, DISK_MAGICIAN_STAT_BIN=str(stat))
+        if sandbox:
+            env["DISK_MAGICIAN_TEST_SANDBOX"] = "1"
+        else:
+            env.pop("DISK_MAGICIAN_TEST_SANDBOX", None)
+        script = ROOT / "scripts/lib/worktree_restore_receipt.sh"
+        command = 'source "$1"; worktree_restore_receipt_matches_live "$2" "$3"'
+        if retire:
+            script = ROOT / "scripts/worktree_remove_hook.sh"
+            env.update(HOME=str(self.base / "home"), PATH="/usr/bin:/bin",
+                       DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS=str(receipt))
+            command = 'source "$1"; WRH_RECENCY_SPEC=minutes:360; wrh_remove_now "$2" "$2" --quarantine "$4"'
+        return subprocess.run(["bash", "-c", command, "_", str(script), str(self.wt),
+                               str(receipt), str(self.manifest)], env=env, capture_output=True)
+
+    def test_retirement_rechecks_pinned_remote_objects(self):
+        receipt = self.verify()
+        self.assertEqual(self.remote_receipt_gate(receipt).returncode, 0)
+        self.assertTrue(self.wt.is_dir())
+
+    def test_retirement_refuses_missing_or_changed_remote_objects(self):
+        receipt = self.verify()
+        target = self.store / "recovery.bundle.1"
+        original = target.read_bytes()
+        for payload in (None, b"changed remote bytes"):
+            if payload is None:
+                target.unlink()
+            else:
+                target.write_bytes(payload)
+            self.assertNotEqual(self.remote_receipt_gate(receipt).returncode, 0)
+            self.assertTrue(self.wt.is_dir())
+        target.write_bytes(original)
+        row = json.loads(receipt.read_text())
+        for obj in row["durable_backup"]["objects"]:
+            obj["generation"] = "999"
+        receipt.write_text(json.dumps(row))
+        self.assertEqual(self.validate_receipt(receipt).returncode, 0)
+        self.assertNotEqual(self.remote_receipt_gate(receipt).returncode, 0)
+
+    def test_retirement_remote_fixture_requires_explicit_sandbox(self):
+        self.assertNotEqual(self.remote_receipt_gate(self.verify(), sandbox=False).returncode, 0)
+
+    def test_removal_hook_cannot_retire_when_remote_backup_disappears(self):
+        receipt = self.verify()
+        (self.store / "recovery.bundle.1").unlink()
+        result = self.remote_receipt_gate(receipt, retire=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.wt.is_dir())
+        self.assertIn(b"pinned remote object verification failed", result.stderr)
+        log = self.base / "home/.disk_magician_state/worktree_guard.log"
+        self.assertIn("durable restore receipt no longer matches", log.read_text())
+
+    def test_retirement_refuses_source_changes_during_remote_readback(self):
+        receipt = self.verify()
+        (self.wt / "file").write_text("concurrent source change\n")
+        self.assertNotEqual(self.remote_receipt_gate(receipt).returncode, 0)
+        self.assertTrue(self.wt.is_dir())
+
+    def test_remote_readback_pins_sdk_generation_and_hashes_bytes(self):
+        evidence_spec = importlib.util.spec_from_file_location("evidence_manifest", ROOT / "scripts/evidence_manifest.py")
+        evidence = importlib.util.module_from_spec(evidence_spec)
+        evidence_spec.loader.exec_module(evidence)
+        from unittest.mock import MagicMock
+        blob = MagicMock(generation=123, md5_hash="unused", crc32c="unused")
+        blob.open.return_value.__enter__.return_value = io.BytesIO(b"remote bytes")
+        env = dict(os.environ)
+        env.pop("DISK_MAGICIAN_STAT_BIN", None)
+        with patch.dict(os.environ, env, clear=True), patch.object(evidence, "sdk_blob", return_value=blob) as factory:
+            actual = evidence.describe(module.PREFIX + "fixture/tree.tar", 30, "123")
+        factory.assert_called_once_with(module.PREFIX + "fixture/tree.tar", generation=123)
+        self.assertEqual(actual["generation"], "123")
+        self.assertEqual(actual["size"], 12)
+        self.assertEqual(actual["sha256"], __import__("hashlib").sha256(b"remote bytes").hexdigest())
+
     def test_fixture_requires_sandbox(self):
         env = dict(os.environ, DISK_MAGICIAN_RESTORE_FIXTURE_DIR=str(self.store))
         env.pop('DISK_MAGICIAN_TEST_SANDBOX', None)

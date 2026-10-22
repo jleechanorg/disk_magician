@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Shared durable restore receipt validation for worktree retirement.
 #
-# Receipts are input-only evidence.  This library never creates, fetches, or
-# uploads a backup; callers decide whether a receipt is required for their
-# operation and invoke the live-match check immediately before removal.
+# Receipts are input-only evidence. The final gate streams their pinned remote
+# objects through the evidence verifier; it never creates or uploads a backup.
 
 # worktree_restore_receipt_resolve <worktree> <receipt-root>
 # Resolve one exact receipt name.  A root may itself be a receipt file, but a
@@ -107,7 +106,7 @@ if len(roots) != 1:
 # Revalidate identity and compare the configured upstream SHA at the moment of
 # the destructive caller's final gate.
 worktree_restore_receipt_matches_live() {
-    local path="$1" metadata="$2" real sha branch remote merge_ref remote_url live_sha
+    local path="$1" metadata="$2" real sha branch remote merge_ref remote_url live_sha status
     real="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
     worktree_restore_receipt_validate "$real" "$metadata" || return 1
     sha="$(git -C "$real" rev-parse --verify HEAD 2>/dev/null)" || return 1
@@ -123,5 +122,14 @@ with open(metadata, encoding="utf-8") as fh:
     remote=json.load(fh).get("remote")
 if not isinstance(remote, dict) or remote.get("sha") != live_sha:
     raise SystemExit(1)
-' "$metadata" "$live_sha"
+' "$metadata" "$live_sha" || return 1
+    local evidence_helper
+    evidence_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/evidence_manifest.py" || return 1
+    timeout 300 python3 "$evidence_helper" verify-receipt "$metadata" || return 1
+    # Remote streaming can take time; bind the final result to fresh identity.
+    worktree_restore_receipt_validate "$real" "$metadata" || return 1
+    status="$(git -C "$real" status --porcelain --untracked-files=normal --ignore-submodules=none 2>/dev/null)" || return 1
+    [[ -z "$status" ]] || return 1
+    live_sha="$(git -C "$real" ls-remote --heads "$remote_url" "$merge_ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
+    [[ -n "$live_sha" && "$live_sha" == "$sha" ]]
 }

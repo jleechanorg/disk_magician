@@ -401,6 +401,10 @@ retire_owner() {
         log "PRESERVE owner=$owner session=$id project=$project path=$path reason=external receipt no longer matches live ref/head/tree/remote"
         continue
       fi
+      if ! ao_c14_gate "$path"; then
+        log "PRESERVE owner=$owner session=$id project=$project path=$path reason=C14 gate failed after remote readback"
+        continue
+      fi
       log "BACKUP-VERIFIED owner=$owner session=$id project=$project path=$path receipt=$receipt source=external-fetched-restore"
       log "+ ${env_prefix[*]} ao session kill $id -p $project"
       if "${env_prefix[@]}" ao session kill "$id" -p "$project"; then
