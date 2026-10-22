@@ -167,7 +167,7 @@ lsof_collect_cwds() {
 # DISK_MAGICIAN_TEST_SANDBOX.
 LSOF_SCANNER_BIN=/usr/local/sbin/diskm-cwd-scan
 lsof_scanner_fpn() {
-    local tmp rc=0 rec pid rest uid cwd out="" saw_init=0
+    local tmp errf rc=0 rec pid rest uid cwd out="" saw_init=0 attempts
     local -a cmd
     LSOF_SCANNER_OUT=""
     [[ "$(uname -s)" == Linux ]] || return 1
@@ -179,8 +179,22 @@ lsof_scanner_fpn() {
     fi
     command -v timeout >/dev/null 2>&1 && cmd=(timeout 30 "${cmd[@]}")
     tmp="$(mktemp "${TMPDIR:-/tmp}/dm-cwdscan.XXXXXX" 2>/dev/null)" || return 1
-    "${cmd[@]}" >"$tmp" 2>/dev/null </dev/null || rc=$?
-    if (( rc != 0 )); then rm -f "$tmp"; return 1; fi
+    errf="$(mktemp "${TMPDIR:-/tmp}/dm-cwdscan-err.XXXXXX" 2>/dev/null)" || { rm -f "$tmp"; return 1; }
+    # A busy Linux host can fork a short-lived helper while /proc is being
+    # walked. Retry only that explicit completeness failure; every other
+    # non-zero result still falls back exactly as before, and exhausting the
+    # bounded retries remains fail closed.
+    for attempts in 1 2 3; do
+        rc=0
+        "${cmd[@]}" >"$tmp" 2>"$errf" </dev/null || rc=$?
+        (( rc == 0 )) && break
+        if (( attempts < 3 )) && grep -Fqx 'diskm-cwd-scan: process table kept changing' "$errf"; then
+            continue
+        fi
+        rm -f "$tmp" "$errf"
+        return 1
+    done
+    rm -f "$errf"
     # Records are NUL-terminated; a missing final NUL means truncated output.
     if [[ ! -s "$tmp" || -n "$(tail -c1 "$tmp" | tr -d '\0')" ]]; then rm -f "$tmp"; return 2; fi
     while IFS= read -r -d '' rec; do
