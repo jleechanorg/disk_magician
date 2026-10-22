@@ -56,6 +56,7 @@ Commands:
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
   cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
+  worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
@@ -410,6 +411,9 @@ case "$CMD" in
     ;;
   cleanup_worktree_deps|cleanup-worktree-deps)
     "$SCRIPT_DIR/scripts/cleanup_worktree_deps.sh" "$@"
+    ;;
+  worktree_restore_verify|worktree-restore-verify)
+    python3 "$SCRIPT_DIR/scripts/worktree_restore_verify.py" "$@"
     ;;
   worktree_hygiene|worktree-hygiene)
     "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"
