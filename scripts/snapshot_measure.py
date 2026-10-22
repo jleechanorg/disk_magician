@@ -246,8 +246,10 @@ def measure_sharded(root, workers, shard_timeout, deadline, prior, now=None, car
         if deadline - time.time() < 1:
             return None  # not attempted: keeps its place at the front of the queue
         factor = min(1 + pri[shard[0]]["fails"], SHARD_TIMEOUT_MAX_FACTOR)
-        res = measure_shard(shard[1], shard_timeout * factor, deadline)
-        return None if res[0] is None and time.time() >= deadline - 1 else res  # cut by the deadline: not attempted
+        want = shard_timeout * factor
+        cut = deadline - time.time() < want  # the run deadline, not the shard's own timeout, is the binding limit
+        res = measure_shard(shard[1], want, deadline)
+        return None if res[0] is None and cut else res  # cut short by the deadline: not attempted
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         got = dict(zip((s[0] for s in todo), pool.map(run, todo)))
