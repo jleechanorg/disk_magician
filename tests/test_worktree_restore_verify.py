@@ -113,13 +113,13 @@ class RestoreVerificationTests(unittest.TestCase):
         with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
             receipt = module.verify(self.wt, self.manifest, receipt_dir, self.store)
 
-        self.assertEqual(receipt, physical / 'receipts' / (self.wt.name + '-' + self.meta['head']) / 'restore-receipt.json')
+        self.assertEqual(receipt, physical.resolve() / 'receipts' / (self.wt.name + '-' + self.meta['head']) / 'restore-receipt.json')
         self.assertTrue(receipt.is_file())
 
         physical_receipt = physical / 'physical-receipts'
         with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
             canonical_receipt = module.verify(self.wt, self.manifest, physical_receipt, self.store)
-        self.assertEqual(canonical_receipt.parent.parent, physical_receipt)
+        self.assertEqual(canonical_receipt.parent.parent, physical_receipt.resolve())
         self.assertTrue(canonical_receipt.is_file())
 
         outside = self.base / 'outside'
@@ -316,7 +316,7 @@ class RestoreVerificationTests(unittest.TestCase):
 
         def check(context):
             return subprocess.run(['bash', str(harness), str(ROOT / 'scripts'), str(target), context],
-                                  env=dict(os.environ, PATH='/usr/bin:/bin'), capture_output=True)
+                                  env=dict(os.environ, PATH=os.environ.get("PATH", "/usr/bin:/bin")), capture_output=True)
 
         default = check('')
         self.assertNotEqual(default.returncode, 0)
@@ -352,7 +352,7 @@ class RestoreVerificationTests(unittest.TestCase):
         command = 'source "$1"; worktree_restore_receipt_matches_live "$2" "$3"'
         if retire:
             script = ROOT / "scripts/worktree_remove_hook.sh"
-            env.update(HOME=str(self.base / "home"), PATH="/usr/bin:/bin",
+            env.update(HOME=str(self.base / "home"), PATH=os.environ.get("PATH", "/usr/bin:/bin"),
                        DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS=str(receipt))
             command = 'source "$1"; WRH_RECENCY_SPEC=minutes:360; wrh_remove_now "$2" "$2" --quarantine "$4"'
         return subprocess.run(["bash", "-c", command, "_", str(script), str(self.wt),
