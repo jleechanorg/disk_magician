@@ -40,6 +40,9 @@ REPORT_COMPLETE = "<!-- diskm reclaim-ledger complete -->"
 FAST_DAYS = 3    # cleaned on this many distinct days ...
 FAST_HOURS = 6   # ... or in this many distinct hours => regrows fast
 TOP_C, TOP_D = 30, 15
+SAMPLE_HOURS = 3         # B1 history sampling interval
+SHARD_MAX_AGE_H = 24     # a sharded root older than this is not a complete reading
+SUSPECT_FLOOR_RATIO = 10  # now >= 10x floor => the floor was probably partial
 TOOL_STAGING = ("/_disk_magician_archive",)  # the tool's own staging target, not a producer
 EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var/folders", "/tmp", "/var/folders")
 BROAD_CONTAINER_PREFIXES = (
@@ -390,60 +393,97 @@ def sync_monitored_superset(state_dir, home, roots=None, frontier_path=None,
 
 
 def snapshot_history(state_dir, since):
-    """[(ts, snapshot dict)] sampled at most once per 6h from committed
-    snapshots/disk_snapshot.json with coverage >= 70%, oldest first."""
+    """[(ts, snapshot dict)] from committed snapshots/disk_snapshot.json, oldest first, sampled at most
+    once per SAMPLE_HOURS (the newest commit is always kept). Coverage is gated per key by
+    observations(), not per snapshot."""
     rel = "snapshots/disk_snapshot.json"
     r = subprocess.run(["git", "-C", str(state_dir), "log", f"--since={since.isoformat()}",
                         "--format=%H %ct", "--", rel], capture_output=True, text=True)
-    out, last = [], None
-    for line in reversed(r.stdout.splitlines()):
-        sha, ct = line.split()
-        if last is not None and int(ct) - last < 6 * 3600:
+    commits = [l.split() for l in reversed(r.stdout.splitlines()) if len(l.split()) == 2]
+    picked, last = [], None
+    for i, (sha, ct) in enumerate(commits):
+        if i < len(commits) - 1 and last is not None and int(ct) - last < SAMPLE_HOURS * 3600:
             continue
-        g = subprocess.run(["git", "-C", str(state_dir), "show", f"{sha}:{rel}"],
-                           capture_output=True, text=True)
+        picked.append((sha, int(ct)))
+        last = int(ct)
+    out = []
+    for sha, ct in picked:
+        g = subprocess.run(["git", "-C", str(state_dir), "show", f"{sha}:{rel}"], capture_output=True, text=True)
         try:
-            snap = json.loads(g.stdout)
+            out.append((ct, json.loads(g.stdout)))
         except ValueError:
             continue
-        if snap.get("snapshot_coverage_pct", 0) >= 70:
-            out.append((int(ct), snap))
-            last = int(ct)
     return out
 
 
+def observations(snap):
+    """{key: {kb, complete, note}} for keys measured in that run (carried values are skipped). A reading is
+    complete unless the key is a lower bound / partial sharded root, or its oldest shard is over SHARD_MAX_AGE_H."""
+    md = snap.get("snapshot_metadata") or {}
+    carried = {c.get("key") for c in snap.get("carried_keys", [])}
+    lower = set(md.get("lower_bound_keys") or [])
+    sharded = md.get("sharded_roots") or {}
+    out = {}
+    for k, v in (snap.get("directories") or {}).items():
+        if not isinstance(v, (int, float)) or k in carried:
+            continue
+        sh = sharded.get(k) or {}
+        age = sh.get("max_shard_age_hours")
+        stale = age is not None and age > SHARD_MAX_AGE_H
+        note = ""
+        if sh.get("partial") or (sh and stale):
+            note = (f"partial: {sh.get('fresh_fraction', 0):.0%} of {sh.get('shards_total')} shards fresh, "
+                    f"{sh.get('shards_missing') or 0} missing, oldest {age}h")
+        elif k in lower:
+            note = "lower bound (unreadable subpaths)"
+        out[k] = {"kb": v, "complete": not (k in lower or sh.get("partial") or stale), "note": note}
+    return out
+
+
+def stamp_of(ts):
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
 def section_monitored(state_dir, mon, since, days, home):
-    """Growth per monitored directory vs its lowest fresh size in the window."""
+    """Growth per monitored directory vs its lowest complete size in the window, gated per key."""
     out = [f"### B1. Monitored directories vs {days}-day floor (`monitored_dirs` x committed snapshot history)", ""]
     if mon is None:
         return out + [f"Unavailable: `{state_dir}/config/config.json` unreadable.", ""]
     hist = snapshot_history(state_dir, since)
-    if len(hist) < 2:
-        return out + [f"Unavailable: {len(hist)} committed snapshot(s) with coverage >= 70% in the window.", ""]
-
-    def fresh(snap):
-        carried = {c.get("key") for c in snap.get("carried_keys", [])}
-        return {k: v for k, v in (snap.get("directories") or {}).items()
-                if isinstance(v, (int, float)) and k not in carried}
-    now_ts, now_snap = hist[-1]
-    now = fresh(now_snap)
+    if not hist:
+        return out + ["Unavailable: no committed snapshot in the window.", ""]
+    obs = [(ts, observations(sn)) for ts, sn in hist]
     rows = []
-    for key, kb in now.items():
-        floor = min((fresh(sn)[key] for _, sn in hist if key in fresh(sn)), default=kb)
-        if kb - floor >= GIB_KB:
-            rows.append((kb - floor, key, kb, floor))
-    stamp = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
-    out.append(f"Current = snapshot at {stamp}; floor = lowest fresh size over {len(hist)} snapshots "
-               f"(coverage >= 70%, one per 6 h). Carried or timed-out sizes are skipped. "
-               f"{len(now)} keys measured fresh in the current snapshot. A floor can be a partial "
-               f"measurement; confirm a large jump with a direct measurement.")
+    for key in sorted({k for _, o in obs for k in o}):
+        series = [(ts, o[key]) for ts, o in obs if key in o]
+        done = [(ts, e) for ts, e in series if e["complete"]]
+        newest_any = series[-1]
+        cur_ts, cur = done[-1] if done else newest_any
+        flags = [cur["note"]] if cur["note"] else []
+        if not done:
+            flags.append("no complete reading in window")
+        elif newest_any[0] > cur_ts and newest_any[1]["kb"] > cur["kb"]:
+            flags.append(f"newer partial reading {gib(newest_any[1]['kb'])} GiB at {stamp_of(newest_any[0])}"
+                         + (f" ({newest_any[1]['note']})" if newest_any[1]["note"] else ""))
+        floor_ts, floor = min(((ts, e["kb"]) for ts, e in done), key=lambda t: t[1], default=(None, None))
+        if floor is None:
+            continue
+        growth = cur["kb"] - floor
+        if cur["kb"] >= SUSPECT_FLOOR_RATIO * max(floor, 1):
+            flags.append(f"suspect floor ({cur['kb'] / max(floor, 1):.0f}x lower than now; likely a partial reading)")
+        if growth >= GIB_KB or any(f.startswith("newer partial") for f in flags):
+            rows.append((growth, key, cur["kb"], cur_ts, floor, floor_ts, "; ".join(flags)))
+    out.append(f"Each key uses its own newest complete reading (measured in that run, not carried, not partial, "
+               f"oldest shard <= {SHARD_MAX_AGE_H} h) and its lowest complete reading over {len(hist)} snapshots "
+               f"(one per {SAMPLE_HOURS} h). Partial and lower-bound readings are flagged, never used as a floor. "
+               f"Confirm a large jump with `diskm measure KEY`.")
     out.append("")
     if not rows:
         return out + ["No monitored directory grew by 1 GiB or more over its floor.", ""]
     rows.sort(reverse=True)
-    return out + table(["Key", "Path", "Now GiB", "Floor GiB", "Growth GiB"],
-                       [[f"`{k}`", f"`{fold(mon[2][k], home)}`" if k in mon[2] else "(unknown)", gib(n), gib(f), gib(d)]
-                        for d, k, n, f in rows[:25]]) + [""]
+    return out + table(["Key", "Path", "Now GiB", "Measured", "Floor GiB", "Floor at", "Growth GiB", "Flags"],
+                       [[f"`{k}`", f"`{fold(mon[2][k], home)}`" if k in mon[2] else "(unknown)", gib(n), stamp_of(nt),
+                         gib(f), stamp_of(ft), gib(d), fl or "-"] for d, k, n, nt, f, ft, fl in rows[:25]]) + [""]
 
 
 def run_json(fn, argv):
