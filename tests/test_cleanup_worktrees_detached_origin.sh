@@ -38,11 +38,12 @@ printf 'local\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am local
 LOCAL_SHA=$(git -C "$REPO" rev-parse HEAD); git -C "$REPO" checkout -q main
 # dstale: only a stale remote-tracking ref contains GONE_SHA (branch deleted upstream).
 git -C "$REPO" update-ref refs/remotes/origin/gone "$GONE_SHA"
-add_det() { git -C "$REPO" worktree add -q --detach "$WT/wt-$1" "$2"; age_days_ago "$WT/wt-$1" 4; }
+add_det() { git -C "$REPO" worktree add -q --detach "$WT/wt-$1" "$2"; }
 add_det doriginok "$AHEAD_SHA"
 add_det dlocal "$LOCAL_SHA"
 add_det ddirty "$AHEAD_SHA"; printf 'x\n' >> "$WT/wt-ddirty/README.md"
 add_det dstale "$GONE_SHA"
+for n in doriginok dlocal ddirty dstale; do age_days_ago "$WT/wt-$n" 4; done
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/bin"
 printf '#!/bin/sh\nprintf "p1\\nn/\\n"\n' > "$TMP_ROOT/bin/lsof"
 printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/gh"
