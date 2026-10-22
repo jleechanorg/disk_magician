@@ -18,7 +18,7 @@ FLAGS = ('isMeta', 'isSidechain', 'isCompactSummary', 'inherited_user_message')
 def _flagged(*objs):  # provenance flags on ANY envelope layer refuse the entry/header
     return any(isinstance(o, dict) and any(o.get(k) for k in FLAGS) for o in objs)
 INJECTED = re.compile(r'<(?:teammate-message|task-notification|system-reminder|command-(?:message|name|args)|local-command-\w+|bash-(?:input|stdout|stderr))\b'
-                      r'|Another Claude session sent a message')  # harness-injected wrappers: never a typed approval
+                      r'|Another Claude session sent a message|\[SYSTEM NOTIFICATION\]')  # harness-injected wrappers: never a typed approval
 AGENT_KEYS = ('agentId', 'sourceToolUseID', 'toolUseResult')  # agent/tool provenance on a Claude user envelope
 def _typed_phrase(text, want):  # typed text CONTAINS want as whole tokens; whitespace-normalised so a line wrap still matches
     return not INJECTED.search(text) and re.search(r'(?<![\w-])' + re.escape(want) + r'(?![\w-])', ' '.join(text.split())) is not None
