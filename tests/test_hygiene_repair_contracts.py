@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,8 +30,12 @@ def _complete_lsof_env():
     p.write_text('#!/bin/sh\nprintf "p1\\nn/\\n"\n')
     p.chmod(0o755)
     rm = Path(d) / "rm"
-    rm.write_text('#!/bin/sh\nexec /usr/bin/rm "$@"\n')
+    system_rm = shutil.which("rm", path="/usr/bin:/bin")
+    if not system_rm:
+        raise RuntimeError("system rm was not found in /usr/bin or /bin")
+    rm.write_text('#!/bin/sh\nexec ' + system_rm + ' "$@"\n')
     rm.chmod(0o755)
+    # Keep the host PATH intact so tools such as timeout remain available.
     return str(d) + os.pathsep + os.environ.get("PATH", "")
 
 
