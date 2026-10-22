@@ -18,6 +18,7 @@ T="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state" "$T/home/.worktrees/r" "$T/tmpdir" && ln -s "$T" "$T/alias"
 export TMPDIR="$T/tmpdir" HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit" DISK_MAGICIAN_ADMIT_RETRY_S=0
+if [[ "$(uname -s)" == Darwin ]]; then CANON_TMP=/private/tmp; else CANON_TMP=/tmp; fi
 cat >"$T/bin/admit" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$T/admit.log"
@@ -60,9 +61,9 @@ echo "── 1. governed forms: admit args, no output on rc 0 ──"
 W="$T/home/.worktrees"
 forms=(
   "git worktree add $W/r/n|worktrees|--dest $W/r/n|hook:git-worktree-add:repo"
-  "cd /repo && git clone https://github.com/o/r.git /private/tmp/r/x|tmp_containers|--dest /private/tmp/r/x|hook:git-clone:github.com/o/r"
+  "cd /repo && git clone https://github.com/o/r.git $CANON_TMP/r/x|tmp_containers|--dest $CANON_TMP/r/x|hook:git-clone:github.com/o/r"
   "git -C $W/r/main worktree add ../n2|worktrees|--dest $W/r/n2|hook:git-worktree-add:main"
-  "FOO=1 git clone git@github.com:o/r.git /tmp/r/y|tmp_containers|--dest /private/tmp/r/y|hook:git-clone:github.com/o/r"
+  "FOO=1 git clone git@github.com:o/r.git /tmp/r/y|tmp_containers|--dest $CANON_TMP/r/y|hook:git-clone:github.com/o/r"
   "cp -R a $W/r/z|worktrees|--dest $W/r/z|hook:cp-R"
 )
 for f in "${forms[@]}"; do
@@ -99,52 +100,52 @@ for rc in 0 3 10 75 76; do STUB_RC=$rc hook PreToolUse "git worktree add $W/r/n"
     [[ "$OUT" != *updatedInput* ]] && ok "rc $rc: no updatedInput" || bad "rc $rc: $OUT"; done
 
 echo "── 3. compound vs single simple; PostToolUse confirm ──"
-STUB_RC=0 hook PreToolUse "git clone bad-url /private/tmp/r/x || mkdir -p /private/tmp/r/x"
+STUB_RC=0 hook PreToolUse "git clone bad-url $CANON_TMP/r/x || mkdir -p $CANON_TMP/r/x"
 logged "--compound" && ok "|| compound flagged" || bad "compound: $(cat "$T/admit.log")"
-STUB_RC=0 hook PreToolUse "cd /repo && git clone url /private/tmp/r/x"
+STUB_RC=0 hook PreToolUse "cd /repo && git clone url $CANON_TMP/r/x"
 logged "--compound" && ok "&& compound flagged" || bad "compound: $(cat "$T/admit.log")"
-STUB_RC=0 hook PreToolUse "FOO=1 git clone url /private/tmp/r/y"
+STUB_RC=0 hook PreToolUse "FOO=1 git clone url $CANON_TMP/r/y"
 logged "--compound" && bad "env-prefixed simple flagged compound" || ok "env-prefixed is simple"
-STUB_RC=0 hook PostToolUse "FOO=1 git clone url /private/tmp/r/y" '{"stdout":"","exit_code":0}'
+STUB_RC=0 hook PostToolUse "FOO=1 git clone url $CANON_TMP/r/y" '{"stdout":"","exit_code":0}'
 assert_eq "$(cat "$T/admit.log")" "--confirm-tool-use tu-1" "simple exit 0 → confirm"; assert_eq "$OUT" "" "confirm prints nothing"
-STUB_RC=0 hook PostToolUse "FOO=1 git clone url /private/tmp/r/y" '{"stdout":"","exit_code":128}'
+STUB_RC=0 hook PostToolUse "FOO=1 git clone url $CANON_TMP/r/y" '{"stdout":"","exit_code":128}'
 assert_eq "$ADMITS" 0 "simple exit 128 → no confirm"
-STUB_RC=0 hook PostToolUseFailure "FOO=1 git clone url /private/tmp/r/y" '{"exit_code":1}'
+STUB_RC=0 hook PostToolUseFailure "FOO=1 git clone url $CANON_TMP/r/y" '{"exit_code":1}'
 assert_eq "$ADMITS" 0 "PostToolUseFailure → no confirm"
-for c in "git clone bad-url /private/tmp/r/x || mkdir -p /private/tmp/r/x" "cd /repo && git clone url /private/tmp/r/x" \
-         "git clone url /private/tmp/r/x &"; do
+for c in "git clone bad-url $CANON_TMP/r/x || mkdir -p $CANON_TMP/r/x" "cd /repo && git clone url $CANON_TMP/r/x" \
+         "git clone url $CANON_TMP/r/x &"; do
     STUB_RC=0 hook PostToolUse "$c" '{"exit_code":0}'; assert_eq "$ADMITS" 0 "compound never confirmed: $c"
 done
 
 echo "── 4. ungoverned and unparsed → silent, admit not called ──"
-for c in "ls -la" "git clone url $T/elsewhere/x" "cp -R a /opt/x" "git status"; do
+for c in "ls -la" "git clone url /var/tmp/dm-hook-elsewhere/x" "cp -R a /opt/x" "git status"; do
     STUB_RC=0 hook PreToolUse "$c"; assert_eq "$ADMITS:$OUT" "0:" "ungoverned: $c"
 done
 assert_eq "$(grep -c hook_unparsed "$T/state/admission/events.jsonl" 2>/dev/null || echo 0)" 0 "no hook_unparsed yet"
 n=0
-for c in $'cat <<EOF\ngit clone url /private/tmp/r/h\nEOF' $'true\ngit clone url /private/tmp/r/n' \
-         'echo $(git clone url /private/tmp/r/s)' 'echo `git clone url /private/tmp/r/b`' \
-         'eval git clone url /private/tmp/r/e' '( git clone url /private/tmp/r/p )'; do
+for c in $'cat <<EOF\ngit clone url '$CANON_TMP$'/r/h\nEOF' $'true\ngit clone url '$CANON_TMP$'/r/n' \
+         'echo $(git clone url '$CANON_TMP'/r/s)' 'echo `git clone url '$CANON_TMP'/r/b`' \
+         'eval git clone url '$CANON_TMP'/r/e' '( git clone url '$CANON_TMP'/r/p )'; do
     STUB_RC=0 hook PreToolUse "$c"; n=$((n + 1))
     assert_eq "$ADMITS:$OUT:$RC" "0::0" "unparsed silent: ${c//$'\n'/\\n}"
     assert_eq "$(grep -c '"event": "hook_unparsed"' "$T/state/admission/events.jsonl")" "$n" "hook_unparsed +1"
 done
 
 echo "── 5. canonical dests, redirections, value options, copy into a dir ──"
-mkdir -p /private/tmp/dm-hook-test-$$; R=/private/tmp/dm-hook-test-$$
+mkdir -p "$CANON_TMP/dm-hook-test-$$"; R="$CANON_TMP/dm-hook-test-$$"
 forms5=(
   "cp -R a $T/alias/tmpdir/x|tmpdir_scratch|--dest $T/tmpdir/x"
-  "cp -R a /tmp/x|tmp_containers|--dest /private/tmp/x"
-  "cp -R a /tmp/r/x 2>/dev/null|tmp_containers|--dest /private/tmp/r/x"
-  "git clone url /tmp/r/x >log 2>&1|tmp_containers|--dest /private/tmp/r/x"
-  "cp -R a /private/tmp/r/x &>/dev/null <in|tmp_containers|--dest /private/tmp/r/x"
+  "cp -R a /tmp/x|tmp_containers|--dest $CANON_TMP/x"
+  "cp -R a /tmp/r/x 2>/dev/null|tmp_containers|--dest $CANON_TMP/r/x"
+  "git clone url /tmp/r/x >log 2>&1|tmp_containers|--dest $CANON_TMP/r/x"
+  "cp -R a $CANON_TMP/r/x &>/dev/null <in|tmp_containers|--dest $CANON_TMP/r/x"
   "cp -R a \$HOME/.worktrees/r/h|worktrees|--dest $W/r/h"
   "cp -R a ~/.worktrees/r/t|worktrees|--dest $W/r/t"
   "cp -a a $W/r/a|worktrees|--dest $W/r/a"
-  "git clone --jobs 4 url /tmp/r/j|tmp_containers|--dest /private/tmp/r/j"
+  "git clone --jobs 4 url /tmp/r/j|tmp_containers|--dest $CANON_TMP/r/j"
   "git --git-dir $W/r/main/.git worktree add $W/r/g|worktrees|--dest $W/r/g"
   "cp -R src $T/tmpdir/|tmpdir_scratch|--dest $T/tmpdir/src"
-  "cp -R src /tmp/|tmp_containers|--dest /private/tmp/src"
+  "cp -R src /tmp/|tmp_containers|--dest $CANON_TMP/src"
   "cp -R src $R|tmp_containers|--dest $R/src"
 )
 for f in "${forms5[@]}"; do
