@@ -6,6 +6,10 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+# shellcheck source=scripts/lib/worktree_recency.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
@@ -85,9 +89,57 @@ clear_contents() {
   fi
 }
 
+# Custom -derivedDataPath dirs sit outside DERIVED_DATA (~/dd_*, /private/tmp/pr*/dd,
+# worldai_frontend build dirs). Only a dir that is itself DerivedData-shaped (or whose
+# DerivedData/ child is) is a candidate; the removal goes through the C14 verdict
+# (kind xcode-derived-data: live cwd, open files, secrets, repos) and is logged by
+# quarantine_remove. Dirs written within CUSTOM_DD_IDLE_MINUTES, or whose recency
+# cannot be measured, are kept.
+CUSTOM_DD_IDLE_MINUTES=60
+
+clean_custom_derived_data() {
+  local ptmp utmp cand target seen=$'\n' before_kb
+  # Same overridable roots as the other scratch sweepers; an unresolved root drops its globs.
+  ptmp="$(scratch_roots_get_private_tmp)"
+  utmp="$(scratch_roots_get_user_tmp)"
+  for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
+      ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
+      "$ptmp"/worldai_frontend/* "$ptmp"/worldai_frontend/*/* \
+      "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
+      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
+    [[ -d "$cand" && ! -L "$cand" ]] || continue
+    if _av_derived_data_shape "$cand"; then
+      target="$cand"
+    elif _av_derived_data_shape "$cand/DerivedData"; then
+      target="$cand/DerivedData"
+    else
+      continue
+    fi
+    [[ "$seen" == *$'\n'"$target"$'\n'* ]] && continue
+    seen+="$target"$'\n'
+    local _safety_reason
+    if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
+      log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
+      continue
+    fi
+    if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
+      log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
+      continue
+    fi
+    before_kb=$(size_kb "$target")
+    if [[ "$DRY_RUN" == true ]]; then
+      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+    else
+      log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
+      c14_remove "$target" --kind xcode-derived-data || true
+    fi
+  done
+}
+
 log "Cleanup mode: $( [[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo APPLY )"
 
 clear_contents "Xcode DerivedData" "$DERIVED_DATA"
+clean_custom_derived_data
 clear_contents "CoreSimulator Temp" "$SIM_TEMP"
 clear_contents "CoreSimulator Caches" "$SIM_CACHES"
 
