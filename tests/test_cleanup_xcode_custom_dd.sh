@@ -35,7 +35,9 @@ case " $* " in
   *) exit 1 ;;
 esac
 STUB
-chmod +x "$TMPROOT/fakebin/lsof"
+# xcrun stub: --clean would otherwise run `simctl delete unavailable` on the real host.
+printf '#!/bin/sh\nexit 0\n' >"$TMPROOT/fakebin/xcrun"
+chmod +x "$TMPROOT/fakebin/lsof" "$TMPROOT/fakebin/xcrun"
 export PATH="$TMPROOT/fakebin:$PATH"
 mkdir -p "$TMPROOT/ptmp" "$TMPROOT/utmp"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMPROOT/ptmp"
