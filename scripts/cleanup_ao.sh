@@ -14,6 +14,10 @@ MIN_AGE_MINUTES=""
 CWD_SCAN_OK=false
 MANIFEST_PATH="${AO_CLEAR_MANIFEST:-/tmp/disk_magician/evidence/ao-retirement-owner-manifest.json}"
 LOG_PATH="${AO_CLEAR_LOG:-/tmp/disk_magician/evidence/ao-retirement.log}"
+# This is an input-only receipt root.  AO retirement never creates a local
+# backup artifact: a local bundle is not a durable, independently fetched
+# restore proof.
+BACKUP_DIR="${AO_CLEAR_BACKUP_DIR:-${AO_CLEAR_BACKUP_RECEIPTS:-}}"
 VERIFY_TIMEOUT_SEC="${AO_CLEAR_VERIFY_TIMEOUT_SEC:-30}"
 VERIFICATION_FAILURES=0
 
@@ -34,6 +38,7 @@ Dirty, unpushed, secret-bearing, missing, or live-cwd workspaces are preserved.
   --all                 Required with --clean; authorize all eligible owners/projects.
   --ignore-age          Required with --clean; explicitly waive the age filter.
   --min-age-minutes N   Require workspaces to be quiet for N minutes before retirement.
+  --backup-dir PATH      Read externally supplied durable restore receipt(s) from PATH.
   --stop-producers-only Stop/disable producers and verify they are inactive.
   --manifest PATH       Write the fresh owner directory manifest to PATH.
   -h, --help            Show this help.
@@ -57,6 +62,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --stop-producers-only) STOP_PRODUCERS=true; STOP_ONLY=true; DRY_RUN=false ;;
     --manifest) shift; MANIFEST_PATH="${1:?--manifest requires a path}" ;;
+    --backup-dir) shift; BACKUP_DIR="${1:?--backup-dir requires a path}" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -230,6 +236,89 @@ workspace_has_live_cwd() {
   cwd_list_has_path "$1" "$LSOF_CWDS"
 }
 
+# ao_preservation_paths_safe <worktree> <revision>: enumerate names in the
+# reachable history and current payload before any recovery artifact is trusted.
+# Names are enough for this gate; payload scanners must not open a candidate
+# until this check has passed.  Keep this in the AO adapter so it cannot be
+# bypassed by a receipt supplied by another workflow.
+ao_preservation_paths_safe() {
+  python3 -c 'import fnmatch, subprocess, sys
+wt, revision = sys.argv[1:]
+patterns = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+            "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", ".npmrc", ".netrc",
+            "*credentials*", "secrets*", "service-account*.json")
+commands = [["log", "--no-ext-diff", "--no-renames", "--format=", "--name-only",
+             "-z", "--full-history", "-m", "--root", revision, "--"],
+            ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]]
+try:
+    for command in commands:
+        names = subprocess.run(["git", "-C", wt] + command, check=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               timeout=90).stdout
+        for path in names.split(b"\0"):
+            components = path.lstrip(b"\n").decode("utf-8", "surrogateescape").lower().split("/")
+            if any(fnmatch.fnmatchcase(component, pattern) for component in components for pattern in patterns):
+                raise SystemExit("protected-path-in-history-or-payload")
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit("preservation-path-enumeration-failed")
+' "$1" "${2:-HEAD}"
+}
+
+# ao_backup_receipt <worktree>: resolve and validate an externally supplied,
+# durable, fetched-and-restored receipt.  The receipt is deliberately an input
+# only.  It must bind the exact live worktree/ref/HEAD/tree and the configured
+# upstream ref; the remote SHA is re-read below rather than trusted from JSON.
+ao_backup_receipt() {
+  local path="$1" real sha metadata
+  real="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
+  sha="$(git -C "$real" rev-parse --verify HEAD 2>/dev/null)" || return 1
+  ao_preservation_paths_safe "$real" "$sha" || return 1
+  metadata="$(worktree_restore_receipt_resolve "$real" "$BACKUP_DIR")" || return 1
+  worktree_restore_receipt_validate "$real" "$metadata" || return 1
+  printf '%s\n' "$metadata"
+}
+
+# ao_backup_receipt_matches_live <worktree> <metadata>: re-read the upstream
+# ref after receipt validation and require the receipt's exact remote SHA.
+ao_backup_receipt_matches_live() {
+  worktree_restore_receipt_matches_live "$1" "$2"
+}
+
+# ao_c14_gate <worktree>: same-target, fail-closed content/identity proof.
+# AO-owned paths intentionally cannot use the normal removal verdict (that
+# verdict preserves AO ownership), so this reuses its C14 content probes while
+# retaining the owner lifecycle's exact-path registration gate.
+ao_c14_gate() {
+  local path="$1" real="$1" content inv registration gitdir
+  real="$(cd "$path" 2>/dev/null && pwd -P)" || { printf '%s' 'workspace path changed'; return 1; }
+  [[ "$real" == "$path" && -d "$real" && ! -L "$real" ]] || { printf '%s' 'workspace identity changed'; return 1; }
+  registration="$(git -C "$real" worktree list --porcelain 2>/dev/null)" || { printf '%s' 'worktree registration unreadable'; return 1; }
+  awk -v want="worktree $real" 'BEGIN { hit=0; locked=0 }
+    $0 == want { hit=1; next }
+    hit && /^worktree / { exit 2 }
+    hit && /^locked($| )/ { locked=1 }
+    END { if (!hit || locked) exit 2; exit 0 }' <<<"$registration" || { printf '%s' 'worktree is unregistered or locked'; return 1; }
+  gitdir="$(git -C "$real" rev-parse --absolute-git-dir 2>/dev/null)" || { printf '%s' 'worktree git metadata unreadable'; return 1; }
+  [[ ! -e "$gitdir/locked" && ! -e "$gitdir/index.lock" && ! -e "$gitdir/HEAD.lock" ]] || { printf '%s' 'worktree is locked or a git operation is in progress'; return 1; }
+  content="$(c14_repo_content_ok "$real" 2>/dev/null || true)"
+  [[ "$content" == ok ]] || { printf '%s' "${content#kept:}"; return 1; }
+  inv="$(mktemp "${TMPDIR:-/tmp}/ao-c14-inventory.XXXXXX")" || { printf '%s' 'C14 inventory allocation failed'; return 1; }
+  if ! python3 "$SCRIPT_DIR/c14_probe.py" inventory "$real" "$inv" >/dev/null 2>&1; then
+    rm -f "$inv"; printf '%s' 'C14 inventory failed'; return 1
+  fi
+  if worktree_is_recently_active_minutes "$real" 360; then
+    rm -f "$inv"; printf '%s' 'workspace was active within the six-hour minimum'; return 1
+  fi
+  wrh_live_cwd_reason "$real"
+  if [[ -n "${WRH_LIVE_CWD_REASON:-}" ]]; then
+    rm -f "$inv"; printf '%s' "live-cwd check: $WRH_LIVE_CWD_REASON"; return 1
+  fi
+  rm -f "$inv"
+}
+
 workspace_preservation_reason() {
   local path="$1" root="$2" branch upstream ignored cwd_rc status_output ignored_output
   local remote merge_ref remote_url local_sha remote_sha
@@ -271,13 +360,18 @@ workspace_preservation_reason() {
 }
 
 retire_owner() {
-  local owner db root run_file port id project terminated path branch reason
+  local owner db root run_file port id project terminated path branch reason receipt final_reason
   owner="$1"; db="$2"; root="$3"; run_file="$4"; port="$5"
   local -a env_prefix=(env AO_RUN_FILE="$run_file" AO_DATA_DIR="$root/data")
   [[ -n "$port" ]] && env_prefix+=(AO_PORT="$port")
   log "Owner $owner: evaluating manifest entries"
   while IFS=$'\t' read -r id project terminated path branch; do
     [[ -n "$id" ]] || continue
+    # Screen names before git status or C14 can open working-tree payloads.
+    if ! ao_preservation_paths_safe "$path" HEAD; then
+      log "PRESERVE owner=$owner session=$id project=$project path=$path reason=protected path or history enumeration failed"
+      continue
+    fi
     reason="$(workspace_preservation_reason "$path" "$root")"
     if [[ -n "$reason" ]]; then
       log "PRESERVE owner=$owner session=$id project=$project path=$path reason=$reason"
@@ -286,6 +380,28 @@ retire_owner() {
     if [[ "$DRY_RUN" == true ]]; then
       log "[dry-run] ${env_prefix[*]} ao session kill $id -p $project"
     else
+      # Re-run the exact-target proof immediately before trusting the external
+      # receipt and again after it.  Any failure preserves the AO session.
+      if ! ao_c14_gate "$path"; then
+        final_reason="$(ao_c14_gate "$path" 2>/dev/null || true)"
+        log "PRESERVE owner=$owner session=$id project=$project path=$path reason=${final_reason:-C14 gate failed}"
+        continue
+      fi
+      receipt="$(ao_backup_receipt "$path" 2>/dev/null || true)"
+      if [[ -z "$receipt" || ! -f "$receipt" ]]; then
+        log "PRESERVE owner=$owner session=$id project=$project path=$path reason=external durable restore receipt unavailable"
+        continue
+      fi
+      if ! ao_c14_gate "$path"; then
+        final_reason="$(ao_c14_gate "$path" 2>/dev/null || true)"
+        log "PRESERVE owner=$owner session=$id project=$project path=$path reason=${final_reason:-C14 gate failed after receipt}"
+        continue
+      fi
+      if ! ao_backup_receipt_matches_live "$path" "$receipt"; then
+        log "PRESERVE owner=$owner session=$id project=$project path=$path reason=external receipt no longer matches live ref/head/tree/remote"
+        continue
+      fi
+      log "BACKUP-VERIFIED owner=$owner session=$id project=$project path=$path receipt=$receipt source=external-fetched-restore"
       log "+ ${env_prefix[*]} ao session kill $id -p $project"
       if "${env_prefix[@]}" ao session kill "$id" -p "$project"; then
         if ! verify_session_retired "$owner" "$db" "$id" "$path"; then
@@ -302,6 +418,8 @@ retire_owner() {
 
 source "$SCRIPT_DIR/lib/lsof_linux.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
+source "$SCRIPT_DIR/lib/artifact_verdict.sh"
+source "$SCRIPT_DIR/lib/worktree_restore_receipt.sh"
 
 log "Stage 1: producer quiescence"
 if [[ "$STOP_PRODUCERS" == true ]]; then stop_producers; else log "[dry-run] pass --stop-producers to enable producer stop"; fi
