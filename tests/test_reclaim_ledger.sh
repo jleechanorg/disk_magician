@@ -129,7 +129,7 @@ M="$TMP_ROOT/mon"; mkdir -p "$M/.local/state/disk-magician/config" "$M/.local/st
 MSD="$M/.local/state/disk-magician"
 git -C "$MSD" init -q 2>/dev/null
 printf '{"monitored_dirs":[{"key":"adir","path":"~/a","timeout":60}],"monitored_globs":[{"key":"g","pattern":"~/glob*"}]}' >"$MSD/config/config.json"
-snap() { printf '{"snapshot_coverage_pct":90,"directories":{"adir":%s},"carried_keys":[]}' "$1" >"$MSD/snapshots/disk_snapshot.json"
+snap() { printf '{"snapshot_coverage_pct":90,"directories":{"adir":%s,"g":%s},"carried_keys":[]}' "$1" "$1" >"$MSD/snapshots/disk_snapshot.json"
   git -C "$MSD" add -A && GIT_COMMITTER_DATE="$2" git -C "$MSD" -c user.name=t -c user.email=t@t commit -q -m s --date "$2"; }
 snap $((1*GIB)) "2026-10-20T00:00:00Z"
 snap $((5*GIB)) "2026-10-21T12:00:00Z"
@@ -141,6 +141,7 @@ MLOG="$M/deletions.log"
 } >"$MLOG"
 OUT11=$(run_rl "$M" "$MLOG" --stdout --freshness-line "$FRESH_OK")
 has "$OUT11" '| `adir` | `~/a` | 5.00 | 1.00 | 4.00 |' && ok "B1 shows monitored dir growth 4.00 GiB" || bad "B1 row" "$OUT11"
+has "$OUT11" '| `g` | `~/glob*` | 5.00 | 1.00 | 4.00 |' && ok "B1 shows a glob key with its pattern" || bad "B1 glob row" "$OUT11"
 C11=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT11")
 has "$(grep -F '~/a' <<<"$C11")" '| yes |' && ok "dir under monitored_dirs is yes" || bad "monitored yes" "$C11"
 has "$(grep -F '~/glob1' <<<"$C11")" '| yes |' && ok "dir matching monitored_globs is yes" || bad "glob yes" "$C11"

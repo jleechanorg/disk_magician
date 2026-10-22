@@ -163,13 +163,13 @@ def load_monitored(state_dir, home):
         return None
     ex = lambda p: (home + p[1:] if p.startswith("~") else p).replace("$HOME", home)  # noqa: E731
     dirs = {d["key"]: ex(d["path"]) for d in cfg.get("monitored_dirs", []) if "path" in d}
-    globs = [ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs")
-             for g in cfg.get(k, []) if "pattern" in g]
-    return dirs, globs
+    gl = {g["key"]: ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs")
+          for g in cfg.get(k, []) if "pattern" in g and "key" in g}
+    return dirs, list(gl.values()), {**gl, **dirs}
 
 
 def is_monitored(path, mon):
-    dirs, globs = mon
+    dirs, globs = mon[0], mon[1]
     path = path.rstrip("/")
     return (any(path == d or path.startswith(d + "/") for d in dirs.values())
             or any(fnmatch.fnmatch(path, g) for g in globs))
@@ -228,7 +228,7 @@ def section_monitored(state_dir, mon, since, days, home):
         return out + ["No monitored directory grew by 1 GiB or more over its floor.", ""]
     rows.sort(reverse=True)
     return out + table(["Key", "Path", "Now GiB", "Floor GiB", "Growth GiB"],
-                       [[f"`{k}`", f"`{fold(mon[0][k], home)}`" if k in mon[0] else "(glob)", gib(n), gib(f), gib(d)]
+                       [[f"`{k}`", f"`{fold(mon[2][k], home)}`" if k in mon[2] else "(unknown)", gib(n), gib(f), gib(d)]
                         for d, k, n, f in rows[:25]]) + [""]
 
 
