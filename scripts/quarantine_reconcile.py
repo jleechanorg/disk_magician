@@ -123,12 +123,12 @@ def prune_reconcile_temps():
             except OSError: pass
 
 
-def clean(roots, deadline_seconds):
+def clean(deadline_seconds):
     deadline = time.monotonic() + deadline_seconds
     lock = qr.operation_lock(deadline)
     if lock is None: print("deferred\toperation-lock"); return 0
     try:
-        rows = plan(roots, min(30, deadline_seconds))
+        rows = plan([], 0)  # orphan-store scan is dry-run only: never hold the lock for it
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf): rc = qr.quarantine_reconcile(["--deadline-at", repr(deadline)])
         for line in buf.getvalue().splitlines():
@@ -152,5 +152,5 @@ if __name__ == "__main__":
         elif args[i] in ("--scan-seconds", "--deadline-seconds") and i + 1 < len(args): seconds = float(args[i + 1]); i += 2
         else: sys.exit("usage: quarantine_reconcile.py plan|clean [--root R ...] [--scan-seconds N | --deadline-seconds N]")
     if mode == "plan": plan(roots, seconds if seconds is not None else 30)
-    elif mode == "clean": sys.exit(clean(roots, seconds if seconds is not None else 300))
+    elif mode == "clean": sys.exit(clean(seconds if seconds is not None else 300))
     else: sys.exit("usage: quarantine_reconcile.py plan|clean ...")
