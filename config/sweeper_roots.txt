@@ -35,6 +35,9 @@ $HOME/Library/Caches/org.swift.swiftpm	cleanup_dev_caches.sh	Section 3b rebuilda
 $HOME/Library/Caches/CocoaPods	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 130
 $HOME/Library/Caches/@granolaelectron-updater	cleanup_dev_caches.sh	Section 3b rebuildable user caches, line 131
 $HOME/.cache/ezgha-recovery-target-20261004	cleanup_dev_caches.sh	Section 3b non-cache recovery target, line 132
+$HOME/Library/Application Support/Google/GoogleUpdater/crx_cache	cleanup_dev_caches.sh	Section 3b rebuildable user caches
+$HOME/.config/gcloud/logs	cleanup_dev_caches.sh	Section 3c dated log dirs >7d
+$HOME/Library/Logs/com.openai.codex	cleanup_dev_caches.sh	Section 3c dated log dirs >7d
 $HOME/.local/share/opencode	cleanup_dev_caches.sh	line 142
 $HOME/.local/share/cursor-agent/versions	cleanup_dev_caches.sh	line 179
 $HOME/.npm/_cacache	cleanup_dev_caches.sh	Section 6, line 245
@@ -75,6 +78,10 @@ $HOME/projects	cleanup_worktree_venvs.sh	ROOTS default, line 55
 $HOME/project_worldaiclaw	cleanup_worktree_venvs.sh	ROOTS, line 56
 $HOME/project_worldaiclaw/worldai_claw	cleanup_worktrees.sh	discovered_repos_str, line 76
 $HOME/wc-wt	cleanup_worktree_venvs.sh	ROOTS default, line 60
+$HOME/llm_wiki.worktrees	cleanup_worktrees.sh	dwr_agent_roots (discovery + repo-local match)
+$HOME/worldarchitect.ai.worktrees	cleanup_worktrees.sh	dwr_agent_roots (discovery + repo-local match)
+$HOME/project_worldai_frontend	cleanup_worktrees.sh	dwr_agent_roots (discovery + repo-local match)
+$HOME/project_agento	cleanup_worktrees.sh	dwr_agent_roots (discovery + repo-local match)
 $HOME/.worktrees	cleanup_worktrees.sh	standard worktree root (find_repos_from_worktrees + cleanup_worktree_venvs.sh ROOTS)
 $HOME/.ao/data/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 94
 $HOME/.gemini/antigravity/worktrees	cleanup_worktrees.sh	find_repos_from_worktrees, line 95
