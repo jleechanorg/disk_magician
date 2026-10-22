@@ -81,10 +81,14 @@ clear_contents() {
     fi
     # Per-entry so every cache entry gets the same C14 rebuildable verdict and
     # a kept entry does not stop the rest of the sweep.
-    local entry
+    local entry kind
     while IFS= read -r -d '' entry; do
       [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
-      c14_remove "$entry" --kind rebuildable || true
+      kind=rebuildable
+      # A per-project DerivedData dir gets the xcode-derived-data kind so its generated
+      # build output (e.g. NativeRequestCredentials.o) is not read as a secret.
+      [[ "$path" == "$DERIVED_DATA" ]] && _av_derived_data_shape "$entry" && kind=xcode-derived-data
+      c14_remove "$entry" --kind "$kind" || true
     done < <(find "$path" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   fi
 }
