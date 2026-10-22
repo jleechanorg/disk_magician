@@ -784,9 +784,52 @@ except Exception:
 ' "$1" "${2:-HEAD}"
 }
 
+# Git bundles and archives contain LFS pointers, never their external payloads.
+preservation_no_lfs() {
+    preservation_paths_safe "$1" "${2:-HEAD}" || return 1
+    timeout 90 python3 -c 'import os, pathlib, subprocess, sys, tempfile
+wt, revision = sys.argv[1:]
+def git(*args, env=None, data=None):
+    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", wt] + list(args),
+                          input=data, env=env, check=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, timeout=80).stdout
+try:
+    # An isolated index reads attributes from the selected immutable tree,
+    # including when the fetched repository is bare. Never change its index.
+    with tempfile.TemporaryDirectory(prefix="diskm-lfs-", dir="/tmp") as scratch:
+        env = dict(os.environ, GIT_INDEX_FILE=str(pathlib.Path(scratch) / "index"))
+        git("read-tree", revision, env=env)
+        names = git("ls-tree", "-r", "--name-only", "-z", revision)
+        attrs = git("check-attr", "--cached", "-z", "--stdin", "filter", env=env, data=names).split(b"\0")
+        if any(attrs[i] == b"lfs" for i in range(2, len(attrs), 3)):
+            raise ValueError("LFS-attributed selected file")
+    objects = git("rev-list", "--objects", "--no-object-names", revision)
+    rows = git("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)", data=objects)
+    # Pointers are small; do not open arbitrarily large historical blobs.
+    with subprocess.Popen(["git", "-C", wt, "cat-file", "--batch"], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
+        for row in rows.splitlines():
+            oid, kind, size = row.split()
+            if kind != b"blob" or int(size) > 4096:
+                continue
+            batch.stdin.write(oid + b"\n")
+            batch.stdin.flush()
+            if batch.stdout.readline().split() != [oid, kind, size]:
+                raise ValueError("object lookup failed")
+            blob = batch.stdout.read(int(size))
+            if len(blob) != int(size) or batch.stdout.read(1) != b"\n":
+                raise ValueError("incomplete object")
+            if blob.splitlines()[:1] == [b"version https://git-lfs.github.com/spec/v1"]:
+                raise ValueError("reachable LFS pointer payload")
+except Exception:
+    print("LFS payload unsupported or LFS enumeration failed", file=sys.stderr)
+    sys.exit(1)
+' "$1" "${2:-HEAD}"
+}
+
 preservation_secret_scan() {
     local wt="$1" sha="$2"
-    preservation_paths_safe "$wt" "$sha" || return 1
+    preservation_no_lfs "$wt" "$sha" || return 1
     command -v gitleaks >/dev/null 2>&1 || return 1
     command -v timeout >/dev/null 2>&1 || return 1
     timeout 90 gitleaks git "$wt" --log-opts="$sha" --redact --no-banner >/dev/null 2>&1 || return 1

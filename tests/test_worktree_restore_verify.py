@@ -181,6 +181,92 @@ class RestoreVerificationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn(b'--upload-manifest', result.stdout)
 
+    def update_capture(self):
+        for key, value in (("head", "HEAD"), ("tree", "HEAD^{tree}")):
+            self.meta[key] = module.git(self.wt, "rev-parse", value).decode().strip()
+        self.git("-C", str(self.wt), "push", "-q")
+        self.capture()
+
+    def test_lfs_materialized_payload_refused_before_fetch(self):
+        if not shutil.which("git-lfs"):
+            self.skipTest("git-lfs unavailable")
+        self.git("-C", str(self.wt), "config", "filter.lfs.clean", "git-lfs clean -- %f")
+        (self.wt / ".gitattributes").write_text("*.bin filter=lfs\n")
+        (self.wt / "asset.bin").write_bytes(b"materialized fixture payload" * 80)
+        self.git("-C", str(self.wt), "add", ".gitattributes", "asset.bin")
+        self.git("-C", str(self.wt), "commit", "-qm", "LFS fixture")
+        pointer = self.git("-C", str(self.wt), "show", "HEAD:asset.bin")
+        self.assertTrue(pointer.startswith(b"version https://git-lfs.github.com/spec/v1\n"))
+        self.assertNotEqual(pointer, (self.wt / "asset.bin").read_bytes())
+        self.update_capture()
+        with self.assertRaises(subprocess.CalledProcessError):
+            module.helper("preservation_no_lfs", self.wt, "HEAD")
+        with patch.object(module, "fetch", side_effect=AssertionError("must not fetch")):
+            self.refused()
+
+    def test_selected_lfs_attribute_without_pointer_refused(self):
+        (self.wt / ".gitattributes").write_text("file filter=lfs\n")
+        self.git("-C", str(self.wt), "add", ".gitattributes")
+        self.git("-C", str(self.wt), "commit", "-qm", "LFS attribute")
+        with self.assertRaises(subprocess.CalledProcessError):
+            module.helper("preservation_no_lfs", self.wt, "HEAD")
+
+    def test_historical_lfs_pointer_refused_in_fetched_bundle(self):
+        (self.wt / "old-asset").write_text("version https://git-lfs.github.com/spec/v1\n"
+                                          + "oid sha256:" + "1" * 64 + "\nsize 12\n")
+        self.git("-C", str(self.wt), "add", "old-asset")
+        self.git("-C", str(self.wt), "commit", "-qm", "historical pointer")
+        self.git("-C", str(self.wt), "rm", "-q", "old-asset")
+        self.git("-C", str(self.wt), "commit", "-qm", "remove pointer")
+        self.update_capture()
+        fetched = self.base / "fetched"
+        fetched.mkdir()
+        module.fetch(self.rows, fetched, self.store)
+        with self.assertRaises(subprocess.CalledProcessError):
+            module.restore(fetched, self.meta, self.base)
+        with self.assertRaises(subprocess.CalledProcessError):
+            module.helper("preservation_no_lfs", self.wt, "HEAD")
+
+    def validate_receipt(self, receipt):
+        return subprocess.run(["bash", "-c", "source \"$1\"; worktree_restore_receipt_validate \"$2\" \"$3\"",
+                               "_", str(ROOT / "scripts/lib/worktree_restore_receipt.sh"),
+                               str(self.wt), str(receipt)], capture_output=True)
+
+    def test_consumer_accepts_canonical_receipt_and_rejects_incomplete_claims(self):
+        receipt = self.verify()
+        valid = json.loads(receipt.read_text())
+        self.assertEqual(self.validate_receipt(receipt).returncode, 0)
+        for field in ("objects", "verifier", "fsck", "generation", "hash", "storage_root", "lfs"):
+            row = json.loads(json.dumps(valid))
+            if field == "objects":
+                row["durable_backup"].pop("objects")
+            elif field == "verifier":
+                row.pop("verifier")
+            elif field == "fsck":
+                row["restore"].pop("fsck")
+            elif field == "lfs":
+                row["restore"].pop("lfs")
+            elif field == "generation":
+                row["durable_backup"]["objects"][0]["generation"] = "0"
+            elif field == "hash":
+                row["durable_backup"]["objects"][0]["sha256"] = "bad"
+            else:
+                row["durable_backup"]["objects"][0]["object"] = "gs://other/metadata.json"
+            receipt.write_text(json.dumps(row))
+            self.assertNotEqual(self.validate_receipt(receipt).returncode, 0, field)
+
+    def test_minutes_removal_requires_receipt_root(self):
+        env = dict(os.environ, HOME=str(self.base / "home"))
+        env.pop("DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS", None)
+        result = subprocess.run(["bash", "-c", "source \"$1\"; WRH_RECENCY_SPEC=minutes:360; "
+                                 "wrh_remove_now \"$2\" \"$2\" --quarantine \"$3\"", "_",
+                                 str(ROOT / "scripts/worktree_remove_hook.sh"), str(self.wt),
+                                 str(self.manifest)], env=env, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.wt.is_dir())
+        log = self.base / "home/.disk_magician_state/worktree_guard.log"
+        self.assertIn("minute recency override requires durable restore receipt", log.read_text())
+
     def test_fixture_requires_sandbox(self):
         env = dict(os.environ, DISK_MAGICIAN_RESTORE_FIXTURE_DIR=str(self.store))
         env.pop('DISK_MAGICIAN_TEST_SANDBOX', None)

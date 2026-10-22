@@ -48,11 +48,12 @@ worktree_restore_receipt_validate() {
     merge_ref="$(git -C "$real" config --get "branch.$branch.merge" 2>/dev/null)" || return 1
     [[ "$merge_ref" == refs/heads/* && "$remote" != . ]] || return 1
     remote_url="$(git -C "$real" remote get-url "$remote" 2>/dev/null)" || return 1
-    python3 -c 'import json,sys
+    python3 -c 'import datetime,json,re,sys
+from pathlib import PurePosixPath
 metadata,worktree,ref,head,tree,remote_url,merge_ref=sys.argv[1:]
 with open(metadata, encoding="utf-8") as fh:
     row=json.load(fh)
-if row.get("format") not in ("disk-magician-ao-restore-v1", "disk-magician-worktree-restore-v1"):
+if row.get("format") != "disk-magician-worktree-restore-v1":
     raise SystemExit(1)
 if row.get("status") != "verified":
     raise SystemExit(1)
@@ -71,6 +72,34 @@ if [backup.get(k) for k in ("head", "tree")] != [head, tree]:
     raise SystemExit(1)
 if [restore.get(k) for k in ("head", "tree")] != [head, tree]:
     raise SystemExit(1)
+verifier=row.get("verifier")
+if not isinstance(verifier, dict) or verifier.get("command") != "diskm worktree-restore-verify" or verifier.get("method") != "pinned fetched-only fsck and complete tar/blob/mode/symlink restore":
+    raise SystemExit(1)
+when=datetime.datetime.fromisoformat(row.get("verified_at", "").replace("Z", "+00:00"))
+if when.tzinfo is None or when > datetime.datetime.now(datetime.timezone.utc):
+    raise SystemExit(1)
+if restore.get("lfs") != "absent-in-selected-tree-and-reachable-history":
+    raise SystemExit(1)
+if restore.get("fsck") != "passed --full --strict" or restore.get("no_extra_files") is not True or type(restore.get("file_count")) is not int or restore["file_count"] < 0:
+    raise SystemExit(1)
+objects=backup.get("objects")
+names={"metadata.json", "recovery.bundle", "tree.tar", "tree.manifest", "files.before.manifest", "files.after.manifest"}
+prefix="gs://wa-test-evidence/agent-evidence/disk_magician/"
+if not isinstance(objects, list) or len(objects) != len(names) or any(not isinstance(o, dict) for o in objects) or {o.get("path") for o in objects} != names:
+    raise SystemExit(1)
+roots=set()
+for obj in objects:
+    url=obj.get("object", "")
+    relative=url[len(prefix):] if isinstance(url, str) and url.startswith(prefix) else ""
+    path=PurePosixPath(relative)
+    if not relative or str(path) != relative or path.is_absolute() or ".." in path.parts or "\\" in relative or not url.endswith("/" + obj["path"]):
+        raise SystemExit(1)
+    if not re.fullmatch(r"[1-9][0-9]*", str(obj.get("generation", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(obj.get("sha256", ""))) or type(obj.get("size")) is not int or obj["size"] < 0:
+        raise SystemExit(1)
+    roots.add(url.rsplit("/", 1)[0])
+if len(roots) != 1:
+    raise SystemExit(1)
+
 ' "$metadata" "$real" "$ref" "$sha" "$tree" "$remote_url" "$merge_ref"
 }
 
