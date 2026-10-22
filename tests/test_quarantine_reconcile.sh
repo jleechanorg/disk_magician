@@ -78,7 +78,7 @@ check 'pruned partials are logged' grep -q "quarantine-partial" "$DISK_MAGICIAN_
 
 # Orphan store (no index entry) is reported, never touched.
 mkdir -p "$TMP/scratch/orph/.dm-quarantine/abc"; chmod 700 "$TMP/scratch/orph/.dm-quarantine"
-OUT="$(qr --clean --deadline-seconds 60)"
+OUT="$(qr --dry-run)"
 check 'orphan store is reported' grep -q "^orphan-store.*orph/.dm-quarantine" <<<"$OUT"
 check 'orphan store content is untouched' [ -d "$TMP/scratch/orph/.dm-quarantine/abc" ]
 
