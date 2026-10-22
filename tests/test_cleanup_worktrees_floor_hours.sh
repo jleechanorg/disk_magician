@@ -52,7 +52,6 @@ printf 'p1\nn/\n'
 SH
 printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/gh"
 printf '#!/bin/sh\nshift\nexec "$@"\n' > "$TMP_ROOT/bin/timeout"
-printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/lsof-open"  # C14 open-file probe: nothing open
 chmod +x "$TMP_ROOT/bin/lsof" "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/timeout"
 run() { env -i HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=3 HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" bash "$CLEANUP_SCRIPT" ${MODE:---dry-run} --repos "$REPO" 2>&1; }
 
