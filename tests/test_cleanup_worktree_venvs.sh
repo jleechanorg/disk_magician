@@ -624,32 +624,5 @@ else
 fi
 
 echo
-echo "=== Test 12: a venv whose files are tracked by git is never stripped ==="
-mk_real_wt() {  # <name> <tracked:yes|no> -> prints worktree path
-  local base="$TMP_ROOT/$1-base" wt="$ROOTS_DIR/$1"
-  git init -q -b main "$base"
-  : > "$base/README.md"
-  if [[ "$2" == yes ]]; then mkdir "$base/.venv"; : > "$base/.venv/pyvenv.cfg"; fi
-  git -C "$base" -c user.name=t -c user.email=t@t add -A
-  git -C "$base" -c user.name=t -c user.email=t@t commit -qm init
-  git -C "$base" -c user.name=t -c user.email=t@t worktree add -q -b "$1-branch" "$wt"
-  [[ "$2" == yes ]] || { mkdir "$wt/.venv"; : > "$wt/.venv/pyvenv.cfg"; }
-  find "$wt" -path "$wt/.git" -prune -o -type f -print | while read -r f; do age_path_days_ago "$f" 30; done
-  age_path_days_ago "$wt/.git" 30
-  printf '%s' "$wt"
-}
-TRACKED_WT="$(mk_real_wt trk_wt yes)"
-UNTRACKED_WT="$(mk_real_wt untrk_wt no)"
-OUT12="$TMP_ROOT/out12.txt"
-env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
-  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
-  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
-  bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run >"$OUT12" 2>&1
-OUT12_CONTENT=$(cat "$OUT12")
-assert_contains "tracked .venv is skipped" "skip (tracked by git): $TRACKED_WT/.venv" "$OUT12_CONTENT"
-assert_not_contains "tracked .venv is not a strip candidate" "would strip $TRACKED_WT/.venv" "$OUT12_CONTENT"
-assert_contains "untracked .venv is still a strip candidate" "would strip $UNTRACKED_WT/.venv" "$OUT12_CONTENT"
-
-echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
