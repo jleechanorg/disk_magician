@@ -16,6 +16,7 @@ file only aggregates and renders.
 import argparse
 import contextlib
 import datetime
+import fnmatch
 import io
 import json
 import os
@@ -113,7 +114,11 @@ def table(head, rows):
     return out
 
 
-def section_c(roots, home, days):
+def monitored_cell(path, mon):
+    return "?" if mon is None else ("yes" if is_monitored(path, mon) else "**NO**")
+
+
+def section_c(roots, home, days, mon):
     ranked = sorted(roots.items(), key=lambda kv: kv[1]["kb"], reverse=True)
     out = [f"### C. Cleaned roots, last {days} days", ""]
     if not ranked:
@@ -123,19 +128,19 @@ def section_c(roots, home, days):
         scripts = ", ".join(f"`{s}` ({n})" for s, n in
                             sorted(e["scripts"].items(), key=lambda x: -x[1])[:3]) or "-"
         rows.append([f"`{fold(root, home)}`", gib(e["kb"]), str(e["n"]), scripts,
-                     e["last"].strftime("%Y-%m-%dT%H:%MZ")])
+                     e["last"].strftime("%Y-%m-%dT%H:%MZ"), monitored_cell(root, mon)])
     rest = ranked[TOP_C:]
     if rest:
-        rows.append([f"_{len(rest)} smaller roots_", gib(sum(e["kb"] for _, e in rest)), "", "", ""])
+        rows.append([f"_{len(rest)} smaller roots_", gib(sum(e["kb"] for _, e in rest)), "", "", "", ""])
     total = sum(e["kb"] for e in roots.values())
     unknown = sum(e["unknown"] for e in roots.values())
-    out += table(["Root", "GiB", "Deletions", "Owner script(s)", "Last cleaned"], rows)
+    out += table(["Root", "GiB", "Deletions", "Owner script(s)", "Last cleaned", "Monitored"], rows)
     out += ["", f"Total logged: **{gib(total)} GiB** across {len(roots)} roots "
                 f"(`du` upper bounds, not `df` deltas; {unknown} rows had no size).", ""]
     return out
 
 
-def section_d(roots, home, days):
+def section_d(roots, home, days, mon):
     fast = [(r, e) for r, e in roots.items()
             if (len(e["days"]) >= FAST_DAYS or len(e["hours"]) >= FAST_HOURS) and e["kb"] > 0
             and not r.endswith(TOOL_STAGING)]
@@ -144,9 +149,87 @@ def section_d(roots, home, days):
     if not fast:
         return out + ["None in the window.", ""]
     rows = [[str(i), f"`{fold(r, home)}`", gib(e["kb"]),
-             f"{len(e['hours'])} h / {len(e['days'])} of {days} days"]
+             f"{len(e['hours'])} h / {len(e['days'])} of {days} days", monitored_cell(r, mon)]
             for i, (r, e) in enumerate(fast[:TOP_D], 1)]
-    return out + table(["#", "Root", "GiB removed", "Cleaned in"], rows) + [""]
+    return out + table(["#", "Root", "GiB removed", "Cleaned in", "Monitored"], rows) + [""]
+
+
+def load_monitored(state_dir, home):
+    """(dir paths, glob patterns) from the state repo's mirrored config.json,
+    the same list the snapshot measures; None when unreadable."""
+    try:
+        cfg = json.loads((state_dir / "config" / "config.json").read_text())
+    except (OSError, ValueError):
+        return None
+    ex = lambda p: (home + p[1:] if p.startswith("~") else p).replace("$HOME", home)  # noqa: E731
+    dirs = {d["key"]: ex(d["path"]) for d in cfg.get("monitored_dirs", []) if "path" in d}
+    globs = [ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs")
+             for g in cfg.get(k, []) if "pattern" in g]
+    return dirs, globs
+
+
+def is_monitored(path, mon):
+    dirs, globs = mon
+    path = path.rstrip("/")
+    return (any(path == d or path.startswith(d + "/") for d in dirs.values())
+            or any(fnmatch.fnmatch(path, g) for g in globs))
+
+
+def snapshot_history(state_dir, since):
+    """[(ts, snapshot dict)] sampled at most once per 6h from committed
+    snapshots/disk_snapshot.json with coverage >= 70%, oldest first."""
+    rel = "snapshots/disk_snapshot.json"
+    r = subprocess.run(["git", "-C", str(state_dir), "log", f"--since={since.isoformat()}",
+                        "--format=%H %ct", "--", rel], capture_output=True, text=True)
+    out, last = [], None
+    for line in reversed(r.stdout.splitlines()):
+        sha, ct = line.split()
+        if last is not None and int(ct) - last < 6 * 3600:
+            continue
+        g = subprocess.run(["git", "-C", str(state_dir), "show", f"{sha}:{rel}"],
+                           capture_output=True, text=True)
+        try:
+            snap = json.loads(g.stdout)
+        except ValueError:
+            continue
+        if snap.get("snapshot_coverage_pct", 0) >= 70:
+            out.append((int(ct), snap))
+            last = int(ct)
+    return out
+
+
+def section_monitored(state_dir, mon, since, days, home):
+    """Growth per monitored directory vs its lowest fresh size in the window."""
+    out = [f"### B1. Monitored directories vs {days}-day floor (`monitored_dirs` x committed snapshot history)", ""]
+    if mon is None:
+        return out + [f"Unavailable: `{state_dir}/config/config.json` unreadable.", ""]
+    hist = snapshot_history(state_dir, since)
+    if len(hist) < 2:
+        return out + [f"Unavailable: {len(hist)} committed snapshot(s) with coverage >= 70% in the window.", ""]
+
+    def fresh(snap):
+        carried = {c.get("key") for c in snap.get("carried_keys", [])}
+        return {k: v for k, v in (snap.get("directories") or {}).items()
+                if isinstance(v, (int, float)) and k not in carried}
+    now_ts, now_snap = hist[-1]
+    now = fresh(now_snap)
+    rows = []
+    for key, kb in now.items():
+        floor = min((fresh(sn)[key] for _, sn in hist if key in fresh(sn)), default=kb)
+        if kb - floor >= GIB_KB:
+            rows.append((kb - floor, key, kb, floor))
+    stamp = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    out.append(f"Current = snapshot at {stamp}; floor = lowest fresh size over {len(hist)} snapshots "
+               f"(coverage >= 70%, one per 6 h). Carried or timed-out sizes are skipped. "
+               f"{len(now)} keys measured fresh in the current snapshot. A floor can be a partial "
+               f"measurement; confirm a large jump with a direct measurement.")
+    out.append("")
+    if not rows:
+        return out + ["No monitored directory grew by 1 GiB or more over its floor.", ""]
+    rows.sort(reverse=True)
+    return out + table(["Key", "Path", "Now GiB", "Floor GiB", "Growth GiB"],
+                       [[f"`{k}`", f"`{fold(mon[0][k], home)}`" if k in mon[0] else "(glob)", gib(n), gib(f), gib(d)]
+                        for d, k, n, f in rows[:25]]) + [""]
 
 
 def run_json(fn, argv):
@@ -162,7 +245,7 @@ def run_json(fn, argv):
 def section_b(state_dir, days):
     rc, data = run_json(growth_top10.main, [
         "--days", str(days), "--limit", "25", "--state-dir", str(state_dir), "--json"])
-    out = [f"### B. Growth vs {days}-day floor (committed ledger history, via `growth-top10`)", ""]
+    out = [f"### B2. Top-down ledger growth vs {days}-day floor (paths outside `monitored_dirs`, via `growth-top10`)", ""]
     if not data:
         return out + ["Unavailable: growth-top10 produced no result.", ""]
     kind = data.get("comparison_kind")
@@ -250,7 +333,15 @@ def render(args, state_dir, now):
         out += [f"Full-disk ledger freshness: `{fresh}`.", ""]
     src = args.deletions_log + (f" ({rows} rows in window)" if rows is not None else " (missing)")
     out += [f"Deletion log source: `{fold(src, home)}`.", ""]
-    out += section_c(roots, home, args.days) + section_d(roots, home, args.days)
+    mon = load_monitored(state_dir, home)
+    out += ["`monitored_dirs` (in the state repo's `config/config.json`) is the one list of directories "
+            "this tool measures. This file is a report over that list, not a second list. "
+            "**Monitored** = covered by `monitored_dirs`/`monitored_globs`; **NO** rows are growers or "
+            "cleaned roots outside it and should be added there by editing `monitored_dirs` "
+            "(`check_uncovered_roots.py --register` records sweeper owners in "
+            "`config/sweeper_roots.txt`, not `monitored_dirs`).", ""]
+    out += section_c(roots, home, args.days, mon) + section_d(roots, home, args.days, mon)
+    out += section_monitored(state_dir, mon, since, args.days, home)
     out += section_b(state_dir, args.days) + section_a(args.frontier, home, now)
     return "\n".join(out).rstrip() + "\n"
 

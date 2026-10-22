@@ -12,13 +12,16 @@ Regenerate and commit it with `diskm reclaim-ledger` (`--stdout` previews withou
 
 ## How to read it
 
+The one list of directories this tool measures is `monitored_dirs` (plus `monitored_globs`) in the machine's `config/config.json`, mirrored in the state repo. The ledger is a report over that list, not a second source of truth; it adds a **Monitored** column and flags roots outside the list (**NO**) so you add them to `monitored_dirs`. `check_uncovered_roots.py --register` records sweeper owners in `config/sweeper_roots.txt`; it does not edit `monitored_dirs`.
+
 Every section names its data source and time. A banner at the top says when the full-disk ledger is stale; in that case A and B are old or unavailable, while C and D (from the deletion log) are current.
 
 | Section | Source | Use |
 |---|---|---|
 | C. Cleaned roots | deletion log, `~/Library/Logs/disk-magician-deletions.log` (`DISK_MAGICIAN_DELETION_LOG`) | Directories already reclaimed in the window, grouped by parent root, with the script that cleaned them. Re-clean these first. |
 | D. Regrows fast | same log | Roots cleaned on many days or in many distinct hours. These are producers: cleaning treats the symptom, so stop or admit-control the producer. |
-| B. Growth vs floor | `diskm history growth-top10` (committed ledger history) | Paths that grew since the lowest-used snapshot in the window. Needs a fresh complete scan. |
+| B1. Monitored dirs vs floor | `monitored_dirs` x committed `snapshots/disk_snapshot.json` history | Per-directory growth over its lowest fresh size in the window (coverage >= 70% snapshots, one per 6 h). A floor can be a partial measurement. |
+| B2. Top-down growth | `diskm history growth-top10` (committed ledger history) | Paths outside `monitored_dirs` that grew since the lowest-used snapshot in the window. Needs a fresh complete scan. |
 | A. Uncovered / needs-decision / protected | `check_uncovered_roots.py` over the frontier scan | Rows of 5 GiB or more with no sweeper owner. Class: *uncovered* = no owner (register or decide), *needs-decision* = report-only, the operator decides, *protected* = never-delete list. |
 
 Sizes in C and D are `du` figures taken at deletion time, so they are upper bounds, not `df` deltas. Confirm a reclaim by the `df` change on one item before claiming it.

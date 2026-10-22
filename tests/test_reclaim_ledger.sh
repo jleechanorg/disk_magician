@@ -67,7 +67,7 @@ UNK=$(run_rl "$H" "$LOG" --stdout --freshness-line "UNKNOWN	no output")
 has "$UNK" 'STALE FULL-DISK LEDGER' && ok "banner when unknown" || bad "banner when unknown" "$UNK"
 
 echo "Test 4: B and A degrade to explicit 'Unavailable', never silent"
-has "$OUT" '### B. Growth vs 7-day floor' && has "$OUT" '### A. Uncovered' && ok "B and A headings present" || bad "headings" "$OUT"
+has "$OUT" '### B2. Top-down ledger growth' && has "$OUT" '### A. Uncovered' && ok "B and A headings present" || bad "headings" "$OUT"
 has "$OUT" 'Unavailable' && ok "unavailable data is stated" || bad "unavailable" "$OUT"
 
 echo "Test 5: --stdout writes and commits nothing"
@@ -123,6 +123,29 @@ SC="$REPO_ROOT/scripts/snapshot_commit.sh"
 L1=$(grep -n -F 'reclaim_ledger.py' "$SC" | head -1 | cut -d: -f1)
 L2=$(grep -n -F 'git_id add -A' "$SC" | head -1 | cut -d: -f1)
 [[ -n "$L1" && -n "$L2" && "$L1" -lt "$L2" ]] && ok "reclaim_ledger.py runs before git add -A" || bad "snapshot wiring" "L1=$L1 L2=$L2"
+
+echo "Test 11: monitored_dirs growth from snapshot history; unmonitored roots flagged"
+M="$TMP_ROOT/mon"; mkdir -p "$M/.local/state/disk-magician/config" "$M/.local/state/disk-magician/snapshots"
+MSD="$M/.local/state/disk-magician"
+git -C "$MSD" init -q 2>/dev/null
+printf '{"monitored_dirs":[{"key":"adir","path":"~/a","timeout":60}],"monitored_globs":[{"key":"g","pattern":"~/glob*"}]}' >"$MSD/config/config.json"
+snap() { printf '{"snapshot_coverage_pct":90,"directories":{"adir":%s},"carried_keys":[]}' "$1" >"$MSD/snapshots/disk_snapshot.json"
+  git -C "$MSD" add -A && GIT_COMMITTER_DATE="$2" git -C "$MSD" -c user.name=t -c user.email=t@t commit -q -m s --date "$2"; }
+snap $((1*GIB)) "2026-10-20T00:00:00Z"
+snap $((5*GIB)) "2026-10-21T12:00:00Z"
+MLOG="$M/deletions.log"
+{
+  row 2026-10-21T01:00:00Z cleanup_tmp.sh remove "$GIB" "$M/a/inside"
+  row 2026-10-21T01:00:00Z cleanup_tmp.sh remove "$GIB" "$M/glob1/x"
+  row 2026-10-21T01:00:00Z cleanup_tmp.sh remove "$GIB" "$M/elsewhere/x"
+} >"$MLOG"
+OUT11=$(run_rl "$M" "$MLOG" --stdout --freshness-line "$FRESH_OK")
+has "$OUT11" '| `adir` | `~/a` | 5.00 | 1.00 | 4.00 |' && ok "B1 shows monitored dir growth 4.00 GiB" || bad "B1 row" "$OUT11"
+C11=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT11")
+has "$(grep -F '~/a' <<<"$C11")" '| yes |' && ok "dir under monitored_dirs is yes" || bad "monitored yes" "$C11"
+has "$(grep -F '~/glob1' <<<"$C11")" '| yes |' && ok "dir matching monitored_globs is yes" || bad "glob yes" "$C11"
+has "$(grep -F '~/elsewhere' <<<"$C11")" '**NO**' && ok "unmonitored root flagged NO" || bad "NO flag" "$C11"
+has "$OUT11" 'not a second list' && ok "report-over-monitored_dirs statement present" || bad "statement" "missing"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

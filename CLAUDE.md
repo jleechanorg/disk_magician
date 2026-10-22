@@ -72,7 +72,9 @@ underestimated cumulative-reservoir growth):
     committed `<state-repo>/reclaim/known-reclaim-dirs.md`) before any live probe:
     it lists this machine's cleaned roots, fast regrowers, growth vs floor and
     uncovered rows, with a stale-ledger banner. Machine-specific paths and sizes
-    belong there, never in repo docs.
+    belong there, never in repo docs. It is a report over `monitored_dirs`
+    (`config/config.json`, the one list of directories to check), not a second
+    list: add roots it flags as not-monitored to `monitored_dirs`.
 
 1. **Find the last-week floor** before proposing anything. The floor is
    the **lowest `df used` in the most recent ~14 daily snapshots** (NOT
