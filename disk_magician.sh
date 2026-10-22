@@ -46,6 +46,7 @@ Commands:
   ledger-freshness       Print OK|STALE|UNKNOWN for the published ledger, accepting a fresh valid partial scan.
   sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
+  quarantine-reconcile   Finish deferred C14 quarantine removals (--dry-run|--clean).
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
@@ -399,6 +400,9 @@ case "$CMD" in
     ;;
   cleanup_dev_caches|cleanup-dev-caches)
     "$SCRIPT_DIR/scripts/cleanup_dev_caches.sh" "$@"
+    ;;
+  quarantine_reconcile|quarantine-reconcile)
+    "$SCRIPT_DIR/scripts/quarantine_reconcile.sh" "$@"
     ;;
   cleanup_tmp|cleanup-tmp)
     "$SCRIPT_DIR/scripts/cleanup_tmp.sh" "$@"
