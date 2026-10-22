@@ -17,7 +17,7 @@ def _trusted_root(home, uid):  # fixed OS-home trust: .codex AND .codex/sessions
 FLAGS = ('isMeta', 'isSidechain', 'isCompactSummary', 'inherited_user_message')
 def _flagged(*objs):  # provenance flags on ANY envelope layer refuse the entry/header
     return any(isinstance(o, dict) and any(o.get(k) for k in FLAGS) for o in objs)
-INJECTED = re.compile(r'<(?:teammate-message|task-notification|system-reminder|command-(?:message|name|args)|local-command-\w+|bash-(?:input|stdout|stderr))\b'
+INJECTED = re.compile(r'<(?:teammate-message|task-notification|system-reminder|command-(?:message|name|args)|local-command-\w+|bash-(?:input|stdout|stderr)|agent-message|send_user_message_\w+|environment_context|user_instructions|user_shell_command|turn_aborted|subagent_notification)\b'
                       r'|Another Claude session sent a message|\[SYSTEM NOTIFICATION\]')  # harness-injected wrappers: never a typed approval
 AGENT_KEYS = ('agentId', 'sourceToolUseID', 'toolUseResult')  # agent/tool provenance on a Claude user envelope
 def _typed_phrase(text, want):  # typed text CONTAINS want as whole tokens; whitespace-normalised so a line wrap still matches
