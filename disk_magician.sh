@@ -54,6 +54,7 @@ Commands:
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
   cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
+  worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
@@ -64,6 +65,7 @@ Commands:
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
   cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
+  cleanup-ao             Retire AO owners and workspaces (explicit approval required).
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
   sweep                  Run the single main disk sweeper (snapshot, pressure reclaim, 6-tier routine maintenance, health).
@@ -382,6 +384,9 @@ case "$CMD" in
   prune_aside_sessions|prune-aside-sessions)
     "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
     ;;
+  cleanup_ao|cleanup-ao)
+    exec bash "$SCRIPT_DIR/scripts/cleanup_ao.sh" "$@"
+    ;;
   cleanup_colima|cleanup-colima)
     "$SCRIPT_DIR/scripts/cleanup_colima.sh" "$@"
     ;;
@@ -393,6 +398,9 @@ case "$CMD" in
     ;;
   cleanup_worktree_deps|cleanup-worktree-deps)
     "$SCRIPT_DIR/scripts/cleanup_worktree_deps.sh" "$@"
+    ;;
+  worktree_restore_verify|worktree-restore-verify)
+    python3 "$SCRIPT_DIR/scripts/worktree_restore_verify.py" "$@"
     ;;
   worktree_hygiene|worktree-hygiene)
     "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"

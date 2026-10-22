@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # evidence_push.sh — publish a /tmp evidence dir to the durable GCS store
-# (spec D8): gcloud storage rsync -r <dir> $EVIDENCE_GCS_PREFIX/<repo>/<slug>/
+# (spec D8): gcloud storage rsync, or the Python storage SDK when gcloud is absent
 #
 # Usage: evidence_push.sh <dir> --repo <repo> --slug <slug>
 # Exit: 0 uploaded and verified (lease marked published), 1 usage/gcloud error,
@@ -67,14 +67,22 @@ PY
 $hits"
 fi
 
-command -v gcloud >/dev/null 2>&1 || die 1 "gcloud not found on PATH"
+if ! command -v gcloud >/dev/null 2>&1; then
+    python3 -c 'from google.cloud import storage' 2>/dev/null ||
+        die 1 "neither gcloud nor the google-cloud-storage Python SDK is available"
+fi
 
 dest="${EVIDENCE_GCS_PREFIX%/}/$repo/$slug/"
 pre="$(mktemp)" post="$(mktemp)"
 trap 'rm -f "$pre" "$post"' EXIT
 # Hash before uploading so the manifest describes the bytes the remote holds.
 python3 "$here/evidence_manifest.py" hash "$real_src" > "$pre" || die 1 "pre-upload hashing failed"
-gcloud storage rsync -r "$real_src" "$dest" || die 1 "gcloud storage rsync failed"
+if command -v gcloud >/dev/null 2>&1; then
+    gcloud storage rsync -r "$real_src" "$dest" || die 1 "gcloud storage rsync failed"
+else
+    python3 "$here/evidence_manifest.py" upload "$real_src" "$pre" "$dest" ||
+        die 1 "SDK upload failed"
+fi
 
 browse="${dest#gs://}"
 echo "$dest"
