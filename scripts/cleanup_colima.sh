@@ -29,13 +29,14 @@ fi
 DRY_RUN=true
 PRUNE_VOLUMES=false
 TRIM_ONLY=false
+NATIVE_DOCKER=false
 TRIM_GB="${DISK_MAGICIAN_COLIMA_TRIM_GB:-8}"
 TRIM_TIMEOUT_SEC="${DISK_MAGICIAN_COLIMA_TRIM_TIMEOUT:-300}"
 ACTUATOR_REMOVED_COUNT=0
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--prune-volumes] [--trim-only] [-h|--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--prune-volumes] [--trim-only] [--native-docker] [-h|--help]
 
 Options:
   --clean           Apply prune (default: dry-run).
@@ -44,6 +45,8 @@ Options:
   --trim-only       Only in-VM fstrim, and only when the host datadisk exceeds
                     DISK_MAGICIAN_COLIMA_TRIM_GB (default 8; 0 disables). No prune,
                     no restart; unreachable VM is logged DEGRADED and exits 0.
+  --native-docker   Use the native Linux Docker daemon at unix:///var/run/docker.sock
+                    (DockerRootDir /var/lib/docker); no Colima recovery or fstrim.
   -h, --help        Show this help.
 EOF
 }
@@ -54,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)       DRY_RUN=true ;;
     --prune-volumes) PRUNE_VOLUMES=true ;;
     --trim-only)     TRIM_ONLY=true ;;
+    --native-docker) NATIVE_DOCKER=true ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -65,6 +69,11 @@ if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
   actuator_receipt_begin "$SCRIPT_DIR" cleanup_colima "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" || {
     echo "ERROR: could not begin governed cleanup receipt" >&2; exit 3;
   }
+fi
+
+if [[ "$NATIVE_DOCKER" == true && "$TRIM_ONLY" == true ]]; then
+  echo "ERROR: --native-docker cannot be combined with --trim-only" >&2
+  exit 2
 fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
@@ -139,6 +148,9 @@ record_docker_prune_output() {
 COLIMA_LIMA="$HOME/.colima/_lima"
 COLIMA_DOCKER_SOCKET="$HOME/.colima/default/docker.sock"
 COLIMA_SSH_DIR="$COLIMA_LIMA/colima"
+NATIVE_DOCKER_SOCKET="/var/run/docker.sock"
+NATIVE_DOCKER_ENDPOINT="unix://$NATIVE_DOCKER_SOCKET"
+NATIVE_DOCKER_ROOT="/var/lib/docker"
 
 path_owner_uid() {
   stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
@@ -147,6 +159,84 @@ path_owner_uid() {
 colima_socket_is_trusted() {
   [[ -S "$COLIMA_DOCKER_SOCKET" && ! -L "$COLIMA_DOCKER_SOCKET" \
      && "$(path_owner_uid "$COLIMA_DOCKER_SOCKET" 2>/dev/null || echo unknown)" == "$(id -u)" ]]
+}
+
+native_socket_is_trusted() {
+  [[ -S "$NATIVE_DOCKER_SOCKET" && ! -L "$NATIVE_DOCKER_SOCKET" ]] || return 1
+  [[ "$(stat -c '%u' "$NATIVE_DOCKER_SOCKET" 2>/dev/null)" == 0 ]]
+}
+
+native_docker_endpoint() {
+  local context endpoint
+
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    context="$DOCKER_CONTEXT"
+    endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || {
+      log "DEGRADED / SKIPPED: Docker context inspect failed, timed out, or returned empty endpoint for context '$context'." >&2
+      return 1
+    }
+    [[ -n "$endpoint" ]] || {
+      log "DEGRADED / SKIPPED: Docker context inspect returned an empty endpoint for context '$context'." >&2
+      return 1
+    }
+    printf '%s\n' "$endpoint"
+    return 0
+  fi
+
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    printf '%s\n' "$DOCKER_HOST"
+    return 0
+  fi
+
+  context=$(docker_probe context show 2>/dev/null) || {
+    log "DEGRADED / SKIPPED: Docker context show failed, timed out, or returned empty context." >&2
+    return 1
+  }
+  [[ -n "$context" ]] || {
+    log "DEGRADED / SKIPPED: Docker context show returned an empty context." >&2
+    return 1
+  }
+  endpoint=$(docker_probe context inspect "$context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || {
+    log "DEGRADED / SKIPPED: Docker context inspect failed, timed out, or returned empty endpoint for context '$context'." >&2
+    return 1
+  }
+  [[ -n "$endpoint" ]] || {
+    log "DEGRADED / SKIPPED: Docker context inspect returned an empty endpoint for context '$context'." >&2
+    return 1
+  }
+  printf '%s\n' "$endpoint"
+}
+
+prove_native_docker_backend() {
+  local endpoint docker_root
+
+  if [[ "$(uname -s 2>/dev/null || echo unknown)" != "Linux" ]]; then
+    log "DEGRADED / SKIPPED: --native-docker requires Linux."
+    return 1
+  fi
+  endpoint=$(native_docker_endpoint) || return 1
+  if [[ "$endpoint" != "$NATIVE_DOCKER_ENDPOINT" ]]; then
+    log "DEGRADED / SKIPPED: selected Docker endpoint '$endpoint' is not the native socket $NATIVE_DOCKER_ENDPOINT; refusing TCP, Colima, or implicit context switching."
+    return 1
+  fi
+  # Pin every subsequent Docker probe and prune operation to the endpoint just
+  # verified. DOCKER_CONTEXT takes precedence over DOCKER_HOST, so clear it
+  # before exporting the proven native socket.
+  unset DOCKER_CONTEXT
+  export DOCKER_HOST="$NATIVE_DOCKER_ENDPOINT"
+  if ! native_socket_is_trusted; then
+    log "DEGRADED / SKIPPED: native Docker socket is missing, symlinked, or not root-owned: $NATIVE_DOCKER_SOCKET"
+    return 1
+  fi
+  if ! docker_root=$(docker_probe info --format '{{.DockerRootDir}}' 2>/dev/null); then
+    log "DEGRADED / SKIPPED: native Docker daemon is unreachable or docker info failed."
+    return 1
+  fi
+  if [[ "$docker_root" != "$NATIVE_DOCKER_ROOT" ]]; then
+    log "DEGRADED / SKIPPED: native docker info reported DockerRootDir '$docker_root', expected $NATIVE_DOCKER_ROOT."
+    return 1
+  fi
+  log "Selected native Docker endpoint $endpoint with DockerRootDir $docker_root."
 }
 
 prove_colima_docker_backend() {
@@ -457,37 +547,43 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 
-backend_rc=0
-select_colima_docker_backend || backend_rc=$?
-if [[ "$backend_rc" -eq 10 ]]; then
-  log "DEGRADED / SKIPPED: Docker backend identity probe failed or timed out."
-  exit 1
-elif [[ "$backend_rc" -eq 2 ]] && colima_vm_is_stopped; then
-  # Colima socket absent/untrusted but the default profile is provably Stopped:
-  # a Stopped VM has no socket, so recovery must not depend on one.
-  log "DEGRADED / SKIPPED: Colima backend expected but socket absent; default profile is Stopped — checking guarded Colima recovery."
-  if attempt_guarded_colima_recovery; then
+if [[ "$NATIVE_DOCKER" == true ]]; then
+  prove_native_docker_backend || exit 1
+  before_kb=0
+  log "Native Docker root before: $NATIVE_DOCKER_ROOT"
+else
+  backend_rc=0
+  select_colima_docker_backend || backend_rc=$?
+  if [[ "$backend_rc" -eq 10 ]]; then
+    log "DEGRADED / SKIPPED: Docker backend identity probe failed or timed out."
+    exit 1
+  elif [[ "$backend_rc" -eq 2 ]] && colima_vm_is_stopped; then
+    # Colima socket absent/untrusted but the default profile is provably Stopped:
+    # a Stopped VM has no socket, so recovery must not depend on one.
+    log "DEGRADED / SKIPPED: Colima backend expected but socket absent; default profile is Stopped — checking guarded Colima recovery."
+    if attempt_guarded_colima_recovery; then
+      exit 0
+    fi
+    exit 1
+  elif [[ "$backend_rc" -ne 0 ]]; then
+    if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
+      ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=non_colima_docker_backend
+    fi
     exit 0
   fi
-  exit 1
-elif [[ "$backend_rc" -ne 0 ]]; then
-  if [[ "${DISK_MAGICIAN_ACTUATOR_TRIGGER:-}" == act ]]; then
-    ACTUATOR_OUTCOME=skipped_threshold; ACTUATOR_REASON=non_colima_docker_backend
-  fi
-  exit 0
-fi
 
-if ! docker_probe info >/dev/null 2>&1; then
-  log "DEGRADED / SKIPPED: Docker daemon unreachable or probe timed out — checking guarded Colima recovery."
-  if attempt_guarded_colima_recovery; then
-    exit 0
+  if ! docker_probe info >/dev/null 2>&1; then
+    log "DEGRADED / SKIPPED: Docker daemon unreachable or probe timed out — checking guarded Colima recovery."
+    if attempt_guarded_colima_recovery; then
+      exit 0
+    fi
+    exit 1
   fi
-  exit 1
-fi
 
-before_kb=$(size_kb "$COLIMA_LIMA")
-log "Colima _lima before: $(fmt_kb "$before_kb") ($COLIMA_LIMA)"
-log "Docker context: $(docker_probe context show 2>/dev/null || echo unknown)"
+  before_kb=$(size_kb "$COLIMA_LIMA")
+  log "Colima _lima before: $(fmt_kb "$before_kb") ($COLIMA_LIMA)"
+  log "Docker context: $(docker_probe context show 2>/dev/null || echo unknown)"
+fi
 report_status=0
 log "=== docker system df (before) ==="
 if ! docker_probe system df; then
@@ -550,14 +646,18 @@ else
     log "DEGRADED: post-prune docker system df probe failed or timed out."
     report_status=1
   fi
-  if command -v colima >/dev/null 2>&1; then
-    if ! fstrim_colima_disk; then
-      recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
+  if [[ "$NATIVE_DOCKER" == true ]]; then
+    log "Native Docker prune complete; Colima recovery and fstrim are disabled for --native-docker."
+  else
+    if command -v colima >/dev/null 2>&1; then
+      if ! fstrim_colima_disk; then
+        recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
+      fi
     fi
+    after_kb=$(size_kb "$COLIMA_LIMA")
+    freed_kb=$(( before_kb - after_kb ))
+    [[ $freed_kb -lt 0 ]] && freed_kb=0
+    log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
   fi
-  after_kb=$(size_kb "$COLIMA_LIMA")
-  freed_kb=$(( before_kb - after_kb ))
-  [[ $freed_kb -lt 0 ]] && freed_kb=0
-  log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
 fi
 exit "$report_status"
