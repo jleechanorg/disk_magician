@@ -18,13 +18,14 @@ cleanup() {
     case "$TMPROOT" in /tmp/dm-xcode-dd-test.*|/private/tmp/dm-xcode-dd-test.*) ;; *) return ;; esac
     [[ -d "$TMPROOT" ]] || return
     chmod -R u+rwx "$TMPROOT" 2>/dev/null
-    rm -rf "$TMPROOT"
+    /bin/rm -rf "$TMPROOT"
 }
 trap cleanup EXIT
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
 NOW="$(date +%s)"
-age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
+stamp() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S; }
+age() { find "$1" -exec touch -h -t "$(stamp $((NOW - $2 * 60)))" {} +; }
 
 mkdir -p "$HOME/dd_idle/Build/Products" "$HOME/dd_idle/Index.noindex" \
     "$HOME/dd_recent/Build/Products" "$HOME/dd_recent/Index.noindex" \
