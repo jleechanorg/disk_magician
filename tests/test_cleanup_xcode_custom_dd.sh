@@ -62,6 +62,12 @@ printf 'o' >"$TMPROOT/ptmp/pr7/dd/Build/a.o"
 printf 'o' >"$TMPROOT/ptmp/worldai_frontend/build-x/Build/a.o"
 printf 'shot' >"$TMPROOT/ptmp/worldai_frontend/evidence/shot.png"
 printf 'o' >"$TMPROOT/utmp/dd_t/Build/a.o"
+mkdir -p "$HOME/dd_gen/Build/Intermediates.noindex/Pods.build/Objects-normal/arm64" "$HOME/dd_gen/Index.noindex/DataStore/v5/records/K2" \
+    "$HOME/dd_envroot/Build" "$HOME/dd_envroot/Index.noindex" "$HOME/dd_secretjson/Build" "$HOME/dd_secretjson/Index.noindex"
+printf 'o' >"$HOME/dd_gen/Build/Intermediates.noindex/Pods.build/Objects-normal/arm64/NativeRequestCredentials.o"
+printf 'h' >"$HOME/dd_gen/Index.noindex/DataStore/v5/records/K2/NSURLCredentialStorage.h-abc"
+printf 'K=v' >"$HOME/dd_envroot/.env"
+printf '{}' >"$HOME/dd_secretjson/secrets.json"
 printf '<key>WorkspacePath</key>' >"$HOME/dd_plist/info.plist"
 printf 'o' >"$HOME/dd_buildonly/Build/x.o"
 printf 'o' >"$HOME/dd_idle/Build/Products/a.o"
@@ -71,7 +77,7 @@ printf 'o' >"$HOME/proj_dd_nested/DerivedData/Build/b.o"
 printf 'keep' >"$HOME/proj_dd_nested/README.md"
 printf 'o' >"$HOME/real_dd/Build/c.o"
 ln -s "$HOME/real_dd" "$HOME/dd_link"
-age "$TMPROOT/ptmp" 120 && age "$TMPROOT/utmp" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
+age "$TMPROOT/ptmp" 120 && age "$TMPROOT/utmp" 120 && age "$HOME/dd_gen" 120 && age "$HOME/dd_envroot" 120 && age "$HOME/dd_secretjson" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
 age "$HOME/dd_recent" 5
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
@@ -97,6 +103,9 @@ out="$(run --clean)"
 [[ ! -e "$TMPROOT/ptmp/worldai_frontend/build-x" ]] && ok "worldai_frontend build dir removed" || bad "worldai_frontend/build-x still present"
 [[ -f "$TMPROOT/ptmp/worldai_frontend/evidence/shot.png" ]] && ok "non-DerivedData worldai_frontend dir kept" || bad "worldai_frontend/evidence removed"
 [[ ! -e "$TMPROOT/utmp/dd_t" ]] && ok "dd_* under the per-user temp root removed" || bad "utmp/dd_t still present"
+[[ ! -e "$HOME/dd_gen" ]] && ok "generated *Credentials* build outputs do not block removal" || bad "dd_gen kept by the secret scan"
+[[ -f "$HOME/dd_envroot/.env" ]] && ok "root .env keeps the dir" || bad "dd_envroot removed"
+[[ -f "$HOME/dd_secretjson/secrets.json" ]] && ok "root secrets.json keeps the dir" || bad "dd_secretjson removed"
 log="$HOME/Library/Logs/disk-magician-deletions.log"
 if [[ -f "$log" ]] && [[ "$(<"$log")" == *"$HOME/dd_idle"* ]]; then ok "removal recorded in the deletion log"; else bad "no deletion-log line for dd_idle"; fi
 
@@ -111,5 +120,12 @@ if [[ "$(id -u)" != 0 ]]; then
 fi
 
 (( FAIL == 0 )) || printf '%s\n' "$out" | /usr/bin/grep -E "Custom|C14" >&2
+echo "-- secret scan is kind-scoped --"
+inv="$TMPROOT/inv.json"
+printf '[{"path":".","name":"x"},{"path":"Build/a/NativeRequestCredentials.o"}]' >"$inv"
+[[ "$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$inv" xcode-derived-data)" == no ]] && ok "xcode kind ignores generated credentials name" || bad "xcode kind flagged generated name"
+[[ "$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$inv" rebuildable)" == yes ]] && ok "other kinds still flag it" || bad "non-xcode kind lost the secret scan"
+[[ "$(python3 "$REPO_ROOT/scripts/c14_probe.py" secrets "$inv")" == yes ]] && ok "no kind still flags it" || bad "kindless scan lost the secret scan"
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
