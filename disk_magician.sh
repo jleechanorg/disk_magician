@@ -66,6 +66,7 @@ Commands:
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
   cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
+  cleanup-ao             Retire AO owners and workspaces (explicit approval required).
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
   vacuum-hermes-state    Vacuum SQLite state and truncate WAL in ~/.hermes.
   sweep                  Run the single main disk sweeper (snapshot, pressure reclaim, 6-tier routine maintenance, health).
@@ -394,6 +395,9 @@ case "$CMD" in
     ;;
   prune_aside_sessions|prune-aside-sessions)
     "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
+    ;;
+  cleanup_ao|cleanup-ao)
+    exec bash "$SCRIPT_DIR/scripts/cleanup_ao.sh" "$@"
     ;;
   cleanup_colima|cleanup-colima)
     "$SCRIPT_DIR/scripts/cleanup_colima.sh" "$@"

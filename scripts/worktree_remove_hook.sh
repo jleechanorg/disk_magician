@@ -18,6 +18,8 @@ source "$_WRH_DIR/lib/lsof_linux.sh"
 source "$_WRH_DIR/lib/ao_worktree_config.sh"
 # shellcheck source=scripts/lib/worktree_ignored.sh
 source "$_WRH_DIR/lib/worktree_ignored.sh"
+# shellcheck source=scripts/lib/worktree_restore_receipt.sh
+source "$_WRH_DIR/lib/worktree_restore_receipt.sh"
 # Lease bookkeeping is optional: the hook still works without the lease lib,
 # it just cannot delete the lease after removing the worktree.
 # shellcheck source=scripts/lib/worktree_lease.sh
@@ -191,7 +193,7 @@ wrh_quarantine_capable() { return 0; }
 # absent flag preserves today's unbounded behavior. There is no unguarded
 # `git worktree remove` fallback. rc 0 only when the worktree was removed.
 wrh_remove_now() {
-    local real="$1" display="$2" main branch result inv='' deadline='' dkb
+    local real="$1" display="$2" main branch result inv='' deadline='' dkb restore_receipt
     shift 2
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -209,6 +211,16 @@ wrh_remove_now() {
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     dkb="$(deletion_size_kb "$real")"
+    if [[ ${DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS+x} == x ]]; then
+        restore_receipt="$(worktree_restore_receipt_resolve "$real" "$DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS")" || {
+            wrh_log "kept $display: durable restore receipt unavailable"
+            return 1
+        }
+        if ! worktree_restore_receipt_matches_live "$real" "$restore_receipt"; then
+            wrh_log "kept $display: durable restore receipt no longer matches live ref/head/tree/remote"
+            return 1
+        fi
+    fi
     if [[ -n "$deadline" ]]; then
         result="$(python3 "$_WRH_DIR/worktree_quarantine.py" remove "$main" "$real" "$inv" --deadline-at "$deadline")" || return 1
     else
