@@ -254,7 +254,19 @@ clean, pushed, non-live-cwd, non-AO linked worktree, and the owner-null lease re
 `artifact_removal_verdict` requires clean + pushed + non-AO + idle >= max(caller
 floor, 60 min), failing closed on an unreadable AO config. An active override is
 written to `worktree_guard.log` and to the deletion-log line (`recency=<spec>`).
-No config file, flag, or other script may lower the floor this way.
+No config file, flag, or other script may lower the floor this way, apart from the
+second override below.
+
+**Second override (user decision 2026-10-22, "do worktrees not modified last 12hr"):**
+`scripts/cleanup_worktrees.sh` (and nothing else besides the hook above) accepts the
+env-only opt-in `DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=N` (N >= 12), which lowers its
+non-AO recency floor to N hours via `worktree_is_recently_active_minutes`. Lower or
+malformed values (including `6` and zero-padded) fall back to the day floor; AO
+worktrees keep 7 days. Every other gate still applies at any age: clean, no hidden
+index state or ignored secrets, HEAD on main / gh-verified merged / live `origin` tip,
+no live cwd, not locked, not AO-owned, unmeasurable recency preserved. An active
+override is written to `worktree_guard.log` (audit-first; an unwritable log keeps the
+day floor), the ledger line, and the deletion-log line (`recency=hours:N`).
 
 **Measure recency, never proxy it.** The only sanctioned implementation is
 `worktree_age_days` / `worktree_is_recently_active` from

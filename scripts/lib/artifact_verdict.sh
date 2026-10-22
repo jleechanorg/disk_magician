@@ -303,6 +303,36 @@ _av_sparkle_update_staging() (
     done
     (( nchild == 1 ))
 )
+# _av_derived_data_shape <dir>: rc 0 when <dir> itself looks like an Xcode
+# DerivedData folder: Xcode's info.plist naming a WorkspacePath, or a Build/ dir
+# beside at least one *.noindex dir. Never a parent that merely contains one, and
+# never through a symlink.
+_av_derived_data_shape() (
+    local d="$1" f n
+    [[ -d "$d" && ! -L "$d" ]] || return 1
+    for f in "$d/info.plist" "$d/Info.plist"; do
+        [[ -f "$f" && ! -L "$f" ]] && /usr/bin/grep -aq WorkspacePath "$f" 2>/dev/null && return 0
+    done
+    [[ -d "$d/Build" && ! -L "$d/Build" ]] || return 1
+    for n in "$d"/*.noindex; do
+        [[ -d "$n" && ! -L "$n" ]] && return 0
+    done
+    return 1
+)
+# _av_derived_data <path>: rc 0 only for a DerivedData-shaped dir that sits strictly
+# inside $HOME or a temp root. Custom -derivedDataPath dirs (~/dd_*, /private/tmp/pr*/dd,
+# worldai_frontend build dirs) are not under the fixed Xcode cache root, so plain
+# `rebuildable` answers kept:unproven-content for them.
+_av_derived_data() (
+    local p="$1"
+    [[ -n "${HOME:-}" && "$HOME" != / ]] || return 1
+    case "$p" in
+        */../*|*/..) return 1 ;;
+        "$HOME"/*|/tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
+        *) return 1 ;;
+    esac
+    _av_derived_data_shape "$p"
+)
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
@@ -571,7 +601,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
     newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv")"
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$kind")"
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
     case "$kind" in
@@ -590,6 +620,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             esac
             return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
+        xcode-derived-data) _av_derived_data "$p" || { echo kept:unproven-content; return 0; } ;;
         sparkle-update-staging) _av_sparkle_update_staging "$p" || { echo kept:unproven-content; return 0; } ;;
         '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |
                     python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"

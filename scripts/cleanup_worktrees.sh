@@ -137,6 +137,21 @@ fi
 [[ "$MERGED_MIN_DAYS" -lt 3 ]] && MERGED_MIN_DAYS=3
 [[ "$MERGED_MIN_DAYS" -gt 7 ]] && MERGED_MIN_DAYS=7
 
+# Idle-floor override (operator decision 2026-10-22): DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=N
+# (N>=12) lowers the non-AO recency floor to N hours. Lower or malformed values keep the
+# day floor. Env-only; every other removal gate still applies at any age.
+FLOOR_HOURS=""
+if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" -ge 12 ]]; then
+    # Audit-first: the shorter floor is used only if its record was actually written.
+    if { mkdir -p "$HOME/.disk_magician_state" && printf '%s cleanup-worktrees: recency override active: hours:%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" >>"$HOME/.disk_magician_state/worktree_guard.log"; } 2>/dev/null; then
+        FLOOR_HOURS="$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS"
+        WRH_RECENCY_SPEC="hours:$FLOOR_HOURS"  # read by wrh_remove_now for the deletion-log line
+    else
+        echo "cleanup-worktrees: cannot record recency override hours:$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS; using day floor" >&2
+    fi
+fi
+
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"
 
@@ -340,7 +355,11 @@ classify_repo_local_worktree() {
         min_age=7
     fi
     now="$(date +%s)"
-    if worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
+    if [[ -n "$FLOOR_HOURS" && "$wt_path" != *"ao/data/worktrees/"* ]]; then
+        if worktree_is_recently_active_minutes "$wt_path" $(( FLOOR_HOURS * 60 )) "$now"; then
+            recently_active=true
+        fi
+    elif worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
         recently_active=true
     fi
 
@@ -904,7 +923,7 @@ process_repo_local_worktrees() {
             size_fmt=$(fmt_kb "$size_kb_val")
         fi
         branch_label="${branch:-detached}"
-        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}"
+        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}${FLOOR_HOURS:+ recency=hours:$FLOOR_HOURS}"
 
         if [[ -n "$reason" ]]; then
             ledger_line "repo-local" "PRESERVE" "$abs_path" "$reason" "$extra"
