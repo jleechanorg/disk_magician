@@ -752,6 +752,39 @@ assert_eq "$(av "$HOME/Library/Caches/ms-playwright" --kind rebuildable)" kept:u
 assert_eq "$(av "$HOME/.local/share/cursor-agent/versions/2026.02-stale" --kind rebuildable)" kept:unproven-content "installed cursor-agent versions stay outside rebuildable cache allowlist"
 assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
 assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
+echo "-- sparkle update staging (--kind sparkle-update-staging) --"
+SPK="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
+mkdir -p "$SPK/tokA/tokB/ChatGPT.app/Contents" "$SPK/tokC/tokD/Ghost.app/Contents" \
+    "$HOME/Applications/ChatGPT.app/Contents" \
+    "$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/PersistentDownloads/leftover.app"
+printf 'x' >"$SPK/tokA/tokB/ChatGPT.app/Contents/Info.plist"
+printf 'x' >"$SPK/tokC/tokD/Ghost.app/Contents/Info.plist"
+printf 'x' >"$HOME/Applications/ChatGPT.app/Contents/Info.plist"
+printf 'x' >"$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/PersistentDownloads/leftover.app/f"
+printf 'x' >"$SPK/loose.app"
+mkdir -p "$SPK/tokE/tokF/ChatGPT.app/Contents" "$SPK/tokG/tokH/ChatGPT.app/Contents" \
+    "$SPK/tokI/JklMnoPq/ChatGPT.app/Contents" "$SPK/tokJ/JklMnoPq/ChatGPT.app/Contents"
+printf 'x' >"$SPK/tokE/tokF/ChatGPT.app/Contents/Info.plist"
+printf 'x' >"$SPK/tokE/stray.txt"
+printf 'x' >"$SPK/tokG/tokH/ChatGPT.app/Contents/Info.plist"
+printf 'zip' >"$SPK/tokI/1285BC88-update.zip"
+printf 'x' >"$SPK/tokI/JklMnoPq/ChatGPT.app/Contents/Info.plist"
+printf 'zip' >"$SPK/tokJ/1285BC88-update.zip"
+printf 'x' >"$SPK/tokJ/JklMnoPq/ChatGPT.app/Contents/Info.plist"
+printf 'x' >"$SPK/tokJ/notes.txt"
+age "$HOME/Library/Caches/com.openai.codex" 43200
+assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app" --kind sparkle-update-staging)" remove "staged update whose app is installed outside the cache"
+assert_eq "$(av "$SPK/tokC/tokD/Ghost.app" --kind sparkle-update-staging)" kept:unproven-content "staged update with no installed twin is kept"
+assert_eq "$(av "$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/PersistentDownloads/leftover.app" --kind sparkle-update-staging)" kept:unproven-content "a .app outside Installation/ is not sparkle staging"
+assert_eq "$(av "$SPK/loose.app" --kind sparkle-update-staging)" kept:unproven-content "a direct child of Installation/ is not the staged shape"
+assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app" --kind rebuildable)" kept:unproven-content "sparkle staging is not a plain rebuildable cache"
+assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app")" kept:unproven-content "sparkle staging without --kind stays unproven"
+assert_eq "$(av "$SPK/tokA" --kind sparkle-update-staging)" remove "a token dir holding only a proven staged app is removable"
+assert_eq "$(av "$SPK/tokE" --kind sparkle-update-staging)" kept:unproven-content "a token dir with payload outside the bundle is kept"
+assert_eq "$(av "$SPK/tokI" --kind sparkle-update-staging)" remove "a token dir with its downloaded update zip and a proven bundle is removable"
+assert_eq "$(av "$SPK/tokJ" --kind sparkle-update-staging)" kept:unproven-content "a zip alongside non-archive payload is kept"
+assert_eq "$(av "$SPK" --kind sparkle-update-staging)" kept:unproven-content "the Installation root is kept while any token lacks an installed twin"
+
 # venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
 venvw() {
     git -C "$TMPROOT/wtbase" worktree add -q "$1" -b "${1##*/}" origin/main 2>/dev/null

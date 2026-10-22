@@ -237,6 +237,72 @@ _av_rebuildable() (
     fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
 )
+# _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
+# installed outside the cache (which proves the staged copy is a leftover).
+_av_sparkle_installed_twin() (
+    local name="$1" staged base installed
+    staged="$(cd "$2" 2>/dev/null && pwd -P)" || return 1
+    for base in /Applications "$HOME/Applications"; do
+        installed="$base/$name"
+        [[ -d "$installed" ]] || continue
+        installed="$(cd "$installed" 2>/dev/null && pwd -P)" || continue
+        [[ "$installed" != "$staged" ]] || continue
+        return 0
+    done
+    return 1
+)
+
+# _av_sparkle_update_staging <path>: rc 0 only for a Sparkle auto-update staging
+# entry whose application is ALREADY installed outside the cache. Sparkle unpacks
+# every downloaded update into
+#   .../org.sparkle-project.Sparkle/Installation/<token>/<token>/<App>.app
+# applies it, and leaves the staged copy behind (~2.4 GiB per update, measured
+# 2026-10-21: two leftover ChatGPT.app bundles = 4.7 GiB). The staged copy is a
+# leftover only once the same app exists elsewhere, which proves the update
+# landed. Accepted shapes:
+#   - the staged <App>.app itself
+#   - a token dir directly under Installation/ (what the cleanup script iterates)
+#   - the Installation root
+# A token dir is accepted when it holds exactly one <token>/<App>.app layer whose
+# bundle has a proven installed twin, plus optionally the downloaded update
+# archive (<name>.zip) Sparkle keeps beside it. Nothing else may ride along.
+_av_sparkle_update_staging() (
+    local p="$1" tok child grand nchild napp
+    if [[ "$p" =~ /org\.sparkle-project\.Sparkle/Installation/[^/]+/[^/]+/[^/]+\.app$ ]]; then
+        _av_sparkle_installed_twin "${p##*/}" "$p"
+        return
+    fi
+    if [[ "$p" =~ /org\.sparkle-project\.Sparkle/Installation/?$ ]]; then
+        local -a toks=()
+        for tok in "$p"/*; do [[ -e "$tok" ]] && toks+=("$tok"); done
+        (( ${#toks[@]} > 0 )) || return 1
+        for tok in "${toks[@]}"; do
+            _av_sparkle_update_staging "$tok" || return 1
+        done
+        return 0
+    fi
+    [[ "$p" =~ /org\.sparkle-project\.Sparkle/Installation/[^/]+$ ]] || return 1
+    nchild=0
+    for child in "$p"/*; do
+        [[ -e "$child" ]] || continue
+        if [[ -f "$child" ]]; then
+            # Sparkle's own downloaded update archive; anything else is payload.
+            [[ "${child##*/}" == *.zip && ! -L "$child" ]] || return 1
+            continue
+        fi
+        [[ -d "$child" && ! -L "$child" ]] || return 1
+        nchild=$((nchild + 1))
+        napp=0
+        for grand in "$child"/*; do
+            [[ -e "$grand" ]] || continue
+            [[ "${grand##*/}" == *.app && -d "$grand" && ! -L "$grand" ]] || return 1
+            napp=$((napp + 1))
+            _av_sparkle_installed_twin "${grand##*/}" "$grand" || return 1
+        done
+        (( napp == 1 )) || return 1
+    done
+    (( nchild == 1 ))
+)
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }
 # _av_open_file <path>: rc 0 when lsof prints anything (an open non-cwd fd or an error).
@@ -524,6 +590,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             esac
             return 0; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
+        sparkle-update-staging) _av_sparkle_update_staging "$p" || { echo kept:unproven-content; return 0; } ;;
         '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |
                     python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"
             [[ "$st" == ok ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; } ;;

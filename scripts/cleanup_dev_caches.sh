@@ -122,6 +122,8 @@ clean_dir_contents "pre-commit cache" "$HOME/.cache/pre-commit" false rebuildabl
 
 # 3b. Rebuildable user caches (user-approved 2026-10-08: "any caches"). Apps that
 # are running (cmux, Aside, Chrome, Cursor) are left to their needs_decision gates.
+# Sparkle staging is the exception to "rebuildable": its entries are extracted
+# .app bundles, so it carries its own C14 kind (see below).
 log "=== Section 3b: rebuildable user caches ==="
 for approved_cache in \
   "worldai:$HOME/.cache/worldai" \
@@ -129,8 +131,13 @@ for approved_cache in \
   "ms-playwright:$HOME/Library/Caches/ms-playwright" \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
+  "Codex Sparkle update staging:$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation" \
   "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
   approved_kind=rebuildable
+  # Sparkle staging has its own C14 kind: an extracted .app is not a cache format,
+  # so `rebuildable` would always answer kept:unproven-content (measured). The
+  # kind only releases a staged bundle once its app is installed elsewhere.
+  [[ "${approved_cache%%:*}" == "Codex Sparkle update staging" ]] && approved_kind="sparkle-update-staging"
   # The ezgha recovery target is explicitly a non-cache target (spec §7.2):
   # ordinary provenance, not the fixed cache-root table.
   [[ "${approved_cache%%:*}" == "ezgha recovery target" ]] && approved_kind=""
