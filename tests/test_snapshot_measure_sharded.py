@@ -291,5 +291,57 @@ class IncrementalShardTests(unittest.TestCase):
         self.assertEqual(bad.returncode, 2)
 
 
+    def test_big_roots_cannot_starve_small_keys_under_a_tight_deadline(self):
+        fake = Path(self.tmp.name) / "fake_snapshot.sh"
+        fake.write_text('#!/usr/bin/env bash\necho \'{"kb": 5}\' > "$5"\n')
+        entries = []
+        for i in range(3):
+            d = Path(self.tmp.name) / f"big{i}"
+            d.mkdir()
+            make_tree(d, ["a", "b"])
+            entries.append({"key": f"big{i}", "path": str(d), "timeout": 2, "retry_timeout": 0, "shard": True})
+        entries.append({"key": "small", "path": str(self.root), "timeout": 5, "retry_timeout": 0})
+        os.environ["FAKE_DU_SLEEP"] = "3"
+        res = sm.orchestrate(entries, str(fake), 2, time.time() + 4, str(Path(self.tmp.name) / "o"), {},
+                             shard_state_path=str(Path(self.tmp.name) / "s.json"), shard_timeout=1, shard_workers=1)
+        self.assertEqual(res["small"], 5)
+
+    def test_nested_split_umbrellas_are_counted_once(self):
+        for d in ("a", "a/b", "a/b/p", "a/b/q", "a/c"):
+            (self.root / d).mkdir(exist_ok=True)
+        t = time.time()
+        later = {"kb": None, "ts": None, "at": t + 1, "fails": 0}
+        prior = {"a": {"kb": 1000, "ts": t - 60, "at": t - 60, "fails": 0},
+                 "a/b": {"kb": 600, "ts": t - 60, "at": t - 60, "fails": 0}, "a/b/p": later, "a/b/q": later}
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=5, deadline=t + 600, prior=prior, now=t,
+                               max_per_run=1, split=["a", "a/b"])
+        self.assertEqual(sorted(r["fresh_shards"]), ["a/c"])
+        self.assertEqual(r["kb"], self.own(self.root / "a", self.root / "a" / "b") + 1000)  # not 1000 + 600 - ...
+
+    def test_root_with_nothing_measured_this_run_is_partial(self):
+        make_tree(self.root, ["a", "b"])
+        t = time.time()
+        prior = {n: {"kb": 700, "ts": t - 60, "at": t - 60, "fails": 0} for n in ("a", "b")}
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=5, deadline=t, prior=prior, now=t)
+        self.assertEqual((r["shards_fresh"], r["shards_carried"], r["partial"]), (0, 2, True))
+        self.assertEqual(r["kb"], self.own() + 1400)
+
+    def test_vanished_path_in_a_bucket_is_a_lower_bound_not_a_timeout(self):
+        make_tree(self.root, ["here"])
+        stub = self.bin / "du"
+        stub.write_text("#!/usr/bin/env bash\nrc=0\nfor a in \"$@\"; do [[ \"$a\" == -* ]] && continue\n"
+                        "  if [[ -e \"$a\" ]]; then printf '100\\t%s\\n' \"$a\"; "
+                        "else echo \"du: $a: No such file or directory\" >&2; rc=1; fi; done\nexit $rc\n")
+        self.assertEqual(sm.measure_shard([str(self.root / "here"), str(self.root / "gone")], 5, time.time() + 60), (100, True))
+
+    def test_time_cut_by_the_run_deadline_is_not_a_shard_failure(self):
+        make_tree(self.root, ["ok", "slow"])
+        os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
+        t = time.time()
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=30, deadline=t + 2, prior={}, now=t)
+        self.assertEqual(r["timed_out_shards"], [])
+        self.assertEqual(r["carry"]["slow"]["fails"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
