@@ -57,7 +57,7 @@ def safe_path(name):
 
 
 def identity(wt):
-    helper('preservation_paths_safe', wt, 'HEAD')  # Names only, before payload reads.
+    helper('preservation_no_lfs', wt, 'HEAD')  # Names guard runs before any payload reads.
     head = git(wt, 'rev-parse', 'HEAD').decode().strip()
     ref = git(wt, 'symbolic-ref', 'HEAD').decode().strip()
     require(ref.startswith('refs/heads/'), 'attached branch required')
@@ -104,7 +104,7 @@ def restore(fetched, meta, scratch):
         str(fetched / 'recovery.bundle'), str(mirror))
     names_tree = scratch / 'names-only-tree'
     names_tree.mkdir(mode=0o700)
-    helper('preservation_paths_safe', mirror, meta['head'], work_tree=names_tree)
+    helper('preservation_no_lfs', mirror, meta['head'], work_tree=names_tree)
     git(mirror, 'fsck', '--full', '--strict')
     require(git(mirror, 'rev-parse', meta['ref']).decode().strip() == meta['head'], 'bundle ref mismatch')
     require(git(mirror, 'rev-parse', meta['head'] + '^{tree}').decode().strip()
@@ -210,8 +210,9 @@ def verify(wt, manifest, receipt_dir, fixture=None):
                        durable_backup={'status': 'verified', 'fetched': True, 'head': before['head'],
                                        'tree': before['tree'], 'objects': rows},
                        restore={'status': 'verified', 'head': before['head'], 'tree': before['tree'],
-                                'file_count': count, 'fsck': 'passed --full --strict', 'no_extra_files': True})
-        require(receipt_dir.resolve().is_relative_to(Path('/tmp')), 'receipt directory must be under /tmp')
+                                'file_count': count, 'fsck': 'passed --full --strict', 'no_extra_files': True,
+                                'lfs': 'absent-in-selected-tree-and-reachable-history'})
+        require(Path('/tmp') in receipt_dir.resolve().parents, 'receipt directory must be under /tmp')
         require(not any(p.is_symlink() for p in [receipt_dir, *receipt_dir.parents]), 'symlink receipt directory')
         leaf = re.sub(r'[^A-Za-z0-9._-]', '_', wt.name)
         output = receipt_dir / (leaf + '-' + before['head'])

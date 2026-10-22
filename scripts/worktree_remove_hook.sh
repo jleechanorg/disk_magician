@@ -211,6 +211,10 @@ wrh_remove_now() {
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     dkb="$(deletion_size_kb "$real")"
+    if [[ ${WRH_RECENCY_SPEC:-days:7} == minutes:* && -z ${DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS:-} ]]; then
+        wrh_log "kept $display: minute recency override requires durable restore receipt"
+        return 1
+    fi
     if [[ ${DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS+x} == x ]]; then
         restore_receipt="$(worktree_restore_receipt_resolve "$real" "$DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS")" || {
             wrh_log "kept $display: durable restore receipt unavailable"
