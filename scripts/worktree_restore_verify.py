@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 FILES = {'metadata.json', 'recovery.bundle', 'tree.tar', 'tree.manifest',
          'files.before.manifest', 'files.after.manifest'}
 PREFIX = 'gs://wa-test-evidence/agent-evidence/disk_magician/'
+SYSTEM_TEMP_ALIAS = Path('/tmp')
 
 
 def require(condition, message):
@@ -46,6 +47,31 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             h.update(block)
     return h.hexdigest()
+
+
+def system_temp_paths():
+    # macOS commonly exposes /tmp as a symlink to /private/tmp. Resolve the
+    # trusted system temp root once, then keep scratch and receipt checks on
+    # that physical path while allowing the system-provided alias itself.
+    alias = SYSTEM_TEMP_ALIAS.absolute()
+    return alias, alias.resolve(strict=True)
+
+
+def checked_receipt_dir(receipt_dir, temp_alias, temp_root):
+    receipt_dir = Path(os.path.abspath(receipt_dir))
+    base = next((candidate for candidate in (temp_alias, temp_root)
+                 if receipt_dir == candidate or candidate in receipt_dir.parents), None)
+    if base is None:
+        raise ValueError('receipt directory must be under system temp')
+    relative = receipt_dir.relative_to(base)
+    current = base
+    for part in relative.parts:
+        current /= part
+        require(not current.is_symlink(), 'symlink receipt directory')
+    physical = temp_root / relative
+    require(receipt_dir.resolve(strict=False) == physical,
+            'receipt directory escaped system temp')
+    return physical
 
 
 def safe_path(name):
@@ -159,6 +185,8 @@ def restore(fetched, meta, scratch):
 
 
 def verify(wt, manifest, receipt_dir, fixture=None):
+    temp_alias, temp_root = system_temp_paths()
+    receipt_dir = checked_receipt_dir(receipt_dir, temp_alias, temp_root)
     require(not wt.is_symlink() and wt.is_dir(), 'worktree must be a real directory')
     wt = wt.resolve()
     require(not manifest.is_symlink() and manifest.is_file(), 'manifest must be a regular file')
@@ -176,7 +204,7 @@ def verify(wt, manifest, receipt_dir, fixture=None):
         require(re.fullmatch(r'[0-9a-f]{64}', str(row.get('sha256', ''))) is not None, 'invalid hash')
     require(len({r['object'].rsplit('/', 1)[0] for r in rows}) == 1, 'mixed backup roots')
     # Include fetched files, unpacked Git objects, and restored tree; retain 40 GiB.
-    require(shutil.disk_usage('/tmp').free >= 40 * 1024**3 + sum(r['size'] for r in rows) * 8,
+    require(shutil.disk_usage(temp_root).free >= 40 * 1024**3 + sum(r['size'] for r in rows) * 8,
             'insufficient capacity for restore plus 40 GiB reserve')
     before = identity(wt)
     objects = git(wt, 'rev-list', '--objects', '--no-object-names', before['head'])
@@ -184,11 +212,11 @@ def verify(wt, manifest, receipt_dir, fixture=None):
                             '--batch-check=%(objectsize)'], input=objects,
                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120).stdout
     expanded = sum(int(size) + 4096 for size in sizes.splitlines())
-    require(shutil.disk_usage('/tmp').free >= 40 * 1024**3
+    require(shutil.disk_usage(temp_root).free >= 40 * 1024**3
             + sum(r['size'] for r in rows) + expanded * 4,
             'insufficient capacity for uncompressed restore plus reserve')
     files_before = helper('preservation_file_manifest', wt)
-    with tempfile.TemporaryDirectory(prefix='diskm-restore-', dir='/tmp') as temporary:
+    with tempfile.TemporaryDirectory(prefix='diskm-restore-', dir=temp_root) as temporary:
         scratch = Path(temporary)
         fetched = scratch / 'fetched'
         fetched.mkdir(mode=0o700)
@@ -212,8 +240,6 @@ def verify(wt, manifest, receipt_dir, fixture=None):
                        restore={'status': 'verified', 'head': before['head'], 'tree': before['tree'],
                                 'file_count': count, 'fsck': 'passed --full --strict', 'no_extra_files': True,
                                 'lfs': 'absent-in-selected-tree-and-reachable-history'})
-        require(Path('/tmp') in receipt_dir.resolve().parents, 'receipt directory must be under /tmp')
-        require(not any(p.is_symlink() for p in [receipt_dir, *receipt_dir.parents]), 'symlink receipt directory')
         leaf = re.sub(r'[^A-Za-z0-9._-]', '_', wt.name)
         output = receipt_dir / (leaf + '-' + before['head'])
         output.mkdir(mode=0o700, parents=True, exist_ok=True)

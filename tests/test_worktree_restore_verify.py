@@ -103,6 +103,36 @@ class RestoreVerificationTests(unittest.TestCase):
         self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
         self.assertEqual(before, module.identity(self.wt))
 
+    def test_system_temp_alias_uses_physical_scratch_and_receipt_paths(self):
+        physical = self.base / 'physical-temp'
+        physical.mkdir()
+        alias = self.base / 'system-temp-alias'
+        alias.symlink_to(physical, target_is_directory=True)
+        receipt_dir = alias / 'receipts'
+
+        with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
+            receipt = module.verify(self.wt, self.manifest, receipt_dir, self.store)
+
+        self.assertEqual(receipt, physical / 'receipts' / (self.wt.name + '-' + self.meta['head']) / 'restore-receipt.json')
+        self.assertTrue(receipt.is_file())
+
+        physical_receipt = physical / 'physical-receipts'
+        with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
+            canonical_receipt = module.verify(self.wt, self.manifest, physical_receipt, self.store)
+        self.assertEqual(canonical_receipt.parent.parent, physical_receipt)
+        self.assertTrue(canonical_receipt.is_file())
+
+        outside = self.base / 'outside'
+        outside.mkdir()
+        with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
+            with self.assertRaisesRegex(ValueError, 'under system temp'):
+                module.verify(self.wt, self.manifest, outside / 'receipts', self.store)
+        user_link = alias / 'user-link'
+        user_link.symlink_to(outside, target_is_directory=True)
+        with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
+            with self.assertRaisesRegex(ValueError, 'symlink receipt directory'):
+                module.verify(self.wt, self.manifest, user_link, self.store)
+
     def test_tampered_object(self):
         (self.store / 'tree.tar.1').write_bytes(b'corrupt')
         self.refused()
