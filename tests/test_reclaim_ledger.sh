@@ -140,13 +140,26 @@ MLOG="$M/deletions.log"
   row 2026-10-21T01:00:00Z cleanup_tmp.sh remove "$GIB" "$M/elsewhere/x"
 } >"$MLOG"
 OUT11=$(run_rl "$M" "$MLOG" --stdout --freshness-line "$FRESH_OK")
-has "$OUT11" '| `adir` | `~/a` | 5.00 | 1.00 | 4.00 |' && ok "B1 shows monitored dir growth 4.00 GiB" || bad "B1 row" "$OUT11"
-has "$OUT11" '| `g` | `~/glob*` | 5.00 | 1.00 | 4.00 |' && ok "B1 shows a glob key with its pattern" || bad "B1 glob row" "$OUT11"
+has "$OUT11" '| `adir` | `~/a` | 5.00 | 2026-10-21T12:00Z | 1.00 | 2026-10-20T00:00Z | 4.00 | - |' && ok "B1 shows monitored dir growth 4.00 GiB" || bad "B1 row" "$OUT11"
+has "$OUT11" '| `g` | `~/glob*` | 5.00 | 2026-10-21T12:00Z | 1.00 | 2026-10-20T00:00Z | 4.00 | - |' && ok "B1 shows a glob key with its pattern" || bad "B1 glob row" "$OUT11"
 C11=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT11")
 has "$(grep -F '~/a' <<<"$C11")" '| yes |' && ok "dir under monitored_dirs is yes" || bad "monitored yes" "$C11"
 has "$(grep -F '~/glob1' <<<"$C11")" '| yes |' && ok "dir matching monitored_globs is yes" || bad "glob yes" "$C11"
 has "$(grep -F '~/elsewhere' <<<"$C11")" '**NO**' && ok "unmonitored root flagged NO" || bad "NO flag" "$C11"
 has "$OUT11" 'not a second list' && ok "report-over-monitored_dirs statement present" || bad "statement" "missing"
+
+echo "Test 12: B1 gates per key, not per snapshot; partial readings flagged, never a floor"
+P="$TMP_ROOT/perkey"; mkdir -p "$P/.local/state/disk-magician/config" "$P/.local/state/disk-magician/snapshots"
+PSD="$P/.local/state/disk-magician"
+git -C "$PSD" init -q 2>/dev/null
+printf '{"monitored_dirs":[{"key":"prod","path":"~/wt","timeout":60},{"key":"pv","path":"/private/var","timeout":60}]}' >"$PSD/config/config.json"
+psnap() { printf '%s' "$1" >"$PSD/snapshots/disk_snapshot.json"
+  git -C "$PSD" add -A && GIT_COMMITTER_DATE="$2" git -C "$PSD" -c user.name=t -c user.email=t@t commit -q -m s --date "$2"; }
+psnap '{"snapshot_coverage_pct":40,"directories":{"prod":'$((100*GIB))',"pv":'$((8*GIB))'},"carried_keys":[]}' "2026-10-20T00:00:00Z"
+psnap '{"snapshot_coverage_pct":30,"directories":{"prod":'$((140*GIB))',"pv":'$((360*GIB))'},"carried_keys":[],"snapshot_metadata":{"lower_bound_keys":["prod"],"sharded_roots":{"prod":{"partial":true,"fresh_fraction":0.1,"shards_total":60,"shards_missing":50,"max_shard_age_hours":20}}}}' "2026-10-21T12:00:00Z"
+: >"$P/none.log"; OUT12=$(run_rl "$P" "$P/none.log" --stdout --freshness-line "$FRESH_OK")
+has "$OUT12" '| `pv` |' && has "$OUT12" 'suspect floor' && ok "low-coverage snapshots still feed B1; implausible floor flagged" || bad "per-key gate" "$OUT12"
+has "$OUT12" 'newer partial reading 140.00 GiB' && has "$OUT12" 'partial: 10% of 60 shards fresh' && ok "partial producer reading shown flagged with shard freshness" || bad "partial flag" "$OUT12"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

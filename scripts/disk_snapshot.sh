@@ -769,6 +769,7 @@ MEASURE_MODE=serial
 MEASURE_WORKERS_USED=0
 MEASUREMENT_FAILURES_JSON='[]'
 LOWER_BOUND_KEYS_JSON='[]'
+SHARDED_ROOTS_JSON='{}'
 PARTIAL_KEYS=""
 MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
 if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
@@ -783,6 +784,7 @@ if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
     MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
     MEASUREMENT_FAILURES_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('measurement_failures', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
     LOWER_BOUND_KEYS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('lower_bound_keys', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
+    SHARDED_ROOTS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('sharded_roots', {}), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '{}')
     PARTIAL_KEYS=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1])).get('partial_keys', [])))" "$ORCH_META" 2>/dev/null || echo '')
     while IFS= read -r orch_line; do
       orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
@@ -1392,6 +1394,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_RESIDUAL_GB="$residual_gb" \
   SNAP_RESIDUAL_FRESH_GB="$residual_fresh_gb" \
   SNAP_LOWER_BOUND_KEYS="$LOWER_BOUND_KEYS_JSON" \
+  SNAP_SHARDED_ROOTS="$SHARDED_ROOTS_JSON" \
   SNAP_RESIDUAL_DELTA_GB="$residual_delta_gb" \
   SNAP_AGE_SECONDS="$age_seconds" \
   SNAP_STATUS="$measurement_status" \
@@ -1540,6 +1543,12 @@ try:
         lower_bound = []
     if lower_bound:
         data["snapshot_metadata"]["lower_bound_keys"] = lower_bound
+    try:
+        sharded_roots = json.loads(os.environ.get("SNAP_SHARDED_ROOTS") or "{}")
+    except (TypeError, ValueError):
+        sharded_roots = {}
+    if isinstance(sharded_roots, dict) and sharded_roots:
+        data["snapshot_metadata"]["sharded_roots"] = sharded_roots
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
     if residual_delta:
         data["residual_delta_gb"] = float(residual_delta)
