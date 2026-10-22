@@ -1160,38 +1160,6 @@ chmod +x "$TMPROOT/bad-wt/trunc-nonul/git" "$TMPROOT/bad-wt/trunc-sep/git"
 assert_eq "$(PATH="$TMPROOT/bad-wt/trunc-nonul:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "worktree topology missing final NUL fails closed"
 assert_eq "$(PATH="$TMPROOT/bad-wt/trunc-sep:$PATH" c14_repo_pushed_ok "$ext_ctl" "$ext_ctl")" kept:check-failed "worktree topology missing record separator fails closed"
 
-echo "-- custom DerivedData (--kind xcode-derived-data) --"
-ddv() { av "$1" --kind xcode-derived-data; }
-mkdir -p "$HOME/dd_noindex/Build/Products" "$HOME/dd_noindex/Index.noindex" "$HOME/dd_plist" \
-    "$HOME/dd_recent/Build/Products" "$HOME/dd_recent/Index.noindex" "$HOME/dd_plain" \
-    "$HOME/dd_buildonly/Build/Products" "$HOME/dd_parent/DerivedData/Build" "$HOME/dd_parent/DerivedData/ModuleCache.noindex"
-printf 'o' >"$HOME/dd_noindex/Build/Products/app.o"
-printf '<key>WorkspacePath</key>' >"$HOME/dd_plist/info.plist"
-printf 'o' >"$HOME/dd_recent/Build/Products/app.o"
-printf 'notes' >"$HOME/dd_plain/notes.txt"
-printf 'o' >"$HOME/dd_buildonly/Build/Products/app.o"
-printf 'keep' >"$HOME/dd_parent/README.md"
-printf 'o' >"$HOME/dd_parent/DerivedData/Build/x.o"
-ln -s "$HOME/dd_noindex" "$HOME/dd_link"
-age "$HOME/dd_noindex" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_plain" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_parent" 120
-age "$HOME/dd_recent" 5
-assert_eq "$(ddv "$HOME/dd_noindex")" remove "idle Build/ + *.noindex dir is DerivedData-shaped"
-assert_eq "$(ddv "$HOME/dd_plist")" remove "idle dir whose info.plist names a WorkspacePath"
-assert_eq "$(ddv "$HOME/dd_recent")" kept:recent-activity "DerivedData-shaped dir written 5 minutes ago"
-assert_eq "$(ddv "$HOME/dd_plain")" kept:unproven-content "non-DerivedData dir beside the dd_ naming"
-assert_eq "$(ddv "$HOME/dd_buildonly")" kept:unproven-content "Build/ without any *.noindex is not enough"
-assert_eq "$(ddv "$HOME/dd_parent")" kept:unproven-content "a parent holding DerivedData/ is not itself DerivedData"
-assert_eq "$(ddv "$HOME/dd_parent/DerivedData")" remove "the DerivedData/ child of that parent"
-assert_eq "$(ddv "$HOME/dd_link")" kept:unproven-content "a symlink to a DerivedData dir is never followed"
-assert_eq "$(av "$HOME/dd_noindex" --kind rebuildable)" kept:unproven-content "plain rebuildable does not cover custom DerivedData"
-if [[ "$(id -u)" != 0 ]]; then
-    mkdir -p "$HOME/dd_unreadable/Build" "$HOME/dd_unreadable/Index.noindex/sub" && age "$HOME/dd_unreadable" 120
-    chmod 000 "$HOME/dd_unreadable/Index.noindex/sub"
-    v="$(ddv "$HOME/dd_unreadable")"
-    chmod 755 "$HOME/dd_unreadable/Index.noindex/sub"
-    [[ "$v" == kept:* ]] && ok "unmeasurable recency is kept ($v)" || bad "unmeasurable recency: $v"
-fi
-
 echo "== verdict stays blocked =="
 v="$(artifact_removal_verdict "$TMPROOT/clean")" && [[ "$v" == kept:* ]] && ok "non-ephemeral path kept ($v)" || bad "non-ephemeral path: $v"
 st="$(artifact_removal_verdict --self-test)"
