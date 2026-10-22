@@ -118,6 +118,12 @@ OUT9=$(env -i HOME="$H" PATH="$PYDIR:/usr/bin:/bin" DISK_MAGICIAN_DELETION_LOG="
 has "$OUT9" '### C. Cleaned roots, last 7 days' && ok "dispatch works" || bad "dispatch" "$OUT9"
 has "$(bash "$REPO_ROOT/disk_magician.sh" --help 2>&1)" 'reclaim-ledger' && ok "listed in usage" || bad "usage" "missing"
 
+echo "Test 10: the snapshot job regenerates the ledger before its commit"
+SC="$REPO_ROOT/scripts/snapshot_commit.sh"
+L1=$(grep -n -F 'reclaim_ledger.py' "$SC" | head -1 | cut -d: -f1)
+L2=$(grep -n -F 'git_id add -A' "$SC" | head -1 | cut -d: -f1)
+[[ -n "$L1" && -n "$L2" && "$L1" -lt "$L2" ]] && ok "reclaim_ledger.py runs before git add -A" || bad "snapshot wiring" "L1=$L1 L2=$L2"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

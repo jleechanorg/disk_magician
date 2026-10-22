@@ -57,8 +57,6 @@ def group_root(path, home):
     if root:
         return root
     parts = path.split("/")
-    if path.startswith(("/tmp/", "/var/tmp/")) and len(parts) > 3:
-        return "/".join(parts[:4])
     return "/".join(parts[:3]) if len(parts) > 3 else path
 
 
