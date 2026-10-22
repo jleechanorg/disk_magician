@@ -197,11 +197,12 @@ git -C "$PSD14" init -q 2>/dev/null
 printf '{"monitored_dirs":[{"key":"prod","path":"~/wt","timeout":60},{"key":"pv","path":"/private/var","timeout":60}]}' >"$PSD14/config/config.json"
 psnap() { printf '%s' "$1" >"$PSD14/snapshots/disk_snapshot.json"
   git -C "$PSD14" add -A && GIT_COMMITTER_DATE="$2" git -C "$PSD14" -c user.name=t -c user.email=t@t commit -q -m s --date "$2"; }
-psnap '{"snapshot_coverage_pct":40,"directories":{"prod":'$((100*GIB))',"pv":'$((8*GIB))'},"carried_keys":[]}' "2026-10-20T00:00:00Z"
-psnap '{"snapshot_coverage_pct":30,"directories":{"prod":'$((140*GIB))',"pv":'$((360*GIB))'},"carried_keys":[],"snapshot_metadata":{"lower_bound_keys":["prod"],"sharded_roots":{"prod":{"partial":true,"fresh_fraction":0.1,"shards_total":60,"shards_missing":50,"max_shard_age_hours":20}}}}' "2026-10-21T12:00:00Z"
+psnap '{"snapshot_coverage_pct":40,"directories":{"prod":'$((100*GIB))',"pv":'$((8*GIB))',"onlypart":'$((60*GIB))'},"carried_keys":[],"snapshot_metadata":{"lower_bound_keys":["onlypart"]}}' "2026-10-20T00:00:00Z"
+psnap '{"snapshot_coverage_pct":30,"directories":{"prod":'$((140*GIB))',"pv":'$((360*GIB))',"onlypart":'$((69*GIB))'},"carried_keys":[],"snapshot_metadata":{"lower_bound_keys":["prod","onlypart"],"sharded_roots":{"prod":{"partial":true,"fresh_fraction":0.1,"shards_total":60,"shards_missing":50,"max_shard_age_hours":20}}}}' "2026-10-21T12:00:00Z"
 : >"$P14/none.log"; OUT14=$(run_rl "$P14" "$P14/none.log" --stdout --freshness-line "$FRESH_OK")
 has "$OUT14" '| `pv` |' && has "$OUT14" 'suspect floor' && ok "low-coverage snapshots still feed B1; implausible floor flagged" || bad "per-key gate" "$OUT14"
 has "$OUT14" 'newer partial reading 140.00 GiB' && has "$OUT14" 'partial: 10% of 60 shards fresh' && ok "partial producer reading shown flagged with shard freshness" || bad "partial flag" "$OUT14"
+has "$OUT14" '`onlypart`' && has "$OUT14" 'no complete reading in window' && ok "a key that only ever read partial still gets a flagged row" || bad "partial-only key" "$OUT14"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

@@ -458,16 +458,15 @@ def section_monitored(state_dir, mon, since, days, home):
         series = [(ts, o[key]) for ts, o in obs if key in o]
         done = [(ts, e) for ts, e in series if e["complete"]]
         newest_any = series[-1]
-        cur_ts, cur = done[-1] if done else newest_any
+        basis = done or series  # a key that only ever read partial still gets a row, flagged
+        cur_ts, cur = basis[-1]
         flags = [cur["note"]] if cur["note"] else []
         if not done:
-            flags.append("no complete reading in window")
+            flags.append("no complete reading in window; floor is also partial")
         elif newest_any[0] > cur_ts and newest_any[1]["kb"] > cur["kb"]:
             flags.append(f"newer partial reading {gib(newest_any[1]['kb'])} GiB at {stamp_of(newest_any[0])}"
                          + (f" ({newest_any[1]['note']})" if newest_any[1]["note"] else ""))
-        floor_ts, floor = min(((ts, e["kb"]) for ts, e in done), key=lambda t: t[1], default=(None, None))
-        if floor is None:
-            continue
+        floor_ts, floor = min(((ts, e["kb"]) for ts, e in basis), key=lambda t: t[1])
         growth = cur["kb"] - floor
         if cur["kb"] >= SUSPECT_FLOOR_RATIO * max(floor, 1):
             flags.append(f"suspect floor ({cur['kb'] / max(floor, 1):.0f}x lower than now; likely a partial reading)")

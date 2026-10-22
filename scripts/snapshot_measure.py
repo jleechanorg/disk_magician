@@ -178,7 +178,7 @@ def measure_shard(paths, timeout, deadline):
     if proc.returncode == 1 and any(l.strip() and not _BENIGN_DU_ERR.search(l.strip()) for l in err.splitlines()):
         return None, False
     sizes = [int(l.split()[0]) for l in out.splitlines() if l.split() and l.split()[0].isdigit()]
-    if not sizes or len(sizes) != len(paths):
+    if not sizes or (len(sizes) != len(paths) and proc.returncode != 1):  # rc 1 + benign errors: a path vanished
         return None, False
     return sum(sizes), proc.returncode == 1
 
@@ -246,7 +246,8 @@ def measure_sharded(root, workers, shard_timeout, deadline, prior, now=None, car
         if deadline - time.time() < 1:
             return None  # not attempted: keeps its place at the front of the queue
         factor = min(1 + pri[shard[0]]["fails"], SHARD_TIMEOUT_MAX_FACTOR)
-        return measure_shard(shard[1], shard_timeout * factor, deadline)
+        res = measure_shard(shard[1], shard_timeout * factor, deadline)
+        return None if res[0] is None and time.time() >= deadline - 1 else res  # cut by the deadline: not attempted
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         got = dict(zip((s[0] for s in todo), pool.map(run, todo)))
@@ -280,18 +281,21 @@ def measure_sharded(root, workers, shard_timeout, deadline, prior, now=None, car
             missing.append(rel)
     # a freshly split dir keeps its old value (umbrella) until every child has one, so the root never dips
     values = {**fresh, **lb_kb, **carried, **stale}
-    for dirname in expanded:
+    covered = []  # outermost umbrellas only: an inner split dir's old value is already inside its parent's
+    for dirname in sorted(expanded, key=lambda d: d.count("/")):
         under = [r for r, _ in leaves if r.startswith(dirname + "/")]
         old = _prior_entry(prior.get(dirname))
         if any(r in missing for r in under) and old["kb"] is not None and old["ts"] is not None and 0 <= now - old["ts"] <= carry_max_s:
-            extra = old["kb"] - sum(values.get(r, 0) for r in under)
-            if extra > 0:
-                stale[dirname] = extra
             carry[dirname] = {"kb": old["kb"], "ts": old["ts"], "at": old["at"], "fails": 0}
+            if not any(dirname.startswith(c + "/") for c in covered):
+                covered.append(dirname)
+                extra = old["kb"] - sum(values.get(r, 0) for r in under)
+                if extra > 0:
+                    stale[dirname] = extra
     if not (fresh or lb_kb or carried or stale):
         return None
     total_kb = own_kb + sum(fresh.values()) + sum(lb_kb.values()) + sum(carried.values()) + sum(stale.values())
-    partial = bool(timed_out or lb_kb or missing)
+    partial = bool(timed_out or lb_kb or missing or not fresh)  # nothing measured this run is not a fresh reading
     return {"kb": total_kb, "fresh_kb": own_kb + sum(fresh.values()) + sum(lb_kb.values()), "partial": partial,
             "timed_out_shards": timed_out, "stale_shards": stale, "expired_shards": expired,
             "missing_shards": missing, "lower_bound_shards": sorted(lb_kb), "fresh_shards": fresh, "carry": carry,
@@ -480,15 +484,21 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
         return shardable(e) and (e.get("shard") or sizes.get(e["key"], 0) >= SHARD_MIN_KB
                                  or (shard_state.get(e["key"]) or {}).get("timed_out"))
 
-    # Phase 1: sharded roots first (each bounded by its own timeout, so the single probes cannot eat their
-    # budget), then every other key once, shortest configured timeout first (stable).
-    big = [e for e in entries if wants_shards(e)]
+    # Phase 1: sharded roots (each bounded by its own timeout) run in a side thread while every other key is
+    # probed once, shortest configured timeout first (stable).
+    big = sorted((e for e in entries if wants_shards(e)), key=lambda e: (not e.get("shard"), -sizes.get(e["key"], 0)))
     order = sorted((e for e in entries if e not in big), key=lambda e: e["timeout"])
-    for e in big:
-        if not run_sharded(e):
-            job(e, e["timeout"], 1)
+
+    def sharded_phase():
+        for e in big:
+            if not run_sharded(e):
+                job(e, e["timeout"], 1)
+
+    side = threading.Thread(target=sharded_phase)  # beside the pool: neither can starve the other
+    side.start()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(lambda e: job(e, e["timeout"], 1), order))
+    side.join()
 
     # Phase 2: one retry per timed-out key, largest estimated size first, only
     # with time left; budget is the key's retry_timeout (else its own timeout).
@@ -514,7 +524,7 @@ def orchestrate(entries, snapshot_script, workers, deadline, tmpdir, carry_sizes
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda eb: job(eb[0], eb[1], 2), jobs))
     if shard_state_path:
-        roots = dict(shard_state)
+        roots = _load_shard_state(shard_state_path)  # re-read: keep other roots a concurrent run saved meanwhile
         for e in entries:
             k = e["key"]
             if k in sharded:
