@@ -68,6 +68,12 @@ underestimated cumulative-reservoir growth):
    (`/private/var/folders/.../X/`), APFS local snapshots (`com.apple.os.update-...`),
    and system daemon state (`/private/var/db`). Measure directly with bounded timeouts.
 
+0b. **Read the per-host reclaim ledger** (`diskm reclaim-ledger --stdout`, or the
+    committed `<state-repo>/reclaim/known-reclaim-dirs.md`) before any live probe:
+    it lists this machine's cleaned roots, fast regrowers, growth vs floor and
+    uncovered rows, with a stale-ledger banner. Machine-specific paths and sizes
+    belong there, never in repo docs.
+
 1. **Find the last-week floor** before proposing anything. The floor is
    the **lowest `df used` in the most recent ~14 daily snapshots** (NOT
    proxies, NOT a single fresh `du`, NOT current df). Pull it from the
@@ -322,7 +328,9 @@ production ran v1).
   naive `du` over home-dir args triple-counts them.
 - **Deletion log is the reclaim list.** Every deletion path must log to
   `~/Library/Logs/disk-magician-deletions.log` via `deletion_log`; before any
-  disk investigation or cleanup, read `docs/known-reclaim-dirs.md` and the last
+  disk investigation or cleanup, read this machine's reclaim ledger
+  (`<state-repo>/reclaim/known-reclaim-dirs.md`, regenerate with
+  `diskm reclaim-ledger`; reading guide `docs/known-reclaim-dirs.md`) and the last
   7 days of that log: those directories are the known growers; re-clean them
   first. Log from a removal primitive (`quarantine_remove`, `wrh_remove_now`,
   `strip_dir`, `rm_logged`), not per script; a caller that already logs the

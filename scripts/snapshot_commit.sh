@@ -144,6 +144,8 @@ python3 "$SCRIPT_DIR/render_topdown_ledger.py" --frontier "$FRONTIER" \
   --out-dir "$STATE_DIR/ledger" 2>/dev/null || true
 python3 "$SCRIPT_DIR/retain_evidence.py" --frontier "$FRONTIER" \
   --evidence-dir "$STATE_DIR/evidence" --keep "$KEEP" 2>/dev/null || true
+# Per-host reclaim ledger (fail-open; the `git add -A` below commits it).
+python3 "$SCRIPT_DIR/reclaim_ledger.py" --state-dir "$STATE_DIR" --no-commit >/dev/null 2>&1 || true
 
 # 4. Write back the resolved config.
 CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"

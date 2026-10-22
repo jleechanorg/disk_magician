@@ -17,6 +17,7 @@ Commands:
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
+  reclaim-ledger  Regenerate this machine's reclaim ledger into the state repo (--stdout to preview).
   correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   report        Generate interactive HTML Treemap & canonical diskm cleanup report (--html, --output, --json).
@@ -250,6 +251,9 @@ case "$CMD" in
     ;;
   growth-top10)
     exec python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
+    ;;
+  reclaim_ledger|reclaim-ledger)
+    exec python3 "$SCRIPT_DIR/scripts/reclaim_ledger.py" "$@"
     ;;
   correlate-swings)
     exec python3 "$SCRIPT_DIR/scripts/correlate_disk_swings.py" "$@"
