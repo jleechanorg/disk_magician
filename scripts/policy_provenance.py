@@ -5,7 +5,7 @@ IDS = {'worktree_reap_remove': 'D1', 'worktree_cleanup': 'D1b', 'admission_enfor
        'ci_autopause': 'D4', 'external_edits': 'D6', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
 PATH = os.environ.get('DISK_MAGICIAN_POLICY_FILE') or os.path.expanduser('~/.config/disk-magician/standing_decisions.json')
 MARK, phrase = 'policy:worktree_reap_remove', 'APPROVE {}'.format  # fixed per id; the caller never chooses it
-USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a genuine typed user message contains the whole phrase "APPROVE <id>" (case-sensitive; injected wrappers never count); ids: ' + ' '.join(IDS)
+USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a genuine typed user message contains the whole phrase "APPROVE <id>" (case-sensitive; injected wrappers never count; Claude entries without origin.kind=human must equal it); ids: ' + ' '.join(IDS)
 git = lambda repo, *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
 stamp = lambda m: datetime.datetime.fromisoformat(m.get('timestamp') or '1970-01-01T00:00:00+00:00').timestamp()  # after a revoke only newer lines count
 def _trusted_root(home, uid):  # fixed OS-home trust: .codex AND .codex/sessions must be real uid-owned dirs
@@ -63,9 +63,10 @@ def _claude_approval(real, want, after):  # original fixed-phrase Claude project
     for n, line in enumerate(open(real, 'rb'), 1):
         m = json.loads(line); c = m.get('message', {}).get('content')
         if m.get('type') != 'user' or _flagged(m) or any(m.get(k) for k in AGENT_KEYS): continue
-        if 'origin' in m and not (isinstance(m['origin'], dict) and m['origin'].get('kind') == 'human'): continue  # task-notification etc.
+        human = isinstance(m.get('origin'), dict) and m['origin'].get('kind') == 'human'  # harness-stamped typed input
+        if 'origin' in m and not human: continue  # task-notification etc.
         if isinstance(c, list) and all(b.get('type') == 'text' for b in c): c = ''.join(b.get('text', '') for b in c)
-        if isinstance(c, str) and _typed_phrase(c, want) and stamp(m) > (after or -1): return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
+        if isinstance(c, str) and (_typed_phrase(c, want) if human else c.strip() == want) and stamp(m) > (after or -1): return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
 def find_approval(path, want, after):  # (realpath, line, sha256) of a genuine typed user message containing want, else None
     home, uid = pwd.getpwuid(os.getuid()).pw_dir, os.getuid()  # real OS home: $HOME/CODEX_HOME cannot move the root
     real = os.path.realpath(path)
