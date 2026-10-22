@@ -50,6 +50,7 @@ $DARWIN_USER_TEMP_DIR	cleanup_tmp.sh / cleanup_pr_scratch.sh	scratch_roots_get_u
 
 # cleanup_xcode.sh
 $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
+/private/tmp/worldai-ios-release-*	cleanup_xcode.sh	clean_ios_release_scratch: DerivedData/ + verify-unpacked/ only; archive, export, receipts kept
 $HOME/Library/Developer/CoreSimulator/Temp	cleanup_xcode.sh	line 12
 $HOME/Library/Developer/CoreSimulator/Caches	cleanup_xcode.sh	line 13
 
