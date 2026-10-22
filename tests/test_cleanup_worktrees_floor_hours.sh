@@ -47,7 +47,8 @@ mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/bin"
 printf '#!/bin/sh\nprintf '"'"'p1\\nn/\\n'"'"'\n' > "$TMP_ROOT/bin/lsof"
 printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/gh"
 printf '#!/bin/sh\nshift\nexec "$@"\n' > "$TMP_ROOT/bin/timeout"
-chmod +x "$TMP_ROOT/bin/lsof" "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/timeout"
+printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/lsof-open"  # C14 open-file probe: nothing open
+chmod +x "$TMP_ROOT/bin/lsof-open" "$TMP_ROOT/bin/lsof" "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/timeout"
 run() { env -i HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=3 HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" bash "$CLEANUP_SCRIPT" ${MODE:---dry-run} --repos "$REPO" 2>&1; }
 
 OUT="$(run)"
@@ -75,7 +76,7 @@ check "zero-padded floor falls back to the day floor" "wt-h13 | young" "$OUT"
 
 # Real removal: the 13h-idle worktree goes, and its deletion-log line names the override.
 DLOG="$TMP_ROOT/deletions.log"
-MODE=--clean run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12 WORKTREE_APPROVED=1 DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" >"$TMP_ROOT/clean.out" || true
+MODE=--clean run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12 WORKTREE_APPROVED=1 DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" DISK_MAGICIAN_LSOF_BIN="$TMP_ROOT/bin/lsof-open" >"$TMP_ROOT/clean.out" || true
 [[ ! -e "$WT/wt-h13" ]] && { echo "  PASS  --clean removed the 13h-idle worktree"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean left wt-h13"; tail -15 "$TMP_ROOT/clean.out"; FAIL=$((FAIL+1)); }
 check "deletion log names the override" "recency=hours:12" "$(cat "$DLOG" 2>/dev/null)"
 [[ -d "$WT/wt-h11" && -d "$WT/wt-d2dirty" && -d "$WT/wt-d2unpushed" ]] && { echo "  PASS  --clean kept 11h, dirty and unpushed worktrees"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean removed a protected worktree"; FAIL=$((FAIL+1)); }
