@@ -116,7 +116,7 @@ class RestoreVerificationTests(unittest.TestCase):
         self.assertEqual(receipt, physical.resolve() / 'receipts' / (self.wt.name + '-' + self.meta['head']) / 'restore-receipt.json')
         self.assertTrue(receipt.is_file())
 
-        physical_receipt = physical / 'physical-receipts'
+        physical_receipt = physical.resolve() / 'physical-receipts'
         with patch.object(module, 'SYSTEM_TEMP_ALIAS', alias):
             canonical_receipt = module.verify(self.wt, self.manifest, physical_receipt, self.store)
         self.assertEqual(canonical_receipt.parent.parent, physical_receipt.resolve())
@@ -314,8 +314,10 @@ class RestoreVerificationTests(unittest.TestCase):
                            'if [[ "$3" == gate ]]; then ao_c14_gate "$2"; '
                            'else c14_repo_pushed_ok "$2" "$2" "" "$3"; fi\n')
 
+        canonical_target = target.resolve()
+
         def check(context):
-            return subprocess.run(['bash', str(harness), str(ROOT / 'scripts'), str(target), context],
+            return subprocess.run(['bash', str(harness), str(ROOT / 'scripts'), str(canonical_target), context],
                                   env=dict(os.environ, PATH=os.environ.get("PATH", "/usr/bin:/bin")), capture_output=True)
 
         default = check('')
