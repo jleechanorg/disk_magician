@@ -40,7 +40,10 @@ class RestoreVerificationTests(unittest.TestCase):
         self.meta = {k: module.git(self.wt, *args).decode().strip() for k, args in {
             'head': ('rev-parse', 'HEAD'), 'ref': ('symbolic-ref', 'HEAD'),
             'tree': ('rev-parse', 'HEAD^{tree}')}.items()}
-        self.meta.update(worktree=str(self.wt), format='disk-magician-worktree-backup-v1',
+        # Git and the verifier identify linked worktrees by their canonical
+        # path. On macOS, /tmp is a symlink to /private/tmp, so preserve the
+        # same realpath form in capture metadata that verify() observes.
+        self.meta.update(worktree=str(self.wt.resolve()), format='disk-magician-worktree-backup-v1',
                          status='verified', capture_stable=True, bundle='recovery.bundle',
                          archive='tree.tar', tree_manifest='tree.manifest', file_manifest='files.after.manifest')
         self.capture()

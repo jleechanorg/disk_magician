@@ -28,6 +28,9 @@ def _complete_lsof_env():
     p = d / "lsof"
     p.write_text('#!/bin/sh\nprintf "p1\\nn/\\n"\n')
     p.chmod(0o755)
+    rm = Path(d) / "rm"
+    rm.write_text('#!/bin/sh\nexec /usr/bin/rm "$@"\n')
+    rm.chmod(0o755)
     return str(d) + os.pathsep + os.environ.get("PATH", "")
 
 
@@ -141,7 +144,7 @@ class RepairContracts(unittest.TestCase):
             old = time.time() - 30 * 86400
             os.utime(wt / "file", (old, old))
             script = (
-                'source "$1"; SKIP_PUSH=true; preserve_wip_and_remove "$2" "$3" || true'
+                'source "$1"; EXECUTE=true; SKIP_PUSH=true; preserve_wip_and_remove "$2" "$3" || true'
             )
             env = {
                 **os.environ,
@@ -165,7 +168,7 @@ class RepairContracts(unittest.TestCase):
             )
             self.assertTrue(wt.exists(), r.stdout)
             self.assertIn("WIP-KEPT", r.stdout)
-            script = 'source "$1"; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
+            script = 'source "$1"; EXECUTE=true; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
             r = subprocess.run(
                 [
                     "bash",
@@ -307,8 +310,9 @@ class RepairContracts(unittest.TestCase):
                 "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
+                "WORKTREE_MIN_AGE_DAYS": "0",
             }
-            script = 'source "$1"; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
+            script = 'source "$1"; EXECUTE=true; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
             r = subprocess.run(
                 [
                     "bash",
@@ -371,12 +375,13 @@ class RepairContracts(unittest.TestCase):
                 "PATH": _complete_lsof_env(),
                 "HOME": str(root),
                 "DISK_MAGICIAN_STATE_DIR": str(root / "state"),
+                "WORKTREE_MIN_AGE_DAYS": "0",
             }
             r = subprocess.run(
                 [
                     "bash",
                     "-c",
-                    'source "$1"; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"',
+                    'source "$1"; EXECUTE=true; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"',
                     "fixture",
                     str(ROOT / "scripts/worktree_hygiene.sh"),
                     str(repo),
@@ -388,7 +393,7 @@ class RepairContracts(unittest.TestCase):
             )
             self.assertNotEqual(r.returncode, 0)
             self.assertTrue(wt.exists())
-            self.assertIn("WIP-KEPT", r.stdout)
+            self.assertIn("WIP-REFUSED", r.stdout)
             self.assertEqual(
                 subprocess.run(
                     ["git", "--git-dir", str(remote), "show-ref"],
@@ -457,7 +462,7 @@ class RepairContracts(unittest.TestCase):
                     "FIXTURE_WT": str(wt),
                     "FIXTURE_REPO": str(repo),
                 }
-                script = 'source "$1"; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
+                script = 'source "$1"; EXECUTE=true; PUSH_WIP=true; preserve_wip_and_remove "$2" "$3"'
                 r = subprocess.run(
                     [
                         "bash",
@@ -521,21 +526,25 @@ class RepairContracts(unittest.TestCase):
             git("-C", repo, "remote", "add", "origin", remote)
             scanner = fakebin / "gitleaks"
             scanner.write_text(
-                '#!/bin/sh\nprintf "new unscanned content" > "$FIXTURE_REPO/file"\ngit -C "$FIXTURE_REPO" add file\ngit -C "$FIXTURE_REPO" -c user.name=test -c user.email=test@example.com commit -qm unscanned\n'
+                '#!/bin/sh\n'
+                'if [ "$(git -C "$FIXTURE_REPO" log -1 --format=%s)" = unscanned ]; then exit 0; fi\n'
+                'printf "new unscanned content" > "$FIXTURE_REPO/file"\n'
+                'git -C "$FIXTURE_REPO" add file\n'
+                'git -C "$FIXTURE_REPO" -c user.name=test -c user.email=test@example.com commit -qm unscanned\n'
             )
             scanner.chmod(0o755)
             env = {
                 **os.environ,
                 "PATH": _complete_lsof_env(),
                 "HOME": str(root),
-                "PATH": str(fakebin) + ":" + os.environ["PATH"],
+                "PATH": str(fakebin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
                 "FIXTURE_REPO": str(repo),
             }
             r = subprocess.run(
                 [
                     "bash",
                     "-c",
-                    'source "$1"; publish_wip_ref "$2" backup-test',
+                    'source "$1"; EXECUTE=true; publish_wip_ref "$2" backup-test',
                     "fixture",
                     str(ROOT / "scripts/worktree_hygiene.sh"),
                     str(repo),
@@ -545,6 +554,7 @@ class RepairContracts(unittest.TestCase):
                 text=True,
                 timeout=30,
             )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(
                 git("--git-dir", remote, "rev-parse", "refs/heads/backup-test"), scanned
             )
