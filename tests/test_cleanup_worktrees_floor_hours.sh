@@ -37,12 +37,15 @@ add_wt h11 "$WT/wt-h11" "$AHEAD_SHA";     git -C "$REPO" push -q origin h11
 add_wt d2dirty "$WT/wt-d2dirty" "$AHEAD_SHA"; git -C "$REPO" push -q origin d2dirty
 add_wt d2unpushed "$WT/wt-d2unpushed" "$AHEAD_SHA"
 add_wt unmeas "$WT/wt-unmeas" "$AHEAD_SHA";   git -C "$REPO" push -q origin unmeas
+add_wt locked13 "$WT/wt-locked13" "$AHEAD_SHA"; git -C "$REPO" push -q origin locked13
+git -C "$REPO" worktree lock "$WT/wt-locked13"
 printf 'wip\n' >> "$WT/wt-d2dirty/README.md"
 age_hours_ago "$WT/wt-h13" 13
 age_hours_ago "$WT/wt-h11" 11
 age_hours_ago "$WT/wt-d2dirty" 48
 age_hours_ago "$WT/wt-d2unpushed" 48
 age_hours_ago "$WT/wt-unmeas" 13
+age_hours_ago "$WT/wt-locked13" 13
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/bin"
 # cwd snapshot reports one process at /; the C14/quarantine "+D <tree>" open-file probes find nothing
 cat > "$TMP_ROOT/bin/lsof" <<'SH'
@@ -60,7 +63,8 @@ check "no env: 13h-idle clean pushed worktree stays young" "wt-h13 | young" "$OU
 [[ ! -e "$TMP_ROOT/home/.disk_magician_state/worktree_guard.log" ]] && { echo "  PASS  no env: nothing written to guard log"; PASS=$((PASS+1)); } || { echo "  FAIL  no env: guard log written"; FAIL=$((FAIL+1)); }
 
 # a worktree dir the scan cannot read: recency is unmeasurable, so it stays preserved
-chmod 000 "$WT/wt-unmeas"
+# (chmod cannot deny root, so that one check is skipped when run as root)
+[[ "$(id -u)" -eq 0 ]] || chmod 000 "$WT/wt-unmeas"
 OUT="$(run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12)"
 chmod 755 "$WT/wt-unmeas"
 check "12h floor: 13h-idle clean pushed worktree is ELIGIBLE" "ELIGIBLE  $WT/wt-h13 |" "$OUT"
@@ -68,7 +72,8 @@ check "12h floor: ELIGIBLE line names the override" "recency=hours:12" "$OUT"
 check "12h floor: 11h-idle worktree stays young" "wt-h11 | young" "$OUT"
 check "12h floor: 2-day-old dirty worktree is preserved" "PRESERVE  $WT/wt-d2dirty |" "$OUT"
 check "12h floor: 2-day-old unpushed worktree is preserved" "wt-d2unpushed | ahead-of-main" "$OUT"
-check "12h floor: unreadable worktree is preserved" "PRESERVE  $WT/wt-unmeas |" "$OUT"
+[[ "$(id -u)" -eq 0 ]] || check "12h floor: unreadable worktree is preserved" "PRESERVE  $WT/wt-unmeas |" "$OUT"
+check "12h floor: locked 13h-idle worktree is preserved" "wt-locked13 | locked" "$OUT"
 check "12h floor: override recorded in guard log" "recency override active: hours:12" "$(cat "$TMP_ROOT/home/.disk_magician_state/worktree_guard.log")"
 
 OUT="$(run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=6)"
@@ -83,5 +88,5 @@ DLOG="$TMP_ROOT/deletions.log"
 MODE=--clean run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12 WORKTREE_APPROVED=1 DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" >"$TMP_ROOT/clean.out" || true
 [[ ! -e "$WT/wt-h13" ]] && { echo "  PASS  --clean removed the 13h-idle worktree"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean left wt-h13"; grep -iE "wrh|kept|quarantine|error" "$TMP_ROOT/clean.out" | head -15; FAIL=$((FAIL+1)); }
 check "deletion log names the override" "recency=hours:12" "$(cat "$DLOG" 2>/dev/null)"
-[[ -d "$WT/wt-h11" && -d "$WT/wt-d2dirty" && -d "$WT/wt-d2unpushed" ]] && { echo "  PASS  --clean kept 11h, dirty and unpushed worktrees"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean removed a protected worktree"; FAIL=$((FAIL+1)); }
+[[ -d "$WT/wt-h11" && -d "$WT/wt-d2dirty" && -d "$WT/wt-d2unpushed" && -d "$WT/wt-locked13" ]] && { echo "  PASS  --clean kept 11h, dirty, unpushed and locked worktrees"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean removed a protected worktree"; FAIL=$((FAIL+1)); }
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]
