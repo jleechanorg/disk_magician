@@ -5,7 +5,7 @@ IDS = {'worktree_reap_remove': 'D1', 'worktree_cleanup': 'D1b', 'admission_enfor
        'ci_autopause': 'D4', 'external_edits': 'D6', 'colima_selfheal': 'D8', 'claude_state_cleanup': None}
 PATH = os.environ.get('DISK_MAGICIAN_POLICY_FILE') or os.path.expanduser('~/.config/disk-magician/standing_decisions.json')
 MARK, phrase = 'policy:worktree_reap_remove', 'APPROVE {}'.format  # fixed per id; the caller never chooses it
-USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a typed user message is exactly "APPROVE <id>" (trimmed, case-sensitive); ids: ' + ' '.join(IDS)
+USAGE = 'usage: diskm policy approve <id> --from-transcript <~/.claude*/projects/**/*.jsonl | ~/.codex/sessions/**/*.jsonl> | set-amendment <id> <sha> | revoke <id> | list\napprove records only when a genuine typed user message contains the whole phrase "APPROVE <id>" (case-sensitive; injected wrappers never count; Claude entries without origin.kind=human must equal it); ids: ' + ' '.join(IDS)
 git = lambda repo, *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
 stamp = lambda m: datetime.datetime.fromisoformat(m.get('timestamp') or '1970-01-01T00:00:00+00:00').timestamp()  # after a revoke only newer lines count
 def _trusted_root(home, uid):  # fixed OS-home trust: .codex AND .codex/sessions must be real uid-owned dirs
@@ -17,6 +17,11 @@ def _trusted_root(home, uid):  # fixed OS-home trust: .codex AND .codex/sessions
 FLAGS = ('isMeta', 'isSidechain', 'isCompactSummary', 'inherited_user_message')
 def _flagged(*objs):  # provenance flags on ANY envelope layer refuse the entry/header
     return any(isinstance(o, dict) and any(o.get(k) for k in FLAGS) for o in objs)
+INJECTED = re.compile(r'<(?:teammate-message|task-notification|system-reminder|command-(?:message|name|args)|local-command-\w+|bash-(?:input|stdout|stderr)|agent-message|send_user_message_\w+|environment_context|user_instructions|user_shell_command|turn_aborted|subagent_notification)\b'
+                      r'|Another Claude session sent a message|\[SYSTEM NOTIFICATION\]')  # harness-injected wrappers: never a typed approval
+AGENT_KEYS = ('agentId', 'sourceToolUseID', 'toolUseResult')  # agent/tool provenance on a Claude user envelope
+def _typed_phrase(text, want):  # typed text CONTAINS want as whole tokens; whitespace-normalised so a line wrap still matches
+    return not INJECTED.search(text) and re.search(r'(?<![\w-])' + re.escape(want) + r'(?![\w-])', ' '.join(text.split())) is not None
 def _codex_header(m):  # session_meta must be the interactive codex-tui CLI; flags on any layer never count
     p = m.get('payload')
     if not isinstance(p, dict): return False
@@ -52,15 +57,17 @@ def _codex_approval(real, want, after, uid):  # (realpath, line, sha256) in the 
             try: m = json.loads(line)
             except ValueError: continue
             text = _codex_text(m)
-            if text is not None and text.strip() == want and stamp(m) > (after or -1):
+            if text is not None and _typed_phrase(text, want) and stamp(m) > (after or -1):
                 return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
 def _claude_approval(real, want, after):  # original fixed-phrase Claude projects scan, semantics unchanged
     for n, line in enumerate(open(real, 'rb'), 1):
         m = json.loads(line); c = m.get('message', {}).get('content')
-        if m.get('type') != 'user' or any(m.get(k) for k in ('isMeta', 'isSidechain', 'isCompactSummary')): continue
+        if m.get('type') != 'user' or _flagged(m) or any(m.get(k) for k in AGENT_KEYS): continue
+        human = isinstance(m.get('origin'), dict) and m['origin'].get('kind') == 'human'  # harness-stamped typed input
+        if 'origin' in m and not human: continue  # task-notification etc.
         if isinstance(c, list) and all(b.get('type') == 'text' for b in c): c = ''.join(b.get('text', '') for b in c)
-        if isinstance(c, str) and c.strip() == want and stamp(m) > (after or -1): return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
-def find_approval(path, want, after):  # (realpath, line, sha256) of a genuine typed user message equal to want, else None
+        if isinstance(c, str) and (_typed_phrase(c, want) if human else c.strip() == want) and stamp(m) > (after or -1): return real, n, hashlib.sha256(line.rstrip(b'\n')).hexdigest()
+def find_approval(path, want, after):  # (realpath, line, sha256) of a genuine typed user message containing want, else None
     home, uid = pwd.getpwuid(os.getuid()).pw_dir, os.getuid()  # real OS home: $HOME/CODEX_HOME cannot move the root
     real = os.path.realpath(path)
     if not (os.path.isfile(real) and real.endswith('.jsonl')): return None
@@ -87,7 +94,7 @@ def main(cmd='', i='', *a):
     live, repo = i in d and d[i]['revoked_at'] is None, os.environ.get('DISK_MAGICIAN_POLICY_REPO') or os.path.dirname(sys.path[0])
     if cmd == 'approve' and a[:1] == ('--from-transcript',) and len(a) == 2 and i in IDS:
         hit = find_approval(a[1], phrase(i), d.get(i, {}).get('revoked_at'))
-        if not hit: return print(f'refused: no typed user message equal to {phrase(i)!r} in a supported Claude projects or Codex sessions transcript', file=sys.stderr) or 2
+        if not hit: return print(f'refused: no typed user message containing {phrase(i)!r} in a supported Claude projects or Codex sessions transcript', file=sys.stderr) or 2
         d[i] = dict(zip(('transcript', 'line', 'line_sha256'), hit), id=i, phrase=phrase(i), approved_at=int(time.time()), revoked_at=None)
     elif cmd == 'set-amendment' and live and len(a) == 1:  # full commit sha that edits CLAUDE.md and carries MARK
         if not (re.fullmatch('[0-9a-f]{40}', a[0]) and 'CLAUDE.md' in git(repo, 'diff-tree', '--root', '--name-only', '-r', a[0]).stdout.split()
