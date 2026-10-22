@@ -968,12 +968,10 @@ process_repo_local_worktrees() {
                     # candidate's own owner-null lease (never an
                     # ancestor/descendant), after all other C14 checks and the
                     # recency/policy/remote proof above.
-                    # The override floor also sets the owner-null relax idle floor (C14 clamps it to >= 60 min).
-                    local cw_idle=(--min-idle-minutes "$(( ${FLOOR_HOURS:-0} * 60 ))")
                     if [[ -n "$ACT_DEADLINE_AT" ]]; then
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT" "${cw_idle[@]}")"
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
                     else
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" "${cw_idle[@]}")"
+                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
                     fi
                     if [[ "$cw_c14_verdict" == remove ]]; then
                         if [[ -n "$ACT_DEADLINE_AT" ]]; then
