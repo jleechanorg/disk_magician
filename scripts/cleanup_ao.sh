@@ -292,7 +292,7 @@ ao_backup_receipt_matches_live() {
 # verdict preserves AO ownership), so this reuses its C14 content probes while
 # retaining the owner lifecycle's exact-path registration gate.
 ao_c14_gate() {
-  local path="$1" real="$1" content inv registration gitdir
+  local path="$1" real="$1" content inv registration gitdir pushed
   real="$(cd "$path" 2>/dev/null && pwd -P)" || { printf '%s' 'workspace path changed'; return 1; }
   [[ "$real" == "$path" && -d "$real" && ! -L "$real" ]] || { printf '%s' 'workspace identity changed'; return 1; }
   registration="$(git -C "$real" worktree list --porcelain 2>/dev/null)" || { printf '%s' 'worktree registration unreadable'; return 1; }
@@ -305,6 +305,10 @@ ao_c14_gate() {
   [[ ! -e "$gitdir/locked" && ! -e "$gitdir/index.lock" && ! -e "$gitdir/HEAD.lock" ]] || { printf '%s' 'worktree is locked or a git operation is in progress'; return 1; }
   content="$(c14_repo_content_ok "$real" 2>/dev/null || true)"
   [[ "$content" == ok ]] || { printf '%s' "${content#kept:}"; return 1; }
+  pushed="$(c14_repo_pushed_ok "$real" "$real" '' ao-owner-validated)" || {
+    printf '%s' "${pushed:-kept:check-failed}"; return 1
+  }
+  [[ "$pushed" == ok ]] || { printf '%s' "${pushed:-kept:check-failed}"; return 1; }
   inv="$(mktemp "${TMPDIR:-/tmp}/ao-c14-inventory.XXXXXX")" || { printf '%s' 'C14 inventory allocation failed'; return 1; }
   if ! python3 "$SCRIPT_DIR/c14_probe.py" inventory "$real" "$inv" >/dev/null 2>&1; then
     rm -f "$inv"; printf '%s' 'C14 inventory failed'; return 1

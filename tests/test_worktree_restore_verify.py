@@ -267,6 +267,41 @@ class RestoreVerificationTests(unittest.TestCase):
         log = self.base / "home/.disk_magician_state/worktree_guard.log"
         self.assertIn("minute recency override requires durable restore receipt", log.read_text())
 
+    def test_ao_retirement_preserves_unpublished_reflog_history(self):
+        target = self.base / '.ao/data/worktrees/fixture/session'
+        target.parent.mkdir(parents=True)
+        self.git('-C', str(self.repo), 'worktree', 'move', str(self.wt), str(target))
+        published = self.git('-C', str(target), 'rev-parse', 'HEAD').decode().strip()
+        source = (ROOT / 'scripts/cleanup_ao.sh').read_text()
+        gate = source[source.index('ao_c14_gate() {'):].split('\n}\n', 1)[0] + '\n}\n'
+        harness = self.base / 'ao-gate.sh'
+        harness.write_text('source "$1/lib/artifact_verdict.sh"\nSCRIPT_DIR="$1"\n' + gate +
+                           '\nwrh_live_cwd_reason() { WRH_LIVE_CWD_REASON=""; }\n'
+                           'worktree_is_recently_active_minutes() { return 1; }\n'
+                           'if [[ "$3" == gate ]]; then ao_c14_gate "$2"; '
+                           'else c14_repo_pushed_ok "$2" "$2" "" "$3"; fi\n')
+
+        def check(context):
+            return subprocess.run(['bash', str(harness), str(ROOT / 'scripts'), str(target), context],
+                                  env=dict(os.environ, PATH='/usr/bin:/bin'), capture_output=True)
+
+        default = check('')
+        self.assertNotEqual(default.returncode, 0)
+        self.assertIn(b'ao-owned', default.stdout)
+        self.assertNotEqual(check('ao-owner-validatd').returncode, 0)
+        self.assertEqual(check('gate').returncode, 0)
+        (target / 'file').write_text('unpublished work\n')
+        self.git('-C', str(target), 'commit', '-qam', 'unpublished')
+        unpublished = self.git('-C', str(target), 'rev-parse', 'HEAD').decode().strip()
+        self.git('-C', str(target), 'reset', '--hard', published)
+        blocked = check('gate')
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn(b'not-pushed', blocked.stdout)
+        self.assertEqual(self.git('-C', str(target), 'status', '--porcelain'), b'')
+        self.git('-C', str(target), 'push', 'origin', unpublished + ':refs/heads/saved-history')
+        self.assertEqual(check('gate').returncode, 0)
+        self.assertTrue(target.is_dir())
+
     def remote_receipt_gate(self, receipt, sandbox=True, retire=False):
         stat = self.base / "stat-object"
         stat.write_text("#!/usr/bin/python3\nimport hashlib,json,pathlib,sys\n"
