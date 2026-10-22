@@ -23,6 +23,19 @@ cleanup() {
 trap cleanup EXIT
 export HOME="$TMPROOT/home"
 mkdir -p "$HOME"
+# lsof stub with no holders: a complete, empty cwd map for the live-cwd gate and no
+# output for the open-file probe, so a shared host's unreadable foreign processes
+# cannot turn either gate into kept:cwd-unknown / kept:open-file.
+mkdir -p "$TMPROOT/fakebin"
+cat >"$TMPROOT/fakebin/lsof" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *" -d cwd "*) printf 'p1\nfcwd\nn/\n' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMPROOT/fakebin/lsof"
+export PATH="$TMPROOT/fakebin:$PATH"
 NOW="$(date +%s)"
 stamp() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S; }
 age() { find "$1" -exec touch -h -t "$(stamp $((NOW - $2 * 60)))" {} +; }
@@ -53,7 +66,7 @@ out="$(run --dry-run)"
 
 echo "-- clean --"
 out="$(run --clean)"
-[[ ! -e "$HOME/dd_idle" ]] && ok "idle DerivedData-shaped dir removed" || bad "dd_idle still present: $out"
+[[ ! -e "$HOME/dd_idle" ]] && ok "idle DerivedData-shaped dir removed" || bad "dd_idle still present"
 [[ -d "$HOME/dd_recent" ]] && ok "recent dir kept" || bad "recent dir removed"
 [[ -f "$HOME/dd_notdd/notes.txt" ]] && ok "non-DerivedData dir kept" || bad "non-DerivedData dir removed"
 [[ ! -e "$HOME/proj_dd_nested/DerivedData" && -f "$HOME/proj_dd_nested/README.md" ]] \
@@ -75,5 +88,6 @@ if [[ "$(id -u)" != 0 ]]; then
     [[ -d "$HOME/dd_unmeasured" ]] && ok "unreadable tree is kept" || bad "unreadable tree removed"
 fi
 
+(( FAIL == 0 )) || printf '%s\n' "$out" | /usr/bin/grep -E "Custom|C14" >&2
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
