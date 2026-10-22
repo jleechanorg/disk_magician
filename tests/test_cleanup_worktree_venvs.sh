@@ -653,5 +653,7 @@ if [[ -d "$WT_30D/.venv" ]]; then
 else
   record_fail "<90d worktree .venv preserved when WORKTREE_APPROVED=1 unset" "30d .venv was stripped without WORKTREE_APPROVED=1"
 fi
+
+echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
