@@ -156,6 +156,10 @@ for f in "${forms5[@]}"; do
     logged "--class $cls " && logged -- "$dest " && ok "dest $dest" || bad "admit args for '$cmd': $(cat "$T/admit.log")"
     assert_eq "$(field 'd["hookSpecificOutput"]["permissionDecision"]')" deny "75 denies: $cmd"
 done
+if [[ "$(uname -s)" == Darwin ]]; then
+    TMPDIR=/private/tmp STUB_RC=75 hook PreToolUse "cp -R a /tmp/overlap/x"
+    logged "--class tmp_containers " && ok "Darwin private tmp wins over overlapping TMPDIR" || bad "Darwin overlap: $(cat "$T/admit.log")"
+fi
 rmdir "$R"
 
 echo "== diskm setup --hooks installer (plan Task B1) =="

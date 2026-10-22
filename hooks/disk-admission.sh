@@ -14,8 +14,10 @@ def canon(p):
     p = os.path.normpath(p)
     if sys.platform == "darwin": p = re.sub(r"^/tmp(?=/|$)", "/private/tmp", p)
     return os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))
-ROOTS = [(os.path.realpath(r), n, c) for r, n, c in [(home + "/.worktrees", 2, "worktrees"),
-         (home + "/Documents/Codex", 2, "codex_documents"), (tmpd, 1, "tmpdir_scratch"), (private_tmp, 1, "tmp_containers")]]
+roots = [(home + "/.worktrees", 2, "worktrees"), (home + "/Documents/Codex", 2, "codex_documents")]
+roots += ([(private_tmp, 1, "tmp_containers"), (tmpd, 1, "tmpdir_scratch")] if sys.platform == "darwin"
+          else [(tmpd, 1, "tmpdir_scratch"), (private_tmp, 1, "tmp_containers")])
+ROOTS = [(os.path.realpath(r), n, c) for r, n, c in roots]
 def governed(p):
     p = canon(p)
     for root, depth, cls in ROOTS:
