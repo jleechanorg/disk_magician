@@ -68,6 +68,14 @@ printf 'o' >"$HOME/dd_gen/Build/Intermediates.noindex/Pods.build/Objects-normal/
 printf 'h' >"$HOME/dd_gen/Index.noindex/DataStore/v5/records/K2/NSURLCredentialStorage.h-abc"
 printf 'K=v' >"$HOME/dd_envroot/.env"
 printf '{}' >"$HOME/dd_secretjson/secrets.json"
+# Standard DerivedData (HOME is the fixture): per-project children share the xcode kind.
+SDD="$HOME/Library/Developer/Xcode/DerivedData"
+[[ "$SDD" == "$TMPROOT"/home/* ]] || { echo "FAIL: standard DerivedData is not in the fixture tree" >&2; exit 1; }
+mkdir -p "$SDD/wf-gen/Build/Intermediates.noindex/Pods.build/Objects-normal/arm64" "$SDD/wf-gen/Index.noindex/DataStore/v5/records/K2" \
+    "$SDD/wf-env/Build" "$SDD/wf-env/Index.noindex"
+printf 'o' >"$SDD/wf-gen/Build/Intermediates.noindex/Pods.build/Objects-normal/arm64/NativeRequestCredentials.o"
+printf 'h' >"$SDD/wf-gen/Index.noindex/DataStore/v5/records/K2/NSURLCredentialStorage.h-abc"
+printf 'K=v' >"$SDD/wf-env/.env"
 printf '<key>WorkspacePath</key>' >"$HOME/dd_plist/info.plist"
 printf 'o' >"$HOME/dd_buildonly/Build/x.o"
 printf 'o' >"$HOME/dd_idle/Build/Products/a.o"
@@ -78,6 +86,7 @@ printf 'keep' >"$HOME/proj_dd_nested/README.md"
 printf 'o' >"$HOME/real_dd/Build/c.o"
 ln -s "$HOME/real_dd" "$HOME/dd_link"
 age "$TMPROOT/ptmp" 120 && age "$TMPROOT/utmp" 120 && age "$HOME/dd_gen" 120 && age "$HOME/dd_envroot" 120 && age "$HOME/dd_secretjson" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
+age "$SDD" 120
 age "$HOME/dd_recent" 5
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
@@ -106,6 +115,8 @@ out="$(run --clean)"
 [[ ! -e "$HOME/dd_gen" ]] && ok "generated *Credentials* build outputs do not block removal" || bad "dd_gen kept by the secret scan"
 [[ -f "$HOME/dd_envroot/.env" ]] && ok "root .env keeps the dir" || bad "dd_envroot removed"
 [[ -f "$HOME/dd_secretjson/secrets.json" ]] && ok "root secrets.json keeps the dir" || bad "dd_secretjson removed"
+[[ ! -e "$SDD/wf-gen" ]] && ok "standard DerivedData child with generated *Credentials* outputs removed" || bad "standard wf-gen kept by the secret scan"
+[[ -f "$SDD/wf-env/.env" ]] && ok "standard DerivedData child with a top-level .env kept" || bad "standard wf-env removed"
 log="$HOME/Library/Logs/disk-magician-deletions.log"
 if [[ -f "$log" ]] && [[ "$(<"$log")" == *"$HOME/dd_idle"* ]]; then ok "removal recorded in the deletion log"; else bad "no deletion-log line for dd_idle"; fi
 
