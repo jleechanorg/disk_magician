@@ -967,10 +967,20 @@ def exempt_name(path):
         return dep
     return dep and "." in n and n.rpartition(".")[2] in _SRC_EXTS
 
-def secrets(inv_file):
+def _xcode_generated(q):
+    """Compiler/indexer output and fetched package clones inside a DerivedData root."""
+    top = q.split("/", 1)[0].lower()
+    return top in ("build", "logs") or top.endswith(".noindex") or top.startswith("modulecache") \
+        or q.lower().startswith("sourcepackages/checkouts/")
+
+def secrets(inv_file, kind=""):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
         paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
+        if kind == "xcode-derived-data":
+            # Generated names such as NativeRequestCredentials.o are not secrets; anything
+            # else in the root (a .env, secrets.json, *.p12) still is.
+            paths = (q for q in paths if not _xcode_generated(q))
         print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
@@ -1067,8 +1077,8 @@ if __name__ == "__main__":
             sys.exit(repos(a[1]))
         if len(a) == 2 and a[0] == "newest-mtime":
             sys.exit(newest_mtime(a[1]))
-        if len(a) == 2 and a[0] == "secrets":
-            sys.exit(secrets(a[1]))
+        if len(a) in (2, 3) and a[0] == "secrets":
+            sys.exit(secrets(*a[1:]))
         if len(a) == 2 and a[0] == "exempt-name":
             print("yes" if exempt_name(a[1]) else "no"); sys.exit(0)
         if len(a) in (4, 5) and a[0] == "merge-inventory":
