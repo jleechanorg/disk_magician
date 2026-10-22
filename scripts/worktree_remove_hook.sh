@@ -212,7 +212,7 @@ wrh_remove_now() {
     fi
     [[ $result == removed:* ]] || { wrh_log "kept $display: $result"; return 1; }
     wrh_log "removed $display"
-    deletion_log_removal "$real" "$dkb" remove_worktree "${WRH_RECENCY_SPEC:+recency=$WRH_RECENCY_SPEC}"
+    deletion_log_removal "$real" "$dkb" remove_worktree "${WRH_RECENCY_SPEC:+recency=$WRH_RECENCY_SPEC}${WRH_REASON:+ reason=$WRH_REASON}"
     if [[ "$branch" == worktree-* ]]; then
         if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
             wrh_log "kept branch $branch: checked out elsewhere"
