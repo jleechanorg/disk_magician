@@ -38,7 +38,7 @@ add_wt() {  # <branch> <path>: pushed, aged 4d
 ROOTS_WT=("wc-wt/advice-x" "llm_wiki.worktrees/clean-x" "project_agento/wa-techdebt" \
   "project_worldai_frontend/wf-x" "worldarchitect.ai.worktrees/pr-x")
 i=0; for rel in "${ROOTS_WT[@]}"; do i=$((i+1)); add_wt "b$i" "$HOME_DIR/$rel"; done
-add_wt dirty "$HOME_DIR/wc-wt/dirty-x"; printf 'x\n' >> "$HOME_DIR/wc-wt/dirty-x/README.md"
+add_wt dirty "$HOME_DIR/wc-wt/dirty-x"; printf 'x\n' >> "$HOME_DIR/wc-wt/dirty-x/README.md"; age_days_ago "$HOME_DIR/wc-wt/dirty-x" 4
 add_wt outside "$HOME_DIR/elsewhere/plain-x"
 cat > "$TMP_ROOT/bin/lsof" <<'SH'
 #!/bin/sh
