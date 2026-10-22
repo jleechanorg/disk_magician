@@ -533,11 +533,11 @@ class RepairContracts(unittest.TestCase):
                 'git -C "$FIXTURE_REPO" -c user.name=test -c user.email=test@example.com commit -qm unscanned\n'
             )
             scanner.chmod(0o755)
+            complete_path = _complete_lsof_env()
             env = {
                 **os.environ,
-                "PATH": _complete_lsof_env(),
                 "HOME": str(root),
-                "PATH": str(fakebin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                "PATH": str(fakebin) + ":" + complete_path,
                 "FIXTURE_REPO": str(repo),
             }
             r = subprocess.run(
