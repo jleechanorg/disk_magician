@@ -8,6 +8,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
@@ -96,16 +98,15 @@ clear_contents() {
 CUSTOM_DD_IDLE_MINUTES=60
 
 clean_custom_derived_data() {
-  local darwin_tmp="" cand target seen=$'\n' before_kb
-  if command -v getconf >/dev/null 2>&1; then
-    darwin_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
-    darwin_tmp="${darwin_tmp%/}"
-  fi
+  local ptmp utmp cand target seen=$'\n' before_kb
+  # Same overridable roots as the other scratch sweepers; an unresolved root drops its globs.
+  ptmp="$(scratch_roots_get_private_tmp)"
+  utmp="$(scratch_roots_get_user_tmp)"
   for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
-      /private/tmp/*_dd* /private/tmp/dd_* /private/tmp/pr* /private/tmp/pr*/dd \
-      /private/tmp/worldai_frontend/* /private/tmp/worldai_frontend/*/* \
-      /private/tmp/worldai_claw/*/* /private/tmp/ipad*/* \
-      ${darwin_tmp:+"$darwin_tmp"/tmp.* "$darwin_tmp"/*_dd* "$darwin_tmp"/dd_*}; do
+      ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
+      "$ptmp"/worldai_frontend/* "$ptmp"/worldai_frontend/*/* \
+      "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
+      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
     if _av_derived_data_shape "$cand"; then
       target="$cand"

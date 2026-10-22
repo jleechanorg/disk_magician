@@ -2,7 +2,8 @@
 # test_cleanup_xcode_custom_dd.sh — cleanup_xcode.sh clean_custom_derived_data:
 # idle DerivedData-shaped dirs outside ~/Library are removed through C14 and
 # logged; recent, non-DerivedData, symlinked and unmeasurable ones are kept.
-# Temp HOME only; nothing outside it is touched.
+# Temp HOME and temp scratch roots only; the script's /private/tmp and per-user temp
+# globs are redirected into the fixture tree, and the test aborts if they are not.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +37,14 @@ esac
 STUB
 chmod +x "$TMPROOT/fakebin/lsof"
 export PATH="$TMPROOT/fakebin:$PATH"
+mkdir -p "$TMPROOT/ptmp" "$TMPROOT/utmp"
+export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMPROOT/ptmp"
+export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
+# Fuse: never run --clean unless every scan root resolves inside the fixture tree.
+# shellcheck source=scripts/lib/scratch_roots.sh
+source "$REPO_ROOT/scripts/lib/scratch_roots.sh"
+[[ "$(scratch_roots_get_private_tmp)" == "$TMPROOT/ptmp" && "$(scratch_roots_get_user_tmp)" == "$TMPROOT/utmp" ]] \
+    || { echo "FAIL: scratch roots not redirected into the fixture tree" >&2; exit 1; }
 NOW="$(date +%s)"
 stamp() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S; }
 age() { find "$1" -exec touch -h -t "$(stamp $((NOW - $2 * 60)))" {} +; }
@@ -44,6 +53,13 @@ mkdir -p "$HOME/dd_idle/Build/Products" "$HOME/dd_idle/Index.noindex" \
     "$HOME/dd_recent/Build/Products" "$HOME/dd_recent/Index.noindex" \
     "$HOME/dd_notdd" "$HOME/proj_dd_nested/DerivedData/Build" "$HOME/proj_dd_nested/DerivedData/Logs.noindex" \
     "$HOME/real_dd/Build" "$HOME/real_dd/Index.noindex" "$HOME/dd_plist" "$HOME/dd_buildonly/Build"
+mkdir -p "$TMPROOT/ptmp/pr7/dd/Build" "$TMPROOT/ptmp/pr7/dd/Index.noindex" \
+    "$TMPROOT/ptmp/worldai_frontend/build-x/Build" "$TMPROOT/ptmp/worldai_frontend/build-x/ModuleCache.noindex" \
+    "$TMPROOT/ptmp/worldai_frontend/evidence" "$TMPROOT/utmp/dd_t/Build" "$TMPROOT/utmp/dd_t/Index.noindex"
+printf 'o' >"$TMPROOT/ptmp/pr7/dd/Build/a.o"
+printf 'o' >"$TMPROOT/ptmp/worldai_frontend/build-x/Build/a.o"
+printf 'shot' >"$TMPROOT/ptmp/worldai_frontend/evidence/shot.png"
+printf 'o' >"$TMPROOT/utmp/dd_t/Build/a.o"
 printf '<key>WorkspacePath</key>' >"$HOME/dd_plist/info.plist"
 printf 'o' >"$HOME/dd_buildonly/Build/x.o"
 printf 'o' >"$HOME/dd_idle/Build/Products/a.o"
@@ -53,7 +69,7 @@ printf 'o' >"$HOME/proj_dd_nested/DerivedData/Build/b.o"
 printf 'keep' >"$HOME/proj_dd_nested/README.md"
 printf 'o' >"$HOME/real_dd/Build/c.o"
 ln -s "$HOME/real_dd" "$HOME/dd_link"
-age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
+age "$TMPROOT/ptmp" 120 && age "$TMPROOT/utmp" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
 age "$HOME/dd_recent" 5
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
@@ -75,6 +91,10 @@ out="$(run --clean)"
 [[ ! -e "$HOME/real_dd" ]] && ok "real_dd (matched *_dd*, idle, shaped) removed via its own path" || bad "real_dd still present"
 [[ ! -e "$HOME/dd_plist" ]] && ok "dir whose info.plist names a WorkspacePath removed" || bad "dd_plist still present"
 [[ -d "$HOME/dd_buildonly" ]] && ok "Build/ without *.noindex kept" || bad "dd_buildonly removed"
+[[ ! -e "$TMPROOT/ptmp/pr7/dd" ]] && ok "pr*/dd under the private tmp root removed" || bad "ptmp/pr7/dd still present"
+[[ ! -e "$TMPROOT/ptmp/worldai_frontend/build-x" ]] && ok "worldai_frontend build dir removed" || bad "worldai_frontend/build-x still present"
+[[ -f "$TMPROOT/ptmp/worldai_frontend/evidence/shot.png" ]] && ok "non-DerivedData worldai_frontend dir kept" || bad "worldai_frontend/evidence removed"
+[[ ! -e "$TMPROOT/utmp/dd_t" ]] && ok "dd_* under the per-user temp root removed" || bad "utmp/dd_t still present"
 log="$HOME/Library/Logs/disk-magician-deletions.log"
 if [[ -f "$log" ]] && [[ "$(<"$log")" == *"$HOME/dd_idle"* ]]; then ok "removal recorded in the deletion log"; else bad "no deletion-log line for dd_idle"; fi
 
