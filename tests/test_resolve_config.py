@@ -41,5 +41,22 @@ class TestResolveConfig(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out.endswith("config.json.template"), out)
 
+    def test_invalid_explicit_override_does_not_fall_back(self):
+        fallback = self._mk("home/.config/disk-magician/config.json")
+        invalid = [
+            os.path.join(self.tmp, "missing.json"),
+            os.path.join(self.tmp, "config-dir"),
+            os.path.join(self.tmp, "broken-link.json"),
+        ]
+        os.mkdir(invalid[1])
+        os.symlink(os.path.join(self.tmp, "nowhere.json"), invalid[2])
+        for path in invalid:
+            with self.subTest(path=path):
+                rc, out = resolve(
+                    {"HOME": self.home, "DISK_MAGICIAN_CONFIG": path}
+                )
+                self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(open(fallback).read(), "{}")
+
 if __name__ == "__main__":
     unittest.main()
