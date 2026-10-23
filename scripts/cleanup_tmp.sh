@@ -756,10 +756,13 @@ has_open_files() {
 
   "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
-  local diagnostic=""
-  if [[ -s "$err_file" ]]; then
-    diagnostic=$(head -n 1 "$err_file")
+  local err_content="" diagnostic=""
+  if ! err_content=$(cat "$err_file"); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (could not read lsof stderr) — fail-closed, treating as active."
+    return 0
   fi
+  diagnostic="${err_content%%$'\n'*}"
 
   if (( rc != 0 )); then
     rm -f "$hit_file" "$err_file"
@@ -767,7 +770,7 @@ has_open_files() {
     return 0
   fi
 
-  if lsof_stderr_incomplete_for_path "$(cat "$err_file")" "$canon_dir"; then
+  if lsof_stderr_incomplete_for_path "$err_content" "$canon_dir"; then
     rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
     return 0

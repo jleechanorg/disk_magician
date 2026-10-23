@@ -16,10 +16,10 @@ lsof_stderr_incomplete() {
   local line trimmed fs warned=0
   [[ -n "$1" ]] || return 1
   while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
+    [[ -n "$line" ]] || return 0
     case "$line" in
       "lsof: WARNING: can"*" stat() "*" file system "*)
-        fs="${line##* file system }"
+        fs="${line#* file system }"
         while [[ "$fs" == */ ]]; do fs="${fs%/}"; done
         [[ -z "$fs" ]] && fs="/"
         [[ "$fs" == "/" ]] && return 0
@@ -49,10 +49,10 @@ lsof_stderr_incomplete_for_path() {
   [[ "$query_real" == / ]] || query_real="${query_real%/}"
 
   while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
+    [[ -n "$line" ]] || return 0
     case "$line" in
       "lsof: WARNING: can"*" stat() "*" file system "*)
-        fs="${line##* file system }"
+        fs="${line#* file system }"
         # The warning includes a real mount path. Resolve it through the
         # filesystem so symlinked spellings cannot make an overlapping mount
         # look unrelated. Unknown paths fail closed.
@@ -69,7 +69,10 @@ lsof_stderr_incomplete_for_path() {
     esac
     line="${line#"${line%%[![:space:]]*}"}"
     if [[ "$line" == "Output information may be incomplete." ]]; then
-      (( warned_unrelated )) && continue
+      if (( warned_unrelated )); then
+        warned_unrelated=0
+        continue
+      fi
       return 0
     fi
     return 0

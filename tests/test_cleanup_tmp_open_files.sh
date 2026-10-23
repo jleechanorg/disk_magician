@@ -227,6 +227,42 @@ assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpec
 assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: unrelated mount warning does not fail closed" "Open-file check failed" "$T1_OUT_CONTENT"
 assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+
+echo "Test 1b: stderr read failure fails closed"
+T1B_ARCHIVE="$TMP_ROOT/t1b-archive"
+mkdir -p "$T1B_ARCHIVE/20200101T000000Z/quarantined_app"
+touch "$T1B_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
+set_old_mtime "$T1B_ARCHIVE/20200101T000000Z"
+cat > "$T1_BIN/cat" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */disk-magician-lsof-error.*)
+      [[ "${DISK_MAGICIAN_TEST_FAIL_ERR_CAT:-}" == 1 ]] && exit 1
+      ;;
+  esac
+done
+exec /bin/cat "$@"
+EOF
+chmod +x "$T1_BIN/cat"
+T1B_OUT="$TMP_ROOT/t1b.out"
+run_capture "$T1B_OUT" env -i HOME="$TMP_ROOT/t1b-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_FAIL_ERR_CAT=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1B_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+T1B_RC=$?
+T1B_OUT_CONTENT=$(cat "$T1B_OUT")
+assert_rc "Test 1b: exits 0" 0 "$T1B_RC"
+assert_contains "Test 1b: unreadable stderr fails closed" "could not read lsof stderr" "$T1B_OUT_CONTENT"
+assert_exists "Test 1b: candidate preserved on stderr read failure" "$T1B_ARCHIVE/20200101T000000Z/quarantined_app"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: Fresh authoritative scan at each guarded destructive decision
 # (closed on scan 1, then open on pre-mutation scan -> candidate preserved)

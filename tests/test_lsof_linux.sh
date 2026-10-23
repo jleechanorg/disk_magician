@@ -63,6 +63,7 @@ lsof_collect_cwds $'p1\np2\nfcwd\nn/b' "" 0 && bad "pid-only block accepted" || 
 lsof_collect_cwds $'n/a\nn/b' "" 0 && bad "pid-less scan accepted" || ok "pid-less scan rejected: $LSOF_CWD_REASON"
 lsof_stderr_incomplete $'      Output information may be incomplete.' && ok "standalone trailer incomplete" || bad "standalone trailer trusted"
 lsof_stderr_incomplete $'lsof: WARNING: can\'t stat() apfs file system /' && ok "root mount warning incomplete" || bad "root mount warning trusted"
+lsof_stderr_incomplete $' \n' && ok "blank-only stderr fails closed" || bad "blank-only stderr trusted"
 
 echo "== lsof_stderr_incomplete_for_path =="
 WARN_ROOT="$(mktemp -d -t lsof-warn.XXXXXX)"
@@ -72,7 +73,13 @@ unrelated_warn="lsof: WARNING: can't stat() tracefs file system $WARN_ROOT/unrel
 matching_warn="lsof: WARNING: can't stat() tmpfs file system $query"
 ancestor_warn="lsof: WARNING: can't stat() tmpfs file system $WARN_ROOT"
 child_warn="lsof: WARNING: can't stat() tmpfs file system $query/child"
+mkdir -p "$query/a file system /proc"
+phrase_mount_warn="lsof: WARNING: can't stat() tmpfs file system $query/a file system /proc"
+double_trailer_warn="$unrelated_warn"$'\n      Output information may be incomplete.'
 lsof_stderr_incomplete_for_path "$unrelated_warn" "$query" && bad "unrelated tracefs warning blocked closed query" || ok "unrelated tracefs warning is query-safe"
+lsof_stderr_incomplete_for_path "$phrase_mount_warn" "$query" && ok "mount path containing separator phrase fails closed" || bad "mount path containing separator phrase was truncated"
+lsof_stderr_incomplete_for_path "$double_trailer_warn"$'\n      Output information may be incomplete.' "$query" && ok "duplicate incomplete trailer fails closed" || bad "duplicate incomplete trailer trusted"
+lsof_stderr_incomplete_for_path $' \n' "$query" && ok "blank-only path stderr fails closed" || bad "blank-only path stderr trusted"
 lsof_stderr_incomplete_for_path "$matching_warn" "$query" && ok "matching mount warning fails closed" || bad "matching mount warning ignored"
 lsof_stderr_incomplete_for_path "$ancestor_warn" "$query" && ok "ancestor mount warning fails closed" || bad "ancestor mount warning ignored"
 lsof_stderr_incomplete_for_path "$child_warn" "$query" && ok "nested mount warning fails closed" || bad "nested mount warning ignored"
