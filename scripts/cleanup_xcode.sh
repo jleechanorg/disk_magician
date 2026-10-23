@@ -140,10 +140,49 @@ clean_custom_derived_data() {
   done
 }
 
+# worldai iOS release CI leaves /private/tmp/worldai-ios-release-<run>-<attempt>/ with
+# rebuildable DerivedData/ and verify-unpacked/ beside the archive, export/ and receipts
+# (kept: they await App Store Connect processing). Only a finished dir (receipts/export.json)
+# whose newest content is idle IOS_RELEASE_IDLE_MINUTES loses those two children, through
+# the same C14 verdict (live cwd, open files, secrets).
+IOS_RELEASE_IDLE_MINUTES=1440
+
+clean_ios_release_scratch() {
+  local ptmp dir sub before_kb _safety_reason
+  ptmp="$(scratch_roots_get_private_tmp)"
+  [[ -n "$ptmp" ]] || return 0
+  for dir in "$ptmp"/worldai-ios-release-*-*; do
+    [[ "${dir##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ && -d "$dir" && ! -L "$dir" ]] || continue
+    if [[ ! -f "$dir/receipts/export.json" || -L "$dir/receipts/export.json" ]]; then
+      log "iOS release scratch: no completion receipt, keeping $dir"
+      continue
+    fi
+    if worktree_is_recently_active_minutes "$dir" "$IOS_RELEASE_IDLE_MINUTES"; then
+      log "iOS release scratch: written within ${IOS_RELEASE_IDLE_MINUTES}m or recency unmeasurable, keeping $dir"
+      continue
+    fi
+    for sub in DerivedData verify-unpacked; do
+      [[ -d "$dir/$sub" && ! -L "$dir/$sub" ]] || continue
+      if ! _safety_reason="$(safety_gate "$dir/$sub" 2>/dev/null)"; then
+        log "iOS release scratch: SAFETY-SKIP $dir/$sub ($_safety_reason)"
+        continue
+      fi
+      before_kb=$(size_kb "$dir/$sub")
+      if [[ "$DRY_RUN" == true ]]; then
+        log "iOS release scratch: [dry-run] would remove $dir/$sub ($(fmt_kb "$before_kb"))"
+      else
+        log "iOS release scratch: removing $dir/$sub ($(fmt_kb "$before_kb"))"
+        c14_remove "$dir/$sub" --kind xcode-derived-data || true
+      fi
+    done
+  done
+}
+
 log "Cleanup mode: $( [[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo APPLY )"
 
 clear_contents "Xcode DerivedData" "$DERIVED_DATA"
 clean_custom_derived_data
+clean_ios_release_scratch
 clear_contents "CoreSimulator Temp" "$SIM_TEMP"
 clear_contents "CoreSimulator Caches" "$SIM_CACHES"
 
