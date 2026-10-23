@@ -50,10 +50,11 @@ def _load(path: Path) -> dict:
 
 
 def _add_entry(data: dict, field: str, entry: dict) -> bool:
-    rows = data.get(field)
-    if rows is None:
+    if field not in data:
         rows = []
         data[field] = rows
+    else:
+        rows = data[field]
     if not isinstance(rows, list):
         raise ConfigError(f"config field {field!r} must be a JSON array")
 

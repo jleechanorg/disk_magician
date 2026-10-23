@@ -123,6 +123,31 @@ class TestConfigMutator(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(config.read_bytes(), before)
 
+    def test_null_monitored_fields_fail_without_replacement(self):
+        for field, args in (
+            (
+                "monitored_dirs",
+                ("add-monitored-dir", "--key", "null-dir", "--path", "/null"),
+            ),
+            (
+                "monitored_file_globs",
+                (
+                    "add-monitored-file-glob",
+                    "--key",
+                    "null-glob",
+                    "--pattern",
+                    "/null/*",
+                ),
+            ),
+        ):
+            with self.subTest(field=field):
+                config = self.write_config(data={field: None, "unrelated": {"keep": True}})
+                before = config.read_bytes()
+                result = self.run_config(*args, config=config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"config field '{field}' must be a JSON array", result.stderr)
+                self.assertEqual(config.read_bytes(), before)
+
     def test_packaged_template_is_read_only(self):
         template = REPO / "config.json.template"
         before = template.read_bytes()
