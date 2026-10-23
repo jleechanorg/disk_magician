@@ -200,6 +200,50 @@ assert_not_contains "$HTML_BODY" "npx npkill" "HTML does not recommend npx npkil
 assert_not_contains "$HTML_BODY" "rm -rf ~/.codex" "HTML does not contain rm -rf ~/.codex"
 assert_not_contains "$HTML_BODY" "mv ~/.codex" "HTML does not contain mv ~/.codex"
 
+# 5. The report must use the same effective-config precedence as snapshot and
+# the config mutator, so a newly added key renders its actual configured path.
+CONFIG_HOME="$TMP_TEST_DIR/config-home"
+STATE_REPO="$TMP_TEST_DIR/state-repo"
+ENV_CONFIG="$TMP_TEST_DIR/env-config.json"
+mkdir -p "$CONFIG_HOME/disk-magician" "$STATE_REPO/config"
+cat <<'JSON' > "$ENV_CONFIG"
+{"monitored_dirs": [{"key": "precedence_key", "path": "/env/winner"}]}
+JSON
+cat <<'JSON' > "$CONFIG_HOME/disk-magician/config.json"
+{"monitored_dirs": [{"key": "precedence_key", "path": "/xdg/winner"}]}
+JSON
+cat <<'JSON' > "$STATE_REPO/config/config.json"
+{"monitored_dirs": [{"key": "precedence_key", "path": "/state/winner"}]}
+JSON
+python3 - "$SNAP_FILE" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+data = json.loads(open(path).read())
+data["directories"]["precedence_key"] = 1048576
+open(path, "w").write(json.dumps(data))
+PY
+
+DISK_MAGICIAN_CONFIG="$ENV_CONFIG" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  DISK_MAGICIAN_STATE_REPO="$STATE_REPO" "$DISKM_SH" report --html \
+  --snapshot "$SNAP_FILE" --frontier "$FRONTIER_FILE" --output "$OUT_HTML" >/dev/null
+HTML_BODY="$(cat "$OUT_HTML")"
+assert_contains "$HTML_BODY" "/env/winner" "HTML uses explicit ENV config path"
+assert_not_contains "$HTML_BODY" "/xdg/winner" "ENV config takes precedence over XDG"
+
+env -u DISK_MAGICIAN_CONFIG XDG_CONFIG_HOME="$CONFIG_HOME" \
+  DISK_MAGICIAN_STATE_REPO="$STATE_REPO" "$DISKM_SH" report --html \
+  --snapshot "$SNAP_FILE" --frontier "$FRONTIER_FILE" --output "$OUT_HTML" >/dev/null
+HTML_BODY="$(cat "$OUT_HTML")"
+assert_contains "$HTML_BODY" "/xdg/winner" "HTML uses XDG config path"
+assert_not_contains "$HTML_BODY" "/state/winner" "XDG config takes precedence over state"
+
+env -u DISK_MAGICIAN_CONFIG XDG_CONFIG_HOME="$TMP_TEST_DIR/empty-xdg" \
+  DISK_MAGICIAN_STATE_REPO="$STATE_REPO" "$DISKM_SH" report --html \
+  --snapshot "$SNAP_FILE" --frontier "$FRONTIER_FILE" --output "$OUT_HTML" >/dev/null
+HTML_BODY="$(cat "$OUT_HTML")"
+assert_contains "$HTML_BODY" "/state/winner" "HTML uses state config when higher-precedence configs are absent"
+
 echo ""
 echo "Summary: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
