@@ -125,6 +125,9 @@ $HOME/.ollama/models	cleanup_ollama.sh	MODELS_DIR default, line 9
 $HOME/.claude/state	cleanup_claude_state.sh	CLAUDE_STATE_ROOT default (>=7d dormant workdirs); scheduled report-only, --clean needs approval
 
 # cleanup_codex_documents.sh — narrowed to the <YYYY-MM-DD>/<task-dir> paths
+# (runs as the "Codex task documents (>=7d)" category in `diskm clean --routine`
+# since 2026-10-22; before that this registry line claimed coverage that no
+# schedule actually provided — bead disk_magician-cxut)
 # it actually enumerates (leaving non-date siblings like archive/ unvisited).
 $HOME/Documents/Codex/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*	cleanup_codex_documents.sh	ROOT_LOGICAL/<YYYY-MM-DD>/<task-dir> task directories, line 116-144
 
