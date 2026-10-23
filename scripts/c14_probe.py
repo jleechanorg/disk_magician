@@ -493,7 +493,20 @@ def admin(ad, lease=None):
                 continue
             if not stat.S_ISREG(st.st_mode):
                 return print("kept:admin-unknown")
-            need = rel.endswith("HEAD") or "/" in rel  # *HEAD, refs/**, logs/**
+            # Only the worktree's OWN HEAD (and ORIG_HEAD) are push obligations. A
+            # blanket "*HEAD" also matched FETCH_HEAD, whose contents are every
+            # fetched branch tip -- none of them this worktree's work. Any worktree
+            # that had ever fetched therefore required dozens of unrelated commits
+            # to be advertised and answered kept:not-pushed forever (bead
+            # disk_magician-vp7h). ORIG_HEAD is deliberately KEPT as an obligation:
+            # after a completed `reset --hard` it can be the only remaining pointer
+            # to unpushed commits when reflogs are disabled or expired, and dropping
+            # it would let cleanup GC the last recovery path to real work (raised by
+            # the /advice Codex reviewer on PR #242). In-progress states that could
+            # carry real work (MERGE_HEAD, CHERRY_PICK_HEAD, REVERT_HEAD, rebase
+            # dirs, locked) are already rejected above, and logs/HEAD plus refs/**
+            # still match through the "/" arm.
+            need = rel in ("HEAD", "ORIG_HEAD") or "/" in rel  # HEAD, ORIG_HEAD, refs/**, logs/**
             keep = need or rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG")
             fst, digest, data = _read_verified(p, keep=keep)
             if digest is None or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):

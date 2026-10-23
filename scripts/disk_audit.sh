@@ -611,6 +611,14 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "Codex SQLite vacuum" "$SCRIPT_DIR/cleanup_codex_db.sh" $clean_arg
     fi
 
+    # Codex task documents (Tier 5: ~/Documents/Codex per-task clones, C14-gated and
+    # >=7d dormant). config/sweeper_roots.txt registers this script as the owner of
+    # the <YYYY-MM-DD>/<task-dir> pattern, so the routine must actually run it
+    # (bead disk_magician-cxut: the registry claimed coverage that did not exist).
+    if [[ -f "$SCRIPT_DIR/cleanup_codex_documents.sh" ]]; then
+        run_category "Codex task documents (>=7d)" "$SCRIPT_DIR/cleanup_codex_documents.sh" $clean_arg
+    fi
+
     # Run Supervisor Launchd Logs Cleanup (Tier 5: Rotated Logs)
     if [[ -f "$SCRIPT_DIR/cleanup_supervisor_logs.sh" ]]; then
         run_category "Supervisor logs" "$SCRIPT_DIR/cleanup_supervisor_logs.sh" $clean_arg
