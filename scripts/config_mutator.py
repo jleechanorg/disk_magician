@@ -14,6 +14,7 @@ import resolve_config
 
 
 DEFAULT_DIR_TIMEOUT = 60
+MONITORED_KEY_FIELDS = ("monitored_dirs", "monitored_globs", "monitored_file_globs")
 
 
 class ConfigError(Exception):
@@ -50,6 +51,19 @@ def _load(path: Path) -> dict:
 
 
 def _add_entry(data: dict, field: str, entry: dict) -> bool:
+    key = entry["key"]
+    for other_field in MONITORED_KEY_FIELDS:
+        if other_field == field:
+            continue
+        other_rows = data.get(other_field, [])
+        if not isinstance(other_rows, list):
+            continue
+        for existing in other_rows:
+            if isinstance(existing, dict) and existing.get("key") == key:
+                raise ConfigError(
+                    f"config key {key!r} is already used in field {other_field!r}"
+                )
+
     if field not in data:
         rows = []
         data[field] = rows
@@ -58,7 +72,6 @@ def _add_entry(data: dict, field: str, entry: dict) -> bool:
     if not isinstance(rows, list):
         raise ConfigError(f"config field {field!r} must be a JSON array")
 
-    key = entry["key"]
     for existing in rows:
         if not isinstance(existing, dict):
             raise ConfigError(f"config field {field!r} contains a non-object entry")

@@ -31,6 +31,22 @@ class TestConfigMutator(unittest.TestCase):
             text=True,
         )
 
+    def run_snapshot(self, output):
+        env = self.config_env()
+        env.update(
+            {
+                "DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS": "5",
+                "DISK_MAGICIAN_LIBRARY_FRONTIER_BUDGET_SECONDS": "1",
+                "DISK_MAGICIAN_STATE_DIR": str(self.root / "snapshot-state"),
+            }
+        )
+        return subprocess.run(
+            ["bash", str(REPO / "scripts" / "disk_snapshot.sh"), "--output", str(output)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
     def config_env(self, config=None):
         env = os.environ.copy()
         env.update(
@@ -98,6 +114,28 @@ class TestConfigMutator(unittest.TestCase):
         self.assertEqual(json.loads(explicit.read_text())["monitored_file_globs"][0]["key"], "swapfile")
         self.assertNotIn("monitored_file_globs", json.loads(xdg.read_text()))
 
+    def test_default_snapshot_consumer_reads_config_cli_mutation(self):
+        target = self.home / "ledger-root"
+        target.mkdir()
+        config = self.root / "xdg" / "disk-magician" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps({"library_frontier_enabled": False, "monitored_dirs": []}) + "\n"
+        )
+        result = self.run_config(
+            "add-monitored-dir",
+            "--key",
+            "ledger_root",
+            "--path",
+            "~/ledger-root",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        output = self.root / "snapshot.json"
+        snapshot = self.run_snapshot(output)
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertEqual(set(json.loads(output.read_text())["directories"]), {"ledger_root"})
+
     def test_repeat_is_idempotent_and_conflict_preserves_file(self):
         config = self.write_config(data={"monitored_dirs": []})
         args = ("add-monitored-dir", "--key", "swap", "--path", "/swapfile")
@@ -112,6 +150,26 @@ class TestConfigMutator(unittest.TestCase):
         )
         self.assertNotEqual(conflict.returncode, 0)
         self.assertEqual(config.read_bytes(), after_first)
+
+    def test_cross_field_key_conflict_preserves_file(self):
+        config = self.write_config(
+            data={
+                "monitored_dirs": [{"key": "shared", "path": "/existing", "timeout": 60}],
+                "monitored_file_globs": [],
+            }
+        )
+        before = config.read_bytes()
+        result = self.run_config(
+            "add-monitored-file-glob",
+            "--key",
+            "shared",
+            "--pattern",
+            "/other/*",
+            config=config,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already used in field 'monitored_dirs'", result.stderr)
+        self.assertEqual(config.read_bytes(), before)
 
     def test_malformed_config_fails_without_replacement(self):
         config = self.write_config()
