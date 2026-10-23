@@ -47,7 +47,61 @@ def _load(path: Path) -> dict:
         raise ConfigError(f"cannot read valid JSON config {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"config root must be a JSON object: {path}")
+    _validate_schema(data)
     return data
+
+
+def _validate_schema(data: dict) -> None:
+    """Reject shapes that the snapshot and ledger consumers cannot read."""
+    seen_keys = {}
+    value_field = {
+        "monitored_dirs": "path",
+        "monitored_globs": "pattern",
+        "monitored_file_globs": "pattern",
+    }
+    for field in MONITORED_KEY_FIELDS:
+        if field not in data:
+            continue
+        rows = data[field]
+        if not isinstance(rows, list):
+            raise ConfigError(f"config field {field!r} must be a JSON array")
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ConfigError(
+                    f"config field {field!r} entry {index} must be a JSON object"
+                )
+            key = row.get("key")
+            if not isinstance(key, str) or not key.strip():
+                raise ConfigError(
+                    f"config field {field!r} entry {index} key must be a non-empty string"
+                )
+            if key in seen_keys:
+                raise ConfigError(
+                    f"config key {key!r} is duplicated in field {seen_keys[key]!r}"
+                )
+            seen_keys[key] = field
+
+            name = value_field[field]
+            value = row.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(
+                    f"config field {field!r} entry {index} {name} must be a non-empty string"
+                )
+            if field == "monitored_dirs":
+                for timeout_name, minimum in (("timeout", 1), ("retry_timeout", 0)):
+                    if timeout_name not in row:
+                        continue
+                    timeout = row[timeout_name]
+                    if (
+                        isinstance(timeout, bool)
+                        or not isinstance(timeout, int)
+                        or timeout < minimum
+                    ):
+                        comparator = "positive" if minimum else "non-negative"
+                        raise ConfigError(
+                            f"config field {field!r} entry {index} {timeout_name} "
+                            f"must be a {comparator} integer"
+                        )
 
 
 def _add_entry(data: dict, field: str, entry: dict) -> bool:

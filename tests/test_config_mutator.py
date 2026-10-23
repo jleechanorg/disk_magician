@@ -74,7 +74,7 @@ class TestConfigMutator(unittest.TestCase):
         config = self.write_config(
             data={
                 "unrelated": {"keep": True},
-                "monitored_globs": ["~/existing"],
+                "monitored_globs": [{"key": "existing", "pattern": "~/existing"}],
                 "monitored_dirs": [],
             }
         )
@@ -91,7 +91,9 @@ class TestConfigMutator(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(config.read_text())
         self.assertEqual(data["unrelated"], {"keep": True})
-        self.assertEqual(data["monitored_globs"], ["~/existing"])
+        self.assertEqual(
+            data["monitored_globs"], [{"key": "existing", "pattern": "~/existing"}]
+        )
         self.assertEqual(
             data["monitored_dirs"],
             [{"key": "linux_usr_lib", "path": "/usr/lib", "timeout": 90}],
@@ -231,6 +233,52 @@ class TestConfigMutator(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"config field '{field}' must be a JSON array", result.stderr)
                 self.assertEqual(config.read_bytes(), before)
+
+    def test_malformed_monitored_schema_fails_without_replacement(self):
+        cases = [
+            ("monitored_dirs", "not-an-array"),
+            ("monitored_globs", None),
+            ("monitored_file_globs", 7),
+            ("monitored_dirs", [None]),
+            ("monitored_globs", ["~/glob*"]),
+            ("monitored_file_globs", [{}]),
+            ("monitored_dirs", [{"key": "dir"}]),
+            ("monitored_dirs", [{"key": "dir", "path": None}]),
+            ("monitored_globs", [{"key": None, "pattern": "~/glob*"}]),
+            ("monitored_file_globs", [{"key": "glob", "pattern": 4}]),
+            (
+                "monitored_dirs",
+                [{"key": "dir", "path": "/tmp", "timeout": None}],
+            ),
+            (
+                "monitored_dirs",
+                [{"key": "dir", "path": "/tmp", "retry_timeout": "5"}],
+            ),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                config = self.write_config(data={field: value, "unrelated": {"keep": True}})
+                before = config.read_bytes()
+                result = self.run_config(
+                    "add-monitored-dir", "--key", "new", "--path", "/new", config=config
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(config.read_bytes(), before)
+
+    def test_duplicate_monitored_keys_fail_without_replacement(self):
+        config = self.write_config(
+            data={
+                "monitored_dirs": [{"key": "shared", "path": "/one"}],
+                "monitored_globs": [{"key": "shared", "pattern": "/two/*"}],
+            }
+        )
+        before = config.read_bytes()
+        result = self.run_config(
+            "add-monitored-dir", "--key", "new", "--path", "/new", config=config
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicated", result.stderr)
+        self.assertEqual(config.read_bytes(), before)
 
     def test_packaged_template_is_read_only(self):
         template = REPO / "config.json.template"
