@@ -8,8 +8,10 @@ import os, pathlib, sys
 
 def resolve() -> str:
     explicit = os.environ.get("DISK_MAGICIAN_CONFIG")
-    if explicit and os.path.isfile(explicit):
-        return explicit
+    if explicit:
+        # An explicit override is authoritative even when it is unusable.  Do
+        # not silently edit an XDG/state/template fallback in its place.
+        return explicit if os.path.isfile(explicit) else ""
     home = pathlib.Path(os.environ.get("HOME", "/"))
     xdg_cfg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     p = xdg_cfg / "disk-magician" / "config.json"

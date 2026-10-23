@@ -31,8 +31,8 @@ class TestConfigMutator(unittest.TestCase):
             text=True,
         )
 
-    def run_snapshot(self, output):
-        env = self.config_env()
+    def run_snapshot(self, output, config=None):
+        env = self.config_env(config)
         env.update(
             {
                 "DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS": "5",
@@ -180,6 +180,32 @@ class TestConfigMutator(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(config.read_bytes(), before)
+
+    def test_invalid_explicit_config_fails_closed_for_mutator_and_snapshot(self):
+        fallback = self.root / "xdg" / "disk-magician" / "config.json"
+        fallback.parent.mkdir(parents=True)
+        fallback.write_text(json.dumps({"monitored_dirs": []}) + "\n")
+        before = fallback.read_bytes()
+        invalid = [
+            self.root / "missing.json",
+            self.root / "config-dir",
+            self.root / "broken-link.json",
+        ]
+        invalid[1].mkdir()
+        invalid[2].symlink_to(self.root / "nowhere.json")
+        for config in invalid:
+            with self.subTest(config=config):
+                result = self.run_config(
+                    "add-monitored-dir", "--key", "wrong", "--path", "/wrong",
+                    config=config,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(fallback.read_bytes(), before)
+                output = self.root / f"snapshot-{config.name}.json"
+                snapshot = self.run_snapshot(output, config=config)
+                self.assertNotEqual(snapshot.returncode, 0)
+                self.assertIn("missing file", snapshot.stderr)
+                self.assertFalse(output.exists())
 
     def test_null_monitored_fields_fail_without_replacement(self):
         for field, args in (
