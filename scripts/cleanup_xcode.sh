@@ -207,7 +207,14 @@ run_simctl() {
   if [[ "$rc" -ne 0 ]]; then
     log "xcrun simctl $*: rc=${rc} (non-fatal)"
   fi
-  SIMCTL_STATUS="completed"
+  # The WORST outcome wins: a later successful call must never overwrite an
+  # earlier timeout/skip, or the summary would report "completed" for a run in
+  # which simulator housekeeping was actually degraded and silently dropped
+  # (/advice review of PR #249 raised exactly this). Precedence:
+  # degraded > skipped > completed.
+  if [[ "$SIMCTL_STATUS" != degraded* && "$SIMCTL_STATUS" != skipped* ]]; then
+    SIMCTL_STATUS="completed"
+  fi
   return 0
 }
 

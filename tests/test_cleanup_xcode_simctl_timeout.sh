@@ -39,6 +39,15 @@ cat >"$TMPROOT/bin/xcrun" <<STUB
 echo "\$*" >>"$CALLS"
 case "\${FAKE_XCRUN_MODE:-fast}" in
   hang) sleep 90 ;;
+  # Hang only the FIRST invocation, succeed afterwards: proves a later success
+  # cannot overwrite an earlier degraded verdict in the summary.
+  hang-first)
+    n=0
+    [ -n "\${FAKE_XCRUN_COUNTER:-}" ] && [ -f "\${FAKE_XCRUN_COUNTER}" ] && n=\$(cat "\${FAKE_XCRUN_COUNTER}")
+    n=\$((n + 1))
+    [ -n "\${FAKE_XCRUN_COUNTER:-}" ] && printf '%s' "\$n" >"\${FAKE_XCRUN_COUNTER}"
+    [ "\$n" -eq 1 ] && sleep 90
+    ;;
 esac
 exit 0
 STUB
