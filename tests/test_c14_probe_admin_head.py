@@ -98,10 +98,17 @@ class TestAdminHeadObligations(unittest.TestCase):
             "the worktree's own HEAD must stay a push obligation (unpushed WIP must still be protected)",
         )
 
-    def test_orig_head_oid_is_not_a_push_obligation(self) -> None:
-        # ORIG_HEAD is written by resets/merges; it is history, not work.
+    def test_orig_head_oid_remains_a_push_obligation(self) -> None:
+        # ORIG_HEAD is KEPT deliberately: after a completed `reset --hard` it can be
+        # the only remaining pointer to unpushed commits when reflogs are disabled or
+        # expired. Dropping it would let cleanup GC the last recovery path to real
+        # work (raised by the /advice Codex reviewer on PR #242).
         (self.admin / "ORIG_HEAD").write_text(f"{self.foreign_oid}\n")
-        self.assertNotIn(self.foreign_oid, self.probe_admin())
+        self.assertIn(
+            self.foreign_oid,
+            self.probe_admin(),
+            "ORIG_HEAD must stay a push obligation: it can be the sole pointer to unpushed work",
+        )
 
 
 if __name__ == "__main__":
