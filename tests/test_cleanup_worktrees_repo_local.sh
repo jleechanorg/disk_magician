@@ -428,13 +428,13 @@ fi
 assert_contains "custom STANDARD_WORKTREE_ROOT summary eligible count" "Repo-local:  1 eligible, 0 preserved." "$CUSTOM_TEXT"
 
 DISCOVERY_LIB="$REPO_ROOT/scripts/lib/worktree_repo_discovery.sh"
-SCRIPT_TEXT=$(cat "$CLEANUP_SCRIPT" "$DISCOVERY_LIB" 2>/dev/null || cat "$CLEANUP_SCRIPT")
-if grep -Eq '(_dwr_find_repos_from_worktrees|find_repos_from_worktrees) "\$HOME/wc-wt"' <<<"$SCRIPT_TEXT"; then
+SCRIPT_TEXT=$(sed -n '/^dwr_agent_roots()/,/^}/p' "$DISCOVERY_LIB")
+if grep -Fq '"$HOME/wc-wt"' <<<"$SCRIPT_TEXT"; then
   record_pass "wc-wt discovery line kept"
 else
   record_fail "wc-wt discovery line kept" "expected discovery to include \$HOME/wc-wt"
 fi
-if grep -Eq '(_dwr_find_repos_from_worktrees|find_repos_from_worktrees) "\$HOME/project_worldaiclaw"' <<<"$SCRIPT_TEXT"; then
+if grep -Fq '"$HOME/project_worldaiclaw"' <<<"$SCRIPT_TEXT"; then
   record_pass "project_worldaiclaw discovery line kept"
 else
   record_fail "project_worldaiclaw discovery line kept" "expected discovery to include \$HOME/project_worldaiclaw"

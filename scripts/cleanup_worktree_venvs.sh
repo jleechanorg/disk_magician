@@ -583,6 +583,7 @@ SKIPPED_NOT_WORKTREE=0
 SKIPPED_TOO_YOUNG=0
 SKIPPED_ALREADY_CENTRALIZED=0
 SKIPPED_EXCLUDED=0
+SKIPPED_TRACKED=0
 SKIPPED_NO_VENV=0
 INSPECTED=0
 
@@ -607,6 +608,15 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     # Skip symlinked / broken venvs.
     if is_already_centralized_or_broken "$venv_path"; then
       SKIPPED_ALREADY_CENTRALIZED=$(( SKIPPED_ALREADY_CENTRALIZED + 1 ))
+      continue
+    fi
+
+    # A venv whose files are committed is repo content, not a rebuildable
+    # cache: stripping it leaves thousands of tracked `D` entries that keep the
+    # worktree dirty forever.
+    if [[ -n "$(git -C "$parent" ls-files -- "$venv_name" 2>/dev/null | head -n 1)" ]]; then
+      SKIPPED_TRACKED=$(( SKIPPED_TRACKED + 1 ))
+      log "  skip (tracked by git): $venv_path"
       continue
     fi
 
@@ -659,6 +669,7 @@ log "  Skipped (not worktree): $SKIPPED_NOT_WORKTREE"
 log "  Skipped (too young):    $SKIPPED_TOO_YOUNG  (< ${MIN_AGE_DAYS} days old)"
 log "  Skipped (centralized):  $SKIPPED_ALREADY_CENTRALIZED  (symlink / broken)"
 log "  Skipped (excluded):     $SKIPPED_EXCLUDED  (ao-owned / live-cwd / unknown)"
+log "  Skipped (tracked):      $SKIPPED_TRACKED  (venv files committed to git)"
 if [[ "$DRY_RUN" == true ]]; then
   log ""
   log "This was a DRY-RUN. Re-run with WORKTREE_APPROVED=1 $0 --clean to apply."

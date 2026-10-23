@@ -731,6 +731,51 @@
       "key": "venvs_home",
       "path": "~/.venvs",
       "timeout": 60
+    },
+    {
+      "key": "worktrees_worldarchitect_ai",
+      "path": "~/.worktrees/worldarchitect.ai",
+      "timeout": 300
+    },
+    {
+      "key": "tmp_worldarchitect_ai",
+      "path": "/private/tmp/worldarchitect.ai",
+      "timeout": 180
+    },
+    {
+      "key": "tmp_dm_archive",
+      "path": "/private/tmp/_disk_magician_archive",
+      "timeout": 120
+    },
+    {
+      "key": "project_worldai_frontend",
+      "path": "~/project_worldai_frontend",
+      "timeout": 180
+    },
+    {
+      "key": "worldarchitect_ai_worktrees",
+      "path": "~/worldarchitect.ai.worktrees",
+      "timeout": 180
+    },
+    {
+      "key": "llm_wiki_worktrees",
+      "path": "~/llm_wiki.worktrees",
+      "timeout": 60
+    },
+    {
+      "key": "project_agento",
+      "path": "~/project_agento",
+      "timeout": 180
+    },
+    {
+      "key": "actions_runner",
+      "path": "~/actions-runner",
+      "timeout": 180
+    },
+    {
+      "key": "local_state",
+      "path": "~/.local/state",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
@@ -851,6 +896,10 @@
     {
       "key": "tmp_wf_derived_data",
       "pattern": "/tmp/wf*_dd*"
+    },
+    {
+      "key": "tmp_worldai_ios_release",
+      "pattern": "/private/tmp/worldai-ios-release-*"
     }
   ],
   "cleanup_thresholds": {

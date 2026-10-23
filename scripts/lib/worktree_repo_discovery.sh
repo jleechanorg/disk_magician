@@ -19,6 +19,8 @@
 #   $HOME/projects/*/.claude/worktrees
 #   $HOME/project_worldaiclaw            (multi-agent worktree clusters)
 #   $HOME/wc-wt                          (review/advice/recut worktree clusters)
+#   $HOME/project_agento, project_worldai_frontend, worldarchitect.ai.worktrees,
+#   $HOME/llm_wiki.worktrees             (see dwr_agent_roots)
 # plus includes $HOME/projects/worldarchitect.ai and
 # $HOME/project_worldaiclaw/worldai_claw if they have a valid .git.
 #
@@ -27,6 +29,22 @@
 # timeout per search root prevents hanging unattended cleanup runs.
 #
 # Not meant to be executed directly.
+
+# Agent worktree roots outside the standard root. Single list shared by repo
+# discovery and cleanup_worktrees.sh's repo-local match, so a root added here is
+# both discovered and swept (all existing gates still apply).
+dwr_agent_roots() {
+    printf '%s\n' "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/project_agento" \
+        "$HOME/project_worldai_frontend" "$HOME/worldarchitect.ai.worktrees" "$HOME/llm_wiki.worktrees"
+}
+
+dwr_in_agent_root() {
+    local p="$1" r
+    while IFS= read -r r; do
+        [[ "$p" == "$r/"* ]] && return 0
+    done < <(dwr_agent_roots)
+    return 1
+}
 
 discover_worktree_repos() {
     local override="${1:-}"
@@ -147,8 +165,10 @@ except Exception:
     _dwr_add_main_repo "$HOME/project_worldaiclaw/worldai_claw"
 
     # Auto-discover worktrees under sibling agent roots
-    _dwr_find_repos_from_worktrees "$HOME/project_worldaiclaw" 3
-    _dwr_find_repos_from_worktrees "$HOME/wc-wt" 3
+    local agent_root
+    while IFS= read -r agent_root; do
+        _dwr_find_repos_from_worktrees "$agent_root" 3
+    done < <(dwr_agent_roots)
 
     if [[ -n "$discovered_repos_str" ]]; then
         echo "$discovered_repos_str" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | sort -u
