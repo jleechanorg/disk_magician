@@ -17,6 +17,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
 # shellcheck source=scripts/lib/actuator_deadline.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
@@ -683,7 +684,8 @@ has_ambiguous_lsof_path() {
 # escalation (--kill-after=2s).
 # Fails closed (returns 0, unsafe/active) on canonicalization failure, control
 # characters in candidate/canonical path, missing lsof, missing timeout, timeout,
-# nonzero status, stderr output, unknown path formats, or malformed records.
+# nonzero status, relevant or unknown stderr diagnostics, unknown path formats,
+# or malformed records. Unrelated mount-stat warnings are ignored.
 # Returns 1 only when authoritatively proven that no open files match.
 has_open_files() {
   local dir="$1"
@@ -765,7 +767,7 @@ has_open_files() {
     return 0
   fi
 
-  if [[ -s "$err_file" ]]; then
+  if lsof_stderr_incomplete_for_path "$(cat "$err_file")" "$canon_dir"; then
     rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
     return 0

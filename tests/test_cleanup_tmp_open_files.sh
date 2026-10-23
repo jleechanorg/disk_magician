@@ -163,7 +163,7 @@ EOF
 }
 echo "=== cleanup_tmp.sh open-file probes test suite (disk_magician-dcz) ==="
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 1: Fake lsof only accepts `+w -n -P -F fnt` and fails if +D is passed
+# Test 1: Fake lsof only accepts `+w -n -P -F fnt`; unrelated mount warning is safe
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Test 1: Fake lsof requires targetless '+w -n -P -F fnt' and rejects '+D'"
 T1_PRIVATE_TMP="$TMP_ROOT/t1-private-tmp"
@@ -200,6 +200,10 @@ fi
 echo "p1234"
 echo "fcwd"
 echo "n/"
+if [[ -n "${DISK_MAGICIAN_TEST_UNRELATED_MOUNT:-}" ]]; then
+  echo "lsof: WARNING: can't stat() tracefs file system $DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  echo "      Output information may be incomplete." >&2
+fi
 exit 0
 EOF
 chmod +x "$T1_BIN/lsof"
@@ -208,6 +212,7 @@ run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
   PATH="$T1_BIN:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -220,6 +225,7 @@ assert_rc "Test 1: exits 0" 0 "$T1_RC"
 assert_not_contains "Test 1: fake lsof did not reject +D" "+D is forbidden" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpected flags" "$T1_OUT_CONTENT"
 assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
+assert_not_contains "Test 1: unrelated mount warning does not fail closed" "Open-file check failed" "$T1_OUT_CONTENT"
 assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: Fresh authoritative scan at each guarded destructive decision

@@ -63,6 +63,23 @@ lsof_collect_cwds $'p1\np2\nfcwd\nn/b' "" 0 && bad "pid-only block accepted" || 
 lsof_collect_cwds $'n/a\nn/b' "" 0 && bad "pid-less scan accepted" || ok "pid-less scan rejected: $LSOF_CWD_REASON"
 lsof_stderr_incomplete $'      Output information may be incomplete.' && ok "standalone trailer incomplete" || bad "standalone trailer trusted"
 lsof_stderr_incomplete $'lsof: WARNING: can\'t stat() apfs file system /' && ok "root mount warning incomplete" || bad "root mount warning trusted"
+
+echo "== lsof_stderr_incomplete_for_path =="
+WARN_ROOT="$(mktemp -d -t lsof-warn.XXXXXX)"
+mkdir -p "$WARN_ROOT/query/child" "$WARN_ROOT/ancestor" "$WARN_ROOT/unrelated"
+query="$WARN_ROOT/query"
+unrelated_warn="lsof: WARNING: can't stat() tracefs file system $WARN_ROOT/unrelated"$'\n      Output information may be incomplete.'
+matching_warn="lsof: WARNING: can't stat() tmpfs file system $query"
+ancestor_warn="lsof: WARNING: can't stat() tmpfs file system $WARN_ROOT"
+child_warn="lsof: WARNING: can't stat() tmpfs file system $query/child"
+lsof_stderr_incomplete_for_path "$unrelated_warn" "$query" && bad "unrelated tracefs warning blocked closed query" || ok "unrelated tracefs warning is query-safe"
+lsof_stderr_incomplete_for_path "$matching_warn" "$query" && ok "matching mount warning fails closed" || bad "matching mount warning ignored"
+lsof_stderr_incomplete_for_path "$ancestor_warn" "$query" && ok "ancestor mount warning fails closed" || bad "ancestor mount warning ignored"
+lsof_stderr_incomplete_for_path "$child_warn" "$query" && ok "nested mount warning fails closed" || bad "nested mount warning ignored"
+lsof_stderr_incomplete_for_path 'lsof: unexpected diagnostic' "$query" && ok "unknown diagnostic fails closed" || bad "unknown diagnostic ignored"
+lsof_stderr_incomplete_for_path '      Output information may be incomplete.' "$query" && ok "unpaired incomplete trailer fails closed" || bad "unpaired trailer ignored"
+rm -rf "$WARN_ROOT"
+
 if [[ -d /proc/self ]]; then
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   lsof_collect_cwds $'p1\nfcwd\nn/proc/'"$dead"'/cwd (readlink: Permission denied)' "" 0 \

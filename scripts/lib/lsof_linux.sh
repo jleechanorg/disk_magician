@@ -36,6 +36,47 @@ lsof_stderr_incomplete() {
   return 1
 }
 
+# lsof_stderr_incomplete_for_path <stderr text> <query path>: fail closed when
+# diagnostics could hide a user of the queried tree. lsof's global mount scan
+# can warn about unrelated mounts (e.g. tracefs) even when the target is
+# readable; those warnings do not affect this query. Warnings for /, the query,
+# an ancestor, or a mount nested in the query remain incomplete.
+lsof_stderr_incomplete_for_path() {
+  local err="$1" query="$2" line fs fs_real query_real warned_unrelated=0
+  [[ -n "$err" ]] || return 1
+  query_real="$(cd "$query" 2>/dev/null && pwd -P)" || return 0
+  [[ -n "$query_real" ]] || return 0
+  [[ "$query_real" == / ]] || query_real="${query_real%/}"
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      "lsof: WARNING: can"*" stat() "*" file system "*)
+        fs="${line##* file system }"
+        # The warning includes a real mount path. Resolve it through the
+        # filesystem so symlinked spellings cannot make an overlapping mount
+        # look unrelated. Unknown paths fail closed.
+        fs_real="$(cd "$fs" 2>/dev/null && pwd -P)" || return 0
+        [[ -n "$fs_real" ]] || return 0
+        [[ "$fs_real" == / ]] || fs_real="${fs_real%/}"
+        if [[ "$fs_real" == / || "$query_real" == "$fs_real" \
+            || "$query_real" == "$fs_real"/* \
+            || "$fs_real" == "$query_real"/* ]]; then
+          return 0
+        fi
+        warned_unrelated=1
+        continue ;;
+    esac
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$line" == "Output information may be incomplete." ]]; then
+      (( warned_unrelated )) && continue
+      return 0
+    fi
+    return 0
+  done <<<"$err"
+  return 1
+}
+
 # lsof_denied_ignorable "/proc/<pid>/cwd (readlink: Permission denied)": rc 0
 # when that hidden cwd cannot be this user's live use -- the process exited, it
 # belongs to another uid, or nothing can be read from it at all. Without procfs
