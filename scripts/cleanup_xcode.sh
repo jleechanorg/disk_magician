@@ -27,6 +27,15 @@ Options:
   --dry-run         Preview cleanup without deleting.
   --all-simulators  Also erase all simulator devices. Requires SIMULATORS_APPROVED=1 with --clean.
   -h, --help        Show this help.
+
+Environment:
+  SIMULATORS_APPROVED=1                 Required for --all-simulators with --clean.
+  DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS  Per-call xcrun simctl bound in seconds
+                                        (default 120). A timed-out simctl call logs
+                                        a warning and the sweep continues.
+  DISK_MAGICIAN_TIMEOUT_BIN             Timeout binary to use instead of the probe
+                                        (or "none" to force the pure-bash watchdog).
+                                        Tests/diagnostics only.
 EOF
 }
 
@@ -47,6 +56,83 @@ if [[ "$DRY_RUN" != true && "$DELETE_ALL_SIMULATORS" == true && "${SIMULATORS_AP
 fi
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
+
+# simctl is bounded: a wedged `simctl` (hung CoreSimulatorService, stuck device
+# shutdown) must not wedge the whole cleanup step. Every invocation goes through
+# simctl_run, which mirrors the timeout-resolution ladder in
+# cleanup_claude_state.sh (probe timeout, gtimeout, then the usual Homebrew/local
+# bin paths) and falls back to a pure-bash watchdog when no coreutils timeout
+# exists (stock macOS). A timeout is never fatal: callers keep the same
+# fail-open semantics as the previous `xcrun simctl ... || true`.
+SIMCTL_TIMEOUT_SECONDS="${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-120}"
+if [[ "$SIMCTL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+  # 10# keeps a leading-zero value from being parsed as invalid octal.
+  SIMCTL_TIMEOUT_SECONDS=$((10#$SIMCTL_TIMEOUT_SECONDS))
+else
+  SIMCTL_TIMEOUT_SECONDS=120
+fi
+(( SIMCTL_TIMEOUT_SECONDS >= 1 )) || SIMCTL_TIMEOUT_SECONDS=120
+
+# simctl_timeout_bin -- print the timeout binary to use, or fail when there is
+# none (the caller then takes the pure-bash path). DISK_MAGICIAN_TIMEOUT_BIN
+# forces a specific binary, or "none" to exercise/force the pure-bash fallback.
+simctl_timeout_bin() {
+  local cand
+  if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+    [[ "$DISK_MAGICIAN_TIMEOUT_BIN" == none ]] && return 1
+    printf '%s\n' "$DISK_MAGICIAN_TIMEOUT_BIN"
+    return 0
+  fi
+  for cand in timeout gtimeout \
+      /opt/homebrew/bin/gtimeout /opt/homebrew/bin/timeout \
+      /usr/local/bin/gtimeout /usr/local/bin/timeout; do
+    if [[ "$cand" == /* ]]; then
+      [[ -x "$cand" ]] && { printf '%s\n' "$cand"; return 0; }
+    elif command -v "$cand" >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# simctl_run <simctl args...> -- run `xcrun simctl ...` bounded by
+# SIMCTL_TIMEOUT_SECONDS. Always returns 0 (fail-open) and logs a warning naming
+# the subcommand when the bound was hit, so one hung call cannot abort the sweep.
+simctl_run() {
+  local timeout_cmd rc pid waited
+  if timeout_cmd="$(simctl_timeout_bin)"; then
+    "$timeout_cmd" "$SIMCTL_TIMEOUT_SECONDS" xcrun simctl "$@" 2>/dev/null || rc=$?
+    rc=${rc:-0}
+  else
+    # Output goes to /dev/null, not just stderr: an orphaned grandchild of a
+    # killed simctl must not hold this shell's stdout pipe open (that would make
+    # a `$(...)` caller wait for the orphan, i.e. for the full hang again).
+    xcrun simctl "$@" >/dev/null 2>&1 &
+    pid=$!
+    waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if (( waited >= SIMCTL_TIMEOUT_SECONDS )); then
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rc=124
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ -z "${rc:-}" ]]; then
+      wait "$pid" 2>/dev/null || rc=$?
+      rc=${rc:-0}
+    fi
+  fi
+  if [[ "$rc" == 124 || "$rc" == 137 ]]; then
+    log "WARNING: xcrun simctl $*: timed out after ${SIMCTL_TIMEOUT_SECONDS}s, continuing"
+  fi
+  return 0
+}
 
 size_kb() {
   local path="$1"
@@ -154,16 +240,16 @@ if command -v xcrun >/dev/null 2>&1; then
       log "[dry-run] would run: xcrun simctl delete all"
     else
       log "running: xcrun simctl shutdown all"
-      xcrun simctl shutdown all 2>/dev/null || true
+      simctl_run shutdown all
       log "running: xcrun simctl delete all"
-      xcrun simctl delete all 2>/dev/null || true
+      simctl_run delete all
     fi
   else
     if [[ "$DRY_RUN" == true ]]; then
       log "[dry-run] would run: xcrun simctl delete unavailable"
     else
       log "running: xcrun simctl delete unavailable"
-      xcrun simctl delete unavailable 2>/dev/null || true
+      simctl_run delete unavailable
     fi
   fi
 else
