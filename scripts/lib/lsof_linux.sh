@@ -8,24 +8,30 @@
 # operator explicitly approves uninspectable processes. Everything else still
 # fails closed.
 
+# lsof_mount_warning_path <line>: print the path from one exact lsof warning.
+lsof_mount_warning_path() {
+  local line="$1"
+  local pattern="^lsof: WARNING: can't stat\\(\\) [^[:space:]]+ file system (/.*)$"
+  [[ "$line" =~ $pattern ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
 # lsof_stderr_incomplete <stderr text>: rc 0 when any line is not a mount-stat
 # warning or its "Output information may be incomplete." trailer.
 lsof_stderr_incomplete() {
-  # rc 0 => the scan may be incomplete. Glob matching, not regex: the warning
-  # contains an apostrophe, and mount paths may hold any character.
+  # rc 0 => the scan may be incomplete. The lsof warning shape is exact; only
+  # its filesystem type is a token and its path may contain spaces.
   local line trimmed fs warned=0
   [[ -n "$1" ]] || return 1
   while IFS= read -r line; do
     [[ -n "$line" ]] || return 0
-    case "$line" in
-      "lsof: WARNING: can"*" stat() "*" file system "*)
-        fs="${line#* file system }"
+    if fs="$(lsof_mount_warning_path "$line")"; then
         while [[ "$fs" == */ ]]; do fs="${fs%/}"; done
         [[ -z "$fs" ]] && fs="/"
         [[ "$fs" == "/" ]] && return 0
         warned=1
-        continue ;;
-    esac
+        continue
+    fi
     trimmed="${line#"${line%%[![:space:]]*}"}"
     if [[ "$trimmed" == "Output information may be incomplete." ]]; then
       (( warned )) && { warned=0; continue; }
@@ -50,9 +56,7 @@ lsof_stderr_incomplete_for_path() {
 
   while IFS= read -r line; do
     [[ -n "$line" ]] || return 0
-    case "$line" in
-      "lsof: WARNING: can"*" stat() "*" file system "*)
-        fs="${line#* file system }"
+    if fs="$(lsof_mount_warning_path "$line")"; then
         # The warning includes a real mount path. Resolve it through the
         # filesystem so symlinked spellings cannot make an overlapping mount
         # look unrelated. Unknown paths fail closed.
@@ -65,8 +69,8 @@ lsof_stderr_incomplete_for_path() {
           return 0
         fi
         warned_unrelated=1
-        continue ;;
-    esac
+        continue
+    fi
     line="${line#"${line%%[![:space:]]*}"}"
     if [[ "$line" == "Output information may be incomplete." ]]; then
       if (( warned_unrelated )); then

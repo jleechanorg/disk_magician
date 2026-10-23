@@ -12,8 +12,12 @@ eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (want '$3' got '$2')"; }
 
 echo "== lsof_stderr_incomplete =="
 mount_warn=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
+mount_warn_line="${mount_warn%$'\n'*}"
+malformed_type_warn="${mount_warn_line/tracefs/trace fs}"
 lsof_stderr_incomplete "" && bad "empty stderr flagged" || ok "empty stderr is complete"
 lsof_stderr_incomplete "$mount_warn" && bad "mount-stat warning flagged" || ok "mount-stat warning alone is complete"
+lsof_stderr_incomplete 'lsof: WARNING: canary stat() fake file system /sys/kernel/debug/tracing' && ok "malformed mount warning fails closed" || bad "malformed mount warning trusted"
+lsof_stderr_incomplete "$malformed_type_warn" && ok "mount warning with malformed type fails closed" || bad "mount warning with malformed type trusted"
 lsof_stderr_incomplete "$mount_warn"$'\nlsof: WARNING: can\'t open /proc/42/fd: Permission denied' && ok "other warning still incomplete" || bad "other warning ignored"
 lsof_stderr_incomplete $'      Output information may be incomplete.\nlsof: WARNING: can\'t stat() file /home/x/wt: No such file' && ok "non-mount stat warning still incomplete" || bad "non-mount stat warning ignored"
 

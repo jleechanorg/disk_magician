@@ -560,6 +560,29 @@ run_capture "$T5_OUT" env -i HOME="$TMP_ROOT/t5-home" \
 assert_rc "Test 5c (stderr output): exits 0" 0 $?
 assert_exists "Test 5c: archive preserved on stderr output" "$T5_ARCHIVE/20200101T000000Z"
 assert_contains "Test 5c: logs fail-closed on stderr" "Open-file check failed" "$(cat "$T5_OUT")"
+# 5c2: A newline-only stderr stream must not become empty via command substitution.
+reset_t5_archive
+cat > "$T5_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+printf 'p100\nfcwd\nn/\n'
+printf '\n' >&2
+exit 0
+EOF
+chmod +x "$T5_BIN/lsof"
+run_capture "$T5_OUT" env -i HOME="$TMP_ROOT/t5-home" \
+  PATH="$T5_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T5_BIN/lsof" \
+  DISK_MAGICIAN_TIMEOUT_BIN="$T5_BIN/timeout" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T5_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T5_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T5_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 5c2 (newline-only stderr): exits 0" 0 $?
+assert_exists "Test 5c2: archive preserved on newline-only stderr" "$T5_ARCHIVE/20200101T000000Z"
+assert_contains "Test 5c2: newline-only stderr fails closed" "Open-file check failed" "$(cat "$T5_OUT")"
 # 5d: Malformed output preserves candidate
 reset_t5_archive
 cat > "$T5_BIN/lsof" <<'EOF'

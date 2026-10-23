@@ -762,6 +762,11 @@ has_open_files() {
     log "Open-file check failed for $dir (could not read lsof stderr) — fail-closed, treating as active."
     return 0
   fi
+  if [[ -s "$err_file" && -z "$err_content" ]]; then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (lsof stderr contained only line breaks) — fail-closed, treating as active."
+    return 0
+  fi
   diagnostic="${err_content%%$'\n'*}"
 
   if (( rc != 0 )); then
