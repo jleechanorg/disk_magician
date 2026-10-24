@@ -304,6 +304,8 @@ def main(argv=None) -> int:
 
     try:
         path = _effective_path()
+        if path.is_symlink():
+            raise ConfigError(f"refusing to write through symlink config: {path}")
         with _lock(path) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
