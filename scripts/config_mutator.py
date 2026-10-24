@@ -37,7 +37,11 @@ def _effective_path() -> Path:
         if os.environ.get("DISK_MAGICIAN_CONFIG") or not (
             overlay.is_file() and resolve_config._is_snapshot_overlay(overlay)
         ):
-            raise ConfigError(f"refusing to write packaged config template: {configured_path}")
+            if os.environ.get("DISK_MAGICIAN_CONFIG"):
+                raise ConfigError(f"refusing to write packaged config template: {configured_path}")
+            target = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            return target
         # A snapshot-only XDG overlay is an additive tuning file.  Keep the
         # packaged inventory as the read-only fallback, and materialize the
         # first writable inventory in the state repo when this command runs.
@@ -55,8 +59,8 @@ def _effective_path() -> Path:
     return path
 
 
-def _initialize_state_config(path: Path) -> None:
-    """Seed a writable state config from the package and optional overlay."""
+def _initial_state_config() -> dict:
+    """Build the first writable state config without publishing it."""
     template = Path(__file__).resolve().parents[1] / "config.json.template"
     try:
         data = json.loads(template.read_text(encoding="utf-8"))
@@ -73,10 +77,12 @@ def _initialize_state_config(path: Path) -> None:
             overlay_data = json.loads(overlay.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ConfigError(f"cannot read valid JSON config {overlay}: {exc}") from exc
-        if isinstance(overlay_data, dict):
-            data.update(overlay_data)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, data)
+        if not isinstance(overlay_data, dict):
+            raise ConfigError(f"config root must be a JSON object: {overlay}")
+        data.update(overlay_data)
+    if not isinstance(data, dict):
+        raise ConfigError(f"config root must be a JSON object: {template}")
+    return data
 
 
 def _load(path: Path) -> dict:
@@ -255,9 +261,11 @@ def main(argv=None) -> int:
         with _lock(path) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                if not path.exists():
-                    _initialize_state_config(path)
-                data = _load(path)
+                if path.exists():
+                    data = _load(path)
+                else:
+                    data = _initial_state_config()
+                    _validate_schema(data)
                 changed = _add_entry(data, field, entry)
                 if changed:
                     _atomic_write(path, data)
