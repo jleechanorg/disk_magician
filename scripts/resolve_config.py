@@ -64,10 +64,6 @@ def resolve() -> str:
     p = state / "config" / "config.json"
     if p.is_file():
         return str(p)
-    # An overlay is the only usable config when no full state config exists;
-    # callers may then add the first monitored entry to the user config.
-    if overlay.is_file():
-        return str(overlay)
     here = pathlib.Path(__file__).resolve().parent.parent
     for cand in (here / "config.json", here / "config.json.template"):
         if cand.is_file():

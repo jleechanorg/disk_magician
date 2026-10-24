@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 import resolve_config
+import resolve_state_repo_path
 
 
 DEFAULT_DIR_TIMEOUT = 60
@@ -27,7 +28,22 @@ def _effective_path() -> Path:
         raise ConfigError("no effective config file was found")
     configured_path = Path(configured)
     if configured_path.name == "config.json.template":
-        raise ConfigError(f"refusing to write packaged config template: {configured_path}")
+        overlay = Path(
+            os.environ.get(
+                "XDG_CONFIG_HOME",
+                Path(os.environ.get("HOME", "/")) / ".config",
+            )
+        ) / "disk-magician" / "config.json"
+        if os.environ.get("DISK_MAGICIAN_CONFIG") or not (
+            overlay.is_file() and resolve_config._is_snapshot_overlay(overlay)
+        ):
+            raise ConfigError(f"refusing to write packaged config template: {configured_path}")
+        # A snapshot-only XDG overlay is an additive tuning file.  Keep the
+        # packaged inventory as the read-only fallback, and materialize the
+        # first writable inventory in the state repo when this command runs.
+        target = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
     try:
         path = configured_path.resolve(strict=True)
     except OSError as exc:
@@ -37,6 +53,30 @@ def _effective_path() -> Path:
     if not path.is_file():
         raise ConfigError(f"effective config is not a regular file: {path}")
     return path
+
+
+def _initialize_state_config(path: Path) -> None:
+    """Seed a writable state config from the package and optional overlay."""
+    template = Path(__file__).resolve().parents[1] / "config.json.template"
+    try:
+        data = json.loads(template.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"cannot read packaged config template {template}: {exc}") from exc
+    overlay = Path(
+        os.environ.get(
+            "XDG_CONFIG_HOME",
+            Path(os.environ.get("HOME", "/")) / ".config",
+        )
+    ) / "disk-magician" / "config.json"
+    if overlay.is_file():
+        try:
+            overlay_data = json.loads(overlay.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"cannot read valid JSON config {overlay}: {exc}") from exc
+        if isinstance(overlay_data, dict):
+            data.update(overlay_data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, data)
 
 
 def _load(path: Path) -> dict:
@@ -141,7 +181,7 @@ def _add_entry(data: dict, field: str, entry: dict) -> bool:
 
 
 def _atomic_write(path: Path, data: dict) -> None:
-    mode = stat.S_IMODE(path.stat().st_mode)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(tmp_name)
     try:
@@ -215,6 +255,8 @@ def main(argv=None) -> int:
         with _lock(path) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                if not path.exists():
+                    _initialize_state_config(path)
                 data = _load(path)
                 changed = _add_entry(data, field, entry)
                 if changed:

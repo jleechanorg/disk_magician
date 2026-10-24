@@ -20,12 +20,6 @@ def resolve() -> str:
     if explicit:
         return explicit
     home = pathlib.Path(os.environ.get("HOME", "/"))
-    xdg_cfg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    xdg_path = xdg_cfg / "disk-magician" / "config.json"
-    if xdg_path.is_file():
-        configured = resolve_config.configured_state_repo(xdg_path, home)
-        if configured is not None:
-            return str(configured)
     cfg_path = resolve_config.resolve()
     if cfg_path:
         try:
@@ -43,6 +37,17 @@ def resolve() -> str:
                 return str(expanded)
         except (OSError, ValueError):
             pass
+    # A snapshot-only XDG overlay is intentionally not the general config
+    # winner when no state config exists, but it still owns this grandfathering
+    # knob.  Do this only after the effective config path so an explicit
+    # DISK_MAGICIAN_CONFIG remains authoritative.
+    if not os.environ.get("DISK_MAGICIAN_CONFIG"):
+        xdg_cfg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+        xdg_path = xdg_cfg / "disk-magician" / "config.json"
+        if xdg_path.is_file():
+            configured = resolve_config.configured_state_repo(xdg_path, home)
+            if configured is not None:
+                return str(configured)
     state_home = pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
     return str(state_home / "disk-magician")
 

@@ -44,7 +44,8 @@ class TestResolveConfig(unittest.TestCase):
         with open(xdg, "w") as f:
             f.write('{"snapshot_measure": {"path_max_seconds": 7}}\n')
         rc, out = resolve({"HOME": self.home})
-        self.assertEqual((rc, out), (0, xdg))
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.endswith("config.json.template"), out)
 
     def test_snapshot_overlay_uses_its_configured_state_repo(self):
         xdg = self._mk("home/.config/disk-magician/config.json")

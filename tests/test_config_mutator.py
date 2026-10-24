@@ -177,6 +177,35 @@ class TestConfigMutator(unittest.TestCase):
             {"baseline", "added"},
         )
 
+    def test_snapshot_only_overlay_materializes_template_inventory_for_cli(self):
+        xdg_config = self.root / "xdg" / "disk-magician" / "config.json"
+        xdg_config.parent.mkdir(parents=True)
+        xdg_config.write_text(
+            json.dumps({"snapshot_measure": {"path_max_seconds": 7}}) + "\n"
+        )
+        (self.home / ".claude").mkdir()
+        (self.home / "added").mkdir()
+
+        result = self.run_config(
+            "add-monitored-dir", "--key", "added", "--path", "~/added"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        self.assertTrue(state_config.is_file())
+        self.assertEqual(
+            json.loads(xdg_config.read_text()),
+            {"snapshot_measure": {"path_max_seconds": 7}},
+        )
+        state = json.loads(state_config.read_text())
+        self.assertIn("claude_root", {entry["key"] for entry in state["monitored_dirs"]})
+        self.assertIn("added", {entry["key"] for entry in state["monitored_dirs"]})
+
+        output = self.root / "snapshot-overlay-template.json"
+        snapshot = self.run_snapshot(output)
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertIn("claude_root", json.loads(output.read_text())["directories"])
+        self.assertIn("added", json.loads(output.read_text())["directories"])
+
     def test_repeat_is_idempotent_and_conflict_preserves_file(self):
         config = self.write_config(data={"monitored_dirs": []})
         args = ("add-monitored-dir", "--key", "swap", "--path", "/swapfile")
