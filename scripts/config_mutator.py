@@ -248,6 +248,8 @@ def main(argv=None) -> int:
 
     try:
         path = _effective_path()
+        if path.is_symlink():
+            raise ConfigError(f"refusing to write through symlink config: {path}")
         first_use_data = None
         first_use_changed = False
         if not path.exists():

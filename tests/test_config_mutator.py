@@ -409,6 +409,22 @@ class TestConfigMutator(unittest.TestCase):
         self.assertFalse(state_root.exists())
         self.assertFalse(lock_path.exists())
 
+    def test_dangling_state_config_symlink_is_rejected_without_replacement(self):
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        state_config.parent.mkdir(parents=True)
+        target = state_config.parent / "missing-config.json"
+        state_config.symlink_to(target)
+
+        result = self.run_config(
+            "add-monitored-dir", "--key", "fresh", "--path", "/fresh"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to write through symlink config", result.stderr)
+        self.assertTrue(state_config.is_symlink())
+        self.assertEqual(state_config.readlink(), target)
+        self.assertFalse(target.exists())
+
     def test_symlink_config_updates_target_and_keeps_link(self):
         target = self.write_config(data={"monitored_dirs": []})
         link = self.root / "config-link.json"
