@@ -17,9 +17,11 @@ plus `/Applications`. One live handle therefore reports the same pid for all
 clones. Measured on 2026-10-24 while Chrome ran:
 
 - `stat -f %l "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`
-  → `nlink=348`, `ino=2390441631`.
+  → `nlink=348`, `ino=2390441631`, and one hour later `nlink=433` for the same
+  inode: the link count *is* the clone count.
 - `X/com.google.Chrome.code_sign_clone` held **347** `code_sign_clone.*`
-  children; `X/at.studio.AsideBrowser.code_sign_clone` held 1.
+  children (432 an hour later); `X/at.studio.AsideBrowser.code_sign_clone`
+  held 1.
 - `lsof -Fpcn +D <one clone>` returned pids 1060, 10370, 53504 for a single
   path inside that clone (`.../Google Chrome.app.bundle/Contents/MacOS/Google
   Chrome`), i.e. the hard-linked inode, not a per-clone file.

@@ -155,8 +155,9 @@ lsof_state() {
   # the record stream and diagnostics are empty.
   if grep -q '^p' <<<"$output" && grep -q '^n' <<<"$output"; then
     # lsof +D matches by inode, not by path, and every clone hard-links the
-    # app's main executable (observed nlink=348 on this host: 347 clones plus
-    # /Applications). A process holding that single inode is therefore reported
+    # app's main executable, so the link count tracks the clone count (measured
+    # on this host: nlink=348 with 347 clones, and 433 with 432 clones an hour
+    # later). A process holding that single inode is therefore reported
     # under every clone and reads as "this clone is in use" — 4 live pids once
     # pinned 344 clone bundles whose only match was one shared path. That is an
     # artifact: an inode with other links survives unlinking this clone's copy.
