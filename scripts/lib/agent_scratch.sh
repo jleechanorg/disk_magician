@@ -30,7 +30,16 @@ _agent_scratch_valid_component() {
 _agent_scratch_fs_id() {
   local target="${1:-}"
   [[ -e "$target" || -L "$target" ]] || return 1
-  stat -f '%d:%i' "$target" 2>/dev/null || python3 -c 'import os, sys; st = os.stat(sys.argv[1]); print(f"{st.st_dev}:{st.st_ino}")' "$target" 2>/dev/null
+  local identity
+  # GNU and BSD stat use different format flags. Capture each attempt so a
+  # failed command cannot leak filesystem statistics into the identity token.
+  if identity="$(stat -c '%d:%i' "$target" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  elif identity="$(stat -f '%d:%i' "$target" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  else
+    python3 -c 'import os, sys; st = os.stat(sys.argv[1]); print(f"{st.st_dev}:{st.st_ino}")' "$target" 2>/dev/null
+  fi
 }
 
 agent_scratch_create() {
