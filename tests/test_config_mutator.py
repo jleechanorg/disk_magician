@@ -241,6 +241,28 @@ class TestConfigMutator(unittest.TestCase):
         self.assertIn("already used in field 'monitored_dirs'", result.stderr)
         self.assertEqual(config.read_bytes(), before)
 
+    def test_record_delimiters_are_rejected_without_replacement(self):
+        cases = [
+            ("add-monitored-dir", "--key", "bad\tkey", "--path", "/new"),
+            ("add-monitored-dir", "--key", "bad\nkey", "--path", "/new"),
+            ("add-monitored-dir", "--key", "new", "--path", "/bad\rpath"),
+            (
+                "add-monitored-file-glob",
+                "--key",
+                "new",
+                "--pattern",
+                "/bad\npattern",
+            ),
+        ]
+        for command in cases:
+            with self.subTest(command=command):
+                config = self.write_config(data={"monitored_dirs": []})
+                before = config.read_bytes()
+                result = self.run_config(*command, config=config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must not contain tabs or newline characters", result.stderr)
+                self.assertEqual(config.read_bytes(), before)
+
     def test_malformed_config_fails_without_replacement(self):
         config = self.write_config()
         config.write_text('{"monitored_dirs": [')
