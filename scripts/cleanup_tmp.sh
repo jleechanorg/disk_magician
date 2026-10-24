@@ -17,6 +17,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/scratch_lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lsof_linux.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
 # shellcheck source=scripts/lib/actuator_deadline.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
@@ -683,7 +684,8 @@ has_ambiguous_lsof_path() {
 # escalation (--kill-after=2s).
 # Fails closed (returns 0, unsafe/active) on canonicalization failure, control
 # characters in candidate/canonical path, missing lsof, missing timeout, timeout,
-# nonzero status, stderr output, unknown path formats, or malformed records.
+# nonzero status, relevant or unknown stderr diagnostics, unknown path formats,
+# or malformed records. Unrelated mount-stat warnings are ignored.
 # Returns 1 only when authoritatively proven that no open files match.
 has_open_files() {
   local dir="$1"
@@ -754,10 +756,43 @@ has_open_files() {
 
   "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
-  local diagnostic=""
-  if [[ -s "$err_file" ]]; then
-    diagnostic=$(head -n 1 "$err_file")
+  # Bash command substitution silently removes NUL bytes. A malformed lsof
+  # warning could then look like an allowlisted mount warning, so reject NULs
+  # in the original byte stream before converting stderr to shell text.
+  local -a stderr_filter_status
+  if LC_ALL=C tr -d '\000' <"$err_file" | cmp -s - "$err_file"; then
+    stderr_filter_status=("${PIPESTATUS[@]}")
+  else
+    stderr_filter_status=("${PIPESTATUS[@]}")
   fi
+  if (( stderr_filter_status[0] != 0 || stderr_filter_status[1] > 1 )); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (could not validate lsof stderr bytes) — fail-closed, treating as active."
+    return 0
+  fi
+  if (( stderr_filter_status[1] == 1 )); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (lsof stderr contained NUL bytes) — fail-closed, treating as active."
+    return 0
+  fi
+
+  local err_content="" diagnostic="" non_newline_stderr=""
+  if ! err_content=$(cat "$err_file" && printf '.'); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (could not read lsof stderr) — fail-closed, treating as active."
+    return 0
+  fi
+  err_content="${err_content%.}"
+  # Treat the final line terminator as part of the last stderr line; retain
+  # any preceding blank line so the parser can reject malformed extra output.
+  [[ "$err_content" == *$'\n' ]] && err_content="${err_content%$'\n'}"
+  non_newline_stderr="${err_content//$'\n'/}"
+  if [[ -s "$err_file" && -z "$non_newline_stderr" ]]; then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (lsof stderr contained only line breaks) — fail-closed, treating as active."
+    return 0
+  fi
+  diagnostic="${err_content%%$'\n'*}"
 
   if (( rc != 0 )); then
     rm -f "$hit_file" "$err_file"
@@ -765,7 +800,7 @@ has_open_files() {
     return 0
   fi
 
-  if [[ -s "$err_file" ]]; then
+  if lsof_stderr_incomplete_for_path "$err_content" "$canon_dir"; then
     rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (lsof rc=${rc}: ${diagnostic}) — fail-closed, treating as active."
     return 0
@@ -1025,7 +1060,16 @@ purge_archive_entry() {
   # process holding fds into the archive keeps it alive unboundedly. If
   # the entry's mtime can't be read, fall through to the guarded path
   # (fail closed toward keeping data, not toward the cap).
-  entry_mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now_epoch")"
+  # BSD stat returns an epoch for -f %m; GNU stat treats -f as a
+  # filesystem query and can succeed with nonnumeric output. Validate the
+  # result before arithmetic, then use GNU -c %Y or fail closed to now.
+  local stat_mtime=""
+  stat_mtime="$(stat -f %m "$d" 2>/dev/null)" || stat_mtime=""
+  if [[ ! "$stat_mtime" =~ ^[0-9]+$ ]]; then
+    stat_mtime="$(stat -c %Y "$d" 2>/dev/null)" || stat_mtime=""
+  fi
+  [[ "$stat_mtime" =~ ^[0-9]+$ ]] || stat_mtime="$now_epoch"
+  entry_mtime="$stat_mtime"
   age_hours=$(( (now_epoch - entry_mtime) / 3600 ))
   # Not yet aged out (find -mmin equivalent for receipt-discovered units).
   (( now_epoch - entry_mtime <= mins * 60 )) && return 0

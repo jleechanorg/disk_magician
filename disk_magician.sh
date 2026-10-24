@@ -40,6 +40,7 @@ Commands:
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
+  config        Edit the effective JSON config (add-monitored-dir|add-monitored-file-glob).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-tmp-clones       Detect full git clones, oversize scratch, and advice dirs in /private/tmp.
   check-launchd-fleet    Verify all disk-magician launchd jobs are loaded and valid (run this FIRST when investigating disk fill).
@@ -351,6 +352,9 @@ case "$CMD" in
     ;;
   state)
     "$SCRIPT_DIR/scripts/state_repo.sh" "$@"
+    ;;
+  config)
+    exec python3 "$SCRIPT_DIR/scripts/config_mutator.py" "$@"
     ;;
   check_system_residual|check-system-residual)
     "$SCRIPT_DIR/scripts/check_system_residual.sh" "$@"

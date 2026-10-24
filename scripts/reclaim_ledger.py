@@ -30,6 +30,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import check_uncovered_roots as cur  # noqa: E402
 import growth_top10  # noqa: E402
+import resolve_config  # noqa: E402
 import resolve_state_repo_path  # noqa: E402
 
 GIB_KB = 1024 * 1024
@@ -156,10 +157,33 @@ def section_d(roots, home, days, mon):
 
 
 def load_monitored(state_dir, home):
-    """(dir paths, glob patterns) from the state repo's mirrored config.json,
-    the same list the snapshot measures; None when unreadable."""
+    """(dir paths, glob patterns) from the effective config.
+
+    Snapshot consumers use ``resolve_config`` while the ledger historically
+    read only the state-repo mirror.  A higher-precedence XDG or explicit
+    config can therefore make the ledger classify the same cleaned root as
+    unmonitored until the next state-config materialization.  Resolve with
+    the requested state directory as the default so ``--state-dir`` remains
+    useful in isolated runs, while preserving the resolver's explicit/XDG
+    precedence.
+    """
+    configured_state = os.environ.get("DISK_MAGICIAN_STATE_REPO")
+    explicit_config = os.environ.get("DISK_MAGICIAN_CONFIG")
+    if configured_state is None:
+        os.environ["DISK_MAGICIAN_STATE_REPO"] = str(state_dir)
     try:
-        cfg = json.loads((state_dir / "config" / "config.json").read_text())
+        configured = resolve_config.resolve()
+    finally:
+        if configured_state is None:
+            os.environ.pop("DISK_MAGICIAN_STATE_REPO", None)
+    if not configured:
+        # An unusable explicit override is authoritative and must not silently
+        # fall through to a stale state mirror.
+        if explicit_config:
+            return None
+        configured = str(state_dir / "config" / "config.json")
+    try:
+        cfg = json.loads(pathlib.Path(configured).read_text())
     except (OSError, ValueError):
         return None
     ex = lambda p: (home + p[1:] if p.startswith("~") else p).replace("$HOME", home)  # noqa: E731

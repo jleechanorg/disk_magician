@@ -139,17 +139,21 @@ then
   exit 1
 fi
 
-# 3. Refresh the 5G ledger (fail-open) and evidence retention.
+# 3. Write back the resolved config before consumers publish reports over it.
+CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
+if [[ -n "$CFG" && -f "$CFG" ]]; then
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import config_mutator, sys; config_mutator.sync_state_config(sys.argv[1])' "$CFG" || \
+    log "WARNING: resolved config could not be copied to the state repo"
+fi
+
+# 4. Refresh the 5G ledger (fail-open) and evidence retention.
 python3 "$SCRIPT_DIR/render_topdown_ledger.py" --frontier "$FRONTIER" \
   --out-dir "$STATE_DIR/ledger" 2>/dev/null || true
 python3 "$SCRIPT_DIR/retain_evidence.py" --frontier "$FRONTIER" \
   --evidence-dir "$STATE_DIR/evidence" --keep "$KEEP" 2>/dev/null || true
 # Per-host reclaim ledger (fail-open; the `git add -A` below commits it).
 python3 "$SCRIPT_DIR/reclaim_ledger.py" --state-dir "$STATE_DIR" --no-commit >/dev/null 2>&1 || true
-
-# 4. Write back the resolved config.
-CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
-[[ -n "$CFG" && -f "$CFG" ]] && cp "$CFG" "$STATE_DIR/config/config.json"
 
 # Capture actual snapshot and renderer publication status
 RENDER_STATUS="unknown"
