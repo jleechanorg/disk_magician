@@ -569,7 +569,16 @@ PY
   # Process substitution (not a pipe) keeps cache hit/miss counters in this
   # shell. Each refreshed row is also the complete replacement cache.
   while read -r dir; do
-    mtime=$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || echo 0)
+    # BSD stat supports -f %m; GNU stat treats -f as filesystem formatting and
+    # can emit non-numeric output even when the probe fails. Accept only an
+    # epoch value before selecting that platform-specific result.
+    mtime=$(stat -f %m "$dir" 2>/dev/null || true)
+    if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+      mtime=$(stat -c %Y "$dir" 2>/dev/null || true)
+    fi
+    if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+      mtime=0
+    fi
     cached_mtime=""
     cached_size=""
     while IFS=$'\t' read -r cached_path candidate_mtime candidate_size; do
