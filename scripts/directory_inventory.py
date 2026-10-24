@@ -345,20 +345,53 @@ def publish_inventory(records, *, state_dir, git_state_repo=None, complete=False
     lock_path = inventory / "publish.lock"
     with publication_lock(state):
         if merge_existing and (inventory / "current.json").exists():
-            current = read_current(state)
             if merge_policy not in ("incoming_wins", "existing_wins"):
                 raise ValueError("unsupported inventory merge policy")
-            merged = {(r.get("filesystem_id"), r["canonical_path"]): r for r in current["records"]}
-            incoming_count = 0
-            for incoming in normalized:
-                incoming_count += 1
-                key = (incoming.get("filesystem_id"), incoming["canonical_path"])
-                if merge_policy == "incoming_wins" or key not in merged:
-                    merged[key] = incoming
-            normalized = iter(sorted(merged.values(), key=lambda r: (r.get("filesystem_id") or "", r["canonical_path"])))
-            normalized_count = len(merged)
-            serialized_bytes = sum(len(_canonical(record)) + 1 for record in merged.values())
-            prior_metadata = current["manifest"].get("scan_metadata", {})
+            pointer = json.loads((inventory / "current.json").read_bytes())
+            current_sha = _validated_sha(pointer.get("manifest_sha256"))
+            current_manifest = read_manifest(state, current_sha)
+            if bool(pointer.get("complete")) != bool(current_manifest.get("complete")):
+                raise ValueError("pointer/manifest completeness mismatch")
+            prior_records = iter(iter_publication_records(state, current_sha))
+            incoming_records = iter(normalized)
+            prior = next(prior_records, None)
+            incoming = next(incoming_records, None)
+            merged_count = [0]
+
+            def merge_sorted_records():
+                prior_row, incoming_row = prior, incoming
+                while prior_row is not None or incoming_row is not None:
+                    prior_key = ((prior_row.get("filesystem_id") or "", prior_row["canonical_path"])
+                                 if prior_row is not None else None)
+                    incoming_key = ((incoming_row.get("filesystem_id") or "", incoming_row["canonical_path"])
+                                    if incoming_row is not None else None)
+                    if prior_row is None:
+                        selected = incoming_row
+                        incoming_row = next(incoming_records, None)
+                    elif incoming_row is None:
+                        selected = prior_row
+                        prior_row = next(prior_records, None)
+                    elif prior_key < incoming_key:
+                        selected = prior_row
+                        prior_row = next(prior_records, None)
+                    elif incoming_key < prior_key:
+                        selected = incoming_row
+                        incoming_row = next(incoming_records, None)
+                    elif merge_policy == "incoming_wins":
+                        selected = incoming_row
+                        prior_row = next(prior_records, None)
+                        incoming_row = next(incoming_records, None)
+                    else:
+                        selected = prior_row
+                        prior_row = next(prior_records, None)
+                        incoming_row = next(incoming_records, None)
+                    merged_count[0] += 1
+                    yield selected
+
+            normalized = merge_sorted_records()
+            normalized_count = None
+            serialized_bytes = None
+            prior_metadata = current_manifest.get("scan_metadata", {})
             incoming_metadata = scan_metadata or {}
             scan_metadata = dict(prior_metadata)
             scan_metadata.update({k: v for k, v in incoming_metadata.items() if k != "provenance"})
@@ -381,6 +414,8 @@ def publish_inventory(records, *, state_dir, git_state_repo=None, complete=False
         objects.mkdir(parents=True, exist_ok=True)
         chunks = _stage_inventory_chunks(normalized, objects, indexes)
         sort_spool.cleanup()
+        if normalized_count is None:
+            normalized_count = merged_count[0]
         measured_bytes = sum(chunk["measurement_raw_bytes"] for chunk in chunks)
         compressed_size = sum(chunk["measurement_compressed_bytes"] for chunk in chunks)
         object_sha = chunks[0]["measurement_sha256"]

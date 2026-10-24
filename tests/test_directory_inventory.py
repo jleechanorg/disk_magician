@@ -312,3 +312,15 @@ def test_compressible_universe_over_32_mib_is_not_rejected_by_raw_size_cap(tmp_p
     assert sum(chunk["row_count"] for chunk in chunks) == count
     loaded = read_current(tmp_path)
     assert len(loaded["records"]) == count
+
+
+def test_merge_publication_uses_ordered_stream_without_compat_list_reader(tmp_path, monkeypatch):
+    import scripts.directory_inventory as codec
+    publish_inventory([row("/a", 1), row("/c", 3)], state_dir=tmp_path, complete=True)
+    def forbidden_list_reader(*args, **kwargs):
+        raise AssertionError("merge must not materialize read_current compatibility list")
+    monkeypatch.setattr(codec, "read_current", forbidden_list_reader)
+    result = codec.publish_inventory((row(path, size) for path, size in (("/b", 2),)),
+        state_dir=tmp_path, complete=True, merge_existing=True, merge_policy="incoming_wins")
+    assert result["records_count"] == 3
+    assert [item["canonical_path"] for item in codec.iter_current_records(tmp_path)] == ["/a", "/b", "/c"]
