@@ -72,6 +72,9 @@ safety_rule: none (reclaim catalog)
 
 # Need env var or app closure (operator OK):
 # CODE_SIGN_CLONES_APPROVED=1 ./scripts/cleanup_code_sign_clones.sh --clean
+#   ^ hygiene only, NOT a reclaim pool (APFS CoW shared blocks; 73 clones =
+#     104.1 GiB of du -> 0.3 GiB of df, 2026-10-06). See
+#     findings_wiki/2026-10-17-codesign-clone-du-is-phantom-when-versions-match.md
 # ./scripts/cleanup_colima.sh --clean  # preserves active containers
 # WORKTREE_APPROVED=1 ./scripts/cleanup_worktrees.sh --clean  # 14-day gated
 # AGENT_ARTIFACTS_APPROVED=1 ./scripts/cleanup_agent_artifacts.sh --clean
