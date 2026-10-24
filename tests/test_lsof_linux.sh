@@ -17,6 +17,14 @@ lsof_stderr_incomplete "$mount_warn" && bad "mount-stat warning flagged" || ok "
 lsof_stderr_incomplete "$mount_warn"$'\nlsof: WARNING: can\'t open /proc/42/fd: Permission denied' && ok "other warning still incomplete" || bad "other warning ignored"
 lsof_stderr_incomplete $'      Output information may be incomplete.\nlsof: WARNING: can\'t stat() file /home/x/wt: No such file' && ok "non-mount stat warning still incomplete" || bad "non-mount stat warning ignored"
 
+echo "== lsof_stderr_byte_status =="
+byte_tmp="$(mktemp -d "${TMPDIR:-/tmp}/dm-lsof-byte.XXXXXX")"
+printf 'clean diagnostic\n' >"$byte_tmp/clean"
+printf 'raw diagnostic\0' >"$byte_tmp/nul"
+lsof_stderr_byte_status "$byte_tmp/clean" && ok "clean stderr bytes accepted" || bad "clean stderr bytes rejected"
+lsof_stderr_byte_status "$byte_tmp/nul" && bad "NUL stderr bytes accepted" || [[ $? == 1 ]] && ok "NUL stderr bytes rejected before capture" || bad "NUL stderr status was not 1"
+lsof_stderr_byte_status "$byte_tmp/missing" && bad "missing stderr accepted" || [[ $? == 2 ]] && ok "missing stderr fails closed" || bad "missing stderr status was not 2"
+
 echo "== lsof_cwd_blocks =="
 eq "two complete blocks" \
   "$(lsof_cwd_blocks <<< $'p1\nfcwd\nn/home/a\np2\nfcwd\nn/home/b')" \
