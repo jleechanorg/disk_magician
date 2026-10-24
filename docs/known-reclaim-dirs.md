@@ -52,7 +52,7 @@ Route every deletion through these scripts so their recency and safety filters a
 
 ## Do not chase
 
-- Chrome `code_sign_clone` directories under `/private/var/folders/*/*/X/`: `du` shows tens to 100+ GiB, but they are APFS clones that share blocks with `/Applications`, so deleting them frees about nothing (`findings_wiki/2026-10-17-codesign-clone-du-is-phantom-when-versions-match.md`).
+- Chrome `code_sign_clone` directories under `/private/var/folders/*/*/X/`: `du` shows tens to 100+ GiB, but they are APFS clones that share blocks with `/Applications`, so deleting them frees about nothing: 73 clones whose `du` total was 104.1 GiB moved `df` by 0.3 GiB (2026-10-06), and a controlled 3 x 300 MB `cp -c` re-measure on 2026-10-24 returned ~0 MB when two of the three copies were deleted. Never quote this bucket as reclaimable (`findings_wiki/2026-10-17-codesign-clone-du-is-phantom-when-versions-match.md`, `findings_wiki/2026-10-24-codesign-clone-shared-inode-rules-and-c14-blocker.md`).
 - Local Time Machine / APFS snapshots taken the same day as a deletion pin the freed blocks until they thin or expire. `df` can stay flat after a large delete; check `tmutil listlocalsnapshots /` before concluding a cleanup did nothing.
 - `_disk_magician_archive` under the OS temp dir is the tool's own staging target for archived items, not a producer.
 - The never-delete list: `~/.codex/sessions*`, `~/.codex/state*.sqlite`, `~/.codex/log`, `~/.claude/projects`.

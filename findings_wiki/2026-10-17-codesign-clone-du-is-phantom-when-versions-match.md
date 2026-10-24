@@ -61,6 +61,12 @@ path, and quitting Chrome to unlock the cleaner buys ~0 GiB when versions match.
 
 ## How to tell phantom from real
 
+> 2026-10-24 update: the inode-blind lsof gate described below is fixed for
+> classification (per-clone evidence + launch-time keep-set), and the
+> reclaim is confirmed ~0 with a fresh `cp -c` measurement. The destructive
+> C14 quarantine gate still refuses these clones by inode — see
+> `2026-10-24-codesign-clone-shared-inode-rules-and-c14-blocker.md`.
+
 ```sh
 X=~/../../private/var/folders/j0/byd1z6px50v88lf679bgt0h00000gn/X/com.google.Chrome.code_sign_clone
 installed=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' \

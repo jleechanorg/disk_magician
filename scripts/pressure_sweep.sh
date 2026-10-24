@@ -85,7 +85,8 @@ exit immediately (one log line, no work). Otherwise run, in order:
      DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB, 0 disables)
   2. scripts/cleanup_colima.sh --clean (docker-prune semantics + fstrim)
   3. scripts/cleanup_code_sign_clones.sh --clean (per-launch Chrome/Aside/
-     CodexBar code_sign_clone reclaim; CODE_SIGN_CLONES_APPROVED=1)
+     CodexBar orphan code_sign_clone hygiene; APFS CoW shared blocks, so it
+     frees ~nothing while clone versions match; CODE_SIGN_CLONES_APPROVED=1)
 each under a ${STEP_TIMEOUT}s timeout (escalating to SIGKILL ${STEP_KILL_AFTER}s after
 TERM when the timeout implementation supports --kill-after), logging free-GB
 before/after to ${LOG_FILE}.

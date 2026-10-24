@@ -73,6 +73,13 @@ Aside is a Chromium-based browser (Aside Helper, Aside Helper (Renderer), Aside 
 ### Operator action (this machine, low-risk)
 
 1. **Verify before delete:** the lsof gate in `cleanup_code_sign_clones.sh` is correct. Confirm chrome **fully** quit (`pkill -x "Google Chrome"; sleep 2; lsof -Fpcn +D /private/var/folders/j0/byd1z6px50v88lf679bgt0h00000gn/X/com.google.Chrome.code_sign_clone | head`), then `CODE_SIGN_CLONES_APPROVED=1 ./scripts/cleanup_code_sign_clones.sh --clean`. Should free ~64-66 GiB.
+   **Superseded 2026-10-24 — do not act on that size.** While clone versions
+   match the installed app these are APFS copy-on-write shared blocks: a
+   controlled 2026-10-06 run deleted 73 clones whose `du` total was
+   104.1 GiB and moved `df` by 0.3 GiB. The lsof gate described here is also
+   **not** correct: it is inode-based, so one shared handle pins every clone.
+   See `2026-10-17-codesign-clone-du-is-phantom-when-versions-match.md` and
+   `2026-10-24-codesign-clone-shared-inode-rules-and-c14-blocker.md`.
 2. **Same for Aside:** quit Aside from menu bar (orange dot → Quit), then run the cleaner. Frees ~2 GiB more.
 3. **Persistent mitigation for future runs (highest leverage):** add `--disable-features=MacAppCodeSignClone` to Chrome and Aside launch args (Chrome: `defaults write com.google.Chrome.plist`, but Chrome ignores plist flags from non-Google domains — use `open -na "Google Chrome" --args --disable-features=MacAppCodeSignClone` or wrap in a launcher). Same for Aside. This stops the leak at the source per the three upstream reports above. Caveat: trace the code-signature + update mechanism is what enables seamless auto-update; disabling it may cause update-relaunch prompts.
 4. **Reboot equivalent without reboot:** `sudo periodic daily` triggers `sandbox_cleanup` which is supposed to clear `var/folders/.../X/` older than 3 days for the user; not reliable on its own, but `tmutil delete /private/var/folders/j0/byd1z6px50v88lf679bgt0h00000gn/X/com.google.Chrome.code_sign_clone/*` will leave Chrome functional because the active clone is unaffected. **Don't** `rm -rf` the top-level dir — Chrome writes the per-launch `code_sign_clone.XXXXXX/` *underneath* it.

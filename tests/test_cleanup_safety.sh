@@ -571,8 +571,8 @@ assert_contains "safety-protected clone reports SAFETY-SKIP" \
   "SAFETY-SKIP" "$(cat "$OUT8_SKIP")"
 assert_exists "safety-protected per-launch clone is preserved" \
   "$CSC_SKIP_PARENT/code_sign_clone.STALE/blob"
-assert_contains "SAFETY-SKIP is not counted toward dirs removed or freed" \
-  "Done. Dirs removed: 0  Total freed: 0 KB" "$(cat "$OUT8_SKIP")"
+assert_contains "SAFETY-SKIP is not counted toward dirs removed or du bytes" \
+  "Done. Dirs removed: 0  du-walked clone bytes: 0 KB" "$(cat "$OUT8_SKIP")"
 
 OUT8_NO_LSOF="$TMP_ROOT/csc-no-lsof.out"
 if run_capture "$OUT8_NO_LSOF" env -i HOME="$CSC_HOME" \
