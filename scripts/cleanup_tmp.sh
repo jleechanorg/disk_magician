@@ -756,6 +756,26 @@ has_open_files() {
 
   "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
+  # Bash command substitution silently removes NUL bytes. A malformed lsof
+  # warning could then look like an allowlisted mount warning, so reject NULs
+  # in the original byte stream before converting stderr to shell text.
+  local -a stderr_filter_status
+  if LC_ALL=C tr -d '\000' <"$err_file" | cmp -s - "$err_file"; then
+    stderr_filter_status=("${PIPESTATUS[@]}")
+  else
+    stderr_filter_status=("${PIPESTATUS[@]}")
+  fi
+  if (( stderr_filter_status[0] != 0 || stderr_filter_status[1] > 1 )); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (could not validate lsof stderr bytes) — fail-closed, treating as active."
+    return 0
+  fi
+  if (( stderr_filter_status[1] == 1 )); then
+    rm -f "$hit_file" "$err_file"
+    log "Open-file check failed for $dir (lsof stderr contained NUL bytes) — fail-closed, treating as active."
+    return 0
+  fi
+
   local err_content="" diagnostic="" non_newline_stderr=""
   if ! err_content=$(cat "$err_file" && printf '.'); then
     rm -f "$hit_file" "$err_file"

@@ -171,6 +171,7 @@ T1_TMP="$TMP_ROOT/t1-tmp"
 T1_ARCHIVE="$TMP_ROOT/t1-archive"
 T1_BIN="$TMP_ROOT/t1-bin"
 mkdir -p "$T1_PRIVATE_TMP" "$T1_TMP" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+mkdir -p "$TMP_ROOT/t1-home"
 touch "$T1_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
 set_old_mtime "$T1_ARCHIVE/20200101T000000Z"
 make_find_shim "$T1_BIN" "$T1_PRIVATE_TMP" "$T1_TMP"
@@ -201,7 +202,11 @@ echo "p1234"
 echo "fcwd"
 echo "n/"
 if [[ -n "${DISK_MAGICIAN_TEST_UNRELATED_MOUNT:-}" ]]; then
-  echo "lsof: WARNING: can't stat() tracefs file system $DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  if [[ -n "${DISK_MAGICIAN_TEST_MALFORMED_NUL:-}" ]]; then
+    printf "lsof: WARNING: can't stat() tracefs file system %s\0\n" "$DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  else
+    echo "lsof: WARNING: can't stat() tracefs file system $DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  fi
   echo "      Output information may be incomplete." >&2
   if [[ -n "${DISK_MAGICIAN_TEST_EXTRA_BLANK_WARNING_LINES:-}" ]]; then
     printf '\n\n' >&2
@@ -255,6 +260,25 @@ run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
 assert_rc "Test 1c (extra trailing warning blanks): exits 0" 0 $?
 assert_exists "Test 1c: archive preserved on extra trailing warning blanks" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
 assert_contains "Test 1c: extra trailing warning blanks fail closed" "Open-file check failed" "$(cat "$T1_OUT")"
+
+# An actual NUL byte embedded in an otherwise allowlisted warning is malformed.
+# Bash command substitution drops NUL bytes, so inspect stderr before parsing.
+reset_t1_archive
+run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_MALFORMED_NUL=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 1d (NUL in lsof stderr): exits 0" 0 $?
+assert_contains "Test 1d: NUL stderr fails closed" "lsof stderr contained NUL bytes" "$(cat "$T1_OUT")"
+assert_exists "Test 1d: archive preserved on NUL stderr" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
 
 echo "Test 1b: stderr read failure fails closed"
 T1B_ARCHIVE="$TMP_ROOT/t1b-archive"
