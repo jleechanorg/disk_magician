@@ -31,9 +31,12 @@ MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
 MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-600}"
 
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [-h|--help]
-
+  local prog="${0##*/}"
+  printf 'Usage: %s [--clean] [--dry-run] [-h|--help]\n\n' "$prog"
+  # Quoted delimiter, deliberately: an unquoted heredoc expands this body, so
+  # the backticked `du` and `df` below were executed by `--help` itself (they
+  # walked the whole disk and spliced their tables into the help text).
+  cat <<'EOF'
 Delete stale *.code_sign_clone directories under the user's var/folders X cache.
 
 Reported sizes are `du` walks of APFS copy-on-write clones and are NOT
@@ -147,7 +150,16 @@ lsof_state() {
     return 2
   }
   output=$(lsof -Fpcn +D "$candidate" 2>"$err_file") || rc=$?
-  diagnostics=$(cat "$err_file" 2>/dev/null || true)
+  # A diagnostics capture that cannot be read is an INCOMPLETE inspection, not
+  # proof that nothing holds this clone. Swallowing the failure (the old
+  # `|| true`) left diagnostics empty, so the rc=1/empty-output/empty-stderr
+  # branch below classified a clone as INACTIVE — deletable — whenever the read
+  # itself failed. Fail closed instead and preserve the candidate.
+  if ! diagnostics=$(cat "$err_file" 2>/dev/null); then
+    rm -f "$err_file"
+    LSOF_DETAIL="unable to read captured lsof diagnostics"
+    return 2
+  fi
   rm -f "$err_file"
   diagnostics="${diagnostics//$'\n'/; }"
   # macOS lsof may return 1 even when +D emitted valid matches. Structured

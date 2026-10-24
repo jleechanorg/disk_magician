@@ -41,6 +41,12 @@ if [[ " $* " != *" +D "* ]]; then
   exit 0
 fi
 target="${!#}"
+if [[ -n "${MOCK_LSOF_WARN:-}" ]]; then
+  # rc=1 with EMPTY stdout and a warning on stderr: the inspection did not
+  # complete, which must never be read as "nothing holds this clone".
+  echo "lsof: WARNING: cannot statfs $target (probe)" >&2
+  exit 1
+fi
 if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
   # Simulate an active process whose only match is a path that does not exist
   # on disk: an open-but-unlinked file, which must always pin the clone.
@@ -335,13 +341,33 @@ else
     echo "$OUTPUT11" >&2
     exit 1
   fi
-  # Negative control: the same clone with an exec path outside it is reclaimed.
-  OUTPUT11B=$(PATH="$MOCK_BIN:$PATH" \
+  # Negative control: SAME shared-handle evidence and the SAME known holder
+  # start time as the positive case above, but the process was launched outside
+  # every clone. Without MOCK_LSOF_SHARED the mock emitted no lsof records at
+  # all, so the shared-inode/exec-path attribution was never exercised and this
+  # clone was classified INACTIVE for a reason unrelated to the assertion.
+  OUTPUT11B=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
     MOCK_PS_EXEC_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    MOCK_PS_START_4321="Fri Oct 23 09:00:00 2026" \
     CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
     DISK_MAGICIAN_CODE_SIGN_X_DIR="$PRIV_X_DIR" "$SCRIPT" --clean 2>&1)
-  if [[ -d "$EXE_PARENT/code_sign_clone.exe" ]]; then
-    echo "FAIL: exec-path check matched a process running outside every clone" >&2
+  if [[ ! -d "$EXE_PARENT/code_sign_clone.exe" ]]; then
+    echo "FAIL: a shared handle held by an outside executable must still preserve the clone" >&2
+    echo "$OUTPUT11B" >&2
+    exit 1
+  fi
+  if grep -q "running executable inside clone" <<<"$OUTPUT11B"; then
+    echo "FAIL: exec-path check attributed an outside executable to the clone" >&2
+    echo "$OUTPUT11B" >&2
+    exit 1
+  fi
+  if grep -q "ACTIVE — preserving: $EXE_PARENT/code_sign_clone.exe" <<<"$OUTPUT11B"; then
+    echo "FAIL: a shared-inode clone with an outside executable must not be ACTIVE" >&2
+    echo "$OUTPUT11B" >&2
+    exit 1
+  fi
+  if ! grep -q "SHARED-INODE — not a per-clone handle, not reclaimable: $EXE_PARENT/code_sign_clone.exe" <<<"$OUTPUT11B"; then
+    echo "FAIL: expected the clone classified outside-executable (shared-inode, not ACTIVE)" >&2
     echo "$OUTPUT11B" >&2
     exit 1
   fi
@@ -419,6 +445,101 @@ if ! grep -q "holder start time unavailable" <<<"$OUTPUT14"; then
   exit 1
 fi
 echo "  PASS  Test 14"
+
+echo "Test 15: Unreadable lsof diagnostics is an inspection error, not INACTIVE"
+# P0 regression: the diagnostics capture was read as `cat ... || true`, so a
+# failed read produced empty diagnostics and the rc=1 / empty-output /
+# empty-stderr branch classified the clone as INACTIVE (deletable). Identical
+# lsof behaviour must classify as an inspection error whether or not the
+# capture can be read.
+DIAG_PARENT="$MOCK_X_DIR/com.example.diag.code_sign_clone"
+mkdir -p "$DIAG_PARENT"
+create_candidate "$DIAG_PARENT/code_sign_clone.diag"
+create_candidate "$DIAG_PARENT/code_sign_clone.nomatch"
+find "$DIAG_PARENT" -exec touch -t 202610041100 {} + 2>/dev/null
+touch -t 202610041100 "$DIAG_PARENT"
+
+REAL_CAT=$(command -v cat)
+CATFAIL_BIN="$TMP_DIR/catfail-bin"
+mkdir -p "$CATFAIL_BIN"
+cat > "$CATFAIL_BIN/cat" <<EOF
+#!/usr/bin/env bash
+last="\${!#}"
+case "\$last" in
+  *disk-magician-lsof*) echo "cat: \$last: Permission denied" >&2; exit 1 ;;
+esac
+exec "$REAL_CAT" "\$@"
+EOF
+chmod +x "$CATFAIL_BIN/cat"
+
+# Control arm: the capture IS readable, lsof warned and exited 1.
+OUTPUT15A=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_WARN=1 \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+# Regressed arm: same lsof behaviour, capture unreadable.
+OUTPUT15B=$(PATH="$CATFAIL_BIN:$MOCK_BIN:$PATH" MOCK_LSOF_WARN=1 \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if ! grep -q "Skipping code_sign_clones: lsof failed for $DIAG_PARENT/code_sign_clone.diag" <<<"$OUTPUT15A"; then
+  echo "FAIL: a readable lsof warning must be reported as an inspection failure" >&2
+  echo "$OUTPUT15A" >&2
+  exit 1
+fi
+if ! grep -q "Skipping code_sign_clones: lsof failed for $DIAG_PARENT/code_sign_clone.diag.*unable to read captured lsof diagnostics" <<<"$OUTPUT15B"; then
+  echo "FAIL: an unreadable diagnostics capture must be an inspection error" >&2
+  echo "$OUTPUT15B" >&2
+  exit 1
+fi
+if grep -q "INACTIVE candidate: $DIAG_PARENT/code_sign_clone.diag" <<<"$OUTPUT15B"; then
+  echo "FAIL: unreadable diagnostics failed open and marked a clone INACTIVE" >&2
+  echo "$OUTPUT15B" >&2
+  exit 1
+fi
+if [[ ! -d "$DIAG_PARENT/code_sign_clone.diag" ]]; then
+  echo "FAIL: candidate was removed despite an incomplete inspection" >&2
+  exit 1
+fi
+# Do not weaken the normal no-match case: lsof rc=1 with empty stdout AND empty
+# stderr, diagnostics readable, must STILL be return 1 (INACTIVE candidate).
+OUTPUT15C=$(PATH="$MOCK_BIN:$PATH" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --dry-run 2>&1)
+if ! grep -q "INACTIVE candidate: $DIAG_PARENT/code_sign_clone.nomatch" <<<"$OUTPUT15C"; then
+  echo "FAIL: the normal empty/no-match case must stay INACTIVE (return 1)" >&2
+  echo "$OUTPUT15C" >&2
+  exit 1
+fi
+echo "  PASS  Test 15"
+
+echo "Test 16: --help performs no command substitution (never runs du or df)"
+# The usage body used an unquoted heredoc delimiter, so the backticked `du` and
+# `df` in the help text executed on --help and spliced their output into it.
+HELP_BIN="$TMP_DIR/help-bin"
+mkdir -p "$HELP_BIN"
+for _cmd in du df; do
+  cat > "$HELP_BIN/$_cmd" <<EOF
+#!/usr/bin/env bash
+echo invoked >> "$TMP_DIR/marker-$_cmd"
+exit 0
+EOF
+  chmod +x "$HELP_BIN/$_cmd"
+done
+OUTPUT16=$(PATH="$HELP_BIN:$PATH" "$SCRIPT" --help 2>&1)
+for _cmd in du df; do
+  if [[ -f "$TMP_DIR/marker-$_cmd" ]]; then
+    echo "FAIL: --help executed \`$_cmd\` via the usage heredoc" >&2
+    echo "$OUTPUT16" >&2
+    exit 1
+  fi
+done
+for _line in "^Usage: " "Options:" "--clean" "--dry-run" "Measure reclaim with"; do
+  if ! grep -qE -- "$_line" <<<"$OUTPUT16"; then
+    echo "FAIL: --help no longer prints a usage line matching: $_line" >&2
+    echo "$OUTPUT16" >&2
+    exit 1
+  fi
+done
+echo "  PASS  Test 16"
 
 echo "ALL CHECKS PASSED: test_cleanup_code_sign_clones.sh"
 exit 0
