@@ -78,5 +78,14 @@ class TestResolveStateRepoPath(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, os.path.join(self.home, "relative", "backup"))
 
+    def test_non_string_state_repo_path_falls_back_to_default(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": 7}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, os.path.join(self.home, ".local", "state", "disk-magician"))
+
 if __name__ == "__main__":
     unittest.main()

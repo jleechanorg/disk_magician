@@ -11,7 +11,7 @@ import sys
 from typing import Optional
 
 
-_MONITORED_FIELDS = ("monitored_dirs", "monitored_globs", "monitored_file_globs")
+_SNAPSHOT_OVERLAY_FIELDS = {"snapshot_measure", "state_repo_path"}
 
 
 def _is_snapshot_overlay(path: pathlib.Path) -> bool:
@@ -29,7 +29,7 @@ def _is_snapshot_overlay(path: pathlib.Path) -> bool:
     return (
         isinstance(data, dict)
         and "snapshot_measure" in data
-        and not any(field in data for field in _MONITORED_FIELDS)
+        and set(data).issubset(_SNAPSHOT_OVERLAY_FIELDS)
     )
 
 
@@ -40,7 +40,7 @@ def configured_state_repo(path: pathlib.Path, home: pathlib.Path) -> Optional[pa
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     configured = data.get("state_repo_path") if isinstance(data, dict) else None
-    if not configured:
+    if not isinstance(configured, str) or not configured:
         return None
     expanded = pathlib.Path(os.path.expanduser(configured))
     return expanded if expanded.is_absolute() else home / expanded
