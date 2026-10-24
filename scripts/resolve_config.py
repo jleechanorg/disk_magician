@@ -28,7 +28,7 @@ def _is_snapshot_overlay(path: pathlib.Path) -> bool:
         return False
     return (
         isinstance(data, dict)
-        and "snapshot_measure" in data
+        and bool(data)
         and set(data).issubset(_SNAPSHOT_OVERLAY_FIELDS)
     )
 
