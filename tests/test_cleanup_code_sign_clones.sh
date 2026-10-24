@@ -36,23 +36,60 @@ cat > "$MOCK_BIN/lsof" <<'EOF'
 # record stream; the candidate open-file probe uses `+D <dir>`. Emit a
 # synthetic cwd of "/" (never inside the fixture) for the former, and the
 # inactive/active answer for the latter.
-if [[ " $* " == *" +D "* ]]; then
-  if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
-    # Simulate active process holding handle inside candidate
-    echo "p12345"
-    echo "cGoogle Chrome"
-    echo "n/Contents/MacOS/Google Chrome"
-    exit 0
-  fi
-  # Inactive: empty output and exit 1
-  exit 1
+if [[ " $* " != *" +D "* ]]; then
+  printf 'p%s\nfcwd\nn/\n' "$$"
+  exit 0
 fi
-echo "p$$"
-echo "fcwd"
-echo "n/"
-exit 0
+target="${!#}"
+if [[ -n "${MOCK_LSOF_ACTIVE:-}" ]]; then
+  # Simulate an active process whose only match is a path that does not exist
+  # on disk: an open-but-unlinked file, which must always pin the clone.
+  printf 'p12345\ncGoogle Chrome\nn/Contents/MacOS/Google Chrome\n'
+  exit 0
+fi
+if [[ -n "${MOCK_LSOF_EXCL_TARGET:-}" && "$target" == "$MOCK_LSOF_EXCL_TARGET" ]]; then
+  printf 'p555\ncAsideBrowser\nn%s/Contents/MacOS/exclusive\n' "$target"
+  exit 0
+fi
+if [[ -n "${MOCK_LSOF_UNLINKED_TARGET:-}" && "$target" == "$MOCK_LSOF_UNLINKED_TARGET" ]]; then
+  printf 'p556\ncAsideBrowser\nn%s/Contents/MacOS/gone\n' "$target"
+  exit 0
+fi
+if [[ -n "${MOCK_LSOF_SHARED:-}" ]]; then
+  # A hardlink-shared inode open elsewhere: lsof +D matches it by inode and
+  # reports it for every clone even though the handle is on another path.
+  for _pid in ${MOCK_LSOF_SHARED_PIDS:-4321}; do
+    printf 'p%s\ncGoogle Chrome\nn%s\n' "$_pid" "$MOCK_LSOF_SHARED"
+  done
+  exit 0
+fi
+exit 1
 EOF
 chmod +x "$MOCK_BIN/lsof"
+
+# Mock ps: only the clone gates' per-pid lookups are simulated — the launch
+# path (`ps -p <pid> -o comm=`) and the process start time
+# (`ps -p <pid> -o lstart=`). Every other invocation — pid liveness, the C14
+# live-cwd probe — delegates to the real ps. `ps -Ao comm=` is never called: it
+# costs 2m15s on this host with 2071 processes, which is why the script asks per
+# pid instead.
+REAL_PS=$(command -v ps)
+cat > "$MOCK_BIN/ps" <<EOF
+#!/usr/bin/env bash
+args=" \$* "
+pid=""; prev=""
+for a in "\$@"; do [[ "\$prev" == "-p" ]] && pid="\$a"; prev="\$a"; done
+if [[ "\$args" == *" -o comm= "* ]]; then
+  if [[ -n "\${MOCK_PS_EXEC_PATH:-}" ]]; then printf '%s\\n' "\$MOCK_PS_EXEC_PATH"; exit 0; fi
+elif [[ "\$args" == *" -o lstart= "* ]]; then
+  if [[ "\${MOCK_PS_NO_START:-}" == "1" ]]; then exit 1; fi
+  var="MOCK_PS_START_\$pid"
+  if [[ -n "\${!var:-}" ]]; then printf '%s\\n' "\${!var}"; exit 0; fi
+  if [[ -n "\${MOCK_PS_START_STAMP:-}" ]]; then printf '%s\\n' "\$MOCK_PS_START_STAMP"; exit 0; fi
+fi
+exec "$REAL_PS" "\$@"
+EOF
+chmod +x "$MOCK_BIN/ps"
 
 export CODE_SIGN_CLONE_MIN_KB=10
 
@@ -152,6 +189,236 @@ if ! grep -q "ERROR: DISK_MAGICIAN_CODE_SIGN_X_DIR is not a directory" <<<"$OUTP
   exit 1
 fi
 echo "  PASS  Test 6"
+
+# ── Shared-inode regression fixtures ─────────────────────────────────────────
+# Every Chromium clone hard-links the app's main executable, so one open handle
+# makes lsof +D match *all* clones by inode. Only an exclusive (nlink 1) or
+# unlinked handle proves a given clone is in use.
+SHARED_APP="$TMP_DIR/Applications/App.app/Contents/MacOS"
+mkdir -p "$SHARED_APP"
+dd if=/dev/zero of="$SHARED_APP/binary" bs=1024 count=8 2>/dev/null
+
+make_clone() {  # make_clone <dir> <mtime-stamp>
+  local dir="$1" stamp="$2"
+  create_candidate "$dir"
+  ln "$SHARED_APP/binary" "$dir/Contents/MacOS/shared"
+  # Age the whole tree, not just the directory: C14's newest-mtime floor and the
+  # script's MIN_AGE_SEC both read content mtimes.
+  find "$dir" -exec touch -t "$stamp" {} + 2>/dev/null
+  touch -t "$stamp" "$dir"
+}
+
+echo "Test 7: Only a hardlink-shared inode open — never reported ACTIVE per clone"
+SP="$MOCK_X_DIR/com.example.shared.code_sign_clone"
+mkdir -p "$SP"
+make_clone "$SP/code_sign_clone.old" 202610041100
+make_clone "$SP/code_sign_clone.new" 202610051300
+touch -t 202610051300 "$SP"
+# The live holder started (Oct 05 11:30) after the old clone and before the new
+# one, so only the old clone is provably not that holder's.
+OUTPUT7=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_PS_START_4321="Mon Oct 05 11:30:00 2026" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$SP/code_sign_clone.old" || ! -d "$SP/code_sign_clone.new" ]]; then
+  echo "FAIL: shared-inode-only clones must be preserved, not deleted" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if grep -q "ACTIVE — preserving: $SP/code_sign_clone.old" <<<"$OUTPUT7"; then
+  echo "FAIL: a clone older than every live holder was reported ACTIVE" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if ! grep -q "SHARED-INODE — not a per-clone handle, not reclaimable: $SP/code_sign_clone.old" <<<"$OUTPUT7"; then
+  echo "FAIL: expected the pre-holder clone classified SHARED-INODE and excluded from reclaim" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if ! grep -q "clone predates every live holder" <<<"$OUTPUT7"; then
+  echo "FAIL: expected the pre-holder reason in the classification line" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if ! grep -q "SHARED-INODE — preserving: $SP/code_sign_clone.new" <<<"$OUTPUT7"; then
+  echo "FAIL: a clone created after the live holder started must be preserved" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if ! grep -q "Dirs removed: 0" <<<"$OUTPUT7"; then
+  echo "FAIL: shared-inode-only clones must not be counted as removed/reclaimable" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+echo "  PASS  Test 7"
+
+echo "Test 8: Sole clone whose only open file is hardlink-shared is preserved"
+SOLE_PARENT="$MOCK_X_DIR/at.studio.AsideBrowser.code_sign_clone"
+mkdir -p "$SOLE_PARENT"
+make_clone "$SOLE_PARENT/code_sign_clone.sole" 202610051300
+touch -t 202610051300 "$SOLE_PARENT"
+OUTPUT8=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_PS_START_4321="Mon Oct 05 11:30:00 2026" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$SOLE_PARENT/code_sign_clone.sole" ]]; then
+  echo "FAIL: a live app's sole clone (only shared-inode handles) was deleted" >&2
+  echo "$OUTPUT8" >&2
+  exit 1
+fi
+echo "  PASS  Test 8"
+
+echo "Test 9: Exclusive (single-link) open file inside a clone still pins it"
+EXCL_PARENT="$MOCK_X_DIR/com.example.exclusive.code_sign_clone"
+mkdir -p "$EXCL_PARENT"
+make_clone "$EXCL_PARENT/code_sign_clone.old" 202610041100
+make_clone "$EXCL_PARENT/code_sign_clone.excl" 202610051300
+# An exclusive (nlink 1) file that is open inside the clone: unlike the
+# hardlinked main executable, only this clone's path holds it.
+dd if=/dev/zero of="$EXCL_PARENT/code_sign_clone.excl/Contents/MacOS/exclusive" bs=1024 count=4 2>/dev/null
+touch -t 202610041100 "$EXCL_PARENT/code_sign_clone.excl/Contents/MacOS/exclusive"
+OUTPUT9=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_LSOF_EXCL_TARGET="$EXCL_PARENT/code_sign_clone.excl" \
+  MOCK_PS_START_4321="Mon Oct 05 11:30:00 2026" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$EXCL_PARENT/code_sign_clone.excl" ]]; then
+  echo "FAIL: clone holding an exclusive open file was deleted" >&2
+  echo "$OUTPUT9" >&2
+  exit 1
+fi
+if ! grep -q "pid=555 command=AsideBrowser" <<<"$OUTPUT9"; then
+  echo "FAIL: expected the exclusive-handle owner to be reported" >&2
+  echo "$OUTPUT9" >&2
+  exit 1
+fi
+echo "  PASS  Test 9"
+
+echo "Test 10: Open-but-unlinked file inside a clone pins it (fail closed)"
+UNL_PARENT="$MOCK_X_DIR/com.example.unlinked.code_sign_clone"
+mkdir -p "$UNL_PARENT"
+make_clone "$UNL_PARENT/code_sign_clone.old" 202610041100
+make_clone "$UNL_PARENT/code_sign_clone.unl" 202610051300
+OUTPUT10=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_LSOF_UNLINKED_TARGET="$UNL_PARENT/code_sign_clone.unl" \
+  MOCK_PS_START_4321="Mon Oct 05 11:30:00 2026" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$UNL_PARENT/code_sign_clone.unl" ]]; then
+  echo "FAIL: clone with an open-but-unlinked file was deleted" >&2
+  echo "$OUTPUT10" >&2
+  exit 1
+fi
+echo "  PASS  Test 10"
+
+echo "Test 11: Running executable inside a clone pins it across the /private alias"
+# /tmp is a symlink to /private/tmp on macOS: the candidate is spelled
+# /private/var|tmp/... while ps reports the /tmp/... form. Both must match.
+PRIV_X_DIR=""
+if [[ -d "/private$MOCK_X_DIR" ]]; then PRIV_X_DIR="/private$MOCK_X_DIR"; fi
+if [[ -z "$PRIV_X_DIR" ]]; then
+  echo "  SKIP  Test 11 (/tmp is not a /private alias on this host)"
+else
+  EXE_PARENT="$PRIV_X_DIR/com.example.exec.code_sign_clone"
+  mkdir -p "$EXE_PARENT"
+  make_clone "$EXE_PARENT/code_sign_clone.exe" 202610041100
+  touch -t 202610041100 "$EXE_PARENT"
+  # ps reports the non-/private spelling of the same path while lsof matches
+  # only the hardlink-shared inode: the launch path is what pins this clone.
+  OUTPUT11=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+    MOCK_PS_EXEC_PATH="$MOCK_X_DIR/com.example.exec.code_sign_clone/code_sign_clone.exe/App.app.bundle/Contents/MacOS/App" \
+    MOCK_PS_START_4321="Fri Oct 23 09:00:00 2026" \
+    CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+    DISK_MAGICIAN_CODE_SIGN_X_DIR="$PRIV_X_DIR" "$SCRIPT" --clean 2>&1)
+  if [[ ! -d "$EXE_PARENT/code_sign_clone.exe" ]] || ! grep -q "running executable inside clone" <<<"$OUTPUT11"; then
+    echo "FAIL: an executable running out of the clone was not detected across the /private alias" >&2
+    echo "$OUTPUT11" >&2
+    exit 1
+  fi
+  # Negative control: the same clone with an exec path outside it is reclaimed.
+  OUTPUT11B=$(PATH="$MOCK_BIN:$PATH" \
+    MOCK_PS_EXEC_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+    DISK_MAGICIAN_CODE_SIGN_X_DIR="$PRIV_X_DIR" "$SCRIPT" --clean 2>&1)
+  if [[ -d "$EXE_PARENT/code_sign_clone.exe" ]]; then
+    echo "FAIL: exec-path check matched a process running outside every clone" >&2
+    echo "$OUTPUT11B" >&2
+    exit 1
+  fi
+  echo "  PASS  Test 11"
+fi
+
+echo "Test 12: Summary reports du bytes as APFS CoW, never as freed space"
+if ! grep -q "APFS CoW shared blocks, NOT freed space" <<<"$OUTPUT7"; then
+  echo "FAIL: the summary must label clone bytes as non-reclaimable APFS CoW blocks" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+if grep -q "Total freed:" <<<"$OUTPUT7"; then
+  echo "FAIL: the summary must not quote clone du bytes as reclaimed space" >&2
+  echo "$OUTPUT7" >&2
+  exit 1
+fi
+echo "  PASS  Test 12"
+
+echo "Test 13: Two live shared-handle holders — nothing created after either is unpinned"
+# disk_magician-bd6 asked for exactly this: the oldest live holder's start bounds
+# the keep-set, and it is a superset of the newest clone.
+TWO_PARENT="$MOCK_X_DIR/com.example.twoholders.code_sign_clone"
+mkdir -p "$TWO_PARENT"
+make_clone "$TWO_PARENT/code_sign_clone.early" 202610051000
+make_clone "$TWO_PARENT/code_sign_clone.mid" 202610051100
+make_clone "$TWO_PARENT/code_sign_clone.late" 202610051300
+touch -t 202610051300 "$TWO_PARENT"
+OUTPUT13=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_LSOF_SHARED_PIDS="4321 4322" \
+  MOCK_PS_START_4321="Mon Oct 05 10:30:00 2026" \
+  MOCK_PS_START_4322="Mon Oct 05 12:30:00 2026" \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$TWO_PARENT/code_sign_clone.early" || ! -d "$TWO_PARENT/code_sign_clone.mid" \
+      || ! -d "$TWO_PARENT/code_sign_clone.late" ]]; then
+  echo "FAIL: every clone of a two-holder parent must be preserved" >&2
+  echo "$OUTPUT13" >&2
+  exit 1
+fi
+if grep -q "ACTIVE — preserving: $TWO_PARENT/code_sign_clone.early" <<<"$OUTPUT13"; then
+  echo "FAIL: pre-holder clone reported ACTIVE" >&2
+  echo "$OUTPUT13" >&2
+  exit 1
+fi
+if grep -q "ACTIVE — preserving: $TWO_PARENT/code_sign_clone.mid" <<<"$OUTPUT13"; then
+  echo "FAIL: clone newer than the oldest holder must not be a per-clone ACTIVE" >&2
+  echo "$OUTPUT13" >&2
+  exit 1
+fi
+if ! grep -q "SHARED-INODE — preserving: $TWO_PARENT/code_sign_clone.late" <<<"$OUTPUT13"; then
+  echo "FAIL: newest clone must be preserved" >&2
+  echo "$OUTPUT13" >&2
+  exit 1
+fi
+echo "  PASS  Test 13"
+
+echo "Test 14: Unreadable holder start time fails closed (preserves)"
+NOS_P="$MOCK_X_DIR/com.example.nostart.code_sign_clone"
+mkdir -p "$NOS_P"
+make_clone "$NOS_P/code_sign_clone.stale" 202001010000
+touch -t 202001010000 "$NOS_P"
+OUTPUT14=$(PATH="$MOCK_BIN:$PATH" MOCK_LSOF_SHARED="$SHARED_APP/binary" \
+  MOCK_PS_NO_START=1 \
+  CODE_SIGN_CLONES_APPROVED=1 CODE_SIGN_CLONE_MIN_AGE_SEC=60 \
+  DISK_MAGICIAN_CODE_SIGN_X_DIR="$MOCK_X_DIR" "$SCRIPT" --clean 2>&1)
+if [[ ! -d "$NOS_P/code_sign_clone.stale" ]]; then
+  echo "FAIL: unreadable holder start time must preserve the clone" >&2
+  echo "$OUTPUT14" >&2
+  exit 1
+fi
+if ! grep -q "holder start time unavailable" <<<"$OUTPUT14"; then
+  echo "FAIL: expected the unreadable-start-time reason" >&2
+  echo "$OUTPUT14" >&2
+  exit 1
+fi
+echo "  PASS  Test 14"
 
 echo "ALL CHECKS PASSED: test_cleanup_code_sign_clones.sh"
 exit 0

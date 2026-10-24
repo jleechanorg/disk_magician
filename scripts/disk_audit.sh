@@ -477,6 +477,11 @@ if command -v docker &>/dev/null; then
 fi
 
 # macOS code_sign_clone caches (Aside, Chrome, Codex, etc.)
+# These are APFS copy-on-write clonefiles of an installed bundle, so `du` counts
+# shared extents once per clone. The total below is a du walk, NOT reclaimable
+# space: a documented controlled test deleted 73 clones whose du total was
+# 104.1 GiB and moved df by 0.3 GiB. Surface the count as hygiene signal, never
+# as a reclaim pool (findings_wiki/2026-10-17-codesign-clone-du-is-phantom-when-versions-match.md).
 _user_tmp="${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-}"
 if [[ -z "$_user_tmp" ]] && command -v getconf &>/dev/null; then
     _user_tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "")"
@@ -492,7 +497,10 @@ if [[ -n "$_user_tmp" && -d "$(dirname "$_user_tmp")/X" ]]; then
         _csc_kb=$(( _csc_kb + kb ))
     done < <(find "$_x_dir" -mindepth 1 -maxdepth 1 -type d -name '*code_sign_clone' -print0 2>/dev/null || true)
     if [[ $_csc_count -gt 0 ]]; then
-        printf "  %-50s %8s  %s\n" "code_sign_clone caches (var/folders X)" "$(fmt_size "$_csc_kb")" "RUN: cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1; quit apps first)"
+        printf "  %-50s %8s  %s\n" \
+          "code_sign_clone caches (var/folders X, ${_csc_count} parent(s))" \
+          "$(fmt_size "$_csc_kb")" \
+          "NON-RECLAIMABLE — APFS CoW shared blocks, not freeable GB; orphan-clone hygiene only: RUN cleanup_code_sign_clones.sh --clean (requires CODE_SIGN_CLONES_APPROVED=1)"
     fi
 fi
 
