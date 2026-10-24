@@ -861,6 +861,7 @@
     "worktree_pointer_minutes": 30,
     "worktree_pointer_min_kb": 51200,
     "large_tmp_active_hours": 24,
+    "aged_tmp_active_hours": 72,
     "large_tmp_archive_retention_hours": 24,
     "downloads_evidence_retention_hours": 72,
     "downloads_evidence_keep_count": 2,

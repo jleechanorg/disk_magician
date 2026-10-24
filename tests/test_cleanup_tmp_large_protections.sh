@@ -98,6 +98,10 @@ assert_missing() {
 run_capture() {
   local out_file="$1"
   shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in HOME=*) mkdir -p "${arg#HOME=}" && chmod 700 "${arg#HOME=}" ;; esac
+  done
   set +e
   "$@" >"$out_file" 2>&1
   local rc=$?
@@ -1158,11 +1162,14 @@ mkdir -p "$G10_PRIVATE_TMP" "$G10_TMP"
 make_find_shim "$G10_BIN" "$G10_PRIVATE_TMP" "$G10_TMP"
 make_large_dir "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
 make_large_dir "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
+make_large_dir "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child"
 set_old_mtime "$G10_PRIVATE_TMP/worldarchitect.ai"
+touch -t "$(ago_stamp 2160)" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child/payload.bin"
+touch -t "$(ago_stamp 2160)" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child"
 G10_OUT="$TMP_ROOT/g10.out"
 if run_capture "$G10_OUT" env -i HOME="$TMP_ROOT/g10-home" \
   PATH="$G10_BIN:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_ACTIVE_HOURS=24 PROTECTED_ROOT_CHILD_MIN_AGE_HOURS=48 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G10_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -1177,6 +1184,9 @@ G10_OUT_CONTENT=$(cat "$G10_OUT")
 assert_rc "GREEN 10: exits 0" 0 "$G10_RC"
 assert_exists "GREEN 10: protected root itself preserved" "$G10_PRIVATE_TMP/worldarchitect.ai"
 assert_exists "GREEN 10: canonical evidence child preserved" "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
+assert_contains "GREEN 10: --large retains the 48h protected-child floor despite its 24h scan" \
+  "Skipping recently active protected-root child (mtime/ctime within 48h): $G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child" "$G10_OUT_CONTENT"
+assert_exists "GREEN 10: 36h protected-root child remains untouched" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child/payload.bin"
 assert_exists "GREEN 10: stale non-evidence child stays at its original path" "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
 assert_contains "GREEN 10: logs the protected-child skip" \
   "Skipping protected child of a protected root: $G10_PRIVATE_TMP/worldarchitect.ai/evidence" "$G10_OUT_CONTENT"
