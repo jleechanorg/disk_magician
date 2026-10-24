@@ -52,7 +52,20 @@ STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 LOCK_DIR="$STATE_DIR/pressure_sweep.lock"
 LOCK_TTL_SEC=3600
 LOG_FILE="${DISK_MAGICIAN_PRESSURE_LOG:-$HOME/Library/Logs/disk-magician-pressure-sweep.log}"
-STEP_TIMEOUT=600
+STEP_TIMEOUT="${DISK_MAGICIAN_PRESSURE_STEP_TIMEOUT:-600}"
+# SIGKILL escalation (bead disk_magician-xt2y). `timeout STEP_TIMEOUT cmd`
+# sends TERM only; a step child that traps TERM and then keeps working (the
+# deferred-TERM case observed on this host) outlives its deadline. That matters
+# beyond the step itself: cleanup_tmp's scratch flock fd is deliberately
+# inheritable (scripts/scratch_lock.py os.set_inheritable), flock lives on the
+# open file description, so any surviving descendant keeps
+# ~/.disk_magician_locks/scratch_cleanup.lock held and every competing cleanup
+# then fails closed (rc 75 "skipped, scratch lock held"). STEP_KILL_AFTER is
+# the grace period between TERM and SIGKILL; 0 disables escalation (byte-for-
+# byte pre-fix behaviour). Both values accept the DISK_MAGICIAN_PRESSURE_* env
+# hook pattern used by FREE_GB_OVERRIDE above so tests can drive them
+# deterministically.
+STEP_KILL_AFTER="${DISK_MAGICIAN_PRESSURE_STEP_KILL_AFTER:-20}"
 DRY_RUN=false
 # Testing hook: skip the real `df` read and use a fabricated free-GB value
 # instead, so the triggered path can be exercised deterministically without
@@ -73,8 +86,9 @@ exit immediately (one log line, no work). Otherwise run, in order:
   2. scripts/cleanup_colima.sh --clean (docker-prune semantics + fstrim)
   3. scripts/cleanup_code_sign_clones.sh --clean (per-launch Chrome/Aside/
      CodexBar code_sign_clone reclaim; CODE_SIGN_CLONES_APPROVED=1)
-each under a ${STEP_TIMEOUT}s timeout, logging free-GB before/after to
-${LOG_FILE}.
+each under a ${STEP_TIMEOUT}s timeout (escalating to SIGKILL ${STEP_KILL_AFTER}s after
+TERM when the timeout implementation supports --kill-after), logging free-GB
+before/after to ${LOG_FILE}.
 
 Options:
   --threshold-gb N  Free-space threshold in GB (default: ${THRESHOLD_GB})
@@ -128,11 +142,22 @@ elif [[ -x /opt/homebrew/bin/timeout ]]; then TIMEOUT_CMD=/opt/homebrew/bin/time
 elif [[ -x /usr/local/bin/gtimeout ]]; then TIMEOUT_CMD=/usr/local/bin/gtimeout
 elif [[ -x /usr/local/bin/timeout ]]; then TIMEOUT_CMD=/usr/local/bin/timeout
 fi
+# Capability detection, not assumption: only GNU coreutils timeout and
+# gtimeout understand --kill-after. Probe with `true` so a non-supporting
+# implementation (busybox etc., rc 125) falls back to the plain invocation.
+TIMEOUT_KILL_AFTER_SUPPORTED=false
+if [[ -n "$TIMEOUT_CMD" && "$STEP_KILL_AFTER" =~ ^[0-9]+$ && "$STEP_KILL_AFTER" != "0" ]]; then
+  if "$TIMEOUT_CMD" --kill-after=1 5 true >/dev/null 2>&1; then
+    TIMEOUT_KILL_AFTER_SUPPORTED=true
+  fi
+fi
 run_step_timeout() {
-  if [[ -n "$TIMEOUT_CMD" ]]; then
-    "$TIMEOUT_CMD" "$STEP_TIMEOUT" "$@"
-  else
+  if [[ -z "$TIMEOUT_CMD" ]]; then
     "$@"
+  elif [[ "$TIMEOUT_KILL_AFTER_SUPPORTED" == true ]]; then
+    "$TIMEOUT_CMD" --kill-after="$STEP_KILL_AFTER" "$STEP_TIMEOUT" "$@"
+  else
+    "$TIMEOUT_CMD" "$STEP_TIMEOUT" "$@"
   fi
 }
 
