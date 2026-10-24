@@ -261,6 +261,10 @@ def _nonempty(value: str, option: str) -> str:
     value = value.strip()
     if not value:
         raise argparse.ArgumentTypeError(f"{option} must not be empty")
+    if any(character in value for character in "\t\r\n"):
+        raise argparse.ArgumentTypeError(
+            f"{option} must not contain tabs or newline characters"
+        )
     return value
 
 
