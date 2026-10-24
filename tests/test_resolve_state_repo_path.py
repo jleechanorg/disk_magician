@@ -41,6 +41,15 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, os.path.join(self.home, ".disk_magician_backup")))
 
+    def test_snapshot_overlay_preserves_configured_state_repo(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        legacy = os.path.join(self.home, "legacy-backup")
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": legacy, "snapshot_measure": {"path_max_seconds": 7}}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual((rc, out), (0, legacy))
+
     def test_relative_state_repo_path_anchors_to_home_not_cwd(self):
         # cursor-agent adversarial finding 2026-07-21: a relative
         # state_repo_path used to resolve against the caller's CWD (/ under

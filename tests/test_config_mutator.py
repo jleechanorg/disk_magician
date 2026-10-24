@@ -138,6 +138,45 @@ class TestConfigMutator(unittest.TestCase):
         self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
         self.assertEqual(set(json.loads(output.read_text())["directories"]), {"ledger_root"})
 
+    def test_snapshot_overlay_preserves_state_inventory_for_cli_and_snapshot(self):
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        state_config.parent.mkdir(parents=True)
+        state_config.write_text(
+            json.dumps({
+                "monitored_dirs": [
+                    {"key": "baseline", "path": "~/baseline", "timeout": 60}
+                ]
+            }) + "\n"
+        )
+        (self.home / "baseline").mkdir()
+        xdg_config = self.root / "xdg" / "disk-magician" / "config.json"
+        xdg_config.parent.mkdir(parents=True)
+        xdg_config.write_text(
+            json.dumps({"snapshot_measure": {"path_max_seconds": 7}}) + "\n"
+        )
+
+        result = self.run_config(
+            "add-monitored-dir", "--key", "added", "--path", "~/added"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(xdg_config.read_text()),
+            {"snapshot_measure": {"path_max_seconds": 7}},
+        )
+        state = json.loads(state_config.read_text())
+        self.assertEqual(
+            [entry["key"] for entry in state["monitored_dirs"]],
+            ["baseline", "added"],
+        )
+
+        output = self.root / "snapshot-overlay.json"
+        snapshot = self.run_snapshot(output)
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertEqual(
+            set(json.loads(output.read_text())["directories"]),
+            {"baseline", "added"},
+        )
+
     def test_repeat_is_idempotent_and_conflict_preserves_file(self):
         config = self.write_config(data={"monitored_dirs": []})
         args = ("add-monitored-dir", "--key", "swap", "--path", "/swapfile")

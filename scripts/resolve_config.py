@@ -4,7 +4,46 @@
 Design: roadmap/2026-07-21-generic-split-state-repo-design.md (env-first is a repo-wide
 contract; see LARGE_TMP_* precedent in scripts/cleanup_tmp.sh).
 """
-import os, pathlib, sys
+import json
+import os
+import pathlib
+import sys
+from typing import Optional
+
+
+_MONITORED_FIELDS = ("monitored_dirs", "monitored_globs", "monitored_file_globs")
+
+
+def _is_snapshot_overlay(path: pathlib.Path) -> bool:
+    """Return whether *path* is only the user-owned snapshot tuning overlay.
+
+    ``snapshot_measure`` was deliberately introduced as an additive user
+    setting.  Its presence must not hide the state-repo config that owns the
+    monitored directory/glob inventory.  Invalid JSON is left to the normal
+    consumer to reject rather than silently falling through.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(data, dict)
+        and "snapshot_measure" in data
+        and not any(field in data for field in _MONITORED_FIELDS)
+    )
+
+
+def configured_state_repo(path: pathlib.Path, home: pathlib.Path) -> Optional[pathlib.Path]:
+    """Read the optional state-repo location from a user config file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    configured = data.get("state_repo_path") if isinstance(data, dict) else None
+    if not configured:
+        return None
+    expanded = pathlib.Path(os.path.expanduser(configured))
+    return expanded if expanded.is_absolute() else home / expanded
 
 def resolve() -> str:
     explicit = os.environ.get("DISK_MAGICIAN_CONFIG")
@@ -14,14 +53,21 @@ def resolve() -> str:
         return explicit if os.path.isfile(explicit) else ""
     home = pathlib.Path(os.environ.get("HOME", "/"))
     xdg_cfg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    p = xdg_cfg / "disk-magician" / "config.json"
-    if p.is_file():
-        return str(p)
-    state = pathlib.Path(os.environ.get("DISK_MAGICIAN_STATE_REPO",
-             pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "disk-magician"))
+    overlay = xdg_cfg / "disk-magician" / "config.json"
+    if overlay.is_file() and not _is_snapshot_overlay(overlay):
+        return str(overlay)
+    configured_state = configured_state_repo(overlay, home) if overlay.is_file() else None
+    state = pathlib.Path(os.environ.get(
+        "DISK_MAGICIAN_STATE_REPO",
+        configured_state or pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "disk-magician",
+    ))
     p = state / "config" / "config.json"
     if p.is_file():
         return str(p)
+    # An overlay is the only usable config when no full state config exists;
+    # callers may then add the first monitored entry to the user config.
+    if overlay.is_file():
+        return str(overlay)
     here = pathlib.Path(__file__).resolve().parent.parent
     for cand in (here / "config.json", here / "config.json.template"):
         if cand.is_file():
