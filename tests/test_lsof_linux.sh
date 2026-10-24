@@ -12,8 +12,12 @@ eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (want '$3' got '$2')"; }
 
 echo "== lsof_stderr_incomplete =="
 mount_warn=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
+mount_warn_line="${mount_warn%$'\n'*}"
+malformed_type_warn="${mount_warn_line/tracefs/trace fs}"
 lsof_stderr_incomplete "" && bad "empty stderr flagged" || ok "empty stderr is complete"
 lsof_stderr_incomplete "$mount_warn" && bad "mount-stat warning flagged" || ok "mount-stat warning alone is complete"
+lsof_stderr_incomplete 'lsof: WARNING: canary stat() fake file system /sys/kernel/debug/tracing' && ok "malformed mount warning fails closed" || bad "malformed mount warning trusted"
+lsof_stderr_incomplete "$malformed_type_warn" && ok "mount warning with malformed type fails closed" || bad "mount warning with malformed type trusted"
 lsof_stderr_incomplete "$mount_warn"$'\nlsof: WARNING: can\'t open /proc/42/fd: Permission denied' && ok "other warning still incomplete" || bad "other warning ignored"
 lsof_stderr_incomplete $'      Output information may be incomplete.\nlsof: WARNING: can\'t stat() file /home/x/wt: No such file' && ok "non-mount stat warning still incomplete" || bad "non-mount stat warning ignored"
 
@@ -63,6 +67,114 @@ lsof_collect_cwds $'p1\np2\nfcwd\nn/b' "" 0 && bad "pid-only block accepted" || 
 lsof_collect_cwds $'n/a\nn/b' "" 0 && bad "pid-less scan accepted" || ok "pid-less scan rejected: $LSOF_CWD_REASON"
 lsof_stderr_incomplete $'      Output information may be incomplete.' && ok "standalone trailer incomplete" || bad "standalone trailer trusted"
 lsof_stderr_incomplete $'lsof: WARNING: can\'t stat() apfs file system /' && ok "root mount warning incomplete" || bad "root mount warning trusted"
+lsof_stderr_incomplete $' \n' && ok "blank-only stderr fails closed" || bad "blank-only stderr trusted"
+
+echo "== lsof_stderr_incomplete_for_path =="
+WARN_ROOT="$(builtin cd "$(mktemp -d -t lsof-warn.XXXXXX)" && pwd -P)"
+mkdir -p "$WARN_ROOT/query/child" "$WARN_ROOT/ancestor" "$WARN_ROOT/unrelated"
+query="$WARN_ROOT/query"
+unrelated_warn="lsof: WARNING: can't stat() tracefs file system $WARN_ROOT/unrelated"$'\n      Output information may be incomplete.'
+matching_warn="lsof: WARNING: can't stat() tmpfs file system $query"
+ancestor_warn="lsof: WARNING: can't stat() tmpfs file system $WARN_ROOT"
+child_warn="lsof: WARNING: can't stat() tmpfs file system $query/child"
+mkdir -p "$query/a file system /proc"
+phrase_mount_warn="lsof: WARNING: can't stat() tmpfs file system $query/a file system /proc"
+double_trailer_warn="$unrelated_warn"$'\n      Output information may be incomplete.'
+lsof_stderr_incomplete_for_path "$unrelated_warn" "$query" && bad "unrelated tracefs warning blocked closed query" || ok "unrelated tracefs warning is query-safe"
+lsof_stderr_incomplete_for_path "$phrase_mount_warn" "$query" && ok "mount path containing separator phrase fails closed" || bad "mount path containing separator phrase was truncated"
+lsof_stderr_incomplete_for_path "$double_trailer_warn"$'\n      Output information may be incomplete.' "$query" && ok "duplicate incomplete trailer fails closed" || bad "duplicate incomplete trailer trusted"
+lsof_stderr_incomplete_for_path $' \n' "$query" && ok "blank-only path stderr fails closed" || bad "blank-only path stderr trusted"
+lsof_stderr_incomplete_for_path "$matching_warn" "$query" && ok "matching mount warning fails closed" || bad "matching mount warning ignored"
+lsof_stderr_incomplete_for_path "$ancestor_warn" "$query" && ok "ancestor mount warning fails closed" || bad "ancestor mount warning ignored"
+lsof_stderr_incomplete_for_path "$child_warn" "$query" && ok "nested mount warning fails closed" || bad "nested mount warning ignored"
+lsof_stderr_incomplete_for_path 'lsof: unexpected diagnostic' "$query" && ok "unknown diagnostic fails closed" || bad "unknown diagnostic ignored"
+lsof_stderr_incomplete_for_path '      Output information may be incomplete.' "$query" && ok "unpaired incomplete trailer fails closed" || bad "unpaired trailer ignored"
+# Exercise the inaccessible-mount branch deterministically, including an
+# inaccessible non-mount symlink that resolves into the queried tree.
+denied_mount="$WARN_ROOT/inaccessible-mount"
+overlap_mount="$query/inaccessible-mount"
+hidden_parent="$WARN_ROOT/unsearchable"
+hidden_alias="$hidden_parent/alias"
+mkdir -p "$denied_mount" "$overlap_mount" "$hidden_parent"
+ln -s "$query" "$hidden_alias"
+chmod 000 "$hidden_parent"
+cd() {
+  [[ "${1-}" == "$denied_mount" || "${1-}" == "$overlap_mount" || "${1-}" == "$hidden_alias" || "${1-}" == "${encoded_mount-}" || "${1-}" == "${dot_mount-}" ]] && return 1
+  builtin cd "$@"
+}
+findmnt() {
+  if [[ "${4-}" == "$denied_mount" || "${4-}" == "$overlap_mount" || "${4-}" == "$encoded_mount" || "${4-}" == "$dot_mount" ]]; then
+    case "${FINDMNT_TEST_MODE-}" in
+      multiple) printf '%s\n%s\n' "${4}" "$WARN_ROOT/other-mount" ;;
+      blankline) printf '%s\n\n' "${4}" ;;
+      encoded) printf '%s\n' "${4}" ;;
+      *) printf '%s\n' "${4}" ;;
+    esac
+    return 0
+  fi
+  return 1
+}
+unrelated_inaccessible_warn="lsof: WARNING: can't stat() tracefs file system $denied_mount"
+lsof_stderr_incomplete_for_path "$unrelated_inaccessible_warn" "$query" \
+  && bad "verified unrelated inaccessible mount blocked query" \
+  || ok "verified unrelated inaccessible mount is query-safe"
+overlap_inaccessible_warn="lsof: WARNING: can't stat() tmpfs file system $overlap_mount"
+lsof_stderr_incomplete_for_path "$overlap_inaccessible_warn" "$query" \
+  && ok "inaccessible mount inside query fails closed" \
+  || bad "inaccessible mount inside query was ignored"
+hidden_symlink_warn="lsof: WARNING: can't stat() tmpfs file system $hidden_alias"
+lsof_stderr_incomplete_for_path "$hidden_symlink_warn" "$query" \
+  && ok "inaccessible non-mount symlink overlap fails closed" \
+  || bad "inaccessible non-mount symlink overlap was ignored"
+FINDMNT_TEST_MODE=multiple
+lsof_stderr_incomplete_for_path "$unrelated_inaccessible_warn" "$query" \
+  && ok "ambiguous multiple mount targets fail closed" \
+  || bad "ambiguous multiple mount targets were accepted"
+FINDMNT_TEST_MODE=blankline
+lsof_stderr_incomplete_for_path "$unrelated_inaccessible_warn" "$query" \
+  && ok "extra findmnt blank line fails closed" \
+  || bad "extra findmnt blank line was accepted"
+FINDMNT_TEST_MODE=encoded
+encoded_mount="$WARN_ROOT/encoded\\040mount"
+encoded_warn="lsof: WARNING: can't stat() tracefs file system $encoded_mount"
+lsof_stderr_incomplete_for_path "$encoded_warn" "$query" \
+  && ok "matching encoded mount target fails closed" \
+  || bad "matching encoded mount target was accepted"
+dot_mount="$WARN_ROOT/../inaccessible-mount"
+dot_warn="lsof: WARNING: can't stat() tracefs file system $dot_mount"
+lsof_stderr_incomplete_for_path "$dot_warn" "$query" \
+  && ok "dot-component mount target fails closed" \
+  || bad "dot-component mount target was accepted"
+FINDMNT_TEST_MODE=missing
+findmnt() { return 127; }
+lsof_stderr_incomplete_for_path "$unrelated_inaccessible_warn" "$query" \
+  && ok "missing findmnt fails closed" \
+  || bad "missing findmnt was accepted"
+unset FINDMNT_TEST_MODE
+unset -f cd findmnt
+cd() {
+  [[ "${1-}" == "$query" ]] && return 1
+  builtin cd "$@"
+}
+lsof_stderr_incomplete_for_path "$unrelated_warn" "$query" \
+  && ok "unresolvable query path fails closed" \
+  || bad "unresolvable query path was accepted"
+unset -f cd
+chmod 700 "$hidden_parent"
+
+# On Linux hosts that expose an unreadable tracefs mount, exercise the real
+# findmnt/mount-namespace path in addition to the deterministic stub above.
+if command -v findmnt >/dev/null 2>&1 && [[ -r /proc/self/mountinfo ]]; then
+  actual_tracefs="$(findmnt -rn --raw -M /sys/kernel/debug/tracing -o TARGET 2>/dev/null || true)"
+  if [[ "$actual_tracefs" == /sys/kernel/debug/tracing ]] && ! (builtin cd "$actual_tracefs" 2>/dev/null); then
+    actual_tracefs_warn="lsof: WARNING: can't stat() tracefs file system $actual_tracefs"
+    lsof_stderr_incomplete_for_path "$actual_tracefs_warn" "$query" \
+      && bad "actual unrelated inaccessible tracefs mount blocked query" \
+      || ok "actual unrelated inaccessible tracefs mount is query-safe"
+  fi
+fi
+rm -rf "$WARN_ROOT"
+
 if [[ -d /proc/self ]]; then
   dead=999999; while [[ -e /proc/$dead ]]; do dead=$((dead - 1)); done
   lsof_collect_cwds $'p1\nfcwd\nn/proc/'"$dead"'/cwd (readlink: Permission denied)' "" 0 \
