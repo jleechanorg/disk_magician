@@ -157,7 +157,7 @@ else
 fi
 OUT3_CONTENT=$(cat "$OUT3")
 assert_rc "cleanup_tmp --clean --large refusal exits 0" 0 "$RC3"
-assert_contains "cleanup_tmp refuses large delete without approval" "Refusing large /private/tmp deletion: set LARGE_TMP_APPROVED=1" "$OUT3_CONTENT"
+assert_contains "cleanup_tmp refuses large delete without approval" "Refusing /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." "$OUT3_CONTENT"
 
 echo "Test 4: disk_audit.sh clean-all --dry-run skips sessions by default"
 AUDIT_FIXTURE_ALL="$TMP_ROOT/audit-fixture-clean-all"
