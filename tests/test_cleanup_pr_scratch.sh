@@ -370,8 +370,9 @@ if command -v chflags >/dev/null 2>&1; then
   chflags nouchg "$T12_DIR/pr-immutable-dir/file.txt" 2>/dev/null || true
   chmod -R u+w "$T12_DIR" 2>/dev/null || true
   assert_rc "T12: sweep exits 0 despite a chmod-immune entry" 0 "$T12_RC"
-  assert_contains "T12: unremovable item is SKIP-logged" "SKIP (rm failed)" "$T12_OUT"
-  assert_contains "T12: summary reports the RM_FAILED count" "Skipped (rm failed): 1" "$T12_OUT"
+  assert_contains "T12: unremovable item is SKIP-logged with its specific verdict" "SKIP (removal failed: kept:quarantine_partial_kept" "$T12_OUT"
+  assert_contains "T12: summary reports the removal-failed count" "Skipped (removal failed): 1" "$T12_OUT"
+  assert_contains "T12: a partial keep is not counted as a C14 policy keep" "Skipped (C14 kept): 0" "$T12_OUT"
   assert_missing "T12: sibling dir still removed (sweep did not abort)" "$T12_DIR/pr-normal-dir2"
 else
   record_pass "T12: chflags unavailable on this platform, skipping (not a failure)"
@@ -401,7 +402,7 @@ T13_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T13_DIR" DIS
 T13_PERMS_AFTER="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
 chmod u+w "$T13_EXTERNAL" 2>/dev/null || true
 assert_exists "T13: stale symlink preserved (C14 never removes symlinks)" "$T13_DIR/pr-stale-symlink"
-assert_contains "T13: C14 kept the symlink candidate" "C14 kept: $T13_DIR/pr-stale-symlink" "$T13_OUT"
+assert_contains "T13: C14 kept the symlink candidate (specific verdict reported)" "SKIP (removal failed: kept:check-failed): $T13_DIR/pr-stale-symlink" "$T13_OUT"
 if [[ "$T13_PERMS_BEFORE" == "$T13_PERMS_AFTER" ]]; then
   record_pass "T13: external symlink target permissions unchanged ($T13_PERMS_BEFORE)"
 else
@@ -435,7 +436,7 @@ T14_DIR_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c 
 T14_FILE_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
 chmod -R u+w "$T14_EXTERNAL_DIR" 2>/dev/null || true
 assert_exists "T14: stale directory symlink preserved (C14 never removes symlinks)" "$T14_DIR/pr-stale-dir-symlink"
-assert_contains "T14: C14 kept the directory-symlink candidate" "C14 kept: $T14_DIR/pr-stale-dir-symlink" "$T14_OUT"
+assert_contains "T14: C14 kept the directory-symlink candidate (specific verdict reported)" "SKIP (removal failed: kept:check-failed): $T14_DIR/pr-stale-dir-symlink" "$T14_OUT"
 if [[ "$T14_DIR_PERMS_BEFORE" == "$T14_DIR_PERMS_AFTER" && "$T14_FILE_PERMS_BEFORE" == "$T14_FILE_PERMS_AFTER" ]]; then
   record_pass "T14: external target dir+file permissions unchanged ($T14_DIR_PERMS_BEFORE/$T14_FILE_PERMS_BEFORE)"
 else
@@ -477,6 +478,79 @@ assert_rc "T16: aborts with rc=90 when root is outside sandbox" 90 "$T16_RC"
 assert_contains "T16: abort message names sandbox_guard_roots" "sandbox_guard_roots" "$T16_OUT"
 assert_exists "T16: target untouched by the aborted run" "$T16_DIR/pr-sandbox-guard-target"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests 17-20: bead disk_magician-273z — the 12 h sweep must actually reclaim,
+# and a non-removal must report its OWN reason instead of one collapsed
+# "rm failed". Root cause: C14's declared-ephemeral row E3 hard-codes 2880
+# minutes for top-level pr*/claude-* names, so it overrode --min-age-hours and
+# every candidate at 12 h came back kept:recent-activity, which the caller
+# printed as "SKIP (rm failed)".
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 17: 12h Dial Is Honored For A Validated Plain File"
+T17_DIR="$TMP_TEST_ROOT/t17_tmp"
+mkdir -p "$T17_DIR"
+for n in pr240_after_api.json pr10577-dot-review-current-request.txt; do
+  echo "stale pr scratch" >"$T17_DIR/$n"
+  # 13 h: PAST the sweep's 12 h window, well INSIDE the 48 h row floor.
+  touch -t "$(date -v-13H '+%Y%m%d%H%M' 2>/dev/null || date -d '13 hours ago' '+%Y%m%d%H%M')" "$T17_DIR/$n"
+done
+set +e
+T17_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T17_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T17_DIR" \
+  DISK_MAGICIAN_SKIP_LSOF_CHECK=1 bash "$TARGET_SCRIPT" --clean --tmp-dir "$T17_DIR" --min-age-hours 12 2>&1)
+T17_RC=$?
+set -e
+assert_rc "T17: sweep exits 0" 0 "$T17_RC"
+assert_missing "T17: 13h-old plain file is reclaimed by --min-age-hours 12" "$T17_DIR/pr240_after_api.json"
+assert_missing "T17: second 13h-old plain file is reclaimed too" "$T17_DIR/pr10577-dot-review-current-request.txt"
+assert_contains "T17: summary reports the real removals" "Files removed: 2" "$T17_OUT"
+assert_contains "T17: nothing is reported as C14 kept" "Skipped (C14 kept): 0" "$T17_OUT"
+assert_contains "T17: nothing is reported as a removal failure" "Skipped (removal failed): 0" "$T17_OUT"
+assert_not_contains "T17: the collapsed generic reason is gone" "SKIP (rm failed)" "$T17_OUT"
+
+echo "Test 18: A Raised Dial Still Protects (Fails Closed)"
+T18_DIR="$TMP_TEST_ROOT/t18_tmp"
+mkdir -p "$T18_DIR"
+echo "stale" >"$T18_DIR/pr-13h-window.md"
+touch -t "$(date -v-13H '+%Y%m%d%H%M' 2>/dev/null || date -d '13 hours ago' '+%Y%m%d%H%M')" "$T18_DIR/pr-13h-window.md"
+T18_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T18_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T18_DIR" \
+  DISK_MAGICIAN_SKIP_LSOF_CHECK=1 bash "$TARGET_SCRIPT" --clean --tmp-dir "$T18_DIR" --min-age-hours 48 2>&1)
+assert_exists "T18: --min-age-hours 48 keeps a 13h-old candidate" "$T18_DIR/pr-13h-window.md"
+assert_contains "T18: the item is reported as recently active, not removed" "Skipping recently active path" "$T18_OUT"
+
+# A stale dir whose only content is secret-like: the retention override must not
+# turn into a blanket permit — C14's own data-loss checks still decide, and the
+# refusal must name its specific reason.
+echo "Test 19: A C14 Keep Reports Its Specific Reason, Not A Collapse"
+T19_DIR="$TMP_TEST_ROOT/t19_tmp"
+mkdir -p "$T19_DIR/pr273z-secret"
+printf 'TOKEN=abc123\n' >"$T19_DIR/pr273z-secret/.env"
+set_old_mtime "$T19_DIR"
+T19_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T19_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T19_DIR" \
+  DISK_MAGICIAN_SKIP_LSOF_CHECK=1 bash "$TARGET_SCRIPT" --clean --tmp-dir "$T19_DIR" --min-age-hours 12 2>&1)
+assert_exists "T19: secret-like content is preserved even past the dial" "$T19_DIR/pr273z-secret/.env"
+assert_contains "T19: the per-item line names the specific verdict" "SKIP (C14 kept: kept:secret-like): $T19_DIR/pr273z-secret" "$T19_OUT"
+assert_contains "T19: the summary counts it as a C14 keep" "Skipped (C14 kept): 1" "$T19_OUT"
+assert_contains "T19: it is NOT counted as a removal failure" "Skipped (removal failed): 0" "$T19_OUT"
+assert_contains "T19: the reason breakdown names the reason" "C14 kept by reason: kept:secret-like: 1" "$T19_OUT"
+
+# The override is per-candidate, not a blanket permit for the run: in ONE run a
+# plain 13 h scratch file must be reclaimed while a sibling that holds
+# secret-like content must still be kept, by C14, for its own reason.
+echo "Test 20: Override Is Per-Candidate, Not A Blanket Permit"
+T20_DIR="$TMP_TEST_ROOT/t20_tmp"
+mkdir -p "$T20_DIR" "$T20_DIR/pr273z-holds-secret"
+echo stale >"$T20_DIR/pr-zzz-plain.json"
+printf 'TOKEN=abc123\n' >"$T20_DIR/pr273z-holds-secret/.env"
+for p in "$T20_DIR/pr-zzz-plain.json" "$T20_DIR/pr273z-holds-secret" "$T20_DIR/pr273z-holds-secret/.env"; do
+  touch -t "$(date -v-13H '+%Y%m%d%H%M' 2>/dev/null || date -d '13 hours ago' '+%Y%m%d%H%M')" "$p"
+done
+T20_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T20_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T20_DIR" \
+  DISK_MAGICIAN_SKIP_LSOF_CHECK=1 bash "$TARGET_SCRIPT" --clean --tmp-dir "$T20_DIR" --min-age-hours 12 2>&1)
+assert_missing "T20: the plain 13h candidate is removed in the same run" "$T20_DIR/pr-zzz-plain.json"
+assert_exists "T20: the secret-holding sibling is still kept" "$T20_DIR/pr273z-holds-secret/.env"
+assert_contains "T20: one removal and one C14 keep are reported separately" "Files removed: 1  Total freed:" "$T20_OUT"
+assert_contains "T20: the keep is counted under C14, not as a failure" "Skipped (C14 kept): 1  Skipped (removal failed): 0" "$T20_OUT"
+assert_contains "T20: the keep names its reason" "SKIP (C14 kept: kept:secret-like): $T20_DIR/pr273z-holds-secret" "$T20_OUT"
+
 echo
-echo "=== Test Results: $PASS pass, $FAIL fail ==="
-[[ "$FAIL" -eq 0 ]]
+echo "=== Test Results: $PASS pass, $FAIL fail ==="[[ "$FAIL" -eq 0 ]]

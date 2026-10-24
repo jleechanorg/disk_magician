@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
@@ -328,7 +328,12 @@ def phase1(path, inv_file, binding_file, deadline=None):
     try: renamex(pfd, base, qfd, qid)  # commit point; both directory bindings stay pinned
     except (LookupError, OSError) as e:
         if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
-        return "kept:exclusive_rename_unavailable" if isinstance(e, LookupError) else "kept:rename-failed"
+        # Name the actual errno: a bare "rename-failed" collapsed EXDEV, EPERM,
+        # EACCES, ENOSPC, EROFS and a missing symbol into one indistinguishable
+        # string, so the caller could only report a generic "rm failed"
+        # (bead disk_magician-273z).
+        if isinstance(e, LookupError): return "kept:exclusive_rename_unavailable"
+        return "kept:rename-failed:" + errno.errorcode.get(e.errno, str(e.errno))
     try:
         os.fsync(pfd); os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"

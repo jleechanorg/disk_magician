@@ -103,7 +103,7 @@ DISK_MAGICIAN_STATE_DIR="$T/state-pr" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$
   bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" --clean --tmp-dir "$SCRATCH" >"$T/pr.out" 2>&1
 absent  "$SCRATCH/pr-old" "past-retention E3 scratch entry removed"
 present "$SCRATCH/pr-secret" "secret-like scratch entry kept"
-contains "$T/pr.out" "C14 kept: $SCRATCH/pr-secret" "pr_scratch logs the C14 keep reason"
+contains "$T/pr.out" "SKIP (C14 kept: kept:secret-like): $SCRATCH/pr-secret" "pr_scratch logs the C14 keep reason with its specific verdict"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
