@@ -352,11 +352,36 @@ class TestConfigMutator(unittest.TestCase):
         template = REPO / "config.json.template"
         before = template.read_bytes()
         result = self.run_config(
-            "add-monitored-dir", "--key", "template", "--path", "/tmp"
+            "add-monitored-dir", "--key", "template", "--path", "/tmp", config=template
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing to write packaged config template", result.stderr)
         self.assertEqual(template.read_bytes(), before)
+
+    def test_fresh_install_materializes_state_config_without_template_write(self):
+        before = (REPO / "config.json.template").read_bytes()
+        result = self.run_config(
+            "add-monitored-dir", "--key", "fresh", "--path", "/fresh"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        self.assertTrue(state_config.is_file())
+        self.assertIn("fresh", {entry["key"] for entry in json.loads(state_config.read_text())["monitored_dirs"]})
+        self.assertEqual((REPO / "config.json.template").read_bytes(), before)
+
+    def test_failed_fresh_mutation_does_not_materialize_state_config(self):
+        xdg_config = self.root / "xdg" / "disk-magician" / "config.json"
+        xdg_config.parent.mkdir(parents=True)
+        xdg_config.write_text(json.dumps({"snapshot_measure": {}}) + "\n")
+
+        result = self.run_config(
+            "add-monitored-dir", "--key", "tmp", "--path", "/newtmp"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already has a different entry", result.stderr)
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        self.assertFalse(state_config.exists())
 
     def test_symlink_config_updates_target_and_keeps_link(self):
         target = self.write_config(data={"monitored_dirs": []})
