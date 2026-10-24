@@ -20,6 +20,12 @@ def resolve() -> str:
     if explicit:
         return explicit
     home = pathlib.Path(os.environ.get("HOME", "/"))
+    xdg_cfg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    xdg_path = xdg_cfg / "disk-magician" / "config.json"
+    if xdg_path.is_file():
+        configured = resolve_config.configured_state_repo(xdg_path, home)
+        if configured is not None:
+            return str(configured)
     cfg_path = resolve_config.resolve()
     if cfg_path:
         try:
