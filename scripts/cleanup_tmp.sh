@@ -38,6 +38,7 @@ WORKTREE_POINTER_MIN_KB=51200
 # mtime within this window is considered "active use" and is skipped
 # regardless of size or protected-root status.
 LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
+AGED_TMP_ACTIVE_HOURS="${AGED_TMP_ACTIVE_HOURS:-72}"
 # --large branch: how long an archived dir sits under
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
@@ -92,14 +93,17 @@ fi
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS AGED_TMP_ACTIVE_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168 72"
 import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))}")
+print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))} {os.environ.get('AGED_TMP_ACTIVE_HOURS', t.get('aged_tmp_active_hours', 72))}")
 PY
 )"
 fi
+if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=72; fi
+AGED_TMP_ACTIVE_HOURS=$((10#${AGED_TMP_ACTIVE_HOURS}))
+(( AGED_TMP_ACTIVE_HOURS < 72 )) && AGED_TMP_ACTIVE_HOURS=72
 
 # --large branch: top-level /private/tmp basenames that are NEVER deleted or
 # archived, regardless of mtime/size — a documented canonical evidence/repo
@@ -156,6 +160,7 @@ fi
 
 DRY_RUN=true
 INCLUDE_LARGE=false
+INCLUDE_AGED=false
 INCLUDE_OPENCODE_DYLIBS=false
 LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 # Size-budget mode (bead disk_magician-d45): 0 disables. Env default lets
@@ -173,7 +178,7 @@ act_parse_deadline_args "$@" || exit 2
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--aged] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
 
 Delete stale agent git clones and temp files from system temp paths.
 
@@ -181,6 +186,9 @@ Options:
   --clean      Actually perform the cleanup (default: dry-run)
   --dry-run    Run in dry-run/preview mode
   --large      Include top-level /private/tmp dirs larger than LARGE_TMP_MIN_KB
+  --aged       Include C14-proven top-level /private/tmp dirs of any size
+               and C14 agent_prompt_*.txt files after AGED_TMP_ACTIVE_HOURS
+               (minimum 72h) without recent activity; uses quarantine gates.
   --opencode-dylibs
                Include closed OpenCode libopentui dylibs in DARWIN_USER_TEMP_DIR
   --budget-gb N
@@ -202,6 +210,7 @@ while [[ $# -gt 0 ]]; do
     --clean)   DRY_RUN=false ;;
     --dry-run) DRY_RUN=true ;;
     --large)   INCLUDE_LARGE=true ;;
+    --aged)    INCLUDE_AGED=true ;;
     --opencode-dylibs) INCLUDE_OPENCODE_DYLIBS=true ;;
     --budget-gb)
       if [[ $# -lt 2 || -z "$2" ]]; then
@@ -225,6 +234,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "$INCLUDE_AGED" == true && "$INCLUDE_LARGE" == true ]]; then
+  echo "Error: --aged and --large select different activity and recovery windows; run one mode at a time." >&2
+  exit 2
+fi
+
 if ! [[ "$BUDGET_GB" =~ ^[0-9]+$ ]]; then
   echo "Error: --budget-gb must be a non-negative integer, got '$BUDGET_GB'" >&2
   exit 2
@@ -234,8 +248,8 @@ if ! [[ "$BUDGET_FLOOR_MINUTES" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-if [[ "$INCLUDE_LARGE" == true && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0}" != "1" ]]; then
-  echo "Refusing large /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." >&2
+if [[ ( "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true ) && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0}" != "1" ]]; then
+  echo "Refusing /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." >&2
   exit 0
 fi
 
@@ -269,7 +283,7 @@ PRIVATE_TMP_ROOT="$(scratch_roots_get_private_tmp)"
 
 # Candidate scope/order is part of the resume contract. A cursor created for
 # different effective thresholds, modes, budgets, or roots fails closed.
-ACT_CURSOR_SOURCE="cleanup_tmp:v1:dry=${DRY_RUN}:large=${INCLUDE_LARGE}:dylibs=${INCLUDE_OPENCODE_DYLIBS}:budget=${BUDGET_GB}:floor=${BUDGET_FLOOR_MINUTES}:git=${GIT_CLONE_MIN}:prompt=${AGENT_PROMPT_MIN}:cli=${CLI_VALIDATION_MIN}:pointer=${WORKTREE_POINTER_MIN}:${WORKTREE_POINTER_MIN_KB}:large_min=${LARGE_TMP_MIN_KB}:active=${LARGE_TMP_ACTIVE_HOURS}:retention=${LARGE_TMP_ARCHIVE_RETENTION_HOURS}:max=${LARGE_TMP_ARCHIVE_MAX_HOURS}:archive=${ARCHIVE_ROOT}:tmp=${TMP_DIRS[*]}:user_tmp=${USER_TMP}:private_tmp=${PRIVATE_TMP_ROOT}:protected=${PROTECTED_TMP_ROOTS[*]}"
+ACT_CURSOR_SOURCE="cleanup_tmp:v1:dry=${DRY_RUN}:large=${INCLUDE_LARGE}:aged=${INCLUDE_AGED}:${AGED_TMP_ACTIVE_HOURS}:dylibs=${INCLUDE_OPENCODE_DYLIBS}:budget=${BUDGET_GB}:floor=${BUDGET_FLOOR_MINUTES}:git=${GIT_CLONE_MIN}:prompt=${AGENT_PROMPT_MIN}:cli=${CLI_VALIDATION_MIN}:pointer=${WORKTREE_POINTER_MIN}:${WORKTREE_POINTER_MIN_KB}:large_min=${LARGE_TMP_MIN_KB}:active=${LARGE_TMP_ACTIVE_HOURS}:retention=${LARGE_TMP_ARCHIVE_RETENTION_HOURS}:max=${LARGE_TMP_ARCHIVE_MAX_HOURS}:archive=${ARCHIVE_ROOT}:tmp=${TMP_DIRS[*]}:user_tmp=${USER_TMP}:private_tmp=${PRIVATE_TMP_ROOT}:protected=${PROTECTED_TMP_ROOTS[*]}"
 if [[ -n "$ACT_CURSOR" ]]; then
   act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || {
     echo "cleanup_tmp: cursor invalid or options changed; preserving candidates" >&2
@@ -522,7 +536,11 @@ is_protected_root_child() {
 # Uses the same guards as the large-dir class (marker, recency, size, open
 # files, unsaved work) on a stricter recency clock.
 scan_protected_root_children() {
-  local root="$1" child base rel kb archive_rc
+  local root="$1" min_kb="${2:-$LARGE_TMP_MIN_KB}" active_hours="${3:-$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}" aged_mode="${4:-false}" child base rel kb archive_rc protected_child_active_hours
+  protected_child_active_hours="$active_hours"
+  if [[ "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS" =~ ^[0-9]+$ ]] && (( PROTECTED_ROOT_CHILD_MIN_AGE_HOURS > protected_child_active_hours )); then
+    protected_child_active_hours="$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"
+  fi
   while IFS= read -r -d '' child; do
     base="$(basename "$child")"
     if is_protected_root_child "$base"; then
@@ -533,8 +551,8 @@ scan_protected_root_children() {
       log "Skipping active-use marker (.in-use present): $child"
       continue
     fi
-    if has_recent_activity "$child" "$PROTECTED_ROOT_CHILD_MIN_AGE_HOURS"; then
-      log "Skipping recently active protected-root child (mtime/ctime within ${PROTECTED_ROOT_CHILD_MIN_AGE_HOURS}h): $child"
+    if has_recent_activity "$child" "$protected_child_active_hours" "$aged_mode"; then
+      log "Skipping recently active protected-root child (mtime/ctime within ${protected_child_active_hours}h): $child"
       continue
     fi
     kb=$(path_size_kb "$child")
@@ -542,19 +560,27 @@ scan_protected_root_children() {
       log "Skipping protected-root child (size unknown): $child"
       continue
     fi
-    if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+    if [[ "$kb" -lt "$min_kb" ]]; then
       continue
     fi
-    if [[ "$DRY_RUN" != true ]] && has_open_files "$child"; then
+    if { [[ "$DRY_RUN" != true ]] || [[ "$aged_mode" == true ]]; } && has_open_files "$child"; then
       log "Skipping in-use protected-root child: $child  (${kb} KB)"
       continue
+    fi
+    if [[ "$aged_mode" == true ]]; then
+      local special_entries special_rc=0
+      special_entries="$(/usr/bin/find "$child" ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
+      if (( special_rc != 0 )) || [[ -n "$special_entries" ]]; then
+        log "Skipping aged protected-root child with symlink, special, or unreadable entries: $child"
+        continue
+      fi
     fi
     if declare -F worktree_has_unsaved_work >/dev/null 2>&1 && worktree_has_unsaved_work "$child"; then
       log "Skipping protected-root child with unsaved work (uncommitted/unpushed/no-upstream): $child"
       continue
     fi
     archive_rc=0
-    archive_path "$child" "$kb" "$(basename "$root")" >/dev/null || archive_rc=$?
+    archive_path "$child" "$kb" "$(basename "$root")" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ACTIVE_HOURS" || echo 0)" >/dev/null || archive_rc=$?
     (( archive_rc == 1 )) && continue
     if (( archive_rc != 0 )); then
       log "ERROR: could not archive: $child (rc=$archive_rc); preserving and continuing"
@@ -609,7 +635,7 @@ tmp_root_grace_minutes() {
 # 8.7h-old content and a fresh dir mtime, so every pass skipped it and /tmp
 # doubled while the sweeper correctly reported "Dirs removed: 0".
 has_recent_activity() {
-  local dir="$1" hours="$2" mins grace hit_file rc=0 tbin
+  local dir="$1" hours="$2" aged_mode="${3:-false}" mins grace hit_file rc=0 tbin
   mins=$(( hours * 60 ))
   # The ROOT's own mtime/ctime counts only within a short grace (default 30m,
   # floor 5, clamped to the normal window): enough to protect a child that was
@@ -619,9 +645,11 @@ has_recent_activity() {
   # test context judges mtime only unless a test opts into the ctime signal.
   local -a recent_expr=( \( -mmin "-${mins}" -o -cmin "-${mins}" \) )
   local -a root_expr=( \( -mmin "-${grace}" -o -cmin "-${grace}" \) )
+  if [[ "$aged_mode" == true ]]; then root_expr=( "${recent_expr[@]}" ); fi
   if [[ -n "${DISK_MAGICIAN_TEST_CONTEXT:-}" && "${DISK_MAGICIAN_TEST_CTIME_SIGNAL:-}" != 1 ]]; then
     recent_expr=( -mmin "-${mins}" )
     root_expr=( -mmin "-${grace}" )
+    if [[ "$aged_mode" == true ]]; then root_expr=( "${recent_expr[@]}" ); fi
   fi
   hit_file="$(mktemp -t disk-magician-activity.XXXXXX)"
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
@@ -898,8 +926,9 @@ has_open_files() {
 # archive_path <dir> <size_kb> — move (not delete) a large top-level /private/tmp dir
 # into a dated quarantine root instead of an instant rm -rf. Same-filesystem
 # mv is a rename (near-zero cost, frees no space immediately) so a later
-# --large run can still purge_aged_archives() once the retention window
-# passes, giving a real recovery window before space is reclaimed.
+# --large and --aged runs reconcile their own archive entries after the
+# mode-specific recovery window, giving a real recovery window before space is
+# reclaimed.
 archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusal (logged)
   local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
   secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
@@ -930,7 +959,7 @@ archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusa
 }
 
 archive_path() {
-  local path="$1" kb="$2" sub="${3:-}" ts dest entry receipt safety_reason canon="" retention=""
+  local path="$1" kb="$2" sub="${3:-}" recovery_hours="${4:-0}" ts dest entry receipt safety_reason canon="" retention=""
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
 
@@ -962,7 +991,7 @@ archive_path() {
     fi
     entry="$dest/${path##*/}"
     receipt="$entry.c14-origin.json"
-    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$canon" "$receipt" "" "$retention"; then
+    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$canon" "$receipt" "" "$retention" "$recovery_hours"; then
       log "ERROR: could not write archive origin receipt: $receipt"
       return 2
     fi
@@ -988,10 +1017,10 @@ archive_path() {
 # keeping quarantined data alive and the operator should look at it before
 # the LARGE_TMP_ARCHIVE_MAX_HOURS hard cap eventually force-purges it.
 warn_if_long_lived() {
-  local d="$1" age_hours="$2"
-  local warn_after=$(( LARGE_TMP_ARCHIVE_RETENTION_HOURS * 2 ))
+  local d="$1" age_hours="$2" retention_hours="${3:-$LARGE_TMP_ARCHIVE_RETENTION_HOURS}" max_hours="${4:-$LARGE_TMP_ARCHIVE_MAX_HOURS}"
+  local warn_after=$(( retention_hours * 2 ))
   if (( age_hours > warn_after )); then
-    log "WARNING: archive entry still alive after ${age_hours}h (>2x retention ${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h; hard cap ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d"
+    log "WARNING: archive entry still alive after ${age_hours}h (>2x retention ${retention_hours}h; hard cap ${max_hours}h): $d"
   fi
 }
 
@@ -1012,15 +1041,44 @@ PY
 }
 
 purge_archive_entry() {
-  local d="$1" mins="$2"
-  local kb entry_mtime age_hours result size_unknown=false now_epoch
+  local d="$1" mins="$2" retention_hours="${3:-$LARGE_TMP_ARCHIVE_RETENTION_HOURS}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" max_hours="${5:-$LARGE_TMP_ARCHIVE_MAX_HOURS}"
+  local kb entry_mtime age_hours result size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
   now_epoch="$(date +%s)"
+  # Aged-mode archives carry a recovery window in the existing C14 origin
+  # receipt. Honor it in every purge mode, even when source mtime predates the
+  # archive move and the ordinary 24h policy is shorter.
+  recovery_info="$(python3 - "$d.c14-origin.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        row = json.load(f)
+    hours, archived = row.get("recovery_hours", 0), row.get("archived_at", 0)
+    if type(hours) is int and hours >= 0 and type(archived) is int and archived > 0:
+        print(f"{hours} {archived}")
+except Exception:
+    pass
+PY
+)"
+  recovery_hours=0
+  archived_at=0
+  read -r recovery_hours archived_at <<<"$recovery_info" || true
+  activity_hours="$active_hours"
+  if [[ "$recovery_hours" =~ ^[0-9]+$ && "$archived_at" =~ ^[0-9]+$ ]] && (( recovery_hours > 0 )); then
+    recovery_age=$(( now_epoch - archived_at ))
+    if (( recovery_age < recovery_hours * 3600 )); then
+      log "Skipping archive inside its persisted ${recovery_hours}h recovery window: $d"
+      return 0
+    fi
+    activity_hours="$active_hours"
+    (( activity_hours < recovery_hours )) && activity_hours="$recovery_hours"
+    aged_recovery=true
+  fi
   # Size first because du can be slow. All safety probes follow it, with the
   # open-file check last immediately before the destructive operation.
   kb=$(path_size_kb "$d")
   size_unknown=false
   (( kb < 0 )) && { size_unknown=true; kb=0; }
-  # Hard cap (bead jleechan-mtow): past LARGE_TMP_ARCHIVE_MAX_HOURS the
+  # Hard cap (bead jleechan-mtow): past max_hours the
   # entry is purged even if activity probes would keep it — otherwise a
   # process holding fds into the archive keeps it alive unboundedly. If
   # the entry's mtime can't be read, fall through to the guarded path
@@ -1031,46 +1089,46 @@ purge_archive_entry() {
   (( now_epoch - entry_mtime <= mins * 60 )) && return 0
   if [[ "$size_unknown" == true ]]; then
     log "Skipping aged archive (size unknown): $d"
-    if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+    if (( age_hours > max_hours )); then
       archive_overcap_kept "$d" size-unknown
     fi
     return 0
   fi
   if has_active_marker "$d"; then
     log "Skipping marked-active aged archive: $d"
-    if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+    if (( age_hours > max_hours )); then
       archive_overcap_kept "$d" active-marker
     else
-      warn_if_long_lived "$d" "$age_hours"
+      warn_if_long_lived "$d" "$age_hours" "$retention_hours" "$max_hours"
     fi
     return 0
   fi
-  if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
+  if has_recent_activity "$d" "$activity_hours" "$aged_recovery"; then
     log "Skipping recently-active aged archive: $d"
-    if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+    if (( age_hours > max_hours )); then
       archive_overcap_kept "$d" recent-activity
     else
-      warn_if_long_lived "$d" "$age_hours"
+      warn_if_long_lived "$d" "$age_hours" "$retention_hours" "$max_hours"
     fi
     return 0
   fi
   if has_open_files "$d"; then
     log "Skipping in-use aged archive: $d"
-    if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+    if (( age_hours > max_hours )); then
       archive_overcap_kept "$d" open-file
     else
-      warn_if_long_lived "$d" "$age_hours"
+      warn_if_long_lived "$d" "$age_hours" "$retention_hours" "$max_hours"
     fi
     return 0
   fi
-  if (( age_hours > LARGE_TMP_ARCHIVE_MAX_HOURS )); then
+  if (( age_hours > max_hours )); then
     if [[ "$DRY_RUN" == true ]]; then
-      log "DRY RUN: would request C14 purge for over-cap archive (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
+      log "DRY RUN: would request C14 purge for over-cap archive (${age_hours}h > max ${max_hours}h): $d  (${kb} KB)"
     else
       result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
       cleanup_tmp_count_candidate_result "$result"
       if [[ "$result" == removed:* ]]; then
-        log "Purged over-cap archive after C14 approval (${age_hours}h > max ${LARGE_TMP_ARCHIVE_MAX_HOURS}h): $d  (${kb} KB)"
+        log "Purged over-cap archive after C14 approval (${age_hours}h > max ${max_hours}h): $d  (${kb} KB)"
         deletion_log "cleanup_tmp.sh" "purge_archive_overcap" "$kb" "$d"
       else
         archive_overcap_kept "$d" "$result"
@@ -1082,16 +1140,16 @@ purge_archive_entry() {
     return 0
   fi
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY RUN: would purge aged archive (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
+    log "DRY RUN: would purge aged archive (>${retention_hours}h): $d  (${kb} KB)"
   else
     result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$d")"
     cleanup_tmp_count_candidate_result "$result"
     if [[ "$result" == removed:* ]]; then
-      log "Purged aged archive after C14 approval (>${LARGE_TMP_ARCHIVE_RETENTION_HOURS}h): $d  (${kb} KB)"
+      log "Purged aged archive after C14 approval (>${retention_hours}h): $d  (${kb} KB)"
       deletion_log "cleanup_tmp.sh" "purge_archive" "$kb" "$d"
     else
       log "Skipping aged archive (C14 $result): $d"
-      warn_if_long_lived "$d" "$age_hours"
+      warn_if_long_lived "$d" "$age_hours" "$retention_hours" "$max_hours"
       return 0
     fi
   fi
@@ -1101,15 +1159,23 @@ purge_archive_entry() {
 }
 
 # purge_aged_archives — permanently remove C14-approved inactive archive entries older than
-# LARGE_TMP_ARCHIVE_RETENTION_HOURS. Safety checks run again at purge time
+# the selected mode retention window. Safety checks run again at purge time
 # because quarantined content can become active during its recovery window.
 # The former age-only hard cap now reports a kept entry instead of bypassing
 # C14 activity, ownership, provenance, and quarantine checks.
 purge_aged_archives() {
   [[ -d "$ARCHIVE_ROOT" ]] || return 0
-  local scan_hours mins d
-  scan_hours="$LARGE_TMP_ARCHIVE_RETENTION_HOURS"
-  (( LARGE_TMP_ARCHIVE_MAX_HOURS < scan_hours )) && scan_hours="$LARGE_TMP_ARCHIVE_MAX_HOURS"
+  local mode="${1:-large}" scan_hours mins d retention_hours active_hours max_hours
+  retention_hours="$LARGE_TMP_ARCHIVE_RETENTION_HOURS"
+  active_hours="$LARGE_TMP_ACTIVE_HOURS"
+  max_hours="$LARGE_TMP_ARCHIVE_MAX_HOURS"
+  if [[ "$mode" == aged ]]; then
+    retention_hours="$AGED_TMP_ACTIVE_HOURS"
+    active_hours="$AGED_TMP_ACTIVE_HOURS"
+    (( max_hours < retention_hours )) && max_hours="$retention_hours"
+  fi
+  scan_hours="$retention_hours"
+  (( max_hours < scan_hours )) && scan_hours="$max_hours"
   mins=$(( scan_hours * 60 ))
   # Depth-2 units: top-level archives at "$ARCHIVE_ROOT/<ts>/<unit>". Raw
   # (unreceipted) directories stay visible here so their keep/over-cap reason
@@ -1120,7 +1186,7 @@ purge_aged_archives() {
        [[ -n "$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type f -name '*.c14-origin.json' -print -quit 2>/dev/null || true)" ]]; then
       continue
     fi
-    purge_archive_entry "$d" "$mins"
+    purge_archive_entry "$d" "$mins" "$retention_hours" "$active_hours" "$max_hours"
   done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null || true)
   # Descended container children live at "$ARCHIVE_ROOT/<ts>/<container>/<unit>"
   # and are discovered by their origin receipts, never by blindly walking and
@@ -1135,7 +1201,7 @@ purge_aged_archives() {
   while IFS= read -r -d '' d; do
     d="${d%.c14-origin.json}"
     [[ -d "$d" && ! -L "$d" ]] || continue
-    purge_archive_entry "$d" "$mins"
+    purge_archive_entry "$d" "$mins" "$retention_hours" "$active_hours" "$max_hours"
   done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 3 -maxdepth 3 -type f -name '*.c14-origin.json' -print0 2>/dev/null || true)
 }
 
@@ -1148,6 +1214,7 @@ DIRS_ARCHIVED=0
 ARCHIVED_KB=0
 
 # Scan all temp directories for git clones & validation scratch dirs
+if [[ "$INCLUDE_AGED" != true ]]; then
 for tmp_dir in "${TMP_DIRS[@]}"; do
   [[ -d "$tmp_dir" ]] || continue
   log "Scanning $tmp_dir ..."
@@ -1322,6 +1389,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
               -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
 done
 
+fi
+
 if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
   log "Scanning DARWIN_USER_TEMP_DIR for OpenCode libopentui dylibs ..."
   if [[ -z "$USER_TMP" || ! -d "$USER_TMP" ]]; then
@@ -1451,7 +1520,7 @@ container_child_has_protected_repository() {
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
-  local d="$1" depth="$2" base kb archive_rc=0
+  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
   local scratch_container=false
   base="$(basename "$d")"
 
@@ -1488,7 +1557,7 @@ large_consider_entry() {
   if is_protected_root "$base" || { (( depth > 0 )) && is_protected_tmp_path "$d"; }; then
     log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
     if (( depth == 0 )); then
-      scan_protected_root_children "$d"
+      scan_protected_root_children "$d" "$min_kb" "$active_hours" "$aged_mode"
     fi
     return 0
   fi
@@ -1528,12 +1597,12 @@ large_consider_entry() {
   if [[ "$scratch_container" == true ]]; then
     log "Descending into scratch container (children evaluated individually): $d"
     while IFS= read -r -d '' child; do
-      large_consider_entry "$child" 1
+      large_consider_entry "$child" 1 "$min_kb" "$active_hours" "$aged_mode"
     done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
     return 0
   fi
-  if has_recent_activity "$d" "$LARGE_TMP_ACTIVE_HOURS"; then
-    log "Skipping recently active dir (mtime/ctime within ${LARGE_TMP_ACTIVE_HOURS}h): $d"
+  if has_recent_activity "$d" "$active_hours" "$aged_mode"; then
+    log "Skipping recently active dir (mtime/ctime within ${active_hours}h): $d"
     return 0
   fi
 
@@ -1542,16 +1611,25 @@ large_consider_entry() {
     log "Skipping large-dir candidate (size unknown): $d"
     return 0
   fi
-  if [[ "$kb" -lt "$LARGE_TMP_MIN_KB" ]]; then
+  if [[ "$kb" -lt "$min_kb" ]]; then
     return 0
   fi
 
-  if [[ "$DRY_RUN" != true ]] && has_open_files "$d"; then
+  if { [[ "$DRY_RUN" != true ]] || [[ "$aged_mode" == true ]]; } && has_open_files "$d"; then
     log "Skipping in-use large tmp dir: $d  (${kb} KB)"
     return 0
   fi
 
-  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" >/dev/null || archive_rc=$?
+  if [[ "$aged_mode" == true ]]; then
+    local special_entries special_rc=0
+    special_entries="$(/usr/bin/find "$d" ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
+    if (( special_rc != 0 )) || [[ -n "$special_entries" ]]; then
+      log "Skipping aged tmp dir with symlink, special, or unreadable entries: $d"
+      return 0
+    fi
+  fi
+
+  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ACTIVE_HOURS" || echo 0)" >/dev/null || archive_rc=$?
   if (( archive_rc == 1 )); then
     return 0
   fi
@@ -1564,22 +1642,70 @@ large_consider_entry() {
   DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
 }
 
-if [[ "$INCLUDE_LARGE" == true && -z "$PRIVATE_TMP_ROOT" ]]; then
+if [[ ( "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true ) && -z "$PRIVATE_TMP_ROOT" ]]; then
   # Fail closed (bead disk_magician-ka4): an unresolvable private-tmp root
   # (e.g. DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE pointing at a dir that
   # doesn't exist) must never silently fall back to the real /private/tmp.
   log "Skipping --large scan: private-tmp root is unavailable (resolution failed closed)"
-elif [[ "$INCLUDE_LARGE" == true ]]; then
-  log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}, scratch containers: ${SCRATCH_CONTAINER_ROOTS[*]}) ..."
+elif [[ "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true ]]; then
+  if [[ "$INCLUDE_AGED" == true ]]; then
+    log "Scanning $PRIVATE_TMP_ROOT for C14-proven dirs of any size with no activity for ${AGED_TMP_ACTIVE_HOURS}h ..."
+  else
+    log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}, scratch containers: ${SCRATCH_CONTAINER_ROOTS[*]}) ..."
+  fi
   while IFS= read -r -d '' d; do
-    large_consider_entry "$d" 0
+    if [[ "$INCLUDE_AGED" == true ]]; then
+      large_consider_entry "$d" 0 0 "$AGED_TMP_ACTIVE_HOURS" true
+    fi
+    if [[ "$INCLUDE_LARGE" == true ]]; then
+      large_consider_entry "$d" 0
+    fi
   done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 
-# Always purge aged archives if the archive directory exists, regardless of --large.
-# This prevents _disk_magician_archive quarantine from accumulating indefinitely
-# when standard/regular cleanup_tmp.sh runs occur without --large.
-purge_aged_archives
+
+if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
+  aged_file_minutes=$((AGED_TMP_ACTIVE_HOURS * 60))
+  aged_file_age_args=( -mmin "+${aged_file_minutes}" -cmin "+${aged_file_minutes}" )
+  if [[ -n "${DISK_MAGICIAN_TEST_CONTEXT:-}" && "${DISK_MAGICIAN_TEST_CTIME_SIGNAL:-}" != 1 ]]; then
+    aged_file_age_args=( -mmin "+${aged_file_minutes}" )
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    aged_file_kb=$(path_size_kb "$f")
+    if (( aged_file_kb < 0 )); then
+      log "Skipping aged agent prompt (size unknown): $f"
+      continue
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+      result="$(artifact_removal_verdict "$f" --kind ephemeral)"
+      if [[ "$result" == remove ]]; then
+        log "DRY RUN: would remove C14 agent prompt (>${AGED_TMP_ACTIVE_HOURS}h): $f (${aged_file_kb} KB)"
+      else
+        log "Preserving aged agent prompt (C14 $result): $f"
+      fi
+      continue
+    fi
+    result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$f")"
+    cleanup_tmp_count_candidate_result "$result"
+    if [[ "$result" == removed:* ]]; then
+      deletion_log "cleanup_tmp.sh" "remove_aged_agent_prompt" "$aged_file_kb" "$f"
+      TOTAL_KB=$(( TOTAL_KB + aged_file_kb ))
+      FILES_DELETED=$(( FILES_DELETED + 1 ))
+    else
+      log "Preserving aged agent prompt (C14 $result): $f"
+    fi
+  done < <(/usr/bin/find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type f -name 'agent_prompt_*.txt' "${aged_file_age_args[@]}" -print0 2>/dev/null || true)
+fi
+
+# Both modes reconcile their own archive entries. --aged uses its enforced
+# 72-hour minimum for archive retention/activity; ordinary mode keeps its own
+# independent retention policy.
+if [[ "$INCLUDE_AGED" == true ]]; then
+  purge_aged_archives aged
+else
+  purge_aged_archives
+fi
 
 # Size-budget mode (bead disk_magician-d45): evicts oldest-first,
 # independent of the 24h/4h age gates above, so 0-24h scratch growth is no
@@ -1588,7 +1714,7 @@ purge_aged_archives
 BUDGET_DIRS_DELETED=0
 BUDGET_FILES_DELETED=0
 BUDGET_KB_FREED=0
-if [[ "$BUDGET_GB" -gt 0 ]]; then
+if [[ "$BUDGET_GB" -gt 0 && "$INCLUDE_AGED" != true ]]; then
   BUDGET_KB=$(( BUDGET_GB * 1024 * 1024 ))
   for tmp_dir in "${TMP_DIRS[@]}"; do
     [[ -d "$tmp_dir" ]] || continue

@@ -77,6 +77,10 @@ assert_missing() {
 run_capture() {
   local out_file="$1"
   shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in HOME=*) mkdir -p "${arg#HOME=}" && chmod 700 "${arg#HOME=}" ;; esac
+  done
   set +e
   "$@" >"$out_file" 2>&1
   local rc=$?

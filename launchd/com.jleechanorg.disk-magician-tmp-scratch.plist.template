@@ -7,26 +7,27 @@
   cleanup_tmp.sh --large step, once free space had already dropped below
   40GB). This job runs scripts/tmp_scratch_sweep.sh --clean (bead
   disk_magician-tmp-scratch-sweep-wrapper-impl-ruo), which wraps the
-  already-safety-gated cleanup_tmp.sh --large path AND cleanup_claude_state.sh
+  already-safety-gated cleanup_tmp.sh --aged path AND cleanup_claude_state.sh
   --dry-run (bead disk_magician-isw's ~/.claude/state clone sweeper, report-only;
-  unattended automated deletion is forbidden) on a fixed hourly cadence, so stale
-  scratch (>24h, LARGE_TMP_ACTIVE_HOURS gate for cleanup_tmp.sh) gets reclaimed
-  and dormant state workdirs are proactively monitored well before either can
-  contribute to a pressure event, not just after one starts.
+  unattended automated deletion is forbidden) on a fixed hourly cadence. It
+  archives C14-proven directories idle for at least 72h and removes eligible
+  agent_prompt_*.txt files past the same activity window. Archived bytes remain
+  recoverable for at least 72h, then a later C14-approved purge can reclaim them.
 
-  Safety: neither wrapped script's own behavior changed — cleanup_tmp.sh
-  --large still only acts on top-level /private/tmp dirs with no file mtime
-  within the last 24h (LARGE_TMP_ACTIVE_HOURS), skips the
-  DEFAULT_PROTECTED_TMP_ROOTS list, archives (never immediately rm -rf's)
-  into /private/tmp/_disk_magician_archive/<ts>/, and only purges an
-  archived copy after its own retention window. The LARGE_TMP_APPROVED=1
-  approval gate is set by the wrapper per-command via `env` (not by this
-  plist's EnvironmentVariables), while cleanup_claude_state.sh is strictly
-  invoked in report-only mode (--dry-run). The wrapper runs cleanup_tmp.sh first,
-  then cleanup_claude_state.sh even if the tmp step failed (failure-continue),
-  and exits nonzero if either step failed so a persistent failure is visible
-  in this job's StandardErrorPath log / exit status rather than looking
-  healthy.
+  Safety: the hourly wrapper now selects cleanup_tmp.sh --aged directly. It
+  scans only C14-proven /private/tmp directories and supported
+  agent_prompt_*.txt files after at least 72h (or the configured higher
+  minimum) without nested activity. It does not run the ordinary 4h/1h
+  small-item scans. Candidate directories use the existing archive and C14
+  recovery-receipt path; a later run purges them only after that 72h recovery
+  window and a fresh C14 ownership/activity/open-file check. The ordinary
+  --large path used by pressure cleanup retains its
+  existing 24h activity and archive-retention settings. The wrapper sets
+  LARGE_TMP_APPROVED=1 per command, then runs cleanup_claude_state.sh
+  --dry-run (unattended deletion is forbidden). It continues to the state
+  report if the tmp step fails and exits nonzero if either step failed, so a
+  persistent failure remains visible in the job log/exit status.
+
 
   Schedule:  Every hour (StartInterval=3600s) — matches jleechan-dqiz's
              literal "hourly stale-clone sweeper" interim ask. Idle fires

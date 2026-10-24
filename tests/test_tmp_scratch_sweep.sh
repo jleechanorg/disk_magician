@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/tmp_scratch_sweep.sh"
 
-TMP_ROOT="$(mktemp -d /tmp/disk-magician-tmp-scratch-sweep.XXXXXX)" || {
-  echo "FATAL: could not allocate /tmp fixture root" >&2
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/disk-magician-tmp-scratch-sweep.XXXXXX") || {
+  echo "FATAL: could not allocate fixture root under TMPDIR" >&2
   exit 2
 }
 if [[ -z "$TMP_ROOT" || ! -d "$TMP_ROOT" || -L "$TMP_ROOT" ]]; then
@@ -19,8 +19,8 @@ TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)" || {
   exit 2
 }
 case "$TMP_ROOT" in
-  /tmp/*|/private/tmp/*) ;;
-  *) echo "FATAL: fixture root not under /tmp: '$TMP_ROOT'" >&2; exit 2 ;;
+  "${TMPDIR:-/tmp}"/*|/tmp/*|/private/tmp/*) ;;
+  *) echo "FATAL: fixture root outside TMPDIR: '$TMP_ROOT'" >&2; exit 2 ;;
 esac
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -97,7 +97,7 @@ echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --clean
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
-assert_contains "cleanup_tmp invoked with --clean --large" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_tmp invoked with --clean --aged" "cleanup_tmp --clean --aged LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 
 echo "Test 2: --clean invokes cleanup_claude_state.sh with --dry-run"
 assert_contains "cleanup_claude_state invoked with --dry-run" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
@@ -126,7 +126,7 @@ echo "Test 5: dry-run mode passes --dry-run to both, sets neither approval var"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --dry-run
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
-assert_contains "cleanup_tmp dry-run, no approval" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
+assert_contains "cleanup_tmp dry-run, no approval" "cleanup_tmp --dry-run --aged LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 assert_contains "cleanup_claude_state dry-run, no approval" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 assert_receipt_field "dry-run receipt outcome success_noop" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success_noop"
 assert_receipt_field "dry-run receipt reports zero reclaimed bytes" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "0"
@@ -165,7 +165,7 @@ INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" CLAUDE_STA
 STATE_FAIL_RC=$?
 set -e
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
-assert_contains "cleanup_tmp ran successfully in Test 8" "cleanup_tmp --clean --large LARGE_TMP_APPROVED=1" "$INVOCATIONS"
+assert_contains "cleanup_tmp ran successfully in Test 8" "cleanup_tmp --clean --aged LARGE_TMP_APPROVED=1" "$INVOCATIONS"
 assert_contains "cleanup_claude_state ran and failed in Test 8" "cleanup_claude_state --dry-run CLAUDE_STATE_APPROVED=0" "$INVOCATIONS"
 if [[ "$STATE_FAIL_RC" -ne 0 ]]; then
   echo "  PASS  wrapper propagates nonzero exit when cleanup_claude_state failed alone"
@@ -198,7 +198,7 @@ else
   echo "  FAIL  no-argument entrypoint aborted under nounset"
   FAIL=$(( FAIL + 1 ))
 fi
-assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-run --large LARGE_TMP_APPROVED=0" "$INVOCATIONS"
+assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-run --aged LARGE_TMP_APPROVED=0" "$INVOCATIONS"
 
 echo "Test 10: cleanup_tmp exit 75 (scratch lock held) records skipped_lock and exits 0"
 : > "$INVOCATION_LOG"
