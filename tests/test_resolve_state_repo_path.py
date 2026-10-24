@@ -50,6 +50,21 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, legacy))
 
+    def test_snapshot_overlay_root_wins_over_stale_embedded_state_root(self):
+        state_a = os.path.join(self.tmp, "state-a")
+        state_b = os.path.join(self.tmp, "state-b")
+        os.makedirs(os.path.join(state_a, "config"))
+        with open(os.path.join(state_a, "config", "config.json"), "w") as f:
+            json.dump({"state_repo_path": state_b, "monitored_dirs": []}, f)
+        xdg = os.path.join(self.tmp, "xdg")
+        cfg_dir = os.path.join(xdg, "disk-magician")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"snapshot_measure": {"path_max_seconds": 7}, "state_repo_path": state_a}, f)
+
+        rc, out = resolve({"HOME": self.home, "XDG_CONFIG_HOME": xdg})
+        self.assertEqual((rc, out), (0, state_a))
+
     def test_explicit_config_wins_over_xdg_state_repo_path(self):
         cfg_dir = os.path.join(self.home, ".config", "disk-magician")
         os.makedirs(cfg_dir)
