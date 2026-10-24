@@ -49,7 +49,8 @@ Commands:
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
-  cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
+  cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
+                         (use --native-docker for the verified Linux daemon).
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
