@@ -4,9 +4,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Cheap, synchronous preflight must finish before ANY deeper diagnostic lane starts.
+fleet_rc=0
 echo "=== Automation Fleet Health ==="
 if [[ -x "$SCRIPT_DIR/check_launchd_fleet.sh" ]]; then
-  "$SCRIPT_DIR/check_launchd_fleet.sh" || true
+  "$SCRIPT_DIR/check_launchd_fleet.sh" || fleet_rc=$?
 else
   echo "Fleet health UNKNOWN: check_launchd_fleet.sh unavailable."
 fi
@@ -266,6 +267,6 @@ echo "=== Lane 3/3: safe quick wins and obvious outliers ==="
 cat "$QUICK_LOG"
 [[ "$quick_rc" -eq 0 ]] || echo "Quick-win lane failed (rc=$quick_rc)."
 
-if [[ "$topdown_rc" -ne 0 || "$render_rc" -ne 0 || "$history_rc" -ne 0 || "$quick_rc" -ne 0 ]]; then
+if [[ "$fleet_rc" -ne 0 || "$topdown_rc" -ne 0 || "$render_rc" -ne 0 || "$history_rc" -ne 0 || "$quick_rc" -ne 0 ]]; then
   exit 1
 fi

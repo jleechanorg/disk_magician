@@ -78,6 +78,20 @@ class AuditLedgerFirst(unittest.TestCase):
         self.assertEqual(before, (ledger.read_bytes(), ledger.stat().st_mtime_ns))
         self.assertEqual(list(self.state.rglob('*')), [self.state / 'reclaim', ledger])
 
+    def test_fleet_failure_survives_successful_scanner(self):
+        self.ledger()
+        (self.tree / "scripts/check_launchd_fleet.sh").write_text(
+            "#!/bin/bash\necho FLEET_FIRST\nexit 7\n")
+        scanner = self.tree / "scripts/disk_frontier_scan.py"
+        scanner.write_text(scanner.read_text().replace("sys.exit(3)",
+            'pathlib.Path(sys.argv[sys.argv.index("--output") + 1]).write_text("{}")\nsys.exit(0)'))
+        out, at_scan = self.run_audit()
+        self.assertIn("LEDGER_SENTINEL", at_scan)
+        self.assertLess(at_scan.index("FLEET_FIRST"), at_scan.index("LEDGER_SENTINEL"))
+        self.assertIn("Physical/APFS capacity:", out)
+        self.assertIn("HISTORY_STUB", out)
+        self.assertIn("QUICK_STUB", out)
+
     def test_missing_ledger_is_unknown_not_no_growth_and_scan_continues(self):
         out, at_scan = self.run_audit()
         self.assertIn("MISSING", at_scan)
