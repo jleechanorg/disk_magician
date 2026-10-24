@@ -25,6 +25,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -396,12 +397,16 @@ def read_existing(state_dir):
         print(f"UNREADABLE reclaim ledger ({type(exc).__name__}); not evidence of no growth. "
               "Deeper diagnosis may continue.")
         return
-    # Minimal producer evidence: a named report plus a populated known section.
-    # This is not a schema/parser for its tables; unavailable/empty-window prose is valid.
+    # All five producer sections must be present, ordered and populated. Accept
+    # unavailable/empty-window prose, without parsing tables or interpreting values.
     title = re.search(r"^# Known reclaim directories: \S.*$", text, re.M)
-    section = re.search(r"^### (?:A|B1|B2|C|D)\. [^\n]+\n(?:[ \t]*\n)*([^\n]+)", text, re.M)
-    if text.strip() and (not title or not section or section[1].lstrip().startswith("#")):
-        print("INVALID RECLAIM REPORT: missing report title or populated producer section; "
+    sections = re.split(r"^### ([A-Z][0-9]*)\. [^\n]+\n", text, flags=re.M)
+    labels = sections[1::2]
+    bodies = sections[2::2]
+    complete = labels == ["C", "D", "B1", "B2", "A"] and all(
+        body.strip() and not body.lstrip().startswith("#") for body in bodies)
+    if text.strip() and (not title or not complete):
+        print("INVALID RECLAIM REPORT: incomplete producer sections or missing report title; "
               "not evidence of no growth. Deeper diagnosis may continue.")
     # Use the report's generation time, not mtime (a checkout/copy can refresh mtime).
     match = re.search(r"^Generated (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) by `diskm reclaim-ledger`", text, re.M)
@@ -431,6 +436,27 @@ def read_existing(state_dir):
     print(text, end="" if text.endswith("\n") else "\n")
     if not text.strip():
         print("EMPTY reclaim ledger; not evidence of no growth.")
+
+
+def publish_report(dest, text):
+    """Publish complete text atomically; failures before replace preserve old bytes."""
+    # Existing config_mutator._atomic_write is JSON-specific; use its sibling
+    # tempfile/flush/fsync/replace pattern here without changing the report format.
+    fd, name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+    temp = pathlib.Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if dest.exists():
+            os.chmod(temp, dest.stat().st_mode & 0o777)
+        os.replace(temp, dest)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def main(argv=None):
@@ -464,7 +490,7 @@ def main(argv=None):
         return 0
     dest = state_dir / OUT_REL
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text)
+    publish_report(dest, text)
     status = "written"
     if not args.no_commit and (state_dir / ".git").exists():
         status = commit(state_dir, OUT_REL, now.strftime("%Y-%m-%dT%H:%M:%SZ"))

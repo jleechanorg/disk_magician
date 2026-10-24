@@ -57,7 +57,7 @@ class AuditLedgerFirst(unittest.TestCase):
         p = (state or self.state) / reclaim_ledger.OUT_REL
         p.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\n### C. Cleaned roots, last 7 days\nNo deletions logged in the window.\nLEDGER_SENTINEL\n')
+        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\n### C. Cleaned roots, last 7 days\nNo deletions logged in the window.\nLEDGER_SENTINEL\n### D. Regrows fast\nNone.\n### B1. Monitored directories\nUnavailable.\n### B2. Top-down ledger growth\nUnavailable.\n### A. Uncovered / needs-decision / protected rows >= 5 GiB\nUnavailable.\n')
         return p
 
     def run_audit(self):
@@ -167,6 +167,44 @@ class AuditLedgerFirst(unittest.TestCase):
         self.ledger().write_bytes(b'\xff')
         _, at_scan = self.run_audit()
         self.assertIn('UNREADABLE reclaim ledger (UnicodeDecodeError)', at_scan)
+
+    def test_current_report_truncated_after_c_is_invalid(self):
+        ledger = self.ledger()
+        ledger.write_text(ledger.read_text().split('### D.')[0])
+        before = ledger.read_bytes()
+        out, at_scan = self.run_audit()
+        self.assertIn('INVALID RECLAIM REPORT', at_scan)
+        self.assertIn('not evidence of no growth', at_scan)
+        self.assertIn('SCANNER_STUB', out)
+        self.assertEqual(before, ledger.read_bytes())
+
+    def test_atomic_publish_failure_preserves_old_report_and_cleans_temp(self):
+        ledger = self.ledger()
+        before = ledger.read_bytes()
+        for failure in ('fsync', 'replace'):
+            with self.subTest(failure=failure), \
+                    patch.object(reclaim_ledger, 'render', return_value='new complete report'), \
+                    patch.object(reclaim_ledger.os, failure, side_effect=OSError('injected')):
+                with self.assertRaises(OSError):
+                    reclaim_ledger.main(['--state-dir', str(self.state), '--no-commit'])
+            self.assertEqual(before, ledger.read_bytes())
+            self.assertEqual(list(ledger.parent.iterdir()), [ledger])
+
+    def test_atomic_publish_replaces_only_after_complete_write(self):
+        ledger = self.ledger()
+        before = ledger.read_bytes()
+        real_replace = os.replace
+        def observe_replace(source, target):
+            self.assertEqual(ledger.parent, Path(source).parent)
+            self.assertEqual(before, ledger.read_bytes())
+            self.assertEqual('new complete report', Path(source).read_text())
+            return real_replace(source, target)
+        with patch.object(reclaim_ledger, 'render', return_value='new complete report'), \
+                patch.object(reclaim_ledger.os, 'replace', side_effect=observe_replace) as replace:
+            self.assertEqual(0, reclaim_ledger.main(['--state-dir', str(self.state), '--no-commit']))
+        replace.assert_called_once()
+        self.assertEqual('new complete report', ledger.read_text())
+        self.assertEqual(list(ledger.parent.iterdir()), [ledger])
 
     def test_timestamp_only_report_is_invalid_and_read_only(self):
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
