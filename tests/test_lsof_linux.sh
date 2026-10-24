@@ -70,7 +70,7 @@ lsof_stderr_incomplete $'lsof: WARNING: can\'t stat() apfs file system /' && ok 
 lsof_stderr_incomplete $' \n' && ok "blank-only stderr fails closed" || bad "blank-only stderr trusted"
 
 echo "== lsof_stderr_incomplete_for_path =="
-WARN_ROOT="$(cd "$(mktemp -d -t lsof-warn.XXXXXX)" && pwd -P)"
+WARN_ROOT="$(builtin cd "$(mktemp -d -t lsof-warn.XXXXXX)" && pwd -P)"
 mkdir -p "$WARN_ROOT/query/child" "$WARN_ROOT/ancestor" "$WARN_ROOT/unrelated"
 query="$WARN_ROOT/query"
 unrelated_warn="lsof: WARNING: can't stat() tracefs file system $WARN_ROOT/unrelated"$'\n      Output information may be incomplete.'
