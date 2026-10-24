@@ -8,24 +8,30 @@
 # operator explicitly approves uninspectable processes. Everything else still
 # fails closed.
 
+# lsof_mount_warning_path <line>: print the path from one exact lsof warning.
+lsof_mount_warning_path() {
+  local line="$1"
+  local pattern="^lsof: WARNING: can't stat\\(\\) [^[:space:]]+ file system (/.*)$"
+  [[ "$line" =~ $pattern ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
 # lsof_stderr_incomplete <stderr text>: rc 0 when any line is not a mount-stat
 # warning or its "Output information may be incomplete." trailer.
 lsof_stderr_incomplete() {
-  # rc 0 => the scan may be incomplete. Glob matching, not regex: the warning
-  # contains an apostrophe, and mount paths may hold any character.
+  # rc 0 => the scan may be incomplete. The lsof warning shape is exact; only
+  # its filesystem type is a token and its path may contain spaces.
   local line trimmed fs warned=0
   [[ -n "$1" ]] || return 1
   while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    case "$line" in
-      "lsof: WARNING: can"*" stat() "*" file system "*)
-        fs="${line##* file system }"
+    [[ -n "$line" ]] || return 0
+    if fs="$(lsof_mount_warning_path "$line")"; then
         while [[ "$fs" == */ ]]; do fs="${fs%/}"; done
         [[ -z "$fs" ]] && fs="/"
         [[ "$fs" == "/" ]] && return 0
         warned=1
-        continue ;;
-    esac
+        continue
+    fi
     trimmed="${line#"${line%%[![:space:]]*}"}"
     if [[ "$trimmed" == "Output information may be incomplete." ]]; then
       (( warned )) && { warned=0; continue; }
@@ -33,6 +39,80 @@ lsof_stderr_incomplete() {
     fi
     return 0
   done <<<"$1"
+  return 1
+}
+
+# lsof_stderr_byte_status <path>: validate raw stderr before Bash captures it.
+#   0 = readable and contains no NUL bytes
+#   1 = readable and contains at least one NUL byte
+#   2 = unreadable or byte validation failed
+# Bash strips NUL bytes during command substitution, so callers must run this
+# while the diagnostic is still a file and fail closed for statuses 1 and 2.
+lsof_stderr_byte_status() {
+  local path="${1:-}"
+  local -a pipe_status
+  [[ -f "$path" && -r "$path" ]] || return 2
+  LC_ALL=C tr -d '\000' <"$path" | cmp -s - "$path"
+  pipe_status=("${PIPESTATUS[@]}")
+  (( pipe_status[0] == 0 )) || return 2
+  case "${pipe_status[1]:-2}" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# lsof_stderr_incomplete_for_path <stderr text> <query path>: fail closed when
+# diagnostics could hide a user of the queried tree. lsof's global mount scan
+# can warn about unrelated mounts (e.g. tracefs) even when the target is
+# readable; those warnings do not affect this query. Warnings for /, the query,
+# an ancestor, or a mount nested in the query remain incomplete.
+lsof_stderr_incomplete_for_path() {
+  local err="$1" query="$2" line fs fs_real query_real findmnt_result findmnt_status warned_unrelated=0
+  [[ -n "$err" ]] || return 1
+  query_real="$(cd "$query" 2>/dev/null && pwd -P)" || return 0
+  [[ -n "$query_real" ]] || return 0
+  [[ "$query_real" == / ]] || query_real="${query_real%/}"
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || return 0
+    if fs="$(lsof_mount_warning_path "$line")"; then
+        # The warning includes a real mount path. Resolve it through the
+        # filesystem so symlinked spellings cannot make an overlapping mount
+        # look unrelated. Unknown paths fail closed.
+        if ! fs_real="$(cd "$fs" 2>/dev/null && pwd -P)"; then
+          # An inaccessible path is safe to classify only when the kernel mount
+          # table confirms it is this exact, canonical mountpoint. findmnt -M
+          # is exact mountpoint selection, not a containing-filesystem lookup.
+          # Reject escaped/control bytes and dot components before querying so
+          # matching encoded spellings cannot be mistaken for physical paths.
+          [[ "$fs" == /* && ! "$fs" =~ [[:cntrl:]] ]] || return 0
+          case "$fs" in *\\*) return 0 ;; esac
+          case "/$fs/" in *"/./"*|*"/../"*) return 0 ;; esac
+          findmnt_result="$(findmnt -rn --raw -M "$fs" -o TARGET 2>/dev/null; rc=$?; printf '\034%s' "$rc")" || return 0
+          [[ "$findmnt_result" == "$fs"$'\n\034'0 ]] || return 0
+          fs_real="$fs"
+        fi
+        [[ -n "$fs_real" ]] || return 0
+        [[ "$fs_real" == / ]] || fs_real="${fs_real%/}"
+        if [[ "$fs_real" == / || "$query_real" == "$fs_real" \
+            || "$query_real" == "$fs_real"/* \
+            || "$fs_real" == "$query_real"/* ]]; then
+          return 0
+        fi
+        warned_unrelated=1
+        continue
+    fi
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$line" == "Output information may be incomplete." ]]; then
+      if (( warned_unrelated )); then
+        warned_unrelated=0
+        continue
+      fi
+      return 0
+    fi
+    return 0
+  done <<<"$err"
   return 1
 }
 
@@ -215,6 +295,12 @@ lsof_snapshot_cwds() {
     errf="$(mktemp "${TMPDIR:-/tmp}/dm-lsof-err.XXXXXX" 2>/dev/null)" || { LSOF_CWD_REASON="stderr-capture-failed"; return 1; }
     [[ -f "$errf" ]] || { LSOF_CWD_REASON="stderr-capture-failed"; return 1; }
     out="$("$bin" -d cwd -Fpn 2>"$errf")" || rc=$?
+    local stderr_status=0
+    lsof_stderr_byte_status "$errf" || stderr_status=$?
+    case "$stderr_status" in
+        1) rm -f "$errf"; LSOF_CWD_REASON="stderr-nul"; return 1 ;;
+        2) rm -f "$errf"; LSOF_CWD_REASON="stderr-read-failed"; return 1 ;;
+    esac
     if ! err="$(cat "$errf" 2>/dev/null)"; then
         rm -f "$errf"; LSOF_CWD_REASON="stderr-read-failed"; return 1
     fi

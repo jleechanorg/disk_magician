@@ -32,7 +32,7 @@ wrh_log() {
 }
 
 wrh_live_cwd_reason() {
-    local target=$1 out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID
+    local target=$1 out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID stderr_status=0
     WRH_LIVE_CWD_REASON=
     if [[ ${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-} =~ ^[0-9]+$ ]]; then
         ancestry=$(ps -Ao pid=,ppid= 2>/dev/null | awk -v start="$$" -v wanted="$DISK_MAGICIAN_LIFECYCLE_PARENT_PID" '
@@ -58,6 +58,10 @@ wrh_live_cwd_reason() {
         # -Fpn keeps the pid so this hook can exclude its own ancestry; the parsing
         # itself is the shared strict parser, never a local reimplementation.
         out=$(WRH_LIFECYCLE_CALLER_PID="$caller_pid" WRH_LIFECYCLE_CALLER_CHAIN="$caller_chain" lsof -n -P -d cwd -Fpn 2>"$err") || rc=$?
+        lsof_stderr_byte_status "$err" || stderr_status=$?
+        case "$stderr_status" in
+            1|2) [[ -e $err ]] && rm -f "$err"; WRH_LIVE_CWD_REASON=cwd-unknown; return ;;
+        esac
         # A failed stderr read is NOT an empty stderr: it means the diagnostics are
         # unknown, which must fail closed just like a non-empty read would.
         if ! err_text="$(cat "$err" 2>/dev/null)"; then

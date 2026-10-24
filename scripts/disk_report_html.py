@@ -35,22 +35,23 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 
 def _load_key_path_map() -> Dict[str, str]:
-    """Load key -> path/pattern mapping from config.json or config.json.template."""
+    """Load key -> path/pattern mapping from the effective config."""
     mapping: Dict[str, str] = {}
-    for candidate in (REPO_ROOT / "config.json", REPO_ROOT / "config.json.template"):
-        if candidate.is_file():
-            try:
-                cfg = json.loads(candidate.read_text(encoding="utf-8"))
-                for section in ("monitored_dirs", "monitored_globs", "monitored_file_globs"):
-                    for entry in cfg.get(section, []) or []:
-                        if isinstance(entry, dict) and entry.get("key"):
-                            p = entry.get("path") or entry.get("pattern") or ""
-                            if p:
-                                mapping[str(entry["key"])] = str(p)
-                if mapping:
-                    break
-            except Exception:
-                continue
+    try:
+        from resolve_config import resolve
+
+        config_path = resolve()
+        if not config_path:
+            return mapping
+        cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        for section in ("monitored_dirs", "monitored_globs", "monitored_file_globs"):
+            for entry in cfg.get(section, []) or []:
+                if isinstance(entry, dict) and entry.get("key"):
+                    p = entry.get("path") or entry.get("pattern") or ""
+                    if p:
+                        mapping[str(entry["key"])] = str(p)
+    except (ImportError, OSError, TypeError, ValueError):
+        return mapping
     return mapping
 
 

@@ -200,6 +200,14 @@ if [[ -f "$REPO_ROOT/safety.local.json.template" ]]; then
   cp "$REPO_ROOT/safety.local.json.template" "$TREE/"
 fi
 
+# Preserve real preflight/resolver imports; only the diagnostic lanes below are stubbed.
+cp "$REPO_ROOT/scripts/"*.py "$TREE/scripts/"
+cp "$REPO_ROOT/scripts/check_launchd_fleet.sh" "$TREE/scripts/"
+cp "$REPO_ROOT/config.json.template" "$TREE/"
+# Exercise the real non-macOS fleet path, never inspect a host's launchd fleet.
+export DISK_MAGICIAN_OSTYPE=linux-gnu
+export DISK_MAGICIAN_STATE_REPO="$WORK/state"
+
 cat > "$TREE/scripts/disk_frontier_scan.py" <<'PY'
 #!/usr/bin/env python3
 import json, os, sys, time

@@ -148,6 +148,19 @@ has "$(grep -F '~/glob1' <<<"$C11")" '| yes |' && ok "dir matching monitored_glo
 has "$(grep -F '~/elsewhere' <<<"$C11")" '**NO**' && ok "unmonitored root flagged NO" || bad "NO flag" "$C11"
 has "$OUT11" 'not a second list' && ok "report-over-monitored_dirs statement present" || bad "statement" "missing"
 
+echo "Test 12: reclaim ledger uses the same effective config as snapshot consumers"
+P="$TMP_ROOT/precedence"
+mkdir -p "$P/home" "$P/state/config" "$P/xdg/disk-magician"
+printf '%s\n' '{"monitored_dirs":[{"key":"old","path":"/old"}]}' >"$P/state/config/config.json"
+printf '%s\n' '{"monitored_dirs":[{"key":"new","path":"/new"}]}' >"$P/xdg/disk-magician/config.json"
+PLOG="$P/deletions.log"
+printf '%s\n' '2026-10-21T01:00:00Z	cleanup_tmp.sh	remove	1048576	/new/inside' >"$PLOG"
+OUT12=$(env -i HOME="$P/home" XDG_CONFIG_HOME="$P/xdg" DISK_MAGICIAN_STATE_REPO="$P/state" \
+  DISK_MAGICIAN_DELETION_LOG="$PLOG" PATH="$PYDIR:/usr/bin:/bin" \
+  python3 "$RL" --stdout --freshness-line "$FRESH_OK" --frontier "$P/none.json" --now "$NOW")
+C12=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT12")
+has "$(grep -F '/new/inside' <<<"$C12")" '| yes |' && ok "XDG inventory marks the cleaned root monitored" || bad "effective config" "$C12"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

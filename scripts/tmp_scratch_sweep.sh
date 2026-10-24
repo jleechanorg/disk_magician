@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tmp_scratch_sweep.sh — hourly tmp-scratch job entry point (bead disk_magician-isw
-# scheduling gap). Wraps cleanup_tmp.sh (--large, under LARGE_TMP_APPROVED=1
+# scheduling gap). Wraps cleanup_tmp.sh (--aged, under LARGE_TMP_APPROVED=1
 # when cleaning) then cleanup_claude_state.sh (invoked report-only with
 # --dry-run; unattended deletions of ~/.claude/state remain strictly forbidden),
 # failure-continuing between steps but propagating a nonzero exit if either step
@@ -56,9 +56,9 @@ tmp_rc=0
 TMP_LOCK_SKIPPED=false
 if [[ "$clean_flag" == "--clean" ]]; then
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
-    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large ${governor_args[@]+"${governor_args[@]}"} || tmp_rc=$?
+    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --aged ${governor_args[@]+"${governor_args[@]}"} || tmp_rc=$?
   else
-    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --large || tmp_rc=$?
+    env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --aged || tmp_rc=$?
   fi
   if [[ $tmp_rc -eq 75 ]]; then
     TMP_LOCK_SKIPPED=true
@@ -67,7 +67,7 @@ if [[ "$clean_flag" == "--clean" ]]; then
   fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 else
-  run_cleanup_tmp --dry-run --large || tmp_rc=$?
+  run_cleanup_tmp --dry-run --aged || tmp_rc=$?
   if [[ $tmp_rc -eq 75 ]]; then
     TMP_LOCK_SKIPPED=true
   elif [[ $tmp_rc -ne 0 ]]; then
@@ -129,17 +129,19 @@ if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   # unrelated system activity and must never be reported as reclaimed bytes.
   [[ "$clean_flag" == "--dry-run" || "$TMP_LOCK_SKIPPED" == true ]] && FREED_BYTES=0
 fi
-if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+# Lock contention needs no child receipt, but wrapper df evidence is still required.
+if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
   REMOVED_COUNT=0
   DEFERRED_COUNT=0
   INTERRUPTED_COUNT=0
 elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
+  rc=1
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
   REMOVED_COUNT="${REMOVED_COUNT/null/0}"
   DEFERRED_COUNT="${DEFERRED_COUNT/null/0}"
   INTERRUPTED_COUNT="${INTERRUPTED_COUNT/null/0}"
-elif [[ "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 ]]; then
+elif [[ $rc -eq 0 && ( "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 ) ]]; then
   OUTCOME="partial"
   REASON="sweep completed with candidate deferrals or interruptions"
 fi
