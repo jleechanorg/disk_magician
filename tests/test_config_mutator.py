@@ -380,8 +380,12 @@ class TestConfigMutator(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already has a different entry", result.stderr)
+        state_root = self.root / "state" / "disk-magician"
         state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        lock_path = state_root / "config" / ".config.json.lock"
         self.assertFalse(state_config.exists())
+        self.assertFalse(state_root.exists())
+        self.assertFalse(lock_path.exists())
 
     def test_symlink_config_updates_target_and_keeps_link(self):
         target = self.write_config(data={"monitored_dirs": []})

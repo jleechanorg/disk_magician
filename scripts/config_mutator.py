@@ -28,26 +28,12 @@ def _effective_path() -> Path:
         raise ConfigError("no effective config file was found")
     configured_path = Path(configured)
     if configured_path.name == "config.json.template":
-        overlay = Path(
-            os.environ.get(
-                "XDG_CONFIG_HOME",
-                Path(os.environ.get("HOME", "/")) / ".config",
-            )
-        ) / "disk-magician" / "config.json"
-        if os.environ.get("DISK_MAGICIAN_CONFIG") or not (
-            overlay.is_file() and resolve_config._is_snapshot_overlay(overlay)
-        ):
-            if os.environ.get("DISK_MAGICIAN_CONFIG"):
-                raise ConfigError(f"refusing to write packaged config template: {configured_path}")
-            target = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            return target
-        # A snapshot-only XDG overlay is an additive tuning file.  Keep the
-        # packaged inventory as the read-only fallback, and materialize the
-        # first writable inventory in the state repo when this command runs.
-        target = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        return target
+        if os.environ.get("DISK_MAGICIAN_CONFIG"):
+            raise ConfigError(f"refusing to write packaged config template: {configured_path}")
+        # A snapshot-only XDG overlay is an additive tuning file. Keep the
+        # packaged inventory as the read-only fallback and materialize the
+        # first writable inventory only after the requested mutation passes.
+        return Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
     try:
         path = configured_path.resolve(strict=True)
     except OSError as exc:
@@ -258,15 +244,25 @@ def main(argv=None) -> int:
 
     try:
         path = _effective_path()
+        first_use_data = None
+        first_use_changed = False
+        if not path.exists():
+            first_use_data = _initial_state_config()
+            _validate_schema(first_use_data)
+            first_use_changed = _add_entry(first_use_data, field, entry)
+            if not first_use_changed:
+                print(f"{entry['key']!r} already exists in {field}; unchanged {path}")
+                return 0
+            path.parent.mkdir(parents=True, exist_ok=True)
         with _lock(path) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 if path.exists():
                     data = _load(path)
+                    changed = _add_entry(data, field, entry)
                 else:
-                    data = _initial_state_config()
-                    _validate_schema(data)
-                changed = _add_entry(data, field, entry)
+                    data = first_use_data
+                    changed = first_use_changed
                 if changed:
                     _atomic_write(path, data)
                     print(f"added {entry['key']!r} to {field} in {path}")
