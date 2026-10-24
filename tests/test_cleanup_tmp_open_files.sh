@@ -28,6 +28,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
 TMP_ROOT=$(mktemp -d -t test_cleanup_tmp_open_files.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
+# scratch_lock validates HOME with lstat; create each synthetic HOME before
+# invoking cleanup so the fixture behaves consistently in a clean Linux env.
+for home in t1-home t1b-home t2-home t3-home t4-home t5-home t6-home t7-home t8-home t9-home t10-home t11-home; do
+  mkdir -p "$TMP_ROOT/$home"
+done
 PASS=0
 FAIL=0
 record_pass() { echo "  PASS  $1"; PASS=$(( PASS + 1 )); }
@@ -319,7 +324,7 @@ assert_exists "Test 1b: candidate preserved on stderr read failure" "$T1B_ARCHIV
 # Test 2: Fresh authoritative scan at each guarded destructive decision
 # (closed on scan 1, then open on pre-mutation scan -> candidate preserved)
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 2: Fresh pre-mutation scan catches files opened between decisions"
+echo "Test 2: Fresh pre-mutation scan catches a file missed by the inventory snapshot"
 T2_PRIVATE_TMP="$TMP_ROOT/t2-private-tmp"
 T2_TMP="$TMP_ROOT/t2-tmp"
 T2_ARCHIVE="$TMP_ROOT/t2-archive"
@@ -332,26 +337,40 @@ set_old_mtime "$T2_ARCHIVE/20200101T000000Z"
 set_old_mtime "$T2_ARCHIVE/20200102T000000Z"
 make_find_shim "$T2_BIN" "$T2_PRIVATE_TMP" "$T2_TMP"
 make_fake_timeout "$T2_BIN/timeout"
-T2_SCAN_COUNT_FILE="$TMP_ROOT/t2-scan.count"
-echo "0" > "$T2_SCAN_COUNT_FILE"
 # Resolve canonical paths of both archives
-T2_APP1_CANON=$(cd "$T2_ARCHIVE/20200101T000000Z" && pwd -P)
 T2_APP2_CANON=$(cd "$T2_ARCHIVE/20200102T000000Z" && pwd -P)
 cat > "$T2_BIN/lsof" <<EOF
 #!/usr/bin/env bash
-count=\$(cat "$T2_SCAN_COUNT_FILE")
-count=\$(( count + 1 ))
-echo "\$count" > "$T2_SCAN_COUNT_FILE"
-echo "p1234"
-echo "fcwd"
-echo "n/"
-# On scan 1 (app1), report no open files
-# On scan 2 (app2), report app2 open!
-if [[ "\$count" -ge 2 ]]; then
+# The cached enumeration snapshot is empty. The candidate-specific
+# pre-mutation query reports app2 open, independent of filesystem find order.
+if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1234"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
+if [[ "\$*" == "-n -P -F n" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" == "-w" ]]; then
+  for arg in "\$@"; do
+    if [[ "\$arg" == "${T2_APP2_CANON}/app2" ]]; then
+      echo "p1234"
+      echo "f10"
+      echo "n${T2_APP2_CANON}/app2/payload.bin"
+      exit 0
+    fi
+  done
+  exit 1
+fi
+if [[ "\$*" == "+w -n -P -F fnt" ]]; then
+  echo "p1234"
   echo "f10"
   echo "n${T2_APP2_CANON}/app2/payload.bin"
+  exit 0
 fi
-exit 0
+echo "unexpected lsof arguments: \$*" >&2
+exit 98
 EOF
 chmod +x "$T2_BIN/lsof"
 T2_OUT="$TMP_ROOT/t2.out"
@@ -369,7 +388,7 @@ T2_RC=$?
 T2_OUT_CONTENT=$(cat "$T2_OUT")
 assert_rc "Test 2: exits 0" 0 "$T2_RC"
 assert_exists "Test 2: closed app1 remains until it has C14 proof" "$T2_ARCHIVE/20200101T000000Z/app1"
-assert_contains "Test 2: closed app1 reaches C14" "C14 kept:cwd-unknown" "$T2_OUT_CONTENT"
+assert_contains "Test 2: closed app1 reaches C14" "Skipping aged archive (C14 " "$T2_OUT_CONTENT"
 assert_exists "Test 2: app2 (scanned open on fresh scan) is preserved" "$T2_ARCHIVE/20200102T000000Z"
 assert_contains "Test 2: logs skipping in-use for app2" "Skipping in-use aged archive" "$T2_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -756,6 +775,7 @@ run_capture "$T6_OUT" env -i HOME="$TMP_ROOT/t6-home" \
 assert_rc "Test 6b (over-cap purge): exits 0" 0 $?
 assert_exists "Test 6b: over-cap archive with an open file is preserved" "$T6_ARCHIVE/20200101T000000Z/app"
 assert_contains "Test 6b: over-cap keep is surfaced" "archive_overcap_kept" "$(cat "$T6_OUT")"
+assert_not_contains "Test 6b: GNU stat mtime does not break aged archive handling" "syntax error" "$(cat "$T6_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 7: --large guard placement: open-file check runs after marker/mtime, directly before archive
 # ─────────────────────────────────────────────────────────────────────────────

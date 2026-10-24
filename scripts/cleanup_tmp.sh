@@ -1060,7 +1060,16 @@ purge_archive_entry() {
   # process holding fds into the archive keeps it alive unboundedly. If
   # the entry's mtime can't be read, fall through to the guarded path
   # (fail closed toward keeping data, not toward the cap).
-  entry_mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now_epoch")"
+  # BSD stat returns an epoch for -f %m; GNU stat treats -f as a
+  # filesystem query and can succeed with nonnumeric output. Validate the
+  # result before arithmetic, then use GNU -c %Y or fail closed to now.
+  local stat_mtime=""
+  stat_mtime="$(stat -f %m "$d" 2>/dev/null)" || stat_mtime=""
+  if [[ ! "$stat_mtime" =~ ^[0-9]+$ ]]; then
+    stat_mtime="$(stat -c %Y "$d" 2>/dev/null)" || stat_mtime=""
+  fi
+  [[ "$stat_mtime" =~ ^[0-9]+$ ]] || stat_mtime="$now_epoch"
+  entry_mtime="$stat_mtime"
   age_hours=$(( (now_epoch - entry_mtime) / 3600 ))
   # Not yet aged out (find -mmin equivalent for receipt-discovered units).
   (( now_epoch - entry_mtime <= mins * 60 )) && return 0
