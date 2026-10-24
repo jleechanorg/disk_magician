@@ -9,7 +9,7 @@ default. Reusing resolve_config.resolve() (rather than re-implementing the
 env->XDG->state-repo->packaged chain) means a single config file is the one
 source of truth for both the app's general settings and this one key.
 """
-import json, os, pathlib, sys
+import os, pathlib, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import resolve_config  # noqa: E402
@@ -23,11 +23,9 @@ def resolve() -> str:
     cfg_path = resolve_config.resolve()
     if cfg_path:
         try:
-            with open(cfg_path) as f:
-                data = json.load(f)
-            configured = data.get("state_repo_path")
-            if configured:
-                expanded = pathlib.Path(os.path.expanduser(configured))
+            configured = resolve_config.configured_state_repo(pathlib.Path(cfg_path), home)
+            if configured is not None:
+                expanded = configured
                 # A relative state_repo_path would resolve against the caller's
                 # CWD — repo root in dev, but `/` under launchd (cursor-agent
                 # adversarial finding 2026-07-21). Anchor it to $HOME so the
@@ -35,7 +33,7 @@ def resolve() -> str:
                 if not expanded.is_absolute():
                     expanded = home / expanded
                 return str(expanded)
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             pass
     # A snapshot-only XDG overlay is intentionally not the general config
     # winner when no state config exists, but it still owns this grandfathering

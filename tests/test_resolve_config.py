@@ -59,6 +59,22 @@ class TestResolveConfig(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, state))
 
+    def test_snapshot_measure_with_other_settings_is_full_xdg_config(self):
+        xdg = self._mk("home/.config/disk-magician/config.json")
+        with open(xdg, "w") as f:
+            json.dump({"snapshot_measure": {"path_max_seconds": 7}, "budgets": {}}, f)
+        state = self._mk("home/.local/state/disk-magician/config/config.json")
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual((rc, out), (0, xdg))
+
+    def test_non_string_state_repo_path_uses_default_chain(self):
+        xdg = self._mk("home/.config/disk-magician/config.json")
+        with open(xdg, "w") as f:
+            json.dump({"snapshot_measure": {"path_max_seconds": 7}, "state_repo_path": 7}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.endswith("config.json.template"), out)
+
     def test_state_repo_beats_packaged(self):
         st = self._mk("home/.local/state/disk-magician/config/config.json")
         rc, out = resolve({"HOME": self.home})
