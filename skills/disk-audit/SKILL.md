@@ -7,4 +7,4 @@ description: Use when checking local disk capacity, investigating disk growth, o
 
 Read and follow `../disk-root-cause/SKILL.md` in full before taking action.
 
-Run `disk-magician audit` first so whole-disk accounting, coverage-validated deltas, and safety-gated quick wins run together. Never delete anything without explicit user approval.
+Follow fleet check -> `diskm reclaim-ledger --read-existing` -> floor/buckets -> bounded `diskm audit`, after the resource gate. Audit prints fleet and ledger before concurrent deeper lanes; missing/unreadable/stale is not no growth. Never delete anything without explicit user approval.

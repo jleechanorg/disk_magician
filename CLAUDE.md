@@ -18,7 +18,7 @@ dispatch. Migrate legacy direct-script schedules with behavior and safety
 checks; their current existence is not permission to add more. Build, package,
 and isolated test harnesses may call internal files directly.
 
-## Investigation methodology — always find the floor, always show the buckets
+## Investigation methodology — fleet, existing ledger, floor/buckets, bounded audit
 
 Disk-fill investigations in this repo MUST follow a fixed pre-analysis
 sequence (added 2026-07-30 after four "200 GiB does not exist" misses that
@@ -68,8 +68,16 @@ underestimated cumulative-reservoir growth):
    (`/private/var/folders/.../X/`), APFS local snapshots (`com.apple.os.update-...`),
    and system daemon state (`/private/var/db`). Measure directly with bounded timeouts.
 
-0b. **Read the per-host reclaim ledger** (`diskm reclaim-ledger --stdout`, or the
-    committed `<state-repo>/reclaim/known-reclaim-dirs.md`) before any live probe:
+0b. **Read the existing per-host reclaim ledger** (`diskm reclaim-ledger --read-existing`)
+    before any deeper live probe. The existing state resolver selects the Mac
+    configured `~/.disk_magician_backup` or Linux XDG state root; do not hardcode
+    a different host's path. This reads `<state-repo>/reclaim/known-reclaim-dirs.md`
+    without regenerating history or writing state. `--stdout` regenerates a preview
+    and is NOT the cheap read-first path. Missing/unreadable/stale reports are
+    explicit evidence gaps, never evidence of no growth; diagnosis may continue.
+    `audit` prints fleet health and this report synchronously before its scanners.
+    Check current CPU/RAM/I/O and the existing resource gate before starting the
+    bounded deeper audit; defer heavy scans when the host is saturated. The report
     it lists this machine's cleaned roots, fast regrowers, growth vs floor and
     uncovered rows, with a stale-ledger banner. Machine-specific paths and sizes
     belong there, never in repo docs. It is a report over `monitored_dirs`
@@ -343,8 +351,8 @@ production ran v1).
 - **Deletion log is the reclaim list.** Every deletion path must log to
   `~/Library/Logs/disk-magician-deletions.log` via `deletion_log`; before any
   disk investigation or cleanup, read this machine's reclaim ledger
-  (`<state-repo>/reclaim/known-reclaim-dirs.md`, regenerate with
-  `diskm reclaim-ledger`; reading guide `docs/known-reclaim-dirs.md`) and the last
+  (`diskm reclaim-ledger --read-existing`; regenerate separately only when needed
+  with `diskm reclaim-ledger`; reading guide `docs/known-reclaim-dirs.md`) and the last
   7 days of that log: those directories are the known growers; re-clean them
   first. Log from a removal primitive (`quarantine_remove`, `wrh_remove_now`,
   `strip_dir`, `rm_logged`), not per script; a caller that already logs the

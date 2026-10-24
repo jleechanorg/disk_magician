@@ -16,6 +16,15 @@ Analyze disk usage, scan for blind spots, and run safe cleanups using the `disk-
 Full integration guide and guidelines:
 - `~/.claude/skills/disk_magician/SKILL.md`
 
+## Ledger-first diagnosis
+
+Follow fleet check -> `diskm reclaim-ledger --read-existing` -> existing
+floor/buckets -> bounded `diskm audit`, respecting current CPU/RAM/I/O resource
+gates. The existing state resolver selects this host's report; do not regenerate
+history to read it. Missing/unreadable/stale is unknown, not no growth. Audit
+prints fleet health and the report before any deeper scanner. Defer heavy scans
+on a saturated host; no cleanup is implied by diagnosis.
+
 ## Quick Commands:
 - **Audit**: `disk-magician audit`
 - **Discover**: `disk-magician discover`

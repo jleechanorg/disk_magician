@@ -8,7 +8,8 @@ description: Use when diagnosing why a disk is full, what consumes its capacity,
 Read and follow the canonical repository skill at
 `../../../skills/disk-root-cause/SKILL.md` in full before taking action.
 
-The first command for a whole-disk investigation is `disk-magician audit`.
-It runs the top-down 5 GiB accounting, coverage-validated snapshot deltas,
-and safe quick-win analysis concurrently. Keep every cleanup read-only until
-the canonical skill's approval gate is satisfied.
+Follow fleet check -> existing per-host ledger (`diskm reclaim-ledger --read-existing`)
+-> floor/buckets -> bounded `diskm audit`, respecting current resource gates.
+Audit displays fleet health and the existing ledger before starting its lanes.
+Missing/unreadable/stale ledger data is unknown, not "no growth"; do not regenerate
+history merely to read it. Keep cleanup read-only until the canonical approval gate.
