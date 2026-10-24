@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import select
 import subprocess
 import tempfile
 import time
@@ -499,14 +500,35 @@ class TestConfigMutator(unittest.TestCase):
         command = [
             "python3",
             "-c",
-            "import config_mutator,sys; config_mutator.sync_state_config(sys.argv[1])",
+            """import config_mutator, fcntl, sys
+original_flock = fcntl.flock
+
+def observed_flock(lock, operation):
+    if operation == fcntl.LOCK_EX:
+        # sync_state_config has already sampled the destination with lstat.
+        # Prove contention on the real parent-held lock, not just child startup.
+        try:
+            original_flock(lock, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("LOCK_ATTEMPT", flush=True)
+        else:
+            raise AssertionError("snapshot lock was not held by the parent")
+    return original_flock(lock, operation)
+
+fcntl.flock = observed_flock
+config_mutator.sync_state_config(sys.argv[1])
+""",
             str(source),
         ]
         with lock_path.open("a+") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                time.sleep(0.5)
+                # Wait for the actual contended lock attempt after initial lstat;
+                # a startup sleep can let the winning write precede that sample.
+                ready, _, _ = select.select([process.stdout], [], [], 10)
+                self.assertTrue(ready, "snapshot copy never attempted the mutation lock")
+                self.assertEqual(process.stdout.readline(), "LOCK_ATTEMPT\n")
                 self.assertIsNone(process.poll(), "snapshot copy did not wait on the mutation lock")
                 winning = {"monitored_dirs": [{"key": "created-during-snapshot", "path": "/new"}]}
                 state_config.write_text(json.dumps(winning) + "\n")

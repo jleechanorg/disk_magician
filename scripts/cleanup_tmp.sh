@@ -368,6 +368,7 @@ cleanup_tmp_finish_receipt() {
   elif [[ "$delta" == null ]]; then
     outcome=error
     reason="df postcondition unavailable"
+    rc=1
   elif [[ "$DRY_RUN" == true && "$CANDIDATE_REMOVED_COUNT" == 0 ]]; then
     outcome=success_noop
     reason="dry-run completed"
@@ -389,17 +390,19 @@ cleanup_tmp_finish_receipt() {
       log "ERROR: failed to record cleanup_tmp receipt finish"
       return 1
     }
+  return "$rc"
 }
 cleanup_tmp_exit_trap() {
   local rc=$? sig="${1:-0}"
   trap - EXIT HUP INT TERM
-  cleanup_tmp_finish_receipt "$rc" "$sig" || rc=1
+  cleanup_tmp_finish_receipt "$rc" "$sig" || { [[ "$rc" != 0 ]] || rc=1; }
   if [[ "$sig" != 0 ]]; then
     [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
     kill -"$sig" "$$" 2>/dev/null || exit "$((128 + sig))"
   fi
   if [[ -n "${dylib_candidate_file:-}" ]]; then rm -f "$dylib_candidate_file"; fi
-  return "$rc"
+  # Returning from an EXIT trap does not change the process exit status.
+  exit "$rc"
 }
 scratch_lock_set_traps
 trap 'cleanup_tmp_exit_trap 0' EXIT

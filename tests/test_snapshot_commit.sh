@@ -148,7 +148,8 @@ echo "Test 5: tracked 5G ledger is unmasked before snapshot staging"
 H5="$TMP_ROOT/h5"; mkdir -p "$H5/.disk_magician_state"
 DM_TEST_FRONTIER="$H5/.disk_magician_state/frontier_last.json"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-FIXTURE_USER_HOME="$(python3 -c 'import os; print(os.path.realpath(os.path.expanduser("~")))')"
+# The ledger validator intentionally accepts only macOS /Users/<name> probe paths.
+FIXTURE_USER_HOME="/Users/testuser"
 cat > "$DM_TEST_FRONTIER" <<EOF
 {"schema_version":2,"captured_at":"$NOW","hostname":"test","mode":"complete","coverage_envelope":{"complete":true,"fda_preflight_status":"granted","fda_user_preflight_status":"granted","reachable_top_level_roots":1,"measured_top_level_roots":1,"unfinished_top_level_roots":0},"fda_probe_paths":{"mobile_sync":"$FIXTURE_USER_HOME/Library/Application Support/MobileSync/Backup","mail":"$FIXTURE_USER_HOME/Library/Mail","messages":"$FIXTURE_USER_HOME/Library/Messages"},"fda_preflight":{"status":"granted","probes":{"mobile_sync":{"path":"$FIXTURE_USER_HOME/Library/Application Support/MobileSync/Backup","status":"readable"},"mail":{"path":"$FIXTURE_USER_HOME/Library/Mail","status":"readable"},"messages":{"path":"$FIXTURE_USER_HOME/Library/Messages","status":"readable"}}},"frontier_unfinished":[],"opaque_intrinsic_gates":[],"disk_used_kb":1048576,"residual_kb":0,"purgeable_kb":0,"granularity_buckets":[{"path":"/small","measured_kb":1048576}],"oversize_indivisible_files":[],"accounting_equation":{"displayed_balanced":true,"display_ledger_valid":true,"data_used_kb":1048576,"displayed_buckets_kb":1048576,"oversize_indivisible_files_kb":0,"sub_granularity_tail_kb":0,"purgeable_kb":0,"residual_kb":0,"clone_shared_adjustment_kb":0}}
 EOF
