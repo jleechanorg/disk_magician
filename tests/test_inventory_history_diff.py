@@ -158,3 +158,127 @@ class InventoryComparisonLogicTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class InventoryHistoryAcceptanceGapsTest(unittest.TestCase):
+    def test_floor_and_path_own_minimum_are_reported_separately(self):
+        from directory_inventory import publish_inventory
+        from history_diff import inventory_history_report
+        with tempfile.TemporaryDirectory(prefix="inventory_two_floors_") as tmp:
+            state = Path(tmp)
+            def publish(stamp, used, size):
+                record = {"filesystem_id": "fs", "mountpoint": "/", "canonical_path": "/x",
+                    "path_generation": {"id": "same", "status": "known"},
+                    "observation": {"scan_id": stamp, "started_at": stamp, "ended_at": stamp,
+                        "allocated_bytes": size, "apparent_bytes": size, "subtree_coverage_status": "complete", "comparable": True}}
+                fs = {"filesystem_id": "fs", "mountpoint": "/", "selection_epoch": "epoch",
+                    "df_samples": [{"sampled_at": stamp, "used_bytes": used, "free_bytes": 1, "total_bytes": used + 1}]}
+                return publish_inventory([record], state_dir=state, complete=True,
+                    scan_metadata={"selected_filesystems": [fs]}, now=stamp)
+            publish("2026-10-23T00:00:00Z", 80, 100)
+            publish("2026-10-23T12:00:00Z", 50, 80)
+            publish("2026-10-24T00:00:00Z", 120, 120)
+            report = inventory_history_report(state, days=7, now=datetime(2026, 10, 24, 12, tzinfo=timezone.utc))
+        fs = report["filesystems"][0]
+        row = next(item for item in fs["path_deltas"] if item["path"] == "/x")
+        self.assertEqual(row["matching_fs_floor_delta_bytes"], 40)
+        self.assertEqual(row["path_own_floor_delta_bytes"], 40)
+        self.assertEqual(row["path_own_floor_at"], "2026-10-23T12:00:00+00:00")
+
+    def test_path_first_seen_after_filesystem_floor_uses_path_own_floor(self):
+        from directory_inventory import publish_inventory
+        from history_diff import inventory_history_report
+        with tempfile.TemporaryDirectory(prefix="inventory_late_path_") as tmp:
+            state = Path(tmp)
+            def publish(stamp, used, paths):
+                records = []
+                for path, size, generation in paths:
+                    generation_id, generation_status = (generation if isinstance(generation, tuple) else (generation, "known"))
+                    records.append({"filesystem_id": "fs", "mountpoint": "/", "canonical_path": path,
+                        "path_generation": {"id": generation_id, "status": generation_status},
+                        "observation": {"scan_id": stamp, "started_at": stamp, "ended_at": stamp,
+                            "allocated_bytes": size, "apparent_bytes": size, "subtree_coverage_status": "complete", "comparable": True}})
+                fs = {"filesystem_id": "fs", "mountpoint": "/", "selection_epoch": "epoch",
+                    "df_samples": [{"sampled_at": stamp, "used_bytes": used, "free_bytes": 1, "total_bytes": used + 1}]}
+                publish_inventory(records, state_dir=state, complete=True,
+                    scan_metadata={"selected_filesystems": [fs]}, now=stamp)
+            publish("2026-10-20T00:00:00Z", 50, [("/floor", 10, "floor")])
+            publish("2026-10-21T00:00:00Z", 100, [("/floor", 10, "floor"), ("/late", 20, ("late", "unknown"))])
+            publish("2026-10-22T00:00:00Z", 120, [("/floor", 10, "floor"), ("/late", 20, "late")])
+            publish("2026-10-23T00:00:00Z", 150, [("/floor", 10, "floor"), ("/late", 60, "late")])
+            report = inventory_history_report(state, days=7, now=datetime(2026, 10, 23, 1, tzinfo=timezone.utc))
+        fs = report["filesystems"][0]
+        row = next(item for item in fs["path_deltas"] if item["path"] == "/late")
+        self.assertIsNone(row["matching_fs_floor_delta_bytes"])
+        self.assertIsNone(row["logical_delta_bytes"])
+        self.assertEqual(row["path_own_floor_bytes"], 20)
+        self.assertEqual(row["path_own_floor_delta_bytes"], 40)
+
+    def test_stale_current_observations_do_not_claim_comparable_delta(self):
+        from directory_inventory import publish_inventory
+        from history_diff import inventory_history_report
+        with tempfile.TemporaryDirectory(prefix="inventory_stale_current_") as tmp:
+            state = Path(tmp)
+            def publish(stamp, size):
+                record = {"filesystem_id": "fs", "mountpoint": "/", "canonical_path": "/x",
+                    "path_generation": {"id": "same", "status": "known"},
+                    "observation": {"scan_id": stamp, "started_at": stamp, "ended_at": stamp,
+                        "allocated_bytes": size, "apparent_bytes": size, "subtree_coverage_status": "complete", "comparable": True}}
+                fs = {"filesystem_id": "fs", "mountpoint": "/", "selection_epoch": "epoch",
+                    "df_samples": [{"sampled_at": stamp, "used_bytes": size, "free_bytes": 1, "total_bytes": size + 1}]}
+                publish_inventory([record], state_dir=state, complete=True,
+                    scan_metadata={"selected_filesystems": [fs]}, now=stamp)
+            publish("2026-10-22T00:00:00Z", 100)
+            publish("2026-10-24T00:00:00Z", 120)
+            report = inventory_history_report(state, days=7, now=datetime(2026, 10, 25, 12, tzinfo=timezone.utc))
+        fs = report["filesystems"][0]
+        self.assertEqual(fs["status"], "stale_current_observation")
+        self.assertIsNone(fs["current_minus_floor_bytes"])
+        self.assertEqual(fs["path_deltas"], [])
+        self.assertGreater(fs["current_sample_age_hours"], 24)
+
+    def test_daily_summary_exposes_observed_range_and_max_sample_gap(self):
+        samples = [
+            {"filesystem_id": "fs", "sampled_at": "2026-10-20T00:00:00Z", "used_bytes": 100},
+            {"filesystem_id": "fs", "sampled_at": "2026-10-20T06:00:00Z", "used_bytes": 90},
+            {"filesystem_id": "fs", "sampled_at": "2026-10-21T00:00:00Z", "used_bytes": 80},
+        ]
+        got = history_diff.daily_minimum_summary(samples, days=7,
+            now=datetime(2026, 10, 22, tzinfo=timezone.utc))["fs"]
+        self.assertEqual(got["observed_range"]["start"], "2026-10-20T00:00:00+00:00")
+        self.assertEqual(got["observed_range"]["end"], "2026-10-21T00:00:00+00:00")
+        self.assertEqual(got["max_sample_gap_hours"], 18)
+
+    def test_seven_day_floor_uses_per_epoch_alignment_and_keeps_other_filesystems_out(self):
+        from directory_inventory import publish_inventory
+        from history_diff import inventory_history_report
+        with tempfile.TemporaryDirectory(prefix="inventory_multiday_alignment_") as tmp:
+            state = Path(tmp)
+            def publish(stamp, fs_samples, rows):
+                records = []
+                for fsid, path, size in rows:
+                    records.append({"filesystem_id": fsid, "mountpoint": "/" if fsid == "root" else "/home",
+                        "canonical_path": path, "path_generation": {"id": "stable-" + fsid, "status": "known"},
+                        "observation": {"scan_id": stamp, "started_at": stamp, "ended_at": stamp,
+                            "allocated_bytes": size, "apparent_bytes": size, "subtree_coverage_status": "complete", "comparable": True}})
+                filesystems = [{"filesystem_id": fsid, "mountpoint": mount, "selection_epoch": "epoch-" + fsid,
+                    "df_samples": [{"sampled_at": sample_at, "used_bytes": used, "free_bytes": 10, "total_bytes": used + 10}]}
+                    for fsid, mount, sample_at, used in fs_samples]
+                return publish_inventory(records, state_dir=state, complete=True,
+                    scan_metadata={"selected_filesystems": filesystems}, now=stamp)
+            publish("2026-10-18T00:00:00Z", [("root", "/", "2026-10-18T00:00:00Z", 50), ("home", "/home", "2026-10-18T00:00:00Z", 40)],
+                [("root", "/root-data", 90), ("home", "/home-data", 30)])
+            publish("2026-10-19T00:00:00Z", [("root", "/", "2026-10-19T00:00:00Z", 70), ("home", "/home", "2026-10-19T00:00:00Z", 45)],
+                [("root", "/root-data", 95), ("home", "/home-data", 20)])
+            current = publish("2026-10-24T10:00:00Z", [("root", "/", "2026-10-24T10:00:00Z", 90), ("home", "/home", "2026-10-24T10:00:00Z", 55)],
+                [("root", "/root-data", 160), ("home", "/home-data", 50)])
+            report = inventory_history_report(state, days=7, now=datetime(2026, 10, 24, 12, tzinfo=timezone.utc))
+        root = next(item for item in report["filesystems"] if item["filesystem_id"] == "root")
+        row = next(item for item in root["path_deltas"] if item["path"] == "/root-data")
+        self.assertEqual(row["matching_fs_floor_delta_bytes"], 70)
+        self.assertEqual(row["floor_path_df_offset_hours"], 0)
+        self.assertEqual(row["current_path_df_offset_hours"], 0)
+        self.assertEqual(row["path_own_floor_bytes"], 90)
+        self.assertEqual(row["path_own_floor_delta_bytes"], 70)
+        self.assertIsNotNone(row["path_own_floor_manifest_sha256"])
+        self.assertEqual(root["floor_manifest_sha256"], row["path_own_floor_manifest_sha256"])
+        self.assertEqual([item["path"] for item in root["path_deltas"]], ["/root-data"])

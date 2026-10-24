@@ -3,10 +3,32 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
+import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 import reclaim_ledger
+
+
+class HistoricalSnapshotLineageTest(unittest.TestCase):
+    def test_each_qualified_snapshot_is_an_immutable_timestamped_measurement(self):
+        with tempfile.TemporaryDirectory(prefix="history_import_lineage_") as td:
+            root = pathlib.Path(td)
+            snapshots = []
+            for name, stamp, size in (("old.json", "2026-10-20T00:00:00Z", 10),
+                                      ("new.json", "2026-10-21T00:00:00Z", 30)):
+                data = json.dumps({"directories": {"/fixture/repeated": size}}).encode()
+                (root / name).write_bytes(data)
+                snapshots.append({"path": name, "sha256": hashlib.sha256(data).hexdigest(),
+                                  "captured_at": stamp, "coverage_pct": 85})
+            (root / "bundle.json").write_text(json.dumps({"schema_version": 1, "snapshots": snapshots}))
+            imported = reclaim_ledger.parse_history_bundle(root)
+            observations = [r for r in imported["rows"] if r.get("row_type") == "historical_measurement"]
+            self.assertEqual(len(observations), 2)
+            self.assertEqual({r["source_timestamp"] for r in observations}, {"2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"})
+            self.assertEqual({r["observation"]["allocated_bytes"] for r in observations}, {10 * 1024, 30 * 1024})
+            self.assertEqual(len({r["import_row_key"] for r in observations}), 2)
 
 
 def segment(root, name, text):
@@ -132,3 +154,23 @@ def test_import_cli_publishes_union_and_exports_lineage_events(tmp_path, monkeyp
     })(), tmp_path, reclaim_ledger.datetime.datetime.fromisoformat("2026-10-24T00:00:00+00:00"))
     assert any(row.get("event_id") == events[0]["event_id"] for row in exported["rows"])
     assert exported["counts"]["exact_cleanup_events"] == 1
+
+
+def test_qualified_snapshot_import_preserves_each_timestamped_path_observation(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    snapshot_rows = []
+    snapshots = []
+    for name, stamp, size in (("old.json", "2026-10-20T00:00:00Z", 10),
+                              ("new.json", "2026-10-21T00:00:00Z", 30)):
+        data = json.dumps({"directories": {"/fixture/repeated": size}}).encode()
+        (tmp_path / name).write_bytes(data)
+        snapshots.append({"path": name, "sha256": hashlib.sha256(data).hexdigest(),
+                          "captured_at": stamp, "coverage_pct": 85})
+    (tmp_path / "bundle.json").write_text(json.dumps({"schema_version": 1, "snapshots": snapshots}))
+    imported = reclaim_ledger.parse_history_bundle(tmp_path)
+    observations = [row for row in imported["rows"] if row.get("row_type") == "historical_measurement"]
+    assert len(observations) == 2
+    assert len({row["import_row_key"] for row in observations}) == 2
+    assert {row["source_timestamp"] for row in observations} == {"2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"}
+    assert {row["observation"]["allocated_bytes"] for row in observations} == {10 * 1024, 30 * 1024}

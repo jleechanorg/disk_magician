@@ -747,6 +747,9 @@ def daily_minimum_summary(samples, *, days, now=None):
     result = {}
     expected = {now.date() - datetime.timedelta(days=i) for i in range(days)}
     for fsid, dates in grouped.items():
+        all_stamps = sorted(_parse_utc(s.get("sampled_at")) for s in samples
+            if s.get("filesystem_id") == fsid and _parse_utc(s.get("sampled_at")) is not None
+            and _parse_utc(s.get("sampled_at")) <= now and _parse_utc(s.get("sampled_at")) >= cutoff)
         minima = [min(values) for values in dates.values()]
         ordered = sorted(minima)
         mid = len(ordered) // 2
@@ -757,6 +760,8 @@ def daily_minimum_summary(samples, *, days, now=None):
             "coverage_status": "complete" if expected.issubset(dates) else "partial",
             "missing_dates": sorted(day.isoformat() for day in expected - set(dates)),
             "floor_date": min(day for day, values in dates.items() if min(values) == min(minima)).isoformat(),
+            "observed_range": {"start": all_stamps[0].isoformat(), "end": all_stamps[-1].isoformat()},
+            "max_sample_gap_hours": max(((b - a).total_seconds() / 3600 for a, b in zip(all_stamps, all_stamps[1:])), default=0),
         }
     return result
 
@@ -835,22 +840,79 @@ def inventory_history_report(state_dir, *, days, now=None):
         fsnow = current_fs.get(fsid)
         floor_fs = next((fs for fs in floor_manifest.get("selected_filesystems", []) if fs.get("filesystem_id") == fsid), {})
         same_epoch = bool(fsnow and floor_fs and floor_fs.get("selection_epoch") == fsnow.get("selection_epoch"))
-        now_samples = [s for s in (fsnow or {}).get("df_samples", []) if type(s.get("used_bytes")) is int]
-        now_used = max(now_samples, key=lambda s: s.get("sampled_at", "")).get("used_bytes") if now_samples else None
-        base_records = {(r.get("filesystem_id"), r.get("canonical_path")): r for r in floor_records}
+        now_samples = [s for s in (fsnow or {}).get("df_samples", []) if type(s.get("used_bytes")) is int and _parse_utc(s.get("sampled_at"))]
+        current_sample = max(now_samples, key=lambda s: s.get("sampled_at", "")) if now_samples else None
+        now_used = current_sample.get("used_bytes") if current_sample else None
+        current_at = _parse_utc(current_sample.get("sampled_at")) if current_sample else None
+        current_age = (now - current_at).total_seconds() / 3600 if current_at else None
+        fresh = current_age is not None and 0 <= current_age <= 24
+        base_records = {(r.get("filesystem_id"), r.get("canonical_path")): r for r in floor_records
+                        if r.get("filesystem_id") == fsid}
+        current_fs_records = {key: row for key, row in current_records.items() if key[0] == fsid}
+        keys = sorted(set(base_records) | set(current_fs_records))
         deltas = []
-        if same_epoch:
-            for key, base in base_records.items():
-                target = current_records.get(key)
-                if target is None or key[0] != fsid:
+        if same_epoch and fresh:
+            for key in keys:
+                base = base_records.get(key)
+                target = current_fs_records.get(key)
+                if target is None:
+                    deltas.append({"path": key[1], "logical_delta_bytes": None, "apparent_delta_bytes": None,
+                        "physical_delta_bytes": None, "reason": "path not present in current observation",
+                        "matching_fs_floor_delta_bytes": None, "path_own_floor_bytes": None,
+                        "path_own_floor_at": None, "path_own_floor_manifest_sha256": None,
+                        "path_own_floor_offset_hours": None, "path_own_floor_delta_bytes": None})
                     continue
-                delta = compare_inventory_path(base, target)
-                deltas.append({"path": key[1], **delta})
+                co = target.get("observation") or {}
+                ct = _parse_utc(co.get("ended_at") or co.get("started_at"))
+                path_age = (now - ct).total_seconds() / 3600 if ct else None
+                floor_df_offset = None
+                current_df_offset = abs((ct - current_at).total_seconds()) / 3600 if ct and current_at else None
+                if base is None:
+                    delta = {"logical_delta_bytes": None, "apparent_delta_bytes": None,
+                        "physical_delta_bytes": None, "reason": "path absent from filesystem-floor observation"}
+                    offset = None
+                else:
+                    delta = compare_inventory_path(base, target)
+                    bo = base.get("observation") or {}
+                    bt = _parse_utc(bo.get("ended_at") or bo.get("started_at"))
+                    floor_df_offset = abs((bt - floor_at).total_seconds()) / 3600 if bt and floor_at else None
+                    offset = current_df_offset
+                    if (floor_df_offset is None or floor_df_offset > 24 or current_df_offset is None
+                            or current_df_offset > 24 or path_age is None or path_age < 0 or path_age > 24):
+                        delta = {"logical_delta_bytes": None, "apparent_delta_bytes": None, "physical_delta_bytes": None,
+                            "reason": "path/df alignment exceeds 24h or observation timestamp unavailable"}
+                own = []
+                if (target.get("path_generation") or {}).get("status") == "known" and type(co.get("allocated_bytes")) is int:
+                    for _, history_digest, md, recs in histories:
+                        for candidate in recs:
+                            if candidate.get("filesystem_id") == fsid and candidate.get("canonical_path") == key[1] and candidate.get("path_generation") == target.get("path_generation"):
+                                obs = candidate.get("observation") or {}
+                                ts = _parse_utc(obs.get("ended_at") or obs.get("started_at"))
+                                if ts and since <= ts <= now and type(obs.get("allocated_bytes")) is int and obs.get("comparable") is True and obs.get("subtree_coverage_status") == "complete":
+                                    own.append((obs["allocated_bytes"], ts, history_digest))
+                own_bytes, own_at, own_digest = min(own, key=lambda item: (item[0], item[1])) if own else (None, None, None)
+                own_offset = abs((ct - own_at).total_seconds()) / 3600 if ct and own_at else None
+                current_path_comparable = (co.get("comparable") is True
+                    and co.get("subtree_coverage_status") == "complete"
+                    and type(co.get("allocated_bytes")) is int)
+                own_delta = (co["allocated_bytes"] - own_bytes if own_bytes is not None
+                    and current_path_comparable and current_df_offset is not None and current_df_offset <= 24
+                    and path_age is not None and 0 <= path_age <= 24 else None)
+                deltas.append({"path": key[1], **delta, "observation_offset_hours": offset,
+                    "floor_path_df_offset_hours": floor_df_offset,
+                    "current_path_df_offset_hours": current_df_offset,
+                    "matching_fs_floor_delta_bytes": delta.get("logical_delta_bytes"),
+                    "path_own_floor_bytes": own_bytes, "path_own_floor_at": own_at.isoformat() if own_at else None,
+                    "path_own_floor_manifest_sha256": own_digest, "path_own_floor_offset_hours": own_offset,
+                    "path_own_floor_delta_bytes": own_delta})
+        fs_status = ("stale_current_observation" if fsnow and not fresh else "comparable" if same_epoch else "selection_epoch_changed" if fsnow else "missing_current_filesystem")
         per_fs.append({"filesystem_id": fsid, "mountpoint": (fsnow or {}).get("mountpoint"),
             "daily_floor_summary": floor_summaries.get(fsid),
             "floor_used_bytes": floor_used, "floor_at": floor_at.isoformat(), "floor_manifest_sha256": digest,
-            "current_used_bytes": now_used, "current_minus_floor_bytes": now_used - floor_used if now_used is not None else None,
-            "path_deltas": deltas, "status": ("comparable" if same_epoch else ("selection_epoch_changed" if fsnow else "missing_current_filesystem"))})
+            "current_used_bytes": now_used, "current_sample_at": current_sample.get("sampled_at") if current_sample else None,
+            "current_sample_age_hours": current_age,
+            "current_minus_floor_bytes": now_used - floor_used if now_used is not None and fresh else None,
+            "path_deltas": deltas, "status": fs_status})
     return {"source": "inventory", "requested_days": days, "status": "partial" if len(per_fs) < len(current_fs) else "observed",
         "current_manifest_sha256": current["pointer"]["manifest_sha256"], "filesystems": per_fs,
         "host_aggregate_delta_bytes": None, "host_aggregate_reason": "filesystem selection overlap and epoch alignment are not proven"}
