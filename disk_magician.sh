@@ -245,7 +245,7 @@ case "$CMD" in
     run_setup "$@"
     ;;
   snapshot)
-    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh"
+    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh" "$@"
     ;;
   status)
     exec python3 "$SCRIPT_DIR/scripts/disk_status.py" "$@"
