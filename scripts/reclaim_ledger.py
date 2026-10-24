@@ -36,6 +36,7 @@ import resolve_state_repo_path  # noqa: E402
 
 GIB_KB = 1024 * 1024
 OUT_REL = "reclaim/known-reclaim-dirs.md"
+REPORT_COMPLETE = "<!-- diskm reclaim-ledger complete -->"
 FAST_DAYS = 3    # cleaned on this many distinct days ...
 FAST_HOURS = 6   # ... or in this many distinct hours => regrows fast
 TOP_C, TOP_D = 30, 15
@@ -369,6 +370,7 @@ def render(args, state_dir, now):
     out += section_c(roots, home, args.days, mon) + section_d(roots, home, args.days, mon)
     out += section_monitored(state_dir, mon, since, args.days, home)
     out += section_b(state_dir, args.days) + section_a(args.frontier, home, now)
+    out += [REPORT_COMPLETE]
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -405,8 +407,8 @@ def read_existing(state_dir):
     bodies = sections[2::2]
     complete = labels == ["C", "D", "B1", "B2", "A"] and all(
         body.strip() and not body.lstrip().startswith("#") for body in bodies)
-    if text.strip() and (not title or not complete):
-        print("INVALID RECLAIM REPORT: incomplete producer sections or missing report title; "
+    if text.strip() and (not title or not complete or not text.rstrip().endswith(REPORT_COMPLETE)):
+        print("INVALID RECLAIM REPORT: incomplete producer sections, title or final completion footer; "
               "not evidence of no growth. Deeper diagnosis may continue.")
     # Use the report's generation time, not mtime (a checkout/copy can refresh mtime).
     match = re.search(r"^Generated (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) by `diskm reclaim-ledger`", text, re.M)

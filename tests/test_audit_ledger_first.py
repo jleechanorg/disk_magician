@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -57,7 +58,7 @@ class AuditLedgerFirst(unittest.TestCase):
         p = (state or self.state) / reclaim_ledger.OUT_REL
         p.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\n### C. Cleaned roots, last 7 days\nNo deletions logged in the window.\nLEDGER_SENTINEL\n### D. Regrows fast\nNone.\n### B1. Monitored directories\nUnavailable.\n### B2. Top-down ledger growth\nUnavailable.\n### A. Uncovered / needs-decision / protected rows >= 5 GiB\nUnavailable.\n')
+        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\n### C. Cleaned roots, last 7 days\nNo deletions logged in the window.\nLEDGER_SENTINEL\n### D. Regrows fast\nNone.\n### B1. Monitored directories\nUnavailable.\n### B2. Top-down ledger growth\nUnavailable.\n### A. Uncovered / needs-decision / protected rows >= 5 GiB\nUnavailable.\n<!-- diskm reclaim-ledger complete -->\n')
         return p
 
     def run_audit(self):
@@ -205,6 +206,44 @@ class AuditLedgerFirst(unittest.TestCase):
         replace.assert_called_once()
         self.assertEqual('new complete report', ledger.read_text())
         self.assertEqual(list(ledger.parent.iterdir()), [ledger])
+
+    def actual_render(self):
+        args = SimpleNamespace(home=str(self.home), days=7,
+            deletions_log=str(self.root / 'missing-deletions'),
+            freshness_line='OK fixture', frontier=None)
+        with patch.object(reclaim_ledger, 'run_json', return_value=(0, None)), \
+                patch.object(reclaim_ledger, 'load_monitored', return_value=None):
+            return reclaim_ledger.render(args, self.state, datetime.datetime.now(datetime.timezone.utc))
+
+    def test_actual_render_has_final_footer_and_is_accepted(self):
+        text = self.actual_render()
+        self.assertTrue(text.rstrip().endswith('<!-- diskm reclaim-ledger complete -->'))
+        self.ledger(text)
+        _, at_scan = self.run_audit()
+        self.assertNotIn('INVALID RECLAIM REPORT', at_scan)
+
+    def test_truncation_at_each_section_and_inside_final_body_is_invalid(self):
+        text = self.actual_render()
+        ends = [text.index('### ' + label + '.') for label in ('D', 'B1', 'B2', 'A')]
+        ends += [text.index('Unavailable: check_uncovered_roots') + 1]
+        # Cutting after A's complete body also lacks the required completion footer.
+        ends += [text.index('<!-- diskm reclaim-ledger complete -->') if
+                 '<!-- diskm reclaim-ledger complete -->' in text else len(text)]
+        for end in ends:
+            with self.subTest(end=end):
+                self.ledger(text[:end])
+                out, at_scan = self.run_audit()
+                self.assertIn('INVALID RECLAIM REPORT', at_scan)
+                self.assertIn('not evidence of no growth', at_scan)
+                self.assertIn('SCANNER_STUB', out)
+
+    def test_footer_must_be_final_except_whitespace(self):
+        text = self.actual_render()
+        for suffix, invalid in [('\n \t\n', False), ('\ntrailing unverified content', True)]:
+            with self.subTest(suffix=suffix):
+                self.ledger(text + suffix)
+                _, at_scan = self.run_audit()
+                self.assertEqual(invalid, 'INVALID RECLAIM REPORT' in at_scan)
 
     def test_timestamp_only_report_is_invalid_and_read_only(self):
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
