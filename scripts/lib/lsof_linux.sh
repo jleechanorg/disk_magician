@@ -36,6 +36,26 @@ lsof_stderr_incomplete() {
   return 1
 }
 
+# lsof_stderr_byte_status <path>: validate raw stderr before Bash captures it.
+#   0 = readable and contains no NUL bytes
+#   1 = readable and contains at least one NUL byte
+#   2 = unreadable or byte validation failed
+# Bash strips NUL bytes during command substitution, so callers must run this
+# while the diagnostic is still a file and fail closed for statuses 1 and 2.
+lsof_stderr_byte_status() {
+  local path="${1:-}"
+  local -a pipe_status
+  [[ -f "$path" && -r "$path" ]] || return 2
+  LC_ALL=C tr -d '\000' <"$path" | cmp -s - "$path"
+  pipe_status=("${PIPESTATUS[@]}")
+  (( pipe_status[0] == 0 )) || return 2
+  case "${pipe_status[1]:-2}" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # lsof_denied_ignorable "/proc/<pid>/cwd (readlink: Permission denied)": rc 0
 # when that hidden cwd cannot be this user's live use -- the process exited, it
 # belongs to another uid, or nothing can be read from it at all. Without procfs
@@ -215,6 +235,12 @@ lsof_snapshot_cwds() {
     errf="$(mktemp "${TMPDIR:-/tmp}/dm-lsof-err.XXXXXX" 2>/dev/null)" || { LSOF_CWD_REASON="stderr-capture-failed"; return 1; }
     [[ -f "$errf" ]] || { LSOF_CWD_REASON="stderr-capture-failed"; return 1; }
     out="$("$bin" -d cwd -Fpn 2>"$errf")" || rc=$?
+    local stderr_status=0
+    lsof_stderr_byte_status "$errf" || stderr_status=$?
+    case "$stderr_status" in
+        1) rm -f "$errf"; LSOF_CWD_REASON="stderr-nul"; return 1 ;;
+        2) rm -f "$errf"; LSOF_CWD_REASON="stderr-read-failed"; return 1 ;;
+    esac
     if ! err="$(cat "$errf" 2>/dev/null)"; then
         rm -f "$errf"; LSOF_CWD_REASON="stderr-read-failed"; return 1
     fi
