@@ -1,0 +1,11 @@
+// TEMPLATE ONLY: installing this rule is a separate explicit access grant.
+// The installer must validate the designated local account before substitution.
+// systemd's existing manage-units action needs no new .policy definition.
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        subject.user === "@DESIGNATED_USER@" &&
+        action.lookup("unit") === "disk-magician-inventory-root.service" &&
+        action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+    }
+});

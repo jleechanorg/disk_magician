@@ -1,0 +1,20 @@
+# TEMPLATE ONLY. Render the trusted interpreter and designated reader group
+# through the root installer after its ownership/path checks. Do not activate
+# until the fixed root-mode scanner and admission checks are complete.
+[Unit]
+Description=Fixed privileged Disk Magician inventory collector
+
+[Service]
+Type=oneshot
+User=root
+Group=@READER_GROUP@
+WorkingDirectory=/
+UMask=0027
+Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=@TRUSTED_PYTHON@ -I /usr/local/libexec/disk-magician/disk_frontier_scan.py --root / --inventory --root-inventory
+# Collector independently owns freshness, quota, lock/reentry and scan budget.
+# No root timer, environment-selected path, shell wrapper or user dispatcher.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/disk-magician

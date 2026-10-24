@@ -9,6 +9,28 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Validate before state resolution, receipt creation or snapshot mutation. The
+# public dispatcher forwards arguments unchanged to this single orchestrator.
+INVENTORY_MAX_AGE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --refresh-inventory-if-stale=*)
+      age="${1#*=}"
+      if [[ -n "$INVENTORY_MAX_AGE" || ! "$age" =~ ^[1-9][0-9]*[smhd]$ || ${#age} -gt 10 ]]; then
+        echo "snapshot: invalid stale age: $age (expected positive integer plus s, m, h or d)" >&2
+        exit 2
+      fi
+      INVENTORY_MAX_AGE="$age"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: diskm snapshot [--refresh-inventory-if-stale=24h]"
+      exit 0
+      ;;
+    *) echo "snapshot: invalid option: $1" >&2; exit 2 ;;
+  esac
+done
+
 STATE_DIR="$(python3 "$SCRIPT_DIR/resolve_state_repo_path.py")"
 SNAP_BIN="${DISK_MAGICIAN_SNAPSHOT_BIN:-$SCRIPT_DIR/disk_snapshot.sh}"
 RECEIPT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
@@ -78,6 +100,11 @@ if ! acquire_snapshot_lock; then
     --safety '{"status": "not_applicable", "reason": "lock_contention_no_mutation", "delegated": false}' >/dev/null 2>&1; then
     log "ERROR: failed to record skipped_lock receipt"
   fi
+  if [[ -n "$INVENTORY_MAX_AGE" ]]; then
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job directory_inventory \
+      --outcome skipped_lock --reason "snapshot_lock_contention" \
+      --lock '{"held": true, "reason": "contention"}' >/dev/null 2>&1 || log "ERROR: failed to record inventory skip receipt"
+  fi
   exit 0
 fi
 
@@ -88,6 +115,117 @@ RECEIPT_RUN_ID=$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job snapshot_commi
   log "ERROR: failed to record receipt begin"
   exit 1
 }
+
+# This is orchestration only. The core codec owns validation, durable copying,
+# quota, publication locks and immutable dependencies; no second scanner/importer.
+if [[ -n "$INVENTORY_MAX_AGE" ]]; then
+  python3 - "$SCRIPT_DIR" "$INVENTORY_MAX_AGE" "$RECEIPT_STATE_DIR" <<'PY'
+import datetime
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from job_receipt import JobReceiptStore, parse_iso
+
+age_spec, state_dir = sys.argv[2:]
+max_age = int(age_spec[:-1]) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[age_spec[-1]]
+store = JobReceiptStore(state_dir)
+run = store.begin('directory_inventory', trigger='snapshot_refresh',
+                  safety={'status': 'not_applicable', 'reason': 'metadata_collection_only', 'delegated': False})
+
+def finish(outcome, reason, publication=None):
+    store.finish('directory_inventory', run, outcome, reason=reason,
+                 lock={'held': outcome == 'skipped_lock', 'reason': 'contention' if outcome == 'skipped_lock' else None},
+                 postcondition={'manifest_sha256': (publication or {}).get('pointer', {}).get('manifest_sha256'),
+                                'complete': (publication or {}).get('manifest', {}).get('complete'), 'freed_bytes': None})
+
+def fresh(publication):
+    try:
+        when = parse_iso(publication['manifest']['published_at'])
+        age = (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()
+        digest = publication['pointer']['manifest_sha256']
+        return 0 <= age <= max_age and isinstance(digest, str) and re.fullmatch('[a-f0-9]{64}', digest)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+try:
+    from directory_inventory import read_current, import_root_publication
+except ImportError:
+    finish('blocked_safety', 'privileged_collector_unavailable: inventory API unavailable')
+    print('snapshot: privileged_collector_unavailable (inventory API unavailable)', file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    current = read_current(state_dir, verify=True)
+except (OSError, ValueError, RuntimeError):
+    current = None
+if fresh(current):
+    finish('success_noop', 'fresh_inventory_no_collector_requested', current)
+    raise SystemExit(0)
+
+if sys.platform.startswith('linux'):
+    root_parent = Path('/var/lib/disk-magician')
+    command = ['systemctl', '--system', '--no-ask-password', 'start', 'disk-magician-inventory-root.service']
+elif sys.platform == 'darwin':
+    root_parent = Path('/var/db/disk-magician')
+    command = ['launchctl', 'kickstart', 'system/com.jleechanorg.disk-magician-frontier-root']
+else:
+    finish('blocked_safety', 'privileged_collector_unavailable: unsupported platform')
+    raise SystemExit(1)
+
+try:
+    # A bounded request, not a change to the collector's scan deadline. A timeout
+    # never stops/restarts the root collector or falls back to an unprivileged walk.
+    requested = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+except (OSError, subprocess.TimeoutExpired):
+    finish('blocked_safety', 'privileged_collector_unavailable: request unavailable or timed out')
+    raise SystemExit(1)
+if requested.returncode:
+    finish('blocked_safety', 'privileged_collector_unavailable: fixed collector request failed')
+    raise SystemExit(1)
+
+try:
+    with (root_parent / 'inventory-root-receipt.json').open() as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('root receipt exceeds bound')
+    receipt = json.loads(raw)
+    if receipt.get('status') == 'skipped_lock':
+        finish('skipped_lock', 'root_collector_lock_contention')
+        raise SystemExit(75)
+    if receipt.get('status') not in ('success', 'success_noop', 'partial'):
+        raise ValueError('root collector has no successful receipt')
+    source = read_current(str(root_parent), verify=True)
+    if not fresh(source) or source['pointer']['manifest_sha256'] != receipt.get('manifest_sha256') or source['manifest']['published_at'] != receipt.get('published_at'):
+        raise ValueError('root receipt does not identify a fresh verified publication')
+    # source_root is the fixed root state parent; core adds inventory internally.
+    import_root_publication(str(root_parent), state_dir=state_dir, retries=3)
+    imported = read_current(state_dir, verify=True)
+    if not fresh(imported) or imported['pointer']['manifest_sha256'] != source['pointer']['manifest_sha256']:
+        raise ValueError('import did not yield the verified fresh root publication')
+except BlockingIOError:
+    finish('skipped_lock', 'inventory_publication_lock_contention')
+    raise SystemExit(75)
+except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+    finish('error', 'inventory_refresh_unavailable: ' + str(exc))
+    raise SystemExit(1)
+finish('success' if imported['manifest'].get('complete') is True else 'partial',
+       'verified_root_handoff_imported', imported)
+PY
+  refresh_rc=$?
+  if [[ $refresh_rc -ne 0 ]]; then
+    refresh_outcome=error
+    refresh_reason=inventory_refresh_unavailable
+    [[ $refresh_rc -eq 75 ]] && { refresh_outcome=skipped_lock; refresh_reason=inventory_collector_lock_contention; }
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job snapshot_commit --run-id "$RECEIPT_RUN_ID" \
+      --outcome "$refresh_outcome" --reason "$refresh_reason" >/dev/null 2>&1 || log "ERROR: failed to record refresh failure"
+    [[ $refresh_rc -eq 75 ]] && exit 0
+    exit 1
+  fi
+fi
 
 # Freeze the selected bytes once, after acquiring the transaction lock.
 if ! { TRANSACTION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/disk_magician_snapshot.XXXXXX") &&
