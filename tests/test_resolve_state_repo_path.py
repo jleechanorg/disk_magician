@@ -50,6 +50,22 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, legacy))
 
+    def test_explicit_config_wins_over_xdg_state_repo_path(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        explicit = os.path.join(self.tmp, "explicit.json")
+        xdg_state = os.path.join(self.home, "xdg-state")
+        explicit_state = os.path.join(self.home, "explicit-state")
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": xdg_state}, f)
+        with open(explicit, "w") as f:
+            json.dump({"state_repo_path": explicit_state}, f)
+        rc, out = resolve({
+            "HOME": self.home,
+            "DISK_MAGICIAN_CONFIG": explicit,
+        })
+        self.assertEqual((rc, out), (0, explicit_state))
+
     def test_relative_state_repo_path_anchors_to_home_not_cwd(self):
         # cursor-agent adversarial finding 2026-07-21: a relative
         # state_repo_path used to resolve against the caller's CWD (/ under
