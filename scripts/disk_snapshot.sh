@@ -572,9 +572,17 @@ PY
     # BSD stat supports -f %m; GNU stat treats -f as filesystem formatting and
     # can emit non-numeric output even when the probe fails. Accept only an
     # epoch value before selecting that platform-specific result.
-    mtime=$(stat -f %m "$dir" 2>/dev/null || true)
+    if mtime=$(stat -f %m "$dir" 2>/dev/null) && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+      :
+    else
+      mtime=""
+    fi
     if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
-      mtime=$(stat -c %Y "$dir" 2>/dev/null || true)
+      if mtime=$(stat -c %Y "$dir" 2>/dev/null) && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+        :
+      else
+        mtime=""
+      fi
     fi
     if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
       mtime=0
@@ -587,7 +595,7 @@ PY
       cached_size="$candidate_size"
       break
     done < "$CACHE_READ_FILE"
-    if [[ -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
+    if [[ "$mtime" != 0 && -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
       kb="${cached_size:-0}"
       cache_hits=$(( cache_hits + 1 ))
     else
