@@ -4,27 +4,27 @@
   Proactive /private/tmp scratch sweep — closes the interim gap named in
   bead jleechan-dqiz (AO worktree scratch under /private/tmp/worldarchitect-pr*
   and pr*-evidence-* only got cleaned reactively, via pressure_sweep.sh's
-  cleanup_tmp.sh --large step, once free space had already dropped below
-  40GB). This job runs scripts/tmp_scratch_sweep.sh --clean (bead
+  large cleanup_tmp.sh step, once free space had already dropped below
+  40GB). This job runs the clean mode of scripts/tmp_scratch_sweep.sh (bead
   disk_magician-tmp-scratch-sweep-wrapper-impl-ruo), which wraps the
-  already-safety-gated cleanup_tmp.sh --aged path AND cleanup_claude_state.sh
-  --dry-run (bead disk_magician-isw's ~/.claude/state clone sweeper, report-only;
+  already-safety-gated aged mode of cleanup_tmp.sh AND report-only mode of
+  cleanup_claude_state.sh (bead disk_magician-isw's ~/.claude/state clone sweeper;
   unattended automated deletion is forbidden) on a fixed hourly cadence. It
   archives C14-proven directories idle for at least 72h and removes eligible
   agent_prompt_*.txt files past the same activity window. Archived bytes remain
   recoverable for at least 72h, then a later C14-approved purge can reclaim them.
 
-  Safety: the hourly wrapper now selects cleanup_tmp.sh --aged directly. It
+  Safety: the hourly wrapper now selects cleanup_tmp.sh aged mode directly. It
   scans only C14-proven /private/tmp directories and supported
   agent_prompt_*.txt files after at least 72h (or the configured higher
   minimum) without nested activity. It does not run the ordinary 4h/1h
   small-item scans. Candidate directories use the existing archive and C14
   recovery-receipt path; a later run purges them only after that 72h recovery
   window and a fresh C14 ownership/activity/open-file check. The ordinary
-  --large path used by pressure cleanup retains its
+  large-cleanup path used by pressure cleanup retains its
   existing 24h activity and archive-retention settings. The wrapper sets
   LARGE_TMP_APPROVED=1 per command, then runs cleanup_claude_state.sh
-  --dry-run (unattended deletion is forbidden). It continues to the state
+  report-only dry-run mode (unattended deletion is forbidden). It continues to the state
   report if the tmp step fails and exits nonzero if either step failed, so a
   persistent failure remains visible in the job log/exit status.
 

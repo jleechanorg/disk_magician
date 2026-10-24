@@ -93,6 +93,9 @@ assert_receipt_field() {
   fi
 }
 
+echo "Test 0: launchd template is a valid plist with the expected schedule"
+python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert p["Label"] == "com.jleechanorg.disk-magician-tmp-scratch", p["Label"]; assert p["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "tmp-scratch-sweep", "--clean"], p["ProgramArguments"]; assert p["StartInterval"] == 3600, p["StartInterval"]; print("  PASS  plist parses and matches Label, ProgramArguments, and StartInterval")' "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template"
+
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --clean
