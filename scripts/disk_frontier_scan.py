@@ -804,7 +804,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     }
 
 
-def list_children(path, unfinished=None, remaining_budget=None):
+def list_children(path, unfinished=None, remaining_budget=None, claim_discovery_slot=None):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
@@ -822,6 +822,8 @@ def list_children(path, unfinished=None, remaining_budget=None):
         try:
             with os.scandir(path) as it:
                 for entry in it:
+                    if claim_discovery_slot is not None and not claim_discovery_slot():
+                        return children, "child_entry_limit_exceeded"
                     # A directory with millions of children can otherwise keep an
                     # already-expired scan walking well past its wall-clock cap.
                     if remaining_budget is not None and remaining_budget() <= 0:
@@ -1184,6 +1186,8 @@ class FrontierScanner:
         )
         self.fda_preflight = fda_preflight(self.fda_probe_catalog)
         self.nodes_processed = 0
+        self.inventory_discovery_count = 0
+        self.inventory_discovery_lock = threading.Lock()
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
         self.root_dev = None
@@ -1460,6 +1464,14 @@ class FrontierScanner:
             self.nodes_processed += 1
             return True
 
+    def claim_inventory_discovery_slot(self):
+        """Bound aggregate inventory child materialization across workers."""
+        with self.inventory_discovery_lock:
+            if self.inventory_discovery_count >= self.max_nodes:
+                return False
+            self.inventory_discovery_count += 1
+            return True
+
     def maybe_throttle(self):
         """Backpressure: halve worker-pool capacity when 1-min loadavg
         exceeds core count or free disk drops below the safety floor.
@@ -1594,14 +1606,20 @@ class FrontierScanner:
                     "reason": "inventory_max_depth_reached"})
             else:
                 children, enumeration_error = list_children(
-                    path, self.frontier_unfinished, self.remaining_budget
+                    path, self.frontier_unfinished, self.remaining_budget,
+                    self.claim_inventory_discovery_slot,
                 )
                 if children is None:
                     self.frontier_unfinished.append({"path": path, "depth": depth,
                         "reason": "inventory_" + (enumeration_error or "enumeration_failed")})
-                elif children:
+                    return []
+                if enumeration_error:
+                    self.frontier_unfinished.append({"path": path, "depth": depth,
+                        "reason": "inventory_" + enumeration_error})
+                if children:
                     return [(child_path, depth + 1, child_symlink)
                             for child_path, child_symlink in children]
+                return []
 
         # Symlinks are always measured as leaves (du -P never follows them,
         # so this is O(1) and cannot double-count or recurse).
@@ -1741,8 +1759,12 @@ class FrontierScanner:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
         level1, root_enumeration_error = list_children(
-            self.root, self.frontier_unfinished, self.remaining_budget
+            self.root, self.frontier_unfinished, self.remaining_budget,
+            self.claim_inventory_discovery_slot if self.inventory_mode else None,
         )
+        if level1 is not None and root_enumeration_error and self.inventory_mode:
+            self.frontier_unfinished.append({"path": self.root, "depth": 0,
+                "reason": "inventory_" + root_enumeration_error})
         if level1 is None:
             return {
                 "error": f"could not enumerate root: {self.root}",
@@ -2621,7 +2643,11 @@ def main(argv=None):
                 reason = "privileged_collector_unavailable"
             report["inventory"] = {"status": admission.report["status"],
                 "admission_allowed": False, "reason": reason,
-                "quota": admission.report, "published": False}
+                "quota": admission.report, "published": False,
+                "scan_coverage_complete": inventory_complete,
+                "unresolved_frontier": report.get("frontier_unfinished", []),
+                "discovered_directory_count": len(scanner.discovered_directories),
+                "discovery_entry_count": scanner.inventory_discovery_count}
             print(json.dumps(report, indent=2))
             return 2
         if args.root_inventory:

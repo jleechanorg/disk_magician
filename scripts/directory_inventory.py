@@ -201,27 +201,27 @@ def _physical_tree(path, *, grace_after=None, exclude_paths=()):
         if directory in exclude_paths:
             continue
         try:
-            entries = list(os.scandir(directory))
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    p = Path(entry.path)
+                    st = entry.stat(follow_symlinks=False)
+                    if entry.is_symlink():
+                        raise ValueError("symlink in inventory quota path: " + str(p))
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(p)
+                    elif entry.is_file(follow_symlinks=False):
+                        inode_key = (st.st_dev, st.st_ino)
+                        if inode_key in seen_inodes:
+                            continue
+                        seen_inodes.add(inode_key)
+                        allocated = int(getattr(st, "st_blocks", 0)) * 512
+                        if not allocated:
+                            allocated = int(st.st_size)
+                        total += allocated
+                        if grace_after is not None and st.st_mtime >= grace_after:
+                            selected += allocated
         except OSError as exc:
             raise ValueError("unreadable inventory quota path: " + str(directory)) from exc
-        for entry in entries:
-            p = Path(entry.path)
-            st = entry.stat(follow_symlinks=False)
-            if entry.is_symlink():
-                raise ValueError("symlink in inventory quota path: " + str(p))
-            if entry.is_dir(follow_symlinks=False):
-                stack.append(p)
-            elif entry.is_file(follow_symlinks=False):
-                inode_key = (st.st_dev, st.st_ino)
-                if inode_key in seen_inodes:
-                    continue
-                seen_inodes.add(inode_key)
-                allocated = int(getattr(st, "st_blocks", 0)) * 512
-                if not allocated:
-                    allocated = int(st.st_size)
-                total += allocated
-                if grace_after is not None and st.st_mtime >= grace_after:
-                    selected += allocated
     return total, selected
 
 

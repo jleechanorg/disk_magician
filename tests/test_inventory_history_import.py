@@ -174,3 +174,34 @@ def test_qualified_snapshot_import_preserves_each_timestamped_path_observation(t
     assert len({row["import_row_key"] for row in observations}) == 2
     assert {row["source_timestamp"] for row in observations} == {"2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"}
     assert {row["observation"]["allocated_bytes"] for row in observations} == {10 * 1024, 30 * 1024}
+
+
+def test_imported_qualified_snapshot_paths_remain_directory_membership(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    snapshots = []
+    for name, stamp, size in (("snapshot-old.json", "2026-10-20T00:00:00Z", 4096),
+                              ("snapshot-new.json", "2026-10-21T00:00:00Z", 8192)):
+        data = json.dumps({"directories": {"/fixture/snapshot-only": size}}).encode()
+        (tmp_path / name).write_bytes(data)
+        snapshots.append({"path": name, "sha256": hashlib.sha256(data).hexdigest(),
+                          "captured_at": stamp, "coverage_pct": 85})
+    (tmp_path / "bundle.json").write_text(json.dumps({"schema_version": 1, "snapshots": snapshots}))
+    (tmp_path / "xdg").mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+           "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "DISK_MAGICIAN_STATE_DIR": str(state),
+           "DISK_MAGICIAN_DELETION_LOG": str(tmp_path / "missing.log")}
+    result = subprocess.run([sys.executable, str(REPO / "scripts/reclaim_ledger.py"),
+        "--state-dir", str(tmp_path), "--import-history", "--source-dir", str(tmp_path)],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    current = reclaim_ledger.directory_inventory.read_current(state)
+    path_rows = [row for row in current["records"] if row["canonical_path"] == "/fixture/snapshot-only"]
+    assert len(path_rows) == 1
+    assert path_rows[0]["history_status"] == "historical-snapshot"
+    assert path_rows[0]["observation"]["allocated_bytes"] == 8192 * 1024
+    history = current["manifest"]["scan_metadata"]["provenance"]["historical_events"]
+    measurements = [row for row in history if row.get("row_type") == "historical_measurement"]
+    assert len(measurements) == 2
+    assert {row["source_timestamp"] for row in measurements} == {
+        "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"}

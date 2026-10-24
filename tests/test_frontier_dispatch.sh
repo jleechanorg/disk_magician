@@ -48,4 +48,26 @@ with tempfile.TemporaryDirectory(prefix="frontier-inventory-") as temp:
     assert not list((state / "inventory").glob("**/*")) if (state / "inventory").exists() else True
     print("PASS: frontier --inventory reports admission_blocked and publishes nothing when fixed aggregate stores are unavailable")
 
+with tempfile.TemporaryDirectory(prefix="frontier-fanout-") as temp:
+    root = Path(temp) / "root"
+    root.mkdir()
+    for index in range(30):
+        (root / f"child-{index:02d}").mkdir()
+    state = Path(temp) / "state"
+    env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)}
+    result = subprocess.run(command + ["--root", str(root), "--inventory", "--max-depth", "4", "--max-nodes", "2", "--wall-clock-cap", "5", "--no-sibling-volumes", "--no-purgeable"], text=True, capture_output=True, env=env)
+    assert result.returncode == 2, result.stderr
+    report = json.loads(result.stdout)
+    inventory = report["inventory"]
+    assert inventory["scan_coverage_complete"] is False, inventory
+    assert inventory["unresolved_frontier"], inventory
+    assert any(item["reason"] == "inventory_child_entry_limit_exceeded" for item in inventory["unresolved_frontier"]), inventory
+    assert inventory["discovery_entry_count"] <= 2, inventory
+    assert inventory["discovered_directory_count"] <= 3, inventory
+    assert not (state / "inventory" / "current.json").exists()
+    legacy = subprocess.run(command + ["--root", str(root), "--max-depth", "4", "--max-nodes", "2", "--wall-clock-cap", "5", "--no-sibling-volumes", "--no-purgeable"], text=True, capture_output=True)
+    assert legacy.returncode == 0, legacy.stderr
+    assert "inventory" not in json.loads(legacy.stdout), legacy.stdout
+    print("PASS: inventory fanout is bounded and partial; legacy frontier behavior is unchanged")
+
 PY

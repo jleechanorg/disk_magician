@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+EXPECTED_SYSTEMD = {
+    "systemd/disk-magician-routine-clean.service.template",
+    "systemd/disk-magician-routine-clean.timer.template",
+}
+EXPECTED_SCHEDULER = {
+    "templates/systemd/disk-magician-inventory-root.service.template",
+    "templates/systemd/disk-magician-snapshot.service.template",
+    "templates/systemd/disk-magician-snapshot.timer.template",
+}
+EXPECTED_POLKIT = {"templates/polkit/50-disk-magician-inventory-root.rules.template"}
+
+
+class InventoryPackageTests(unittest.TestCase):
+    def test_wheel_contains_inventory_and_scheduler_templates_and_shared_dispatcher(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="disk-magician-package-test-") as tmp:
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            for filename in ("setup.py", "pyproject.toml", "README.md", "disk_magician.sh", "config.json.template"):
+                shutil.copy2(REPO / filename, fixture / filename)
+            shutil.copytree(REPO / "src" / "disk_magician", fixture / "src" / "disk_magician", dirs_exist_ok=True)
+            for dirname in ("config", "scripts", "launchd", "tools", "hooks", "systemd", "templates"):
+                source = REPO / dirname
+                if source.is_dir():
+                    shutil.copytree(source, fixture / dirname)
+            dist = Path(tmp) / "dist"
+            dist.mkdir()
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), str(fixture)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            wheels = list(dist.glob("*.whl"))
+            self.assertEqual(len(wheels), 1)
+            with zipfile.ZipFile(wheels[0]) as wheel:
+                names = set(wheel.namelist())
+                self.assertIn("disk_magician/scripts/directory_inventory.py", names)
+                expected_wheel_systemd = {f"disk_magician/{rel}" for rel in EXPECTED_SYSTEMD}
+                self.assertTrue(expected_wheel_systemd <= names, expected_wheel_systemd - names)
+                entry_points = wheel.read("disk_magician-0.2.284.dist-info/entry_points.txt").decode()
+                self.assertIn("disk-magician = disk_magician.cli:main", entry_points)
+                self.assertIn("diskm = disk_magician.cli:main", entry_points)
+                install = Path(tmp) / "install"
+                installed = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--no-deps", "--no-compile", "--target", str(install), str(wheels[0])],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                self.assertTrue((install / "disk_magician/scripts/directory_inventory.py").is_file())
+                self.assertTrue((install / "disk_magician/systemd/disk-magician-routine-clean.service.template").is_file())
+                for command in ("diskm", "disk-magician"):
+                    wrapper = (install / "bin" / command).read_text()
+                    self.assertIn("from disk_magician.cli import main", wrapper)
+                expected_templates = {f"disk_magician/{rel}" for rel in EXPECTED_SCHEDULER | EXPECTED_POLKIT}
+                self.assertTrue(expected_templates <= names, expected_templates - names)
+                for rel in EXPECTED_SCHEDULER | EXPECTED_POLKIT:
+                    self.assertTrue((install / ("disk_magician/" + rel)).is_file(), rel)
+
+    def test_sync_stage_contains_inventory_and_scheduler_templates(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="disk-magician-stage-test-") as tmp:
+            stage = Path(tmp) / "stage"
+            subprocess.run(["bash", str(REPO / "scripts" / "sync_package_tree.sh"), "--stage", str(stage)], check=True)
+            self.assertTrue((stage / "scripts" / "directory_inventory.py").is_file())
+            for rel in EXPECTED_SYSTEMD:
+                self.assertTrue((stage / rel).is_file(), rel)
+            for rel in EXPECTED_SCHEDULER | EXPECTED_POLKIT:
+                self.assertTrue((stage / rel).is_file(), rel)
+
+
+if __name__ == "__main__":
+    unittest.main()

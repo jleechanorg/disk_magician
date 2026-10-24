@@ -441,13 +441,16 @@ def parse_history_bundle(source_dir):
             raise ValueError("qualified snapshot hash mismatch: " + rel)
         snap = json.loads(data)
         for path, size in (snap.get("directories") or {}).items():
-            rows.append({"row_type": "directory", "canonical_path": norm(path),
+            captured_at = snapshot.get("captured_at")
+            canonical_path = norm(path)
+            row_key = hashlib.sha256(f"{digest}\0{captured_at}\0{canonical_path}".encode()).hexdigest()
+            rows.append({"row_type": "historical_measurement", "canonical_path": canonical_path,
                          "history_status": "historical-snapshot", "source": rel,
-                         "source_timestamp": snapshot.get("captured_at"),
-                         "source_sha256": digest, "observation": {
-                             "allocated_bytes": int(size) * 1024,
+                         "source_timestamp": captured_at, "source_sha256": digest,
+                         "import_row_key": row_key, "filesystem_id": snapshot.get("filesystem_id"),
+                         "observation": {"ended_at": captured_at, "allocated_bytes": int(size) * 1024,
                              "apparent_bytes": None, "measurement_status": "historical-measured",
-                             "subtree_coverage_status": "qualified_snapshot"}})
+                             "subtree_coverage_status": "qualified_snapshot", "comparable": False}})
             counts["qualified_snapshots"] += 1
     return {"rows": rows, "counts": counts}
 
@@ -783,8 +786,24 @@ def main(argv=None):
             p.error("inventory publisher unavailable")
         try:
             directory_rows = [row for row in imported["rows"] if row.get("row_type") == "directory"]
+            # Keep qualified snapshot-only paths in the directory universe as
+            # well as in the immutable per-observation lineage. The membership
+            # row is the newest imported observation for that filesystem/path;
+            # every timestamped measurement remains in historical_events below.
+            latest_measurements = {}
+            for measurement in imported["rows"]:
+                if measurement.get("row_type") != "historical_measurement":
+                    continue
+                key = (measurement.get("filesystem_id"), measurement["canonical_path"])
+                prior = latest_measurements.get(key)
+                if prior is None or (measurement.get("source_timestamp") or "") > (prior.get("source_timestamp") or ""):
+                    latest_measurements[key] = measurement
+            for measurement in latest_measurements.values():
+                directory_row = dict(measurement)
+                directory_row["row_type"] = "directory"
+                directory_rows.append(directory_row)
             historical_events = [row for row in imported["rows"]
-                                 if row.get("row_type") in ("cleanup_event", "cleanup_summary")]
+                                 if row.get("row_type") in ("cleanup_event", "cleanup_summary", "historical_measurement")]
             directory_inventory.publish_inventory(directory_rows,
                 state_dir=os.environ.get("DISK_MAGICIAN_STATE_DIR", os.path.expanduser("~/.disk_magician_state")),
                 complete=False, scan_metadata={"provenance": {

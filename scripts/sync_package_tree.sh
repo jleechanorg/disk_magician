@@ -40,6 +40,9 @@ PATTERNS=(
   "tools/*.sh"
   "tools/guards/*"
   "hooks/*.sh"
+  "systemd/*.template"
+  "templates/systemd/*.template"
+  "templates/polkit/*.template"
 )
 
 if [[ -n "$STAGE_DIR" ]]; then
