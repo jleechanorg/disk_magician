@@ -88,11 +88,21 @@ PY
 
 echo "Test 1: fresh run auto-inits state repo, writes snapshot, commits"
 H1="$TMP_ROOT/h1"; mkdir -p "$H1"
+mkdir -p "$H1/.config/disk-magician" "$H1/managed/old" "$H1/Library/Logs"
+printf '{"monitored_dirs":[{"key":"managed","path":"~/managed","timeout":60}]}\n' \
+  >"$H1/.config/disk-magician/config.json"
+printf '%s\tcleanup_tmp.sh\tremove\t1048576\t%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$H1/managed/old" \
+  >"$H1/Library/Logs/disk-magician-deletions.log"
 OUT1=$(run_sc "$H1" 2>&1); RC1=$?
 SD1="$H1/.local/state/disk-magician"
 [[ $RC1 -eq 0 ]] && ok "exits 0" || bad "rc" "$RC1: $OUT1"
 [[ -f "$SD1/snapshots/disk_snapshot.json" ]] && ok "snapshot written under snapshots/" || bad "snapshot path" "missing"
 [[ -f "$SD1/config/config.json" ]] && ok "resolved config written" || bad "config path" "missing"
+grep -Fq '| `~/managed` |' "$SD1/reclaim/known-reclaim-dirs.md" && \
+  grep -Fq '| yes |' "$SD1/reclaim/known-reclaim-dirs.md" && \
+  ok "first reclaim report uses the copied monitored config" || \
+  bad "reclaim publication order" "managed root was not marked monitored"
 LOG1="$(git -C "$SD1" log --oneline 2>&1)"
 [[ "$LOG1" == *[Ss]napshot* ]] && ok "commit made" || bad "commit" "$LOG1"
 LASTC=$(git -C "$SD1" rev-list --count HEAD)
