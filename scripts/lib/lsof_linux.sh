@@ -48,7 +48,7 @@ lsof_stderr_incomplete() {
 # readable; those warnings do not affect this query. Warnings for /, the query,
 # an ancestor, or a mount nested in the query remain incomplete.
 lsof_stderr_incomplete_for_path() {
-  local err="$1" query="$2" line fs fs_real query_real warned_unrelated=0
+  local err="$1" query="$2" line fs fs_real query_real findmnt_result findmnt_status warned_unrelated=0
   [[ -n "$err" ]] || return 1
   query_real="$(cd "$query" 2>/dev/null && pwd -P)" || return 0
   [[ -n "$query_real" ]] || return 0
@@ -60,7 +60,19 @@ lsof_stderr_incomplete_for_path() {
         # The warning includes a real mount path. Resolve it through the
         # filesystem so symlinked spellings cannot make an overlapping mount
         # look unrelated. Unknown paths fail closed.
-        fs_real="$(cd "$fs" 2>/dev/null && pwd -P)" || return 0
+        if ! fs_real="$(cd "$fs" 2>/dev/null && pwd -P)"; then
+          # An inaccessible path is safe to classify only when the kernel mount
+          # table confirms it is this exact, canonical mountpoint. findmnt -M
+          # is exact mountpoint selection, not a containing-filesystem lookup.
+          # Reject escaped/control bytes and dot components before querying so
+          # matching encoded spellings cannot be mistaken for physical paths.
+          [[ "$fs" == /* && ! "$fs" =~ [[:cntrl:]] ]] || return 0
+          case "$fs" in *\\*) return 0 ;; esac
+          case "/$fs/" in *"/./"*|*"/../"*) return 0 ;; esac
+          findmnt_result="$(findmnt -rn --raw -M "$fs" -o TARGET 2>/dev/null; rc=$?; printf '\034%s' "$rc")" || return 0
+          [[ "$findmnt_result" == "$fs"$'\n\034'0 ]] || return 0
+          fs_real="$fs"
+        fi
         [[ -n "$fs_real" ]] || return 0
         [[ "$fs_real" == / ]] || fs_real="${fs_real%/}"
         if [[ "$fs_real" == / || "$query_real" == "$fs_real" \
