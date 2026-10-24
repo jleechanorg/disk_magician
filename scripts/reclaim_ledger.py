@@ -404,7 +404,7 @@ def read_existing(state_dir):
     title = re.search(r"^# Known reclaim directories: \S.*$", text, re.M)
     sections = re.split(r"^### ([A-Z][0-9]*)\. [^\n]+\n", text, flags=re.M)
     labels = sections[1::2]
-    bodies = sections[2::2]
+    bodies = [body.replace(REPORT_COMPLETE, "") for body in sections[2::2]]
     complete = labels == ["C", "D", "B1", "B2", "A"] and all(
         body.strip() and not body.lstrip().startswith("#") for body in bodies)
     if text.strip() and (not title or not complete or not text.rstrip().endswith(REPORT_COMPLETE)):
