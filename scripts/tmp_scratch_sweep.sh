@@ -134,12 +134,13 @@ if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
   DEFERRED_COUNT=0
   INTERRUPTED_COUNT=0
 elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
+  rc=1
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
   REMOVED_COUNT="${REMOVED_COUNT/null/0}"
   DEFERRED_COUNT="${DEFERRED_COUNT/null/0}"
   INTERRUPTED_COUNT="${INTERRUPTED_COUNT/null/0}"
-elif [[ "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 ]]; then
+elif [[ $rc -eq 0 && ( "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 ) ]]; then
   OUTCOME="partial"
   REASON="sweep completed with candidate deferrals or interruptions"
 fi
