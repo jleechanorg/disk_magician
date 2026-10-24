@@ -203,6 +203,9 @@ echo "n/"
 if [[ -n "${DISK_MAGICIAN_TEST_UNRELATED_MOUNT:-}" ]]; then
   echo "lsof: WARNING: can't stat() tracefs file system $DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
   echo "      Output information may be incomplete." >&2
+  if [[ -n "${DISK_MAGICIAN_TEST_EXTRA_BLANK_WARNING_LINES:-}" ]]; then
+    printf '\n\n' >&2
+  fi
 fi
 exit 0
 EOF
@@ -227,6 +230,31 @@ assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpec
 assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: unrelated mount warning does not fail closed" "Open-file check failed" "$T1_OUT_CONTENT"
 assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+
+# The same allowlisted warning followed by extra blank stderr lines is malformed.
+# Command substitution must preserve the raw trailing-newline shape for the parser.
+reset_t1_archive() {
+  rm -rf "$T1_ARCHIVE/20200101T000000Z"
+  mkdir -p "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+  touch "$T1_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
+  set_old_mtime "$T1_ARCHIVE/20200101T000000Z"
+}
+reset_t1_archive
+run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_EXTRA_BLANK_WARNING_LINES=2 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 1c (extra trailing warning blanks): exits 0" 0 $?
+assert_exists "Test 1c: archive preserved on extra trailing warning blanks" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+assert_contains "Test 1c: extra trailing warning blanks fail closed" "Open-file check failed" "$(cat "$T1_OUT")"
 
 echo "Test 1b: stderr read failure fails closed"
 T1B_ARCHIVE="$TMP_ROOT/t1b-archive"

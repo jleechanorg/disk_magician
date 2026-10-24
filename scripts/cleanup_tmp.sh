@@ -756,13 +756,18 @@ has_open_files() {
 
   "$timeout_bin" --kill-after=2s "${timeout_sec}s" "$lsof_bin" +w -n -P -F fnt >"$hit_file" 2>"$err_file" || rc=$?
 
-  local err_content="" diagnostic=""
-  if ! err_content=$(cat "$err_file"); then
+  local err_content="" diagnostic="" non_newline_stderr=""
+  if ! err_content=$(cat "$err_file" && printf '.'); then
     rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (could not read lsof stderr) — fail-closed, treating as active."
     return 0
   fi
-  if [[ -s "$err_file" && -z "$err_content" ]]; then
+  err_content="${err_content%.}"
+  # Treat the final line terminator as part of the last stderr line; retain
+  # any preceding blank line so the parser can reject malformed extra output.
+  [[ "$err_content" == *$'\n' ]] && err_content="${err_content%$'\n'}"
+  non_newline_stderr="${err_content//$'\n'/}"
+  if [[ -s "$err_file" && -z "$non_newline_stderr" ]]; then
     rm -f "$hit_file" "$err_file"
     log "Open-file check failed for $dir (lsof stderr contained only line breaks) — fail-closed, treating as active."
     return 0
