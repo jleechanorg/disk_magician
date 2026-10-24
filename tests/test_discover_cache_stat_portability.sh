@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-REPO=${1:?usage: test_discover_cache_stat_portability.sh REPO}
+REPO=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 WORK=$(mktemp -d)
 FAKE_HOME="$WORK/home"
 FAKE_BIN="$WORK/bin"
