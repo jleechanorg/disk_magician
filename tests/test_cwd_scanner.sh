@@ -127,6 +127,20 @@ cd / && PATH="$FB:$PATH" wrh_live_cwd_reason /tmp/x; [[ -z "$WRH_LIVE_CWD_REASON
 printf '#!/bin/sh\nprintf "1\\t0\\t/"\n' >"$FAKE"
 PATH="$FB:$PATH" wrh_live_cwd_reason /tmp/x; [[ "$WRH_LIVE_CWD_REASON" == cwd-unknown ]] && ok "hook: malformed map fails closed" || bad "hook malformed: '$WRH_LIVE_CWD_REASON'"
 
+echo "== raw NUL stderr fails closed before shell capture =="
+unset DISK_MAGICIAN_TEST_SANDBOX
+LSOF_SCANNER_BIN="$TMP/no-cwd-scanner"
+cat >"$FB/lsof" <<SH
+#!/bin/sh
+printf 'p424242\nfcwd\nn%s\n' '$TMP/target'
+printf 'lsof: WARNING: can'\''t stat() tracefs file system %s\000' '$TMP/target' >&2
+SH
+chmod +x "$FB/lsof"
+PATH="$FB:$PATH" lsof_snapshot_cwds
+[[ $? != 0 && "$LSOF_CWD_REASON" == stderr-nul ]] && ok "snapshot rejects raw NUL stderr" || bad "snapshot NUL reason='$LSOF_CWD_REASON'"
+cd / && PATH="$FB:$PATH" wrh_live_cwd_reason "$TMP/target"
+[[ "$WRH_LIVE_CWD_REASON" == cwd-unknown ]] && ok "hook rejects raw NUL stderr" || bad "hook NUL reason='$WRH_LIVE_CWD_REASON'"
+
 echo "== installer contract =="
 out="$(bash "$ROOT/scripts/install_cwd_scanner.sh" --dry-run --user nobody 2>&1)"; rc=$?
 [[ $rc == 0 ]] && ok "dry-run exits 0" || bad "dry-run rc=$rc: $out"

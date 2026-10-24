@@ -21,9 +21,11 @@ import io
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -34,6 +36,7 @@ import resolve_state_repo_path  # noqa: E402
 
 GIB_KB = 1024 * 1024
 OUT_REL = "reclaim/known-reclaim-dirs.md"
+REPORT_COMPLETE = "<!-- diskm reclaim-ledger complete -->"
 FAST_DAYS = 3    # cleaned on this many distinct days ...
 FAST_HOURS = 6   # ... or in this many distinct hours => regrows fast
 TOP_C, TOP_D = 30, 15
@@ -367,6 +370,7 @@ def render(args, state_dir, now):
     out += section_c(roots, home, args.days, mon) + section_d(roots, home, args.days, mon)
     out += section_monitored(state_dir, mon, since, args.days, home)
     out += section_b(state_dir, args.days) + section_a(args.frontier, home, now)
+    out += [REPORT_COMPLETE]
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -382,9 +386,86 @@ def commit(state_dir, rel, stamp):
     return "committed" if r.returncode == 0 else "commit_failed"
 
 
+def read_existing(state_dir):
+    """Display the published report only: no history traversal, generation or writes."""
+    path = state_dir / OUT_REL
+    print(f"=== Existing per-host reclaim ledger: {path} ===")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print("MISSING reclaim ledger; not evidence of no growth. Deeper diagnosis may continue.")
+        return
+    except (OSError, UnicodeError) as exc:
+        print(f"UNREADABLE reclaim ledger ({type(exc).__name__}); not evidence of no growth. "
+              "Deeper diagnosis may continue.")
+        return
+    # All five producer sections must be present, ordered and populated. Accept
+    # unavailable/empty-window prose, without parsing tables or interpreting values.
+    title = re.search(r"^# Known reclaim directories: \S.*$", text, re.M)
+    sections = re.split(r"^### ([A-Z][0-9]*)\. [^\n]+\n", text, flags=re.M)
+    labels = sections[1::2]
+    bodies = sections[2::2]
+    complete = labels == ["C", "D", "B1", "B2", "A"] and all(
+        body.strip() and not body.lstrip().startswith("#") for body in bodies)
+    if text.strip() and (not title or not complete or not text.rstrip().endswith(REPORT_COMPLETE)):
+        print("INVALID RECLAIM REPORT: incomplete producer sections, title or final completion footer; "
+              "not evidence of no growth. Deeper diagnosis may continue.")
+    # Use the report's generation time, not mtime (a checkout/copy can refresh mtime).
+    match = re.search(r"^Generated (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) by `diskm reclaim-ledger`", text, re.M)
+    generated = None
+    if match:
+        try:
+            generated = datetime.datetime.strptime(match[1], "%Y-%m-%d %H:%M UTC").replace(
+                tzinfo=datetime.timezone.utc)
+        except ValueError:
+            pass
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        stale_hours = float(os.environ.get("DISK_MAGICIAN_LEDGER_STALE_HOURS", "48"))
+        if not 0 < stale_hours < float("inf"):
+            raise ValueError
+    except ValueError:
+        stale_hours = 48.0
+    if generated is None:
+        print("UNKNOWN RECLAIM REPORT AGE; not evidence of no growth.")
+    elif generated > now:
+        print("FUTURE RECLAIM REPORT: generation time is ahead of current UTC; "
+              "not evidence of no growth.")
+    elif (now - generated).total_seconds() > stale_hours * 3600:
+        print(f"STALE RECLAIM REPORT: generated {generated.isoformat()}, older than "
+              f"{stale_hours:g}h; not evidence of no growth.")
+    # Preserve the producer's own source freshness/partial/missing banners verbatim.
+    print(text, end="" if text.endswith("\n") else "\n")
+    if not text.strip():
+        print("EMPTY reclaim ledger; not evidence of no growth.")
+
+
+def publish_report(dest, text):
+    """Publish complete text atomically; failures before replace preserve old bytes."""
+    # Existing config_mutator._atomic_write is JSON-specific; use its sibling
+    # tempfile/flush/fsync/replace pattern here without changing the report format.
+    fd, name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+    temp = pathlib.Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if dest.exists():
+            os.chmod(temp, dest.stat().st_mode & 0o777)
+        os.replace(temp, dest)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--state-dir", default=None)
+    p.add_argument("--read-existing", action="store_true",
+                   help="display the existing per-host report without regeneration or writes")
     p.add_argument("--deletions-log", default=os.environ.get(
         "DISK_MAGICIAN_DELETION_LOG",
         os.path.expanduser("~/Library/Logs/disk-magician-deletions.log")))
@@ -401,6 +482,9 @@ def main(argv=None):
         p.error("--days must be positive")
 
     state_dir = pathlib.Path(args.state_dir or resolve_state_repo_path.resolve())
+    if args.read_existing:
+        read_existing(state_dir)
+        return 0
     now = parse_ts(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc)
     text = render(args, state_dir, now)
     if args.stdout:
@@ -408,7 +492,7 @@ def main(argv=None):
         return 0
     dest = state_dir / OUT_REL
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text)
+    publish_report(dest, text)
     status = "written"
     if not args.no_commit and (state_dir / ".git").exists():
         status = commit(state_dir, OUT_REL, now.strftime("%Y-%m-%dT%H:%M:%SZ"))

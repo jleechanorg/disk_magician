@@ -1,6 +1,6 @@
 # Known reclaim directories (how to read the per-host ledger)
 
-Read the **per-host ledger first** in any disk investigation or cleanup. It names the directories that grew, were cleaned, and will grow again on that machine, so you re-clean them before hunting elsewhere. This file is machine-agnostic; the paths and sizes live in the machine's own state repo.
+After the fleet check, read the **existing per-host ledger first** in any disk investigation or cleanup. It names the directories that grew, were cleaned, and will grow again on that machine, so you re-clean them before hunting elsewhere. This file is machine-agnostic; the paths and sizes live in the machine's own state repo.
 
 ## Where the ledger is
 
@@ -8,7 +8,17 @@ Read the **per-host ledger first** in any disk investigation or cleanup. It name
 |---|---|
 | Any | `<state-repo>/reclaim/known-reclaim-dirs.md` (the state repo is `~/.disk_magician_backup` on the Mac, the XDG default `~/.local/state/disk-magician` on Linux; `diskm state status` prints it; the `MACHINE` marker names the host) |
 
-Regenerate and commit it with `diskm reclaim-ledger` (`--stdout` previews without writing). The 30-minute snapshot job runs it too, so the committed copy is at most a half hour old. `--days N` changes the window (default 7).
+Use `diskm reclaim-ledger --read-existing` for the cheap, read-only display.
+`diskm audit` prints fleet health and this existing report before starting deeper
+scans. Use its floors/buckets first, then respect the CPU/RAM/I/O resource gate
+before running a bounded audit. Missing/unreadable/empty reports and unknown or
+stale generation times are explicit, never proof of no growth. The report age
+uses its `Generated` timestamp (not file mtime), with the existing
+`DISK_MAGICIAN_LEDGER_STALE_HOURS` threshold (default 48h); embedded source
+freshness/partial warnings are preserved independently. Deeper diagnosis may
+continue, but the report is never regenerated automatically by audit.
+
+Regenerate and commit it separately when needed with `diskm reclaim-ledger` (`--stdout` previews without writing). The 30-minute snapshot job runs it too, but a failed or stopped job can leave the committed copy stale. `--days N` changes the window (default 7).
 
 ## How to read it
 
