@@ -215,20 +215,40 @@ def _lock(path: Path):
     return path.with_name(f".{path.name}.lock").open("a+")
 
 
-def sync_state_config_if_missing(source: str) -> None:
-    """Publish the initial state config without racing a first CLI mutation."""
+def sync_state_config(source: str) -> None:
+    """Refresh an unchanged state config without racing a CLI mutation."""
     destination = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
     source_path = Path(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source_path.resolve() == destination.resolve():
         return
 
+    try:
+        initial = destination.lstat()
+        initial_signature = (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns)
+        if not stat.S_ISREG(initial.st_mode):
+            return
+    except FileNotFoundError:
+        initial_signature = None
+
     with _lock(destination) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            # A concurrent config mutation may have initialized this file
-            # after snapshot config resolution. Its new entry must survive.
-            if os.path.lexists(destination):
+            try:
+                current = destination.lstat()
+                current_signature = (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_size,
+                    current.st_mtime_ns,
+                )
+                if not stat.S_ISREG(current.st_mode):
+                    return
+            except FileNotFoundError:
+                current_signature = None
+            # Preserve any file that appeared or changed while snapshot waited
+            # for a CLI mutation to release the shared lock.
+            if current_signature != initial_signature:
                 return
             payload = source_path.read_bytes()
             mode = stat.S_IMODE(source_path.stat().st_mode)

@@ -143,7 +143,7 @@ fi
 CFG="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 if [[ -n "$CFG" && -f "$CFG" ]]; then
   PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
-    'import config_mutator, sys; config_mutator.sync_state_config_if_missing(sys.argv[1])' "$CFG" || \
+    'import config_mutator, sys; config_mutator.sync_state_config(sys.argv[1])' "$CFG" || \
     log "WARNING: resolved config could not be copied to the state repo"
 fi
 

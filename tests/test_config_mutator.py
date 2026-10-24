@@ -499,7 +499,7 @@ class TestConfigMutator(unittest.TestCase):
         command = [
             "python3",
             "-c",
-            "import config_mutator,sys; config_mutator.sync_state_config_if_missing(sys.argv[1])",
+            "import config_mutator,sys; config_mutator.sync_state_config(sys.argv[1])",
             str(source),
         ]
         with lock_path.open("a+") as held:
@@ -515,6 +515,50 @@ class TestConfigMutator(unittest.TestCase):
         stdout, stderr = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 0, stderr or stdout)
         self.assertEqual(json.loads(state_config.read_text()), winning)
+
+    def test_snapshot_config_refreshes_existing_stale_state_config(self):
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        state_config.parent.mkdir(parents=True)
+        state_config.write_text(json.dumps({"monitored_dirs": [{"key": "old"}]}) + "\n")
+        source = self.write_config("xdg.json", {"monitored_dirs": [{"key": "new"}]})
+        env = self.config_env()
+        env["DISK_MAGICIAN_STATE_REPO"] = str(self.root / "state" / "disk-magician")
+        env["PYTHONPATH"] = str(REPO / "scripts")
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                "import config_mutator,sys; config_mutator.sync_state_config(sys.argv[1])",
+                str(source),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(state_config.read_text()), {"monitored_dirs": [{"key": "new"}]})
+
+    def test_snapshot_config_read_failure_preserves_existing_state_config(self):
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        state_config.parent.mkdir(parents=True)
+        original = {"monitored_dirs": [{"key": "keep"}]}
+        state_config.write_text(json.dumps(original) + "\n")
+        env = self.config_env()
+        env["DISK_MAGICIAN_STATE_REPO"] = str(self.root / "state" / "disk-magician")
+        env["PYTHONPATH"] = str(REPO / "scripts")
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                "import config_mutator,sys; config_mutator.sync_state_config(sys.argv[1])",
+                str(self.root / "missing-source.json"),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(state_config.read_text()), original)
 
 
 if __name__ == "__main__":
