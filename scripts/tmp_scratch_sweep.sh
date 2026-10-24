@@ -129,7 +129,8 @@ if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   # unrelated system activity and must never be reported as reclaimed bytes.
   [[ "$clean_flag" == "--dry-run" || "$TMP_LOCK_SKIPPED" == true ]] && FREED_BYTES=0
 fi
-if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+# Lock contention needs no child receipt, but wrapper df evidence is still required.
+if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
   REMOVED_COUNT=0
   DEFERRED_COUNT=0
   INTERRUPTED_COUNT=0

@@ -62,6 +62,9 @@ else:
     def test_partial_cannot_downgrade_step_error(self):
         self.assertEqual(self.run_wrapper(STATE_RC='1', DEFERRED='1'), (1, 'error'))
 
+    def test_lockskip_missing_df_fails(self):
+        self.assertEqual(self.run_wrapper(CHILD_RC='75', BAD_DF='1'), (1, 'error'))
+
     def test_finish_failure_fails(self):
         self.assertEqual(self.run_wrapper(FINISH_RC='1')[0], 1)
 
@@ -71,6 +74,48 @@ else:
 
     def test_lockskip_preserved(self):
         self.assertEqual(self.run_wrapper(CHILD_RC='75', MISSING_METRICS='1'), (0, 'skipped_lock'))
+
+    def test_real_receipt_wrapper_matrix(self):
+        # Real ledger begin/read/finish with fixture children, never cleanup.
+        shutil.copy2(ROOT / 'scripts/job_receipt.py', self.scripts / 'real_receipt.py')
+        self.write('real_helper.py', """import os, runpy, sys
+if sys.argv[1]=='finish' and sys.argv[sys.argv.index('--job')+1]=='tmp_scratch_sweep' and os.environ.get('FINISH_RC')=='1':
+    sys.exit(1)
+runpy.run_path(os.path.join(os.path.dirname(__file__),'real_receipt.py'),run_name='__main__')
+""")
+        self.write('cleanup_tmp.sh', r"""#!/bin/bash
+rc=${CHILD_RC:-0}
+[[ $rc == 75 ]] && exit 75
+helper=$DISK_MAGICIAN_RECEIPT_HELPER
+id=$(python3 "$helper" begin --job cleanup_tmp --trigger "$DISK_MAGICIAN_RECEIPT_TRIGGER" --precondition '{}') || exit 1
+metrics="{\"removed_count\":0,\"deferred_count\":${DEFERRED:-0},\"interrupted_count\":0}"
+[[ ${MISSING_METRICS:-0} == 1 ]] && metrics='{}'
+python3 "$helper" finish --job cleanup_tmp --run-id "$id" --outcome success --reason fixture --candidates "$metrics" --postcondition '{"df_delta_bytes":0}' || exit 1
+exit "$rc"
+""")
+        cases = [
+            ({}, 0, 'success_noop'),
+            ({'DEFERRED': '1'}, 0, 'partial'),
+            ({'STATE_RC': '1', 'DEFERRED': '1'}, 1, 'error'),
+            ({'CHILD_RC': '75', 'MISSING_METRICS': '1'}, 0, 'skipped_lock'),
+            ({'CHILD_RC': '75', 'BAD_DF': '1'}, 1, 'error'),
+            ({'BAD_DF': '1'}, 1, 'error'),
+            ({'MISSING_METRICS': '1'}, 1, 'error'),
+            ({'FINISH_RC': '1'}, 1, None),
+        ]
+        for index, (overrides, expected_rc, expected_outcome) in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                state = self.root / f'real-state-{index}'
+                env = dict(self.env, DISK_MAGICIAN_STATE_DIR=str(state),
+                           DISK_MAGICIAN_RECEIPT_HELPER=str(self.scripts / 'real_helper.py'), **overrides)
+                result = subprocess.run(['bash', str(self.scripts / 'tmp_scratch_sweep.sh'), '--dry-run'],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+                receipt = json.loads((state / 'receipts/tmp_scratch_sweep.json').read_text())
+                if expected_outcome is not None:
+                    self.assertEqual(receipt['last_terminal']['outcome'], expected_outcome)
+                else:
+                    self.assertIsNone(receipt.get('last_terminal'))
 
     def run_adapter_terminal(self, status=0, **env):
         # Execute exact production receipt/trap functions, not the cleanup body.
