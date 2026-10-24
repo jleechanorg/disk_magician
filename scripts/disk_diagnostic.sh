@@ -3,6 +3,17 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Cheap, synchronous preflight must finish before ANY deeper diagnostic lane starts.
+echo "=== Automation Fleet Health ==="
+if [[ -x "$SCRIPT_DIR/check_launchd_fleet.sh" ]]; then
+  "$SCRIPT_DIR/check_launchd_fleet.sh" || true
+else
+  echo "Fleet health UNKNOWN: check_launchd_fleet.sh unavailable."
+fi
+if ! python3 "$SCRIPT_DIR/reclaim_ledger.py" --read-existing; then
+  echo "UNREADABLE reclaim ledger: reader failed; not evidence of no growth."
+fi
+
 # shellcheck source=scripts/lib/agent_scratch.sh
 source "$SCRIPT_DIR/lib/agent_scratch.sh" || exit 1
 WORK="$(agent_scratch_create "disk_diagnostic" "$$-$(date +%s)")" || exit 1

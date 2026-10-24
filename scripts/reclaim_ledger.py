@@ -21,6 +21,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -358,9 +359,51 @@ def commit(state_dir, rel, stamp):
     return "committed" if r.returncode == 0 else "commit_failed"
 
 
+def read_existing(state_dir):
+    """Display the published report only: no history traversal, generation or writes."""
+    path = state_dir / OUT_REL
+    print(f"=== Existing per-host reclaim ledger: {path} ===")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print("MISSING reclaim ledger; not evidence of no growth. Deeper diagnosis may continue.")
+        return
+    except (OSError, UnicodeError) as exc:
+        print(f"UNREADABLE reclaim ledger ({type(exc).__name__}); not evidence of no growth. "
+              "Deeper diagnosis may continue.")
+        return
+    # Use the report's generation time, not mtime (a checkout/copy can refresh mtime).
+    match = re.search(r"^Generated (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) by `diskm reclaim-ledger`", text, re.M)
+    generated = None
+    if match:
+        try:
+            generated = datetime.datetime.strptime(match[1], "%Y-%m-%d %H:%M UTC").replace(
+                tzinfo=datetime.timezone.utc)
+        except ValueError:
+            pass
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        stale_hours = float(os.environ.get("DISK_MAGICIAN_LEDGER_STALE_HOURS", "48"))
+        if not 0 < stale_hours < float("inf"):
+            raise ValueError
+    except ValueError:
+        stale_hours = 48.0
+    if generated is None or generated > now:
+        print("UNKNOWN RECLAIM REPORT AGE; not evidence of no growth.")
+    elif (now - generated).total_seconds() > stale_hours * 3600:
+        print(f"STALE RECLAIM REPORT: generated {generated.isoformat()}, older than "
+              f"{stale_hours:g}h; not evidence of no growth.")
+    # Preserve the producer's own source freshness/partial/missing banners verbatim.
+    print(text, end="" if text.endswith("\n") else "\n")
+    if not text.strip():
+        print("EMPTY reclaim ledger; not evidence of no growth.")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--state-dir", default=None)
+    p.add_argument("--read-existing", action="store_true",
+                   help="display the existing per-host report without regeneration or writes")
     p.add_argument("--deletions-log", default=os.environ.get(
         "DISK_MAGICIAN_DELETION_LOG",
         os.path.expanduser("~/Library/Logs/disk-magician-deletions.log")))
@@ -377,6 +420,9 @@ def main(argv=None):
         p.error("--days must be positive")
 
     state_dir = pathlib.Path(args.state_dir or resolve_state_repo_path.resolve())
+    if args.read_existing:
+        read_existing(state_dir)
+        return 0
     now = parse_ts(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc)
     text = render(args, state_dir, now)
     if args.stdout:
