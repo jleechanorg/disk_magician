@@ -69,7 +69,7 @@ fi
 
 # Verify private leaf permissions 0700 under umask 022
 path_umask=$(umask 022 && agent_scratch_create "testruntime" "run_umask")
-mode_umask=$(stat -f "%Lp" "$path_umask" 2>/dev/null || stat -c "%a" "$path_umask" 2>/dev/null)
+mode_umask=$(python3 -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$path_umask")
 if [[ "$mode_umask" == "700" ]]; then
   record_pass "leaf created with mode 0700 under umask 022"
 else

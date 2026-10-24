@@ -245,6 +245,19 @@ class AuditLedgerFirst(unittest.TestCase):
                 _, at_scan = self.run_audit()
                 self.assertEqual(invalid, 'INVALID RECLAIM REPORT' in at_scan)
 
+    def test_each_section_requires_content_independent_of_footer(self):
+        text = self.actual_render()
+        import re
+        for label in ('C', 'D', 'B1', 'B2', 'A'):
+            for body in ('', reclaim_ledger.REPORT_COMPLETE):
+                with self.subTest(label=label, body=body):
+                    pattern = r'(^### ' + label + r'\. [^\n]+\n).*?(?=^### |' + re.escape(reclaim_ledger.REPORT_COMPLETE) + r'\s*\Z)'
+                    damaged = re.sub(pattern, lambda match: match[1] + body + '\n', text,
+                                     count=1, flags=re.M | re.S)
+                    self.ledger(damaged)
+                    _, at_scan = self.run_audit()
+                    self.assertIn('INVALID RECLAIM REPORT', at_scan)
+
     def test_timestamp_only_report_is_invalid_and_read_only(self):
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         ledger = self.ledger(f'Generated {stamp} by `diskm reclaim-ledger`\n')
