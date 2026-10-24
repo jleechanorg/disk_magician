@@ -9,11 +9,26 @@ When a user asks **why the disk filled up**, **what grew over a window**, or **w
 
 ## Default first-use workflow
 
-Run this before chasing individual directories:
+Follow this order before chasing individual directories:
+
+1. Check the fleet with `diskm check-launchd-fleet`; report unhealthy or unknown collection first.
+2. Read the existing per-host report with `diskm reclaim-ledger --read-existing`.
+   It resolves `<state-repo>/reclaim/known-reclaim-dirs.md` through the existing
+   state resolver (configured Mac `~/.disk_magician_backup`, Linux XDG state).
+   This does not regenerate history. Missing, unreadable or stale is an explicit
+   evidence gap, never "no growth". Preserve the report's partial/source warnings.
+3. Use the existing history to report the floor and non-overlapping buckets;
+   retain missing/invalid-floor findings rather than substituting a fresh scan.
+4. Check current CPU/RAM/I/O and the existing resource gate. Only when suitable,
+   run the bounded deeper audit; otherwise defer the scan, not the cheap ledger read:
 
 ```bash
-disk-magician audit
+diskm audit
 ```
+
+Audit itself prints fleet health and the existing reclaim report synchronously
+before starting any deeper lane. It never automatically regenerates the report;
+`diskm reclaim-ledger --stdout` is a regeneration preview, not a read-existing alias.
 
 This is the mandatory three-lane diagnostic. It launches in parallel:
 
@@ -74,8 +89,11 @@ Do **not** use this skill for one-off size queries — `du -sh <path>` answers t
 ## Phase 0 — environment ground truth (always run)
 
 ```bash
-# Produce the default concurrent top-down + delta + quick-win report first.
-disk-magician audit
+# Cheap pre-analysis first; no history regeneration.
+diskm check-launchd-fleet
+diskm reclaim-ledger --read-existing
+# Consult floors/buckets from existing history, then check the resource gate.
+# Only on a suitable host: diskm audit (bounded deeper scans).
 
 # Authenticate the data source
 df -h /System/Volumes/Data

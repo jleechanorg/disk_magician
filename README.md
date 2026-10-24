@@ -10,7 +10,12 @@ Designed to work across macOS and Linux, it can be exposed as a skill/plugin for
 # 1. Install straight from GitHub (requires https://docs.astral.sh/uv/):
 uv tool install git+https://github.com/jleechanorg/disk_magician.git@main
 
-# 2. First run — audits your disk and auto-initializes a per-machine state
+# 2. First use — inspect existing evidence before a resource-gated audit.
+#    Fleet -> existing reclaim ledger -> floor/buckets -> bounded audit.
+#    Audit prints the existing ledger first; it does not regenerate history.
+diskm check-launchd-fleet
+diskm reclaim-ledger --read-existing
+#    The snapshot workflow auto-initializes a per-machine state
 #    repo at $XDG_STATE_HOME/disk-magician (default: ~/.local/state/disk-magician).
 #    If `gh` is authenticated, you'll be offered a private
 #    disk-magician-state-<hostname> GitHub repo for snapshot history;
