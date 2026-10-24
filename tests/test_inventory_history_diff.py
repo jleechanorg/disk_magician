@@ -22,6 +22,8 @@ class InventoryHistoryDispatchTest(unittest.TestCase):
             home = Path(tmp) / "home"
             state.mkdir()
             home.mkdir()
+            from directory_inventory import publish_inventory
+            publish_inventory([], state_dir=state, complete=True)
             env = {
                 "PATH": "/usr/bin:/bin",
                 "HOME": str(home),
@@ -40,6 +42,11 @@ class InventoryHistoryDispatchTest(unittest.TestCase):
         self.assertNotIn("unrecognized arguments: --source", result.stderr)
         self.assertNotIn("unrecognized arguments: --json", result.stderr)
         self.assertNotIn("no state repo", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("NameError", result.stderr)
+        import json
+        self.assertEqual(json.loads(result.stdout)["source"], "inventory")
+        self.assertEqual(result.returncode, 0)
         self.assertTrue(
             result.returncode in (0, 1, 2),
             f"unexpected CLI exit {result.returncode}: {result.stderr}",

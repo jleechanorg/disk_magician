@@ -788,8 +788,6 @@ def compare_inventory_path(base, current):
     return result
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
 def inventory_history_report(state_dir, *, days, now=None):
     """Compare current paths with the per-filesystem observed df floor."""
     import gzip
