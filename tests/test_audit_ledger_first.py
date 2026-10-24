@@ -92,6 +92,19 @@ class AuditLedgerFirst(unittest.TestCase):
         self.assertIn("HISTORY_STUB", out)
         self.assertIn("QUICK_STUB", out)
 
+    def test_missing_fleet_helper_survives_successful_scanner(self):
+        self.ledger()
+        (self.tree / "scripts/check_launchd_fleet.sh").unlink()
+        scanner = self.tree / "scripts/disk_frontier_scan.py"
+        scanner.write_text(scanner.read_text().replace("sys.exit(3)",
+            'pathlib.Path(sys.argv[sys.argv.index("--output") + 1]).write_text("{}")\nsys.exit(0)'))
+        out, at_scan = self.run_audit()
+        self.assertIn("LEDGER_SENTINEL", at_scan)
+        self.assertLess(at_scan.index("Fleet health UNKNOWN"), at_scan.index("LEDGER_SENTINEL"))
+        self.assertIn("Physical/APFS capacity:", out)
+        self.assertIn("HISTORY_STUB", out)
+        self.assertIn("QUICK_STUB", out)
+
     def test_missing_ledger_is_unknown_not_no_growth_and_scan_continues(self):
         out, at_scan = self.run_audit()
         self.assertIn("MISSING", at_scan)
