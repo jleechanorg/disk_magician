@@ -157,7 +157,7 @@ else
 fi
 OUT3_CONTENT=$(cat "$OUT3")
 assert_rc "cleanup_tmp --clean --large refusal exits 0" 0 "$RC3"
-assert_contains "cleanup_tmp refuses large delete without approval" "Refusing large /private/tmp deletion: set LARGE_TMP_APPROVED=1" "$OUT3_CONTENT"
+assert_contains "cleanup_tmp refuses large delete without approval" "Refusing /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." "$OUT3_CONTENT"
 
 echo "Test 4: disk_audit.sh clean-all --dry-run skips sessions by default"
 AUDIT_FIXTURE_ALL="$TMP_ROOT/audit-fixture-clean-all"
@@ -432,38 +432,45 @@ fi
 exec /usr/bin/getconf "$@"
 EOF
 chmod +x "$FAKE_BIN8/getconf"
+# cleanup_code_sign_clones.sh probes liveness with ONE global enumeration
+# (`-w -n -P -F pcn`, no path operand) and keeps `+D` only for the C14 probes.
+# FAKE_LSOF_ACTIVE is a newline-separated list of dirs with an open fd;
+# FAKE_LSOF_PID (default 1, always alive) is the recorded holder.
 cat > "$FAKE_BIN8/lsof" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${FAKE_LSOF_FAIL:-0}" == "1" ]]; then
   echo "simulated lsof failure" >&2
   exit 2
 fi
+if [[ -n "${FAKE_LSOF_DIAGNOSTIC_ALL:-}" ]]; then
+  # Incomplete scan: neither the global pass nor the +D fallback is clean.
+  echo "lsof: permission denied while inspecting candidate" >&2
+  exit 2
+fi
+if [[ " $* " == *" +D "* ]]; then
+  # C14 open-file probe: no holder, so an eligible candidate may be removed.
+  exit 1
+fi
 if [[ " $* " == *" -d cwd "* ]]; then
   printf 'p999\nfcwd\nn/\n'
   exit 0
 fi
-target="${!#}"
-if [[ -n "${FAKE_LSOF_DIAGNOSTIC_TARGET:-}" && "$target" == "$FAKE_LSOF_DIAGNOSTIC_TARGET" ]]; then
-  echo "lsof: permission denied while inspecting candidate" >&2
-  exit 1
-fi
-if [[ -n "${FAKE_LSOF_ACTIVE:-}" && "$target" == "$FAKE_LSOF_ACTIVE" ]]; then
-  printf 'p4242\ncAsideBrowser\nn%s/blob\n' "$target"
-  # macOS lsof can return 1 despite emitting valid +D matches.
-  exit 1
-fi
-if [[ -n "${FAKE_LSOF_RACE_TARGET:-}" && "$target" == "$FAKE_LSOF_RACE_TARGET" ]]; then
+if [[ -n "${FAKE_LSOF_RACE_TARGET:-}" ]]; then
   count=0
-  [[ -f "$FAKE_LSOF_STATE" ]] && count=$(cat "$FAKE_LSOF_STATE")
+  [[ -f "${FAKE_LSOF_STATE:?}" ]] && count=$(cat "$FAKE_LSOF_STATE")
   count=$((count + 1))
   printf '%s\n' "$count" > "$FAKE_LSOF_STATE"
   if [[ "$count" -eq 2 ]]; then
-    rm -rf "$target"
-    mkdir -p "$target"
-    printf 'replacement' > "$target/replacement"
+    rm -rf "$FAKE_LSOF_RACE_TARGET"
+    mkdir -p "$FAKE_LSOF_RACE_TARGET"
+    dd if=/dev/zero of="$FAKE_LSOF_RACE_TARGET/replacement" bs=1024 count=200 2>/dev/null
   fi
 fi
-exit 1
+while IFS= read -r d; do
+  [[ -n "$d" ]] || continue
+  printf 'p%s\ncAsideBrowser\nf7\nn%s/blob\n' "${FAKE_LSOF_PID:-1}" "$d"
+done <<<"${FAKE_LSOF_ACTIVE:-}"
+exit 0
 EOF
 cat > "$FAKE_BIN8/stat" <<'EOF'
 #!/usr/bin/env bash
@@ -506,7 +513,7 @@ assert_rc "code_sign_clone dry-run classifies active clone" 0 "$RC8_ACTIVE"
 assert_contains "active code_sign_clone is reported as preserved" \
   "ACTIVE — preserving: $CSC_ACTIVE" "$(cat "$OUT8_ACTIVE")"
 assert_contains "active code_sign_clone reports owner process" \
-  "pid=4242 command=AsideBrowser" "$(cat "$OUT8_ACTIVE")"
+  "pid=1 command=AsideBrowser" "$(cat "$OUT8_ACTIVE")"
 assert_exists "active code_sign_clone with spaces is preserved" "$CSC_ACTIVE"
 
 # Long-running app: per-launch children under one parent; only the mapped child survives.
@@ -606,7 +613,10 @@ if run_capture "$OUT8_LSOF_FAIL" env -i HOME="$CSC_HOME" \
   RC8_LSOF_FAIL=0
 else RC8_LSOF_FAIL=$?; fi
 assert_rc "code_sign_clone clean skips when lsof fails" 0 "$RC8_LSOF_FAIL"
-assert_contains "code_sign_clone lsof failure is reported" "Skipping code_sign_clones: lsof failed" "$(cat "$OUT8_LSOF_FAIL")"
+assert_contains "code_sign_clone lsof failure is reported as unverified" \
+  "UNVERIFIED — preserving: $CSC_X/at.studio.AsideBrowser.code_sign_clone" "$(cat "$OUT8_LSOF_FAIL")"
+assert_contains "code_sign_clone lsof failure keeps fail-closed verdict" \
+  "kept:unverified" "$(cat "$OUT8_LSOF_FAIL")"
 assert_exists "code_sign_clone preserved when lsof fails" "$CSC_X/at.studio.AsideBrowser.code_sign_clone"
 
 # rc=1 with empty stdout is only the normal no-match result when stderr is
@@ -622,12 +632,12 @@ CSC_DIAG_CLONE="$CSC_DIAG/X/com.example.PermissionDenied.code_sign_clone"
 OUT8_LSOF_DIAG="$TMP_ROOT/csc-lsof-diagnostic.out"
 if run_capture "$OUT8_LSOF_DIAG" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_DIAG/T" \
-  FAKE_LSOF_DIAGNOSTIC_TARGET="$CSC_DIAG_CLONE" \
+  FAKE_LSOF_DIAGNOSTIC_ALL=1 \
   CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_LSOF_DIAG=0
 else RC8_LSOF_DIAG=$?; fi
-assert_rc "code_sign_clone preserves candidate when lsof rc=1 has diagnostics" 0 "$RC8_LSOF_DIAG"
+assert_rc "code_sign_clone preserves candidate when the probe reports diagnostics" 0 "$RC8_LSOF_DIAG"
 assert_contains "diagnostic lsof failure is reported" "permission denied" "$(cat "$OUT8_LSOF_DIAG")"
 assert_exists "candidate with lsof diagnostic is preserved" "$CSC_DIAG_CLONE/blob"
 
@@ -636,13 +646,17 @@ if run_capture "$OUT8_RACE" env -i HOME="$CSC_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PARENT/T" \
   FAKE_LSOF_ACTIVE="$CSC_ACTIVE" FAKE_FOREIGN_OWNER="$CSC_FOREIGN" \
   FAKE_LSOF_RACE_TARGET="$CSC_RACE" FAKE_LSOF_STATE="$TMP_ROOT/csc-lsof-count" \
+  CODE_SIGN_CLONE_LIVENESS_MAX_AGE_SEC=0 \
   CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_RACE=0
 else RC8_RACE=$?; fi
 assert_rc "code_sign_clone clean detects replacement race" 0 "$RC8_RACE"
+# The swap lands on the first pre-removal liveness refresh (forced with a 0s
+# window), which happens before this candidate's own identity freeze re-check —
+# so the earlier identity guard reports and preserves it.
 assert_contains "replacement candidate is reported and preserved" \
-  "Candidate changed after lsof recheck — preserving: $CSC_RACE" "$(cat "$OUT8_RACE")"
+  "Unsafe candidate ownership or identity changed — preserving: $CSC_RACE" "$(cat "$OUT8_RACE")"
 assert_exists "replacement clone is preserved" "$CSC_RACE/replacement"
 
 OUT8_CLEAN="$TMP_ROOT/csc-clean.out"
@@ -694,10 +708,16 @@ CSC_PSWAP_CHILD="$CSC_PSWAP_PARENT/code_sign_clone.ORIG"
 FAKE_BIN8_PSWAP="$TMP_ROOT/bin-csc-pswap"
 mkdir -p "$FAKE_BIN8_PSWAP"
 cp "$FAKE_BIN8/getconf" "$FAKE_BIN8/stat" "$FAKE_BIN8_PSWAP/"
+# The parent swap lands on the pre-removal liveness refresh (global pass #2,
+# forced by a 0s refresh window) and must still be caught.
 cat > "$FAKE_BIN8_PSWAP/lsof" <<EOF
 #!/usr/bin/env bash
-target="\${!#}"
-if [[ "\$target" == "$CSC_PSWAP_CHILD" ]]; then
+if [[ " \$* " == *" +D "* || " \$* " == *" -d cwd "* ]]; then exit 1; fi
+count=0
+[[ -f "$TMP_ROOT/csc-pswap-count" ]] && count=\$(cat "$TMP_ROOT/csc-pswap-count")
+count=\$((count + 1))
+printf '%s\\n' "\$count" > "$TMP_ROOT/csc-pswap-count"
+if [[ "\$count" -eq 2 ]]; then
   # Swap the immediate parent for a brand-new directory while preserving the
   # child's own inode (mv keeps it on the same filesystem) — the exact TOCTOU
   # codex advice review flagged: only the parent's identity changes.
@@ -712,6 +732,7 @@ chmod +x "$FAKE_BIN8_PSWAP/lsof"
 OUT8_PSWAP="$TMP_ROOT/csc-pswap.out"
 if run_capture "$OUT8_PSWAP" env -i HOME="$CSC_PSWAP_HOME" \
   CODE_SIGN_CLONES_APPROVED=1 FAKE_CSC_TMP="$CSC_PSWAP/T" \
+  CODE_SIGN_CLONE_LIVENESS_MAX_AGE_SEC=0 \
   CODE_SIGN_CLONE_MIN_KB=150 CODE_SIGN_CLONE_MIN_AGE_SEC=0 PATH="$FAKE_BIN8_PSWAP:$PYTHON3_DIR:/usr/bin:/bin" \
   bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" --clean; then
   RC8_PSWAP=0

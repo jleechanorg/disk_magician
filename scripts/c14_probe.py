@@ -775,7 +775,7 @@ def account(inv_file, ledger, reason):
     except Exception:
         print("kept:check-failed")
 
-def archive_receipt(source, receipt, archived_at=None, retention_minutes=None):
+def archive_receipt(source, receipt, archived_at=None, retention_minutes=None, recovery_hours=None):
     """Write an exclusive, durable identity receipt for a directory before it moves."""
     try:
         st = os.lstat(source)
@@ -784,9 +784,12 @@ def archive_receipt(source, receipt, archived_at=None, retention_minutes=None):
         retention = int(retention_minutes) if retention_minutes is not None else 0
         if retention < 0:
             raise ValueError("invalid retention")
+        recovery = int(recovery_hours) if recovery_hours is not None else 0
+        if recovery < 0:
+            raise ValueError("invalid recovery window")
         row = {"original_path": os.path.abspath(source), "dev": st.st_dev, "ino": st.st_ino,
                "size": st.st_size, "archived_at": int(archived_at) if archived_at else int(time.time()),
-               "retention_minutes": retention}
+               "retention_minutes": retention, "recovery_hours": recovery}
         parent = os.path.dirname(os.path.abspath(receipt))
         fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
@@ -828,14 +831,17 @@ def archive_info(candidate, receipt, inv_file):
         original = row.get("original_path")
         dev, ino, archived_at = row.get("dev"), row.get("ino"), row.get("archived_at")
         retention = row.get("retention_minutes")
+        recovery = row.get("recovery_hours", 0)
         if not isinstance(original, str) or not os.path.isabs(original) or type(dev) is not int or type(ino) is not int or type(archived_at) is not int or archived_at <= 0 or type(retention) is not int or retention < 0:
             raise ValueError("receipt fields missing")
+        if type(recovery) is not int or recovery < 0:
+            raise ValueError("receipt recovery field invalid")
         if (dev, ino) != identity[:2] or type(row.get("size")) is not int or row["size"] != st.st_size:
             raise ValueError("archive identity changed")
         if "sha256" in row:
             raise ValueError("unsupported receipt digest")
         print(json.dumps({"original_path": original, "archived_at": archived_at,
-                          "retention_minutes": retention}, separators=(",", ":")))
+                          "retention_minutes": retention, "recovery_hours": recovery}, separators=(",", ":")))
     except Exception:
         print("kept:archive-identity")
 
@@ -1082,8 +1088,8 @@ if __name__ == "__main__":
             sys.exit(inventory(a[1], a[2], a[3] if len(a) == 4 else None))
         if len(a) == 4 and a[0] == "account":
             sys.exit(account(*a[1:]))
-        if len(a) in (3, 4, 5) and a[0] == "archive-receipt":
-            sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) >= 5 else None))
+        if len(a) in (3, 4, 5, 6) and a[0] == "archive-receipt":
+            sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) >= 5 else None, a[5] if len(a) >= 6 else None))
         if len(a) == 4 and a[0] == "archive-info":
             sys.exit(archive_info(a[1], a[2], a[3]))
         if len(a) == 2 and a[0] == "repos":

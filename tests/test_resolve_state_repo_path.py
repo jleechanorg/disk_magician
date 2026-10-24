@@ -41,6 +41,46 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, os.path.join(self.home, ".disk_magician_backup")))
 
+    def test_snapshot_overlay_preserves_configured_state_repo(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        legacy = os.path.join(self.home, "legacy-backup")
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": legacy, "snapshot_measure": {"path_max_seconds": 7}}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual((rc, out), (0, legacy))
+
+    def test_snapshot_overlay_root_wins_over_stale_embedded_state_root(self):
+        state_a = os.path.join(self.tmp, "state-a")
+        state_b = os.path.join(self.tmp, "state-b")
+        os.makedirs(os.path.join(state_a, "config"))
+        with open(os.path.join(state_a, "config", "config.json"), "w") as f:
+            json.dump({"state_repo_path": state_b, "monitored_dirs": []}, f)
+        xdg = os.path.join(self.tmp, "xdg")
+        cfg_dir = os.path.join(xdg, "disk-magician")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"snapshot_measure": {"path_max_seconds": 7}, "state_repo_path": state_a}, f)
+
+        rc, out = resolve({"HOME": self.home, "XDG_CONFIG_HOME": xdg})
+        self.assertEqual((rc, out), (0, state_a))
+
+    def test_explicit_config_wins_over_xdg_state_repo_path(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        explicit = os.path.join(self.tmp, "explicit.json")
+        xdg_state = os.path.join(self.home, "xdg-state")
+        explicit_state = os.path.join(self.home, "explicit-state")
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": xdg_state}, f)
+        with open(explicit, "w") as f:
+            json.dump({"state_repo_path": explicit_state}, f)
+        rc, out = resolve({
+            "HOME": self.home,
+            "DISK_MAGICIAN_CONFIG": explicit,
+        })
+        self.assertEqual((rc, out), (0, explicit_state))
+
     def test_relative_state_repo_path_anchors_to_home_not_cwd(self):
         # cursor-agent adversarial finding 2026-07-21: a relative
         # state_repo_path used to resolve against the caller's CWD (/ under
@@ -52,6 +92,15 @@ class TestResolveStateRepoPath(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual(rc, 0)
         self.assertEqual(out, os.path.join(self.home, "relative", "backup"))
+
+    def test_non_string_state_repo_path_falls_back_to_default(self):
+        cfg_dir = os.path.join(self.home, ".config", "disk-magician")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+            json.dump({"state_repo_path": 7}, f)
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, os.path.join(self.home, ".local", "state", "disk-magician"))
 
 if __name__ == "__main__":
     unittest.main()

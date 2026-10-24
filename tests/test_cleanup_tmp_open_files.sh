@@ -28,6 +28,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
 TMP_ROOT=$(mktemp -d -t test_cleanup_tmp_open_files.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
+# scratch_lock validates HOME with lstat; create each synthetic HOME before
+# invoking cleanup so the fixture behaves consistently in a clean Linux env.
+for home in t1-home t1b-home t2-home t3-home t4-home t5-home t6-home t7-home t8-home t9-home t10-home t11-home; do
+  mkdir -p "$TMP_ROOT/$home"
+done
 PASS=0
 FAIL=0
 record_pass() { echo "  PASS  $1"; PASS=$(( PASS + 1 )); }
@@ -77,6 +82,10 @@ assert_missing() {
 run_capture() {
   local out_file="$1"
   shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in HOME=*) mkdir -p "${arg#HOME=}" && chmod 700 "${arg#HOME=}" ;; esac
+  done
   set +e
   "$@" >"$out_file" 2>&1
   local rc=$?
@@ -163,7 +172,7 @@ EOF
 }
 echo "=== cleanup_tmp.sh open-file probes test suite (disk_magician-dcz) ==="
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 1: Fake lsof only accepts `+w -n -P -F fnt` and fails if +D is passed
+# Test 1: Fake lsof only accepts `+w -n -P -F fnt`; unrelated mount warning is safe
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Test 1: Fake lsof requires targetless '+w -n -P -F fnt' and rejects '+D'"
 T1_PRIVATE_TMP="$TMP_ROOT/t1-private-tmp"
@@ -171,6 +180,7 @@ T1_TMP="$TMP_ROOT/t1-tmp"
 T1_ARCHIVE="$TMP_ROOT/t1-archive"
 T1_BIN="$TMP_ROOT/t1-bin"
 mkdir -p "$T1_PRIVATE_TMP" "$T1_TMP" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+mkdir -p "$TMP_ROOT/t1-home"
 touch "$T1_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
 set_old_mtime "$T1_ARCHIVE/20200101T000000Z"
 make_find_shim "$T1_BIN" "$T1_PRIVATE_TMP" "$T1_TMP"
@@ -200,6 +210,17 @@ fi
 echo "p1234"
 echo "fcwd"
 echo "n/"
+if [[ -n "${DISK_MAGICIAN_TEST_UNRELATED_MOUNT:-}" ]]; then
+  if [[ -n "${DISK_MAGICIAN_TEST_MALFORMED_NUL:-}" ]]; then
+    printf "lsof: WARNING: can't stat() tracefs file system %s\0\n" "$DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  else
+    echo "lsof: WARNING: can't stat() tracefs file system $DISK_MAGICIAN_TEST_UNRELATED_MOUNT" >&2
+  fi
+  echo "      Output information may be incomplete." >&2
+  if [[ -n "${DISK_MAGICIAN_TEST_EXTRA_BLANK_WARNING_LINES:-}" ]]; then
+    printf '\n\n' >&2
+  fi
+fi
 exit 0
 EOF
 chmod +x "$T1_BIN/lsof"
@@ -208,6 +229,7 @@ run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
   PATH="$T1_BIN:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -220,12 +242,93 @@ assert_rc "Test 1: exits 0" 0 "$T1_RC"
 assert_not_contains "Test 1: fake lsof did not reject +D" "+D is forbidden" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpected flags" "$T1_OUT_CONTENT"
 assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
+assert_not_contains "Test 1: unrelated mount warning does not fail closed" "Open-file check failed" "$T1_OUT_CONTENT"
 assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+
+# The same allowlisted warning followed by extra blank stderr lines is malformed.
+# Command substitution must preserve the raw trailing-newline shape for the parser.
+reset_t1_archive() {
+  rm -rf "$T1_ARCHIVE/20200101T000000Z"
+  mkdir -p "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+  touch "$T1_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
+  set_old_mtime "$T1_ARCHIVE/20200101T000000Z"
+}
+reset_t1_archive
+run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_EXTRA_BLANK_WARNING_LINES=2 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 1c (extra trailing warning blanks): exits 0" 0 $?
+assert_exists "Test 1c: archive preserved on extra trailing warning blanks" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+assert_contains "Test 1c: extra trailing warning blanks fail closed" "Open-file check failed" "$(cat "$T1_OUT")"
+
+# An actual NUL byte embedded in an otherwise allowlisted warning is malformed.
+# Bash command substitution drops NUL bytes, so inspect stderr before parsing.
+reset_t1_archive
+run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_MALFORMED_NUL=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 1d (NUL in lsof stderr): exits 0" 0 $?
+assert_contains "Test 1d: NUL stderr fails closed" "lsof stderr contained NUL bytes" "$(cat "$T1_OUT")"
+assert_exists "Test 1d: archive preserved on NUL stderr" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
+
+echo "Test 1b: stderr read failure fails closed"
+T1B_ARCHIVE="$TMP_ROOT/t1b-archive"
+mkdir -p "$T1B_ARCHIVE/20200101T000000Z/quarantined_app"
+touch "$T1B_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
+set_old_mtime "$T1B_ARCHIVE/20200101T000000Z"
+cat > "$T1_BIN/cat" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */disk-magician-lsof-error.*)
+      [[ "${DISK_MAGICIAN_TEST_FAIL_ERR_CAT:-}" == 1 ]] && exit 1
+      ;;
+  esac
+done
+exec /bin/cat "$@"
+EOF
+chmod +x "$T1_BIN/cat"
+T1B_OUT="$TMP_ROOT/t1b.out"
+run_capture "$T1B_OUT" env -i HOME="$TMP_ROOT/t1b-home" \
+  PATH="$T1_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
+  DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
+  DISK_MAGICIAN_TEST_FAIL_ERR_CAT=1 \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T1B_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+T1B_RC=$?
+T1B_OUT_CONTENT=$(cat "$T1B_OUT")
+assert_rc "Test 1b: exits 0" 0 "$T1B_RC"
+assert_contains "Test 1b: unreadable stderr fails closed" "could not read lsof stderr" "$T1B_OUT_CONTENT"
+assert_exists "Test 1b: candidate preserved on stderr read failure" "$T1B_ARCHIVE/20200101T000000Z/quarantined_app"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: Fresh authoritative scan at each guarded destructive decision
 # (closed on scan 1, then open on pre-mutation scan -> candidate preserved)
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 2: Fresh pre-mutation scan catches files opened between decisions"
+echo "Test 2: Fresh pre-mutation scan catches a file missed by the inventory snapshot"
 T2_PRIVATE_TMP="$TMP_ROOT/t2-private-tmp"
 T2_TMP="$TMP_ROOT/t2-tmp"
 T2_ARCHIVE="$TMP_ROOT/t2-archive"
@@ -238,26 +341,40 @@ set_old_mtime "$T2_ARCHIVE/20200101T000000Z"
 set_old_mtime "$T2_ARCHIVE/20200102T000000Z"
 make_find_shim "$T2_BIN" "$T2_PRIVATE_TMP" "$T2_TMP"
 make_fake_timeout "$T2_BIN/timeout"
-T2_SCAN_COUNT_FILE="$TMP_ROOT/t2-scan.count"
-echo "0" > "$T2_SCAN_COUNT_FILE"
 # Resolve canonical paths of both archives
-T2_APP1_CANON=$(cd "$T2_ARCHIVE/20200101T000000Z" && pwd -P)
 T2_APP2_CANON=$(cd "$T2_ARCHIVE/20200102T000000Z" && pwd -P)
 cat > "$T2_BIN/lsof" <<EOF
 #!/usr/bin/env bash
-count=\$(cat "$T2_SCAN_COUNT_FILE")
-count=\$(( count + 1 ))
-echo "\$count" > "$T2_SCAN_COUNT_FILE"
-echo "p1234"
-echo "fcwd"
-echo "n/"
-# On scan 1 (app1), report no open files
-# On scan 2 (app2), report app2 open!
-if [[ "\$count" -ge 2 ]]; then
+# The cached enumeration snapshot is empty. The candidate-specific
+# pre-mutation query reports app2 open, independent of filesystem find order.
+if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
+  echo "p1234"
+  echo "fcwd"
+  echo "n/"
+  exit 0
+fi
+if [[ "\$*" == "-n -P -F n" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" == "-w" ]]; then
+  for arg in "\$@"; do
+    if [[ "\$arg" == "${T2_APP2_CANON}/app2" ]]; then
+      echo "p1234"
+      echo "f10"
+      echo "n${T2_APP2_CANON}/app2/payload.bin"
+      exit 0
+    fi
+  done
+  exit 1
+fi
+if [[ "\$*" == "+w -n -P -F fnt" ]]; then
+  echo "p1234"
   echo "f10"
   echo "n${T2_APP2_CANON}/app2/payload.bin"
+  exit 0
 fi
-exit 0
+echo "unexpected lsof arguments: \$*" >&2
+exit 98
 EOF
 chmod +x "$T2_BIN/lsof"
 T2_OUT="$TMP_ROOT/t2.out"
@@ -275,7 +392,7 @@ T2_RC=$?
 T2_OUT_CONTENT=$(cat "$T2_OUT")
 assert_rc "Test 2: exits 0" 0 "$T2_RC"
 assert_exists "Test 2: closed app1 remains until it has C14 proof" "$T2_ARCHIVE/20200101T000000Z/app1"
-assert_contains "Test 2: closed app1 reaches C14" "C14 kept:cwd-unknown" "$T2_OUT_CONTENT"
+assert_contains "Test 2: closed app1 reaches C14" "Skipping aged archive (C14 " "$T2_OUT_CONTENT"
 assert_exists "Test 2: app2 (scanned open on fresh scan) is preserved" "$T2_ARCHIVE/20200102T000000Z"
 assert_contains "Test 2: logs skipping in-use for app2" "Skipping in-use aged archive" "$T2_OUT_CONTENT"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +635,29 @@ run_capture "$T5_OUT" env -i HOME="$TMP_ROOT/t5-home" \
 assert_rc "Test 5c (stderr output): exits 0" 0 $?
 assert_exists "Test 5c: archive preserved on stderr output" "$T5_ARCHIVE/20200101T000000Z"
 assert_contains "Test 5c: logs fail-closed on stderr" "Open-file check failed" "$(cat "$T5_OUT")"
+# 5c2: A newline-only stderr stream must not become empty via command substitution.
+reset_t5_archive
+cat > "$T5_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+printf 'p100\nfcwd\nn/\n'
+printf '\n' >&2
+exit 0
+EOF
+chmod +x "$T5_BIN/lsof"
+run_capture "$T5_OUT" env -i HOME="$TMP_ROOT/t5-home" \
+  PATH="$T5_BIN:/usr/bin:/bin" \
+  LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+  DISK_MAGICIAN_LSOF_BIN="$T5_BIN/lsof" \
+  DISK_MAGICIAN_TIMEOUT_BIN="$T5_BIN/timeout" \
+  DISK_MAGICIAN_ARCHIVE_ROOT="$T5_ARCHIVE" \
+  DISK_MAGICIAN_TEST_CONTEXT=1 \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T5_PRIVATE_TMP" \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T5_TMP" \
+  bash "$SOURCE_SCRIPT" --clean
+assert_rc "Test 5c2 (newline-only stderr): exits 0" 0 $?
+assert_exists "Test 5c2: archive preserved on newline-only stderr" "$T5_ARCHIVE/20200101T000000Z"
+assert_contains "Test 5c2: newline-only stderr fails closed" "Open-file check failed" "$(cat "$T5_OUT")"
 # 5d: Malformed output preserves candidate
 reset_t5_archive
 cat > "$T5_BIN/lsof" <<'EOF'
@@ -639,6 +779,7 @@ run_capture "$T6_OUT" env -i HOME="$TMP_ROOT/t6-home" \
 assert_rc "Test 6b (over-cap purge): exits 0" 0 $?
 assert_exists "Test 6b: over-cap archive with an open file is preserved" "$T6_ARCHIVE/20200101T000000Z/app"
 assert_contains "Test 6b: over-cap keep is surfaced" "archive_overcap_kept" "$(cat "$T6_OUT")"
+assert_not_contains "Test 6b: GNU stat mtime does not break aged archive handling" "syntax error" "$(cat "$T6_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 7: --large guard placement: open-file check runs after marker/mtime, directly before archive
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # disk_snapshot.sh — Write a JSON snapshot of disk usage for monitored paths
 #
-# Reads configuration from config.json (or config.json.template).
+# Reads the effective configuration selected by scripts/resolve_config.py.
 # Supports --discover to scan home folder for large untracked folders.
 set -euo pipefail
 
@@ -70,22 +70,16 @@ SNAPSHOT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 CARRY_STATE_FILE="$SNAPSHOT_STATE_DIR/last_good_measurements.json"
 export DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS="$MEASURE_PATH_MAX_SECONDS"
 
-# Config resolution order:
-#   1. DISK_MAGICIAN_CONFIG env var (caller-supplied path, e.g. user_scope's
-#      site-specific config) — lets an external repo reuse this script with its
-#      own monitored-dir set without forking it.
-#   2. $REPO_ROOT/config.json
-#   3. $REPO_ROOT/config.json.template
+# Use the shared resolver so snapshot consumers read the same effective config
+# that `diskm config` mutates: explicit env, XDG config, state-repo config,
+# then the repository config/template fallback.
 CONFIG_FILE="${DISK_MAGICIAN_CONFIG:-}"
 if [[ -n "$CONFIG_FILE" && ! -f "$CONFIG_FILE" ]]; then
   echo "Error: DISK_MAGICIAN_CONFIG points to a missing file: $CONFIG_FILE" >&2
   exit 1
 fi
 if [[ -z "$CONFIG_FILE" ]]; then
-  CONFIG_FILE="$REPO_ROOT/config.json"
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    CONFIG_FILE="$REPO_ROOT/config.json.template"
-  fi
+  CONFIG_FILE="$(python3 "$SCRIPT_DIR/resolve_config.py" 2>/dev/null || true)"
 fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
