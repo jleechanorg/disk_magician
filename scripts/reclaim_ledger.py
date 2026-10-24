@@ -396,6 +396,13 @@ def read_existing(state_dir):
         print(f"UNREADABLE reclaim ledger ({type(exc).__name__}); not evidence of no growth. "
               "Deeper diagnosis may continue.")
         return
+    # Minimal producer evidence: a named report plus a populated known section.
+    # This is not a schema/parser for its tables; unavailable/empty-window prose is valid.
+    title = re.search(r"^# Known reclaim directories: \S.*$", text, re.M)
+    section = re.search(r"^### (?:A|B1|B2|C|D)\. [^\n]+\n(?:[ \t]*\n)*([^\n]+)", text, re.M)
+    if text.strip() and (not title or not section or section[1].lstrip().startswith("#")):
+        print("INVALID RECLAIM REPORT: missing report title or populated producer section; "
+              "not evidence of no growth. Deeper diagnosis may continue.")
     # Use the report's generation time, not mtime (a checkout/copy can refresh mtime).
     match = re.search(r"^Generated (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) by `diskm reclaim-ledger`", text, re.M)
     generated = None
@@ -412,8 +419,11 @@ def read_existing(state_dir):
             raise ValueError
     except ValueError:
         stale_hours = 48.0
-    if generated is None or generated > now:
+    if generated is None:
         print("UNKNOWN RECLAIM REPORT AGE; not evidence of no growth.")
+    elif generated > now:
+        print("FUTURE RECLAIM REPORT: generation time is ahead of current UTC; "
+              "not evidence of no growth.")
     elif (now - generated).total_seconds() > stale_hours * 3600:
         print(f"STALE RECLAIM REPORT: generated {generated.isoformat()}, older than "
               f"{stale_hours:g}h; not evidence of no growth.")

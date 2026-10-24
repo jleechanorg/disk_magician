@@ -57,7 +57,7 @@ class AuditLedgerFirst(unittest.TestCase):
         p = (state or self.state) / reclaim_ledger.OUT_REL
         p.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\nLEDGER_SENTINEL\n')
+        p.write_text(text if text is not None else f'# Known reclaim directories: fixture\nGenerated {stamp} by `diskm reclaim-ledger` (window 7d).\n### C. Cleaned roots, last 7 days\nNo deletions logged in the window.\nLEDGER_SENTINEL\n')
         return p
 
     def run_audit(self):
@@ -160,18 +160,30 @@ class AuditLedgerFirst(unittest.TestCase):
     def test_future_generation_is_unknown_not_fresh(self):
         self.ledger('Generated 2999-01-01 00:00 UTC by `diskm reclaim-ledger`\n')
         _, at_scan = self.run_audit()
-        self.assertIn('UNKNOWN RECLAIM REPORT AGE', at_scan)
+        self.assertIn('FUTURE RECLAIM REPORT', at_scan)
+        self.assertIn('SCANNER_STUB', Path(self.env['CAPTURE']).read_text())
 
     def test_invalid_utf8_is_unreadable(self):
         self.ledger().write_bytes(b'\xff')
         _, at_scan = self.run_audit()
         self.assertIn('UNREADABLE reclaim ledger (UnicodeDecodeError)', at_scan)
 
+    def test_timestamp_only_report_is_invalid_and_read_only(self):
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        ledger = self.ledger(f'Generated {stamp} by `diskm reclaim-ledger`\n')
+        before = (ledger.read_bytes(), ledger.stat().st_mtime_ns)
+        out, at_scan = self.run_audit()
+        self.assertIn('INVALID RECLAIM REPORT', at_scan)
+        self.assertIn('not evidence of no growth', at_scan)
+        self.assertIn('SCANNER_STUB', out)
+        self.assertEqual(before, (ledger.read_bytes(), ledger.stat().st_mtime_ns))
+
     def test_fresh_report_has_no_stale_age_warning(self):
         self.ledger()
         _, at_scan = self.run_audit()
         self.assertNotIn('STALE RECLAIM REPORT', at_scan)
         self.assertNotIn('UNKNOWN RECLAIM REPORT AGE', at_scan)
+        self.assertNotIn('INVALID RECLAIM REPORT', at_scan)
 
     def test_permission_error_is_explicit_and_no_generation(self):
         out = io.StringIO()
