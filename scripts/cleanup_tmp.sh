@@ -104,6 +104,16 @@ fi
 if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=72; fi
 AGED_TMP_ACTIVE_HOURS=$((10#${AGED_TMP_ACTIVE_HOURS}))
 (( AGED_TMP_ACTIVE_HOURS < 72 )) && AGED_TMP_ACTIVE_HOURS=72
+# The hourly aged mode broadens size eligibility, not existing safety policy.
+# Preserve higher legacy activity and archive-recovery overrides after config/env
+# resolution. Persist the effective recovery floor in each aged archive receipt.
+if [[ "$LARGE_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ACTIVE_HOURS > AGED_TMP_ACTIVE_HOURS )); then
+  AGED_TMP_ACTIVE_HOURS=$((10#$LARGE_TMP_ACTIVE_HOURS))
+fi
+AGED_TMP_ARCHIVE_RETENTION_HOURS="$AGED_TMP_ACTIVE_HOURS"
+if [[ "$LARGE_TMP_ARCHIVE_RETENTION_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS > AGED_TMP_ARCHIVE_RETENTION_HOURS )); then
+  AGED_TMP_ARCHIVE_RETENTION_HOURS=$((10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS))
+fi
 
 # --large branch: top-level /private/tmp basenames that are NEVER deleted or
 # archived, regardless of mtime/size — a documented canonical evidence/repo
@@ -580,7 +590,7 @@ scan_protected_root_children() {
       continue
     fi
     archive_rc=0
-    archive_path "$child" "$kb" "$(basename "$root")" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ACTIVE_HOURS" || echo 0)" >/dev/null || archive_rc=$?
+    archive_path "$child" "$kb" "$(basename "$root")" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ARCHIVE_RETENTION_HOURS" || echo 0)" >/dev/null || archive_rc=$?
     (( archive_rc == 1 )) && continue
     if (( archive_rc != 0 )); then
       log "ERROR: could not archive: $child (rc=$archive_rc); preserving and continuing"
@@ -1170,7 +1180,7 @@ purge_aged_archives() {
   active_hours="$LARGE_TMP_ACTIVE_HOURS"
   max_hours="$LARGE_TMP_ARCHIVE_MAX_HOURS"
   if [[ "$mode" == aged ]]; then
-    retention_hours="$AGED_TMP_ACTIVE_HOURS"
+    retention_hours="$AGED_TMP_ARCHIVE_RETENTION_HOURS"
     active_hours="$AGED_TMP_ACTIVE_HOURS"
     (( max_hours < retention_hours )) && max_hours="$retention_hours"
   fi
@@ -1629,7 +1639,7 @@ large_consider_entry() {
     fi
   fi
 
-  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ACTIVE_HOURS" || echo 0)" >/dev/null || archive_rc=$?
+  archive_path "$d" "$kb" "$( (( depth > 0 )) && basename "$(dirname "$d")" )" "$([[ "$aged_mode" == true ]] && echo "$AGED_TMP_ARCHIVE_RETENTION_HOURS" || echo 0)" >/dev/null || archive_rc=$?
   if (( archive_rc == 1 )); then
     return 0
   fi
