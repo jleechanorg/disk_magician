@@ -67,6 +67,15 @@ class TestResolveConfig(unittest.TestCase):
         rc, out = resolve({"HOME": self.home})
         self.assertEqual((rc, out), (0, xdg))
 
+    def test_state_repo_only_xdg_config_is_overlay(self):
+        xdg = self._mk("home/.config/disk-magician/config.json")
+        state_root = os.path.join(self.tmp, "custom-state")
+        with open(xdg, "w") as f:
+            json.dump({"state_repo_path": state_root}, f)
+        state = self._mk("custom-state/config/config.json")
+        rc, out = resolve({"HOME": self.home})
+        self.assertEqual((rc, out), (0, state))
+
     def test_non_string_state_repo_path_uses_default_chain(self):
         xdg = self._mk("home/.config/disk-magician/config.json")
         with open(xdg, "w") as f:
