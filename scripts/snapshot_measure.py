@@ -14,6 +14,7 @@ tree is killed (GNU timeout escapes process groups, so groups are not enough).
 """
 import argparse
 import concurrent.futures
+import datetime
 import json
 import os
 import re
@@ -28,6 +29,43 @@ MAX_WORKERS = 6
 GRACE = 2.0
 MIN_RETRY_SECONDS = 5
 MAX_DIAGNOSTIC_TEXT = 256
+
+
+def inventory_metadata(state_dir, captured_at, previous=None):
+    """Reference verified inventory bytes; watched refresh never traverses directories."""
+    from directory_inventory import read_current, read_publication
+
+    previous = previous if isinstance(previous, dict) else {}
+    reference = {"manifest_sha256": None, "captured_at": None,
+                 "status": "unavailable", "complete": False}
+    manifest = None
+    try:
+        current = read_current(state_dir, verify=True)
+        manifest = current["manifest"]
+        reference.update(manifest_sha256=current["pointer"]["manifest_sha256"],
+                         captured_at=manifest["published_at"],
+                         complete=bool(manifest.get("complete")))
+        now = datetime.datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        observed = datetime.datetime.fromisoformat(reference["captured_at"].replace("Z", "+00:00"))
+        age = (now - observed).total_seconds()
+        reference["status"] = "fresh" if 0 <= age <= 24 * 3600 else "stale"
+    except (OSError, ValueError, KeyError, TypeError):
+        if previous.get("manifest_sha256"):
+            reference.update(manifest_sha256=previous["manifest_sha256"],
+                             captured_at=previous.get("captured_at"))
+            try:
+                manifest = read_publication(state_dir, previous["manifest_sha256"], verify=True)["manifest"]
+                reference.update(status="stale", complete=bool(manifest.get("complete")))
+            except FileNotFoundError:
+                reference["status"] = "retention-expired"
+            except (OSError, ValueError, KeyError, TypeError):
+                reference["status"] = "invalid"
+    metadata = (manifest or {}).get("scan_metadata", {})
+    return {"directory_inventory": reference,
+            "selected_filesystem_df_samples": metadata.get("df_samples", []),
+            "selected_filesystem_df_aggregate": None,
+            "selected_filesystem_selection_epoch": metadata.get("selection_epoch"),
+            "selected_filesystem_set_sha256": metadata.get("selected_set_sha256")}
 
 
 def worker_count(cores, load1, pressure, avail_gb, override=None):

@@ -642,12 +642,26 @@ def main(argv) -> int:
     parser = argparse.ArgumentParser(prog="disk-magician history diff")
     parser.add_argument("ref", nargs="?", default=None,
                          help="base ref to diff against HEAD (default: HEAD~1)")
+    parser.add_argument("--source", choices=("ledger", "inventory"), default="ledger")
+    parser.add_argument("--json", action="store_true")
     parser.add_argument("--days", type=int, default=None,
                         help="select the lowest-used valid ledger from the last N days")
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--validate", metavar="LEDGER_JSON", default=None,
                          help="validate a single ledger file and exit (no diff)")
     args = parser.parse_args(argv)
+    if args.source == "inventory":
+        state = pathlib.Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", pathlib.Path.home() / ".disk_magician_state"))
+        try:
+            from directory_inventory import read_current
+            current = read_current(state)
+        except (OSError, ValueError, KeyError) as exc:
+            report = {"source": "inventory", "status": "unknown", "reason": str(exc)}
+            print(json.dumps(report, sort_keys=True) if args.json else f"history diff: inventory unavailable: {exc}", file=sys.stderr if not args.json else sys.stdout)
+            return 2
+        report = inventory_history_report(state, days=args.days or 7)
+        print(json.dumps(report, sort_keys=True) if args.json else json.dumps(report, indent=2, sort_keys=True))
+        return 0
 
     if args.validate:
         try:
@@ -709,6 +723,139 @@ def main(argv) -> int:
         )
     print(format_diff(deltas, residual_delta, note))
     return 0
+
+
+def _parse_utc(value):
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def daily_minimum_summary(samples, *, days, now=None):
+    """Summarize observed daily minima independently for each filesystem."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=days)
+    grouped = {}
+    for sample in samples:
+        fsid = sample.get("filesystem_id")
+        stamp = _parse_utc(sample.get("sampled_at"))
+        used = sample.get("used_bytes")
+        if not fsid or stamp is None or stamp > now or stamp < cutoff or type(used) is not int or used < 0:
+            continue
+        grouped.setdefault(fsid, {}).setdefault(stamp.date(), []).append(used)
+    result = {}
+    expected = {now.date() - datetime.timedelta(days=i) for i in range(days)}
+    for fsid, dates in grouped.items():
+        minima = [min(values) for values in dates.values()]
+        ordered = sorted(minima)
+        mid = len(ordered) // 2
+        median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+        result[fsid] = {
+            "floor_bytes": min(minima), "median_daily_minimum_bytes": median,
+            "observed_days": len(dates),
+            "coverage_status": "complete" if expected.issubset(dates) else "partial",
+            "missing_dates": sorted(day.isoformat() for day in expected - set(dates)),
+            "floor_date": min(day for day, values in dates.items() if min(values) == min(minima)).isoformat(),
+        }
+    return result
+
+
+def compare_inventory_path(base, current):
+    """Return deltas only where path identity and local subtree are comparable."""
+    result = {"logical_delta_bytes": None, "apparent_delta_bytes": None, "physical_delta_bytes": None, "reason": None}
+    if base.get("filesystem_id") != current.get("filesystem_id"):
+        result["reason"] = "filesystem identity changed"
+        return result
+    bg, cg = base.get("path_generation") or {}, current.get("path_generation") or {}
+    if bg.get("status") != "known" or cg.get("status") != "known" or not bg.get("id") or bg != cg:
+        result["reason"] = "path generation is unknown or changed"
+        return result
+    bo, co = base.get("observation") or {}, current.get("observation") or {}
+    if any(o.get("subtree_coverage_status") != "complete" or o.get("comparable") is not True for o in (bo, co)):
+        result["reason"] = "subtree coverage is incomplete or incomparable"
+        return result
+    for key, out in (("allocated_bytes", "logical_delta_bytes"), ("apparent_bytes", "apparent_delta_bytes")):
+        a, b = bo.get(key), co.get(key)
+        if type(a) is int and type(b) is int:
+            result[out] = b - a
+    ba, ca = base.get("attribution") or {}, current.get("attribution") or {}
+    if (ba.get("basis") == ca.get("basis") == "physical"
+            and ba.get("comparability") == ca.get("comparability") == "comparable"
+            and ba.get("capability") == ca.get("capability") == "exclusive"
+            and type(bo.get("allocated_bytes")) is int and type(co.get("allocated_bytes")) is int):
+        result["physical_delta_bytes"] = co["allocated_bytes"] - bo["allocated_bytes"]
+    return result
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+def inventory_history_report(state_dir, *, days, now=None):
+    """Compare current paths with the per-filesystem observed df floor."""
+    import gzip
+    import glob
+    from directory_inventory import read_current, read_publication
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    state = pathlib.Path(state_dir)
+    current = read_current(state)
+    since = now - datetime.timedelta(days=days)
+    histories = []
+    manifest_root = state / "inventory" / "manifests"
+    for filename in glob.glob(str(manifest_root / "*.json")):
+        digest = pathlib.Path(filename).stem
+        try:
+            publication = read_publication(state, digest, verify=True)
+            manifest = publication["manifest"]
+            stamp = _parse_utc(manifest.get("published_at"))
+            if stamp is None or stamp > now or stamp < since:
+                continue
+            histories.append((stamp, digest, manifest, publication["records"]))
+        except (OSError, ValueError, KeyError):
+            continue
+    histories.sort(key=lambda row: row[0])
+    floor_candidates = {}
+    all_samples = []
+    for stamp, digest, manifest, records in histories:
+        for fs in manifest.get("selected_filesystems", []):
+            fsid = fs.get("filesystem_id")
+            if not fsid:
+                continue
+            for sample in fs.get("df_samples", []):
+                all_samples.append({**sample, "filesystem_id": fsid})
+                at = _parse_utc(sample.get("sampled_at"))
+                used = sample.get("used_bytes")
+                if at is None or at > now or at < since or type(used) is not int:
+                    continue
+                candidate = (used, at, digest, manifest, records)
+                if fsid not in floor_candidates or candidate[:2] < floor_candidates[fsid][:2]:
+                    floor_candidates[fsid] = candidate
+    current_fs = {fs.get("filesystem_id"): fs for fs in current["manifest"].get("selected_filesystems", [])}
+    current_records = {(r.get("filesystem_id"), r.get("canonical_path")): r for r in current["records"]}
+    floor_summaries = daily_minimum_summary(all_samples, days=days, now=now)
+    per_fs = []
+    for fsid, (floor_used, floor_at, digest, floor_manifest, floor_records) in sorted(floor_candidates.items()):
+        fsnow = current_fs.get(fsid)
+        floor_fs = next((fs for fs in floor_manifest.get("selected_filesystems", []) if fs.get("filesystem_id") == fsid), {})
+        same_epoch = bool(fsnow and floor_fs and floor_fs.get("selection_epoch") == fsnow.get("selection_epoch"))
+        now_samples = [s for s in (fsnow or {}).get("df_samples", []) if type(s.get("used_bytes")) is int]
+        now_used = max(now_samples, key=lambda s: s.get("sampled_at", "")).get("used_bytes") if now_samples else None
+        base_records = {(r.get("filesystem_id"), r.get("canonical_path")): r for r in floor_records}
+        deltas = []
+        if same_epoch:
+            for key, base in base_records.items():
+                target = current_records.get(key)
+                if target is None or key[0] != fsid:
+                    continue
+                delta = compare_inventory_path(base, target)
+                deltas.append({"path": key[1], **delta})
+        per_fs.append({"filesystem_id": fsid, "mountpoint": (fsnow or {}).get("mountpoint"),
+            "daily_floor_summary": floor_summaries.get(fsid),
+            "floor_used_bytes": floor_used, "floor_at": floor_at.isoformat(), "floor_manifest_sha256": digest,
+            "current_used_bytes": now_used, "current_minus_floor_bytes": now_used - floor_used if now_used is not None else None,
+            "path_deltas": deltas, "status": ("comparable" if same_epoch else ("selection_epoch_changed" if fsnow else "missing_current_filesystem"))})
+    return {"source": "inventory", "requested_days": days, "status": "partial" if len(per_fs) < len(current_fs) else "observed",
+        "current_manifest_sha256": current["pointer"]["manifest_sha256"], "filesystems": per_fs,
+        "host_aggregate_delta_bytes": None, "host_aggregate_reason": "filesystem selection overlap and epoch alignment are not proven"}
 
 
 if __name__ == "__main__":
