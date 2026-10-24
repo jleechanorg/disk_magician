@@ -451,6 +451,33 @@ class TestConfigMutator(unittest.TestCase):
             {"one", "two"},
         )
 
+    def test_snapshot_config_copy_waits_for_mutator_and_preserves_first_write(self):
+        state_config = self.root / "state" / "disk-magician" / "config" / "config.json"
+        state_config.parent.mkdir(parents=True)
+        source = self.write_config("packaged.json", {"monitored_dirs": []})
+        lock_path = state_config.with_name(f".{state_config.name}.lock")
+        env = self.config_env()
+        env["PYTHONPATH"] = str(REPO / "scripts")
+        command = [
+            "python3",
+            "-c",
+            "import config_mutator,sys; config_mutator.sync_state_config_if_missing(sys.argv[1])",
+            str(source),
+        ]
+        with lock_path.open("a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                time.sleep(0.5)
+                self.assertIsNone(process.poll(), "snapshot copy did not wait on the mutation lock")
+                winning = {"monitored_dirs": [{"key": "created-during-snapshot", "path": "/new"}]}
+                state_config.write_text(json.dumps(winning) + "\n")
+            finally:
+                fcntl.flock(held, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, stderr or stdout)
+        self.assertEqual(json.loads(state_config.read_text()), winning)
+
 
 if __name__ == "__main__":
     unittest.main()

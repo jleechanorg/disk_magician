@@ -215,6 +215,48 @@ def _lock(path: Path):
     return path.with_name(f".{path.name}.lock").open("a+")
 
 
+def sync_state_config_if_missing(source: str) -> None:
+    """Publish the initial state config without racing a first CLI mutation."""
+    destination = Path(resolve_state_repo_path.resolve()) / "config" / "config.json"
+    source_path = Path(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() == destination.resolve():
+        return
+
+    with _lock(destination) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            # A concurrent config mutation may have initialized this file
+            # after snapshot config resolution. Its new entry must survive.
+            if os.path.lexists(destination):
+                return
+            payload = source_path.read_bytes()
+            mode = stat.S_IMODE(source_path.stat().st_mode)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
+            tmp = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(tmp, mode)
+                os.replace(tmp, destination)
+                dir_fd = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            finally:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def _nonempty(value: str, option: str) -> str:
     value = value.strip()
     if not value:
