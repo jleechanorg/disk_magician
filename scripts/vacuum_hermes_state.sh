@@ -33,6 +33,8 @@
 set -euo pipefail
 
 DB="${HERMES_STATE_DB:-$HOME/.hermes/state.db}"
+# Checkpoint-only on a live db: wait this long for a competing writer/reader.
+BUSY_TIMEOUT_MS="${HERMES_DB_BUSY_TIMEOUT_MS:-30000}"
 # Floor below which a full VACUUM refuses even if 2x DB size is smaller
 # (e.g. a tiny DB shouldn't "pass" the guard at a razor-thin free margin).
 VACUUM_MIN_FREE_GB="${VACUUM_MIN_FREE_GB:-15}"
@@ -42,6 +44,7 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=true ;;
     --full-vacuum) FULL_VACUUM=true ;;
+    --db=*) DB="${arg#--db=}" ;;
   esac
 done
 
@@ -81,23 +84,44 @@ before=$(stat -f%z "$DB" 2>/dev/null || echo 0)
 before_mb=$(awk "BEGIN {printf \"%.1f\", $before / 1048576}")
 log "state.db before: ${before_mb} MB ($DB)"
 
+wal_bytes=$(stat -f%z "$DB-wal" 2>/dev/null || echo 0)
+wal_mb=$(awk "BEGIN {printf \"%.1f\", $wal_bytes / 1048576}")
+jmode=$(sqlite3 -readonly -cmd ".timeout $BUSY_TIMEOUT_MS" "$DB" 'PRAGMA journal_mode;' 2>/dev/null | tail -1 || true)
+log "state.db-wal: ${wal_mb} MB; journal_mode=${jmode:-unknown}"
+# Live holder (another process has the db open): checkpoint is still safe under
+# SQLite locking, but real runs on a live db need explicit approval.
+holders=$(timeout 30 lsof -t -- "$DB" 2>/dev/null | grep -v -x "$$" | tr '\n' ' ' || true)
+[[ -n "$holders" ]] && log "db held open by pid(s): ${holders}"
+
 if ! $APPLY; then
-  log "[dry-run] would wal_checkpoint(TRUNCATE) $DB (${before_mb} MB) — pass --apply to execute"
+  log "[dry-run] would wal_checkpoint(TRUNCATE) $DB (WAL ${wal_mb} MB, busy_timeout ${BUSY_TIMEOUT_MS}ms) — pass --apply to execute"
+  [[ -n "$holders" ]] && log "[dry-run] live db: --apply also needs HERMES_DB_CHECKPOINT_APPROVED=1"
   if $FULL_VACUUM; then
     log "[dry-run] would also attempt guarded full VACUUM (--full-vacuum) if free space allows"
   fi
   exit 0
 fi
 
+if [[ -n "$holders" && "${HERMES_DB_CHECKPOINT_APPROVED:-}" != 1 ]]; then
+  log "REFUSING: $DB is held open by pid(s) ${holders}; set HERMES_DB_CHECKPOINT_APPROVED=1 to checkpoint a live db."
+  exit 0
+fi
+
 # ────────── Step 1: WAL checkpoint (routine, low-risk, no amplification) ──────────
 log "Running wal_checkpoint(TRUNCATE) — flushes WAL into the main file, no full-size temp copy."
-sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);'
+# Result row is busy|log_frames|checkpointed_frames; busy=1 means a reader pinned the WAL.
+ckpt=$(sqlite3 -cmd ".timeout $BUSY_TIMEOUT_MS" "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 | tail -1) || true
+wal_after=$(stat -f%z "$DB-wal" 2>/dev/null || echo 0)
+log "checkpoint result busy|log|checkpointed=${ckpt:-none}; WAL ${wal_mb} MB -> $(awk "BEGIN {printf \"%.1f\", $wal_after / 1048576}") MB"
+[[ "$ckpt" == 1\|* ]] && log "checkpoint BUSY: a reader holds an old snapshot or a writer is active; WAL not truncated (retry later)."
 after_checkpoint=$(stat -f%z "$DB" 2>/dev/null || echo 0)
 after_checkpoint_mb=$(awk "BEGIN {printf \"%.1f\", $after_checkpoint / 1048576}")
 log "wal_checkpoint(TRUNCATE) done — state.db now ${after_checkpoint_mb} MB (a checkpoint truncates *.db-wal, not the main file; main file only shrinks via VACUUM below)."
 
 # ────────── Step 2: full VACUUM (opt-in, free-space-gated) ──────────
-if $FULL_VACUUM; then
+if $FULL_VACUUM && [[ -n "$holders" ]]; then
+  log "REFUSING full VACUUM: db is held open by pid(s) ${holders}; checkpoint only on a live db."
+elif $FULL_VACUUM; then
   current_size=$(stat -f%z "$DB" 2>/dev/null || echo 0)
   free_now_bytes="$(free_bytes)"
   if [[ -z "$free_now_bytes" || "$free_now_bytes" == 0 ]]; then
