@@ -79,6 +79,37 @@ set -e
 expect "missing DB exit code 0" "0" "$RC"
 expect "missing DB logs skip" "skipping" "$OUT"
 
+echo "Test 6: dry-run reports WAL size and journal_mode"
+OUT=$(HERMES_STATE_DB="$DB" "$SCRIPT" 2>&1)
+expect "journal_mode reported" "journal_mode=wal" "$OUT"
+expect "WAL size reported" "state.db-wal:" "$OUT"
+
+echo "Test 7: live holder with a pinned read snapshot"
+HOLDER_PY="$REPO_ROOT/tests/lib/sqlite_reader_holder.py"
+python3 "$HOLDER_PY" "$DB" 5 >"$TMP_DIR/holder.out" 2>&1 &
+HPID=$!
+for _ in $(seq 1 50); do grep -q ready "$TMP_DIR/holder.out" 2>/dev/null && break; sleep 0.1; done
+sqlite3 "$DB" "INSERT INTO t (v) VALUES ('after-reader');"
+OUT=$(HERMES_STATE_DB="$DB" "$SCRIPT" --apply 2>&1)
+expect "live apply without approval refused" "REFUSING: " "$OUT"
+expect "refusal names the approval env" "HERMES_DB_CHECKPOINT_APPROVED=1" "$OUT"
+OUT=$(HERMES_STATE_DB="$DB" HERMES_DB_CHECKPOINT_APPROVED=1 HERMES_DB_BUSY_TIMEOUT_MS=200 "$SCRIPT" --apply 2>&1)
+expect "approved apply reports busy checkpoint" "checkpoint BUSY" "$OUT"
+expect "checkpoint result line clean format" "checkpoint result busy|log|checkpointed=" "$OUT"
+expect "WAL transition cleanly formatted" "-> 0.0 MB" "$OUT"
+OUT=$(HERMES_STATE_DB="$DB" HERMES_DB_CHECKPOINT_APPROVED=1 HERMES_DB_BUSY_TIMEOUT_MS=200 "$SCRIPT" --apply --full-vacuum 2>&1)
+expect "live db never gets VACUUM" "REFUSING full VACUUM: db is held open" "$OUT"
+kill "$HPID" 2>/dev/null || true; wait "$HPID" 2>/dev/null || true
+
+echo "Test 8: --db= selects an explicit target"
+OUT=$("$SCRIPT" --db="$DB" 2>&1)
+expect "explicit db used" "($DB)" "$OUT"
+
+echo "Test 9: weekly hermes-vacuum launchd plist includes HERMES_DB_CHECKPOINT_APPROVED=1"
+PLIST="$REPO_ROOT/launchd/com.disk-magician.hermes-vacuum.plist"
+PLIST_ENV=$(plutil -extract EnvironmentVariables.HERMES_DB_CHECKPOINT_APPROVED raw -o - "$PLIST" 2>/dev/null || true)
+expect "plist approved env set" "1" "$PLIST_ENV"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
