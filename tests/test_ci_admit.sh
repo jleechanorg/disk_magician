@@ -19,6 +19,23 @@ export DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_POLICY_FILE="$T/policy.j
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl" RUNNER_NAME=mac-1
 export GITHUB_RUN_ID=111 GITHUB_RUN_ATTEMPT=2 GITHUB_JOB=build GITHUB_WORKSPACE=/ezgha-vm/_work/ws
 printf '#!/bin/sh\necho "$*" >>"%s/launchctl.log"\n' "$T" >"$T/bin/launchctl"; chmod +x "$T/bin/launchctl"
+cat >"$T/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+pid="" fmt=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in -p) pid="$2"; shift 2 ;; -o) fmt="$2"; shift 2 ;; *) shift ;; esac
+done
+[[ "${CI_TEST_WORKER_DEAD:-0}" != 1 && -n "$pid" ]] || exit 1
+case "$fmt" in
+    ppid=,comm=) if [[ "$pid" == 900 ]]; then echo "1 Runner.Worker"; elif [[ "$pid" == 1 ]]; then echo "0 launchd"; else echo "900 bash"; fi ;;
+    lstart=) [[ "$pid" == 900 ]] && echo "Thu Oct  9 12:00:00 2026" || exit 1 ;;
+    args=) [[ "$pid" == 900 ]] && echo "Runner.Worker" || echo "bash" ;;
+    comm=) [[ "$pid" == 900 ]] && echo "Runner.Worker" || echo "bash" ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$T/bin/ps"
+export DISK_MAGICIAN_PS_BIN="$T/bin/ps"
 
 echo "== caller contract (class colima) =="
 git init -q "$T/repo" && git -C "$T/repo" commit -q --allow-empty -m init
@@ -66,6 +83,39 @@ for ws in /private/tmp/ezgha-job/ws /tmp/ezgha-job/ws; do
     grep -q -- "--class tmp_containers" "$CONTRACT_DIR/admit.log" && ok "$ws charged to tmp_containers" || bad "$ws: $(cat "$CONTRACT_DIR/admit.log")"
     grep -q -- "--est-gb" "$CONTRACT_DIR/admit.log" && bad "$ws: caller passed --est-gb" || ok "$ws: empty CI_ADMIT_EST_GB leaves the calibrated producer estimate"
 done
+echo "== real CI hook creates a worker lease, preserves prior owners, and refuses unknown ancestry =="
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+ci_ws="$T/ci-workspace"; mkdir -p "$ci_ws"
+_contract_case ci_new "0" "" "GITHUB_WORKSPACE=$ci_ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "0/1" "CI hook acquires owner before admission"
+lease="$(lease_path_for "$ci_ws")"
+python3 - "$lease" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["kind"]=="scratch" and d["producer"]=="ci-admit"
+assert any(o.get("pid")==900 and o.get("comm")=="Runner.Worker" for o in d["owners"])
+PY
+[[ $? -eq 0 ]] && ok "missing lease created with live Runner.Worker" || bad "missing CI owner"
+assert_eq "$(lease_owner_state "$lease")" "alive" "CI worker owner holds lease while process lives"
+assert_eq "$(CI_TEST_WORKER_DEAD=1 lease_owner_state "$lease")" "dead" "worker death retires CI owner naturally"
+prior_ws="$T/ci-existing"; mkdir -p "$prior_ws"
+lease_prior="$(lease_path_for "$prior_ws")"
+mkdir -p "$(dirname "$lease_prior")"
+python3 - "$lease_prior" "$prior_ws" <<'PY'
+import json,sys
+json.dump({"path":sys.argv[2],"owner":{"pid":901,"start_epoch":1,"comm":"parent"},
+           "owners":[{"pid":901,"start_epoch":1,"comm":"parent"}],"released_at":None},open(sys.argv[1],"w"))
+PY
+_contract_case ci_existing "0" "" "GITHUB_WORKSPACE=$prior_ws bash '$CI'"
+python3 - "$lease_prior" <<'PY'
+import json,sys
+owners=json.load(open(sys.argv[1]))["owners"]
+assert any(o.get("pid")==901 for o in owners) and any(o.get("pid")==900 for o in owners)
+PY
+[[ $? -eq 0 ]] && ok "existing lease owner preserved and worker appended" || bad "existing lease overwritten"
+_contract_case ci_unknown "0" "" "CI_TEST_WORKER_DEAD=1 GITHUB_WORKSPACE=$T/ci-unknown bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "75/0" "unknown worker ancestry fails closed before admission"
+grep -q "admission_degraded:ci_owner_identity" <<<"$C_ERR" && ok "unknown ancestry reported" || bad "unknown ancestry stderr: $C_ERR"
 _contract_case wimg "0" "" "GITHUB_WORKSPACE=/private/tmp/ezgha-job/ws CI_ADMIT_IMAGE_EST_GB=3 bash '$CI'"
 assert_eq "$C_RC/$C_ADMITS" "0/2" "image estimate: a second admit"
 assert_eq "$(sed -n 2p "$CONTRACT_DIR/admit.log" | grep -o -- '--class colima --est-gb 3')" "--class colima --est-gb 3" "image pull charged to colima"

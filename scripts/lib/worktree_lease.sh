@@ -134,6 +134,74 @@ lease_resolve_owner() {
     printf -- '-\t-\t-\n'
 }
 
+# Resolve the nearest verified Runner.Worker ancestor for CI owner binding.
+lease_resolve_runner_worker() {
+    local pid="${1:-$$}" hops=0 row ppid comm found="" start check seen=""
+    while (( hops < 64 )); do
+        case ",$seen," in *",$pid,"*) return 1 ;; esac
+        seen="$seen,$pid"
+        row="$(_lease_ps -p "$pid" -o ppid=,comm= 2>/dev/null)" || return 1
+        [[ -n "${row//[[:space:]]/}" ]] || return 1
+        read -r ppid comm <<<"$row"
+        if [[ "${comm##*/}" == Runner.Worker ]]; then
+            [[ -z "$found" ]] || return 1
+            start="$(_lease_ps_lstart_epoch "$pid")" || return 1
+            check="$(_lease_ps -p "$pid" -o ppid=,comm= 2>/dev/null)" || return 1
+            [[ "$row" == "$check" ]] || return 1
+            found="$pid"$'\t'"$start"$'\t'"Runner.Worker"
+        fi
+        [[ "$ppid" =~ ^[1-9][0-9]*$ ]] || break
+        pid="$ppid"
+    done
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
+}
+
+# Ensure a CI owner without replacing any existing lease or owners.
+lease_ensure_ci_owner() {
+    local wt="$1" pid="$2" start="$3" comm="$4" lease admin_id admin_birth ttl rc
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^-?[0-9]+$ && "$comm" == Runner.Worker ]] || return 2
+    lease="$(lease_path_for "$wt")"
+    mkdir -p "$(lease_dir)" || return 1
+    lease_mutation_lock_enter "$lease" || return 1
+    if [[ -e "$lease" ]]; then
+        python3 - "$lease" "$pid" "$start" "$comm" <<'PYCIOWNER'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+path, pid, start, comm = sys.argv[1:]
+try:
+    with open(path) as f: d=json.load(f)
+    if not isinstance(d, dict): sys.exit(1)
+    owners=d.get("owners")
+    if not isinstance(owners,list):
+        old=d.get("owner")
+        owners=[old] if isinstance(old,dict) else []
+    if not any(isinstance(o,dict) and str(o.get("pid"))==pid and
+               str(o.get("start_epoch"))==start and not o.get("released_at") for o in owners):
+        owners.append({"pid":int(pid),"start_epoch":int(start),"comm":comm,
+                       "session":None,"added_at":datetime.now(timezone.utc).isoformat()})
+    d["owners"]=owners
+    if d.get("owner") is None and owners: d["owner"]=owners[0]
+    d["released_at"]=None
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".ci-owner-")
+    with os.fdopen(fd,"w") as f:
+        json.dump(d,f,indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
+except Exception:
+    sys.exit(1)
+PYCIOWNER
+        rc=$?
+    else
+        IFS=$'\t' read -r admin_id admin_birth < <(_lease_admin_info "$wt")
+        ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
+        _lease_emit_json "$lease" "$wt" "" "" "ci" "False" "$pid" "$start" "$comm" \
+            "$admin_id" "$admin_birth" "$ttl" scratch ci-admit ci "" "" "" "" "" --lock-held
+        rc=$?
+    fi
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
+}
+
 # _lease_admin_info <worktree_path> — "admin_id<TAB>birth_epoch" from the
 # .git pointer's admin dir, or "-<TAB>-" when unresolvable.
 _lease_admin_info() {
