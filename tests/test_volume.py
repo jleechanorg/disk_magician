@@ -4,6 +4,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("volume", ROOT / "scripts" / "volume.py")
@@ -95,6 +96,8 @@ class LifecycleTest(VolumeTestBase):
         self.assertEqual(reg["volumes"]["scratch"]["uuid"], "SCRATCH-UUID")
         self.assertTrue(volume.ballast_ok(self.mp))
         self.assertEqual(volume.path_cmd("scratch"), 0)
+        self.assertEqual(volume.main(["verify-mount", str(self.mp)]), 0)
+        self.assertEqual(volume.main(["verify-mount", str(self.root / "wrong")]), 75)
 
     def test_create_does_not_allocate_when_free_below_threshold(self):
         self.make_fit()
@@ -181,3 +184,138 @@ class SnapshotResolverTest(VolumeTestBase):
             os.environ.pop("DISK_MAGICIAN_DU_BIN", None)
         self.assertEqual(result["status"], "measured")
         self.assertEqual(result["candidates"][0]["path"], "/private/tmp/worldai_frontend")
+
+class ApprovedR13RegressionTest(VolumeTestBase):
+    def setUp(self):
+        super().setUp()
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+
+    def install_exact_registry(self, state="active"):
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        path, _ = volume.registry_paths()
+        registry = json.loads(path.read_text())
+        registry["volumes"]["scratch"]["state"] = state
+        path.write_text(json.dumps(registry))
+
+    def test_load_container_selects_container_containing_data_role(self):
+        data = json.loads(self.state.read_text())
+        data["distractor_containers"] = [{
+            "ref": "disk8", "uuid": "DECOY-CONTAINER", "ceiling": 500 * 2**30,
+            "free": 400 * 2**30,
+            "volumes": [{"uuid": "DECOY-DATA", "name": "Data", "ref": "disk8s1",
+                         "device": "disk8s1", "used": 20 * 2**30, "quota": 0,
+                         "roles": ["Data"], "mountpoint": "/Volumes/decoy-data"}],
+        }]
+        self.state.write_text(json.dumps(data))
+        c = volume.load_container()
+        self.assertEqual(c.ref, "disk3")
+        self.assertEqual(c.uuid, "CONTAINER-UUID")
+
+    def test_create_rejects_existing_mountpoint_before_diskutil_mutation(self):
+        self.mp.mkdir(parents=True)
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        self.assertFalse(self.calls_file.exists())
+
+    def test_create_only_accepts_encryption_none_with_acknowledgment(self):
+        for encryption in (None, "encrypted", "filevault", "unsupported"):
+            with self.subTest(encryption=encryption):
+                config = json.loads(self.config.read_text())
+                config["volumes"]["encryption"] = encryption
+                self.config.write_text(json.dumps(config))
+                self.assertEqual(volume.create_cmd("scratch", execute=True), 2)
+                self.assertFalse(self.calls_file.exists())
+
+    def test_path_and_ballast_require_exact_registry_identity(self):
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        registry_path, _ = volume.registry_paths()
+        registry = json.loads(registry_path.read_text())
+        registry["volumes"]["scratch"] = {"name": "diskm-scratch", "state": "active"}
+        registry_path.write_text(json.dumps(registry))
+        self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_for_reclaim_path_survives_released_ballast(self):
+        self.install_exact_registry(state="retired")
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        self.assertEqual(volume.path_cmd("scratch"), 3)
+        self.assertEqual(volume.path_cmd("scratch", for_reclaim=True), 0)
+
+    def test_registered_quota_must_match_live_measured_quota(self):
+        self.install_exact_registry()
+        data = json.loads(self.state.read_text())
+        next(v for v in data["volumes"] if v["name"] == "diskm-scratch")["quota"] += 1
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(volume.retire_cmd("scratch"), 75)
+
+    def test_config_rejects_bool_negative_and_nonpositive_capacities(self):
+        for key, value in (("quota_gb", True), ("quota_gb", -1),
+                           ("swap_headroom_gb", 0), ("alarm_floor_gb", -1)):
+            with self.subTest(key=key, value=value):
+                config = json.loads(self.config.read_text())
+                if key == "quota_gb":
+                    config["volumes"]["classes"]["scratch"][key] = value
+                else:
+                    config["volumes"][key] = value
+                self.config.write_text(json.dumps(config))
+                with self.assertRaises(ValueError):
+                    volume.fit_result()
+        self.assertFalse(self.calls_file.exists())
+
+    def test_config_rejects_unsupported_v1_classes(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["evidence"] = {
+            "name": "diskm-evidence", "quota_gb": 2,
+            "mountpoint": str(self.root / "Volumes" / "evidence"),
+        }
+        self.config.write_text(json.dumps(config))
+        with self.assertRaises(ValueError):
+            volume.fit_result()
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 2)
+        self.assertFalse(self.calls_file.exists())
+
+    def test_sparse_ballast_failure_does_not_activate_volume(self):
+        with mock.patch.object(volume, "write_ballast", side_effect=self.write_sparse_ballast):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        registry_path, _ = volume.registry_paths()
+        self.assertFalse(registry_path.exists())
+
+    def write_sparse_ballast(self, mountpoint):
+        path = volume.ballast(mountpoint)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as stream:
+            stream.truncate(volume.BALLOST_BYTES)
+        self.assertFalse(volume.ballast_ok(mountpoint))
+
+    def test_volume_identity_rejects_wrong_mount_uuid_container_and_roles(self):
+        self.install_exact_registry()
+        for field, value in (("mounted_uuid", "OTHER-UUID"),
+                             ("mounted_container_ref", "disk9"),
+                             ("mounted_mountpoint", str(self.root / "elsewhere")),
+                             ("mounted_roles", ["Data"])):
+            with self.subTest(field=field):
+                data = json.loads(self.state.read_text())
+                data[field] = value
+                self.state.write_text(json.dumps(data))
+                self.assertEqual(volume.path_cmd("scratch"), 75)
+                data.pop(field)
+                self.state.write_text(json.dumps(data))
+
+    def test_ballast_ensure_threshold_is_inclusive_1088_mib(self):
+        self.install_exact_registry()
+        data = json.loads(self.state.read_text())
+        scratch = next(v for v in data["volumes"] if v["name"] == "diskm-scratch")
+        scratch["used"] = scratch["quota"] - 1088 * 2**20
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 0)
+        volume.ballast_cmd("release", "scratch")
+        data = json.loads(self.state.read_text())
+        scratch = next(v for v in data["volumes"] if v["name"] == "diskm-scratch")
+        scratch["used"] += 1
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 75)
+        self.assertFalse(volume.ballast_ok(self.mp))

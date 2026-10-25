@@ -39,11 +39,38 @@ def main(args):
         row = next((v for v in data["volumes"] if target in (v.get("ref"), v.get("name"), v.get("mountpoint"))), None)
         if row is None:
             fail()
-        result = {"MountPoint": row.get("mountpoint", ""), "VolumeUUID": row["uuid"], "APFSContainerReference": data["container"]["ref"], "DeviceIdentifier": row.get("device", ""), "CapacityInUse": row.get("used")}
+        result = {
+            "MountPoint": data.get("mounted_mountpoint", row.get("mountpoint", "")),
+            "VolumeUUID": data.get("mounted_uuid", row["uuid"]),
+            "APFSContainerReference": data.get("mounted_container_ref", data["container"]["ref"]),
+            "DeviceIdentifier": row.get("device", ""),
+            **({"CapacityInUse": row["used"]} if isinstance(row.get("used"), int) else {}),
+        }
         sys.stdout.buffer.write(plistlib.dumps(result)); return
     if args[:3] == ["apfs", "list", "-plist"]:
         c = data["container"]
-        result = {"Containers": [{"APFSContainerUUID": c["uuid"], "CapacityCeiling": c["ceiling"], "CapacityFree": c.get("free"), "ContainerReference": c["ref"], "Volumes": [{"APFSVolumeUUID": v["uuid"], **({"CapacityInUse": v["used"]} if isinstance(v.get("used"), int) else {}), "CapacityQuota": v.get("quota", 0), "DeviceIdentifier": v.get("device", ""), "Name": v["name"], "Roles": v.get("roles", [])} for v in data["volumes"]]}]}
+        containers = [c, *data.get("distractor_containers", [])]
+        result = {"Containers": [
+            {
+                "APFSContainerUUID": container["uuid"],
+                "CapacityCeiling": container["ceiling"],
+                "CapacityFree": container.get("free"),
+                "ContainerReference": container["ref"],
+                "Volumes": [
+                    {
+                        "APFSVolumeUUID": v["uuid"],
+                        **({"CapacityInUse": v["used"]} if isinstance(v.get("used"), int) else {}),
+                        "CapacityQuota": v.get("quota", 0),
+                        "DeviceIdentifier": v.get("device", ""),
+                        "Name": v["name"],
+                        "Roles": data.get("mounted_roles", v.get("roles", []))
+                        if container is c else v.get("roles", []),
+                    }
+                    for v in (data["volumes"] if container is c else container["volumes"])
+                ],
+            }
+            for container in containers
+        ]}
         sys.stdout.buffer.write(plistlib.dumps(result)); return
     if args[:2] == ["apfs", "addVolume"]:
         record(args)
@@ -54,7 +81,11 @@ def main(args):
         quota = next((int(x[:-1]) * 2**30 for x in args if x.endswith("g")), 0)
         mountpoint = os.environ.get("FAKE_DISKUTIL_MOUNTPOINT", "/Volumes/" + name)
         row = {"uuid": "SCRATCH-UUID", "name": name, "ref": "disk3s9", "device": "disk3s9", "used": 0, "quota": quota, "roles": [], "mountpoint": mountpoint}
-        data["volumes"].append(row); data["container"]["free"] = max(0, data["container"].get("free", 0) - quota); save(data); return
+        data["volumes"].append(row)
+        data["container"]["free"] = max(0, data["container"].get("free", 0) - quota)
+        os.makedirs(mountpoint, exist_ok=True)
+        save(data)
+        return
     if args and args[0] in ("mount", "unmount"):
         record(args)
         if os.environ.get("FAKE_DISKUTIL_HOOK"):
