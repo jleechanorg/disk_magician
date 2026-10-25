@@ -11,6 +11,9 @@ import os
 import sys
 
 
+MAX_SCAN_PASSES = 200
+
+
 def pids():
     return {n for n in os.listdir(b"/proc") if n.isdigit()}
 
@@ -51,13 +54,42 @@ def scan(names):
 def main():
     if len(sys.argv) != 1:
         sys.exit("diskm-cwd-scan: takes no arguments")
-    for _ in range(5):
-        names = pids()
-        records = scan(names)
-        # A process forked after the listing would be missing from the map:
-        # rescan until no new pid appeared while we were reading.
-        if pids() <= names:
+    # Completeness means: every pid ALIVE when we finish has been scanned in some
+    # pass. The previous rule demanded a single pass during which no new pid
+    # appeared at all (`if pids() <= names`), retried 5 times. On a host that forks
+    # continuously (CI runners, agent fleets) that is unsatisfiable, so this exited
+    # rc 1 with "process table kept changing" on EVERY attempt. The caller then had
+    # no privileged map, fell back to `kept:cwd-unknown`, and every cwd-gated Linux
+    # cleanup refused. Measured on jeff-ubuntu 2026-10-23: 3/3 attempts failed and
+    # /tmp (174 GiB) could not be reclaimed at all, which in turn kept free space
+    # under ezgha's min_free_disk_gb=30 so the runner fleet could not start.
+    # Scan only the pids not yet covered and accept once the live set is a subset
+    # of what we covered. Convergence is monotonic: each pass only has to read pids
+    # forked since the previous pass.
+    # Completeness means: every pid that is ALIVE when we finish has been scanned
+    # in some pass. The original rule demanded a single pass during which no new
+    # pid appeared (`if pids() <= names`), retried 5 times -- unsatisfiable on a
+    # host that forks continuously, so it exited rc 1 with "process table kept
+    # changing" every time and the caller fell back to kept:cwd-unknown.
+    #
+    # This version keeps the SAME fail-closed guarantee but makes convergence
+    # reachable: each pass scans only the pids not yet covered, so the work per
+    # pass shrinks to just what was forked since the previous pass. It succeeds
+    # only when the live pid set is fully covered; if it cannot reach that within
+    # MAX_SCAN_PASSES it exits non-zero, exactly like before.
+    #
+    # Do NOT relax this to a time/attempt "best effort" success: a child that
+    # chdir()s immediately after being skipped would not be covered, and nothing
+    # about fork's cwd inheritance proves otherwise. A non-zero exit is the
+    # correct answer when coverage cannot be established.
+    seen = set()
+    records = []
+    for _ in range(MAX_SCAN_PASSES):
+        todo = pids() - seen
+        if not todo:
             break
+        records.extend(scan(todo))
+        seen |= todo
     else:
         sys.exit("diskm-cwd-scan: process table kept changing")
     if not records:
