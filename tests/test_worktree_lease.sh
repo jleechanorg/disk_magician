@@ -519,15 +519,15 @@ L10="$(lease_path_for "$WT10")"
 seed_comm 700 1 codex
 seed_lstart 700 "$OWNER_LSTART"
 seed_args 700 "/usr/bin/codex"
-if lease_owner_add "$WT10" 700 "$OWNER_EPOCH" codex; then ok "child owner appended"; else bad "child owner append failed"; fi
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT10" --owner-pid 700; then ok "CLI adds live child owner"; else bad "CLI child owner add failed"; fi
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT10" --owner-pid 700; then ok "CLI child add is idempotent"; else bad "CLI idempotent child add failed"; fi
 assert_eq "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["owners"]))' "$L10")" "2" "both parent and child owners retained"
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT10" --owner-pid 799 >/dev/null 2>&1; then bad "CLI rejects unknown PID"; else ok "CLI rejects unknown PID"; fi
 assert_eq "$(lease_owner_state "$L10")" "alive" "live child keeps lease alive"
+if "$REPO_ROOT/disk_magician.sh" lease-release-owner "$WT10" --owner-pid 700; then ok "CLI releases only the child owner"; else bad "CLI child owner release failed"; fi
+assert_eq "$(lease_owner_state "$L10")" "alive" "parent remains protective after child release"
 if lease_release "$WT10"; then ok "parent owner release succeeds"; else bad "parent owner release failed"; fi
-assert_eq "$(lease_owner_state "$L10")" "alive" "child remains protective after parent release"
-lease_resolve_owner() { printf "700\t%s\tcodex\n" "$OWNER_EPOCH"; }
-if lease_release "$WT10"; then ok "child owner release succeeds"; else bad "child owner release failed"; fi
-unset -f lease_resolve_owner
-assert_eq "$(lease_owner_state "$L10")" "released" "lease released only after all owners release"
+assert_eq "$(lease_owner_state "$L10")" "released" "lease releases after every owner releases"
 
 echo "== session release is owner-scoped =="
 WT11="$(mk_wt wt_session_multi)"

@@ -901,3 +901,65 @@ for entry in entries:
             pass
 PY
 }
+
+# lease_add_owner <worktree_path> --owner-pid <pid> resolves a live process
+# incarnation before adding it; callers cannot supply a stale start identity.
+lease_add_owner() {
+    local wt="$1" flag="${2:-}" pid="${3:-}" start comm confirm
+    [[ $# -eq 3 && "$flag" == --owner-pid && "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+    start="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    comm="$(_lease_full_comm "$pid")"
+    [[ -n "$comm" ]] || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    confirm="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    [[ "$confirm" == "$start" ]] || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    lease_owner_add "$wt" "$pid" "$start" "$comm"
+}
+
+# lease_release_owner_pid <worktree_path> --owner-pid <pid> releases only the
+# lease entry for the exact live process incarnation.
+lease_release_owner_pid() {
+    local wt="$1" flag="${2:-}" pid="${3:-}" start confirm lease
+    [[ $# -eq 3 && "$flag" == --owner-pid && "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+    start="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    confirm="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    [[ "$confirm" == "$start" ]] || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    lease="$(lease_path_for "$wt")"
+    [[ -f "$lease" ]] || { echo "no lease" >&2; return 1; }
+    lease_mutation_lock_enter "$lease" || { echo "lease busy" >&2; return 1; }
+    if python3 - "$lease" "$pid" "$start" <<'PYLEASEPIDRELEASE'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+lease, pid, start = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(lease) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+owners = d.get("owners")
+if not isinstance(owners, list):
+    owners = [d.get("owner")] if isinstance(d.get("owner"), dict) else []
+matches = [o for o in owners if isinstance(o, dict) and str(o.get("pid")) == pid
+           and str(o.get("start_epoch")) == start and not o.get("released_at")]
+if not matches:
+    sys.exit(1)
+stamp = datetime.now(timezone.utc).isoformat()
+for owner in matches:
+    owner["released_at"] = stamp
+d["owners"] = owners
+if owners and all(not isinstance(o, dict) or o.get("released_at") for o in owners):
+    d["released_at"] = stamp
+else:
+    d.pop("released_at", None)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".release-owner-")
+with os.fdopen(fd, "w") as f:
+    json.dump(d, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+os.replace(tmp, lease)
+PYLEASEPIDRELEASE
+    then
+        lease_mutation_lock_exit "$lease"
+        return 0
+    fi
+    lease_mutation_lock_exit "$lease"
+    echo "not lease owner" >&2
+    return 1
+}
