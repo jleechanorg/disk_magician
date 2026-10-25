@@ -1,10 +1,10 @@
 # Opt-in quota'd Scratch volume (`diskm volume`)
 
-Date: 2026-10-25. This is revision 10, updated after Codex review of revision 9. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
+Date: 2026-10-25. This is revision 12, updated after the pilot acceptance correction and Codex review of revision 11. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
 
 ## Outcome
 
-Scratch requested through `diskm scratch-new` may land on one APFS volume with a quota. Exact usage comes from `diskutil`; nothing walks the tree for usage reporting. When the volume is unavailable, the request errors and nothing is written there. Aged entries are reclaimed by the existing per-entry C14 removal primitive. v1 is opt-in and covers Scratch only. Volume deletion and quota recreation are deferred; rollback retires the volume and drains eligible entries while keeping the volume available for inspection.
+Scratch requested through `diskm scratch-new` may land on one APFS volume with a quota. Exact usage comes from `diskutil`; nothing walks the tree for usage reporting. When the volume is unavailable, the request errors and nothing is written there. At the existing hourly sweep, quota pressure triggers automatic trim through the existing per-entry C14 removal primitive: whole eligible disposable artifacts are considered oldest-content-mtime first until usage falls to the low-water target. This is an mtime-based last-modified proxy, not true access-time LRU; no access events are recorded. The fill→trim→space-recovered→write-resumes pilot is a required acceptance result, not established by the earlier primitive-only pilots. v1 is opt-in and covers Scratch only. Volume deletion and quota recreation are deferred; rollback retires the volume and drains eligible entries while keeping the volume available for inspection.
 
 ## Containment: what a quota does and does not do
 
@@ -12,6 +12,7 @@ Scratch requested through `diskm scratch-new` may land on one APFS volume with a
 - **A full container fails first.** If the container fills, the volume and Data both hit `ENOSPC` before any cap matters.
 - **Data keeps today's protections.** These are the container free-space alarm (`disk_usage_alert.sh`, 20 GiB), `diskm admit`, budgets/`govern`, and the existing cleaners.
 - **What the volume adds:** a ceiling on routed scratch, exact attribution, and an audit of scratch that is still on Data.
+- **A quota pilot is incomplete until automatic recovery is demonstrated.** On a disposable test-only volume, prove fill→existing scheduled sweep→oldest-eligible whole-artifact trim→measured low-water recovery→successful new CLI-routed write; keep a leased/protected artifact and prove it survives. This is separate from the later 24-hour audit success measure.
 - **v1 success is measured by the audit, not volume bytes.** Capture depends on producers adopting `scratch-new` (P-5 policy, P-6 `dd` repos). v1 succeeds when the audit's list of unrouted `/private/tmp` roots shrinks.
 
 ## Evidence
@@ -50,7 +51,8 @@ Out of scope:
 | How is it enabled? | `create scratch --execute` is the enabling step: the active registry entry is the switch. `retire scratch` disables it. There is no `enabled` config flag | Removes the ordering trap where create was refused while disabled |
 | Mountpoint? | DiskArbitration's `/Volumes/diskm-scratch`, resolved by UUID | When unmounted, the path is absent and cannot be created under root-owned `/Volumes`. The OS enforces fail-closed; no custom mountpoint or permissions trick is needed |
 | How are writes routed? | `scratch-new <repo> <purpose> --kind evidence\|build` → `<mp>/<repo>/<kind>/<purpose>-<UTC>`. It returns rc 75 when the volume is registered but unavailable, and rc 3 (legacy `/tmp`) when no volume is registered | The CLI is the only path source. When it creates a `<repo>/<kind>` parent it also creates `<mp>/<repo>/<kind>/.dm-quarantine` (mode 0700, owned by the user: what C14 checks at `quarantine_rename.py:288-296`) before the entry directory, so C14's own `mkdir` is never the first allocation at the cap |
-| How are aged entries reclaimed? | A new `volume reclaim [--clean]` enumerates exactly `<mp>/<repo>/<kind>/<entry>` and skips dot-names at every level. Each entry goes to `scratch_budget_quarantine_remove`, which runs C14 `--kind ephemeral`. The existing `tmp_scratch_sweep.sh` hourly job runs it | The existing cleaners do not reach these depths. One enumerator feeds the existing primitive, so no second quarantine root is needed |
+| How does automatic trim work under quota pressure? | The existing hourly `tmp_scratch_sweep.sh` invokes the volume reclaim path. It is a no-op below 90% quota use; at or above 90%, it considers only eligible whole `<mp>/<repo>/<kind>/<entry>` disposable artifacts, oldest measured content mtime first, and stops once usage is at or below 80%. It skips dot-names and sends each candidate through `scratch_budget_quarantine_remove` / C14. This is last-modified ordering, not access-time LRU; access events are not recorded. If protected or unmeasurable entries prevent reaching 80%, it stops fail-closed and reports the shortfall; it never widens the candidate class | Reuses the existing hourly entry point and C14 primitive; explicit high/low watermarks bound reclaim work and avoid a parallel runner |
+| What is the pilot acceptance? | Fill a disposable test-only quota volume to ≥90% with eligible aged artifacts plus at least one leased/protected artifact; let the configured existing scheduled sweep trigger automatically (an accelerated test schedule is allowed, but no manual reclaim or direct sweep invocation); prove oldest eligible whole artifacts are removed first, protected content remains, measured usage reaches ≤80%, then a new disposable CLI-routed write succeeds. Record recovery bound as schedule interval plus one sweep runtime; the writer may see `ENOSPC` before the next run. Repeat with every candidate protected and prove no deletion and no false recovery | Earlier pilots exercised three volume primitives only; they did not prove automatic multi-entry trim, recovered space, or resumed writes |
 | Will C14 accept these entries? | Not today: `c14_ephemeral_retention` in `scripts/lib/artifact_verdict.sh` only matches its own rows under `scratch_roots_get_unique`, so these entries return `kept:unproven-content`. Add one row: when the candidate is under a root from a new `scratch_roots_get_volumes` (in `scripts/lib/scratch_roots.sh`) and `rel` matches `^[^./][^/]*/(evidence\|build)/[^./][^/]*$`, return a hard-coded `2880` minutes (48 h), the same way the existing rows hard-code their retentions (`artifact_verdict.sh:176`) | Extends the existing classifier, not a parallel one. Recency, lease, live-cwd, fd, secret and repo checks stay in the same verdict |
 | Is the mount at the root the registered volume? | Checked at removal time. In the `ephemeral` branch of `artifact_removal_verdict`, a candidate under a `scratch_roots_get_volumes` root first runs `volume.py verify-mount <root>`, which is the same UUID identity check `path` uses. A mismatch or error gives `kept:volume-identity` | A different volume at the configured path must never be trusted |
 | Where does the scratch root come from? | `scratch_roots_get_volumes` reads `volumes.classes.*.mountpoint` from the same config file that `scratch_roots_protected` reads, and prints only existing canonical dirs. It is deliberately not part of `scratch_roots_get` | No hardcoded path. Being outside `scratch_roots_get` stops `protected_tmp_roots` basenames (`worldarchitect.ai`, …) from protecting `<mp>/<repo>` |
@@ -105,7 +107,7 @@ Every mutation first re-checks identity. All of the following must hold, otherwi
 
 Alarms surface through `status` rc 1, the snapshot rows, and one added check in `disk_usage_alert.sh` that uses its existing notify and silence path. No new LaunchAgent.
 
-**Admission:** when `--dest` is on the volume and `quota − used − est < 1 GiB`, `diskm admit` also refuses (rc 75, `volume_full:scratch`). For example, 29.5 of 30 GiB used refuses for any estimate, because only 0.5 GiB of headroom remains. The Data zone check is unchanged.
+**Admission:** when `--dest` is on the volume and current use is ≥90%, `diskm admit` requests the same bounded reclaim once, remeasures, then makes its final decision. No loop. If `quota − used − est < 1 GiB`, it refuses (rc 75, `volume_full:scratch`); otherwise admission succeeds. Reclaim failure or unmeasurable/stale status fails closed. The Data zone check is unchanged. `scratch-new` follows the same one-reclaim rule before path handoff and creates/prints no path if usage remains at high water. Neither operation guarantees against concurrent container-wide allocation or later producer `ENOSPC`.
 
 **Attribution** follows the sibling contract (`2026-10-24-directory-inventory-growth-ledger-design.md`):
 - Volume row: `{host_id, filesystem_id: <uuid>, kind: "filesystem", source: "apfs_volume", path: <mp>, class, allocated_bytes: CapacityInUse, quota_bytes, measured_at, status, attribution: "exclusive_exact"}`.
@@ -154,7 +156,8 @@ The Worktrees volume starts only when all of the following hold:
   - Spike S1 verifies automount, the unmounted fail-closed path, and the real list of OS dot-dirs. S2 deletion checks are deferred from v1.
 - **P3:**
   - `scratch-new` creates nothing on rc 75.
-  - `reclaim` removes an aged eligible entry through the real C14 path (no stub), keeps fresh, leased or live ones, and skips dot-dirs.
+  - `reclaim` removes aged eligible whole artifacts through the real C14 path (no stub), keeps fresh, leased or live ones, and skips dot-dirs. Eligible entries are ordered by ascending newest content mtime (oldest last-modified first); this is not access-time LRU.
+  - **Automatic-trim pilot (required):** on a disposable test-only volume, drive measured quota use to ≥90% while the existing scheduled sweep job is configured; let the job trigger automatically through the same `tmp_scratch_sweep.sh` entry point (an accelerated documented test schedule is allowed). The operator must not call `reclaim` or invoke the sweep directly to satisfy this pilot. Assert eligible whole artifacts are removed oldest-content-mtime first only until measured use is ≤80%, while leased/protected and unmeasurable entries survive. Bound and record recovery by the configured schedule interval plus one sweep runtime. Before the next run, a producer can still receive `ENOSPC`. After recovery, create/write a new disposable artifact through `diskm scratch-new`; assert the write succeeds. With all candidates leased/protected, assert no deletion and report that the low-water target was not reached. This closes the fill→automatic trim→space-recovered→writes-resume path; primitive-only volume tests do not satisfy it.
   - `diskm status` prints the stuck line after two zero-removal runs.
   - Admission refuses on low headroom.
   - At a full quota, a supported-size aged entry is retried once through the real C14 path after the ballast is released; the ballast is recreated when space returns if space permits.
@@ -172,6 +175,7 @@ The Worktrees volume starts only when all of the following hold:
 | P-5 | The user amends the shared policy to allow `scratch-new` paths on `/Volumes/diskm-scratch` | Real `create` (the enabling step) |
 | P-6 | `dd` producer repos adopt `scratch-new --kind build` | Capturing `dd` builds |
 | P-7 | The sibling inventory is implemented | Inventory ingestion (snapshot embedding ships without it) |
+| P-8 | Automatic-trim pilot uses only disposable test artifacts on a test-only quota volume; the existing scheduled job triggers through `tmp_scratch_sweep.sh` automatically (no manual reclaim/direct sweep invocation); no production volume or arbitrary user data | Pilot acceptance above |
 
 No path needs sudo.
 
@@ -214,6 +218,17 @@ No path needs sudo.
   - `scratch-new` pre-creates `.dm-quarantine` (0700) with each `<repo>/<kind>` parent, so C14's `mkdir` is not the first allocation at the cap. The ballast trigger stays `kept:intent-write-failed` only.
   - Pilot 3 is historical evidence only; it does not prove that large sidecars or concurrent APFS-container allocations cannot fail.
 - No placeholders remain.
+
+### Revision 12 pilot acceptance correction
+
+- The earlier volume pilot created three disposable volumes and tested 1 GiB/200 MiB/100 MiB primitives once; it did not test automatic trim under pressure, multi-entry oldest-first behavior, measured low-water recovery, or writes resuming. It is not automatic-trim pilot evidence.
+- Keep 48 h C14 age eligibility. Among eligible whole disposable entries, order by ascending newest content mtime and stop after the 80% low-water target once reclaim was triggered at 90%. This is a last-modified proxy, not true access-time LRU; current paths do not record reads/access events.
+- Required pilot uses only disposable test artifacts and the existing scheduled sweep job / `tmp_scratch_sweep.sh` path; it triggers automatically (no manual reclaim or direct sweep invocation). A test-only accelerated cadence is allowed. Measure recovery within configured cadence plus one sweep runtime and disclose that a producer may receive `ENOSPC` before the next sweep. Protected/leased candidates survive, all-protected fails safe, and no production-volume creation or arbitrary user-data deletion is authorized.
+
+### Revision 12 automatic-trim and admission requirements
+
+- The installed existing hourly sweep automatically triggers trim at ≥90% and stops at ≤80%; a disposable pilot may accelerate the scheduled cadence but must not manually invoke reclaim/sweep. Recovery bound is configured cadence plus one run; at-full writers may see `ENOSPC` until then.
+- At ≥90%, `diskm admit` and `scratch-new` each invoke the same reclaim at most once before the final headroom/path decision, remeasure, and fail closed if still high or unmeasurable. No unbounded retries. Ordering remains oldest last-modified eligible content, not true access-time LRU.
 
 ### Revision 11 review resolutions
 

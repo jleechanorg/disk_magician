@@ -5,7 +5,7 @@
 **Goal:** Ship `diskm volume` for one opt-in Scratch volume with a quota.
 - Paths come only from `diskm scratch-new`, and only while the volume is available (fail-closed).
 - Reports show exact usage.
-- Aged entries are reclaimed by the existing C14 per-entry primitive.
+- At ≥90% quota use, the existing scheduled hourly sweep automatically trims eligible whole disposable artifacts oldest-content-mtime first through C14 until ≤80%; it preserves protected entries and reports when recovery cannot reach target. This is last-modified ordering, not access-time LRU. `diskm admit` and `scratch-new` each may request the same bounded reclaim once at high water before their final decision; they never loop.
 
 **Architecture:**
 - `scripts/volume.py` (stdlib) sits behind `disk_magician.sh volume)`. It handles registry, live fit, create, path, status, retire and the quota ballast file; delete/recreate are deferred from v1.
@@ -249,7 +249,7 @@ Deletion-specific read-only mount checks (S2) are deferred with volume deletion/
 - Modify `scripts/scratch_new.sh`:
   - Accept `kind=build`.
   - For `evidence` and `build`, call `diskm volume path scratch` (overridable via `DISK_MAGICIAN_DISKM_BIN`):
-    - rc 0: path is `<mp>/<repo>/<kind>/<purpose>-<UTC>`, with containment checked against `<mp>`. When it creates the `<repo>/<kind>` parent it first runs `mkdir -m 0700 <parent>/.dm-quarantine` (tolerating an existing directory; failure returns 1). C14 requires a directory owned by the user with mode exactly 0700 (`quarantine_rename.py:288-296`), so the mode must not depend on umask.
+    - rc 0: before handing out a path, read quota use. At ≥90%, request the same `diskm volume reclaim --clean` once, remeasure, and fail closed without creating the parent or printing a path if the high-water trigger remains. Never loop. Otherwise path is `<mp>/<repo>/<kind>/<purpose>-<UTC>`, with containment checked against `<mp>`. When it creates the `<repo>/<kind>` parent it first runs `mkdir -m 0700 <parent>/.dm-quarantine` (tolerating an existing directory; failure returns 1). C14 requires a directory owned by the user with mode exactly 0700 (`quarantine_rename.py:288-296`), so the mode must not depend on umask.
     - rc 75: return 75 and create nothing.
     - rc 3: keep the legacy `$EVIDENCE_TMP_ROOT/<repo>/<kind>/…`.
 - Test in `tests/test_scratch_new.sh`.
@@ -257,7 +257,7 @@ Deletion-specific read-only mount checks (S2) are deferred with volume deletion/
 **Steps:**
 1. **Failing test:**
    - (a) rc 0 creates under the fake `<mp>`.
-   - (b) rc 75 exits 75, and `test ! -e` passes for both candidate paths.
+   - (b) rc 75 exits 75, and `test ! -e` passes for both candidate paths. At ≥90%, stub reclaim to count calls and mutate measured use: prove one call and remeasurement, successful handoff only after recovery below the trigger, and no path or parent on failed/unmeasurable reclaim; prove no retry loop.
    - (c) rc 3 produces the legacy path.
     - (d) `--kind build` with rc 3 produces `…/<repo>/build/…`.
    - (e) With rc 0, every parent `scratch-new` creates (evidence and build) has `.dm-quarantine` as a directory, mode 0700, owned by the user; a second call into an existing parent leaves it intact.
@@ -269,8 +269,8 @@ Deletion-specific read-only mount checks (S2) are deferred with volume deletion/
 ### Task 10: Admission volume headroom
 
 **Files:**
-- Modify `scripts/disk_budget.py`, admit path (around line 1018): when the dest realpath is under the scratch `<mp>` and `quota − used − est < 1 GiB`, return rc 75 with `volume_full:scratch`.
-- Tests in `tests/test_disk_budget.py` and `tests/test_admit.sh`.
+- Modify `scripts/disk_budget.py`, admit path (around line 1018): when the dest realpath is under the scratch `<mp>` and current use is ≥90%, request `diskm volume reclaim --clean` once, then remeasure and make the final decision. Do not loop. If `quota − used − est < 1 GiB`, return rc 75 with `volume_full:scratch`; otherwise allow admission. Reclaim failure or a stale/unmeasurable quota fails closed.
+- Tests in `tests/test_disk_budget.py` and `tests/test_admit.sh`: prove high-water admission invokes reclaim at most once then remeasures, enough headroom admits, insufficient headroom rejects, and unavailable/unmeasurable status fails closed.
 
 **Steps:**
 1. **Failing test:**
@@ -304,9 +304,10 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
   - Preserve public reason `kept:intent-write-failed` and add typed `intent_write_errno` from `quarantine_rename.py` through the existing wrapper to reclaim. Only sidecar errno ENOSPC triggers; other errors never do. Do not infer errno from logs or reason text. If `result` is `kept:intent-write-failed` due to `ENOSPC` on the bounded C14 sidecar write, run `diskm volume ballast release` and retry that same removal once. A second failure remains kept; there is no loop. No other result releases the ballast. C14 checks are not bypassed: the retry goes through the same primitive. The 64 MiB reserve does not guarantee capacity against concurrent APFS-container writers.
   - After the run it runs `diskm volume ballast ensure`.
   - The enumeration excludes `.diskm-ballast` by exact name, in addition to the dot-name skip.
-  - Each run atomically writes `$STATE/volumes/reclaim_runs.json` (the last two runs: `at`, `aged_scanned`, `removed`, `top_kept_reason`).
+  - Each run atomically writes `$STATE/volumes/reclaim_runs.json` (last two runs: `at`, `quota_used_before_pct`, `quota_used_after_pct`, `aged_scanned`, `removed`, `target_pct`, `target_reached`, `top_kept_reason`). The CLI reports `trim_target_not_reached` with before/after usage and kept reasons when the 80% target remains unmet.
 - Modify `scripts/volume.py` so the `reclaim` verb execs the script. (`ballast ensure|release` already exist from Task 4.)
-- Modify `scripts/tmp_scratch_sweep.sh` to add a step after `run_cleanup_tmp` that runs `diskm volume reclaim` (with `--clean` when cleaning). A failure continues and sets rc=1.
+- Reclaim trigger/ordering: retain the 48 h C14 eligibility floor. Read exact quota use from the existing volume status/diskutil path. Below 90%, do not trim. At ≥90%, order only eligible whole entries by ascending `scratch_budget_content_mtime` (the helper's newest real content mtime; never access-time), invoke the existing C14 primitive, and remeasure after each successful removal; stop at ≤80%. Unmeasurable entries are preserved/excluded. If the target cannot be reached because candidates are protected/leased/unmeasurable or removals fail, stop and report target-not-reached with retained reasons; do not broaden eligibility or claim recovery. The existing scheduled hourly sweep invokes this automatically; no operator reclaim call is part of acceptance and no new daemon/runner is added. A disposable pilot may use an accelerated schedule, but it must invoke the same scheduled entry point automatically.
+- Modify `scripts/tmp_scratch_sweep.sh` to add a step after `run_cleanup_tmp` that runs `diskm volume reclaim` (with `--clean` when cleaning). The installed existing hourly job therefore triggers reclaim without operator action. A failure continues and sets rc=1.
 - Modify `scripts/disk_status.py` to print one line when both runs in `reclaim_runs.json` have `aged_scanned>0` and `removed==0`: `volume_reclaim_stuck: aged=<n> removed=0 runs=2 reason=<r>`.
 - Tests:
   - Create `tests/test_volume_reclaim.sh`.
@@ -346,6 +347,7 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
    - (o) An intent larger than 32 MiB and an unmeasurable serialized intent both return `kept:intent-too-large`; assert the candidate, parent, `.dm-quarantine`, sidecar and deletion log are unchanged.
    - (p) Lease tests cover compatible legacy single-owner reads plus concurrent `owners` entries. Parent and child add owners simultaneously; neither overwrites the other. Either alive owner blocks reclaim, unknown identity blocks, and only all-dead permits removal. Cover child exit, PID/start mismatch, read errors and CI acquire/release. Release removes only the caller owner and leaves other owners intact.
    - (r) Force producer lease acquisition failure in `scratch-new`; assert nonzero exit, empty stdout (no path handoff), and no downstream path use. Successful producer lease acquisition must precede path output.
+   - (s) Automatic-trim pilot on a disposable test-only quota volume: configure the existing scheduled sweep job (the same `tmp_scratch_sweep.sh` entry point used hourly) and let it trigger automatically; an accelerated documented test schedule is allowed, but the operator must not invoke `diskm volume reclaim` or call the sweep directly to satisfy acceptance. Fill with eligible ≥48 h aged whole artifacts to ≥90%, keeping a leased/protected artifact. Assert exact ordered removals (oldest newest-content-mtime first), protected artifact survives, usage is remeasured after each removal, trim stops at ≤80%, and a new disposable `scratch-new`-routed write succeeds afterward. Bound recovery to the configured schedule interval plus one sweep runtime; record both. A producer can still receive `ENOSPC` before the next scheduled run. In the all-protected variant, assert no deletion and an explicit target-not-reached result; no false write-recovery claim. This test/pilot is required for acceptance; earlier one-time primitive pilot is insufficient. Use only disposable test artifacts; never create a production volume or select arbitrary user data.
 
    Also add these tests:
    - `test_scratch_roots.sh`: `scratch_roots_get_volumes` prints `<mp>` only when it exists, and `scratch_roots_get` does not include it.
@@ -418,7 +420,7 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | 8 | TDD: N/A (platform spike); verify S1 automount, OS dot-dirs and fail-closed unmounted path [COND P-3] |
 | 9 | RED → impl → GREEN → commit; rc 75 creates nothing; every created parent has a 0700 `.dm-quarantine` (case e) |
 | 10 | RED → impl → GREEN + `test_admit.sh` → commit; 29.5/30 GiB refuses for est 1 and 0.1, 20/30 admits |
-| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: typed ENOSPC on C14 sidecar alone releases ballast, one retry through real path removes aged entry, fresh/live/leased kept, EIO does not release, ballast recreated only at >=1,088 MiB, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q) |
+| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: typed ENOSPC on C14 sidecar alone releases ballast, one retry through real path removes aged entry, fresh/live/leased kept, EIO does not release, ballast recreated only at >=1,088 MiB, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q); pressure mode tests 90% trigger/80% stop, oldest eligible content-mtime ordering, remeasurement, protected retention, target-not-reached reporting; case (s) proves disposable fill/sweep/recovery/routed-write pilot and all-protected fail-safe |
 | 12 | RED → impl → GREEN → commit; no-walk stub |
 | 13 | Deferred from v1: no RED/implementation/acceptance tests for volume deletion, read-only remount checks, or quota recreation. Rollback remains retire + C14 drain; keep the volume mounted for inspection. Re-scope separately before implementation |
 | 14 | TDD: N/A (release/deploy); verified by fit output, status JSON and rollout evidence |
@@ -441,6 +443,7 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | Web-advice | Unmount before delete | Superseded: deletion deferred from v1 |
 | Web-advice | No cross-volume rename | (forbidden by design) |
 | Codex (round 11) | Concurrent multi-owner leases, fail-closed scratch path handoff, one 1,088 MiB ballast threshold, typed ENOSPC result, physical allocation tests | Tasks 4, 9 and 11 |
+| User acceptance correction (round 12) | Automatic pressure-triggered trim, oldest eligible whole disposable artifact ordering, low-water stop, protected preservation, recovered-space write-resume pilot | Task 11 case (s), existing hourly sweep; only last-modified proxy is available, not access-time LRU |
 | Codex (round 7, superseded by revision 11) | Full-quota recovery: ballast released on C14 `ENOSPC`, one retry, recreated | Tasks 4 and 11 (case l, m) |
 | Codex + Opus (round 8) | `.dm-quarantine` mkdir `ENOSPC` maps to `kept:check-failed`: `scratch-new` pre-creates it (Pilot 3 cited, defense in depth) | Tasks 9 and 11 (case q) |
 | Codex (round 7) | Admission example contradicted the 1 GiB headroom rule | Task 10 |
