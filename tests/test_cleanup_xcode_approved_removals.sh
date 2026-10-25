@@ -74,6 +74,8 @@ case " $* " in
   *) exit 1 ;;
 esac
 STUB
+# Host rm/du shims resolve $HOME, which is a fixture here; use the real binaries.
+ln -s /bin/rm "$TMPROOT/bin/rm"
 chmod +x "$TMPROOT"/bin/*
 export PATH="$TMPROOT/bin:$PATH"
 
@@ -83,6 +85,9 @@ for n in Xcode-active Xcode-other Xcode-running NotXcode; do
 done
 mkdir -p "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2"
 echo sym >"$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2/sym"
+# C14 keeps recently written entries; age the fixture past that window.
+touch -t 202001010000 "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2/sym" \
+  "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2"
 
 run() { # <args...>; env assignments via ENVS
   : >"$CALLS"
