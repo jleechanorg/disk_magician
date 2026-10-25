@@ -181,6 +181,56 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(row["source"], "apfs_volume")
         self.assertEqual(result["container"]["filesystem_id"], "CONTAINER-UUID")
 
+    def test_status_corrupt_config_returns_fatal_rc(self):
+        self.config.write_text("{")
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        self.assertEqual(rc, 2)
+        result = json.loads(output.getvalue())
+        self.assertIn("volume_measurement_unavailable", result["alarms"])
+
+    def test_status_invalid_container_measurement_returns_fatal_rc(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["free"] = None
+        self.state.write_text(json.dumps(data))
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        self.assertEqual(rc, 2)
+        result = json.loads(output.getvalue())
+        self.assertIn("volume_measurement_unavailable", result["alarms"])
+
+    def test_status_corrupt_registry_returns_fatal_rc(self):
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text("{")
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        self.assertEqual(rc, 2)
+        result = json.loads(output.getvalue())
+        self.assertIn("volume_measurement_unavailable", result["alarms"])
+
+    def test_status_identity_mismatch_returns_fatal_rc(self):
+        self.make_fit()
+        data = json.loads(self.state.read_text())
+        data["mounted_uuid"] = "OTHER-UUID"
+        self.state.write_text(json.dumps(data))
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        self.assertEqual(rc, 2)
+        result = json.loads(output.getvalue())
+        self.assertIn("volume_measurement_unavailable:scratch", result["alarms"])
+
     def test_plan_fit_includes_maximum_quota(self):
         result = volume.fit_result()
         self.assertEqual(result["max_quota_gb_that_fits"], 22)
@@ -321,11 +371,15 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         self.assertFalse(registry_path.exists())
 
     def write_sparse_ballast(self, mountpoint):
-        path = volume.ballast(mountpoint)
+        path = volume.ballast_path(mountpoint)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as stream:
-            stream.truncate(volume.BALLOST_BYTES)
+            stream.truncate(volume.BALLAST_BYTES)
+        details = path.stat()
+        self.assertEqual(details.st_size, volume.BALLAST_BYTES)
+        self.assertLess(details.st_blocks * 512, volume.BALLAST_BYTES)
         self.assertFalse(volume.ballast_ok(mountpoint))
+        raise RuntimeError("sparse ballast did not allocate reserved blocks")
 
     def test_volume_identity_rejects_wrong_mount_uuid_container_and_roles(self):
         self.install_exact_registry()

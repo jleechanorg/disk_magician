@@ -512,6 +512,7 @@ def status(snapshot: bool = False) -> int:
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     alarms: list[str] = []
     rows: list[dict[str, Any]] = []
+    fatal = False
     try:
         container = load_container()
         settings = config()
@@ -538,26 +539,31 @@ def status(snapshot: bool = False) -> int:
             "available": False,
             "attribution": "exclusive_exact",
         }
-        try:
-            if not isinstance(entry, dict) or entry.get("state") not in {"active", "retired"}:
-                raise ValueError("volume is not registered")
-            volume = validate_entry(container, settings, entry)
-            used = require_nonnegative(volume.used, "volume usage")
-            quota = require_positive(volume.quota, "volume quota")
-            row.update({
-                "filesystem_id": volume.uuid,
-                "allocated_bytes": used,
-                "quota_bytes": quota,
-                "measured_at": timestamp,
-                "available": ballast_ok(settings["classes"]["scratch"]["mountpoint"]),
-            })
-            if used >= quota:
-                alarms.append("volume_full")
-            elif used / quota >= 0.9:
-                alarms.append("volume_high")
-        except Exception:
-            if isinstance(entry, dict) and entry.get("state") == "active":
-                alarms.append("volume_measurement_unavailable:scratch")
+        if isinstance(entry, dict) and entry.get("state") in {"active", "retired"}:
+            try:
+                volume = validate_entry(container, settings, entry)
+            except Exception:
+                fatal = True
+                if entry.get("state") == "active":
+                    alarms.append("volume_measurement_unavailable:scratch")
+            else:
+                try:
+                    used = require_nonnegative(volume.used, "volume usage")
+                    quota = require_positive(volume.quota, "volume quota")
+                    row.update({
+                        "filesystem_id": volume.uuid,
+                        "allocated_bytes": used,
+                        "quota_bytes": quota,
+                        "measured_at": timestamp,
+                        "available": ballast_ok(settings["classes"]["scratch"]["mountpoint"]),
+                    })
+                    if used >= quota:
+                        alarms.append("volume_full")
+                    elif used / quota >= 0.9:
+                        alarms.append("volume_high")
+                except Exception:
+                    if entry.get("state") == "active":
+                        alarms.append("volume_measurement_unavailable:scratch")
         rows.append(row)
 
         output: dict[str, Any] = {
@@ -572,6 +578,7 @@ def status(snapshot: bool = False) -> int:
             "alarms": alarms,
         }
     except Exception:
+        fatal = True
         output = {
             "measured_at": None,
             "container": {
@@ -586,8 +593,9 @@ def status(snapshot: bool = False) -> int:
     if not snapshot:
         output["tmp_audit"] = audit_tmp()
     print(json.dumps(output, sort_keys=True))
+    if fatal:
+        return 2
     return 1 if alarms else 0
-
 
 def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
     if path is None:
