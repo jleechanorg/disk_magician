@@ -48,6 +48,16 @@ class ParseTest(VolumeTestBase):
     def test_fake_bin_in_use(self):
         self.assertNotEqual(volume.diskutil_bin(), "/usr/sbin/diskutil")
 
+    def test_fake_diskutil_distinguishes_decimal_g_and_binary_gi(self):
+        volume.run_diskutil([
+            "apfs", "addVolume", "disk3", "APFS", "decimal", "-quota", "10g",
+        ])
+        volume.run_diskutil([
+            "apfs", "addVolume", "disk3", "APFS", "binary", "-quota", "10Gi",
+        ])
+        added = json.loads(self.state.read_text())["volumes"][3:]
+        self.assertEqual([row["quota"] for row in added], [10 * 10**9, 10 * 2**30])
+
 if __name__ == "__main__": unittest.main()
 
 class FitAndAuditTest(VolumeTestBase):
@@ -121,6 +131,25 @@ class StatusAndBallastTest(VolumeTestBase):
         data["container"]["ceiling"] = 1000 * 2**30
         self.state.write_text(json.dumps(data))
         self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+
+    def test_create_rejects_custom_mountpoint_on_macos_before_mutation(self):
+        with mock.patch.object(volume.sys, "platform", "darwin"):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 2)
+        self.assertFalse(self.calls_file.exists())
+
+    def test_create_passes_exact_binary_quota_bytes(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+        add = next(call for call in calls if call[:2] == ["apfs", "addVolume"])
+        self.assertEqual(add[add.index("-quota") + 1], str(30 * 2**30))
+        measured = next(
+            row for row in json.loads(self.state.read_text())["volumes"]
+            if row["name"] == "diskm-scratch"
+        )
+        self.assertEqual(measured["quota"], 30 * 2**30)
 
     def test_reclaim_clean_dispatches_to_shared_implementation(self):
         completed = type("Completed", (), {"returncode": 17})()

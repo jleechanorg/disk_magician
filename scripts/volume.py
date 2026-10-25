@@ -424,6 +424,8 @@ def create_cmd(name: str, execute: bool = False) -> int:
         return 2
 
     mountpoint = scratch["mountpoint"]
+    if sys.platform == "darwin" and mountpoint != f"/Volumes/{scratch['name']}":
+        return 2
     if os.path.lexists(mountpoint):
         return 75
 
@@ -454,7 +456,7 @@ def create_cmd(name: str, execute: bool = False) -> int:
 
             run_diskutil([
                 "apfs", "addVolume", container.ref, "APFS", scratch["name"],
-                "-quota", str(scratch["quota_gb"]) + "g",
+                "-quota", str(scratch["quota_gb"] * GIB),
             ])
             updated = load_container()
             matches = [volume for volume in updated.volumes if volume.name == scratch["name"]]

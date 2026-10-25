@@ -78,7 +78,17 @@ def main(args):
             os.system(os.environ["FAKE_DISKUTIL_HOOK"])
         if os.environ.get("FAKE_DISKUTIL_FAIL_ADD") == "1": fail()
         name = args[4]
-        quota = next((int(x[:-1]) * 2**30 for x in args if x.endswith("g")), 0)
+        quota = 0
+        for value in args:
+            if value.isdigit():
+                quota = int(value)
+                break
+            if value.endswith("Gi") and value[:-2].isdigit():
+                quota = int(value[:-2]) * 2**30
+                break
+            if value.endswith("g") and value[:-1].isdigit():
+                quota = int(value[:-1]) * 10**9
+                break
         mountpoint = os.environ.get("FAKE_DISKUTIL_MOUNTPOINT", "/Volumes/" + name)
         row = {"uuid": "SCRATCH-UUID", "name": name, "ref": "disk3s9", "device": "disk3s9", "used": 0, "quota": quota, "roles": [], "mountpoint": mountpoint}
         data["volumes"].append(row)
