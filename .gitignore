@@ -48,3 +48,4 @@ uv.lock
 /src/disk_magician/scripts/
 /src/disk_magician/launchd/
 /src/disk_magician/tools/
+/src/disk_magician/hooks/
