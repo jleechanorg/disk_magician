@@ -413,7 +413,7 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | 10 | RED → impl → GREEN + `test_admit.sh` → commit; 29.5/30 GiB refuses for est 1 and 0.1, 20/30 admits |
 | 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: ENOSPC on the C14 sidecar → ballast released, one retry through the real path removes the aged entry, fresh/live/leased kept, ballast recreated, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q) |
 | 12 | RED → impl → GREEN → commit; no-walk stub |
-| 13 | RED → impl → GREEN + deletion-log coverage → commit; retired-only, UUID-checked `delete`; unmount → ro-mount check → unmount → delete; write-before-unmount refuses; post-check writes impossible; dot-dir rules; `recreate` = `delete` + `create`; `recreate` on a non-retired volume gives rc 2 with the retire-first message; ballast ignored by exact name only; `addVolume` failure leaves `deleted` |
+| 13 | Deferred from v1: no RED/implementation/acceptance tests for volume deletion, read-only remount checks, or quota recreation. Rollback remains retire + C14 drain; keep the volume mounted for inspection. Re-scope separately before implementation |
 | 14 | TDD: N/A (release/deploy); verified by fit output, status JSON and rollout evidence |
 
 ## Plan self-review
@@ -426,7 +426,7 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | Codex | (b) Reclaim mechanism | Task 11 |
 | Codex + Opus (round 3) | C14 classifier row for volume entries, config-sourced root, real-path end-to-end test, stuck signal | Task 11 |
 | Codex | (c) Reuse per-parent quarantine | Task 11 (no new quarantine root) |
-| Opus | OS dot-dirs | Tasks 11 and 13 |
+| Opus | OS dot-dirs | Task 11; deletion-specific emptiness checks deferred with Task 13 |
 | Opus | Markers dropped | (removed) |
 | Web-advice | Live fit | Task 2 |
 | Web-advice | No `find -newermt` | (recency helper used instead) |
