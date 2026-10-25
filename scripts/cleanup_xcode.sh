@@ -27,6 +27,13 @@ Options:
   --dry-run         Preview cleanup without deleting.
   --all-simulators  Also erase all simulator devices. Requires SIMULATORS_APPROVED=1 with --clean.
   -h, --help        Show this help.
+
+Environment:
+  DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS  Per-call bound for `xcrun simctl` (default 60).
+                                        A timed-out call is logged and skipped;
+                                        it never fails the sweep.
+  DISK_MAGICIAN_TIMEOUT_BIN             Timeout binary to use instead of probing
+                                        timeout/gtimeout. Tests/diagnostics only.
 EOF
 }
 
@@ -140,6 +147,77 @@ clean_custom_derived_data() {
   done
 }
 
+# Simulator housekeeping talks to CoreSimulator, which can wedge for minutes
+# (bead disk_magician-wcxs: an unbounded `simctl delete unavailable` produced no
+# output for 6+ minutes and suppressed the rest of the run). Every simctl call
+# goes through run_simctl, bounded by a timeout resolved with the same ladder as
+# scripts/pressure_sweep.sh. A timeout is a logged SKIP, never fatal.
+SIMCTL_TIMEOUT_SECONDS="${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-60}"
+if [[ "$SIMCTL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+  # 10# keeps a leading-zero value from being parsed as invalid octal.
+  SIMCTL_TIMEOUT_SECONDS=$((10#$SIMCTL_TIMEOUT_SECONDS))
+else
+  SIMCTL_TIMEOUT_SECONDS=60
+fi
+(( SIMCTL_TIMEOUT_SECONDS >= 1 )) || SIMCTL_TIMEOUT_SECONDS=60
+SIMCTL_KILL_AFTER_S=10
+
+TIMEOUT_CMD=""
+if [[ -n "${DISK_MAGICIAN_TIMEOUT_BIN:-}" ]]; then
+  if [[ "${DISK_MAGICIAN_TIMEOUT_BIN}" == */* ]]; then
+    [[ -x "$DISK_MAGICIAN_TIMEOUT_BIN" ]] && TIMEOUT_CMD="$DISK_MAGICIAN_TIMEOUT_BIN"
+  else
+    TIMEOUT_CMD="$(command -v "$DISK_MAGICIAN_TIMEOUT_BIN" 2>/dev/null || true)"
+  fi
+elif command -v timeout &>/dev/null; then TIMEOUT_CMD="$(command -v timeout)"
+elif command -v gtimeout &>/dev/null; then TIMEOUT_CMD="$(command -v gtimeout)"
+elif [[ -x /opt/homebrew/bin/gtimeout ]]; then TIMEOUT_CMD=/opt/homebrew/bin/gtimeout
+elif [[ -x /opt/homebrew/bin/timeout ]]; then TIMEOUT_CMD=/opt/homebrew/bin/timeout
+elif [[ -x /usr/local/bin/gtimeout ]]; then TIMEOUT_CMD=/usr/local/bin/gtimeout
+elif [[ -x /usr/local/bin/timeout ]]; then TIMEOUT_CMD=/usr/local/bin/timeout
+fi
+# Only GNU coreutils timeout/gtimeout understand --kill-after; probe with `true`
+# so a non-supporting implementation falls back to the plain invocation.
+TIMEOUT_KILL_AFTER_SUPPORTED=false
+if [[ -n "$TIMEOUT_CMD" ]] && "$TIMEOUT_CMD" --kill-after=1 5 true >/dev/null 2>&1; then
+  TIMEOUT_KILL_AFTER_SUPPORTED=true
+fi
+
+# reported in the final summary line so a skipped simulator section is visible
+SIMCTL_STATUS="not-run"
+
+# run_simctl <simctl args...> — always returns 0, like the previous `|| true`.
+run_simctl() {
+  local rc=0
+  if [[ -z "$TIMEOUT_CMD" ]]; then
+    log "simulator housekeeping skipped: no timeout(1)/gtimeout available to bound 'xcrun simctl $*'"
+    SIMCTL_STATUS="skipped (no timeout binary)"
+    return 0
+  fi
+  if [[ "$TIMEOUT_KILL_AFTER_SUPPORTED" == true ]]; then
+    "$TIMEOUT_CMD" --kill-after="$SIMCTL_KILL_AFTER_S" "$SIMCTL_TIMEOUT_SECONDS" xcrun simctl "$@" 2>/dev/null || rc=$?
+  else
+    "$TIMEOUT_CMD" "$SIMCTL_TIMEOUT_SECONDS" xcrun simctl "$@" 2>/dev/null || rc=$?
+  fi
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    log "CoreSimulator unavailable (simctl timed out after ${SIMCTL_TIMEOUT_SECONDS}s) — skipping simulator housekeeping"
+    SIMCTL_STATUS="degraded (simctl timed out after ${SIMCTL_TIMEOUT_SECONDS}s)"
+    return 0
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    log "xcrun simctl $*: rc=${rc} (non-fatal)"
+  fi
+  # The WORST outcome wins: a later successful call must never overwrite an
+  # earlier timeout/skip, or the summary would report "completed" for a run in
+  # which simulator housekeeping was actually degraded and silently dropped
+  # (/advice review of PR #249 raised exactly this). Precedence:
+  # degraded > skipped > completed.
+  if [[ "$SIMCTL_STATUS" != degraded* && "$SIMCTL_STATUS" != skipped* ]]; then
+    SIMCTL_STATUS="completed"
+  fi
+  return 0
+}
+
 log "Cleanup mode: $( [[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo APPLY )"
 
 clear_contents "Xcode DerivedData" "$DERIVED_DATA"
@@ -152,20 +230,25 @@ if command -v xcrun >/dev/null 2>&1; then
     if [[ "$DRY_RUN" == true ]]; then
       log "[dry-run] would run: xcrun simctl shutdown all"
       log "[dry-run] would run: xcrun simctl delete all"
+      SIMCTL_STATUS="dry-run"
     else
       log "running: xcrun simctl shutdown all"
-      xcrun simctl shutdown all 2>/dev/null || true
+      run_simctl shutdown all
       log "running: xcrun simctl delete all"
-      xcrun simctl delete all 2>/dev/null || true
+      run_simctl delete all
     fi
   else
     if [[ "$DRY_RUN" == true ]]; then
       log "[dry-run] would run: xcrun simctl delete unavailable"
+      SIMCTL_STATUS="dry-run"
     else
       log "running: xcrun simctl delete unavailable"
-      xcrun simctl delete unavailable 2>/dev/null || true
+      run_simctl delete unavailable
     fi
   fi
 else
   log "xcrun not found; simulator cleanup skipped."
+  SIMCTL_STATUS="skipped (xcrun not found)"
 fi
+
+log "summary: simulator housekeeping ${SIMCTL_STATUS}"
