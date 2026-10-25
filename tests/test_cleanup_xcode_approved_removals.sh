@@ -75,8 +75,8 @@ case " $* " in
 esac
 STUB
 # Host rm/du shims resolve $HOME, which is a fixture here; use the real binaries.
-ln -s /bin/rm "$TMPROOT/bin/rm"
 chmod +x "$TMPROOT"/bin/*
+ln -s /bin/rm "$TMPROOT/bin/rm"
 export PATH="$TMPROOT/bin:$PATH"
 
 for n in Xcode-active Xcode-other Xcode-running NotXcode; do
