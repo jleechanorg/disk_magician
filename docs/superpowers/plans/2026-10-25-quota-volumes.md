@@ -8,7 +8,7 @@
 - Aged entries are reclaimed by the existing C14 per-entry primitive.
 
 **Architecture:**
-- `scripts/volume.py` (stdlib) sits behind `disk_magician.sh volume)`. It handles registry, live fit, create, path, status, recreate, retire and the quota ballast file.
+- `scripts/volume.py` (stdlib) sits behind `disk_magician.sh volume)`. It handles registry, live fit, create, path, status, retire and the quota ballast file; delete/recreate are deferred from v1.
 - `scripts/volume_reclaim.sh` is a small enumerator that feeds `scratch_budget_quarantine_remove`.
 - Hooks into existing code: `scratch_new.sh`, `disk_budget.py` (admit), `disk_snapshot.sh`, `disk_usage_alert.sh`, `tmp_scratch_sweep.sh`.
 - No new LaunchAgent, no symlinks, no wipe, no cross-volume copy.
@@ -41,10 +41,10 @@
 **What the fake does:**
 - Answers `apfs list -plist` (`Containers[]` with `APFSContainerUUID`, `CapacityCeiling`, `CapacityFree`, `ContainerReference`, `Volumes[]` with `APFSVolumeUUID`, `CapacityInUse`, `CapacityQuota`, `DeviceIdentifier`, `Name`, `Roles`).
 - Answers `info -plist <x>` (`MountPoint`, `VolumeUUID`, `APFSContainerReference`, `DeviceIdentifier`, `CapacityInUse`).
-- Records `apfs addVolume`, `apfs deleteVolume`, `mount [readOnly] [-mountPoint]` and `unmount` in order.
-- `FAKE_DISKUTIL_BUSY=1` makes `unmount` and `deleteVolume` exit 1.
+- Records `apfs addVolume`, mount and unmount in order.
+- `FAKE_DISKUTIL_BUSY=1` makes `unmount` exit 1.
 - `FAKE_DISKUTIL_FAIL_ADD=1` makes `addVolume` exit 1.
-- `FAKE_DISKUTIL_HOOK=<cmd>` runs before each mutating verb. Task 13 uses it, together with a fake `DISK_MAGICIAN_LSOF_BIN` hook, to inject concurrent writers.
+- `FAKE_DISKUTIL_HOOK=<cmd>` runs before each mutating verb; retained fake support for `deleteVolume` is unused by v1.
 
 **Steps:**
 1. **Failing test:**
@@ -120,9 +120,9 @@
 
 **Files:**
 - Modify `scripts/volume.py`: `create()`, `path_cmd()`, `retire()`, `verify_identity()`, and `ballast ensure|release`.
-  - `BALLAST = ".diskm-ballast"`, 64 MiB of real (non-sparse) bytes at `<mp>/.diskm-ballast`.
-  - `ensure` writes it when it is absent and free space (`quota − used`) is above ballast size + 1 GiB, and does nothing otherwise. `create --execute` calls `ensure` after registering the volume.
-  - `release` deletes it if it is a regular file and logs the deletion (`deletion_log volume release_ballast 0 <path> "uuid=…"`). It runs the same identity check as `path`.
+  - `BALLAST = ".diskm-ballast"`, exactly 64 MiB of allocated bytes at `<mp>/.diskm-ballast`; verify its size and allocation before registering the volume active.
+  - `ensure` writes it only when free space (`quota − used`) is above ballast size + 1 GiB, and does nothing otherwise. `create --execute` must create and verify the ballast before setting registry state to active; on failure the registry remains unavailable.
+  - `release` removes it if it is a regular file and logs the removal (`deletion_log volume release_ballast 0 <path> "uuid=…"`). It runs the same identity check as `path`.
 - Modify `tests/test_deletion_log_coverage.sh` to register `volume.py`.
 - Test in `tests/test_volume.py`.
 
@@ -221,7 +221,7 @@
 4. **GREEN** plus regression.
 5. **Commit.**
 
-### Task 8: Spikes S1/S2 **[COND P-3]**
+### Task 8: Spike S1 **[COND P-3]**
 
 **TDD: N/A.** This is an empirical platform check.
 
@@ -231,12 +231,10 @@
 - Record the automount path after login.
 - Record `ls -a <mp>` to get the real OS dot-dirs.
 - While the volume is unmounted, `mkdir /Volumes/diskm-spike-1` must fail with EACCES. This is checked on the unmounted path, not the mounted root.
-- If the real dot-dir list differs from the spec, update the constant `OS_DOT_DIRS` and its tests first (Tasks 11 and 13).
+- If the real dot-dir list differs from the spec, update the constant `OS_DOT_DIRS` and its tests first (Task 11).
 
-**S2:** the main risk is resolved by `~/roadmap/disk_magician/quota-volumes-2026-10-25/pilot-result.md`, "Pilot 2": a non-root `diskutil mount readOnly -mountPoint <private dir>` works, `mount` shows it read-only, and writes fail. On the target machine, re-check only:
-- Hold a file open with `sleep 600 < <mp>/f &`. A non-forced `diskutil unmount` and `deleteVolume` must both fail.
-- Mount the volume read-only at a private mountpoint as the user and confirm `mount` shows `read-only` and a write fails.
 
+Deletion-specific read-only mount checks (S2) are deferred with volume deletion/recreation from v1.
 ## Phase P3 — routing + reclaim
 
 ### Task 9: `scratch-new` on the volume + `--kind build`
@@ -282,6 +280,7 @@
 Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its classifier, `c14_ephemeral_retention` in `scripts/lib/artifact_verdict.sh`, matches rows only under `scratch_roots_get_unique`. Volume entries therefore return `kept:unproven-content`. This task extends that classifier and adds no parallel one.
 
 **Files:**
+- Modify `scripts/lib/worktree_lease.sh` and its focused tests: extend `lease_write` with `--owner-pid PID`, recording PID and process-start identity; preserve caller identity as the default and fail closed when the requested owner identity cannot be read. Wire producer/CI wrappers to acquire and release leases; detached children must acquire their own lease before receiving a scratch path. Test live child, child exit, PID reuse/start-identity mismatch, and identity-read error.
 - Modify `scripts/lib/scratch_roots.sh`: add `scratch_roots_get_volumes [config.json]`.
   - It reads `volumes.classes.*.mountpoint` from the given config. If no config is given, it uses the path printed by `scripts/resolve_config.py`.
   - It prints each existing directory canonicalized with `cd && pwd -P`.
@@ -295,7 +294,8 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
   - It takes `<mp>/<repo>/<kind>/<entry>` at exact depth 3 via globs, skipping names that start with `.` at every level.
   - It counts entries whose newest mtime exceeds retention as `aged`.
   - In dry-run it prints `would_check`. With `--clean` it runs `result=$(scratch_budget_quarantine_remove "$entry")` and counts `removed:*`, recording kept reasons.
-  - If `result` is `kept:intent-write-failed` (the primitive's report of an `ENOSPC` on the C14 sidecar write), it runs `diskm volume ballast release` and retries that same removal once. A second failure is recorded as a kept reason; there is no loop. No other result releases the ballast. C14 checks are not bypassed: the retry goes through the same primitive.
+  - In the existing C14 inventory serialization path in `scripts/quarantine_rename.py`, preserve unknown fields, serialize once, and measure the encoded bytes before creating `.dm-quarantine`, writing a sidecar, or renaming anything. Support up to 32 MiB; serialization failure or overflow returns `kept:intent-too-large`, with no candidate, parent, sidecar, or log mutation.
+  - If `result` is `kept:intent-write-failed` due to `ENOSPC` on the bounded C14 sidecar write, run `diskm volume ballast release` and retry that same removal once. A second failure remains kept; there is no loop. No other result releases the ballast. C14 checks are not bypassed: the retry goes through the same primitive. The 64 MiB reserve does not guarantee capacity against concurrent APFS-container writers.
   - After the run it runs `diskm volume ballast ensure`.
   - The enumeration excludes `.diskm-ballast` by exact name, in addition to the dot-name skip.
   - Each run atomically writes `$STATE/volumes/reclaim_runs.json` (the last two runs: `at`, `aged_scanned`, `removed`, `top_kept_reason`).
@@ -328,15 +328,17 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
    - (j) Retire, then reclaim: after `diskm volume retire scratch` (real `volume.py`, fake diskutil, volume mounted), `path scratch` returns rc 3 and `path scratch --for-reclaim` returns rc 0. `reclaim --clean` removes an aged entry and keeps a fresh one and a leased one.
    - (k) A fake diskutil reports a different `VolumeUUID` mounted at `<mp>`. An aged entry is kept with `kept:volume-identity`, and nothing is removed.
    - (i) After two `--clean` runs where every aged entry is leased, `reclaim_runs.json` shows `aged_scanned>0`, `removed=0` ×2.
-   - (l) Full quota. `<mp>/.diskm-ballast` exists (64 MiB). The test wraps `scratch_budget_quarantine_remove` in a shell function that calls the real function with `DISK_MAGICIAN_TEST_INTENT_ERRNO=28` (the existing intent-write fault hook in `quarantine_rename.py`) only while `<mp>/.diskm-ballast` exists. This simulates `ENOSPC` until the ballast is released, and the real C14, quarantine and rename path still runs. With real `volume.py` and the fake diskutil reporting 5 GiB used:
+   - (l) Full quota. `<mp>/.diskm-ballast` exists and is verified at exactly 64 MiB. With a serialized intent at the supported 32 MiB maximum, the test wraps `scratch_budget_quarantine_remove` in a shell function that calls the real function with `DISK_MAGICIAN_TEST_INTENT_ERRNO=28` (the existing intent-write fault hook in `quarantine_rename.py`) only while `<mp>/.diskm-ballast` exists. This simulates `ENOSPC` until the ballast is released, and the real C14, quarantine and rename path still runs. With real `volume.py` and the fake diskutil reporting 5 GiB used:
      - the aged 72 h entry first returns `kept:intent-write-failed`, the ballast is released (one deletion-log line for it), and the single retry returns `removed:*` through the real path (entry gone, one more deletion-log line);
      - a fresh entry, a live-cwd entry and a leased entry are kept with their usual reasons and do not release the ballast;
      - after the run the ballast exists again at 64 MiB;
      - with the fake reporting used = quota − 0.5 GiB at the end of the run, the ballast is not recreated.
-   - (n) Missing `.dm-quarantine` plus a real `mkdir` `ENOSPC`. Add one hook at the C14 mkdir site, mirroring the existing `DISK_MAGICIAN_TEST_INTENT_ERRNO`: in `quarantine_rename.py`, just before `os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)`, `if ENV.get("DISK_MAGICIAN_TEST_MKDIR_ERRNO") and not os.path.isdir(os.path.join(parent, ".dm-quarantine")): raise OSError(int(ENV["DISK_MAGICIAN_TEST_MKDIR_ERRNO"]), "test")`. With `=28`:
+   - (q) Missing `.dm-quarantine` plus a real `mkdir` `ENOSPC`. Add one hook at the C14 mkdir site, mirroring the existing `DISK_MAGICIAN_TEST_INTENT_ERRNO`: in `quarantine_rename.py`, just before `os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)`, `if ENV.get("DISK_MAGICIAN_TEST_MKDIR_ERRNO") and not os.path.isdir(os.path.join(parent, ".dm-quarantine")): raise OSError(int(ENV["DISK_MAGICIAN_TEST_MKDIR_ERRNO"]), "test")`. With `=28`:
      - an entry whose parent was made by `scratch-new` (so `.dm-quarantine` exists) is removed normally (the real `mkdir` on an existing directory raises `FileExistsError`, not `ENOSPC`);
      - a pre-existing parent with no `.dm-quarantine` returns `kept:check-failed`, does **not** release the ballast, is not retried, and the run ends rc 0 with `check-failed` as `top_kept_reason` in `reclaim_runs.json` (so the stuck line shows it rather than the failure being silent).
    - (m) With the hook forced on regardless of the ballast, the aged entry is attempted twice at most, the ballast is released once, the result is kept (`kept:intent-write-failed`), and the run ends rc 0.
+   - (o) An intent larger than 32 MiB and an unmeasurable serialized intent both return `kept:intent-too-large`; assert the candidate, parent, `.dm-quarantine`, sidecar and deletion log are unchanged.
+   - (p) Producer lease tests cover the explicit owner PID/start-identity API, detached-child lifetime, PID reuse/start-identity mismatch, identity-read errors, and CI producer acquire-release. The caller lease is not inherited.
 
    Also add these tests:
    - `test_scratch_roots.sh`: `scratch_roots_get_volumes` prints `<mp>` only when it exists, and `scratch_roots_get` does not include it.
@@ -369,74 +371,9 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
 4. **GREEN** plus regression.
 5. **Commit.**
 
-### Task 13: `delete scratch` (gated, read-only check) and `recreate` = `delete` + `create`
+### Task 13: Deferred — volume deletion and quota recreation
 
-**Files:**
-- Modify `scripts/volume.py`:
-  - Constants: `OS_METADATA_DIRS = (".Spotlight-V100", ".fseventsd")` (contents ignored) and `OS_EMPTY_ONLY_DIRS = (".Trashes", ".TemporaryItems", ".DocumentRevisions-V100")` (ignored only when empty).
-  - Emptiness on the read-only mount `R`: `find R -xdev ( -path R/.Spotlight-V100 -o -path R/.fseventsd ) -prune -o ! -type d ! ( -path R/.diskm-ballast -type f ) -print -quit` prints nothing, and `find R/<d> -mindepth 1 -print -quit` prints nothing for each existing `OS_EMPTY_ONLY_DIRS` entry. Each check has a 60 s timeout; a timeout counts as non-empty.
-  - `delete()` follows the spec's ordered steps: non-forced unmount, `mount readOnly -mountPoint $STATE/volumes/ro/<uuid>`, check, unmount, `deleteVolume <uuid>`, `state=deleted`, deletion-log line. On failure it remounts with `diskutil mount <uuid>` and keeps `retired`.
-  - `delete()` refuses a volume that is not `retired` with rc 2 and the stderr line `not retired: run 'diskm volume retire scratch' first`, before any `diskutil` call and also in dry-run.
-  - `recreate()` calls `delete()`, then `create()` (only if `delete()` returned 0), and contains no other diskutil calls. It returns `delete()`'s rc, so a non-retired volume gives rc 2 with that message.
-- Test in `tests/test_volume.py`. The fake records `mount readOnly -mountPoint`. In the fake, unmounting removes the mountpoint dir, and a read-only mount sets the private dir to mode 0555. The fixtures seed `state=retired` unless told otherwise.
-
-**Steps:**
-1. **Failing test**
-   ```python
-   class DeleteTest(VolumeTestBase):
-       def run_delete(self): return volume.main(["delete", "scratch", "--execute"])
-       def test_refusals_change_nothing(self):
-           for setup, rc in [(lambda: self.mounted(state="active"), 2), (lambda: self.mounted(registry_uuid="OTHER"), 2)]:
-               with self.subTest(): self.reset(); setup(); self.assertEqual(self.run_delete(), rc); self.assertEqual(self.calls(), [])
-       def test_order_and_log(self):
-           self.mounted(); self.assertEqual(self.run_delete(), 0)
-           self.assertEqual(self.verbs(), ["unmount", "mount readOnly", "unmount", "deleteVolume"])
-           self.assertEqual(self.registry_state(), "deleted"); self.assertEqual(len(self.deletion_log_lines()), 1)
-       def test_write_before_unmount_blocks_delete(self):
-           self.mounted(); self.write_file("wa/build/late/f")
-           self.assertEqual(self.run_delete(), 75)
-           self.assertNotIn("deleteVolume", self.verbs()); self.assertEqual(self.registry_state(), "retired")
-           self.assertEqual(self.verbs()[-1], "mount")                          # restored at default mountpoint
-       def test_nothing_can_write_after_check(self):
-           self.mounted()
-           self.on_fake_call("mount readOnly", self.assert_writes_fail)          # tries <mp>/x and <ro>/x; both must raise OSError
-           self.assertEqual(self.run_delete(), 0)
-       def test_busy_unmount_refuses_unforced(self):
-           self.mounted(); os.environ["FAKE_DISKUTIL_BUSY"] = "1"
-           self.assertEqual(self.run_delete(), 75); self.assertFalse(any("force" in " ".join(c) for c in self.calls()))
-       def test_dot_dirs(self):
-           self.mounted(files=[".Spotlight-V100/Store-V2/x", ".fseventsd/u", ".diskm-ballast"], dirs=[".Trashes"])
-           self.assertEqual(self.run_delete(), 0)
-           self.reset(); self.mounted(files=[".diskm-ballast.bak"]); self.assertEqual(self.run_delete(), 75)   # exact name only
-           for sub in (".Trashes/501", ".TemporaryItems/x", ".DocumentRevisions-V100/y"):
-               with self.subTest(sub=sub): self.reset(); self.mounted(dirs=[sub]); self.assertEqual(self.run_delete(), 75)
-       def test_scratch_new_on_retired_volume_never_gets_volume_path(self):
-           self.mounted(); self.on_fake_call("unmount", self.run_scratch_new)
-           self.run_delete(); self.assertEqual(self.scratch_new_result.rc, 3)
-           self.assertFalse(self.scratch_new_result.path.startswith(str(self.mp)))
-   class RecreateTest(VolumeTestBase):
-       def test_recreate_is_delete_then_create(self):
-           self.mounted(); self.fit_passes(quota_gb=12)
-           self.assertEqual(volume.main(["recreate", "scratch", "--quota-gb", "12", "--execute"]), 0)
-           self.assertEqual(self.verbs()[-2:], ["deleteVolume", "addVolume"]); self.assertIn("-quota 12g", " ".join(self.calls()[-1]))
-           self.assertEqual(self.registry_state(), "active")
-       def test_addvolume_failure_leaves_deleted_and_path_75(self):
-           self.mounted(); os.environ["FAKE_DISKUTIL_FAIL_ADD"] = "1"
-           self.assertNotEqual(volume.main(["recreate", "scratch", "--quota-gb", "12", "--execute"]), 0)
-           self.assertEqual(self.registry_state(), "deleted"); self.assertEqual(volume.main(["path", "scratch"]), 75)
-       def test_recreate_requires_retire_first(self):
-           self.mounted(state="active")
-           self.assertEqual(volume.main(["recreate", "scratch", "--quota-gb", "12", "--execute"]), 2)
-           self.assertEqual(self.calls(), []); self.assertIn("not retired", self.stderr()); self.assertIn("retire scratch", self.stderr())
-           self.assertEqual(volume.main(["recreate", "scratch", "--quota-gb", "12"]), 2)           # dry-run refuses too
-       def test_recreate_has_no_own_delete_code(self):
-           with mock.patch.object(volume, "delete", return_value=75) as d:
-               self.assertEqual(volume.main(["recreate", "scratch", "--quota-gb", "12", "--execute"]), 75); d.assert_called_once()
-   ```
-2. **Verify RED:** `… -k "DeleteTest or RecreateTest" -v` (run each `-k` separately if your unittest version does not support expressions).
-3. **Minimal implementation.**
-4. **Verify GREEN:** also run `bash tests/test_deletion_log_coverage.sh` and the regression.
-5. **Commit.**
+Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch` followed by `reclaim --clean`; keep the retired volume mounted and available for inspection. Do not implement `delete`, `recreate`, read-only remount emptiness checks, or `deleteVolume` in this release. Revisit only as a separately scoped follow-up with fresh approval and its own evidence plan.
 
 ### Task 14: Release and rollout **[COND P-1, P-2, P-3, P-4, P-5]**
 
@@ -458,7 +395,7 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
 
 **After 24 h:** record the audit's unrouted list as the success baseline, and record the `scratch-new` bytes on the volume.
 
-**Rollback:** `retire scratch`, then `reclaim --clean`, then `diskm volume delete scratch --execute`. Raw `diskutil` is never used.
+**Rollback:** `retire scratch`, then `reclaim --clean`; keep the retired volume mounted and available for inspection. v1 has no volume-delete command.
 
 ## TDD Plan Check
 
@@ -471,10 +408,10 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
 | 5 | RED (`Unknown command`) → impl → GREEN + package check → commit |
 | 6 | RED → impl → GREEN + swap_vm regression → commit |
 | 7 | RED (two tests) → impl → GREEN → commit |
-| 8 | TDD: N/A (platform spike); verified by RESULT.md and a clean `diskutil list` [COND P-3]; S2 is already evidenced by Pilot 2, so only a re-check remains |
+| 8 | TDD: N/A (platform spike); verify S1 automount, OS dot-dirs and fail-closed unmounted path [COND P-3] |
 | 9 | RED → impl → GREEN → commit; rc 75 creates nothing; every created parent has a 0700 `.dm-quarantine` (case e) |
 | 10 | RED → impl → GREEN + `test_admit.sh` → commit; 29.5/30 GiB refuses for est 1 and 0.1, 20/30 admits |
-| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: ENOSPC on the C14 sidecar → ballast released, one retry through the real path removes the aged entry, fresh/live/leased kept, ballast recreated, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case n) |
+| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: ENOSPC on the C14 sidecar → ballast released, one retry through the real path removes the aged entry, fresh/live/leased kept, ballast recreated, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q) |
 | 12 | RED → impl → GREEN → commit; no-walk stub |
 | 13 | RED → impl → GREEN + deletion-log coverage → commit; retired-only, UUID-checked `delete`; unmount → ro-mount check → unmount → delete; write-before-unmount refuses; post-check writes impossible; dot-dir rules; `recreate` = `delete` + `create`; `recreate` on a non-retired volume gives rc 2 with the retire-first message; ballast ignored by exact name only; `addVolume` failure leaves `deleted` |
 | 14 | TDD: N/A (release/deploy); verified by fit output, status JSON and rollout evidence |
@@ -494,13 +431,13 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
 | Web-advice | Live fit | Task 2 |
 | Web-advice | No `find -newermt` | (recency helper used instead) |
 | Web-advice | Permission check on unmounted path only | Task 8 |
-| Web-advice | Unmount before delete | Task 13 |
+| Web-advice | Unmount before delete | Superseded: deletion deferred from v1 |
 | Web-advice | No cross-volume rename | (forbidden by design) |
 | Codex (round 7) | Full-quota recovery: ballast released on C14 `ENOSPC`, one retry, recreated | Tasks 4 and 11 (case l, m) |
-| Codex + Opus (round 8) | `.dm-quarantine` mkdir `ENOSPC` maps to `kept:check-failed`: `scratch-new` pre-creates it (Pilot 3 cited, defense in depth) | Tasks 9 and 11 (case n) |
+| Codex + Opus (round 8) | `.dm-quarantine` mkdir `ENOSPC` maps to `kept:check-failed`: `scratch-new` pre-creates it (Pilot 3 cited, defense in depth) | Tasks 9 and 11 (case q) |
 | Codex (round 7) | Admission example contradicted the 1 GiB headroom rule | Task 10 |
-| Opus (round 7) | `recreate` requires `retire` first, with a defined message and rc | Task 13 |
-| Opus (round 7) | S2 resolved by Pilot 2; target-machine re-check only | Task 8 |
+| Opus (round 7, superseded by revision 10) | `recreate` requires `retire` first, with a defined message and rc | Deferred from v1 |
+| Opus (round 7, superseded by revision 10) | S2 resolved by Pilot 2; target-machine re-check only | Deferred with deletion from v1 |
 | — | Success measure (unrouted audit) | Tasks 12 and 14 |
 
 **Other checks:**

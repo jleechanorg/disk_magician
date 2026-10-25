@@ -1,10 +1,10 @@
 # Opt-in quota'd Scratch volume (`diskm volume`)
 
-Date: 2026-10-25. This is revision 9, written after eight rounds of `/advice` and one round of `/web-advice` review. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
+Date: 2026-10-25. This is revision 10, updated after Codex review of revision 9. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
 
 ## Outcome
 
-Scratch requested through `diskm scratch-new` lands on one APFS volume with a quota. Exact usage comes from `diskutil`; nothing walks the tree. When the volume is unavailable, the request errors and nothing is written anywhere. Aged entries are reclaimed by the existing per-entry C14 removal primitive. v1 is opt-in and covers Scratch only.
+Scratch requested through `diskm scratch-new` may land on one APFS volume with a quota. Exact usage comes from `diskutil`; nothing walks the tree for usage reporting. When the volume is unavailable, the request errors and nothing is written there. Aged entries are reclaimed by the existing per-entry C14 removal primitive. v1 is opt-in and covers Scratch only. Volume deletion and quota recreation are deferred; rollback retires the volume and drains eligible entries while keeping the volume available for inspection.
 
 ## Containment: what a quota does and does not do
 
@@ -54,15 +54,15 @@ Out of scope:
 | Will C14 accept these entries? | Not today: `c14_ephemeral_retention` in `scripts/lib/artifact_verdict.sh` only matches its own rows under `scratch_roots_get_unique`, so these entries return `kept:unproven-content`. Add one row: when the candidate is under a root from a new `scratch_roots_get_volumes` (in `scripts/lib/scratch_roots.sh`) and `rel` matches `^[^./][^/]*/(evidence\|build)/[^./][^/]*$`, return a hard-coded `2880` minutes (48 h), the same way the existing rows hard-code their retentions (`artifact_verdict.sh:176`) | Extends the existing classifier, not a parallel one. Recency, lease, live-cwd, fd, secret and repo checks stay in the same verdict |
 | Is the mount at the root the registered volume? | Checked at removal time. In the `ephemeral` branch of `artifact_removal_verdict`, a candidate under a `scratch_roots_get_volumes` root first runs `volume.py verify-mount <root>`, which is the same UUID identity check `path` uses. A mismatch or error gives `kept:volume-identity` | A different volume at the configured path must never be trusted |
 | Where does the scratch root come from? | `scratch_roots_get_volumes` reads `volumes.classes.*.mountpoint` from the same config file that `scratch_roots_protected` reads, and prints only existing canonical dirs. It is deliberately not part of `scratch_roots_get` | No hardcoded path. Being outside `scratch_roots_get` stops `protected_tmp_roots` basenames (`worldarchitect.ai`, …) from protecting `<mp>/<repo>` |
-| Long-lived owners? | An entry whose `scratch-new` owner process is still alive stays `kept:owner-*`. The `volume_reclaim_stuck` line surfaces this. The remedy is the owner's normal lease expiry or release; no new mechanism is added | Owner protection is a correct C14 gate |
+| Long-lived owners? | Extend `lease_write` with an explicit `--owner-pid PID` option that records both PID and process start identity; retain the caller identity as the default. `scratch-new` writes a lease for its producer, and child processes that continue writing must acquire their own lease before receiving the path. CI integrations must write/release leases around producer lifetime. Reclaim treats a PID whose start identity no longer matches as dead, but keeps entries on identity-read errors. Do not assume an agent lease propagates to detached children | PID reuse cannot release a live producer's lease; integration tests must cover detached children and PID/start identity |
 | Reclaim health? | Each run writes `$STATE/volumes/reclaim_runs.json` (last two runs: `at`, `aged_scanned`, `removed`, top kept reason). `diskm status` prints one line, `volume_reclaim_stuck: aged=N removed=0 runs=2 reason=<r>`, when both runs scanned more than 0 aged entries and removed 0 | Detects a classifier gap before the volume reaches `ENOSPC`. No new daemon |
 | Retention? | 48 h, hard-coded as 2880 in the classifier row; no config read | Matches the existing `pr*` row and how the classifier works |
-| Full-quota recovery? | `create` writes one ballast file, `<mp>/.diskm-ballast` (64 MiB of real bytes). C14 writes a `.dm-quarantine` sidecar before it removes anything, and at the cap that write fails with `ENOSPC`; the primitive reports this as `kept:intent-write-failed` (`scripts/quarantine_rename.py:311-317`). When a C14 removal returns that result, `reclaim` deletes the ballast (`volume ballast release`, logged) and retries that one removal once. C14 safety checks are unchanged. After the run, `volume ballast ensure` recreates the ballast when free space (`quota − used`) is above ballast size + 1 GiB. Reclaim and `delete` enumeration exclude the file by exact name. C14 also creates `.dm-quarantine` before the sidecar (`quarantine_rename.py:288`); an `ENOSPC` there maps to `kept:check-failed`, which does not release the ballast. `scratch-new` therefore pre-creates it for every parent it makes. Pilot 3 (`RESULT.md`) saw `mkdir` and small writes succeed at full quota, so this is defense in depth (the failure is unlikely, not proven impossible). A pre-existing parent without `.dm-quarantine` is not repaired: it reports `kept:check-failed` in the `volume_reclaim_stuck` line | Without it a full volume cannot reclaim itself, and rollback (`retire` → `reclaim --clean` → `delete`) stalls. One fixed file is simpler than a reserve or a second quarantine root |
+| Full-quota recovery? | `create` verifies one 64 MiB ballast file, `<mp>/.diskm-ballast`, before activating the volume. Before any C14 filesystem mutation, reclaim serializes the complete existing inventory intent (preserving unknown fields) and measures its encoded byte length. The supported maximum is 32 MiB; larger or unmeasurable intent fails closed as `kept:intent-too-large`, with no sidecar, rename, or other destructive mutation. If the bounded sidecar write returns `kept:intent-write-failed` from `ENOSPC`, reclaim releases/logs the ballast and retries that same C14 removal once. A second failure remains kept; there is no loop. At run end, `ballast ensure` recreates it when free space is above 65 MiB. Tests prove oversized intent causes no mutation and the real C14 path releases/retries successfully within the 32 MiB bound. The 64 MiB reserve supports the tested bounded intent but cannot guarantee capacity against concurrent writers elsewhere in the APFS container; the bounded retry can still fail safely. `.dm-quarantine` creation failures remain kept and do not release the ballast | Without bounded intent and the retry, a full volume may not reclaim itself; the reserve improves recovery but is not a container-wide capacity guarantee |
 | Quarantined/deferred entries? | Entries left in `.dm-quarantine` count toward the quota, and nothing calls `quarantine_reconcile`. This is an existing gap across all roots and is out of scope. The `volume_reclaim_stuck` line surfaces it | It belongs to the C14 owner, not this design |
 | Cross-volume moves? | Forbidden. Nothing renames or copies between Data and the volume. Quarantine is per-parent, so it stays on the same filesystem. Rollback drains in place | Cross-volume `rename` fails with EXDEV, and a copy would double usage |
 | OS-created dot-dirs? | `reclaim` skips every dot-name. In `delete`'s emptiness check, the contents of the index-only metadata dirs `.Spotlight-V100` and `.fseventsd` are ignored. `.Trashes`, `.TemporaryItems` and `.DocumentRevisions-V100` are ignored only when empty: any entry beneath them makes the volume non-empty. The regular file `.diskm-ballast` at the root is ignored by exact name | macOS creates these dirs on user volumes. Trash, temp items and document revisions can hold user data |
 | Encryption? | Unencrypted, only with explicit user acknowledgment (P-2). The Keychain-passphrase variant needs credential creation and an unlock LaunchAgent, so it is a separate approval-gated follow-up | Keeps automount; scratch is ephemeral |
-| Change the cap? | `recreate scratch --quota-gb N` is exactly `delete scratch` followed by `create scratch`, so there is no second deletion path. `delete` runs only on a **retired** volume, which `scratch-new` no longer allocates from. It requires `retire scratch` first. Its steps, in order: a non-forced `unmount` (fails if anything is open), a read-only remount at a private mountpoint, the emptiness check on that read-only mount, an unmount, then `deleteVolume <uuid>`. Nothing can write after the check | diskutil has no quota verb. The read-only check removes the late-write race |
+| Change the cap? | Deferred from v1. There is no `delete` or `recreate` command. A retired volume remains mounted for inspection; quota changes require a separately scoped follow-up | Avoids adding destructive volume lifecycle behavior to the opt-in v1 |
 | Policy conflict? | Shared policy says scratch goes "strictly to `/tmp`". P-5 asks the user to allow `scratch-new` paths on `/Volumes/diskm-scratch` | That file is owned by the user |
 | Tests? | `diskutil` and `lsof` are injected via `DISK_MAGICIAN_{DISKUTIL,LSOF}_BIN` and a stateful fake. No test creates a volume or asserts permissions on a mounted root | Follows the `DF_BIN`/`DU_BIN` precedent |
 | ZFC? | Not applicable. Every decision is a mechanical gate on measured facts | |
@@ -77,7 +77,7 @@ Out of scope:
             "classes": {"scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": "/Volumes/diskm-scratch"}}}
 ```
 
-**Registry:** `$STATE/volumes/registry.json`, written under flock with atomic replace. A corrupt file fails closed. Each entry holds `{class, name, uuid, container_uuid, quota_bytes, created_at, state: active|retired|deleted}`.
+**Registry:** `$STATE/volumes/registry.json`, written under flock with atomic replace. A corrupt file fails closed. Each entry holds `{class, name, uuid, container_uuid, quota_bytes, created_at, state: active|retired}`.
 
 Every mutation first re-checks identity. All of the following must hold, otherwise the command exits rc 2:
 - the registry UUID equals the `diskutil info` UUID;
@@ -92,11 +92,9 @@ Every mutation first re-checks identity. All of the following must hold, otherwi
 |---|---|
 | `status [--json] [--snapshot]` | Shows volume and container rows, live fit, alarms and the unrouted-`/tmp` audit. The audit lists `/private/tmp/*` entries of 1 GiB or more from the latest existing snapshot, with `measured_at`, or reports `unknown`. It never walks. `--snapshot` omits the audit. Exit codes: 0 healthy, 1 degraded, 2 identity or config error |
 | `plan-fit [--json]` | Live fit (above), with every term and `max_quota_gb_that_fits` |
-| `create scratch [--execute]` | Dry-run by default. Refuses if the encryption acknowledgment is missing (rc 2), an active entry or the name exists (rc 2), the live fit fails (rc 2), or free space is below the alarm floor (rc 75). Runs `addVolume <ctr> APFS diskm-scratch -quota <N>g`, registers the volume as active, then writes the ballast file (`volume ballast ensure`). This is the enabling step |
+| `create scratch [--execute]` | Dry-run by default. Refuses if the encryption acknowledgment is missing (rc 2), an active entry or the name exists (rc 2), the live fit fails (rc 2), or free space is below the alarm floor (rc 75). Runs `addVolume <ctr> APFS diskm-scratch -quota <N>g`, writes and verifies the ballast, then registers the volume as active. If ballast creation or verification fails, the registry remains unavailable. This is the enabling step |
 | `path scratch [--for-reclaim]` | rc 0 prints the mountpoint after verifying identity and that the actual `MountPoint` equals the configured `mountpoint`. rc 75: an entry exists but the volume is unmounted, locked, mismatched or mounted elsewhere. rc 3: no active entry. `--for-reclaim` also accepts a `retired` entry, so retirement stops new allocations while reclaim can still drain the volume. Only `reclaim` uses this flag |
 | `reclaim [--clean]` | The enumerator described above, judged by the extended C14 ephemeral classifier. Dry-run by default. Each removal is logged by the primitive. If a removal returns `kept:intent-write-failed`, it releases the ballast and retries that removal once (see Full-quota recovery); it recreates the ballast at the end of the run when space allows. Each run writes `reclaim_runs.json` |
-| `delete scratch [--execute]` | Gated: it requires `state=retired` and a matching identity (UUID, via the same check `path` uses), and returns rc 2 otherwise. Steps in order:<br>1. Non-forced `diskutil unmount <mp>`. If busy, it returns rc 75 and nothing changes.<br>2. `diskutil mount readOnly -mountPoint $STATE/volumes/ro/<uuid> <uuid>`.<br>3. The emptiness check on that read-only mount (a `find` timeout counts as non-empty).<br>4. `diskutil unmount` the private mount.<br>5. `deleteVolume <uuid>`.<br>6. `state=deleted` and `deletion_log volume delete_volume 0 <mp> "uuid=…"`.<br>If steps 2–4 fail or the volume is non-empty, it unmounts the private mount, runs `diskutil mount <uuid>` (back to the default mountpoint), leaves the state as `retired`, and returns rc 75. Dry-run is the default |
-| `recreate scratch --quota-gb N [--execute]` | Requires a **retired** volume: run `retire scratch` first. If the volume is not retired (active, or no entry), `recreate` stops at `delete`'s gate, prints `not retired: run 'diskm volume retire scratch' first` to stderr, runs no `diskutil` verb, changes nothing and returns rc 2 (also without `--execute`). Otherwise it runs `delete scratch --execute`, then `create scratch --execute` with the new quota. `create` accepts a `deleted` entry. If `create` fails (for example `addVolume` fails), the state stays `deleted` and `path` returns rc 75 |
 | `retire scratch` | Sets state to `retired`. `path` then returns rc 3 and new scratch goes back to `/tmp`, while `path --for-reclaim` still resolves the volume. Nothing is deleted |
 
 **Alarms:**
@@ -137,15 +135,13 @@ The Worktrees volume starts only when all of the following hold:
 | Producers keep writing to Data | Audit plus existing protections; this is stated openly |
 | Volume fills and a build fails | That is the cap working. Admission refuses before creation, and an alarm fires at 90% |
 | Clones and hardlinks are lost on the volume | Measured from rollout bytes; feeds the deferred Worktrees fit |
-| A busy volume blocks `delete` / `recreate` | Never forced; retry later |
+| A retired volume remains allocated after rollback | Retire and drain through C14; keep it mounted for inspection. Volume deletion and quota changes are deferred from v1 |
 | Unencrypted volume | Requires explicit acknowledgment |
 
 **Rollback:**
 1. `retire scratch`. New scratch goes to `/tmp`.
 2. `reclaim --clean` drains the volume under its gates.
-3. `diskm volume delete scratch --execute` runs its read-only emptiness check and, if that passes, deletes the volume and logs it. Raw `diskutil` is never used.
-
-Every step is reversible until the delete. Nothing is copied back.
+3. Keep the retired volume mounted and inspect it. v1 does not delete or recreate volumes; no raw `diskutil` deletion is used.
 
 ## Acceptance criteria
 
@@ -155,15 +151,13 @@ Every step is reversible until the delete. Nothing is copied back.
 - **P2:**
   - `path` returns rc 75 when unmounted.
   - Alarms fire through `disk_usage_alert.sh`.
-  - Spikes S1/S2 are recorded, including the real list of OS dot-dirs.
+  - Spike S1 verifies automount, the unmounted fail-closed path, and the real list of OS dot-dirs. S2 deletion checks are deferred from v1.
 - **P3:**
   - `scratch-new` creates nothing on rc 75.
   - `reclaim` removes an aged eligible entry through the real C14 path (no stub), keeps fresh, leased or live ones, and skips dot-dirs.
   - `diskm status` prints the stuck line after two zero-removal runs.
   - Admission refuses on low headroom.
-  - `delete` ignores OS metadata dirs, refuses when the volume holds any file, and checks on a read-only mount.
-  - `recreate` is `delete` followed by `create`, and returns rc 2 with the retire-first message on a volume that is not retired.
-  - At a full quota, an aged entry is still reclaimed through the real C14 path after the ballast is released; the ballast is recreated when space returns.
+  - At a full quota, a supported-size aged entry is retried once through the real C14 path after the ballast is released; the ballast is recreated when space returns if space permits.
   - The C14 row keeps entries when the mount's UUID mismatches (`kept:volume-identity`).
   - After 24 h live, the audit list is recorded as the success baseline.
 
@@ -173,7 +167,7 @@ Every step is reversible until the delete. Nothing is copied back.
 |---|---|---|
 | P-1 | The user picks a cap that passes the live fit (13.3 GiB today), or frees Data until 30 GiB fits | Real `create` |
 | P-2 | The user acknowledges an unencrypted volume, or approves Keychain encryption as a follow-up | Real `create` |
-| P-3 | The user authorizes 1 GiB spike volumes. S1: the user reboots; record the automount path and the OS dot-dirs, and confirm `/Volumes/<name>` cannot be created by the user while unmounted (EACCES). S2 is resolved by Pilot 2 (`RESULT.md`, section "Pilot 2"): a non-root `diskutil mount readOnly -mountPoint <private dir>` works, `mount` shows it read-only, and writes fail. Re-check on the target machine (non-forced `unmount`/`deleteVolume` refuse while busy; read-only private mount works) | P2 acceptance |
+| P-3 | The user authorizes 1 GiB spike volumes. S1: the user reboots; record the automount path and the OS dot-dirs, and confirm `/Volumes/<name>` cannot be created by the user while unmounted (EACCES). S2, which concerned read-only volume deletion, is deferred with deletion/recreation from v1 | P2 acceptance |
 | P-4 | The diff exceeds 150 production lines: `/cs` and `MERGE APPROVED` are required | Deploy |
 | P-5 | The user amends the shared policy to allow `scratch-new` paths on `/Volumes/diskm-scratch` | Real `create` (the enabling step) |
 | P-6 | `dd` producer repos adopt `scratch-new --kind build` | Capturing `dd` builds |
@@ -192,7 +186,6 @@ No path needs sudo.
   - the fit uses live values (13.3 GiB stated);
   - no `find -newermt` remains (recency uses the canonical helper);
   - no permission assertions are made on mounted roots;
-  - unmount happens before `deleteVolume`;
   - cross-volume moves are forbidden.
 - **Round 3:**
   - The C14 classifier row is added in `c14_ephemeral_retention`.
@@ -201,24 +194,32 @@ No path needs sudo.
   - The reclaim-stuck line is added.
 - **Round 4:**
   - `path --for-reclaim` lets a retired-but-mounted volume drain; the retire→reclaim sequence is tested.
-  - A non-empty `.Trashes`, `.TemporaryItems` or `.DocumentRevisions-V100` blocks `recreate`.
   - The long-lived-owner behavior is documented.
 - **Round 5:**
-  - `recreate` requires a retired volume and uses the `recreating` → `deleted` → `active` states. (superseded in round 6: `recreate` is now `delete` + `create`)
+  - Historical revision 5 proposed volume recreation; revision 10 defers deletion and recreation from v1.
   - Tests cover a concurrent `scratch-new` call and an `addVolume` failure.
   - Retention is hard-coded at 2880.
   - The header is corrected.
   - The quarantine gap is documented.
 - **Round 6:**
-  - Gated `delete` added; `recreate` = `delete` + `create`; rollback uses `delete`.
+  - Historical revision 6 added gated deletion and recreation; revision 10 supersedes this for v1. Rollback now retires and drains without deleting.
   - The late-write race is eliminated by unmounting and checking on a read-only private mount. The window note is removed.
   - The C14 row now verifies the UUID.
 - **Round 7:**
   - Full-quota recovery: the `.diskm-ballast` file, released only on a C14 `ENOSPC` result, with one retry, and recreated when space returns.
   - The admission example is fixed: 29.5/30 GiB refuses for any estimate.
-  - `recreate` requires `retire` first and prints a message, rc 2, otherwise.
-  - S2 is cited from Pilot 2 and kept as a target-machine re-check.
+  - Historical revision 7 required retirement before recreation; revision 10 defers recreation from v1.
+  - Historical S2 cited Pilot 2 for the planned delete flow; revision 10 defers that flow from v1.
 - **Round 8:**
   - `scratch-new` pre-creates `.dm-quarantine` (0700) with each `<repo>/<kind>` parent, so C14's `mkdir` is not the first allocation at the cap. The ballast trigger stays `kept:intent-write-failed` only.
-  - Pilot 3 is cited as the evidence that this is defense in depth.
+  - Pilot 3 is historical evidence only; it does not prove that large sidecars or concurrent APFS-container allocations cannot fail.
 - No placeholders remain.
+
+
+## Revision 10 review resolutions
+
+- C14 intent is explicitly bounded at 32 MiB against a verified 64 MiB reserve. Existing inventory serialization is measured before any filesystem mutation and preserves unknown fields; oversized intent is `kept:intent-too-large` with no destructive action.
+- Ballast recovery is one release and one retry through the real C14 path. A concurrent container-wide allocation can consume headroom, so failure after retry remains kept and is not claimed impossible.
+- Producer lifetime protection requires explicit PID plus process-start identity leases, including detached children and CI producers; agent leases are not assumed to propagate.
+
+- Revision 10 defers `delete` and `recreate` from v1. Rollback is `retire scratch` followed by C14 drain; keep the retired volume mounted for inspection.
