@@ -4,6 +4,7 @@ import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subproc
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
+MAX_INTENT_BYTES = 32 * 1024 * 1024
 # Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
 # Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
 # RENAME_WHITEOUT, which is not an exclusive rename.
@@ -281,6 +282,14 @@ def phase1(path, inv_file, binding_file, deadline=None):
         with open(inv_file) as f: inv = [e for e in json.load(f) if isinstance(e, dict)]
         root = next(e for e in inv if e.get("path") == ".")
         if any(type(root.get(k)) is not int for k in ("dev", "ino")): return "kept:identity-mismatch"
+        # Bound the full recovery record before creating quarantine state. Preserve unknown inventory fields.
+        preview = {"id": "f" * 32, "original": os.path.join(parent, base),
+                   "dev": 9223372036854775807, "ino": 9223372036854775807,
+                   "parent_dev": parent_id[0], "parent_ino": parent_id[1],
+                   "quarantine_dev": 9223372036854775807, "quarantine_ino": 9223372036854775807,
+                   "inventory": inv, "phase": "intent"}
+        if len(json.dumps(preview, separators=(",", ":")).encode("utf-8")) > MAX_INTENT_BYTES:
+            return "kept:intent-too-large"
         path = os.path.join(parent, base)
         pfd = os.open(parent, DIRFL)
         bound_parent = os.fstat(pfd)

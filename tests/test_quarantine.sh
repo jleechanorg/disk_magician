@@ -359,6 +359,13 @@ fixture; run DISK_MAGICIAN_TEST_RENAMEX_SYMBOL=renamex_np_missing
 check 'renamex_np missing: kept:exclusive_rename_unavailable' [ "$OUT" = kept:exclusive_rename_unavailable ]
 check 'renamex_np missing: untouched, no sidecar' bash -c '[[ -f "$1/report.md" && $(ls -A "$2" | wc -l) -eq 0 ]]' _ "$A" "$Q"
 
+# Oversized serialized intent fails before quarantine directory or index mutation.
+prepare_inputs
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x[0]["unknown_preserved"]="x"*(32*1024*1024); json.dump(x,open(sys.argv[1],"w"))' "$INV"
+OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING")"
+check 'oversized intent: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
+check 'oversized intent: artifact remains, no quarantine dir or index entry' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+
 # ENOSPC on the intent sidecar aborts before the rename.
 fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28
 check 'ENOSPC sidecar: kept:intent-write-failed' [ "$OUT" = kept:intent-write-failed ]
