@@ -47,6 +47,7 @@ Commands:
   ledger-freshness       Print OK|STALE|UNKNOWN for the published ledger, accepting a fresh valid partial scan.
   sweeper-health        Check scheduled cleanup and ledger health.
   cleanup-dirs-cleaner   Safely clean /private/var/dirs_cleaner accumulation.
+  evict-fileprovider     Evict fully-uploaded cloud-storage (FileProvider) files back to cloud-only; dry-run unless --clean + FILEPROVIDER_EVICT_APPROVED=1.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
@@ -373,6 +374,9 @@ case "$CMD" in
     ;;
   cleanup_dirs_cleaner|cleanup-dirs-cleaner)
     "$SCRIPT_DIR/scripts/cleanup_dirs_cleaner.sh" "$@"
+    ;;
+  evict_fileprovider|evict-fileprovider)
+    "$SCRIPT_DIR/scripts/evict_fileprovider.sh" "$@"
     ;;
   cleanup_pr_scratch|cleanup-pr-scratch)
     "$SCRIPT_DIR/scripts/cleanup_pr_scratch.sh" "$@"
