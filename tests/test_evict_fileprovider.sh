@@ -83,7 +83,8 @@ out="$(env -u DM_FILEPROVIDER_ALLOW_ANY_ROOT bash "$ROOT/scripts/evict_fileprovi
 fixture
 out="$(bash "$ROOT/disk_magician.sh" evict-fileprovider --root "$D" 2>&1)"
 grep -q '^\[DRY-RUN\]' <<<"$out" && ok "disk_magician.sh dispatches evict-fileprovider" || bad "dispatch: $out"
-bash "$ROOT/disk_magician.sh" help 2>&1 | grep -q 'evict-fileprovider' && ok "help lists evict-fileprovider" || bad "help missing entry"
+helpout="$(bash "$ROOT/disk_magician.sh" help 2>&1)"
+grep -q 'evict-fileprovider' <<<"$helpout" && ok "help lists evict-fileprovider" || bad "help missing entry"
 
 echo "evict_fileprovider: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
