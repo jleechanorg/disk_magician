@@ -219,7 +219,7 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
@@ -235,7 +235,10 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
-    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
+    local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
+    app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
+    return 1
 )
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
 # installed outside the cache (which proves the staged copy is a leftover).
