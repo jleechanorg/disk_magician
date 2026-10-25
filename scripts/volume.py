@@ -339,6 +339,31 @@ def write_ballast(mountpoint: str) -> None:
         raise
 
 
+def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any],
+                     registry_file: Path, lock_handle: Any,
+                     current_registry: dict[str, Any], entry: dict[str, Any],
+                     container: Container) -> int:
+    """Finish only a volume whose exact UUID was recorded after addVolume."""
+    if entry.get("state") == "creating":
+        raise ValueError("creation intent has no verified UUID; manual reconciliation required")
+    if entry.get("state") != "needs_recovery":
+        raise ValueError("volume is already registered")
+    volume = validate_entry(container, settings, entry)
+    mountpoint = scratch["mountpoint"]
+    if not ballast_ok(mountpoint):
+        if os.path.lexists(ballast_path(mountpoint)):
+            raise ValueError("ballast path exists but is not valid")
+        used = require_nonnegative(volume.used, "volume usage")
+        quota = require_positive(volume.quota, "volume quota")
+        if quota - used < BALLAST_RECREATE_FREE_BYTES:
+            raise ValueError("insufficient free quota to restore ballast")
+        write_ballast(mountpoint)
+    entry["state"] = "active"
+    entry["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_registry(registry_file, lock_handle, current_registry)
+    return 0
+
+
 def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[str, Any], dict[str, Any], Volume]:
     settings, scratch = cls(name)
     entries = registry()["volumes"]
@@ -426,16 +451,19 @@ def create_cmd(name: str, execute: bool = False) -> int:
     mountpoint = scratch["mountpoint"]
     if sys.platform == "darwin" and mountpoint != f"/Volumes/{scratch['name']}":
         return 2
-    if os.path.lexists(mountpoint):
-        return 75
-
     try:
         container = load_container()
         registry_file, lock_handle = locked_registry()
         try:
             current_registry = registry()
-            if name in current_registry["volumes"]:
-                return 2
+            existing = current_registry["volumes"].get(name)
+            if isinstance(existing, dict):
+                if not execute:
+                    return 2
+                return recover_creation(name, settings, scratch, registry_file,
+                                        lock_handle, current_registry, existing, container)
+            if os.path.lexists(mountpoint):
+                return 75
             if any(volume.name == scratch["name"] for volume in container.volumes):
                 return 2
             fit = fit_result(container)
@@ -454,6 +482,19 @@ def create_cmd(name: str, execute: bool = False) -> int:
             if free < settings["alarm_floor_gb"] * GIB:
                 return 75
 
+            current_registry["volumes"][name] = {
+                "class": name,
+                "name": scratch["name"],
+                "container_uuid": container.uuid,
+                "mountpoint": mountpoint,
+                "quota_bytes": scratch["quota_gb"] * GIB,
+                "state": "creating",
+                "intent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            save_registry(registry_file, lock_handle, current_registry)
+            registry_file, lock_handle = locked_registry()
+            current_registry = registry()
+
             run_diskutil([
                 "apfs", "addVolume", container.ref, "APFS", scratch["name"],
                 "-quota", str(scratch["quota_gb"] * GIB),
@@ -470,17 +511,17 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 "container_uuid": updated.uuid,
                 "mountpoint": mountpoint,
                 "quota_bytes": scratch["quota_gb"] * GIB,
+                "state": "needs_recovery",
+                "intent_at": current_registry["volumes"][name]["intent_at"],
             }
             validate_entry(updated, settings, provisional)
-            write_ballast(mountpoint)
-
-            current_registry["volumes"][name] = {
-                **provisional,
-                "state": "active",
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
+            current_registry["volumes"][name] = provisional
             save_registry(registry_file, lock_handle, current_registry)
-            return 0
+            registry_file, lock_handle = locked_registry()
+            current_registry = registry()
+            return recover_creation(name, settings, scratch, registry_file,
+                                    lock_handle, current_registry,
+                                    current_registry["volumes"][name], updated)
         finally:
             if not lock_handle.closed:
                 lock_handle.close()

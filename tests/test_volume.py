@@ -368,7 +368,38 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         with mock.patch.object(volume, "write_ballast", side_effect=self.write_sparse_ballast):
             self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
         registry_path, _ = volume.registry_paths()
-        self.assertFalse(registry_path.exists())
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual(entry["state"], "needs_recovery")
+        self.assertEqual(entry["uuid"], "SCRATCH-UUID")
+
+    def test_create_retries_exact_recorded_volume_after_ballast_failure(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        with mock.patch.object(volume, "write_ballast", side_effect=RuntimeError("injected")):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        registry_path, _ = volume.registry_paths()
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual((entry["state"], entry["uuid"]), ("needs_recovery", "SCRATCH-UUID"))
+        calls_before = self.calls_file.read_text().count("addVolume")
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        self.assertEqual(self.calls_file.read_text().count("addVolume"), calls_before)
+        active = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual(active["state"], "active")
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_create_refuses_ambiguous_intent_without_uuid(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        path, _ = volume.registry_paths()
+        path.write_text(json.dumps({"schema_version": 1, "volumes": {
+            "scratch": {"state": "creating", "class": "scratch", "name": "diskm-scratch",
+                        "container_uuid": "CONTAINER-UUID", "mountpoint": str(self.mp),
+                        "quota_bytes": 30 * 2**30}
+        }}))
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        self.assertFalse(self.calls_file.exists())
 
     def write_sparse_ballast(self, mountpoint):
         path = volume.ballast_path(mountpoint)
