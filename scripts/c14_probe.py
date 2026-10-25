@@ -952,7 +952,7 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
-SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
+SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credential(?!services)(?-i:s|S(?![a-z])).*|secrets.*)$", re.I)
 _TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
 _DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
@@ -972,6 +972,8 @@ def exempt_name(path):
         return True
     if _never(n):
         return False
+    if not SECRET_RE.fullmatch(parts[-1]):
+        return True
     comps = {c.lower() for c in parts[:-1]}
     dep = bool(_DEP_DIRS & comps)
     stripped = n
@@ -992,14 +994,21 @@ def _xcode_generated(q):
     return top in ("build", "logs") or top.endswith(".noindex") or top.startswith("modulecache") \
         or q.lower().startswith("sourcepackages/checkouts/")
 
+def _xcode_device_support_generated(q):
+    """Extracted device system symbols inside an iOS DeviceSupport root."""
+    return q.lower().startswith("symbols/")
+
 def secrets(inv_file, kind=""):
     try:
+        kind = os.environ.get("C14_SECRET_KIND") or kind
         entries = json.load(open(inv_file, encoding="utf-8"))
         paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
         if kind == "xcode-derived-data":
             # Generated names such as NativeRequestCredentials.o are not secrets; anything
             # else in the root (a .env, secrets.json, *.p12) still is.
             paths = (q for q in paths if not _xcode_generated(q))
+        elif kind == "xcode-device-support":
+            paths = (q for q in paths if not _xcode_device_support_generated(q))
         print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
