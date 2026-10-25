@@ -122,6 +122,14 @@ class StatusAndBallastTest(VolumeTestBase):
         self.state.write_text(json.dumps(data))
         self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
 
+    def test_reclaim_clean_dispatches_to_shared_implementation(self):
+        completed = type("Completed", (), {"returncode": 17})()
+        with mock.patch.object(volume.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(volume.main(["reclaim", "--clean"]), 17)
+        command = run.call_args.args[0]
+        self.assertEqual(command[0:2], ["bash", str(ROOT / "scripts" / "volume_reclaim.sh")])
+        self.assertEqual(command[-1], "--clean")
+
     def test_status_reports_identity_measurements_and_high_water_alarm(self):
         self.make_fit()
         data = json.loads(self.state.read_text())

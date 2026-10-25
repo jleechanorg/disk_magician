@@ -631,6 +631,15 @@ def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
     }
 
 
+def reclaim_cmd(clean: bool = False) -> int:
+    script = Path(__file__).resolve().parent / "volume_reclaim.sh"
+    arguments = ["bash", str(script)]
+    if clean:
+        arguments.append("--clean")
+    result = subprocess.run(arguments, check=False)
+    return result.returncode
+
+
 def verify_mount(root: str) -> int:
     try:
         settings, _ = cls("scratch")
@@ -649,6 +658,8 @@ def main(argv: list[str] | None = None) -> int:
             return path_cmd(arguments[1], "--for-reclaim" in arguments[2:])
         if arguments[:1] == ["verify-mount"] and len(arguments) > 1:
             return verify_mount(arguments[1])
+        if arguments[:1] == ["reclaim"]:
+            return reclaim_cmd("--clean" in arguments[1:])
         if arguments[:1] in (["fit"], ["plan-fit"]):
             print(json.dumps(fit_result(), sort_keys=True))
             return 0
