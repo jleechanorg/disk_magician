@@ -3,12 +3,14 @@ import json
 import os
 import pathlib
 import tempfile
+import sys
 import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("volume", ROOT / "scripts" / "volume.py")
 volume = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = volume
 spec.loader.exec_module(volume)
 
 class VolumeTestBase(unittest.TestCase):

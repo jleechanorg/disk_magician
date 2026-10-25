@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Opt-in, fail-closed APFS quota-volume helpers used by diskm."""
+from __future__ import annotations
 import fcntl
 import json
 import os
