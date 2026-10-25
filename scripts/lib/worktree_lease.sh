@@ -144,7 +144,11 @@ _lease_admin_info() {
     gitdir="${line#gitdir:}"
     gitdir="${gitdir# }"
     [[ -n "$gitdir" && -d "$gitdir" ]] || { printf -- '-\t-\n'; return 0; }
-    birth="$(stat -f %B "$gitdir" 2>/dev/null || stat -c %W "$gitdir" 2>/dev/null || echo 0)"
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        birth="$(stat -f %B "$gitdir" 2>/dev/null || echo 0)"
+    else
+        birth="$(stat -c %W "$gitdir" 2>/dev/null || echo 0)"
+    fi
     printf '%s\t%s\n' "${gitdir##*/}" "$birth"
 }
 

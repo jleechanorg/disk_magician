@@ -83,6 +83,15 @@ assert_eq "$(lease_field "$OUT" source)" "git:https://example.invalid/o/myrepo.g
 assert_contains "$(cat "$T/admit.log")" "--class worktrees --est-gb 3" "admit class worktrees with --est-gb"
 assert_eq "$(lease_field "$OUT" producer)" scratch-new "default producer"
 
+echo "== lease failure: scratch-new fails closed without handing out path =="
+OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
+[[ "$RC" != 0 ]] && ok "lease failure is non-zero" || bad "lease failure returned success"
+ERR="$(cat "$T/err")"
+assert_eq "$OUT" "" "lease failure emits no path"
+assert_contains "$ERR" "lease write failed" "lease failure diagnosed"
+LEASE_FAIL_PATH="$(find "$STANDARD_WORKTREE_ROOT/myrepo" -mindepth 1 -maxdepth 1 -type d -name 'scratch-lease-fail-*' | head -n 1)"
+[[ -n "$LEASE_FAIL_PATH" && -d "$LEASE_FAIL_PATH" ]] && ok "failed lease leaves created worktree available for recovery" || bad "failed lease worktree missing"
+
 echo "== bad purpose / escaping root -> rc 2, nothing admitted =="
 for p in ../x Bad_Purpose "" "$(printf 'a%.0s' {1..41})"; do
     run 0 "$T/myrepo" "$p" --detach HEAD
@@ -143,7 +152,7 @@ EOF
 chmod +x "$T/bin/gcloud" "$T/bin/gcs-stat"
 export DISK_MAGICIAN_STAT_BIN="$T/bin/gcs-stat"
 # The cloud-object fake must never be reachable as `stat`: the lease library
-# shells out to the real `stat -f %B` for the git admin dir birth. Probe that
+# shells out to the real platform-specific stat birth-time call for the git admin dir. Probe that
 # under the same PATH evidence-push uses. A shadowing `stat` loses the birth.
 echo "== lease birth uses the OS stat, not the cloud-object fake =="
 git -C "$T/myrepo" worktree add -q -b birth-probe "$T/birth-wt" HEAD 2>/dev/null || bad "admin-birth fixture setup"

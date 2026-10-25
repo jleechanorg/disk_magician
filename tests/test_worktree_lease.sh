@@ -261,9 +261,9 @@ WT9="$(mk_wt wt_admin)"
 seed_comm "$TESTPID" 400 bash
 lease_write "$WT9" "myrepo" "fix/z" "worktree-new"
 L9="$(lease_path_for "$WT9")"
-ADMIN_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"
+if [[ $(uname -s) == Darwin ]]; then ADMIN_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"; else ADMIN_BIRTH="$(stat -c %W "$TMPROOT/.gitadmin/wt_admin")"; fi
 assert_eq "$(lease_field "$L9" 'd["admin_id"]')" "wt_admin" "admin_id from admin dir name"
-assert_eq "$(lease_field "$L9" 'd["admin_birth_epoch"]')" "$ADMIN_BIRTH" "admin_birth_epoch from stat -f %B"
+assert_eq "$(lease_field "$L9" 'd["admin_birth_epoch"]')" "$ADMIN_BIRTH" "admin_birth_epoch from platform stat birth time"
 if lease_matches_incarnation "$L9"; then ok "incarnation matches -> rc 0"; else bad "incarnation should match"; fi
 # recreate the admin dir -> new birth time -> stale lease
 rm -rf "$TMPROOT/.gitadmin/wt_admin"
@@ -273,7 +273,7 @@ sleep 1
 rm -rf "$TMPROOT/.gitadmin/wt_admin"      # ensure creation time moves
 mkdir -p "$TMPROOT/.gitadmin/wt_admin"
 : > "$TMPROOT/.gitadmin/wt_admin/HEAD"
-NEW_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"
+if [[ $(uname -s) == Darwin ]]; then NEW_BIRTH="$(stat -f %B "$TMPROOT/.gitadmin/wt_admin")"; else NEW_BIRTH="$(stat -c %W "$TMPROOT/.gitadmin/wt_admin")"; fi
 if lease_matches_incarnation "$L9"; then bad "recreated admin dir still matches (stale lease undetected)"; else ok "recreated admin dir -> no match (rc 1)"; fi
 
 echo "== lease_matches_incarnation: legacy fallback and strict checkout identity =="

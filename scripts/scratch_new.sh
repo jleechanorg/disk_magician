@@ -50,8 +50,11 @@ sn_main() {
         return 1
     fi
     admit_confirm_created
-    declare -F lease_write >/dev/null 2>&1 && { lease_write "$path" "$repo" "" scratch-new --kind "$kind" \
-        --producer scratch-new ${src:+--source "$src"} >/dev/null 2>&1 || echo "scratch-new: lease write failed: $path" >&2; }
+    if ! declare -F lease_write >/dev/null 2>&1 || ! lease_write "$path" "$repo" "" scratch-new --kind "$kind" \
+        --producer scratch-new ${src:+--source "$src"} >/dev/null 2>&1; then
+        echo "scratch-new: lease write failed: $path" >&2
+        return 1
+    fi
     printf '%s\n' "$path"
 }
 
