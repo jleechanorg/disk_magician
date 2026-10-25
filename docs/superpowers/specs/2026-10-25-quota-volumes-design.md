@@ -1,6 +1,6 @@
 # Opt-in quota'd Scratch volume (`diskm volume`)
 
-Date: 2026-10-25. This is revision 12, updated after the pilot acceptance correction and Codex review of revision 11. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
+Date: 2026-10-25. This is revision 13, updated after Codex review of revision 12. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
 
 ## Outcome
 
@@ -107,7 +107,7 @@ Every mutation first re-checks identity. All of the following must hold, otherwi
 
 Alarms surface through `status` rc 1, the snapshot rows, and one added check in `disk_usage_alert.sh` that uses its existing notify and silence path. No new LaunchAgent.
 
-**Admission:** when `--dest` is on the volume and current use is ≥90%, `diskm admit` requests the same bounded reclaim once, remeasures, then makes its final decision. No loop. If `quota − used − est < 1 GiB`, it refuses (rc 75, `volume_full:scratch`); otherwise admission succeeds. Reclaim failure or unmeasurable/stale status fails closed. The Data zone check is unchanged. `scratch-new` follows the same one-reclaim rule before path handoff and creates/prints no path if usage remains at high water. Neither operation guarantees against concurrent container-wide allocation or later producer `ENOSPC`.
+**Admission:** when `--dest` is on the volume and current use is ≥90%, `diskm admit` requests the same bounded reclaim once and remeasures; no loop. If the fresh usage is still ≥90%, it refuses (rc 75, `volume_full:scratch`) regardless of estimated headroom. Otherwise it applies the existing `quota − used − est ≥ 1 GiB` admission rule; insufficient headroom refuses with the same result. Reclaim failure or unmeasurable/stale status fails closed. The Data zone check is unchanged. `scratch-new` follows the same one-reclaim rule before path handoff and creates/prints no path if usage remains at high water. Neither operation guarantees against concurrent container-wide allocation or later producer `ENOSPC`.
 
 **Attribution** follows the sibling contract (`2026-10-24-directory-inventory-growth-ledger-design.md`):
 - Volume row: `{host_id, filesystem_id: <uuid>, kind: "filesystem", source: "apfs_volume", path: <mp>, class, allocated_bytes: CapacityInUse, quota_bytes, measured_at, status, attribution: "exclusive_exact"}`.
@@ -224,6 +224,11 @@ No path needs sudo.
 - The earlier volume pilot created three disposable volumes and tested 1 GiB/200 MiB/100 MiB primitives once; it did not test automatic trim under pressure, multi-entry oldest-first behavior, measured low-water recovery, or writes resuming. It is not automatic-trim pilot evidence.
 - Keep 48 h C14 age eligibility. Among eligible whole disposable entries, order by ascending newest content mtime and stop after the 80% low-water target once reclaim was triggered at 90%. This is a last-modified proxy, not true access-time LRU; current paths do not record reads/access events.
 - Required pilot uses only disposable test artifacts and the existing scheduled sweep job / `tmp_scratch_sweep.sh` path; it triggers automatically (no manual reclaim or direct sweep invocation). A test-only accelerated cadence is allowed. Measure recovery within configured cadence plus one sweep runtime and disclose that a producer may receive `ENOSPC` before the next sweep. Protected/leased candidates survive, all-protected fails safe, and no production-volume creation or arbitrary user-data deletion is authorized.
+
+### Revision 13 Codex review resolutions
+
+- At admission, if one high-water-triggered reclaim leaves fresh usage ≥90%, refuse regardless of estimated headroom; below 90%, apply the existing 1 GiB headroom rule.
+- Separate deterministic fake-volume unit tests from the required disposable macOS/APFS scheduled pilot; pilot results gate production activation.
 
 ### Revision 12 automatic-trim and admission requirements
 

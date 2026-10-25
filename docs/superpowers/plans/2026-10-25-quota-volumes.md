@@ -269,13 +269,14 @@ Deletion-specific read-only mount checks (S2) are deferred with volume deletion/
 ### Task 10: Admission volume headroom
 
 **Files:**
-- Modify `scripts/disk_budget.py`, admit path (around line 1018): when the dest realpath is under the scratch `<mp>` and current use is ≥90%, request `diskm volume reclaim --clean` once, then remeasure and make the final decision. Do not loop. If `quota − used − est < 1 GiB`, return rc 75 with `volume_full:scratch`; otherwise allow admission. Reclaim failure or a stale/unmeasurable quota fails closed.
+- Modify `scripts/disk_budget.py`, admit path (around line 1018): when the dest realpath is under the scratch `<mp>` and current use is ≥90%, request `diskm volume reclaim --clean` once, then remeasure; do not loop. If fresh use remains ≥90%, return rc 75 with `volume_full:scratch` regardless of estimated headroom. Otherwise apply the existing admission rule: `quota − used − est ≥ 1 GiB` admits; less than 1 GiB returns rc 75. Reclaim failure or stale/unmeasurable quota fails closed.
 - Tests in `tests/test_disk_budget.py` and `tests/test_admit.sh`: prove high-water admission invokes reclaim at most once then remeasures, enough headroom admits, insufficient headroom rejects, and unavailable/unmeasurable status fails closed.
 
 **Steps:**
 1. **Failing test:**
-   - 29.5/30 GiB used gives rc 75 (`volume_full:scratch`) for both `est=1` and `est=0.1`, because the headroom is 0.5 GiB, which is below 1 GiB.
-   - 20/30 GiB used with `est=0.1` gives rc 0.
+   - At 29.5/30 GiB, even `est=0.1` refuses if one reclaim leaves fresh use ≥90%; remaining high water takes precedence over headroom.
+   - If one reclaim takes 29.5/30 below 90% to 26/30, `est=2` admits (2 GiB headroom) and `est=2.1` refuses (0.9 GiB headroom).
+   - Below 90%, 20/30 GiB with `est=0.1` admits. Prove the final decision uses the post-reclaim measurement, and reclaim is called at most once.
 2. **RED:** `python3 -m unittest discover -s tests -p 'test_disk_budget.py' -k volume -v`.
 3. **Implement.**
 4. **GREEN**, plus `bash tests/test_admit.sh`, plus regression.
@@ -347,7 +348,7 @@ Today `scratch_budget_quarantine_remove` runs C14 with `--kind ephemeral`. Its c
    - (o) An intent larger than 32 MiB and an unmeasurable serialized intent both return `kept:intent-too-large`; assert the candidate, parent, `.dm-quarantine`, sidecar and deletion log are unchanged.
    - (p) Lease tests cover compatible legacy single-owner reads plus concurrent `owners` entries. Parent and child add owners simultaneously; neither overwrites the other. Either alive owner blocks reclaim, unknown identity blocks, and only all-dead permits removal. Cover child exit, PID/start mismatch, read errors and CI acquire/release. Release removes only the caller owner and leaves other owners intact.
    - (r) Force producer lease acquisition failure in `scratch-new`; assert nonzero exit, empty stdout (no path handoff), and no downstream path use. Successful producer lease acquisition must precede path output.
-   - (s) Automatic-trim pilot on a disposable test-only quota volume: configure the existing scheduled sweep job (the same `tmp_scratch_sweep.sh` entry point used hourly) and let it trigger automatically; an accelerated documented test schedule is allowed, but the operator must not invoke `diskm volume reclaim` or call the sweep directly to satisfy acceptance. Fill with eligible ≥48 h aged whole artifacts to ≥90%, keeping a leased/protected artifact. Assert exact ordered removals (oldest newest-content-mtime first), protected artifact survives, usage is remeasured after each removal, trim stops at ≤80%, and a new disposable `scratch-new`-routed write succeeds afterward. Bound recovery to the configured schedule interval plus one sweep runtime; record both. A producer can still receive `ENOSPC` before the next scheduled run. In the all-protected variant, assert no deletion and an explicit target-not-reached result; no false write-recovery claim. This test/pilot is required for acceptance; earlier one-time primitive pilot is insufficient. Use only disposable test artifacts; never create a production volume or select arbitrary user data.
+   - (s) With the fake volume at ≥90%, verify pressure-triggered ordering, one-at-a-time remeasurement, the ≤80% stop, protected retention, and explicit target-not-reached when all candidates are protected. This is a deterministic fake-volume unit case only; it does not satisfy the separate macOS/APFS pilot or release gate in Task 14.
 
    Also add these tests:
    - `test_scratch_roots.sh`: `scratch_roots_get_volumes` prints `<mp>` only when it exists, and `scratch_roots_get` does not include it.
@@ -389,9 +390,12 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 **TDD: N/A.** This is release and deploy.
 
 **Verification before release:**
+- The separate disposable macOS/APFS automatic-trim pilot below passes and its measured results are recorded; fake-volume unit tests do not substitute for it.
 - `check-version` and `sync-package-tree --check` pass.
 - `/cs` passes.
 - `MERGE APPROVED` is given.
+
+**Separate macOS/APFS acceptance pilot (required before production activation):** This is an empirical platform pilot, not part of `tests/test_volume_reclaim.sh` and not replaceable by fake-volume tests. On a disposable test-only APFS quota volume, configure the existing scheduled sweep entry point (an accelerated documented schedule is allowed), fill with eligible ≥48 h disposable whole artifacts to measured ≥90%, and wait for the schedule to trigger automatically. Do not invoke manual `reclaim` or the sweep directly as the acceptance trigger. Verify exact oldest-content-mtime removals, remeasurement after each removal, ≤80% measured use, survival of leased/protected content, and a successful new `diskm scratch-new`-routed write. Record schedule interval, one sweep runtime, total recovery bound, before/after quota use, and the routed write result. Repeat with all candidates protected and verify no deletion plus explicit target-not-reached. A producer may receive `ENOSPC` before the next scheduled run. Use no production volume or arbitrary user data; if this pilot has not passed, do not activate the production volume.
 
 **Steps:**
 1. Bump `pyproject.toml` above the `origin/main` version.
@@ -419,8 +423,8 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | 7 | RED (two tests) → impl → GREEN → commit |
 | 8 | TDD: N/A (platform spike); verify S1 automount, OS dot-dirs and fail-closed unmounted path [COND P-3] |
 | 9 | RED → impl → GREEN → commit; rc 75 creates nothing; every created parent has a 0700 `.dm-quarantine` (case e) |
-| 10 | RED → impl → GREEN + `test_admit.sh` → commit; 29.5/30 GiB refuses for est 1 and 0.1, 20/30 admits |
-| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: typed ENOSPC on C14 sidecar alone releases ballast, one retry through real path removes aged entry, fresh/live/leased kept, EIO does not release, ballast recreated only at >=1,088 MiB, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q); pressure mode tests 90% trigger/80% stop, oldest eligible content-mtime ordering, remeasurement, protected retention, target-not-reached reporting; case (s) proves disposable fill/sweep/recovery/routed-write pilot and all-protected fail-safe |
+| 10 | RED → impl → GREEN + `test_admit.sh` → commit; after one reclaim, ≥90% still refuses; below 90%, independent 1 GiB headroom check applies (26/30 admits est 2, refuses est 2.1) |
+| 11 | RED (script missing, then `kept:unproven-content` before the classifier row) → impl → GREEN + artifact_verdict/scratch_budget/quarantine/large-protections/deletion-log regressions → commit; real C14 removal of an aged entry; fresh/live/leased kept; dot-dirs skipped; row scoped to the volume; retire→reclaim drains; UUID mismatch → `kept:volume-identity`; stuck line in `diskm status`; full quota: typed ENOSPC on C14 sidecar alone releases ballast, one retry through real path removes aged entry, fresh/live/leased kept, EIO does not release, ballast recreated only at >=1,088 MiB, no retry loop; mkdir `ENOSPC` hook: pre-created parent removes normally, a parent lacking `.dm-quarantine` reports `kept:check-failed` without releasing the ballast (case q); pressure mode tests 90% trigger/80% stop, oldest eligible content-mtime ordering, remeasurement, protected retention, target-not-reached reporting; case (s) proves fake-volume pressure ordering/remeasurement/stop and all-protected fail-safe; the separate Mac/APFS scheduled pilot is a Task 14 release gate |
 | 12 | RED → impl → GREEN → commit; no-walk stub |
 | 13 | Deferred from v1: no RED/implementation/acceptance tests for volume deletion, read-only remount checks, or quota recreation. Rollback remains retire + C14 drain; keep the volume mounted for inspection. Re-scope separately before implementation |
 | 14 | TDD: N/A (release/deploy); verified by fit output, status JSON and rollout evidence |
@@ -443,7 +447,8 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | Web-advice | Unmount before delete | Superseded: deletion deferred from v1 |
 | Web-advice | No cross-volume rename | (forbidden by design) |
 | Codex (round 11) | Concurrent multi-owner leases, fail-closed scratch path handoff, one 1,088 MiB ballast threshold, typed ENOSPC result, physical allocation tests | Tasks 4, 9 and 11 |
-| User acceptance correction (round 12) | Automatic pressure-triggered trim, oldest eligible whole disposable artifact ordering, low-water stop, protected preservation, recovered-space write-resume pilot | Task 11 case (s), existing hourly sweep; only last-modified proxy is available, not access-time LRU |
+| User acceptance correction (round 12) | Automatic pressure-triggered trim, oldest eligible whole disposable artifact ordering, low-water stop, protected preservation, recovered-space write-resume pilot | Task 11 fake-volume pressure case (s) plus separate Task 14 Mac/APFS scheduled pilot; only last-modified proxy is available, not access-time LRU |
+| Codex (round 13) | Admission precedence after one reclaim; separate real Mac/APFS scheduled pilot is a release gate | Task 10 and Task 14; fake-volume case (s) is unit evidence only |
 | Codex (round 7, superseded by revision 11) | Full-quota recovery: ballast released on C14 `ENOSPC`, one retry, recreated | Tasks 4 and 11 (case l, m) |
 | Codex + Opus (round 8) | `.dm-quarantine` mkdir `ENOSPC` maps to `kept:check-failed`: `scratch-new` pre-creates it (Pilot 3 cited, defense in depth) | Tasks 9 and 11 (case q) |
 | Codex (round 7) | Admission example contradicted the 1 GiB headroom rule | Task 10 |
@@ -452,6 +457,6 @@ Revision 10 removes deletion and recreation from v1. Rollback is `retire scratch
 | — | Success measure (unrouted audit) | Tasks 12 and 14 |
 
 **Other checks:**
-- No test touches real volumes.
+- Shell/unit tests use fake volumes only. The separate disposable macOS/APFS scheduled pilot is empirical acceptance evidence, not a unit test; it must complete before production volume activation.
 - Every deleter logs.
 - No placeholders.
