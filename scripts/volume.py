@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import plistlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -306,15 +307,45 @@ def ballast_path(mountpoint: str) -> Path:
 def ballast_ok(mountpoint: str) -> bool:
     path = ballast_path(mountpoint)
     try:
-        details = path.stat()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return False
-    return (
-        path.is_file()
-        and not path.is_symlink()
-        and details.st_size == BALLAST_BYTES
-        and details.st_blocks * 512 >= BALLAST_BYTES
-    )
+    try:
+        details = os.fstat(descriptor)
+        return (stat.S_ISREG(details.st_mode)
+                and details.st_size == BALLAST_BYTES
+                and details.st_blocks * 512 >= BALLAST_BYTES)
+    finally:
+        os.close(descriptor)
+
+
+def unlink_ballast_verified(mountpoint: str) -> bool:
+    path = ballast_path(mountpoint)
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return False
+    try:
+        try:
+            file_fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                              dir_fd=directory_fd)
+        except OSError:
+            return False
+        try:
+            opened = os.fstat(file_fd)
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_size != BALLAST_BYTES
+                    or opened.st_blocks * 512 < BALLAST_BYTES):
+                return False
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                return False
+            os.unlink(path.name, dir_fd=directory_fd)
+            return True
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def write_ballast(mountpoint: str) -> None:
@@ -409,7 +440,10 @@ def log_ballast_release(path: Path, volume_uuid: str) -> None:
 
 
 def ballast_cmd(action: str, name: str) -> int:
+    registry_file = None
+    lock_handle = None
     try:
+        registry_file, lock_handle = locked_registry()
         container, settings, entry, volume = exact_entry(name, {"active", "retired"})
         mountpoint = settings["classes"]["scratch"]["mountpoint"]
         path = ballast_path(mountpoint)
@@ -425,14 +459,17 @@ def ballast_cmd(action: str, name: str) -> int:
             write_ballast(mountpoint)
             return 0 if ballast_ok(mountpoint) else 75
         if action == "release":
-            if not ballast_ok(mountpoint):
+            if not unlink_ballast_verified(mountpoint):
                 return 75
-            path.unlink()
+            path = ballast_path(mountpoint)
             log_ballast_release(path, volume.uuid)
             return 0
         raise ValueError("unknown ballast action")
     except Exception:
         return 75
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
 
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:

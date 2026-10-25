@@ -244,6 +244,29 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertIn("release_ballast", log.read_text())
         self.assertIn("SCRATCH-UUID", log.read_text())
 
+    def test_ballast_release_detects_replacement_before_final_identity_check(self):
+        self.make_fit()
+        ballast = self.mp / ".diskm-ballast"
+        original_stat = volume.os.stat
+        sentinel = self.root / "sentinel"
+        sentinel.write_text("preserve me")
+        swapped = False
+
+        def swap_before_identity_check(path, *args, **kwargs):
+            nonlocal swapped
+            if path == ballast.name and kwargs.get("dir_fd") is not None and not swapped:
+                swapped = True
+                ballast.rename(self.mp / "original-ballast")
+                ballast.symlink_to(sentinel)
+            return original_stat(path, *args, **kwargs)
+
+        with mock.patch.object(volume.os, "stat", side_effect=swap_before_identity_check):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertTrue(swapped)
+        self.assertTrue(ballast.is_symlink())
+        self.assertEqual(sentinel.read_text(), "preserve me")
+        self.assertTrue((self.mp / "original-ballast").is_file())
+
     def test_create_requires_unencrypted_acknowledgment(self):
         config = json.loads(self.config.read_text())
         config["volumes"]["encryption_acknowledged_at"] = None
