@@ -297,6 +297,9 @@ case "$CMD" in
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
     ;;
+  volume)
+    exec python3 "$SCRIPT_DIR/scripts/volume.py" "$@"
+    ;;
   main-sweeper|sweep)
     exec bash "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
     ;;

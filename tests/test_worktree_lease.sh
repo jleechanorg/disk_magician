@@ -512,6 +512,42 @@ if lease_prune_birth_audit_scratch; then ok "lease_prune_birth_audit_scratch rc 
 [[ -f "$L_BADHASH" ]] && ok "hash-mismatched lease filename preserved" || bad "hash-mismatched lease filename was pruned"
 [[ -f "$L_NULPATH" ]] && ok "embedded-NUL path lease preserved without aborting scan" || bad "embedded-NUL path lease was pruned"
 
+echo "== multi-owner lease lifecycle =="
+WT10="$(mk_wt wt_multi)"
+lease_write "$WT10" myrepo fix/multi test
+L10="$(lease_path_for "$WT10")"
+seed_comm 700 1 codex
+seed_lstart 700 "$OWNER_LSTART"
+seed_args 700 "/usr/bin/codex"
+if lease_owner_add "$WT10" 700 "$OWNER_EPOCH" codex; then ok "child owner appended"; else bad "child owner append failed"; fi
+assert_eq "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["owners"]))' "$L10")" "2" "both parent and child owners retained"
+assert_eq "$(lease_owner_state "$L10")" "alive" "live child keeps lease alive"
+if lease_release "$WT10"; then ok "parent owner release succeeds"; else bad "parent owner release failed"; fi
+assert_eq "$(lease_owner_state "$L10")" "alive" "child remains protective after parent release"
+lease_resolve_owner() { printf "700\t%s\tcodex\n" "$OWNER_EPOCH"; }
+if lease_release "$WT10"; then ok "child owner release succeeds"; else bad "child owner release failed"; fi
+unset -f lease_resolve_owner
+assert_eq "$(lease_owner_state "$L10")" "released" "lease released only after all owners release"
+
+echo "== session release is owner-scoped =="
+WT11="$(mk_wt wt_session_multi)"
+lease_resolve_owner() { printf "400\t%s\tbash\n" "$OWNER_EPOCH"; }
+lease_write "$WT11" myrepo fix/session test
+L11="$(lease_path_for "$WT11")"
+python3 - "$L11" "$OWNER_EPOCH" <<'PYSESSIONSEED'
+import json,sys
+p,ep=sys.argv[1:]
+d=json.load(open(p)); parent=d["owner"]
+parent["session"]="session-parent"
+child={"pid":700,"start_epoch":int(ep),"comm":"codex","session":"session-child"}
+d["owners"]=[parent,child]
+json.dump(d,open(p,"w"))
+PYSESSIONSEED
+lease_release_owner_session session-parent 400 "$OWNER_EPOCH" >/dev/null
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(bool(d["owners"][0].get("released_at")), bool(d["owners"][1].get("released_at")), bool(d.get("released_at")))' "$L11")" "True False False" "session release releases only matching owner"
+lease_release_owner_session session-child 700 "$OWNER_EPOCH" >/dev/null
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(bool(d.get("released_at")))' "$L11")" "True" "global release set only after all session owners release"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

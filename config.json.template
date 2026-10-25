@@ -873,6 +873,16 @@
   ],
   "gc_worktree_repos": [],
   "downloads_evidence_patterns": [],
+  "volumes": {
+    "swap_headroom_gb": 40,
+    "alarm_floor_gb": 20,
+    "swap_used_bytes": null,
+    "encryption": "none",
+    "encryption_acknowledged_at": null,
+    "classes": {
+      "scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": "/Volumes/diskm-scratch"}
+    }
+  },
   "budgets": {
     "enforcement": "observe",
     "concurrency_margin_gb": 10,
