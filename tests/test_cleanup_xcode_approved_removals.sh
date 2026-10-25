@@ -87,7 +87,8 @@ mkdir -p "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2"
 echo sym >"$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2/sym"
 # C14 keeps recently written entries; age the fixture past that window.
 touch -t 202001010000 "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2/sym" \
-  "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2"
+  "$HOME/Library/Developer/Xcode/iOS DeviceSupport/iPhone15,4 26.6.2" \
+  "$APPS/Xcode-other.app/Contents/Info.plist" "$APPS/Xcode-other.app/Contents" "$APPS/Xcode-other.app"
 
 run() { # <args...>; env assignments via ENVS
   : >"$CALLS"

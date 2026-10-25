@@ -235,7 +235,10 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
-    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
+    local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
+    app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
+    return 1
 )
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
 # installed outside the cache (which proves the staged copy is a leftover).

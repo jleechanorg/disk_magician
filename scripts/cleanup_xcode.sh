@@ -367,7 +367,7 @@ remove_xcode_app() { # <path>
     echo "SAFETY-SKIP $app ($_safety_reason)"; TARGETED_FAILED=1; return 0
   fi
   log "xcode app $app: removing Xcode $ver (du ~$(fmt_kb "$kb"))"
-  rm_logged "$app" || { log "xcode app $app: removal failed"; TARGETED_FAILED=1; }
+  c14_remove "$app" --kind rebuildable || { log "xcode app $app: removal failed"; TARGETED_FAILED=1; }
 }
 
 run_targeted_removals() {
