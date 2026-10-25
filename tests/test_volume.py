@@ -13,6 +13,11 @@ spec.loader.exec_module(volume)
 
 class VolumeTestBase(unittest.TestCase):
     def setUp(self):
+        # Temp mountpoints belong to fake-diskutil, not the Darwin host.
+        # The Darwin-only production guard has a dedicated test.
+        self.platform_patch = mock.patch.object(volume.sys, "platform", "linux")
+        self.platform_patch.start()
+        self.addCleanup(self.platform_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = pathlib.Path(self.temp.name)
