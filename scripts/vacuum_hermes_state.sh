@@ -112,7 +112,8 @@ log "Running wal_checkpoint(TRUNCATE) — flushes WAL into the main file, no ful
 # Result row is busy|log_frames|checkpointed_frames; busy=1 means a reader pinned the WAL.
 ckpt=$(sqlite3 -cmd ".timeout $BUSY_TIMEOUT_MS" "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 | tail -1) || true
 wal_after=$(stat -f%z "$DB-wal" 2>/dev/null || echo 0)
-log "checkpoint result busy|log|checkpointed=${ckpt:-none}; WAL ${wal_mb} MB -> $(awk "BEGIN {printf \"%.1f\", $wal_after / 1048576}") MB"
+wal_after_mb=$(awk -v b="${wal_after:-0}" 'BEGIN {printf "%.1f", b / 1048576}')
+log "checkpoint result busy|log|checkpointed=${ckpt:-none}; WAL ${wal_mb} MB -> ${wal_after_mb} MB"
 [[ "$ckpt" == 1\|* ]] && log "checkpoint BUSY: a reader holds an old snapshot or a writer is active; WAL not truncated (retry later)."
 after_checkpoint=$(stat -f%z "$DB" 2>/dev/null || echo 0)
 after_checkpoint_mb=$(awk "BEGIN {printf \"%.1f\", $after_checkpoint / 1048576}")
