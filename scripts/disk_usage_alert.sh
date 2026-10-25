@@ -220,7 +220,18 @@ if [[ "$swap_used_gb" != "unknown" ]] && awk -v v="$swap_used_gb" 'BEGIN{exit !(
   swap_alert=true
 fi
 
-if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true ]]; then
+DISKM="${DISK_MAGICIAN_DISKM_BIN:-disk-magician}"
+volume_alarms="[]"
+if command -v "$DISKM" >/dev/null 2>&1; then
+  volume_status="$("$DISKM" volume status --json --snapshot 2>/dev/null || true)"
+  if [[ -n "$volume_status" ]]; then
+    volume_alarms="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d.get("alarms", [])))' "$volume_status" 2>/dev/null || echo '[]')"
+  fi
+fi
+volume_alert=false
+[[ "$volume_alarms" != "[]" ]] && volume_alert=true
+
+if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true || "$volume_alert" == true ]]; then
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
@@ -241,6 +252,9 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
     fi
     if [[ "$swap_alert" == true ]]; then
       echo "🚨 WARNING: Swap used: ${swap_used_gb} GiB (>10 GB) — disk space consumed outside the Data volume (vm.swapusage)." >&2
+    fi
+    if [[ "$volume_alert" == true ]]; then
+      python3 -c 'import json,sys; [print("WARNING: volume " + str(a), file=sys.stderr) for a in json.loads(sys.argv[1])]' "$volume_alarms"
     fi
     exit 1
   fi

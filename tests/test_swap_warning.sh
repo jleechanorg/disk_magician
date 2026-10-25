@@ -82,6 +82,24 @@ else
   pass "disk_usage_alert.sh stays silent (no swap warning) when swap_used_gb is under threshold"
 fi
 
+FAKE_DISKM="$TMP/disk-magician"
+cat > "$FAKE_DISKM" <<'EOF'
+#!/usr/bin/env bash
+[[ "$*" == "volume status --json --snapshot" ]] || exit 2
+echo '{"alarms":["volume_high"]}'
+exit 1
+EOF
+chmod +x "$FAKE_DISKM"
+ALERT_OUT_VOLUME=$(DISK_MAGICIAN_DISKM_BIN="$FAKE_DISKM" DISK_MAGICIAN_SNAPSHOT_FILE="$LOW_SNAP" \
+  DISK_MAGICIAN_ALERT_SILENCE_FILE="$TMP/nope" timeout 15 bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)
+alert_rc_volume=$?
+if [[ "$alert_rc_volume" -eq 1 ]] && echo "$ALERT_OUT_VOLUME" | grep -q "WARNING: volume volume_high"; then
+  pass "disk_usage_alert.sh surfaces measured APFS volume alarms"
+else
+  fail "disk_usage_alert.sh did not surface APFS volume alarms (rc=$alert_rc_volume):
+$ALERT_OUT_VOLUME"
+fi
+
 if [[ $FAIL -eq 0 ]]; then
   echo "ALL PASS: swap-used warning gate (disk_magician-8to)"
   exit 0

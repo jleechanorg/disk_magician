@@ -17,6 +17,7 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
 T="$(mktemp -d)"
+export T
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state"
 export DISK_MAGICIAN_STATE_DIR="$T/state"
@@ -262,6 +263,61 @@ assert_eq "$(last admit_id)" "$id" "confirm-tool-use resolves the admit"
 "$DISKM" admit --confirm "$id" --confirm-tool-use tu-1 >/dev/null 2>&1; assert_eq "$?" 2 "both confirm forms is a usage error"
 
 echo "── 8. event-log ENOSPC keeps the decision, writes admission_degraded:log ──"
+echo "14. scratch quota admission reclaims once and enforces fresh volume headroom"
+mkdir -p "$T/scratch"
+python3 - "$REPO_ROOT/config.json.template" "$T/volume-config.json" "$T/scratch" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+config["budgets"]["enforcement"] = "observe"
+config["volumes"]["classes"]["scratch"]["mountpoint"] = sys.argv[3]
+json.dump(config, open(sys.argv[2], "w"))
+PY
+cat > "$T/bin/disk-magician-volume" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "volume status --json --snapshot")
+    calls="$T/volume-status-count"
+    n=0; [[ -f "$calls" ]] && n=$(cat "$calls")
+    n=$((n + 1)); printf '%s\n' "$n" > "$calls"
+    used_gib="$FAKE_VOLUME_FIRST_GIB"
+    (( n > 1 )) && used_gib="$FAKE_VOLUME_AFTER_GIB"
+    used=$(( used_gib * 1073741824 ))
+    printf '{"ok":true,"measured_at":"now","volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":32212254720,"filesystem_id":"vol-1","path":"%s"}]}\n' "$used" "$T/scratch"
+    exit 1
+    ;;
+  "volume reclaim --clean")
+    echo reclaim >> "$T/reclaim-calls"
+    exit 0
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$T/bin/disk-magician-volume"
+fake_df 150; config observe
+export DISK_MAGICIAN_CONFIG="$T/volume-config.json"
+export DISK_MAGICIAN_DISKM_BIN="$T/bin/disk-magician-volume"
+export FAKE_VOLUME_FIRST_GIB=28 FAKE_VOLUME_AFTER_GIB=26
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 2 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 0 "admit after one reclaim with fresh headroom"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 1 "one reclaim invocation"
+assert_eq "$(last decision)" 0 "volume admit event decision"
+assert_eq "$(last volume_gate)" None "volume admit event gate"
+export FAKE_VOLUME_AFTER_GIB=28
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "post-reclaim high water forces refusal"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 1 "high water reclaims only once"
+[[ "$(cat "$T/err")" == *volume_full:scratch* ]] && ok "high-water denial is explicit" || bad "missing volume_full reason"
+export FAKE_VOLUME_FIRST_GIB=26 FAKE_VOLUME_AFTER_GIB=26
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+: > "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 3.1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "less than one GiB quota headroom refuses"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 0 "low-water case does not reclaim"
+[[ "$(cat "$T/err")" == *volume_headroom:scratch* ]] && ok "headroom denial is explicit" || bad "missing volume_headroom reason"
+unset DISK_MAGICIAN_DISKM_BIN
+
 if command -v hdiutil >/dev/null 2>&1; then
   hdiutil create -size 2m -fs HFS+ -volname admitfull "$T/full.dmg" >/dev/null &&
     hdiutil attach -nobrowse -mountpoint "$T/mnt" "$T/full.dmg" >/dev/null
