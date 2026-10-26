@@ -216,8 +216,58 @@ mkdir -p "$CLEAN_OTHER_CONTAINER"
 echo "artifact" > "$CLEAN_OTHER_CONTAINER/packet.txt"
 set_old_mtime "$CLEAN_OTHER_CONTAINER"
 
+# 5c. A live descendant lease keeps a nested worktree. 5d receives a fresh
+# C14 receipt under the shared registry
+# lock. The after-verdict hook attempts the normal owner-birth path for a
+# descendant; it must fail while the lock is held, then the eligible worktree
+# must still be removed through WRH quarantine.
+LIVE_CONTAINER="$HOME/projects/pr-5000-live-descendant"
+mkdir -p "$LIVE_CONTAINER"
+git -C "$BASE_REPO" worktree add -q -b live-desc-wt-branch "$LIVE_CONTAINER/worktree" HEAD
+git -C "$LIVE_CONTAINER/worktree" push -q -u origin live-desc-wt-branch
+mkdir -p "$LIVE_CONTAINER/worktree/descendant"
+set_old_mtime "$LIVE_CONTAINER"
+set_old_mtime "$LIVE_CONTAINER/worktree/descendant"
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+if lease_write "$LIVE_CONTAINER/worktree/descendant" --owner-pid "$$"; then
+  record_pass "T5: live descendant lease fixture created"
+else
+  record_fail "T5: live descendant lease fixture created" "lease_write failed"
+fi
+
+# 5d. Nested worktree receives a fresh C14 receipt under the shared registry
+RACE_CONTAINER="$HOME/projects/pr-5001-owner-race"
+mkdir -p "$RACE_CONTAINER"
+git -C "$BASE_REPO" worktree add -q -b race-wt-branch "$RACE_CONTAINER/worktree" HEAD
+git -C "$RACE_CONTAINER/worktree" push -q -u origin race-wt-branch
+mkdir -p "$RACE_CONTAINER/worktree/descendant"
+set_old_mtime "$RACE_CONTAINER"
+set_old_mtime "$RACE_CONTAINER/worktree/descendant"
+OWNER_BIRTH_MARKER="$TMP_TEST_ROOT/owner-birth-blocked"
+OWNER_BIRTH_HOOK="$TMP_TEST_ROOT/attempt-descendant-owner-birth.sh"
+cat >"$OWNER_BIRTH_HOOK" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$TASK_SCRATCH_REPO_ROOT/scripts/lib/worktree_lease.sh"
+if lease_write "$1/descendant"; then
+  echo unexpected-owner-birth >"$TASK_SCRATCH_OWNER_BIRTH_MARKER"
+else
+  echo blocked-by-registry-lock >"$TASK_SCRATCH_OWNER_BIRTH_MARKER"
+fi
+HOOK
+chmod +x "$OWNER_BIRTH_HOOK"
+if lease_write "$RACE_CONTAINER/worktree/descendant"; then
+  record_pass "T5: unlocked descendant owner birth control succeeds"
+  rm -f -- "$(lease_path_for "$RACE_CONTAINER/worktree/descendant")"
+else
+  record_fail "T5: unlocked descendant owner birth control succeeds" "lease_write failed without registry lock"
+fi
+
 # Fix mtimes on BASE_REPO after worktree operations
 set_old_mtime "$BASE_REPO"
+export TASK_SCRATCH_REPO_ROOT="$REPO_ROOT"
+export TASK_SCRATCH_OWNER_BIRTH_MARKER="$OWNER_BIRTH_MARKER"
+export DISK_MAGICIAN_TEST_AFTER_TASK_SCRATCH_C14_VERDICT="$OWNER_BIRTH_HOOK"
 
 # Hold an open file on OPEN_CONTAINER during --clean
 tail -f "$OPEN_CONTAINER/busy.log" >/dev/null 2>&1 &
@@ -231,6 +281,10 @@ kill "$HOLDER_PID" 2>/dev/null || true
 wait "$HOLDER_PID" 2>/dev/null || true
 
 assert_rc "T5: --clean exits 0" 0 "$CLEAN_RC"
+if [[ "$CLEAN_RC" -ne 0 || -d "$RACE_CONTAINER" ]]; then
+  printf 'T5 cleaner output:\n%s\n' "$CLEAN_OUT"
+  printf 'T5 WRH guard log:\n%s\n' "$(cat "$HOME/.disk_magician_state/worktree_guard.log" 2>/dev/null || true)"
+fi
 
 # Verify protected items are preserved:
 assert_exists "T3/5: real top-level git repo preserved" "$BASE_REPO"
@@ -242,11 +296,15 @@ assert_exists "T4a: dirty nested worktree itself preserved" "$DIRTY_CONTAINER/wo
 assert_exists "T4b: unpushed nested repo container preserved" "$UNPUSHED_CONTAINER"
 assert_exists "T4c: secret-like file container preserved" "$SECRET_CONTAINER"
 assert_exists "T4d: open-file container preserved" "$OPEN_CONTAINER"
+assert_exists "T5: live descendant lease preserves nested worktree container" "$LIVE_CONTAINER"
+assert_exists "T5: live descendant lease preserves nested worktree" "$LIVE_CONTAINER/worktree"
 
 # Verify eligible aged clean containers are removed:
 assert_missing "T5: clean container in ~/projects removed" "$DRY_CONTAINER"
 assert_missing "T5: clean worktree container in ~/projects removed" "$CLEAN_WT_CONTAINER"
 assert_missing "T5: clean container in ~/projects_other removed" "$CLEAN_OTHER_CONTAINER"
+assert_missing "T5: eligible nested worktree container removed after final C14" "$RACE_CONTAINER"
+assert_contains "T5: descendant owner birth was blocked after final C14 verdict" "blocked-by-registry-lock" "$(cat "$OWNER_BIRTH_MARKER" 2>/dev/null || true)"
 
 # Verify manifest file entries:
 assert_exists "T5: manifest file created" "$MANIFEST_FILE"

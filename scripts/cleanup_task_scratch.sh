@@ -28,6 +28,8 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 source "$SCRIPT_DIR/lib/worktree_ignored.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$SCRIPT_DIR/lib/quarantine.sh"
+# shellcheck source=scripts/worktree_remove_hook.sh
+source "$SCRIPT_DIR/worktree_remove_hook.sh"
 
 DRY_RUN=true
 TASK_SCRATCH_MIN_AGE_HOURS="${DISK_MAGICIAN_TASK_SCRATCH_MIN_AGE_HOURS:-12}"
@@ -406,14 +408,14 @@ if declare -F c14_repos_ok >/dev/null 2>&1; then
   c14_repos_ok() {
     local root="${1:-}"
     if [[ -n "$CURRENT_APPROVED_SCRATCH_DIR" ]] && { [[ "$root" == "$CURRENT_APPROVED_SCRATCH_DIR" ]] || [[ "$root" == "$CURRENT_APPROVED_SCRATCH_DIR"/* ]]; }; then
-      local saved_reason="$CONTAINER_REPO_REASON" saved_wts="$CONTAINER_WT_REMOVALS" res=0
+      local saved_reason="$CONTAINER_REPO_REASON" saved_wts="$CONTAINER_WT_REMOVALS" res=0 original_verdict
       inspect_container_repos "$root"
       if [[ -n "$CONTAINER_REPO_REASON" ]]; then
         echo "kept:$CONTAINER_REPO_REASON"
         res=1
       else
-        echo "ok"
-        res=0
+        original_verdict="$(_orig_c14_repos_ok "$@")" || res=$?
+        if [[ "$res" -eq 0 ]]; then echo "ok"; else echo "${original_verdict:-kept:check-failed}"; fi
       fi
       CONTAINER_REPO_REASON="$saved_reason"
       CONTAINER_WT_REMOVALS="$saved_wts"
@@ -552,23 +554,47 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     CURRENT_APPROVED_SCRATCH_DIR="$dir"
     container_abort=false
 
-    # 1. Remove clean, pushed linked worktrees via 'git worktree remove' (without --force)
+    # 1. Revalidate each clean, pushed linked worktree through C14 and pass
+    # that exact receipt to WRH quarantine while holding the shared lease lock.
     if [[ -n "$CONTAINER_WT_REMOVALS" ]]; then
-      while IFS=$'\t' read -r common wt; do
+      while IFS=$'\t' read -r _common wt; do
         [[ -n "$wt" ]] || continue
         wt_kb="$(path_size_kb "$wt")"
         wt_parent="$(dirname "$wt")"
-        if git --git-dir="$common" worktree remove "$wt" 2>/dev/null; then
+        wt_inv="$(mktemp "${TMPDIR:-/tmp}/task-scratch-c14.XXXXXX")" || {
+          log "KEEP [c14: inventory-allocation-failed] $wt"
+          container_abort=true
+          break
+        }
+        if ! lease_registry_mutation_lock_enter; then
+          rm -f -- "$wt_inv"
+          log "KEEP [c14: lease-busy] $wt"
+          container_abort=true
+          break
+        fi
+        wt_verdict="$(artifact_removal_verdict "$wt" --kind ephemeral --inventory-out "$wt_inv" 2>/dev/null || echo "kept:check-failed")"
+        if [[ "$wt_verdict" == remove ]] && [[ -n "${DISK_MAGICIAN_TEST_AFTER_TASK_SCRATCH_C14_VERDICT:-}" ]]; then
+          "$DISK_MAGICIAN_TEST_AFTER_TASK_SCRATCH_C14_VERDICT" "$wt" || true
+        fi
+        if [[ "$wt_verdict" == remove ]] && wrh_quarantine_capable && wrh_remove_now "$wt" "$wt" --quarantine "$wt_inv"; then
+          rm -f -- "$wt_inv"
+          wt_qdir="$wt_parent/.dm-quarantine"
+          if [[ -d "$wt_qdir" && ! -L "$wt_qdir" ]] && rmdir "$wt_qdir" 2>/dev/null; then
+            append_manifest "rmdir" "$wt_qdir"
+            deletion_log "cleanup_task_scratch.sh" "rmdir" "0" "$wt_qdir"
+          fi
+          lease_registry_mutation_lock_exit || true
           # Restore parent mtime so C14 age check on remaining siblings/container sees original mtime
           set_dir_mtime_epoch "$wt_parent" "$newest_epoch"
           set_dir_mtime_epoch "$dir" "$newest_epoch"
           append_manifest "removed-worktree" "$wt"
-          deletion_log "cleanup_task_scratch.sh" "removed-worktree" "$wt_kb" "$wt"
           log "removed-worktree $wt (${wt_kb} KB)"
           WORKTREES_REMOVED=$(( WORKTREES_REMOVED + 1 ))
           TOTAL_KB=$(( TOTAL_KB + wt_kb ))
         else
-          log "KEEP [git-worktree-remove-failed: $wt] $dir"
+          rm -f -- "$wt_inv"
+          lease_registry_mutation_lock_exit || true
+          log "KEEP [c14-or-wrh-remove-failed: $wt_verdict] $dir"
           container_abort=true
           break
         fi

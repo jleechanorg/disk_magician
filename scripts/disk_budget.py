@@ -982,17 +982,58 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or daily_rc
 def _scratch_mountpoint():
+    """Return configured mount, None for legacy config, or False if damaged."""
     try:
         config_path = resolve_config.resolve()
         if not config_path:
+            # An explicit but missing override is damaged configuration. An
+            # implicit config miss is legacy only when no volume registry exists.
+            if os.environ.get("DISK_MAGICIAN_CONFIG"):
+                return False
+            state_dir = Path(os.environ.get(
+                "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
+            ))
+            if os.path.lexists(state_dir / "volumes" / "registry.json"):
+                return False
+            if sys.platform == "darwin":
+                try:
+                    probe = subprocess.run(
+                        [os.environ.get("DISK_MAGICIAN_DISKM_BIN", "disk-magician"),
+                         "volume", "path", "scratch"],
+                        capture_output=True, text=True, timeout=12, check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if probe.returncode != 3:
+                    return False
             return None
         raw = json.loads(Path(config_path).read_text())
+        if not isinstance(raw, dict):
+            return False
+        if "volumes" not in raw:
+            state_dir = Path(os.environ.get(
+                "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
+            ))
+            if os.path.lexists(state_dir / "volumes" / "registry.json"):
+                return False
+            if sys.platform == "darwin":
+                try:
+                    probe = subprocess.run(
+                        [os.environ.get("DISK_MAGICIAN_DISKM_BIN", "disk-magician"),
+                         "volume", "path", "scratch"],
+                        capture_output=True, text=True, timeout=12, check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if probe.returncode != 3:
+                    return False
+            return None
         mountpoint = raw["volumes"]["classes"]["scratch"]["mountpoint"]
         if not isinstance(mountpoint, str) or not Path(mountpoint).is_absolute():
-            return None
+            return False
         return Path(mountpoint).expanduser().resolve(strict=False)
     except (OSError, ValueError, KeyError, TypeError):
-        return None
+        return False
 
 
 def _volume_status(disksm):
@@ -1034,6 +1075,8 @@ def volume_admission_gate(dest, estimate_gb, dry_run=False):
     if not dest:
         return None
     mountpoint = _scratch_mountpoint()
+    if mountpoint is False:
+        return "volume_measurement_unavailable:scratch"
     if mountpoint is None:
         return None
     try:

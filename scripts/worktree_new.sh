@@ -300,16 +300,21 @@ wtn_branch_is_checked_out() {
 # path alone: a replacement checkout may now own it, and switching that path
 # would mutate code this call never created. rc 0 when switched.
 wtn_reuse_rollback() {
-    local file="$1" candidate="$2" old="$3"
+    local file="$1" candidate="$2" old="$3" lock_mode="${4:-}"
     if ! lease_matches_incarnation "$file"; then
-        lease_mark_reuse_incomplete "$file"
+        lease_mark_reuse_incomplete "$file" "$lock_mode"
         return 1
     fi
     if ! git -C "$candidate" switch --no-overwrite-ignore "$old" >&2; then
-        lease_mark_reuse_incomplete "$file"
+        lease_mark_reuse_incomplete "$file" "$lock_mode"
         return 1
     fi
     return 0
+}
+
+wtn_reuse_unlock() {
+    lease_reuse_lock_release "$1"
+    lease_registry_mutation_lock_exit || true
 }
 
 
@@ -381,19 +386,33 @@ PY
         # fails closed. Never a broad cleanup.
         declare -F lease_reuse_lock_recover >/dev/null && lease_reuse_lock_recover "$file" >/dev/null 2>&1 || true
         owner="$(lease_resolve_owner)"
+        if ! lease_registry_mutation_lock_enter; then continue; fi
+        if ! lease_reuse_lock_acquire "$file"; then
+            lease_registry_mutation_lock_exit || true
+            continue
+        fi
         lease_claim_reuse "$file" "$lease_hash" "$old" "$tip" "$owner" \
-            "$repo" "$candidate" "$admin_id" "$admin_birth" "$checkout_dev" "$checkout_ino" || continue
+            "$repo" "$candidate" "$admin_id" "$admin_birth" "$checkout_dev" "$checkout_ino" --lock-held || {
+                wtn_reuse_unlock "$file"
+                continue
+            }
         if ! wtn_reuse_path_is_canonical "$repo" "$candidate" "$file" || ! lease_matches_incarnation "$file"; then
-            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         # Claim first, then repeat the final content/removal verdict. The
         # verdict only honors this pending claim when it names the exact
         # candidate lease it just claimed (never an ancestor or a competitor).
         verdict="$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)"
-        if [[ "$verdict" != remove ]]; then lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"; continue; fi
+        if [[ "$verdict" != remove ]]; then
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
+            continue
+        fi
         if ! git -C "$candidate" switch --detach "$tip" >&2; then
-            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         # Verify the exact checkout incarnation and detached tip after Git
@@ -401,8 +420,9 @@ PY
         # pre-switch observation.
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]]; then
-            wtn_reuse_rollback "$file" "$candidate" "$old"
-            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old" --lock-held
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_UPDATE_REF:-}" ]]; then
@@ -412,27 +432,34 @@ PY
         if ! lease_matches_incarnation "$file" ||
             [[ "$(git -C "$candidate" rev-parse -q --verify HEAD 2>/dev/null)" != "$tip" ]] ||
             [[ "$(artifact_removal_verdict "$candidate" --own-reuse-claim "$file" 2>/dev/null)" != remove ]]; then
-            wtn_reuse_rollback "$file" "$candidate" "$old"
-            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old" --lock-held
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
+        fi
+        if [[ -n "${DISK_MAGICIAN_TEST_AFTER_FINAL_REUSE_VERDICT:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_AFTER_FINAL_REUSE_VERDICT" "$repo" "$old" "$candidate" "$file" >&2 || true
         fi
         # update-ref does not know whether another worktree has checked out
         # this branch. Check as late as possible, after the final C14 verdict
         # and immediately before the conditional delete, so a checkout created
         # inside the window parks the candidate instead of dangling HEAD.
         if wtn_branch_is_checked_out "$repo" "$old"; then
-            lease_mark_reuse_incomplete "$file"
+            lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         else
             local checkout_rc=$?
             if [[ "$checkout_rc" != 1 ]]; then
-                lease_mark_reuse_incomplete "$file"
+                lease_mark_reuse_incomplete "$file" --lock-held
+                wtn_reuse_unlock "$file"
                 continue
             fi
         fi
         if ! git -C "$repo" update-ref -d "refs/heads/$old" "$tip"; then
-            wtn_reuse_rollback "$file" "$candidate" "$old"
-            lease_restore_reuse_claim "$file" || lease_mark_reuse_incomplete "$file"
+            wtn_reuse_rollback "$file" "$candidate" "$old" --lock-held
+            lease_restore_reuse_claim "$file" --lock-held || lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         if [[ -n "${DISK_MAGICIAN_TEST_RECREATE_OLD_REF_AFTER_DELETE:-}" ]]; then
@@ -452,21 +479,24 @@ PY
         local lease_rc=0
         if [[ -n "${DISK_MAGICIAN_TEST_FAIL_LEASE_REWRITE:-}" ]]; then lease_rc=1
         elif [[ "$switch_rc" == 0 ]]; then
-            lease_write "$candidate" "$repo" "$branch" worktree-new >/dev/null 2>&1 || lease_rc=$?
+            lease_write "$candidate" "$repo" "$branch" worktree-new --lock-held >/dev/null 2>&1 || lease_rc=$?
         fi
         if [[ "$switch_rc" == 0 && "$lease_rc" == 0 ]]; then
+            wtn_reuse_unlock "$file"
             wtn_configure_lfs "$candidate"
             printf '%s\n' "$candidate"
             return 0
         fi
         # Restore is create-only: a concurrent ref is never overwritten.
         if git -C "$repo" show-ref -q --verify "refs/heads/$old"; then
-            lease_mark_reuse_incomplete "$file"
+            lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         if ! git -C "$repo" update-ref "refs/heads/$old" "$tip" 0000000000000000000000000000000000000000 ||
-            ! wtn_reuse_rollback "$file" "$candidate" "$old"; then
-            lease_mark_reuse_incomplete "$file"
+            ! wtn_reuse_rollback "$file" "$candidate" "$old" --lock-held; then
+            lease_mark_reuse_incomplete "$file" --lock-held
+            wtn_reuse_unlock "$file"
             continue
         fi
         if [[ "$switch_rc" == 0 ]]; then
@@ -477,9 +507,10 @@ PY
             # the retained branch if Git verifies that it is still unoccupied.
             echo "worktree-new: retained failed new branch $branch for recovery" >&2
         fi
-        if ! lease_restore_reuse_claim "$file"; then
-            lease_mark_reuse_incomplete "$file"
+        if ! lease_restore_reuse_claim "$file" --lock-held; then
+            lease_mark_reuse_incomplete "$file" --lock-held
         fi
+        wtn_reuse_unlock "$file"
     done
     return 1
 }

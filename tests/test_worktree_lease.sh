@@ -655,9 +655,20 @@ cp "$L_GONE" "$L_BADHASH"
 L_NULPATH="$(lease_dir)/0000000000000001.json"
 printf '{"schema_version":1,"path":"/tmp/bad\\u0000path","owner":null,"pending":false,"creator":"birth-audit","kind":"scratch","expires_at":1}\n' > "$L_NULPATH"
 
+cat > "$TMPROOT/add-prune-owner-hook" <<'HOOK'
+#!/usr/bin/env bash
+[[ "$1" == "$TEST_PRUNE_LEASE" ]] || exit 0
+source "$TEST_LEASE_LIB"
+lease_owner_add "$TEST_PRUNE_PATH" 401 1760000000 claude
+HOOK
+chmod +x "$TMPROOT/add-prune-owner-hook"
+export TEST_LEASE_LIB="$REPO_ROOT/scripts/lib/worktree_lease.sh" TEST_PRUNE_LEASE="$L_EXP_AT" TEST_PRUNE_PATH="$P_EXP_AT"
+export DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK="$TMPROOT/add-prune-owner-hook"
 if lease_prune_birth_audit_scratch; then ok "lease_prune_birth_audit_scratch rc 0"; else bad "lease_prune_birth_audit_scratch failed"; fi
+unset DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK TEST_LEASE_LIB TEST_PRUNE_LEASE TEST_PRUNE_PATH
 [[ ! -e "$L_GONE" ]] && ok "missing-path birth-audit scratch lease pruned" || bad "missing-path birth-audit scratch lease still exists"
-[[ ! -e "$L_EXP_AT" ]] && ok "expired (expires_at) birth-audit scratch lease pruned" || bad "expired (expires_at) birth-audit scratch lease still exists"
+[[ -f "$L_EXP_AT" ]] && ok "lease with owner added at prune boundary survives" || bad "lease with owner added at prune boundary was unlinked"
+assert_eq "$(lease_field "$L_EXP_AT" 'd.get("owner",{}).get("pid")')" "401" "owner survives prune boundary"
 [[ ! -e "$L_EXP_CE" ]] && ok "expired (created_epoch+ttl) birth-audit scratch lease pruned" || bad "expired (created_epoch+ttl) birth-audit scratch lease still exists"
 [[ -f "$L_LIVE" ]] && ok "live unexpired birth-audit scratch lease preserved" || bad "live unexpired birth-audit scratch lease was pruned"
 [[ -f "$L_WT" ]] && ok "worktree kind lease preserved even when missing/expired" || bad "worktree kind lease was pruned"

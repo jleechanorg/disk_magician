@@ -259,9 +259,11 @@ PY
 lease_write() {
     local wt="$1"; shift
     local -a pos=() prov=("" "" "" "" "" "" "" "") owner_pids=()
+    local lock_mode=""
     while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
     local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
     while [[ $# -gt 0 ]]; do
+        if [[ "$1" == --lock-held ]]; then lock_mode=--lock-held; shift; continue; fi
         [[ $# -ge 2 ]] || return 2
         case "$1" in
             --kind) prov[0]="$2" ;; --producer) prov[1]="$2" ;;
@@ -289,7 +291,7 @@ lease_write() {
     mkdir -p "$(lease_dir)" 2>/dev/null || return 1
     ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
     _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}" "" "$owner_tsv"
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}" "$lock_mode" "$owner_tsv"
 }
 
 # lease_owner_add <worktree_path> <pid> <start_epoch> <comm> adds a concrete
@@ -384,19 +386,26 @@ lease_write_pending() {
 # Atomically converts the exact observed lease to a pending reuse claim. The
 # previous lease is retained for rollback; an abandoned claim is never reaped.
 lease_claim_reuse() {
-    local rc=0
-    lease_registry_mutation_lock_enter || return 1
-    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY' || rc=$?
+    local rc=0 lock_mode="${12:-}"
+    if [[ "$lock_mode" == --lock-held ]]; then
+        lease_mutation_lock_enter "$1" "$lock_mode" || return 1
+    else
+        lease_registry_mutation_lock_enter || return 1
+    fi
+    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "$lock_mode" <<'PY' || rc=$?
 import hashlib, json, os, sys, tempfile, time
-path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:]
+path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:12]
 lock = path + ".reuse-lock"
+lock_held = sys.argv[12] == "--lock-held"
+if lock_held:
+    if not os.path.isdir(lock): sys.exit(1)
+else:
+    try: os.mkdir(lock)
+    except OSError: sys.exit(1)
 try:
-    os.mkdir(lock)
-except OSError:
-    sys.exit(1)
-try:
-    with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
-    with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
+    if not lock_held:
+        with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
+        with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
     with open(path, "rb") as f: raw = f.read()
     if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
     old = json.loads(raw)
@@ -433,13 +442,14 @@ try:
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
 finally:
-    for name in ("pid", "acquired_at"):
-        try: os.unlink(os.path.join(lock, name))
-        except FileNotFoundError: pass
-    try: os.rmdir(lock)
-    except OSError: pass
+    if not lock_held:
+        for name in ("pid", "acquired_at"):
+            try: os.unlink(os.path.join(lock, name))
+            except FileNotFoundError: pass
+        try: os.rmdir(lock)
+        except OSError: pass
 PY
-    lease_registry_mutation_lock_exit || rc=$?
+    [[ "$lock_mode" == --lock-held ]] || lease_registry_mutation_lock_exit || rc=$?
     return "$rc"
 }
 
@@ -573,8 +583,8 @@ lease_registry_mutation_lock_exit() {
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
 lease_restore_reuse_claim() {
-    local lease="$1"
-    lease_mutation_lock_enter "$lease" || return 1
+    local lease="$1" lock_mode="${2:-}"
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
@@ -588,15 +598,15 @@ try:
 except Exception: sys.exit(1)
 PY
     local rc=$?
-    lease_mutation_lock_exit "$lease"
+    lease_mutation_lock_exit "$lease" "$lock_mode"
     return "$rc"
 }
 
 # lease_mark_reuse_incomplete <lease_file> — preserve old branch/tip and block
 # future claims when recovery could not restore the candidate safely.
 lease_mark_reuse_incomplete() {
-    local lease="$1"
-    lease_mutation_lock_enter "$lease" || return 1
+    local lease="$1" lock_mode="${2:-}"
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
@@ -610,7 +620,7 @@ try:
 except Exception: sys.exit(1)
 PY
     local rc=$?
-    lease_mutation_lock_exit "$lease"
+    lease_mutation_lock_exit "$lease" "$lock_mode"
     return "$rc"
 }
 
@@ -994,84 +1004,70 @@ PY
 # worktree/clone/evidence leases, pending leases, owned leases, non-birth-audit
 # leases, symlinks, or hash-mismatched files (fail closed on any ambiguity).
 lease_prune_birth_audit_scratch() {
-    local ld
+    local ld fp
     ld="$(lease_dir)"
     [[ -d "$ld" && ! -L "$ld" ]] || return 0
-    python3 - "$ld" "${1:-}" <<'PY'
+    for fp in "$ld"/*.json; do
+        [[ -e "$fp" || -L "$fp" ]] || continue
+        if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK" "$fp" || true
+        fi
+        # Owner writes take the same registry -> lease lock order. Re-read the
+        # candidate only after both locks are held so a fresh owner cannot be
+        # unlinked based on an earlier ownerless snapshot.
+        lease_registry_mutation_lock_enter || continue
+        if ! lease_reuse_lock_acquire "$fp"; then
+            lease_registry_mutation_lock_exit || true
+            continue
+        fi
+        python3 - "$fp" "${1:-}" <<'PY'
 import hashlib, json, os, stat, sys, time
 
-ld = sys.argv[1]
+fp = sys.argv[1]
+ld = os.path.dirname(fp)
 try:
     now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
 except (TypeError, ValueError):
     now = time.time()
 
 try:
-    entries = list(os.scandir(ld))
-except OSError:
+    n = os.path.basename(fp)
+    if not n.endswith(".json") or n.startswith("."): sys.exit(0)
+    st = os.lstat(fp)
+    if not stat.S_ISREG(st.st_mode): sys.exit(0)
+    with open(fp, "rb") as f: d = json.load(f)
+except Exception:
     sys.exit(0)
-
-for entry in entries:
-    n = entry.name
-    if not n.endswith(".json") or n.startswith("."):
-        continue
-    fp = entry.path
-    try:
-        st = os.lstat(fp)
-    except OSError:
-        continue
-    if not stat.S_ISREG(st.st_mode):
-        continue
-    if os.path.lexists(fp + ".reuse-lock"):
-        continue
-    try:
-        with open(fp, "rb") as f:
-            d = json.load(f)
-    except Exception:
-        continue
-    if not isinstance(d, dict):
-        continue
-    p = d.get("path")
-    if not (isinstance(p, str) and bool(p)):
-        continue
-    if not ("owner" in d and d["owner"] is None):
-        continue
-    if d.get("pending") is not False:
-        continue
-    if d.get("creator") != "birth-audit":
-        continue
-    if d.get("kind") != "scratch":
-        continue
-    try:
-        real = os.path.realpath(p)
-        encoded = os.fsencode(real)
-        path_gone = not os.path.lexists(p) and not os.path.exists(real)
-    except (ValueError, UnicodeError, OSError):
-        continue
-    if n != hashlib.sha256(encoded).hexdigest()[:16] + ".json":
-        continue
-    exp = d.get("expires_at")
-    ce = d.get("created_epoch")
-    ttl = d.get("ttl_hours")
-    exp_ok = isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0
-    ce_ok = (
-        isinstance(ce, (int, float))
-        and not isinstance(ce, bool)
-        and ce > 0
-        and isinstance(ttl, (int, float))
-        and not isinstance(ttl, bool)
-        and ttl > 0
-    )
-    if "expires_at" in d and not exp_ok:
-        ttl_expired = False
-    else:
-        ttl_expired = (exp_ok and now >= exp) or (ce_ok and now >= ce + ttl * 3600)
-    if path_gone or ttl_expired:
-        try:
-            os.unlink(fp)
-        except OSError:
-            pass
+if not isinstance(d, dict): sys.exit(0)
+p = d.get("path")
+if not (isinstance(p, str) and bool(p)): sys.exit(0)
+if not ("owner" in d and d["owner"] is None): sys.exit(0)
+if d.get("pending") is not False: sys.exit(0)
+if d.get("creator") != "birth-audit": sys.exit(0)
+if d.get("kind") != "scratch": sys.exit(0)
+try:
+    real = os.path.realpath(p)
+    encoded = os.fsencode(real)
+    path_gone = not os.path.lexists(p) and not os.path.exists(real)
+except (ValueError, UnicodeError, OSError): sys.exit(0)
+if n != hashlib.sha256(encoded).hexdigest()[:16] + ".json": sys.exit(0)
+exp = d.get("expires_at")
+ce = d.get("created_epoch")
+ttl = d.get("ttl_hours")
+exp_ok = isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0
+ce_ok = (isinstance(ce, (int, float)) and not isinstance(ce, bool) and ce > 0
+         and isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl > 0)
+if "expires_at" in d and not exp_ok:
+    ttl_expired = False
+else:
+    ttl_expired = (exp_ok and now >= exp) or (ce_ok and now >= ce + ttl * 3600)
+if path_gone or ttl_expired:
+    try: os.unlink(fp)
+    except OSError: pass
 PY
+        lease_reuse_lock_release "$fp" || true
+        lease_registry_mutation_lock_exit || true
+    done
 }
 
 # lease_add_owner <worktree_path> --owner-pid <pid> resolves a live process

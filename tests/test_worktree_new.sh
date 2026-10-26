@@ -655,6 +655,38 @@ assert_eq "$fresh" "$WTROOT/activity-boundary" "late content blocks candidate re
 assert_eq "$(git -C "$ACTIVITY_WT" rev-parse --abbrev-ref HEAD)" "reuse/activity-boundary" "late-activity branch preserved"
 [[ -f "$ACTIVITY_WT/late-untracked.txt" ]] && ok "late content remains intact" || bad "late content was lost"
 
+echo "== case 35: owner and lease births are excluded after the final C14 verdict =="
+RACE_OWNER_WT="$WTROOT/reuse-owner-race"
+git -C "$REPO" branch reuse/owner-race "$ORIGIN_SHA"
+git -C "$REPO" worktree add -q "$RACE_OWNER_WT" reuse/owner-race
+cat > "$TMPROOT/after-final-verdict-owner-hook" <<'EOF'
+#!/usr/bin/env bash
+source "$TEST_LEASE_LIB"
+repo="$1" candidate="$3"
+if lease_owner_add "$candidate" 401 1760000000 claude; then
+  echo raced > "$TEST_OWNER_ADD_RESULT"
+else
+  echo blocked > "$TEST_OWNER_ADD_RESULT"
+fi
+if lease_write "$candidate" "$repo" raced/lease rewrite-race; then
+  echo raced > "$TEST_LEASE_WRITE_RESULT"
+else
+  echo blocked > "$TEST_LEASE_WRITE_RESULT"
+fi
+EOF
+chmod +x "$TMPROOT/after-final-verdict-owner-hook"
+export TEST_LEASE_LIB="$REPO_ROOT/scripts/lib/worktree_lease.sh"
+export TEST_OWNER_ADD_RESULT="$TMPROOT/owner-add-result" TEST_LEASE_WRITE_RESULT="$TMPROOT/lease-write-result"
+export DISK_MAGICIAN_TEST_AFTER_FINAL_REUSE_VERDICT="$TMPROOT/after-final-verdict-owner-hook"
+fresh="$(run_reuse_attempt "$RACE_OWNER_WT" reuse/owner-race feat/owner-race owner-race)"; rc=$?
+unset DISK_MAGICIAN_TEST_AFTER_FINAL_REUSE_VERDICT TEST_LEASE_LIB TEST_OWNER_ADD_RESULT TEST_LEASE_WRITE_RESULT
+assert_eq "$rc" "0" "owner-race reuse exits successfully"
+assert_eq "$fresh" "$RACE_OWNER_WT" "owner-race candidate is recycled"
+assert_eq "$(cat "$TMPROOT/owner-add-result" 2>/dev/null)" blocked "owner addition after final verdict is blocked"
+assert_eq "$(cat "$TMPROOT/lease-write-result" 2>/dev/null)" blocked "lease replacement after final verdict is blocked"
+assert_eq "$(git -C "$RACE_OWNER_WT" rev-parse --abbrev-ref HEAD)" feat/owner-race "recycled branch is checked out"
+assert_eq "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("branch"))' "$(bash -c 'source "$1"; lease_path_for "$2"' _ "$SCRIPT" "$RACE_OWNER_WT")")" feat/owner-race "final lease matches recycled branch"
+
 echo "== case 34: ignored user content blocks branch switch and remains intact =="
 IGNORED_WT="$WTROOT/reuse-ignored-boundary"
 git -C "$REPO" branch reuse/ignored-boundary "$ORIGIN_SHA"

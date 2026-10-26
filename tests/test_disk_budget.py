@@ -85,6 +85,31 @@ class VolumeAdmissionGateTest(unittest.TestCase):
         return {"used": used, "quota": quota, "uuid": volume_id,
                 "path": Path(path) if path else self.mount}
 
+    def test_macos_legacy_config_checks_for_unregistered_live_scratch(self):
+        config = Path(self.tmp.name) / "legacy.json"
+        config.write_text('{"budgets":{}}')
+        with patch.dict(os.environ, {
+                "DISK_MAGICIAN_CONFIG": str(config),
+                "DISK_MAGICIAN_STATE_DIR": str(Path(self.tmp.name) / "state"),
+        }), patch.object(disk_budget.sys, "platform", "darwin"), \
+             patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 75})()) as run:
+            self.assertIs(disk_budget._scratch_mountpoint(), False)
+        run.assert_called_once_with(
+            ["disk-magician", "volume", "path", "scratch"],
+            capture_output=True, text=True, timeout=12, check=False)
+
+    def test_macos_missing_implicit_config_checks_for_live_scratch(self):
+        with patch.dict(os.environ, {
+                "DISK_MAGICIAN_STATE_DIR": str(Path(self.tmp.name) / "state"),
+        }, clear=False), patch.object(disk_budget.resolve_config, "resolve", return_value=""), \
+             patch.object(disk_budget.sys, "platform", "darwin"), \
+             patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 75})()) as run:
+            os.environ.pop("DISK_MAGICIAN_CONFIG", None)
+            self.assertIs(disk_budget._scratch_mountpoint(), False)
+        run.assert_called_once_with(
+            ["disk-magician", "volume", "path", "scratch"],
+            capture_output=True, text=True, timeout=12, check=False)
+
     def invoke(self, samples, estimate_gb):
         with patch.object(disk_budget, "_scratch_mountpoint", return_value=self.mount), \
              patch.object(disk_budget, "_volume_status", side_effect=samples), \

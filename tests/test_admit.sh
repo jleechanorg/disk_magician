@@ -346,6 +346,41 @@ assert_eq "$?" 75 "unavailable post-reclaim ballast fails closed"
 unset FAKE_VOLUME_STATUS FAKE_VOLUME_AVAILABLE FAKE_VOLUME_AFTER_STATUS FAKE_VOLUME_AFTER_AVAILABLE
 unset DISK_MAGICIAN_DISKM_BIN
 
+# A damaged quota registration must never be treated as a legacy host.
+printf '{"volumes":{"classes":{"scratch":{"mountpoint":"%s"}}' "$T/scratch" > "$T/damaged-volume-config.json"
+export DISK_MAGICIAN_CONFIG="$T/damaged-volume-config.json"
+rm -f "$T/volume-status-count"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "malformed registered-volume config fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "damaged quota registration is explicit" || bad "damaged volume reason: $(cat "$T/err")"
+[[ ! -e "$T/volume-status-count" ]] && ok "does not admit using an unmeasured registered volume" || bad "volume probe unexpectedly ran"
+
+# Missing explicit config plus an active state registry is also a damaged
+# registration, even though the mountpoint cannot be recovered from config.
+mkdir -p "$T/state/volumes"
+python3 - "$T/state/volumes/registry.json" "$T/scratch" <<'PY'
+import json, sys
+json.dump({"schema_version": 1, "volumes": {"scratch": {
+    "state": "active", "mountpoint": sys.argv[2]}}}, open(sys.argv[1], "w"))
+PY
+export DISK_MAGICIAN_CONFIG="$T/missing-config.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "missing explicit config with registry fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "missing config cannot bypass registered volume quota" || bad "missing config volume reason: $(cat "$T/err")"
+
+# A valid legacy config with no volume section keeps the historical behavior.
+python3 - "$T/config.json" "$T/legacy-config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c.pop("volumes", None)
+json.dump(c, open(sys.argv[2], "w"))
+PY
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "legacy config with registered Scratch volume fails closed"
+rm "$T/state/volumes/registry.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 0 "legacy no-volume config without registry keeps admission fallback"
+
 if command -v hdiutil >/dev/null 2>&1; then
   hdiutil create -size 2m -fs HFS+ -volname admitfull "$T/full.dmg" >/dev/null &&
     hdiutil attach -nobrowse -mountpoint "$T/mnt" "$T/full.dmg" >/dev/null
