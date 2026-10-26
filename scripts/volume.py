@@ -654,6 +654,27 @@ def linux_mountpoint_safe(mountpoint: Path) -> bool:
         return False
 
 
+def linux_recover_underlay(mountpoint: Path, image: Path, entry: dict[str, Any]) -> bool:
+    """Close only the exact empty writable underlay left by an interrupted mount."""
+    if (entry.get("state") != "active" or entry.get("mountpoint") != str(mountpoint)
+            or entry.get("image_path") != str(image) or linux_mount_record(mountpoint)):
+        return False
+    try:
+        fd = os.open(mountpoint, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            details = os.fstat(fd)
+            if (details.st_uid != os.geteuid() or not stat.S_ISDIR(details.st_mode)
+                    or stat.S_IMODE(details.st_mode) != 0o700 or os.listdir(fd)):
+                return False
+            os.fchmod(fd, 0o500)
+            details = os.fstat(fd)
+            return stat.S_IMODE(details.st_mode) == 0o500 and not os.listdir(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
 def linux_mount_record(mountpoint: Path) -> tuple[str, str] | None:
     escaped = str(mountpoint).replace("\\", "\\134").replace("\t", "\\011").replace(" ", "\\040").replace("\n", "\\012")
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
@@ -770,13 +791,21 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
         mounted = linux_mount_record(mountpoint)
         if mounted:
             linux_validate_mount(settings, scratch, entry)
+            # A systemd foreground invocation must own the FUSE process. An
+            # already-mounted filesystem has no process for this invocation
+            # to supervise, so fail instead of reporting a successful start.
+            if foreground:
+                return 75
             return 0
         if image.is_symlink() or not image.is_file() or image.stat().st_uid != os.geteuid():
             return 75
-        if not linux_mountpoint_safe(mountpoint):
-            return 75
         if entry.get("filesystem_uuid") != linux_fs_uuid(image) or image.stat().st_size != entry.get("quota_bytes"):
             return 75
+        if not linux_mountpoint_safe(mountpoint):
+            if not linux_recover_underlay(mountpoint, image, entry):
+                return 75
+            if not linux_mountpoint_safe(mountpoint):
+                return 75
         # Keep an FD to the verified underlay so its permissions can be restored
         # even after the mount obscures the path. fusermount requires a writable
         # mountpoint during startup, so widen only for the bounded handshake.
@@ -833,27 +862,59 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
 
 def linux_status() -> int:
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    alarms: list[str] = []
+    rows: list[dict[str, Any]] = []
+    fatal = False
     try:
         settings, scratch = cls("scratch")
         image, mountpoint = linux_paths(scratch)
         entry = registry()["volumes"].get("scratch")
         mounted = linux_mount_record(mountpoint)
         identity_ok = False
-        if entry and mounted:
+        if isinstance(entry, dict) and entry.get("state") == "active" and mounted:
             linux_validate_mount(settings, scratch, entry)
             identity_ok = True
         backing_free = shutil.disk_usage(image.parent).free if image.parent.exists() else None
-        volume_free = shutil.disk_usage(mountpoint).free if identity_ok else None
-        output = {"measured_at": timestamp, "host_id": os.uname().nodename, "class": "scratch",
-                  "image_path": str(image), "path": str(mountpoint), "quota_bytes": scratch["quota_gb"] * GIB,
-                  "filesystem_uuid": entry.get("filesystem_uuid") if isinstance(entry, dict) else None,
-                  "state": "active" if identity_ok else "unavailable", "available": identity_ok,
-                  "mount_source": mounted[1] if mounted else None, "backing_free_bytes": backing_free,
-                  "volume_free_bytes": volume_free}
-        print(json.dumps(output, sort_keys=True))
-        return 0
+        volume_used = volume_free = None
+        if identity_ok:
+            usage = shutil.disk_usage(mountpoint)
+            volume_used, volume_free = usage.total - usage.free, usage.free
+        row = {
+            "host_id": os.uname().nodename,
+            "filesystem_id": entry.get("filesystem_uuid") if isinstance(entry, dict) else None,
+            "kind": "filesystem",
+            "source": "ext4_image",
+            "path": str(mountpoint),
+            "class": "scratch",
+            "allocated_bytes": volume_used,
+            "quota_bytes": scratch["quota_gb"] * GIB,
+            "measured_at": timestamp if identity_ok else None,
+            "status": "active" if identity_ok else "unavailable",
+            "available": identity_ok,
+            "attribution": "exclusive_exact",
+        }
+        rows.append(row)
+        if not identity_ok:
+            alarms.append("volume_measurement_unavailable:scratch")
+        elif volume_used >= row["quota_bytes"]:
+            alarms.append("volume_full")
+        elif volume_used / row["quota_bytes"] >= 0.9:
+            alarms.append("volume_high")
+        output = {
+            "measured_at": timestamp,
+            "container": {"filesystem_id": None, "source": "linux_host_filesystem",
+                          "ceiling_bytes": None, "free_bytes": backing_free},
+            "capacity_fit": None,
+            "volumes": rows,
+            "alarms": alarms,
+        }
     except Exception:
-        return 75
+        fatal = True
+        output = {"measured_at": timestamp, "container": {"filesystem_id": None,
+            "source": "linux_host_filesystem", "ceiling_bytes": None, "free_bytes": None},
+            "capacity_fit": None, "volumes": rows, "alarms": ["volume_measurement_unavailable"]}
+    print(json.dumps(output, sort_keys=True))
+    return 2 if fatal else (1 if alarms else 0)
 
 
 def systemd_quote(value: str) -> str:
@@ -873,6 +934,11 @@ def linux_service_install_cmd(name: str) -> int:
             return 75
         if entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint):
             return 75
+        if linux_mount_record(mountpoint):
+            # Do not let systemd claim an unmanaged mount. Only an already
+            # active instance of this exact unit can legitimately own it.
+            linux_validate_mount(cls(name)[0], scratch, entry)
+            linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
         unit_template = Path(__file__).resolve().parent.parent / "systemd" / "diskm-scratch.service.in"
         if not unit_template.is_file():
             return 75
@@ -909,7 +975,19 @@ def linux_service_install_cmd(name: str) -> int:
                 os.fsync(stream.fileno())
         linux_command(["systemctl", "--user", "daemon-reload"])
         linux_command(["systemctl", "--user", "enable", "--now", "diskm-scratch.service"], 60)
-        return 0
+        linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
+        settings, scratch = cls(name)
+        _, mountpoint = linux_paths(scratch)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            active = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
+                                     "diskm-scratch.service"], capture_output=True, check=False)
+            mounted = linux_mount_record(mountpoint)
+            if active.returncode == 0 and mounted:
+                linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+                return 0
+            time.sleep(0.1)
+        return 75
     except Exception:
         return 75
 

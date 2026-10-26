@@ -190,6 +190,69 @@ class LinuxScratchTest(VolumeTestBase):
         self.set_linux_image_config(200)
         self.assertEqual(volume.path_cmd("scratch"), 3)
 
+
+    def test_linux_foreground_mount_refuses_an_existing_mount_without_owning_it(self):
+        scratch = self.set_linux_image_config(1)
+        entry = {"state": "active", "image_path": scratch["image_path"],
+                 "mountpoint": scratch["mountpoint"], "quota_bytes": volume.GIB,
+                 "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", scratch["image_path"])), \
+             mock.patch.object(volume, "linux_validate_mount") as validate, \
+             mock.patch.object(volume.subprocess, "Popen") as popen:
+            self.assertEqual(volume.linux_mount_cmd("scratch", foreground=True), 75)
+        validate.assert_called_once()
+        popen.assert_not_called()
+
+    def test_linux_service_install_rejects_an_unmanaged_existing_mount(self):
+        scratch = self.set_linux_image_config(1)
+        entry = {"state": "active", "image_path": scratch["image_path"],
+                 "mountpoint": scratch["mountpoint"], "quota_bytes": volume.GIB,
+                 "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", scratch["image_path"])), \
+             mock.patch.object(volume, "linux_validate_mount"), \
+             mock.patch.object(volume, "linux_command", side_effect=RuntimeError("inactive")) as command:
+            self.assertEqual(volume.linux_service_install_cmd("scratch"), 75)
+        command.assert_called_once_with(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
+
+    def test_linux_mount_recovers_only_empty_owned_0700_interrupted_underlay(self):
+        mountpoint = self.root / "underlay"
+        mountpoint.mkdir(mode=0o700)
+        mountpoint.chmod(0o700)
+        image = self.root / "scratch.ext4"
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint)}
+        with mock.patch.object(volume, "linux_mount_record", return_value=None):
+            self.assertTrue(volume.linux_recover_underlay(mountpoint, image, entry))
+            self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o500)
+            mountpoint.chmod(0o700)
+            (mountpoint / "unexpected").touch()
+            self.assertFalse(volume.linux_recover_underlay(mountpoint, image, entry))
+            self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o700)
+
+    def test_linux_status_uses_shared_volume_schema(self):
+        scratch = self.set_linux_image_config(1)
+        image, mountpoint = volume.linux_paths(scratch)
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+                 "quota_bytes": volume.GIB, "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        usage = volume.shutil._ntuple_diskusage(total=volume.GIB, used=100, free=volume.GIB - 100)
+        output = io.StringIO()
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", str(image))), \
+             mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]), \
+             mock.patch.object(volume.shutil, "disk_usage", return_value=usage), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(volume.linux_status(), 0)
+        data = json.loads(output.getvalue())
+        self.assertIn("measured_at", data)
+        self.assertIn("alarms", data)
+        row = next(x for x in data["volumes"] if x["class"] == "scratch")
+        self.assertEqual((row["status"], row["available"], row["allocated_bytes"],
+                          row["quota_bytes"], row["filesystem_id"], row["path"]),
+                         ("active", True, 100, volume.GIB, entry["filesystem_uuid"], str(mountpoint)))
+
 class ParseTest(VolumeTestBase):
     def test_container_rows(self):
         c = volume.load_container()
