@@ -384,7 +384,9 @@ lease_write_pending() {
 # Atomically converts the exact observed lease to a pending reuse claim. The
 # previous lease is retained for rollback; an abandoned claim is never reaped.
 lease_claim_reuse() {
-    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY'
+    local rc=0
+    lease_registry_mutation_lock_enter || return 1
+    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY' || rc=$?
 import hashlib, json, os, sys, tempfile, time
 path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:]
 lock = path + ".reuse-lock"
@@ -437,6 +439,8 @@ finally:
     try: os.rmdir(lock)
     except OSError: pass
 PY
+    lease_registry_mutation_lock_exit || rc=$?
+    return "$rc"
 }
 
 # lease_owner_state_for <lease> <own_owner_tsv> [expected_candidate] —
@@ -538,13 +542,32 @@ lease_reuse_lock_release() {
 lease_mutation_lock_enter() {
     local lease="$1" mode="${2:-}"
     if [[ "$mode" == --lock-held ]]; then
-        [[ -d "$lease.reuse-lock" ]]
+        [[ -d "$lease.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
     else
-        lease_reuse_lock_acquire "$lease"
+        lease_registry_mutation_lock_enter || return 1
+        lease_reuse_lock_acquire "$lease" || {
+            lease_registry_mutation_lock_exit
+            return 1
+        }
     fi
 }
 lease_mutation_lock_exit() {
-    [[ "${2:-}" == --lock-held ]] || lease_reuse_lock_release "$1"
+    [[ "${2:-}" == --lock-held ]] && return 0
+    local rc=0
+    lease_reuse_lock_release "$1" || rc=$?
+    lease_registry_mutation_lock_exit || rc=$?
+    return "$rc"
+}
+
+# Serialize owner and lease births across all paths with C14's verdict-to-rename
+# critical section. A single registry lock closes races involving descendant or
+# ancestor leases that do not share the candidate's own per-lease lock.
+lease_registry_mutation_lock_enter() {
+    mkdir -p "$(lease_dir)" || return 1
+    lease_reuse_lock_acquire "$(lease_dir)/.owner-mutation"
+}
+lease_registry_mutation_lock_exit() {
+    lease_reuse_lock_release "$(lease_dir)/.owner-mutation"
 }
 
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only

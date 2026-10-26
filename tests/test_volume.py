@@ -359,6 +359,20 @@ class StatusAndBallastTest(VolumeTestBase):
                     self.assertEqual(volume.status(snapshot=True), 2)
                 self.assertIn(expected_alarm, json.loads(output.getvalue())["alarms"])
 
+    def test_status_fails_closed_for_malformed_present_registry_entry(self):
+        registry_path, _ = volume.registry_paths()
+        for entry in (None, [], "invalid", 7, {}, {"state": "unknown"}):
+            with self.subTest(entry=entry):
+                registry_path.write_text(json.dumps({
+                    "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+                    "volumes": {"scratch": entry},
+                }))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(volume.status(snapshot=True), 2)
+                result = json.loads(output.getvalue())
+                self.assertIn("volume_registry_invalid:scratch", result["alarms"])
+
     def test_create_rejects_custom_mountpoint_on_macos_before_mutation(self):
         with mock.patch.object(volume.sys, "platform", "darwin"):
             self.assertEqual(volume.create_cmd("scratch", execute=True), 2)

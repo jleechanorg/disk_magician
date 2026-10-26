@@ -20,6 +20,9 @@ lease_empty_and_removed() {
   [[ "$1" == removed:* && ! -e "$2" ]] &&
     python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["owners"] == []' "$3"
 }
+lease_owner_stays_empty() {
+  [[ -d "$1" ]] && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["owners"] == []' "$2"
+}
 
 # Independent inventory writer for the stub verdict (same shape C14 emits with --inventory-out).
 cat > "$TMP/inv.py" <<'PY'
@@ -256,18 +259,27 @@ fixture; run DISK_MAGICIAN_TEST_AFTER_VERDICT='printf BBBB > "$DM_Q_PATH/report.
 check 'rewrite before rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]
 check 'rewrite before rename: rolled back, B intact' intact BBBB
 check 'rewrite before rename: quarantine empty' [ "$(qcount)" = 0 ]
-# C14 holds the same per-lease lock used by owner acquisition from before its
-# verdict through rename. An acquisition injected after the verdict therefore
-# fails closed instead of racing a live owner onto a removed artifact.
+# C14 holds the shared lease-registry lock from before its verdict through
+# rename. A descendant lease owner injected after the verdict therefore fails
+# closed instead of racing a live owner onto a removed ancestor.
 fixture
-race_lease="$(lease_path_for "$A")"; mkdir -p "$(dirname "$race_lease")"
-python3 - "$race_lease" "$A" <<'PY'
+mkdir -p "$A/child"
+race_lease="$(lease_path_for "$A/child")"; mkdir -p "$(dirname "$race_lease")"
+python3 - "$race_lease" "$A/child" <<'PY'
 import json,sys
 json.dump({"path":sys.argv[2],"owner":None,"owners":[],"released_at":"released"},open(sys.argv[1],"w"))
 PY
-run DISK_MAGICIAN_TEST_AFTER_VERDICT="source '$ROOT/scripts/lib/worktree_lease.sh'; row=\$(lease_resolve_process_owner \"\$BASHPID\"); IFS=\$'\\t' read -r pid start comm <<<\"\$row\"; if lease_owner_add '$A' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/owner-race'; else echo blocked >'$TMP/owner-race'; fi"
-check 'verdict-to-rename race: injected owner acquisition fails closed' grep -Fx blocked "$TMP/owner-race"
-check 'verdict-to-rename race: C14 completes with no owner added' lease_empty_and_removed "$OUT" "$A" "$race_lease"
+unrelated="$TMP/unrelated"; mkdir -p "$unrelated"
+unrelated_lease="$(lease_path_for "$unrelated")"
+python3 - "$unrelated_lease" "$unrelated" <<'PY'
+import json,sys
+json.dump({"path":sys.argv[2],"owner":None,"owners":[],"released_at":"released"},open(sys.argv[1],"w"))
+PY
+run DISK_MAGICIAN_TEST_AFTER_VERDICT="source '$ROOT/scripts/lib/worktree_lease.sh'; row=\$(lease_resolve_process_owner \"\$BASHPID\"); IFS=\$'\\t' read -r pid start comm <<<\"\$row\"; if lease_owner_add '$A/child' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/descendant-owner-race'; else echo blocked >'$TMP/descendant-owner-race'; fi; if lease_owner_add '$unrelated' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/unrelated-owner-race'; else echo blocked >'$TMP/unrelated-owner-race'; fi"
+check 'verdict-to-rename race: descendant owner acquisition fails closed' grep -Fx blocked "$TMP/descendant-owner-race"
+check 'verdict-to-rename race: C14 removes ancestor with no descendant owner added' lease_empty_and_removed "$OUT" "$A" "$race_lease"
+check 'registry lock contention fails unrelated lease acquisition closed' grep -Fx blocked "$TMP/unrelated-owner-race"
+check 'unrelated lease remains unchanged after contention' lease_owner_stays_empty "$unrelated" "$unrelated_lease"
 # Same rewrite after the rename, before the re-hash.
 fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"'
 check 'rewrite after rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]

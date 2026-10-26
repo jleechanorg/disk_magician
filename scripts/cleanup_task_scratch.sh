@@ -583,8 +583,14 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 
     # 2. Remove remaining scratch files/dirs inside $dir that pass artifact_removal_verdict --kind ephemeral
     while IFS= read -r -d '' entry; do
+      if ! lease_registry_mutation_lock_enter; then
+        log "KEEP [c14: kept:lease-busy] $entry"
+        container_abort=true
+        continue
+      fi
       verdict="$(artifact_removal_verdict "$entry" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
       if [[ "$verdict" != "remove" ]]; then
+        lease_registry_mutation_lock_exit || true
         log "KEEP [c14: $verdict] $entry"
         container_abort=true
         continue
@@ -606,11 +612,17 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
         log "KEEP [rm-failed: $entry] $dir"
         container_abort=true
       fi
+      lease_registry_mutation_lock_exit || true
     done < <(/usr/bin/find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
 
     # 3. Remove the emptied container directory itself
     if [[ "$container_abort" == false ]]; then
       set_dir_mtime_epoch "$dir" "$newest_epoch"
+      if ! lease_registry_mutation_lock_enter; then
+        dir_verdict=kept:lease-busy
+        log "KEEP [rmdir-or-c14-kept: $dir_verdict] $dir"
+        CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))
+      else
       dir_verdict="$(artifact_removal_verdict "$dir" --kind ephemeral 2>/dev/null || echo "kept:check-failed")"
       if [[ "$dir_verdict" == "remove" ]] && rmdir "$dir" 2>/dev/null; then
         append_manifest "rmdir" "$dir"
@@ -620,6 +632,8 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
       else
         log "KEEP [rmdir-or-c14-kept: $dir_verdict] $dir"
         CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))
+      fi
+      lease_registry_mutation_lock_exit || true
       fi
     else
       CONTAINERS_KEPT=$(( CONTAINERS_KEPT + 1 ))

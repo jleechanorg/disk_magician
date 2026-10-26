@@ -708,12 +708,18 @@ def status(snapshot: bool = False) -> int:
             for volume in container.volumes
         )
         entry_state = entry.get("state") if isinstance(entry, dict) else None
-        if entry is None and live_scratch:
+        if "scratch" in entries and not isinstance(entry, dict):
+            fatal = True
+            alarms.append("volume_registry_invalid:scratch")
+        elif "scratch" not in entries and live_scratch:
             fatal = True
             alarms.append("volume_registry_missing:scratch")
         elif entry_state in {"creating", "needs_recovery"}:
             fatal = True
             alarms.append("volume_registry_incomplete:scratch")
+        elif isinstance(entry, dict) and entry_state not in {"active", "retired"}:
+            fatal = True
+            alarms.append("volume_registry_invalid:scratch")
         try:
             capacity_fit = fit_result(container)
         except Exception:
