@@ -62,6 +62,57 @@ class NativeFstabPublicCliTest(unittest.TestCase):
             else:
                 os.environ[key] = value
 
+    def run_fixture_fstab(self, action):
+        base = [action, "scratch", "--config", str(self.config), "--state-dir", str(self.state),
+                "--user-uid", str(os.getuid()), "--fixture-root", str(self.root), "--execute"]
+        with (
+            mock.patch.object(volume.sys, "platform", "linux"),
+            mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume.os, "geteuid", return_value=0),
+        ):
+            return volume.main(["fstab", *base])
+
+    def test_public_fstab_install_rejects_octal_escaped_conflicts_unchanged(self):
+        for field in ("source", "target"):
+            with self.subTest(field=field):
+                escaped_image = str(self.image).replace("/", r"\057")
+                escaped_mount = str(self.mountpoint).replace("/", r"\057")
+                fields = [escaped_image, "/unrelated", "ext4", "defaults", "0", "2"]
+                if field == "target":
+                    fields = ["/unrelated", escaped_mount, "ext4", "defaults", "0", "2"]
+                original = self.original_fstab + (" ".join(fields) + "\n").encode()
+                self.fstab.write_bytes(original)
+                self.assertEqual(self.run_fixture_fstab("install"), 75)
+                self.assertEqual(self.fstab.read_bytes(), original)
+
+    def test_fstab_round_trip_preserves_eof_without_final_newline(self):
+        original = b"# exact bytes\n/dev/example /example ext4 defaults 0 2"
+        self.fstab.write_bytes(original)
+        self.assertEqual(self.run_fixture_fstab("install"), 0)
+        self.assertNotEqual(self.fstab.read_bytes(), original)
+        self.assertEqual(self.run_fixture_fstab("remove"), 0)
+        self.assertEqual(self.fstab.read_bytes(), original)
+
+    def test_public_fstab_install_rejects_other_fixture_markers_unchanged(self):
+        marker = b"a" * 64
+        begin = b"# diskm-scratch:" + marker + b":begin\n"
+        end = b"# diskm-scratch:" + marker + b":end\n"
+        record = b"/other-image /other-mount ext4 loop,user,noauto,nosuid,nodev,noatime,exec 0 0\n"
+        cases = {
+            "orphan begin": self.original_fstab + begin,
+            "duplicate pair": self.original_fstab + begin + record + end + begin + record + end,
+            "mismatched pair": self.original_fstab + begin + record + b"# diskm-scratch:" + b"b" * 64 + b":end\n",
+        }
+        for label, original in cases.items():
+            with self.subTest(case=label):
+                self.fstab.write_bytes(original)
+                self.assertEqual(self.run_fixture_fstab("install"), 75)
+                self.assertEqual(self.fstab.read_bytes(), original)
+
     def test_unrelated_image_and_mount_are_rejected_before_fstab_write(self):
         document = json.loads(self.config.read_text())
         scratch = document["volumes"]["classes"]["scratch"]
@@ -258,6 +309,49 @@ class NativeFstabPublicCliTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity"):
                 volume.linux_validate_native_mount({}, scratch, entry)
 
+    def test_mount_record_rejects_stacked_rows_for_target(self):
+        rows = "".join(
+            f"{mount_id} 1 0:42 / {self.mountpoint} rw - {fs_type} {source} rw\n"
+            for mount_id, fs_type, source in (
+                (100, "ext4", "/dev/loop42"),
+                (101, "overlay", "overlay"),
+            )
+        )
+        with mock.patch.object(Path, "read_text", return_value=rows):
+            with self.assertRaisesRegex(ValueError, "ambiguous mountpoint"):
+                volume.linux_mount_record(self.mountpoint)
+
+    def test_ambiguous_native_mount_refuses_ballast_release_and_unmount(self):
+        device = Path("/dev/loop42")
+        with self.image.open("wb") as stream:
+            stream.truncate(volume.GIB)
+        scratch = {"backend": "native", "image_path": str(self.image),
+                   "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        reserve = volume.ballast_path(str(self.mountpoint))
+        reserve.write_bytes(b"protected reserve")
+        handle = mock.Mock()
+        with (
+            mock.patch.object(volume, "linux_backend_enabled", return_value=True),
+            mock.patch.object(volume, "cls", return_value=({}, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "locked_registry", return_value=(self.root / "registry", handle)),
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_loop_devices", return_value=[device]),
+            mock.patch.object(volume, "linux_mount_record", side_effect=ValueError("ambiguous mountpoint")),
+            mock.patch.object(volume, "linux_command") as command,
+            mock.patch.object(volume, "log_ballast_release") as log_release,
+        ):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+            with self.assertRaisesRegex(ValueError, "ambiguous mountpoint"):
+                volume.linux_native_unmount_cmd(scratch, entry)
+        self.assertEqual(reserve.read_bytes(), b"protected reserve")
+        command.assert_not_called()
+        log_release.assert_not_called()
+        handle.close.assert_called_once()
+
     def test_native_mount_rolls_back_only_the_exact_invalid_mount(self):
         device = Path("/dev/loop42")
         scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
@@ -317,6 +411,99 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), config_bytes)
         self.assertEqual(unit.read_bytes(), unit_bytes)
         self.assertEqual(calls, ["stop", "daemon-reload", "start", "stop", "daemon-reload"])
+
+    def test_failed_rollback_stop_restores_exact_files_without_restarting_fuse(self):
+        config_bytes = self.config.read_bytes()
+        self.config.chmod(0o640)
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime, str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        unit.chmod(0o600)
+        config_bytes = self.config.read_bytes()
+        config_stat, unit_stat = self.config.stat(), unit.stat()
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        settings, scratch = {"classes": {"scratch": {}}}, json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        calls = []
+
+        def command(args, timeout=30):
+            if args[:2] == ["systemctl", "--user"]:
+                calls.append(args[2])
+                if args[2] == "stop" and calls.count("stop") == 2:
+                    raise RuntimeError("injected busy stop failure")
+            return ""
+
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("forced native validation failure")),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", side_effect=[False, True]),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_command", side_effect=command),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+        self.assertEqual((self.config.stat().st_mode & 0o777, self.config.stat().st_uid,
+                          self.config.stat().st_gid, self.config.stat().st_mtime_ns),
+                         (config_stat.st_mode & 0o777, config_stat.st_uid,
+                          config_stat.st_gid, config_stat.st_mtime_ns))
+        self.assertEqual((unit.stat().st_mode & 0o777, unit.stat().st_uid,
+                          unit.stat().st_gid, unit.stat().st_mtime_ns),
+                         (unit_stat.st_mode & 0o777, unit_stat.st_uid,
+                          unit_stat.st_gid, unit_stat.st_mtime_ns))
+        self.assertEqual(calls.count("start"), 1)
+        self.assertEqual(calls[-1], "daemon-reload")
+
+    def test_native_migration_binds_explicit_config_and_state_paths(self):
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit.write_bytes(volume.linux_service_render(self.runtime, str(self.config), self.state, "fuse").encode())
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        registry_path = self.state / "volumes/registry.json"
+        registry_path.parent.mkdir(mode=0o700)
+        registry_path.write_text(json.dumps({"schema_version": 1, "volumes": {"scratch": entry}}))
+        ambient_config = self.root / "ambient-config.json"
+        ambient_document = json.loads(self.config.read_text())
+        ambient_document["volumes"]["classes"]["scratch"]["backend"] = "native"
+        ambient_config.write_text(json.dumps(ambient_document))
+        ambient_state = self.root / "ambient-state"
+        (ambient_state / "volumes").mkdir(mode=0o700, parents=True)
+        (ambient_state / "volumes/registry.json").write_text(json.dumps({"schema_version": 1, "volumes": {}}))
+        ambient_bytes = ambient_config.read_bytes()
+        os.environ["DISK_MAGICIAN_CONFIG"] = str(ambient_config)
+        os.environ["DISK_MAGICIAN_STATE_DIR"] = str(ambient_state)
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_command", return_value=""),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 0)
+        self.assertEqual(json.loads(self.config.read_text())["volumes"]["classes"]["scratch"]["backend"], "native")
+        self.assertEqual(ambient_config.read_bytes(), ambient_bytes)
+        self.assertEqual(volume.registry(self.state)["volumes"]["scratch"], entry)
 
     def test_native_migration_commits_backend_and_oneshot_service(self):
         unit = self.root / ".config/systemd/user/diskm-scratch.service"

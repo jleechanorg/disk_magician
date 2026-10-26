@@ -167,10 +167,11 @@ def load_container() -> Container:
     return Container(ref, uuid, ceiling, free, tuple(volumes), tuple(all_volume_names))
 
 
-def config() -> dict[str, Any]:
+def config(config_path: str | Path | None = None) -> dict[str, Any]:
     import resolve_config
 
-    document = json.loads(Path(resolve_config.resolve()).read_text())
+    source = resolve_config.resolve() if config_path is None else config_path
+    document = json.loads(Path(source).read_text())
     if not isinstance(document, dict):
         raise ValueError("invalid quota configuration")
     if "volumes" not in document:
@@ -200,8 +201,8 @@ def config() -> dict[str, Any]:
     return volumes
 
 
-def cls(name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    volumes = config()
+def cls(name: str, config_path: str | Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    volumes = config(config_path)
     if name not in SUPPORTED_CLASSES:
         raise ValueError("unsupported v1 volume class")
     return volumes, volumes["classes"][name]
@@ -265,20 +266,22 @@ def fit_result(
     }
 
 
-def state_root() -> Path:
+def state_root(state_dir: str | Path | None = None) -> Path:
+    if state_dir is not None:
+        return Path(state_dir)
     return Path(os.environ.get(
         "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
     ))
 
 
-def registry_paths() -> tuple[Path, Path]:
-    directory = state_root() / "volumes"
+def registry_paths(state_dir: str | Path | None = None) -> tuple[Path, Path]:
+    directory = state_root(state_dir) / "volumes"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "registry.json", directory / "registry.lock"
 
 
-def registry() -> dict[str, Any]:
-    path, _ = registry_paths()
+def registry(state_dir: str | Path | None = None) -> dict[str, Any]:
+    path, _ = registry_paths(state_dir)
     try:
         value = json.loads(path.read_text())
     except FileNotFoundError:
@@ -771,14 +774,20 @@ def linux_recover_underlay(mountpoint: Path, image: Path, entry: dict[str, Any])
 
 def linux_mount_record(mountpoint: Path) -> tuple[str, str] | None:
     escaped = str(mountpoint).replace("\\", "\\134").replace("\t", "\\011").replace(" ", "\\040").replace("\n", "\\012")
+    records = []
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
         fields = line.split()
-        if len(fields) > 6 and fields[4] == escaped and "-" in fields:
-            separator = fields.index("-")
-            if len(fields) > separator + 2:
-                return fields[separator + 1], fields[separator + 2]
-    return None
-
+        if len(fields) <= 4 or fields[4] != escaped:
+            continue
+        if "-" not in fields:
+            raise ValueError("invalid mountinfo row for target mountpoint")
+        separator = fields.index("-")
+        if len(fields) <= separator + 2:
+            raise ValueError("invalid mountinfo row for target mountpoint")
+        records.append((fields[separator + 1], fields[separator + 2]))
+    if len(records) > 1:
+        raise ValueError("ambiguous mountpoint has stacked mounts")
+    return records[0] if records else None
 
 def linux_validate_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
     if scratch.get("backend", "fuse") == "native":
@@ -1036,7 +1045,8 @@ def linux_service_render(runtime: Path, config_path: str, state_path: Path,
     return rendered
 
 
-def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result) -> None:
+def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result,
+                      preserve_times: bool = False) -> None:
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".diskm-", dir=path.parent)
     os.fchmod(fd, stat.S_IMODE(details.st_mode))
     os.fchown(fd, details.st_uid, details.st_gid)
@@ -1045,11 +1055,18 @@ def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result) -> None
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
+    if preserve_times:
+        os.utime(path, ns=(details.st_atime_ns, details.st_mtime_ns), follow_symlinks=False)
+        restored_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            os.fsync(restored_fd)
+        finally:
+            os.close(restored_fd)
     linux_fsync_directory(path.parent)
-
 
 def linux_service_migrate_cmd(arguments: list[str]) -> int:
     config_path = unit = None
+    state = image = mountpoint = None
     config_bytes = unit_bytes = b""
     config_stat = unit_stat = None
     fstab_installed = False
@@ -1075,8 +1092,8 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         if allowed is None or int(values["--user-uid"]) != os.geteuid():
             return 75
         config_path, state, image, mountpoint = allowed
-        settings, scratch = cls("scratch")
-        entry = registry()["volumes"].get("scratch")
+        settings, scratch = cls("scratch", config_path)
+        entry = registry(state)["volumes"].get("scratch")
         if (not isinstance(entry, dict) or entry.get("state") != "active" or
                 scratch.get("backend", "fuse") != "fuse"):
             return 75
@@ -1110,39 +1127,47 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         linux_atomic_bytes(unit, native_unit.encode(), unit_stat)
         linux_command(systemctl + ["daemon-reload"])
         linux_command(systemctl + ["start", "diskm-scratch.service"], 60)
-        linux_validate_native_mount(cls("scratch")[0], cls("scratch")[1], registry()["volumes"].get("scratch"))
+        settings, scratch = cls("scratch", config_path)
+        linux_validate_native_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
         linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
         return 0
     except Exception as error:
         print("volume service migrate: " + str(error), file=sys.stderr)
         if config_path is None or unit is None or config_stat is None or unit_stat is None:
             return 75
+        stopped = True
         try:
             linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
-            allowed = linux_fstab_allowed_paths(str(config_path), str(state_root()), str(os.geteuid()), None)
-            if allowed is None:
-                return 75
-            _, _, image, mountpoint = allowed
-            if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
-                    linux_image_has_open_writers(image)):
-                linux_atomic_bytes(config_path, config_bytes, config_stat)
-                linux_atomic_bytes(unit, unit_bytes, unit_stat)
-                linux_command(["systemctl", "--user", "daemon-reload"])
-                return 75
-            if fstab_installed:
+        except Exception:
+            stopped = False
+        try:
+            resources_busy = (
+                linux_mount_record(mountpoint) is not None or
+                linux_image_has_loop_mapping(image) or
+                linux_image_has_open_writers(image)
+            )
+        except Exception:
+            resources_busy = True
+        try:
+            linux_atomic_bytes(config_path, config_bytes, config_stat, preserve_times=True)
+            linux_atomic_bytes(unit, unit_bytes, unit_stat, preserve_times=True)
+            linux_command(["systemctl", "--user", "daemon-reload"])
+            if fstab_installed and not resources_busy:
                 root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
                             "volume", "fstab", "remove", "scratch", "--config", str(config_path),
-                            "--state-dir", str(state_root()), "--user-uid", str(os.geteuid()), "--execute"]
-                if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False).returncode:
+                            "--state-dir", str(state), "--user-uid", str(os.geteuid()), "--execute"]
+                if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True,
+                                   timeout=45, check=False).returncode:
                     return 75
-            linux_atomic_bytes(config_path, config_bytes, config_stat)
-            linux_atomic_bytes(unit, unit_bytes, unit_stat)
-            linux_command(["systemctl", "--user", "daemon-reload"])
+            if not stopped or resources_busy:
+                return 75
+            if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
+                    linux_image_has_open_writers(image)):
+                return 75
             linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
         except Exception:
             return 75
         return 75
-
 
 def linux_service_install_cmd(name: str) -> int:
     try:
@@ -1439,19 +1464,59 @@ def linux_fstab_block(uid: str, config: Path, state: Path, image: Path,
             f"# diskm-scratch:{marker}:end\n").encode()
 
 
+def linux_fstab_decode_field(field: bytes) -> bytes:
+    return re.sub(rb"\\([0-7]{3})", lambda match: bytes((int(match.group(1), 8),)), field)
+
+
+def linux_fstab_markers(lines: list[bytes]) -> dict[bytes, tuple[int, int]]:
+    begins: dict[bytes, int] = {}
+    ends: dict[bytes, int] = {}
+    active: bytes | None = None
+    prefix = b"# diskm-scratch:"
+    for index, line in enumerate(lines):
+        candidate = line.rstrip(b"\r\n")
+        if not candidate.lstrip().startswith(prefix):
+            continue
+        match = re.fullmatch(rb"# diskm-scratch:([0-9a-f]{64}):(begin|end)", candidate)
+        if match is None:
+            raise ValueError("malformed managed fstab marker")
+        marker, boundary = match.groups()
+        if boundary == b"begin":
+            if active is not None or marker in begins:
+                raise ValueError("duplicate or malformed managed fstab markers")
+            begins[marker] = index
+            active = marker
+            continue
+        if active != marker or marker not in begins or marker in ends:
+            raise ValueError("orphan or mismatched managed fstab marker")
+        begin = begins[marker]
+        record = lines[begin + 1].strip() if index == begin + 2 else b""
+        if not record or record.startswith(b"#"):
+            raise ValueError("malformed managed fstab block")
+        ends[marker] = index
+        active = None
+    if active is not None or begins.keys() != ends.keys():
+        raise ValueError("orphan managed fstab marker")
+    return {marker: (begin, ends[marker]) for marker, begin in begins.items()}
+
+
 def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Path,
                           action: str) -> bytes:
     linux_fstab_validate(data)
     lines = data.splitlines(keepends=True)
     block_lines = block.splitlines(keepends=True)
-    begins = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == block_lines[0].rstrip(b"\r\n")]
-    ends = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == block_lines[-1].rstrip(b"\r\n")]
-    if len(begins) > 1 or len(ends) > 1 or len(begins) != len(ends):
-        raise ValueError("duplicate or malformed managed fstab markers")
+    pairs = linux_fstab_markers(lines)
+    begin_match = re.fullmatch(rb"# diskm-scratch:([0-9a-f]{64}):begin\r?\n", block_lines[0])
+    end_match = re.fullmatch(rb"# diskm-scratch:([0-9a-f]{64}):end\r?\n", block_lines[-1])
+    if begin_match is None or end_match is None or begin_match.group(1) != end_match.group(1):
+        raise ValueError("invalid requested managed fstab block")
+    own_marker = begin_match.group(1)
     existing = b""
-    if begins:
-        start, finish = begins[0], ends[0]
-        if finish != start + 2 or lines[start + 1] != block_lines[1]:
+    if own_marker in pairs:
+        start, finish = pairs[own_marker]
+        if (finish != start + 2 or lines[start].rstrip(b"\\r\\n") != block_lines[0].rstrip(b"\\r\\n") or
+                lines[start + 1] != block_lines[1] or
+                lines[finish].rstrip(b"\\r\\n") != block_lines[-1].rstrip(b"\\r\\n")):
             raise ValueError("managed fstab block does not match requested identity")
         existing = b"".join(lines[start:finish + 1])
         del lines[start:finish + 1]
@@ -1459,7 +1524,9 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
         if line.lstrip().startswith(b"#"):
             continue
         fields = line.split()
-        if len(fields) >= 2 and (fields[0] == os.fsencode(image) or fields[1] == os.fsencode(mountpoint)):
+        if len(fields) >= 2 and (
+                linux_fstab_decode_field(fields[0]) == os.fsencode(image) or
+                linux_fstab_decode_field(fields[1]) == os.fsencode(mountpoint)):
             raise ValueError("conflicting unmanaged fstab entry")
     if action == "remove":
         if not existing:
@@ -1469,12 +1536,12 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
         return output
     if action == "install":
         output = b"".join(lines)
-        output = output + (b"" if not output or output.endswith(b"\n") else b"\n") + block
+        # A table without a final newline keeps its original bytes after the
+        # managed block; prefixing the block avoids inventing an EOF newline.
+        output = (block + output) if output and not output.endswith(b"\n") else (output + block)
         linux_fstab_validate(output)
         return output
     raise ValueError("unknown fstab action")
-
-
 def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
     if os.geteuid() != 0:
         raise PermissionError("fstab changes require administrator authentication")
