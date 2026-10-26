@@ -627,6 +627,12 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       continue
     fi
 
+    if [[ "$DRY_RUN" == false && "$UNAPPROVED_CLEAN" == true ]] && (( age_days < AUTO_APPROVE_AGE_DAYS )); then
+      SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+      log "  skip (parent worktree ${age_days}d < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $venv_path"
+      continue
+    fi
+
     # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
     real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
     _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
@@ -643,9 +649,6 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
       TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
       STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
-    elif [[ "$UNAPPROVED_CLEAN" == true ]] && (( age_days < AUTO_APPROVE_AGE_DAYS )); then
-      SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
-      log "  skip (parent worktree ${age_days}d < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $venv_path"
     else
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
@@ -708,19 +711,25 @@ purge_bak_dirs() {
         continue
       fi
 
+      # The bak dir's own age: its rename/creation mtime, not the worktree's.
+      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
+      if (( bak_age_days < purge_days )); then
+        skipped_young_bak=$(( skipped_young_bak + 1 ))
+        continue
+      fi
+
+      if [[ "$DRY_RUN" == false && "$UNAPPROVED_CLEAN" == true ]] && worktree_is_recently_active "$parent" "$AUTO_APPROVE_AGE_DAYS"; then
+        SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+        log "  skip (parent worktree < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $bak_path"
+        continue
+      fi
+
       # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
       real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
       _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
       if [[ -n "$_skip_reason" ]]; then
         skipped_excluded=$(( skipped_excluded + 1 ))
         log "  skip ($_skip_reason): $bak_path"
-        continue
-      fi
-
-      # The bak dir's own age: its rename/creation mtime, not the worktree's.
-      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
-      if (( bak_age_days < purge_days )); then
-        skipped_young_bak=$(( skipped_young_bak + 1 ))
         continue
       fi
 
@@ -731,9 +740,6 @@ purge_bak_dirs() {
         log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
         bak_freed_kb=$(( bak_freed_kb + bak_kb ))
         bak_count=$(( bak_count + 1 ))
-      elif [[ "$UNAPPROVED_CLEAN" == true ]] && worktree_is_recently_active "$parent" "$AUTO_APPROVE_AGE_DAYS"; then
-        SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
-        log "  skip (parent worktree < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $bak_path"
       else
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then

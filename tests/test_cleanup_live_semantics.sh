@@ -132,9 +132,11 @@ printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' \
 
 # Age the whole candidate including git admin. C14's inventory newest-mtime
 # gate covers .git, so touching only working files leaves a fresh index that
-# reads as recent-activity.
+# reads as recent-activity. Use 30 days (>7d floor, <90d auto-approve threshold)
+# for idle/unpushed worktrees so WORKTREE_APPROVED=1 gating is exercised.
+WT_30D_STAMP="$(python3 -c 'import time; print(time.strftime("%Y%m%d%H%M", time.localtime(time.time() - 30 * 86400)))')"
 find "$AG/worktrees/proj/idle" "$AG/worktrees/proj/unpushed" "$AG/worktrees/proj/non_git" \
-  -exec touch -h -t 202001010000 {} + 2>/dev/null
+  -exec touch -h -t "$WT_30D_STAMP" {} + 2>/dev/null
 touch -t 202001010000 "$AG/brain/old" "$AG/brain/old/old_file" \
   "$AG/worktrees/proj/live" "$AG/worktrees/proj/live/f" \
   "$AG/worktrees/proj/non_git" "$AG/worktrees/proj/non_git/f" "$AG/brain.backup"

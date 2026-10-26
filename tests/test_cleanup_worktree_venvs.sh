@@ -508,7 +508,7 @@ EOF
 KXZ_ROOTS="$KXZ_HOME/.worktrees,$KXZ_HOME/ao/data/worktrees"
 
 # Start a background process with cwd inside LIVE_WT
-(cd "$LIVE_WT" && sleep 300) &
+(cd "$LIVE_WT" && exec sleep 300 >/dev/null 2>&1 </dev/null) &
 LIVE_PID=$!
 
 OUT11_DRY=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
