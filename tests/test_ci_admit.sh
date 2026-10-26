@@ -117,6 +117,14 @@ volume_ws="/quota-mount/aged-output"
 _contract_case ci_volume "0" "" "GITHUB_WORKSPACE=$volume_ws bash '$CI'"
 assert_eq "$C_RC/$C_ADMITS" "0/1" "quota-volume workspace remains admitted once"
 grep -q -- "--class colima" "$CONTRACT_DIR/admit.log" && ok "quota volume keeps existing colima admission class" || bad "volume class: $(cat "$CONTRACT_DIR/admit.log")"
+_contract_case ci_volume_unexpected "3" "" "GITHUB_WORKSPACE=$volume_ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "75/1" "quota-volume workspace fails closed on unexpected admission result"
+grep -q "disk-admission: unavailable class=colima rc=3" <<<"$C_ERR" && ok "quota-volume unavailable result diagnosed" || bad "unexpected admission stderr: $C_ERR"
+printf '0\n' >"$CONTRACT_DIR/admit.rcs"; : >"$CONTRACT_DIR/admit.log"
+PATH="$CONTRACT_DIR/bin:$PATH" DISK_MAGICIAN_ADMIT_BIN="$T/bin/missing-admit" GITHUB_WORKSPACE="$volume_ws" bash "$CI" >"$T/missing-out" 2>"$T/missing-err"
+MISSING_RC=$?
+assert_eq "$MISSING_RC" 75 "quota-volume workspace fails closed when admission executable is missing"
+grep -q "admission_degraded:caller admit missing" "$T/missing-err" && ok "missing quota-volume admission diagnosed" || bad "missing admission stderr: $(cat "$T/missing-err")"
 volume_lease="$(lease_path_for "$volume_ws")"
 python3 - "$volume_lease" <<'PY'
 import json,sys

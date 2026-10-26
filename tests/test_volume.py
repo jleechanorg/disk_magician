@@ -194,6 +194,27 @@ class LifecycleTest(VolumeTestBase):
             self.assertEqual(volume.path_cmd("scratch"), 3)
         self.assertEqual(output.getvalue(), "")
 
+    def test_linux_template_config_without_registry_keeps_legacy_fallback(self):
+        previous_config = os.environ.get("DISK_MAGICIAN_CONFIG")
+        previous_diskutil = os.environ.get("DISK_MAGICIAN_DISKUTIL_BIN")
+        os.environ["DISK_MAGICIAN_CONFIG"] = str(ROOT / "config.json.template")
+        os.environ["DISK_MAGICIAN_DISKUTIL_BIN"] = str(self.root / "no-diskutil")
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(volume.path_cmd("scratch"), 3)
+        finally:
+            if previous_config is None:
+                os.environ.pop("DISK_MAGICIAN_CONFIG", None)
+            else:
+                os.environ["DISK_MAGICIAN_CONFIG"] = previous_config
+            if previous_diskutil is None:
+                os.environ.pop("DISK_MAGICIAN_DISKUTIL_BIN", None)
+            else:
+                os.environ["DISK_MAGICIAN_DISKUTIL_BIN"] = previous_diskutil
+        self.assertEqual(output.getvalue(), "")
+        self.assertFalse(self.calls_file.exists())
+
     def test_darwin_legacy_config_falls_back_only_when_apfs_confirms_absence(self):
         self.config.write_text(json.dumps({"budgets": {"daily": 5}}))
         absent = volume.Container("disk3", "CONTAINER-UUID", 100, 50, ())
@@ -229,6 +250,20 @@ class LifecycleTest(VolumeTestBase):
                 self.assertEqual(output.getvalue(), "")
 
     def test_path_fails_closed_when_live_scratch_volume_has_no_registry_entry(self):
+        data = json.loads(self.state.read_text())
+        data["volumes"].append({
+            "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
+            "device": "disk3s9", "used": 0, "quota": 30 * 2**30,
+            "roles": [], "mountpoint": str(self.mp),
+        })
+        self.state.write_text(json.dumps(data))
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_linux_with_available_diskutil_fails_closed_for_live_unregistered_volume(self):
         data = json.loads(self.state.read_text())
         data["volumes"].append({
             "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
@@ -305,9 +340,10 @@ class StatusAndBallastTest(VolumeTestBase):
             ({"scratch": {"state": "needs_recovery"}}, "volume_registry_incomplete:scratch"),
         )
         registry_path, _ = volume.registry_paths()
+        initial_state = self.state.read_text()
         for entries, expected_alarm in cases:
             with self.subTest(expected_alarm=expected_alarm):
-                data = json.loads(self.state.read_text())
+                data = json.loads(initial_state)
                 data["volumes"].append({
                     "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
                     "device": "disk3s9", "used": 0, "quota": 30 * 2**30,
@@ -396,6 +432,18 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(result["volumes"][0]["allocated_bytes"], 28 * 2**30)
         self.assertNotIn("tmp_audit", result)
 
+    def test_status_alarms_when_live_capacity_fit_fails(self):
+        self.make_fit()
+        data = json.loads(self.state.read_text())
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 899 * 2**30
+        self.state.write_text(json.dumps(data))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.status(snapshot=True), 1)
+        result = json.loads(output.getvalue())
+        self.assertIn("scratch_capacity_unavailable", result["alarms"])
+        self.assertFalse(result["capacity_fit"]["fits"])
+
     def test_status_degrades_when_active_scratch_ballast_is_missing_below_high_water(self):
         self.make_fit()
         data = json.loads(self.state.read_text())
@@ -477,6 +525,27 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertFalse((self.mp / ".diskm-ballast").exists())
         self.assertIn("release_ballast", log.read_text())
         self.assertIn("SCRATCH-UUID", log.read_text())
+
+    def test_ballast_release_fails_when_durable_log_record_cannot_be_written(self):
+        self.make_fit()
+        failed_sink = self.root / "deletion-log-directory"
+        failed_sink.mkdir()
+        previous = os.environ.get("DISK_MAGICIAN_DELETION_LOG")
+        os.environ["DISK_MAGICIAN_DELETION_LOG"] = str(failed_sink)
+        try:
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        finally:
+            if previous is None:
+                os.environ.pop("DISK_MAGICIAN_DELETION_LOG", None)
+            else:
+                os.environ["DISK_MAGICIAN_DELETION_LOG"] = previous
+        self.assertTrue((self.mp / ".diskm-ballast").exists())
+
+    def test_ballast_release_requires_final_log_after_unlink(self):
+        self.make_fit()
+        with mock.patch.object(volume, "log_ballast_release", side_effect=[True, False]):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertFalse((self.mp / ".diskm-ballast").exists())
 
     def test_ballast_release_detects_replacement_before_final_identity_check(self):
         self.make_fit()
@@ -587,6 +656,16 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         self.assertEqual(volume.path_cmd("scratch"), 3)
         self.assertEqual(volume.path_cmd("scratch", for_reclaim=True), 0)
 
+    def test_unmounted_retired_volume_is_unavailable_not_legacy_fallback(self):
+        self.install_exact_registry(state="retired")
+        data = json.loads(self.state.read_text())
+        data["mounted_mountpoint"] = str(self.root / "unmounted")
+        self.state.write_text(json.dumps(data))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(output.getvalue(), "")
+
     def test_registered_quota_must_match_live_measured_quota(self):
         self.install_exact_registry()
         data = json.loads(self.state.read_text())
@@ -644,6 +723,42 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         active = json.loads(registry_path.read_text())["volumes"]["scratch"]
         self.assertEqual(active["state"], "active")
         self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_recovery_rechecks_live_fit_after_data_growth(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        with mock.patch.object(volume, "write_ballast", side_effect=RuntimeError("injected")):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        registry_path, _ = volume.registry_paths()
+        calls_before = self.calls_file.read_text().count("addVolume")
+        data = json.loads(self.state.read_text())
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 899 * 2**30
+        self.state.write_text(json.dumps(data))
+
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual(entry["state"], "needs_recovery")
+        self.assertEqual(self.calls_file.read_text().count("addVolume"), calls_before)
+        self.assertFalse(volume.ballast_path(str(self.mp)).exists())
+
+    def test_recovery_rechecks_container_alarm_floor(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        with mock.patch.object(volume, "write_ballast", side_effect=RuntimeError("injected")):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        registry_path, _ = volume.registry_paths()
+        calls_before = self.calls_file.read_text().count("addVolume")
+        data = json.loads(self.state.read_text())
+        data["container"]["free"] = 19 * 2**30
+        self.state.write_text(json.dumps(data))
+
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual(entry["state"], "needs_recovery")
+        self.assertEqual(self.calls_file.read_text().count("addVolume"), calls_before)
+        self.assertFalse(volume.ballast_path(str(self.mp)).exists())
 
     def test_create_refuses_ambiguous_intent_without_uuid(self):
         data = json.loads(self.state.read_text())

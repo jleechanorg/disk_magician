@@ -725,6 +725,8 @@ assert_eq "$(lease_owner_state "$L13")" "released" "lease is released before new
 if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT13" --owner-pid 700; then ok "new live owner added to released lease"; else bad "new owner add failed"; fi
 assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("released_at"), len(d["owners"]))' "$L13")" "None 2" "owner add clears global release marker"
 assert_eq "$(lease_owner_state "$L13")" "alive" "new live owner makes lease protective"
+rm -rf -- "$WT13"
+if lease_owner_add "$WT13" 701 1760000000 codex; then bad "owner add after artifact removal succeeded"; else ok "owner add after artifact removal fails closed"; fi
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

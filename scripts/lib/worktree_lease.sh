@@ -300,12 +300,20 @@ lease_owner_add() {
     lease="$(lease_path_for "$wt")"
     [[ -f "$lease" ]] || return 1
     lease_mutation_lock_enter "$lease" || return 1
-    python3 - "$lease" "$pid" "$start" "$comm" <<'PYOWNERADD'
-import json, os, sys, tempfile
+    local rc=0
+    python3 - "$lease" "$wt" "$pid" "$start" "$comm" <<'PYOWNERADD' || rc=$?
+import json, os, stat, sys, tempfile
 from datetime import datetime, timezone
-path, pid, start, comm = sys.argv[1:]
+path, wt, pid, start, comm = sys.argv[1:]
 try:
-    d=json.load(open(path))
+    st=os.lstat(wt)
+    if not stat.S_ISDIR(st.st_mode): sys.exit(1)
+    with open(path) as f: d=json.load(f)
+    if not isinstance(d, dict) or d.get("path") != os.path.realpath(wt): sys.exit(1)
+    checkout_dev, checkout_ino = d.get("checkout_dev"), d.get("checkout_ino")
+    if ((checkout_dev is not None and checkout_dev != st.st_dev) or
+            (checkout_ino is not None and checkout_ino != st.st_ino)):
+        sys.exit(1)
     owners=d.get("owners")
     if not isinstance(owners,list):
         old=d.get("owner")
@@ -327,7 +335,6 @@ try:
 except Exception:
     sys.exit(1)
 PYOWNERADD
-    local rc=$?
     lease_mutation_lock_exit "$lease"
     return "$rc"
 }

@@ -14,7 +14,9 @@ else
 fi
 ws="${GITHUB_WORKSPACE:-$PWD}"
 cls="$(admit_class_for "$ws")"; cls="${cls:-colima}"
-if [[ "$cls" != colima ]] || admit_is_configured_volume_path "$ws"; then
+quota_volume=0
+admit_is_configured_volume_path "$ws" && quota_volume=1
+if [[ "$cls" != colima || "$quota_volume" == 1 ]]; then
     source "$_CI_DIR/lib/worktree_lease.sh"
     owner="$(lease_resolve_runner_worker "$$")" || {
         echo "admission_degraded:ci_owner_identity" >&2
@@ -27,7 +29,11 @@ if [[ "$cls" != colima ]] || admit_is_configured_volume_path "$ws"; then
     }
 fi
 rc=0
-admit_gate "$cls" "${CI_ADMIT_EST_GB:-}" ci "$ws" ci --ci-job "$job" || rc=$?
+if [[ "$quota_volume" == 1 ]]; then
+    admit_gate_required "$cls" "${CI_ADMIT_EST_GB:-}" ci "$ws" ci --ci-job "$job" || rc=$?
+else
+    admit_gate "$cls" "${CI_ADMIT_EST_GB:-}" ci "$ws" ci --ci-job "$job" || rc=$?
+fi
 if [[ "$rc" == 0 && "$cls" != colima && -n "${CI_ADMIT_IMAGE_EST_GB:-}" ]]; then
     admit_gate colima "$CI_ADMIT_IMAGE_EST_GB" ci "$ws" ci --ci-job "$job" || rc=$?
 fi

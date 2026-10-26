@@ -8,6 +8,7 @@
 # each caller re-validates identity before removal.
 _Q_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$_Q_LIB/artifact_verdict.sh" ]] && source "$_Q_LIB/artifact_verdict.sh"
+[[ -f "$_Q_LIB/worktree_lease.sh" ]] && source "$_Q_LIB/worktree_lease.sh"
 declare -F deletion_log_removal >/dev/null || source "$_Q_LIB/../safety_lib.sh"
 # c14_remove <path> [quarantine_remove args...] — rc 0 only on removed:*.
 c14_remove() {
@@ -20,7 +21,7 @@ c14_remove() {
 }
 
 quarantine_remove() {
-  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 dkb=0 dact=remove
+  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 dkb=0 dact=remove candidate_lease='' lease_lock_held=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
   local -a caller_verdict_args=()
@@ -51,17 +52,26 @@ quarantine_remove() {
   fi
   verdict_path="$(python3 "$_Q_LIB/../quarantine_rename.py" candidate "$binding" 2>/dev/null)" || verdict_path=""
   if [[ -z "$verdict_path" ]]; then rm -f "$inv" "$binding"; echo kept:parent-identity-missing; return 0; fi
+  # Serialize owner acquisition against the entire C14 verdict-to-rename
+  # interval. Owner mutations use this same per-lease mkdir lock. The absent
+  # lease case also locks its canonical future lease path, preventing a birth
+  # lease from racing into existence between verdict and rename.
+  candidate_lease="$(lease_path_for "$verdict_path")" || { rm -f "$inv" "$binding"; echo kept:owner-unknown; return 0; }
+  mkdir -p "$(dirname "$candidate_lease")" || { rm -f "$inv" "$binding"; echo kept:owner-unknown; return 0; }
+  lease_mutation_lock_enter "$candidate_lease" || { rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; }
+  lease_lock_held=1
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
   if [[ "$v" == remove ]]; then
-    dkb="$(deletion_size_kb "$path_arg")"
+    dkb="$(deletion_size_kb "$path_arg")" || dkb=0
     if [[ -L "$path_arg" ]]; then dact=remove_symlink; elif [[ -f "$path_arg" ]]; then dact=remove_file; fi
     if [[ "$deadline_seen" == 1 ]]; then
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" --deadline-at "$deadline" 2>/dev/null)"
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" --deadline-at "$deadline" 2>/dev/null)" || v=kept:check-failed
     else
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" 2>/dev/null)"
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" 2>/dev/null)" || v=kept:check-failed
     fi
   fi
-  rm -f "$inv" "$binding"
+  rm -f "$inv" "$binding" || true
+  if [[ "$lease_lock_held" == 1 ]]; then lease_mutation_lock_exit "$candidate_lease" || true; fi
   [[ "$v" == removed:* ]] && deletion_log_removal "$path_arg" "$dkb" "$dact"
   echo "${v:-kept:check-failed}"
 }

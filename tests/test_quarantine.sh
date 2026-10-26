@@ -16,6 +16,10 @@ cleanup() {
 trap cleanup EXIT
 PASS=0 FAIL=0
 check() { local label="$1"; shift; if "$@"; then echo "PASS: $label"; PASS=$((PASS+1)); else echo "FAIL: $label"; FAIL=$((FAIL+1)); fi; }
+lease_empty_and_removed() {
+  [[ "$1" == removed:* && ! -e "$2" ]] &&
+    python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["owners"] == []' "$3"
+}
 
 # Independent inventory writer for the stub verdict (same shape C14 emits with --inventory-out).
 cat > "$TMP/inv.py" <<'PY'
@@ -252,6 +256,18 @@ fixture; run DISK_MAGICIAN_TEST_AFTER_VERDICT='printf BBBB > "$DM_Q_PATH/report.
 check 'rewrite before rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]
 check 'rewrite before rename: rolled back, B intact' intact BBBB
 check 'rewrite before rename: quarantine empty' [ "$(qcount)" = 0 ]
+# C14 holds the same per-lease lock used by owner acquisition from before its
+# verdict through rename. An acquisition injected after the verdict therefore
+# fails closed instead of racing a live owner onto a removed artifact.
+fixture
+race_lease="$(lease_path_for "$A")"; mkdir -p "$(dirname "$race_lease")"
+python3 - "$race_lease" "$A" <<'PY'
+import json,sys
+json.dump({"path":sys.argv[2],"owner":None,"owners":[],"released_at":"released"},open(sys.argv[1],"w"))
+PY
+run DISK_MAGICIAN_TEST_AFTER_VERDICT="source '$ROOT/scripts/lib/worktree_lease.sh'; row=\$(lease_resolve_process_owner \"\$BASHPID\"); IFS=\$'\\t' read -r pid start comm <<<\"\$row\"; if lease_owner_add '$A' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/owner-race'; else echo blocked >'$TMP/owner-race'; fi"
+check 'verdict-to-rename race: injected owner acquisition fails closed' grep -Fx blocked "$TMP/owner-race"
+check 'verdict-to-rename race: C14 completes with no owner added' lease_empty_and_removed "$OUT" "$A" "$race_lease"
 # Same rewrite after the rename, before the re-hash.
 fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"'
 check 'rewrite after rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]

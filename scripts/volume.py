@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -408,6 +409,12 @@ def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any
     if entry.get("state") != "needs_recovery":
         raise ValueError("volume is already registered")
     volume = validate_entry(container, settings, entry)
+    fit = fit_result(container)
+    if not fit["fits"]:
+        raise ValueError("container no longer satisfies scratch capacity fit")
+    free = require_nonnegative(container.free, "container free capacity")
+    if free < settings["alarm_floor_gb"] * GIB:
+        raise ValueError("container free capacity is below the alarm floor")
     mountpoint = scratch["mountpoint"]
     if not ballast_ok(mountpoint):
         if os.path.lexists(ballast_path(mountpoint)):
@@ -427,9 +434,14 @@ def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[st
     settings, scratch = cls(name)
     entries = registry()["volumes"]
     if name not in entries:
-        container = load_container()
-        if any(volume.name == scratch["name"] for volume in container.volumes):
-            raise ValueError("live scratch volume is missing its registry entry")
+        diskutil = Path(diskutil_bin())
+        can_inspect = sys.platform == "darwin" or (
+            diskutil.is_file() and os.access(diskutil, os.X_OK)
+        )
+        if can_inspect:
+            container = load_container()
+            if any(volume.name == scratch["name"] for volume in container.volumes):
+                raise ValueError("live scratch volume is missing its registry entry")
         raise ValueError("volume is not registered in an eligible state")
     entry = entries.get(name)
     if not isinstance(entry, dict):
@@ -479,16 +491,48 @@ def path_cmd(name: str, for_reclaim: bool = False) -> int:
     return 0
 
 
-def log_ballast_release(path: Path, volume_uuid: str) -> None:
+def log_ballast_release(path: Path, volume_uuid: str, action: str) -> bool:
     log_script = Path(__file__).resolve().parent / "safety_lib.sh"
-    subprocess.run(
+    log_path = Path(os.environ.get(
+        "DISK_MAGICIAN_DELETION_LOG",
+        Path.home() / "Library" / "Logs" / "disk-magician-deletions.log",
+    ))
+    marker = uuid.uuid4().hex
+    completed = subprocess.run(
         [
             "bash", "-c",
-            'source "$1"; deletion_log volume release_ballast 0 "$2" "$3"',
-            "volume", str(log_script), str(path), "uuid=" + volume_uuid,
+            'source "$1"; deletion_log volume "$4" 0 "$2" "$3"',
+            "volume", str(log_script), str(path),
+            "uuid=" + volume_uuid + ";record=" + marker,
+            action,
         ],
         check=False,
     )
+    if completed.returncode != 0:
+        return False
+    try:
+        descriptor = os.open(log_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode):
+                return False
+            start = max(0, details.st_size - 8192)
+            tail = os.pread(descriptor, details.st_size - start, start)
+            if marker.encode() not in tail:
+                return False
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        directory_fd = os.open(
+            log_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return True
+    except OSError:
+        return False
 
 
 def ballast_cmd(action: str, name: str) -> int:
@@ -511,11 +555,12 @@ def ballast_cmd(action: str, name: str) -> int:
             write_ballast(mountpoint)
             return 0 if ballast_ok(mountpoint) else 75
         if action == "release":
+            if not log_ballast_release(path, volume.uuid, "release_ballast_intent"):
+                return 75
             if not unlink_ballast_verified(mountpoint):
                 return 75
             path = ballast_path(mountpoint)
-            log_ballast_release(path, volume.uuid)
-            return 0
+            return 0 if log_ballast_release(path, volume.uuid, "release_ballast") else 75
         raise ValueError("unknown ballast action")
     except Exception:
         return 75
@@ -645,6 +690,7 @@ def status(snapshot: bool = False) -> int:
     alarms: list[str] = []
     rows: list[dict[str, Any]] = []
     fatal = False
+    capacity_fit: dict[str, Any] | None = None
     try:
         container = load_container()
         settings = config()
@@ -668,6 +714,13 @@ def status(snapshot: bool = False) -> int:
         elif entry_state in {"creating", "needs_recovery"}:
             fatal = True
             alarms.append("volume_registry_incomplete:scratch")
+        try:
+            capacity_fit = fit_result(container)
+        except Exception:
+            fatal = True
+            alarms.append("scratch_capacity_measurement_unavailable")
+        if capacity_fit is not None and not capacity_fit["fits"]:
+            alarms.append("scratch_capacity_unavailable")
         row: dict[str, Any] = {
             "host_id": os.uname().nodename,
             "filesystem_id": entry.get("uuid") if isinstance(entry, dict) else None,
@@ -720,6 +773,7 @@ def status(snapshot: bool = False) -> int:
                 "ceiling_bytes": ceiling,
                 "free_bytes": free,
             },
+            "capacity_fit": capacity_fit,
             "volumes": rows,
             "alarms": alarms,
         }
@@ -733,6 +787,7 @@ def status(snapshot: bool = False) -> int:
                 "ceiling_bytes": None,
                 "free_bytes": None,
             },
+            "capacity_fit": None,
             "volumes": [],
             "alarms": ["volume_measurement_unavailable"],
         }
