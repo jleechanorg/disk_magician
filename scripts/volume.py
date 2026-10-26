@@ -694,8 +694,16 @@ def linux_native_mount_cmd(scratch: dict[str, Any], entry: Any) -> int:
     if linux_image_has_loop_mapping(image):
         return 75
     linux_command(["mount", str(mountpoint)])
-    linux_validate_native_mount(config(), scratch, entry)
-    return 0
+    try:
+        linux_validate_native_mount(config(), scratch, entry)
+        return 0
+    except Exception:
+        devices = linux_loop_devices(image)
+        if len(devices) == 1 and linux_mount_record(mountpoint) == ("ext4", str(devices[0])):
+            linux_command(["umount", str(mountpoint)])
+            if linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image):
+                raise RuntimeError("failed native mount identity remains active after rollback")
+        raise
 
 
 def linux_native_unmount_cmd(scratch: dict[str, Any], entry: Any) -> int:
@@ -1389,7 +1397,8 @@ def linux_fstab_validate(data: bytes) -> None:
         if not stripped or stripped.startswith(b"#"):
             continue
         fields = stripped.split()
-        if len(fields) != 6 or not fields[4].isdigit() or not fields[5].isdigit():
+        if (len(fields) != 6 or not fields[4].isdigit() or not fields[5].isdigit() or
+                any(any(byte < 32 for byte in field) for field in fields)):
             raise ValueError("invalid fstab record at line " + str(number))
 
 

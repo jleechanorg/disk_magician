@@ -222,6 +222,8 @@ class NativeFstabPublicCliTest(unittest.TestCase):
     def test_malformed_full_table_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "invalid fstab record"):
             volume.linux_fstab_validate(b"/dev/example /bad ext4 defaults\n")
+        with self.assertRaisesRegex(ValueError, "invalid fstab record"):
+            volume.linux_fstab_validate(b"/dev/example /bad\x01 ext4 defaults 0 2\n")
 
     def test_fixture_target_overlapping_state_is_rejected(self):
         document = json.loads(self.config.read_text())
@@ -255,6 +257,22 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         with mock.patch.object(volume, "linux_mount_record", return_value=("ext4", "/dev/loop43")):
             with self.assertRaisesRegex(ValueError, "identity"):
                 volume.linux_validate_native_mount({}, scratch, entry)
+
+    def test_native_mount_rolls_back_only_the_exact_invalid_mount(self):
+        device = Path("/dev/loop42")
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        with (
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_mount_record", side_effect=[None, ("ext4", str(device)), None]),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", side_effect=[False, False]),
+            mock.patch.object(volume, "linux_loop_devices", return_value=[device]),
+            mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("UUID mismatch")),
+            mock.patch.object(volume, "linux_command", return_value="") as command,
+        ):
+            with self.assertRaisesRegex(ValueError, "UUID mismatch"):
+                volume.linux_native_mount_cmd(scratch, {"state": "active"})
+        self.assertEqual(command.call_args_list[0].args[0], ["mount", str(self.mountpoint)])
+        self.assertEqual(command.call_args_list[1].args[0], ["umount", str(self.mountpoint)])
 
     def test_loop_backing_file_resolves_the_exact_kernel_device(self):
         backing = self.root / "sys/block/loop7/loop/backing_file"
