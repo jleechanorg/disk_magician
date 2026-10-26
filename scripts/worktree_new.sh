@@ -189,8 +189,19 @@ wtn_create() {
             return 1
         fi
     fi
+    local common branch_lock=""
+    common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$common" && -d "$common" ]]; then
+        branch_lock="$common/wtn-add-${branch//\//_}.lock"
+        if ! mkdir "$branch_lock" 2>/dev/null; then
+            echo "worktree-new: concurrent worktree add in progress for branch $branch" >&2
+            wtn_unclaim "$path"
+            return 1
+        fi
+    fi
     WTN_ADD_RC=0
     wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2 || WTN_ADD_RC=$?
+    [[ -n "$branch_lock" ]] && rmdir "$branch_lock" 2>/dev/null || true
     if [[ "$WTN_ADD_RC" != 0 ]]; then
         echo "worktree-new: git worktree add failed: $path" >&2
         if wtn_registered "$repo" "$path"; then
