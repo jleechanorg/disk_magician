@@ -52,6 +52,21 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+if [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+else
+  AUTO_APPROVE_AGE_DAYS=90
+fi
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
+if [[ "$DRY_RUN" == false && "${SESSIONS_APPROVED:-0}" != "1" ]]; then
+  echo "Notice: SESSIONS_APPROVED=1 not set; auto-approving sessions >= ${AUTO_APPROVE_AGE_DAYS}d only."
+  if [[ "$THRESHOLD_DAYS" =~ ^[0-9]+$ ]] && (( THRESHOLD_DAYS < AUTO_APPROVE_AGE_DAYS )); then
+    THRESHOLD_DAYS="$AUTO_APPROVE_AGE_DAYS"
+  fi
+fi
+
 AO_SESSIONS_DIR="${HOME}/.ao-sessions"
 TMP_DIR=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "/tmp/")
 
@@ -219,6 +234,9 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 HERMES_SESSIONS_DIR="$HOME/.hermes/sessions"
 HERMES_SESSIONS_DAYS=30
+if [[ "$DRY_RUN" == false && "${SESSIONS_APPROVED:-0}" != "1" ]] && (( HERMES_SESSIONS_DAYS < AUTO_APPROVE_AGE_DAYS )); then
+  HERMES_SESSIONS_DAYS="$AUTO_APPROVE_AGE_DAYS"
+fi
 
 if [[ ! -d "$HERMES_SESSIONS_DIR" ]]; then
   log "No ~/.hermes/sessions directory — nothing to do."

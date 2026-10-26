@@ -333,6 +333,51 @@ class TestC14ProbeRemoteAlternates(unittest.TestCase):
         )
         self.assertEqual(ls_cycle.returncode, 0)
 
+    def test_open_file_ignores_shared_hardlink_when_process_runs_outside_root(self):
+        app_dir = self.tmproot / "Applications" / "Fake.app" / "Contents" / "MacOS"
+        clone_dir = self.tmproot / "X" / "code_sign_clone.1" / "Fake.app.bundle" / "Contents" / "MacOS"
+        app_dir.mkdir(parents=True)
+        clone_dir.mkdir(parents=True)
+        app_bin = app_dir / "Fake"
+        clone_bin = clone_dir / "Fake"
+        unique_file = clone_dir.parent / "Resources" / "data.pak"
+        unique_file.parent.mkdir(parents=True)
+        app_bin.write_text("binary\n", encoding="utf-8")
+        os.link(app_bin, clone_bin)
+        unique_file.write_text("pak\n", encoding="utf-8")
+
+        fake_lsof = self.tmproot / "fake-lsof"
+        fake_lsof.write_text(
+            "#!/bin/sh\n"
+            'for a in "$@"; do\n'
+            '  if [ "$a" = "+D" ]; then\n'
+            f'    printf "p%s\\nftxt\\nn%s\\n" "{os.getpid()}" "$TARGET_PATH"\n'
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
+            f'printf "p%s\\nftxt\\nn%s\\n" "{os.getpid()}" "{app_bin}"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_lsof.chmod(0o755)
+
+        root_dir = self.tmproot / "X" / "code_sign_clone.1"
+        res_hardlink = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(root_dir)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_lsof), "TARGET_PATH": str(clone_bin)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_hardlink.stdout.strip(), "no")
+
+        res_unique = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(root_dir)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_lsof), "TARGET_PATH": str(unique_file)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_unique.stdout.strip(), "yes")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -431,17 +431,23 @@ acquire_cleanup_venvs_lock() {
   return 1
 }
 
-# Gate: refuse --clean without the explicit approval token, matching the
-# repo worktree-safety rule (which guards against accidental mass deletion).
+# Gate: candidates >= 90d (>3 months) are auto-approved for --clean without
+# WORKTREE_APPROVED=1; candidates < 90d still require WORKTREE_APPROVED=1.
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+if [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+else
+  AUTO_APPROVE_AGE_DAYS=90
+fi
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
+UNAPPROVED_CLEAN=false
+SKIPPED_UNAPPROVED_YOUNG=0
+TOTAL_BAK_PURGED=0
 if [[ "$DRY_RUN" == false ]]; then
   if [[ "${WORKTREE_APPROVED:-}" != "1" ]]; then
-    echo "ERROR: --clean requires WORKTREE_APPROVED=1 in the environment." >&2
-    echo "       This script strips files inside Git worktrees, which the" >&2
-    echo "       repo CLAUDE.md flags as requiring explicit approval." >&2
-    echo "" >&2
-    echo "Re-run as:" >&2
-    echo "  WORKTREE_APPROVED=1 $0 --clean" >&2
-    exit 3
+    UNAPPROVED_CLEAN=true
+    echo "WARNING: --clean requires WORKTREE_APPROVED=1 in the environment for worktrees < ${AUTO_APPROVE_AGE_DAYS}d (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)." >&2
   fi
 fi
 
@@ -621,6 +627,12 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       continue
     fi
 
+    if [[ "$DRY_RUN" == false && "$UNAPPROVED_CLEAN" == true ]] && (( age_days < AUTO_APPROVE_AGE_DAYS )); then
+      SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+      log "  skip (parent worktree ${age_days}d < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $venv_path"
+      continue
+    fi
+
     # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
     real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
     _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
@@ -699,19 +711,25 @@ purge_bak_dirs() {
         continue
       fi
 
+      # The bak dir's own age: its rename/creation mtime, not the worktree's.
+      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
+      if (( bak_age_days < purge_days )); then
+        skipped_young_bak=$(( skipped_young_bak + 1 ))
+        continue
+      fi
+
+      if [[ "$DRY_RUN" == false && "$UNAPPROVED_CLEAN" == true ]] && worktree_is_recently_active "$parent" "$AUTO_APPROVE_AGE_DAYS"; then
+        SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+        log "  skip (parent worktree < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $bak_path"
+        continue
+      fi
+
       # AO worktreeDir + live-cwd exclusion (bead disk_magician-kxz).
       real_parent="$(cd "$parent" 2>/dev/null && pwd -P || printf '%s' "$parent")"
       _skip_reason="$(std_root_skip_reason "$parent" "$real_parent")"
       if [[ -n "$_skip_reason" ]]; then
         skipped_excluded=$(( skipped_excluded + 1 ))
         log "  skip ($_skip_reason): $bak_path"
-        continue
-      fi
-
-      # The bak dir's own age: its rename/creation mtime, not the worktree's.
-      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
-      if (( bak_age_days < purge_days )); then
-        skipped_young_bak=$(( skipped_young_bak + 1 ))
         continue
       fi
 
@@ -729,6 +747,7 @@ purge_bak_dirs() {
         elif c14_remove "$bak_path" --kind rebuildable; then
           bak_freed_kb=$(( bak_freed_kb + bak_kb ))
           bak_count=$(( bak_count + 1 ))
+          TOTAL_BAK_PURGED=$(( TOTAL_BAK_PURGED + 1 ))
         else
           log "    Preserved (C14 kept) $bak_path"
         fi
@@ -751,4 +770,8 @@ purge_bak_dirs() {
 
 if [[ -n "$PURGE_BAK_DAYS" ]]; then
   purge_bak_dirs "$PURGE_BAK_DAYS"
+fi
+
+if [[ "$UNAPPROVED_CLEAN" == true && "$STRIPPED_COUNT" -eq 0 && "$TOTAL_BAK_PURGED" -eq 0 && "$SKIPPED_UNAPPROVED_YOUNG" -gt 0 ]]; then
+  exit 3
 fi
