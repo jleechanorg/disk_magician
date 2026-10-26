@@ -290,11 +290,15 @@ try:
         owners=[old] if isinstance(old,dict) else []
     if any(str(o.get("pid"))==pid and str(o.get("start_epoch"))==start and not o.get("released_at")
            for o in owners if isinstance(o,dict)):
-        raise SystemExit(0)
-    owners.append({"pid":int(pid),"start_epoch":int(start),"comm":comm,
-                   "session":None,"added_at":datetime.now(timezone.utc).isoformat()})
-    d["owners"]=owners
-    if d.get("owner") is None and owners: d["owner"]=owners[0]
+        if not d.get("released_at"):
+            raise SystemExit(0)
+        d["released_at"] = None
+    else:
+        owners.append({"pid":int(pid),"start_epoch":int(start),"comm":comm,
+                       "session":None,"added_at":datetime.now(timezone.utc).isoformat()})
+        d["owners"]=owners
+        if d.get("owner") is None and owners: d["owner"]=owners[0]
+        d["released_at"] = None
     fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".owner-add-")
     with os.fdopen(fd,"w") as f: json.dump(d,f,indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
     os.replace(tmp,path)
@@ -724,11 +728,12 @@ try:
 except Exception:
     sys.exit(1)
 owners = d.get("owners")
-if not isinstance(owners, list):
+legacy_owner_only = not isinstance(owners, list)
+if legacy_owner_only:
     owners = [d.get("owner")] if isinstance(d.get("owner"), dict) else []
 matches = [o for o in owners if isinstance(o, dict) and str(o.get("pid")) == str(pid)
            and str(o.get("start_epoch")) == ep and not o.get("released_at")]
-if not matches:
+if not matches and legacy_owner_only:
     o = d.get("owner")
     if isinstance(o, dict) and str(o.get("pid")) == str(pid) and str(o.get("start_epoch")) == ep:
         owners = [o]

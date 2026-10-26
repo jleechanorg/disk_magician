@@ -548,6 +548,30 @@ assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(
 lease_release_owner_session session-child 700 "$OWNER_EPOCH" >/dev/null
 assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(bool(d.get("released_at")))' "$L11")" "True" "global release set only after all session owners release"
 
+echo "== repeated parent release preserves live child =="
+WT12="$(mk_wt wt_repeat_parent_release)"
+lease_resolve_owner() { printf "400\t%s\tbash\n" "$OWNER_EPOCH"; }
+lease_write "$WT12" myrepo fix/repeated test
+L12="$(lease_path_for "$WT12")"
+seed_comm 700 1 codex
+seed_lstart 700 "$OWNER_LSTART"
+seed_args 700 "/usr/bin/codex"
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT12" --owner-pid 700; then ok "child owner added before parent release"; else bad "child owner add failed"; fi
+if lease_release "$WT12"; then ok "first parent release succeeds"; else bad "first parent release failed"; fi
+if lease_release "$WT12" 2>/dev/null; then bad "repeated parent release is refused"; else ok "repeated parent release is refused"; fi
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d["owners"]), bool(d.get("released_at")), sum(not bool(o.get("released_at")) for o in d["owners"]))' "$L12")" "2 False 1" "live child remains recorded and globally unreleased"
+assert_eq "$(lease_owner_state "$L12")" "alive" "live child remains protective after repeated parent release"
+
+echo "== adding owner reopens globally released lease =="
+WT13="$(mk_wt wt_add_owner_after_release)"
+lease_write "$WT13" myrepo fix/add-owner test
+L13="$(lease_path_for "$WT13")"
+if lease_release "$WT13"; then ok "sole owner releases lease"; else bad "sole owner release failed"; fi
+assert_eq "$(lease_owner_state "$L13")" "released" "lease is released before new owner add"
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WT13" --owner-pid 700; then ok "new live owner added to released lease"; else bad "new owner add failed"; fi
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("released_at"), len(d["owners"]))' "$L13")" "None 2" "owner add clears global release marker"
+assert_eq "$(lease_owner_state "$L13")" "alive" "new live owner makes lease protective"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
