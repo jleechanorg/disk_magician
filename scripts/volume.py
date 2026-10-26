@@ -1099,6 +1099,25 @@ def create_cmd(name: str, execute: bool = False) -> int:
     mountpoint = scratch["mountpoint"]
     if sys.platform == "darwin" and mountpoint != f"/Volumes/{scratch['name']}":
         return 2
+
+    def fresh_create_container(previous: Container) -> tuple[Container | None, int]:
+        try:
+            current = load_container()
+            if current.ref != previous.ref or current.uuid != previous.uuid:
+                return None, 75
+            if os.path.lexists(mountpoint):
+                return None, 75
+            if any(volume.name == scratch["name"] for volume in current.volumes):
+                return None, 2
+            if not fit_result(current)["fits"]:
+                return None, 2
+            free = require_nonnegative(current.free, "container free capacity")
+            if free < settings["alarm_floor_gb"] * GIB:
+                return None, 75
+            return current, 0
+        except Exception:
+            return None, 75
+
     try:
         container = load_container()
         registry_file, lock_handle = locked_registry()
@@ -1112,13 +1131,10 @@ def create_cmd(name: str, execute: bool = False) -> int:
                     return 2
                 return recover_creation(name, settings, scratch, registry_file,
                                         lock_handle, current_registry, existing, container)
-            if os.path.lexists(mountpoint):
-                return 75
-            if any(volume.name == scratch["name"] for volume in container.volumes):
-                return 2
-            fit = fit_result(container)
-            if not fit["fits"]:
-                return 2
+
+            container, result = fresh_create_container(container)
+            if result:
+                return result
             if not execute:
                 print(json.dumps({
                     "class": name,
@@ -1128,11 +1144,7 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 }))
                 return 0
 
-            free = require_nonnegative(container.free, "container free capacity")
-            if free < settings["alarm_floor_gb"] * GIB:
-                return 75
-
-            current_registry["volumes"][name] = {
+            creation_intent = {
                 "class": name,
                 "name": scratch["name"],
                 "container_uuid": container.uuid,
@@ -1141,9 +1153,18 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 "state": "creating",
                 "intent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            current_registry["volumes"][name] = creation_intent
             save_registry(registry_file, lock_handle, current_registry)
             registry_file, lock_handle = locked_registry()
             current_registry = registry()
+            if current_registry["volumes"].get(name) != creation_intent:
+                return 75
+
+            container, result = fresh_create_container(container)
+            if result:
+                current_registry["volumes"].pop(name)
+                save_registry(registry_file, lock_handle, current_registry)
+                return result
 
             run_diskutil([
                 "apfs", "addVolume", container.ref, "APFS", scratch["name"],

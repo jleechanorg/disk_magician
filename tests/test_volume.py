@@ -520,6 +520,91 @@ class LifecycleTest(VolumeTestBase):
         data["container"]["ceiling"] = 1000 * 2**30
         self.state.write_text(json.dumps(data))
 
+    def _run_create_race(self, lock_number, mutation):
+        case_root = self.root / f"create-race-{lock_number}-{id(mutation)}"
+        case_root.mkdir()
+        disk_state = case_root / "diskutil.json"
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        disk_state.write_text(json.dumps(data))
+        mountpoint = case_root / "Volumes" / "diskm-scratch"
+        config_path = case_root / "config.json"
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = str(mountpoint)
+        config_path.write_text(json.dumps(config))
+        calls_path = case_root / "calls.jsonl"
+        state_dir = case_root / "state"
+        env = {
+            "DISK_MAGICIAN_DISKUTIL_BIN": str(ROOT / "tests/lib/fake_diskutil.py"),
+            "FAKE_DISKUTIL_STATE": str(disk_state),
+            "FAKE_DISKUTIL_CALLS": str(calls_path),
+            "DISK_MAGICIAN_STATE_DIR": str(state_dir),
+            "DISK_MAGICIAN_CONFIG": str(config_path),
+            "DISK_MAGICIAN_DELETION_LOG": str(case_root / "deletions.log"),
+            "FAKE_DISKUTIL_MOUNTPOINT": str(mountpoint),
+        }
+        lock_calls = 0
+        observed_state = {}
+        real_locked_registry = volume.locked_registry
+
+        def locked_registry_with_mutation():
+            nonlocal lock_calls
+            result = real_locked_registry()
+            lock_calls += 1
+            if lock_calls == lock_number:
+                current = json.loads(disk_state.read_text())
+                mutation(current, mountpoint)
+                disk_state.write_text(json.dumps(current))
+                observed_state["diskutil"] = current
+            return result
+
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(volume, "locked_registry", side_effect=locked_registry_with_mutation), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = volume.main(["create", "scratch", "--execute"])
+        calls = [json.loads(line) for line in calls_path.read_text().splitlines()] if calls_path.exists() else []
+        registry_path = state_dir / "volumes" / "registry.json"
+        registry = json.loads(registry_path.read_text()) if registry_path.exists() else {"volumes": {}}
+        return result, lock_calls, observed_state, json.loads(disk_state.read_text()), calls, mountpoint, registry
+
+    def test_create_revalidates_fit_free_and_collisions_after_both_registry_locks(self):
+        def low_free(data, _mountpoint):
+            data["container"]["free"] = 19 * 2**30
+
+        def no_fit(data, _mountpoint):
+            data["container"]["ceiling"] = 933 * 2**30
+
+        def volume_name_collision(data, _mountpoint):
+            data["volumes"].append({
+                "uuid": "RACE-UUID", "name": "diskm-scratch", "ref": "disk3s9",
+                "device": "disk3s9", "used": 0, "quota": 30 * 2**30,
+                "roles": [], "mountpoint": "/Volumes/existing-scratch",
+            })
+
+        def mountpoint_collision(_data, mountpoint):
+            mountpoint.mkdir(parents=True)
+            (mountpoint / "preserve.txt").write_text("existing user data")
+
+        mutations = (
+            ("free below floor", low_free),
+            ("fit no longer holds", no_fit),
+            ("volume name appears", volume_name_collision),
+            ("mountpoint appears", mountpoint_collision),
+        )
+        for lock_number in (1, 2):
+            for label, mutation in mutations:
+                with self.subTest(lock_number=lock_number, change=label):
+                    result, lock_calls, observed, disk_after, calls, mountpoint, registry = \
+                        self._run_create_race(lock_number, mutation)
+                    self.assertGreaterEqual(lock_calls, lock_number)
+                    self.assertIn("diskutil", observed)
+                    self.assertNotEqual(result, 0)
+                    self.assertFalse(any(call[:2] == ["apfs", "addVolume"] for call in calls))
+                    self.assertEqual(disk_after, observed["diskutil"])
+                    self.assertNotIn("scratch", registry["volumes"])
+                    if label == "mountpoint appears":
+                        self.assertEqual((mountpoint / "preserve.txt").read_text(), "existing user data")
+
     def test_create_registers_only_after_verified_ballast_and_path_requires_active(self):
         self.make_fit()
         self.assertEqual(volume.path_cmd("scratch"), 3)
