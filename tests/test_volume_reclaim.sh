@@ -2,11 +2,24 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d /tmp/dm-volume-reclaim.XXXXXX)"
-if [[ -d /dev/shm ]] && [[ "$(stat -c %d /dev/shm 2>/dev/null || echo x)" != "$(stat -c %d /tmp 2>/dev/null || echo y)" ]]; then
+if [[ "$(uname -s)" == Darwin ]]; then
+  # C14 diagnostics must live on a different device from the fake volume.
+  # A small task-owned HFS+ image supplies that boundary on macOS, where
+  # /tmp and /var/tmp both reside on the Data volume.
+  DIAG_IMAGE="$T/diagnostic.dmg"
+  DIAG_MOUNT="$T/diagnostic"
+  mkdir -p "$DIAG_MOUNT"
+  hdiutil create -quiet -size 64m -fs HFS+ -volname "dm-reclaim-$$" "$DIAG_IMAGE" >/dev/null
+  hdiutil attach -quiet -nobrowse -owners off -mountpoint "$DIAG_MOUNT" "$DIAG_IMAGE" >/dev/null
+  trap 'if hdiutil detach -quiet "$DIAG_MOUNT" >/dev/null 2>&1; then /bin/rm -f "$DIAG_IMAGE"; fi' EXIT
+  DISK_MAGICIAN_STATE_DIR="$DIAG_MOUNT/state"
+elif [[ -d /dev/shm ]] && [[ "$(stat -c %d /dev/shm 2>/dev/null || echo x)" != "$(stat -c %d /tmp 2>/dev/null || echo y)" ]]; then
   DISK_MAGICIAN_STATE_DIR="$(mktemp -d /dev/shm/dm-volume-reclaim-state.XXXXXX)"
 else
   DISK_MAGICIAN_STATE_DIR="$T/state"
 fi
+mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+python3 -c 'import os,sys; assert os.stat(sys.argv[1]).st_dev != os.stat(sys.argv[2]).st_dev' "$T" "$DISK_MAGICIAN_STATE_DIR"
 export DISK_MAGICIAN_STATE_DIR
 export DISK_MAGICIAN_DISKM_BIN="$T/diskm"
 export TEST_ROOT="$T/volume"
