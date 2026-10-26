@@ -31,12 +31,16 @@ cat > "$DISK_MAGICIAN_DISKM_BIN" <<'MOCK'
 case "$*" in
   'volume path scratch --for-reclaim') printf '%s\n' "$TEST_ROOT" ;;
   'volume status --json')
+    n=0; [[ -f "$STATUS_CALLS_FILE" ]] && n="$(cat "$STATUS_CALLS_FILE")"
+    n=$((n+1)); printf '%s' "$n" >"$STATUS_CALLS_FILE"
     if [[ -n "${TEST_STATUS_SEQUENCE:-}" ]]; then
-      n=0; [[ -f "$STATUS_CALLS_FILE" ]] && n="$(cat "$STATUS_CALLS_FILE")"
-      n=$((n+1)); printf '%s' "$n" >"$STATUS_CALLS_FILE"
       set -- $TEST_STATUS_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "used=\${$idx}"
     else used="${TEST_USED:-900}"; fi
-    printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":1000}]}\n' "$used"
+    available="${TEST_BALLAST_AVAILABLE:-true}"
+    if [[ -n "${TEST_BALLAST_AVAILABLE_SEQUENCE:-}" ]]; then
+      set -- $TEST_BALLAST_AVAILABLE_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "available=\${$idx}"
+    fi
+    printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":1000,"available":%s}]}\n' "$used" "$available"
     if [[ -n "${TEST_STATUS_RC_SEQUENCE:-}" ]]; then
       set -- $TEST_STATUS_RC_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "rc=\${$idx}"
     else rc="${TEST_STATUS_RC:-0}"; fi
@@ -88,7 +92,7 @@ grep -q '^release$' "$BALLAST_LOG" && grep -q '^ensure$' "$BALLAST_LOG"
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=5 TEST_STATUS_SEQUENCE="900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-eio.out"
 grep -q 'kept:intent-write-failed' "$T/c14-eio.out"
-[[ ! -s "$BALLAST_LOG" ]]
+[[ "$(grep -c '^release$' "$BALLAST_LOG")" == 0 ]]
 [[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
 
 # A failed reserve ensure after release + retry is surfaced as partial recovery.
@@ -141,6 +145,25 @@ PY
 BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_MIN_STATUS_CALLS=3 TEST_STATUS_SEQUENCE="900 850 790 795" "$FIXTURE_SCRIPTS/volume_reclaim.sh" --clean >"$T/c14-final-restore.out"
 [[ ! -e "$TEST_ROOT/retry/evidence/first" && ! -e "$TEST_ROOT/retry/build/second" ]]
 [[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
+
+# A previous run can release ballast and fail to restore it.  The next run must
+# detect the absent reserve, restore it after ordinary reclaim, and only then
+# report success.  The old implementation skipped ensure because that second
+# run did not release ballast itself.
+TWO_RUN_ROOT="$TEST_ROOT/repo2"
+mkdir -p "$TWO_RUN_ROOT/evidence/oldest"
+printf x > "$TWO_RUN_ROOT/evidence/oldest/content"
+python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TWO_RUN_ROOT/evidence/oldest"
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_RC=1 TEST_BALLAST_AVAILABLE_SEQUENCE="true false false" TEST_STATUS_SEQUENCE="900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-two-run-first.out"
+grep -q '^release$' "$BALLAST_LOG" && grep -q '^ensure$' "$BALLAST_LOG"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["ballast_restore_failures"]==1'
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" TEST_ENSURE_RC=0 TEST_BALLAST_AVAILABLE_SEQUENCE="false false true" TEST_STATUS_SEQUENCE="900 790 795" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-two-run-second.out"
+[[ ! -e "$TWO_RUN_ROOT/evidence/oldest" ]]
+[[ ! -s "$BALLAST_LOG" || "$(grep -c '^release$' "$BALLAST_LOG")" == 0 ]]
+[[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'

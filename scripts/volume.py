@@ -692,12 +692,28 @@ def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
         return {"status": "unknown", "reason": "snapshot_unavailable", "candidates": []}
 
     measured_at = document.get("snapshot_ts") or document.get("timestamp")
-    entries = document.get("directories") or document.get("top_directories") or []
-    if isinstance(entries, dict):
-        entries = [
-            dict(path=entry_path, **(value if isinstance(value, dict) else {"size_bytes": value}))
-            for entry_path, value in entries.items()
-        ]
+    # disk_snapshot.sh emits `directories` as path -> size_kb. Keep that
+    # producer contract separate from record-shaped compatibility inputs.
+    if "directories" in document:
+        entries = document["directories"] or {}
+        if isinstance(entries, dict):
+            normalized = []
+            for entry_path, value in entries.items():
+                if is_int(value):
+                    normalized.append({"path": entry_path, "size_bytes": value * 1024})
+                elif isinstance(value, dict):
+                    if is_int(value.get("size_bytes")):
+                        normalized.append({"path": entry_path, "size_bytes": value["size_bytes"]})
+                    elif is_int(value.get("size_kb")):
+                        normalized.append({"path": entry_path, "size_bytes": value["size_kb"] * 1024})
+            entries = normalized
+    else:
+        entries = document.get("top_directories") or []
+        if isinstance(entries, dict):
+            entries = [
+                dict(path=entry_path, **(value if isinstance(value, dict) else {"size_bytes": value}))
+                for entry_path, value in entries.items()
+            ]
     candidates = []
     for item in entries:
         path_value = item.get("path") or item.get("name")

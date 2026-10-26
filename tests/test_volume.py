@@ -91,6 +91,26 @@ class FitAndAuditTest(VolumeTestBase):
         self.assertEqual([x["path"] for x in result["candidates"]], ["/private/tmp/cache"])
         self.assertEqual(result["candidates"][0]["measured_at"], "2026-10-25T12:00:00Z")
 
+    def test_snapshot_audit_reads_source_directory_map_in_kib(self):
+        snapshot = self.root / "source-snapshot.json"
+        snapshot.write_text(json.dumps({
+            "timestamp": "2026-10-25T12:00:00Z",
+            "directories": {
+                "/private/tmp/cache": 5 * 1024 * 1024,
+                "/private/tmp/unmeasured": None,
+                "/Users/example": 6 * 1024 * 1024,
+            },
+        }))
+
+        result = volume.audit_tmp(snapshot)
+
+        self.assertEqual(result["status"], "measured")
+        self.assertEqual(result["candidates"], [{
+            "path": "/private/tmp/cache",
+            "size_bytes": 5 * 2**30,
+            "measured_at": "2026-10-25T12:00:00Z",
+        }])
+
     def test_missing_snapshot_is_unknown_not_empty_measurement(self):
         result = volume.audit_tmp(self.root / "missing.json")
         self.assertEqual(result["status"], "unknown")

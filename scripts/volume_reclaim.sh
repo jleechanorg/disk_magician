@@ -84,9 +84,9 @@ done < <(
   printf '%s\t%s\n' "$newest" "$entry"
  done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
 )
-# A release may have freed temporary capacity for C14. Recreate the reserve only
-# after the pass, then measure again because the reserve itself is allocated.
-if [[ "$clean" == true && "$BALLAST_RELEASE_ATTEMPTED" -eq 1 ]]; then
+# Every clean pass ends by running the idempotent reserve ensure. It physically
+# validates or recreates the reserve after reclaim and before success is recorded.
+if [[ "$clean" == true ]]; then
  "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
  # A successful final measurement supersedes an earlier transient probe error;
  # an unknown final allocation remains fail-closed.
