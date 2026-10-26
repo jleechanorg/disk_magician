@@ -10,9 +10,7 @@
 # SAFETY POSTURE
 # ---------------
 # Every unknown fails toward "owner alive / keep". A lease with no resolvable
-# runtime owner is kept, except explicit ownerless scratch-new evidence/build
-# output after its 48h minimum and recorded expiry; C14 still checks content,
-# cwd, and activity before removal. pid liveness is checked
+# producer owner is kept. pid liveness is checked
 # by pid PLUS lstart epoch so a reused pid reads dead, not alive. A comm
 # mismatch with matching epochs reads unknown (keep), never dead.
 #
@@ -136,6 +134,19 @@ lease_resolve_owner() {
     printf -- '-\t-\t-\n'
 }
 
+# Resolve one PID incarnation before binding it into a lease. Read start time
+# on both sides of comm so a reused PID cannot be attached to the artifact.
+lease_resolve_process_owner() {
+    local pid="${1:-}" first second comm
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    first="$(_lease_ps_lstart_epoch "$pid")" || return 1
+    comm="$(_lease_full_comm "$pid")"
+    [[ -n "$comm" ]] || return 1
+    second="$(_lease_ps_lstart_epoch "$pid")" || return 1
+    [[ "$first" == "$second" ]] || return 1
+    printf '%s\t%s\t%s\n' "$pid" "$first" "$comm"
+}
+
 # Resolve the nearest verified Runner.Worker ancestor for CI owner binding.
 lease_resolve_runner_worker() {
     local pid="${1:-$$}" hops=0 row ppid comm found="" start check seen=""
@@ -247,7 +258,7 @@ PY
 # all three --published flags. rc 2 on invalid options (nothing written).
 lease_write() {
     local wt="$1"; shift
-    local -a pos=() prov=("" "" "" "" "" "" "" "")
+    local -a pos=() prov=("" "" "" "" "" "" "" "") owner_pids=()
     while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
     local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
     while [[ $# -gt 0 ]]; do
@@ -257,19 +268,28 @@ lease_write() {
             --source) prov[2]="$2" ;; --manifest) prov[3]="$2" ;;
             --git-meta) prov[4]="$2" ;; --published) prov[5]="$2" ;;
             --upload-manifest) prov[6]="$2" ;; --verified-at) prov[7]="$2" ;;
+            --owner-pid) owner_pids+=("$2") ;;
             *) return 2 ;;
         esac
         shift 2
     done
-    local tsv pid ep comm admin_id admin_birth lease ttl
-    tsv="$(lease_resolve_owner)"
+    local tsv pid ep comm admin_id admin_birth lease ttl owner_row owner_tsv="" owner_candidate
+    if (( ${#owner_pids[@]} )); then
+        for owner_candidate in "${owner_pids[@]}"; do
+            owner_row="$(lease_resolve_process_owner "$owner_candidate")" || return 1
+            owner_tsv+="$owner_row"$'\n'
+        done
+        tsv="${owner_tsv%%$'\n'*}"
+    else
+        tsv="$(lease_resolve_owner)"
+    fi
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
     IFS=$'\t' read -r admin_id admin_birth < <(_lease_admin_info "$wt")
     lease="$(lease_path_for "$wt")"
     mkdir -p "$(lease_dir)" 2>/dev/null || return 1
     ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
     _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}"
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}" "" "$owner_tsv"
 }
 
 # lease_owner_add <worktree_path> <pid> <start_epoch> <comm> adds a concrete
@@ -579,6 +599,7 @@ from datetime import datetime, timezone
  admin_id, admin_birth, ttl) = sys.argv[1:13]
 (kind, producer, source, manifest, git_meta, pub_url, upload, verified_at) = (
     sys.argv[13:21] + [""] * 8)[:8]
+explicit_owner_tsv = sys.argv[22] if len(sys.argv) > 22 else ""
 UPLOAD_KEYS = {"path", "sha256", "md5", "crc32c", "size", "object", "generation"}
 def load(p):
     if not p:
@@ -609,6 +630,22 @@ if pid not in ("-", ""):
         owner = None
 if owner and os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
     owner["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
+owners = [owner] if owner else []
+if explicit_owner_tsv:
+    owners = []
+    for line in explicit_owner_tsv.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 3 or not fields[0].isdigit() or not fields[1].isdigit() or not fields[2]:
+            sys.exit(2)
+        item = {"pid": int(fields[0]), "start_epoch": int(fields[1]), "comm": fields[2]}
+        if os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
+            item["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
+        if not any(existing["pid"] == item["pid"] and existing["start_epoch"] == item["start_epoch"]
+                   for existing in owners):
+            owners.append(item)
+    if not owners:
+        sys.exit(2)
+    owner = owners[0]
 now = datetime.now(timezone.utc)
 d = {
     "schema_version": 1,
@@ -622,7 +659,7 @@ d = {
     "ttl_hours": int(ttl),
     "expires_at": int(now.timestamp()) + int(ttl) * 3600,
     "owner": owner,
-    "owners": ([owner] if owner else []),
+    "owners": owners,
     "admin_id": None if admin_id in ("", "-") else admin_id,
     "admin_birth_epoch": None if admin_birth in ("", "-") else int(admin_birth),
     "checkout_dev": checkout_dev,
@@ -680,8 +717,8 @@ PY
 
 # lease_owner_state <lease_file> [now_epoch] — prints exactly one of:
 #   none | released | dead | alive | alive-expired | unknown | unreadable
-# Explicit release and the narrow expired ownerless-output case precede pid
-# checks. Fail-closed: every other unmeasurable case keeps the artifact.
+# Explicit release precedes pid checks. An empty or unresolvable owner set
+# remains `none` and C14 keeps it; age alone never retires an unknown producer.
 # The liveness probe is LC_ALL=C TZ=UTC pinned so ambient LANG/TZ cannot
 # localize the lstart rendering (fr_FR renders "Sam 10 oct ..." and breaks
 # the parse, which would silently turn alive owners into unknown).
@@ -696,34 +733,10 @@ except Exception:
     print("unreadable"); raise SystemExit
 if d.get("released_at"): print("released"); raise SystemExit
 owners=d.get("owners")
-owners_is_list=isinstance(owners,list)
-if not owners_is_list: owners=[] if d.get("owner") is None else [d.get("owner")]
+if not isinstance(owners,list): owners=[] if d.get("owner") is None else [d.get("owner")]
 now=int(sys.argv[2]) if sys.argv[2].isdigit() else int(time.time())
 if not owners:
-    # Ownerless scratch-new evidence/build output has no process identity to
-    # reap. After its minimum 48-hour retention (and any longer recorded
-    # expiry), report it released so ordinary C14 content, cwd, and activity
-    # checks can decide whether removal is safe. Worktrees, live/unknown
-    # owners, malformed leases, and pending/reuse claims never use this path.
-    ownerless_output = (
-        "owner" in d and d.get("owner") is None and owners_is_list and
-        d.get("pending") is False and d.get("creator") == "scratch-new" and
-        d.get("kind") in ("evidence", "build") and "reuse" not in d
-    )
-    created=d.get("created_epoch")
-    expires=d.get("expires_at")
-    ttl=d.get("ttl_hours")
-    valid_time = (
-        type(created) is int and created > 0 and
-        type(expires) is int and expires > 0 and
-        type(ttl) is int and 1 <= ttl <= 24 * 365 and
-        expires == created + ttl * 3600
-    )
-    if ownerless_output and valid_time and now >= max(created + 48 * 3600, expires):
-        print("released")
-    else:
-        print("none")
-    raise SystemExit
+    print("none"); raise SystemExit
 states=[]
 for owner in owners:
     if not isinstance(owner,dict) or not isinstance(owner.get("pid"),int) or isinstance(owner.get("pid"),bool):

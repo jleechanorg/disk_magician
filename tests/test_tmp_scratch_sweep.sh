@@ -206,6 +206,15 @@ echo "Test 7d: explicit below-trigger skip is valid and dry-run does not claim t
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --dry-run
 assert_receipt_field "dry-run volume target is not claimed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_target_reached'))" "None"
 
+echo "Test 7d2: measurement-unavailable skip is an error, not a successful scheduler receipt"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=skip VOLUME_MOCK_SKIP=skipped:measurement-unavailable /bin/bash "$SCRIPT" --clean >/dev/null 2>&1
+MEASUREMENT_SKIP_RC=$?
+set -e
+if [[ "$MEASUREMENT_SKIP_RC" -ne 0 ]]; then echo "  PASS  measurement-unavailable skip exits nonzero"; PASS=$((PASS+1)); else echo "  FAIL  measurement-unavailable skip exits zero"; FAIL=$((FAIL+1)); fi
+assert_receipt_field "measurement-unavailable skip records parent error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+assert_receipt_field "measurement-unavailable reason stays explicit" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "measurement-unavailable"
+
 echo "Test 7e: volume reclaim receives governor state and a stalled scan has a bounded terminal receipt"
 : >"$INVOCATION_LOG"
 DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"

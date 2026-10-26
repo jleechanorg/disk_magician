@@ -153,7 +153,9 @@ except Exception: r={}
 if isinstance(r,dict) and r.get("id")!=sys.argv[2] and r.get("trigger")==sys.argv[3]:
  c=r.get("candidates") or {}; p=r.get("postcondition") or {}
  print(json.dumps({"valid":True,"outcome":r.get("outcome"),"aged_scanned":c.get("aged_scanned"),"removed":c.get("removed"),"target_reached":(p.get("target_reached") if sys.argv[5]=="--clean" else None),"top_kept_reason":c.get("top_kept_reason"),"ballast_restore_failures":c.get("ballast_restore_failures",0)},separators=(",",":")))
-elif sys.argv[4].strip() in ("skipped:unavailable","skipped:measurement-unavailable") or sys.argv[4].strip().startswith("skipped:below-trigger:"):
+elif sys.argv[4].strip() == "skipped:measurement-unavailable":
+ print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
+elif sys.argv[4].strip() == "skipped:unavailable" or sys.argv[4].strip().startswith("skipped:below-trigger:"):
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":sys.argv[4].strip(),"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
 else:
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"bound-receipt-unavailable"},separators=(",",":")))

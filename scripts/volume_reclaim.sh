@@ -10,7 +10,7 @@ if [[ "$clean" == true ]]; then source "$SCRIPT_DIR/lib/scratch_lock.sh"; scratc
 diskm="${DISK_MAGICIAN_DISKM_BIN:-$SCRIPT_DIR/../disk_magician.sh}"
 status_json() {
  local output rc
- output="$("$diskm" volume status --json 2>/dev/null)"; rc=$?
+ output="$("$diskm" volume status --json --snapshot 2>/dev/null)"; rc=$?
  (( rc == 0 || rc == 1 )) || return "$rc"
  printf '%s\n' "$output"
 }

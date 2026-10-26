@@ -15,6 +15,7 @@ assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expec
 T="$(mktemp -d)"
 trap 'rm -rf "$T" "${CONTRACT_DIR:-}"' EXIT
 mkdir -p "$T/bin" "$T/state"
+REAL_PS="$(command -v ps)"
 export DISK_MAGICIAN_STATE_DIR="$T/state" DISK_MAGICIAN_POLICY_FILE="$T/policy.json"
 export DISK_MAGICIAN_LAUNCHCTL_BIN="$T/bin/launchctl" RUNNER_NAME=mac-1
 export GITHUB_RUN_ID=111 GITHUB_RUN_ATTEMPT=2 GITHUB_JOB=build GITHUB_WORKSPACE=/ezgha-vm/_work/ws
@@ -36,6 +37,29 @@ esac
 EOF
 chmod +x "$T/bin/ps"
 export DISK_MAGICIAN_PS_BIN="$T/bin/ps"
+cat >"$T/bin/ps_scratch" <<EOF
+#!/usr/bin/env bash
+pid="" fmt=""
+while [[ \$# -gt 0 ]]; do
+    case \$1 in -p) pid=\$2; shift 2 ;; -o) fmt=\$2; shift 2 ;; *) shift ;; esac
+done
+if [[ \$pid == 900 ]]; then
+    case \$fmt in
+        ppid=,comm=) echo "1 Runner.Worker" ;;
+        lstart=) echo "Thu Oct  9 12:00:00 2026" ;;
+        args=|comm=) echo "Runner.Worker" ;;
+        *) exit 1 ;;
+    esac
+elif [[ \$pid == 1 ]]; then
+    case \$fmt in ppid=,comm=) echo "0 launchd" ;; *) exec "$REAL_PS" -p "\$pid" -o "\$fmt" ;; esac
+else
+    case \$fmt in
+        ppid=,comm=) echo "900 bash" ;;
+        *) exec "$REAL_PS" -p "\$pid" -o "\$fmt" ;;
+    esac
+fi
+EOF
+chmod +x "$T/bin/ps_scratch"
 
 echo "== caller contract (class colima) =="
 git init -q "$T/repo" && git -C "$T/repo" commit -q --allow-empty -m init
@@ -134,6 +158,29 @@ PY
 [[ $? -eq 0 ]] && ok "missing lease created with live Runner.Worker" || bad "missing CI owner"
 assert_eq "$(lease_owner_state "$lease")" "alive" "CI worker owner holds lease while process lives"
 assert_eq "$(CI_TEST_WORKER_DEAD=1 lease_owner_state "$lease")" "dead" "worker death retires CI owner naturally"
+echo "== scratch-new evidence lease retains the CI Runner.Worker owner =="
+mkdir -p "$T/worktrees" "$T/evidence"
+cat >"$T/bin/diskm-volume" <<EOF
+#!/usr/bin/env bash
+[[ "\$*" == "volume path scratch" ]] || exit 2
+echo "$T/evidence"
+EOF
+chmod +x "$T/bin/diskm-volume"
+printf '0\n' >"$CONTRACT_DIR/admit.rcs"; : >"$CONTRACT_DIR/admit.log"
+OUT="$(PATH="$CONTRACT_DIR/bin:$PATH" STANDARD_WORKTREE_ROOT="$T/worktrees" EVIDENCE_TMP_ROOT="$T/evidence" \
+    DISK_MAGICIAN_ADMIT_BIN="$CONTRACT_DIR/bin/admit" DISK_MAGICIAN_PS_BIN="$T/bin/ps_scratch" \
+    DISK_MAGICIAN_DISKM_BIN="$T/bin/diskm-volume" GITHUB_ACTIONS=true GITHUB_WORKSPACE="$T/repo" \
+    bash "$REPO_ROOT/disk_magician.sh" scratch-new "$T/repo" ci-evidence --kind evidence 2>"$T/scratch.err")"; SCRATCH_RC=$?
+if [[ "$SCRATCH_RC" != 0 ]]; then cat "$T/scratch.err" >&2; fi
+assert_eq "$SCRATCH_RC" 0 "CI scratch-new succeeds"
+scratch_lease="$(lease_path_for "$OUT")"
+python3 - "$scratch_lease" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert any(o.get("pid")==900 and o.get("comm")=="Runner.Worker" for o in d["owners"])
+PY
+[[ $? -eq 0 ]] && ok "scratch-new artifact lease retains Runner.Worker" || bad "scratch-new artifact lease lost Runner.Worker"
+assert_eq "$(lease_owner_state "$scratch_lease")" "alive" "CI artifact lease is live while Runner.Worker lives"
 prior_ws="$T/ci-existing"; mkdir -p "$prior_ws"
 lease_prior="$(lease_path_for "$prior_ws")"
 mkdir -p "$(dirname "$lease_prior")"

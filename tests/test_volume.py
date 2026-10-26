@@ -372,6 +372,30 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(row["source"], "apfs_volume")
         self.assertEqual(result["container"]["filesystem_id"], "CONTAINER-UUID")
 
+    def test_malformed_tmp_snapshot_does_not_suppress_live_scratch_high_water(self):
+        self.make_fit()
+        data = json.loads(self.state.read_text())
+        scratch = next(x for x in data["volumes"] if x["name"] == "diskm-scratch")
+        scratch["used"] = 28 * 2**30
+        self.state.write_text(json.dumps(data))
+        snapshot = self.root / "malformed-snapshot.json"
+        snapshot.write_text(json.dumps({"directories": [None]}))
+        previous = os.environ.get("DISK_MAGICIAN_SNAPSHOT_FILE")
+        os.environ["DISK_MAGICIAN_SNAPSHOT_FILE"] = str(snapshot)
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(volume.status(snapshot=True), 1)
+        finally:
+            if previous is None:
+                os.environ.pop("DISK_MAGICIAN_SNAPSHOT_FILE", None)
+            else:
+                os.environ["DISK_MAGICIAN_SNAPSHOT_FILE"] = previous
+        result = json.loads(output.getvalue())
+        self.assertIn("volume_high", result["alarms"])
+        self.assertEqual(result["volumes"][0]["allocated_bytes"], 28 * 2**30)
+        self.assertNotIn("tmp_audit", result)
+
     def test_status_degrades_when_active_scratch_ballast_is_missing_below_high_water(self):
         self.make_fit()
         data = json.loads(self.state.read_text())

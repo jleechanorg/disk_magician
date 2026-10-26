@@ -118,11 +118,26 @@ print("ready\t" + str(i) + "\t" + str(idx) + "\t" + json.dumps(items, separators
   fi
   # A finished visit advances; only an interruption (or a preflight config
   # failure) leaves the cursor on the unit so the next invocation retries it.
-  case "$result" in
-    deferred:deadline-before-unit|kept:invalid-deadline|kept:cursor-*)
-      cursor_visit_complete=false ;;
-    *) cursor_visit_complete=true ;;
-  esac
+  if [[ "$result" == kept:intent-write-failed && -n "${DISK_MAGICIAN_C14_DIAGNOSTIC_OUT:-}" ]] && \
+    python3 - "${DISK_MAGICIAN_C14_DIAGNOSTIC_OUT}" <<'PYDIAG' >/dev/null 2>&1
+import json,sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: value=json.load(f)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if value == {"operation":"intent_write","errno":28,"errno_name":"ENOSPC"} else 1)
+PYDIAG
+  then
+    # volume_reclaim may perform one typed ENOSPC ballast-release retry for
+    # this exact item. Keep the cursor on it until that retry's final result.
+    cursor_visit_complete=false
+  else
+    case "$result" in
+      deferred:deadline-before-unit|kept:invalid-deadline|kept:cursor-*)
+        cursor_visit_complete=false ;;
+      *) cursor_visit_complete=true ;;
+    esac
+  fi
   if [[ -n "${ACT_CURSOR:-}" && "$cursor_step" == ready && "$cursor_visit_complete" == true ]]; then
     act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "$cursor_items" "$((cursor_item_index + 1))" || { echo 'kept:cursor-save-failed'; return 0; }
   fi

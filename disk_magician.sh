@@ -459,7 +459,14 @@ case "$CMD" in
     python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
     ;;
   scratch_new|scratch-new)
-    "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
+    producer_pids="${DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS:-}"
+    if [[ -z "$producer_pids" ]]; then
+      producer_pids="$(python3 "$SCRIPT_DIR/scripts/scratch_producer_pids.py" "${DISK_MAGICIAN_SCRATCH_PRODUCER_PID:-$PPID}")" || {
+        echo "scratch-new: producer identity unavailable" >&2
+        exit 75
+      }
+    fi
+    DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS="$producer_pids" "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
     ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"

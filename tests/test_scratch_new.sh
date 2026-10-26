@@ -92,6 +92,26 @@ assert_eq "$(lease_field "$OUT" producer)" scratch-new "default producer"
 # the short-lived CLI process exits, so the lease must retain the caller/runtime
 # owner rather than the CLI PID. Explicit owner PID covers detached workers.
 echo "== command-substitution caller and explicit detached owner =="
+CALLER_PID="$BASHPID"
+PYTHONPATH="$REPO_ROOT/src" python3 -m disk_magician.cli scratch-new "$T/myrepo" packaged-direct --detach HEAD >"$T/packaged-direct.out" 2>"$T/err"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "packaged CLI direct scratch-new succeeds"
+DIRECT_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$(cat "$T/packaged-direct.out")")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$DIRECT_LEASE" "$CALLER_PID")" True "packaged CLI direct invocation persists its caller"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("owners",[])))' "$DIRECT_LEASE")" 1 "packaged direct invocation does not retain unrelated ancestors"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$DIRECT_LEASE")" alive "packaged direct caller keeps its lease alive"
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" shell-cli --detach HEAD 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "direct shell command-substitution scratch-new succeeds"
+SHELL_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$SHELL_LEASE" "$CALLER_PID")" True "direct shell command-substitution persists its caller"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$SHELL_LEASE")" alive "direct shell caller keeps its lease alive"
+OUT="$(PYTHONPATH="$REPO_ROOT/src" python3 -m disk_magician.cli scratch-new "$T/myrepo" packaged-cli --detach HEAD 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "packaged CLI command-substitution scratch-new succeeds"
+PACKAGED_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$PACKAGED_LEASE" "$CALLER_PID")" True "packaged CLI persists the live command-substitution caller"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$PACKAGED_LEASE")" alive "packaged CLI caller keeps its lease alive after command substitution"
 sleep 300 & DETACHED_OWNER=$!
 OUT="$(bash "$DISKM" scratch-new "$T/myrepo" detached-owner --detach HEAD --owner-pid "$DETACHED_OWNER" 2>"$T/err")"; RC=$?
 if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
@@ -137,7 +157,7 @@ assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
 [[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
 assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
 
-echo "== ownerless evidence lease becomes reclaim-eligible after 48h =="
+echo "== ownerless evidence lease remains protected after 48h =="
 run 0 "$T/myrepo" ownerless-evidence --kind evidence
 OWNERLESS_OUT="$OUT"
 LEASE_FILE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OWNERLESS_OUT")"
@@ -149,7 +169,7 @@ d["owner"]=None; d["owners"]=[]; d["created_epoch"]=created; d["expires_at"]=cre
 json.dump(d,open(p,"w"))
 PYOWNERLESS
 assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("owner") is None and d.get("owners")==[])' "$LEASE_FILE")" True "ownerless evidence lease shape is explicit"
-assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2" "$3"' _ "$REPO_ROOT" "$LEASE_FILE" "$((LEASE_CREATED + 48*3600))")" released "C14 lease-state input is reclaim-eligible at 48h"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2" "$3"' _ "$REPO_ROOT" "$LEASE_FILE" "$((LEASE_CREATED + 48*3600))")" none "C14 keeps unknown ownerless evidence protected after 48h"
 
 echo "== malformed scratch registry: evidence/build fail closed without allocation =="
 cat > "$T/volume-config.json" <<EOF

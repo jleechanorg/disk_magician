@@ -191,30 +191,32 @@ craft_lease "$WT3" 400 "$OWNER_EPOCH" claude "$E25H"
 L3="$(lease_path_for "$WT3")"
 assert_eq "$(lease_owner_state "$L3")" "alive-expired" "alive owner past 24h TTL -> alive-expired"
 
-echo "== ownerless scratch-new output becomes eligible after 48h =="
-WT14="$(mk_wt wt_ownerless_evidence)"
-lease_write "$WT14" myrepo "" scratch-new --kind evidence
+echo "== aged live producer lease stays protective; producer exit retires it =="
+WT14="$(mk_wt wt_aged_live_evidence)"
+if lease_write "$WT14" myrepo "" scratch-new --kind evidence --owner-pid 400; then ok "producer-bound evidence lease written"; else bad "producer-bound evidence lease failed"; fi
 L14="$(lease_path_for "$WT14")"
 LEASE_NOW="$(date +%s)"
 LEASE_CREATED=$((LEASE_NOW - 48*3600 - 10))
-python3 -c 'import json,sys; p=sys.argv[1]; created=int(sys.argv[2]); d=json.load(open(p)); d.update(creator="scratch-new",kind="evidence",owner=None,owners=[],created_epoch=created,ttl_hours=24,expires_at=created+24*3600); json.dump(d,open(p,"w"))' "$L14" "$LEASE_CREATED"
-assert_eq "$(lease_owner_state "$L14" "$((LEASE_CREATED + 48*3600 - 1))")" "none" "ownerless evidence remains protected before 48h"
-assert_eq "$(lease_owner_state "$L14" "$((LEASE_CREATED + 48*3600))")" "released" "ownerless evidence is eligible at 48h"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["expires_at"]+=1; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "inconsistent expiry keeps ownerless evidence"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["expires_at"]=d["created_epoch"]+24*3600; d["ttl_hours"]=24.0; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "floating TTL keeps ownerless evidence"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["ttl_hours"]=True; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "boolean TTL keeps ownerless evidence"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["ttl_hours"]=8761; d["expires_at"]=d["created_epoch"]+d["ttl_hours"]*3600; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "out-of-bound TTL keeps ownerless evidence"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["created_epoch"]=float(d["created_epoch"]); d["ttl_hours"]=24; d["expires_at"]=int(d["created_epoch"])+24*3600; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "floating creation time keeps ownerless evidence"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["created_epoch"]=int(d["created_epoch"]); d["expires_at"]=d["created_epoch"]+24*3600; json.dump(d,open(p,"w"))' "$L14"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["kind"]="worktree"; json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "none" "old ownerless worktree remains protected"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); o={"pid":400,"start_epoch":1760000000,"comm":"claude"}; d.update(kind="evidence",owner=o,owners=[o]); json.dump(d,open(p,"w"))' "$L14"
-assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "alive-expired" "expired live evidence owner remains protective"
+python3 -c 'import json,sys; p=sys.argv[1]; created=int(sys.argv[2]); d=json.load(open(p)); d["created_epoch"]=created; d["expires_at"]=created+24*3600; json.dump(d,open(p,"w"))' "$L14" "$LEASE_CREATED"
+assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "alive-expired" "48h age does not retire a live evidence producer"
+seed_fail 400 "1"
+assert_eq "$(lease_owner_state "$L14" "$LEASE_NOW")" "dead" "producer exit makes aged evidence lease reclaim-eligible"
+rm -f "$FAKE_PS_DIR/fail/400"
+
+echo "== unknown ownerless evidence never ages into reclaim =="
+WT15="$(mk_wt wt_unknown_owner_evidence)"
+lease_write "$WT15" myrepo "" scratch-new --kind evidence
+L15="$(lease_path_for "$WT15")"
+LEASE_CREATED=$((LEASE_NOW - 96*3600))
+python3 -c 'import json,sys; p=sys.argv[1]; created=int(sys.argv[2]); d=json.load(open(p)); d.update(owner=None,owners=[],created_epoch=created,expires_at=created+24*3600); json.dump(d,open(p,"w"))' "$L15" "$LEASE_CREATED"
+assert_eq "$(lease_owner_state "$L15" "$LEASE_NOW")" "none" "unknown ownerless evidence remains protected after 96h"
+WT16="$(mk_wt wt_bad_explicit_owner)"
+if lease_write "$WT16" myrepo "" scratch-new --kind evidence --owner-pid 99999999; then
+    bad "unknown explicit producer identity accepted"
+else
+    ok "unknown explicit producer identity rejected"
+fi
+[[ ! -f "$(lease_path_for "$WT16")" ]] && ok "unknown producer writes no lease" || bad "unknown producer lease exists"
 
 echo "== release by owner =="
 if lease_release "$WT1"; then ok "lease_release by owner rc 0"; else bad "lease_release by owner failed"; fi

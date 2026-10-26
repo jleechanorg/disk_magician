@@ -34,6 +34,7 @@ python3 -c 'import json,os,sys; cfg={"volumes":{"swap_headroom_gb":40,"alarm_flo
 # guard has its own volume.py test and must stay active in production.
 python3 -c 'import sys; from unittest.mock import patch; sys.path.insert(0, sys.argv[1]); import volume; patch.object(sys, "platform", "linux").start(); raise SystemExit(volume.create_cmd("scratch", True))' "$ROOT/scripts"
 export STATUS_CALLS_FILE="$T/status.calls"
+export STATUS_COMMANDS_FILE="$T/status.commands"
 mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger" "$TEST_ROOT/repo/evidence/fresh"
 printf x > "$TEST_ROOT/repo/evidence/oldest/content"
 printf x > "$TEST_ROOT/repo/build/younger/content"
@@ -45,7 +46,8 @@ cat > "$DISK_MAGICIAN_DISKM_BIN" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
   'volume path scratch --for-reclaim') printf '%s\n' "$TEST_ROOT" ;;
-  'volume status --json')
+  'volume status --json --snapshot')
+    printf '%s\n' "$*" >>"$STATUS_COMMANDS_FILE"
     n=0; [[ -f "$STATUS_CALLS_FILE" ]] && n="$(cat "$STATUS_CALLS_FILE")"
     n=$((n+1)); printf '%s' "$n" >"$STATUS_CALLS_FILE"
     if [[ -n "${TEST_STATUS_SEQUENCE:-}" ]]; then
@@ -55,7 +57,7 @@ case "$*" in
     if [[ -n "${TEST_BALLAST_AVAILABLE_SEQUENCE:-}" ]]; then
       set -- $TEST_BALLAST_AVAILABLE_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "available=\${$idx}"
     fi
-    printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":1000,"available":%s}]}\n' "$used" "$available"
+    printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":1000,"available":%s}],"tmp_audit":{"status":"unknown","reason":"snapshot_unavailable"}}\n' "$used" "$available"
     if [[ -n "${TEST_STATUS_RC_SEQUENCE:-}" ]]; then
       set -- $TEST_STATUS_RC_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "rc=\${$idx}"
     else rc="${TEST_STATUS_RC:-0}"; fi
@@ -88,7 +90,30 @@ python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600;
 TEST_STATUS_RC=1 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'would_check:'
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["precondition"]["used_pct"]==90'
 TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:below-trigger'
+# Snapshot audit failure is advisory: use the live APFS allocation and reclaim
+# above high-water without running the unrelated tmp snapshot scan.
+printf '{"directories":[null]}\n' >"$T/malformed-snapshot.json"
+set +e
+DISK_MAGICIAN_SNAPSHOT_FILE="$T/malformed-snapshot.json" python3 "$ROOT/scripts/volume.py" status >"$T/status-with-audit.out" 2>&1
+AUDIT_STATUS_RC=$?
+set -e
+[[ "$AUDIT_STATUS_RC" -ne 0 ]]
+DISK_MAGICIAN_SNAPSHOT_FILE="$T/malformed-snapshot.json" python3 "$ROOT/scripts/volume.py" status --snapshot >"$T/status-snapshot-only.json"
+python3 - "$T/status-snapshot-only.json" <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1])); scratch=next(row for row in status["volumes"] if row.get("class")=="scratch")
+assert isinstance(scratch.get("allocated_bytes"),int) and "tmp_audit" not in status
+PY
+mkdir -p "$TEST_ROOT/repo/evidence/oldest"; printf x >"$TEST_ROOT/repo/evidence/oldest/content"
+python3 -c 'import os,sys,time; from pathlib import Path; root=Path(sys.argv[1]); t=time.time()-72*3600; [os.utime(p,(t,t)) for p in [root,*root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
+: >"$STATUS_CALLS_FILE"; : >"$STATUS_COMMANDS_FILE"
+TEST_STATUS_SEQUENCE="900 800 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-snapshot-audit-unknown.out"
+grep -q '^volume status --json --snapshot$' "$STATUS_COMMANDS_FILE"
+[[ ! -e "$TEST_ROOT/repo/evidence/oldest" ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["precondition"]["allocated_bytes"]==900 and r["postcondition"]["target_reached"] and r["candidates"]["removed"]==1'
 # The real C14 path removes one whole artifact, remeasures, and stops at the low-water target.
+mkdir -p "$TEST_ROOT/repo/evidence/oldest"; printf x >"$TEST_ROOT/repo/evidence/oldest/content"
+python3 -c 'import os,sys,time; from pathlib import Path; root=Path(sys.argv[1]); t=time.time()-72*3600; [os.utime(p,(t,t)) for p in [root,*root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
 : >"$STATUS_CALLS_FILE"
 TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-real-remove.out"
 [[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -f "$TEST_ROOT/repo/build/younger/content" ]]
@@ -218,16 +243,25 @@ needle = 'if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["
 replacement = (
     f'if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO") and not Path({str(marker)!r}).exists():'
     f'\n                open({str(marker)!r}, "x").close()'
+    f'\n                if ENV.get("ACT_CURSOR"): Path({str(marker)!r} + ".cursor").write_text(Path(ENV["ACT_CURSOR"]).read_text())'
     f'\n                raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")'
 )
 assert source.count(needle) == 1
 path.write_text(source.replace(needle, replacement))
 PY
+CURSOR="$T/c14-enospc.cursor"
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
-BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_MIN_STATUS_CALLS=3 TEST_STATUS_SEQUENCE="900 850 790 795" "$FIXTURE_SCRIPTS/volume_reclaim.sh" --clean >"$T/c14-final-restore.out"
+BALLAST_LOG="$BALLAST_LOG" ACT_CURSOR="$CURSOR" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_MIN_STATUS_CALLS=3 TEST_STATUS_SEQUENCE="900 850 790 795" "$FIXTURE_SCRIPTS/volume_reclaim.sh" --clean >"$T/c14-final-restore.out"
 [[ ! -e "$TEST_ROOT/retry/evidence/first" && ! -e "$TEST_ROOT/retry/build/second" ]]
 [[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
-python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
+python3 - "$CURSOR" "$T/intent-once.cursor" "$TEST_ROOT/retry/evidence/first" "$TEST_ROOT/retry/build/second" <<'PY'
+import json,sys
+cursor,first_attempt,first,second=sys.argv[1:]
+before=json.load(open(first_attempt)); after=json.load(open(cursor))
+assert before["next_index"]==0 and before["items"]==[first]
+assert after["next_index"]==2 and after["items"]==[first,second]
+PY
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
 
 # A previous run can release ballast and fail to restore it.  The next run must
 # detect the absent reserve, restore it after ordinary reclaim, and only then

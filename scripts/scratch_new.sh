@@ -21,7 +21,9 @@ sn_admit() {
 
 sn_main() {
     local -a pos=()
-    local kind=scratch sha="" est="" owner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc quota_volume=0 admit_mode=""
+    local -a lease_owner_args=()
+    local -a producer_owner_list=()
+    local kind=scratch sha="" est="" owner_pid="" producer_owner="" producer_pid="" producer_pids="${DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS:-${DISK_MAGICIAN_SCRATCH_PRODUCER_PID:-}}" runner_owner="" runner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc quota_volume=0 admit_mode=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind) kind="${2:-}"; shift 2 || return 2 ;;
@@ -59,6 +61,24 @@ sn_main() {
         sha="$(git -C "$repo" rev-parse -q --verify "$sha^{commit}")" || { echo "scratch-new: unknown commit" >&2; return 1; }
         src="git:$(git -C "$repo" remote get-url origin 2>/dev/null || echo "$repo")@$sha"
     fi
+    [[ -n "$producer_pids" ]] || producer_pids="$PPID"
+    IFS=, read -r -a producer_pid_list <<<"$producer_pids"
+    for producer_pid in "${producer_pid_list[@]}"; do
+        producer_owner="$(lease_resolve_process_owner "$producer_pid")" || { echo "scratch-new: producer identity unavailable" >&2; return 75; }
+        producer_owner_list+=("$producer_owner")
+        lease_owner_args+=(--owner-pid "$producer_pid")
+    done
+    if runner_owner="$(lease_resolve_runner_worker "$$" 2>/dev/null)"; then
+        runner_pid="$(cut -f1 <<<"$runner_owner")"
+        lease_owner_args+=(--owner-pid "$runner_pid")
+    elif [[ "${GITHUB_ACTIONS:-}" == true || -n "${GITHUB_RUN_ID:-}" ]]; then
+        echo "scratch-new: CI worker identity unavailable" >&2
+        return 75
+    fi
+    if [[ -n "$owner_pid" ]]; then
+        lease_resolve_process_owner "$owner_pid" >/dev/null || { echo "scratch-new: owner identity unavailable: pid=$owner_pid" >&2; return 75; }
+        lease_owner_args+=(--owner-pid "$owner_pid")
+    fi
     [[ "$quota_volume" == 1 ]] && admit_mode=required
     sn_admit "$cls" "$est" "$path" "scratch-new:$name" "$admit_mode" || return $?
     if [[ "$kind" == evidence || "$kind" == build ]]; then
@@ -91,13 +111,20 @@ PYQUARANTINEDIR
     fi
     admit_confirm_created
     if ! declare -F lease_write >/dev/null 2>&1 || ! lease_write "$path" "$repo" "" scratch-new --kind "$kind" \
-        --producer scratch-new ${src:+--source "$src"} >/dev/null 2>&1; then
+        --producer scratch-new ${src:+--source "$src"} "${lease_owner_args[@]}" >/dev/null 2>&1; then
         echo "scratch-new: lease write failed: $path" >&2
         return 1
     fi
-    if [[ -n "$owner_pid" ]] && ! "$_SN_DIR/../disk_magician.sh" lease-add-owner "$path" --owner-pid "$owner_pid" >/dev/null; then
-        echo "scratch-new: child owner acquisition failed: pid=$owner_pid" >&2
-        return 1
+    for i in "${!producer_pid_list[@]}"; do
+        producer_pid="${producer_pid_list[$i]}"
+        [[ "$(lease_resolve_process_owner "$producer_pid" 2>/dev/null)" == "${producer_owner_list[$i]}" ]] || {
+            echo "scratch-new: producer identity changed before path handoff" >&2
+            return 75
+        }
+    done
+    if [[ -n "$runner_pid" && "$(lease_resolve_runner_worker "$$" 2>/dev/null)" != "$runner_owner" ]]; then
+        echo "scratch-new: CI worker identity changed before path handoff" >&2
+        return 75
     fi
     printf '%s\n' "$path"
 }
