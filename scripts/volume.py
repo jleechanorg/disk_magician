@@ -1045,6 +1045,42 @@ def linux_service_render(runtime: Path, config_path: str, state_path: Path,
     return rendered
 
 
+def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
+                                      config_path: str, state_path: Path) -> bool:
+    try:
+        if unit_bytes == linux_service_render(runtime, config_path, state_path, "fuse").encode():
+            return True
+    except (OSError, ValueError):
+        return False
+
+    candidates = Path.home() / ".local/share/disk-magician/candidates"
+    try:
+        if candidates.is_symlink() or not candidates.is_dir():
+            return False
+        if candidates.resolve(strict=True) != candidates.absolute():
+            return False
+        if candidates.stat().st_uid != os.geteuid():
+            return False
+        for previous in candidates.iterdir():
+            if not re.fullmatch(r"[0-9a-f]{40}", previous.name):
+                continue
+            if previous.is_symlink() or not previous.is_dir() or previous.stat().st_uid != os.geteuid():
+                continue
+            if previous.resolve(strict=True) != previous.absolute():
+                continue
+            template = previous / "systemd/diskm-scratch.service.in"
+            orchestrator = previous / "disk_magician.sh"
+            systemd = previous / "systemd"
+            if (systemd.is_symlink() or template.is_symlink() or orchestrator.is_symlink() or
+                    not systemd.is_dir() or not template.is_file() or not orchestrator.is_file()):
+                continue
+            if unit_bytes == linux_service_render(previous, config_path, state_path, "fuse").encode():
+                return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result,
                       preserve_times: bool = False) -> None:
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".diskm-", dir=path.parent)
@@ -1064,12 +1100,24 @@ def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result,
             os.close(restored_fd)
     linux_fsync_directory(path.parent)
 
+def linux_fstab_change_result(output: bytes | str | None) -> bool | None:
+    try:
+        if output is None:
+            return None
+        result = json.loads(output)
+        changed = result.get("changed") if isinstance(result, dict) else None
+        return changed if isinstance(changed, bool) else None
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
 def linux_service_migrate_cmd(arguments: list[str]) -> int:
     config_path = unit = None
     state = image = mountpoint = None
     config_bytes = unit_bytes = b""
     config_stat = unit_stat = None
-    fstab_installed = False
+    fstab_install_attempted = False
+    fstab_install_changed: bool | None = None
     try:
         if not arguments or arguments[0] != "scratch":
             return 2
@@ -1106,7 +1154,7 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         runtime = Path(__file__).resolve().parent.parent
         if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
             return 75
-        if unit_bytes.decode() != linux_service_render(runtime, str(config_path), state, "fuse"):
+        if not linux_service_matches_fuse_unit(unit_bytes, runtime, str(config_path), state):
             return 75
         systemctl = ["systemctl", "--user"]
         linux_command(systemctl + ["stop", "diskm-scratch.service"], 60)
@@ -1116,10 +1164,15 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
                     "--config", str(config_path), "--state-dir", str(state),
                     "--user-uid", values["--user-uid"], "--execute"]
-        result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
-        if result.returncode:
-            raise RuntimeError("administrator fstab installation failed")
-        fstab_installed = True
+        fstab_install_attempted = True
+        try:
+            result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
+        except subprocess.TimeoutExpired as error:
+            fstab_install_changed = linux_fstab_change_result(error.stdout or error.output)
+            raise
+        fstab_install_changed = linux_fstab_change_result(result.stdout)
+        if result.returncode or fstab_install_changed is None:
+            raise RuntimeError("administrator fstab installation failed or returned no change receipt")
         document = json.loads(config_bytes)
         document["volumes"]["classes"]["scratch"]["backend"] = "native"
         linux_atomic_bytes(config_path, (json.dumps(document, indent=2) + "\n").encode(), config_stat)
@@ -1152,10 +1205,12 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
             linux_atomic_bytes(config_path, config_bytes, config_stat, preserve_times=True)
             linux_atomic_bytes(unit, unit_bytes, unit_stat, preserve_times=True)
             linux_command(["systemctl", "--user", "daemon-reload"])
-            if fstab_installed and not resources_busy:
+            if fstab_install_attempted and fstab_install_changed is None:
+                return 75
+            if fstab_install_attempted and fstab_install_changed and not resources_busy:
                 root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
                             "volume", "fstab", "remove", "scratch", "--config", str(config_path),
-                            "--state-dir", str(state), "--user-uid", str(os.geteuid()), "--execute"]
+                            "--state-dir", str(state), "--user-uid", str(os.geteuid()), "--allow-absent", "--execute"]
                 if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True,
                                    timeout=45, check=False).returncode:
                     return 75
@@ -1323,6 +1378,23 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None) -> int:
         return 75
 
 
+def linux_path_components_owned(path: Path, uid: int) -> bool:
+    if not path.is_absolute():
+        return False
+    current = Path("/")
+    try:
+        for index, component in enumerate(path.parts[1:], 1):
+            current = current / component
+            details = current.lstat()
+            if stat.S_ISLNK(details.st_mode) or details.st_uid not in {0, uid}:
+                return False
+            if index < len(path.parts) - 1 and not stat.S_ISDIR(details.st_mode):
+                return False
+        return True
+    except OSError:
+        return False
+
+
 def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
                         fixture_root: str) -> tuple[Path, Path, Path, Path] | None:
     """Validate the exact private fixture tuple before any privileged operation."""
@@ -1333,7 +1405,8 @@ def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
         root_arg = Path(fixture_root)
         config_arg = Path(config_path)
         state_arg = Path(state_path)
-        if not all(path.is_absolute() for path in (root_arg, config_arg, state_arg)):
+        if not all(linux_path_components_owned(path, uid)
+                   for path in (root_arg, config_arg, state_arg)):
             return None
         root = root_arg.resolve(strict=True)
         config = config_arg.resolve(strict=True)
@@ -1356,6 +1429,8 @@ def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
         image_arg = Path(scratch["image_path"])
         mount_arg = Path(scratch["mountpoint"])
         if not image_arg.is_absolute() or not mount_arg.is_absolute():
+            return None
+        if not all(linux_path_components_owned(path, uid) for path in (image_arg, mount_arg)):
             return None
         image = image_arg.resolve(strict=True)
         mountpoint = mount_arg.resolve(strict=True)
@@ -1385,9 +1460,11 @@ def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
         home = Path(pwd.getpwuid(uid).pw_dir)
         config = Path(config_path)
         state = Path(state_path)
-        if (uid < 0 or not config.is_absolute() or not state.is_absolute() or
+        if (uid < 0 or home.lstat().st_uid != uid or
                 config != home / ".config/disk-magician/linux-scratch.json" or
-                state != home / ".disk_magician_state"):
+                state != home / ".disk_magician_state" or
+                not all(linux_path_components_owned(path, uid)
+                        for path in (home, config, state))):
             return None
         if (config.resolve(strict=True) != config or state.resolve(strict=True) != state or
                 config.stat().st_uid != uid or state.stat().st_uid != uid or
@@ -1398,7 +1475,9 @@ def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
         image = Path(scratch["image_path"])
         mountpoint = Path(scratch["mountpoint"])
         if (image != home / ".local/share/disk-magician/volumes/scratch.ext4" or
-                mountpoint != home / "Scratch" or image.resolve(strict=True) != image or
+                mountpoint != home / "Scratch" or
+                not all(linux_path_components_owned(path, uid) for path in (image, mountpoint)) or
+                image.resolve(strict=True) != image or
                 mountpoint.resolve(strict=True) != mountpoint or image.stat().st_uid != uid or
                 mountpoint.stat().st_uid != uid or not image.is_file() or not mountpoint.is_dir()):
             return None
@@ -1528,8 +1607,8 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
                 linux_fstab_decode_field(fields[0]) == os.fsencode(image) or
                 linux_fstab_decode_field(fields[1]) == os.fsencode(mountpoint)):
             raise ValueError("conflicting unmanaged fstab entry")
-    if action == "remove":
-        if not existing:
+    if action in {"remove", "remove-if-present"}:
+        if not existing and action == "remove":
             raise ValueError("exact managed fstab entry is absent")
         output = b"".join(lines)
         linux_fstab_validate(output)
@@ -1585,16 +1664,12 @@ def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
             raise OSError("fstab read-back mismatch")
         linux_fstab_validate(path.read_bytes())
     except Exception:
-        if path.read_bytes() != old:
-            fd, restore = tempfile.mkstemp(prefix=".fstab-diskm-restore-", dir=path.parent)
-            os.fchmod(fd, stat.S_IMODE(details.st_mode))
-            os.fchown(fd, details.st_uid, details.st_gid)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(old)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(restore, path)
-            linux_fsync_directory(path.parent)
+        try:
+            restore_needed = path.read_bytes() != old
+        except OSError:
+            restore_needed = True
+        if restore_needed:
+            linux_atomic_bytes(path, old, details, preserve_times=True)
         raise
 
 
@@ -1631,11 +1706,15 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             return 2
         values: dict[str, str] = {}
         execute = False
+        allow_absent = False
         i = 1
         while i < len(arguments):
             key = arguments[i]
             if key == "--execute":
                 execute = True
+                i += 1
+            elif key == "--allow-absent":
+                allow_absent = True
                 i += 1
             elif key in {"--config", "--state-dir", "--user-uid", "--fixture-root"} and i + 1 < len(arguments):
                 values[key] = arguments[i + 1]
@@ -1649,7 +1728,8 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             if "--fixture-root" in values:
                 return 2
             values["--state-dir"] = str(Path(pwd.getpwuid(int(values["--user-uid"])).pw_dir) / ".disk_magician_state")
-        if (action == "preview" and execute) or (action != "preview" and not execute):
+        if ((action == "preview" and execute) or (action != "preview" and not execute) or
+                (allow_absent and action != "remove")):
             return 2
         safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
         if safe is None:
@@ -1664,6 +1744,8 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
                              "--user-uid", values["--user-uid"]]
                 if "--fixture-root" in values:
                     root_args.extend(("--fixture-root", values["--fixture-root"]))
+                if allow_absent:
+                    root_args.append("--allow-absent")
                 root_args.append("--execute")
                 result = subprocess.run(["sudo", "-n", "bash", *root_args],
                                         capture_output=True, text=True, timeout=45, check=False)
@@ -1681,7 +1763,10 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
                                     linux_image_has_loop_mapping(image) or
                                     linux_image_has_open_writers(image)):
             return 75
-        new = linux_fstab_transform(old, block, image, mountpoint, "remove" if action == "remove" else "install")
+        transform_action = "install"
+        if action == "remove":
+            transform_action = "remove-if-present" if allow_absent else "remove"
+        new = linux_fstab_transform(old, block, image, mountpoint, transform_action)
         print(json.dumps({"path": str(path), "changed": old != new,
                           "before_sha256": hashlib.sha256(old).hexdigest(),
                           "after_sha256": hashlib.sha256(new).hexdigest()}, sort_keys=True))

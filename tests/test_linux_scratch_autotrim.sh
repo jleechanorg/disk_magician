@@ -53,9 +53,12 @@ print("systemd user manager version present:", bool(bus.stdout.strip()), flush=T
 assert bus.returncode == 0 and bus.stdout.strip(), bus.stderr
 production_config = Path.home() / ".config/disk-magician/linux-scratch.json"
 production = json.loads(production_config.read_text())["volumes"]
-protected = [production_config, Path.home() / ".config/systemd/user/diskm-scratch.service",
-             Path.home() / ".config/systemd/user/diskm-scratch-reclaim.service",
-             Path.home() / ".config/systemd/user/diskm-scratch-reclaim.timer"]
+unit_directory = Path.home() / ".config/systemd/user"
+protected = [production_config, unit_directory / "diskm-scratch.service",
+             unit_directory / "diskm-scratch-reclaim.service",
+             unit_directory / "diskm-scratch-reclaim.timer"]
+for pattern in ("diskm-scratch-reclaim*.service", "diskm-scratch-reclaim*.timer"):
+    protected.extend(path for path in sorted(unit_directory.glob(pattern)) if path not in protected)
 protected_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
                     for p in protected}
 run(["bash", root / "disk_magician.sh", "volume", "scheduler", "--help"])
