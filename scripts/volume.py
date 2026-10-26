@@ -1127,6 +1127,10 @@ def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
             return None
         if not image.is_relative_to(root) or not mountpoint.is_relative_to(root):
             return None
+        if (image.is_relative_to(mountpoint) or mountpoint.is_relative_to(image) or
+                config.is_relative_to(mountpoint) or state.is_relative_to(mountpoint) or
+                mountpoint.is_relative_to(config) or mountpoint.is_relative_to(state)):
+            return None
         for path, expected_type in ((image, stat.S_ISREG), (mountpoint, stat.S_ISDIR)):
             ps = path.lstat()
             if ps.st_uid != uid or not expected_type(ps.st_mode) or stat.S_ISLNK(ps.st_mode):
@@ -1167,37 +1171,44 @@ def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
         return None
 
 
-def linux_fstab_install_cmd(arguments: list[str]) -> int:
-    # Keep unsupported requests fail-closed before touching fstab or sudo.
-    try:
-        if not arguments or arguments[0] != "scratch":
-            return 2
-        values: dict[str, str] = {}
-        execute = False
-        index = 1
-        while index < len(arguments):
-            key = arguments[index]
-            if key == "--execute":
-                execute = True
-                index += 1
-                continue
-            if key not in {"--config", "--state-dir", "--user-uid", "--fixture-root"} or index + 1 >= len(arguments):
-                return 2
-            values[key] = arguments[index + 1]
-            index += 2
-        required = {"--config", "--state-dir", "--user-uid"}
-        if not required.issubset(values) or set(values) - required - {"--fixture-root"} or not execute:
-            return 2
-        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"],
-                                         values["--user-uid"], values.get("--fixture-root"))
-        return 75 if safe is None else 75
-    except Exception:
-        return 75
-
-
-
 def linux_fstab_path() -> Path:
     return Path("/etc/fstab")
+
+
+def linux_fstab_lock_path() -> Path:
+    return Path("/etc/.diskm-fstab.lock")
+
+
+def linux_fstab_lock() -> int:
+    path = linux_fstab_lock_path()
+    parent = path.parent.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) or parent.st_mode & 0o022:
+        raise PermissionError("fstab lock parent is not private to its owner")
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    details = os.fstat(descriptor)
+    if not stat.S_ISREG(details.st_mode) or details.st_uid != parent.st_uid or stat.S_IMODE(details.st_mode) != 0o600:
+        os.close(descriptor)
+        raise PermissionError("fstab lock identity is unsafe")
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def linux_fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def linux_fstab_validate(data: bytes) -> None:
+    for number, line in enumerate(data.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(b"#"):
+            continue
+        fields = stripped.split()
+        if len(fields) != 6 or not fields[4].isdigit() or not fields[5].isdigit():
+            raise ValueError("invalid fstab record at line " + str(number))
 
 
 def linux_fstab_marker_id(uid: str, config: Path, state: Path, image: Path,
@@ -1208,7 +1219,7 @@ def linux_fstab_marker_id(uid: str, config: Path, state: Path, image: Path,
 
 def linux_fstab_block(uid: str, config: Path, state: Path, image: Path,
                       mountpoint: Path) -> bytes:
-    if any(any(c.isspace() or ord(c) < 32 for c in str(path)) for path in (image, mountpoint)):
+    if any(any(c.isspace() or c == "\\" or ord(c) < 32 for c in str(path)) for path in (image, mountpoint)):
         raise ValueError("fstab paths may not contain whitespace or control characters")
     marker = linux_fstab_marker_id(uid, config, state, image, mountpoint)
     return (f"# diskm-scratch:{marker}:begin\n{image} {mountpoint} ext4 "
@@ -1218,6 +1229,7 @@ def linux_fstab_block(uid: str, config: Path, state: Path, image: Path,
 
 def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Path,
                           action: str) -> bytes:
+    linux_fstab_validate(data)
     lines = data.splitlines(keepends=True)
     block_lines = block.splitlines(keepends=True)
     begins = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == block_lines[0].rstrip(b"\r\n")]
@@ -1240,10 +1252,14 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
     if action == "remove":
         if not existing:
             raise ValueError("exact managed fstab entry is absent")
-        return b"".join(lines)
+        output = b"".join(lines)
+        linux_fstab_validate(output)
+        return output
     if action == "install":
         output = b"".join(lines)
-        return (output + (b"" if not output or output.endswith(b"\n") else b"\n") + block)
+        output = output + (b"" if not output or output.endswith(b"\n") else b"\n") + block
+        linux_fstab_validate(output)
+        return output
     raise ValueError("unknown fstab action")
 
 
@@ -1285,8 +1301,10 @@ def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        linux_fsync_directory(path.parent)
         if path.read_bytes() != new:
             raise OSError("fstab read-back mismatch")
+        linux_fstab_validate(path.read_bytes())
     except Exception:
         if path.read_bytes() != old:
             fd, restore = tempfile.mkstemp(prefix=".fstab-diskm-restore-", dir=path.parent)
@@ -1297,6 +1315,7 @@ def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(restore, path)
+            linux_fsync_directory(path.parent)
         raise
 
 
@@ -1327,6 +1346,7 @@ def linux_image_has_open_writers(image: Path) -> bool:
 
 
 def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
+    lock_fd = None
     try:
         if not arguments or arguments[0] != "scratch":
             return 2
@@ -1351,6 +1371,10 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
         safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
         if safe is None:
             return 75
+        if action != "preview":
+            if os.geteuid() != 0:
+                return 75
+            lock_fd = linux_fstab_lock()
         config, state, image, mountpoint = safe
         block = linux_fstab_block(values["--user-uid"], config, state, image, mountpoint)
         path = linux_fstab_path()
@@ -1369,6 +1393,9 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
     except Exception as error:
         print("volume fstab: " + str(error), file=sys.stderr)
         return 75
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 def create_cmd(name: str, execute: bool = False) -> int:
     if linux_backend_enabled(name):

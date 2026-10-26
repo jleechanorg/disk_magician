@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,7 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         with (
             mock.patch.object(volume.sys, "platform", "linux"),
             mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
             mock.patch.object(volume, "linux_mount_record", return_value=None),
         ):
             self.assertEqual(volume.main(["fstab", "preview", *base]), 0)
@@ -102,12 +104,58 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         with (
             mock.patch.object(volume.sys, "platform", "linux"),
             mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
             mock.patch.object(volume, "linux_mount_record", return_value=None),
             mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=True),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
             mock.patch.object(volume.os, "geteuid", return_value=0),
         ):
             self.assertEqual(volume.main(["fstab", "remove", *base, "--execute"]), 75)
         self.assertEqual(self.fstab.read_bytes(), self.original_fstab + block)
+        with (
+            mock.patch.object(volume.sys, "platform", "linux"),
+            mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=True),
+            mock.patch.object(volume.os, "geteuid", return_value=0),
+        ):
+            self.assertEqual(volume.main(["fstab", "remove", *base, "--execute"]), 75)
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab + block)
+
+    def test_concurrent_fixture_installs_both_survive(self):
+        second = self.root / "second"
+        second.mkdir(mode=0o700)
+        state, mountpoint = second / "state", second / "Scratch"
+        image, config = second / "scratch.ext4", second / "config.json"
+        state.mkdir(mode=0o700)
+        mountpoint.mkdir(mode=0o700)
+        image.write_bytes(b"second fixture")
+        config.write_text(json.dumps({"volumes": {
+            "swap_headroom_gb": 40, "alarm_floor_gb": 20,
+            "encryption": "none", "encryption_acknowledged_at": "ack",
+            "classes": {"scratch": {"name": "diskm-scratch", "quota_gb": 2,
+                "mountpoint": str(mountpoint), "image_path": str(image)}}}}))
+        first_args = ["fstab", "install", "scratch", "--config", str(self.config),
+            "--state-dir", str(self.state), "--user-uid", str(os.getuid()),
+            "--fixture-root", str(self.root), "--execute"]
+        second_args = ["fstab", "install", "scratch", "--config", str(config),
+            "--state-dir", str(state), "--user-uid", str(os.getuid()),
+            "--fixture-root", str(second), "--execute"]
+        with (
+            mock.patch.object(volume.sys, "platform", "linux"),
+            mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
+            mock.patch.object(volume.os, "geteuid", return_value=0),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(volume.main, (first_args, second_args)))
+        self.assertEqual(results, [0, 0])
+        actual = self.fstab.read_bytes()
+        self.assertIn(str(self.mountpoint).encode(), actual)
+        self.assertIn(str(mountpoint).encode(), actual)
+        self.assertTrue(actual.startswith(self.original_fstab))
 
     def test_fstab_write_preserves_mode_and_restores_after_bad_readback(self):
         self.fstab.chmod(0o640)
@@ -137,6 +185,24 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         conflict = self.original_fstab + f"{self.root}/other {self.mountpoint} ext4 defaults 0 2\n".encode()
         with self.assertRaisesRegex(ValueError, "conflicting unmanaged"):
             volume.linux_fstab_transform(conflict, block, self.image, self.mountpoint, "install")
+
+    def test_malformed_full_table_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "invalid fstab record"):
+            volume.linux_fstab_validate(b"/dev/example /bad ext4 defaults\n")
+
+    def test_fixture_target_overlapping_state_is_rejected(self):
+        document = json.loads(self.config.read_text())
+        nested = self.state / "Scratch"
+        nested.mkdir(mode=0o700)
+        document["volumes"]["classes"]["scratch"]["mountpoint"] = str(nested)
+        self.config.write_text(json.dumps(document))
+        self.assertIsNone(volume.linux_fixture_paths(str(self.config), str(self.state),
+                                                     str(os.getuid()), str(self.root)))
+
+    def test_fstab_paths_with_backslash_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "fstab paths"):
+            volume.linux_fstab_block(str(os.getuid()), self.config, self.state,
+                                     self.image, self.root / "bad\\path")
 
 
 if __name__ == "__main__":
