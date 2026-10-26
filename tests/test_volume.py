@@ -24,7 +24,8 @@ class VolumeTestBase(unittest.TestCase):
         self.addCleanup(self.platform_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = pathlib.Path(self.temp.name)
+        # macOS temp roots can traverse /var -> /private/var.
+        self.root = pathlib.Path(self.temp.name).resolve()
         self.state = self.root / "diskutil.json"
         self.calls_file = self.root / "calls.jsonl"
         self.state_dir = self.root / "state"
@@ -65,8 +66,10 @@ class LinuxScratchTest(VolumeTestBase):
 
     def test_linux_scratch_create_preview_is_sparse_and_capped(self):
         self.set_linux_image_config(200)
+        usage = volume.shutil._ntuple_diskusage(total=500 * volume.GIB, used=0, free=500 * volume.GIB)
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with mock.patch.object(volume.shutil, "disk_usage", return_value=usage), \
+             contextlib.redirect_stdout(output):
             self.assertEqual(volume.linux_create_cmd("scratch"), 0)
         result = json.loads(output.getvalue())
         self.assertTrue(result["sparse"])
@@ -92,7 +95,9 @@ class LinuxScratchTest(VolumeTestBase):
             commands.append(args)
             return "4f9f36b2-6896-46b3-b909-8bedf1a2273f" if args[0] == "blkid" else ""
 
-        with mock.patch.object(volume, "linux_command", side_effect=fake_linux_command):
+        usage = volume.shutil._ntuple_diskusage(total=500 * volume.GIB, used=0, free=500 * volume.GIB)
+        with mock.patch.object(volume.shutil, "disk_usage", return_value=usage), \
+             mock.patch.object(volume, "linux_command", side_effect=fake_linux_command):
             self.assertEqual(volume.linux_create_cmd("scratch", execute=True), 0)
         self.assertTrue(image.is_file())
         self.assertEqual(image.stat().st_size, volume.GIB)
@@ -105,8 +110,20 @@ class LinuxScratchTest(VolumeTestBase):
         scratch = self.set_linux_image_config(200)
         entry = {"state": "active", "image_path": scratch["image_path"],
                  "mountpoint": scratch["mountpoint"], "quota_bytes": 200 * volume.GIB}
-        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}):
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_mount_record", return_value=None):
             self.assertEqual(volume.linux_service_install_cmd("scratch"), 75)
+
+    def test_linux_paths_reject_symlinked_image_and_mountpoint_parents(self):
+        scratch = self.set_linux_image_config(1)
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        for key in ("image_path", "mountpoint"):
+            with self.subTest(path=key):
+                unsafe = dict(scratch)
+                unsafe[key] = str(alias / pathlib.Path(scratch[key]).relative_to(self.root))
+                with self.assertRaisesRegex(ValueError, "may not traverse symlinks"):
+                    volume.linux_paths(unsafe)
 
     def test_linux_mount_temporarily_opens_underlay_then_restores_read_only_mode(self):
         scratch = self.set_linux_image_config(1)
