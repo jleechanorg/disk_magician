@@ -1296,6 +1296,121 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         self.assertEqual(volume.create_cmd("scratch", execute=True), 2)
         self.assertFalse(self.calls_file.exists())
 
+    def test_create_ballast_failure_preserves_replacement_and_needs_recovery(self):
+        import hashlib
+
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        path = volume.ballast_path(str(self.mp))
+        renamed_original = self.mp / "renamed-original-ballast"
+        replacement = b"unrelated replacement payload"
+        observed = {}
+
+        def digest(target):
+            value = hashlib.sha256()
+            with target.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    value.update(chunk)
+            return value.hexdigest()
+
+        def replace_before_failed_verification(mountpoint):
+            target = volume.ballast_path(mountpoint)
+            if not target.exists():
+                return False
+            target.rename(renamed_original)
+            target.write_bytes(replacement)
+            observed["original_hash"] = digest(renamed_original)
+            observed["replacement_hash"] = digest(target)
+            return False
+
+        with mock.patch.object(volume, "ballast_ok", side_effect=replace_before_failed_verification), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(volume.main(["create", "scratch", "--execute"]), 75)
+
+        registry_path, _ = volume.registry_paths()
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual((entry["state"], entry["uuid"]), ("needs_recovery", "SCRATCH-UUID"))
+        self.assertEqual(self.calls_file.read_text().count("addVolume"), 1)
+        self.assertEqual(path.read_bytes(), replacement)
+        self.assertEqual(digest(path), observed["replacement_hash"])
+        self.assertEqual(digest(renamed_original), observed["original_hash"])
+        self.assertFalse(volume.ballast_ok(str(self.mp)))
+
+    def test_write_ballast_failure_leaves_partial_file_and_closes_descriptor(self):
+        self.mp.mkdir(parents=True)
+        descriptor_state = {}
+        real_fdopen = os.fdopen
+
+        class PartialWriter:
+            def __init__(self, descriptor, mode):
+                self.stream = real_fdopen(descriptor, mode)
+                descriptor_state["fd"] = descriptor
+                self.wrote = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.stream.close()
+
+            def write(self, block):
+                if self.wrote:
+                    raise OSError("injected partial ballast write failure")
+                self.wrote = True
+                return self.stream.write(block[:4096])
+
+            def flush(self):
+                return self.stream.flush()
+
+            def fileno(self):
+                return self.stream.fileno()
+
+        path = volume.ballast_path(str(self.mp))
+        with mock.patch.object(volume.os, "fdopen", side_effect=PartialWriter):
+            with self.assertRaisesRegex(OSError, "injected partial ballast write failure"):
+                volume.write_ballast(str(self.mp))
+
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_size, 4096)
+        self.assertFalse(volume.ballast_ok(str(self.mp)))
+        with self.assertRaises(OSError):
+            os.fstat(descriptor_state["fd"])
+
+    def test_write_ballast_fdopen_failure_preserves_file_and_closes_descriptor(self):
+        mountpoint = self.root / "fdopen-failure"
+        mountpoint.mkdir()
+        descriptor_state = {}
+        path = volume.ballast_path(str(mountpoint))
+
+        def fail_fdopen(descriptor, mode):
+            descriptor_state["fd"] = descriptor
+            raise OSError("injected fdopen failure")
+
+        with mock.patch.object(volume.os, "fdopen", side_effect=fail_fdopen):
+            with self.assertRaisesRegex(OSError, "injected fdopen failure"):
+                volume.write_ballast(str(mountpoint))
+
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_size, 0)
+        with self.assertRaises(OSError):
+            os.fstat(descriptor_state["fd"])
+
+    def test_write_ballast_refuses_to_change_existing_valid_reserve(self):
+        import hashlib
+
+        self.mp.mkdir(parents=True)
+        path = volume.ballast_path(str(self.mp))
+        volume.write_ballast(str(self.mp))
+        before = (path.stat().st_ino, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+
+        with self.assertRaises(FileExistsError):
+            volume.write_ballast(str(self.mp))
+
+        after = (path.stat().st_ino, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(after, before)
+        self.assertTrue(volume.ballast_ok(str(self.mp)))
+
     def test_sparse_ballast_failure_does_not_activate_volume(self):
         with mock.patch.object(volume, "write_ballast", side_effect=self.write_sparse_ballast):
             self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
