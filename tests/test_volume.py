@@ -1,3 +1,4 @@
+import errno
 import importlib.util
 import contextlib
 import io
@@ -1279,6 +1280,27 @@ class ApprovedR13RegressionTest(VolumeTestBase):
             self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
         self.assertTrue(volume.ballast_ok(str(self.mp)))
         self.assertFalse(self.calls_file.exists())
+
+    def test_encrypted_create_requires_controlling_tty_not_only_isatty_streams(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = "/Volumes/diskm-scratch"
+        self.config.write_text(json.dumps(config))
+        tty_streams = [mock.Mock(isatty=mock.Mock(return_value=True)) for _ in range(3)]
+        with (
+            mock.patch.object(volume.sys, "platform", "darwin"),
+            mock.patch.object(volume.sys, "stdin", tty_streams[0]),
+            mock.patch.object(volume.sys, "stdout", tty_streams[1]),
+            mock.patch.object(volume.sys, "stderr", tty_streams[2]),
+            mock.patch.object(volume, "linux_backend_enabled", return_value=False),
+            mock.patch.object(volume.os, "open", side_effect=OSError(errno.ENXIO, "no controlling tty")),
+            mock.patch.object(volume.subprocess, "run") as run,
+        ):
+            self.assertFalse(volume.has_interactive_diskutil_tty())
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        run.assert_not_called()
+        self.assertFalse(self.calls_file.exists())
+        self.assertFalse((self.state_dir / "volumes" / "registry.json").exists())
 
     def test_encrypted_create_requires_tty_before_intent_or_diskutil_mutation(self):
         config = json.loads(self.config.read_text())

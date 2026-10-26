@@ -91,8 +91,14 @@ def run_diskutil(arguments: list[str]) -> bytes:
 
 def has_interactive_diskutil_tty() -> bool:
     try:
-        return all(stream is not None and stream.isatty()
-                   for stream in (sys.stdin, sys.stdout, sys.stderr))
+        if not all(stream is not None and stream.isatty()
+                   for stream in (sys.stdin, sys.stdout, sys.stderr)):
+            return False
+        descriptor = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            return stat.S_ISCHR(os.fstat(descriptor).st_mode) and os.isatty(descriptor)
+        finally:
+            os.close(descriptor)
     except (AttributeError, OSError):
         return False
 
