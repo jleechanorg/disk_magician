@@ -209,7 +209,8 @@ for case in ("recovery", "protected"):
     config_path.write_text(json.dumps(cfg))
     local = dict(env, DISK_MAGICIAN_CONFIG=str(config_path), DISK_MAGICIAN_STATE_DIR=str(state),
                  DISK_MAGICIAN_DELETION_LOG=str(state / "deletions.log"),
-                 DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS=f"{os.getpid()},{os.getppid()}")
+                 DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS=f"{os.getpid()},{os.getppid()}",
+                 DISK_MAGICIAN_DISKM_BIN=str(candidate / "disk_magician.sh"))
     unit = "diskm-scratch-reclaim-" + hashlib.sha256(os.fsencode(config_path.resolve())).hexdigest()[:12]
     unit_dir = Path.home() / ".config/systemd/user"
     assert not any((unit_dir / (unit + s)).exists() for s in (".timer", ".service")), "test unit collision"
