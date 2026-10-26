@@ -763,7 +763,13 @@ def linux_native_mount_cmd(scratch: dict[str, Any], entry: Any) -> int:
     if linux_mount_record(mountpoint) is not None:
         linux_validate_native_mount(config(), scratch, entry)
         return 0
-    if linux_image_has_loop_mapping(image):
+    try:
+        if linux_image_has_loop_mapping(image) or linux_image_has_open_writers(image):
+            return 75
+        image_details = image.stat()
+        if not stat.S_ISREG(image_details.st_mode) or image_details.st_nlink != 1:
+            return 75
+    except OSError:
         return 75
     linux_command(["mount", str(mountpoint)])
     try:
@@ -1680,6 +1686,12 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
 def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
     if os.geteuid() != 0:
         raise PermissionError("fstab changes require administrator authentication")
+    try:
+        attributes = os.listxattr(path, follow_symlinks=False)
+        if not isinstance(attributes, list) or attributes:
+            raise OSError("fstab mutation refuses extended attributes or ACLs")
+    except (AttributeError, OSError, TypeError) as error:
+        raise OSError("fstab mutation cannot verify extended attributes or ACLs") from error
     details = path.stat()
     backup = path.with_name(path.name + ".diskm-backup-" + hashlib.sha256(old).hexdigest()[:16])
     try:

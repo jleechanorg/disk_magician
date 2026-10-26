@@ -128,6 +128,44 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         fstab_lock.assert_not_called()
         fstab_path.assert_not_called()
 
+    def test_fstab_write_refuses_extended_attributes_before_backup_or_write(self):
+        original = self.fstab.read_bytes()
+        details = self.fstab.stat()
+        try:
+            os.setxattr(self.fstab, "user.diskm-test", b"metadata")
+        except (AttributeError, OSError) as error:
+            self.skipTest("user extended attributes unavailable: " + str(error))
+        backup = self.fstab.with_name(self.fstab.name + ".diskm-backup-" +
+                                      volume.hashlib.sha256(original).hexdigest()[:16])
+        with mock.patch.object(volume.os, "geteuid", return_value=0):
+            with self.assertRaises(OSError):
+                volume.linux_fstab_write(self.fstab, original, original + b"# replacement\n")
+        self.assertEqual(self.fstab.read_bytes(), original)
+        restored = self.fstab.stat()
+        self.assertEqual((restored.st_mode, restored.st_uid, restored.st_gid, restored.st_mtime_ns),
+                         (details.st_mode, details.st_uid, details.st_gid, details.st_mtime_ns))
+        self.assertEqual(os.getxattr(self.fstab, "user.diskm-test"), b"metadata")
+        self.assertFalse(backup.exists())
+        self.assertEqual(list(self.root.glob(".fstab-diskm-*")), [])
+
+    def test_fstab_write_refuses_xattr_enumeration_error_without_effects(self):
+        original = self.fstab.read_bytes()
+        details = self.fstab.stat()
+        backup = self.fstab.with_name(self.fstab.name + ".diskm-backup-" +
+                                      volume.hashlib.sha256(original).hexdigest()[:16])
+        with (
+            mock.patch.object(volume.os, "geteuid", return_value=0),
+            mock.patch.object(volume.os, "listxattr", side_effect=OSError("metadata unavailable")),
+        ):
+            with self.assertRaises(OSError):
+                volume.linux_fstab_write(self.fstab, original, original + b"# replacement\n")
+        self.assertEqual(self.fstab.read_bytes(), original)
+        restored = self.fstab.stat()
+        self.assertEqual((restored.st_mode, restored.st_uid, restored.st_gid, restored.st_mtime_ns),
+                         (details.st_mode, details.st_uid, details.st_gid, details.st_mtime_ns))
+        self.assertFalse(backup.exists())
+        self.assertEqual(list(self.root.glob(".fstab-diskm-*")), [])
+
     def test_fstab_write_restores_original_when_readback_fails_twice(self):
         self.fstab.chmod(0o640)
         original = self.fstab.read_bytes()
@@ -439,6 +477,71 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         log_release.assert_not_called()
         handle.close.assert_called_once()
 
+    def test_native_mount_refuses_open_writer_before_mount(self):
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        with (
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=True),
+            mock.patch.object(volume, "linux_validate_native_mount", return_value="12345678-1234-1234-1234-123456789abc"),
+            mock.patch.object(volume, "linux_command") as command,
+        ):
+            result = volume.linux_native_mount_cmd(scratch, {"state": "active"})
+        command.assert_not_called()
+        self.assertEqual(result, 75)
+
+    def test_native_mount_refuses_hardlinked_image_before_mount(self):
+        alias = self.root / "scratch-alias.ext4"
+        os.link(self.image, alias)
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        with (
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_validate_native_mount", return_value="12345678-1234-1234-1234-123456789abc"),
+            mock.patch.object(volume, "linux_command") as command,
+        ):
+            result = volume.linux_native_mount_cmd(scratch, {"state": "active"})
+        command.assert_not_called()
+        self.assertEqual(result, 75)
+
+    def test_native_mount_refuses_unavailable_image_metadata_before_mount(self):
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        original_stat = Path.stat
+        def fail_image_stat(path, *args, **kwargs):
+            if path == self.image:
+                raise OSError("image metadata unavailable")
+            return original_stat(path, *args, **kwargs)
+        with (
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume.Path, "stat", new=fail_image_stat),
+            mock.patch.object(volume, "linux_command") as command,
+        ):
+            result = volume.linux_native_mount_cmd(scratch, {"state": "active"})
+        command.assert_not_called()
+        self.assertEqual(result, 75)
+
+    def test_native_mount_keeps_existing_mount_identity_validation(self):
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        with (
+            mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
+            mock.patch.object(volume, "linux_mount_record", return_value=("ext4", "/dev/loop42")),
+            mock.patch.object(volume, "linux_validate_native_mount", return_value="12345678-1234-1234-1234-123456789abc") as validate,
+            mock.patch.object(volume, "linux_image_has_loop_mapping") as loop,
+            mock.patch.object(volume, "linux_image_has_open_writers") as writers,
+            mock.patch.object(volume, "linux_command") as command,
+        ):
+            self.assertEqual(volume.linux_native_mount_cmd(scratch, {"state": "active"}), 0)
+        validate.assert_called_once()
+        loop.assert_not_called()
+        writers.assert_not_called()
+        command.assert_not_called()
+
     def test_native_mount_rolls_back_only_the_exact_invalid_mount(self):
         device = Path("/dev/loop42")
         scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
@@ -446,6 +549,7 @@ class NativeFstabPublicCliTest(unittest.TestCase):
             mock.patch.object(volume, "linux_paths", return_value=(self.image, self.mountpoint)),
             mock.patch.object(volume, "linux_mount_record", side_effect=[None, ("ext4", str(device)), None]),
             mock.patch.object(volume, "linux_image_has_loop_mapping", side_effect=[False, False]),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
             mock.patch.object(volume, "linux_loop_devices", return_value=[device]),
             mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("UUID mismatch")),
             mock.patch.object(volume, "linux_command", return_value="") as command,
