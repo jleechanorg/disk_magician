@@ -37,7 +37,10 @@ case "$*" in
       set -- $TEST_STATUS_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "used=\${$idx}"
     else used="${TEST_USED:-900}"; fi
     printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":1000}]}\n' "$used"
-    exit "${TEST_STATUS_RC:-0}"
+    if [[ -n "${TEST_STATUS_RC_SEQUENCE:-}" ]]; then
+      set -- $TEST_STATUS_RC_SEQUENCE; idx=$((n>=$# ? $# : n)); eval "rc=\${$idx}"
+    else rc="${TEST_STATUS_RC:-0}"; fi
+    exit "$rc"
     ;;
   'volume verify-mount '*) exit 0 ;;
   'volume ballast release scratch') printf 'release\n' >> "$BALLAST_LOG"; exit "${TEST_RELEASE_RC:-0}" ;;
@@ -94,6 +97,20 @@ BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_RC=1 T
 grep -q 'kept:ballast-restore-failed' "$T/c14-restore-fails.out"
 [[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["ballast_restore_failures"]==1'
+
+# A failed in-pass status probe cannot strand released ballast: ensure precedes a
+# fresh final measurement, which is the only measurement used for completion.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUENCE="900 900 800" TEST_STATUS_RC_SEQUENCE="0 2 0" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-status-recovery.out"
+[[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["allocated_bytes_after"]==800 and r["postcondition"]["target_reached"]'
+
+# Reserve reallocation can cross low-water after removals; the final measurement
+# must therefore record a partial outcome instead of reporting stale success.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUENCE="900 900 850" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-reserve-over-target.out"
+[[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["postcondition"]["allocated_bytes_after"]==850 and not r["postcondition"]["target_reached"]'
 
 # A one-shot typed ENOSPC must release, retry through C14, and defer reserve
 # restoration until later removals have made room. The copied

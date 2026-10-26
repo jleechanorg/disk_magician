@@ -86,8 +86,11 @@ done < <(
 )
 # A release may have freed temporary capacity for C14. Recreate the reserve only
 # after the pass, then measure again because the reserve itself is allocated.
-if [[ "$clean" == true && "$measurement_error" -eq 0 && "$BALLAST_RELEASE_ATTEMPTED" -eq 1 ]]; then
+if [[ "$clean" == true && "$BALLAST_RELEASE_ATTEMPTED" -eq 1 ]]; then
  "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
+ # A successful final measurement supersedes an earlier transient probe error;
+ # an unknown final allocation remains fail-closed.
+ measurement_error=0
  current="$(status_json)" || { TOP_REASON=measurement-unavailable; measurement_error=1; }
  if (( ! measurement_error )); then
   read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; }
