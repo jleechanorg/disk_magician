@@ -21,7 +21,7 @@ before="$(status_json)" || { echo skipped:measurement-unavailable; exit 0; }
 read -r used quota < <(usage_pair "$before" 2>/dev/null) || { echo skipped:measurement-unavailable; exit 0; }
 (( used * 100 >= quota * 90 )) || { echo "skipped:below-trigger:$((used * 100 / quota))"; exit 0; }
 pct=$((used * 100 / quota))
-AGED=0 REMOVED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0
+AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0
 receipt="$SCRIPT_DIR/job_receipt.py"
 run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct}")" || { echo kept:receipt-begin-failed; exit 1; }
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
@@ -48,17 +48,13 @@ except Exception: raise SystemExit(1)
 raise SystemExit(0 if d == {"operation":"intent_write","errno":28,"errno_name":"ENOSPC"} else 1)
 PYDIAG
  then
-  local release_rc=0 restore_rc=0
+  local release_rc=0
   "$diskm" volume ballast release scratch >/dev/null 2>&1 || release_rc=$?
   if (( release_rc == 0 )); then
    result="$(TMPDIR="$diag_dir" DISK_MAGICIAN_C14_DIAGNOSTIC_OUT="$diag" scratch_budget_quarantine_remove "$candidate")"
   fi
-  # A failed release can be partial, so every attempted release is followed by
-  # idempotent ensure. Never leave the volume without its reserve on an error.
-  "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || restore_rc=$?
-  if (( restore_rc != 0 )); then
-   if [[ "$result" == removed:* ]]; then result=removed:ballast-restore-failed; else result=kept:ballast-restore-failed; fi
-  fi
+  # Signal the parent shell to restore once the pass has made all possible room.
+  result="${result}:ballast-release-attempted"
  fi
  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$diag" 2>/dev/null || true
  printf '%s\n' "$result"
@@ -68,7 +64,10 @@ while IFS=$'\t' read -r newest entry; do
  AGED=$((AGED+1))
  if [[ "$clean" != true ]]; then echo "would_check:$entry"; continue; fi
  result="$(reclaim_one "$entry")"
- [[ "$result" == *ballast-restore-failed ]] && BALLAST_RESTORE_FAILURES=$((BALLAST_RESTORE_FAILURES+1))
+ if [[ "$result" == *:ballast-release-attempted ]]; then
+  BALLAST_RELEASE_ATTEMPTED=1
+  result="${result%:ballast-release-attempted}"
+ fi
  case "$result" in removed:*) REMOVED=$((REMOVED+1));; *) TOP_REASON="${result#kept:}"; echo "$result:$entry";; esac
  current="$(status_json)" || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
@@ -85,6 +84,18 @@ done < <(
   printf '%s\t%s\n' "$newest" "$entry"
  done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
 )
+# A release may have freed temporary capacity for C14. Recreate the reserve only
+# after the pass, then measure again because the reserve itself is allocated.
+if [[ "$clean" == true && "$measurement_error" -eq 0 && "$BALLAST_RELEASE_ATTEMPTED" -eq 1 ]]; then
+ "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
+ current="$(status_json)" || { TOP_REASON=measurement-unavailable; measurement_error=1; }
+ if (( ! measurement_error )); then
+  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; }
+ fi
+ if (( ! measurement_error )) && [[ "$now_quota" -ne "$quota" ]]; then TOP_REASON=quota-changed; measurement_error=1; fi
+ if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
+ if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
+fi
 outcome=success_noop
 reason="dry-run"
 if [[ "$clean" == true ]]; then

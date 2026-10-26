@@ -41,7 +41,14 @@ case "$*" in
     ;;
   'volume verify-mount '*) exit 0 ;;
   'volume ballast release scratch') printf 'release\n' >> "$BALLAST_LOG"; exit "${TEST_RELEASE_RC:-0}" ;;
-  'volume ballast ensure scratch') printf 'ensure\n' >> "$BALLAST_LOG"; exit "${TEST_ENSURE_RC:-0}" ;;
+  'volume ballast ensure scratch')
+    printf 'ensure\n' >> "$BALLAST_LOG"
+    if [[ -n "${TEST_ENSURE_MIN_STATUS_CALLS:-}" ]]; then
+      n=0; [[ -f "$STATUS_CALLS_FILE" ]] && n="$(cat "$STATUS_CALLS_FILE")"
+      (( n >= TEST_ENSURE_MIN_STATUS_CALLS )) || exit 1
+    fi
+    exit "${TEST_ENSURE_RC:-0}"
+    ;;
   *) exit 1 ;;
 esac
 MOCK
@@ -87,6 +94,37 @@ BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_RC=1 T
 grep -q 'kept:ballast-restore-failed' "$T/c14-restore-fails.out"
 [[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["ballast_restore_failures"]==1'
+
+# A one-shot typed ENOSPC must release, retry through C14, and defer reserve
+# restoration until later removals have made room. The copied
+# C14 fixture is test-only: production has no test hook or retry bypass.
+touch "$TEST_ROOT/repo/evidence/oldest/content" "$TEST_ROOT/repo/build/younger/content"
+mkdir -p "$TEST_ROOT/retry/evidence/first" "$TEST_ROOT/retry/build/second"
+printf x > "$TEST_ROOT/retry/evidence/first/content"
+printf x > "$TEST_ROOT/retry/build/second/content"
+python3 -c 'import os,sys,time; from pathlib import Path; old=time.time()-72*3600; young=time.time()-60*3600; [os.utime(p, (old,old)) for p in [Path(sys.argv[1]), *Path(sys.argv[1]).rglob("*")]]; [os.utime(p, (young,young)) for p in [Path(sys.argv[2]), *Path(sys.argv[2]).rglob("*")] ]' "$TEST_ROOT/retry/evidence/first" "$TEST_ROOT/retry/build/second"
+FIXTURE_SCRIPTS="$T/one-shot-scripts"
+cp -R "$ROOT/scripts" "$FIXTURE_SCRIPTS"
+python3 - "$FIXTURE_SCRIPTS/quarantine_rename.py" "$T/intent-once" <<'PY'
+import sys
+from pathlib import Path
+
+path, marker = map(Path, sys.argv[1:])
+source = path.read_text()
+needle = 'if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")'
+replacement = (
+    f'if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO") and not Path({str(marker)!r}).exists():'
+    f'\n                open({str(marker)!r}, "x").close()'
+    f'\n                raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")'
+)
+assert source.count(needle) == 1
+path.write_text(source.replace(needle, replacement))
+PY
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_ENSURE_MIN_STATUS_CALLS=3 TEST_STATUS_SEQUENCE="900 850 790 795" "$FIXTURE_SCRIPTS/volume_reclaim.sh" --clean >"$T/c14-final-restore.out"
+[[ ! -e "$TEST_ROOT/retry/evidence/first" && ! -e "$TEST_ROOT/retry/build/second" ]]
+[[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'
 echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 48h filter, oldest-first, and unavailable path passed'
