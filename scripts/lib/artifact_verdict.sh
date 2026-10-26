@@ -536,7 +536,11 @@ _av_artifact_removal_verdict() (
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
-    q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
+    q="$(python3 "$_AV_DIR/../resolve_config.py")" || { echo kept:volume-config; return 0; }
+    export DISK_MAGICIAN_CONFIG="$q"
+    python3 -c 'import json,sys; sys.path.insert(0,sys.argv[2]); import volume
+d=json.load(open(sys.argv[1])); assert isinstance(d,dict)
+if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kept:volume-config; return 0; }
     # Anchored protection: only a configured protected basename directly under a
     # real scratch root (and its descendants) is protected. A same-named
     # component elsewhere (e.g. ~/.worktrees/worldarchitect.ai/foo or an

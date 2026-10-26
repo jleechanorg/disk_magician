@@ -1,0 +1,9 @@
+[Unit]
+Description=Disk Magician Scratch reclaim schedule
+
+[Timer]
+Unit=@UNIT_NAME@.service
+@CADENCE@
+
+[Install]
+WantedBy=timers.target

@@ -8,4 +8,4 @@ recursive-include tools *.sh
 recursive-include tools/guards *
 recursive-include hooks *.sh
 
-recursive-include systemd *.service.in
+recursive-include systemd *.service.in *.timer.in

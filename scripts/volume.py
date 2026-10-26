@@ -2,6 +2,7 @@
 """Opt-in, fail-closed Scratch-volume helpers used by diskm."""
 from __future__ import annotations
 import fcntl
+import hashlib
 import json
 import os
 import plistlib
@@ -556,7 +557,15 @@ def ballast_cmd(action: str, name: str) -> int:
     lock_handle = None
     try:
         registry_file, lock_handle = locked_registry()
-        container, settings, entry, volume = exact_entry(name, {"active", "retired"})
+        if linux_backend_enabled(name):
+            settings, scratch = cls(name)
+            entry = registry()["volumes"].get(name)
+            filesystem_uuid = linux_validate_mount(settings, scratch, entry)
+            usage = shutil.disk_usage(scratch["mountpoint"])
+            volume = Volume(scratch["name"], filesystem_uuid, scratch["image_path"],
+                            usage.total - usage.free, usage.total, ())
+        else:
+            container, settings, entry, volume = exact_entry(name, {"active", "retired"})
         mountpoint = settings["classes"]["scratch"]["mountpoint"]
         path = ballast_path(mountpoint)
         if action == "ensure":
@@ -1003,6 +1012,80 @@ def linux_unmount_cmd(name: str) -> int:
         return 75
 
 
+def linux_scheduler_install_cmd(name: str, interval: int | None = None) -> int:
+    try:
+        if name != "scratch" or not linux_backend_enabled(name):
+            return 2
+        if interval is not None:
+            require_positive(interval, "scheduler interval")
+        import resolve_config
+        resolved = resolve_config.resolve()
+        if not resolved:
+            return 75
+        config_path = Path(resolved).resolve(strict=True)
+        settings, scratch = cls(name)
+        linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+        production = config_path == Path.home() / ".config/disk-magician/linux-scratch.json"
+        protected = (scratch["mountpoint"] == str(Path.home() / "Scratch") or
+                     scratch["image_path"] == str(Path.home() / ".local/share/disk-magician/volumes/scratch.ext4"))
+        if (interval is not None and (production or protected)) or (protected and not production):
+            return 75
+        unit_name = "diskm-scratch-reclaim"
+        if not production:
+            unit_name += "-" + hashlib.sha256(os.fsencode(config_path)).hexdigest()[:12]
+        runtime = Path(__file__).resolve().parent.parent
+        if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
+            return 75
+        if production and any(runtime.is_relative_to(path.resolve()) for path in (Path("/tmp"), Path("/var/tmp"))):
+            return 75
+        values = {"@ORCHESTRATOR@": str(runtime / "disk_magician.sh"),
+                  "@CONFIG_PATH@": str(config_path), "@STATE_PATH@": str(state_root().resolve()),
+                  "@DELETION_LOG@": str(state_root().resolve() / "deletions.log")}
+        if any(any(c in value for c in "%$") for value in values.values()):
+            return 75
+        cadence = "OnCalendar=hourly\nPersistent=true"
+        if interval is not None:
+            cadence = f"OnBootSec=5s\nOnUnitActiveSec={interval}s\nAccuracySec=1s"
+        units = []
+        unit_dir = Path.home() / ".config/systemd/user"
+        for suffix in ("service", "timer"):
+            content = (runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
+            for key, value in values.items():
+                content = content.replace(key, systemd_quote(value))
+            content = content.replace("@UNIT_NAME@", unit_name).replace("@CADENCE@", cadence)
+            if "@" in content:
+                return 75
+            target = unit_dir / f"{unit_name}.{suffix}"
+            if target.is_symlink() or (target.exists() and
+                    (not target.is_file() or target.stat().st_uid != os.geteuid() or target.read_text() != content)):
+                return 75
+            units.append((target, content))
+        unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for target, content in units:
+            if not target.exists():
+                with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        linux_command(["systemctl", "--user", "daemon-reload"])
+        linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+        if production:
+            usage = shutil.disk_usage(scratch["mountpoint"])
+            if (usage.total - usage.free) * 100 >= scratch["quota_gb"] * GIB * 90 or not ballast_ok(scratch["mountpoint"]):
+                return 75
+        linux_command(["systemctl", "--user", "enable", "--now", unit_name + ".timer"])
+        linux_command(["systemctl", "--user", "is-active", "--quiet", unit_name + ".timer"])
+        print(json.dumps({"unit": unit_name, "runtime": str(runtime), "config": str(config_path),
+            "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+            "units": [{"path": str(p), "mtime_ns": p.stat().st_mtime_ns,
+                       "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p, _ in units]}, sort_keys=True))
+        print(unit_name)
+        return 0
+    except Exception as error:
+        print("volume scheduler: " + str(error), file=sys.stderr)
+        return 75
+
+
 def create_cmd(name: str, execute: bool = False) -> int:
     if linux_backend_enabled(name):
         return linux_create_cmd(name, execute)
@@ -1329,6 +1412,18 @@ def verify_mount(root: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     try:
+        if arguments[:1] == ["scheduler"]:
+            if arguments[1:] == ["--help"]:
+                print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
+                return 0
+            if arguments[1:3] != ["install", "scratch"] or not sys.platform.startswith("linux"):
+                return 2
+            interval = None
+            if len(arguments) != 3:
+                if len(arguments) != 5 or arguments[3] != "--interval-seconds" or not re.fullmatch(r"[1-9][0-9]*", arguments[4]):
+                    return 2
+                interval = int(arguments[4])
+            return linux_scheduler_install_cmd("scratch", interval)
         if arguments[:1] == ["path"] and len(arguments) > 1:
             return path_cmd(arguments[1], "--for-reclaim" in arguments[2:])
         if arguments[:1] == ["verify-mount"] and len(arguments) > 1:

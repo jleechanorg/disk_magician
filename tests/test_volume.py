@@ -51,6 +51,130 @@ class VolumeTestBase(unittest.TestCase):
             else: os.environ[key] = value
 
 class LinuxScratchTest(VolumeTestBase):
+    def test_canonical_owner_release_requires_every_live_producer(self):
+        artifact = self.root / "owned-artifact"
+        artifact.mkdir()
+        (artifact / "payload").write_bytes(b"preserve")
+        owners = [volume.subprocess.Popen(["sleep", "60"]) for _ in range(2)]
+        try:
+            library = ROOT / "scripts/lib/worktree_lease.sh"
+            command = ["bash", "-c", 'source "$1"; lease_write "$2" repo branch scratch-new --owner-pid "$3" --owner-pid "$4"',
+                       "test", str(library), str(artifact), *[str(p.pid) for p in owners]]
+            volume.subprocess.run(command, check=True, capture_output=True, text=True)
+            lease = next((self.state_dir / "worktree_leases").glob("*.json"))
+            for index, owner in enumerate(owners):
+                self.assertTrue(all(p.poll() is None for p in owners))
+                volume.subprocess.run(["bash", str(ROOT / "disk_magician.sh"), "lease-release-owner",
+                    str(artifact), "--owner-pid", str(owner.pid)], check=True, capture_output=True)
+                result = volume.subprocess.run(["bash", "-c", 'source "$1"; lease_owner_state "$2"',
+                    "test", str(library), str(lease)], check=True, capture_output=True, text=True)
+                self.assertEqual(result.stdout.strip(), "alive" if index == 0 else "released")
+            self.assertEqual((artifact / "payload").read_bytes(), b"preserve")
+        finally:
+            for owner in owners:
+                owner.terminate()
+                owner.wait(timeout=5)
+
+    def test_linux_ballast_uses_verified_mount_under_lock(self):
+        self.set_linux_image_config(2)
+        self.mp.mkdir(parents=True)
+        volume.write_ballast(str(self.mp))
+        with mock.patch.object(volume, "linux_validate_mount", return_value="fixture-uuid") as verify, \
+             mock.patch.object(volume, "exact_entry", side_effect=AssertionError("APFS called")), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {}}}):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+            verify.assert_called_once()
+            self.assertFalse(volume.ballast_ok(str(self.mp)))
+            self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 0)
+            self.assertTrue(volume.ballast_ok(str(self.mp)))
+
+    def test_linux_ballast_unknown_mount_preserves_reserve(self):
+        self.set_linux_image_config(2)
+        self.mp.mkdir(parents=True)
+        volume.write_ballast(str(self.mp))
+        with mock.patch.object(volume, "linux_validate_mount", side_effect=ValueError("identity")):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertTrue(volume.ballast_ok(str(self.mp)))
+
+    def test_scheduler_dispatch_validates_interval(self):
+        with mock.patch.object(volume, "linux_scheduler_install_cmd", return_value=0) as install:
+            self.assertEqual(volume.main(["scheduler", "install", "scratch", "--interval-seconds", "20"]), 0)
+            install.assert_called_once_with("scratch", 20)
+            for suffix in (["--interval-seconds", "0"], ["--interval-seconds", "-1"],
+                           ["--interval-seconds", "1.5"], ["--interval-seconds"], ["--unknown"]):
+                self.assertEqual(volume.main(["scheduler", "install", "scratch", *suffix]), 2)
+
+    def test_scheduler_renders_isolated_units_and_preserves_collisions(self):
+        import hashlib
+        import shutil
+        self.set_linux_image_config(2)
+        candidate = self.root / "candidate"
+        (candidate / "scripts").mkdir(parents=True)
+        (candidate / "systemd").mkdir()
+        (candidate / "disk_magician.sh").touch()
+        for suffix in ("service", "timer"):
+            shutil.copy(ROOT / "systemd" / f"diskm-scratch-reclaim.{suffix}.in", candidate / "systemd")
+        unit_name = "diskm-scratch-reclaim-" + hashlib.sha256(os.fsencode(self.config.resolve())).hexdigest()[:12]
+        units = self.root / ".config/systemd/user"
+        with mock.patch.object(volume, "__file__", str(candidate / "scripts/volume.py")), \
+             mock.patch.object(volume.Path, "home", return_value=self.root), \
+             mock.patch.object(volume, "linux_validate_mount"), \
+             mock.patch.object(volume, "linux_command") as command:
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", 20), 0)
+            timer = (units / (unit_name + ".timer")).read_text()
+            service = (units / (unit_name + ".service")).read_text()
+            self.assertIn("OnBootSec=5s\nOnUnitActiveSec=20s\nAccuracySec=1s", timer)
+            self.assertNotIn("Persistent", timer)
+            self.assertIn("volume reclaim --clean", service)
+            self.assertIn("Restart=no", service)
+            self.assertIn(str(self.config), service)
+            self.assertIn(str(self.state_dir), service)
+            self.assertFalse((units / "diskm-scratch.service").exists())
+            self.assertNotIn(mock.call(["systemctl", "--user", "start", unit_name + ".service"]), command.call_args_list)
+            (units / (unit_name + ".timer")).write_text("unrelated")
+            command.reset_mock()
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", 20), 75)
+            command.assert_not_called()
+            self.assertEqual((units / (unit_name + ".timer")).read_text(), "unrelated")
+
+    def test_scheduler_rejects_mutable_checkout(self):
+        self.set_linux_image_config(2)
+        with mock.patch.object(volume, "linux_validate_mount"), mock.patch.object(volume, "linux_command") as command:
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", 20), 75)
+            command.assert_not_called()
+
+    def test_scheduler_production_override_and_unverified_mount_fail_closed(self):
+        self.set_linux_image_config(2)
+        with mock.patch.object(volume, "linux_validate_mount", side_effect=ValueError("unmounted")), \
+             mock.patch.object(volume, "linux_command") as command:
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", 20), 75)
+            command.assert_not_called()
+        document = json.loads(self.config.read_text())
+        document["volumes"]["classes"]["scratch"]["mountpoint"] = str(pathlib.Path.home() / "Scratch")
+        self.config.write_text(json.dumps(document))
+        with mock.patch.object(volume, "linux_validate_mount"), mock.patch.object(volume, "linux_command") as command:
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", 20), 75)
+            command.assert_not_called()
+
+    def test_c14_resolves_active_config_and_rejects_unknown_config(self):
+        scratch = self.set_linux_image_config(2)
+        candidate = pathlib.Path(scratch["mountpoint"]) / "repo/evidence/old"
+        candidate.mkdir(parents=True)
+        xdg = self.root / "xdg/disk-magician"
+        xdg.mkdir(parents=True)
+        active = xdg / "config.json"
+        active.write_text(self.config.read_text())
+        env = dict(os.environ, XDG_CONFIG_HOME=str(xdg.parent))
+        env.pop("DISK_MAGICIAN_CONFIG", None)
+        command = ['bash', '-c', 'source "$1"; artifact_removal_verdict "$2" --kind ephemeral',
+                   'c14', str(ROOT / 'scripts/lib/artifact_verdict.sh'), str(candidate)]
+        result = volume.subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "kept:volume-identity")
+        for content in ('{', '{"volumes":null}'):
+            active.write_text(content)
+            result = volume.subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), "kept:volume-config")
+
     def set_linux_image_config(self, quota=30):
         data = json.loads(self.config.read_text())
         scratch = data["volumes"]["classes"]["scratch"]
