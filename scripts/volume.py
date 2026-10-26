@@ -1769,7 +1769,7 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
         new = linux_fstab_transform(old, block, image, mountpoint, transform_action)
         print(json.dumps({"path": str(path), "changed": old != new,
                           "before_sha256": hashlib.sha256(old).hexdigest(),
-                          "after_sha256": hashlib.sha256(new).hexdigest()}, sort_keys=True))
+                          "after_sha256": hashlib.sha256(new).hexdigest()}, sort_keys=True), flush=True)
         if action != "preview" and old != new:
             linux_fstab_write(path, old, new)
         return 0
