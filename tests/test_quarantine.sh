@@ -366,10 +366,14 @@ OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING
 check 'oversized intent: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
 check 'oversized intent: artifact remains, no quarantine dir or index entry' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
 
-# ENOSPC on the intent sidecar aborts before the rename.
-fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28
+# ENOSPC on the intent sidecar aborts before the rename and exposes typed diagnostics only to a secure caller file.
+DIAG="$TMP/c14-diagnostic.json"; : >"$DIAG"; chmod 600 "$DIAG"
+fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28 DISK_MAGICIAN_C14_DIAGNOSTIC_OUT="$DIAG"
 check 'ENOSPC sidecar: kept:intent-write-failed' [ "$OUT" = kept:intent-write-failed ]
 check 'ENOSPC sidecar: untouched, no partial sidecar' bash -c '[[ -f "$1/report.md" && $(ls -A "$2" | wc -l) -eq 0 ]]' _ "$A" "$Q"
+check 'ENOSPC sidecar: typed errno is private diagnostic' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"operation":"intent_write","errno":28,"errno_name":"ENOSPC"}' "$DIAG"
+fixture; : >"$DIAG"; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28
+check 'ENOSPC without diagnostic request: public result remains stable' [ "$OUT" = kept:intent-write-failed ]
 
 # Quarantine dir on another device: kept:cross-device, nothing copied.
 if [[ "$(uname)" == Darwin ]] && hdiutil create -quiet -size 4m -fs HFS+ -volname dmq "$TMP/q.dmg" >/dev/null 2>&1; then

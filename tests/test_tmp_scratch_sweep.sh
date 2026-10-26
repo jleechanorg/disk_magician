@@ -64,6 +64,24 @@ cp "$REPO_ROOT/scripts/lib/actuator_deadline.sh" "$MOCK_BIN/lib/actuator_deadlin
 cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/tmp_scratch_sweep.sh"
 chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
+cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
+#!/bin/bash
+echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-}" >> "${INVOCATION_LOG:?}"
+if [[ "${VOLUME_MOCK_MODE:-receipt}" == skip ]]; then
+  echo "${VOLUME_MOCK_SKIP:-skipped:below-trigger:80}"
+  exit 0
+fi
+helper="${DISK_MAGICIAN_RECEIPT_HELPER:?}"
+run_id="$(python3 "$helper" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-mock}" --precondition '{}')"
+trigger="${DISK_MAGICIAN_TRIGGER:-mock}"
+[[ "${VOLUME_MOCK_MODE:-receipt}" != stale ]] || trigger=stale-trigger
+outcome="${VOLUME_MOCK_OUTCOME:-success}"
+target=true
+[[ "$outcome" != partial ]] || target=false
+python3 "$helper" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome"   --reason "mock volume result" --trigger "$trigger" --safety '{}'   --candidates "{\"aged_scanned\":3,\"removed\":${VOLUME_MOCK_REMOVED:-2},\"top_kept_reason\":\"lease_active\",\"ballast_restore_failures\":${VOLUME_MOCK_BALLAST_FAILURES:-0}}"   --postcondition "{\"target_reached\":$target}" >/dev/null
+MOCK
+chmod +x "$TMP_ROOT/disk_magician.sh"
+export DISK_MAGICIAN_RECEIPT_HELPER="$MOCK_BIN/job_receipt.py"
 SCRIPT="$MOCK_BIN/tmp_scratch_sweep.sh"
 
 PASS=0
@@ -161,6 +179,31 @@ fi
 assert_receipt_field "clean receipt outcome success" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "success"
 assert_receipt_field "clean receipt safety delegated" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
 
+echo "Test 7a: scheduler routes volume reclaim and folds its trigger-bound metrics"
+assert_contains "scheduler invokes volume reclaim" "disk_magician volume reclaim --clean trigger=tmp_scratch_sweep:" "$(cat "$INVOCATION_LOG")"
+assert_receipt_field "parent receipt includes volume artifacts removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
+assert_receipt_field "parent receipt includes volume safety reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "lease_active"
+
+echo "Test 7b: partial volume result propagates to scheduler receipt"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --clean
+assert_receipt_field "volume partial produces parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+
+echo "Test 7b: ballast restore failure propagates partial and remains counted"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial VOLUME_MOCK_BALLAST_FAILURES=1 /bin/bash "$SCRIPT" --clean >/dev/null
+DISK_MAGICIAN_STATE_DIR="$STATE_DIR" python3 "$MOCK_BIN/job_receipt.py" read --job tmp_scratch_sweep --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["volume_ballast_restore_failures"]==1 and "ballast restore failure" in r["reason"]'
+
+echo "Test 7c: missing trigger-bound receipt fails closed"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=stale /bin/bash "$SCRIPT" --clean
+STALE_RC=$?
+set -e
+if [[ "$STALE_RC" -ne 0 ]]; then echo "  PASS  stale volume receipt fails"; PASS=$((PASS+1)); else echo "  FAIL  stale volume receipt accepted"; FAIL=$((FAIL+1)); fi
+assert_receipt_field "stale volume receipt produces parent error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+
+echo "Test 7d: explicit below-trigger skip is valid and dry-run does not claim target recovery"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --dry-run
+assert_receipt_field "dry-run volume target is not claimed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_target_reached'))" "None"
+
 echo "Test 8: exit code — wrapper exits nonzero if cleanup_claude_state fails alone while cleanup_tmp succeeds"
 : > "$INVOCATION_LOG"
 set +e
@@ -206,7 +249,7 @@ assert_contains "no-argument entrypoint defaults to dry-run" "cleanup_tmp --dry-
 echo "Test 10: cleanup_tmp exit 75 (scratch lock held) records skipped_lock and exits 0"
 : > "$INVOCATION_LOG"
 set +e
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_EXIT=75 /bin/bash "$SCRIPT" --clean
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_EXIT=75 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --clean
 LOCK_SKIP_RC=$?
 set -e
 if [[ "$LOCK_SKIP_RC" -eq 0 ]]; then
@@ -218,6 +261,13 @@ else
 fi
 assert_receipt_field "scratch lock contention records skipped_lock" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
 assert_receipt_field "scratch lock contention records removed_count 0" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "0"
+
+echo "Test 10a: volume mutation after cleanup_tmp lock is partial and delegated"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_EXIT=75 VOLUME_MOCK_REMOVED=2 /bin/bash "$SCRIPT" --clean
+assert_receipt_field "lock plus volume mutation records partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "lock plus volume mutation preserves removal metric" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
+assert_receipt_field "lock plus volume mutation is delegated safety" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
+assert_receipt_field "lock plus volume mutation avoids no-mutation reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('reason')" "delegated to cleanup_tmp, cleanup_claude_state, and quota volume reclaim"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

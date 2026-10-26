@@ -317,12 +317,38 @@ def phase1(path, inv_file, binding_file, deadline=None):
             if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")
             f.write(json.dumps(rec)); f.flush(); os.fsync(f.fileno())
         os.fsync(qfd)
-    except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
+    except OSError as exc:  # ENOSPC aborts before the rename; the artifact stays in place
         try:
             if not finish_sidecar(qfd, qid, "original"):
                 return f"quarantine_conflict:{qid}:index-cleanup-failed"
         except Exception:
             return f"quarantine_conflict:{qid}:index-cleanup-failed"
+        diagnostic = ENV.get("DISK_MAGICIAN_C14_DIAGNOSTIC_OUT", "")
+        if diagnostic:
+            dfd = -1
+            try:
+                dfd = os.open(diagnostic, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                dst = os.fstat(dfd)
+                if not stat.S_ISREG(dst.st_mode) or dst.st_uid != os.getuid() or stat.S_IMODE(dst.st_mode) != 0o600:
+                    return "kept:intent-write-failed"
+                payload = json.dumps({"operation": "intent_write", "errno": exc.errno,
+                                      "errno_name": errno.errorcode.get(exc.errno, str(exc.errno))},
+                                     separators=(",", ":")).encode()
+                view = memoryview(payload)
+                while view:
+                    written = os.write(dfd, view)
+                    if written <= 0:
+                        raise OSError(errno.EIO, "short diagnostic write")
+                    view = view[written:]
+                os.fsync(dfd)
+            except OSError:
+                pass
+            finally:
+                if dfd >= 0:
+                    try:
+                        os.close(dfd)
+                    except OSError:
+                        pass
         return "kept:intent-write-failed"
     kill_at("after_intent")
     dest = os.path.join(qdir, qid)

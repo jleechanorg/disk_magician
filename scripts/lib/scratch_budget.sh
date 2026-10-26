@@ -189,7 +189,30 @@ _scratch_budget_snapshot_has_prefix() {
 # also ambiguous with a legitimate epoch-0 file. Callers MUST treat a
 # non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
-  local path="$1" epoch
+  local path="$1" epoch strict="${2:-}" links stat_format
+  if [[ "$strict" == --strict ]]; then
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    links="$(find "$path" -type l -print -quit 2>/dev/null)" || return 1
+    [[ -z "$links" ]] || return 1
+    local files item stamp newest=0
+    files="$(find "$path" -type f -print 2>/dev/null)" || return 1
+    [[ -n "$files" ]] || return 1
+    if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      if [[ "$(uname -s)" == Darwin ]]; then
+        stamp="$(stat -f "$stat_format" "$item" 2>/dev/null)" || return 1
+      else
+        stamp="$(stat -c "$stat_format" "$item" 2>/dev/null)" || return 1
+      fi
+      [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
+      (( stamp > newest )) && newest="$stamp"
+    done <<<"$files"
+    (( newest > 0 )) || return 1
+    echo "$newest"
+    return 0
+  fi
+  if [[ "$(uname -s)" == Darwin ]]; then stat_format="%m"; else stat_format="%Y"; fi
   # PR #71 /advice follow-up (Opus, PR #78): every `stat`/`find` call below is
   # neutralized with `|| true` so a failure (e.g. the path vanishing between
   # the caller's enumeration and this call -- the same TOCTOU class as bead
@@ -197,13 +220,18 @@ scratch_budget_content_mtime() {
   # A bare failing command here previously aborted the ENTIRE cleanup script
   # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    stat -f '%m' "$path" 2>/dev/null || true
+    if [[ "$(uname -s)" == Darwin ]]; then stat -f "$stat_format" "$path" 2>/dev/null || true; else stat -c "$stat_format" "$path" 2>/dev/null || true; fi
     return
   fi
-  epoch="$(find "$path" -type f -exec stat -f '%m' {} + 2>/dev/null \
-      | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    epoch="$(find "$path" -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+  else
+    epoch="$(find "$path" -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+  fi
   if [[ -z "$epoch" ]]; then
-    epoch="$(stat -f '%m' "$path" 2>/dev/null || true)"
+    if [[ "$(uname -s)" == Darwin ]]; then epoch="$(stat -f "$stat_format" "$path" 2>/dev/null || true)"; else epoch="$(stat -c "$stat_format" "$path" 2>/dev/null || true)"; fi
   fi
   echo "$epoch"
 }

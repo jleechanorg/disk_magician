@@ -65,8 +65,6 @@ class ParseTest(VolumeTestBase):
         added = json.loads(self.state.read_text())["volumes"][3:]
         self.assertEqual([row["quota"] for row in added], [10 * 10**9, 10 * 2**30])
 
-if __name__ == "__main__": unittest.main()
-
 class FitAndAuditTest(VolumeTestBase):
     def test_fit_uses_live_data_and_vm_headroom(self):
         result = volume.fit_result()
@@ -471,3 +469,6 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         self.state.write_text(json.dumps(data))
         self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 75)
         self.assertFalse(volume.ballast_ok(self.mp))
+
+if __name__ == "__main__":
+    unittest.main()
