@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import plistlib
+import pwd
 import re
 import shutil
 import stat
@@ -46,6 +47,7 @@ class Container:
     ceiling: int | None
     free: int | None
     volumes: tuple[Volume, ...]
+    all_volume_names: tuple[str, ...] = ()
 
     def volume_by_role(self, role: str) -> Volume:
         matches = [volume for volume in self.volumes if role in volume.roles]
@@ -97,6 +99,22 @@ def load_container() -> Container:
     if not isinstance(containers, list) or not containers:
         raise ValueError("APFS containers are unavailable")
 
+    all_volume_names = []
+    for candidate in containers:
+        if not isinstance(candidate, dict):
+            raise ValueError("invalid APFS container row")
+        rows = candidate.get("Volumes")
+        if not isinstance(rows, list):
+            raise ValueError("APFS volume inventory is unavailable")
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or not isinstance(row.get("Name"), str)
+                or not row["Name"]
+            ):
+                raise ValueError("APFS volume name is unavailable")
+            all_volume_names.append(row["Name"])
+
     data_info = plist(["info", "-plist", DATA_MOUNTPOINT])
     data_container_ref = data_info.get("APFSContainerReference")
     if not isinstance(data_container_ref, str) or not data_container_ref:
@@ -146,7 +164,7 @@ def load_container() -> Container:
         require_nonnegative(ceiling, "container ceiling")
     if free is not None:
         require_nonnegative(free, "container free capacity")
-    return Container(ref, uuid, ceiling, free, tuple(volumes))
+    return Container(ref, uuid, ceiling, free, tuple(volumes), tuple(all_volume_names))
 
 
 def config() -> dict[str, Any]:
@@ -177,6 +195,8 @@ def config() -> dict[str, Any]:
     if not isinstance(mountpoint, str) or not Path(mountpoint).is_absolute():
         raise ValueError("scratch mountpoint must be absolute")
     require_positive(scratch.get("quota_gb"), "scratch quota")
+    if scratch.get("backend", "fuse") not in {"fuse", "native"}:
+        raise ValueError("unsupported Linux Scratch backend")
     return volumes
 
 
@@ -187,9 +207,12 @@ def cls(name: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return volumes, volumes["classes"][name]
 
 
-def fit_result(container: Container | None = None) -> dict[str, Any]:
+def fit_result(
+    container: Container | None = None,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     container = container or load_container()
-    settings = config()
+    settings = config() if settings is None else settings
     data_used = require_nonnegative(
         container.volume_by_role("Data").used, "Data volume usage"
     )
@@ -415,7 +438,7 @@ def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any
     if entry.get("state") != "needs_recovery":
         raise ValueError("volume is already registered")
     volume = validate_entry(container, settings, entry)
-    fit = fit_result(container)
+    fit = fit_result(container, settings)
     if not fit["fits"]:
         raise ValueError("container no longer satisfies scratch capacity fit")
     free = require_nonnegative(container.free, "container free capacity")
@@ -654,6 +677,67 @@ def linux_fs_uuid(image: Path) -> str:
     return value.lower()
 
 
+def linux_loop_devices(image: Path) -> list[Path]:
+    devices = []
+    for backing in Path("/sys/block").glob("loop*/loop/backing_file"):
+        value = backing.read_text().rstrip("\n").replace("\\040", " ")
+        if value and Path(value).resolve() == image.resolve():
+            devices.append(Path("/dev") / backing.parents[1].name)
+    return devices
+
+
+def linux_validate_native_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
+    image, mountpoint = linux_paths(scratch)
+    if not isinstance(entry, dict) or entry.get("state") != "active":
+        raise ValueError("Scratch volume is not registered active")
+    if (entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint) or
+            entry.get("quota_bytes") != scratch["quota_gb"] * GIB or
+            image.stat().st_size != scratch["quota_gb"] * GIB):
+        raise ValueError("Scratch volume registry identity mismatch")
+    devices = linux_loop_devices(image)
+    record = linux_mount_record(mountpoint)
+    if len(devices) != 1 or record != ("ext4", str(devices[0])):
+        raise ValueError("native Scratch mount identity mismatch")
+    mounted_uuid = linux_command(["blkid", "-p", "-s", "UUID", "-o", "value", str(devices[0])]).lower()
+    image_uuid = linux_fs_uuid(image)
+    if (not re.fullmatch(r"[0-9a-f-]{36}", mounted_uuid) or mounted_uuid != image_uuid or
+            entry.get("filesystem_uuid") != image_uuid):
+        raise ValueError("native Scratch filesystem UUID mismatch")
+    return image_uuid
+
+
+def linux_native_mount_cmd(scratch: dict[str, Any], entry: Any) -> int:
+    image, mountpoint = linux_paths(scratch)
+    if linux_mount_record(mountpoint) is not None:
+        linux_validate_native_mount(config(), scratch, entry)
+        return 0
+    if linux_image_has_loop_mapping(image):
+        return 75
+    linux_command(["mount", str(mountpoint)])
+    try:
+        linux_validate_native_mount(config(), scratch, entry)
+        return 0
+    except Exception:
+        devices = linux_loop_devices(image)
+        if len(devices) == 1 and linux_mount_record(mountpoint) == ("ext4", str(devices[0])):
+            linux_command(["umount", str(mountpoint)])
+            if linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image):
+                raise RuntimeError("failed native mount identity remains active after rollback")
+        raise
+
+
+def linux_native_unmount_cmd(scratch: dict[str, Any], entry: Any) -> int:
+    image, mountpoint = linux_paths(scratch)
+    linux_validate_native_mount(config(), scratch, entry)
+    linux_command(["umount", str(mountpoint)])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if linux_mount_record(mountpoint) is None and not linux_image_has_loop_mapping(image):
+            return 0
+        time.sleep(0.1)
+    return 75
+
+
 def linux_mountpoint_safe(mountpoint: Path) -> bool:
     try:
         details = mountpoint.lstat()
@@ -696,6 +780,8 @@ def linux_mount_record(mountpoint: Path) -> tuple[str, str] | None:
 
 
 def linux_validate_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
+    if scratch.get("backend", "fuse") == "native":
+        return linux_validate_native_mount(settings, scratch, entry)
     image, mountpoint = linux_paths(scratch)
     if not isinstance(entry, dict) or entry.get("state") != "active":
         raise ValueError("Scratch volume is not registered active")
@@ -797,6 +883,8 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
         entry = registry()["volumes"].get(name)
         if not isinstance(entry, dict) or entry.get("state") != "active":
             return 75
+        if scratch.get("backend", "fuse") == "native":
+            return linux_native_mount_cmd(scratch, entry)
         mounted = linux_mount_record(mountpoint)
         if mounted:
             linux_validate_mount(settings, scratch, entry)
@@ -932,6 +1020,129 @@ def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def linux_service_render(runtime: Path, config_path: str, state_path: Path,
+                         backend: str) -> str:
+    template = runtime / "systemd/diskm-scratch.service.in"
+    rendered = template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(runtime / "disk_magician.sh")))
+    rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
+    rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_path)))
+    if backend == "native":
+        if "Type=simple" not in rendered:
+            raise ValueError("service template lacks FUSE service type")
+        rendered = rendered.replace("Type=simple", "Type=oneshot\nRemainAfterExit=yes", 1)
+    if "@" in rendered:
+        raise ValueError("service template contains unresolved placeholders")
+    return rendered
+
+
+def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result) -> None:
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".diskm-", dir=path.parent)
+    os.fchmod(fd, stat.S_IMODE(details.st_mode))
+    os.fchown(fd, details.st_uid, details.st_gid)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    linux_fsync_directory(path.parent)
+
+
+def linux_service_migrate_cmd(arguments: list[str]) -> int:
+    config_path = unit = None
+    config_bytes = unit_bytes = b""
+    config_stat = unit_stat = None
+    fstab_installed = False
+    try:
+        if not arguments or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        execute = False
+        index = 1
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--backend", "--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if set(values) != {"--backend", "--config", "--state-dir", "--user-uid"} or not execute or values["--backend"] != "native":
+            return 2
+        allowed = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], None)
+        if allowed is None or int(values["--user-uid"]) != os.geteuid():
+            return 75
+        config_path, state, image, mountpoint = allowed
+        settings, scratch = cls("scratch")
+        entry = registry()["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active" or
+                scratch.get("backend", "fuse") != "fuse"):
+            return 75
+        linux_validate_mount(settings, scratch, entry)
+        unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
+        if unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != os.geteuid():
+            return 75
+        config_bytes, config_stat = config_path.read_bytes(), config_path.stat()
+        unit_bytes, unit_stat = unit.read_bytes(), unit.stat()
+        runtime = Path(__file__).resolve().parent.parent
+        if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
+            return 75
+        if unit_bytes.decode() != linux_service_render(runtime, str(config_path), state, "fuse"):
+            return 75
+        systemctl = ["systemctl", "--user"]
+        linux_command(systemctl + ["stop", "diskm-scratch.service"], 60)
+        if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
+                linux_image_has_open_writers(image)):
+            raise RuntimeError("FUSE image remains mounted or open after stop")
+        root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
+                    "--config", str(config_path), "--state-dir", str(state),
+                    "--user-uid", values["--user-uid"], "--execute"]
+        result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
+        if result.returncode:
+            raise RuntimeError("administrator fstab installation failed")
+        fstab_installed = True
+        document = json.loads(config_bytes)
+        document["volumes"]["classes"]["scratch"]["backend"] = "native"
+        linux_atomic_bytes(config_path, (json.dumps(document, indent=2) + "\n").encode(), config_stat)
+        native_unit = linux_service_render(runtime, str(config_path), state, "native")
+        linux_atomic_bytes(unit, native_unit.encode(), unit_stat)
+        linux_command(systemctl + ["daemon-reload"])
+        linux_command(systemctl + ["start", "diskm-scratch.service"], 60)
+        linux_validate_native_mount(cls("scratch")[0], cls("scratch")[1], registry()["volumes"].get("scratch"))
+        linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
+        return 0
+    except Exception as error:
+        print("volume service migrate: " + str(error), file=sys.stderr)
+        if config_path is None or unit is None or config_stat is None or unit_stat is None:
+            return 75
+        try:
+            linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
+            allowed = linux_fstab_allowed_paths(str(config_path), str(state_root()), str(os.geteuid()), None)
+            if allowed is None:
+                return 75
+            _, _, image, mountpoint = allowed
+            if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
+                    linux_image_has_open_writers(image)):
+                linux_atomic_bytes(config_path, config_bytes, config_stat)
+                linux_atomic_bytes(unit, unit_bytes, unit_stat)
+                linux_command(["systemctl", "--user", "daemon-reload"])
+                return 75
+            if fstab_installed:
+                root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
+                            "volume", "fstab", "remove", "scratch", "--config", str(config_path),
+                            "--state-dir", str(state_root()), "--user-uid", str(os.geteuid()), "--execute"]
+                if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False).returncode:
+                    return 75
+            linux_atomic_bytes(config_path, config_bytes, config_stat)
+            linux_atomic_bytes(unit, unit_bytes, unit_stat)
+            linux_command(["systemctl", "--user", "daemon-reload"])
+            linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
+        except Exception:
+            return 75
+        return 75
+
+
 def linux_service_install_cmd(name: str) -> int:
     try:
         if name != "scratch":
@@ -963,11 +1174,8 @@ def linux_service_install_cmd(name: str) -> int:
         orchestrator = runtime_root / "disk_magician.sh"
         if not orchestrator.is_file():
             return 75
-        rendered = unit_template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(orchestrator)))
-        rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
-        rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_root())))
-        if "@" in rendered:
-            return 75
+        rendered = linux_service_render(runtime_root, config_path, state_root(),
+                                        scratch.get("backend", "fuse"))
         unit_dir = Path.home() / ".config/systemd/user"
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         unit = unit_dir / "diskm-scratch.service"
@@ -1005,7 +1213,10 @@ def linux_unmount_cmd(name: str) -> int:
     try:
         settings, scratch = cls(name)
         _, mountpoint = linux_paths(scratch)
-        linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+        entry = registry()["volumes"].get(name)
+        linux_validate_mount(settings, scratch, entry)
+        if scratch.get("backend", "fuse") == "native":
+            return linux_native_unmount_cmd(scratch, entry)
         linux_command(["fusermount3", "-u", str(mountpoint)])
         return 0 if linux_mount_record(mountpoint) is None else 75
     except Exception:
@@ -1086,6 +1297,336 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None) -> int:
         return 75
 
 
+def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
+                        fixture_root: str) -> tuple[Path, Path, Path, Path] | None:
+    """Validate the exact private fixture tuple before any privileged operation."""
+    try:
+        uid = int(user_uid)
+        if uid < 0:
+            return None
+        root_arg = Path(fixture_root)
+        config_arg = Path(config_path)
+        state_arg = Path(state_path)
+        if not all(path.is_absolute() for path in (root_arg, config_arg, state_arg)):
+            return None
+        root = root_arg.resolve(strict=True)
+        config = config_arg.resolve(strict=True)
+        state = state_arg.resolve(strict=True)
+        rs = root.lstat()
+        if (not stat.S_ISDIR(rs.st_mode) or rs.st_uid != uid or
+                stat.S_IMODE(rs.st_mode) != 0o700 or root != root_arg):
+            return None
+        if (config != config_arg or state != state_arg or
+                not config.is_relative_to(root) or not state.is_relative_to(root)):
+            return None
+        for path in (config, state):
+            ps = path.lstat()
+            if ps.st_uid != uid or stat.S_ISLNK(ps.st_mode):
+                return None
+        if not stat.S_ISDIR(state.lstat().st_mode):
+            return None
+        document = json.loads(config.read_text())
+        scratch = document["volumes"]["classes"]["scratch"]
+        image_arg = Path(scratch["image_path"])
+        mount_arg = Path(scratch["mountpoint"])
+        if not image_arg.is_absolute() or not mount_arg.is_absolute():
+            return None
+        image = image_arg.resolve(strict=True)
+        mountpoint = mount_arg.resolve(strict=True)
+        if image != image_arg or mountpoint != mount_arg:
+            return None
+        if not image.is_relative_to(root) or not mountpoint.is_relative_to(root):
+            return None
+        if (image.is_relative_to(mountpoint) or mountpoint.is_relative_to(image) or
+                config.is_relative_to(mountpoint) or state.is_relative_to(mountpoint) or
+                mountpoint.is_relative_to(config) or mountpoint.is_relative_to(state)):
+            return None
+        for path, expected_type in ((image, stat.S_ISREG), (mountpoint, stat.S_ISDIR)):
+            ps = path.lstat()
+            if ps.st_uid != uid or not expected_type(ps.st_mode) or stat.S_ISLNK(ps.st_mode):
+                return None
+        return config, state, image, mountpoint
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, OverflowError):
+        return None
+
+
+def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
+                             fixture_root: str | None) -> tuple[Path, Path, Path, Path] | None:
+    if fixture_root is not None:
+        return linux_fixture_paths(config_path, state_path, user_uid, fixture_root)
+    try:
+        uid = int(user_uid)
+        home = Path(pwd.getpwuid(uid).pw_dir)
+        config = Path(config_path)
+        state = Path(state_path)
+        if (uid < 0 or not config.is_absolute() or not state.is_absolute() or
+                config != home / ".config/disk-magician/linux-scratch.json" or
+                state != home / ".disk_magician_state"):
+            return None
+        if (config.resolve(strict=True) != config or state.resolve(strict=True) != state or
+                config.stat().st_uid != uid or state.stat().st_uid != uid or
+                not state.is_dir()):
+            return None
+        document = json.loads(config.read_text())
+        scratch = document["volumes"]["classes"]["scratch"]
+        image = Path(scratch["image_path"])
+        mountpoint = Path(scratch["mountpoint"])
+        if (image != home / ".local/share/disk-magician/volumes/scratch.ext4" or
+                mountpoint != home / "Scratch" or image.resolve(strict=True) != image or
+                mountpoint.resolve(strict=True) != mountpoint or image.stat().st_uid != uid or
+                mountpoint.stat().st_uid != uid or not image.is_file() or not mountpoint.is_dir()):
+            return None
+        return config, state, image, mountpoint
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def linux_fstab_path() -> Path:
+    return Path("/etc/fstab")
+
+
+def linux_fstab_lock_path() -> Path:
+    return Path("/etc/.diskm-fstab.lock")
+
+
+def linux_fstab_lock() -> int:
+    path = linux_fstab_lock_path()
+    parent = path.parent.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) or parent.st_mode & 0o022:
+        raise PermissionError("fstab lock parent is not private to its owner")
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    details = os.fstat(descriptor)
+    if not stat.S_ISREG(details.st_mode) or details.st_uid != parent.st_uid or stat.S_IMODE(details.st_mode) != 0o600:
+        os.close(descriptor)
+        raise PermissionError("fstab lock identity is unsafe")
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def linux_fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def linux_fstab_validate(data: bytes) -> None:
+    for number, line in enumerate(data.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(b"#"):
+            continue
+        fields = stripped.split()
+        if (len(fields) != 6 or not fields[4].isdigit() or not fields[5].isdigit() or
+                any(any(byte < 32 for byte in field) for field in fields)):
+            raise ValueError("invalid fstab record at line " + str(number))
+
+
+def linux_fstab_marker_id(uid: str, config: Path, state: Path, image: Path,
+                          mountpoint: Path) -> str:
+    raw = "\0".join((uid, str(config), str(state), str(image), str(mountpoint)))
+    return hashlib.sha256(os.fsencode(raw)).hexdigest()
+
+
+def linux_fstab_block(uid: str, config: Path, state: Path, image: Path,
+                      mountpoint: Path) -> bytes:
+    if any(any(c.isspace() or c == "\\" or ord(c) < 32 for c in str(path)) for path in (image, mountpoint)):
+        raise ValueError("fstab paths may not contain whitespace or control characters")
+    marker = linux_fstab_marker_id(uid, config, state, image, mountpoint)
+    return (f"# diskm-scratch:{marker}:begin\n{image} {mountpoint} ext4 "
+            "loop,user,noauto,nosuid,nodev,noatime,exec 0 0\n"
+            f"# diskm-scratch:{marker}:end\n").encode()
+
+
+def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Path,
+                          action: str) -> bytes:
+    linux_fstab_validate(data)
+    lines = data.splitlines(keepends=True)
+    block_lines = block.splitlines(keepends=True)
+    begins = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == block_lines[0].rstrip(b"\r\n")]
+    ends = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == block_lines[-1].rstrip(b"\r\n")]
+    if len(begins) > 1 or len(ends) > 1 or len(begins) != len(ends):
+        raise ValueError("duplicate or malformed managed fstab markers")
+    existing = b""
+    if begins:
+        start, finish = begins[0], ends[0]
+        if finish != start + 2 or lines[start + 1] != block_lines[1]:
+            raise ValueError("managed fstab block does not match requested identity")
+        existing = b"".join(lines[start:finish + 1])
+        del lines[start:finish + 1]
+    for line in lines:
+        if line.lstrip().startswith(b"#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 2 and (fields[0] == os.fsencode(image) or fields[1] == os.fsencode(mountpoint)):
+            raise ValueError("conflicting unmanaged fstab entry")
+    if action == "remove":
+        if not existing:
+            raise ValueError("exact managed fstab entry is absent")
+        output = b"".join(lines)
+        linux_fstab_validate(output)
+        return output
+    if action == "install":
+        output = b"".join(lines)
+        output = output + (b"" if not output or output.endswith(b"\n") else b"\n") + block
+        linux_fstab_validate(output)
+        return output
+    raise ValueError("unknown fstab action")
+
+
+def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
+    if os.geteuid() != 0:
+        raise PermissionError("fstab changes require administrator authentication")
+    details = path.stat()
+    backup = path.with_name(path.name + ".diskm-backup-" + hashlib.sha256(old).hexdigest()[:16])
+    try:
+        backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                            stat.S_IMODE(details.st_mode))
+    except FileExistsError:
+        existing = backup.stat()
+        if (backup.is_symlink() or backup.read_bytes() != old or existing.st_uid != details.st_uid or
+                existing.st_gid != details.st_gid or
+                stat.S_IMODE(existing.st_mode) != stat.S_IMODE(details.st_mode)):
+            raise OSError("fstab backup identity mismatch")
+    else:
+        try:
+            os.fchown(backup_fd, details.st_uid, details.st_gid)
+            os.fchmod(backup_fd, stat.S_IMODE(details.st_mode))
+            with os.fdopen(backup_fd, "wb") as stream:
+                stream.write(old)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup_dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(backup_dir_fd)
+            finally:
+                os.close(backup_dir_fd)
+        except Exception:
+            raise
+    fd, temporary = tempfile.mkstemp(prefix=".fstab-diskm-", dir=path.parent)
+    try:
+        os.fchmod(fd, stat.S_IMODE(details.st_mode))
+        os.fchown(fd, details.st_uid, details.st_gid)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(new)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        linux_fsync_directory(path.parent)
+        if path.read_bytes() != new:
+            raise OSError("fstab read-back mismatch")
+        linux_fstab_validate(path.read_bytes())
+    except Exception:
+        if path.read_bytes() != old:
+            fd, restore = tempfile.mkstemp(prefix=".fstab-diskm-restore-", dir=path.parent)
+            os.fchmod(fd, stat.S_IMODE(details.st_mode))
+            os.fchown(fd, details.st_uid, details.st_gid)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(old)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(restore, path)
+            linux_fsync_directory(path.parent)
+        raise
+
+
+def linux_image_has_loop_mapping(image: Path) -> bool:
+    """Fail closed if any kernel loop device still references this image."""
+    root = Path("/sys/block")
+    if not root.is_dir():
+        return True
+    for backing in root.glob("loop*/loop/backing_file"):
+        try:
+            value = backing.read_text().rstrip("\n").replace("\\040", " ")
+        except OSError:
+            return True
+        if value and Path(value).resolve() == image.resolve():
+            return True
+    return False
+
+
+def linux_image_has_open_writers(image: Path) -> bool:
+    try:
+        result = subprocess.run(["fuser", "-w", "--", str(image)],
+                                capture_output=True, timeout=10, check=False)
+        if result.returncode == 1 and not result.stdout and not result.stderr:
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
+    lock_fd = None
+    try:
+        if not arguments or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        execute = False
+        i = 1
+        while i < len(arguments):
+            key = arguments[i]
+            if key == "--execute":
+                execute = True
+                i += 1
+            elif key in {"--config", "--state-dir", "--user-uid", "--fixture-root"} and i + 1 < len(arguments):
+                values[key] = arguments[i + 1]
+                i += 2
+            else:
+                return 2
+        required = {"--config", "--user-uid"}
+        if not required.issubset(values) or set(values) - required - {"--state-dir", "--fixture-root"}:
+            return 2
+        if "--state-dir" not in values:
+            if "--fixture-root" in values:
+                return 2
+            values["--state-dir"] = str(Path(pwd.getpwuid(int(values["--user-uid"])).pw_dir) / ".disk_magician_state")
+        if (action == "preview" and execute) or (action != "preview" and not execute):
+            return 2
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
+        if safe is None:
+            return 75
+        if action != "preview":
+            if os.geteuid() != 0:
+                runtime = Path(__file__).resolve().parent.parent
+                if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
+                    return 75
+                root_args = [str(runtime / "disk_magician.sh"), "volume", "fstab", action,
+                             "scratch", "--config", str(safe[0]), "--state-dir", str(safe[1]),
+                             "--user-uid", values["--user-uid"]]
+                if "--fixture-root" in values:
+                    root_args.extend(("--fixture-root", values["--fixture-root"]))
+                root_args.append("--execute")
+                result = subprocess.run(["sudo", "-n", "bash", *root_args],
+                                        capture_output=True, text=True, timeout=45, check=False)
+                if result.stdout:
+                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr:
+                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+                return 0 if result.returncode == 0 else 75
+            lock_fd = linux_fstab_lock()
+        config, state, image, mountpoint = safe
+        block = linux_fstab_block(values["--user-uid"], config, state, image, mountpoint)
+        path = linux_fstab_path()
+        old = path.read_bytes()
+        if action == "remove" and (linux_mount_record(mountpoint) is not None or
+                                    linux_image_has_loop_mapping(image) or
+                                    linux_image_has_open_writers(image)):
+            return 75
+        new = linux_fstab_transform(old, block, image, mountpoint, "remove" if action == "remove" else "install")
+        print(json.dumps({"path": str(path), "changed": old != new,
+                          "before_sha256": hashlib.sha256(old).hexdigest(),
+                          "after_sha256": hashlib.sha256(new).hexdigest()}, sort_keys=True))
+        if action != "preview" and old != new:
+            linux_fstab_write(path, old, new)
+        return 0
+    except Exception as error:
+        print("volume fstab: " + str(error), file=sys.stderr)
+        return 75
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
 def create_cmd(name: str, execute: bool = False) -> int:
     if linux_backend_enabled(name):
         return linux_create_cmd(name, execute)
@@ -1099,6 +1640,28 @@ def create_cmd(name: str, execute: bool = False) -> int:
     mountpoint = scratch["mountpoint"]
     if sys.platform == "darwin" and mountpoint != f"/Volumes/{scratch['name']}":
         return 2
+
+    def fresh_create_container(previous: Container) -> tuple[Container | None, int]:
+        try:
+            current_settings, current_scratch = cls(name)
+            if current_settings != settings or current_scratch != scratch:
+                return None, 75
+            current = load_container()
+            if current.ref != previous.ref or current.uuid != previous.uuid:
+                return None, 75
+            if os.path.lexists(mountpoint):
+                return None, 75
+            if scratch["name"] in current.all_volume_names:
+                return None, 2
+            if not fit_result(current, settings)["fits"]:
+                return None, 2
+            free = require_nonnegative(current.free, "container free capacity")
+            if free < settings["alarm_floor_gb"] * GIB:
+                return None, 75
+            return current, 0
+        except Exception:
+            return None, 75
+
     try:
         container = load_container()
         registry_file, lock_handle = locked_registry()
@@ -1112,13 +1675,10 @@ def create_cmd(name: str, execute: bool = False) -> int:
                     return 2
                 return recover_creation(name, settings, scratch, registry_file,
                                         lock_handle, current_registry, existing, container)
-            if os.path.lexists(mountpoint):
-                return 75
-            if any(volume.name == scratch["name"] for volume in container.volumes):
-                return 2
-            fit = fit_result(container)
-            if not fit["fits"]:
-                return 2
+
+            container, result = fresh_create_container(container)
+            if result:
+                return result
             if not execute:
                 print(json.dumps({
                     "class": name,
@@ -1128,11 +1688,7 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 }))
                 return 0
 
-            free = require_nonnegative(container.free, "container free capacity")
-            if free < settings["alarm_floor_gb"] * GIB:
-                return 75
-
-            current_registry["volumes"][name] = {
+            creation_intent = {
                 "class": name,
                 "name": scratch["name"],
                 "container_uuid": container.uuid,
@@ -1141,9 +1697,18 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 "state": "creating",
                 "intent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            current_registry["volumes"][name] = creation_intent
             save_registry(registry_file, lock_handle, current_registry)
             registry_file, lock_handle = locked_registry()
             current_registry = registry()
+            if current_registry["volumes"].get(name) != creation_intent:
+                return 75
+
+            container, result = fresh_create_container(container)
+            if result:
+                current_registry["volumes"].pop(name)
+                save_registry(registry_file, lock_handle, current_registry)
+                return result
 
             run_diskutil([
                 "apfs", "addVolume", container.ref, "APFS", scratch["name"],
@@ -1412,6 +1977,8 @@ def verify_mount(root: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     try:
+        if len(arguments) >= 2 and arguments[0] == "fstab" and arguments[1] in {"preview", "install", "remove"} and sys.platform.startswith("linux"):
+            return linux_fstab_cmd(arguments[1], arguments[2:])
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
                 print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
@@ -1439,6 +2006,8 @@ def main(argv: list[str] | None = None) -> int:
             return linux_mount_cmd(arguments[1], "--foreground" in arguments[2:]) if sys.platform.startswith("linux") else 2
         if arguments[:1] == ["unmount"] and len(arguments) > 1:
             return linux_unmount_cmd(arguments[1]) if sys.platform.startswith("linux") else 2
+        if arguments[:2] == ["service", "migrate"] and sys.platform.startswith("linux"):
+            return linux_service_migrate_cmd(arguments[2:])
         if arguments[:2] == ["service", "install"] and len(arguments) > 2:
             return linux_service_install_cmd(arguments[2]) if sys.platform.startswith("linux") else 2
         if arguments[:1] == ["retire"] and len(arguments) > 1:

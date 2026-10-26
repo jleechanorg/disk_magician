@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real disposable FUSE fixtures. Evidence and images survive canonical unmount.
+# Real disposable native-ext4 fixtures. Evidence and images survive canonical unmount.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EVIDENCE="$(mktemp -d /tmp/dm-linux-autotrim.XXXXXX)"
@@ -45,7 +45,7 @@ def systemctl(*args, **kwargs):
     return run(["systemctl", "--user", *args], **kwargs)
 
 assert shutil.disk_usage(evidence).free >= 10 * GIB, "host headroom below 10 GiB"
-for binary in ("mke2fs", "blkid", "fusermount3", "systemctl"):
+for binary in ("mke2fs", "blkid", "mount", "umount", "fuser", "systemctl", "sudo"):
     assert shutil.which(binary), binary
 bus = subprocess.run(["systemctl", "--user", "show", "--property=Version", "--value"], env=env,
                      capture_output=True, text=True, timeout=10)
@@ -53,14 +53,13 @@ print("systemd user manager version present:", bool(bus.stdout.strip()), flush=T
 assert bus.returncode == 0 and bus.stdout.strip(), bus.stderr
 production_config = Path.home() / ".config/disk-magician/linux-scratch.json"
 production = json.loads(production_config.read_text())["volumes"]
-assert Path(production["fuse2fs_bin"]).is_file()
 protected = [production_config, Path.home() / ".config/systemd/user/diskm-scratch.service",
              Path.home() / ".config/systemd/user/diskm-scratch-reclaim.service",
              Path.home() / ".config/systemd/user/diskm-scratch-reclaim.timer"]
 protected_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
                     for p in protected}
 run(["bash", root / "disk_magician.sh", "volume", "scheduler", "--help"])
-print("PASS preflight: user bus, canonical scheduler help, FUSE, >=10 GiB headroom", flush=True)
+print("PASS preflight: user bus, canonical scheduler help, native ext4 tools, >=10 GiB headroom", flush=True)
 if preflight:
     raise SystemExit(0)
 
@@ -198,13 +197,15 @@ class Diagnostics:
 for case in ("recovery", "protected"):
     assert shutil.disk_usage(evidence).free >= 10 * GIB, "host headroom below 10 GiB"
     fixture = evidence / case
-    fixture.mkdir()
+    fixture.mkdir(mode=0o700)
+    assert fixture.stat().st_mode & 0o777 == 0o700
     state = fixture / "state"
-    state.mkdir()
+    state.mkdir(mode=0o700)
     config_path, mount, image = fixture / "config.json", fixture / "mount", fixture / "scratch.ext4"
     cfg = json.loads((root / "config.json.template").read_text())
     cfg["volumes"] = dict(production, swap_headroom_gb=1, alarm_floor_gb=1,
                           classes={"scratch": {"name": "diskm-scratch", "quota_gb": 2,
+                                   "backend": "native",
                                    "mountpoint": str(mount), "image_path": str(image)}})
     config_path.write_text(json.dumps(cfg))
     local = dict(env, DISK_MAGICIAN_CONFIG=str(config_path), DISK_MAGICIAN_STATE_DIR=str(state),
@@ -224,11 +225,17 @@ for case in ("recovery", "protected"):
     def dm(*args, **kwargs):
         return run([*diskm, *args], current=local, **kwargs)
     sleeper = subprocess.Popen(["sleep", "600"], cwd=fixture)
-    mounted, installed, observer = False, False, None
+    mounted, installed, fstab_installed, observer = False, False, False, None
     try:
         dm("volume", "create", "scratch")
         dm("volume", "create", "scratch", "--execute", timeout=180)
         assert image.stat().st_size == 2 * GIB
+        run([*diskm, "volume", "fstab", "preview", "scratch", "--config", config_path,
+             "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture], timeout=60)
+        fstab_args = ["volume", "fstab", "install", "scratch", "--config", config_path,
+                      "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"]
+        run(["sudo", "-n", *diskm, *fstab_args], timeout=60)
+        fstab_installed = True
         dm("volume", "mount", "scratch")
         mounted = True
         dm("volume", "ballast", "ensure", "scratch")
@@ -297,13 +304,17 @@ for case in ("recovery", "protected"):
                 finally:
                     registry.write_bytes(original_registry)
                     config_path.write_bytes(original_config)
-            # A real second FUSE filesystem at the registered mount must not be
+            # A real second native ext4 filesystem at the registered mount must not be
             # accepted merely because the original image and registry still match.
             assert shutil.disk_usage(evidence).free >= 10 * GIB
             dm("volume", "unmount", "scratch")
             mounted = False
+            run(["sudo", "-n", *diskm, "volume", "fstab", "remove", "scratch", "--config", config_path,
+                 "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"], timeout=60)
+            fstab_installed = False
             substitute_config = fixture / "substitute-config.json"
             substitute_state = fixture / "substitute-state"
+            substitute_state.mkdir(mode=0o700)
             substitute_cfg = json.loads(original_config)
             substitute_cfg["volumes"]["classes"]["scratch"]["image_path"] = str(fixture / "substitute.ext4")
             substitute_config.write_text(json.dumps(substitute_cfg))
@@ -311,10 +322,17 @@ for case in ("recovery", "protected"):
                                   DISK_MAGICIAN_STATE_DIR=str(substitute_state))
             def substitute_dm(*args):
                 return run([*diskm, *args], current=substitute_env, timeout=180)
-            substitute_mounted = False
+            substitute_mounted, substitute_fstab_installed = False, False
             try:
                 substitute_dm("volume", "create", "scratch")
                 substitute_dm("volume", "create", "scratch", "--execute")
+                run([*diskm, "volume", "fstab", "preview", "scratch", "--config", substitute_config,
+                     "--state-dir", substitute_state, "--user-uid", os.getuid(), "--fixture-root", fixture], timeout=60)
+                substitute_fstab = ["sudo", "-n", *diskm, "volume", "fstab", "install", "scratch",
+                    "--config", substitute_config, "--state-dir", substitute_state,
+                    "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"]
+                run(substitute_fstab, timeout=60)
+                substitute_fstab_installed = True
                 substitute_dm("volume", "mount", "scratch")
                 substitute_mounted = True
                 substitute_dm("volume", "ballast", "ensure", "scratch")
@@ -328,6 +346,15 @@ for case in ("recovery", "protected"):
             finally:
                 if substitute_mounted:
                     substitute_dm("volume", "unmount", "scratch")
+                if substitute_fstab_installed:
+                    run(["sudo", "-n", *diskm, "volume", "fstab", "remove", "scratch",
+                         "--config", substitute_config, "--state-dir", substitute_state,
+                         "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"], timeout=60)
+                run([*diskm, "volume", "fstab", "preview", "scratch", "--config", config_path,
+                     "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture], timeout=60)
+                run(["sudo", "-n", *diskm, "volume", "fstab", "install", "scratch", "--config", config_path,
+                     "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"], timeout=60)
+                fstab_installed = True
                 dm("volume", "mount", "scratch")
                 mounted = True
             assert all(digest(Path(p)) == h for p, h in hashes.items())
@@ -424,6 +451,9 @@ for case in ("recovery", "protected"):
                 assert not any((unit_dir / f"{unit}.{suffix}").exists() for suffix in expected_units), "unit identity changed; leave untouched"
         if mounted:
             dm("volume", "unmount", "scratch")
+        if fstab_installed:
+            run(["sudo", "-n", *diskm, "volume", "fstab", "remove", "scratch", "--config", config_path,
+                 "--state-dir", state, "--user-uid", os.getuid(), "--fixture-root", fixture, "--execute"], timeout=60)
         sleeper.terminate()
         sleeper.wait(timeout=5)
         assert all((digest(Path(p)) if Path(p).is_file() else None) == h
