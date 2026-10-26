@@ -1228,13 +1228,268 @@ class ApprovedR13RegressionTest(VolumeTestBase):
         self.assertFalse(self.calls_file.exists())
 
     def test_create_only_accepts_encryption_none_with_acknowledgment(self):
-        for encryption in (None, "encrypted", "filevault", "unsupported"):
+        for encryption in (None, "encrypted", "filevault", "apfs-passphrase", "unsupported"):
             with self.subTest(encryption=encryption):
                 config = json.loads(self.config.read_text())
                 config["volumes"]["encryption"] = encryption
                 self.config.write_text(json.dumps(config))
                 self.assertEqual(volume.create_cmd("scratch", execute=True), 2)
                 self.assertFalse(self.calls_file.exists())
+
+    def test_darwin_accepts_explicit_encrypted_mode_with_acknowledgment(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        self.config.write_text(json.dumps(config))
+        with mock.patch.object(volume.sys, "platform", "darwin"):
+            settings, scratch = volume.cls("scratch")
+        self.assertEqual(settings["encryption"], "apfs-passphrase")
+        self.assertTrue(volume.encryption_is_acknowledged(settings))
+        self.assertEqual(scratch["quota_gb"], 30)
+
+    def test_encrypted_create_preview_is_nonmutating_without_tty(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 70
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = "/Volumes/diskm-scratch"
+        self.config.write_text(json.dumps(config))
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=False), \
+             mock.patch.object(volume.os.path, "lexists",
+                               side_effect=lambda path: False if str(path) == "/Volumes/diskm-scratch" else os.path.lexists(path)), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(volume.create_cmd("scratch", execute=False), 0)
+        self.assertTrue(json.loads(output.getvalue())["fits"])
+        self.assertFalse(self.calls_file.exists())
+        self.assertFalse((self.state_dir / "volumes" / "registry.json").exists())
+
+    def test_locked_encrypted_volume_cannot_be_reclaimed_or_lose_ballast(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = str(self.mp)
+        self.config.write_text(json.dumps(config))
+        registry_path, _ = volume.registry_paths()
+        registry = json.loads(registry_path.read_text())
+        registry["volumes"]["scratch"]["mountpoint"] = str(self.mp)
+        registry_path.write_text(json.dumps(registry))
+        self.mp.mkdir(parents=True)
+        volume.write_ballast(str(self.mp))
+        with mock.patch.object(volume.sys, "platform", "darwin"):
+            self.assertEqual(volume.path_cmd("scratch", for_reclaim=True), 75)
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertTrue(volume.ballast_ok(str(self.mp)))
+        self.assertFalse(self.calls_file.exists())
+
+    def test_encrypted_create_requires_tty_before_intent_or_diskutil_mutation(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = "/Volumes/diskm-scratch"
+        self.config.write_text(json.dumps(config))
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=False, create=True):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        self.assertFalse(self.calls_file.exists())
+        self.assertFalse((self.state_dir / "volumes" / "registry.json").exists())
+
+    def test_encrypted_create_uses_diskutil_passprompt_with_inherited_terminal(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 70
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = "/Volumes/diskm-scratch"
+        self.config.write_text(json.dumps(config))
+        original_run = volume.subprocess.run
+        original_ballast_ok = volume.ballast_ok
+        calls = []
+        def tracked_run(arguments, **kwargs):
+            args = list(arguments)
+            if args and args[0] == volume.diskutil_bin():
+                calls.append((args, kwargs.copy()))
+            return original_run(arguments, **kwargs)
+        actual_lexists = volume.os.path.lexists
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.object(volume.subprocess, "run", side_effect=tracked_run), \
+             mock.patch.object(volume.os.path, "lexists",
+                               side_effect=lambda path: False if str(path) == "/Volumes/diskm-scratch" else actual_lexists(path)), \
+             mock.patch.object(volume, "ballast_ok",
+                               side_effect=lambda path: True if path == "/Volumes/diskm-scratch" else original_ballast_ok(path)), \
+             mock.patch.dict(os.environ, {"FAKE_DISKUTIL_REPORTED_MOUNTPOINT": "/Volumes/diskm-scratch"}):
+            self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        add_calls = [(args, kwargs) for args, kwargs in calls if args[1:3] == ["apfs", "addVolume"]]
+        self.assertEqual(len(add_calls), 1)
+        args, kwargs = add_calls[0]
+        self.assertEqual(args[1:5], ["apfs", "addVolume", "disk3", "APFS"])
+        self.assertIn("-passprompt", args)
+        self.assertIn("-quota", args)
+        self.assertIn(str(70 * volume.GIB), args)
+        self.assertNotIn("-passphrase", args)
+        self.assertNotIn("capture_output", kwargs)
+        self.assertEqual(kwargs["timeout"], 300)
+        self.assertIsNone(kwargs.get("stdin"))
+        self.assertIsNone(kwargs.get("stdout"))
+        self.assertIsNone(kwargs.get("stderr"))
+
+    def prepare_fake_encrypted_entry(self, locked=True, mountpoint=None, entry_state="active"):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["encryption"] = "apfs-passphrase"
+        scratch = config["volumes"]["classes"]["scratch"]
+        scratch["quota_gb"] = 70
+        scratch["mountpoint"] = "/Volumes/diskm-scratch"
+        self.config.write_text(json.dumps(config))
+        state = json.loads(self.state.read_text())
+        state["volumes"].append({
+            "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
+            "device": "disk3s9", "used": 0, "quota": 70 * volume.GIB,
+            "roles": [], "mountpoint": mountpoint,
+            "encrypted": True, "locked": locked,
+        })
+        self.state.write_text(json.dumps(state))
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {"scratch": {
+                "class": "scratch", "name": "diskm-scratch", "uuid": "SCRATCH-UUID",
+                "container_uuid": "CONTAINER-UUID", "mountpoint": scratch["mountpoint"],
+                "quota_bytes": 70 * volume.GIB, "state": entry_state,
+                "created_at": "2026-10-26T00:00:00Z",
+            }},
+        }))
+
+    def test_encrypted_mount_finishes_needs_recovery_only_after_exact_unlock(self):
+        self.prepare_fake_encrypted_entry(locked=True, entry_state="needs_recovery")
+        registry_path, _ = volume.registry_paths()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.object(volume, "ballast_ok", return_value=True), \
+             mock.patch.dict(os.environ, {"FAKE_DISKUTIL_MOUNTPOINT": "/Volumes/diskm-scratch"}):
+            self.assertEqual(volume.main(["mount", "scratch"]), 0)
+        entry = json.loads(registry_path.read_text())["volumes"]["scratch"]
+        self.assertEqual(entry["state"], "active")
+        self.assertTrue(entry.get("created_at"))
+
+    def test_encrypted_unlock_requires_tty_before_diskutil_or_registry_mutation(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        registry_path, _ = volume.registry_paths()
+        registry_before = registry_path.read_bytes()
+        data_before = self.state.read_bytes()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=False):
+            self.assertEqual(volume.main(["mount", "scratch"]), 75)
+        self.assertFalse(self.calls_file.exists())
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertEqual(self.state.read_bytes(), data_before)
+
+    def test_encrypted_unlock_failure_preserves_locked_state_and_registry(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        registry_path, _ = volume.registry_paths()
+        registry_before = registry_path.read_bytes()
+        state_before = self.state.read_bytes()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.dict(os.environ, {
+                 "FAKE_DISKUTIL_MOUNTPOINT": "/Volumes/diskm-scratch",
+                 "FAKE_DISKUTIL_FAIL_UNLOCK": "1",
+             }):
+            self.assertEqual(volume.main(["mount", "scratch"]), 75)
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertEqual(self.state.read_bytes(), state_before)
+
+    def test_encrypted_recovery_does_not_activate_after_post_unlock_uuid_mismatch(self):
+        self.prepare_fake_encrypted_entry(locked=True, entry_state="needs_recovery")
+        registry_path, _ = volume.registry_paths()
+        registry_before = registry_path.read_bytes()
+        write_ballast = mock.Mock()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.object(volume, "write_ballast", write_ballast), \
+             mock.patch.dict(os.environ, {
+                 "FAKE_DISKUTIL_MOUNTPOINT": "/Volumes/diskm-scratch",
+                 "FAKE_DISKUTIL_UNLOCK_UUID": "OTHER-UUID",
+             }):
+            self.assertEqual(volume.main(["mount", "scratch"]), 75)
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        write_ballast.assert_not_called()
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        self.assertFalse(scratch["locked"])
+        self.assertEqual(data["mounted_uuid"], "OTHER-UUID")
+        calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+        self.assertIn(["apfs", "unlockVolume", "disk3s9"], calls)
+
+    def test_encrypted_entry_with_unknown_encryption_state_fails_closed(self):
+        self.prepare_fake_encrypted_entry(locked=False, mountpoint="/Volumes/diskm-scratch")
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        scratch.pop("encrypted")
+        self.state.write_text(json.dumps(data))
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(volume.status(snapshot=True), 2)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["volumes"][0]["available"])
+        self.assertIn("volume_measurement_unavailable:scratch", result["alarms"])
+
+    def test_encrypted_unlock_with_unexpected_default_mount_preserves_registry(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        registry_path, _ = volume.registry_paths()
+        registry_before = registry_path.read_bytes()
+        unexpected = "/Volumes/diskm-scratch 1"
+        stderr = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.dict(os.environ, {"FAKE_DISKUTIL_MOUNTPOINT": unexpected}), \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(volume.main(["mount", "scratch"]), 75)
+        self.assertIn("mounted-unexpected", stderr.getvalue())
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        self.assertFalse(scratch["locked"])
+        self.assertEqual(scratch["mountpoint"], unexpected)
+        calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+        unlock = next(call for call in calls if call[:2] == ["apfs", "unlockVolume"])
+        self.assertEqual(unlock, ["apfs", "unlockVolume", "disk3s9"])
+        self.assertFalse(volume.ballast_path(self.mp).exists())
+
+    def test_status_reports_encrypted_locked_volume_truthfully(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(volume.status(snapshot=True), 0)
+        row = json.loads(output.getvalue())["volumes"][0]
+        self.assertEqual(row["status"], "locked")
+        self.assertIsNone(row["allocated_bytes"])
+        self.assertFalse(row["available"])
+
+    def test_status_reports_unexpected_encrypted_mount_without_availability(self):
+        unexpected = "/Volumes/diskm-scratch 1"
+        self.prepare_fake_encrypted_entry(locked=False, mountpoint=unexpected)
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(volume.status(snapshot=True), 1)
+        result = json.loads(output.getvalue())
+        row = result["volumes"][0]
+        self.assertEqual(row["status"], "mounted-unexpected")
+        self.assertEqual(row["mounted_path"], unexpected)
+        self.assertFalse(row["available"])
+        self.assertIn("scratch_mounted_unexpected", result["alarms"])
+
+    def test_darwin_mount_unlocks_by_registered_uuid_with_default_mountpoint(self):
+        self.prepare_fake_encrypted_entry(locked=True)
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch.object(volume, "has_interactive_diskutil_tty", return_value=True), \
+             mock.patch.dict(os.environ, {"FAKE_DISKUTIL_MOUNTPOINT": "/Volumes/diskm-scratch"}):
+            self.assertEqual(volume.main(["mount", "scratch"]), 0)
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        self.assertFalse(scratch["locked"])
+        self.assertEqual(scratch["mountpoint"], "/Volumes/diskm-scratch")
+        calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+        unlock = next(call for call in calls if call[:2] == ["apfs", "unlockVolume"])
+        self.assertEqual(unlock, ["apfs", "unlockVolume", "disk3s9"])
 
     def test_path_and_ballast_require_exact_registry_identity(self):
         self.assertEqual(volume.create_cmd("scratch", execute=True), 0)

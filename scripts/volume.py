@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,9 @@ class Volume:
     used: int | None
     quota: int | None
     roles: tuple[str, ...]
+    encrypted: bool | None = None
+    locked: bool | None = None
+    mountpoint: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,22 @@ def run_diskutil(arguments: list[str]) -> bytes:
         detail = result.stderr.decode(errors="replace").strip()
         raise RuntimeError("diskutil operation failed" + (": " + detail if detail else ""))
     return result.stdout
+
+
+def has_interactive_diskutil_tty() -> bool:
+    try:
+        return all(stream is not None and stream.isatty()
+                   for stream in (sys.stdin, sys.stdout, sys.stderr))
+    except (AttributeError, OSError):
+        return False
+
+
+def run_diskutil_interactive(arguments: list[str]) -> None:
+    if not has_interactive_diskutil_tty():
+        raise RuntimeError("diskutil passphrase prompt requires an interactive terminal")
+    result = subprocess.run([diskutil_bin(), *arguments], timeout=300, check=False)
+    if result.returncode:
+        raise RuntimeError("diskutil interactive operation failed")
 
 
 def plist(arguments: list[str]) -> dict[str, Any]:
@@ -146,17 +165,23 @@ def load_container() -> Container:
         volume_uuid = item.get("APFSVolumeUUID")
         device = item.get("DeviceIdentifier")
         roles = item.get("Roles") or []
+        encrypted = item.get("Encryption")
+        locked = item.get("Locked")
         if not all(isinstance(value, str) and value for value in (name, volume_uuid, device)):
             raise ValueError("volume identity is incomplete")
         if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
             raise ValueError("volume roles are invalid")
+        if encrypted is not None and not isinstance(encrypted, bool):
+            raise ValueError("volume encryption state is invalid")
+        if locked is not None and not isinstance(locked, bool):
+            raise ValueError("volume lock state is invalid")
         used = item.get("CapacityInUse")
         quota = item.get("CapacityQuota")
         if used is not None:
             require_nonnegative(used, "volume used capacity")
         if quota is not None:
             require_nonnegative(quota, "volume quota")
-        volumes.append(Volume(name, volume_uuid, device, used, quota, tuple(roles)))
+        volumes.append(Volume(name, volume_uuid, device, used, quota, tuple(roles), encrypted, locked))
 
     ceiling = raw.get("CapacityCeiling")
     free = raw.get("CapacityFree")
@@ -184,7 +209,8 @@ def config(config_path: str | Path | None = None) -> dict[str, Any]:
         raise ValueError("unsupported v1 volume classes")
     require_positive(volumes.get("swap_headroom_gb"), "swap headroom")
     require_positive(volumes.get("alarm_floor_gb"), "container alarm floor")
-    if volumes.get("encryption") != "none":
+    encryption = volumes.get("encryption")
+    if encryption != "none" and not (encryption == "apfs-passphrase" and sys.platform == "darwin"):
         raise ValueError("unsupported v1 encryption mode")
 
     scratch = classes["scratch"]
@@ -320,7 +346,8 @@ def save_registry(path: Path, lock_handle: Any, value: dict[str, Any]) -> None:
 
 
 def validate_entry(
-    container: Container, settings: dict[str, Any], entry: Any
+    container: Container, settings: dict[str, Any], entry: Any,
+    *, allow_locked: bool = False, allow_unexpected_mount: bool = False,
 ) -> Volume:
     if not isinstance(entry, dict):
         raise ValueError("volume registry entry is missing")
@@ -350,15 +377,30 @@ def validate_entry(
     if volume.quota != expected_quota:
         raise ValueError("measured quota does not match configured quota")
 
+    encrypted_mode = settings["encryption"] == "apfs-passphrase"
     measured = plist(["info", "-plist", volume.ref])
     if (
         measured.get("VolumeUUID") != volume.uuid
-        or measured.get("MountPoint") != scratch["mountpoint"]
         or measured.get("APFSContainerReference") != container.ref
         or measured.get("DeviceIdentifier") != volume.ref
     ):
-        raise ValueError("mounted volume identity mismatch")
-    return volume
+        raise ValueError("volume identity mismatch")
+    if encrypted_mode:
+        measured_locked = measured.get("Locked")
+        if volume.encrypted is not True or measured.get("Encryption") is not True:
+            raise ValueError("encrypted volume verification failed")
+        if not isinstance(volume.locked, bool) or measured_locked is not volume.locked:
+            raise ValueError("volume lock state is unavailable or inconsistent")
+        if volume.locked:
+            if not allow_locked:
+                raise ValueError("encrypted volume is locked")
+            return replace(volume, mountpoint=None)
+    mountpoint = measured.get("MountPoint")
+    if not isinstance(mountpoint, str):
+        raise ValueError("mounted volume path is unavailable")
+    if mountpoint != scratch["mountpoint"] and not allow_unexpected_mount:
+        raise ValueError("mounted volume path mismatch")
+    return replace(volume, mountpoint=mountpoint)
 
 
 def ballast_path(mountpoint: str) -> Path:
@@ -623,7 +665,7 @@ def ballast_cmd(action: str, name: str) -> int:
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:
     acknowledgement = settings.get("encryption_acknowledged_at")
-    return settings.get("encryption") == "none" and isinstance(acknowledgement, str) and bool(acknowledgement.strip())
+    return settings.get("encryption") in {"none", "apfs-passphrase"} and isinstance(acknowledgement, str) and bool(acknowledgement.strip())
 
 
 
@@ -1780,6 +1822,60 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
         if lock_fd is not None:
             os.close(lock_fd)
 
+def darwin_mount_cmd(name: str) -> int:
+    if sys.platform != "darwin":
+        return 2
+    try:
+        settings, scratch = cls(name)
+        if settings["encryption"] != "apfs-passphrase":
+            return 2
+        entry = registry()["volumes"].get(name)
+        if not isinstance(entry, dict) or entry.get("state") not in {"active", "needs_recovery"}:
+            return 75
+        entry_state = entry["state"]
+        container = load_container()
+        volume = validate_entry(
+            container, settings, entry,
+            allow_locked=True, allow_unexpected_mount=True,
+        )
+        if volume.locked:
+            if not has_interactive_diskutil_tty():
+                return 75
+            run_diskutil_interactive(["apfs", "unlockVolume", volume.ref])
+            container = load_container()
+            volume = validate_entry(
+                container, settings, entry,
+                allow_locked=True, allow_unexpected_mount=True,
+            )
+        if volume.locked:
+            return 75
+        if volume.mountpoint != scratch["mountpoint"]:
+            print("mounted-unexpected", file=sys.stderr)
+            return 75
+        if entry_state == "needs_recovery":
+            registry_file, lock_handle = locked_registry()
+            try:
+                current_registry = registry()
+                current_entry = current_registry["volumes"].get(name)
+                if current_entry != entry or not isinstance(current_entry, dict):
+                    return 75
+                container = load_container()
+                volume = validate_entry(container, settings, current_entry)
+                if volume.locked or volume.mountpoint != scratch["mountpoint"]:
+                    return 75
+                return recover_creation(
+                    name, settings, scratch, registry_file, lock_handle,
+                    current_registry, current_entry, container,
+                )
+            finally:
+                if not lock_handle.closed:
+                    lock_handle.close()
+        return 0
+    except Exception as error:
+        print("volume mount: " + str(error), file=sys.stderr)
+        return 75
+
+
 def create_cmd(name: str, execute: bool = False) -> int:
     if linux_backend_enabled(name):
         return linux_create_cmd(name, execute)
@@ -1789,6 +1885,9 @@ def create_cmd(name: str, execute: bool = False) -> int:
         return 2
     if not encryption_is_acknowledged(settings):
         return 2
+    encrypted = sys.platform == "darwin" and settings["encryption"] == "apfs-passphrase"
+    if execute and encrypted and not has_interactive_diskutil_tty():
+        return 75
 
     mountpoint = scratch["mountpoint"]
     if sys.platform == "darwin" and mountpoint != f"/Volumes/{scratch['name']}":
@@ -1863,10 +1962,14 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 save_registry(registry_file, lock_handle, current_registry)
                 return result
 
-            run_diskutil([
+            add_volume_arguments = [
                 "apfs", "addVolume", container.ref, "APFS", scratch["name"],
                 "-quota", str(scratch["quota_gb"] * GIB),
-            ])
+            ]
+            if encrypted:
+                run_diskutil_interactive([*add_volume_arguments, "-passprompt"])
+            else:
+                run_diskutil(add_volume_arguments)
             updated = load_container()
             matches = [volume for volume in updated.volumes if volume.name == scratch["name"]]
             if len(matches) != 1:
@@ -1976,33 +2079,47 @@ def status(snapshot: bool = False) -> int:
             "attribution": "exclusive_exact",
         }
         if isinstance(entry, dict) and entry.get("state") in {"active", "retired"}:
+            encrypted_mode = settings["encryption"] == "apfs-passphrase"
             try:
-                volume = validate_entry(container, settings, entry)
+                volume = validate_entry(
+                    container, settings, entry,
+                    allow_locked=encrypted_mode, allow_unexpected_mount=encrypted_mode,
+                )
             except Exception:
                 fatal = True
                 if entry.get("state") == "active":
                     alarms.append("volume_measurement_unavailable:scratch")
             else:
-                try:
-                    used = require_nonnegative(volume.used, "volume usage")
-                    quota = require_positive(volume.quota, "volume quota")
-                    reserve_ok = ballast_ok(settings["classes"]["scratch"]["mountpoint"])
-                    row.update({
-                        "filesystem_id": volume.uuid,
-                        "allocated_bytes": used,
-                        "quota_bytes": quota,
-                        "measured_at": timestamp,
-                        "available": reserve_ok,
-                    })
-                    if entry.get("state") == "active" and not reserve_ok:
-                        alarms.append("scratch_ballast_missing")
-                    if used >= quota:
-                        alarms.append("volume_full")
-                    elif used / quota >= 0.9:
-                        alarms.append("volume_high")
-                except Exception:
-                    if entry.get("state") == "active":
-                        alarms.append("volume_measurement_unavailable:scratch")
+                if encrypted_mode and volume.locked:
+                    row.update({"status": "locked", "encrypted": True, "locked": True,
+                                "quota_bytes": volume.quota, "available": False})
+                elif encrypted_mode and volume.mountpoint != settings["classes"]["scratch"]["mountpoint"]:
+                    row.update({"status": "mounted-unexpected", "mounted_path": volume.mountpoint,
+                                "encrypted": True, "locked": False,
+                                "quota_bytes": volume.quota, "available": False})
+                    alarms.append("scratch_mounted_unexpected")
+                else:
+                    try:
+                        used = require_nonnegative(volume.used, "volume usage")
+                        quota = require_positive(volume.quota, "volume quota")
+                        reserve_ok = ballast_ok(settings["classes"]["scratch"]["mountpoint"])
+                        row.update({
+                            "filesystem_id": volume.uuid,
+                            "allocated_bytes": used,
+                            "quota_bytes": quota,
+                            "measured_at": timestamp,
+                            "available": reserve_ok,
+                            **({"encrypted": True, "locked": False} if encrypted_mode else {}),
+                        })
+                        if entry.get("state") == "active" and not reserve_ok:
+                            alarms.append("scratch_ballast_missing")
+                        if used >= quota:
+                            alarms.append("volume_full")
+                        elif used / quota >= 0.9:
+                            alarms.append("volume_high")
+                    except Exception:
+                        if entry.get("state") == "active":
+                            alarms.append("volume_measurement_unavailable:scratch")
         rows.append(row)
 
         output: dict[str, Any] = {
@@ -2156,7 +2273,11 @@ def main(argv: list[str] | None = None) -> int:
         if arguments[:1] == ["create"] and len(arguments) > 1:
             return create_cmd(arguments[1], "--execute" in arguments[2:])
         if arguments[:1] == ["mount"] and len(arguments) > 1:
-            return linux_mount_cmd(arguments[1], "--foreground" in arguments[2:]) if sys.platform.startswith("linux") else 2
+            if sys.platform.startswith("linux"):
+                return linux_mount_cmd(arguments[1], "--foreground" in arguments[2:])
+            if sys.platform == "darwin":
+                return darwin_mount_cmd(arguments[1])
+            return 2
         if arguments[:1] == ["unmount"] and len(arguments) > 1:
             return linux_unmount_cmd(arguments[1]) if sys.platform.startswith("linux") else 2
         if arguments[:2] == ["service", "migrate"] and sys.platform.startswith("linux"):

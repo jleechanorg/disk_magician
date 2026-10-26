@@ -39,11 +39,16 @@ def main(args):
         row = next((v for v in data["volumes"] if target in (v.get("ref"), v.get("name"), v.get("mountpoint"))), None)
         if row is None:
             fail()
+        mountpoint = data.get("mounted_mountpoint", os.environ.get("FAKE_DISKUTIL_REPORTED_MOUNTPOINT", row.get("mountpoint", "")))
         result = {
-            "MountPoint": data.get("mounted_mountpoint", row.get("mountpoint", "")),
+            "MountPoint": mountpoint if isinstance(mountpoint, str) else "",
             "VolumeUUID": data.get("mounted_uuid", row["uuid"]),
             "APFSContainerReference": data.get("mounted_container_ref", data["container"]["ref"]),
             "DeviceIdentifier": row.get("device", ""),
+            **({"Encryption": bool(row["encrypted"])} if "encrypted" in row else {}),
+            **({"FileVault": bool(row.get("filevault", row["encrypted"]))}
+               if "filevault" in row or "encrypted" in row else {}),
+            **({"Locked": bool(row["locked"])} if "locked" in row else {}),
             **({"CapacityInUse": row["used"]} if isinstance(row.get("used"), int) else {}),
         }
         sys.stdout.buffer.write(plistlib.dumps(result)); return
@@ -63,6 +68,10 @@ def main(args):
                         "CapacityQuota": v.get("quota", 0),
                         "DeviceIdentifier": v.get("device", ""),
                         "Name": v["name"],
+                        **({"Encryption": bool(v["encrypted"])} if "encrypted" in v else {}),
+                        **({"FileVault": bool(v.get("filevault", v["encrypted"]))}
+                           if "filevault" in v or "encrypted" in v else {}),
+                        **({"Locked": bool(v["locked"])} if "locked" in v else {}),
                         "Roles": data.get("mounted_roles", v.get("roles", []))
                         if container is c else v.get("roles", []),
                     }
@@ -91,9 +100,25 @@ def main(args):
                 break
         mountpoint = os.environ.get("FAKE_DISKUTIL_MOUNTPOINT", "/Volumes/" + name)
         row = {"uuid": "SCRATCH-UUID", "name": name, "ref": "disk3s9", "device": "disk3s9", "used": 0, "quota": quota, "roles": [], "mountpoint": mountpoint}
+        if "-passprompt" in args:
+            row.update({"encrypted": True, "locked": False})
         data["volumes"].append(row)
         data["container"]["free"] = max(0, data["container"].get("free", 0) - quota)
         os.makedirs(mountpoint, exist_ok=True)
+        save(data)
+        return
+    if args[:2] == ["apfs", "unlockVolume"]:
+        record(args)
+        if "-mountpoint" in args or any(value in args for value in ("-passphrase", "-stdinpassphrase")):
+            fail(2)
+        if os.environ.get("FAKE_DISKUTIL_FAIL_UNLOCK") == "1": fail()
+        target = args[2] if len(args) > 2 else ""
+        row = next((v for v in data["volumes"] if target in (v.get("ref"), v.get("device"), v.get("uuid"))), None)
+        if row is None or not row.get("encrypted", False): fail()
+        row["locked"] = False
+        row["mountpoint"] = os.environ.get("FAKE_DISKUTIL_MOUNTPOINT", "/Volumes/" + row["name"])
+        if os.environ.get("FAKE_DISKUTIL_UNLOCK_UUID"):
+            data["mounted_uuid"] = os.environ["FAKE_DISKUTIL_UNLOCK_UUID"]
         save(data)
         return
     if args and args[0] in ("mount", "unmount"):
