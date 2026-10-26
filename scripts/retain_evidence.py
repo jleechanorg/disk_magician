@@ -7,7 +7,32 @@ mtime, keeping the prune's newest-N-by-mtime ordering meaningful. Python, not a
 shell pipeline, per the grep-shim pipeline-corruption precedent (memory
 feedback_2026-07-20_grep_shim_truncates_pipelines_use_python_parsing.md).
 """
-import argparse, datetime, glob, os, shutil, sys
+import argparse, datetime, glob, json, os, shutil, sys
+
+DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB GitHub recommended limit
+MEASURED_MIN_KB = 64
+
+
+def copy_or_compact_frontier(src, dest):
+    max_bytes = int(os.environ.get("DISK_MAGICIAN_EVIDENCE_MAX_BYTES", DEFAULT_MAX_BYTES))
+    if os.path.getsize(src) <= max_bytes:
+        shutil.copy2(src, dest)
+        return
+    try:
+        with open(src, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and isinstance(data.get("measured"), dict):
+            data["measured"] = {
+                k: v for k, v in data["measured"].items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= MEASURED_MIN_KB
+            }
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as out:
+            json.dump(data, out, indent=2)
+        shutil.copystat(src, tmp)
+        os.replace(tmp, dest)
+    except Exception:
+        shutil.copy2(src, dest)
 
 
 def main():
@@ -24,7 +49,7 @@ def main():
         stamp = datetime.datetime.utcfromtimestamp(mtime).strftime("%Y%m%dT%H%M%SZ")
         dest = os.path.join(args.evidence_dir, f"frontier-{stamp}.json")
         if not os.path.exists(dest):
-            shutil.copy2(args.frontier, dest)
+            copy_or_compact_frontier(args.frontier, dest)
 
     files = sorted(
         glob.glob(os.path.join(args.evidence_dir, "frontier-*.json")),
