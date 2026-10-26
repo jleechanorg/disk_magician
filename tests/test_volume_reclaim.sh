@@ -75,7 +75,7 @@ TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:below-trigger
 # The real C14 path removes one whole artifact, remeasures, and stops at the low-water target.
 : >"$STATUS_CALLS_FILE"
 TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-real-remove.out"
-[[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" ]]
+[[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -f "$TEST_ROOT/repo/build/younger/content" ]]
 [[ ! -s "$T/c14-real-remove.out" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["candidates"]["removed"]==1'
 # C14 ENOSPC must be typed through the real cleanup wrapper before ballast release.
@@ -142,7 +142,9 @@ python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python
 # restoration until later removals have made room. Recreate the earlier fixture
 # because the final-availability regression may have removed it.
 mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
-printf x >"$TEST_ROOT/repo/evidence/oldest/content" "$TEST_ROOT/repo/build/younger/content"
+printf x >"$TEST_ROOT/repo/evidence/oldest/content"
+printf x >"$TEST_ROOT/repo/build/younger/content"
+[[ -f "$TEST_ROOT/repo/evidence/oldest/content" && -f "$TEST_ROOT/repo/build/younger/content" ]]
 python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
 # The copied C14 fixture is test-only: production has no test hook or retry
 # bypass.
