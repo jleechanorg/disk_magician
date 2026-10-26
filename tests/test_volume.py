@@ -78,6 +78,106 @@ class LinuxScratchTest(VolumeTestBase):
         self.assertEqual(volume.linux_create_cmd("scratch", execute=True), 2)
         self.assertFalse((self.root / "scratch.ext4").exists())
 
+    def test_linux_scratch_create_makes_missing_image_parent_under_lock(self):
+        scratch = self.set_linux_image_config(1)
+        image = self.root / "new-parent" / "nested" / "scratch.ext4"
+        scratch["image_path"] = str(image)
+        document = json.loads(self.config.read_text())
+        document["volumes"]["classes"]["scratch"] = scratch
+        self.config.write_text(json.dumps(document))
+
+        commands = []
+
+        def fake_linux_command(args, timeout=30):
+            commands.append(args)
+            return "4f9f36b2-6896-46b3-b909-8bedf1a2273f" if args[0] == "blkid" else ""
+
+        with mock.patch.object(volume, "linux_command", side_effect=fake_linux_command):
+            self.assertEqual(volume.linux_create_cmd("scratch", execute=True), 0)
+        self.assertTrue(image.is_file())
+        self.assertEqual(image.stat().st_size, volume.GIB)
+        self.assertEqual(image.parent.stat().st_uid, os.geteuid())
+        mkfs_args = next(args for args in commands if len(args) > 1 and args[1] == "-F")
+        self.assertIn("ext4", mkfs_args)
+        self.assertEqual(volume.registry()["volumes"]["scratch"]["image_path"], str(image))
+
+    def test_linux_service_installer_refuses_mutable_source_checkout(self):
+        scratch = self.set_linux_image_config(200)
+        entry = {"state": "active", "image_path": scratch["image_path"],
+                 "mountpoint": scratch["mountpoint"], "quota_bytes": 200 * volume.GIB}
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}):
+            self.assertEqual(volume.linux_service_install_cmd("scratch"), 75)
+
+    def test_linux_mount_temporarily_opens_underlay_then_restores_read_only_mode(self):
+        scratch = self.set_linux_image_config(1)
+        image = pathlib.Path(scratch["image_path"])
+        with image.open("wb") as stream:
+            stream.truncate(volume.GIB)
+        mountpoint = pathlib.Path(scratch["mountpoint"])
+        mountpoint.mkdir(parents=True, mode=0o500)
+        mountpoint.chmod(0o500)
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+                 "quota_bytes": volume.GIB, "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        mount_reads = iter([None, ("fuse.ext4", str(image)), ("fuse.ext4", str(image))])
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]), \
+             mock.patch.object(volume, "linux_mount_record", side_effect=lambda _: next(mount_reads)), \
+             mock.patch.object(volume.subprocess, "Popen") as popen:
+            process = mock.Mock()
+            process.poll.return_value = None
+            popen.return_value = process
+            def launch(command, **kwargs):
+                self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o700)
+                self.assertNotIn("stdout", kwargs)
+                self.assertNotIn("stderr", kwargs)
+                self.assertNotIn(volume.subprocess.PIPE, kwargs.values())
+                self.assertNotIn("rw+", command)
+                return process
+            popen.side_effect = launch
+            self.assertEqual(volume.linux_mount_cmd("scratch"), 0)
+        self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o500)
+
+    def test_linux_mount_validation_failure_unmounts_only_its_image(self):
+        scratch = self.set_linux_image_config(1)
+        image = pathlib.Path(scratch["image_path"])
+        with image.open("wb") as stream:
+            stream.truncate(volume.GIB)
+        mountpoint = pathlib.Path(scratch["mountpoint"])
+        mountpoint.mkdir(parents=True, mode=0o500)
+        mountpoint.chmod(0o500)
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+                 "quota_bytes": volume.GIB, "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        mount_reads = iter([None, ("fuse.ext4", str(image)), ("fuse.ext4", str(image))])
+        process = mock.Mock()
+        process.poll.return_value = 0
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]), \
+             mock.patch.object(volume, "linux_mount_record", side_effect=lambda _: next(mount_reads)), \
+             mock.patch.object(volume, "linux_validate_mount", side_effect=ValueError("invalid UUID")), \
+             mock.patch.object(volume, "linux_command") as command, \
+             mock.patch.object(volume.subprocess, "Popen", return_value=process):
+            self.assertEqual(volume.linux_mount_cmd("scratch"), 75)
+        command.assert_called_once_with(["fusermount3", "-u", str(mountpoint)])
+        self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o500)
+
+    def test_linux_mount_failure_restores_underlay_mode(self):
+        scratch = self.set_linux_image_config(1)
+        image = pathlib.Path(scratch["image_path"])
+        image.write_bytes(b"image")
+        mountpoint = pathlib.Path(scratch["mountpoint"])
+        mountpoint.mkdir(parents=True, mode=0o500)
+        mountpoint.chmod(0o500)
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+                 "quota_bytes": volume.GIB, "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        process = mock.Mock()
+        process.poll.return_value = 1
+        with mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}), \
+             mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]), \
+             mock.patch.object(volume, "linux_mount_record", return_value=None), \
+             mock.patch.object(volume.subprocess, "Popen", return_value=process):
+            self.assertEqual(volume.linux_mount_cmd("scratch"), 75)
+        self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o500)
+
     def test_linux_underlay_mountpoint_must_not_be_writable(self):
         mountpoint = self.root / "underlay"
         mountpoint.mkdir(mode=0o500)

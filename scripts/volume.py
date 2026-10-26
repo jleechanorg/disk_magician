@@ -241,11 +241,14 @@ def fit_result(container: Container | None = None) -> dict[str, Any]:
     }
 
 
-def registry_paths() -> tuple[Path, Path]:
-    root = Path(os.environ.get(
+def state_root() -> Path:
+    return Path(os.environ.get(
         "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
     ))
-    directory = root / "volumes"
+
+
+def registry_paths() -> tuple[Path, Path]:
+    directory = state_root() / "volumes"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "registry.json", directory / "registry.lock"
 
@@ -609,20 +612,26 @@ def linux_paths(scratch: dict[str, Any]) -> tuple[Path, Path]:
     return image, mountpoint
 
 
-def linux_command(args: list[str], timeout: int | None = 30) -> str:
+def linux_command_env(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    command = list(args)
     env = os.environ.copy()
-    if args[0] == "fuse2fs":
+    if command[0] == "fuse2fs":
         settings = config()
         binary = settings.get("fuse2fs_bin")
         if isinstance(binary, str) and Path(binary).is_absolute():
-            args[0] = binary
+            command[0] = binary
         else:
-            args[0] = shutil.which("fuse2fs") or "fuse2fs"
+            command[0] = shutil.which("fuse2fs") or "fuse2fs"
         library_path = settings.get("fuse2fs_library_path")
         if isinstance(library_path, str) and library_path:
             if any(not Path(item).is_absolute() for item in library_path.split(":")):
                 raise ValueError("fuse2fs library paths must be absolute")
             env["LD_LIBRARY_PATH"] = library_path
+    return command, env
+
+
+def linux_command(args: list[str], timeout: int | None = 30) -> str:
+    args, env = linux_command_env(args)
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False, env=env)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "command failed: " + args[0])
@@ -667,7 +676,7 @@ def linux_validate_mount(settings: dict[str, Any], scratch: dict[str, Any], entr
         raise ValueError("Scratch volume identity or capacity mismatch")
     if image.stat().st_size != quota:
         raise ValueError("Scratch image size differs from configured capacity")
-    if linux_mount_record(mountpoint) != ("fuse2fs", str(image)):
+    if linux_mount_record(mountpoint) != ("fuse.ext4", str(image)):
         raise ValueError("Scratch mount identity mismatch")
     return entry["filesystem_uuid"]
 
@@ -682,6 +691,30 @@ def linux_create_cmd(name: str, execute: bool = False) -> int:
         quota = scratch["quota_gb"] * GIB
         if quota > 200 * GIB:
             return 2
+        reserve = (settings["swap_headroom_gb"] + settings["alarm_floor_gb"] + scratch["quota_gb"]) * GIB
+        if not execute:
+            if image.exists() or image.is_symlink():
+                return 75
+            if mountpoint.exists() and (mountpoint.is_symlink() or not mountpoint.is_dir()
+                                        or mountpoint.stat().st_uid != os.geteuid()
+                                        or any(mountpoint.iterdir())):
+                return 75
+            parent = image.parent
+            while not parent.exists() and parent != parent.parent:
+                parent = parent.parent
+            if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid not in {0, os.geteuid()}:
+                return 75
+            if shutil.disk_usage(parent).free < reserve:
+                return 2
+            print(json.dumps({"class": name, "fits": True, "quota_bytes": quota,
+                              "image_path": str(image), "mountpoint": str(mountpoint), "sparse": True}))
+            return 0
+        registry_file, lock = locked_registry()
+        data = registry()
+        if name in data["volumes"]:
+            return 75
+        # Recheck mutable filesystem and mountpoint preconditions while holding
+        # the registry lock used by every diskm creator.
         if image.exists() or image.is_symlink():
             return 75
         if mountpoint.exists() and (mountpoint.is_symlink() or not mountpoint.is_dir()
@@ -691,19 +724,12 @@ def linux_create_cmd(name: str, execute: bool = False) -> int:
         parent = image.parent
         while not parent.exists() and parent != parent.parent:
             parent = parent.parent
-        if parent.is_symlink() or parent.stat().st_uid not in {0, os.geteuid()}:
+        if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.geteuid():
             return 75
-        free = shutil.disk_usage(parent).free
-        reserve = (settings["swap_headroom_gb"] + settings["alarm_floor_gb"] + scratch["quota_gb"]) * GIB
-        if free < reserve:
+        if shutil.disk_usage(parent).free < reserve:
             return 2
-        if not execute:
-            print(json.dumps({"class": name, "fits": True, "quota_bytes": quota,
-                              "image_path": str(image), "mountpoint": str(mountpoint), "sparse": True}))
-            return 0
-        registry_file, lock = locked_registry()
-        data = registry()
-        if name in data["volumes"]:
+        image.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if image.parent.is_symlink() or image.parent.stat().st_uid != os.geteuid():
             return 75
         fd = os.open(image, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
         try:
@@ -730,6 +756,11 @@ def linux_create_cmd(name: str, execute: bool = False) -> int:
 
 
 def linux_mount_cmd(name: str, foreground: bool = False) -> int:
+    mount_fd = None
+    process = None
+    image = mountpoint = None
+    started = False
+    restored = False
     try:
         settings, scratch = cls(name)
         image, mountpoint = linux_paths(scratch)
@@ -746,16 +777,58 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
             return 75
         if entry.get("filesystem_uuid") != linux_fs_uuid(image) or image.stat().st_size != entry.get("quota_bytes"):
             return 75
-        args = ["fuse2fs", str(image), str(mountpoint), "-o", "rw+,noatime"]
+        # Keep an FD to the verified underlay so its permissions can be restored
+        # even after the mount obscures the path. fusermount requires a writable
+        # mountpoint during startup, so widen only for the bounded handshake.
+        mount_fd = os.open(mountpoint, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        underlay = os.fstat(mount_fd)
+        if underlay.st_uid != os.geteuid() or not stat.S_ISDIR(underlay.st_mode):
+            return 75
+        os.fchmod(mount_fd, 0o700)
+        args = ["fuse2fs", str(image), str(mountpoint), "-o", "noatime"]
         if foreground:
             args.append("-f")
-        linux_command(args, None if foreground else 30)
-        if foreground:
-            return 0
-        linux_validate_mount(settings, scratch, entry)
-        return 0
-    except Exception:
+        command, env = linux_command_env(args)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=env, close_fds=True)
+        started = True
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            mounted = linux_mount_record(mountpoint)
+            if mounted:
+                linux_validate_mount(settings, scratch, entry)
+                os.fchmod(mount_fd, 0o500)
+                restored = True
+                if foreground:
+                    return 0 if process.wait() == 0 else 75
+                return 0
+            if process.poll() is not None:
+                return 75
+            time.sleep(0.1)
         return 75
+    except Exception as error:
+        print("volume mount: " + str(error), file=sys.stderr)
+        return 75
+    finally:
+        if process is not None and process.poll() is None and not restored:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if started and not restored and image is not None and mountpoint is not None:
+            try:
+                mounted = linux_mount_record(mountpoint)
+                if mounted and mounted[1] == str(image):
+                    linux_command(["fusermount3", "-u", str(mountpoint)])
+            except Exception:
+                pass
+        if mount_fd is not None:
+            try:
+                if not restored:
+                    os.fchmod(mount_fd, 0o500)
+            finally:
+                os.close(mount_fd)
 
 
 def linux_status() -> int:
@@ -807,13 +880,17 @@ def linux_service_install_cmd(name: str) -> int:
         config_path = resolve_config.resolve()
         if not config_path:
             return 75
-        state_path, _ = registry_paths()
-        orchestrator = Path(__file__).resolve().parent.parent / "disk_magician.sh"
+        runtime_root = Path(__file__).resolve().parent.parent
+        # A service must be bound to the installed candidate package, never a
+        # mutable source checkout that can change beneath systemd.
+        if (runtime_root / ".git").exists():
+            return 75
+        orchestrator = runtime_root / "disk_magician.sh"
         if not orchestrator.is_file():
             return 75
         rendered = unit_template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(orchestrator)))
         rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
-        rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_path.parent)))
+        rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_root())))
         if "@" in rendered:
             return 75
         unit_dir = Path.home() / ".config/systemd/user"
