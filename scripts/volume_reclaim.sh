@@ -111,6 +111,9 @@ if [[ "$clean" == true ]]; then
  if (( ! measurement_error )) && [[ "$now_quota" -ne "$quota" ]]; then TOP_REASON=quota-changed; measurement_error=1; fi
  if (( ! measurement_error )) && [[ "$(reserve_available "$current" 2>/dev/null)" != 1 ]]; then TOP_REASON=ballast-restore-failed; BALLAST_RESTORE_FAILURES=1; fi
  if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
+ if (( ! measurement_error && now_used * 100 > quota * 80 )); then
+  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
+ fi
  if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
 fi
 outcome=success_noop

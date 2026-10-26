@@ -1,4 +1,6 @@
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -184,6 +186,29 @@ class LifecycleTest(VolumeTestBase):
         self.assertEqual(volume.path_cmd("scratch"), 0)
         self.assertEqual(volume.main(["verify-mount", str(self.mp)]), 0)
         self.assertEqual(volume.main(["verify-mount", str(self.root / "wrong")]), 75)
+
+    def test_path_fails_closed_for_malformed_existing_registry_entries(self):
+        registry_path, _ = volume.registry_paths()
+        for entry in (None, [], {"state": "unknown"}, {"state": None}):
+            with self.subTest(entry=entry):
+                registry_path.write_text(json.dumps({
+                    "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+                    "volumes": {"scratch": entry},
+                }))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(volume.path_cmd("scratch"), 75)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_create_fails_closed_for_malformed_existing_registry_entry(self):
+        self.make_fit()
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {"scratch": []},
+        }))
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 75)
+        self.assertFalse(self.calls_file.exists())
 
     def test_create_does_not_allocate_when_free_below_threshold(self):
         self.make_fit()

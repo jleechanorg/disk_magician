@@ -41,6 +41,28 @@ admit_class_for() {
     esac
 }
 
+# admit_is_configured_volume_path <abs-path> — true when the path resolves
+# beneath the configured quota-volume mountpoint. The volume configuration is
+# the authority; this deliberately does not infer a mount from a fixed path.
+admit_is_configured_volume_path() {
+    python3 - "$_ADMIT_CALLER_DIR" "$1" <<'PY'
+import json, os, pathlib, sys
+try:
+    sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
+    import resolve_config
+    config_path = resolve_config.resolve()
+    if not config_path:
+        raise ValueError("configuration unavailable")
+    data = json.loads(pathlib.Path(config_path).read_text())
+    mount = data["volumes"]["classes"]["scratch"]["mountpoint"]
+    if not isinstance(mount, str) or not pathlib.Path(mount).is_absolute():
+        raise ValueError("invalid quota mountpoint")
+    pathlib.Path(os.path.realpath(sys.argv[2])).relative_to(pathlib.Path(os.path.realpath(os.path.expanduser(mount))))
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY
+}
+
 admit_gate() {
     local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd output line
     ADMIT_ID=""

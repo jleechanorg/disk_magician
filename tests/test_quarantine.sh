@@ -366,6 +366,21 @@ OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING
 check 'oversized intent: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
 check 'oversized intent: artifact remains, no quarantine dir or index entry' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
 
+# A serialization failure is classified before the index write and leaves no quarantine state.
+prepare_inputs
+SERIALIZE_FAIL="$TMP/serialize-fail.py"
+python3 - "$ROOT/scripts/quarantine_rename.py" "$SERIALIZE_FAIL" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+needle = 'intent_text = json.dumps(rec)'
+assert source.count(needle) == 1
+Path(sys.argv[2]).write_text(source.replace(needle, 'raise TypeError("injected serialization failure")'))
+PY
+OUT="$(python3 "$SERIALIZE_FAIL" phase1 "$A" "$INV" "$BINDING")"
+check 'intent serialization failure: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
+check 'intent serialization failure: original and metadata remain untouched' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+
 # ENOSPC on the intent sidecar aborts before the rename and exposes typed diagnostics only to a secure caller file.
 DIAG="$TMP/c14-diagnostic.json"; : >"$DIAG"; chmod 600 "$DIAG"
 fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28 DISK_MAGICIAN_C14_DIAGNOSTIC_OUT="$DIAG"

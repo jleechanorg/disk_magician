@@ -81,7 +81,8 @@ OUT="$("$ROOT/scripts/volume_reclaim.sh")"
 [[ "$(printf '%s\n' "$OUT" | grep -n 'oldest' | cut -d: -f1)" -lt "$(printf '%s\n' "$OUT" | grep -n 'younger' | cut -d: -f1)" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["candidates"]["aged_scanned"]==2'
 touch "$TEST_ROOT/repo/evidence/oldest/content" "$TEST_ROOT/repo/build/younger/content" "$TEST_ROOT/repo/evidence/fresh/content"
-DISK_MAGICIAN_TRIGGER=zero-aged "$ROOT/scripts/volume_reclaim.sh" --clean >/dev/null
+DISK_MAGICIAN_TRIGGER=zero-aged "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/zero-aged.out"
+grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=1000 target_pct=80' "$T/zero-aged.out"
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==0 and not r["postcondition"]["target_reached"]'
 python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
 TEST_STATUS_RC=1 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'would_check:'

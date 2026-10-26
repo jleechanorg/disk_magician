@@ -14,7 +14,7 @@ else
 fi
 ws="${GITHUB_WORKSPACE:-$PWD}"
 cls="$(admit_class_for "$ws")"; cls="${cls:-colima}"
-if [[ "$cls" != colima ]]; then
+if [[ "$cls" != colima ]] || admit_is_configured_volume_path "$ws"; then
     source "$_CI_DIR/lib/worktree_lease.sh"
     owner="$(lease_resolve_runner_worker "$$")" || {
         echo "admission_degraded:ci_owner_identity" >&2

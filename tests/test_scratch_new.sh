@@ -132,6 +132,28 @@ assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
 [[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
 assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
 
+echo "== malformed scratch registry: evidence/build fail closed without allocation =="
+cat > "$T/volume-config.json" <<EOF
+{"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":"$T/Volumes/diskm-scratch"}}}}
+EOF
+mkdir -p "$T/state/volumes"
+cat > "$T/state/volumes/registry.json" <<'EOF'
+{"schema_version":1,"volumes":{"scratch":[]}}
+EOF
+export DISK_MAGICIAN_CONFIG="$T/volume-config.json"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "malformed-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    ERR="$(cat "$T/err")"
+    assert_eq "$RC" 75 "$kind malformed registry rc"
+    assert_eq "$OUT" "" "$kind malformed registry emits no path"
+    assert_contains "$ERR" "scratch volume unavailable" "$kind failure diagnosed"
+    assert_eq "$(admits)" "$before" "$kind failure never admitted"
+    [[ "$(find "$T/tmp/myrepo/$kind" -mindepth 1 -maxdepth 1 -name "malformed-$kind-*" 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "$kind failure created no fallback path" || bad "$kind failure created fallback path"
+done
+[[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "malformed registry created no volume allocation" || bad "malformed registry volume allocation exists"
+mv "$T/state/volumes/registry.json" "$T/state/volumes/malformed-registry.json"
+
 echo "== real diskm admit (observe, fake df) admits and logs one event =="
 cat > "$T/bin/df" <<'EOF'
 #!/usr/bin/env bash

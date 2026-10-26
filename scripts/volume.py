@@ -422,9 +422,16 @@ def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any
 def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[str, Any], dict[str, Any], Volume]:
     settings, scratch = cls(name)
     entries = registry()["volumes"]
-    entry = entries.get(name)
-    if not isinstance(entry, dict) or entry.get("state") not in allowed_states:
+    if name not in entries:
         raise ValueError("volume is not registered in an eligible state")
+    entry = entries.get(name)
+    if not isinstance(entry, dict):
+        raise ValueError("invalid volume registry entry")
+    state = entry.get("state")
+    if state == "retired" and "retired" not in allowed_states:
+        raise ValueError("volume is retired")
+    if state not in allowed_states:
+        raise ValueError("invalid volume registry state")
     container = load_container()
     volume = validate_entry(container, settings, entry)
     return container, settings, entry, volume
@@ -442,7 +449,10 @@ def path_cmd(name: str, for_reclaim: bool = False) -> int:
         elif not ballast_ok(mountpoint):
             return 75
     except ValueError as error:
-        if "not registered" in str(error):
+        if str(error) in {
+            "volume is not registered in an eligible state",
+            "volume is retired",
+        }:
             return 3
         return 75
     except Exception:
@@ -518,7 +528,9 @@ def create_cmd(name: str, execute: bool = False) -> int:
         try:
             current_registry = registry()
             existing = current_registry["volumes"].get(name)
-            if isinstance(existing, dict):
+            if name in current_registry["volumes"]:
+                if not isinstance(existing, dict):
+                    return 75
                 if not execute:
                     return 2
                 return recover_creation(name, settings, scratch, registry_file,

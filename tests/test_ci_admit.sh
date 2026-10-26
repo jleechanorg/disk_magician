@@ -85,6 +85,42 @@ for ws in /private/tmp/ezgha-job/ws /tmp/ezgha-job/ws; do
 done
 echo "== real CI hook creates a worker lease, preserves prior owners, and refuses unknown ancestry =="
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+cat >"$T/quota-config.json" <<'EOF'
+{"volumes":{"classes":{"scratch":{"mountpoint":"/quota-mount"}}}}
+EOF
+export DISK_MAGICIAN_CONFIG="$T/quota-config.json"
+volume_ws="/quota-mount/aged-output"
+_contract_case ci_volume "0" "" "GITHUB_WORKSPACE=$volume_ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "0/1" "quota-volume workspace remains admitted once"
+grep -q -- "--class colima" "$CONTRACT_DIR/admit.log" && ok "quota volume keeps existing colima admission class" || bad "volume class: $(cat "$CONTRACT_DIR/admit.log")"
+volume_lease="$(lease_path_for "$volume_ws")"
+python3 - "$volume_lease" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["producer"]=="ci-admit"
+assert any(o.get("pid")==900 and o.get("comm")=="Runner.Worker" for o in d["owners"])
+PY
+[[ $? -eq 0 ]] && ok "configured quota-volume workspace receives Runner.Worker lease before C14 cleanup" || bad "quota-volume worker owner missing"
+assert_eq "$(lease_owner_state "$volume_lease")" "alive" "lease reports live Runner.Worker owner"
+_contract_case ci_volume_unknown "0" "" "CI_TEST_WORKER_DEAD=1 GITHUB_WORKSPACE=$volume_ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "75/0" "quota-volume workspace fails closed for unknown worker"
+cat >"$T/quota-config-tmp.json" <<'EOF'
+{"volumes":{"classes":{"scratch":{"mountpoint":"/tmp/quota-mount"}}}}
+EOF
+export DISK_MAGICIAN_CONFIG="$T/quota-config-tmp.json"
+tmp_volume_ws="/tmp/quota-mount/aged-output"
+_contract_case ci_volume_tmp "0" "" "GITHUB_WORKSPACE=$tmp_volume_ws bash '$CI'"
+assert_eq "$C_RC/$C_ADMITS" "0/1" "quota volume under /tmp retains tmp admission class"
+grep -q -- "--class tmp_containers" "$CONTRACT_DIR/admit.log" && ok "configured /tmp volume uses existing tmp class" || bad "tmp volume class: $(cat "$CONTRACT_DIR/admit.log")"
+tmp_volume_lease="$(lease_path_for "$tmp_volume_ws")"
+python3 - "$tmp_volume_lease" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert any(o.get("pid")==900 and o.get("comm")=="Runner.Worker" for o in d["owners"])
+PY
+[[ $? -eq 0 ]] && ok "configured /tmp quota-volume workspace also receives worker lease" || bad "tmp volume worker owner missing"
+export DISK_MAGICIAN_CONFIG="$T/quota-config.json"
+
 ci_ws="$T/ci-workspace"; mkdir -p "$ci_ws"
 _contract_case ci_new "0" "" "GITHUB_WORKSPACE=$ci_ws bash '$CI'"
 assert_eq "$C_RC/$C_ADMITS" "0/1" "CI hook acquires owner before admission"
