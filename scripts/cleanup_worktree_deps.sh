@@ -58,13 +58,18 @@ floor=$((10#$floor))
 MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
 [[ "$MIN_AGE_DAYS" -lt "$floor" ]] && MIN_AGE_DAYS="$floor"
 
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+[[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]] || AUTO_APPROVE_AGE_DAYS=90
+AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
 if [[ "$DRY_RUN" == true ]]; then
   echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${MIN_AGE_DAYS}d ==="
 else
   echo "=== WORKTREE DEPS CLEANUP — floor ${MIN_AGE_DAYS}d ==="
   if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
-    echo "Refusing to delete: set WORKTREE_APPROVED=1."
-    exit 0
+    echo "Refusing to delete: set WORKTREE_APPROVED=1 (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
+    [[ "$MIN_AGE_DAYS" -lt "$AUTO_APPROVE_AGE_DAYS" ]] && MIN_AGE_DAYS="$AUTO_APPROVE_AGE_DAYS"
   fi
 fi
 

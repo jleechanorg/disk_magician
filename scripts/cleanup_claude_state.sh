@@ -347,13 +347,20 @@ if [[ -n "$CODEX_DIR_REAL" ]] && { [[ "$STATE_ROOT_REAL" == "$CODEX_DIR_REAL" ]]
   exit 1
 fi
 
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+if [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+else
+  AUTO_APPROVE_AGE_DAYS=90
+fi
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
 if [[ "$DRY_RUN" == true ]]; then
   echo "=== CLAUDE STATE CLEANUP (DRY-RUN) === root=$STATE_ROOT_REAL min-age=${MIN_AGE_DAYS}d"
 else
   echo "=== CLAUDE STATE CLEANUP === root=$STATE_ROOT_REAL min-age=${MIN_AGE_DAYS}d"
   if [[ "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
-    echo "Refusing to delete: set CLAUDE_STATE_APPROVED=1 after explicit approval."
-    exit 0
+    echo "Refusing to delete: set CLAUDE_STATE_APPROVED=1 after explicit approval (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
   fi
 fi
 
@@ -436,6 +443,9 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
 
   if [[ "$DRY_RUN" == true ]]; then
     echo "ELIGIBLE $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
+  elif [[ "${CLAUDE_STATE_APPROVED:-0}" != "1" ]] && (( age_days < AUTO_APPROVE_AGE_DAYS )); then
+    echo "PRESERVE $candidate  (age ${age_days}d < ${AUTO_APPROVE_AGE_DAYS}d auto-approve floor; set CLAUDE_STATE_APPROVED=1)"
+    PRESERVED_YOUNG_COUNT=$((PRESERVED_YOUNG_COUNT + 1))
   else
     echo "DELETING $candidate  (age ${age_days}d, $(fmt_kb "$size_kb_val"))"
     if rm -rf -- "$candidate" && [[ ! -e "$candidate" ]]; then

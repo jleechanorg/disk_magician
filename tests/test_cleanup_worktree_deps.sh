@@ -127,4 +127,17 @@ OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WO
 [[ ! -e "$T/roots/nested/target" && -f "$T/roots/nested/Cargo.toml" ]] && ok "root target removed beside its Cargo.toml" || bad "root target not removed"
 [[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
 
+# Candidates >= 90d (>3 months) are stripped by --clean without WORKTREE_APPROVED=1, while < 90d are preserved.
+mkdir -p "$T/roots90"
+git -C "$T/base" worktree add -q -b "b-ancient90" "$T/roots90/ancient"
+git -C "$T/base" worktree add -q -b "b-mid30" "$T/roots90/mid"
+mkdir -p "$T/roots90/ancient/node_modules/x" "$T/roots90/mid/node_modules/x"
+echo d > "$T/roots90/ancient/node_modules/x/f"
+echo d > "$T/roots90/mid/node_modules/x/f"
+/usr/bin/find "$T/roots90/ancient" -exec touch -h -t "$(date -v-100d +%Y%m%d%H%M)" {} + 2>/dev/null
+/usr/bin/find "$T/roots90/mid" -exec touch -h -t "$(date -v-30d +%Y%m%d%H%M)" {} + 2>/dev/null
+OUT90="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots90" bash "$SCRIPT" --clean 2>&1)"
+[[ ! -e "$T/roots90/ancient/node_modules" ]] && ok ">=90d worktree node_modules stripped without WORKTREE_APPROVED=1" || bad ">=90d worktree node_modules not stripped"
+[[ -d "$T/roots90/mid/node_modules" ]] && ok "<90d worktree node_modules preserved without WORKTREE_APPROVED=1" || bad "<90d worktree node_modules stripped without approval"
+
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]

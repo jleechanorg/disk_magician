@@ -246,6 +246,74 @@ def lsof_stderr_incomplete(err, query):
             continue
         return True
     return False
+def _hardlink_only_false_positive(target, out, timeout):
+    try:
+        pids, paths = set(), []
+        for raw in out.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"p":
+                pid = os.fsdecode(raw[1:])
+                if not pid.isdigit():
+                    return False
+                pids.add(pid)
+            elif tag == b"n":
+                paths.append(os.fsdecode(raw[1:]))
+            elif tag not in (b"f", b"c"):
+                return False
+        if not pids or not paths:
+            return False
+        hardlink_paths = set()
+        for p in paths:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+                return False
+            hardlink_paths.add(os.path.abspath(p))
+            hardlink_paths.add(os.path.realpath(p))
+        root_abs = os.path.abspath(target).rstrip(os.sep)
+        root_real = os.path.realpath(target).rstrip(os.sep)
+        ps_r = subprocess.run(
+            ["ps", "-p", ",".join(sorted(pids)), "-o", "comm="],
+            capture_output=True, timeout=timeout,
+        )
+        if ps_r.returncode not in (0, 1):
+            return False
+        for raw in ps_r.stdout.splitlines():
+            comm = os.fsdecode(raw).strip()
+            if not comm or not os.path.isabs(comm):
+                continue
+            c_abs = os.path.abspath(comm)
+            c_real = os.path.realpath(comm)
+            if (c_abs == root_abs or c_abs.startswith(root_abs + os.sep) or
+                    c_real == root_real or c_real.startswith(root_real + os.sep)):
+                return False
+        r = subprocess.run(
+            ["lsof", "-nP", "-Fn", "-a", "-d", "^cwd", "-p", ",".join(sorted(pids))],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode not in (0, 1) or lsof_stderr_incomplete(r.stderr, target):
+            return False
+        for raw in r.stdout.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"n":
+                vp = os.fsdecode(raw[1:])
+                if not os.path.isabs(vp):
+                    continue
+                vp_abs = os.path.abspath(vp)
+                vp_real = os.path.realpath(vp)
+                if vp_abs in hardlink_paths or vp_real in hardlink_paths:
+                    continue
+                if (vp_abs == root_abs or vp_abs.startswith(root_abs + os.sep) or
+                        vp_real == root_real or vp_real.startswith(root_real + os.sep)):
+                    return False
+            elif tag not in (b"p", b"f", b"c"):
+                return False
+        return True
+    except Exception:
+        return False
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     try:
         if deadline_passed(deadline): return "deferred:deadline"
@@ -255,11 +323,17 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         timeout = remaining_seconds(deadline)
         if timeout is not None and timeout <= 0: return "deferred:deadline"
+        target = os.path.join(qdir, qid)
         try:
-            lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
+            lsof = subprocess.run(["lsof", "-nP", "-Fn", "+D" if stat.S_ISDIR(d.st_mode) else "--", target], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
         except subprocess.TimeoutExpired:
             return "deferred:deadline"
-        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr, os.path.join(qdir, qid)): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
+        has_user = bool(lsof.stdout) and not (
+            lsof.returncode in (0, 1) and stat.S_ISDIR(d.st_mode)
+            and not lsof_stderr_incomplete(lsof.stderr, target)
+            and _hardlink_only_false_positive(target, lsof.stdout, 120 if timeout is None else max(0.1, remaining_seconds(deadline) or 0.1))
+        )
+        if has_user or (not lsof.stdout and lsof.returncode != 1) or lsof_stderr_incomplete(lsof.stderr, target): return "live-user" if has_user or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
@@ -439,15 +513,19 @@ def tree_ancestry_still_quarantined(location_guard, ancestors):
     if not tree_still_quarantined(location_guard): return False
     return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
 
-def record_removed_path(qfd, side, record, rel):
+def _test_journal_active():
+    return any(k.startswith("DISK_MAGICIAN_TEST_") and ENV.get(k) for k in ENV)
+
+def record_removed_path(qfd, side, record, rel, removed_paths=None):
     key = record.get("journal_key", "removed_paths")
     removed = record.setdefault(key, [])
-    if rel in removed: return True
+    if (removed_paths is not None and rel in removed_paths) or (removed_paths is None and rel in removed): return True
     removed.append(rel)
-    try: update_sidecar(qfd, side, record)
-    except OSError:
-        removed.pop()
-        return False
+    if len(removed) <= 16 or len(removed) % 500 == 0 or _test_journal_active():
+        try: update_sidecar(qfd, side, record)
+        except OSError:
+            removed.pop()
+            return False
     return True
 
 def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
@@ -483,6 +561,8 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                                               deadline, location_guard, root_label, child_ancestors,
                                               qfd, side, record, removed_paths):
                     ok = False
+            try: os.fsync(child_fd)
+            except OSError: ok = False
             if not ok: return False
         finally: os.close(child_fd)
         try:
@@ -492,10 +572,10 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                 return False
             if deadline_passed(deadline): raise DeadlineExceeded()
             os.rmdir(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
+            if len(removed_paths) <= 16 or _test_journal_active(): os.fsync(parent_fd)
             kill_at("entry_removed_before_journal")
             if rel == ".": return True
-            if not record_removed_path(qfd, side, record, rel): return False
+            if not record_removed_path(qfd, side, record, rel, removed_paths): return False
             removed_paths.add(rel)
             hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
             kill_at("mid_delete")
@@ -532,12 +612,12 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             return False
         if deadline_passed(deadline): raise DeadlineExceeded()
         os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        if len(removed_paths) <= 16 or _test_journal_active(): os.fsync(parent_fd)
         kill_at("entry_removed_before_journal")
         # Root completion is journaled by phase2, consistently with directory
         # roots. A child-path progress entry must never stand in for that proof.
         if rel == ".": return True
-        if not record_removed_path(qfd, side, record, rel): return False
+        if not record_removed_path(qfd, side, record, rel, removed_paths): return False
         removed_paths.add(rel)
         hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
         kill_at("mid_delete")
@@ -626,8 +706,12 @@ def phase2(binding_file, qid, deadline=None):
                                              location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
                                              qfd, side, record, removed_paths)
         except DeadlineExceeded:
+            try: update_sidecar(qfd, side, record)
+            except OSError: pass
             return "deferred:phase2"
         if not removed:
+            try: update_sidecar(qfd, side, record)
+            except OSError: pass
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"

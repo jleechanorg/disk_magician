@@ -508,7 +508,7 @@ EOF
 KXZ_ROOTS="$KXZ_HOME/.worktrees,$KXZ_HOME/ao/data/worktrees"
 
 # Start a background process with cwd inside LIVE_WT
-(cd "$LIVE_WT" && sleep 30) &
+(cd "$LIVE_WT" && sleep 300) &
 LIVE_PID=$!
 
 OUT11_DRY=$(env -i HOME="$KXZ_HOME" PATH="$TEST_PATH" \
@@ -621,6 +621,37 @@ if [[ -d "$NON_AO_WT/.venv" ]]; then
   record_pass "unreadable AO config fails closed and preserves .venv"
 else
   record_fail "unreadable AO config fails closed and preserves .venv" "removed .venv despite unreadable AO config"
+fi
+
+echo
+echo "=== Test 12: >=90d (>3 months) worktree venvs auto-approved without WORKTREE_APPROVED=1 while <90d preserved ==="
+AUTO90_ROOT="$TMP_ROOT/auto90_roots"
+mkdir -p "$AUTO90_ROOT"
+WT_100D="$AUTO90_ROOT/wt-100d"
+WT_30D="$AUTO90_ROOT/wt-30d"
+for wt in "$WT_100D" "$WT_30D"; do
+  git -C "$KXZ_BASE" -c user.name=t -c user.email=t@t worktree add -q -b "auto90-$(basename "$wt")" "$wt"
+  git -C "$wt" -c user.name=t -c user.email=t@t push -q -u origin "auto90-$(basename "$wt")"
+  mkdir -p "$wt/.venv"
+done
+for p in "$WT_100D/README.md" "$WT_100D/.git" "$WT_100D/.venv"; do age_path_days_ago "$p" 100; done
+for p in "$WT_30D/README.md" "$WT_30D/.git" "$WT_30D/.venv"; do age_path_days_ago "$p" 30; done
+
+OUT12=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
+  bash "$TARGET_SCRIPT" --roots "$AUTO90_ROOT" --clean 2>&1)
+RC12=$?
+if [[ "$RC12" -eq 0 ]]; then record_pass "auto-approved >=90d clean exits 0"; else record_fail "auto-approved >=90d clean exits 0" "rc=$RC12"; fi
+if [[ ! -d "$WT_100D/.venv" ]]; then
+  record_pass ">=90d worktree .venv stripped without WORKTREE_APPROVED=1"
+else
+  record_fail ">=90d worktree .venv stripped without WORKTREE_APPROVED=1" "still present at $WT_100D/.venv"
+fi
+if [[ -d "$WT_30D/.venv" ]]; then
+  record_pass "<90d worktree .venv preserved when WORKTREE_APPROVED=1 unset"
+else
+  record_fail "<90d worktree .venv preserved when WORKTREE_APPROVED=1 unset" "30d .venv was stripped without WORKTREE_APPROVED=1"
 fi
 
 echo

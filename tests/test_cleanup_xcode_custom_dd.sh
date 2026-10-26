@@ -56,9 +56,12 @@ mkdir -p "$HOME/dd_idle/Build/Products" "$HOME/dd_idle/Index.noindex" \
     "$HOME/dd_notdd" "$HOME/proj_dd_nested/DerivedData/Build" "$HOME/proj_dd_nested/DerivedData/Logs.noindex" \
     "$HOME/real_dd/Build" "$HOME/real_dd/Index.noindex" "$HOME/dd_plist" "$HOME/dd_buildonly/Build"
 mkdir -p "$TMPROOT/ptmp/pr7/dd/Build" "$TMPROOT/ptmp/pr7/dd/Index.noindex" \
+    "$TMPROOT/ptmp/worldai-ios-release-123/DerivedData/Build" "$TMPROOT/ptmp/worldai-ios-release-123/DerivedData/ModuleCache.noindex" \
     "$TMPROOT/ptmp/worldai_frontend/build-x/Build" "$TMPROOT/ptmp/worldai_frontend/build-x/ModuleCache.noindex" \
     "$TMPROOT/ptmp/worldai_frontend/evidence" "$TMPROOT/utmp/dd_t/Build" "$TMPROOT/utmp/dd_t/Index.noindex"
 printf 'o' >"$TMPROOT/ptmp/pr7/dd/Build/a.o"
+printf 'o' >"$TMPROOT/ptmp/worldai-ios-release-123/DerivedData/Build/a.o"
+printf 'r' >"$TMPROOT/ptmp/worldai-ios-release-123/release.json"
 printf 'o' >"$TMPROOT/ptmp/worldai_frontend/build-x/Build/a.o"
 printf 'shot' >"$TMPROOT/ptmp/worldai_frontend/evidence/shot.png"
 printf 'o' >"$TMPROOT/utmp/dd_t/Build/a.o"
@@ -109,6 +112,8 @@ out="$(run --clean)"
 [[ ! -e "$HOME/dd_plist" ]] && ok "dir whose info.plist names a WorkspacePath removed" || bad "dd_plist still present"
 [[ -d "$HOME/dd_buildonly" ]] && ok "Build/ without *.noindex kept" || bad "dd_buildonly removed"
 [[ ! -e "$TMPROOT/ptmp/pr7/dd" ]] && ok "pr*/dd under the private tmp root removed" || bad "ptmp/pr7/dd still present"
+[[ ! -e "$TMPROOT/ptmp/worldai-ios-release-123/DerivedData" && -f "$TMPROOT/ptmp/worldai-ios-release-123/release.json" ]] \
+    && ok "worldai-ios-release-*/DerivedData under private tmp removed while parent kept" || bad "worldai-ios-release-123/DerivedData handling wrong"
 [[ ! -e "$TMPROOT/ptmp/worldai_frontend/build-x" ]] && ok "worldai_frontend build dir removed" || bad "worldai_frontend/build-x still present"
 [[ -f "$TMPROOT/ptmp/worldai_frontend/evidence/shot.png" ]] && ok "non-DerivedData worldai_frontend dir kept" || bad "worldai_frontend/evidence removed"
 [[ ! -e "$TMPROOT/utmp/dd_t" ]] && ok "dd_* under the per-user temp root removed" || bad "utmp/dd_t still present"

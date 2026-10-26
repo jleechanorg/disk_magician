@@ -238,7 +238,7 @@ fstrim_via_active_lima_mux() {
   ssh -S "$mux_socket" -F "$ssh_config" -O check lima-colima >/dev/null 2>&1 || return 1
 
   log "+ fstrim via active Lima SSH control master (Colima CLI control plane unavailable)"
-  bounded "$TRIM_TIMEOUT_SEC" ssh -S "$mux_socket" -F "$ssh_config" lima-colima sudo fstrim -av
+  bounded "$TRIM_TIMEOUT_SEC" ssh -S "$mux_socket" -F "$ssh_config" lima-colima sudo fstrim -av </dev/null
 }
 
 fstrim_colima_disk() {
@@ -248,7 +248,7 @@ fstrim_colima_disk() {
   fi
 
   log "+ colima ssh -- sudo fstrim -av (compact VM sparse disk)"
-  if bounded "$TRIM_TIMEOUT_SEC" colima ssh -- sudo fstrim -av 2>/dev/null; then
+  if bounded "$TRIM_TIMEOUT_SEC" colima ssh -- sudo fstrim -av </dev/null 2>/dev/null; then
     return 0
   fi
   fstrim_via_active_lima_mux

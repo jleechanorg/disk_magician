@@ -431,17 +431,23 @@ acquire_cleanup_venvs_lock() {
   return 1
 }
 
-# Gate: refuse --clean without the explicit approval token, matching the
-# repo worktree-safety rule (which guards against accidental mass deletion).
+# Gate: candidates >= 90d (>3 months) are auto-approved for --clean without
+# WORKTREE_APPROVED=1; candidates < 90d still require WORKTREE_APPROVED=1.
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+if [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+else
+  AUTO_APPROVE_AGE_DAYS=90
+fi
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
+UNAPPROVED_CLEAN=false
+SKIPPED_UNAPPROVED_YOUNG=0
+TOTAL_BAK_PURGED=0
 if [[ "$DRY_RUN" == false ]]; then
   if [[ "${WORKTREE_APPROVED:-}" != "1" ]]; then
-    echo "ERROR: --clean requires WORKTREE_APPROVED=1 in the environment." >&2
-    echo "       This script strips files inside Git worktrees, which the" >&2
-    echo "       repo CLAUDE.md flags as requiring explicit approval." >&2
-    echo "" >&2
-    echo "Re-run as:" >&2
-    echo "  WORKTREE_APPROVED=1 $0 --clean" >&2
-    exit 3
+    UNAPPROVED_CLEAN=true
+    echo "WARNING: --clean requires WORKTREE_APPROVED=1 in the environment for worktrees < ${AUTO_APPROVE_AGE_DAYS}d (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)." >&2
   fi
 fi
 
@@ -637,6 +643,9 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
       TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
       STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+    elif [[ "$UNAPPROVED_CLEAN" == true ]] && (( age_days < AUTO_APPROVE_AGE_DAYS )); then
+      SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+      log "  skip (parent worktree ${age_days}d < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $venv_path"
     else
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
@@ -722,6 +731,9 @@ purge_bak_dirs() {
         log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
         bak_freed_kb=$(( bak_freed_kb + bak_kb ))
         bak_count=$(( bak_count + 1 ))
+      elif [[ "$UNAPPROVED_CLEAN" == true ]] && worktree_is_recently_active "$parent" "$AUTO_APPROVE_AGE_DAYS"; then
+        SKIPPED_UNAPPROVED_YOUNG=$(( SKIPPED_UNAPPROVED_YOUNG + 1 ))
+        log "  skip (parent worktree < ${AUTO_APPROVE_AGE_DAYS}d requires WORKTREE_APPROVED=1): $bak_path"
       else
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
@@ -729,6 +741,7 @@ purge_bak_dirs() {
         elif c14_remove "$bak_path" --kind rebuildable; then
           bak_freed_kb=$(( bak_freed_kb + bak_kb ))
           bak_count=$(( bak_count + 1 ))
+          TOTAL_BAK_PURGED=$(( TOTAL_BAK_PURGED + 1 ))
         else
           log "    Preserved (C14 kept) $bak_path"
         fi
@@ -751,4 +764,8 @@ purge_bak_dirs() {
 
 if [[ -n "$PURGE_BAK_DAYS" ]]; then
   purge_bak_dirs "$PURGE_BAK_DAYS"
+fi
+
+if [[ "$UNAPPROVED_CLEAN" == true && "$STRIPPED_COUNT" -eq 0 && "$TOTAL_BAK_PURGED" -eq 0 && "$SKIPPED_UNAPPROVED_YOUNG" -gt 0 ]]; then
+  exit 3
 fi

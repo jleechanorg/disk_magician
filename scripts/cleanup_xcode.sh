@@ -196,6 +196,7 @@ clean_custom_derived_data() {
   utmp="$(scratch_roots_get_user_tmp)"
   for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
       ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
+      "$ptmp"/worldai-ios-* \
       "$ptmp"/worldai_frontend/* "$ptmp"/worldai_frontend/*/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
       ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
