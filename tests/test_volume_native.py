@@ -27,6 +27,13 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         self.state = self.root / "state"
         self.config = self.root / "config.json"
         self.fstab = self.root / "etc-fstab"
+        self.runtime = self.root / "runtime"
+        (self.runtime / "scripts").mkdir(mode=0o700, parents=True)
+        (self.runtime / "systemd").mkdir(mode=0o700)
+        (self.runtime / "disk_magician.sh").write_text("#!/bin/sh\\n")
+        source_template = Path(volume.__file__).resolve().parent.parent / "systemd/diskm-scratch.service.in"
+        (self.runtime / "systemd/diskm-scratch.service.in").write_bytes(source_template.read_bytes())
+        self.runtime_script = self.runtime / "scripts/volume.py"
         self.mountpoint.mkdir(mode=0o700)
         self.state.mkdir(mode=0o700)
         self.image.write_bytes(b"fixture")
@@ -84,6 +91,8 @@ class NativeFstabPublicCliTest(unittest.TestCase):
             mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
             mock.patch.object(volume, "linux_fstab_lock_path", return_value=self.root / "fstab.lock"),
             mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
         ):
             self.assertEqual(volume.main(["fstab", "preview", *base]), 0)
             self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
@@ -94,6 +103,24 @@ class NativeFstabPublicCliTest(unittest.TestCase):
                 self.assertIn(b"ext4 loop,user,noauto,nosuid,nodev,noatime,exec 0 0", installed)
                 self.assertEqual(volume.main(["fstab", "remove", *base, "--execute"]), 0)
             self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+
+    def test_fstab_install_reenters_root_only_after_allowlist_validation(self):
+        runtime = self.root / "installed"
+        (runtime / "scripts").mkdir(mode=0o700, parents=True)
+        (runtime / "disk_magician.sh").write_text("#!/bin/sh\\n")
+        script = runtime / "scripts/volume.py"
+        base = ["scratch", "--config", str(self.config), "--state-dir", str(self.state),
+                "--user-uid", str(os.getuid()), "--fixture-root", str(self.root), "--execute"]
+        with (
+            mock.patch.object(volume.sys, "platform", "linux"),
+            mock.patch.object(volume, "__file__", str(script)),
+            mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
+            mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="ok\\n", stderr="")) as run,
+        ):
+            self.assertEqual(volume.main(["fstab", "install", *base]), 0)
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+        self.assertEqual(run.call_args.args[0][:4], ["sudo", "-n", "bash", str(runtime / "disk_magician.sh")])
 
     def test_remove_refuses_live_loop_mapping_and_writer(self):
         base = ["scratch", "--config", str(self.config), "--state-dir", str(self.state),
@@ -112,6 +139,7 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         ):
             self.assertEqual(volume.main(["fstab", "remove", *base, "--execute"]), 75)
         self.assertEqual(self.fstab.read_bytes(), self.original_fstab + block)
+
         with (
             mock.patch.object(volume.sys, "platform", "linux"),
             mock.patch.object(volume, "linux_fstab_path", return_value=self.fstab),
@@ -123,6 +151,11 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         ):
             self.assertEqual(volume.main(["fstab", "remove", *base, "--execute"]), 75)
         self.assertEqual(self.fstab.read_bytes(), self.original_fstab + block)
+
+    def test_fuser_permission_error_is_unknown_and_fails_closed(self):
+        with mock.patch.object(volume.subprocess, "run",
+                               return_value=mock.Mock(returncode=1, stdout=b"", stderr=b"Permission denied")):
+            self.assertTrue(volume.linux_image_has_open_writers(self.image))
 
     def test_concurrent_fixture_installs_both_survive(self):
         second = self.root / "second"
@@ -203,6 +236,142 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fstab paths"):
             volume.linux_fstab_block(str(os.getuid()), self.config, self.state,
                                      self.image, self.root / "bad\\path")
+
+    def test_native_identity_requires_exact_loop_device_and_matching_uuid(self):
+        device = Path("/dev/loop42")
+        fs_uuid = "12345678-1234-1234-1234-123456789abc"
+        scratch = {"image_path": str(self.image), "mountpoint": str(self.mountpoint), "quota_gb": 1}
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": volume.GIB,
+                 "filesystem_uuid": fs_uuid}
+        with (
+            mock.patch.object(volume.Path, "stat", return_value=mock.Mock(st_size=volume.GIB)),
+            mock.patch.object(volume, "linux_loop_devices", return_value=[device]),
+            mock.patch.object(volume, "linux_mount_record", return_value=("ext4", str(device))),
+            mock.patch.object(volume, "linux_command", return_value=fs_uuid),
+            mock.patch.object(volume, "linux_fs_uuid", return_value=fs_uuid),
+        ):
+            self.assertEqual(volume.linux_validate_native_mount({}, scratch, entry), fs_uuid)
+        with mock.patch.object(volume, "linux_mount_record", return_value=("ext4", "/dev/loop43")):
+            with self.assertRaisesRegex(ValueError, "identity"):
+                volume.linux_validate_native_mount({}, scratch, entry)
+
+    def test_loop_backing_file_resolves_the_exact_kernel_device(self):
+        backing = self.root / "sys/block/loop7/loop/backing_file"
+        backing.parent.mkdir(mode=0o700, parents=True)
+        backing.write_text(str(self.image) + "\n")
+        with mock.patch.object(volume.Path, "glob", return_value=[backing]):
+            self.assertEqual(volume.linux_loop_devices(self.image), [Path("/dev/loop7")])
+
+    def test_busy_native_rollback_restores_captured_files_without_restarting_fuse(self):
+        config_bytes = self.config.read_bytes()
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime,
+                                                  str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        settings, scratch = {"classes": {"scratch": {}}}, json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        calls = []
+        def command(args, timeout=30):
+            if args[:2] == ["systemctl", "--user"]:
+                calls.append(args[2])
+            return ""
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("forced native validation failure")),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", side_effect=[False, True]),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_command", side_effect=command),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+        self.assertEqual(calls, ["stop", "daemon-reload", "start", "stop", "daemon-reload"])
+
+    def test_native_migration_commits_backend_and_oneshot_service(self):
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit.write_bytes(volume.linux_service_render(self.runtime,
+            str(self.config), self.state, "fuse").encode())
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        settings, scratch = {"classes": {"scratch": {}}}, json.loads(self.config.read_text())["volumes"]["classes"]["scratch"]
+        calls = []
+        def command(args, timeout=30):
+            if args[:2] == ["systemctl", "--user"]:
+                calls.append(args[2])
+            return ""
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_command", side_effect=command),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 0)
+        self.assertEqual(json.loads(self.config.read_text())["volumes"]["classes"]["scratch"]["backend"], "native")
+        self.assertIn(b"Type=oneshot\nRemainAfterExit=yes", unit.read_bytes())
+        self.assertEqual(calls, ["stop", "daemon-reload", "start", "is-active"])
+
+    def test_safe_native_rollback_removes_fstab_and_restarts_fuse(self):
+        config_bytes = self.config.read_bytes()
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime,
+                                                  str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        settings, scratch = {"classes": {"scratch": {}}}, json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        calls = []
+        def command(args, timeout=30):
+            if args[:2] == ["systemctl", "--user"]:
+                calls.append(args[2])
+            return ""
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("forced safe rollback")),
+            mock.patch.object(volume, "linux_mount_record", return_value=None),
+            mock.patch.object(volume, "linux_image_has_loop_mapping", return_value=False),
+            mock.patch.object(volume, "linux_image_has_open_writers", return_value=False),
+            mock.patch.object(volume, "linux_command", side_effect=command),
+            mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+        self.assertEqual(calls, ["stop", "daemon-reload", "start", "stop", "daemon-reload", "start"])
 
 
 if __name__ == "__main__":

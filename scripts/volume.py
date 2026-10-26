@@ -178,6 +178,8 @@ def config() -> dict[str, Any]:
     if not isinstance(mountpoint, str) or not Path(mountpoint).is_absolute():
         raise ValueError("scratch mountpoint must be absolute")
     require_positive(scratch.get("quota_gb"), "scratch quota")
+    if scratch.get("backend", "fuse") not in {"fuse", "native"}:
+        raise ValueError("unsupported Linux Scratch backend")
     return volumes
 
 
@@ -655,6 +657,59 @@ def linux_fs_uuid(image: Path) -> str:
     return value.lower()
 
 
+def linux_loop_devices(image: Path) -> list[Path]:
+    devices = []
+    for backing in Path("/sys/block").glob("loop*/loop/backing_file"):
+        value = backing.read_text().rstrip("\n").replace("\\040", " ")
+        if value and Path(value).resolve() == image.resolve():
+            devices.append(Path("/dev") / backing.parents[1].name)
+    return devices
+
+
+def linux_validate_native_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
+    image, mountpoint = linux_paths(scratch)
+    if not isinstance(entry, dict) or entry.get("state") != "active":
+        raise ValueError("Scratch volume is not registered active")
+    if (entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint) or
+            entry.get("quota_bytes") != scratch["quota_gb"] * GIB or
+            image.stat().st_size != scratch["quota_gb"] * GIB):
+        raise ValueError("Scratch volume registry identity mismatch")
+    devices = linux_loop_devices(image)
+    record = linux_mount_record(mountpoint)
+    if len(devices) != 1 or record != ("ext4", str(devices[0])):
+        raise ValueError("native Scratch mount identity mismatch")
+    mounted_uuid = linux_command(["blkid", "-p", "-s", "UUID", "-o", "value", str(devices[0])]).lower()
+    image_uuid = linux_fs_uuid(image)
+    if (not re.fullmatch(r"[0-9a-f-]{36}", mounted_uuid) or mounted_uuid != image_uuid or
+            entry.get("filesystem_uuid") != image_uuid):
+        raise ValueError("native Scratch filesystem UUID mismatch")
+    return image_uuid
+
+
+def linux_native_mount_cmd(scratch: dict[str, Any], entry: Any) -> int:
+    image, mountpoint = linux_paths(scratch)
+    if linux_mount_record(mountpoint) is not None:
+        linux_validate_native_mount(config(), scratch, entry)
+        return 0
+    if linux_image_has_loop_mapping(image):
+        return 75
+    linux_command(["mount", str(mountpoint)])
+    linux_validate_native_mount(config(), scratch, entry)
+    return 0
+
+
+def linux_native_unmount_cmd(scratch: dict[str, Any], entry: Any) -> int:
+    image, mountpoint = linux_paths(scratch)
+    linux_validate_native_mount(config(), scratch, entry)
+    linux_command(["umount", str(mountpoint)])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if linux_mount_record(mountpoint) is None and not linux_image_has_loop_mapping(image):
+            return 0
+        time.sleep(0.1)
+    return 75
+
+
 def linux_mountpoint_safe(mountpoint: Path) -> bool:
     try:
         details = mountpoint.lstat()
@@ -697,6 +752,8 @@ def linux_mount_record(mountpoint: Path) -> tuple[str, str] | None:
 
 
 def linux_validate_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
+    if scratch.get("backend", "fuse") == "native":
+        return linux_validate_native_mount(settings, scratch, entry)
     image, mountpoint = linux_paths(scratch)
     if not isinstance(entry, dict) or entry.get("state") != "active":
         raise ValueError("Scratch volume is not registered active")
@@ -798,6 +855,8 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
         entry = registry()["volumes"].get(name)
         if not isinstance(entry, dict) or entry.get("state") != "active":
             return 75
+        if scratch.get("backend", "fuse") == "native":
+            return linux_native_mount_cmd(scratch, entry)
         mounted = linux_mount_record(mountpoint)
         if mounted:
             linux_validate_mount(settings, scratch, entry)
@@ -933,6 +992,129 @@ def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def linux_service_render(runtime: Path, config_path: str, state_path: Path,
+                         backend: str) -> str:
+    template = runtime / "systemd/diskm-scratch.service.in"
+    rendered = template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(runtime / "disk_magician.sh")))
+    rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
+    rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_path)))
+    if backend == "native":
+        if "Type=simple" not in rendered:
+            raise ValueError("service template lacks FUSE service type")
+        rendered = rendered.replace("Type=simple", "Type=oneshot\nRemainAfterExit=yes", 1)
+    if "@" in rendered:
+        raise ValueError("service template contains unresolved placeholders")
+    return rendered
+
+
+def linux_atomic_bytes(path: Path, data: bytes, details: os.stat_result) -> None:
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".diskm-", dir=path.parent)
+    os.fchmod(fd, stat.S_IMODE(details.st_mode))
+    os.fchown(fd, details.st_uid, details.st_gid)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    linux_fsync_directory(path.parent)
+
+
+def linux_service_migrate_cmd(arguments: list[str]) -> int:
+    config_path = unit = None
+    config_bytes = unit_bytes = b""
+    config_stat = unit_stat = None
+    fstab_installed = False
+    try:
+        if not arguments or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        execute = False
+        index = 1
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--backend", "--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if set(values) != {"--backend", "--config", "--state-dir", "--user-uid"} or not execute or values["--backend"] != "native":
+            return 2
+        allowed = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], None)
+        if allowed is None or int(values["--user-uid"]) != os.geteuid():
+            return 75
+        config_path, state, image, mountpoint = allowed
+        settings, scratch = cls("scratch")
+        entry = registry()["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active" or
+                scratch.get("backend", "fuse") != "fuse"):
+            return 75
+        linux_validate_mount(settings, scratch, entry)
+        unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
+        if unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != os.geteuid():
+            return 75
+        config_bytes, config_stat = config_path.read_bytes(), config_path.stat()
+        unit_bytes, unit_stat = unit.read_bytes(), unit.stat()
+        runtime = Path(__file__).resolve().parent.parent
+        if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
+            return 75
+        if unit_bytes.decode() != linux_service_render(runtime, str(config_path), state, "fuse"):
+            return 75
+        systemctl = ["systemctl", "--user"]
+        linux_command(systemctl + ["stop", "diskm-scratch.service"], 60)
+        if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
+                linux_image_has_open_writers(image)):
+            raise RuntimeError("FUSE image remains mounted or open after stop")
+        root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
+                    "--config", str(config_path), "--state-dir", str(state),
+                    "--user-uid", values["--user-uid"], "--execute"]
+        result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
+        if result.returncode:
+            raise RuntimeError("administrator fstab installation failed")
+        fstab_installed = True
+        document = json.loads(config_bytes)
+        document["volumes"]["classes"]["scratch"]["backend"] = "native"
+        linux_atomic_bytes(config_path, (json.dumps(document, indent=2) + "\n").encode(), config_stat)
+        native_unit = linux_service_render(runtime, str(config_path), state, "native")
+        linux_atomic_bytes(unit, native_unit.encode(), unit_stat)
+        linux_command(systemctl + ["daemon-reload"])
+        linux_command(systemctl + ["start", "diskm-scratch.service"], 60)
+        linux_validate_native_mount(cls("scratch")[0], cls("scratch")[1], registry()["volumes"].get("scratch"))
+        linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
+        return 0
+    except Exception as error:
+        print("volume service migrate: " + str(error), file=sys.stderr)
+        if config_path is None or unit is None or config_stat is None or unit_stat is None:
+            return 75
+        try:
+            linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
+            allowed = linux_fstab_allowed_paths(str(config_path), str(state_root()), str(os.geteuid()), None)
+            if allowed is None:
+                return 75
+            _, _, image, mountpoint = allowed
+            if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
+                    linux_image_has_open_writers(image)):
+                linux_atomic_bytes(config_path, config_bytes, config_stat)
+                linux_atomic_bytes(unit, unit_bytes, unit_stat)
+                linux_command(["systemctl", "--user", "daemon-reload"])
+                return 75
+            if fstab_installed:
+                root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
+                            "volume", "fstab", "remove", "scratch", "--config", str(config_path),
+                            "--state-dir", str(state_root()), "--user-uid", str(os.geteuid()), "--execute"]
+                if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False).returncode:
+                    return 75
+            linux_atomic_bytes(config_path, config_bytes, config_stat)
+            linux_atomic_bytes(unit, unit_bytes, unit_stat)
+            linux_command(["systemctl", "--user", "daemon-reload"])
+            linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
+        except Exception:
+            return 75
+        return 75
+
+
 def linux_service_install_cmd(name: str) -> int:
     try:
         if name != "scratch":
@@ -964,11 +1146,8 @@ def linux_service_install_cmd(name: str) -> int:
         orchestrator = runtime_root / "disk_magician.sh"
         if not orchestrator.is_file():
             return 75
-        rendered = unit_template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(orchestrator)))
-        rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
-        rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_root())))
-        if "@" in rendered:
-            return 75
+        rendered = linux_service_render(runtime_root, config_path, state_root(),
+                                        scratch.get("backend", "fuse"))
         unit_dir = Path.home() / ".config/systemd/user"
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         unit = unit_dir / "diskm-scratch.service"
@@ -1006,7 +1185,10 @@ def linux_unmount_cmd(name: str) -> int:
     try:
         settings, scratch = cls(name)
         _, mountpoint = linux_paths(scratch)
-        linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+        entry = registry()["volumes"].get(name)
+        linux_validate_mount(settings, scratch, entry)
+        if scratch.get("backend", "fuse") == "native":
+            return linux_native_unmount_cmd(scratch, entry)
         linux_command(["fusermount3", "-u", str(mountpoint)])
         return 0 if linux_mount_record(mountpoint) is None else 75
     except Exception:
@@ -1273,7 +1455,7 @@ def linux_fstab_write(path: Path, old: bytes, new: bytes) -> None:
                             stat.S_IMODE(details.st_mode))
     except FileExistsError:
         existing = backup.stat()
-        if (backup.read_bytes() != old or existing.st_uid != details.st_uid or
+        if (backup.is_symlink() or backup.read_bytes() != old or existing.st_uid != details.st_uid or
                 existing.st_gid != details.st_gid or
                 stat.S_IMODE(existing.st_mode) != stat.S_IMODE(details.st_mode)):
             raise OSError("fstab backup identity mismatch")
@@ -1338,7 +1520,7 @@ def linux_image_has_open_writers(image: Path) -> bool:
     try:
         result = subprocess.run(["fuser", "-w", "--", str(image)],
                                 capture_output=True, timeout=10, check=False)
-        if result.returncode == 1:
+        if result.returncode == 1 and not result.stdout and not result.stderr:
             return False
         return True
     except Exception:
@@ -1363,9 +1545,13 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
                 i += 2
             else:
                 return 2
-        required = {"--config", "--state-dir", "--user-uid"}
-        if not required.issubset(values) or set(values) - required - {"--fixture-root"}:
+        required = {"--config", "--user-uid"}
+        if not required.issubset(values) or set(values) - required - {"--state-dir", "--fixture-root"}:
             return 2
+        if "--state-dir" not in values:
+            if "--fixture-root" in values:
+                return 2
+            values["--state-dir"] = str(Path(pwd.getpwuid(int(values["--user-uid"])).pw_dir) / ".disk_magician_state")
         if (action == "preview" and execute) or (action != "preview" and not execute):
             return 2
         safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
@@ -1373,7 +1559,22 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             return 75
         if action != "preview":
             if os.geteuid() != 0:
-                return 75
+                runtime = Path(__file__).resolve().parent.parent
+                if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
+                    return 75
+                root_args = [str(runtime / "disk_magician.sh"), "volume", "fstab", action,
+                             "scratch", "--config", str(safe[0]), "--state-dir", str(safe[1]),
+                             "--user-uid", values["--user-uid"]]
+                if "--fixture-root" in values:
+                    root_args.extend(("--fixture-root", values["--fixture-root"]))
+                root_args.append("--execute")
+                result = subprocess.run(["sudo", "-n", "bash", *root_args],
+                                        capture_output=True, text=True, timeout=45, check=False)
+                if result.stdout:
+                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr:
+                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+                return 0 if result.returncode == 0 else 75
             lock_fd = linux_fstab_lock()
         config, state, image, mountpoint = safe
         block = linux_fstab_block(values["--user-uid"], config, state, image, mountpoint)
@@ -1752,6 +1953,8 @@ def main(argv: list[str] | None = None) -> int:
             return linux_mount_cmd(arguments[1], "--foreground" in arguments[2:]) if sys.platform.startswith("linux") else 2
         if arguments[:1] == ["unmount"] and len(arguments) > 1:
             return linux_unmount_cmd(arguments[1]) if sys.platform.startswith("linux") else 2
+        if arguments[:2] == ["service", "migrate"] and sys.platform.startswith("linux"):
+            return linux_service_migrate_cmd(arguments[2:])
         if arguments[:2] == ["service", "install"] and len(arguments) > 2:
             return linux_service_install_cmd(arguments[2]) if sys.platform.startswith("linux") else 2
         if arguments[:1] == ["retire"] and len(arguments) > 1:
