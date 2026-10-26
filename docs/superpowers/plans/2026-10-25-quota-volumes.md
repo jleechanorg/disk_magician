@@ -1,5 +1,7 @@
 # Opt-in Scratch Quota Volume Implementation Plan
 
+Current platform choices and encryption follow the updated [governing design](../specs/2026-10-25-quota-volumes-design.md). The original command and fixture examples below are implementation history, not authority to use their example cap or unencrypted mode for a live host. Agent artifact placement is owned by `CLAUDE.md` § Agent Scratch placement (Linux first).
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Ship `diskm volume` for one opt-in Scratch volume with a quota.
