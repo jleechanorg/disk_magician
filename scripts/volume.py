@@ -407,22 +407,23 @@ def write_ballast(mountpoint: str) -> None:
     path = ballast_path(mountpoint)
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            remaining = BALLAST_BYTES
-            block = b"\0" * MIB
-            while remaining:
-                stream.write(block)
-                remaining -= len(block)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if not ballast_ok(mountpoint):
-            raise RuntimeError("ballast allocation verification failed")
+        stream = os.fdopen(descriptor, "wb")
     except Exception:
         try:
-            path.unlink()
+            os.close(descriptor)
         except OSError:
             pass
         raise
+    with stream:
+        remaining = BALLAST_BYTES
+        block = b"\0" * MIB
+        while remaining:
+            stream.write(block)
+            remaining -= len(block)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if not ballast_ok(mountpoint):
+        raise RuntimeError("ballast allocation verification failed")
 
 
 def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any],
