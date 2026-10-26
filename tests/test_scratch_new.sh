@@ -124,6 +124,14 @@ assert_contains "$EV" "$T/tmp/myrepo/evidence/ui-proof-" "evidence path"
 assert_eq "$(lease_field "$EV" kind)" evidence "evidence lease kind"
 assert_contains "$(cat "$T/admit.log")" "--class tmp_containers" "admit class tmp_containers"
 
+echo "== --kind build: dir under the build root with a valid producer lease =="
+run 0 "$T/myrepo" compiler-output --kind build
+assert_eq "$RC" 0 "build allocation exits 0"
+BUILD="$OUT"
+assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
+[[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
+assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
+
 echo "== real diskm admit (observe, fake df) admits and logs one event =="
 cat > "$T/bin/df" <<'EOF'
 #!/usr/bin/env bash

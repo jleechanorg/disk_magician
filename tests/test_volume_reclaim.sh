@@ -17,7 +17,9 @@ export FAKE_DISKUTIL_CALLS="$T/diskutil.calls"
 export FAKE_DISKUTIL_MOUNTPOINT="$TEST_ROOT"
 export DISK_MAGICIAN_DELETION_LOG="$T/deletions.log"
 python3 -c 'import json,os,sys; cfg={"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","encryption_acknowledged_at":"2026-10-25T00:00:00Z","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":os.environ["TEST_ROOT"]}}}}; json.dump(cfg,open(sys.argv[1],"w")); state={"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":1000*2**30,"free":100*2**30},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":100*2**30,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":10*2**30,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":10*2**30,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"}]}; json.dump(state,open(os.environ["FAKE_DISKUTIL_STATE"],"w"))' "$DISK_MAGICIAN_CONFIG"
-python3 "$ROOT/scripts/volume.py" create scratch --execute
+# This reclaim fixture uses a temporary mount; the real Darwin mountpoint
+# guard has its own volume.py test and must stay active in production.
+python3 -c 'import sys; from unittest.mock import patch; sys.path.insert(0, sys.argv[1]); import volume; patch.object(sys, "platform", "linux").start(); raise SystemExit(volume.create_cmd("scratch", True))' "$ROOT/scripts"
 export STATUS_CALLS_FILE="$T/status.calls"
 mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger" "$TEST_ROOT/repo/evidence/fresh"
 printf x > "$TEST_ROOT/repo/evidence/oldest/content"

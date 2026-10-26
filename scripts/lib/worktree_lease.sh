@@ -576,7 +576,7 @@ def load(p):
             return json.load(f)
     except Exception:
         sys.exit(2)
-if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence"):
+if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence", "build"):
     sys.exit(2)
 if bool(pub_url) != bool(upload) or bool(pub_url) != bool(verified_at):
     sys.exit(2)

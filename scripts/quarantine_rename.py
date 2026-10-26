@@ -284,11 +284,11 @@ def phase1(path, inv_file, binding_file, deadline=None):
         if any(type(root.get(k)) is not int for k in ("dev", "ino")): return "kept:identity-mismatch"
         # Bound the full recovery record before creating quarantine state. Preserve unknown inventory fields.
         preview = {"id": "f" * 32, "original": os.path.join(parent, base),
-                   "dev": 9223372036854775807, "ino": 9223372036854775807,
+                   "dev": 18446744073709551615, "ino": 18446744073709551615,
                    "parent_dev": parent_id[0], "parent_ino": parent_id[1],
-                   "quarantine_dev": 9223372036854775807, "quarantine_ino": 9223372036854775807,
+                   "quarantine_dev": 18446744073709551615, "quarantine_ino": 18446744073709551615,
                    "inventory": inv, "phase": "intent"}
-        if len(json.dumps(preview, separators=(",", ":")).encode("utf-8")) > MAX_INTENT_BYTES:
+        if len(json.dumps(preview).encode("utf-8")) > MAX_INTENT_BYTES:
             return "kept:intent-too-large"
         path = os.path.join(parent, base)
         pfd = os.open(parent, DIRFL)
