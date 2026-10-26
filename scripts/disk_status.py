@@ -2218,7 +2218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     result["alerts"] = alerts
 
     reclaim_stuck = None
-    reclaim_path = Path(os.environ.get("DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state")) / "reclaim_runs.json"
+    reclaim_path = evaluator.state_dir / "volumes" / "reclaim_runs.json"
     try:
         runs = json.loads(reclaim_path.read_text()).get("runs", [])[-2:]
         if len(runs) == 2 and all(int(r.get("aged_scanned", 0)) > 0 and int(r.get("removed", 0)) == 0 for r in runs):

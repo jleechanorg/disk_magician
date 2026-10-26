@@ -940,6 +940,29 @@ class TestDiskStatus(unittest.TestCase):
         self.assertEqual(sum(result["worktrees"]["leases"].values()), 0)
         self.assertEqual(result["status"], "healthy")
 
+    def test_volume_reclaim_stuck_reads_nested_volume_receipt(self):
+        import contextlib
+        import io
+
+        volume_state = self.state_dir / "volumes"
+        volume_state.mkdir(parents=True, exist_ok=True)
+        (volume_state / "reclaim_runs.json").write_text(json.dumps({
+            "runs": [
+                {"aged_scanned": 4, "removed": 0, "top_kept_reason": "lease_active"},
+                {"aged_scanned": 3, "removed": 0, "top_kept_reason": "lease_active"},
+            ]
+        }), encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"DISK_MAGICIAN_STATE_DIR": str(self.state_dir)}):
+            with contextlib.redirect_stdout(output):
+                disk_status.main([
+                    "--state-dir", str(self.state_dir),
+                    "--state-repo", str(self.state_repo),
+                    "--fleet-json", str(self.fleet_file),
+                    "--now", self.now_str,
+                ])
+        self.assertIn("volume_reclaim_stuck: aged=7 removed=0 runs=2 reason=lease_active", output.getvalue())
+
     def test_cli_exit_codes(self):
         # 1. Healthy -> exit 0
         rc = disk_status.main([

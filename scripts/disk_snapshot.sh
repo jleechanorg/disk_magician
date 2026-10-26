@@ -398,11 +398,18 @@ get_diskm_volumes_json() {
   local result
   local diskm="${DISK_MAGICIAN_DISKM_BIN:-disk-magician}"
   command -v "$diskm" >/dev/null 2>&1 || { echo "null"; return; }
-  result=$(probe_timeout 8 "$diskm" volume status --json --snapshot 2>/dev/null) || {
+  local rc
+  if result=$(probe_timeout 8 "$diskm" volume status --json --snapshot 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 0 || $rc -eq 1 ]] || { echo "null"; return; }
+  [[ -n "$result" ]] || { echo "null"; return; }
+  if ! printf '%s' "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and isinstance(d.get("volumes"),list) and isinstance(d.get("alarms"),list)' >/dev/null 2>&1; then
     echo "null"
     return
-  }
-  [[ -n "$result" ]] || { echo "null"; return; }
+  fi
   printf '%s' "$result"
 }
 
