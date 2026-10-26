@@ -83,6 +83,21 @@ BALLAST_LOG="$T/ballast.log"
 export BALLAST_LOG
 mkdir -p "$TEST_ROOT/repo/evidence/oldest"; printf x >"$TEST_ROOT/repo/evidence/oldest/content"
 python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
+# A below-trigger clean pass still repairs a missing reserve without trimming.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false true" TEST_STATUS_SEQUENCE="899 899" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-restored.out"
+grep -q 'skipped:below-trigger:89' "$T/below-trigger-reserve-restored.out"
+[[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+[[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
+# A failed ensure or a false post-ensure availability must never report healthy.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_ENSURE_RC=1 TEST_BALLAST_AVAILABLE_SEQUENCE="false false" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-ensure-failed.out"
+grep -q 'kept:ballast-restore-failed' "$T/below-trigger-ensure-failed.out"
+! grep -q 'skipped:below-trigger' "$T/below-trigger-ensure-failed.out"
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false false" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-still-missing.out"
+grep -q 'kept:ballast-restore-failed' "$T/below-trigger-reserve-still-missing.out"
+! grep -q 'skipped:below-trigger' "$T/below-trigger-reserve-still-missing.out"
 : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$T/ballast.log" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUENCE="900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-release-fails.out"
 grep -q 'kept:intent-write-failed' "$T/c14-release-fails.out"
@@ -116,9 +131,21 @@ BALLAST_LOG="$BALLAST_LOG" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUEN
 [[ "$(grep -c '^release$' "$BALLAST_LOG")" == 1 && "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["postcondition"]["allocated_bytes_after"]==850 and not r["postcondition"]["target_reached"]'
 
+# A triggered clean pass cannot report success when its fresh final status says
+# the scratch reserve is unavailable, even when ensure itself succeeds.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+BALLAST_LOG="$BALLAST_LOG" TEST_BALLAST_AVAILABLE_SEQUENCE="true false" TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-final-reserve-missing.out"
+grep -q 'kept:ballast-restore-failed' "$T/c14-final-reserve-missing.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["ballast_restore_failures"]==1'
+
 # A one-shot typed ENOSPC must release, retry through C14, and defer reserve
-# restoration until later removals have made room. The copied
-# C14 fixture is test-only: production has no test hook or retry bypass.
+# restoration until later removals have made room. Recreate the earlier fixture
+# because the final-availability regression may have removed it.
+mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
+printf x >"$TEST_ROOT/repo/evidence/oldest/content" "$TEST_ROOT/repo/build/younger/content"
+python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
+# The copied C14 fixture is test-only: production has no test hook or retry
+# bypass.
 touch "$TEST_ROOT/repo/evidence/oldest/content" "$TEST_ROOT/repo/build/younger/content"
 mkdir -p "$TEST_ROOT/retry/evidence/first" "$TEST_ROOT/retry/build/second"
 printf x > "$TEST_ROOT/retry/evidence/first/content"

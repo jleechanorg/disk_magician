@@ -188,15 +188,35 @@ def fit_result(container: Container | None = None) -> dict[str, Any]:
     system_used = require_nonnegative(
         container.volume_by_role("System").used, "System volume usage"
     )
-    vm_used = require_nonnegative(container.volume_by_role("VM").used, "VM usage")
+    vm_volume = container.volume_by_role("VM")
+    vm_used = require_nonnegative(vm_volume.used, "VM usage")
     ceiling = require_positive(container.ceiling, "container ceiling")
     swap_headroom = settings["swap_headroom_gb"] * GIB
     alarm_floor = settings["alarm_floor_gb"] * GIB
     quota_bytes = settings["classes"]["scratch"]["quota_gb"] * GIB
 
+    scratch_volumes = [v for v in container.volumes if v.name == settings["classes"]["scratch"]["name"]]
+    if len(scratch_volumes) > 1:
+        raise ValueError("Scratch volume identity is not unique")
+    scratch_volume = scratch_volumes[0] if scratch_volumes else None
+    if scratch_volume is not None:
+        scratch_used = require_nonnegative(scratch_volume.used, "Scratch usage")
+    else:
+        scratch_used = 0
     vm_reserve = max(vm_used, swap_headroom)
-    required = data_used + system_used + vm_reserve + quota_bytes + alarm_floor
-    max_quota = max(0, (ceiling - data_used - system_used - vm_reserve - alarm_floor) // GIB)
+    # Sum every measured allocation from the Data APFS container. Replace the
+    # VM usage with the larger swap reserve and Scratch usage with its full
+    # configured quota, so neither resource is counted twice.
+    all_allocations = 0
+    other_allocations = 0
+    for volume in container.volumes:
+        used = require_nonnegative(volume.used, "APFS volume usage: " + volume.name)
+        all_allocations += used
+        if volume is not vm_volume and volume is not scratch_volume:
+            other_allocations += used
+    scratch_reservation = max(scratch_used, quota_bytes)
+    required = other_allocations + vm_reserve + scratch_reservation + alarm_floor
+    max_quota = max(0, (ceiling - other_allocations - vm_reserve - alarm_floor) // GIB)
     return {
         "ok": required <= ceiling,
         "fits": required <= ceiling,
@@ -205,6 +225,9 @@ def fit_result(container: Container | None = None) -> dict[str, Any]:
         "data_used_bytes": data_used,
         "system_used_bytes": system_used,
         "vm_reserve_bytes": vm_reserve,
+        "container_volume_allocations_bytes": all_allocations,
+        "other_volume_allocations_bytes": other_allocations,
+        "scratch_reservation_bytes": scratch_reservation,
         "quota_bytes": quota_bytes,
         "alarm_floor_bytes": alarm_floor,
         "max_quota_gb_that_fits": max_quota,
@@ -629,13 +652,16 @@ def status(snapshot: bool = False) -> int:
                 try:
                     used = require_nonnegative(volume.used, "volume usage")
                     quota = require_positive(volume.quota, "volume quota")
+                    reserve_ok = ballast_ok(settings["classes"]["scratch"]["mountpoint"])
                     row.update({
                         "filesystem_id": volume.uuid,
                         "allocated_bytes": used,
                         "quota_bytes": quota,
                         "measured_at": timestamp,
-                        "available": ballast_ok(settings["classes"]["scratch"]["mountpoint"]),
+                        "available": reserve_ok,
                     })
+                    if entry.get("state") == "active" and not reserve_ok:
+                        alarms.append("scratch_ballast_missing")
                     if used >= quota:
                         alarms.append("volume_full")
                     elif used / quota >= 0.9:

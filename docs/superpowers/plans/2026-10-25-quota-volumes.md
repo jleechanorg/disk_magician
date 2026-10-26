@@ -86,7 +86,7 @@
            self.assertAlmostEqual(r["swap_term_gb"], 45, delta=0.1)
    ```
 2. **RED:** `… -k FitTest -v` fails because `fit` is missing.
-3. **Implement:** `quota + Data_used + system_used + max(VM_used, swap_headroom) + alarm_floor ≤ ceiling`, returning every term and `max_quota_gb_that_fits`.
+3. **Implement:** Sum every measured volume allocation in the Data APFS container. Add only the extra VM reserve needed to make VM's contribution at least `swap_headroom` (40 GiB); replace an existing exact Scratch volume's measured allocation with `max(measured, configured quota)`, or add the configured quota when Scratch is absent; then add the alarm floor. Fail closed on incomplete volume enumeration, unknown allocations, or ambiguous VM/Scratch identity. Exclude other APFS containers. Return every term and `max_quota_gb_that_fits`.
 4. **GREEN** plus regression.
 5. **Commit.**
 

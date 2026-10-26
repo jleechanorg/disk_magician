@@ -80,6 +80,57 @@ class FitAndAuditTest(VolumeTestBase):
         with self.assertRaises(ValueError):
             volume.fit_result()
 
+    def test_fit_counts_every_same_container_volume_allocation(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1005 * 2**30
+        data["volumes"][0]["used"] = 900 * 2**30
+        data["volumes"].extend([
+            {"uuid": "PREBOOT-UUID", "name": "Preboot", "ref": "disk3s2",
+             "device": "disk3s2", "used": 10 * 2**30, "quota": 0,
+             "roles": ["Preboot"]},
+            {"uuid": "RECOVERY-UUID", "name": "Recovery", "ref": "disk3s3",
+             "device": "disk3s3", "used": 10 * 2**30, "quota": 0,
+             "roles": ["Recovery"]},
+            {"uuid": "AUX-UUID", "name": "Auxiliary", "ref": "disk3s4",
+             "device": "disk3s4", "used": 2 * 2**30, "quota": 0,
+             "roles": []},
+        ])
+        self.state.write_text(json.dumps(data))
+
+        result = volume.fit_result()
+
+        expected = 900 + 15 + 10 + 10 + 2 + 40 + 30 + 20
+        self.assertEqual(result["container_volume_allocations_bytes"], (900 + 15 + 4 + 10 + 10 + 2) * 2**30)
+        self.assertEqual(result["required_bytes"], expected * 2**30)
+        self.assertFalse(result["fits"])
+
+    def test_fit_counts_active_scratch_quota_once_not_actual_plus_quota(self):
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        scratch["used"] = 5 * 2**30
+        self.state.write_text(json.dumps(data))
+
+        result = volume.fit_result()
+
+        self.assertEqual(result["scratch_reservation_bytes"], 30 * 2**30)
+        self.assertEqual(result["container_volume_allocations_bytes"], (829 + 15 + 4 + 5) * 2**30)
+        self.assertEqual(result["other_volume_allocations_bytes"], (829 + 15) * 2**30)
+        self.assertEqual(result["required_bytes"], (829 + 15 + 40 + 30 + 20) * 2**30)
+
+    def test_fit_unknown_nonstandard_volume_usage_fails_closed(self):
+        data = json.loads(self.state.read_text())
+        data["volumes"].append({
+            "uuid": "AUX-UUID", "name": "Auxiliary", "ref": "disk3s4",
+            "device": "disk3s4", "used": None, "quota": 0, "roles": [],
+        })
+        self.state.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            volume.fit_result()
+
     def test_snapshot_audit_only_reports_measured_large_tmp_rows(self):
         snapshot = self.root / "snapshot.json"
         snapshot.write_text(json.dumps({"snapshot_ts": "2026-10-25T12:00:00Z", "directories": [
@@ -205,6 +256,25 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(row["quota_bytes"], 30 * 2**30)
         self.assertEqual(row["source"], "apfs_volume")
         self.assertEqual(result["container"]["filesystem_id"], "CONTAINER-UUID")
+
+    def test_status_degrades_when_active_scratch_ballast_is_missing_below_high_water(self):
+        self.make_fit()
+        data = json.loads(self.state.read_text())
+        scratch = next(x for x in data["volumes"] if x["name"] == "diskm-scratch")
+        scratch["used"] = 25 * 2**30  # 83.3%, below the reclaim high-water mark.
+        self.state.write_text(json.dumps(data))
+
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with mock.patch.object(volume, "ballast_ok", return_value=False):
+            with redirect_stdout(output):
+                rc = volume.status(snapshot=True)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIn("scratch_ballast_missing", result["alarms"])
+        self.assertFalse(result["volumes"][0]["available"])
 
     def test_status_corrupt_config_returns_fatal_rc(self):
         self.config.write_text("{")

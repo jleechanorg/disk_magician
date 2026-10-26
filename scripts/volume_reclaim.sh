@@ -14,12 +14,25 @@ status_json() {
  printf '%s\n' "$output"
 }
 usage_pair() { python3 -c 'import json,sys; d=json.load(sys.stdin); r=next(x for x in d["volumes"] if x.get("class")=="scratch"); u=r["allocated_bytes"]; q=r["quota_bytes"]; assert isinstance(u,int) and isinstance(q,int) and q>0; print(u,q)' <<<"$1"; }
+reserve_available() { python3 -c 'import json,sys; d=json.load(sys.stdin); r=next(x for x in d["volumes"] if x.get("class")=="scratch"); print("1" if r.get("available") is True else "0")' <<<"$1"; }
 root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)"; rc=$?
 if [[ $rc -ne 0 || ! -d "$root" ]]; then echo skipped:unavailable; exit 0; fi
 "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || { echo skipped:unavailable; exit 0; }
 before="$(status_json)" || { echo skipped:measurement-unavailable; exit 0; }
 read -r used quota < <(usage_pair "$before" 2>/dev/null) || { echo skipped:measurement-unavailable; exit 0; }
-(( used * 100 >= quota * 90 )) || { echo "skipped:below-trigger:$((used * 100 / quota))"; exit 0; }
+if (( used * 100 < quota * 90 )); then
+ if [[ "$clean" == true ]]; then
+  ensure_rc=0
+  "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || ensure_rc=$?
+  after="$(status_json)" || ensure_rc=1
+  if (( ensure_rc != 0 )) || [[ "$(reserve_available "$after" 2>/dev/null)" != 1 ]]; then
+   echo kept:ballast-restore-failed
+   exit 0
+  fi
+ fi
+ echo "skipped:below-trigger:$((used * 100 / quota))"
+ exit 0
+fi
 pct=$((used * 100 / quota))
 AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0
 receipt="$SCRIPT_DIR/job_receipt.py"
@@ -96,6 +109,7 @@ if [[ "$clean" == true ]]; then
   read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; }
  fi
  if (( ! measurement_error )) && [[ "$now_quota" -ne "$quota" ]]; then TOP_REASON=quota-changed; measurement_error=1; fi
+ if (( ! measurement_error )) && [[ "$(reserve_available "$current" 2>/dev/null)" != 1 ]]; then TOP_REASON=ballast-restore-failed; BALLAST_RESTORE_FAILURES=1; fi
  if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
  if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
 fi
