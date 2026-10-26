@@ -77,11 +77,22 @@ run 0 "$T/myrepo" gate-prep --detach HEAD --est-gb 3
 assert_eq "$RC" 0 "exit 0"
 assert_contains "$OUT" "$STANDARD_WORKTREE_ROOT/myrepo/scratch-gate-prep-" "path under ~/.worktrees/<repo>/scratch-<purpose>-<ts>"
 assert_eq "$(git -C "$OUT" rev-parse HEAD)" "$SHA" "checked out at the sha"
+assert_eq "$(stat -c %a "$OUT")" 700 "new scratch directory is mode 0700"
 assert_eq "$(git -C "$OUT" symbolic-ref -q HEAD || echo detached)" detached "HEAD is detached"
 assert_eq "$(lease_field "$OUT" kind)" scratch "lease kind"
 assert_eq "$(lease_field "$OUT" source)" "git:https://example.invalid/o/myrepo.git@$SHA" "lease source = repo URL + sha"
 assert_contains "$(cat "$T/admit.log")" "--class worktrees --est-gb 3" "admit class worktrees with --est-gb"
 assert_eq "$(lease_field "$OUT" producer)" scratch-new "default producer"
+# The production call shape is command substitution; the caller survives while
+# the short-lived CLI process exits, so the lease must retain the caller/runtime
+# owner rather than the CLI PID. Explicit owner PID covers detached workers.
+echo "== command-substitution caller and explicit detached owner =="
+sleep 300 & DETACHED_OWNER=$!
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" detached-owner --detach HEAD --owner-pid "$DETACHED_OWNER" 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "explicit detached owner scratch-new succeeds"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$(python3 -c 'import json,glob,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")" "$DETACHED_OWNER")" True "explicit detached owner is persisted"
+kill "$DETACHED_OWNER" 2>/dev/null || true
 
 echo "== lease failure: scratch-new fails closed without handing out path =="
 OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
