@@ -1197,6 +1197,12 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         if unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != os.geteuid():
             return 75
+        try:
+            for protected_path in (config_path, unit):
+                if os.listxattr(protected_path, follow_symlinks=False):
+                    raise ValueError("migration refuses files with extended attributes or ACLs")
+        except (AttributeError, OSError) as error:
+            raise ValueError("migration cannot verify file extended attributes or ACLs") from error
         config_bytes, config_stat = config_path.read_bytes(), config_path.stat()
         unit_bytes, unit_stat = unit.read_bytes(), unit.stat()
         runtime = Path(__file__).resolve().parent.parent
@@ -1662,6 +1668,8 @@ def linux_fstab_transform(data: bytes, block: bytes, image: Path, mountpoint: Pa
         linux_fstab_validate(output)
         return output
     if action == "install":
+        if existing:
+            return data
         output = b"".join(lines)
         # A table without a final newline keeps its original bytes after the
         # managed block; prefixing the block avoids inventing an EOF newline.

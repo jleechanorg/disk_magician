@@ -168,6 +168,14 @@ class NativeFstabPublicCliTest(unittest.TestCase):
                 self.assertEqual(self.run_fixture_fstab("install"), 75)
                 self.assertEqual(self.fstab.read_bytes(), original)
 
+    def test_public_fstab_install_preserves_existing_block_before_trailing_record(self):
+        block = volume.linux_fstab_block(str(os.getuid()), self.config, self.state,
+                                         self.image, self.mountpoint)
+        original = self.original_fstab + block + b"/dev/trailing /trailing ext4 defaults 0 2\n"
+        self.fstab.write_bytes(original)
+        self.assertEqual(self.run_fixture_fstab("install"), 0)
+        self.assertEqual(self.fstab.read_bytes(), original)
+
     def test_fstab_round_trip_preserves_eof_without_final_newline(self):
         original = b"# exact bytes\n/dev/example /example ext4 defaults 0 2"
         self.fstab.write_bytes(original)
@@ -657,7 +665,7 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         config_bytes = self.config.read_bytes()
         block = volume.linux_fstab_block(str(os.getuid()), self.config, self.state,
                                          self.image, self.mountpoint)
-        original_fstab = self.original_fstab + block
+        original_fstab = self.original_fstab + block + b"/dev/trailing /trailing ext4 defaults 0 2\n"
         self.fstab.write_bytes(original_fstab)
         entry = {"state": "active", "image_path": str(self.image),
                  "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
@@ -695,6 +703,103 @@ class NativeFstabPublicCliTest(unittest.TestCase):
             self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
         self.assertEqual(self.fstab.read_bytes(), original_fstab)
         self.assertEqual(actions, ["install"])
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+
+    def test_native_migration_refuses_extended_attributes_before_service_calls(self):
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime, str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        config_bytes = self.config.read_bytes()
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        scratch = json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        config_xattr = b"metadata"
+        try:
+            os.setxattr(self.config, "user.diskm-test", config_xattr)
+        except (AttributeError, OSError) as error:
+            self.skipTest("user extended attributes unavailable: " + str(error))
+        calls = []
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": {}}}, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_command", side_effect=lambda *args, **kwargs: calls.append("service")),
+            mock.patch.object(volume.subprocess, "run", side_effect=lambda *args, **kwargs: calls.append("fstab")),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+        self.assertEqual(os.getxattr(self.config, "user.diskm-test"), config_xattr)
+
+    def test_native_migration_refuses_unit_extended_attributes_before_service_calls(self):
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime, str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        config_bytes = self.config.read_bytes()
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        scratch = json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        unit_xattr = b"metadata"
+        try:
+            os.setxattr(unit, "user.diskm-test", unit_xattr)
+        except (AttributeError, OSError) as error:
+            self.skipTest("user extended attributes unavailable: " + str(error))
+        calls = []
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": {}}}, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_command", side_effect=lambda *args, **kwargs: calls.append("service")),
+            mock.patch.object(volume.subprocess, "run", side_effect=lambda *args, **kwargs: calls.append("fstab")),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.config.read_bytes(), config_bytes)
+        self.assertEqual(unit.read_bytes(), unit_bytes)
+        self.assertEqual(os.getxattr(unit, "user.diskm-test"), unit_xattr)
+
+    def test_native_migration_refuses_metadata_enumeration_error_before_service_calls(self):
+        unit = self.root / ".config/systemd/user/diskm-scratch.service"
+        unit.parent.mkdir(mode=0o700, parents=True)
+        unit_bytes = volume.linux_service_render(self.runtime, str(self.config), self.state, "fuse").encode()
+        unit.write_bytes(unit_bytes)
+        config_bytes = self.config.read_bytes()
+        entry = {"state": "active", "image_path": str(self.image),
+                 "mountpoint": str(self.mountpoint), "quota_bytes": 2 * volume.GIB,
+                 "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+        scratch = json.loads(config_bytes)["volumes"]["classes"]["scratch"]
+        calls = []
+        with (
+            mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(self.config, self.state, self.image, self.mountpoint)),
+            mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": {}}}, scratch)),
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume.os, "listxattr", side_effect=OSError("metadata unavailable")),
+            mock.patch.object(volume, "linux_command", side_effect=lambda *args, **kwargs: calls.append("service")),
+            mock.patch.object(volume.subprocess, "run", side_effect=lambda *args, **kwargs: calls.append("fstab")),
+            mock.patch.object(volume.Path, "home", return_value=self.root),
+            mock.patch.object(volume, "__file__", str(self.runtime_script)),
+        ):
+            args = ["scratch", "--backend", "native", "--config", str(self.config),
+                    "--state-dir", str(self.state), "--user-uid", str(os.geteuid()), "--execute"]
+            self.assertEqual(volume.linux_service_migrate_cmd(args), 75)
+        self.assertEqual(calls, [])
         self.assertEqual(self.config.read_bytes(), config_bytes)
         self.assertEqual(unit.read_bytes(), unit_bytes)
 
