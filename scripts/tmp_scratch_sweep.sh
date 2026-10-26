@@ -79,8 +79,67 @@ fi
 # The installed hourly entry point also drives quota-volume C14 reclaim.
 volume_args=(volume reclaim)
 [[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
-VOLUME_OUTPUT="$(DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}" 2>&1)"
-VOLUME_RC=$?
+VOLUME_TIMEOUT_BIN="${DISK_MAGICIAN_VOLUME_TIMEOUT_BIN:-}"
+if [[ -z "$VOLUME_TIMEOUT_BIN" ]]; then
+  for candidate in "$(command -v timeout 2>/dev/null || true)" "$(command -v gtimeout 2>/dev/null || true)" /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then VOLUME_TIMEOUT_BIN="$candidate"; break; fi
+  done
+fi
+VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
+if [[ -n "$ACT_DEADLINE_AT" ]]; then
+  VOLUME_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
+import sys,time
+try: remaining=max(0.0,float(sys.argv[1])-time.monotonic())
+except (TypeError,ValueError): remaining=0.0
+print(f"{remaining+15.0:.3f}")
+PY
+)"
+elif ! [[ "$VOLUME_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]]; then
+  VOLUME_TIMEOUT_SEC=0
+fi
+VOLUME_CURSOR=""
+[[ -n "$ACT_CURSOR" ]] && VOLUME_CURSOR="${ACT_CURSOR}.volume-reclaim"
+VOLUME_OUTPUT=""
+VOLUME_RC=0
+VOLUME_COMMAND_STARTED=false
+if [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
+  VOLUME_OUTPUT="skipped:bounded-runtime-unavailable"
+  VOLUME_RC=124
+else
+  VOLUME_COMMAND_STARTED=true
+  VOLUME_OUTPUT="$(ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" \
+    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${VOLUME_TIMEOUT_SEC}s" \
+    "$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}" 2>&1)"
+  VOLUME_RC=$?
+fi
+if (( VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143 )); then
+  VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"
+  VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
+  VOLUME_BALLAST_FAILURES=0
+  if [[ "$clean_flag" == "--clean" && "$VOLUME_COMMAND_STARTED" == true ]]; then
+    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s 12s "$SCRIPT_DIR/../disk_magician.sh" volume ballast ensure scratch >/dev/null 2>&1 || VOLUME_BALLAST_FAILURES=1
+  fi
+  VOLUME_ACTIVE="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --active 2>/dev/null || true)"
+  VOLUME_RUN_IDS="$(python3 - "$VOLUME_ACTIVE" "$CHILD_TRIGGER" <<'PY'
+import json,sys
+try: rows=json.loads(sys.argv[1])
+except Exception: rows=[]
+if isinstance(rows,dict): rows=rows.get("active",[])
+for row in rows if isinstance(rows,list) else []:
+    if isinstance(row,dict) and row.get("trigger")==sys.argv[2] and isinstance(row.get("id"),str): print(row["id"])
+PY
+)"
+  if [[ -z "$VOLUME_RUN_IDS" ]]; then
+    VOLUME_RUN_IDS="$(python3 "$RECEIPT_HELPER" begin --job volume_reclaim --trigger "$CHILD_TRIGGER" --precondition '{}')" || VOLUME_RUN_IDS=""
+  fi
+  for volume_run_id in $VOLUME_RUN_IDS; do
+    [[ -n "$volume_run_id" ]] || continue
+    python3 "$RECEIPT_HELPER" finish --job volume_reclaim --run-id "$volume_run_id" --outcome timeout \
+      --reason "bounded runtime expired: $VOLUME_TIMEOUT_REASON" --trigger "$CHILD_TRIGGER" \
+      --candidates "{\"aged_scanned\":null,\"removed\":null,\"top_kept_reason\":\"runtime-timeout\",\"ballast_restore_failures\":$VOLUME_BALLAST_FAILURES}" \
+      --postcondition '{"allocated_bytes_after":null,"target_reached":null}' >/dev/null 2>&1 || true
+  done
+fi
 [[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
 if [[ $VOLUME_RC -ne 0 ]]; then
   echo "[tmp_scratch_sweep] ERROR: volume reclaim failed" >&2
@@ -110,7 +169,7 @@ for k in ("valid","outcome","aged_scanned","removed","target_reached","ballast_r
 PYV
 )"
 VOLUME_REASON_JSON="$(python3 -c 'import json,sys; print(json.dumps(None if sys.argv[1]=="null" else sys.argv[1]))' "$VOLUME_REASON")"
-if [[ "$VOLUME_VALID" != true || "$VOLUME_OUTCOME" == error ]]; then rc=1; fi
+if [[ "$VOLUME_VALID" != true || "$VOLUME_OUTCOME" == error || "$VOLUME_OUTCOME" == timeout ]]; then rc=1; fi
 
 if [[ $rc -ne 0 ]]; then
   OUTCOME="error"

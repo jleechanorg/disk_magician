@@ -82,7 +82,7 @@ run 0 "$T/myrepo" gate-prep --detach HEAD --est-gb 3
 assert_eq "$RC" 0 "exit 0"
 assert_contains "$OUT" "$STANDARD_WORKTREE_ROOT/myrepo/scratch-gate-prep-" "path under ~/.worktrees/<repo>/scratch-<purpose>-<ts>"
 assert_eq "$(git -C "$OUT" rev-parse HEAD)" "$SHA" "checked out at the sha"
-assert_eq "$(stat -c %a "$OUT")" 700 "new scratch directory is mode 0700"
+assert_eq "$(python3 -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$OUT")" 700 "new scratch directory is mode 0700"
 assert_eq "$(git -C "$OUT" symbolic-ref -q HEAD || echo detached)" detached "HEAD is detached"
 assert_eq "$(lease_field "$OUT" kind)" scratch "lease kind"
 assert_eq "$(lease_field "$OUT" source)" "git:https://example.invalid/o/myrepo.git@$SHA" "lease source = repo URL + sha"
@@ -137,6 +137,20 @@ assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
 [[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
 assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
 
+echo "== ownerless evidence lease becomes reclaim-eligible after 48h =="
+run 0 "$T/myrepo" ownerless-evidence --kind evidence
+OWNERLESS_OUT="$OUT"
+LEASE_FILE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OWNERLESS_OUT")"
+LEASE_CREATED=$(( $(date +%s) - 48*3600 - 10 ))
+python3 - "$LEASE_FILE" "$LEASE_CREATED" <<'PYOWNERLESS'
+import json,sys
+p,created=sys.argv[1],int(sys.argv[2]); d=json.load(open(p))
+d["owner"]=None; d["owners"]=[]; d["created_epoch"]=created; d["expires_at"]=created+24*3600
+json.dump(d,open(p,"w"))
+PYOWNERLESS
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("owner") is None and d.get("owners")==[])' "$LEASE_FILE")" True "ownerless evidence lease shape is explicit"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2" "$3"' _ "$REPO_ROOT" "$LEASE_FILE" "$((LEASE_CREATED + 48*3600))")" released "C14 lease-state input is reclaim-eligible at 48h"
+
 echo "== malformed scratch registry: evidence/build fail closed without allocation =="
 cat > "$T/volume-config.json" <<EOF
 {"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":"$T/Volumes/diskm-scratch"}}}}
@@ -168,6 +182,32 @@ for kind in evidence build; do
     assert_contains "$OUT" "$T/tmp/myrepo/$kind/legacy-$kind-" "legacy config uses $kind tmp fallback"
 done
 assert_eq "$(admits)" "$((before + 2))" "legacy config proceeds through normal admission"
+
+echo "== quota-volume births fail closed on unexpected or missing admission =="
+mkdir -p "$T/QuotaVolume/diskm-scratch"
+cat > "$T/bin/volume-ok" <<EOF
+#!/usr/bin/env bash
+[[ "\$1 \$2" == "volume path" ]] || exit 9
+printf '%s\\n' "$T/QuotaVolume/diskm-scratch"
+EOF
+chmod +x "$T/bin/volume-ok"
+export DISK_MAGICIAN_DISKM_BIN="$T/bin/volume-ok"
+for kind in evidence build; do
+    run 2 "$T/myrepo" "quota-unexpected-$kind" --kind "$kind"
+    assert_eq "$RC" 75 "quota $kind unexpected admission rc fails closed"
+    assert_eq "$OUT" "" "quota $kind unexpected admission emits no path"
+    assert_contains "$ERR" "disk-admission: unavailable" "quota $kind failure is diagnosed"
+    [[ "$(find "$T/QuotaVolume/diskm-scratch/myrepo/$kind" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "quota $kind unexpected rc creates nothing" || bad "quota $kind unexpected rc created a path"
+    assert_eq "$(admits)" 1 "quota $kind admission invoked once"
+done
+export DISK_MAGICIAN_ADMIT_BIN="$T/bin/missing-admit"
+run 0 "$T/myrepo" quota-missing --kind evidence
+assert_eq "$RC" 75 "quota missing admission fails closed"
+assert_eq "$OUT" "" "quota missing admission emits no path"
+assert_contains "$ERR" "admit missing" "quota missing admission is diagnosed"
+[[ "$(find "$T/QuotaVolume/diskm-scratch/myrepo/evidence" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "quota missing admission creates nothing" || bad "quota missing admission created a path"
+export DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit"
+unset DISK_MAGICIAN_DISKM_BIN
 
 echo "== malformed volume config block remains fail-closed =="
 printf '%s\n' '{"volumes":null}' > "$T/volume-config.json"

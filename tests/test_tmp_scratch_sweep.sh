@@ -22,7 +22,7 @@ case "$TMP_ROOT" in
   "${TMPDIR:-/tmp}"/*|/tmp/*|/private/tmp/*) ;;
   *) echo "FATAL: fixture root outside TMPDIR: '$TMP_ROOT'" >&2; exit 2 ;;
 esac
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap '/bin/rm -rf -- "$TMP_ROOT"' EXIT
 
 MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
@@ -66,7 +66,9 @@ cp "$SOURCE_SCRIPT" "$MOCK_BIN/tmp_scratch_sweep.sh"
 chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
-echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-}" >> "${INVOCATION_LOG:?}"
+echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
+if [[ "$*" == "volume ballast ensure scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
+[[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == skip ]]; then
   echo "${VOLUME_MOCK_SKIP:-skipped:below-trigger:80}"
   exit 0
@@ -203,6 +205,51 @@ assert_receipt_field "stale volume receipt produces parent error" "$STATE_DIR/re
 echo "Test 7d: explicit below-trigger skip is valid and dry-run does not claim target recovery"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --dry-run
 assert_receipt_field "dry-run volume target is not claimed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_target_reached'))" "None"
+
+echo "Test 7e: volume reclaim receives governor state and a stalled scan has a bounded terminal receipt"
+: >"$INVOCATION_LOG"
+DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
+CURSOR="$TMP_ROOT/governor.cursor"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  /bin/bash "$SCRIPT" --clean --deadline-at "$DEADLINE" --cursor "$CURSOR" >/dev/null
+assert_contains "volume invocation receives deadline and isolated cursor" "deadline=$DEADLINE cursor=${CURSOR}.volume-reclaim" "$(cat "$INVOCATION_LOG")"
+: >"$INVOCATION_LOG"
+STARTED="$(python3 -c 'import time; print(time.monotonic())')"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_SLEEP=4 DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS=1 \
+  /bin/bash "$SCRIPT" --clean >"$TMP_ROOT/volume-timeout.out" 2>&1
+TIMEOUT_RC=$?
+set -e
+ELAPSED="$(python3 - "$STARTED" <<'PY'
+import sys,time
+print(time.monotonic()-float(sys.argv[1]))
+PY
+)"
+if [[ "$TIMEOUT_RC" -ne 0 && "$(python3 -c 'import sys; print(float(sys.argv[1]) < 6)' "$ELAPSED")" == True ]]; then
+  echo "  PASS  stalled volume reclaim was terminated within the configured bound"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  stalled volume reclaim exceeded bound or returned success (rc=$TIMEOUT_RC elapsed=$ELAPSED)"
+  FAIL=$((FAIL+1))
+fi
+assert_receipt_field "stalled volume reclaim ends volume timeout receipt" "$STATE_DIR/receipts/volume_reclaim.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+assert_receipt_field "stalled volume reclaim ends parent error receipt" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+echo "Test 7f: missing timeout utility fails closed without invoking reclaim"
+: >"$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_VOLUME_TIMEOUT_BIN="$TMP_ROOT/no-timeout" \
+  /bin/bash "$SCRIPT" --clean >"$TMP_ROOT/no-timeout.out" 2>&1
+NO_TIMEOUT_RC=$?
+set -e
+if [[ "$NO_TIMEOUT_RC" -ne 0 ]] && ! grep -q '^disk_magician volume reclaim' "$INVOCATION_LOG"; then
+  echo "  PASS  no timeout utility blocks volume reclaim"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  missing timeout utility did not fail closed (rc=$NO_TIMEOUT_RC)"
+  FAIL=$((FAIL+1))
+fi
+assert_receipt_field "missing timeout utility records volume timeout" "$STATE_DIR/receipts/volume_reclaim.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+assert_receipt_field "missing timeout utility records parent error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
 
 echo "Test 8: exit code — wrapper exits nonzero if cleanup_claude_state fails alone while cleanup_tmp succeeds"
 : > "$INVOCATION_LOG"

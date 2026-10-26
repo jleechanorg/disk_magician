@@ -2,6 +2,7 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/scratch_budget.sh"
+source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 clean=false
 [[ "${1:-}" == --clean && $# == 1 ]] && clean=true
 [[ $# == 0 || "$clean" == true ]] || { echo "usage: volume reclaim [--clean]" >&2; exit 2; }
@@ -38,6 +39,12 @@ AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REAS
 receipt="$SCRIPT_DIR/job_receipt.py"
 run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct}")" || { echo kept:receipt-begin-failed; exit 1; }
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
+ACT_CURSOR_SOURCE="volume_reclaim:v1:$root"
+cursor_error=0
+if [[ "$clean" == true && -n "$ACT_CURSOR" ]]; then
+ act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || { cursor_error=1; TOP_REASON=cursor-invalid; }
+ if (( ! cursor_error )); then act_cursor_reset_once "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" || { cursor_error=1; TOP_REASON=cursor-reset-failed; }; fi
+fi
 reclaim_one() {
  local candidate="$1" diag result state_dir diag_dir root_dev diag_dev
  state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
@@ -72,6 +79,7 @@ PYDIAG
  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$diag" 2>/dev/null || true
  printf '%s\n' "$result"
 }
+if (( ! cursor_error )); then
 while IFS=$'\t' read -r newest entry; do
  [[ -n "$entry" ]] || continue
  AGED=$((AGED+1))
@@ -82,6 +90,7 @@ while IFS=$'\t' read -r newest entry; do
   result="${result%:ballast-release-attempted}"
  fi
  case "$result" in removed:*) REMOVED=$((REMOVED+1));; *) TOP_REASON="${result#kept:}"; echo "$result:$entry";; esac
+ [[ "$result" == deferred:deadline-before-unit ]] && { TOP_REASON=deadline-before-unit; break; }
  current="$(status_json)" || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  [[ "$now_quota" -eq "$quota" ]] || { TOP_REASON=quota-changed; measurement_error=1; break; }
@@ -97,6 +106,7 @@ done < <(
   printf '%s\t%s\n' "$newest" "$entry"
  done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
 )
+fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
 # validates or recreates the reserve after reclaim and before success is recorded.
 if [[ "$clean" == true ]]; then

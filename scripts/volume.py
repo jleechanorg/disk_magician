@@ -434,13 +434,13 @@ def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[st
     entry = entries.get(name)
     if not isinstance(entry, dict):
         raise ValueError("invalid volume registry entry")
+    container = load_container()
+    volume = validate_entry(container, settings, entry)
     state = entry.get("state")
     if state == "retired" and "retired" not in allowed_states:
         raise ValueError("volume is retired")
     if state not in allowed_states:
         raise ValueError("invalid volume registry state")
-    container = load_container()
-    volume = validate_entry(container, settings, entry)
     return container, settings, entry, volume
 
 
@@ -657,6 +657,17 @@ def status(snapshot: bool = False) -> int:
             alarms.append("container_low")
 
         entry = entries.get("scratch")
+        live_scratch = any(
+            volume.name == settings["classes"]["scratch"]["name"]
+            for volume in container.volumes
+        )
+        entry_state = entry.get("state") if isinstance(entry, dict) else None
+        if entry is None and live_scratch:
+            fatal = True
+            alarms.append("volume_registry_missing:scratch")
+        elif entry_state in {"creating", "needs_recovery"}:
+            fatal = True
+            alarms.append("volume_registry_incomplete:scratch")
         row: dict[str, Any] = {
             "host_id": os.uname().nodename,
             "filesystem_id": entry.get("uuid") if isinstance(entry, dict) else None,

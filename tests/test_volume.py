@@ -254,6 +254,17 @@ class LifecycleTest(VolumeTestBase):
                     self.assertEqual(volume.path_cmd("scratch"), 75)
                 self.assertEqual(output.getvalue(), "")
 
+    def test_malformed_retired_entry_fails_closed_before_retired_fallback(self):
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {"scratch": {"state": "retired"}},
+        }))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(output.getvalue(), "")
+
     def test_create_fails_closed_for_malformed_existing_registry_entry(self):
         self.make_fit()
         registry_path, _ = volume.registry_paths()
@@ -286,6 +297,31 @@ class StatusAndBallastTest(VolumeTestBase):
         data["container"]["ceiling"] = 1000 * 2**30
         self.state.write_text(json.dumps(data))
         self.assertEqual(volume.create_cmd("scratch", execute=True), 0)
+
+    def test_status_alarms_for_live_volume_without_complete_registry_state(self):
+        cases = (
+            ({}, "volume_registry_missing:scratch"),
+            ({"scratch": {"state": "creating"}}, "volume_registry_incomplete:scratch"),
+            ({"scratch": {"state": "needs_recovery"}}, "volume_registry_incomplete:scratch"),
+        )
+        registry_path, _ = volume.registry_paths()
+        for entries, expected_alarm in cases:
+            with self.subTest(expected_alarm=expected_alarm):
+                data = json.loads(self.state.read_text())
+                data["volumes"].append({
+                    "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
+                    "device": "disk3s9", "used": 0, "quota": 30 * 2**30,
+                    "roles": [], "mountpoint": str(self.mp),
+                })
+                self.state.write_text(json.dumps(data))
+                registry_path.write_text(json.dumps({
+                    "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+                    "volumes": entries,
+                }))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(volume.status(snapshot=True), 2)
+                self.assertIn(expected_alarm, json.loads(output.getvalue())["alarms"])
 
     def test_create_rejects_custom_mountpoint_on_macos_before_mutation(self):
         with mock.patch.object(volume.sys, "platform", "darwin"):

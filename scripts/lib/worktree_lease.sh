@@ -10,7 +10,9 @@
 # SAFETY POSTURE
 # ---------------
 # Every unknown fails toward "owner alive / keep". A lease with no resolvable
-# runtime owner (owner: null) is never owner-reaped. pid liveness is checked
+# runtime owner is kept, except explicit ownerless scratch-new evidence/build
+# output after its 48h minimum and recorded expiry; C14 still checks content,
+# cwd, and activity before removal. pid liveness is checked
 # by pid PLUS lstart epoch so a reused pid reads dead, not alive. A comm
 # mismatch with matching epochs reads unknown (keep), never dead.
 #
@@ -678,8 +680,8 @@ PY
 
 # lease_owner_state <lease_file> [now_epoch] — prints exactly one of:
 #   none | released | dead | alive | alive-expired | unknown | unreadable
-# Precedence: none (owner null) > released > ps check. Fail-closed: every
-# unmeasurable case keeps the worktree (alive/unknown/unreadable/none).
+# Explicit release and the narrow expired ownerless-output case precede pid
+# checks. Fail-closed: every other unmeasurable case keeps the artifact.
 # The liveness probe is LC_ALL=C TZ=UTC pinned so ambient LANG/TZ cannot
 # localize the lstart rendering (fr_FR renders "Sam 10 oct ..." and breaks
 # the parse, which would silently turn alive owners into unknown).
@@ -694,9 +696,34 @@ except Exception:
     print("unreadable"); raise SystemExit
 if d.get("released_at"): print("released"); raise SystemExit
 owners=d.get("owners")
-if not isinstance(owners,list): owners=[] if d.get("owner") is None else [d.get("owner")]
-if not owners: print("none"); raise SystemExit
+owners_is_list=isinstance(owners,list)
+if not owners_is_list: owners=[] if d.get("owner") is None else [d.get("owner")]
 now=int(sys.argv[2]) if sys.argv[2].isdigit() else int(time.time())
+if not owners:
+    # Ownerless scratch-new evidence/build output has no process identity to
+    # reap. After its minimum 48-hour retention (and any longer recorded
+    # expiry), report it released so ordinary C14 content, cwd, and activity
+    # checks can decide whether removal is safe. Worktrees, live/unknown
+    # owners, malformed leases, and pending/reuse claims never use this path.
+    ownerless_output = (
+        "owner" in d and d.get("owner") is None and owners_is_list and
+        d.get("pending") is False and d.get("creator") == "scratch-new" and
+        d.get("kind") in ("evidence", "build") and "reuse" not in d
+    )
+    created=d.get("created_epoch")
+    expires=d.get("expires_at")
+    ttl=d.get("ttl_hours")
+    valid_time = (
+        type(created) is int and created > 0 and
+        type(expires) is int and expires > 0 and
+        type(ttl) is int and 1 <= ttl <= 24 * 365 and
+        expires == created + ttl * 3600
+    )
+    if ownerless_output and valid_time and now >= max(created + 48 * 3600, expires):
+        print("released")
+    else:
+        print("none")
+    raise SystemExit
 states=[]
 for owner in owners:
     if not isinstance(owner,dict) or not isinstance(owner.get("pid"),int) or isinstance(owner.get("pid"),bool):

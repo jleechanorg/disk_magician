@@ -12,12 +12,16 @@ source "$_SN_DIR/worktree_new.sh"
 # refuse, 76 retry once then refuse, any other rc proceeds as degraded (bypass).
 # DISK_MAGICIAN_ADMIT_BIN replaces `diskm admit` in tests.
 sn_admit() {
-    admit_gate "$1" "$2" "$4" "$3" scratch-new
+    if [[ "${5:-}" == required ]]; then
+        admit_gate_required "$1" "$2" "$4" "$3" scratch-new
+    else
+        admit_gate "$1" "$2" "$4" "$3" scratch-new
+    fi
 }
 
 sn_main() {
     local -a pos=()
-    local kind=scratch sha="" est="" owner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc
+    local kind=scratch sha="" est="" owner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc quota_volume=0 admit_mode=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind) kind="${2:-}"; shift 2 || return 2 ;;
@@ -38,7 +42,7 @@ sn_main() {
         if [[ -z "$volume_bin" ]]; then volume_bin="$_SN_DIR/../disk_magician.sh"; fi
         root="$("$volume_bin" volume path scratch 2>/dev/null)"; volume_rc=$?
         case "$volume_rc" in
-            0) path="${root%/}/$name/$kind/${pos[1]}-$(date -u +%Y%m%dT%H%M%SZ)" ;;
+            0) quota_volume=1; path="${root%/}/$name/$kind/${pos[1]}-$(date -u +%Y%m%dT%H%M%SZ)" ;;
             3)
                 root="$EVIDENCE_TMP_ROOT"
                 path="${root%/}/$name/$kind/${pos[1]}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -55,7 +59,8 @@ sn_main() {
         sha="$(git -C "$repo" rev-parse -q --verify "$sha^{commit}")" || { echo "scratch-new: unknown commit" >&2; return 1; }
         src="git:$(git -C "$repo" remote get-url origin 2>/dev/null || echo "$repo")@$sha"
     fi
-    sn_admit "$cls" "$est" "$path" "scratch-new:$name" || return $?
+    [[ "$quota_volume" == 1 ]] && admit_mode=required
+    sn_admit "$cls" "$est" "$path" "scratch-new:$name" "$admit_mode" || return $?
     if [[ "$kind" == evidence || "$kind" == build ]]; then
         local parent="$(dirname "$path")"
         mkdir -p "$parent" || return 1

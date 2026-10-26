@@ -117,6 +117,19 @@ grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=10
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==2 and r["candidates"]["removed"]==0 and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="protected"'
 touch "$TEST_ROOT/repo/build/younger/content"
+# A pre-expired governor deadline reaches the C14 preflight, preserves the
+# current artifact, and leaves the cursor on that interrupted unit.
+CURSOR="$T/volume-reclaim.cursor"
+DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
+: >"$STATUS_CALLS_FILE"
+ACT_DEADLINE_AT="$DEADLINE" ACT_CURSOR="$CURSOR" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+grep -q 'deferred:deadline-before-unit' "$T/c14-deadline.out"
+[[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
+python3 - "$CURSOR" "$TEST_ROOT/repo/evidence/oldest" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["next_index"]==0 and cursor["items"]==[sys.argv[2]]
+PY
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
 # C14 ENOSPC must be typed through the real cleanup wrapper before ballast release.
 BALLAST_LOG="$T/ballast.log"
 export BALLAST_LOG

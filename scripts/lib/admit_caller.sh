@@ -63,7 +63,8 @@ except (OSError, ValueError, KeyError, TypeError):
 PY
 }
 
-admit_gate() {
+_admit_gate() {
+    local fail_closed="$1"; shift
     local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd output line
     ADMIT_ID=""
     local -a est_arg=()
@@ -72,6 +73,7 @@ admit_gate() {
     else cmd=(python3 "$_ADMIT_CALLER_DIR/../disk_budget.py"); fi
     if [[ ! -f "${cmd[${#cmd[@]}-1]}" ]]; then
         echo "admission_degraded:caller admit missing" >&2
+        [[ "$fail_closed" == true ]] && return 75
         return 0
     fi
     for try in 1 2; do
@@ -94,9 +96,21 @@ admit_gate() {
         0) return 0 ;;
         10) echo "disk-admission: warn class=$cls" >&2; return 0 ;;
         75|76) echo "disk-admission: refused class=$cls rc=$rc" >&2; return 75 ;;
-        *) echo "admission_degraded:caller rc=$rc" >&2; return 0 ;;
+        *)
+            echo "admission_degraded:caller rc=$rc" >&2
+            if [[ "$fail_closed" == true ]]; then
+                echo "disk-admission: unavailable class=$cls rc=$rc" >&2
+                return 75
+            fi
+            return 0 ;;
     esac
 }
+
+# Generic callers retain the degraded-proceed contract. Quota-volume births
+# use the required form so a missing or unexpected admission result cannot
+# create an artifact without a high-water decision.
+admit_gate() { _admit_gate false "$@"; }
+admit_gate_required() { _admit_gate true "$@"; }
 
 # Confirm only the successful creator's exact admission attempt.
 admit_confirm_created() {
