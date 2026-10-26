@@ -18,6 +18,12 @@ spec.loader.exec_module(volume)
 
 class NativeFstabPublicCliTest(unittest.TestCase):
     def setUp(self):
+        # This class drives fake Linux paths. macOS lacks os.listxattr; provide
+        # an empty fake-filesystem result only when the host API is absent.
+        if not hasattr(volume.os, "listxattr"):
+            self.fake_listxattr = mock.patch.object(volume.os, "listxattr", create=True, return_value=[])
+            self.fake_listxattr.start()
+            self.addCleanup(self.fake_listxattr.stop)
         self.previous = {key: os.environ.get(key) for key in ("DISK_MAGICIAN_CONFIG", "DISK_MAGICIAN_STATE_DIR")}
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -145,6 +151,23 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         self.assertEqual((restored.st_mode, restored.st_uid, restored.st_gid, restored.st_mtime_ns),
                          (details.st_mode, details.st_uid, details.st_gid, details.st_mtime_ns))
         self.assertEqual(os.getxattr(self.fstab, "user.diskm-test"), b"metadata")
+        self.assertFalse(backup.exists())
+        self.assertEqual(list(self.root.glob(".fstab-diskm-*")), [])
+
+    def test_fstab_write_refuses_missing_xattr_enumerator_before_backup_or_write(self):
+        original = self.fstab.read_bytes()
+        details = self.fstab.stat()
+        backup = self.fstab.with_name(self.fstab.name + ".diskm-backup-" +
+                                      volume.hashlib.sha256(original).hexdigest()[:16])
+        with mock.patch.object(volume.os, "geteuid", return_value=0), \
+             mock.patch.object(volume.os, "listxattr", create=True, return_value=[]):
+            delattr(volume.os, "listxattr")
+            with self.assertRaises(OSError):
+                volume.linux_fstab_write(self.fstab, original, original + b"# replacement\n")
+        self.assertEqual(self.fstab.read_bytes(), original)
+        restored = self.fstab.stat()
+        self.assertEqual((restored.st_mode, restored.st_uid, restored.st_gid, restored.st_mtime_ns),
+                         (details.st_mode, details.st_uid, details.st_gid, details.st_mtime_ns))
         self.assertFalse(backup.exists())
         self.assertEqual(list(self.root.glob(".fstab-diskm-*")), [])
 

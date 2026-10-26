@@ -1,10 +1,10 @@
 # Opt-in quota'd Scratch volume (`diskm volume`)
 
-Date: 2026-10-25. This is revision 13, updated after Codex review of revision 12. Scope: disk_magician on the Mac (APFS container `disk3`). Planning only. This document does not authorize creating volumes, editing policy, deploying or merging.
+Date: 2026-10-25; platform choices updated 2026-10-26 (revision 14). Scope: opt-in Scratch on Mac APFS and Linux ext4. This document records behavior; it does not itself authorize volume creation, policy changes, deployment or merging.
 
 ## Outcome
 
-Scratch requested through `diskm scratch-new` may land on one APFS volume with a quota. Exact usage comes from `diskutil`; nothing walks the tree for usage reporting. When the volume is unavailable, the request errors and nothing is written there. At the existing hourly sweep, quota pressure triggers automatic trim through the existing per-entry C14 removal primitive: whole eligible disposable artifacts are considered oldest-content-mtime first until usage falls to the low-water target. This is an mtime-based last-modified proxy, not true access-time LRU; no access events are recorded. The fill→trim→space-recovered→write-resumes pilot is a required acceptance result, not established by the earlier primitive-only pilots. v1 is opt-in and covers Scratch only. Volume deletion and quota recreation are deferred; rollback retires the volume and drains eligible entries while keeping the volume available for inspection.
+Scratch requested through `diskm scratch-new` may land on the configured quota-bounded volume. The selected Mac profile is 70 GiB passphrase-encrypted APFS; Linux retains the existing 200 GiB unencrypted ext4 image, matching each host's current protection policy. Linux native migration and scheduled recovery have their own retained physical acceptance; the Mac passphrase goes directly to diskutil's hidden terminal prompt, with no Keychain, password storage or automatic unlock. Mac-specific APFS details below do not describe Linux retirement, which is not implemented. Exact usage comes from `diskutil`; nothing walks the tree for usage reporting. When the volume is unavailable, the request errors and nothing is written there. At the existing hourly sweep, quota pressure triggers automatic trim through the existing per-entry C14 removal primitive: whole eligible disposable artifacts are considered oldest-content-mtime first until usage falls to the low-water target. This is an mtime-based last-modified proxy, not true access-time LRU; no access events are recorded. The fill→trim→space-recovered→write-resumes pilot is a required acceptance result, not established by the earlier primitive-only pilots. v1 is opt-in and covers Scratch only. Volume deletion and quota recreation are deferred; rollback retires the volume and drains eligible entries while keeping the volume available for inspection.
 
 ## Containment: what a quota does and does not do
 
@@ -45,9 +45,9 @@ Out of scope:
 | Question | Pick | Rationale |
 |---|---|---|
 | Which classes? | Scratch only; Worktrees deferred | Reviewer consensus |
-| Cap? | 30 GiB requested, no reserve. `create` refuses unless the live fit passes, and prints the largest cap that fits | A reserve would take Data space. Caps must be checked against live usage |
+| Cap? | Mac: 70 GiB requested, no reserve; Linux: retain the existing 200 GiB image. `create` refuses unless the live fit passes, and prints the largest cap that fits | A reserve would take Data space. Caps must be checked against live usage |
 | What does the fit use? | Live values at `create`/`plan-fit`: sum `CapacityInUse` for every volume enumerated in the Data APFS container, then add only the extra VM swap reserve needed to bring VM's contribution to at least 40 GiB, use `max(measured Scratch allocation, configured quota)` in place of Scratch actual (or the full quota before Scratch exists), and the 20 GiB alarm floor; the result must be ≤ container ceiling. Other APFS containers are excluded. If the volume list or any same-container allocation is unknown, or VM/Scratch identity is ambiguous, the fit fails closed | A constant floor understated live Data, which is 829–890 GiB; omitting same-container volumes understates allocation |
-| Fit today? | 926.4 − (828.8 Data + 24.3 other System/Preboot/Recovery allocations) − max(27.9 VM, 40 swap reserve) − 20 alarm floor = **13.3 GiB**, so a 30 GiB request fails. Either Data drops by about 17 GiB or the user picks a cap of 13 GiB or less (P-1) | Honest live arithmetic; every volume in the Data container is included |
+| Historical fit (2026-10-25)? | 926.4 − (828.8 Data + 24.3 other System/Preboot/Recovery allocations) − max(27.9 VM, 40 swap reserve) − 20 alarm floor = **13.3 GiB**, so a 30 GiB request fails. Either Data drops by about 17 GiB or the user picks a cap of 13 GiB or less (P-1) | Honest live arithmetic; every volume in the Data container is included |
 | How is it enabled? | `create scratch --execute` is the enabling step: the active registry entry is the switch. `retire scratch` disables it. There is no `enabled` config flag | Removes the ordering trap where create was refused while disabled |
 | Mountpoint? | DiskArbitration's `/Volumes/diskm-scratch`, resolved by UUID | When unmounted, the path is absent and cannot be created under root-owned `/Volumes`. The OS enforces fail-closed; no custom mountpoint or permissions trick is needed |
 | How are writes routed? | `scratch-new <repo> <purpose> --kind evidence\|build` → `<mp>/<repo>/<kind>/<purpose>-<UTC>`. It returns rc 75 when the volume is registered but unavailable, and rc 3 (legacy `/tmp`) when no volume is registered | The CLI is the only path source. When it creates a `<repo>/<kind>` parent it also creates `<mp>/<repo>/<kind>/.dm-quarantine` (mode 0700, owned by the user: what C14 checks at `quarantine_rename.py:288-296`) before the entry directory, so C14's own `mkdir` is never the first allocation at the cap |
@@ -63,20 +63,20 @@ Out of scope:
 | Quarantined/deferred entries? | Entries left in `.dm-quarantine` count toward the quota, and nothing calls `quarantine_reconcile`. This is an existing gap across all roots and is out of scope. The `volume_reclaim_stuck` line surfaces it | It belongs to the C14 owner, not this design |
 | Cross-volume moves? | Forbidden. Nothing renames or copies between Data and the volume. Quarantine is per-parent, so it stays on the same filesystem. Rollback drains in place | Cross-volume `rename` fails with EXDEV, and a copy would double usage |
 | OS-created dot-dirs? | `reclaim` skips every dot-name; `.diskm-ballast` is recognized only by its exact root name. Any volume-deletion emptiness rules, including treatment of `.Spotlight-V100`, `.fseventsd`, `.Trashes`, `.TemporaryItems` and `.DocumentRevisions-V100`, are deferred with deletion/recreation from v1 | macOS creates these dirs on user volumes. Trash, temp items and document revisions can hold user data |
-| Encryption? | Unencrypted, only with explicit user acknowledgment (P-2). The Keychain-passphrase variant needs credential creation and an unlock LaunchAgent, so it is a separate approval-gated follow-up | Keeps automount; scratch is ephemeral |
+| Encryption? | Mac uses Darwin-only `apfs-passphrase` with direct hidden diskutil prompting; Linux keeps its acknowledged unencrypted image. No Keychain access, stored password or unlock daemon | Mac requires manual unlock after restart; matching a login password is the user's direct choice, not password synchronization |
 | Change the cap? | Deferred from v1. There is no `delete` or `recreate` command. A retired volume remains mounted for inspection; quota changes require a separately scoped follow-up | Avoids adding destructive volume lifecycle behavior to the opt-in v1 |
-| Policy conflict? | Shared policy says scratch goes "strictly to `/tmp`". P-5 asks the user to allow `scratch-new` paths on `/Volumes/diskm-scratch` | That file is owned by the user |
+| Policy conflict? | The user requested Scratch adoption on 2026-10-26, starting on Linux. `CLAUDE.md` § Agent Scratch placement owns the workflow; the Linux shared policy points there as the narrow exception to host-temp routing | Mac routing waits for an unlocked, identity-verified encrypted volume; no global temp remap |
 | Tests? | `diskutil` and `lsof` are injected via `DISK_MAGICIAN_{DISKUTIL,LSOF}_BIN` and a stateful fake. No test creates a volume or asserts permissions on a mounted root | Follows the `DF_BIN`/`DU_BIN` precedent |
 | ZFC? | Not applicable. Every decision is a mechanical gate on measured facts | |
 
 ## Design
 
-**Config** (`config.json.template`):
+**Selected Mac profile** (the generic `config.json.template` remains opt-in with no acknowledgment):
 
 ```json
-"volumes": {"swap_headroom_gb": 40, "alarm_floor_gb": 20, "encryption": "none",
-            "encryption_acknowledged_at": null,
-            "classes": {"scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": "/Volumes/diskm-scratch"}}}
+"volumes": {"swap_headroom_gb": 40, "alarm_floor_gb": 20, "encryption": "apfs-passphrase",
+            "encryption_acknowledged_at": "2026-10-26T20:46:42.658Z",
+            "classes": {"scratch": {"name": "diskm-scratch", "quota_gb": 70, "mountpoint": "/Volumes/diskm-scratch"}}}
 ```
 
 **Registry:** `$STATE/volumes/registry.json`, written under flock with atomic replace. A corrupt file fails closed. Each entry holds `{class, name, uuid, container_uuid, quota_bytes, created_at, state: active|retired}`.
@@ -94,7 +94,7 @@ Every mutation first re-checks identity. All of the following must hold, otherwi
 |---|---|
 | `status [--json] [--snapshot]` | Shows volume and container rows, live fit, alarms and the unrouted-`/tmp` audit. The audit lists `/private/tmp/*` entries of 1 GiB or more from the latest existing snapshot, with `measured_at`, or reports `unknown`. It never walks. `--snapshot` omits the audit. Exit codes: 0 healthy, 1 degraded, 2 identity or config error |
 | `plan-fit [--json]` | Live fit (above), with every term and `max_quota_gb_that_fits` |
-| `create scratch [--execute]` | Dry-run by default. Refuses if the encryption acknowledgment is missing (rc 2), an active entry or the name exists (rc 2), the live fit fails (rc 2), or free space is below the alarm floor (rc 75). Runs `addVolume <ctr> APFS diskm-scratch -quota <N>g`, writes and verifies the ballast, then registers the volume as active. If ballast creation or verification fails, the registry remains unavailable. This is the enabling step |
+| `create scratch [--execute]` | Dry-run by default. Refuses if the encryption acknowledgment is missing (rc 2), an active entry or the name exists (rc 2), the live fit fails (rc 2), or free space is below the alarm floor (rc 75). For the encrypted Mac profile, requires a controlling TTY before intent and runs `addVolume <ctr> APFS diskm-scratch -quota <bytes> -passprompt` with inherited streams, writes and verifies the ballast, then registers the volume as active. If ballast creation or verification fails, the registry remains unavailable. This is the enabling step |
 | `path scratch [--for-reclaim]` | rc 0 prints the mountpoint after verifying identity and that the actual `MountPoint` equals the configured `mountpoint`. rc 75: an entry exists but the volume is unmounted, locked, mismatched or mounted elsewhere. rc 3: no active entry. `--for-reclaim` also accepts a `retired` entry, so retirement stops new allocations while reclaim can still drain the volume. Only `reclaim` uses this flag |
 | `reclaim [--clean]` | The enumerator described above, judged by the extended C14 ephemeral classifier. Dry-run by default. Each removal is logged by the primitive. If a removal returns `kept:intent-write-failed`, it releases the ballast and retries that removal once (see Full-quota recovery); it recreates the ballast at the end of the run when space allows. Each run writes `reclaim_runs.json` |
 | `retire scratch` | Sets state to `retired`. `path` then returns rc 3 and new scratch goes back to `/tmp`, while `path --for-reclaim` still resolves the volume. Nothing is deleted |
@@ -168,16 +168,16 @@ The Worktrees volume starts only when all of the following hold:
 
 | ID | Precondition | Blocks |
 |---|---|---|
-| P-1 | The user picks a cap that passes the live fit (13.3 GiB today), or frees Data until 30 GiB fits | Real `create` |
-| P-2 | The user acknowledges an unencrypted volume, or approves Keychain encryption as a follow-up | Real `create` |
+| P-1 | The selected 70 GiB Mac cap must pass a fresh live fit immediately before mutation; historical fit figures do not authorize creation | Real `create` |
+| P-2 | Mac encryption is explicitly selected; the user enters the passphrase directly in diskutil's hidden prompt. Linux retains its acknowledged unencrypted image. No Keychain | Real `create` |
 | P-3 | The user authorizes 1 GiB spike volumes. S1: the user reboots; record the automount path and the OS dot-dirs, and confirm `/Volumes/<name>` cannot be created by the user while unmounted (EACCES). S2, which concerned read-only volume deletion, is deferred with deletion/recreation from v1 | P2 acceptance |
 | P-4 | The diff exceeds 150 production lines: `/cs` and `MERGE APPROVED` are required | Deploy |
-| P-5 | The user amends the shared policy to allow `scratch-new` paths on `/Volumes/diskm-scratch` | Real `create` (the enabling step) |
+| P-5 | Adopt the repo-owned Scratch instructions and narrow Linux shared-policy pointer; use CLI-verified, leased paths. Enable Mac task routing only after encrypted mount validation | Agent artifact routing |
 | P-6 | `dd` producer repos adopt `scratch-new --kind build` | Capturing `dd` builds |
 | P-7 | The sibling inventory is implemented | Inventory ingestion (snapshot embedding ships without it) |
 | P-8 | Automatic-trim pilot uses only disposable test artifacts on a test-only quota volume; the existing scheduled job triggers through `tmp_scratch_sweep.sh` automatically (no manual reclaim/direct sweep invocation); no production volume or arbitrary user data | Pilot acceptance above |
 
-No path needs sudo.
+Mac creation uses diskutil's direct terminal flow. Linux native fstab installation requires administrator authentication through the existing CLI; do not change sudoers.
 
 ## Self-review
 
