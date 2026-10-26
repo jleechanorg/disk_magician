@@ -138,12 +138,17 @@ if [[ "$PRUNE_UNUPLOADED_DUPS" == true && -s "$WORK/notready.txt" ]]; then
   CODEX_DIRS="${DM_FILEPROVIDER_LOCAL_CODEX_DIRS:-$HOME/.codex/sessions:$HOME/.codex/sessions_archive}"
   CLAUDE_DIR="${DM_FILEPROVIDER_LOCAL_CLAUDE_DIR:-$HOME/.claude/projects}"
   python3 - "$WORK/notready.txt" "$ROOT" "$CODEX_DIRS" "$CLAUDE_DIR" >"$WORK/dups_verified.txt" <<'PY'
-import os, stat, sys
+import gzip, os, stat, sys
 
 notready_file, root, codex_dirs_raw, claude_dir = sys.argv[1:5]
 codex_dirs = [d for d in codex_dirs_raw.split(":") if d]
 ELIGIBLE = {"SKIP:uploading", "SKIP:upload_error", "SKIP:not_uploaded"}
-CODEX_MARKERS = ("/conversation-backups/codex_conversations/sessions/", "/codex_conversations/sessions/")
+CODEX_MARKERS = (
+    "/conversation-backups/codex_conversations/sessions/",
+    "/conversation-backups/codex_conversations/sessions_archive/",
+    "/codex_conversations/sessions/",
+    "/codex_conversations/sessions_archive/",
+)
 CLAUDE_MARKERS = ("/conversation-backups/claude_conversations/projects/", "/claude_conversations/projects/")
 
 
@@ -152,23 +157,24 @@ def find_primary(dbx_path):
         if m in dbx_path:
             rel = dbx_path.split(m, 1)[1]
             for d in codex_dirs:
-                cand = os.path.join(d, rel)
-                if os.path.lexists(cand):
-                    return cand
+                for cand in (os.path.join(d, rel), os.path.join(d, rel + ".gz")):
+                    if os.path.lexists(cand):
+                        return cand
     for m in CLAUDE_MARKERS:
         if m in dbx_path:
             rel = dbx_path.split(m, 1)[1]
             if claude_dir:
-                cand = os.path.join(claude_dir, rel)
-                if os.path.lexists(cand):
-                    return cand
+                for cand in (os.path.join(claude_dir, rel), os.path.join(claude_dir, rel + ".gz")):
+                    if os.path.lexists(cand):
+                        return cand
     return None
 
 
-def prefix_matches(primary, dbx_path, size):
+def prefix_matches(primary, dbx_path, size, is_gz=False):
     rem = size
     try:
-        with open(primary, "rb") as fp, open(dbx_path, "rb") as fd:
+        open_p = (lambda p: gzip.open(p, "rb")) if is_gz else (lambda p: open(p, "rb"))
+        with open_p(primary) as fp, open(dbx_path, "rb") as fd:
             while rem > 0:
                 chunk = min(rem, 1048576)
                 bp = fp.read(chunk)
@@ -177,7 +183,7 @@ def prefix_matches(primary, dbx_path, size):
                     return False
                 rem -= chunk
         return True
-    except OSError:
+    except (OSError, EOFError, zlib_error := Exception):
         return False
 
 
@@ -203,18 +209,20 @@ with open(notready_file, encoding="utf-8", errors="replace") as f:
             continue
         if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
             continue
-        if st_p.st_size < st_d.st_size:
+        is_gz = primary.endswith(".gz") and not dbx_path.endswith(".gz")
+        if not is_gz and st_p.st_size < st_d.st_size:
             continue
-        if not prefix_matches(primary, dbx_path, st_d.st_size):
+        if not prefix_matches(primary, dbx_path, st_d.st_size, is_gz=is_gz):
             continue
         print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
 PY
   if [[ "$CLEAN" == true && -s "$WORK/dups_verified.txt" ]]; then
+    script_name="$(basename "$0")"
     while IFS=$'\t' read -r before_blocks before_size path primary; do
       if [[ -f "$primary" && ! -L "$primary" && -f "$path" && ! -L "$path" && ! "$primary" -ef "$path" ]]; then
         rm -f -- "$path"
         if [[ ! -e "$path" && -f "$primary" ]]; then
-          deletion_log "$(basename "$0")" "prune_unuploaded_duplicate" "$((before_blocks / 2))" "$path"
+          deletion_log "$script_name" "prune_unuploaded_duplicate" "$((before_blocks / 2))" "$path"
           n_pruned=$((n_pruned + 1))
         else
           n_prune_failed=$((n_prune_failed + 1))
