@@ -187,9 +187,12 @@ def cls(name: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return volumes, volumes["classes"][name]
 
 
-def fit_result(container: Container | None = None) -> dict[str, Any]:
+def fit_result(
+    container: Container | None = None,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     container = container or load_container()
-    settings = config()
+    settings = config() if settings is None else settings
     data_used = require_nonnegative(
         container.volume_by_role("Data").used, "Data volume usage"
     )
@@ -415,7 +418,7 @@ def recover_creation(name: str, settings: dict[str, Any], scratch: dict[str, Any
     if entry.get("state") != "needs_recovery":
         raise ValueError("volume is already registered")
     volume = validate_entry(container, settings, entry)
-    fit = fit_result(container)
+    fit = fit_result(container, settings)
     if not fit["fits"]:
         raise ValueError("container no longer satisfies scratch capacity fit")
     free = require_nonnegative(container.free, "container free capacity")
@@ -1102,6 +1105,9 @@ def create_cmd(name: str, execute: bool = False) -> int:
 
     def fresh_create_container(previous: Container) -> tuple[Container | None, int]:
         try:
+            current_settings, current_scratch = cls(name)
+            if current_settings != settings or current_scratch != scratch:
+                return None, 75
             current = load_container()
             if current.ref != previous.ref or current.uuid != previous.uuid:
                 return None, 75
@@ -1109,7 +1115,7 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 return None, 75
             if any(volume.name == scratch["name"] for volume in current.volumes):
                 return None, 2
-            if not fit_result(current)["fits"]:
+            if not fit_result(current, settings)["fits"]:
                 return None, 2
             free = require_nonnegative(current.free, "container free capacity")
             if free < settings["alarm_floor_gb"] * GIB:

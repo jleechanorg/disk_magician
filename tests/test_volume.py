@@ -605,6 +605,82 @@ class LifecycleTest(VolumeTestBase):
                     if label == "mountpoint appears":
                         self.assertEqual((mountpoint / "preserve.txt").read_text(), "existing user data")
 
+    def _run_config_drift_race(self, lock_number):
+        case_root = self.root / f"config-drift-{lock_number}"
+        case_root.mkdir()
+        disk_state = case_root / "diskutil.json"
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 1000 * 2**30
+        disk_state.write_text(json.dumps(data))
+        mountpoint = case_root / "Volumes" / "diskm-scratch"
+        config_path = case_root / "config.json"
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 70
+        config["volumes"]["classes"]["scratch"]["mountpoint"] = str(mountpoint)
+        config_path.write_text(json.dumps(config))
+        calls_path = case_root / "calls.jsonl"
+        state_dir = case_root / "state"
+        registry_path = state_dir / "volumes" / "registry.json"
+        registry_path.parent.mkdir(parents=True)
+        preserved_entry = {"state": "active", "name": "other-preserved"}
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {"other": preserved_entry},
+        }))
+        env = {
+            "DISK_MAGICIAN_DISKUTIL_BIN": str(ROOT / "tests/lib/fake_diskutil.py"),
+            "FAKE_DISKUTIL_STATE": str(disk_state),
+            "FAKE_DISKUTIL_CALLS": str(calls_path),
+            "DISK_MAGICIAN_STATE_DIR": str(state_dir),
+            "DISK_MAGICIAN_CONFIG": str(config_path),
+            "DISK_MAGICIAN_DELETION_LOG": str(case_root / "deletions.log"),
+            "FAKE_DISKUTIL_MOUNTPOINT": str(mountpoint),
+        }
+        lock_calls = 0
+        observed = {}
+        real_locked_registry = volume.locked_registry
+
+        def locked_registry_with_config_drift():
+            nonlocal lock_calls
+            result = real_locked_registry()
+            lock_calls += 1
+            if lock_calls == lock_number:
+                current_data = json.loads(disk_state.read_text())
+                data_volume = next(row for row in current_data["volumes"] if row["name"] == "Data")
+                data_volume["used"] = 870 * 2**30
+                disk_state.write_text(json.dumps(current_data))
+                current_config = json.loads(config_path.read_text())
+                current_config["volumes"]["classes"]["scratch"]["quota_gb"] = 30
+                config_path.write_text(json.dumps(current_config))
+                observed["diskutil"] = current_data
+                observed["config"] = current_config
+            return result
+
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(volume, "locked_registry", side_effect=locked_registry_with_config_drift), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = volume.main(["create", "scratch", "--execute"])
+        calls = [json.loads(line) for line in calls_path.read_text().splitlines()] if calls_path.exists() else []
+        return result, lock_calls, observed, json.loads(disk_state.read_text()), calls, \
+            json.loads(config_path.read_text()), json.loads(registry_path.read_text()), mountpoint
+
+    def test_create_rejects_config_drift_that_invalidates_original_quota_at_both_locks(self):
+        for lock_number in (1, 2):
+            with self.subTest(lock_number=lock_number):
+                result, lock_calls, observed, disk_after, calls, config_after, registry, mountpoint = \
+                    self._run_config_drift_race(lock_number)
+                self.assertGreaterEqual(lock_calls, lock_number)
+                self.assertIn("diskutil", observed)
+                self.assertIn("config", observed)
+                self.assertNotEqual(result, 0)
+                self.assertFalse(any(call[:2] == ["apfs", "addVolume"] for call in calls))
+                self.assertEqual(disk_after, observed["diskutil"])
+                self.assertEqual(config_after, observed["config"])
+                self.assertEqual(registry["volumes"], {
+                    "other": {"state": "active", "name": "other-preserved"}
+                })
+                self.assertFalse(mountpoint.exists())
+
     def test_create_registers_only_after_verified_ballast_and_path_requires_active(self):
         self.make_fit()
         self.assertEqual(volume.path_cmd("scratch"), 3)
