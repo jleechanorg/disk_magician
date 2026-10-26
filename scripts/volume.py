@@ -149,7 +149,11 @@ def config() -> dict[str, Any]:
     import resolve_config
 
     document = json.loads(Path(resolve_config.resolve()).read_text())
-    volumes = document.get("volumes")
+    if not isinstance(document, dict):
+        raise ValueError("invalid quota configuration")
+    if "volumes" not in document:
+        raise ValueError("quota configuration has no volume block")
+    volumes = document["volumes"]
     if not isinstance(volumes, dict):
         raise ValueError("quota configuration is unavailable")
     classes = volumes.get("classes")
@@ -423,6 +427,9 @@ def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[st
     settings, scratch = cls(name)
     entries = registry()["volumes"]
     if name not in entries:
+        container = load_container()
+        if any(volume.name == scratch["name"] for volume in container.volumes):
+            raise ValueError("live scratch volume is missing its registry entry")
         raise ValueError("volume is not registered in an eligible state")
     entry = entries.get(name)
     if not isinstance(entry, dict):
@@ -449,7 +456,18 @@ def path_cmd(name: str, for_reclaim: bool = False) -> int:
         elif not ballast_ok(mountpoint):
             return 75
     except ValueError as error:
-        if str(error) in {
+        message = str(error)
+        if message == "quota configuration has no volume block":
+            if sys.platform != "darwin":
+                return 3
+            try:
+                container = load_container()
+                if any(volume.name == "diskm-scratch" for volume in container.volumes):
+                    return 75
+            except Exception:
+                return 75
+            return 3
+        if message in {
             "volume is not registered in an eligible state",
             "volume is retired",
         }:

@@ -94,6 +94,29 @@ TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c1
 [[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -f "$TEST_ROOT/repo/build/younger/content" ]]
 [[ ! -s "$T/c14-real-remove.out" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["candidates"]["removed"]==1'
+# Two oldest-first removals are required: the first leaves usage above 80%,
+# and only the second reaches the target.
+mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
+printf x >"$TEST_ROOT/repo/evidence/oldest/content"; printf x >"$TEST_ROOT/repo/build/younger/content"
+python3 -c 'import os,sys,time; from pathlib import Path; now=time.time(); roots=[Path(sys.argv[1]),Path(sys.argv[2])]; ages=[72,60]; [[os.utime(p,(now-h*3600,now-h*3600)) for p in [root,*root.rglob("*")]] for root,h in zip(roots,ages)]' "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
+: >"$STATUS_CALLS_FILE"; : >"$DISK_MAGICIAN_DELETION_LOG"
+TEST_STATUS_SEQUENCE="900 850 790 790" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-multi-remove.out"
+[[ ! -e "$TEST_ROOT/repo/evidence/oldest" && ! -e "$TEST_ROOT/repo/build/younger" ]]
+OLD_LINE="$(grep -nF "$TEST_ROOT/repo/evidence/oldest" "$DISK_MAGICIAN_DELETION_LOG" | cut -d: -f1)"
+YOUNG_LINE="$(grep -nF "$TEST_ROOT/repo/build/younger" "$DISK_MAGICIAN_DELETION_LOG" | cut -d: -f1)"
+[[ -n "$OLD_LINE" && -n "$YOUNG_LINE" && "$OLD_LINE" -lt "$YOUNG_LINE" ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["allocated_bytes_after"]==790 and r["postcondition"]["target_reached"]'
+# Protect every eligible artifact and prove a clean pass reports the unmet target.
+mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
+printf x >"$TEST_ROOT/repo/evidence/oldest/content"; printf x >"$TEST_ROOT/repo/build/younger/content"
+python3 -c 'import json,os,sys,time; from pathlib import Path; roots=[Path(sys.argv[1]),Path(sys.argv[2])]; ages=[72,60]; [[os.utime(p,(time.time()-h*3600,)*2) for p in [root,*root.rglob("*")]] for root,h in zip(roots,ages)]; json.dump({"protected_live_paths":[{"path":str(root),"reason":"test protected candidate"} for root in roots]},open(sys.argv[3],"w"))' "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger" "$T/protected.json"
+: >"$STATUS_CALLS_FILE"; : >"$DISK_MAGICIAN_DELETION_LOG"
+DISK_MAGICIAN_SAFETY_FILE="$T/protected.json" TEST_STATUS_SEQUENCE="900 900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-all-protected.out"
+grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=1000 target_pct=80' "$T/c14-all-protected.out"
+[[ "$(grep -c '^kept:protected:' "$T/c14-all-protected.out")" == 2 ]]
+[[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==2 and r["candidates"]["removed"]==0 and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="protected"'
+touch "$TEST_ROOT/repo/build/younger/content"
 # C14 ENOSPC must be typed through the real cleanup wrapper before ballast release.
 BALLAST_LOG="$T/ballast.log"
 export BALLAST_LOG
@@ -115,6 +138,7 @@ BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false 
 grep -q 'kept:ballast-restore-failed' "$T/below-trigger-reserve-still-missing.out"
 ! grep -q 'skipped:below-trigger' "$T/below-trigger-reserve-still-missing.out"
 : >"$STATUS_CALLS_FILE"
+: >"$BALLAST_LOG"
 BALLAST_LOG="$T/ballast.log" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUENCE="900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-release-fails.out"
 grep -q 'kept:intent-write-failed' "$T/c14-release-fails.out"
 grep -q '^release$' "$BALLAST_LOG" && grep -q '^ensure$' "$BALLAST_LOG"

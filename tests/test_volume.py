@@ -187,6 +187,60 @@ class LifecycleTest(VolumeTestBase):
         self.assertEqual(volume.main(["verify-mount", str(self.mp)]), 0)
         self.assertEqual(volume.main(["verify-mount", str(self.root / "wrong")]), 75)
 
+    def test_path_uses_legacy_fallback_when_config_has_no_volume_block(self):
+        self.config.write_text(json.dumps({"budgets": {"daily": 5}}))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 3)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_darwin_legacy_config_falls_back_only_when_apfs_confirms_absence(self):
+        self.config.write_text(json.dumps({"budgets": {"daily": 5}}))
+        absent = volume.Container("disk3", "CONTAINER-UUID", 100, 50, ())
+        present = volume.Container(
+            "disk3", "CONTAINER-UUID", 100, 50,
+            (volume.Volume("diskm-scratch", "SCRATCH-UUID", "disk3s9", 0, 30, ()),),
+        )
+        for container, expected in ((absent, 3), (present, 75)):
+            with self.subTest(expected=expected):
+                output = io.StringIO()
+                with mock.patch.object(volume.sys, "platform", "darwin"), \
+                        mock.patch.object(volume, "load_container", return_value=container), \
+                        contextlib.redirect_stdout(output):
+                    self.assertEqual(volume.path_cmd("scratch"), expected)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_darwin_legacy_config_fails_closed_when_apfs_inspection_fails(self):
+        self.config.write_text(json.dumps({"budgets": {"daily": 5}}))
+        output = io.StringIO()
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+                mock.patch.object(volume, "load_container", side_effect=RuntimeError("unavailable")), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_path_fails_closed_when_volumes_block_is_malformed(self):
+        for malformed in (None, [], "bad"):
+            with self.subTest(volumes=malformed):
+                self.config.write_text(json.dumps({"volumes": malformed}))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(volume.path_cmd("scratch"), 75)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_path_fails_closed_when_live_scratch_volume_has_no_registry_entry(self):
+        data = json.loads(self.state.read_text())
+        data["volumes"].append({
+            "uuid": "SCRATCH-UUID", "name": "diskm-scratch", "ref": "disk3s9",
+            "device": "disk3s9", "used": 0, "quota": 30 * 2**30,
+            "roles": [], "mountpoint": str(self.mp),
+        })
+        self.state.write_text(json.dumps(data))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.path_cmd("scratch"), 75)
+        self.assertEqual(output.getvalue(), "")
+
     def test_path_fails_closed_for_malformed_existing_registry_entries(self):
         registry_path, _ = volume.registry_paths()
         for entry in (None, [], {"state": "unknown"}, {"state": None}):

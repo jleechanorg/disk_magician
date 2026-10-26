@@ -22,6 +22,11 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/bin" "$T/tmp" "$T/bucket" "$T/state" "$T/elsewhere"
 export HOME="$T/home" STANDARD_WORKTREE_ROOT="$T/home/.worktrees" EVIDENCE_TMP_ROOT="$T/tmp"
 export DISK_MAGICIAN_STATE_DIR="$T/state" EVIDENCE_GCS_PREFIX="gs://bkt/ev"
+# Keep volume lookup deterministic even when the caller exports machine-local
+# volume settings; the legacy no-volume config exercises the intended fallback.
+unset DISK_MAGICIAN_DISKM_BIN DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
+printf '%s\n' '{"budgets":{"daily":5}}' > "$T/legacy-config.json"
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 
 git init -q "$T/myrepo" && git -C "$T/myrepo" commit -q --allow-empty -m init
@@ -153,6 +158,48 @@ for kind in evidence build; do
 done
 [[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "malformed registry created no volume allocation" || bad "malformed registry volume allocation exists"
 mv "$T/state/volumes/registry.json" "$T/state/volumes/malformed-registry.json"
+
+echo "== legacy config: omitted volume block retains evidence/build /tmp fallback =="
+printf '%s\n' '{"budgets":{"daily":5}}' > "$T/volume-config.json"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "legacy-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    assert_eq "$RC" 0 "legacy config $kind fallback rc"
+    assert_contains "$OUT" "$T/tmp/myrepo/$kind/legacy-$kind-" "legacy config uses $kind tmp fallback"
+done
+assert_eq "$(admits)" "$((before + 2))" "legacy config proceeds through normal admission"
+
+echo "== malformed volume config block remains fail-closed =="
+printf '%s\n' '{"volumes":null}' > "$T/volume-config.json"
+before="$(admits)"
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" malformed-config --kind evidence 2>"$T/err")"; RC=$?
+assert_eq "$RC" 75 "malformed config block rc"
+assert_eq "$OUT" "" "malformed config emits no path"
+assert_eq "$(admits)" "$before" "malformed config is rejected before admission"
+
+echo "== unregistered live APFS volume: evidence/build fail closed =="
+cat > "$T/volume-config.json" <<EOF
+{"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":"$T/Volumes/diskm-scratch"}}}}
+EOF
+cat > "$T/fake-diskutil.json" <<EOF
+{"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":994662584320,"free":100000000000},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":890000000000,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":15000000000,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":4000000000,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"},{"uuid":"SCRATCH-UUID","name":"diskm-scratch","ref":"disk3s9","device":"disk3s9","used":0,"quota":32212254720,"roles":[],"mountpoint":"$T/Volumes/diskm-scratch"}]}
+EOF
+export DISK_MAGICIAN_DISKUTIL_BIN="$REPO_ROOT/tests/lib/fake_diskutil.py" FAKE_DISKUTIL_STATE="$T/fake-diskutil.json" FAKE_DISKUTIL_CALLS="$T/fake-diskutil-calls.jsonl"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "orphan-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    assert_eq "$RC" 75 "$kind live unregistered volume rc"
+    assert_eq "$OUT" "" "$kind live unregistered volume emits no path"
+    assert_eq "$(admits)" "$before" "$kind live unregistered volume never admitted"
+done
+[[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "live volume check created no new volume" || bad "live volume check created a volume"
+if [[ ! -f "$FAKE_DISKUTIL_CALLS" ]] || ! grep -q 'addVolume' "$FAKE_DISKUTIL_CALLS"; then
+    ok "live volume check issued no addVolume command"
+else
+    bad "live volume check issued an addVolume command"
+fi
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
+unset DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
 
 echo "== real diskm admit (observe, fake df) admits and logs one event =="
 cat > "$T/bin/df" <<'EOF'

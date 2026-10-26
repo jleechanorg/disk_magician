@@ -280,9 +280,16 @@ case "$*" in
     n=0; [[ -f "$calls" ]] && n=$(cat "$calls")
     n=$((n + 1)); printf '%s\n' "$n" > "$calls"
     used_gib="$FAKE_VOLUME_FIRST_GIB"
-    (( n > 1 )) && used_gib="$FAKE_VOLUME_AFTER_GIB"
+    status="${FAKE_VOLUME_STATUS:-active}"
+    available="${FAKE_VOLUME_AVAILABLE:-true}"
+    if (( n > 1 )); then
+      used_gib="$FAKE_VOLUME_AFTER_GIB"
+      status="${FAKE_VOLUME_AFTER_STATUS:-$status}"
+      available="${FAKE_VOLUME_AFTER_AVAILABLE:-$available}"
+    fi
     used=$(( used_gib * 1073741824 ))
-    printf '{"ok":true,"measured_at":"now","volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":32212254720,"filesystem_id":"vol-1","path":"%s"}]}\n' "$used" "$T/scratch"
+    printf '{"ok":true,"measured_at":"now","volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":32212254720,"filesystem_id":"vol-1","path":"%s","status":"%s","available":%s}]}\n' \
+      "$used" "$T/scratch" "$status" "$available"
     exit 1
     ;;
   "volume reclaim --clean")
@@ -316,6 +323,27 @@ rm -f "$T/volume-status-count" "$T/reclaim-calls"
 assert_eq "$?" 75 "less than one GiB quota headroom refuses"
 assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 0 "low-water case does not reclaim"
 [[ "$(cat "$T/err")" == *volume_headroom:scratch* ]] && ok "headroom denial is explicit" || bad "missing volume_headroom reason"
+export FAKE_VOLUME_FIRST_GIB=26 FAKE_VOLUME_STATUS=retired FAKE_VOLUME_AVAILABLE=true
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "retired scratch volume fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "retired volume measurement is unavailable" || bad "retired volume reason: $(cat "$T/err")"
+export FAKE_VOLUME_STATUS=active FAKE_VOLUME_AVAILABLE=false
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "unavailable scratch ballast fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "unavailable ballast measurement is unavailable" || bad "ballast reason: $(cat "$T/err")"
+export FAKE_VOLUME_FIRST_GIB=28 FAKE_VOLUME_AFTER_GIB=26 FAKE_VOLUME_STATUS=active FAKE_VOLUME_AVAILABLE=true FAKE_VOLUME_AFTER_STATUS=retired
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "retired post-reclaim measurement fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "retired fresh volume measurement is unavailable" || bad "fresh retired reason: $(cat "$T/err")"
+export FAKE_VOLUME_AFTER_STATUS=active FAKE_VOLUME_AFTER_AVAILABLE=false
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "unavailable post-reclaim ballast fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "unavailable fresh ballast measurement is unavailable" || bad "fresh ballast reason: $(cat "$T/err")"
+unset FAKE_VOLUME_STATUS FAKE_VOLUME_AVAILABLE FAKE_VOLUME_AFTER_STATUS FAKE_VOLUME_AFTER_AVAILABLE
 unset DISK_MAGICIAN_DISKM_BIN
 
 if command -v hdiutil >/dev/null 2>&1; then

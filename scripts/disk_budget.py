@@ -1011,6 +1011,8 @@ def _volume_status(disksm):
                     if isinstance(item, dict) and item.get("class") == "scratch"), None)
         if row is None:
             return None
+        if row.get("status") != "active" or row.get("available") is not True:
+            return None
         used, quota, volume_id, path = (
             row.get("allocated_bytes"), row.get("quota_bytes"),
             row.get("filesystem_id"), row.get("path"),

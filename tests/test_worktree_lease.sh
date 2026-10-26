@@ -321,6 +321,14 @@ mkdir -p "$PENDING_TARGET"
 if lease_write_pending "$PENDING_TARGET" "$PTSV" 2>/dev/null; then bad "existing target path must refuse"; else ok "existing path -> rc 1"; fi
 # a lease for an EXISTING worktree must never be overwritten by pending
 if lease_write_pending "$WT9" "$PTSV" 2>/dev/null; then bad "pending write over live lease+worktree succeeded"; else ok "existing lease for existing worktree -> rc 1"; fi
+
+PENDING_ACTIVATE="$TMPROOT/pending_activate"
+PENDING_OWNER="$(printf '600\t%s\tguard' "$OWNER_EPOCH")"
+if lease_write_pending "$PENDING_ACTIVATE" "$PENDING_OWNER"; then ok "pending lease created for activation"; else bad "pending activation lease creation failed"; fi
+mkdir -p "$PENDING_ACTIVATE"
+lease_write "$PENDING_ACTIVATE" myrepo fresh-branch worktree-new
+LPA="$(lease_path_for "$PENDING_ACTIVATE")"
+assert_eq "$(lease_field "$LPA" 'len(d["owners"]) == 1 and d["owners"][0]["pid"] == 400')" "True" "activation replaces pending claimant with resolved owner"
 assert_eq "$(lease_field "$L9" 'd["creator"]')" "worktree-new" "live lease untouched by refused pending write"
 
 echo "== lease_set_verdict =="
@@ -380,13 +388,35 @@ lease_write "$WTB" --manifest "$PROV/missing.json" >/dev/null 2>&1; assert_eq "$
 [[ -e "$LB" ]] && bad "a refused write left a lease" || ok "refused writes leave no lease"
 
 WTE="$(mk_wt wt_evidence)"
+if lease_write "$WTE" myrepo "" evidence-push --kind evidence; then
+    ok "evidence lease created before publication"
+else
+    bad "evidence lease creation failed"
+fi
+seed_comm 700 1 codex
+seed_lstart 700 "$OWNER_LSTART"
+seed_args 700 "/usr/bin/codex"
+if "$REPO_ROOT/disk_magician.sh" lease-add-owner "$WTE" --owner-pid 700; then
+    ok "child owner added before publication update"
+else
+    bad "child owner add before publication failed"
+fi
+python3 - "$(lease_path_for "$WTE")" <<'PYUNKNOWNFIELD'
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p)); d["future_writer_field"]={"kept":True}; json.dump(d,open(p,"w"))
+PYUNKNOWNFIELD
 if lease_write "$WTE" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
     --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z --git-meta "$PROV/gitmeta.json"; then
-    ok "published lease_write rc 0"
+    ok "published lease_write updates existing lease"
 else
     bad "published lease_write failed"
 fi
 LE="$(lease_path_for "$WTE")"
+assert_eq "$(lease_field "$LE" 'len(d["owners"])')" "2" "publication update retains parent and child owners"
+assert_eq "$(lease_field "$LE" 'd.get("future_writer_field", {}).get("kept")')" "True" "publication update retains unknown fields"
+if lease_release "$WTE"; then ok "parent owner releases after publication update"; else bad "parent owner release failed after publication update"; fi
+assert_eq "$(lease_owner_state "$LE")" "alive" "child remains protective after parent releases published lease"
 assert_eq "$(lease_field "$LE" 'd["repo"]')" "myrepo" "positional args still honoured with options"
 assert_eq "$(lease_field "$LE" 'd["kind"]')" "evidence" "evidence kind"
 assert_eq "$(lease_field "$LE" 'd["published"]')" "True" "published set"
@@ -398,10 +428,67 @@ assert_eq "$(lease_field "$LE" 'd["git_meta"]["head"]')" "abc123" "git metadata 
 lease_set_verdict "$LE" "kept:test"
 assert_eq "$(lease_field "$LE" 'd["kind"] + str(d["published"])')" "evidenceTrue" "provenance survives verdict update"
 
+echo "== publication update rejects unverifiable existing lease =="
+WTPUBBAD="$(mk_wt wt_pub_bad)"
+lease_write "$WTPUBBAD" myrepo "" evidence-push --kind evidence
+LPB="$(lease_path_for "$WTPUBBAD")"
+python3 - "$LPB" <<'PYWRONGPATH'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["path"] += "/wrong"; json.dump(d,open(p,"w"))
+PYWRONGPATH
+LPB_HASH="$(sha256sum "$LPB" | cut -d' ' -f1)"
+if lease_write "$WTPUBBAD" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
+    --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z 2>/dev/null; then
+    bad "publication overwrote wrong-path lease"
+else
+    ok "publication refuses wrong-path existing lease"
+fi
+assert_eq "$(sha256sum "$LPB" | cut -d' ' -f1)" "$LPB_HASH" "wrong-path lease remains byte-identical"
+printf '[]\n' > "$LPB"
+LPB_HASH="$(sha256sum "$LPB" | cut -d' ' -f1)"
+if lease_write "$WTPUBBAD" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
+    --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z 2>/dev/null; then
+    bad "publication overwrote malformed lease"
+else
+    ok "publication refuses malformed existing lease"
+fi
+assert_eq "$(sha256sum "$LPB" | cut -d' ' -f1)" "$LPB_HASH" "malformed lease remains byte-identical"
+
+echo "== publication update refuses pending and reuse claims =="
+WTPUBSTATE="$(mk_wt wt_pub_state)"
+lease_write "$WTPUBSTATE" myrepo "" evidence-push --kind evidence
+LPSTATE="$(lease_path_for "$WTPUBSTATE")"
+python3 - "$LPSTATE" <<'PENDINGCLAIM'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["pending"]=True; json.dump(d,open(p,"w"))
+PENDINGCLAIM
+LPSTATE_HASH="$(sha256sum "$LPSTATE" | cut -d' ' -f1)"
+if lease_write "$WTPUBSTATE" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
+    --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z 2>/dev/null; then
+    bad "publication changed pending lease"
+else
+    ok "publication refuses pending lease"
+fi
+assert_eq "$(sha256sum "$LPSTATE" | cut -d' ' -f1)" "$LPSTATE_HASH" "pending lease remains byte-identical"
+python3 - "$LPSTATE" <<'REUSECLAIM'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["pending"]=False; d["reuse"]={"state":"pending","previous_lease":{}}; json.dump(d,open(p,"w"))
+REUSECLAIM
+LPSTATE_HASH="$(sha256sum "$LPSTATE" | cut -d' ' -f1)"
+if lease_write "$WTPUBSTATE" myrepo "" evidence-push --kind evidence --published gs://b/run1 \
+    --upload-manifest "$PROV/upload.json" --verified-at 2026-10-12T00:00:00Z 2>/dev/null; then
+    bad "publication changed reuse claim"
+else
+    ok "publication refuses reuse claim"
+fi
+assert_eq "$(sha256sum "$LPSTATE" | cut -d' ' -f1)" "$LPSTATE_HASH" "reuse claim remains byte-identical"
+
 echo "== atomic reuse lease claim and recovery =="
 REUSE_WT="$(mk_wt wt_reuse)"
 lease_write "$REUSE_WT" myrepo old-branch test
 REUSE_LEASE="$(lease_path_for "$REUSE_WT")"
+if lease_release "$REUSE_WT"; then ok "old reuse lease released before claimant"; else bad "old reuse lease release failed"; fi
+assert_eq "$(lease_owner_state "$REUSE_LEASE")" "released" "released lease is eligible for exact pending claim"
 REUSE_HASH="$(python3 - "$REUSE_LEASE" <<'PY'
 import hashlib,sys
 print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
@@ -411,6 +498,46 @@ REUSE_OWNER="$(printf '500\t%s\tcodex' "$OWNER_EPOCH")"
 if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then ok "exact lease claimed"; else bad "exact lease claim failed"; fi
 assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_branch"]')" "old-branch" "old branch preserved in claim"
 assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["old_tip"]')" "abc123" "old tip preserved in claim"
+assert_eq "$(lease_field "$REUSE_LEASE" 'd["reuse"]["previous_lease"].get("released_at") is not None')" "True" "released previous lease preserved for rollback"
+assert_eq "$(lease_field "$REUSE_LEASE" 'len(d["owners"]) == 1 and d["owners"][0]["pid"] == 500')" "True" "pending claimant is present in preferred owners array"
+seed_comm 500 1 codex
+seed_lstart 500 "$OWNER_LSTART"
+seed_args 500 "/usr/bin/codex"
+assert_eq "$(lease_owner_state "$REUSE_LEASE")" "alive" "unrelated C14 keeps pending claimant lease"
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT")" "own-live" "claimant exemption applies to exact candidate"
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT/ancestor")" "alive" "claimant exemption does not apply to another candidate"
+python3 - "$REUSE_LEASE" <<'PYOWNERSMISSING'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d.pop("owners"); json.dump(d,open(p,"w"))
+PYOWNERSMISSING
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT")" "alive" "missing owners array disables claimant exemption"
+python3 - "$REUSE_LEASE" <<'PYOWNERSRESTORE'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owners"]=[dict(d["owner"])]; json.dump(d,open(p,"w"))
+PYOWNERSRESTORE
+python3 - "$REUSE_LEASE" <<'PYOWNERSMALFORMED'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owners"]={"pid":d["owner"]["pid"]}; json.dump(d,open(p,"w"))
+PYOWNERSMALFORMED
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT")" "alive" "malformed owners array disables claimant exemption"
+python3 - "$REUSE_LEASE" <<'PYOWNERRESTORE'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owners"]=[dict(d["owner"])]; json.dump(d,open(p,"w"))
+PYOWNERRESTORE
+python3 - "$REUSE_LEASE" <<'PYOWNERDISAGREE'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owner"]={"pid":700,"start_epoch":1760000000,"comm":"codex"}; json.dump(d,open(p,"w"))
+PYOWNERDISAGREE
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT")" "alive" "compatibility owner disagreement disables claimant exemption"
+python3 - "$REUSE_LEASE" <<'PYOWNERAGREERESTORE'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owner"]={"pid":500,"start_epoch":1760000000,"comm":"codex"}; json.dump(d,open(p,"w"))
+PYOWNERAGREERESTORE
+python3 - "$REUSE_LEASE" <<'PYEXTRAOWNER'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["owners"].append({"pid":700,"start_epoch":1760000000,"comm":"codex"}); json.dump(d,open(p,"w"))
+PYEXTRAOWNER
+assert_eq "$(lease_owner_state_for "$REUSE_LEASE" "$REUSE_OWNER" "$REUSE_WT")" "alive" "added owner disables claimant exemption"
 if lease_claim_reuse "$REUSE_LEASE" "$REUSE_HASH" old-branch abc123 "$REUSE_OWNER"; then bad "stale lease claim succeeded"; else ok "stale/concurrent lease claim refused"; fi
 if lease_restore_reuse_claim "$REUSE_LEASE"; then ok "claim rollback restored"; else bad "claim rollback failed"; fi
 assert_eq "$(python3 - "$REUSE_LEASE" <<'PY'

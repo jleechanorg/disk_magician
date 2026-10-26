@@ -389,6 +389,10 @@ try:
     d.pop("released_at", None)  # a fresh live claim is not released; old state stays in previous_lease
     d["pending"] = True
     d["owner"] = owner
+    # The liveness reader prefers the owners array whenever present. Keep the
+    # pending claimant there too, or a released modern lease can remain
+    # apparently ownerless even though the compatibility owner field is live.
+    d["owners"] = [owner] if owner else []
     d["reuse"] = {"state": "pending", "old_branch": branch, "old_tip": tip,
                   "previous_lease": old}
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".reuse-lease-")
@@ -435,11 +439,17 @@ if not isinstance(reuse.get("previous_lease"), dict):
 if candidate and d.get("path") != candidate:
     print(sys.argv[4]); sys.exit(0)
 o = d.get("owner")
-if not (isinstance(o, dict) and len(own) >= 2 and own[0].isdigit()):
+owners = d.get("owners")
+# Reuse claims always write both representations. Require them to agree, and
+# require the owners array to contain only that claimant. Missing, malformed,
+# or subsequently extended ownership state stays protective.
+if (not isinstance(o, dict) or not isinstance(owners, list) or len(owners) != 1
+        or not isinstance(owners[0], dict) or len(own) < 2 or not own[0].isdigit()
+        or str(o.get("pid")) != own[0] or str(o.get("start_epoch", "")) != own[1]
+        or str(owners[0].get("pid")) != str(o.get("pid"))
+        or str(owners[0].get("start_epoch", "")) != str(o.get("start_epoch", ""))):
     print(sys.argv[4]); sys.exit(0)
-if str(o.get("pid")) == own[0] and str(o.get("start_epoch", "")) == own[1]:
-    print("own-live"); sys.exit(0)
-print(sys.argv[4])
+print("own-live")
 PY
 }
 
@@ -629,6 +639,25 @@ d = {
     "verified_at": verified_at or None,
     "upload_manifest": upload_manifest,
 }
+# Publication refreshes only publication metadata on an existing evidence
+# lease. Ordinary writes deliberately replace stale/pending leases with the
+# newly resolved owner. The caller holds the mutation lock, so read/update/
+# replace is serialized.
+if pub_url and os.path.isfile(lease):
+    try:
+        with open(lease) as f:
+            previous = json.load(f)
+    except Exception:
+        sys.exit(2)
+    if not isinstance(previous, dict) or previous.get("path") != wt:
+        sys.exit(2)
+    if previous.get("pending") is True or isinstance(previous.get("reuse"), dict):
+        sys.exit(2)
+    for key in ("published", "published_at", "published_url", "verified_at", "upload_manifest"):
+        previous[key] = d[key]
+    if git_meta:
+        previous["git_meta"] = d["git_meta"]
+    d = previous
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".lease-", suffix=".json")
 try:
     with os.fdopen(fd, "w") as f:
