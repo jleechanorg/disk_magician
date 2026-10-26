@@ -46,6 +46,7 @@ class Container:
     ceiling: int | None
     free: int | None
     volumes: tuple[Volume, ...]
+    all_volume_names: tuple[str, ...] = ()
 
     def volume_by_role(self, role: str) -> Volume:
         matches = [volume for volume in self.volumes if role in volume.roles]
@@ -97,6 +98,22 @@ def load_container() -> Container:
     if not isinstance(containers, list) or not containers:
         raise ValueError("APFS containers are unavailable")
 
+    all_volume_names = []
+    for candidate in containers:
+        if not isinstance(candidate, dict):
+            raise ValueError("invalid APFS container row")
+        rows = candidate.get("Volumes")
+        if not isinstance(rows, list):
+            raise ValueError("APFS volume inventory is unavailable")
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or not isinstance(row.get("Name"), str)
+                or not row["Name"]
+            ):
+                raise ValueError("APFS volume name is unavailable")
+            all_volume_names.append(row["Name"])
+
     data_info = plist(["info", "-plist", DATA_MOUNTPOINT])
     data_container_ref = data_info.get("APFSContainerReference")
     if not isinstance(data_container_ref, str) or not data_container_ref:
@@ -146,7 +163,7 @@ def load_container() -> Container:
         require_nonnegative(ceiling, "container ceiling")
     if free is not None:
         require_nonnegative(free, "container free capacity")
-    return Container(ref, uuid, ceiling, free, tuple(volumes))
+    return Container(ref, uuid, ceiling, free, tuple(volumes), tuple(all_volume_names))
 
 
 def config() -> dict[str, Any]:
@@ -1113,7 +1130,7 @@ def create_cmd(name: str, execute: bool = False) -> int:
                 return None, 75
             if os.path.lexists(mountpoint):
                 return None, 75
-            if any(volume.name == scratch["name"] for volume in current.volumes):
+            if scratch["name"] in current.all_volume_names:
                 return None, 2
             if not fit_result(current, settings)["fits"]:
                 return None, 2
