@@ -78,7 +78,7 @@ class VolumeAdmissionGateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
-        self.mount = Path(self.tmp.name) / "scratch"
+        self.mount = Path(self.tmp.name).resolve() / "scratch"
         (self.mount / "project").mkdir(parents=True)
 
     def row(self, used, quota=30 * disk_budget.GIB, volume_id="vol-1", path=None):
