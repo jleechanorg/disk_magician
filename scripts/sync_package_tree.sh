@@ -41,6 +41,7 @@ PATTERNS=(
   "tools/*.sh"
   "tools/guards/*"
   "hooks/*.sh"
+  "systemd/*.service.in"
 )
 
 if [[ -n "$STAGE_DIR" ]]; then

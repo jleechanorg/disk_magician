@@ -49,6 +49,47 @@ class VolumeTestBase(unittest.TestCase):
             if value is None: os.environ.pop(key, None)
             else: os.environ[key] = value
 
+class LinuxScratchTest(VolumeTestBase):
+    def set_linux_image_config(self, quota=30):
+        data = json.loads(self.config.read_text())
+        scratch = data["volumes"]["classes"]["scratch"]
+        scratch["image_path"] = str(self.root / "scratch.ext4")
+        scratch["quota_gb"] = quota
+        self.config.write_text(json.dumps(data))
+        return scratch
+
+    def test_mountinfo_path_escaping_preserves_kernel_escape_sequences(self):
+        path = pathlib.Path("/tmp/back\\slash with\t tab\nline")
+        escaped = str(path).replace("\\", "\\134").replace("\t", "\\011").replace(" ", "\\040").replace("\n", "\\012")
+        self.assertEqual(escaped, "/tmp/back\\134slash\\040with\\011\\040tab\\012line")
+
+    def test_linux_scratch_create_preview_is_sparse_and_capped(self):
+        self.set_linux_image_config(200)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(volume.linux_create_cmd("scratch"), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["sparse"])
+        self.assertEqual(result["quota_bytes"], 200 * volume.GIB)
+        self.assertFalse(pathlib.Path(result["image_path"]).exists())
+
+    def test_linux_scratch_rejects_capacity_above_requested_cap(self):
+        self.set_linux_image_config(201)
+        self.assertEqual(volume.linux_create_cmd("scratch", execute=True), 2)
+        self.assertFalse((self.root / "scratch.ext4").exists())
+
+    def test_linux_underlay_mountpoint_must_not_be_writable(self):
+        mountpoint = self.root / "underlay"
+        mountpoint.mkdir(mode=0o500)
+        mountpoint.chmod(0o500)
+        self.assertTrue(volume.linux_mountpoint_safe(mountpoint))
+        mountpoint.chmod(0o700)
+        self.assertFalse(volume.linux_mountpoint_safe(mountpoint))
+
+    def test_linux_path_never_returns_unmounted_mountpoint(self):
+        self.set_linux_image_config(200)
+        self.assertEqual(volume.path_cmd("scratch"), 3)
+
 class ParseTest(VolumeTestBase):
     def test_container_rows(self):
         c = volume.load_container()

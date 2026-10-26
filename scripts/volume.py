@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Opt-in, fail-closed APFS quota-volume helpers used by diskm."""
+"""Opt-in, fail-closed Scratch-volume helpers used by diskm."""
 from __future__ import annotations
 import fcntl
 import json
 import os
 import plistlib
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -457,6 +459,17 @@ def exact_entry(name: str, allowed_states: set[str]) -> tuple[Container, dict[st
 
 
 def path_cmd(name: str, for_reclaim: bool = False) -> int:
+    if linux_backend_enabled(name):
+        try:
+            settings, scratch = cls(name)
+            entry = registry()["volumes"].get(name)
+            if not isinstance(entry, dict):
+                return 3
+            linux_validate_mount(settings, scratch, entry)
+            print(scratch["mountpoint"])
+            return 0
+        except Exception:
+            return 75
     allowed_states = {"active", "retired"} if for_reclaim else {"active"}
     try:
         container, settings, entry, volume = exact_entry(name, allowed_states)
@@ -574,7 +587,270 @@ def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:
     return settings.get("encryption") == "none" and isinstance(acknowledgement, str) and bool(acknowledgement.strip())
 
 
+
+def linux_backend_enabled(name: str = "scratch") -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        _, scratch = cls(name)
+    except Exception:
+        return False
+    return isinstance(scratch.get("image_path"), str)
+
+
+def linux_paths(scratch: dict[str, Any]) -> tuple[Path, Path]:
+    image = Path(scratch["image_path"])
+    mountpoint = Path(scratch["mountpoint"])
+    for path in (image, mountpoint):
+        if path.resolve(strict=False) != path:
+            raise ValueError("Linux Scratch paths may not traverse symlinks")
+    if image == mountpoint or os.path.commonpath((str(image), str(mountpoint))) in {str(image), str(mountpoint)}:
+        raise ValueError("Linux Scratch image and mountpoint must be separate")
+    return image, mountpoint
+
+
+def linux_command(args: list[str], timeout: int | None = 30) -> str:
+    env = os.environ.copy()
+    if args[0] == "fuse2fs":
+        settings = config()
+        binary = settings.get("fuse2fs_bin")
+        if isinstance(binary, str) and Path(binary).is_absolute():
+            args[0] = binary
+        else:
+            args[0] = shutil.which("fuse2fs") or "fuse2fs"
+        library_path = settings.get("fuse2fs_library_path")
+        if isinstance(library_path, str) and library_path:
+            if any(not Path(item).is_absolute() for item in library_path.split(":")):
+                raise ValueError("fuse2fs library paths must be absolute")
+            env["LD_LIBRARY_PATH"] = library_path
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False, env=env)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "command failed: " + args[0])
+    return result.stdout.strip()
+
+
+def linux_fs_uuid(image: Path) -> str:
+    value = linux_command(["blkid", "-p", "-s", "UUID", "-o", "value", str(image)])
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", value):
+        raise ValueError("Scratch filesystem UUID is invalid")
+    return value.lower()
+
+
+def linux_mountpoint_safe(mountpoint: Path) -> bool:
+    try:
+        details = mountpoint.lstat()
+        return (stat.S_ISDIR(details.st_mode) and details.st_uid == os.geteuid()
+                and not (details.st_mode & 0o222) and not any(mountpoint.iterdir()))
+    except OSError:
+        return False
+
+
+def linux_mount_record(mountpoint: Path) -> tuple[str, str] | None:
+    escaped = str(mountpoint).replace("\\", "\\134").replace("\t", "\\011").replace(" ", "\\040").replace("\n", "\\012")
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields = line.split()
+        if len(fields) > 6 and fields[4] == escaped and "-" in fields:
+            separator = fields.index("-")
+            if len(fields) > separator + 2:
+                return fields[separator + 1], fields[separator + 2]
+    return None
+
+
+def linux_validate_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
+    image, mountpoint = linux_paths(scratch)
+    if not isinstance(entry, dict) or entry.get("state") != "active":
+        raise ValueError("Scratch volume is not registered active")
+    if entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint):
+        raise ValueError("Scratch volume registry identity mismatch")
+    quota = scratch["quota_gb"] * GIB
+    if entry.get("quota_bytes") != quota or entry.get("filesystem_uuid") != linux_fs_uuid(image):
+        raise ValueError("Scratch volume identity or capacity mismatch")
+    if image.stat().st_size != quota:
+        raise ValueError("Scratch image size differs from configured capacity")
+    if linux_mount_record(mountpoint) != ("fuse2fs", str(image)):
+        raise ValueError("Scratch mount identity mismatch")
+    return entry["filesystem_uuid"]
+
+
+def linux_create_cmd(name: str, execute: bool = False) -> int:
+    lock = None
+    try:
+        settings, scratch = cls(name)
+        if name != "scratch" or not encryption_is_acknowledged(settings):
+            return 2
+        image, mountpoint = linux_paths(scratch)
+        quota = scratch["quota_gb"] * GIB
+        if quota > 200 * GIB:
+            return 2
+        if image.exists() or image.is_symlink():
+            return 75
+        if mountpoint.exists() and (mountpoint.is_symlink() or not mountpoint.is_dir()
+                                    or mountpoint.stat().st_uid != os.geteuid()
+                                    or any(mountpoint.iterdir())):
+            return 75
+        parent = image.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        if parent.is_symlink() or parent.stat().st_uid not in {0, os.geteuid()}:
+            return 75
+        free = shutil.disk_usage(parent).free
+        reserve = (settings["swap_headroom_gb"] + settings["alarm_floor_gb"] + scratch["quota_gb"]) * GIB
+        if free < reserve:
+            return 2
+        if not execute:
+            print(json.dumps({"class": name, "fits": True, "quota_bytes": quota,
+                              "image_path": str(image), "mountpoint": str(mountpoint), "sparse": True}))
+            return 0
+        registry_file, lock = locked_registry()
+        data = registry()
+        if name in data["volumes"]:
+            return 75
+        fd = os.open(image, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        try:
+            os.ftruncate(fd, quota)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        linux_command(["mke2fs", "-F", "-t", "ext4", "-m", "0", "-E",
+                       f"root_owner={os.geteuid()}:{os.getegid()}", "-U", str(uuid.uuid4()),
+                       "-L", "diskm-scratch", str(image), str(scratch["quota_gb"]) + "G"], 180)
+        mountpoint.mkdir(mode=0o500, parents=True, exist_ok=True)
+        mountpoint.chmod(0o500)
+        fs_uuid = linux_fs_uuid(image)
+        data["volumes"][name] = {"class": name, "name": scratch["name"], "filesystem_uuid": fs_uuid,
+            "image_path": str(image), "mountpoint": str(mountpoint), "quota_bytes": quota,
+            "state": "active", "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        save_registry(registry_file, lock, data)
+        return 0
+    except Exception:
+        return 75
+    finally:
+        if lock is not None and not lock.closed:
+            lock.close()
+
+
+def linux_mount_cmd(name: str, foreground: bool = False) -> int:
+    try:
+        settings, scratch = cls(name)
+        image, mountpoint = linux_paths(scratch)
+        entry = registry()["volumes"].get(name)
+        if not isinstance(entry, dict) or entry.get("state") != "active":
+            return 75
+        mounted = linux_mount_record(mountpoint)
+        if mounted:
+            linux_validate_mount(settings, scratch, entry)
+            return 0
+        if image.is_symlink() or not image.is_file() or image.stat().st_uid != os.geteuid():
+            return 75
+        if not linux_mountpoint_safe(mountpoint):
+            return 75
+        if entry.get("filesystem_uuid") != linux_fs_uuid(image) or image.stat().st_size != entry.get("quota_bytes"):
+            return 75
+        args = ["fuse2fs", str(image), str(mountpoint), "-o", "rw+,noatime"]
+        if foreground:
+            args.append("-f")
+        linux_command(args, None if foreground else 30)
+        if foreground:
+            return 0
+        linux_validate_mount(settings, scratch, entry)
+        return 0
+    except Exception:
+        return 75
+
+
+def linux_status() -> int:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        settings, scratch = cls("scratch")
+        image, mountpoint = linux_paths(scratch)
+        entry = registry()["volumes"].get("scratch")
+        mounted = linux_mount_record(mountpoint)
+        identity_ok = False
+        if entry and mounted:
+            linux_validate_mount(settings, scratch, entry)
+            identity_ok = True
+        backing_free = shutil.disk_usage(image.parent).free if image.parent.exists() else None
+        volume_free = shutil.disk_usage(mountpoint).free if identity_ok else None
+        output = {"measured_at": timestamp, "host_id": os.uname().nodename, "class": "scratch",
+                  "image_path": str(image), "path": str(mountpoint), "quota_bytes": scratch["quota_gb"] * GIB,
+                  "filesystem_uuid": entry.get("filesystem_uuid") if isinstance(entry, dict) else None,
+                  "state": "active" if identity_ok else "unavailable", "available": identity_ok,
+                  "mount_source": mounted[1] if mounted else None, "backing_free_bytes": backing_free,
+                  "volume_free_bytes": volume_free}
+        print(json.dumps(output, sort_keys=True))
+        return 0
+    except Exception:
+        return 75
+
+
+def systemd_quote(value: str) -> str:
+    if any(char in value for char in "\0\n\r"):
+        raise ValueError("service argument contains a control character")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def linux_service_install_cmd(name: str) -> int:
+    try:
+        if name != "scratch":
+            return 2
+        _, scratch = cls(name)
+        entry = registry()["volumes"].get(name)
+        image, mountpoint = linux_paths(scratch)
+        if not isinstance(entry, dict) or entry.get("state") != "active":
+            return 75
+        if entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint):
+            return 75
+        unit_template = Path(__file__).resolve().parent.parent / "systemd" / "diskm-scratch.service.in"
+        if not unit_template.is_file():
+            return 75
+        import resolve_config
+        config_path = resolve_config.resolve()
+        if not config_path:
+            return 75
+        state_path, _ = registry_paths()
+        orchestrator = Path(__file__).resolve().parent.parent / "disk_magician.sh"
+        if not orchestrator.is_file():
+            return 75
+        rendered = unit_template.read_text().replace("@ORCHESTRATOR@", systemd_quote(str(orchestrator)))
+        rendered = rendered.replace("@CONFIG_PATH@", systemd_quote(config_path))
+        rendered = rendered.replace("@STATE_PATH@", systemd_quote(str(state_path.parent)))
+        if "@" in rendered:
+            return 75
+        unit_dir = Path.home() / ".config/systemd/user"
+        unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        unit = unit_dir / "diskm-scratch.service"
+        if unit.is_symlink() or (unit.exists() and (not unit.is_file() or unit.stat().st_uid != os.geteuid())):
+            return 75
+        if unit.exists():
+            if unit.read_text() != rendered:
+                return 75
+        else:
+            descriptor = os.open(unit, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "w") as stream:
+                stream.write(rendered)
+                stream.flush()
+                os.fsync(stream.fileno())
+        linux_command(["systemctl", "--user", "daemon-reload"])
+        linux_command(["systemctl", "--user", "enable", "--now", "diskm-scratch.service"], 60)
+        return 0
+    except Exception:
+        return 75
+
+
+def linux_unmount_cmd(name: str) -> int:
+    try:
+        settings, scratch = cls(name)
+        _, mountpoint = linux_paths(scratch)
+        linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
+        linux_command(["fusermount3", "-u", str(mountpoint)])
+        return 0 if linux_mount_record(mountpoint) is None else 75
+    except Exception:
+        return 75
+
+
 def create_cmd(name: str, execute: bool = False) -> int:
+    if linux_backend_enabled(name):
+        return linux_create_cmd(name, execute)
     try:
         settings, scratch = cls(name)
     except Exception:
@@ -686,6 +962,8 @@ def retire_cmd(name: str) -> int:
 
 
 def status(snapshot: bool = False) -> int:
+    if linux_backend_enabled():
+        return linux_status()
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     alarms: list[str] = []
     rows: list[dict[str, Any]] = []
@@ -874,6 +1152,15 @@ def reclaim_cmd(clean: bool = False) -> int:
 
 
 def verify_mount(root: str) -> int:
+    if linux_backend_enabled():
+        try:
+            settings, scratch = cls("scratch")
+            if root != scratch["mountpoint"]:
+                return 75
+            linux_validate_mount(settings, scratch, registry()["volumes"].get("scratch"))
+            return 0
+        except Exception:
+            return 75
     try:
         settings, _ = cls("scratch")
         if root != settings["classes"]["scratch"]["mountpoint"]:
@@ -898,6 +1185,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments[:1] == ["create"] and len(arguments) > 1:
             return create_cmd(arguments[1], "--execute" in arguments[2:])
+        if arguments[:1] == ["mount"] and len(arguments) > 1:
+            return linux_mount_cmd(arguments[1], "--foreground" in arguments[2:]) if sys.platform.startswith("linux") else 2
+        if arguments[:1] == ["unmount"] and len(arguments) > 1:
+            return linux_unmount_cmd(arguments[1]) if sys.platform.startswith("linux") else 2
+        if arguments[:2] == ["service", "install"] and len(arguments) > 2:
+            return linux_service_install_cmd(arguments[2]) if sys.platform.startswith("linux") else 2
         if arguments[:1] == ["retire"] and len(arguments) > 1:
             return retire_cmd(arguments[1])
         if arguments[:1] == ["ballast"] and len(arguments) > 2:

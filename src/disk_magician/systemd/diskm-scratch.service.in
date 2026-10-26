@@ -1,0 +1,15 @@
+[Unit]
+Description=Disk Magician Scratch volume
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
+Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
+ExecStart=/usr/bin/bash @ORCHESTRATOR@ volume mount scratch --foreground
+ExecStop=/usr/bin/bash @ORCHESTRATOR@ volume unmount scratch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
