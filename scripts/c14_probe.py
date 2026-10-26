@@ -952,7 +952,7 @@ def newest_mtime(inv_file):
     except Exception:
         print("kept:check-failed")
 
-SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credentials.*|secrets.*)$", re.I)
+SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credential(?!services)(?-i:s|S(?![a-z])).*|secrets.*)$", re.I)
 _TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
 _DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
@@ -972,6 +972,8 @@ def exempt_name(path):
         return True
     if _never(n):
         return False
+    if not SECRET_RE.fullmatch(parts[-1]):
+        return True
     comps = {c.lower() for c in parts[:-1]}
     dep = bool(_DEP_DIRS & comps)
     stripped = n
@@ -992,14 +994,21 @@ def _xcode_generated(q):
     return top in ("build", "logs") or top.endswith(".noindex") or top.startswith("modulecache") \
         or q.lower().startswith("sourcepackages/checkouts/")
 
+def _xcode_device_support_generated(q):
+    """Extracted device system symbols inside an iOS DeviceSupport root."""
+    return q.lower().startswith("symbols/")
+
 def secrets(inv_file, kind=""):
     try:
+        kind = os.environ.get("C14_SECRET_KIND") or kind
         entries = json.load(open(inv_file, encoding="utf-8"))
         paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
         if kind == "xcode-derived-data":
             # Generated names such as NativeRequestCredentials.o are not secrets; anything
             # else in the root (a .env, secrets.json, *.p12) still is.
             paths = (q for q in paths if not _xcode_generated(q))
+        elif kind == "xcode-device-support":
+            paths = (q for q in paths if not _xcode_device_support_generated(q))
         print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
@@ -1041,14 +1050,91 @@ def merge_inventory(inv_file, admin_file, out_file, admin_filter=None):
     except Exception:
         print("kept:check-failed")
 
+def _hardlink_only_false_positive(lsof_bin, root, out, cap, deadline):
+    """True only when every path reported by `lsof +D <root>` is a multi-link hardlink
+    (st_nlink > 1) and no holder PID is executing from <root> or holds any non-hardlink
+    path inside <root>."""
+    try:
+        pids, paths = set(), []
+        for raw in out.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"p":
+                pid = os.fsdecode(raw[1:])
+                if not pid.isdigit():
+                    return False
+                pids.add(pid)
+            elif tag == b"n":
+                paths.append(os.fsdecode(raw[1:]))
+            elif tag not in (b"f", b"c"):
+                return False
+        if not pids or not paths:
+            return False
+        hardlink_paths = set()
+        for p in paths:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+                return False
+            hardlink_paths.add(os.path.abspath(p))
+            hardlink_paths.add(os.path.realpath(p))
+        root_abs = os.path.abspath(root).rstrip(os.sep)
+        root_real = os.path.realpath(root).rstrip(os.sep)
+        ps_res = _run_bounded(
+            ["ps", "-p", ",".join(sorted(pids)), "-o", "comm="],
+            cap=cap, deadline=deadline, step="tree-walk",
+        )
+        if ps_res is None or ps_res[0] not in (0, 1):
+            return False
+        for raw in ps_res[1].splitlines():
+            comm = os.fsdecode(raw).strip()
+            if not comm or not os.path.isabs(comm):
+                continue
+            c_abs = os.path.abspath(comm)
+            c_real = os.path.realpath(comm)
+            if (c_abs == root_abs or c_abs.startswith(root_abs + os.sep) or
+                    c_real == root_real or c_real.startswith(root_real + os.sep)):
+                return False
+        res = _run_bounded(
+            [lsof_bin, "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd", "-p", ",".join(sorted(pids))],
+            cap=cap, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT,
+        )
+        if res is None:
+            return False
+        rc, pout = res
+        if rc not in (0, 1):
+            return False
+        for raw in pout.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"n":
+                vp = os.fsdecode(raw[1:])
+                if not os.path.isabs(vp):
+                    continue
+                vp_abs = os.path.abspath(vp)
+                vp_real = os.path.realpath(vp)
+                if vp_abs in hardlink_paths or vp_real in hardlink_paths:
+                    continue
+                if (vp_abs == root_abs or vp_abs.startswith(root_abs + os.sep) or
+                        vp_real == root_real or vp_real.startswith(root_real + os.sep)):
+                    return False
+            elif tag not in (b"p", b"f", b"c"):
+                return False
+        return True
+    except Exception:
+        return False
+
 def open_file(root, deadline=None):
-    cmd = [os.environ.get("DISK_MAGICIAN_LSOF_BIN", "lsof"), "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd"]
+    lsof_bin = os.environ.get("DISK_MAGICIAN_LSOF_BIN", "lsof")
+    cap = float(os.environ.get("DISK_MAGICIAN_LSOF_CAP", "30"))
+    cmd = [lsof_bin, "-w", "-n", "-P", "-Fn", "-a", "-d", "^cwd"]
     if os.path.isdir(root):
         cmd += ["+D", root]
     else:
         cmd += [root]
     try:
-        result = _run_bounded(cmd, cap=float(os.environ.get("DISK_MAGICIAN_LSOF_CAP", "30")), deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
+        result = _run_bounded(cmd, cap=cap, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT)
     except OSError:
         print("kept:check-failed")
         return
@@ -1056,7 +1142,9 @@ def open_file(root, deadline=None):
         print("deferred:tree-walk")
     else:
         rc, out = result
-        if out:
+        if out and rc in (0, 1) and os.path.isdir(root) and _hardlink_only_false_positive(lsof_bin, root, out, cap, deadline):
+            print("no")
+        elif out:
             print("yes")
         elif rc == 1:
             print("no")

@@ -1360,12 +1360,19 @@ if age_hours < 0:
 if age_hours > 36.0:
     result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
 else:
+    le_5g_count = sum(
+        1 for b in (d.get("granularity_buckets") or [])
+        if isinstance(b, dict) and (
+            b.get("measured_kb") if b.get("measured_kb") is not None else int(round((b.get("size_mb") or 0) * 1024))
+        ) <= 5 * 1024 * 1024
+    )
     result = {
         "mode": d.get("mode"),
         "captured_at": captured_at,
         "age_hours": round(age_hours, 1),
         "measured_total_kb": d.get("measured_total_kb"),
         "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+        "mega_table_le_5g_count": le_5g_count,
         "residual_kb": d.get("residual_kb"),
         "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
         "local_snapshots_count": d.get("local_snapshots_count"),
@@ -1428,6 +1435,13 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
   SNAP_TOPDOWN="$TOPDOWN_JSON" \
+  SNAP_TOPDOWN_ENABLED="$TOPDOWN_ENABLED" \
+  SNAP_CONFIG_FILE="$CONFIG_FILE" \
+  SNAP_HOME="$HOME" \
+  SNAP_FRONTIER_LAST="${DISK_MAGICIAN_FRONTIER_LAST:-}" \
+  SNAP_FRONTIER_ROOT="${DISK_MAGICIAN_FRONTIER_ROOT_JSON:-/var/db/disk-magician/frontier_last.json}" \
+  SNAP_FRONTIER_STATE="$SNAPSHOT_STATE_DIR/frontier_last.json" \
+  SNAP_SCRIPT_DIR="$SCRIPT_DIR" \
   SNAP_LIBRARY_COVERAGE="$LIBRARY_COVERAGE_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
@@ -1597,6 +1611,7 @@ try:
     if library_coverage is not None:
         data["library_coverage"] = library_coverage
     dirs = {}
+    src_paths = []
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):
         with open(dirs_file) as f:
@@ -1608,6 +1623,8 @@ try:
                 if len(parts) < 2:
                     continue
                 k, v = parts[0], parts[1]
+                if len(parts) >= 3 and parts[2]:
+                    src_paths.append(parts[2])
                 if v == "null" or v == "":
                     dirs[k] = None
                 else:
@@ -1615,6 +1632,68 @@ try:
                         dirs[k] = int(v)
                     except ValueError:
                         dirs[k] = None
+    # Backfill/merge persistent >= 1 GiB, <= 5 GiB directory buckets from active
+    # frontier / topdown-5g ledger so snapshot.directories is structurally a superset
+    # of the Mega-Table <= 5 GiB directory entries.
+    if os.environ.get("SNAP_TOPDOWN_ENABLED") == "true":
+        try:
+            import fnmatch
+            sys.path.insert(0, os.environ.get("SNAP_SCRIPT_DIR") or "")
+            import check_uncovered_roots as cur
+            import disk_report_breakdown as drb
+            from frontier_selection import select_frontier
+            import reclaim_ledger as rl
+
+            home = rl.norm(os.environ.get("SNAP_HOME") or os.path.expanduser("~"))
+            cfg_path = os.environ.get("SNAP_CONFIG_FILE") or ""
+            cfg = json.load(open(cfg_path)) if cfg_path and os.path.isfile(cfg_path) else {}
+            ex = lambda p: rl.norm((home + p[1:] if p.startswith("~") else p).replace("$HOME", home).rstrip("/"))
+            mon_dirs = {d["key"]: ex(d["path"]) for d in cfg.get("monitored_dirs", []) if isinstance(d, dict) and "path" in d and "key" in d}
+            for sp in src_paths:
+                if not any(c in sp for c in "*?["):
+                    mon_dirs.setdefault(f"__src_{len(mon_dirs)}", ex(sp))
+            mon_globs = [ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs") for g in cfg.get(k, []) if isinstance(g, dict) and "pattern" in g]
+            mon_tuple = (mon_dirs, mon_globs, {})
+            taken = set(dirs) | set(mon_dirs)
+
+            cand_files = []
+            sel = select_frontier(
+                os.environ.get("SNAP_FRONTIER_ROOT") or "",
+                os.environ.get("SNAP_FRONTIER_STATE") or "",
+                explicit_json=os.environ.get("DISK_MAGICIAN_FRONTIER_JSON"),
+                explicit_last=os.environ.get("SNAP_FRONTIER_LAST") or None,
+            )
+            if sel and os.path.isfile(sel):
+                cand_files.append(sel)
+            if not os.environ.get("DISK_MAGICIAN_FRONTIER_JSON") and not os.environ.get("SNAP_FRONTIER_LAST"):
+                sr = cfg.get("state_repo_path")
+                if isinstance(sr, str) and sr:
+                    td_p = os.path.join(os.path.expanduser(sr), "ledger", "topdown-5g.json")
+                    if os.path.isfile(td_p) and td_p not in cand_files:
+                        cand_files.append(td_p)
+            for cf in cand_files:
+                try:
+                    fdoc = json.load(open(cf))
+                except Exception:
+                    continue
+                for b in fdoc.get("granularity_buckets") or []:
+                    if not isinstance(b, dict):
+                        continue
+                    kb = drb.bucket_kb(b)
+                    if not (rl.GIB_KB <= kb <= 5 * rl.GIB_KB):
+                        continue
+                    raw_p = drb.bucket_path(b)
+                    if not raw_p:
+                        continue
+                    p = rl.norm(drb.normalize_path(raw_p).rstrip("/"))
+                    if rl.is_ephemeral_path(p, home):
+                        continue
+                    if os.path.isdir(p) and not os.path.islink(p) and not rl.is_directly_monitored(p, mon_tuple):
+                        bkey = rl.make_monitored_key(p, home, taken)
+                        dirs[bkey] = kb
+                        mon_dirs[bkey] = p
+        except Exception:
+            pass
     data["directories"] = dirs
     # Additive fresh/carried/unmeasured accounting (schema_version stays 2).
     # snapshot_coverage_pct keeps its fresh-only meaning.

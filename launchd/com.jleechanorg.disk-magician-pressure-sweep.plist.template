@@ -43,6 +43,8 @@
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>DISK_MAGICIAN_PRESSURE_THRESHOLD_GB</key>
+    <string>150</string>
     <key>DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB</key>
     <string>15</string>
   </dict>

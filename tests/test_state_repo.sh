@@ -125,10 +125,10 @@ INIT10=$(run_sr "$H10" - init 2>&1) || { echo "init10 failed: $INIT10"; }
 SD10="$H10/.local/state/disk-magician"
 run_sr "$H10" - remote "$BARE10" >/dev/null 2>&1
 run_sr "$H10" - push >/dev/null 2>&1
-git clone -q "$BARE10" "$TMP_ROOT/other10"
-( cd "$TMP_ROOT/other10" && echo remote-side > MACHINE && git -c user.email=o@o -c user.name=o commit -qam remote-conflict && git push -q )
-REMOTE_HEAD=$(git -C "$BARE10" rev-parse HEAD)
-( cd "$SD10" && echo local-side > MACHINE && git -c user.email=a@a -c user.name=a commit -qam local-conflict )
+HOME="$H10" git clone -q "$BARE10" "$TMP_ROOT/other10"
+( cd "$TMP_ROOT/other10" && echo remote-side > MACHINE && HOME="$H10" git -c user.email=o@o -c user.name=o commit -qam remote-conflict && HOME="$H10" git push -q )
+REMOTE_HEAD=$(HOME="$H10" git -C "$BARE10" rev-parse HEAD)
+( cd "$SD10" && echo local-side > MACHINE && HOME="$H10" git -c user.email=a@a -c user.name=a commit -qam local-conflict )
 run_sr "$H10" - push >/dev/null 2>&1; RC10=$?
 [[ $RC10 -ne 0 ]] && ok "conflicted push exits nonzero" || bad "conflicted push rc" "rc=0"
 [[ "$(git -C "$BARE10" rev-parse HEAD)" == "$REMOTE_HEAD" ]] && ok "remote history untouched" || bad "remote intact" "remote moved"

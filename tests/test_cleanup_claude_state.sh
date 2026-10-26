@@ -455,5 +455,34 @@ fi
 assert_contains "(--root guard) descriptive error printed" "only permitted in sandboxed test contexts" "$OUT11_CONTENT"
 
 echo
+echo "=== Test 12: >=90d (>3 months) clean state dir auto-approved without CLAUDE_STATE_APPROVED=1 ==="
+ROOTS_DIR12="$TMP_ROOT/state12"
+mkdir -p "$ROOTS_DIR12"
+ROOTS_DIR12="$(cd "$ROOTS_DIR12" && pwd -P)"
+ANCIENT_CLEAN="$ROOTS_DIR12/ancient-clean-100d"
+MID_CLEAN="$ROOTS_DIR12/mid-clean-30d"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$ANCIENT_CLEAN"
+git clone -q "$TMP_ROOT/remotes/old_clean.git" "$MID_CLEAN"
+while IFS= read -r f; do age_path_days_ago "$f" 100; done < <(find "$ANCIENT_CLEAN" -type f)
+while IFS= read -r f; do age_path_days_ago "$f" 30; done < <(find "$MID_CLEAN" -type f)
+OUT12="$TMP_ROOT/out12.txt"
+env -i HOME="$TMP_ROOT/home" PATH="$REAL_PATH" \
+  DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+  DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF" \
+  bash "$TARGET_SCRIPT" --root "$ROOTS_DIR12" --min-age 7 --clean \
+  >"$OUT12" 2>&1
+if [[ ! -d "$ANCIENT_CLEAN" ]]; then
+  record_pass "(auto-approve >=90d) 100d clean state dir deleted without CLAUDE_STATE_APPROVED=1"
+else
+  record_fail "(auto-approve >=90d) 100d clean state dir deleted without CLAUDE_STATE_APPROVED=1" "still present: $ANCIENT_CLEAN"
+fi
+if [[ -d "$MID_CLEAN" ]]; then
+  record_pass "(auto-approve >=90d) 30d clean state dir preserved without CLAUDE_STATE_APPROVED=1"
+else
+  record_fail "(auto-approve >=90d) 30d clean state dir preserved without CLAUDE_STATE_APPROVED=1" "30d dir deleted without CLAUDE_STATE_APPROVED=1"
+fi
+
+echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

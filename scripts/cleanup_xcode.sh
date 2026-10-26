@@ -107,6 +107,47 @@ fmt_kb() {
   }"
 }
 
+# _av_xcode_device_support <path>: rc 0 only for an entry dir directly under
+# ~/Library/Developer/Xcode/iOS DeviceSupport that passes _av_rebuildable.
+_av_xcode_device_support() (
+  local p="$1" ds_root
+  [[ -n "${HOME:-}" && "$HOME" != / && -d "$p" && ! -L "$p" ]] || return 1
+  ds_root="$(cd "${DEVICE_SUPPORT_DIR:-$HOME/Library/Developer/Xcode/iOS DeviceSupport}" 2>/dev/null && pwd -P)" || return 1
+  p="$(cd "$p" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$ds_root" && "${p%/*}" == "$ds_root" ]] || return 1
+  _av_rebuildable "$p" >/dev/null
+)
+
+artifact_removal_verdict() {
+  [[ "${1:-}" == --self-test ]] && { _av_self_test; return 0; }
+  local tmpdir inv result reason admin_inv secret_kind="" a prev=""
+  local -a args=()
+  for a in "$@"; do
+    if [[ "$prev" == "--kind" && "$a" == "xcode-device-support" ]]; then
+      secret_kind="xcode-device-support"
+      if _av_xcode_device_support "${1:-}"; then
+        args+=("rebuildable")
+      else
+        args+=("$a")
+      fi
+    else
+      args+=("$a")
+    fi
+    prev="$a"
+  done
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
+  inv="$tmpdir/inventory.json"
+  admin_inv="$tmpdir/admin.jsonl"
+  result="$(GIT_OPTIONAL_LOCKS=0 C14_SECRET_KIND="$secret_kind" C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "${args[@]+"${args[@]}"}")"
+  if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
+    reason=${result#*:}
+    python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
+  fi
+  rm -f "$inv" "$admin_inv"
+  rmdir "$tmpdir" 2>/dev/null || true
+  echo "${result:-kept:check-failed}"
+}
+
 clear_contents() {
   local label="$1" path="$2"
   if [[ ! -d "$path" ]]; then
@@ -130,8 +171,11 @@ clear_contents() {
       [[ "${entry##*/}" == ".dm-quarantine" ]] && continue  # quarantine's own state
       kind=rebuildable
       # A per-project DerivedData dir gets the xcode-derived-data kind so its generated
-      # build output (e.g. NativeRequestCredentials.o) is not read as a secret.
+      # build output (e.g. NativeRequestCredentials.o) is not read as a secret; an
+      # iOS DeviceSupport entry gets xcode-device-support so extracted system symbols
+      # under Symbols/ (e.g. SharedWebCredentials.framework) do not trip the secret gate.
       [[ "$path" == "$DERIVED_DATA" ]] && _av_derived_data_shape "$entry" && kind=xcode-derived-data
+      [[ "$path" == "$DEVICE_SUPPORT_DIR" && -d "$entry" && ! -L "$entry" ]] && kind=xcode-device-support
       c14_remove "$entry" --kind "$kind" || true
     done < <(find "$path" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   fi
@@ -152,6 +196,7 @@ clean_custom_derived_data() {
   utmp="$(scratch_roots_get_user_tmp)"
   for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
       ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
+      "$ptmp"/worldai-ios-* \
       "$ptmp"/worldai_frontend/* "$ptmp"/worldai_frontend/*/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
       ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
