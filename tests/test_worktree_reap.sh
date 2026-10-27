@@ -136,7 +136,7 @@ park() {
 }
 if [[ ! -f "$SCRIPT" ]]; then bash "$SCRIPT"; echo 'RED: scripts/worktree_reap.sh missing'; exit 1; fi
 # removal_activation_ok is covered by test_removal_activation.sh; here it is a switch file.
-cp -R "$ROOT/scripts" "$TMP/root-scripts"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
+cp -R "$ROOT/scripts" "$TMP/root-scripts"; cp "$ROOT/config.json.template" "$TMP/"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
 echo 'removal_activation_ok() { [[ -f "$DISK_MAGICIAN_STATE_DIR/test_gate_open" ]] || { echo activation_blocked:test; return 1; }; }' > "$TMP/root-scripts/lib/removal_activation.sh"
 new; rm "$LF"; run; check 'unleased adopts null owner' test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True
 new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive recorded' kept:live-owner; check 'alive present' test -d "$WT"; park

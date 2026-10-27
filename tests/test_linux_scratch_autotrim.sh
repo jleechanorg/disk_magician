@@ -2,6 +2,7 @@
 # Real disposable native-ext4 fixtures. Evidence and images survive canonical unmount.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+[[ "$(uname -s)" == Linux ]] || { echo "skip - native ext4 autotrim fixtures require Linux"; exit 0; }
 EVIDENCE="$(mktemp -d /tmp/dm-linux-autotrim.XXXXXX)"
 exec > >(tee "$EVIDENCE/full.log") 2>&1
 echo "Evidence: $EVIDENCE"
