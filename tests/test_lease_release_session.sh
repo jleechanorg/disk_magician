@@ -37,7 +37,11 @@ mk() { # mk <name> <session> <pid>
     _lease_emit_json "$(lease_path_for "$TMP/wt/$1")" "$TMP/wt/$1" repo br test False "$3" "1760000$3" claude - - 24
     python3 - "$(lease_path_for "$TMP/wt/$1")" "$2" <<'PY'
 import json,sys
-p,s=sys.argv[1:]; d=json.load(open(p)); d["owner"]["session"]=s; json.dump(d,open(p,"w"))
+p,s=sys.argv[1:]; d=json.load(open(p)); d["owner"]["session"]=s
+owners=d.get("owners")
+if isinstance(owners,list) and owners and isinstance(owners[0],dict):
+    owners[0]["session"]=s
+json.dump(d,open(p,"w"))
 PY
 }
 released() { test -n "$(_lease_get "$(lease_path_for "$TMP/wt/$1")" released_at)"; }
@@ -67,7 +71,7 @@ not_released() { [[ -f "$(lease_path_for "$TMP/wt/$1")" ]] && ! released "$1"; }
 for p in 503 504 505; do echo "1 claude" > "$FAKE_PS_DIR/comm/$p"; touch "$FAKE_PS_DIR/lstart/$p"; done
 mk G S3 503  # owner probe for 503 hands the lease to live pid 501 mid-release
 G="$(lease_path_for "$TMP/wt/G")"
-printf '#!/bin/bash\nrm -f "%s"\npython3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[\\"owner\\"].update(pid=501, start_epoch=1760000501); json.dump(d,open(p,\\"w\\"))" "%s"\nexit 1\n' "$FAKE_PS_DIR/lstart/503" "$G" > "$FAKE_PS_DIR/on_lstart/503"
+printf '#!/bin/bash\nrm -f "%s"\npython3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[\\"owner\\"].update(pid=501, start_epoch=1760000501); d[\\"owners\\"][0].update(pid=501, start_epoch=1760000501); json.dump(d,open(p,\\"w\\"))" "%s"\nexit 1\n' "$FAKE_PS_DIR/lstart/503" "$G" > "$FAKE_PS_DIR/on_lstart/503"
 chmod +x "$FAKE_PS_DIR/on_lstart/503"
 out="$(lease_release_owner_session S3 500 1760000500)"
 check 'owner changed between scan and write: kept' not_released G

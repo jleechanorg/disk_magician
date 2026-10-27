@@ -27,6 +27,9 @@ git -C "$REPO_ROOT" archive "$BASE_SHA" scripts | tar -x -C "$TMP_ROOT/baseline"
 git -C "$REPO_ROOT" archive 2f35dfcd063f1c24f418b013ec9668547bccafff scripts | tar -x -C "$TMP_ROOT/batch_baseline"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/branch/"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/unstubbed/"
+# resolve_config falls back to the template beside the scripts directory.
+cp "$REPO_ROOT/config.json.template" "$TMP_ROOT/branch/"
+cp "$REPO_ROOT/config.json.template" "$TMP_ROOT/unstubbed/"
 for tree in baseline batch_baseline branch; do
   cat >> "$TMP_ROOT/$tree/scripts/lib/worktree_recency.sh" <<'SH'
 

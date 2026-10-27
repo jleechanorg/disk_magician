@@ -102,6 +102,7 @@ fi
   "ttl_hours": 24,
   "pending": true,
   "owner": {"pid": $$, "start_epoch": $ep_, "comm": "bash"},
+  "owners": [{"pid": $$, "start_epoch": $ep_, "comm": "bash"}],
   "reuse": {"state": "pending", "old_branch": "worktree-old", "old_tip": "deadbeef",
             "previous_lease": {"released_at": "2026-10-10T00:00:00+00:00"}}
 }

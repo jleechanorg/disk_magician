@@ -41,7 +41,30 @@ admit_class_for() {
     esac
 }
 
-admit_gate() {
+# admit_is_configured_volume_path <abs-path> — true when the path resolves
+# beneath the configured quota-volume mountpoint. The volume configuration is
+# the authority; this deliberately does not infer a mount from a fixed path.
+admit_is_configured_volume_path() {
+    python3 - "$_ADMIT_CALLER_DIR" "$1" <<'PY'
+import json, os, pathlib, sys
+try:
+    sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
+    import resolve_config
+    config_path = resolve_config.resolve()
+    if not config_path:
+        raise ValueError("configuration unavailable")
+    data = json.loads(pathlib.Path(config_path).read_text())
+    mount = data["volumes"]["classes"]["scratch"]["mountpoint"]
+    if not isinstance(mount, str) or not pathlib.Path(mount).is_absolute():
+        raise ValueError("invalid quota mountpoint")
+    pathlib.Path(os.path.realpath(sys.argv[2])).relative_to(pathlib.Path(os.path.realpath(os.path.expanduser(mount))))
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY
+}
+
+_admit_gate() {
+    local fail_closed="$1"; shift
     local cls="$1" est="$2" producer="$3" dest="$4" source="$5" rc try cmd output line
     ADMIT_ID=""
     local -a est_arg=()
@@ -50,6 +73,7 @@ admit_gate() {
     else cmd=(python3 "$_ADMIT_CALLER_DIR/../disk_budget.py"); fi
     if [[ ! -f "${cmd[${#cmd[@]}-1]}" ]]; then
         echo "admission_degraded:caller admit missing" >&2
+        [[ "$fail_closed" == true ]] && return 75
         return 0
     fi
     for try in 1 2; do
@@ -72,9 +96,21 @@ admit_gate() {
         0) return 0 ;;
         10) echo "disk-admission: warn class=$cls" >&2; return 0 ;;
         75|76) echo "disk-admission: refused class=$cls rc=$rc" >&2; return 75 ;;
-        *) echo "admission_degraded:caller rc=$rc" >&2; return 0 ;;
+        *)
+            echo "admission_degraded:caller rc=$rc" >&2
+            if [[ "$fail_closed" == true ]]; then
+                echo "disk-admission: unavailable class=$cls rc=$rc" >&2
+                return 75
+            fi
+            return 0 ;;
     esac
 }
+
+# Generic callers retain the degraded-proceed contract. Quota-volume births
+# use the required form so a missing or unexpected admission result cannot
+# create an artifact without a high-water decision.
+admit_gate() { _admit_gate false "$@"; }
+admit_gate_required() { _admit_gate true "$@"; }
 
 # Confirm only the successful creator's exact admission attempt.
 admit_confirm_created() {

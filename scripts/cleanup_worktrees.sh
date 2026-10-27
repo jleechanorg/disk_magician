@@ -28,6 +28,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_ignored.sh"
 # Brings artifact_removal_verdict (via artifact_verdict.sh) and, transitively,
 # wrh_remove_now (worktree_remove_hook.sh) for the C14 -> WRH removal route.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_lease.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
@@ -984,6 +985,9 @@ process_repo_local_worktrees() {
                 local cw_c14_inv cw_c14_verdict cw_removed=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
                 if [[ -n "$cw_c14_inv" ]]; then
+                    if ! lease_registry_mutation_lock_enter; then
+                        cw_c14_verdict=kept:lease-busy
+                    else
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
                     # 3-day path. --t3-owner-null lets C14 free EXACTLY this
                     # candidate's own owner-null lease (never an
@@ -1000,6 +1004,8 @@ process_repo_local_worktrees() {
                         else
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         fi
+                    fi
+                    lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
                         rm -f "$cw_c14_inv"

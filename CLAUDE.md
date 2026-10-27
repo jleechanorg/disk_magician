@@ -18,6 +18,33 @@ dispatch. Migrate legacy direct-script schedules with behavior and safety
 checks; their current existence is not permission to add more. Build, package,
 and isolated test harnesses may call internal files directly.
 
+## Agent Scratch placement (Linux first)
+
+For disposable Linux build output, downloads and evidence, use the configured
+Scratch volume through `diskm scratch-new <repo-path> <purpose> --kind build`
+(or `--kind evidence`). Set `DISK_MAGICIAN_CONFIG` to the task's Linux Scratch
+profile, normally `$HOME/.config/disk-magician/linux-scratch.json`, for both the
+path check and allocation. First run `diskm volume path scratch` with that same
+profile; use only the identity-verified path returned by the CLI. Let
+`scratch-new` perform admission and register the producer lease; add
+`--owner-pid PID` for the actual long-lived producer when needed. Consumers and
+detached children must retain their own existing producer leases.
+
+Use the returned artifact directory rather than inventing paths under
+`~/Scratch`. A registered but unavailable, full or mismatched volume refuses
+new work; report that result without writing beneath an unmounted mountpoint or
+silently routing the same request to host temp. This Linux opt-in is the
+exception to the general `/tmp` scratch-location rule, not an exception to
+admission, lease, identity or deletion safety.
+
+Git worktrees still use `~/.worktrees` through `diskm worktree-new`; tool profiles,
+transcripts, credentials and mutable state stay in their existing homes. Durable
+human-readable reports stay in `~/roadmap`; publish evidence that must survive
+reclaim through the established evidence path. Do not remap global `TMPDIR`,
+replace `/tmp`, move existing user data or treat Scratch as durable storage.
+Mac agent routing remains on its existing path until the encrypted volume is
+created, unlocked and identity-verified for that task.
+
 ## Investigation methodology — fleet, existing ledger, floor/buckets, bounded audit
 
 Disk-fill investigations in this repo MUST follow a fixed pre-analysis

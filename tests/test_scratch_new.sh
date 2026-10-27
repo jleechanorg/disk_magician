@@ -22,6 +22,11 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/bin" "$T/tmp" "$T/bucket" "$T/state" "$T/elsewhere"
 export HOME="$T/home" STANDARD_WORKTREE_ROOT="$T/home/.worktrees" EVIDENCE_TMP_ROOT="$T/tmp"
 export DISK_MAGICIAN_STATE_DIR="$T/state" EVIDENCE_GCS_PREFIX="gs://bkt/ev"
+# Keep volume lookup deterministic even when the caller exports machine-local
+# volume settings; the legacy no-volume config exercises the intended fallback.
+unset DISK_MAGICIAN_DISKM_BIN DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
+printf '%s\n' '{"budgets":{"daily":5}}' > "$T/legacy-config.json"
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 
 git init -q "$T/myrepo" && git -C "$T/myrepo" commit -q --allow-empty -m init
@@ -77,11 +82,51 @@ run 0 "$T/myrepo" gate-prep --detach HEAD --est-gb 3
 assert_eq "$RC" 0 "exit 0"
 assert_contains "$OUT" "$STANDARD_WORKTREE_ROOT/myrepo/scratch-gate-prep-" "path under ~/.worktrees/<repo>/scratch-<purpose>-<ts>"
 assert_eq "$(git -C "$OUT" rev-parse HEAD)" "$SHA" "checked out at the sha"
+assert_eq "$(python3 -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$OUT")" 700 "new scratch directory is mode 0700"
 assert_eq "$(git -C "$OUT" symbolic-ref -q HEAD || echo detached)" detached "HEAD is detached"
 assert_eq "$(lease_field "$OUT" kind)" scratch "lease kind"
 assert_eq "$(lease_field "$OUT" source)" "git:https://example.invalid/o/myrepo.git@$SHA" "lease source = repo URL + sha"
 assert_contains "$(cat "$T/admit.log")" "--class worktrees --est-gb 3" "admit class worktrees with --est-gb"
 assert_eq "$(lease_field "$OUT" producer)" scratch-new "default producer"
+# The production call shape is command substitution; the caller survives while
+# the short-lived CLI process exits, so the lease must retain the caller/runtime
+# owner rather than the CLI PID. Explicit owner PID covers detached workers.
+echo "== command-substitution caller and explicit detached owner =="
+CALLER_PID="${BASHPID:-$$}"
+PYTHONPATH="$REPO_ROOT/src" python3 -m disk_magician.cli scratch-new "$T/myrepo" packaged-direct --detach HEAD >"$T/packaged-direct.out" 2>"$T/err"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "packaged CLI direct scratch-new succeeds"
+DIRECT_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$(cat "$T/packaged-direct.out")")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$DIRECT_LEASE" "$CALLER_PID")" True "packaged CLI direct invocation persists its caller"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len([o for o in d.get("owners",[]) if o.get("comm") != "Runner.Worker"]))' "$DIRECT_LEASE")" 1 "packaged direct invocation does not retain unrelated ancestors"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$DIRECT_LEASE")" alive "packaged direct caller keeps its lease alive"
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" shell-cli --detach HEAD 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "direct shell command-substitution scratch-new succeeds"
+SHELL_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$SHELL_LEASE" "$CALLER_PID")" True "direct shell command-substitution persists its caller"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$SHELL_LEASE")" alive "direct shell caller keeps its lease alive"
+OUT="$(PYTHONPATH="$REPO_ROOT/src" python3 -m disk_magician.cli scratch-new "$T/myrepo" packaged-cli --detach HEAD 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "packaged CLI command-substitution scratch-new succeeds"
+PACKAGED_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$PACKAGED_LEASE" "$CALLER_PID")" True "packaged CLI persists the live command-substitution caller"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$PACKAGED_LEASE")" alive "packaged CLI caller keeps its lease alive after command substitution"
+sleep 300 & DETACHED_OWNER=$!
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" detached-owner --detach HEAD --owner-pid "$DETACHED_OWNER" 2>"$T/err")"; RC=$?
+if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
+assert_eq "$RC" 0 "explicit detached owner scratch-new succeeds"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$(python3 -c 'import json,glob,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")" "$DETACHED_OWNER")" True "explicit detached owner is persisted"
+kill "$DETACHED_OWNER" 2>/dev/null || true
+
+echo "== lease failure: scratch-new fails closed without handing out path =="
+OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
+[[ "$RC" != 0 ]] && ok "lease failure is non-zero" || bad "lease failure returned success"
+ERR="$(cat "$T/err")"
+assert_eq "$OUT" "" "lease failure emits no path"
+assert_contains "$ERR" "lease write failed" "lease failure diagnosed"
+LEASE_FAIL_PATH="$(find "$STANDARD_WORKTREE_ROOT/myrepo" -mindepth 1 -maxdepth 1 -type d -name 'scratch-lease-fail-*' | head -n 1)"
+[[ -n "$LEASE_FAIL_PATH" && -d "$LEASE_FAIL_PATH" ]] && ok "failed lease leaves created worktree available for recovery" || bad "failed lease worktree missing"
 
 echo "== bad purpose / escaping root -> rc 2, nothing admitted =="
 for p in ../x Bad_Purpose "" "$(printf 'a%.0s' {1..41})"; do
@@ -103,6 +148,118 @@ assert_contains "$EV" "$T/tmp/myrepo/evidence/ui-proof-" "evidence path"
 [[ -d "$EV" ]] && ok "evidence dir exists" || bad "evidence dir missing"
 assert_eq "$(lease_field "$EV" kind)" evidence "evidence lease kind"
 assert_contains "$(cat "$T/admit.log")" "--class tmp_containers" "admit class tmp_containers"
+
+echo "== --kind build: dir under the build root with a valid producer lease =="
+run 0 "$T/myrepo" compiler-output --kind build
+assert_eq "$RC" 0 "build allocation exits 0"
+BUILD="$OUT"
+assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
+[[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
+assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
+
+echo "== ownerless evidence lease remains protected after 48h =="
+run 0 "$T/myrepo" ownerless-evidence --kind evidence
+OWNERLESS_OUT="$OUT"
+LEASE_FILE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OWNERLESS_OUT")"
+LEASE_CREATED=$(( $(date +%s) - 48*3600 - 10 ))
+python3 - "$LEASE_FILE" "$LEASE_CREATED" <<'PYOWNERLESS'
+import json,sys
+p,created=sys.argv[1],int(sys.argv[2]); d=json.load(open(p))
+d["owner"]=None; d["owners"]=[]; d["created_epoch"]=created; d["expires_at"]=created+24*3600
+json.dump(d,open(p,"w"))
+PYOWNERLESS
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("owner") is None and d.get("owners")==[])' "$LEASE_FILE")" True "ownerless evidence lease shape is explicit"
+assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2" "$3"' _ "$REPO_ROOT" "$LEASE_FILE" "$((LEASE_CREATED + 48*3600))")" none "C14 keeps unknown ownerless evidence protected after 48h"
+
+echo "== malformed scratch registry: evidence/build fail closed without allocation =="
+cat > "$T/volume-config.json" <<EOF
+{"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":"$T/Volumes/diskm-scratch"}}}}
+EOF
+mkdir -p "$T/state/volumes"
+cat > "$T/state/volumes/registry.json" <<'EOF'
+{"schema_version":1,"volumes":{"scratch":[]}}
+EOF
+export DISK_MAGICIAN_CONFIG="$T/volume-config.json"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "malformed-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    ERR="$(cat "$T/err")"
+    assert_eq "$RC" 75 "$kind malformed registry rc"
+    assert_eq "$OUT" "" "$kind malformed registry emits no path"
+    assert_contains "$ERR" "scratch volume unavailable" "$kind failure diagnosed"
+    assert_eq "$(admits)" "$before" "$kind failure never admitted"
+    [[ "$(find "$T/tmp/myrepo/$kind" -mindepth 1 -maxdepth 1 -name "malformed-$kind-*" 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "$kind failure created no fallback path" || bad "$kind failure created fallback path"
+done
+[[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "malformed registry created no volume allocation" || bad "malformed registry volume allocation exists"
+mv "$T/state/volumes/registry.json" "$T/state/volumes/malformed-registry.json"
+
+echo "== legacy config: omitted volume block retains evidence/build /tmp fallback =="
+printf '%s\n' '{"budgets":{"daily":5}}' > "$T/volume-config.json"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "legacy-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    assert_eq "$RC" 0 "legacy config $kind fallback rc"
+    assert_contains "$OUT" "$T/tmp/myrepo/$kind/legacy-$kind-" "legacy config uses $kind tmp fallback"
+done
+assert_eq "$(admits)" "$((before + 2))" "legacy config proceeds through normal admission"
+
+echo "== quota-volume births fail closed on unexpected or missing admission =="
+mkdir -p "$T/QuotaVolume/diskm-scratch"
+cat > "$T/bin/volume-ok" <<EOF
+#!/usr/bin/env bash
+[[ "\$1 \$2" == "volume path" ]] || exit 9
+printf '%s\\n' "$T/QuotaVolume/diskm-scratch"
+EOF
+chmod +x "$T/bin/volume-ok"
+export DISK_MAGICIAN_DISKM_BIN="$T/bin/volume-ok"
+for kind in evidence build; do
+    run 2 "$T/myrepo" "quota-unexpected-$kind" --kind "$kind"
+    assert_eq "$RC" 75 "quota $kind unexpected admission rc fails closed"
+    assert_eq "$OUT" "" "quota $kind unexpected admission emits no path"
+    assert_contains "$ERR" "disk-admission: unavailable" "quota $kind failure is diagnosed"
+    [[ "$(find "$T/QuotaVolume/diskm-scratch/myrepo/$kind" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "quota $kind unexpected rc creates nothing" || bad "quota $kind unexpected rc created a path"
+    assert_eq "$(admits)" 1 "quota $kind admission invoked once"
+done
+export DISK_MAGICIAN_ADMIT_BIN="$T/bin/missing-admit"
+run 0 "$T/myrepo" quota-missing --kind evidence
+assert_eq "$RC" 75 "quota missing admission fails closed"
+assert_eq "$OUT" "" "quota missing admission emits no path"
+assert_contains "$ERR" "admit missing" "quota missing admission is diagnosed"
+[[ "$(find "$T/QuotaVolume/diskm-scratch/myrepo/evidence" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "quota missing admission creates nothing" || bad "quota missing admission created a path"
+export DISK_MAGICIAN_ADMIT_BIN="$T/bin/admit"
+unset DISK_MAGICIAN_DISKM_BIN
+
+echo "== malformed volume config block remains fail-closed =="
+printf '%s\n' '{"volumes":null}' > "$T/volume-config.json"
+before="$(admits)"
+OUT="$(bash "$DISKM" scratch-new "$T/myrepo" malformed-config --kind evidence 2>"$T/err")"; RC=$?
+assert_eq "$RC" 75 "malformed config block rc"
+assert_eq "$OUT" "" "malformed config emits no path"
+assert_eq "$(admits)" "$before" "malformed config is rejected before admission"
+
+echo "== unregistered live APFS volume: evidence/build fail closed =="
+cat > "$T/volume-config.json" <<EOF
+{"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":"$T/Volumes/diskm-scratch"}}}}
+EOF
+cat > "$T/fake-diskutil.json" <<EOF
+{"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":994662584320,"free":100000000000},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":890000000000,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":15000000000,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":4000000000,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"},{"uuid":"SCRATCH-UUID","name":"diskm-scratch","ref":"disk3s9","device":"disk3s9","used":0,"quota":32212254720,"roles":[],"mountpoint":"$T/Volumes/diskm-scratch"}]}
+EOF
+export DISK_MAGICIAN_DISKUTIL_BIN="$REPO_ROOT/tests/lib/fake_diskutil.py" FAKE_DISKUTIL_STATE="$T/fake-diskutil.json" FAKE_DISKUTIL_CALLS="$T/fake-diskutil-calls.jsonl"
+before="$(admits)"
+for kind in evidence build; do
+    OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "orphan-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
+    assert_eq "$RC" 75 "$kind live unregistered volume rc"
+    assert_eq "$OUT" "" "$kind live unregistered volume emits no path"
+    assert_eq "$(admits)" "$before" "$kind live unregistered volume never admitted"
+done
+[[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "live volume check created no new volume" || bad "live volume check created a volume"
+if [[ ! -f "$FAKE_DISKUTIL_CALLS" ]] || ! grep -q 'addVolume' "$FAKE_DISKUTIL_CALLS"; then
+    ok "live volume check issued no addVolume command"
+else
+    bad "live volume check issued an addVolume command"
+fi
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
+unset DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
 
 echo "== real diskm admit (observe, fake df) admits and logs one event =="
 cat > "$T/bin/df" <<'EOF'
@@ -143,7 +300,7 @@ EOF
 chmod +x "$T/bin/gcloud" "$T/bin/gcs-stat"
 export DISK_MAGICIAN_STAT_BIN="$T/bin/gcs-stat"
 # The cloud-object fake must never be reachable as `stat`: the lease library
-# shells out to the real `stat -f %B` for the git admin dir birth. Probe that
+# shells out to the real platform-specific stat birth-time call for the git admin dir. Probe that
 # under the same PATH evidence-push uses. A shadowing `stat` loses the birth.
 echo "== lease birth uses the OS stat, not the cloud-object fake =="
 git -C "$T/myrepo" worktree add -q -b birth-probe "$T/birth-wt" HEAD 2>/dev/null || bad "admin-birth fixture setup"

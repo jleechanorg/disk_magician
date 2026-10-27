@@ -73,6 +73,88 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertEqual(disk_budget.decide("observe", 105, 200, 10, False, True), ("FLOOR", 75))
 
 
+
+class VolumeAdmissionGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.mount = Path(self.tmp.name).resolve() / "scratch"
+        (self.mount / "project").mkdir(parents=True)
+
+    def row(self, used, quota=30 * disk_budget.GIB, volume_id="vol-1", path=None):
+        return {"used": used, "quota": quota, "uuid": volume_id,
+                "path": Path(path) if path else self.mount}
+
+    def test_macos_legacy_config_checks_for_unregistered_live_scratch(self):
+        config = Path(self.tmp.name) / "legacy.json"
+        config.write_text('{"budgets":{}}')
+        with patch.dict(os.environ, {
+                "DISK_MAGICIAN_CONFIG": str(config),
+                "DISK_MAGICIAN_STATE_DIR": str(Path(self.tmp.name) / "state"),
+        }), patch.object(disk_budget.sys, "platform", "darwin"), \
+             patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 75})()) as run:
+            self.assertIs(disk_budget._scratch_mountpoint(), False)
+        run.assert_called_once_with(
+            [disk_budget._diskm_bin(), "volume", "path", "scratch"],
+            capture_output=True, text=True, timeout=12, check=False)
+
+    def test_macos_missing_implicit_config_checks_for_live_scratch(self):
+        with patch.dict(os.environ, {
+                "DISK_MAGICIAN_STATE_DIR": str(Path(self.tmp.name) / "state"),
+        }, clear=False), patch.object(disk_budget.resolve_config, "resolve", return_value=""), \
+             patch.object(disk_budget.sys, "platform", "darwin"), \
+             patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 75})()) as run:
+            os.environ.pop("DISK_MAGICIAN_CONFIG", None)
+            self.assertIs(disk_budget._scratch_mountpoint(), False)
+        run.assert_called_once_with(
+            [disk_budget._diskm_bin(), "volume", "path", "scratch"],
+            capture_output=True, text=True, timeout=12, check=False)
+
+    def invoke(self, samples, estimate_gb):
+        with patch.object(disk_budget, "_scratch_mountpoint", return_value=self.mount), \
+             patch.object(disk_budget, "_volume_status", side_effect=samples), \
+             patch.dict(os.environ, {"DISK_MAGICIAN_DISKM_BIN": "/fake/disk-magician"}), \
+             patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 0})()) as run:
+            reason = disk_budget.volume_admission_gate(self.mount / "project" / "artifact", estimate_gb)
+        return reason, run
+
+    def test_high_water_reclaims_once_then_accepts_with_one_gib_headroom(self):
+        reason, run = self.invoke([
+            self.row(28 * disk_budget.GIB),
+            self.row(26 * disk_budget.GIB),
+        ], 2)
+        self.assertIsNone(reason)
+        run.assert_called_once_with(
+            ["/fake/disk-magician", "volume", "reclaim", "--clean"],
+            capture_output=True, text=True, timeout=300, check=False)
+
+    def test_high_water_that_remains_after_reclaim_is_denied(self):
+        reason, run = self.invoke([
+            self.row(28 * disk_budget.GIB),
+            self.row(28 * disk_budget.GIB),
+        ], 1)
+        self.assertEqual(reason, "volume_full:scratch")
+        run.assert_called_once()
+
+    def test_low_water_exact_one_gib_post_estimate_headroom_is_allowed(self):
+        reason, run = self.invoke([self.row(26 * disk_budget.GIB)], 3)
+        self.assertIsNone(reason)
+        run.assert_not_called()
+
+    def test_low_water_less_than_one_gib_post_estimate_headroom_is_denied(self):
+        reason, run = self.invoke([self.row(26 * disk_budget.GIB)], 3 + 1 / disk_budget.GIB)
+        self.assertEqual(reason, "volume_headroom:scratch")
+        run.assert_not_called()
+
+    def test_reclaim_identity_change_fails_closed(self):
+        reason, _ = self.invoke([
+            self.row(28 * disk_budget.GIB),
+            self.row(20 * disk_budget.GIB, volume_id="different-volume"),
+        ], 1)
+        self.assertEqual(reason, "volume_measurement_unavailable:scratch")
+
+
+
 class WorktreeApprovalScopeTest(unittest.TestCase):
     """Synthetic WORKTREE_APPROVED must be scoped to the supervised child."""
 

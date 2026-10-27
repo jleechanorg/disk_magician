@@ -17,6 +17,7 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
 T="$(mktemp -d)"
+export T
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state"
 export DISK_MAGICIAN_STATE_DIR="$T/state"
@@ -262,6 +263,124 @@ assert_eq "$(last admit_id)" "$id" "confirm-tool-use resolves the admit"
 "$DISKM" admit --confirm "$id" --confirm-tool-use tu-1 >/dev/null 2>&1; assert_eq "$?" 2 "both confirm forms is a usage error"
 
 echo "── 8. event-log ENOSPC keeps the decision, writes admission_degraded:log ──"
+echo "14. scratch quota admission reclaims once and enforces fresh volume headroom"
+mkdir -p "$T/scratch"
+python3 - "$REPO_ROOT/config.json.template" "$T/volume-config.json" "$T/scratch" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+config["budgets"]["enforcement"] = "observe"
+config["volumes"]["classes"]["scratch"]["mountpoint"] = sys.argv[3]
+json.dump(config, open(sys.argv[2], "w"))
+PY
+cat > "$T/bin/disk-magician-volume" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "volume status --json --snapshot")
+    calls="$T/volume-status-count"
+    n=0; [[ -f "$calls" ]] && n=$(cat "$calls")
+    n=$((n + 1)); printf '%s\n' "$n" > "$calls"
+    used_gib="$FAKE_VOLUME_FIRST_GIB"
+    status="${FAKE_VOLUME_STATUS:-active}"
+    available="${FAKE_VOLUME_AVAILABLE:-true}"
+    if (( n > 1 )); then
+      used_gib="$FAKE_VOLUME_AFTER_GIB"
+      status="${FAKE_VOLUME_AFTER_STATUS:-$status}"
+      available="${FAKE_VOLUME_AFTER_AVAILABLE:-$available}"
+    fi
+    used=$(( used_gib * 1073741824 ))
+    printf '{"ok":true,"measured_at":"now","volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":32212254720,"filesystem_id":"vol-1","path":"%s","status":"%s","available":%s}]}\n' \
+      "$used" "$T/scratch" "$status" "$available"
+    exit 1
+    ;;
+  "volume reclaim --clean")
+    echo reclaim >> "$T/reclaim-calls"
+    exit 0
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$T/bin/disk-magician-volume"
+fake_df 150; config observe
+export DISK_MAGICIAN_CONFIG="$T/volume-config.json"
+export DISK_MAGICIAN_DISKM_BIN="$T/bin/disk-magician-volume"
+export FAKE_VOLUME_FIRST_GIB=28 FAKE_VOLUME_AFTER_GIB=26
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 2 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 0 "admit after one reclaim with fresh headroom"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 1 "one reclaim invocation"
+assert_eq "$(last decision)" 0 "volume admit event decision"
+assert_eq "$(last volume_gate)" None "volume admit event gate"
+export FAKE_VOLUME_AFTER_GIB=28
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "post-reclaim high water forces refusal"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 1 "high water reclaims only once"
+[[ "$(cat "$T/err")" == *volume_full:scratch* ]] && ok "high-water denial is explicit" || bad "missing volume_full reason"
+export FAKE_VOLUME_FIRST_GIB=26 FAKE_VOLUME_AFTER_GIB=26
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+: > "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 3.1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "less than one GiB quota headroom refuses"
+assert_eq "$(wc -l < "$T/reclaim-calls" | tr -d ' ')" 0 "low-water case does not reclaim"
+[[ "$(cat "$T/err")" == *volume_headroom:scratch* ]] && ok "headroom denial is explicit" || bad "missing volume_headroom reason"
+export FAKE_VOLUME_FIRST_GIB=26 FAKE_VOLUME_STATUS=retired FAKE_VOLUME_AVAILABLE=true
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "retired scratch volume fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "retired volume measurement is unavailable" || bad "retired volume reason: $(cat "$T/err")"
+export FAKE_VOLUME_STATUS=active FAKE_VOLUME_AVAILABLE=false
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "unavailable scratch ballast fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "unavailable ballast measurement is unavailable" || bad "ballast reason: $(cat "$T/err")"
+export FAKE_VOLUME_FIRST_GIB=28 FAKE_VOLUME_AFTER_GIB=26 FAKE_VOLUME_STATUS=active FAKE_VOLUME_AVAILABLE=true FAKE_VOLUME_AFTER_STATUS=retired
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "retired post-reclaim measurement fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "retired fresh volume measurement is unavailable" || bad "fresh retired reason: $(cat "$T/err")"
+export FAKE_VOLUME_AFTER_STATUS=active FAKE_VOLUME_AFTER_AVAILABLE=false
+rm -f "$T/volume-status-count" "$T/reclaim-calls"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "unavailable post-reclaim ballast fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "unavailable fresh ballast measurement is unavailable" || bad "fresh ballast reason: $(cat "$T/err")"
+unset FAKE_VOLUME_STATUS FAKE_VOLUME_AVAILABLE FAKE_VOLUME_AFTER_STATUS FAKE_VOLUME_AFTER_AVAILABLE
+unset DISK_MAGICIAN_DISKM_BIN
+
+# A damaged quota registration must never be treated as a legacy host.
+printf '{"volumes":{"classes":{"scratch":{"mountpoint":"%s"}}' "$T/scratch" > "$T/damaged-volume-config.json"
+export DISK_MAGICIAN_CONFIG="$T/damaged-volume-config.json"
+rm -f "$T/volume-status-count"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "malformed registered-volume config fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "damaged quota registration is explicit" || bad "damaged volume reason: $(cat "$T/err")"
+[[ ! -e "$T/volume-status-count" ]] && ok "does not admit using an unmeasured registered volume" || bad "volume probe unexpectedly ran"
+
+# Missing explicit config plus an active state registry is also a damaged
+# registration, even though the mountpoint cannot be recovered from config.
+mkdir -p "$T/state/volumes"
+python3 - "$T/state/volumes/registry.json" "$T/scratch" <<'PY'
+import json, sys
+json.dump({"schema_version": 1, "volumes": {"scratch": {
+    "state": "active", "mountpoint": sys.argv[2]}}}, open(sys.argv[1], "w"))
+PY
+export DISK_MAGICIAN_CONFIG="$T/missing-config.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "missing explicit config with registry fails closed"
+[[ "$(cat "$T/err")" == *volume_measurement_unavailable:scratch* ]] && ok "missing config cannot bypass registered volume quota" || bad "missing config volume reason: $(cat "$T/err")"
+
+# A valid legacy config with no volume section keeps the historical behavior.
+python3 - "$T/config.json" "$T/legacy-config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c.pop("volumes", None)
+json.dump(c, open(sys.argv[2], "w"))
+PY
+export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 75 "legacy config with registered Scratch volume fails closed"
+rm "$T/state/volumes/registry.json"
+"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+assert_eq "$?" 0 "legacy no-volume config without registry keeps admission fallback"
+
 if command -v hdiutil >/dev/null 2>&1; then
   hdiutil create -size 2m -fs HFS+ -volname admitfull "$T/full.dmg" >/dev/null &&
     hdiutil attach -nobrowse -mountpoint "$T/mnt" "$T/full.dmg" >/dev/null

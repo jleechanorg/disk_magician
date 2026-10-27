@@ -4,6 +4,7 @@ import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subproc
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
+MAX_INTENT_BYTES = 32 * 1024 * 1024
 # Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
 # Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
 # RENAME_WHITEOUT, which is not an exclusive rename.
@@ -355,11 +356,25 @@ def phase1(path, inv_file, binding_file, deadline=None):
         with open(inv_file) as f: inv = [e for e in json.load(f) if isinstance(e, dict)]
         root = next(e for e in inv if e.get("path") == ".")
         if any(type(root.get(k)) is not int for k in ("dev", "ino")): return "kept:identity-mismatch"
+        # Bound the full recovery record before creating quarantine state. Preserve unknown inventory fields.
+        qid = secrets.token_hex(8)
+        preview = {"id": qid, "original": os.path.join(parent, base),
+                   "dev": 18446744073709551615, "ino": 18446744073709551615,
+                   "parent_dev": parent_id[0], "parent_ino": parent_id[1],
+                   "quarantine_dev": 18446744073709551615, "quarantine_ino": 18446744073709551615,
+                   "inventory": inv, "phase": "intent"}
+        try: intent_bytes = json.dumps(preview).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError): return "kept:intent-too-large"
+        if len(intent_bytes) > MAX_INTENT_BYTES:
+            return "kept:intent-too-large"
         path = os.path.join(parent, base)
         pfd = os.open(parent, DIRFL)
         bound_parent = os.fstat(pfd)
         if (bound_parent.st_dev, bound_parent.st_ino) != parent_id: return "kept:parent-identity-mismatch"
-        try: os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
+        quarantine_created = False
+        try:
+            os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
+            quarantine_created = True
         except FileExistsError: pass
         qpath_st = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
         if not stat.S_ISDIR(qpath_st.st_mode): return "kept:quarantine-dir-unsafe"
@@ -369,25 +384,62 @@ def phase1(path, inv_file, binding_file, deadline=None):
         if [(st.st_dev, st.st_ino)] != [(e.get("dev"), e.get("ino")) for e in inv if e.get("path") == "."]: return "kept:identity-mismatch"
         if q.st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"
-    qdir = os.path.join(parent, ".dm-quarantine"); qid = secrets.token_hex(8); side = qid + ".json"
-    try: index_write(qid, index_record(qid, parent, bound_parent, q, path, st))
-    except Exception: return "kept:quarantine-index-write-failed"
-    kill_at("after_index")
+    qdir = os.path.join(parent, ".dm-quarantine"); side = qid + ".json"
     rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
            "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
            "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
            "inventory": inv, "phase": "intent"}
     try:
+        intent_text = json.dumps(rec)
+        if len(intent_text.encode("utf-8")) > MAX_INTENT_BYTES:
+            raise ValueError("intent too large")
+    except (TypeError, ValueError, UnicodeError):
+        os.close(qfd)
+        if quarantine_created:
+            try: os.rmdir(".dm-quarantine", dir_fd=pfd)
+            except OSError: pass
+        os.close(pfd)
+        return "kept:intent-too-large"
+    try: index_write(qid, index_record(qid, parent, bound_parent, q, path, st))
+    except Exception: return "kept:quarantine-index-write-failed"
+    kill_at("after_index")
+    try:
         with os.fdopen(os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd), "w") as f:
             if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")
-            f.write(json.dumps(rec)); f.flush(); os.fsync(f.fileno())
+            f.write(intent_text); f.flush(); os.fsync(f.fileno())
         os.fsync(qfd)
-    except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
+    except OSError as exc:  # ENOSPC aborts before the rename; the artifact stays in place
         try:
             if not finish_sidecar(qfd, qid, "original"):
                 return f"quarantine_conflict:{qid}:index-cleanup-failed"
         except Exception:
             return f"quarantine_conflict:{qid}:index-cleanup-failed"
+        diagnostic = ENV.get("DISK_MAGICIAN_C14_DIAGNOSTIC_OUT", "")
+        if diagnostic:
+            dfd = -1
+            try:
+                dfd = os.open(diagnostic, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                dst = os.fstat(dfd)
+                if not stat.S_ISREG(dst.st_mode) or dst.st_uid != os.getuid() or stat.S_IMODE(dst.st_mode) != 0o600:
+                    return "kept:intent-write-failed"
+                payload = json.dumps({"operation": "intent_write", "errno": exc.errno,
+                                      "errno_name": errno.errorcode.get(exc.errno, str(exc.errno))},
+                                     separators=(",", ":")).encode()
+                view = memoryview(payload)
+                while view:
+                    written = os.write(dfd, view)
+                    if written <= 0:
+                        raise OSError(errno.EIO, "short diagnostic write")
+                    view = view[written:]
+                os.fsync(dfd)
+            except OSError:
+                pass
+            finally:
+                if dfd >= 0:
+                    try:
+                        os.close(dfd)
+                    except OSError:
+                        pass
         return "kept:intent-write-failed"
     kill_at("after_intent")
     dest = os.path.join(qdir, qid)

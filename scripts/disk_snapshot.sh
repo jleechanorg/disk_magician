@@ -391,6 +391,28 @@ print(json.dumps(result))
 ' 2>/dev/null || echo "{}"
 }
 
+# Quota scratch volume status is an additive snapshot field. Keep the probe
+# bounded and preserve unknown as JSON null so a failed status read is never
+# reported as an empty, measured volume set.
+get_diskm_volumes_json() {
+  local result
+  local diskm="${DISK_MAGICIAN_DISKM_BIN:-disk-magician}"
+  command -v "$diskm" >/dev/null 2>&1 || { echo "null"; return; }
+  local rc
+  if result=$(probe_timeout 8 "$diskm" volume status --json --snapshot 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 0 || $rc -eq 1 ]] || { echo "null"; return; }
+  [[ -n "$result" ]] || { echo "null"; return; }
+  if ! printf '%s' "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and isinstance(d.get("volumes"),list) and isinstance(d.get("alarms"),list)' >/dev/null 2>&1; then
+    echo "null"
+    return
+  fi
+  printf '%s' "$result"
+}
+
 # tmutil listlocalsnapshots is the verifiable proxy for purgeable/reclaimable
 # local-snapshot space — diskutil exposes no distinct "purgeable" field on
 # this macOS version (verified empirically; disk_frontier_scan.py's
@@ -707,6 +729,7 @@ vm_volume_used_gb=$(awk "BEGIN{printf \"%.2f\", (${vm_volume_used_kb:-0} + 0) / 
 # consumed, container free/purgeable, local snapshot count, Colima diffdisk
 # allocation. Same never-blocks-the-snapshot posture as swap/VM above.
 apfs_volume_stats_json=$(get_apfs_volume_stats_json)
+diskm_volumes_json=$(get_diskm_volumes_json)
 read -r local_snapshots_count local_snapshot_names_csv <<< "$(get_local_snapshots_line)"
 read -r colima_diffdisk_stat_bytes colima_diffdisk_du_kb <<< "$(get_colima_diffdisk_stats)"
 
@@ -1374,6 +1397,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_VM_VOLUME_USED_GB="$vm_volume_used_gb" \
   SNAP_DISK_FREE_KB="$disk_free_kb" \
   SNAP_APFS_VOLUMES="$apfs_volume_stats_json" \
+  SNAP_DISKM_VOLUMES="$diskm_volumes_json" \
   SNAP_LOCAL_SNAPSHOTS_COUNT="$local_snapshots_count" \
   SNAP_LOCAL_SNAPSHOT_NAMES="$local_snapshot_names_csv" \
   SNAP_COLIMA_DIFFDISK_STAT_BYTES="$colima_diffdisk_stat_bytes" \
@@ -1486,6 +1510,11 @@ try:
     except (TypeError, ValueError):
         apfs_volume_stats = {}
     volumes_bytes = apfs_volume_stats.get("volumes_bytes") or {}
+    try:
+        diskm_volumes = json.loads(os.environ.get("SNAP_DISKM_VOLUMES") or "null")
+    except (TypeError, ValueError):
+        diskm_volumes = None
+    data["diskm_volumes"] = diskm_volumes
     data["apfs_volumes_gb"] = {
         role: (_bytes_to_gb(volumes_bytes[role]) if volumes_bytes.get(role) is not None else None)
         for role in ("Data", "VM", "Preboot", "Update")

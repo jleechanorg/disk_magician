@@ -76,6 +76,8 @@ Commands:
   worktree-reap          Reap owner leases (nominate by default).
   policy                 Record standing decisions (approve|set-amendment|revoke|list).
   worktree-release <path> Release the caller's lease without deleting the worktree.
+  lease-add-owner <path> --owner-pid PID  Add one live process incarnation to a lease.
+  lease-release-owner <path> --owner-pid PID Release only that process incarnation.
   lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
                          Session-exit release of that session's leases (deletes nothing).
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
@@ -297,6 +299,9 @@ case "$CMD" in
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
     ;;
+  volume)
+    exec python3 "$SCRIPT_DIR/scripts/volume.py" "$@"
+    ;;
   main-sweeper|sweep)
     exec bash "$SCRIPT_DIR/scripts/main_sweeper.sh" "$@"
     ;;
@@ -454,7 +459,14 @@ case "$CMD" in
     python3 "$SCRIPT_DIR/scripts/layout_check.py" "$@"
     ;;
   scratch_new|scratch-new)
-    "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
+    producer_pids="${DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS:-}"
+    if [[ -z "$producer_pids" ]]; then
+      producer_pids="$(python3 "$SCRIPT_DIR/scripts/scratch_producer_pids.py" "${DISK_MAGICIAN_SCRATCH_PRODUCER_PID:-$PPID}")" || {
+        echo "scratch-new: producer identity unavailable" >&2
+        exit 75
+      }
+    fi
+    DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS="$producer_pids" "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
     ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"
@@ -495,6 +507,15 @@ case "$CMD" in
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
+    ;;
+  lease_add_owner|lease-add-owner|lease_release_owner|lease-release-owner)
+    [[ $# -eq 3 && "${2:-}" == --owner-pid ]] || { echo "Usage: diskm $CMD <worktree-path> --owner-pid PID" >&2; exit 2; }
+    source "$SCRIPT_DIR/scripts/lib/worktree_lease.sh"
+    if [[ "$CMD" == lease_add_owner || "$CMD" == lease-add-owner ]]; then
+      lease_add_owner "$1" "$2" "$3"
+    else
+      lease_release_owner_pid "$1" "$2" "$3"
+    fi
     ;;
   lease_release|lease-release)
     [[ "${1:-}" == --owner-session && -n "${2:-}" ]] || { echo "Usage: diskm lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]" >&2; exit 2; }

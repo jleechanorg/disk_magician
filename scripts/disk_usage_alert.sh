@@ -220,7 +220,57 @@ if [[ "$swap_used_gb" != "unknown" ]] && awk -v v="$swap_used_gb" 'BEGIN{exit !(
   swap_alert=true
 fi
 
-if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true ]]; then
+DISKM="${DISK_MAGICIAN_DISKM_BIN:-disk-magician}"
+volume_alarms="[]"
+volume_configured=false
+VOLUME_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+[[ -e "$VOLUME_STATE_DIR/volumes/registry.json" || -L "$VOLUME_STATE_DIR/volumes/registry.json" ]] && volume_configured=true
+if python3 - "$SCRIPT_DIR" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import resolve_config
+path = resolve_config.resolve()
+if not path:
+    raise SystemExit(1)
+try:
+    data = json.loads(pathlib.Path(path).read_text())
+except (OSError, ValueError):
+    # A damaged config may contain an active volume registration; keep probing
+    # so a status failure can surface its measurement alarm.
+    raise SystemExit(0)
+raise SystemExit(0 if not isinstance(data, dict) or "volumes" in data else 1)
+PY
+then
+  volume_configured=true
+fi
+if [[ "$volume_configured" == false ]] && [[ "$(uname -s)" == Darwin ]]; then
+  if command -v "$DISKM" >/dev/null 2>&1; then
+    path_rc=0
+    "$DISKM" volume path scratch >/dev/null 2>&1 || path_rc=$?
+    # path returns 3 only when no eligible/live Scratch volume exists. Any
+    # other result means status must be checked for an unregistered live volume.
+    [[ "$path_rc" -ne 3 ]] && volume_configured=true
+  else
+    # Without the canonical probe we cannot prove that a live volume is absent.
+    volume_configured=true
+  fi
+fi
+if [[ "$volume_configured" == true ]]; then
+  if command -v "$DISKM" >/dev/null 2>&1; then
+    volume_status="$("$DISKM" volume status --json --snapshot 2>/dev/null || true)"
+    if [[ -n "$volume_status" ]]; then
+      volume_alarms="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d.get("alarms", [])))' "$volume_status" 2>/dev/null || echo '["volume_measurement_unavailable:scratch"]')"
+    else
+      volume_alarms='["volume_measurement_unavailable:scratch"]'
+    fi
+  else
+    volume_alarms='["volume_measurement_unavailable:scratch"]'
+  fi
+fi
+volume_alert=false
+[[ "$volume_alarms" != "[]" ]] && volume_alert=true
+
+if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true || "$volume_alert" == true ]]; then
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
@@ -241,6 +291,9 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
     fi
     if [[ "$swap_alert" == true ]]; then
       echo "🚨 WARNING: Swap used: ${swap_used_gb} GiB (>10 GB) — disk space consumed outside the Data volume (vm.swapusage)." >&2
+    fi
+    if [[ "$volume_alert" == true ]]; then
+      python3 -c 'import json,sys; [print("WARNING: volume " + str(a), file=sys.stderr) for a in json.loads(sys.argv[1])]' "$volume_alarms"
     fi
     exit 1
   fi

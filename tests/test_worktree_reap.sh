@@ -96,7 +96,10 @@ new() {
 }
 edit() { python3 - "$LF" "$1" <<'PY'
 import json,sys,time,datetime
-p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2]); json.dump(d,open(p,'w'))
+p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2])
+# The reader prefers the owners array; keep it in step with a fixture owner edit.
+if ('d["owner"]' in sys.argv[2] or "d['owner']" in sys.argv[2]) and 'owners' not in sys.argv[2]: d['owners']=[d['owner']] if isinstance(d.get('owner'),dict) else []
+json.dump(d,open(p,'w'))
 PY
 }
 field() { python3 - "$LF" "$1" <<'PY'
@@ -133,7 +136,7 @@ park() {
 }
 if [[ ! -f "$SCRIPT" ]]; then bash "$SCRIPT"; echo 'RED: scripts/worktree_reap.sh missing'; exit 1; fi
 # removal_activation_ok is covered by test_removal_activation.sh; here it is a switch file.
-cp -R "$ROOT/scripts" "$TMP/root-scripts"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
+cp -R "$ROOT/scripts" "$TMP/root-scripts"; cp "$ROOT/config.json.template" "$TMP/"; SCRIPT="$TMP/root-scripts/worktree_reap.sh"
 echo 'removal_activation_ok() { [[ -f "$DISK_MAGICIAN_STATE_DIR/test_gate_open" ]] || { echo activation_blocked:test; return 1; }; }' > "$TMP/root-scripts/lib/removal_activation.sh"
 new; rm "$LF"; run; check 'unleased adopts null owner' test "$(field 'd["creator"] == "adopt" and d["owner"] is None')" = True
 new; edit 'd["owner"]["pid"]=400; d["last_verdict"]="sentinel"'; run; verdict 'alive recorded' kept:live-owner; check 'alive present' test -d "$WT"; park
@@ -189,24 +192,58 @@ cat > "$TMP/reuse-lock-hook" <<'HOOK'
 #!/usr/bin/env bash
 source "$TEST_LEASE_LIB"
 file="$1"
+real="$2"
 hash="$(shasum -a 256 "$file" | awk '{print $1}')"
 if lease_claim_reuse "$file" "$hash" hook/branch deadbeef $'401\t1760000000\tclaude'; then
     echo raced > "$TEST_HOOK_RESULT"
 else
     echo blocked > "$TEST_HOOK_RESULT"
 fi
+if lease_owner_add "$real" 401 1760000000 claude; then
+    echo owner-raced > "$TEST_HOOK_RESULT.owner"
+else
+    echo owner-blocked > "$TEST_HOOK_RESULT.owner"
+fi
+if lease_registry_mutation_lock_enter; then
+    echo registry-raced > "$TEST_HOOK_RESULT.registry"
+    lease_registry_mutation_lock_exit
+else
+    echo registry-blocked > "$TEST_HOOK_RESULT.registry"
+fi
 HOOK
 chmod +x "$TMP/reuse-lock-hook"
 export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" TEST_HOOK_RESULT="$TMP/reuse-lock-result"
 export DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK="$TMP/reuse-lock-hook"
-new; run --mode remove
+new; edit 'd["owners"]=[d["owner"]]'; run --mode remove
 unset DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK
 check 'reuse claim cannot start inside final removal boundary' grep -qx blocked "$TEST_HOOK_RESULT"
+check 'owner birth cannot start inside final C14-to-removal boundary' grep -qx owner-blocked "$TEST_HOOK_RESULT.owner"
+check 'registry-wide owner birth cannot start inside final C14-to-removal boundary' grep -qx registry-blocked "$TEST_HOOK_RESULT.registry"
 check 'approved removes worktree' test ! -e "$WT"; check 'removal deletes lease' test ! -e "$LF"
 new; mkdir "$LF.reuse-lock"; run --mode remove
 check 'pre-existing reuse lock preserves candidate' test -d "$WT"
 check 'pre-existing reuse lock leaves lease untouched' test "$(field 'd.get("branch")')" = "worktree-c$N"
 rmdir "$LF.reuse-lock"
+cat > "$TMP/after-verdict-owner-hook" <<'HOOK'
+#!/usr/bin/env bash
+source "$TEST_LEASE_LIB"
+descendant="$DM_Q_PATH/lease-descendant"
+if lease_owner_add "$descendant" 401 1760000000 claude; then
+  echo owner-raced > "$TEST_AFTER_VERDICT_RESULT"
+else
+  echo owner-blocked > "$TEST_AFTER_VERDICT_RESULT"
+fi
+HOOK
+chmod +x "$TMP/after-verdict-owner-hook"
+new; mkdir "$WT/lease-descendant"; lease_write "$WT/lease-descendant" "$TMP/repo" descendant test
+candidate_lf="$LF"; LF="$(lease_path_for "$WT/lease-descendant")"; edit 'd["owners"]=[{"pid":401,"start_epoch":1760000000,"comm":"claude","released_at":datetime.datetime.fromtimestamp(time.time()-4000,datetime.timezone.utc).isoformat()}]; d["owner"]=d["owners"][0]; d["released_at"]=d["owners"][0]["released_at"]'; LF="$candidate_lf"; edit 'd["owners"]=[d["owner"]]'; age
+export TEST_LEASE_LIB="$ROOT/scripts/lib/worktree_lease.sh" TEST_AFTER_VERDICT_RESULT="$TMP/after-verdict-result"
+export DISK_MAGICIAN_TEST_AFTER_VERDICT="bash '$TMP/after-verdict-owner-hook'"
+run --mode remove
+unset DISK_MAGICIAN_TEST_AFTER_VERDICT TEST_AFTER_VERDICT_RESULT TEST_LEASE_LIB
+check 'descendant owner birth after final C14 verdict is blocked' grep -qx owner-blocked "$TMP/after-verdict-result"
+check 'approved removal survives descendant owner race attempt' test ! -e "$WT"
+park
 for mode in nominate remove; do new; echo changed >> "$WT/file"; age; run --mode "$mode"; verdict "dirty $mode" kept:dirty; check 'dirty present' test -d "$WT"; park; done
 new; age 300; run; verdict 'quiet five minutes' kept:recent-activity; park
 for mode in nominate remove; do new; edit 'd["owner"]["pid"]=400; d["created_epoch"]=int(time.time())-30*3600-86400'; age 25200; run --mode "$mode"; verdict "TTL expired 30h, owner alive $mode" kept:expired_owner_alive; check "TTL expired owner alive present $mode" test -d "$WT"; park; done
@@ -286,7 +323,7 @@ HOOK
 chmod +x "$TMP/inject"
 for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:secret-like; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
 mkdir "$TMP/minbin"
-for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
+for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof uname; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
 new; before="$(wc -l < "$FAKE_FETCH_LOG")"; PATH="$TMP/minbin" run; verdict 'missing timeout blocks fetch' kept:remote-unverified; check 'no unbounded fetch' test "$(wc -l < "$FAKE_FETCH_LOG")" = "$before"; check 'missing gh logged' grep -q 'missing tool: gh' "$TMP/run.log"; check 'missing gh counted' test "$(receipt 'd["candidates"]["gh_failed"] > 0')" = True; park
 new; edit 'd["owner"]["pid"]=402'; run --mode remove; check 'unknown owner retained' test -d "$WT"; park
 # Owner proof (governor T12): liveness is pid + start epoch only.

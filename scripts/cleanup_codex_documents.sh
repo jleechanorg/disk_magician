@@ -74,6 +74,7 @@ if [[ -f "$QUARANTINE_LIB" ]]; then
   # shellcheck source=/dev/null
   source "$QUARANTINE_LIB"
 fi
+source "$SCRIPT_DIR/lib/worktree_lease.sh"
 
 # Deadline/cursor parsing is owned by the shared helper (no parallel parser).
 # It fills ACT_DEADLINE_AT / ACT_CURSOR and leaves other flags in ACT_ARGS.
@@ -554,15 +555,21 @@ process_task() {
         # same-target inventory receipt, then hand only that receipt to WRH's
         # quarantine remover (which re-validates lock/identity).
         wrh_inv="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-inventory.XXXXXX")" || { keep "wrh-inventory-unavailable" "$task"; return; }
+        if ! lease_registry_mutation_lock_enter; then
+          rm -f -- "$wrh_inv" 2>/dev/null
+          keep "wrh-c14-kept:lease-busy:$wt" "$task"; return
+        fi
         wrh_c14_verdict="$(artifact_removal_verdict "$wt" --inventory-out "$wrh_inv" 2>/dev/null)" || wrh_c14_verdict=kept:check-failed
         if [[ "$wrh_c14_verdict" != remove ]]; then
           rm -f -- "$wrh_inv" 2>/dev/null
+          lease_registry_mutation_lock_exit || true
           keep "wrh-c14-${wrh_c14_verdict#kept:}:$wt" "$task"; return
         fi
         wrh_rc=0
         wrh_errfile="$(mktemp "${TMPDIR:-/tmp}/cxd-wrh-err.XXXXXX")" || wrh_errfile=""
         wrh_out="$(DM_DELETION_LOGGED=1 wrh_remove_now "$wt" "$wt" --quarantine "$wrh_inv" 2>"${wrh_errfile:-/dev/null}")" || wrh_rc=$?
         rm -f -- "$wrh_inv" 2>/dev/null
+        lease_registry_mutation_lock_exit || true
         if (( wrh_rc != 0 )); then
           local wrh_why=""
           [[ -n "$wrh_errfile" && -s "$wrh_errfile" ]] && wrh_why="$(tail -1 "$wrh_errfile" 2>/dev/null | tr -d '\n')"

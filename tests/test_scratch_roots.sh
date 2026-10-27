@@ -140,6 +140,26 @@ for fn in scratch_roots_get_private_tmp scratch_roots_get_tmp; do
   fi
 done
 
+# --- Test 9: configured quota volumes are separate and canonicalized ---
+VOL="$TMP_TEST_ROOT/volume-link-target"
+VOL_LINK="$TMP_TEST_ROOT/volume-link"
+mkdir -p "$VOL"
+ln -s "$VOL" "$VOL_LINK"
+CFG="$TMP_TEST_ROOT/config-volumes.json"
+python3 - "$CFG" "$VOL_LINK" <<'PYCFG'
+import json,sys
+json.dump({"volumes":{"classes":{"scratch":{"mountpoint":sys.argv[2]},"disabled":{"mountpoint":""}}}},open(sys.argv[1],"w"))
+PYCFG
+out="$(bash -c "source '$LIB'; scratch_roots_get_volumes '$CFG'")"
+canon_volume="$(cd "$VOL" && pwd -P)"
+if [[ "$out" == "$canon_volume" ]]; then
+  record_pass "Test9: configured volume mountpoint resolves to one canonical root"
+else
+  record_fail "Test9: configured volume mountpoint resolves to one canonical root" "expected '$canon_volume', got '$out'"
+fi
+out="$(bash -c "source '$LIB'; scratch_roots_get_volumes '$TMP_TEST_ROOT/absent.json'")"
+assert_eq_empty "Test9: missing config returns no volume roots" "$out"
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"

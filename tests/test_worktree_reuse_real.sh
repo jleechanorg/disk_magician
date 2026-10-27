@@ -144,6 +144,7 @@ import json, sys
 p, pid, ep = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 d = json.load(open(p))
 d["owner"] = {"pid": pid, "start_epoch": ep, "comm": "claude"}
+d["owners"] = [d["owner"]]
 json.dump(d, open(p, "w"), indent=2)
 PY
 assert_eq "$(lease_owner_state "$LEASE2")" "alive" "recorded owner is a live process"
