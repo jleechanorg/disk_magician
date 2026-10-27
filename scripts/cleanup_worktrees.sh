@@ -520,6 +520,23 @@ worktree_head_reachable_from_main() {
     return 1
 }
 
+# worktree_head_on_live_origin <repo> <head_sha> — rc 0 when HEAD is an ancestor
+# of a tip origin advertises RIGHT NOW (ls-remote heads + PR heads; never the
+# stale remote-tracking refs). Used for detached worktrees. Fail closed.
+worktree_head_on_live_origin() {
+    local repo="$1" head_sha="$2" t="" refs sha _r
+    [[ -n "$head_sha" ]] || return 1
+    command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+    # shellcheck disable=SC2086
+    refs="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' 2>/dev/null)" || return 1
+    while read -r sha _r; do
+        [[ -n "$sha" ]] || continue
+        git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+        git -C "$repo" merge-base --is-ancestor "$head_sha" "$sha" 2>/dev/null && return 0
+    done <<<"$refs"
+    return 1
+}
+
 # worktree_head_on_origin_branch <repo> <branch> <head_sha> — rc 0 when the exact
 # HEAD is the live tip of that branch on origin (git ls-remote). Fail closed on
 # any error (no timeout available, remote unreachable, mismatch).
@@ -617,6 +634,8 @@ classify_content_and_merge() {
                 fi
                 return 0
             fi
+        elif worktree_head_on_live_origin "$repo" "$head_sha"; then
+            return 0  # detached HEAD already on live origin (reason: detached-on-origin)
         fi
         echo "ahead-of-main"
         return 0
@@ -1026,7 +1045,7 @@ process_repo_local_worktrees() {
             fi
         fi
 
-        local reason size_kb_val size_fmt branch_label extra age_label age_days is_manual_target=false
+        local reason size_kb_val size_fmt branch_label extra age_label age_days is_manual_target=false wrh_reason=""
         if [[ "$MANUAL_DISCARD" == true ]]; then
             if grep -qxF -- "$abs_path" <<<"$MANUAL_TARGETS"; then
                 is_manual_target=true
@@ -1063,7 +1082,12 @@ process_repo_local_worktrees() {
             size_fmt=$(fmt_kb "$size_kb_val")
         fi
         branch_label="${branch:-detached}"
-        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}${FLOOR_HOURS:+ recency=hours:$FLOOR_HOURS}"
+        wrh_reason=""
+        if [[ -z "$reason" && "$branch_label" == detached ]] \
+            && ! worktree_head_reachable_from_main "$repo_abs" "$head_sha" "$(resolve_main_ref "$repo_abs")"; then
+            wrh_reason="detached-on-origin"
+        fi
+        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}${FLOOR_HOURS:+ recency=hours:$FLOOR_HOURS}${wrh_reason:+ reason=$wrh_reason}"
         [[ "$MANUAL_DISCARD" != true ]] || extra+=" discard-local-state=true"
 
         if [[ -n "$reason" ]]; then
@@ -1145,12 +1169,14 @@ process_repo_local_worktrees() {
                         cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
                     fi
                     if [[ "$cw_c14_verdict" == remove ]]; then
+                        WRH_REASON="$wrh_reason"
                         if [[ -n "$ACT_DEADLINE_AT" ]]; then
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         else
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         fi
                     fi
+                    WRH_REASON=""
                     lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
