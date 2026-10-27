@@ -98,7 +98,7 @@ edit() { python3 - "$LF" "$1" <<'PY'
 import json,sys,time,datetime
 p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2])
 # The reader prefers the owners array; keep it in step with a fixture owner edit.
-if 'd["owner"]' in sys.argv[2] and 'owners' not in sys.argv[2]: d['owners']=[d['owner']] if isinstance(d.get('owner'),dict) else []
+if ('d["owner"]' in sys.argv[2] or "d['owner']" in sys.argv[2]) and 'owners' not in sys.argv[2]: d['owners']=[d['owner']] if isinstance(d.get('owner'),dict) else []
 json.dump(d,open(p,'w'))
 PY
 }
@@ -323,7 +323,7 @@ HOOK
 chmod +x "$TMP/inject"
 for injected in .env data/notes.db; do new; export INJECT_WT="$WT" INJECT_FILE="$injected" DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK="$TMP/inject"; run --mode remove; if [[ "$injected" == .env ]]; then verdict 'final secret recheck' kept:secret-like; else verdict 'final ignored data recheck' kept:ignored-data; fi; check 'injected retained' test -f "$WT/$injected"; unset DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK; park; done
 mkdir "$TMP/minbin"
-for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
+for tool in bash python3 git date mkdir cat cp rm rmdir stat awk sed grep head cut shasum dirname find sort mktemp tr wc env lsof uname; do target="$(command -v "$tool")"; [[ -z "$target" ]] || ln -s "$target" "$TMP/minbin/$tool"; done
 new; before="$(wc -l < "$FAKE_FETCH_LOG")"; PATH="$TMP/minbin" run; verdict 'missing timeout blocks fetch' kept:remote-unverified; check 'no unbounded fetch' test "$(wc -l < "$FAKE_FETCH_LOG")" = "$before"; check 'missing gh logged' grep -q 'missing tool: gh' "$TMP/run.log"; check 'missing gh counted' test "$(receipt 'd["candidates"]["gh_failed"] > 0')" = True; park
 new; edit 'd["owner"]["pid"]=402'; run --mode remove; check 'unknown owner retained' test -d "$WT"; park
 # Owner proof (governor T12): liveness is pid + start epoch only.
