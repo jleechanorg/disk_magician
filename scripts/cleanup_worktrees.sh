@@ -912,7 +912,7 @@ process_repo_local_worktrees() {
             match=true
         fi
         local std_real=""
-        if [[ "$abs_path" == "$STD_ROOT/"* || "$abs_path" == "$STD_ROOT_REAL/"* ]]; then
+        if [[ "$abs_path" == "$STD_ROOT/"* || "$abs_path" == "$STD_ROOT_REAL/"* ]] || dwr_in_agent_root "$abs_path"; then
             match=true
             std_real="$(cd "$abs_path" 2>/dev/null && pwd -P || printf '%s' "$abs_path")"
         fi
