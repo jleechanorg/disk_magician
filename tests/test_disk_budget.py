@@ -95,7 +95,7 @@ class VolumeAdmissionGateTest(unittest.TestCase):
              patch.object(disk_budget.subprocess, "run", return_value=type("R", (), {"returncode": 75})()) as run:
             self.assertIs(disk_budget._scratch_mountpoint(), False)
         run.assert_called_once_with(
-            ["disk-magician", "volume", "path", "scratch"],
+            [disk_budget._diskm_bin(), "volume", "path", "scratch"],
             capture_output=True, text=True, timeout=12, check=False)
 
     def test_macos_missing_implicit_config_checks_for_live_scratch(self):
@@ -107,7 +107,7 @@ class VolumeAdmissionGateTest(unittest.TestCase):
             os.environ.pop("DISK_MAGICIAN_CONFIG", None)
             self.assertIs(disk_budget._scratch_mountpoint(), False)
         run.assert_called_once_with(
-            ["disk-magician", "volume", "path", "scratch"],
+            [disk_budget._diskm_bin(), "volume", "path", "scratch"],
             capture_output=True, text=True, timeout=12, check=False)
 
     def invoke(self, samples, estimate_gb):
