@@ -150,6 +150,34 @@ class ReliabilityDispatchTests(unittest.TestCase):
                 self.assertEqual(data["Label"], label)
                 self.assertEqual(data["ProgramArguments"], ["@HOME@/.local/bin/diskm"] + args)
 
+    def test_setup_scratch_dry_run(self):
+        result = subprocess.run(
+            ["/bin/bash", str(ROOT / "disk_magician.sh"), "setup", "--scratch", "--quota-gb", "200", "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[dry-run] Would configure and provision 200 GiB Scratch volume", result.stdout)
+
+        result_default = subprocess.run(
+            ["/bin/bash", str(ROOT / "disk_magician.sh"), "setup", "--scratch", "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result_default.returncode, 0, result_default.stderr)
+        self.assertIn("[dry-run] Would configure and provision 200 GiB Scratch volume", result_default.stdout)
+
+        result_invalid = subprocess.run(
+            ["/bin/bash", str(ROOT / "disk_magician.sh"), "setup", "--scratch", "--quota-gb", "0", "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(result_invalid.returncode, 0)
+        self.assertIn("positive integer argument", result_invalid.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

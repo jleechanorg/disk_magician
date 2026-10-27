@@ -57,3 +57,6 @@ echo "Codex disk-root-cause and disk-audit skills successfully installed!"
 
 echo "=== Optional: install weekly launchd sweepers ==="
 echo "Run: ./scripts/install_launchd_sweepers.sh --unload-legacy"
+
+echo "=== Optional: provision dedicated quota-bounded Scratch volume ==="
+echo "Run: diskm setup --scratch --quota-gb 200"
