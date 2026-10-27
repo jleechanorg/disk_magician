@@ -83,6 +83,7 @@ Commands:
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
+  quarantine-reconcile   Finish deferred C14 quarantine removals (--dry-run|--clean).
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
@@ -504,6 +505,9 @@ case "$CMD" in
       reconcile) exec python3 "$SCRIPT_DIR/scripts/worktree_quarantine.py" reconcile "$@" ;;
       *) echo "Usage: diskm worktree-quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
     esac
+    ;;
+  quarantine_reconcile|quarantine-reconcile)
+    "$SCRIPT_DIR/scripts/quarantine_reconcile.sh" "$@"
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"
