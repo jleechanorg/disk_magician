@@ -162,12 +162,12 @@ echo "SECRET=1" >"$W5/.env"
 backdate_tree "$W5" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R5" --push-wip --execute --preserve-wip)"
 assert_not_contains "$OUT" "PRESERVED-WIP" "no preservation with ignored .env"
-assert_contains "$OUT" "ignored-secret" "skip reason names ignored secret"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "protected filename blocks preservation"
 assert_true "[[ -f '$W5/.env' ]] && wt_registered '$R5' '$W5'" ".env worktree kept"
 assert_true "! git -C '$R5' for-each-ref refs/heads/wip | grep -q ." "no wip branch created"
 
 # ---------------------------------------------------------------------------
-echo "case 5b: secret-like basename inside a rebuildable dir is not a secret"
+echo "case 5b: protected basename inside a rebuildable dir is conservatively retained"
 R5B="$(mk_repo r5b)"
 W5B="$(mk_wt "$R5B" nm5b)"
 echo "edit" >>"$W5B/tracked.txt"
@@ -176,9 +176,9 @@ echo "// vendored" >"$W5B/node_modules/@firebase/firestore/dist/firestore/src/ap
 backdate_tree "$W5B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R5B" --push-wip --execute --preserve-wip)"
 B5B="wip/worktree-hygiene/$TODAY/nm5b"
-assert_not_contains "$OUT" "ignored-secret" "vendored credentials.d.ts is not treated as a secret"
-assert_contains "$OUT" "$W5B -> $B5B" "vendored-credentials worktree preserved"
-assert_true "[[ ! -d '$W5B' ]]" "vendored-credentials worktree removed"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "vendored protected filename blocks preservation"
+assert_not_contains "$OUT" "PRESERVED-WIP" "protected filename is not staged or published"
+assert_true "[[ -f '$W5B/node_modules/@firebase/firestore/dist/firestore/src/api/credentials.d.ts' ]] && wt_registered '$R5B' '$W5B'" "vendored-credentials worktree and payload retained"
 
 # ---------------------------------------------------------------------------
 echo "case 6: large-diff and open-pr untouched"
@@ -406,7 +406,7 @@ echo "export TOKEN=x" >"$W20/.envrc"
 echo "edit" >>"$W20/tracked.txt"
 backdate_tree "$W20" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R20" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-secret" "ignored .envrc blocks"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "ignored .envrc blocks"
 assert_true "[[ -f '$W20/.envrc' ]]" ".envrc intact"
 
 # ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ mkdir -p "$W27/dist"; echo "//registry/:_authToken=x" >"$W27/dist/.npmrc"
 echo "edit" >>"$W27/tracked.txt"
 backdate_tree "$W27" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R27" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-file:" "ignored build/dist content blocks"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "protected ignored build/dist content blocks"
 assert_true "[[ -f '$W27/src/build/secret.txt' && -f '$W27/dist/.npmrc' ]]" "build/dist content intact"
 
 # ---------------------------------------------------------------------------
@@ -596,20 +596,20 @@ echo "TOKEN=1" >"$W31B/pkg/.env"
 echo "edit" >>"$W31B/tracked.txt"
 backdate_tree "$W31B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-secret" "credential-named file outside __pycache__ still blocks"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "credential-named file outside __pycache__ still blocks"
 W31C="$(mk_wt "$R31" pyc31c)"
 mkdir -p "$W31C/pkg/__pycache__"; echo "x" >"$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc"
 echo "edit" >>"$W31C/tracked.txt"
 backdate_tree "$W31C" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-secret" "credential-named bytecode under __pycache__ blocks"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "credential-named bytecode under __pycache__ blocks"
 assert_true "[[ -f '$W31C/pkg/__pycache__/clock_skew_credentials.cpython-312.pyc' ]]" "credential bytecode kept"
 W31D="$(mk_wt "$R31" pyc31d)"
 mkdir -p "$W31D/venv/lib"; echo "x" >"$W31D/venv/lib/x_credentials.pyo"
 echo "edit" >>"$W31D/tracked.txt"
 backdate_tree "$W31D" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R31" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-secret:venv/lib/x_credentials.pyo" "venv credentials .pyo blocks (.pyo is exempt nowhere)"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "venv credentials .pyo blocks (.pyo is exempt nowhere)"
 W31E="$(mk_wt "$R31" pyc31e)"
 mkdir -p "$W31E/venv/lib"; echo "x" >"$W31E/venv/lib/x_credentials.pyc"
 echo "edit" >>"$W31E/tracked.txt"
@@ -755,6 +755,7 @@ OUT="$( (
     # shellcheck disable=SC1090
     source "$SCRIPT"
     set +e
+    EXECUTE=true
     preserve_wip_blocker "$R36" "$W36"
     echo "blocker-rc=$?"
     preserve_wip_and_remove "$R36" "$W36"
@@ -915,7 +916,7 @@ echo "K=v" >"$W43B/.env"; mkdir -p "$W43B/mvp_site/test-results"; echo r >"$W43B
 echo "edit" >>"$W43B/tracked.txt"
 backdate_tree "$W43B" 30
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R43" --push-wip --execute --preserve-wip)"
-assert_contains "$OUT" "ignored-secret" "ignored .env still blocks alongside test-results"
+assert_contains "$OUT" "protected-path-in-history-or-payload" "ignored .env still blocks alongside test-results"
 assert_true "[[ -f '$W43B/.env' ]]" ".env intact"
 W43C="$(mk_wt "$R43" db43)"
 mkdir -p "$W43C/data"; echo d >"$W43C/data/notes.db"; mkdir -p "$W43C/test-results"; echo r >"$W43C/test-results/a.xml"

@@ -43,11 +43,15 @@ source "$SCRIPT_DIR/safety_lib.sh"
 
 EXECUTE=false
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+MIN_AGE_MINUTES=""
 REPOS=()
 SKIP_PUSH=false
 SKIP_GH=false
 PRESERVE_WIP=false
 PUSH_WIP=false
+PRESERVE_ONLY=false
+BACKUP_DIR=""
+SELECTED_WORKTREE=""
 MAX_CANDIDATES=0
 # A raw `git rev-list --count main..HEAD` ahead-count above this is not
 # trusted as a real commit count -- a history rewrite (rebase --onto,
@@ -63,7 +67,7 @@ WORKTREE_AHEAD_SANITY_CAP="${WORKTREE_AHEAD_SANITY_CAP:-500}"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--repos p1,p2,...] [--skip-push|--no-push] [--skip-gh] [--preserve-wip] [--push-wip] [--max-candidates N] [-h|--help]
+Usage: $(basename "$0") [--execute] [--min-age N] [--days N] [--min-age-minutes N] [--preserve-only] [--backup-dir DIR] [--repos p1,p2,...] [--worktree PATH] [--skip-push|--no-push] [--skip-gh] [--preserve-wip] [--push-wip] [--max-candidates N] [-h|--help]
 
 Repeatable worktree-hygiene sweep: IDENTIFY -> TRIAGE -> CLASSIFY -> (optionally) DELETE.
 
@@ -73,9 +77,24 @@ Options:
                 Requires WORKTREE_APPROVED=1 in the environment.
   --min-age N   Minimum worktree age in days for candidacy (default: 7).
   --days N      Alias for --min-age N.
+  --min-age-minutes N
+                Explicit quiet period for preservation-only work. Uses the
+                canonical minute recency helper; it is not raised to the
+                normal seven-day cleanup floor.
+  --preserve-only
+                Preserve eligible worktrees and never remove them. This mode
+                performs the existing commit/ref verification path and then
+                stops. It implies --preserve-wip; mutations require --execute.
+  --backup-dir DIR
+                With --preserve-only, write a verified Git bundle, full-tree
+                archive, tree manifest, and metadata for each preserved tree
+                below DIR. Supplying this option also implies preservation-only.
   --repos LIST  Comma-separated main repo paths to scan (default:
                 CLAUDE_WORKTREE_REPOS env override, else auto-discover --
                 same logic as cleanup_worktrees.sh).
+  --worktree PATH
+                Process only this registered linked worktree; reject the main
+                worktree. Existing recency and safety checks still apply.
   --skip-push   Skip the 'git push origin HEAD:<branch>' preservation step
                 during triage and WIP publication (alias: --no-push).
                 Locally preserved WIP stays in its worktree when push is skipped.
@@ -141,6 +160,7 @@ identify_candidates() {
         case "$line" in
             worktree\ *)
                 path="${line#worktree }"
+                [[ -z "$SELECTED_WORKTREE" || "$path" == "$SELECTED_WORKTREE" ]] || continue
                 if [[ "$path" != "$main_wt_abs" && -d "$path" ]]; then
                     # Recency now comes from scripts/lib/worktree_recency.sh
                     # (sourced at the top of this file), which keeps the
@@ -164,9 +184,15 @@ identify_candidates() {
                     #     active worktrees deletable. The helper fails
                     #     CLOSED (unknown -> age 0 -> preserved).
                     local age_days
-                    age_days=$(worktree_age_days "$path")
-                    if (( age_days >= min_age_days )); then
-                        echo "$path"
+                    if [[ -n "$MIN_AGE_MINUTES" ]]; then
+                        if ! worktree_is_recently_active_minutes "$path" "$MIN_AGE_MINUTES"; then
+                            echo "$path"
+                        fi
+                    else
+                        age_days=$(worktree_age_days "$path")
+                        if (( age_days >= min_age_days )); then
+                            echo "$path"
+                        fi
                     fi
                 fi
                 ;;
@@ -445,6 +471,16 @@ worktree_has_live_tmux_pane() {
     return 1
 }
 
+# hygiene_worktree_is_recently_active <wt_path> — use the explicit minute
+# lease when supplied; ordinary hygiene keeps the historical day floor.
+hygiene_worktree_is_recently_active() {
+    if [[ -n "$MIN_AGE_MINUTES" ]]; then
+        worktree_is_recently_active_minutes "$1" "$MIN_AGE_MINUTES"
+    else
+        worktree_is_recently_active "$1" "$MIN_AGE_DAYS"
+    fi
+}
+
 ledger_line() {
     local action="$1" path="$2" reason="${3:-}"
     if [[ -n "$reason" ]]; then
@@ -499,7 +535,7 @@ worktree_has_live_cwd() {
 # preserve_wip_blocker <repo_abs> <wt_path> — echoes a skip reason and
 # returns 0 when the worktree must NOT be auto-preserved; returns 1 if clear.
 preserve_wip_blocker() {
-    local repo_abs="$1" wt="$2" gitdir f
+    local repo_abs="$1" wt="$2" capture_only="${3:-false}" gitdir f
     local -x GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
              GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
     gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || { echo "no-gitdir"; return 0; }
@@ -515,7 +551,10 @@ preserve_wip_blocker() {
         echo "in-progress-op:unmerged-paths"; return 0
     fi
     git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || { echo "unborn-head"; return 0; }
-    if worktree_has_live_tmux_pane "$wt" || worktree_has_live_cwd "$wt"; then
+    # Immutable Git capture cannot remove or publish the working tree. All
+    # mutation callers retain the owner/cwd gate.
+    if [[ "$capture_only" != true || "$PRESERVE_ONLY" != true || -z "$BACKUP_DIR" ]] &&
+       { worktree_has_live_tmux_pane "$wt" || worktree_has_live_cwd "$wt"; }; then
         echo "live-cwd"; return 0
     fi
     # Edits to skip-worktree (S) or assume-unchanged (lowercase tag) entries
@@ -719,6 +758,126 @@ preserve_wip_raw_bytes_dirty() {
     worktree_bytes_mismatch "$@"
 }
 
+# Inspect path names before any scanner, staging, or capture opens payloads.
+preservation_paths_safe() {
+    python3 -c 'import fnmatch, subprocess, sys
+wt, revision = sys.argv[1:]
+patterns = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+            "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", ".npmrc", ".netrc",
+            "*credentials*", "secrets*", "service-account*.json")
+commands = [["log", "--no-ext-diff", "--no-renames", "--format=", "--name-only",
+             "-z", "--full-history", "-m", "--root", revision, "--"],
+            ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]]
+try:
+    for command in commands:
+        names = subprocess.run(["git", "-C", wt] + command, check=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90).stdout
+        for path in names.split(b"\0"):
+            components = path.lstrip(b"\n").decode("utf-8", "surrogateescape").lower().split("/")
+            if any(fnmatch.fnmatchcase(component, pattern) for component in components for pattern in patterns):
+                print("protected-path-in-history-or-payload", file=sys.stderr)
+                sys.exit(1)
+except Exception:
+    print("preservation-path-enumeration-failed", file=sys.stderr)
+    sys.exit(1)
+' "$1" "${2:-HEAD}"
+}
+
+# Git bundles and archives contain LFS pointers, never their external payloads.
+preservation_no_lfs() {
+    preservation_paths_safe "$1" "${2:-HEAD}" || return 1
+    timeout 90 python3 -c 'import os, pathlib, subprocess, sys, tempfile
+wt, revision = sys.argv[1:]
+def git(*args, env=None, data=None):
+    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", wt] + list(args),
+                          input=data, env=env, check=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, timeout=80).stdout
+try:
+    # An isolated index reads attributes from the selected immutable tree,
+    # including when the fetched repository is bare. Never change its index.
+    with tempfile.TemporaryDirectory(prefix="diskm-lfs-", dir="/tmp") as scratch:
+        env = dict(os.environ, GIT_INDEX_FILE=str(pathlib.Path(scratch) / "index"))
+        git("read-tree", revision, env=env)
+        names = git("ls-tree", "-r", "--name-only", "-z", revision)
+        attrs = git("check-attr", "--cached", "-z", "--stdin", "filter", env=env, data=names).split(b"\0")
+        if any(attrs[i] == b"lfs" for i in range(2, len(attrs), 3)):
+            raise ValueError("LFS-attributed selected file")
+    objects = git("rev-list", "--objects", "--no-object-names", revision)
+    rows = git("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)", data=objects)
+    # Pointers are small; do not open arbitrarily large historical blobs.
+    with subprocess.Popen(["git", "-C", wt, "cat-file", "--batch"], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
+        for row in rows.splitlines():
+            oid, kind, size = row.split()
+            if kind != b"blob" or int(size) > 4096:
+                continue
+            batch.stdin.write(oid + b"\n")
+            batch.stdin.flush()
+            if batch.stdout.readline().split() != [oid, kind, size]:
+                raise ValueError("object lookup failed")
+            blob = batch.stdout.read(int(size))
+            if len(blob) != int(size) or batch.stdout.read(1) != b"\n":
+                raise ValueError("incomplete object")
+            if blob.splitlines()[:1] == [b"version https://git-lfs.github.com/spec/v1"]:
+                raise ValueError("reachable LFS pointer payload")
+except Exception:
+    print("LFS payload unsupported or LFS enumeration failed", file=sys.stderr)
+    sys.exit(1)
+' "$1" "${2:-HEAD}"
+}
+
+preservation_secret_scan() {
+    local wt="$1" sha="$2"
+    preservation_no_lfs "$wt" "$sha" || return 1
+    command -v gitleaks >/dev/null 2>&1 || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 90 gitleaks git "$wt" --log-opts="$sha" --redact --no-banner >/dev/null 2>&1 || return 1
+    timeout 90 gitleaks dir "$wt" --redact --no-banner >/dev/null 2>&1 || return 1
+}
+
+# Record every payload entry without opening file contents (including secrets).
+# Git capture reads immutable objects; any payload metadata change invalidates it.
+preservation_file_manifest() {
+    timeout 90 python3 -c 'import json, os, stat, sys
+root = sys.argv[1]
+def walk(directory):
+    with os.scandir(directory) as entries:
+        for entry in sorted(entries, key=lambda e: e.name):
+            if directory == root and entry.name == ".git":
+                continue
+            info = entry.stat(follow_symlinks=False)
+            path = os.path.relpath(entry.path, root)
+            print(json.dumps([path, info.st_mode, info.st_dev, info.st_ino,
+                              info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                              os.readlink(entry.path) if stat.S_ISLNK(info.st_mode) else None],
+                             ensure_ascii=True))
+            if stat.S_ISDIR(info.st_mode):
+                walk(entry.path)
+walk(root)
+' "$1"
+}
+
+# Read upstream or the existing owner backup live; tracking refs are not proof.
+worktree_head_matches_live_upstream() {
+    local wt="$1" sha ref upstream remote remote_ref remote_sha backup_refs line_sha line_ref
+    sha="$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null)" || return 1
+    ref="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null)" || return 1
+    upstream="$(git -C "$wt" for-each-ref --format='%(upstream:remotename)|%(upstream:remoteref)' "$ref")" || return 1
+    IFS='|' read -r remote remote_ref <<<"$upstream"
+    [[ -n "$remote" && "$remote" != . && "$remote_ref" == refs/heads/* ]] || return 1
+    remote_sha="$(timeout 90 git -C "$wt" ls-remote "$remote" "$remote_ref" | awk '{print $1}')" || return 1
+    if [[ "$remote_sha" != "$sha" ]]; then
+        backup_refs="$(timeout 90 git -C "$wt" ls-remote "$remote" "refs/heads/backup/${ref#refs/heads/}-*")" || return 1
+        remote_sha=""
+        while read -r line_sha line_ref; do
+            [[ "$line_sha" == "$sha" && "$line_ref" == "refs/heads/backup/${ref#refs/heads/}-"* ]] || continue
+            remote_sha="$line_sha"
+        done <<<"$backup_refs"
+    fi
+    [[ "$remote_sha" == "$sha" && "$(git -C "$wt" rev-parse --verify HEAD)" == "$sha" ]]
+}
+
 # A normal push runs the repository's configured hooks. Backup fallback is
 # permitted only for Git's explicit non-fast-forward/fetch-first rejection.
 publish_wip_ref() {
@@ -727,9 +886,8 @@ publish_wip_ref() {
     sha="$(git -C "$wt" rev-parse "${3:-HEAD}")" || return 1
     # Publication is opt-in, but credential safety still fails closed. Scan
     # reachable history because an older unpushed commit can contain secrets.
-    command -v gitleaks >/dev/null 2>&1 || return 1
-    command -v timeout >/dev/null 2>&1 || return 1
-    timeout 90 gitleaks git "$wt" --log-opts="$sha" --redact --no-banner >/dev/null 2>&1 || return 1
+    [[ "$EXECUTE" == true ]] || return 1
+    preservation_secret_scan "$wt" "$sha" || return 1
     err="$(mktemp)" || return 1
     if ! timeout 90 git -C "$wt" push origin "$sha:refs/heads/$ref" >"$err" 2>&1; then
         if ! grep -Eq '\[rejected\].*\((non-fast-forward|fetch first)\)' "$err"; then
@@ -771,7 +929,7 @@ wip_post_publication_blocker() {
     [[ -z "$value" ]] || { echo "working-state-changed"; return 0; }
     value="$(worktree_bytes_mismatch "$wt")" || { echo "byte-check-failed"; return 0; }
     [[ -z "$value" ]] || { echo "preserved-bytes-changed:$value"; return 0; }
-    if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS"; then
+    if hygiene_worktree_is_recently_active "$wt"; then
         echo "recently-active"; return 0
     fi
     return 1
@@ -782,6 +940,9 @@ wip_post_publication_blocker() {
 # non-forced removal. Returns 0 if removed, 1 if preserved-but-kept or failed.
 preserve_wip_and_remove() {
     local repo_abs="$1" wt="$2" pre_wip_sha="${3:-}" branch name email sha orig_ref orig_sha
+    [[ "$EXECUTE" == true ]] || return 1
+    preservation_secret_scan "$wt" "${pre_wip_sha:-HEAD}" || {
+        ledger_line "WIP-REFUSED" "$wt" "protected path or secret scan failed; retained"; return 1; }
     # Never run the repo's hooks (post-checkout, post-commit, post-index-change,
     # reference-transaction, ...) from an automated sweep: every git call here
     # and in wip_restore_head inherits core.hooksPath=/dev/null via the env.
@@ -865,6 +1026,15 @@ preserve_wip_and_remove() {
         return 1
     fi
 
+    if [[ "$PRESERVE_ONLY" == true ]]; then
+        if [[ -n "$BACKUP_DIR" ]] && ! backup_worktree "$wt" "$BACKUP_DIR"; then
+            ledger_line "WIP-KEPT" "$wt" "$branch $sha; backup failed; retained"
+            return 1
+        fi
+        ledger_line "WIP-KEPT" "$wt" "$branch $sha; preserve-only; retained"
+        return 0
+    fi
+
     if git -C "$repo_abs" worktree remove "$wt" 2>/dev/null; then
         ledger_line "DELETE" "$wt" "preserved on $branch"
         return 0
@@ -876,6 +1046,113 @@ preserve_wip_and_remove() {
     wip_restore_head "$wt" "$branch" "$orig_ref" "$orig_sha" keep
     return 1
 }
+
+# backup_worktree <worktree> <backup_dir> — create a self-checking, private
+# recovery artifact without changing the worktree. The bundle carries the
+# complete reachable history; the archive and manifest make the checked tree
+# explicit for recovery tooling and human inspection.
+backup_worktree() (
+    local wt="$1" backup_dir="$2" repo_abs blocker sha ref tree leaf out_dir
+    local bundle archive manifest metadata bundle_ref capture_only=false status hidden
+    repo_abs="$(cd "$wt" 2>/dev/null && pwd -P)" || return 1
+    [[ -d "$repo_abs" && -n "$backup_dir" ]] || return 1
+    [[ "$EXECUTE" == true ]] || return 1
+    [[ "$PRESERVE_ONLY" != true ]] || capture_only=true
+    if blocker="$(preserve_wip_blocker "$repo_abs" "$repo_abs" "$capture_only")"; then
+        ledger_line "BACKUP-REFUSED" "$wt" "$blocker"
+        return 1
+    fi
+    sha="$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null)" || return 1
+    ref="$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || printf 'HEAD')"
+    bundle_ref="$ref"
+    [[ "$bundle_ref" == refs/heads/* ]] && bundle_ref="${bundle_ref#refs/heads/}"
+    tree="$(git -C "$wt" rev-parse --verify "$sha^{tree}" 2>/dev/null)" || return 1
+    status="$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none)" || return 1
+    [[ -z "$status" ]] || return 1
+    hidden="$(preserve_wip_raw_bytes_dirty "$wt")" || return 1
+    [[ -z "$hidden" ]] || return 1
+    leaf="$(basename "$wt")"
+    leaf="${leaf//[^A-Za-z0-9._-]/_}"
+    [[ -n "$leaf" ]] || leaf=worktree
+    out_dir="$backup_dir/$leaf-$sha"
+    umask 077
+    mkdir -p "$backup_dir" || return 1
+    # Serialize capacity admission and capture across parallel repo lanes using
+    # this spool. An abandoned lock fails closed rather than oversubscribing it.
+    mkdir "$backup_dir/.capture.lock" 2>/dev/null || {
+        ledger_line "BACKUP-REFUSED" "$wt" "backup spool capture lock held"; return 1; }
+    trap 'rmdir "$backup_dir/.capture.lock" 2>/dev/null || true' EXIT
+    # Bound cumulative local spooling before creating either duplicate artifact.
+    # Uncompressed reachable objects plus per-object overhead overestimate the
+    # bundle; the tree estimate includes tar headers, padding and final blocks.
+    python3 -c 'import os, shutil, subprocess, sys
+wt, sha, destination = sys.argv[1:]
+try:
+    objects = subprocess.run(["git", "-C", wt, "rev-list", "--objects", "--no-object-names", sha],
+                             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90).stdout
+    sizes = subprocess.run(["git", "-C", wt, "cat-file", "--batch-check=%(objectsize)"],
+                           input=objects, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90).stdout
+    estimate = sum(int(size) + 128 for size in sizes.splitlines()) + 1048576
+    tree = subprocess.run(["git", "-C", wt, "ls-tree", "-r", "-l", "-z", sha],
+                          check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90).stdout
+    for row in tree.split(b"\0"):
+        if row:
+            metadata, name = row.split(b"\t", 1)
+            size = metadata.split()[3]
+            estimate += ((int(size) + 511) // 512 + 1) * 512 if size != b"-" else 512
+            estimate += len(name) * 2 + 1024
+    estimate += 1048576
+    while not os.path.exists(destination):
+        destination = os.path.dirname(os.path.abspath(destination))
+    available = shutil.disk_usage(destination).free
+    if available < estimate + 40 * 1024**3:
+        print("backup-capacity-reserve: estimated_bytes=%d available_bytes=%d reserve_bytes=%d" %
+              (estimate, available, 40 * 1024**3), file=sys.stderr)
+        sys.exit(1)
+except Exception:
+    print("backup-capacity-estimate-failed", file=sys.stderr)
+    sys.exit(1)
+' "$wt" "$sha" "$backup_dir" || return 1
+    # Never leave an older verified receipt beside a failed replacement capture.
+    mkdir "$out_dir" || return 1
+    bundle="$out_dir/recovery.bundle"
+    archive="$out_dir/tree.tar"
+    manifest="$out_dir/tree.manifest"
+    metadata="$out_dir/metadata.json"
+    preservation_file_manifest "$wt" >"$out_dir/files.before.manifest" || return 1
+    preservation_secret_scan "$wt" "$sha" || {
+        ledger_line "BACKUP-REFUSED" "$wt" "protected path or secret scan failed"; return 1; }
+    git -C "$wt" bundle create "$bundle" "$bundle_ref" >/dev/null 2>&1 || return 1
+    git -C "$wt" bundle verify "$bundle" >/dev/null 2>&1 || return 1
+    [[ "$(git -C "$wt" bundle list-heads "$bundle" "$ref")" == "$sha $ref" ]] || return 1
+    git -C "$wt" archive --format=tar --output="$archive" "$sha" || return 1
+    tar -tf "$archive" >/dev/null 2>&1 || return 1
+    git -C "$wt" ls-tree -r --full-tree "$sha" >"$manifest" || return 1
+    [[ -s "$bundle" && -s "$archive" && -s "$manifest" ]] || return 1
+    preservation_file_manifest "$wt" >"$out_dir/files.after.manifest" || return 1
+    if ! cmp -s "$out_dir/files.before.manifest" "$out_dir/files.after.manifest" ||
+       [[ "$(git -C "$wt" rev-parse --verify HEAD)" != "$sha" ||
+          "$(git -C "$wt" symbolic-ref -q HEAD || printf HEAD)" != "$ref" ||
+          "$(git -C "$wt" rev-parse --verify HEAD^{tree})" != "$tree" ]]; then
+        ledger_line "BACKUP-REFUSED" "$wt" "worktree changed during capture"
+        return 1
+    fi
+    status="$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none)" || return 1
+    hidden="$(preserve_wip_raw_bytes_dirty "$wt")" || return 1
+    [[ -z "$status" && -z "$hidden" ]] || {
+        ledger_line "BACKUP-REFUSED" "$wt" "payload changed during capture"; return 1; }
+    python3 -c 'import json, pathlib, sys
+wt, ref, sha, tree, out, bundle, archive, manifest = sys.argv[1:]
+json.dump({"format":"disk-magician-worktree-backup-v1", "worktree":wt,
+           "ref":ref, "head":sha, "tree":tree, "status":"verified",
+           "bundle":pathlib.Path(bundle).name,
+           "archive":pathlib.Path(archive).name,
+           "tree_manifest":pathlib.Path(manifest).name,
+           "file_manifest":"files.after.manifest", "capture_stable":True},
+          open(out, "w"), indent=2, sort_keys=True)
+' "$wt" "$ref" "$sha" "$tree" "$metadata" "$bundle" "$archive" "$manifest" || return 1
+    ledger_line "BACKUP-VERIFIED" "$wt" "$out_dir (HEAD $sha; ref $ref; tree $tree)"
+)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -940,9 +1217,30 @@ main() {
                 MIN_AGE_DAYS="$2"
                 shift
                 ;;
+            --min-age-minutes)
+                [[ $# -ge 2 ]] || { echo "--min-age-minutes requires a value" >&2; exit 2; }
+                MIN_AGE_MINUTES="$2"
+                shift
+                ;;
+            --preserve-only)
+                PRESERVE_ONLY=true
+                PRESERVE_WIP=true
+                ;;
+            --backup-dir)
+                [[ $# -ge 2 ]] || { echo "--backup-dir requires a value" >&2; exit 2; }
+                BACKUP_DIR="$2"
+                PRESERVE_ONLY=true
+                PRESERVE_WIP=true
+                shift
+                ;;
             --repos)
                 [[ $# -ge 2 ]] || { echo "--repos requires a value" >&2; exit 2; }
                 IFS=',' read -ra REPOS <<<"$2"
+                shift
+                ;;
+            --worktree)
+                [[ $# -ge 2 ]] || { echo "--worktree requires a value" >&2; exit 2; }
+                SELECTED_WORKTREE="$2"
                 shift
                 ;;
             --skip-push|--no-push) SKIP_PUSH=true ;;
@@ -967,7 +1265,31 @@ main() {
         shift
     done
 
-    if [[ "$EXECUTE" == true && "${WORKTREE_APPROVED:-0}" != 1 ]]; then
+    if [[ -n "$SELECTED_WORKTREE" ]]; then
+        SELECTED_WORKTREE="$(cd "$SELECTED_WORKTREE" 2>/dev/null && pwd -P)" || { echo "Worktree path unavailable" >&2; exit 2; }
+        local selected_registry selected_main
+        [[ -f "$SELECTED_WORKTREE/.git" ]] || { echo "--worktree requires a linked worktree" >&2; exit 2; }
+        selected_registry="$(git -C "$SELECTED_WORKTREE" worktree list --porcelain)" || exit 2
+        selected_main="$(sed -n '1s/^worktree //p' <<<"$selected_registry")"
+        [[ -n "$selected_main" && "$SELECTED_WORKTREE" != "$selected_main" ]] \
+            && grep -qxF "worktree $SELECTED_WORKTREE" <<<"$selected_registry" \
+            || { echo "--worktree must name an exact registered linked worktree" >&2; exit 2; }
+        REPOS=("$selected_main")
+    fi
+
+    if [[ -n "$MIN_AGE_MINUTES" ]]; then
+        if [[ ! "$MIN_AGE_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "--min-age-minutes must be a non-negative integer" >&2
+            exit 2
+        fi
+        MIN_AGE_MINUTES=$((10#$MIN_AGE_MINUTES))
+        if [[ "$PRESERVE_ONLY" != true ]]; then
+            echo "--min-age-minutes requires --preserve-only" >&2
+            exit 2
+        fi
+    fi
+
+    if [[ "$EXECUTE" == true && "$PRESERVE_ONLY" != true && "${WORKTREE_APPROVED:-0}" != 1 ]]; then
         echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval."
         exit 0
     fi
@@ -1002,19 +1324,20 @@ main() {
     fi
     [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
 
+    if [[ "$PRESERVE_ONLY" == true ]]; then
+        echo "=== WORKTREE HYGIENE (PRESERVE-ONLY) ==="
+    elif [[ "$EXECUTE" == true ]]; then
+        echo "=== WORKTREE HYGIENE ==="
+    else
+        echo "=== WORKTREE HYGIENE (DRY-RUN) ==="
+    fi
+
     if [[ ${#REPOS[@]} -eq 0 ]]; then
         HYGIENE_PHASE=discovery
         while IFS= read -r repo; do
             [[ -n "$repo" ]] && REPOS+=("$repo")
         done < <(discover_worktree_repos "${CLAUDE_WORKTREE_REPOS:-}")
     fi
-
-    if [[ "$EXECUTE" == true ]]; then
-        echo "=== WORKTREE HYGIENE ==="
-    else
-        echo "=== WORKTREE HYGIENE (DRY-RUN) ==="
-    fi
-
 
     [[ ${#REPOS[@]} -eq 0 ]] || HYGIENE_ALL_REPOS="$(printf '%s\n' "${REPOS[@]}")"
     HYGIENE_PHASE=scan
@@ -1064,6 +1387,7 @@ main() {
         [[ ${#all_paths[@]} -eq 0 ]] && continue
 
         for wt_path in "${all_paths[@]}"; do
+            [[ -z "$SELECTED_WORKTREE" || "$wt_path" == "$SELECTED_WORKTREE" ]] || continue
             [[ "$wt_path" == "$repo_abs" ]] && continue
             [[ -d "$wt_path" ]] || continue
 
@@ -1077,13 +1401,18 @@ main() {
                 continue
             fi
 
-            if worktree_has_live_tmux_pane "$wt_path"; then
+            if [[ "$PRESERVE_ONLY" != true || -z "$BACKUP_DIR" ]] && worktree_has_live_tmux_pane "$wt_path"; then
                 ledger_line "PRESERVE" "$wt_path" "live-tmux-session"
                 preserved_count=$(( preserved_count + 1 ))
                 continue
             fi
 
             HYGIENE_CURRENT="$wt_path"
+            if ! preservation_paths_safe "$wt_path" HEAD; then
+                ledger_line "NEEDS-REVIEW" "$wt_path" "protected path or history enumeration failed; retained"
+                review_count=$(( review_count + 1 ))
+                continue
+            fi
             local branch
             branch="$(branch_for_worktree "$repo_abs" "$wt_path")"
             [[ -n "$branch" ]] || branch="detached"
@@ -1100,6 +1429,19 @@ main() {
 
             local class="${verdict%%|*}" reason="${verdict#*|}"
 
+            # Backup eligibility is independent of merge/PR removal policy.
+            # Never promote this path outside preservation-only mode.
+            if [[ "$PRESERVE_ONLY" == true && "$uncommitted_count" == 0 && "$untracked_present" == 0 ]]; then
+                local preservation_blocker
+                if preservation_blocker="$(preserve_wip_blocker "$repo_abs" "$wt_path" true)"; then
+                    class="NEEDS-REVIEW"
+                    reason="preservation-blocked:$preservation_blocker"
+                elif worktree_head_matches_live_upstream "$wt_path"; then
+                    class="SAFE"
+                    reason="clean-live-remote-verified"
+                fi
+            fi
+
             # A lossy clean filter can hide an edit from `git status`; never
             # SAFE-remove a worktree whose on-disk bytes differ from index/HEAD.
             if [[ "$class" == "SAFE" ]]; then
@@ -1112,7 +1454,17 @@ main() {
             fi
 
             if [[ "$class" == "SAFE" ]]; then
-                if [[ "$EXECUTE" == true ]]; then
+                if [[ "$PRESERVE_ONLY" == true ]]; then
+                    if [[ "$EXECUTE" != true ]]; then
+                        ledger_line "WOULD-PRESERVE" "$wt_path" "$reason; dry-run; no backup written"
+                    elif [[ -n "$BACKUP_DIR" ]] && ! backup_worktree "$wt_path" "$BACKUP_DIR"; then
+                        ledger_line "NEEDS-REVIEW" "$wt_path" "backup failed; retained"
+                        review_count=$(( review_count + 1 ))
+                    else
+                        ledger_line "PRESERVE" "$wt_path" "$reason; preserve-only"
+                        preserved_count=$(( preserved_count + 1 ))
+                    fi
+                elif [[ "$EXECUTE" == true ]]; then
                     local pre_remove_hidden
                     pre_remove_hidden="$(preserve_wip_raw_bytes_dirty "$wt_path")" || pre_remove_hidden="byte-check-failed"
                     if [[ -n "$pre_remove_hidden" ]]; then
@@ -1162,7 +1514,7 @@ main() {
                 elif [[ "$EXECUTE" == true ]]; then
                     if preserve_wip_and_remove "$repo_abs" "$wt_path" "$pre_wip_sha"; then
                         wip_count=$(( wip_count + 1 ))
-                        removed_count=$((removed_count + 1))
+                        [[ "$PRESERVE_ONLY" == true ]] || removed_count=$((removed_count + 1))
                     else
                         review_count=$(( review_count + 1 ))
                     fi
@@ -1186,7 +1538,9 @@ main() {
     echo ""
     echo "Worktree-hygiene: ${safe_count} safe, ${review_count} needs-review, ${preserved_count} preserved (protected or capped)."
     if [[ "$PRESERVE_WIP" == true ]]; then
-        if [[ "$EXECUTE" == true ]]; then
+        if [[ "$PRESERVE_ONLY" == true ]]; then
+            echo "Preserve-only: ${wip_count} WIP trees preserved; no worktree removal was attempted."
+        elif [[ "$EXECUTE" == true ]]; then
             echo "Preserve-wip: ${wip_count} preserved to local wip/ branches, published and removed."
         else
             if [[ "$PUSH_WIP" == true && "$SKIP_PUSH" != true ]]; then
