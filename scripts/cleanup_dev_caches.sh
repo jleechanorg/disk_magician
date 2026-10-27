@@ -132,6 +132,7 @@ for approved_cache in \
   "CocoaPods:$HOME/Library/Caches/CocoaPods" \
   "granola updater:$HOME/Library/Caches/@granolaelectron-updater" \
   "Codex Sparkle update staging:$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation" \
+  "GoogleUpdater crx_cache:$HOME/Library/Application Support/Google/GoogleUpdater/crx_cache" \
   "ezgha recovery target:$HOME/.cache/ezgha-recovery-target-20261004"; do
   approved_kind=rebuildable
   # Sparkle staging has its own C14 kind: an extracted .app is not a cache format,
@@ -142,6 +143,41 @@ for approved_cache in \
   # ordinary provenance, not the fixed cache-root table.
   [[ "${approved_cache%%:*}" == "ezgha recovery target" ]] && approved_kind=""
   clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false "$approved_kind"
+done
+
+# 3c. Rotated dated log dirs (YYYY.MM.DD or YYYY/MM/DD) older than 7 days. Only
+# dated leaf dirs are candidates, so a year/month parent holding this week's
+# logs is never removed on its own (older) mtime.
+log "=== Section 3c: rotated dated log dirs (>7d) ==="
+for dated_log_root in \
+  "gcloud CLI logs:$HOME/.config/gcloud/logs" \
+  "Codex app logs:$HOME/Library/Logs/com.openai.codex"; do
+  dated_label="${dated_log_root%%:*}"
+  dated_root="${dated_log_root#*:}"
+  if [[ ! -d "$dated_root" ]]; then
+    log "$dated_label: directory not found, skipping"
+    continue
+  fi
+  dated_before_kb=$(size_kb "$dated_root")
+  log "$dated_label: before $(fmt_kb "$dated_before_kb") ($dated_root)"
+  while IFS= read -r -d '' entry; do
+    if [[ "$DRY_RUN" == true ]]; then
+      log "$dated_label: [dry-run] would delete $entry"
+    elif ! _safety_reason="$(safety_gate "$entry" 2>/dev/null)"; then
+      log "$dated_label: SAFETY-SKIP $entry ($_safety_reason)"
+    else
+      c14_remove "$entry" --kind rebuildable || true
+    fi
+  done < <(find "$dated_root" -mindepth 1 -maxdepth 3 -type d \
+    \( -name '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' -o -path '*/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]' \) \
+    -mtime +7 -print0 2>/dev/null)
+  if [[ "$DRY_RUN" != true ]]; then
+    dated_after_kb=$(size_kb "$dated_root")
+    dated_freed_kb=$(( dated_before_kb - dated_after_kb ))
+    [[ $dated_freed_kb -lt 0 ]] && dated_freed_kb=0
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + dated_freed_kb ))
+    log "$dated_label: after $(fmt_kb "$dated_after_kb"), freed $(fmt_kb "$dated_freed_kb")"
+  fi
 done
 
 # 4. opencode safe subdirs
