@@ -85,8 +85,13 @@ check "zero-padded floor falls back to the day floor" "wt-h13 | young" "$OUT"
 
 # Real removal: the 13h-idle worktree goes, and its deletion-log line names the override.
 DLOG="$TMP_ROOT/deletions.log"
+# h13 also carries its own owner-null lease: only the C14 T3 owner-null relax (clean + pushed + non-AO
+# + idle >= the caller floor) may free it.
+mkdir -p "$TMP_ROOT/state/worktree_leases"
+LEASE_HASH=$(printf '%s' "$WT/wt-h13" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)
+printf '{"path":"%s","owner":null}\n' "$WT/wt-h13" > "$TMP_ROOT/state/worktree_leases/$LEASE_HASH.json"
 MODE=--clean run DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12 WORKTREE_APPROVED=1 DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state" >"$TMP_ROOT/clean.out" || true
-[[ ! -e "$WT/wt-h13" ]] && { echo "  PASS  --clean removed the 13h-idle worktree"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean left wt-h13"; grep -iE "wrh|kept|quarantine|error" "$TMP_ROOT/clean.out" | head -15; FAIL=$((FAIL+1)); }
+[[ ! -e "$WT/wt-h13" ]] && { echo "  PASS  --clean removed the 13h-idle owner-null-lease worktree"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean left wt-h13"; grep -iE "wrh|kept|quarantine|error" "$TMP_ROOT/clean.out" | head -15; FAIL=$((FAIL+1)); }
 check "deletion log names the override" "recency=hours:12" "$(cat "$DLOG" 2>/dev/null)"
 [[ -d "$WT/wt-h11" && -d "$WT/wt-d2dirty" && -d "$WT/wt-d2unpushed" && -d "$WT/wt-locked13" ]] && { echo "  PASS  --clean kept 11h, dirty, unpushed and locked worktrees"; PASS=$((PASS+1)); } || { echo "  FAIL  --clean removed a protected worktree"; FAIL=$((FAIL+1)); }
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]
