@@ -243,10 +243,11 @@ fstrim_via_active_lima_mux() {
 
 fstrim_colima_disk() {
   if [[ "$DRY_RUN" == true ]]; then
-    log "[dry-run] colima ssh -- sudo fstrim -av; if unavailable, use the verified active Lima SSH control master"
+    log "[dry-run] colima ssh -- sudo journalctl --vacuum-size=50M && colima ssh -- sudo fstrim -av; if unavailable, use the verified active Lima SSH control master"
     return 0
   fi
 
+  bounded 30 colima ssh -- sudo journalctl --vacuum-size=50M </dev/null >/dev/null 2>&1 || true
   log "+ colima ssh -- sudo fstrim -av (compact VM sparse disk)"
   if bounded "$TRIM_TIMEOUT_SEC" colima ssh -- sudo fstrim -av </dev/null 2>/dev/null; then
     return 0
@@ -544,10 +545,6 @@ if [[ "$DRY_RUN" == true ]]; then
   fi
   log "=== DRY-RUN complete — nothing pruned ==="
 else
-  after_kb=$(size_kb "$COLIMA_LIMA")
-  freed_kb=$(( before_kb - after_kb ))
-  [[ $freed_kb -lt 0 ]] && freed_kb=0
-  log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
   log "=== docker system df (after) ==="
   if ! docker_probe system df; then
     log "DEGRADED: post-prune docker system df probe failed or timed out."
@@ -558,5 +555,9 @@ else
       recover_colima_wedge_once || log "WARNING: fstrim recovery failed"
     fi
   fi
+  after_kb=$(size_kb "$COLIMA_LIMA")
+  freed_kb=$(( before_kb - after_kb ))
+  [[ $freed_kb -lt 0 ]] && freed_kb=0
+  log "Colima _lima after: $(fmt_kb "$after_kb"), freed $(fmt_kb "$freed_kb")"
 fi
 exit "$report_status"
