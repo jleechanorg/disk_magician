@@ -1,6 +1,7 @@
 # disk_magician roadmap
 
 ## Recent activity (by day)
+- [2026-10-22](activity/2026-10-22.md) — jeff-ubuntu 91%-full recovery (6.8 G → 77 G free): 30d floor 647 GB (Oct 19, 98.9% coverage) vs +181 GB gap; new `diskm slim-worktrees` (sparse-checkout docs exclusion, 184 worktrees, 20.6 GB) with 18-assertion test and an AO-guard bug caught in dry run; 7.9 GB of verified mirror clones removed; `diskm reclaim-ledger` live + 8 growers added to monitored_dirs; media decision measured (LFS/move = 0 per worktree, sparse = 162 MiB).
 - [2026-10-10](activity/2026-10-10.md) — PR #141 squash-merged & deployed (v0.2.191); fixed worktree_remove_hook lsof descriptor handling (fcwd); 12 worktrees pruned (~1.34 GB reclaimed); Mac capacity and CI disk-prevention handoff.
 - [2026-10-09](activity/2026-10-09.md) — PR #128 squash-merged & deployed (v0.2.173); 57 worktrees reclaimed (+14.17 GB); forensic root-cause analysis on ~/.worktrees growth (+77 GB).
 - [2026-10-06](activity/2026-10-06.md) — Emergency disk-fill recovery (+63 GiB reclaimed; 8.7 → 74 GiB available); PR #110 landed & deployed (v0.2.137); Colima VM un-wedged and trimmed (11.5 GiB in-VM); fast-fill root cause documented.
@@ -24,6 +25,8 @@
   - Cleanup modes and approvals are documented in that nextsteps doc: SAFE/REVIEW/MANUAL classes + env-gate map.
 
 ## Recent activity (rolling)
+
+- 2026-10-22 — Worktree sizing root-cause on Linux: per-worktree cost is tracked docs (162 MiB) not git objects; only sparse-checkout reduces checkouts (46.8 GiB tree-wide); venv symlinking rejected (envs differ 293–311 pkgs); stale registrations were 8 not 312; mirror sweeper and prune-policy beads filed.
 
 - 2026-07-06 (evening) — Post-#8 portability: README launchd docs, disk_history backup fallback, find_stale_large_dirs.sh; closed jleechan-p1cw.
 

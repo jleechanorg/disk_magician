@@ -48,6 +48,8 @@ Options:
   --native-docker   Use the native Linux Docker daemon at unix:///var/run/docker.sock
                     (DockerRootDir /var/lib/docker); no Colima recovery or fstrim.
   -h, --help        Show this help.
+  --print-paths     Print the resolved Colima root/datadisk/socket and exit 0
+                    (diagnostic; makes the macOS-vs-XDG resolution testable).
 EOF
 }
 
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)       DRY_RUN=true ;;
     --prune-volumes) PRUNE_VOLUMES=true ;;
     --trim-only)     TRIM_ONLY=true ;;
+    --print-paths)   PRINT_PATHS=true ;;
     --native-docker) NATIVE_DOCKER=true ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -145,12 +148,32 @@ record_docker_prune_output() {
   ACTUATOR_REMOVED_COUNT=$((ACTUATOR_REMOVED_COUNT + count))
 }
 
-COLIMA_LIMA="$HOME/.colima/_lima"
-COLIMA_DOCKER_SOCKET="$HOME/.colima/default/docker.sock"
+# Colima's VM lives under ~/.colima/_lima on macOS but under the XDG config dir
+# (~/.config/colima/_lima) on Linux. Resolve whichever actually exists, honouring
+# COLIMA_HOME, so the cleaner is not silently inactive on Linux — the 2026-10-22
+# audit found an 8.8 GiB running VM at ~/.config/colima that this script skipped
+# as "not Colima". COLIMA_ROOT is the resolved root for the probe helpers below.
+colima_root() {
+  local root="${COLIMA_HOME:-$HOME/.colima}" xdg="${XDG_CONFIG_HOME:-$HOME/.config}/colima"
+  if [[ -d "$root/_lima" || ! -d "$xdg/_lima" ]]; then
+    printf '%s\n' "$root"
+  else
+    printf '%s\n' "$xdg"
+  fi
+}
+COLIMA_ROOT="$(colima_root)"
+COLIMA_LIMA="$COLIMA_ROOT/_lima"
+COLIMA_DOCKER_SOCKET="$COLIMA_ROOT/default/docker.sock"
 COLIMA_SSH_DIR="$COLIMA_LIMA/colima"
 NATIVE_DOCKER_SOCKET="/var/run/docker.sock"
 NATIVE_DOCKER_ENDPOINT="unix://$NATIVE_DOCKER_SOCKET"
 NATIVE_DOCKER_ROOT="/var/lib/docker"
+
+if [[ "${PRINT_PATHS:-false}" == true ]]; then
+  printf 'COLIMA_ROOT=%s\nCOLIMA_LIMA=%s\nCOLIMA_DOCKER_SOCKET=%s\n' \
+    "$COLIMA_ROOT" "$COLIMA_LIMA" "$COLIMA_DOCKER_SOCKET"
+  exit 0
+fi
 
 path_owner_uid() {
   stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
