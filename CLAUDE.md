@@ -55,6 +55,16 @@ human-readable reports stay in `~/roadmap`; publish evidence that must survive
 reclaim through the established evidence path. Do not remap global `TMPDIR`,
 replace `/tmp`, move existing user data or treat Scratch as durable storage.
 
+## Lightweight PR Workflow (/prw) — Internal Tool Contract
+
+Because `disk_magician` is an internal host-maintenance tool, it opts into a **lightweight `/prw` contract** (per `~/.claude/skills/pr-workflow-manager/SKILL.md` § "One operational contract"):
+- **No multi-stage title/label ceremony**: Do not use `[Stage 1]`..`[Stage 5]` title prefixes or multi-reviewer `/advice`, `/web-advice`, or `/er` quorum waits unless explicitly requested by the user.
+- **Required Lightweight `/prw` Gates**:
+  1. **Package Sync & Version Bump**: Run `bash ./disk_magician.sh sync-package-tree --check` and `bash scripts/check_version_bump.sh origin/main` (or `./disk_magician.sh check-version`) whenever packaged code/scripts/config change.
+  2. **Targeted Validation & `/green`**: Run the targeted unit/shell tests covering the changed files locally, ensure `mergeable == MERGEABLE`, and verify GitHub Actions (`Test and lint` + `Evidence Gate`, or a documented local-equivalent receipt if CI is queued/running >10 minutes per `~/.claude/skills/pr-green-definition/SKILL.md`).
+  3. **Evidence Gate (`Claim class: tooling` or `documentation-only`)**: Include an `## Evidence` section in the PR body that passes `python3 .github/scripts/validate_evidence.py` (`**Claim class:** tooling` or `documentation-only`, `**Verdict:** PASS`, `**Commands and results:**`, `**What this proves:**`, `**What this does not prove:**`). Use `Claim class: production` (with gist + head SHA) only when claiming a live production state change.
+  4. **Code Standards (`/cs`)**: Run the 4-lane `/cs` check (`Ponytail`, `ZFC`, `ZFC leveling`, `Root-cause-first`) only when a PR adds `>150` production lines.
+
 ## Investigation methodology — fleet, existing ledger, floor/buckets, bounded audit
 
 Disk-fill investigations in this repo MUST follow a fixed pre-analysis
