@@ -145,6 +145,48 @@ wtn_configure_lfs() {
     git -C "$wt" config lfs.locksverify false >/dev/null 2>&1 || true
 }
 
+# wtn_apply_sparse_excludes <wt> — keep heavy tracked dirs out of a fresh checkout.
+#
+# Worktree size on Linux is dominated by tracked documentation, not git objects:
+# worldarchitect.ai carries 156.8 MB of docs per checkout (user-stories-ui alone
+# is 91.9 MB of PNGs), so every new worktree costs ~162 MiB for docs nobody
+# reopens. Opt in per repo, never host-wide:
+#
+#   git config --add diskm.sparseExclude docs      (in the main repo)
+#   DISK_MAGICIAN_SPARSE_EXCLUDES=docs,evidence    (one-off override)
+#
+# Excludes are applied with per-worktree sparse-checkout, so siblings and the
+# main repo are untouched and `git sparse-checkout disable` reverses it. This
+# never fails the create: a worktree that could not be slimmed is still a
+# worktree, and a partially-materialized tree is worse than a large one.
+wtn_apply_sparse_excludes() {
+    local wt="$1" ex pats=() cfg
+    if [[ "${DISK_MAGICIAN_SPARSE_EXCLUDE_OFF:-0}" == "1" ]]; then
+        return 0
+    fi
+    cfg="${DISK_MAGICIAN_SPARSE_EXCLUDES:-}"
+    if [[ -z "$cfg" ]]; then
+        cfg="$(git -C "$wt" config --get-all diskm.sparseExclude 2>/dev/null | paste -sd, -)"
+    fi
+    [[ -n "$cfg" ]] || return 0
+    # Already sparse (a reused path or an inherited setting): do not re-set it,
+    # which would discard whatever the caller already chose.
+    local gd; gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)"
+    [[ -n "$gd" && -f "$gd/info/sparse-checkout" ]] && return 0
+    pats=('/*')
+    local IFS=','
+    for ex in $cfg; do
+        ex="${ex#/}"; ex="${ex%/}"
+        [[ -n "$ex" ]] && pats+=("!/$ex/")
+    done
+    unset IFS
+    [[ "${#pats[@]}" -gt 1 ]] || return 0
+    if ! git -C "$wt" sparse-checkout set --no-cone "${pats[@]}" >/dev/null 2>&1; then
+        echo "worktree-new: sparse exclude failed for $wt (kept full checkout)" >&2
+    fi
+    return 0
+}
+
 # wtn_create <repo> <branch> <path> <base> [new] — worktree add, git output to
 # stderr, ${WTN_ADD_TIMEOUT:-30} s cap; prints <path> on success; a failed
 # add leaves git's own rc in WTN_ADD_RC (worktree-new's exit, spec §7.1). Existing
@@ -217,6 +259,7 @@ wtn_create() {
         return 1
     fi
     wtn_configure_lfs "$path"
+    wtn_apply_sparse_excludes "$path"
     printf '%s\n' "$path"
 }
 

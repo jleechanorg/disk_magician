@@ -345,7 +345,7 @@ class DiskStatusEvaluator:
         self.tmp_scratch_sweep_max_age_hours = tmp_scratch_sweep_max_age_hours
 
     def evaluate_fleet(self) -> Dict[str, Any]:
-        """Evaluate launchd automation fleet health."""
+        """Evaluate native scheduler automation health without mutation."""
         if self.fleet_json:
             if not self.fleet_json.exists():
                 return make_result(
@@ -366,18 +366,8 @@ class DiskStatusEvaluator:
                 )
             return normalize_fleet_data(data, source=str(self.fleet_json))
 
-        # Subprocess evaluation
-        if sys.platform != "darwin":
-            return make_result(
-                status=STATUS_HEALTHY,
-                reason="launchd_not_applicable_on_platform",
-                owner="launchd_fleet",
-                source="platform_check",
-                paths=[],
-                time=self.now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                records=[],
-            )
-
+        # Inspect the native scheduler on both platforms. A missing systemd
+        # bus is unknown, not a healthy launchd-not-applicable result.
         check_script = SCRIPTS_DIR / "check_launchd_fleet.sh"
         if not check_script.is_file():
             return make_result(

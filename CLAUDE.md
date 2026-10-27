@@ -257,7 +257,10 @@ only strips rebuildable dependency dirs and does not run the hidden-state check;
 it relies on fail-closed recency, live-cwd, AO and `safety_gate` checks.
 `cleanup_worktrees.sh` also treats a clean worktree as removable when its branch tip is
 already on `origin` (live `git ls-remote` equals HEAD; any failure keeps it preserved), since
-the branch ref and the remote copy both survive.
+the branch ref and the remote copy both survive. A clean DETACHED worktree is removable
+the same way when its HEAD is an ancestor of a tip origin advertises live (`ls-remote`
+heads and PR heads, never stale remote-tracking refs; failure or timeout keeps it);
+the ledger and deletion-log lines carry `reason=detached-on-origin`.
 
 **A git worktree touched within the last 7 days is PROTECTED.** No script,
 sweeper, launchd job, or agent in this repo may delete, archive, strip
@@ -333,7 +336,49 @@ is the same incident with extra steps — see the triage ladder in
 `scripts/worktree_hygiene.sh` (`classify_candidate`), which is the canonical
 SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
 
-## Deployment — commit is NOT deploy (two consumers, two paths)
+## Machine-specific state repo — where the ledger lives (read this first in any disk investigation)
+
+Every machine keeps its own **git repo** of measured state. It is separate from this
+code repo, has its own remote (`jleechanorg/disk-magician-state-<host>`), and is the
+only place the per-host ledger, snapshots and config copy exist.
+
+| | |
+|---|---|
+| Find it | `./disk_magician.sh state status` → prints path, commit count, remote |
+| For scripts | `python3 scripts/resolve_state_repo_path.py` (prints the winning path) |
+| Linux (XDG default) | `$XDG_STATE_HOME/disk-magician` → `~/.local/state/disk-magician` |
+| Mac (grandfathered) | `~/.disk_magician_backup` |
+| Identity | `MACHINE` (hostname, created, tool) at the repo root |
+| Remote lifecycle | `diskm state remote <url>` (set), `diskm state push` (publish) |
+
+Precedence (design: `roadmap/2026-07-21-generic-split-state-repo-design.md`):
+`DISK_MAGICIAN_STATE_REPO` env → `state_repo_path` key in the winning config →
+XDG default.
+
+### What diskm reads from it
+
+| Path | Read by | Contents |
+|---|---|---|
+| `reclaim/known-reclaim-dirs.md` | humans + any investigation | **the ledger**: cleaned roots (C), fast regrowers (D), growth vs floor (B), uncovered/needs-decision (A). Regenerate with `diskm reclaim-ledger` (`--stdout` previews) |
+| `snapshots/disk_snapshot.json` | `diskm history`, `disk_status.py`, floor math | 2-hourly used/free + per-`monitored_dirs` sizes; coverage-gated (≥70%) |
+| `ledger/topdown-5g.json` | `diskm history diff`, `growth-top10`, ledger freshness | ≥5 GiB buckets from a **complete** `diskm frontier` run; empty until one succeeds |
+| `config/config.json` | config chain fallback | copy — see the trap below |
+
+### Trap: the state repo's config copy is overwritten every snapshot
+
+`scripts/snapshot_commit.sh` (`cp "$CFG" "$STATE_DIR/config/config.json"`) refreshes
+that copy from the **winning config** on every run. Editing the state-repo copy
+therefore silently reverts within two hours (observed 2026-10-22: eight
+`monitored_dirs` additions were lost this way).
+
+The winner is chosen by `scripts/resolve_config.py` —
+`DISK_MAGICIAN_CONFIG` → `~/.config/disk-magician/config.json` → state repo →
+`config.json`/`config.json.template`. **Add monitored directories to the winning
+file** (on this host `~/.config/disk-magician/config.json`), and `monitored_dirs` is
+the one list the reclaim ledger reports over — the ledger's job is to flag growers
+that are missing from it.
+
+
 
 **Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 

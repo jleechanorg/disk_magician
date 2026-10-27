@@ -31,8 +31,10 @@ Design contract (roadmap doc, "post-critic" section):
 
 import argparse
 import collections
+import datetime
 import concurrent.futures
 import errno
+import hashlib
 import heapq
 import json
 import math
@@ -802,7 +804,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     }
 
 
-def list_children(path, unfinished=None, remaining_budget=None):
+def list_children(path, unfinished=None, remaining_budget=None, claim_discovery_slot=None):
     """Cheap O(1)-per-level enumeration (single readdir). Never descends
     through symlinked directories — those are measured as leaves (du -P
     reports their own tiny size) so they can never contribute a walk cost
@@ -820,6 +822,8 @@ def list_children(path, unfinished=None, remaining_budget=None):
         try:
             with os.scandir(path) as it:
                 for entry in it:
+                    if claim_discovery_slot is not None and not claim_discovery_slot():
+                        return children, "child_entry_limit_exceeded"
                     # A directory with millions of children can otherwise keep an
                     # already-expired scan walking well past its wall-clock cap.
                     if remaining_budget is not None and remaining_budget() <= 0:
@@ -966,6 +970,36 @@ def build_granularity_buckets(measured, root, granularity_kb):
         buckets.extend(select(child))
     buckets.sort(key=lambda item: (-item["measured_kb"], item["path"]))
     return buckets
+
+
+def inventory_mountpoint(path):
+    """Return the longest measured mountpoint containing path."""
+    path = os.path.abspath(path)
+    if sys.platform.startswith("linux"):
+        try:
+            candidates = []
+            with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+                for line in stream:
+                    left, _, _right = line.partition(" - ")
+                    fields = left.split()
+                    if len(fields) < 5:
+                        continue
+                    mountpoint = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+                    mountpoint = os.path.normpath(mountpoint)
+                    if path == mountpoint or path.startswith(mountpoint.rstrip(os.sep) + os.sep):
+                        candidates.append(mountpoint)
+            return max(candidates, key=len) if candidates else None
+        except OSError:
+            return None
+    try:
+        out = subprocess.check_output(["df", "-P", path], text=True)
+        lines = out.strip().splitlines()
+        if len(lines) >= 2:
+            mountpoint = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), lines[-1].split()[-1])
+            return os.path.normpath(mountpoint)
+    except (subprocess.CalledProcessError, OSError):
+        pass
+    return None
 
 
 def get_disk_stats(root):
@@ -1118,6 +1152,8 @@ class FrontierScanner:
         self.tracker = ConcurrencyTracker()
         self.sem = AdjustableSemaphore(args.workers)
         self.measured = {}
+        self.discovered_directories = {os.path.abspath(self.root)}
+        self.inventory_mode = getattr(args, "inventory", False)
         self.hardlink_seen = {}
         self.hardlink_duplicates = []
         self.hardlink_duplicate_kb = 0
@@ -1150,6 +1186,8 @@ class FrontierScanner:
         )
         self.fda_preflight = fda_preflight(self.fda_probe_catalog)
         self.nodes_processed = 0
+        self.inventory_discovery_count = 0
+        self.inventory_discovery_lock = threading.Lock()
         self.nodes_lock = threading.Lock()
         self.start_time = 0.0
         self.root_dev = None
@@ -1164,7 +1202,7 @@ class FrontierScanner:
         #   - ~/.dark-factory/logs/  97,762 log files × ~4 KiB = 383 MiB
         #   - ~/.gemini/history/     1,916 entries × ~120 KiB = 231 MiB
         # Operators may extend via --exclude-prefix.
-        default_excludes = [
+        default_excludes = [] if getattr(args, "inventory", False) else [
             "/.claude/session-env/",
             "/.dark-factory/logs/",
             "/.gemini/history/",
@@ -1426,6 +1464,14 @@ class FrontierScanner:
             self.nodes_processed += 1
             return True
 
+    def claim_inventory_discovery_slot(self):
+        """Bound aggregate inventory child materialization across workers."""
+        with self.inventory_discovery_lock:
+            if self.inventory_discovery_count >= self.max_nodes:
+                return False
+            self.inventory_discovery_count += 1
+            return True
+
     def maybe_throttle(self):
         """Backpressure: halve worker-pool capacity when 1-min loadavg
         exceeds core count or free disk drops below the safety floor.
@@ -1548,6 +1594,32 @@ class FrontierScanner:
                 self.hardlink_seen[hardlink_identity] = (
                     path, (st.st_blocks * 512 + 1023) // 1024
                 )
+
+        if stat.S_ISDIR(st.st_mode):
+            self.discovered_directories.add(os.path.abspath(path))
+
+        # Inventory mode uses the same BFS queue to descend through every directory,
+        # including small and hidden paths; budget/depth/errors remain explicit.
+        if self.inventory_mode and stat.S_ISDIR(st.st_mode):
+            if depth >= self.max_depth:
+                self.frontier_unfinished.append({"path": path, "depth": depth,
+                    "reason": "inventory_max_depth_reached"})
+            else:
+                children, enumeration_error = list_children(
+                    path, self.frontier_unfinished, self.remaining_budget,
+                    self.claim_inventory_discovery_slot,
+                )
+                if children is None:
+                    self.frontier_unfinished.append({"path": path, "depth": depth,
+                        "reason": "inventory_" + (enumeration_error or "enumeration_failed")})
+                    return []
+                if enumeration_error:
+                    self.frontier_unfinished.append({"path": path, "depth": depth,
+                        "reason": "inventory_" + enumeration_error})
+                if children:
+                    return [(child_path, depth + 1, child_symlink)
+                            for child_path, child_symlink in children]
+                return []
 
         # Symlinks are always measured as leaves (du -P never follows them,
         # so this is O(1) and cannot double-count or recurse).
@@ -1687,8 +1759,12 @@ class FrontierScanner:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
         level1, root_enumeration_error = list_children(
-            self.root, self.frontier_unfinished, self.remaining_budget
+            self.root, self.frontier_unfinished, self.remaining_budget,
+            self.claim_inventory_discovery_slot if self.inventory_mode else None,
         )
+        if level1 is not None and root_enumeration_error and self.inventory_mode:
+            self.frontier_unfinished.append({"path": self.root, "depth": 0,
+                "reason": "inventory_" + root_enumeration_error})
         if level1 is None:
             return {
                 "error": f"could not enumerate root: {self.root}",
@@ -1696,7 +1772,7 @@ class FrontierScanner:
             }
         self.level1_paths = [path for path, _ in level1]
 
-        if GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
+        if not self.inventory_mode and GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
             self._capture_system_boundary_attestations()
             self.run_finished_at = time.time()
             return None
@@ -2283,6 +2359,8 @@ def per_path_accounting(top_level_ledger, data_used_kb):
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", default=DEFAULT_ROOT)
+    p.add_argument("--inventory", action="store_true", help="publish a partial immutable directory inventory")
+    p.add_argument("--root-inventory", action="store_true", help="publish through the fixed isolated root store")
     p.add_argument(
         "--scan-user-home",
         default=None,
@@ -2330,7 +2408,17 @@ def parse_args(argv):
                     help="print MAX_CONCURRENT_DU=<n> to stderr at the end (test hook)")
     p.add_argument("--disk-used-kb-override", type=int, default=None,
                     help="test-only: force disk_used_kb to exercise residual clamping")
-    args = p.parse_args(argv)
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+    args = p.parse_args(raw_args)
+    if args.inventory and sys.platform != "darwin" and "--root" not in raw_args:
+        args.root = "/"
+    if args.root_inventory:
+        fixed_root = DEFAULT_ROOT if sys.platform == "darwin" else "/"
+        forbidden = (args.output is not None or args.output_default or args.scan_user_home is not None
+                     or args.exclude_prefix is not None or args.root != fixed_root
+                     or not args.inventory)
+        if forbidden:
+            p.error("--root-inventory requires the platform fixed root (--root " + fixed_root + ") and --inventory; output, user-home, and exclusions are forbidden")
     if args.scan_user_home is not None and not is_valid_scan_user_home(
         args.scan_user_home
     ):
@@ -2347,6 +2435,23 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.root_inventory:
+        if any(name in os.environ for name in ("DISK_MAGICIAN_STATE_DIR", "PYTHONPATH", "PYTHONHOME")):
+            raise PermissionError("root inventory refuses environment path or module overrides")
+        trusted_codec = Path(__file__).absolute().with_name("directory_inventory.py")
+        if trusted_codec.is_symlink():
+            raise PermissionError("root inventory codec must not be a symlink")
+        module_stat = trusted_codec.stat()
+        if module_stat.st_uid != 0 or module_stat.st_mode & 0o022:
+            raise PermissionError("root inventory codec is not fixed root-owned code")
+        for parent in trusted_codec.parents:
+            if parent.is_symlink():
+                raise PermissionError("root inventory codec path contains a symlink")
+            parent_stat = parent.stat()
+            if parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
+                raise PermissionError("root inventory codec ancestor is not root-owned and immutable")
+            if parent == parent.parent:
+                break
 
     disk_stats_before = get_disk_stats(args.root)
     scanner = FrontierScanner(args)
@@ -2383,6 +2488,180 @@ def main(argv=None):
         apfs_accounting=apfs_accounting,
         disk_stats_before=disk_stats_before,
     )
+
+    if args.inventory:
+        if args.root_inventory:
+            import importlib.util
+            module_path = Path(__file__).resolve().with_name("directory_inventory.py")
+            spec = importlib.util.spec_from_file_location("directory_inventory", module_path)
+            codec = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(codec)
+        else:
+            import directory_inventory as codec
+        publish_inventory = codec.publish_inventory
+        records_count = 0
+        scan_id = str(uuid.uuid4())
+        sampled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        state_dir = ("/var/db/disk-magician" if sys.platform == "darwin" else "/var/lib/disk-magician") if args.root_inventory else os.environ.get("DISK_MAGICIAN_STATE_DIR", os.path.expanduser("~/.disk_magician_state"))
+        mountpoint_by_path = {}
+        selected_mounts = {}
+        identity_unresolved = []
+        ledger_measured = {os.path.abspath(item["path"]): item.get("measured_kb")
+            for item in report.get("top_level_ledger", [])}
+        for candidate in scanner.discovered_directories:
+            try:
+                candidate_stat = os.stat(candidate, follow_symlinks=False)
+                mountpoint = inventory_mountpoint(candidate)
+            except OSError:
+                continue
+            if mountpoint:
+                fsid = f"{candidate_stat.st_dev}:{mountpoint}"
+                mountpoint_by_path[candidate] = (fsid, mountpoint, candidate_stat.st_dev)
+                selected_mounts.setdefault(fsid, {"filesystem_id": fsid, "mountpoint": mountpoint,
+                    "device": candidate_stat.st_dev, "fstype": None, "case_sensitive": None,
+                    "identity_status": "observed", "selected_roots": [], "excluded_roots": []})
+                roots = selected_mounts[fsid]["selected_roots"]
+                if os.path.abspath(candidate) == os.path.abspath(args.root) or os.path.abspath(args.root).startswith(os.path.abspath(candidate).rstrip(os.sep) + os.sep):
+                    if os.path.abspath(candidate) not in roots:
+                        roots.append(os.path.abspath(candidate))
+            else:
+                identity_unresolved.append(os.path.abspath(candidate))
+        try:
+            previous_records = iter(codec.iter_current_records(state_dir))
+            previous = next(previous_records, None)
+        except (OSError, ValueError, KeyError):
+            previous_records = iter(())
+            previous = None
+
+        def inventory_records():
+            nonlocal records_count, previous
+            ordered_paths = sorted(scanner.discovered_directories,
+                key=lambda value: (mountpoint_by_path.get(value, (None,))[0] or "", os.path.abspath(value)))
+            for path in ordered_paths:
+                size_kb = ledger_measured.get(os.path.abspath(path))
+                if size_kb is None:
+                    size_kb = scanner.observed.get(path)
+                if size_kb is None:
+                    size_kb = scanner.measured.get(path)
+                if size_kb is None and os.path.isdir(path):
+                    prefix = os.path.abspath(path).rstrip(os.sep) + os.sep
+                    values = [int(kb) for measured_path, kb in scanner.measured.items()
+                        if os.path.abspath(measured_path) == os.path.abspath(path)
+                        or os.path.abspath(measured_path).startswith(prefix)]
+                    if values:
+                        size_kb = sum(values)
+                try:
+                    path_stat = os.stat(path, follow_symlinks=False)
+                    filesystem_id, mountpoint, _device = mountpoint_by_path.get(path, (None, None, None))
+                    generation_id = hashlib.sha256(f"{path_stat.st_dev}:{path_stat.st_ino}".encode()).hexdigest() if filesystem_id else None
+                    candidate_key = (filesystem_id or "", os.path.abspath(path))
+                    prior = None
+                    try:
+                        while previous is not None and (previous.get("filesystem_id") or "", previous["canonical_path"]) < candidate_key:
+                            previous = next(previous_records, None)
+                        if previous is not None and (previous.get("filesystem_id") or "", previous["canonical_path"]) == candidate_key:
+                            prior = previous
+                    except (OSError, ValueError, KeyError, StopIteration):
+                        previous = None
+                        prior = None
+                    if not filesystem_id:
+                        generation_status = "uncertain"
+                    elif prior and prior.get("currently_observed", True) and prior.get("path_generation", {}).get("id") == generation_id:
+                        generation_status = "known"
+                    elif prior:
+                        generation_status = "changed" if prior.get("currently_observed", True) else "uncertain"
+                    else:
+                        generation_status = "uncertain"
+                except OSError:
+                    filesystem_id = None
+                    mountpoint = None
+                    generation_id = None
+                    generation_status = "uncertain"
+                affected = any(os.path.abspath(item.get("path", args.root)) == path
+                    or os.path.abspath(item.get("path", args.root)).startswith(path.rstrip(os.sep) + os.sep)
+                    for item in report.get("frontier_unfinished", []))
+                records_count += 1
+                yield {
+                    "filesystem_id": filesystem_id,
+                    "mountpoint": mountpoint,
+                    "canonical_path": os.path.abspath(path),
+                    "path_generation": {"id": generation_id, "status": generation_status},
+                    "membership_status": "observed", "currently_observed": True,
+                    "observation": {"scan_id": scan_id, "started_at": sampled_at,
+                        "ended_at": sampled_at, "allocated_bytes": int(size_kb) * 1024 if size_kb is not None else None,
+                        "apparent_bytes": None, "size_semantics": "inclusive",
+                        "source": "frontier", "measurement_status": "measured" if size_kb is not None else "unknown",
+                        "subtree_coverage_status": "partial" if affected else "complete",
+                        "comparable": size_kb is not None and not affected},
+                    "attribution": {"basis": "unknown", "capability": "unknown",
+                        "comparability": "unknown", "reason": "filesystem allocation is not attributable from logical scan"},
+                }
+        unresolved = [item.get("path", args.root) for item in report.get("frontier_unfinished", [])]
+        unresolved.extend(identity_unresolved)
+        inventory_complete = not report.get("frontier_unfinished") and not identity_unresolved
+        root_stat = os.stat(args.root)
+        root_mount = inventory_mountpoint(args.root) or args.root
+        root_fsid = f"{root_stat.st_dev}:{root_mount}"
+        if not selected_mounts:
+            selected_mounts[root_fsid] = {"filesystem_id": root_fsid, "mountpoint": root_mount,
+                "device": root_stat.st_dev, "fstype": None, "case_sensitive": None,
+                "identity_status": "uncertain", "selected_roots": [args.root], "excluded_roots": []}
+        selected_filesystems = sorted(selected_mounts.values(), key=lambda item: item["mountpoint"])
+        for item in selected_filesystems:
+            if not item["selected_roots"]:
+                item["selected_roots"] = [os.path.abspath(args.root)] if inventory_mountpoint(args.root) == item["mountpoint"] else []
+        stable_set = [{k: v for k, v in item.items() if k != "identity_status"} for item in selected_filesystems]
+        selected_set_sha = hashlib.sha256(json.dumps(stable_set, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        selection_epoch = selected_set_sha
+        for item in selected_filesystems:
+            item["selection_epoch"] = selection_epoch
+        df_samples = []
+        for item in selected_filesystems:
+            sample = get_disk_stats(item["mountpoint"])
+            sample_row = {"filesystem_id": item["filesystem_id"], "mountpoint": item["mountpoint"],
+                "sampled_at": sampled_at, "used_bytes": int(sample["used_kb"]) * 1024,
+                "free_bytes": int(sample["free_kb"]) * 1024, "total_bytes": int(sample["total_kb"]) * 1024}
+            df_samples.append(sample_row)
+            item["df_samples"] = [sample_row]
+        metadata = {"selected_filesystems": selected_filesystems, "df_samples": df_samples,
+            "selection_epoch": selection_epoch, "selected_set_sha256": selected_set_sha}
+        if args.root_inventory:
+            # Root collection has no configured fixed user-store path yet; fail closed.
+            aggregate_roots = None
+        else:
+            root_state = "/var/db/disk-magician" if sys.platform == "darwin" else "/var/lib/disk-magician"
+            spool_state = root_state + "/spool"
+            aggregate_roots = {"root": root_state, "user": state_dir, "spool": spool_state}
+        try:
+            inventory_result = publish_inventory(inventory_records(), state_dir=state_dir,
+                complete=inventory_complete, unresolved_frontier=[] if inventory_complete else unresolved,
+                scan_metadata=metadata, merge_existing=True, merge_policy="incoming_wins",
+                require_admission=True, aggregate_roots=aggregate_roots)
+        except codec.InventoryAdmissionError as admission:
+            reason = admission.report["reason"]
+            if args.root_inventory and reason in ("aggregate_roots_unknown", "aggregate_unavailable"):
+                reason = "privileged_collector_unavailable"
+            report["inventory"] = {"status": admission.report["status"],
+                "admission_allowed": False, "reason": reason,
+                "quota": admission.report, "published": False,
+                "scan_coverage_complete": inventory_complete,
+                "unresolved_frontier": report.get("frontier_unfinished", []),
+                "discovered_directory_count": len(scanner.discovered_directories),
+                "discovery_entry_count": scanner.inventory_discovery_count}
+            print(json.dumps(report, indent=2))
+            return 2
+        if args.root_inventory:
+            receipt = {"status": "complete" if inventory_complete else "partial",
+                "published_at": inventory_result["pointer"]["published_at"],
+                "manifest_sha256": inventory_result["pointer"]["manifest_sha256"],
+                "complete": inventory_complete,
+                "unresolved_frontier": inventory_result["manifest"]["unresolved_frontier"],
+                "records_count": inventory_result.get("records_count", records_count)}
+            atomic_write_json(os.path.join(state_dir, "inventory-root-receipt.json"), json.dumps(receipt))
+        report["inventory"] = {"complete": inventory_complete,
+            "unresolved_frontier": inventory_result["manifest"]["unresolved_frontier"],
+            "manifest_sha256": inventory_result["pointer"]["manifest_sha256"],
+            "records_count": inventory_result.get("records_count", records_count)}
 
     out_text = json.dumps(report, indent=2)
 

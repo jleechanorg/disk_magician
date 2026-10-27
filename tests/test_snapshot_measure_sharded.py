@@ -98,8 +98,9 @@ class ShardedMeasureTests(unittest.TestCase):
         self.assertTrue(r["partial"])
         self.assertEqual(r["stale_shards"], {"slow": 5000})
         self.assertTrue(r["lower_bound"])
-        # stale value is reported, never summed: it must not count toward coverage
-        self.assertEqual(r["kb"], 100 + int(os.stat(self.root).st_blocks * 512 // 1024))
+        # the last-good value is part of the root's value (flagged stale), so the sum never collapses to the fresh shards
+        self.assertEqual(r["kb"], 100 + 5000 + int(os.stat(self.root).st_blocks * 512 // 1024))
+        self.assertEqual(r["fresh_kb"], 100 + int(os.stat(self.root).st_blocks * 512 // 1024))
 
     def test_shards_run_concurrently(self):
         make_tree(self.root, ["a", "b"])
@@ -129,7 +130,7 @@ class ShardedMeasureTests(unittest.TestCase):
                              str(Path(self.tmp.name) / "out"), {"big": sm.SHARD_MIN_KB},
                              diagnostics_out=diag, shard_state_path=str(state), shard_timeout=1, shard_workers=2)
         own = int(os.stat(self.root).st_blocks * 512 // 1024)
-        self.assertEqual(res["big"], own + 100)
+        self.assertEqual(res["big"], own + 100 + 7000)
         part = [f for f in diag["measurement_failures"] if f["key"] == "big"][0]
         self.assertEqual((part["status"], part["timed_out_shards"], part["stale_shards"]),
                          ("partial", ["slow"], {"slow": 7000}))
@@ -137,6 +138,8 @@ class ShardedMeasureTests(unittest.TestCase):
         self.assertEqual({k: v["kb"] for k, v in saved["shards"].items()}, {"fast": 100, "slow": 7000})
         self.assertIn("big", diag["lower_bound_keys"])
         self.assertIn("big", diag["partial_keys"])
+        meta = diag["sharded_roots"]["big"]
+        self.assertEqual((meta["shards_total"], meta["shards_fresh"], meta["shards_stale"], meta["partial"]), (2, 1, 1, True))
 
     def test_stale_carry_expires_after_max_age(self):
         make_tree(self.root, ["fast1", "slow"])
@@ -147,7 +150,7 @@ class ShardedMeasureTests(unittest.TestCase):
                                prior={"slow": {"kb": 5000, "ts": old}}, carry_max_s=48 * 3600)
         self.assertEqual(r["stale_shards"], {})
         self.assertEqual(r["expired_shards"], ["slow"])
-        self.assertNotIn("slow", r["carry"])
+        self.assertIsNone(r["carry"]["slow"]["kb"])  # expired value dropped; only the attempt record stays
         self.assertTrue(r["partial"] and r["lower_bound"])
 
     def test_legacy_untimestamped_carry_is_expired(self):
@@ -171,8 +174,173 @@ class ShardedMeasureTests(unittest.TestCase):
         r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=10, deadline=time.time() + 60, prior={})
         self.assertEqual(r["lower_bound_shards"], ["denied"])
         self.assertTrue(r["partial"] and r["lower_bound"])
-        self.assertEqual(r["carry"].keys(), {"ok"})  # partial result never persisted as a complete measurement
+        self.assertIsNone(r["carry"]["denied"]["kb"])  # partial result never persisted as a complete measurement
+        self.assertEqual(r["carry"]["ok"]["kb"], 100)
         self.assertEqual(r["kb"], 200 + int(os.stat(self.root).st_blocks * 512 // 1024))
+
+
+
+class IncrementalShardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "bigroot"
+        self.root.mkdir()
+        self.bin = Path(self.tmp.name) / "bin"
+        self.bin.mkdir()
+        stub = self.bin / "du"
+        stub.write_text(STUB_DU)
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.bin}:{self.old_path}"
+        self.addCleanup(lambda: os.environ.update(PATH=self.old_path))
+        for k in ("FAKE_DU_SLEEP", "FAKE_DU_SLOW_NAME", "FAKE_DU_SLOW_SLEEP"):
+            self.addCleanup(os.environ.pop, k, None)
+
+    def own(self, *dirs):
+        return sum(int(os.stat(d).st_blocks * 512 // 1024) for d in (self.root, *dirs))
+
+    def test_rotation_refreshes_every_shard_within_n_runs(self):
+        make_tree(self.root, ["a", "b", "c", "d", "e", "f"])
+        prior, t = {}, time.time()
+        seen = []
+        for run in range(3):
+            r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=5, deadline=t + 600, prior=prior,
+                                   now=t + run * 60, max_per_run=2)
+            prior = r["carry"]
+            seen.append(sorted(r["fresh_shards"]))
+            if run == 0:  # four shards have never been measured: partial, 2 of 6 fresh, not a full value
+                self.assertTrue(r["partial"])
+                self.assertEqual((r["shards_fresh"], r["shards_missing"], r["fresh_fraction"]), (2, 4, 0.333))
+                self.assertEqual(r["kb"], self.own() + 200)
+        self.assertEqual(sorted(sum(seen, [])), ["a", "b", "c", "d", "e", "f"])  # disjoint, each exactly once
+        self.assertFalse(r["partial"])
+        self.assertEqual(r["kb"], self.own() + 600)  # sum of per-shard latest values
+        self.assertEqual((r["shards_fresh"], r["shards_carried"], r["runs_to_full_refresh"]), (2, 4, 3))
+        self.assertAlmostEqual(r["max_shard_age_hours"], 2 / 60, places=1)
+
+    def test_timed_out_shard_goes_to_back_of_queue_and_retries_longer(self):
+        make_tree(self.root, ["a", "slow", "z"])
+        os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
+        t = time.time()
+        r1 = sm.measure_sharded(str(self.root), workers=1, shard_timeout=1, deadline=t + 600, prior={}, now=t, max_per_run=1)
+        r2 = sm.measure_sharded(str(self.root), workers=1, shard_timeout=1, deadline=t + 600, prior=r1["carry"],
+                                now=t + 60, max_per_run=1)
+        r3 = sm.measure_sharded(str(self.root), workers=1, shard_timeout=1, deadline=t + 600, prior=r2["carry"],
+                                now=t + 120, max_per_run=1)
+        self.assertEqual([sorted(r["fresh_shards"]) for r in (r1, r2, r3)], [["a"], [], ["z"]])
+        self.assertEqual(r2["timed_out_shards"], ["slow"])  # attempted second (a was just measured), starved nobody
+
+    def test_twice_timed_out_dir_is_split_into_children(self):
+        make_tree(self.root, ["ok"])
+        (self.root / "rep").mkdir()
+        make_tree(self.root / "rep", ["x", "y"])
+        os.environ.update(FAKE_DU_SLOW_NAME="rep", FAKE_DU_SLOW_SLEEP="30")
+        t = time.time()
+        prior = {}
+        for run in range(2):
+            r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=1, deadline=t + 600, prior=prior, now=t + run)
+            prior = r["carry"]
+        self.assertEqual(r["split"], ["rep"])
+        self.assertIn("rep", r["timed_out_shards"])
+        r = sm.measure_sharded(str(self.root), workers=2, shard_timeout=1, deadline=t + 600, prior=prior, now=t + 2,
+                               split=["rep"])
+        self.assertEqual(sorted(r["fresh_shards"]), ["ok", "rep/x", "rep/y"])
+        self.assertEqual(r["kb"], self.own(self.root / "rep") + 300)  # ok + rep/x + rep/y
+        self.assertFalse(r["partial"])
+
+    def test_split_dir_keeps_old_value_until_children_measured(self):
+        (self.root / "rep").mkdir()
+        make_tree(self.root / "rep", ["x", "y"])
+        t = time.time()
+        prior = {"rep": {"kb": 5000, "ts": t - 60, "at": t - 60, "fails": 0}}
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=5, deadline=t + 600, prior=prior, now=t,
+                               max_per_run=1, split=["rep"])
+        self.assertTrue(r["partial"])
+        self.assertEqual(r["kb"], self.own(self.root / "rep") + 5000)  # umbrella: max(old value, children present)
+        self.assertIn("rep", r["carry"])
+
+    def test_orchestrate_shard_flag_runs_sharded_without_carry_size(self):
+        make_tree(self.root, ["a", "b"])
+        entries = [{"key": "r", "path": str(self.root), "timeout": 30, "retry_timeout": 0, "shard": True}]
+        diag = {}
+        res = sm.orchestrate(entries, "/nonexistent/disk_snapshot.sh", 1, time.time() + 60, str(Path(self.tmp.name) / "o"),
+                             {}, diagnostics_out=diag, shard_state_path=str(Path(self.tmp.name) / "s.json"),
+                             shard_timeout=5, shard_workers=2)
+        self.assertEqual(res["r"], self.own() + 200)
+        self.assertEqual(diag["sharded_roots"]["r"]["shards_total"], 2)
+        saved = json.loads((Path(self.tmp.name) / "s.json").read_text())["roots"]["r"]
+        self.assertIn("run_ts", saved)
+
+    def test_diskm_measure_only_updates_carry_and_shard_state(self):
+        make_tree(self.root, ["a", "b"])
+        cfg = Path(self.tmp.name) / "config.json"
+        cfg.write_text(json.dumps({"monitored_dirs": [{"key": "r", "path": str(self.root), "timeout": 5}]}))
+        state = Path(self.tmp.name) / "state"
+        env = dict(os.environ, DISK_MAGICIAN_CONFIG=str(cfg), DISK_MAGICIAN_STATE_DIR=str(state))
+        out = subprocess.run([sys.executable, str(ROOT / "scripts" / "snapshot_measure.py"), "--only", "r", "--timeout", "30"],
+                             env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        row = json.loads(out.stdout)[0]
+        self.assertEqual((row["key"], row["kb"], row["lower_bound"]), ("r", self.own() + 200, False))
+        self.assertEqual(row["sharded"]["shards_total"], 2)
+        self.assertEqual(json.loads((state / "last_good_measurements.json").read_text())["r"]["kb"], row["kb"])
+        self.assertIn("r", json.loads((state / "shard_last_good.json").read_text())["roots"])
+        bad = subprocess.run([sys.executable, str(ROOT / "scripts" / "snapshot_measure.py"), "--only", "nope"],
+                             env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(bad.returncode, 2)
+
+
+    def test_big_roots_cannot_starve_small_keys_under_a_tight_deadline(self):
+        fake = Path(self.tmp.name) / "fake_snapshot.sh"
+        fake.write_text('#!/usr/bin/env bash\necho \'{"kb": 5}\' > "$5"\n')
+        entries = []
+        for i in range(3):
+            d = Path(self.tmp.name) / f"big{i}"
+            d.mkdir()
+            make_tree(d, ["a", "b"])
+            entries.append({"key": f"big{i}", "path": str(d), "timeout": 2, "retry_timeout": 0, "shard": True})
+        entries.append({"key": "small", "path": str(self.root), "timeout": 5, "retry_timeout": 0})
+        os.environ["FAKE_DU_SLEEP"] = "3"
+        res = sm.orchestrate(entries, str(fake), 2, time.time() + 4, str(Path(self.tmp.name) / "o"), {},
+                             shard_state_path=str(Path(self.tmp.name) / "s.json"), shard_timeout=1, shard_workers=1)
+        self.assertEqual(res["small"], 5)
+
+    def test_nested_split_umbrellas_are_counted_once(self):
+        for d in ("a", "a/b", "a/b/p", "a/b/q", "a/c"):
+            (self.root / d).mkdir(exist_ok=True)
+        t = time.time()
+        later = {"kb": None, "ts": None, "at": t + 1, "fails": 0}
+        prior = {"a": {"kb": 1000, "ts": t - 60, "at": t - 60, "fails": 0},
+                 "a/b": {"kb": 600, "ts": t - 60, "at": t - 60, "fails": 0}, "a/b/p": later, "a/b/q": later}
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=5, deadline=t + 600, prior=prior, now=t,
+                               max_per_run=1, split=["a", "a/b"])
+        self.assertEqual(sorted(r["fresh_shards"]), ["a/c"])
+        self.assertEqual(r["kb"], self.own(self.root / "a", self.root / "a" / "b") + 1000)  # not 1000 + 600 - ...
+
+    def test_root_with_nothing_measured_this_run_is_partial(self):
+        make_tree(self.root, ["a", "b"])
+        t = time.time()
+        prior = {n: {"kb": 700, "ts": t - 60, "at": t - 60, "fails": 0} for n in ("a", "b")}
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=5, deadline=t, prior=prior, now=t)
+        self.assertEqual((r["shards_fresh"], r["shards_carried"], r["partial"]), (0, 2, True))
+        self.assertEqual(r["kb"], self.own() + 1400)
+
+    def test_vanished_path_in_a_bucket_is_a_lower_bound_not_a_timeout(self):
+        make_tree(self.root, ["here"])
+        stub = self.bin / "du"
+        stub.write_text("#!/usr/bin/env bash\nrc=0\nfor a in \"$@\"; do [[ \"$a\" == -* ]] && continue\n"
+                        "  if [[ -e \"$a\" ]]; then printf '100\\t%s\\n' \"$a\"; "
+                        "else echo \"du: $a: No such file or directory\" >&2; rc=1; fi; done\nexit $rc\n")
+        self.assertEqual(sm.measure_shard([str(self.root / "here"), str(self.root / "gone")], 5, time.time() + 60), (100, True))
+
+    def test_time_cut_by_the_run_deadline_is_not_a_shard_failure(self):
+        make_tree(self.root, ["ok", "slow"])
+        os.environ.update(FAKE_DU_SLOW_NAME="slow", FAKE_DU_SLOW_SLEEP="30")
+        t = time.time()
+        r = sm.measure_sharded(str(self.root), workers=1, shard_timeout=30, deadline=t + 2, prior={}, now=t)
+        self.assertEqual(r["timed_out_shards"], [])
+        self.assertEqual(r["carry"]["slow"]["fails"], 0)
 
 
 if __name__ == "__main__":

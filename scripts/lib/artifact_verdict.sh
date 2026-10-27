@@ -343,7 +343,17 @@ _av_derived_data() (
         "$HOME"/*|/tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
         *) return 1 ;;
     esac
-    _av_derived_data_shape "$p"
+    _av_derived_data_shape "$p" || _av_ios_release_unpacked "$p"
+)
+# _av_ios_release_unpacked <dir>: rc 0 for verify-unpacked/ of a finished worldai iOS
+# release scratch dir (/<tmp>/worldai-ios-release-<run>-<attempt>/); the sibling
+# receipts/export.json proves the export ran. Not DerivedData-shaped, so it needs its own proof.
+_av_ios_release_unpacked() (
+    local p="$1" parent
+    [[ "${p##*/}" == verify-unpacked && -d "$p" && ! -L "$p" ]] || return 1
+    parent="${p%/*}"
+    [[ "${parent##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ && -d "$parent" && ! -L "$parent" ]] || return 1
+    [[ -f "$parent/receipts/export.json" && ! -L "$parent/receipts/export.json" ]]
 )
 # _av_newest_mtime <path>: newest mtime of <path> and everything under it; rc 1 if unmeasurable.
 _av_newest_mtime() { python3 "$_AV_DIR/../c14_probe.py" newest-mtime "$1"; }

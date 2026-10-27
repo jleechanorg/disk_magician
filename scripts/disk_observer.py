@@ -637,3 +637,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+def summarize_host_disk_floors(records, *, days, now=None):
+    """Return df-only observed minimum and median daily minimum in KiB."""
+    from datetime import timedelta
+    now = now or datetime.now(timezone.utc)
+    cutoff = now.timestamp() - days * 86400
+    grouped = {}
+    for record in records:
+        try:
+            epoch = float(record["epoch"])
+            used = int((record.get("host_disk") or {})["used_kb"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if epoch < cutoff or epoch > now.timestamp() or used < 0:
+            continue
+        grouped.setdefault(datetime.fromtimestamp(epoch, timezone.utc).date(), []).append(used)
+    minima = [min(values) for values in grouped.values()]
+    if not minima:
+        return {"source": "disk_observer.jsonl", "days_requested": days, "floor_used_kb": None,
+                "median_daily_minimum_kb": None, "observed_days": 0, "coverage_status": "unknown"}
+    ordered = sorted(minima)
+    mid = len(ordered) // 2
+    median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+    expected = {now.date() - timedelta(days=i) for i in range(days)}
+    return {"source": "disk_observer.jsonl", "days_requested": days, "floor_used_kb": min(minima),
+            "median_daily_minimum_kb": median, "observed_days": len(grouped),
+            "earliest_date": min(grouped).isoformat(), "latest_date": max(grouped).isoformat(),
+            "coverage_status": "complete" if expected.issubset(grouped) else "partial"}

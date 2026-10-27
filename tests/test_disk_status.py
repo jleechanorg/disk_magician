@@ -865,12 +865,14 @@ class TestDiskStatus(unittest.TestCase):
         res = evaluator.evaluate_fleet()
         self.assertEqual(res["status"], "unknown")
 
-        # Non-darwin platform fallback -> healthy with launchd_not_applicable_on_platform
+        # Linux must inspect its native scheduler; an unavailable bus is unknown.
         eval_no_fleet = self.get_evaluator(fleet_json=None)
-        with mock.patch("sys.platform", "linux"):
+        with mock.patch("sys.platform", "linux"), mock.patch.object(
+            disk_status.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "No bus")
+        ):
             res = eval_no_fleet.evaluate_fleet()
-            self.assertEqual(res["status"], "healthy")
-            self.assertEqual(res["reason"], "launchd_not_applicable_on_platform")
+            self.assertEqual(res["status"], "unknown")
+            self.assertEqual(res["reason"], "check_launchd_fleet_unavailable_or_unsupported")
 
     def test_worktrees_degraded(self):
         leases = self.state_dir / "worktree_leases"

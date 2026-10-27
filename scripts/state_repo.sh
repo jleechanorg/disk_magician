@@ -7,7 +7,20 @@ export GIT_TERMINAL_PROMPT=0
 
 SR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="$(python3 "$SR_SCRIPT_DIR/resolve_state_repo_path.py")"
+INVENTORY_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-${HOME}/.disk_magician_state}"
 log() { echo "[state_repo] $*"; }
+
+validate_inventory_state_separation() {
+  PYTHONPATH="$SR_SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import sys; from directory_inventory import validate_state_separation; validate_state_separation(sys.argv[1], sys.argv[2])' \
+    "$INVENTORY_STATE_DIR" "$STATE_DIR"
+}
+
+# Check physical paths (including aliases) before init can stage with git add -A.
+validate_inventory_state_separation || {
+  echo "[state_repo] inventory content store and Git state repository must be physically separate" >&2
+  exit 1
+}
 
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
 

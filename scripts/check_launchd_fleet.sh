@@ -91,8 +91,7 @@ fi
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
 
 if [[ "${DISK_MAGICIAN_OSTYPE:-$OSTYPE}" != darwin* ]]; then
-  echo "check_launchd_fleet: not macOS — launchd fleet check skipped (n/a on this OS)."
-  exit 0
+  exec python3 "$SCRIPT_DIR/job_inventory.py" --repo-root "$(cd "$SCRIPT_DIR/.." && pwd)" --text
 fi
 
 missing=0
@@ -229,7 +228,11 @@ fi
 if [[ "$FLEET_ONLY" == false && -x "$SCRIPT_DIR/check_ledger_freshness.sh" ]]; then
   ledger_line="$("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1)" || ledger_rc=$?
   ledger_rc="${ledger_rc:-0}"
-  if [[ "$ledger_line" == STALE* ]]; then
+  if [[ "$ledger_line" == *canonical_publication=stale* ]]; then
+    echo "  ⚠️  Canonical publication stale — a fresh partial scan is not full-disk coverage."
+    echo "  Partial evidence: ${ledger_line#OK	}"
+    fleet_unhealthy=1
+  elif [[ "$ledger_line" == STALE* ]]; then
     echo "  ⚠️  Published ledger stale — ${ledger_line#STALE	}"
     echo "  Bucket deltas from ledger/topdown-5g.json are not trustworthy until a complete frontier scan publishes a new table."
     echo "  Repair: ./disk_magician.sh frontier (deep scan) or wait for com.jleechanorg.disk-magician-frontier-nightly; partial FDA gaps may need root frontier (bead disk_magician-4y6)."

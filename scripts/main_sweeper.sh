@@ -350,6 +350,7 @@ main() {
     [[ -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]] && run_job_step "Tier 1: cleanup_tmp" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_job_step "Tier 1: cleanup_pr_scratch" bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_job_step "Tier 1: cleanup_llm_inspector" bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/quarantine_reconcile.sh" ]] && run_job_step "Tier 1: quarantine_reconcile" bash "$REPO_ROOT/scripts/quarantine_reconcile.sh" "$CLEAN_ARG" --deadline-seconds 300 || true
 
     # Tier 2: Xcode DerivedData & simulator caches (debounced to 24h when healthy)
     if should_run_heavy_task "$STATE_DIR/last_xcode_clean" 86400; then

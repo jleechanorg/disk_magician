@@ -31,6 +31,7 @@ jobs:
 
       - name: Install test tools
         run: |
+          python3 -m pip install pytest
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
           command -v rg >/dev/null 2>&1 || brew install ripgrep
@@ -55,6 +56,15 @@ jobs:
 
       - name: Run Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run inventory integration tests
+        run: >-
+          python3 -m pytest -q
+          tests/test_directory_inventory.py
+          tests/test_directory_ledger_export.py
+          tests/test_inventory_history_import.py
+          tests/test_inventory_retention_cli.py
+          tests/test_inventory_rollout.py
 
       - name: Run shell tests
         run: bash ./disk_magician.sh test-shell

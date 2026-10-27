@@ -37,6 +37,17 @@ if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
 REPO_LOCAL_REPOS=()
+MANUAL_DISCARD=false
+MANUAL_INCLUDE_LIVE=false
+MANUAL_TARGETS_FILE=""
+MANUAL_TARGETS=""
+MANUAL_SEEN_TARGETS=""
+MANUAL_REASON=""
+MANUAL_BASE_HEAD=""
+MANUAL_BASE_STATUS=""
+MANUAL_SNAPSHOT_HEAD=""
+MANUAL_SNAPSHOT_STATUS=""
+MANUAL_RECOVERY_REF=""
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
 RUN_TMP="$(mktemp -d)" || RUN_TMP=""
@@ -46,7 +57,7 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [-h|--help]
+Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [--discard-local-state [--include-live] --targets-file FILE] [-h|--help]
 
 Safely prunes stale linked git worktrees (default: >=3 days old, merged or pristine).
 
@@ -58,6 +69,15 @@ Options:
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
+  --discard-local-state
+                Explicitly permit discarding local changes in exact targets.
+                Requires --targets-file and DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12.
+  --targets-file FILE
+                Absolute newline-delimited allowlist of linked worktree paths.
+                In discard mode, only these paths are considered.
+  --include-live
+                In exact-target discard mode, also permit live, AO-owned, and
+                locked targets. Recency, identity, and machine safety checks remain.
   -h, --help    Show this help.
 
 Environment:
@@ -81,6 +101,13 @@ while [[ $# -gt 0 ]]; do
             IFS=',' read -ra REPO_LOCAL_REPOS <<<"$2"
             shift
             ;;
+        --discard-local-state) MANUAL_DISCARD=true ;;
+        --include-live) MANUAL_INCLUDE_LIVE=true ;;
+        --targets-file)
+            [[ $# -ge 2 ]] || { echo "--targets-file requires a value" >&2; exit 2; }
+            MANUAL_TARGETS_FILE="$2"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -93,6 +120,19 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$MANUAL_DISCARD" == true && -z "$MANUAL_TARGETS_FILE" ]]; then
+    echo "--discard-local-state requires --targets-file" >&2
+    exit 2
+fi
+if [[ "$MANUAL_DISCARD" == false && -n "$MANUAL_TARGETS_FILE" ]]; then
+    echo "--targets-file requires --discard-local-state" >&2
+    exit 2
+fi
+if [[ "$MANUAL_INCLUDE_LIVE" == true && "$MANUAL_DISCARD" == false ]]; then
+    echo "--include-live requires --discard-local-state and --targets-file" >&2
+    exit 2
+fi
 
 if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
@@ -153,6 +193,34 @@ if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_M
     fi
 fi
 
+if [[ "$MANUAL_DISCARD" == true ]]; then
+    if [[ "$FLOOR_HOURS" != 12 ]]; then
+        echo "--discard-local-state requires a logged DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12" >&2
+        exit 2
+    fi
+    if [[ "$MANUAL_TARGETS_FILE" != /* || ! -f "$MANUAL_TARGETS_FILE" || -L "$MANUAL_TARGETS_FILE" || ! -r "$MANUAL_TARGETS_FILE" ]]; then
+        echo "--targets-file must be an absolute, readable regular file (not a symlink)" >&2
+        exit 2
+    fi
+    while IFS= read -r target || [[ -n "$target" ]]; do
+        [[ -n "$target" && "$target" == /* && "$target" != *$'\r'* ]] || {
+            echo "invalid target entry in --targets-file" >&2; exit 2;
+        }
+        [[ -d "$target" && ! -L "$target" ]] || {
+            echo "target must be an existing, non-symlink directory: $target" >&2; exit 2;
+        }
+        target_real="$(cd "$target" 2>/dev/null && pwd -P)" || exit 2
+        [[ "$target_real" == "$target" && "$target" == "$HOME/"* ]] || {
+            echo "target is outside the canonical home worktree scope or not canonical: $target" >&2; exit 2;
+        }
+        if grep -qxF -- "$target" <<<"$MANUAL_TARGETS"; then
+            echo "duplicate target in --targets-file: $target" >&2; exit 2
+        fi
+        MANUAL_TARGETS+="${MANUAL_TARGETS:+$'\n'}$target"
+    done < "$MANUAL_TARGETS_FILE"
+    [[ -n "$MANUAL_TARGETS" ]] || { echo "--targets-file has no targets" >&2; exit 2; }
+fi
+
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"
 
@@ -172,9 +240,18 @@ else
     echo "=== WORKTREE CLEANUP ==="
     if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
         echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
+        if [[ "$MANUAL_DISCARD" == true ]]; then
+            exit 0
+        fi
     fi
 fi
 echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: ${MIN_AGE_DAYS}d)"
+if [[ "$MANUAL_DISCARD" == true ]]; then
+    echo "MANUAL DISCARD MODE: exact targets only; local changes and ignored data may be lost; 12h newest-content cutoff; live/AO/locked/safety gates remain active."
+    if [[ "$MANUAL_INCLUDE_LIVE" == true ]]; then
+        echo "INCLUDE-LIVE OVERRIDE: exact old targets may be removed while live, AO-owned, or locked; target identity, 12h recency, and machine safety rules remain mandatory."
+    fi
+fi
 
 TOTAL_RECLAIMED_KB=0
 ANTIGRAVITY_DELETED=0
@@ -335,10 +412,21 @@ list_has_child_of() {
 # across all worktree roots.
 GLOBAL_LIVE_CWDS=""
 GLOBAL_CWD_BLOCKED=""
-if lsof_snapshot_cwds; then
-    GLOBAL_LIVE_CWDS="$LSOF_CWDS"
-else
-    GLOBAL_CWD_BLOCKED="cwd-unknown"
+if [[ "$MANUAL_INCLUDE_LIVE" != true ]]; then
+    if lsof_snapshot_cwds; then
+        GLOBAL_LIVE_CWDS="$LSOF_CWDS"
+    else
+        GLOBAL_CWD_BLOCKED="cwd-unknown"
+    fi
+fi
+
+manual_df_measure() {
+    df -kP "$HOME" 2>/dev/null | awk -v path="$HOME" 'NR == 2 && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { printf "path=%s used_kb=%s available_kb=%s\n", path, $3, $4; found=1 } END { if (!found) exit 1 }'
+}
+
+if [[ "$MANUAL_DISCARD" == true && "$DRY_RUN" == false ]]; then
+    MANUAL_DF_BEFORE="$(manual_df_measure)" || { echo "manual discard requires a readable before-cleanup df measurement" >&2; exit 3; }
+    echo "MANUAL DF BEFORE $MANUAL_DF_BEFORE"
 fi
 
 classify_repo_local_worktree() {
@@ -429,6 +517,23 @@ worktree_head_reachable_from_main() {
     local repo="$1" head_sha="$2" main_ref="$3"
     [[ -n "$head_sha" && -n "$main_ref" ]] || return 1
     git -C "$repo" merge-base --is-ancestor "$head_sha" "$main_ref" 2>/dev/null && return 0
+    return 1
+}
+
+# worktree_head_on_live_origin <repo> <head_sha> — rc 0 when HEAD is an ancestor
+# of a tip origin advertises RIGHT NOW (ls-remote heads + PR heads; never the
+# stale remote-tracking refs). Used for detached worktrees. Fail closed.
+worktree_head_on_live_origin() {
+    local repo="$1" head_sha="$2" t="" refs sha _r
+    [[ -n "$head_sha" ]] || return 1
+    command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+    # shellcheck disable=SC2086
+    refs="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' 2>/dev/null)" || return 1
+    while read -r sha _r; do
+        [[ -n "$sha" ]] || continue
+        git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+        git -C "$repo" merge-base --is-ancestor "$head_sha" "$sha" 2>/dev/null && return 0
+    done <<<"$refs"
     return 1
 }
 
@@ -529,6 +634,8 @@ classify_content_and_merge() {
                 fi
                 return 0
             fi
+        elif worktree_head_on_live_origin "$repo" "$head_sha"; then
+            return 0  # detached HEAD already on live origin (reason: detached-on-origin)
         fi
         echo "ahead-of-main"
         return 0
@@ -808,7 +915,9 @@ process_antigravity_orphan() {
     fi
 }
 
-if [[ -d "$WORKTREE_ROOT" ]]; then
+if [[ "$MANUAL_DISCARD" == true ]]; then
+    printf '\n--- Antigravity orphan cleanup skipped in exact-target mode ---\n'
+elif [[ -d "$WORKTREE_ROOT" ]]; then
     echo ""
     echo "--- Antigravity orphans ($WORKTREE_ROOT) ---"
     real_worktree_root="$(cd "$WORKTREE_ROOT" 2>/dev/null && pwd -P || true)"
@@ -907,6 +1016,16 @@ process_repo_local_worktrees() {
             return 0
         fi
 
+        if [[ "$MANUAL_DISCARD" == true ]] && grep -qxF -- "$abs_path" <<<"$MANUAL_TARGETS"; then
+            if grep -qxF -- "$abs_path" <<<"$MANUAL_SEEN_TARGETS"; then
+                ledger_line "repo-local" "PRESERVE" "$abs_path" "duplicate-registry-entry"
+                REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                return 0
+            fi
+            MANUAL_SEEN_TARGETS+="${MANUAL_SEEN_TARGETS:+$'\n'}$abs_path"
+        fi
+
         if act_candidate_begin "$abs_path"; then :; else
             candidate_rc=$?
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
@@ -914,7 +1033,7 @@ process_repo_local_worktrees() {
             return "$candidate_rc"
         fi
 
-        if [[ -n "$std_real" ]]; then
+        if [[ -n "$std_real" && "$MANUAL_INCLUDE_LIVE" != true ]]; then
             local std_skip
             std_skip="$(std_root_skip_reason "$abs_path" "$std_real")"
             if [[ -n "$std_skip" ]]; then
@@ -926,19 +1045,50 @@ process_repo_local_worktrees() {
             fi
         fi
 
-        local reason size_kb_val size_fmt branch_label extra age_label age_days
-        reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
+        local reason size_kb_val size_fmt branch_label extra age_label age_days is_manual_target=false wrh_reason=""
+        if [[ "$MANUAL_DISCARD" == true ]]; then
+            if grep -qxF -- "$abs_path" <<<"$MANUAL_TARGETS"; then
+                is_manual_target=true
+                manual_discard_preflight "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable"
+                reason="$MANUAL_REASON"
+                MANUAL_SNAPSHOT_HEAD="$MANUAL_BASE_HEAD"
+                MANUAL_SNAPSHOT_STATUS="$MANUAL_BASE_STATUS"
+            else
+                wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                return 0
+            fi
+        else
+            reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
+        fi
         size_fmt='-'
         age_label='-'
         if [[ -z "$reason" ]]; then
-            age_days="$(worktree_age_days "$abs_path")" || age_days='?'
-            [[ "$age_days" =~ ^(0|[1-9][0-9]*)$ ]] || age_days='?'
-            age_label="${age_days}d"
+            if [[ "$MANUAL_DISCARD" == true ]]; then
+                local last_activity now_epoch age_hours
+                last_activity="$(worktree_last_activity_epoch "$abs_path")" || last_activity=""
+                now_epoch="$(date +%s)"
+                if [[ "$last_activity" =~ ^[1-9][0-9]*$ ]]; then
+                    age_hours=$(( (now_epoch - last_activity) / 3600 ))
+                    age_label="${age_hours}h"
+                else
+                    reason="recency-unmeasurable"
+                fi
+            else
+                age_days="$(worktree_age_days "$abs_path")" || age_days='?'
+                [[ "$age_days" =~ ^(0|[1-9][0-9]*)$ ]] || age_days='?'
+                age_label="${age_days}d"
+            fi
             size_kb_val=$(size_kb "$abs_path")
             size_fmt=$(fmt_kb "$size_kb_val")
         fi
         branch_label="${branch:-detached}"
-        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}${FLOOR_HOURS:+ recency=hours:$FLOOR_HOURS}"
+        wrh_reason=""
+        if [[ -z "$reason" && "$branch_label" == detached ]] \
+            && ! worktree_head_reachable_from_main "$repo_abs" "$head_sha" "$(resolve_main_ref "$repo_abs")"; then
+            wrh_reason="detached-on-origin"
+        fi
+        extra=" | age=${age_label} size=${size_fmt} head=${head_sha:0:8} branch=${branch_label}${FLOOR_HOURS:+ recency=hours:$FLOOR_HOURS}${wrh_reason:+ reason=$wrh_reason}"
+        [[ "$MANUAL_DISCARD" != true ]] || extra+=" discard-local-state=true"
 
         if [[ -n "$reason" ]]; then
             ledger_line "repo-local" "PRESERVE" "$abs_path" "$reason" "$extra"
@@ -949,6 +1099,26 @@ process_repo_local_worktrees() {
                 TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                 REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
             else
+                if [[ "$MANUAL_DISCARD" == true && "$is_manual_target" == true ]]; then
+                    if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "unapproved-manual-discard" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                        act_candidate_done || return 3
+                        wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                        return 0
+                    fi
+                    if manual_discard_remove "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$size_kb_val"; then
+                        ledger_line "repo-local" "DELETE" "$abs_path" "local state discarded${MANUAL_RECOVERY_REF:+; recovery_ref=$MANUAL_RECOVERY_REF}" "$extra"
+                        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                        REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                    else
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "$MANUAL_REASON" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    fi
+                    act_candidate_done || return 3
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
                 if [[ "${WORKTREE_APPROVED:-0}" != "1" ]] && { [[ ! "$age_days" =~ ^[0-9]+$ ]] || (( age_days < AUTO_APPROVE_AGE_DAYS )) || worktree_is_recently_active "$abs_path" "$AUTO_APPROVE_AGE_DAYS"; }; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "unapproved-under-${AUTO_APPROVE_AGE_DAYS}d" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
@@ -999,12 +1169,14 @@ process_repo_local_worktrees() {
                         cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
                     fi
                     if [[ "$cw_c14_verdict" == remove ]]; then
+                        WRH_REASON="$wrh_reason"
                         if [[ -n "$ACT_DEADLINE_AT" ]]; then
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         else
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         fi
                     fi
+                    WRH_REASON=""
                     lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
@@ -1106,11 +1278,138 @@ std_root_skip_reason() {
     fi
 }
 
+# manual_discard_preflight <repo> <worktree> <listed-head> <locked> <prunable>
+# Deliberately bypasses content/branch/remote checks only; identity, age, cwd,
+# AO ownership, lock, and machine safety rules remain mandatory.
+manual_discard_preflight() {
+    local repo="$1" path="$2" listed_head="$3" locked="$4" prunable="$5"
+    local real head status status_rc=0 protected safety_rc listed_path="" listed_oid="" listed_locked=0 registry row
+    MANUAL_REASON=""
+    MANUAL_BASE_HEAD=""
+    MANUAL_BASE_STATUS=""
+    if [[ ! -d "$path" || -L "$path" || ! -f "$path/.git" || -L "$path/.git" ]]; then MANUAL_REASON="not-linked-worktree"; return 0; fi
+    real="$(cd "$path" 2>/dev/null && pwd -P)" || { MANUAL_REASON="path-unreadable"; return 0; }
+    if [[ "$real" != "$path" || "$path" == "$repo" || "$path" == "$HOME" || "$path" == / ]]; then MANUAL_REASON="unsafe-path"; return 0; fi
+    if [[ "$MANUAL_INCLUDE_LIVE" != true ]]; then
+        AO_CONFIG_STATE="missing"
+        AO_CONFIG_LINES=""
+        if [[ -e "$AO_CONFIG_PATH" || -L "$AO_CONFIG_PATH" ]]; then
+            if [[ -f "$AO_CONFIG_PATH" && -r "$AO_CONFIG_PATH" ]] \
+                && AO_CONFIG_LINES="$(ao_worktree_dirs "$AO_CONFIG_PATH" 2>/dev/null)"; then
+                AO_CONFIG_STATE="valid"
+            else
+                AO_CONFIG_STATE="invalid"
+            fi
+        fi
+        if [[ "$path" == *"/.ao/data/worktrees/"* || "$path" == *"/ao/data/worktrees/"* ]] || antigravity_ao_owned "$path"; then MANUAL_REASON="ao-owned-or-unknown"; return 0; fi
+        if [[ "$AO_CONFIG_STATE" == "invalid" ]]; then MANUAL_REASON="ao-config-unreadable"; return 0; fi
+        local standard_skip=""
+        if [[ "$path" == "$STD_ROOT/"* || "$path" == "$STD_ROOT_REAL/"* ]]; then
+            standard_skip="$(std_root_skip_reason "$path" "$real")"
+        fi
+        if [[ -n "$standard_skip" ]]; then MANUAL_REASON="$standard_skip"; return 0; fi
+    fi
+    if [[ "$MANUAL_INCLUDE_LIVE" != true ]]; then
+        # Refresh process state only when live cwd remains a hold condition.
+        if lsof_snapshot_cwds; then
+            GLOBAL_LIVE_CWDS="$LSOF_CWDS"
+            GLOBAL_CWD_BLOCKED=""
+        else
+            GLOBAL_LIVE_CWDS=""
+            GLOBAL_CWD_BLOCKED="cwd-unknown"
+        fi
+        if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then MANUAL_REASON="cwd-unknown"; return 0; fi
+        if list_has_child_of "$path" "$GLOBAL_LIVE_CWDS"; then MANUAL_REASON="live-cwd"; return 0; fi
+    fi
+    registry="$(git -C "$repo" worktree list --porcelain 2>/dev/null)" || {
+        MANUAL_REASON="registry-unreadable"; return 0;
+    }
+    local in_row=0
+    while IFS= read -r row; do
+        case "$row" in
+            "worktree $path") in_row=1; listed_path="$path" ;;
+            "worktree "*) in_row=0 ;;
+            HEAD\ *) if (( in_row )); then listed_oid="${row#HEAD }"; fi ;;
+            locked|locked\ *) if (( in_row )); then listed_locked=1; fi ;;
+        esac
+    done <<<"$registry"
+    [[ "$listed_path" == "$path" && "$listed_oid" == "$listed_head" ]] || { MANUAL_REASON="registry-identity-changed"; return 0; }
+    if [[ "$MANUAL_INCLUDE_LIVE" != true ]]; then
+        [[ "$listed_locked" == 0 && "$locked" == 0 ]] || { MANUAL_REASON="locked"; return 0; }
+    fi
+    [[ "$prunable" == 0 ]] || { MANUAL_REASON="prunable-unknown"; return 0; }
+    if worktree_is_recently_active_minutes "$path" $(( FLOOR_HOURS * 60 )); then
+        MANUAL_REASON="young-or-unmeasurable"; return 0
+    fi
+    if protected="$(safety_is_protected "$path")"; then
+        MANUAL_REASON="machine-safety:${protected:-protected}"; return 0
+    else
+        safety_rc=$?
+        [[ "$safety_rc" == 1 ]] || { MANUAL_REASON="machine-safety:unreadable"; return 0; }
+    fi
+    head="$(git -C "$path" rev-parse --verify HEAD 2>/dev/null)" || { MANUAL_REASON="head-unreadable"; return 0; }
+    [[ "$head" == "$listed_head" ]] || { MANUAL_REASON="head-changed"; return 0; }
+    local listed_top
+    listed_top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || { MANUAL_REASON="worktree-identity-unreadable"; return 0; }
+    [[ "$listed_top" == "$path" ]] || { MANUAL_REASON="worktree-identity-mismatch"; return 0; }
+    status="$(GIT_OPTIONAL_LOCKS=0 git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || status_rc=$?
+    [[ "$status_rc" == 0 ]] || { MANUAL_REASON="status-unreadable"; return 0; }
+    MANUAL_BASE_HEAD="$head"
+    MANUAL_BASE_STATUS="$(printf '%s' "$status" | cksum)"
+}
+
+manual_discard_remove() {
+    local repo="$1" path="$2" listed_head="$3" locked="$4" prunable="$5" size_kb_val="$6"
+    local ref="" ref_oid="" safe_name
+    MANUAL_RECOVERY_REF=""
+    manual_discard_preflight "$repo" "$path" "$listed_head" "$locked" "$prunable"
+    if [[ -n "$MANUAL_REASON" || "$MANUAL_BASE_HEAD" != "$MANUAL_SNAPSHOT_HEAD" || "$MANUAL_BASE_STATUS" != "$MANUAL_SNAPSHOT_STATUS" ]]; then
+        [[ -n "$MANUAL_REASON" ]] || MANUAL_REASON="changed-since-preview"
+        return 1
+    fi
+    if [[ "$(git -C "$path" symbolic-ref -q HEAD 2>/dev/null || true)" == "" ]]; then
+        safe_name="$(basename "$path" | tr -c 'A-Za-z0-9._-' '-')"
+        ref="refs/disk-magician/recovery/manual-12h/$(date -u +%Y%m%dT%H%M%SZ)-${safe_name}-${listed_head:0:8}"
+        if ref_oid="$(git -C "$repo" rev-parse --verify -q "$ref" 2>/dev/null)"; then
+            [[ "$ref_oid" == "$listed_head" ]] || { MANUAL_REASON="recovery-ref-collision"; return 1; }
+        elif ! git -C "$repo" update-ref "$ref" "$listed_head" 0000000000000000000000000000000000000000; then
+            MANUAL_REASON="recovery-ref-failed"; return 1
+        fi
+    fi
+    if [[ "$MANUAL_INCLUDE_LIVE" == true ]]; then
+        removal_args=(--force --force)
+    else
+        removal_args=(--force)
+    fi
+    if ! git -C "$repo" worktree remove "${removal_args[@]}" -- "$path" || [[ -e "$path" || -L "$path" ]]; then
+        MANUAL_REASON="git-worktree-remove-failed${ref:+ recovery_ref=$ref}"
+        return 1
+    fi
+    deletion_log_removal "$path" "$size_kb_val" remove "manual-discard recency=hours:$FLOOR_HOURS${ref:+ recovery_ref=$ref}"
+    MANUAL_REASON=""
+    MANUAL_RECOVERY_REF="$ref"
+    return 0
+}
+
 if ((${#REPO_LOCAL_REPOS[@]})); then
     for repo in "${REPO_LOCAL_REPOS[@]}"; do
         [[ "$ACT_STOP" == 0 ]] || break
         process_repo_local_worktrees "$repo"
     done
+fi
+
+if [[ "$MANUAL_DISCARD" == true ]]; then
+    while IFS= read -r target || [[ -n "$target" ]]; do
+        if ! grep -qxF -- "$target" <<<"$MANUAL_SEEN_TARGETS"; then
+            echo "manual target was not a recognized linked worktree in --repos: $target" >&2
+            exit 2
+        fi
+    done <<<"$MANUAL_TARGETS"
+fi
+
+if [[ "$MANUAL_DISCARD" == true && "$DRY_RUN" == false ]]; then
+    MANUAL_DF_AFTER="$(manual_df_measure)" || { echo "manual discard requires a readable after-cleanup df measurement" >&2; exit 3; }
+    echo "MANUAL DF AFTER $MANUAL_DF_AFTER"
 fi
 
 if [[ -n "$ACT_CURSOR" ]]; then

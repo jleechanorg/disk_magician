@@ -1,0 +1,7 @@
+[Unit]
+Description=Disk Magician snapshot with stale inventory refresh
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/diskm snapshot --refresh-inventory-if-stale=24h
+Environment=DISK_MAGICIAN_TRIGGER=scheduled

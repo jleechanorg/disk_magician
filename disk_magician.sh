@@ -17,6 +17,7 @@ Commands:
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
+  measure         Measure one monitored key now, sharded, with a generous timeout (diskm measure KEY [--timeout S]).
   reclaim-ledger  Read the published report (--read-existing), or regenerate (--stdout to preview).
   correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
@@ -40,6 +41,7 @@ Commands:
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
+  state inventory-retain Preview inventory retention; --apply expires eligible objects.
   config        Edit the effective JSON config (add-monitored-dir|add-monitored-file-glob).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-tmp-clones       Detect full git clones, oversize scratch, and advice dirs in /private/tmp.
@@ -51,11 +53,14 @@ Commands:
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
-  cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk.
+  cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
+                         (use --native-docker for the verified Linux daemon).
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
   cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
+  slim-worktrees Suggest (dry-run) or apply sparse-checkout exclusions (default docs/)
+                on dormant worktrees to shrink each checkout without touching history.
   worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
@@ -85,6 +90,7 @@ Commands:
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
+  quarantine-reconcile   Finish deferred C14 quarantine removals (--dry-run|--clean).
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
@@ -250,13 +256,16 @@ case "$CMD" in
     run_setup "$@"
     ;;
   snapshot)
-    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh"
+    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh" "$@"
     ;;
   status)
     exec python3 "$SCRIPT_DIR/scripts/disk_status.py" "$@"
     ;;
   growth-top10)
     exec python3 "$SCRIPT_DIR/scripts/growth_top10.py" "$@"
+    ;;
+  measure)
+    exec python3 "$SCRIPT_DIR/scripts/snapshot_measure.py" --only "$@"
     ;;
   reclaim_ledger|reclaim-ledger)
     exec python3 "$SCRIPT_DIR/scripts/reclaim_ledger.py" "$@"
@@ -359,6 +368,10 @@ case "$CMD" in
     "$SCRIPT_DIR/scripts/disk_usage_alert.sh" "$@"
     ;;
   state)
+    if [[ "${1:-}" == inventory-retain ]]; then
+      shift
+      exec python3 "$SCRIPT_DIR/scripts/directory_inventory.py" "$@"
+    fi
     "$SCRIPT_DIR/scripts/state_repo.sh" "$@"
     ;;
   config)
@@ -408,6 +421,9 @@ case "$CMD" in
     ;;
   cleanup_worktree_venvs|cleanup-worktree-venvs)
     "$SCRIPT_DIR/scripts/cleanup_worktree_venvs.sh" "$@"
+    ;;
+  slim_worktrees|slim-worktrees|slim_worktree_checkouts|slim-worktree-checkouts)
+    "$SCRIPT_DIR/scripts/slim_worktree_checkouts.sh" "$@"
     ;;
   cleanup_worktree_deps|cleanup-worktree-deps)
     "$SCRIPT_DIR/scripts/cleanup_worktree_deps.sh" "$@"
@@ -512,6 +528,9 @@ case "$CMD" in
       reconcile) exec python3 "$SCRIPT_DIR/scripts/worktree_quarantine.py" reconcile "$@" ;;
       *) echo "Usage: diskm worktree-quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
     esac
+    ;;
+  quarantine_reconcile|quarantine-reconcile)
+    "$SCRIPT_DIR/scripts/quarantine_reconcile.sh" "$@"
     ;;
   policy)
     exec python3 "$SCRIPT_DIR/scripts/policy_provenance.py" "$@"

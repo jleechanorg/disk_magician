@@ -54,6 +54,7 @@ $DARWIN_USER_TEMP_DIR	cleanup_tmp.sh / cleanup_pr_scratch.sh	scratch_roots_get_u
 # cleanup_xcode.sh
 $HOME/Library/Developer/Xcode/DerivedData	cleanup_xcode.sh	line 11
 $HOME/Library/Developer/Xcode/iOS DeviceSupport	cleanup_xcode.sh	--device-support (DEVICE_SUPPORT_APPROVED=1)
+/private/tmp/worldai-ios-release-*	cleanup_xcode.sh	clean_ios_release_scratch: DerivedData/ + verify-unpacked/ only; archive, export, receipts kept
 $HOME/Library/Developer/CoreSimulator/Temp	cleanup_xcode.sh	line 12
 $HOME/Library/Developer/CoreSimulator/Caches	cleanup_xcode.sh	line 13
 
@@ -223,3 +224,4 @@ $HOME/dd_pr115_rel	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.93 GiB, 1 del
 $HOME/wf_cache_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.88 GiB, 1 deletions
 $HOME/wf_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.89 GiB, 1 deletions
 $HOME/wf_ipad_dd	cleanup_xcode.sh	recorded-cleaned 2026-10-20, 4.88 GiB, 1 deletions
+$HOME/.hermes.pre-claw-backup	cleanup_dev_caches.sh	recorded-cleaned 2026-10-21, 2.1 GiB, 2 deletions

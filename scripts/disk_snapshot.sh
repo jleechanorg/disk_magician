@@ -803,6 +803,7 @@ MEASURE_MODE=serial
 MEASURE_WORKERS_USED=0
 MEASUREMENT_FAILURES_JSON='[]'
 LOWER_BOUND_KEYS_JSON='[]'
+SHARDED_ROOTS_JSON='{}'
 PARTIAL_KEYS=""
 MEASURE_WORKERS_SETTING="${DISK_MAGICIAN_MEASURE_WORKERS:-$(snapshot_measure_setting workers)}"
 if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
@@ -817,6 +818,7 @@ if [[ "$MEASURE_WORKERS_SETTING" != "0" ]]; then
     MEASURE_WORKERS_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('measure_workers', 0))" "$ORCH_META" 2>/dev/null || echo 0)
     MEASUREMENT_FAILURES_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('measurement_failures', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
     LOWER_BOUND_KEYS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('lower_bound_keys', []), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '[]')
+    SHARDED_ROOTS_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('sharded_roots', {}), separators=(',', ':')))" "$ORCH_META" 2>/dev/null || echo '{}')
     PARTIAL_KEYS=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1])).get('partial_keys', [])))" "$ORCH_META" 2>/dev/null || echo '')
     while IFS= read -r orch_line; do
       orch_key="${orch_line%%$'\t'*}"; orch_rest="${orch_line#*$'\t'}"
@@ -1404,6 +1406,9 @@ fi
 # Use Python to safely and durably construct and validate JSON.
 # This prevents empty/malformed variables from creating invalid syntax.
 pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
+  SNAP_INVENTORY_STATE="$SNAPSHOT_STATE_DIR" \
+  SNAP_INVENTORY_PREVIOUS_FILE="$prev_snapshot_path" \
+  SNAP_SCRIPT_DIR="$SCRIPT_DIR" \
   SNAP_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
   SNAP_DISK_TOTAL="$disk_total_gb" \
   SNAP_DISK_USED="$disk_used_gb" \
@@ -1434,6 +1439,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_RESIDUAL_GB="$residual_gb" \
   SNAP_RESIDUAL_FRESH_GB="$residual_fresh_gb" \
   SNAP_LOWER_BOUND_KEYS="$LOWER_BOUND_KEYS_JSON" \
+  SNAP_SHARDED_ROOTS="$SHARDED_ROOTS_JSON" \
   SNAP_RESIDUAL_DELTA_GB="$residual_delta_gb" \
   SNAP_AGE_SECONDS="$age_seconds" \
   SNAP_STATUS="$measurement_status" \
@@ -1594,6 +1600,12 @@ try:
         lower_bound = []
     if lower_bound:
         data["snapshot_metadata"]["lower_bound_keys"] = lower_bound
+    try:
+        sharded_roots = json.loads(os.environ.get("SNAP_SHARDED_ROOTS") or "{}")
+    except (TypeError, ValueError):
+        sharded_roots = {}
+    if isinstance(sharded_roots, dict) and sharded_roots:
+        data["snapshot_metadata"]["sharded_roots"] = sharded_roots
     residual_delta = os.environ.get("SNAP_RESIDUAL_DELTA_GB")
     if residual_delta:
         data["residual_delta_gb"] = float(residual_delta)
@@ -1744,6 +1756,26 @@ try:
     partial = not (0.0 <= effective <= 100.0 and effective >= 70.0)
     data["publication_kind"] = "partial" if partial else "complete"
     data["canonical"] = not partial
+    # Inventory is a verified immutable reference, independent of watched probes.
+    if os.environ.get("SNAP_SCRIPT_DIR"):
+        sys.path.insert(0, os.environ["SNAP_SCRIPT_DIR"])
+    from snapshot_measure import inventory_metadata
+    previous_inventory = {}
+    try:
+        previous_file = os.environ.get("SNAP_INVENTORY_PREVIOUS_FILE")
+        if previous_file:
+            with open(previous_file) as previous_stream:
+                previous_inventory = json.load(previous_stream).get("directory_inventory", {})
+        elif os.environ.get("SNAP_INVENTORY_PREVIOUS"):
+            previous_inventory = json.loads(os.environ["SNAP_INVENTORY_PREVIOUS"])
+    except (OSError, ValueError, TypeError):
+        pass
+    data.update(inventory_metadata(os.environ.get("SNAP_INVENTORY_STATE") or
+                                  os.environ.get("DISK_MAGICIAN_STATE_DIR") or
+                                  os.path.expanduser("~/.disk_magician_state"),
+                                  data["timestamp"], previous_inventory))
+    data["legacy_root_df"] = {"scope": "legacy_root_df", "used_bytes": used_kb * 1024,
+                              "sampled_at": data["timestamp"]}
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)

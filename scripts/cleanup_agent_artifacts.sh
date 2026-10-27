@@ -32,6 +32,12 @@ TARGETS=(
   # Idle/stale agent-app targets (regrowth-prevention Fix #6):
   "$HOME/.gemini/antigravity-ide"
   "$HOME/.gemini/antigravity-browser-profile"
+  # Linux XDG cache equivalents — the macOS Library/Caches paths above do not
+  # exist on Linux, so browser/stub caches went unreclaimed there (2026-10-22:
+  # ~/.cache/ms-playwright held three chromium/webkit generations, 2.8 GiB).
+  "${XDG_CACHE_HOME:-$HOME/.cache}/ms-playwright"
+  "${XDG_CACHE_HOME:-$HOME/.cache}/ms-playwright-go"
+  "${XDG_CACHE_HOME:-$HOME/.cache}/pip"
 )
 
 # mtime gate in days. -1 = no gate (clear unconditionally).
@@ -48,6 +54,9 @@ TARGETS_MTIME_GATE_DAYS=(
   -1   # pip cache
    30  # antigravity-ide — idle since 2026-05-29, 2.5 GB
    30  # antigravity-browser-profile — idle since 2026-03-28, 1.5 GB
+   -1  # XDG ms-playwright (Linux)
+   -1  # XDG ms-playwright-go (Linux)
+   -1  # XDG pip cache (Linux)
 )
 
 
