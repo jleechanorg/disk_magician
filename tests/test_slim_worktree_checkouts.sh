@@ -43,7 +43,9 @@ mk_wt() { # mk_wt <name> -> prints path
   echo "$wt"
 }
 age_wt() { # age_wt <path>  — backdate every file so recency reports it dormant
-  find "$1" -path "$1/.git" -prune -o -exec touch -d '6 days ago' {} + 2>/dev/null
+  local ts
+  ts=$(date -v-6d +%Y%m%d%H%M 2>/dev/null || date -d "-6 days" +%Y%m%d%H%M)
+  find "$1" -path "$1/.git" -prune -o -exec touch -t "$ts" {} + 2>/dev/null
 }
 
 OLD=$(mk_wt old-clean);             age_wt "$OLD"
