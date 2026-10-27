@@ -20,7 +20,7 @@ class AdmissionBirthPipelineTest(unittest.TestCase):
                 p.mkdir(parents=True)
             env = {k: v for k, v in os.environ.items()
                    if not k.startswith(("GIT_", "DISK_MAGICIAN_", "C14_"))}
-            env.update(HOME=str(home), TMPDIR=str(root / "user-tmp"),
+            env.update(HOME=str(home), PATH=os.defpath, TMPDIR=str(root / "user-tmp"),
                        DISK_MAGICIAN_STATE_DIR=str(state),
                        DISK_MAGICIAN_CONFIG=str(ROOT / "config.json.template"),
                        DISK_MAGICIAN_POLICY_FILE=str(root / "no-policy.json"),
