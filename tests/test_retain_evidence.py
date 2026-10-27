@@ -56,5 +56,24 @@ class TestRetainEvidence(unittest.TestCase):
         remaining = glob.glob(os.path.join(self.evidence_dir, "frontier-*.json"))
         self.assertEqual(len(remaining), 2)
 
+    def test_compacts_oversize_frontier_measured_entries(self):
+        frontier = os.path.join(self.tmp, "frontier_last.json")
+        with open(frontier, "w") as f:
+            f.write('{"captured_at": "now", "measured": {"/tiny": 4, "/small": 32, "/big": 128}}')
+        os.utime(frontier, (3000, 3000))
+        env = dict(os.environ, DISK_MAGICIAN_EVIDENCE_MAX_BYTES="10")
+        r = subprocess.run(
+            ["python3", str(SCRIPT), "--frontier", str(frontier),
+             "--evidence-dir", str(self.evidence_dir), "--keep", "4"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        remaining = glob.glob(os.path.join(self.evidence_dir, "frontier-*.json"))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(os.path.getmtime(remaining[0]), 3000.0)
+        import json
+        saved = json.load(open(remaining[0]))
+        self.assertEqual(saved["measured"], {"/big": 128})
+
 if __name__ == "__main__":
     unittest.main()

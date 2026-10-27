@@ -10,7 +10,7 @@
 # SAFETY POSTURE
 # ---------------
 # Every unknown fails toward "owner alive / keep". A lease with no resolvable
-# runtime owner (owner: null) is never owner-reaped. pid liveness is checked
+# producer owner is kept. pid liveness is checked
 # by pid PLUS lstart epoch so a reused pid reads dead, not alive. A comm
 # mismatch with matching epochs reads unknown (keep), never dead.
 #
@@ -134,6 +134,87 @@ lease_resolve_owner() {
     printf -- '-\t-\t-\n'
 }
 
+# Resolve one PID incarnation before binding it into a lease. Read start time
+# on both sides of comm so a reused PID cannot be attached to the artifact.
+lease_resolve_process_owner() {
+    local pid="${1:-}" first second comm
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    first="$(_lease_ps_lstart_epoch "$pid")" || return 1
+    comm="$(_lease_full_comm "$pid")"
+    [[ -n "$comm" ]] || return 1
+    second="$(_lease_ps_lstart_epoch "$pid")" || return 1
+    [[ "$first" == "$second" ]] || return 1
+    printf '%s\t%s\t%s\n' "$pid" "$first" "$comm"
+}
+
+# Resolve the nearest verified Runner.Worker ancestor for CI owner binding.
+lease_resolve_runner_worker() {
+    local pid="${1:-$$}" hops=0 row ppid comm found="" start check seen=""
+    while (( hops < 64 )); do
+        case ",$seen," in *",$pid,"*) return 1 ;; esac
+        seen="$seen,$pid"
+        row="$(_lease_ps -p "$pid" -o ppid=,comm= 2>/dev/null)" || return 1
+        [[ -n "${row//[[:space:]]/}" ]] || return 1
+        read -r ppid comm <<<"$row"
+        if [[ "${comm##*/}" == Runner.Worker ]]; then
+            [[ -z "$found" ]] || return 1
+            start="$(_lease_ps_lstart_epoch "$pid")" || return 1
+            check="$(_lease_ps -p "$pid" -o ppid=,comm= 2>/dev/null)" || return 1
+            [[ "$row" == "$check" ]] || return 1
+            found="$pid"$'\t'"$start"$'\t'"Runner.Worker"
+        fi
+        [[ "$ppid" =~ ^[1-9][0-9]*$ ]] || break
+        pid="$ppid"
+    done
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
+}
+
+# Ensure a CI owner without replacing any existing lease or owners.
+lease_ensure_ci_owner() {
+    local wt="$1" pid="$2" start="$3" comm="$4" lease admin_id admin_birth ttl rc
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^-?[0-9]+$ && "$comm" == Runner.Worker ]] || return 2
+    lease="$(lease_path_for "$wt")"
+    mkdir -p "$(lease_dir)" || return 1
+    lease_mutation_lock_enter "$lease" || return 1
+    if [[ -e "$lease" ]]; then
+        python3 - "$lease" "$pid" "$start" "$comm" <<'PYCIOWNER'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+path, pid, start, comm = sys.argv[1:]
+try:
+    with open(path) as f: d=json.load(f)
+    if not isinstance(d, dict): sys.exit(1)
+    owners=d.get("owners")
+    if not isinstance(owners,list):
+        old=d.get("owner")
+        owners=[old] if isinstance(old,dict) else []
+    if not any(isinstance(o,dict) and str(o.get("pid"))==pid and
+               str(o.get("start_epoch"))==start and not o.get("released_at") for o in owners):
+        owners.append({"pid":int(pid),"start_epoch":int(start),"comm":comm,
+                       "session":None,"added_at":datetime.now(timezone.utc).isoformat()})
+    d["owners"]=owners
+    if d.get("owner") is None and owners: d["owner"]=owners[0]
+    d["released_at"]=None
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".ci-owner-")
+    with os.fdopen(fd,"w") as f:
+        json.dump(d,f,indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
+except Exception:
+    sys.exit(1)
+PYCIOWNER
+        rc=$?
+    else
+        IFS=$'\t' read -r admin_id admin_birth < <(_lease_admin_info "$wt")
+        ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
+        _lease_emit_json "$lease" "$wt" "" "" "ci" "False" "$pid" "$start" "$comm" \
+            "$admin_id" "$admin_birth" "$ttl" scratch ci-admit ci "" "" "" "" "" --lock-held
+        rc=$?
+    fi
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
+}
+
 # _lease_admin_info <worktree_path> — "admin_id<TAB>birth_epoch" from the
 # .git pointer's admin dir, or "-<TAB>-" when unresolvable.
 _lease_admin_info() {
@@ -144,7 +225,11 @@ _lease_admin_info() {
     gitdir="${line#gitdir:}"
     gitdir="${gitdir# }"
     [[ -n "$gitdir" && -d "$gitdir" ]] || { printf -- '-\t-\n'; return 0; }
-    birth="$(stat -f %B "$gitdir" 2>/dev/null || stat -c %W "$gitdir" 2>/dev/null || echo 0)"
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        birth="$(stat -f %B "$gitdir" 2>/dev/null || echo 0)"
+    else
+        birth="$(stat -c %W "$gitdir" 2>/dev/null || echo 0)"
+    fi
     printf '%s\t%s\n' "${gitdir##*/}" "$birth"
 }
 
@@ -173,29 +258,87 @@ PY
 # all three --published flags. rc 2 on invalid options (nothing written).
 lease_write() {
     local wt="$1"; shift
-    local -a pos=() prov=("" "" "" "" "" "" "" "")
+    local -a pos=() prov=("" "" "" "" "" "" "" "") owner_pids=()
+    local lock_mode=""
     while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
     local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
     while [[ $# -gt 0 ]]; do
+        if [[ "$1" == --lock-held ]]; then lock_mode=--lock-held; shift; continue; fi
         [[ $# -ge 2 ]] || return 2
         case "$1" in
             --kind) prov[0]="$2" ;; --producer) prov[1]="$2" ;;
             --source) prov[2]="$2" ;; --manifest) prov[3]="$2" ;;
             --git-meta) prov[4]="$2" ;; --published) prov[5]="$2" ;;
             --upload-manifest) prov[6]="$2" ;; --verified-at) prov[7]="$2" ;;
+            --owner-pid) owner_pids+=("$2") ;;
             *) return 2 ;;
         esac
         shift 2
     done
-    local tsv pid ep comm admin_id admin_birth lease ttl
-    tsv="$(lease_resolve_owner)"
+    local tsv pid ep comm admin_id admin_birth lease ttl owner_row owner_tsv="" owner_candidate
+    if (( ${#owner_pids[@]} )); then
+        for owner_candidate in "${owner_pids[@]}"; do
+            owner_row="$(lease_resolve_process_owner "$owner_candidate")" || return 1
+            owner_tsv+="$owner_row"$'\n'
+        done
+        tsv="${owner_tsv%%$'\n'*}"
+    else
+        tsv="$(lease_resolve_owner)"
+    fi
     pid="$(cut -f1 <<<"$tsv")"; ep="$(cut -f2 <<<"$tsv")"; comm="$(cut -f3 <<<"$tsv")"
     IFS=$'\t' read -r admin_id admin_birth < <(_lease_admin_info "$wt")
     lease="$(lease_path_for "$wt")"
     mkdir -p "$(lease_dir)" 2>/dev/null || return 1
     ttl="${DISK_MAGICIAN_LEASE_TTL_HOURS:-24}"
     _lease_emit_json "$lease" "$wt" "$repo" "$branch" "$creator" "False" \
-        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}"
+        "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${prov[@]}" "$lock_mode" "$owner_tsv"
+}
+
+# lease_owner_add <worktree_path> <pid> <start_epoch> <comm> adds a concrete
+# process incarnation without replacing existing owners.
+lease_owner_add() {
+    local wt="$1" pid="$2" start="$3" comm="$4" lease
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^-?[0-9]+$ && -n "$comm" ]] || return 2
+    lease="$(lease_path_for "$wt")"
+    [[ -f "$lease" ]] || return 1
+    lease_mutation_lock_enter "$lease" || return 1
+    local rc=0
+    python3 - "$lease" "$wt" "$pid" "$start" "$comm" <<'PYOWNERADD' || rc=$?
+import json, os, stat, sys, tempfile
+from datetime import datetime, timezone
+path, wt, pid, start, comm = sys.argv[1:]
+try:
+    st=os.lstat(wt)
+    if not stat.S_ISDIR(st.st_mode): sys.exit(1)
+    with open(path) as f: d=json.load(f)
+    if not isinstance(d, dict) or not isinstance(d.get("path"), str) or os.path.realpath(d["path"]) != os.path.realpath(wt): sys.exit(1)
+    checkout_dev, checkout_ino = d.get("checkout_dev"), d.get("checkout_ino")
+    if ((checkout_dev is not None and checkout_dev != st.st_dev) or
+            (checkout_ino is not None and checkout_ino != st.st_ino)):
+        sys.exit(1)
+    owners=d.get("owners")
+    if not isinstance(owners,list):
+        old=d.get("owner")
+        owners=[old] if isinstance(old,dict) else []
+    if any(str(o.get("pid"))==pid and str(o.get("start_epoch"))==start and not o.get("released_at")
+           for o in owners if isinstance(o,dict)):
+        if not d.get("released_at"):
+            raise SystemExit(0)
+        d["released_at"] = None
+    else:
+        owners.append({"pid":int(pid),"start_epoch":int(start),"comm":comm,
+                       "session":None,"added_at":datetime.now(timezone.utc).isoformat()})
+        d["owners"]=owners
+        if d.get("owner") is None and owners: d["owner"]=owners[0]
+        d["released_at"] = None
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".owner-add-")
+    with os.fdopen(fd,"w") as f: json.dump(d,f,indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
+except Exception:
+    sys.exit(1)
+PYOWNERADD
+    lease_mutation_lock_exit "$lease"
+    return "$rc"
 }
 
 # lease_kind <lease_file> — kind, "worktree" for leases written before kinds
@@ -243,17 +386,26 @@ lease_write_pending() {
 # Atomically converts the exact observed lease to a pending reuse claim. The
 # previous lease is retained for rollback; an abandoned claim is never reaped.
 lease_claim_reuse() {
-    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" <<'PY'
+    local rc=0 lock_mode="${12:-}"
+    if [[ "$lock_mode" == --lock-held ]]; then
+        lease_mutation_lock_enter "$1" "$lock_mode" || return 1
+    else
+        lease_registry_mutation_lock_enter || return 1
+    fi
+    python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "$lock_mode" <<'PY' || rc=$?
 import hashlib, json, os, sys, tempfile, time
-path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:]
+path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:12]
 lock = path + ".reuse-lock"
+lock_held = sys.argv[12] == "--lock-held"
+if lock_held:
+    if not os.path.isdir(lock): sys.exit(1)
+else:
+    try: os.mkdir(lock)
+    except OSError: sys.exit(1)
 try:
-    os.mkdir(lock)
-except OSError:
-    sys.exit(1)
-try:
-    with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
-    with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
+    if not lock_held:
+        with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
+        with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
     with open(path, "rb") as f: raw = f.read()
     if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
     old = json.loads(raw)
@@ -277,6 +429,10 @@ try:
     d.pop("released_at", None)  # a fresh live claim is not released; old state stays in previous_lease
     d["pending"] = True
     d["owner"] = owner
+    # The liveness reader prefers the owners array whenever present. Keep the
+    # pending claimant there too, or a released modern lease can remain
+    # apparently ownerless even though the compatibility owner field is live.
+    d["owners"] = [owner] if owner else []
     d["reuse"] = {"state": "pending", "old_branch": branch, "old_tip": tip,
                   "previous_lease": old}
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".reuse-lease-")
@@ -286,12 +442,15 @@ try:
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
 finally:
-    for name in ("pid", "acquired_at"):
-        try: os.unlink(os.path.join(lock, name))
-        except FileNotFoundError: pass
-    try: os.rmdir(lock)
-    except OSError: pass
+    if not lock_held:
+        for name in ("pid", "acquired_at"):
+            try: os.unlink(os.path.join(lock, name))
+            except FileNotFoundError: pass
+        try: os.rmdir(lock)
+        except OSError: pass
 PY
+    [[ "$lock_mode" == --lock-held ]] || lease_registry_mutation_lock_exit || rc=$?
+    return "$rc"
 }
 
 # lease_owner_state_for <lease> <own_owner_tsv> [expected_candidate] —
@@ -323,11 +482,17 @@ if not isinstance(reuse.get("previous_lease"), dict):
 if candidate and d.get("path") != candidate:
     print(sys.argv[4]); sys.exit(0)
 o = d.get("owner")
-if not (isinstance(o, dict) and len(own) >= 2 and own[0].isdigit()):
+owners = d.get("owners")
+# Reuse claims always write both representations. Require them to agree, and
+# require the owners array to contain only that claimant. Missing, malformed,
+# or subsequently extended ownership state stays protective.
+if (not isinstance(o, dict) or not isinstance(owners, list) or len(owners) != 1
+        or not isinstance(owners[0], dict) or len(own) < 2 or not own[0].isdigit()
+        or str(o.get("pid")) != own[0] or str(o.get("start_epoch", "")) != own[1]
+        or str(owners[0].get("pid")) != str(o.get("pid"))
+        or str(owners[0].get("start_epoch", "")) != str(o.get("start_epoch", ""))):
     print(sys.argv[4]); sys.exit(0)
-if str(o.get("pid")) == own[0] and str(o.get("start_epoch", "")) == own[1]:
-    print("own-live"); sys.exit(0)
-print(sys.argv[4])
+print("own-live")
 PY
 }
 
@@ -387,20 +552,39 @@ lease_reuse_lock_release() {
 lease_mutation_lock_enter() {
     local lease="$1" mode="${2:-}"
     if [[ "$mode" == --lock-held ]]; then
-        [[ -d "$lease.reuse-lock" ]]
+        [[ -d "$lease.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
     else
-        lease_reuse_lock_acquire "$lease"
+        lease_registry_mutation_lock_enter || return 1
+        lease_reuse_lock_acquire "$lease" || {
+            lease_registry_mutation_lock_exit
+            return 1
+        }
     fi
 }
 lease_mutation_lock_exit() {
-    [[ "${2:-}" == --lock-held ]] || lease_reuse_lock_release "$1"
+    [[ "${2:-}" == --lock-held ]] && return 0
+    local rc=0
+    lease_reuse_lock_release "$1" || rc=$?
+    lease_registry_mutation_lock_exit || rc=$?
+    return "$rc"
+}
+
+# Serialize owner and lease births across all paths with C14's verdict-to-rename
+# critical section. A single registry lock closes races involving descendant or
+# ancestor leases that do not share the candidate's own per-lease lock.
+lease_registry_mutation_lock_enter() {
+    mkdir -p "$(lease_dir)" || return 1
+    lease_reuse_lock_acquire "$(lease_dir)/.owner-mutation"
+}
+lease_registry_mutation_lock_exit() {
+    lease_reuse_lock_release "$(lease_dir)/.owner-mutation"
 }
 
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
 lease_restore_reuse_claim() {
-    local lease="$1"
-    lease_mutation_lock_enter "$lease" || return 1
+    local lease="$1" lock_mode="${2:-}"
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
@@ -414,15 +598,15 @@ try:
 except Exception: sys.exit(1)
 PY
     local rc=$?
-    lease_mutation_lock_exit "$lease"
+    lease_mutation_lock_exit "$lease" "$lock_mode"
     return "$rc"
 }
 
 # lease_mark_reuse_incomplete <lease_file> — preserve old branch/tip and block
 # future claims when recovery could not restore the candidate safely.
 lease_mark_reuse_incomplete() {
-    local lease="$1"
-    lease_mutation_lock_enter "$lease" || return 1
+    local lease="$1" lock_mode="${2:-}"
+    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
@@ -436,7 +620,7 @@ try:
 except Exception: sys.exit(1)
 PY
     local rc=$?
-    lease_mutation_lock_exit "$lease"
+    lease_mutation_lock_exit "$lease" "$lock_mode"
     return "$rc"
 }
 
@@ -455,6 +639,7 @@ from datetime import datetime, timezone
  admin_id, admin_birth, ttl) = sys.argv[1:13]
 (kind, producer, source, manifest, git_meta, pub_url, upload, verified_at) = (
     sys.argv[13:21] + [""] * 8)[:8]
+explicit_owner_tsv = sys.argv[22] if len(sys.argv) > 22 else ""
 UPLOAD_KEYS = {"path", "sha256", "md5", "crc32c", "size", "object", "generation"}
 def load(p):
     if not p:
@@ -464,7 +649,7 @@ def load(p):
             return json.load(f)
     except Exception:
         sys.exit(2)
-if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence"):
+if (kind or "worktree") not in ("worktree", "clone", "scratch", "evidence", "build"):
     sys.exit(2)
 if bool(pub_url) != bool(upload) or bool(pub_url) != bool(verified_at):
     sys.exit(2)
@@ -485,6 +670,22 @@ if pid not in ("-", ""):
         owner = None
 if owner and os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
     owner["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
+owners = [owner] if owner else []
+if explicit_owner_tsv:
+    owners = []
+    for line in explicit_owner_tsv.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 3 or not fields[0].isdigit() or not fields[1].isdigit() or not fields[2]:
+            sys.exit(2)
+        item = {"pid": int(fields[0]), "start_epoch": int(fields[1]), "comm": fields[2]}
+        if os.environ.get("DISK_MAGICIAN_OWNER_SESSION"):
+            item["session"] = os.environ["DISK_MAGICIAN_OWNER_SESSION"]
+        if not any(existing["pid"] == item["pid"] and existing["start_epoch"] == item["start_epoch"]
+                   for existing in owners):
+            owners.append(item)
+    if not owners:
+        sys.exit(2)
+    owner = owners[0]
 now = datetime.now(timezone.utc)
 d = {
     "schema_version": 1,
@@ -498,6 +699,7 @@ d = {
     "ttl_hours": int(ttl),
     "expires_at": int(now.timestamp()) + int(ttl) * 3600,
     "owner": owner,
+    "owners": owners,
     "admin_id": None if admin_id in ("", "-") else admin_id,
     "admin_birth_epoch": None if admin_birth in ("", "-") else int(admin_birth),
     "checkout_dev": checkout_dev,
@@ -516,6 +718,25 @@ d = {
     "verified_at": verified_at or None,
     "upload_manifest": upload_manifest,
 }
+# Publication refreshes only publication metadata on an existing evidence
+# lease. Ordinary writes deliberately replace stale/pending leases with the
+# newly resolved owner. The caller holds the mutation lock, so read/update/
+# replace is serialized.
+if pub_url and os.path.isfile(lease):
+    try:
+        with open(lease) as f:
+            previous = json.load(f)
+    except Exception:
+        sys.exit(2)
+    if not isinstance(previous, dict) or previous.get("path") != wt:
+        sys.exit(2)
+    if previous.get("pending") is True or isinstance(previous.get("reuse"), dict):
+        sys.exit(2)
+    for key in ("published", "published_at", "published_url", "verified_at", "upload_manifest"):
+        previous[key] = d[key]
+    if git_meta:
+        previous["git_meta"] = d["git_meta"]
+    d = previous
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".lease-", suffix=".json")
 try:
     with os.fdopen(fd, "w") as f:
@@ -536,66 +757,61 @@ PY
 
 # lease_owner_state <lease_file> [now_epoch] — prints exactly one of:
 #   none | released | dead | alive | alive-expired | unknown | unreadable
-# Precedence: none (owner null) > released > ps check. Fail-closed: every
-# unmeasurable case keeps the worktree (alive/unknown/unreadable/none).
+# Explicit release precedes pid checks. An empty or unresolvable owner set
+# remains `none` and C14 keeps it; age alone never retires an unknown producer.
 # The liveness probe is LC_ALL=C TZ=UTC pinned so ambient LANG/TZ cannot
 # localize the lstart rendering (fr_FR renders "Sam 10 oct ..." and breaks
 # the parse, which would silently turn alive owners into unknown).
 lease_owner_state() {
-    local lease="$1" now="${2:-}" inspect
-    inspect="$(python3 - "$lease" <<'PY'
-import json, sys
+    local lease="$1" now="${2:-}"
+    python3 - "$lease" "$now" <<'PYLEASESTATE'
+import json, os, subprocess, sys, time
+from datetime import datetime, timezone
 try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
+    d=json.load(open(sys.argv[1]))
 except Exception:
-    print("unreadable"); sys.exit(0)
-o = d.get("owner")
-if o is None:
-    print("none"); sys.exit(0)
-if not isinstance(o, dict) or not isinstance(o.get("pid"), int) or isinstance(o.get("pid"), bool):
-    print("unreadable"); sys.exit(0)
-if d.get("released_at"):
-    print("released"); sys.exit(0)
-print("check\t%d\t%s\t%s\t%s\t%s" % (o["pid"], o.get("start_epoch", ""),
-      o.get("comm", ""), d.get("created_epoch", ""),
-      d.get("ttl_hours", 24)))
-PY
-)"
-    case "$inspect" in
-        unreadable|none|released)
-            printf '%s\n' "$inspect"; return 0 ;;
-    esac
-    local _tag pid start comm created ttl
-    IFS=$'\t' read -r _tag pid start comm created ttl <<<"$inspect"
-    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { printf 'unreadable\n'; return 0; }
-    [[ "$now" =~ ^[1-9][0-9]*$ ]] || now="$(date +%s)"
-    local out err rc err_file cur_ep cur_comm stored_base cur_base diff
-    err_file="$(mktemp)"
-    out="$(LC_ALL=C TZ=UTC _lease_ps -p "$pid" -o lstart= 2>"$err_file")"; rc=$?
-    err="$(<"$err_file")"; rm -f "$err_file"
-    if (( rc == 1 )) && [[ -z "$out" && -z "$err" ]]; then
-        printf 'dead\n'; return 0
-    fi
-    if (( rc != 0 )); then
-        printf 'unknown\n'; return 0
-    fi
-    [[ -n "${out//[[:space:]]/}" ]] || { printf 'unknown\n'; return 0; }
-    cur_ep="$(_lease_lstart_to_epoch "$out")" || { printf 'unknown\n'; return 0; }
-    [[ "$cur_ep" =~ ^-?[0-9]+$ && "$start" =~ ^-?[0-9]+$ ]] || { printf 'unknown\n'; return 0; }
-    if (( cur_ep > start )); then diff=$(( cur_ep - start )); else diff=$(( start - cur_ep )); fi
-    (( diff > 2 )) && { printf 'dead\n'; return 0; }
-    cur_comm="$(_lease_full_comm "$pid")"
-    stored_base="${comm##*/}"
-    cur_base="${cur_comm##*/}"
-    if [[ -n "$cur_base" && "$cur_base" != "$stored_base" ]] &&
-       [[ "$stored_base" != "$cur_base"* && "$cur_base" != "$stored_base"* ]]; then
-        printf 'unknown\n'; return 0
-    fi
-    if [[ "$created" =~ ^[0-9]+$ && "$ttl" =~ ^[0-9]+$ ]] && (( now >= created + ttl * 3600 )); then
-        printf 'alive-expired\n'; return 0
-    fi
-    printf 'alive\n'
+    print("unreadable"); raise SystemExit
+if d.get("released_at"): print("released"); raise SystemExit
+owners=d.get("owners")
+if not isinstance(owners,list): owners=[] if d.get("owner") is None else [d.get("owner")]
+now=int(sys.argv[2]) if sys.argv[2].isdigit() else int(time.time())
+if not owners:
+    print("none"); raise SystemExit
+states=[]
+for owner in owners:
+    if not isinstance(owner,dict) or not isinstance(owner.get("pid"),int) or isinstance(owner.get("pid"),bool):
+        states.append("unreadable"); continue
+    if owner.get("released_at"):
+        states.append("released"); continue
+    pid=owner["pid"]
+    try:
+        ps=os.environ.get("DISK_MAGICIAN_PS_BIN", "ps")
+        p=subprocess.run([ps,"-p",str(pid),"-o","lstart="],capture_output=True,text=True,env={**os.environ,"LC_ALL":"C","TZ":"UTC"})
+    except Exception:
+        states.append("unknown"); continue
+    if p.returncode==1 and not p.stdout.strip() and not p.stderr.strip():
+        states.append("dead"); continue
+    if p.returncode!=0 or not p.stdout.strip(): states.append("unknown"); continue
+    try:
+        epoch=int(datetime.strptime(p.stdout.strip(),"%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc).timestamp())
+        stored=int(owner.get("start_epoch"))
+    except Exception:
+        states.append("unknown"); continue
+    if abs(epoch-stored)>2: states.append("dead"); continue
+    args=subprocess.run([ps,"-p",str(pid),"-o","args="],capture_output=True,text=True).stdout.strip()
+    comm=os.path.basename(args.split()[0]) if args else ""
+    expected=os.path.basename(str(owner.get("comm", "")))
+    if comm and comm!=expected and not comm.startswith(expected) and not expected.startswith(comm):
+        states.append("unknown"); continue
+    created=d.get("created_epoch"); ttl=d.get("ttl_hours",24)
+    states.append("alive-expired" if isinstance(created,int) and isinstance(ttl,int) and now>=created+ttl*3600 else "alive")
+if "alive" in states: print("alive")
+elif "alive-expired" in states: print("alive-expired")
+elif "unreadable" in states: print("unreadable")
+elif "unknown" in states: print("unknown")
+elif "dead" in states: print("dead")
+else: print("released")
+PYLEASESTATE
 }
 
 # lease_release <worktree_path> — mark the caller's own lease released.
@@ -612,7 +828,7 @@ lease_release() {
     [[ "$ep" =~ ^-?[0-9]+$ ]] || { echo "not lease owner" >&2; return 1; }
     lease_mutation_lock_enter "$lease" || { echo "lease busy" >&2; return 1; }
     if python3 - "$lease" "$pid" "$ep" <<'PY'
-import json, os, sys
+import json, os, sys, tempfile
 from datetime import datetime, timezone
 lease, pid, ep = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 try:
@@ -620,18 +836,30 @@ try:
         d = json.load(f)
 except Exception:
     sys.exit(1)
-o = d.get("owner")
-if not isinstance(o, dict) or not isinstance(o.get("pid"), int) or o["pid"] != pid:
+owners = d.get("owners")
+legacy_owner_only = not isinstance(owners, list)
+if legacy_owner_only:
+    owners = [d.get("owner")] if isinstance(d.get("owner"), dict) else []
+matches = [o for o in owners if isinstance(o, dict) and str(o.get("pid")) == str(pid)
+           and str(o.get("start_epoch")) == ep and not o.get("released_at")]
+if not matches and legacy_owner_only:
+    o = d.get("owner")
+    if isinstance(o, dict) and str(o.get("pid")) == str(pid) and str(o.get("start_epoch")) == ep:
+        owners = [o]
+        d["owners"] = owners
+        matches = [o]
+if not matches:
     sys.exit(1)
-try:
-    if str(int(o.get("start_epoch"))) != ep:
-        sys.exit(1)
-except (TypeError, ValueError):
-    sys.exit(1)
-d["released_at"] = datetime.now(timezone.utc).isoformat()
-tmp = lease + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(d, f, indent=2)
+stamp = datetime.now(timezone.utc).isoformat()
+for o in matches: o["released_at"] = stamp
+d["owners"] = owners
+if owners and all(not isinstance(o, dict) or o.get("released_at") for o in owners):
+    d["released_at"] = stamp
+else:
+    d.pop("released_at", None)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".release-")
+with os.fdopen(fd, "w") as f:
+    json.dump(d, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
 os.replace(tmp, lease)
 PY
     then
@@ -662,33 +890,50 @@ lease_release_owner_session() {
 }
 
 # _lease_session_release scan|commit <lease> <session> <pid> <epoch> — scan prints
-# "self|other<TAB>pid<TAB>epoch<TAB>path"; commit marks released (flock, fsync, rename)
-# only if the re-read lease still has that owner, else rc 1.
+# one matching owner; commit releases only that owner under the mutation lock.
 _lease_session_release() {
     local mode="$1" p="$2"
     if [[ "$mode" == commit ]]; then lease_mutation_lock_enter "$p" || return 1; fi
-    python3 - "$@" <<'PY'
-import fcntl, json, os, sys, tempfile
+    python3 - "$@" <<'PYLEASESESSION'
+import json, os, sys, tempfile
 from datetime import datetime, timezone
 mode, p, sid, pid, ep = sys.argv[1:]
 try:
     lk = open(p[:-5] + ".lock", "a") if mode == "commit" else None
-    lk and fcntl.flock(lk, fcntl.LOCK_EX)
-    d = json.load(open(p)); o = d.get("owner")
-    o = (str(o.get("pid")), str(o.get("start_epoch"))) if isinstance(o, dict) and o.get("session") == sid and not d.get("released_at") else None
+    if lk:
+        import fcntl
+        fcntl.flock(lk, fcntl.LOCK_EX)
+    d = json.load(open(p))
+    owners = d.get("owners")
+    if not isinstance(owners, list):
+        owners = [d.get("owner")] if isinstance(d.get("owner"), dict) else []
+    matches = [o for o in owners if isinstance(o, dict) and o.get("session") == sid
+               and str(o.get("pid")) == pid and str(o.get("start_epoch")) == ep
+               and not o.get("released_at") and not d.get("released_at")]
     if mode == "scan":
-        o and print("%s\t%s\t%s\t%s" % ("self" if o == (pid, ep) else "other", o[0], o[1], d.get("path", "")))
-    elif o == (pid, ep):
-        d["released_at"] = datetime.now(timezone.utc).isoformat()
+        if matches:
+            o = matches[0]
+            print("self\t%s\t%s\t%s" % (o.get("pid"), o.get("start_epoch"), d.get("path", "")))
+        elif any(isinstance(o, dict) and o.get("session") == sid and not o.get("released_at") for o in owners):
+            o = next(o for o in owners if isinstance(o, dict) and o.get("session") == sid and not o.get("released_at"))
+            print("other\t%s\t%s\t%s" % (o.get("pid"), o.get("start_epoch"), d.get("path", "")))
+    elif len(matches) == 1:
+        stamp = datetime.now(timezone.utc).isoformat()
+        matches[0]["released_at"] = stamp
+        d["owners"] = owners
+        if owners and all(not isinstance(o, dict) or o.get("released_at") for o in owners):
+            d["released_at"] = stamp
+        else:
+            d.pop("released_at", None)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".release-")
         with os.fdopen(fd, "w") as f:
-            json.dump(d, f, indent=2); f.flush(); os.fsync(f.fileno())
+            json.dump(d, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, p)
     else:
         sys.exit(1)
 except Exception:
     sys.exit(1)
-PY
+PYLEASESESSION
     local rc=$?
     if [[ "$mode" == commit ]]; then lease_mutation_lock_exit "$p"; fi
     return "$rc"
@@ -759,82 +1004,130 @@ PY
 # worktree/clone/evidence leases, pending leases, owned leases, non-birth-audit
 # leases, symlinks, or hash-mismatched files (fail closed on any ambiguity).
 lease_prune_birth_audit_scratch() {
-    local ld
+    local ld fp
     ld="$(lease_dir)"
     [[ -d "$ld" && ! -L "$ld" ]] || return 0
-    python3 - "$ld" "${1:-}" <<'PY'
+    for fp in "$ld"/*.json; do
+        [[ -e "$fp" || -L "$fp" ]] || continue
+        if [[ -n "${DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK:-}" ]]; then
+            "$DISK_MAGICIAN_TEST_BEFORE_BIRTH_AUDIT_PRUNE_LOCK" "$fp" || true
+        fi
+        # Owner writes take the same registry -> lease lock order. Re-read the
+        # candidate only after both locks are held so a fresh owner cannot be
+        # unlinked based on an earlier ownerless snapshot.
+        lease_registry_mutation_lock_enter || continue
+        if ! lease_reuse_lock_acquire "$fp"; then
+            lease_registry_mutation_lock_exit || true
+            continue
+        fi
+        python3 - "$fp" "${1:-}" <<'PY'
 import hashlib, json, os, stat, sys, time
 
-ld = sys.argv[1]
+fp = sys.argv[1]
+ld = os.path.dirname(fp)
 try:
     now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
 except (TypeError, ValueError):
     now = time.time()
 
 try:
-    entries = list(os.scandir(ld))
-except OSError:
+    n = os.path.basename(fp)
+    if not n.endswith(".json") or n.startswith("."): sys.exit(0)
+    st = os.lstat(fp)
+    if not stat.S_ISREG(st.st_mode): sys.exit(0)
+    with open(fp, "rb") as f: d = json.load(f)
+except Exception:
     sys.exit(0)
-
-for entry in entries:
-    n = entry.name
-    if not n.endswith(".json") or n.startswith("."):
-        continue
-    fp = entry.path
-    try:
-        st = os.lstat(fp)
-    except OSError:
-        continue
-    if not stat.S_ISREG(st.st_mode):
-        continue
-    if os.path.lexists(fp + ".reuse-lock"):
-        continue
-    try:
-        with open(fp, "rb") as f:
-            d = json.load(f)
-    except Exception:
-        continue
-    if not isinstance(d, dict):
-        continue
-    p = d.get("path")
-    if not (isinstance(p, str) and bool(p)):
-        continue
-    if not ("owner" in d and d["owner"] is None):
-        continue
-    if d.get("pending") is not False:
-        continue
-    if d.get("creator") != "birth-audit":
-        continue
-    if d.get("kind") != "scratch":
-        continue
-    try:
-        real = os.path.realpath(p)
-        encoded = os.fsencode(real)
-        path_gone = not os.path.lexists(p) and not os.path.exists(real)
-    except (ValueError, UnicodeError, OSError):
-        continue
-    if n != hashlib.sha256(encoded).hexdigest()[:16] + ".json":
-        continue
-    exp = d.get("expires_at")
-    ce = d.get("created_epoch")
-    ttl = d.get("ttl_hours")
-    exp_ok = isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0
-    ce_ok = (
-        isinstance(ce, (int, float))
-        and not isinstance(ce, bool)
-        and ce > 0
-        and isinstance(ttl, (int, float))
-        and not isinstance(ttl, bool)
-        and ttl > 0
-    )
-    if "expires_at" in d and not exp_ok:
-        ttl_expired = False
-    else:
-        ttl_expired = (exp_ok and now >= exp) or (ce_ok and now >= ce + ttl * 3600)
-    if path_gone or ttl_expired:
-        try:
-            os.unlink(fp)
-        except OSError:
-            pass
+if not isinstance(d, dict): sys.exit(0)
+p = d.get("path")
+if not (isinstance(p, str) and bool(p)): sys.exit(0)
+if not ("owner" in d and d["owner"] is None): sys.exit(0)
+if d.get("pending") is not False: sys.exit(0)
+if d.get("creator") != "birth-audit": sys.exit(0)
+if d.get("kind") != "scratch": sys.exit(0)
+try:
+    real = os.path.realpath(p)
+    encoded = os.fsencode(real)
+    path_gone = not os.path.lexists(p) and not os.path.exists(real)
+except (ValueError, UnicodeError, OSError): sys.exit(0)
+if n != hashlib.sha256(encoded).hexdigest()[:16] + ".json": sys.exit(0)
+exp = d.get("expires_at")
+ce = d.get("created_epoch")
+ttl = d.get("ttl_hours")
+exp_ok = isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0
+ce_ok = (isinstance(ce, (int, float)) and not isinstance(ce, bool) and ce > 0
+         and isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl > 0)
+if "expires_at" in d and not exp_ok:
+    ttl_expired = False
+else:
+    ttl_expired = (exp_ok and now >= exp) or (ce_ok and now >= ce + ttl * 3600)
+if path_gone or ttl_expired:
+    try: os.unlink(fp)
+    except OSError: pass
 PY
+        lease_reuse_lock_release "$fp" || true
+        lease_registry_mutation_lock_exit || true
+    done
+}
+
+# lease_add_owner <worktree_path> --owner-pid <pid> resolves a live process
+# incarnation before adding it; callers cannot supply a stale start identity.
+lease_add_owner() {
+    local wt="$1" flag="${2:-}" pid="${3:-}" start comm confirm
+    [[ $# -eq 3 && "$flag" == --owner-pid && "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+    start="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    comm="$(_lease_full_comm "$pid")"
+    [[ -n "$comm" ]] || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    confirm="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    [[ "$confirm" == "$start" ]] || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    lease_owner_add "$wt" "$pid" "$start" "$comm"
+}
+
+# lease_release_owner_pid <worktree_path> --owner-pid <pid> releases only the
+# lease entry for the exact live process incarnation.
+lease_release_owner_pid() {
+    local wt="$1" flag="${2:-}" pid="${3:-}" start confirm lease
+    [[ $# -eq 3 && "$flag" == --owner-pid && "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+    start="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
+    confirm="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    [[ "$confirm" == "$start" ]] || { echo "owner identity changed: pid=$pid" >&2; return 1; }
+    lease="$(lease_path_for "$wt")"
+    [[ -f "$lease" ]] || { echo "no lease" >&2; return 1; }
+    lease_mutation_lock_enter "$lease" || { echo "lease busy" >&2; return 1; }
+    if python3 - "$lease" "$pid" "$start" <<'PYLEASEPIDRELEASE'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+lease, pid, start = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(lease) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+owners = d.get("owners")
+if not isinstance(owners, list):
+    owners = [d.get("owner")] if isinstance(d.get("owner"), dict) else []
+matches = [o for o in owners if isinstance(o, dict) and str(o.get("pid")) == pid
+           and str(o.get("start_epoch")) == start and not o.get("released_at")]
+if not matches:
+    sys.exit(1)
+stamp = datetime.now(timezone.utc).isoformat()
+for owner in matches:
+    owner["released_at"] = stamp
+d["owners"] = owners
+if owners and all(not isinstance(o, dict) or o.get("released_at") for o in owners):
+    d["released_at"] = stamp
+else:
+    d.pop("released_at", None)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(lease), prefix=".release-owner-")
+with os.fdopen(fd, "w") as f:
+    json.dump(d, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+os.replace(tmp, lease)
+PYLEASEPIDRELEASE
+    then
+        lease_mutation_lock_exit "$lease"
+        return 0
+    fi
+    lease_mutation_lock_exit "$lease"
+    echo "not lease owner" >&2
+    return 1
 }

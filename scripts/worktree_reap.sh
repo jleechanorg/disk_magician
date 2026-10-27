@@ -57,6 +57,10 @@ try: print(json.load(open(sys.argv[1])).get('reuse',{}).get('state',''))
 except Exception: print('unreadable')
 PY
 }
+release_remove_locks() {
+    lease_reuse_lock_release "$1"
+    lease_registry_mutation_lock_exit || true
+}
 acquire_lock() {
     local pid stamp now gate="$LOCK.reclaim_gate"
     if ! mkdir "$LOCK" 2>/dev/null; then
@@ -366,34 +370,44 @@ process_lease() {
     if [[ "$verdict" == remove && "$MODE" == remove ]]; then
         # Exclude reuse from the final lease/verdict check through the actual
         # removal. A fresh unlocked claim check would leave the same TOCTOU.
+        if ! lease_registry_mutation_lock_enter; then
+            log "kept:lease-busy $real"
+            echo kept:lease-busy >> "$EVENTS"
+            return 0
+        fi
         if ! lease_reuse_lock_acquire "$file"; then
+            lease_registry_mutation_lock_exit || true
             log "kept:reuse-locked $real"
             echo kept:reuse-locked >> "$EVENTS"
             return 0
         fi
         reuse_state="$(reuse_claim_state "$file")"
         if [[ "$reuse_state" == pending || "$reuse_state" == reuse_incomplete ]]; then
-            lease_reuse_lock_release "$file"
+            release_remove_locks "$file"
             log "kept:$reuse_state $real"
             echo "kept:$reuse_state" >> "$EVENTS"
             return 0
         fi
         if ! lease_matches_incarnation "$file"; then
             record "$file" "$real" kept:reuse-claim-or-incarnation-changed --lock-held
-            lease_reuse_lock_release "$file"
+            release_remove_locks "$file"
             return 0
         fi
         if [[ -n "${DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK:-}" ]]; then
             "$DISK_MAGICIAN_REAP_AFTER_REMOVE_LOCK_HOOK" "$file" "$real" || true
         fi
         if [[ -n "${DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK:-}" ]]; then "$DISK_MAGICIAN_REAP_BEFORE_REMOVE_HOOK" "$real"; fi
-        if (( STOP )); then lease_reuse_lock_release "$file"; return 1; fi
+        if (( STOP )); then release_remove_locks "$file"; return 1; fi
         # Re-verify through the REAL C14 verdict, which also writes the single
         # original receipt (checkout inventory plus linked-worktree admin rows).
         # WRH consumes exactly that receipt via --quarantine; no second fresh
         # inventory may reauthorize the mutation.
         local reap_c14_inv reap_c14_verdict reap_removed=0
-        reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || { lease_reuse_lock_release "$file"; record "$file" "$real" kept:check-failed; return 0; }
+        reap_c14_inv="$(mktemp "${TMPDIR:-/tmp}/reap-c14-inv.XXXXXX")" || {
+            record "$file" "$real" kept:check-failed --lock-held
+            release_remove_locks "$file"
+            return 0
+        }
         if [[ -n "$ACT_DEADLINE_AT" ]]; then
             reap_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$quiet" --inventory-out "$reap_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
         else
@@ -408,7 +422,7 @@ process_lease() {
         fi
         if [[ "$reap_removed" == 1 ]]; then
             rm -f "$reap_c14_inv"
-            lease_reuse_lock_release "$file"
+            release_remove_locks "$file"
             echo remove >> "$EVENTS"
             return 0
         fi
@@ -424,7 +438,7 @@ process_lease() {
         fi
         verdict="${verdict:-kept:remove-failed}"
         record "$file" "$real" "$verdict" --lock-held
-        lease_reuse_lock_release "$file"
+        release_remove_locks "$file"
         return 0
     fi
     record "$file" "$real" "$verdict"

@@ -44,6 +44,11 @@ FAST_DAYS = 3    # cleaned on this many distinct days ...
 FAST_HOURS = 6   # ... or in this many distinct hours => regrows fast
 TOP_C, TOP_D = 30, 15
 TOOL_STAGING = ("/_disk_magician_archive",)  # the tool's own staging target, not a producer
+EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var/folders", "/tmp", "/var/folders")
+BROAD_CONTAINER_PREFIXES = (
+    "/tmp", "/private/tmp", "/var", "/private/var", "/Library",
+    "/System", "/Applications", "/opt", "/usr", "/Users",
+)
 
 
 def norm(path):
@@ -198,11 +203,193 @@ def load_monitored(state_dir, home):
     return dirs, list(gl.values()), {**gl, **dirs}
 
 
-def is_monitored(path, mon):
+def is_directly_monitored(path, mon):
     dirs, globs = mon[0], mon[1]
-    path = path.rstrip("/")
-    return (any(path == d or path.startswith(d + "/") for d in dirs.values())
-            or any(fnmatch.fnmatch(path, g) for g in globs))
+    path = norm(path.rstrip("/"))
+    return (any(path == norm(d.rstrip("/")) for d in dirs.values())
+            or any(fnmatch.fnmatch(path, norm(g.rstrip("/"))) for g in globs))
+
+
+def is_monitored(path, mon, direct_only=False):
+    if is_directly_monitored(path, mon):
+        return True
+    if direct_only:
+        return False
+    dirs = mon[0]
+    path = norm(path.rstrip("/"))
+    if any(path == p or path.startswith(p + "/") for p in BROAD_CONTAINER_PREFIXES):
+        return False
+    return any(path.startswith(norm(d.rstrip("/")) + "/") for d in dirs.values()
+               if not any(norm(d.rstrip("/")) == p or norm(d.rstrip("/")).startswith(p + "/")
+                          for p in BROAD_CONTAINER_PREFIXES))
+
+
+def is_ephemeral_path(path, home=""):
+    p = path.rstrip("/")
+    if home and (p == home or p.startswith(home.rstrip("/") + "/")):
+        return False
+    return any(p == ep or p.startswith(ep + "/") for ep in EPHEMERAL_PREFIXES)
+
+
+def make_monitored_key(path, home, taken):
+    rel = path[len(home) + 1:] if path.startswith(home + "/") else path.lstrip("/")
+    slug = re.sub(r"[^a-z0-9]+", "_", rel.lower()).strip("_") or "root"
+    if len(slug) > 64:
+        slug = slug[:28] + "_" + slug[-35:]
+    base = slug
+    idx = 2
+    while slug in taken:
+        slug = f"{base}_{idx}"
+        idx += 1
+    taken.add(slug)
+    return slug
+
+
+def collect_superset_candidates(state_dir, home, roots=None, frontier_path=None,
+                                registry_path=None, mega_min_kb=GIB_KB):
+    """Return deduplicated concrete paths from the Disk Dir Ledger and Mega-Table <= 5 GiB."""
+    home = norm(home)
+    candidates, seen = [], set()
+
+    def _add(p):
+        p = norm(p.rstrip("/"))
+        if p and p.startswith("/") and p not in seen:
+            seen.add(p)
+            candidates.append(p)
+
+    reg_path = pathlib.Path(registry_path) if registry_path else (HERE.parent / "config" / "sweeper_roots.txt")
+    darwin_tmp = cur.resolve_darwin_tmp()
+    if reg_path.is_file():
+        for line in reg_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            pat = parts[0].strip()
+            owner = parts[1].strip() if len(parts) > 1 else ""
+            if not pat or owner.startswith("decision:"):
+                continue
+            if "$DARWIN_USER_TEMP_DIR" in pat:
+                if not darwin_tmp:
+                    continue
+                pat = pat.replace("$DARWIN_USER_TEMP_DIR", darwin_tmp)
+            pat = pat.replace("$HOME", home)
+            pat = os.path.normpath(pat)
+            if not any(c in pat for c in "*?["):
+                _add(pat)
+
+    for r, e in sorted((roots or {}).items()):
+        if r.endswith(TOOL_STAGING) or e.get("kb", 0) <= 0:
+            continue
+        r_norm = norm(r.rstrip("/"))
+        is_fast = len(e.get("days", ())) >= FAST_DAYS or len(e.get("hours", ())) >= FAST_HOURS
+        if not is_ephemeral_path(r_norm, home) or is_fast:
+            _add(r_norm)
+
+    ledger_files = []
+    if frontier_path is not None:
+        fp = pathlib.Path(frontier_path)
+        if fp.is_file():
+            ledger_files.append(fp)
+    td_path = pathlib.Path(state_dir) / "ledger" / "topdown-5g.json"
+    if td_path.is_file() and td_path not in ledger_files:
+        ledger_files.append(td_path)
+    for lf in ledger_files:
+        try:
+            td = json.loads(lf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for b in td.get("granularity_buckets") or []:
+            if not isinstance(b, dict):
+                continue
+            kb = cur.drb.bucket_kb(b)
+            if not (mega_min_kb <= kb <= 5 * GIB_KB):
+                continue
+            raw_p = cur.drb.bucket_path(b)
+            if not raw_p:
+                continue
+            p = norm(cur.drb.normalize_path(raw_p).rstrip("/"))
+            if is_ephemeral_path(p, home):
+                continue
+            if os.path.isdir(p) and not os.path.islink(p):
+                _add(p)
+    return candidates
+
+
+def sync_monitored_superset(state_dir, home, roots=None, frontier_path=None,
+                            registry_path=None, mega_min_kb=GIB_KB, create_missing=False):
+    """Ensure effective config and state_dir/config/config.json contain all Disk Dir Ledger
+    roots and persistent Mega-Table <= 5 GiB directory buckets."""
+    home = norm(home)
+    state_dir = pathlib.Path(state_dir)
+    repo_root_real = os.path.realpath(str(HERE.parent))
+    configured_state = os.environ.get("DISK_MAGICIAN_STATE_REPO")
+    if configured_state is None:
+        os.environ["DISK_MAGICIAN_STATE_REPO"] = str(state_dir)
+    try:
+        effective = resolve_config.resolve()
+    finally:
+        if configured_state is None:
+            os.environ.pop("DISK_MAGICIAN_STATE_REPO", None)
+
+    targets, seen_real = [], set()
+    for raw_t in (effective, str(state_dir / "config" / "config.json")):
+        if not raw_t:
+            continue
+        tp = pathlib.Path(raw_t)
+        real_t = os.path.realpath(str(tp))
+        if real_t == repo_root_real or real_t.startswith(repo_root_real + os.sep):
+            continue
+        if not tp.is_file() and not create_missing:
+            continue
+        if real_t not in seen_real:
+            seen_real.add(real_t)
+            targets.append(tp)
+    if not targets:
+        return []
+
+    candidates = collect_superset_candidates(
+        state_dir, home, roots=roots, frontier_path=frontier_path,
+        registry_path=registry_path, mega_min_kb=mega_min_kb,
+    )
+    if not candidates:
+        return []
+
+    ex = lambda p: norm((home + p[1:] if p.startswith("~") else p).replace("$HOME", home).rstrip("/"))  # noqa: E731
+    added_keys = []
+    for tp in targets:
+        if tp.is_file():
+            try:
+                cfg = json.loads(tp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+        else:
+            cfg = {"monitored_dirs": [], "monitored_globs": [], "monitored_file_globs": []}
+        if not isinstance(cfg, dict):
+            continue
+        dirs = {d["key"]: ex(d["path"]) for d in cfg.get("monitored_dirs", [])
+                if isinstance(d, dict) and "path" in d and "key" in d}
+        globs = [ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs")
+                 for g in cfg.get(k, []) if isinstance(g, dict) and "pattern" in g]
+        taken = {row["key"] for k in ("monitored_dirs", "monitored_globs", "monitored_file_globs")
+                 for row in cfg.get(k, []) if isinstance(row, dict) and "key" in row}
+        mon_tuple = (dirs, globs, {})
+        changed = False
+        for p in candidates:
+            if is_directly_monitored(p, mon_tuple):
+                continue
+            key = make_monitored_key(p, home, taken)
+            cfg.setdefault("monitored_dirs", []).append({
+                "key": key, "path": fold(p, home), "timeout": 60,
+            })
+            dirs[key] = p
+            if key not in added_keys:
+                added_keys.append(key)
+            changed = True
+        if changed:
+            tp.parent.mkdir(parents=True, exist_ok=True)
+            publish_report(tp, json.dumps(cfg, indent=2) + "\n")
+    return added_keys
 
 
 
@@ -644,6 +831,12 @@ def render(args, state_dir, now):
         out += [f"Full-disk ledger freshness: `{fresh}`.", ""]
     src = args.deletions_log + (f" ({rows} rows in window)" if rows is not None else " (missing)")
     out += [f"Deletion log source: `{fold(src, home)}`.", ""]
+    if getattr(args, "sync_config", False) or (not getattr(args, "stdout", False) and not getattr(args, "no_sync_config", False)):
+        sync_monitored_superset(
+            state_dir, home, roots=roots, frontier_path=args.frontier,
+            registry_path=getattr(args, "registry", None),
+            create_missing=getattr(args, "sync_config", False),
+        )
     mon = load_monitored(state_dir, home)
     out += ["`monitored_dirs` (in the state repo's `config/config.json`) is the one list of directories "
             "this tool measures. This file is a report over that list, not a second list. "
@@ -662,11 +855,14 @@ def render(args, state_dir, now):
 def commit(state_dir, rels, stamp):
     git = ["git", "-C", str(state_dir), "-c", "user.name=disk-magician",
            "-c", "user.email=disk-magician@localhost"]
-    if subprocess.run(git + ["add", "--", *rels], capture_output=True).returncode:
+    paths = list(rels)
+    if (state_dir / "config" / "config.json").is_file() and "config/config.json" not in paths:
+        paths.append("config/config.json")
+    if subprocess.run(git + ["add", "--", *paths], capture_output=True).returncode:
         return "add_failed"
-    if subprocess.run(git + ["diff", "--cached", "--quiet", "--", *rels]).returncode == 0:
+    if subprocess.run(git + ["diff", "--cached", "--quiet", "--", *paths]).returncode == 0:
         return "unchanged"
-    r = subprocess.run(git + ["commit", "-q", "-m", f"reclaim-ledger {stamp}", "--", *rels],
+    r = subprocess.run(git + ["commit", "-q", "-m", f"reclaim-ledger {stamp}", "--", *paths],
                        capture_output=True)
     return "committed" if r.returncode == 0 else "commit_failed"
 
@@ -764,6 +960,11 @@ def main(argv=None):
     p.add_argument("--stdout", "--dry-run", dest="stdout", action="store_true",
                    help="print the ledger; write and commit nothing")
     p.add_argument("--no-commit", action="store_true", help="write the file but do not commit")
+    p.add_argument("--sync-config", action="store_true",
+                   help="sync Disk Dir Ledger roots and Mega-Table <=5 GiB dirs into monitored_dirs")
+    p.add_argument("--no-sync-config", action="store_true",
+                   help="skip automatic monitored_dirs superset sync during ledger write")
+    p.add_argument("--registry", default=None, help=argparse.SUPPRESS)
     p.add_argument("--freshness-line", default=None, help=argparse.SUPPRESS)
     p.add_argument("--now", default=None, help=argparse.SUPPRESS)
     args = p.parse_args(argv)

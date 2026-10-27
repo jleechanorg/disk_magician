@@ -289,18 +289,22 @@ print(v)
     # remover. No second verdict, no unguarded git removal.
     declare -F artifact_removal_verdict >/dev/null 2>&1 || { wrh_log "kept $p: C14 unavailable"; return 0; }
     inv="$(mktemp "${TMPDIR:-/tmp}/wrh-c14-inventory.XXXXXX")" || { wrh_log "kept $p: inventory allocation failed"; return 0; }
+    lease_registry_mutation_lock_enter || { rm -f -- "$inv" 2>/dev/null; wrh_log "kept $p: lease-busy"; return 0; }
     wrh_c14_verdict="$(artifact_removal_verdict "$real" --min-idle-minutes "$min_idle" --inventory-out "$inv")" || wrh_c14_verdict=kept:check-failed
     if [[ "$wrh_c14_verdict" != remove ]]; then
         rm -f -- "$inv" 2>/dev/null
+        lease_registry_mutation_lock_exit || true
         wrh_log "kept $p: ${wrh_c14_verdict#kept:}"
         return 0
     fi
     if ! wrh_remove_now "$real" "$p" --quarantine "$inv"; then
         rm -f -- "$inv" 2>/dev/null
+        lease_registry_mutation_lock_exit || true
         wrh_log "kept $p: quarantine remove failed"
         return 0
     fi
     rm -f -- "$inv" 2>/dev/null
+    lease_registry_mutation_lock_exit || true
     return 0
 }
 

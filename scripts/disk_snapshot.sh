@@ -391,6 +391,28 @@ print(json.dumps(result))
 ' 2>/dev/null || echo "{}"
 }
 
+# Quota scratch volume status is an additive snapshot field. Keep the probe
+# bounded and preserve unknown as JSON null so a failed status read is never
+# reported as an empty, measured volume set.
+get_diskm_volumes_json() {
+  local result
+  local diskm="${DISK_MAGICIAN_DISKM_BIN:-disk-magician}"
+  command -v "$diskm" >/dev/null 2>&1 || { echo "null"; return; }
+  local rc
+  if result=$(probe_timeout 8 "$diskm" volume status --json --snapshot 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 0 || $rc -eq 1 ]] || { echo "null"; return; }
+  [[ -n "$result" ]] || { echo "null"; return; }
+  if ! printf '%s' "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and isinstance(d.get("volumes"),list) and isinstance(d.get("alarms"),list)' >/dev/null 2>&1; then
+    echo "null"
+    return
+  fi
+  printf '%s' "$result"
+}
+
 # tmutil listlocalsnapshots is the verifiable proxy for purgeable/reclaimable
 # local-snapshot space — diskutil exposes no distinct "purgeable" field on
 # this macOS version (verified empirically; disk_frontier_scan.py's
@@ -569,7 +591,24 @@ PY
   # Process substitution (not a pipe) keeps cache hit/miss counters in this
   # shell. Each refreshed row is also the complete replacement cache.
   while read -r dir; do
-    mtime=$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || echo 0)
+    # BSD stat supports -f %m; GNU stat treats -f as filesystem formatting and
+    # can emit non-numeric output even when the probe fails. Accept only an
+    # epoch value before selecting that platform-specific result.
+    if mtime=$(stat -f %m "$dir" 2>/dev/null) && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+      :
+    else
+      mtime=""
+    fi
+    if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+      if mtime=$(stat -c %Y "$dir" 2>/dev/null) && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+        :
+      else
+        mtime=""
+      fi
+    fi
+    if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+      mtime=0
+    fi
     cached_mtime=""
     cached_size=""
     while IFS=$'\t' read -r cached_path candidate_mtime candidate_size; do
@@ -578,7 +617,7 @@ PY
       cached_size="$candidate_size"
       break
     done < "$CACHE_READ_FILE"
-    if [[ -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
+    if [[ "$mtime" != 0 && -n "$cached_mtime" && "$cached_mtime" == "$mtime" ]]; then
       kb="${cached_size:-0}"
       cache_hits=$(( cache_hits + 1 ))
     else
@@ -707,6 +746,7 @@ vm_volume_used_gb=$(awk "BEGIN{printf \"%.2f\", (${vm_volume_used_kb:-0} + 0) / 
 # consumed, container free/purgeable, local snapshot count, Colima diffdisk
 # allocation. Same never-blocks-the-snapshot posture as swap/VM above.
 apfs_volume_stats_json=$(get_apfs_volume_stats_json)
+diskm_volumes_json=$(get_diskm_volumes_json)
 read -r local_snapshots_count local_snapshot_names_csv <<< "$(get_local_snapshots_line)"
 read -r colima_diffdisk_stat_bytes colima_diffdisk_du_kb <<< "$(get_colima_diffdisk_stats)"
 
@@ -1337,12 +1377,19 @@ if age_hours < 0:
 if age_hours > 36.0:
     result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
 else:
+    le_5g_count = sum(
+        1 for b in (d.get("granularity_buckets") or [])
+        if isinstance(b, dict) and (
+            b.get("measured_kb") if b.get("measured_kb") is not None else int(round((b.get("size_mb") or 0) * 1024))
+        ) <= 5 * 1024 * 1024
+    )
     result = {
         "mode": d.get("mode"),
         "captured_at": captured_at,
         "age_hours": round(age_hours, 1),
         "measured_total_kb": d.get("measured_total_kb"),
         "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
+        "mega_table_le_5g_count": le_5g_count,
         "residual_kb": d.get("residual_kb"),
         "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
         "local_snapshots_count": d.get("local_snapshots_count"),
@@ -1370,6 +1417,7 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_VM_VOLUME_USED_GB="$vm_volume_used_gb" \
   SNAP_DISK_FREE_KB="$disk_free_kb" \
   SNAP_APFS_VOLUMES="$apfs_volume_stats_json" \
+  SNAP_DISKM_VOLUMES="$diskm_volumes_json" \
   SNAP_LOCAL_SNAPSHOTS_COUNT="$local_snapshots_count" \
   SNAP_LOCAL_SNAPSHOT_NAMES="$local_snapshot_names_csv" \
   SNAP_COLIMA_DIFFDISK_STAT_BYTES="$colima_diffdisk_stat_bytes" \
@@ -1407,6 +1455,13 @@ pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
   SNAP_WARNING="$warning" \
   SNAP_TIMEOUTS="$timeout_keys_str" \
   SNAP_TOPDOWN="$TOPDOWN_JSON" \
+  SNAP_TOPDOWN_ENABLED="$TOPDOWN_ENABLED" \
+  SNAP_CONFIG_FILE="$CONFIG_FILE" \
+  SNAP_HOME="$HOME" \
+  SNAP_FRONTIER_LAST="${DISK_MAGICIAN_FRONTIER_LAST:-}" \
+  SNAP_FRONTIER_ROOT="${DISK_MAGICIAN_FRONTIER_ROOT_JSON:-/var/db/disk-magician/frontier_last.json}" \
+  SNAP_FRONTIER_STATE="$SNAPSHOT_STATE_DIR/frontier_last.json" \
+  SNAP_SCRIPT_DIR="$SCRIPT_DIR" \
   SNAP_LIBRARY_COVERAGE="$LIBRARY_COVERAGE_JSON" \
   python3 - "$DIRS_TEMP_FILE" <<'PY' 2>/dev/null || echo ""
 import json, os, sys
@@ -1475,6 +1530,11 @@ try:
     except (TypeError, ValueError):
         apfs_volume_stats = {}
     volumes_bytes = apfs_volume_stats.get("volumes_bytes") or {}
+    try:
+        diskm_volumes = json.loads(os.environ.get("SNAP_DISKM_VOLUMES") or "null")
+    except (TypeError, ValueError):
+        diskm_volumes = None
+    data["diskm_volumes"] = diskm_volumes
     data["apfs_volumes_gb"] = {
         role: (_bytes_to_gb(volumes_bytes[role]) if volumes_bytes.get(role) is not None else None)
         for role in ("Data", "VM", "Preboot", "Update")
@@ -1571,6 +1631,7 @@ try:
     if library_coverage is not None:
         data["library_coverage"] = library_coverage
     dirs = {}
+    src_paths = []
     dirs_file = sys.argv[1]
     if os.path.exists(dirs_file):
         with open(dirs_file) as f:
@@ -1582,6 +1643,8 @@ try:
                 if len(parts) < 2:
                     continue
                 k, v = parts[0], parts[1]
+                if len(parts) >= 3 and parts[2]:
+                    src_paths.append(parts[2])
                 if v == "null" or v == "":
                     dirs[k] = None
                 else:
@@ -1589,6 +1652,68 @@ try:
                         dirs[k] = int(v)
                     except ValueError:
                         dirs[k] = None
+    # Backfill/merge persistent >= 1 GiB, <= 5 GiB directory buckets from active
+    # frontier / topdown-5g ledger so snapshot.directories is structurally a superset
+    # of the Mega-Table <= 5 GiB directory entries.
+    if os.environ.get("SNAP_TOPDOWN_ENABLED") == "true":
+        try:
+            import fnmatch
+            sys.path.insert(0, os.environ.get("SNAP_SCRIPT_DIR") or "")
+            import check_uncovered_roots as cur
+            import disk_report_breakdown as drb
+            from frontier_selection import select_frontier
+            import reclaim_ledger as rl
+
+            home = rl.norm(os.environ.get("SNAP_HOME") or os.path.expanduser("~"))
+            cfg_path = os.environ.get("SNAP_CONFIG_FILE") or ""
+            cfg = json.load(open(cfg_path)) if cfg_path and os.path.isfile(cfg_path) else {}
+            ex = lambda p: rl.norm((home + p[1:] if p.startswith("~") else p).replace("$HOME", home).rstrip("/"))
+            mon_dirs = {d["key"]: ex(d["path"]) for d in cfg.get("monitored_dirs", []) if isinstance(d, dict) and "path" in d and "key" in d}
+            for sp in src_paths:
+                if not any(c in sp for c in "*?["):
+                    mon_dirs.setdefault(f"__src_{len(mon_dirs)}", ex(sp))
+            mon_globs = [ex(g["pattern"]) for k in ("monitored_globs", "monitored_file_globs") for g in cfg.get(k, []) if isinstance(g, dict) and "pattern" in g]
+            mon_tuple = (mon_dirs, mon_globs, {})
+            taken = set(dirs) | set(mon_dirs)
+
+            cand_files = []
+            sel = select_frontier(
+                os.environ.get("SNAP_FRONTIER_ROOT") or "",
+                os.environ.get("SNAP_FRONTIER_STATE") or "",
+                explicit_json=os.environ.get("DISK_MAGICIAN_FRONTIER_JSON"),
+                explicit_last=os.environ.get("SNAP_FRONTIER_LAST") or None,
+            )
+            if sel and os.path.isfile(sel):
+                cand_files.append(sel)
+            if not os.environ.get("DISK_MAGICIAN_FRONTIER_JSON") and not os.environ.get("SNAP_FRONTIER_LAST"):
+                sr = cfg.get("state_repo_path")
+                if isinstance(sr, str) and sr:
+                    td_p = os.path.join(os.path.expanduser(sr), "ledger", "topdown-5g.json")
+                    if os.path.isfile(td_p) and td_p not in cand_files:
+                        cand_files.append(td_p)
+            for cf in cand_files:
+                try:
+                    fdoc = json.load(open(cf))
+                except Exception:
+                    continue
+                for b in fdoc.get("granularity_buckets") or []:
+                    if not isinstance(b, dict):
+                        continue
+                    kb = drb.bucket_kb(b)
+                    if not (rl.GIB_KB <= kb <= 5 * rl.GIB_KB):
+                        continue
+                    raw_p = drb.bucket_path(b)
+                    if not raw_p:
+                        continue
+                    p = rl.norm(drb.normalize_path(raw_p).rstrip("/"))
+                    if rl.is_ephemeral_path(p, home):
+                        continue
+                    if os.path.isdir(p) and not os.path.islink(p) and not rl.is_directly_monitored(p, mon_tuple):
+                        bkey = rl.make_monitored_key(p, home, taken)
+                        dirs[bkey] = kb
+                        mon_dirs[bkey] = p
+        except Exception:
+            pass
     data["directories"] = dirs
     # Additive fresh/carried/unmeasured accounting (schema_version stays 2).
     # snapshot_coverage_pct keeps its fresh-only meaning.

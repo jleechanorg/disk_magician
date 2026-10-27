@@ -33,6 +33,7 @@ PATTERNS=(
   "config/*.txt"
   "scripts/*.sh"
   "scripts/*.py"
+  "scripts/*.swift"
   "scripts/lib/*.sh"
   "launchd/*.plist"
   "launchd/*.plist.template"
@@ -43,6 +44,8 @@ PATTERNS=(
   "systemd/*.template"
   "templates/systemd/*.template"
   "templates/polkit/*.template"
+  "systemd/*.service.in"
+  "systemd/*.timer.in"
 )
 
 if [[ -n "$STAGE_DIR" ]]; then

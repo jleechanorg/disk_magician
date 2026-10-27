@@ -981,6 +981,149 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or daily_rc
+def _diskm_bin():
+    """Prefer this checkout's dispatcher over whatever `disk-magician` is on PATH."""
+    explicit = os.environ.get("DISK_MAGICIAN_DISKM_BIN")
+    if explicit:
+        return explicit
+    sibling = Path(__file__).resolve().parent.parent / "disk_magician.sh"
+    return str(sibling) if sibling.is_file() else "disk-magician"
+
+
+def _scratch_mountpoint():
+    """Return configured mount, None for legacy config, or False if damaged."""
+    try:
+        config_path = resolve_config.resolve()
+        if not config_path:
+            # An explicit but missing override is damaged configuration. An
+            # implicit config miss is legacy only when no volume registry exists.
+            if os.environ.get("DISK_MAGICIAN_CONFIG"):
+                return False
+            state_dir = Path(os.environ.get(
+                "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
+            ))
+            if os.path.lexists(state_dir / "volumes" / "registry.json"):
+                return False
+            if sys.platform == "darwin":
+                try:
+                    probe = subprocess.run(
+                        [_diskm_bin(),
+                         "volume", "path", "scratch"],
+                        capture_output=True, text=True, timeout=12, check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if probe.returncode != 3:
+                    return False
+            return None
+        raw = json.loads(Path(config_path).read_text())
+        if not isinstance(raw, dict):
+            return False
+        if "volumes" not in raw:
+            state_dir = Path(os.environ.get(
+                "DISK_MAGICIAN_STATE_DIR", Path.home() / ".disk_magician_state"
+            ))
+            if os.path.lexists(state_dir / "volumes" / "registry.json"):
+                return False
+            if sys.platform == "darwin":
+                try:
+                    probe = subprocess.run(
+                        [_diskm_bin(),
+                         "volume", "path", "scratch"],
+                        capture_output=True, text=True, timeout=12, check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if probe.returncode != 3:
+                    return False
+            return None
+        mountpoint = raw["volumes"]["classes"]["scratch"]["mountpoint"]
+        if not isinstance(mountpoint, str) or not Path(mountpoint).is_absolute():
+            return False
+        return Path(mountpoint).expanduser().resolve(strict=False)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _volume_status(disksm):
+    try:
+        result = subprocess.run(
+            [disksm, "volume", "status", "--json", "--snapshot"],
+            capture_output=True, text=True, timeout=12, check=False,
+        )
+        if result.returncode not in (0, 1):
+            return None
+        data = json.loads(result.stdout)
+        rows = data.get("volumes")
+        if not isinstance(rows, list):
+            return None
+        row = next((item for item in rows
+                    if isinstance(item, dict) and item.get("class") == "scratch"), None)
+        if row is None:
+            return None
+        if row.get("status") != "active" or row.get("available") is not True:
+            return None
+        used, quota, volume_id, path = (
+            row.get("allocated_bytes"), row.get("quota_bytes"),
+            row.get("filesystem_id"), row.get("path"),
+        )
+        if (type(used) is not int or used < 0 or type(quota) is not int
+                or quota <= 0 or not isinstance(volume_id, str) or not volume_id
+                or not isinstance(path, str) or not path.startswith("/")):
+            return None
+        if not isinstance(data.get("measured_at"), str) or not data["measured_at"]:
+            return None
+        return {"used": used, "quota": quota, "uuid": volume_id,
+                "path": Path(path).resolve(strict=False)}
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+
+
+def volume_admission_gate(dest, estimate_gb, dry_run=False):
+    """Return a denial reason for scratch destinations, else None."""
+    if not dest:
+        return None
+    mountpoint = _scratch_mountpoint()
+    if mountpoint is False:
+        return "volume_measurement_unavailable:scratch"
+    if mountpoint is None:
+        return None
+    try:
+        target = Path(dest).expanduser().resolve(strict=False)
+        target.relative_to(mountpoint)
+    except (OSError, ValueError):
+        return None
+
+    diskm = _diskm_bin()
+    first = _volume_status(diskm)
+    if first is None or first["path"] != mountpoint:
+        return "volume_measurement_unavailable:scratch"
+    high_water = first["used"] / first["quota"] >= 0.9
+    if high_water and not dry_run:
+        try:
+            reclaim = subprocess.run(
+                [diskm, "volume", "reclaim", "--clean"],
+                capture_output=True, text=True, timeout=300, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "volume_reclaim_failed:scratch"
+        if reclaim.returncode != 0:
+            return "volume_reclaim_failed:scratch"
+        fresh = _volume_status(diskm)
+        if fresh is None or fresh["uuid"] != first["uuid"] or fresh["path"] != first["path"] or fresh["quota"] != first["quota"]:
+            return "volume_measurement_unavailable:scratch"
+        if fresh["used"] / fresh["quota"] >= 0.9:
+            return "volume_full:scratch"
+        first = fresh
+    elif high_water:
+        return "volume_full:scratch"
+
+    estimate = int(estimate_gb * GIB)
+    if first["quota"] - first["used"] - estimate < GIB:
+        return "volume_headroom:scratch"
+    return None
+
+
 def admit(a, budgets, state, now, d2):
     estimate_degraded = None
     if a.est_gb is None:
@@ -1035,8 +1178,15 @@ def admit(a, budgets, state, now, d2):
     if degraded: print(f"admission_degraded:{degraded}", file=sys.stderr)
     if estimate_degraded and z not in EMERGENCY:
         decision = 10
+    volume_denial = None
+    if not a.dry_run:
+        volume_denial = volume_admission_gate(a.dest, a.est_gb)
+    if volume_denial:
+        decision = 75
+        print(volume_denial, file=sys.stderr)
     event = dict(event="emergency_probe" if a.probe else "admit", admit_id=str(uuid.uuid4()), at=now, est_bytes=int(a.est_gb * GIB), decision=decision,
-                 zone=z, df_free_bytes=free, degraded=degraded, **{"class": a.cls}, **{k: getattr(a, k) for k in
+                 zone=z, df_free_bytes=free, degraded=degraded, volume_gate=volume_denial,
+                 **{"class": a.cls}, **{k: getattr(a, k) for k in
                  ("producer", "source", "dest", "ci_job", "tool_use_id", "compound")})
     try:
         if not a.dry_run:
@@ -1044,6 +1194,8 @@ def admit(a, budgets, state, now, d2):
     except OSError:
         print("admission_degraded:log", file=sys.stderr)
     print(f"admit_id={event['admit_id']}")
+    if volume_denial:
+        return 75
     return decision if d2 else 0
 def confirm(state, key, value, now):  # admit_confirm with the admitted dest's dev + inode; rc 2 if it is missing
     hit, log = None, state / "admission" / "events.jsonl"

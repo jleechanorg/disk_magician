@@ -65,6 +65,11 @@ def canon(path):
     path = os.path.normpath(os.path.expandvars(os.path.expanduser(path)))
     if path.startswith(DATA_PREFIX + "/"):
         path = path[len(DATA_PREFIX):]
+    # macOS /tmp, /var and /etc are symlinks into /private; match both spellings.
+    for alias in ("/private/tmp", "/private/var", "/private/etc"):
+        if path == alias or path.startswith(alias + "/"):
+            path = path[len("/private"):]
+            break
     return path
 
 

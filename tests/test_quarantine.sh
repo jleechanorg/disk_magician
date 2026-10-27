@@ -16,6 +16,13 @@ cleanup() {
 trap cleanup EXIT
 PASS=0 FAIL=0
 check() { local label="$1"; shift; if "$@"; then echo "PASS: $label"; PASS=$((PASS+1)); else echo "FAIL: $label"; FAIL=$((FAIL+1)); fi; }
+lease_empty_and_removed() {
+  [[ "$1" == removed:* && ! -e "$2" ]] &&
+    python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["owners"] == []' "$3"
+}
+lease_owner_stays_empty() {
+  [[ -d "$1" ]] && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["owners"] == []' "$2"
+}
 
 # Independent inventory writer for the stub verdict (same shape C14 emits with --inventory-out).
 cat > "$TMP/inv.py" <<'PY'
@@ -252,6 +259,27 @@ fixture; run DISK_MAGICIAN_TEST_AFTER_VERDICT='printf BBBB > "$DM_Q_PATH/report.
 check 'rewrite before rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]
 check 'rewrite before rename: rolled back, B intact' intact BBBB
 check 'rewrite before rename: quarantine empty' [ "$(qcount)" = 0 ]
+# C14 holds the shared lease-registry lock from before its verdict through
+# rename. A descendant lease owner injected after the verdict therefore fails
+# closed instead of racing a live owner onto a removed ancestor.
+fixture
+mkdir -p "$A/child"
+race_lease="$(lease_path_for "$A/child")"; mkdir -p "$(dirname "$race_lease")"
+python3 - "$race_lease" "$A/child" <<'PY'
+import json,sys
+json.dump({"path":sys.argv[2],"owner":None,"owners":[],"released_at":"released"},open(sys.argv[1],"w"))
+PY
+unrelated="$TMP/unrelated"; mkdir -p "$unrelated"
+unrelated_lease="$(lease_path_for "$unrelated")"
+python3 - "$unrelated_lease" "$unrelated" <<'PY'
+import json,sys
+json.dump({"path":sys.argv[2],"owner":None,"owners":[],"released_at":"released"},open(sys.argv[1],"w"))
+PY
+run DISK_MAGICIAN_TEST_AFTER_VERDICT="source '$ROOT/scripts/lib/worktree_lease.sh'; row=\$(lease_resolve_process_owner \"\$BASHPID\"); IFS=\$'\\t' read -r pid start comm <<<\"\$row\"; if lease_owner_add '$A/child' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/descendant-owner-race'; else echo blocked >'$TMP/descendant-owner-race'; fi; if lease_owner_add '$unrelated' \"\$pid\" \"\$start\" \"\$comm\"; then echo acquired >'$TMP/unrelated-owner-race'; else echo blocked >'$TMP/unrelated-owner-race'; fi"
+check 'verdict-to-rename race: descendant owner acquisition fails closed' grep -Fx blocked "$TMP/descendant-owner-race"
+check 'verdict-to-rename race: C14 removes ancestor with no descendant owner added' lease_empty_and_removed "$OUT" "$A" "$race_lease"
+check 'registry lock contention fails unrelated lease acquisition closed' grep -Fx blocked "$TMP/unrelated-owner-race"
+check 'unrelated lease remains unchanged after contention' lease_owner_stays_empty "$unrelated" "$unrelated_lease"
 # Same rewrite after the rename, before the re-hash.
 fixture; run DISK_MAGICIAN_TEST_AFTER_QUARANTINE='printf BBBB > "$DM_Q_DEST/report.md"'
 check 'rewrite after rename: kept:rehash-mismatch' [ "$OUT" = kept:rehash-mismatch ]
@@ -359,10 +387,36 @@ fixture; run DISK_MAGICIAN_TEST_RENAMEX_SYMBOL=renamex_np_missing
 check 'renamex_np missing: kept:exclusive_rename_unavailable' [ "$OUT" = kept:exclusive_rename_unavailable ]
 check 'renamex_np missing: untouched, no sidecar' bash -c '[[ -f "$1/report.md" && $(ls -A "$2" | wc -l) -eq 0 ]]' _ "$A" "$Q"
 
-# ENOSPC on the intent sidecar aborts before the rename.
-fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28
+# Oversized serialized intent fails before quarantine directory or index mutation.
+prepare_inputs
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x[0]["unknown_preserved"]="x"*(32*1024*1024); json.dump(x,open(sys.argv[1],"w"))' "$INV"
+OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING")"
+check 'oversized intent: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
+check 'oversized intent: artifact remains, no quarantine dir or index entry' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+
+# A serialization failure is classified before the index write and leaves no quarantine state.
+prepare_inputs
+SERIALIZE_FAIL="$TMP/serialize-fail.py"
+python3 - "$ROOT/scripts/quarantine_rename.py" "$SERIALIZE_FAIL" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+needle = 'intent_text = json.dumps(rec)'
+assert source.count(needle) == 1
+Path(sys.argv[2]).write_text(source.replace(needle, 'raise TypeError("injected serialization failure")'))
+PY
+OUT="$(python3 "$SERIALIZE_FAIL" phase1 "$A" "$INV" "$BINDING")"
+check 'intent serialization failure: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
+check 'intent serialization failure: original and metadata remain untouched' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"
+
+# ENOSPC on the intent sidecar aborts before the rename and exposes typed diagnostics only to a secure caller file.
+DIAG="$TMP/c14-diagnostic.json"; : >"$DIAG"; chmod 600 "$DIAG"
+fixture; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28 DISK_MAGICIAN_C14_DIAGNOSTIC_OUT="$DIAG"
 check 'ENOSPC sidecar: kept:intent-write-failed' [ "$OUT" = kept:intent-write-failed ]
 check 'ENOSPC sidecar: untouched, no partial sidecar' bash -c '[[ -f "$1/report.md" && $(ls -A "$2" | wc -l) -eq 0 ]]' _ "$A" "$Q"
+check 'ENOSPC sidecar: typed errno is private diagnostic' python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"operation":"intent_write","errno":28,"errno_name":"ENOSPC"}' "$DIAG"
+fixture; : >"$DIAG"; run DISK_MAGICIAN_TEST_INTENT_ERRNO=28
+check 'ENOSPC without diagnostic request: public result remains stable' [ "$OUT" = kept:intent-write-failed ]
 
 # Quarantine dir on another device: kept:cross-device, nothing copied.
 if [[ "$(uname)" == Darwin ]] && hdiutil create -quiet -size 4m -fs HFS+ -volname dmq "$TMP/q.dmg" >/dev/null 2>&1; then

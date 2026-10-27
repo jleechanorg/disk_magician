@@ -126,7 +126,15 @@ run_budget() {
 
     DRY_RUN="$DM_DRY_RUN"
     log() { :; }
-    path_size_kb() { { du -sk "$1" 2>/dev/null || true; } | awk "\$1 ~ /^[0-9]+\$/ {f=\$1} END{print f+0}"; }
+    path_size_kb() {
+      local bytes
+      if [[ "$(uname -s)" == Darwin ]]; then
+        bytes="$(find "$1" -type f -exec stat -f "%z" {} + 2>/dev/null | awk "{s += \$1} END{print s+0}")"
+      else
+        bytes="$(find "$1" -type f -exec stat -c "%s" {} + 2>/dev/null | awk "{s += \$1} END{print s+0}")"
+      fi
+      echo $((bytes / 1024))
+    }
     is_protected_root() { [[ -n "$DM_PROTECTED_BASE" && "$1" == "$DM_PROTECTED_BASE" ]]; }
     is_protected_tmp_path() { return 1; }
     has_open_files() {
@@ -313,7 +321,15 @@ result12="$(
 
     DRY_RUN=false
     log() { echo "LOG: $*" >&2; }
-    path_size_kb() { { du -sk "$1" 2>/dev/null || true; } | awk "\$1 ~ /^[0-9]+\$/ {f=\$1} END{print f+0}"; }
+    path_size_kb() {
+      local bytes
+      if [[ "$(uname -s)" == Darwin ]]; then
+        bytes="$(find "$1" -type f -exec stat -f "%z" {} + 2>/dev/null | awk "{s += \$1} END{print s+0}")"
+      else
+        bytes="$(find "$1" -type f -exec stat -c "%s" {} + 2>/dev/null | awk "{s += \$1} END{print s+0}")"
+      fi
+      echo $((bytes / 1024))
+    }
     is_protected_root() { return 1; }
     is_protected_tmp_path() { return 1; }
     has_open_files() { return 1; }
@@ -332,8 +348,13 @@ result12="$(
         echo ""
         return 0
       fi
-      find "$1" -type f -exec stat -f "%m" {} + 2>/dev/null \
-        | awk "{if (\$1+0>m) m=\$1+0} END{print m+0}"
+      if [[ "$(uname -s)" == Darwin ]]; then
+        find "$1" -type f -exec stat -f "%m" {} + 2>/dev/null \
+          | awk "{if (\$1+0>m) m=\$1+0} END{print m+0}"
+      else
+        find "$1" -type f -exec stat -c "%Y" {} + 2>/dev/null \
+          | awk "{if (\$1+0>m) m=\$1+0} END{print m+0}"
+      fi
     }
 
     BUDGET_DIRS_DELETED=0
@@ -420,7 +441,7 @@ R16="$TMP_TEST_ROOT/t16"
 mkdir -p "$R16/container/checkout"
 /usr/bin/git -c init.defaultBranch=main init -q "$R16/container/checkout"
 make_kb_file "$R16/container/checkout/uncommitted" 4096
-stamp16="$(date -v-3H +%Y%m%d%H%M)"
+stamp16="$(date -v-3H +%Y%m%d%H%M 2>/dev/null || date -d "-3 hours" +%Y%m%d%H%M)"
 find "$R16/container" -type f -exec touch -t "$stamp16" {} +
 make_kb_file "$R16/ordinary/f" 4096
 set_age_hours "$R16/ordinary/f" 10
@@ -433,7 +454,7 @@ R17="$TMP_TEST_ROOT/t17"
 mkdir -p "$R17/old-repo"
 /usr/bin/git -c init.defaultBranch=main init -q "$R17/old-repo"
 make_kb_file "$R17/old-repo/uncommitted" 4096
-stamp17="$(date -v-240H +%Y%m%d%H%M)"
+stamp17="$(date -v-240H +%Y%m%d%H%M 2>/dev/null || date -d "-240 hours" +%Y%m%d%H%M)"
 find "$R17/old-repo" -type f -exec touch -t "$stamp17" {} +
 run_budget "$R17" 1024 120 - - 0 false >/dev/null
 assert_exists "Test17: old uncommitted repository is preserved" "$R17/old-repo/uncommitted"
@@ -567,6 +588,30 @@ if bash -c '
 else
   record_fail "Test18: failed repository traversal preserves the candidate" "inspection failure must not authorize eviction"
 fi
+
+# Strict content-mtime mode is used by the quota reclaimer: traversal errors,
+# empty trees, and symlinked trees must fail closed rather than authorize reclaim.
+R25="$TMP_TEST_ROOT/t25"
+mkdir -p "$R25/regular" "$R25/empty" "$R25/linked"
+touch "$R25/regular/item"
+ln -s "$R25/regular/item" "$R25/linked/item-link"
+normal_file="$(source "$REPO_ROOT/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "$R25/regular/item")"
+normal_tree="$(source "$REPO_ROOT/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "$R25/regular")"
+[[ "$normal_file" =~ ^[0-9]+$ ]] && record_pass "Test25: normal file content mtime is portable" || record_fail "Test25: normal file content mtime is portable" "got [$normal_file]"
+[[ "$normal_tree" =~ ^[0-9]+$ ]] && record_pass "Test25: normal directory content mtime is portable" || record_fail "Test25: normal directory content mtime is portable" "got [$normal_tree]"
+strict_regular="$(bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R25/regular"'" --strict')"
+[[ "$strict_regular" =~ ^[0-9]+$ ]] && record_pass "Test25: strict content mtime measures regular tree" || record_fail "Test25: strict content mtime measures regular tree" "got [$strict_regular]"
+set +e
+strict_empty="$(bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R25/empty"'" --strict' 2>&1)"
+strict_empty_rc=$?
+strict_symlink_rc=0
+bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R25/linked"'" --strict' >/dev/null 2>&1 || strict_symlink_rc=$?
+strict_error_rc=0
+bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; find() { return 1; }; scratch_budget_content_mtime "'"$R25/regular"'" --strict' >/dev/null 2>&1 || strict_error_rc=$?
+set -e
+[[ $strict_empty_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects empty tree" || record_fail "Test25: strict content mtime rejects empty tree" "rc=$strict_empty_rc"
+[[ $strict_symlink_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects symlink traversal" || record_fail "Test25: strict content mtime rejects symlink traversal" "rc=$strict_symlink_rc"
+[[ $strict_error_rc -ne 0 ]] && record_pass "Test25: strict content mtime preserves on traversal error" || record_fail "Test25: strict content mtime preserves on traversal error" "rc=$strict_error_rc"
 
 echo ""
 echo "===================================="

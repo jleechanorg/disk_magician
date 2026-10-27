@@ -9,6 +9,7 @@ CANONICAL_PATTERNS = (
     "config/*.txt",
     "scripts/*.sh",
     "scripts/*.py",
+    "scripts/*.swift",
     "scripts/lib/*.sh",
     "launchd/*.plist",
     "launchd/*.plist.template",

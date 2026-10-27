@@ -422,7 +422,78 @@ log "$(dry_prefix)cleanup_pr_scratch.sh starting (roots: ${CANONICAL_TMP_DIRS[*]
 DIRS_DELETED=0
 FILES_DELETED=0
 TOTAL_KB=0
+# Two DIFFERENT outcomes were reported as one before bead disk_magician-273z:
+# a C14 policy keep ("this content is younger than the declared retention")
+# and a removal that actually broke (rename failed, check failed, quarantine
+# conflict). They now get separate counters and each item prints its own
+# verdict, so a policy keep no longer reads as a broken rm.
 RM_FAILED=0
+C14_KEPT=0
+C14_KEPT_VERDICTS=()
+
+# ── Effective ephemeral retention (bead disk_magician-273z root cause) ───────
+# cleanup_pr_scratch.sh's retention policy is --min-age-hours (default 48 h).
+# C14's declared-ephemeral row E3 (artifact_verdict.sh: ^pr[0-9]|pr-|pr_|claude-
+# |claude_@ top level of a scratch root) also hard-codes 2880 minutes, and it
+# wins: the sweep's own age gate lets a 13 h file through, then
+# `artifact_removal_verdict --kind ephemeral` answers kept:recent-activity and
+# c14_remove turns that into a non-zero rc, which the caller used to print as
+# "SKIP (rm failed)". Lowering the dial therefore reclaimed nothing, silently.
+#
+# A candidate that already passed EVERY check in this sweep -- pattern,
+# protected roots, active marker, recency window, open files, unsaved work,
+# safety gate -- is one this sweeper owns, so its declared retention is the
+# policy for it; the shared row stays the fallback for every path this sweep
+# did not validate. Same idiom as scripts/cleanup_task_scratch.sh, which
+# already extends c14_ephemeral_retention in-process for its own container.
+# No C14 data-loss check is relaxed: lease, live-cwd, open-file, secret-like,
+# repo and provenance checks all still run before anything is renamed.
+PR_SCRATCH_APPROVED_ITEM=""
+if declare -F c14_ephemeral_retention >/dev/null 2>&1; then
+  eval "_orig_$(declare -f c14_ephemeral_retention)"
+  c14_ephemeral_retention() {
+    local p="${1:-}" archive_origin="${3:-}"
+    if [[ "$archive_origin" != "--archive-origin" && -n "$PR_SCRATCH_APPROVED_ITEM" && "$p" == "$PR_SCRATCH_APPROVED_ITEM" ]]; then
+      # C14 removes only when age > retention while this sweep removes at
+      # age >= its window, so declare one minute less and the two agree
+      # exactly (the same conversion cleanup_task_scratch.sh uses).
+      local ret_min=$(( MIN_AGE_HOURS * 60 ))
+      if (( ret_min > 0 )); then ret_min=$(( ret_min - 1 )); fi
+      echo "$ret_min"
+      return 0
+    fi
+    _orig_c14_ephemeral_retention "$@"
+  }
+fi
+
+# pr_scratch_remove <item> — C14 two-phase removal of the candidate this sweep
+# just validated; rc 0 on removed:*. Unlike c14_remove it keeps the verdict, so
+# the caller can report the specific reason instead of a generic failure.
+pr_scratch_remove() {
+  local verdict
+  verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+  PR_SCRATCH_LAST_VERDICT="${verdict:-kept:check-failed}"
+  [[ "$PR_SCRATCH_LAST_VERDICT" == removed:* ]]
+}
+
+# pr_scratch_report_keep <item> <verdict> — print the exact verdict and count it
+# under the right bucket. Only verdicts that mean the removal machinery itself
+# could not complete count as removal failures; every other verdict is C14
+# deliberately keeping the content and is grouped by its own reason.
+pr_scratch_report_keep() {
+  local item="$1" verdict="${2:-kept:check-failed}"
+  case "$verdict" in
+    quarantine_conflict*|kept:check-failed*|kept:rename-failed*|kept:exclusive_rename_unavailable|kept:quarantine-*|kept:quarantine_*|kept:intent-write-failed*|kept:cross-device*|kept:identity-mismatch*|kept:parent-identity-*)
+      RM_FAILED=$(( RM_FAILED + 1 ))
+      echo "SKIP (removal failed: $verdict): $item"
+      ;;
+    *)
+      C14_KEPT=$(( C14_KEPT + 1 ))
+      C14_KEPT_VERDICTS+=("$verdict")
+      echo "SKIP (C14 kept: $verdict): $item"
+      ;;
+  esac
+}
 
 if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   for tmp_dir in "${CANONICAL_TMP_DIRS[@]}"; do
@@ -483,6 +554,11 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           continue
         fi
         log "Removing: $item  (${kb} KB)"
+        # Canonical candidate path, parent resolved exactly like
+        # quarantine_rename.py's bind_parent, so the retention override above
+        # recognizes the very path C14 will see.
+        PR_SCRATCH_APPROVED_ITEM="$(cd "$(dirname "$item")" 2>/dev/null && pwd -P)/$(basename "$item")"
+        pr_scratch_item_action=remove
         if [[ -L "$item" ]]; then
           # Symlink operand: handled before the -d test and never chmod'd.
           # `-d "$item"` is true for a symlink-to-directory, so checking
@@ -496,13 +572,13 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # symlink's own mode or its target's mode (found in /advice
           # review of PR #60 -- Opus, symlink-to-file case; symlink-to-dir
           # case hoisted here for the same reason before it ships).
-          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
+          pr_scratch_item_action=remove_symlink
+          if pr_scratch_remove "$item"; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
-            deletion_log "cleanup_pr_scratch.sh" "remove_symlink" "$kb" "$item"
+            deletion_log "cleanup_pr_scratch.sh" "$pr_scratch_item_action" "$kb" "$item"
           else
-            echo "SKIP (rm failed): $item"
-            RM_FAILED=$(( RM_FAILED + 1 ))
+            pr_scratch_report_keep "$item" "$PR_SCRATCH_LAST_VERDICT"
           fi
         elif [[ -d "$item" ]]; then
           # Best-effort write-permission fix before rm -rf: a single
@@ -510,25 +586,24 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           # sweep under `set -euo pipefail` instead of just skipping that
           # one item (bead disk_magician-qap).
           chmod -R u+w "$item" 2>/dev/null || true
-          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
+          if pr_scratch_remove "$item"; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
-            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
+            deletion_log "cleanup_pr_scratch.sh" "$pr_scratch_item_action" "$kb" "$item"
           else
-            echo "SKIP (rm failed): $item"
-            RM_FAILED=$(( RM_FAILED + 1 ))
+            pr_scratch_report_keep "$item" "$PR_SCRATCH_LAST_VERDICT"
           fi
         else
           chmod u+w "$item" 2>/dev/null || true
-          if DM_DELETION_LOGGED=1 c14_remove "$item" --kind ephemeral; then
+          if pr_scratch_remove "$item"; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
-            deletion_log "cleanup_pr_scratch.sh" "remove" "$kb" "$item"
+            deletion_log "cleanup_pr_scratch.sh" "$pr_scratch_item_action" "$kb" "$item"
           else
-            echo "SKIP (rm failed): $item"
-            RM_FAILED=$(( RM_FAILED + 1 ))
+            pr_scratch_report_keep "$item" "$PR_SCRATCH_LAST_VERDICT"
           fi
         fi
+        PR_SCRATCH_APPROVED_ITEM=""
       fi
     done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
   done
@@ -546,5 +621,9 @@ if [[ "$BUDGET_GB" -gt 0 && ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
   log "$(dry_prefix)Budget mode done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Total freed: ${BUDGET_KB_FREED} KB"
 fi
 
-log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (rm failed): ${RM_FAILED}"
+log "$(dry_prefix)Done. Dirs removed: ${DIRS_DELETED}  Files removed: ${FILES_DELETED}  Total freed: ${TOTAL_KB} KB  (~$(( TOTAL_KB / 1024 )) MB)  Skipped (C14 kept): ${C14_KEPT}  Skipped (removal failed): ${RM_FAILED}"
+if [[ ${#C14_KEPT_VERDICTS[@]} -gt 0 ]]; then
+  # Group by verdict: the reason C14 kept each item, not one collapsed label.
+  log "$(dry_prefix)C14 kept by reason: $(printf '%s\n' "${C14_KEPT_VERDICTS[@]}" | sort | uniq -c | awk '{printf "%s%s: %s", sep, $2, $1; sep=", "}')"
+fi
 

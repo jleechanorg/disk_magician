@@ -179,6 +179,11 @@ c14_ephemeral_retention() {
         else continue; fi
         return 0
     done < <(scratch_roots_get_unique)
+    while IFS= read -r r; do
+        r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" ]] || continue
+        [[ "$archive_origin" != --archive-origin ]] || return 1
+        if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 2880; return 0; fi
+    done < <(scratch_roots_get_volumes)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
@@ -219,7 +224,7 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/DerivedData|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
@@ -235,7 +240,10 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
-    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]]
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
+    local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
+    app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
+    return 1
 )
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
 # installed outside the cache (which proves the staged copy is a leftover).
@@ -528,12 +536,21 @@ _av_artifact_removal_verdict() (
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
-    q="$_AV_DIR/../../config.json" && [[ -f "$q" ]] || q+=.template  # never-touch tmp roots, as cleanup_tmp.sh
+    q="$(python3 "$_AV_DIR/../resolve_config.py")" || { echo kept:volume-config; return 0; }
+    export DISK_MAGICIAN_CONFIG="$q"
+    python3 -c 'import json,sys; sys.path.insert(0,sys.argv[2]); import volume
+d=json.load(open(sys.argv[1])); assert isinstance(d,dict)
+if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kept:volume-config; return 0; }
     # Anchored protection: only a configured protected basename directly under a
     # real scratch root (and its descendants) is protected. A same-named
     # component elsewhere (e.g. ~/.worktrees/worldarchitect.ai/foo or an
     # archive copy) must fall through to the ordinary C14 checks.
     scratch_roots_is_protected_path "$p" "$q" && { echo kept:protected; return 0; }
+    if [[ "$kind" == ephemeral ]]; then
+        local volume_root volume_match=0
+        while IFS= read -r volume_root; do [[ "$p" == "$volume_root/"* ]] && { volume_match=1; break; }; done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-$q}")
+        if [[ "$volume_match" == 1 ]] && ! python3 "$_AV_DIR/../volume.py" verify-mount "$volume_root" >/dev/null 2>&1; then echo kept:volume-identity; return 0; fi
+    fi
     if [[ -n "${DISK_MAGICIAN_TEST_AFTER_NOMINATE:-}" ]]; then
         [[ "${DISK_MAGICIAN_TEST_CONTEXT:-}" == 1 ]] || { echo kept:check-failed; return 0; }
         printf 'race fixture\n' >"$DISK_MAGICIAN_TEST_AFTER_NOMINATE" || { echo kept:check-failed; return 0; }

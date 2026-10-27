@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
+import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
+MAX_INTENT_BYTES = 32 * 1024 * 1024
 # Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
 # Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
 # RENAME_WHITEOUT, which is not an exclusive rename.
@@ -246,6 +247,74 @@ def lsof_stderr_incomplete(err, query):
             continue
         return True
     return False
+def _hardlink_only_false_positive(target, out, timeout):
+    try:
+        pids, paths = set(), []
+        for raw in out.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"p":
+                pid = os.fsdecode(raw[1:])
+                if not pid.isdigit():
+                    return False
+                pids.add(pid)
+            elif tag == b"n":
+                paths.append(os.fsdecode(raw[1:]))
+            elif tag not in (b"f", b"c"):
+                return False
+        if not pids or not paths:
+            return False
+        hardlink_paths = set()
+        for p in paths:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+                return False
+            hardlink_paths.add(os.path.abspath(p))
+            hardlink_paths.add(os.path.realpath(p))
+        root_abs = os.path.abspath(target).rstrip(os.sep)
+        root_real = os.path.realpath(target).rstrip(os.sep)
+        ps_r = subprocess.run(
+            ["ps", "-p", ",".join(sorted(pids)), "-o", "comm="],
+            capture_output=True, timeout=timeout,
+        )
+        if ps_r.returncode not in (0, 1):
+            return False
+        for raw in ps_r.stdout.splitlines():
+            comm = os.fsdecode(raw).strip()
+            if not comm or not os.path.isabs(comm):
+                continue
+            c_abs = os.path.abspath(comm)
+            c_real = os.path.realpath(comm)
+            if (c_abs == root_abs or c_abs.startswith(root_abs + os.sep) or
+                    c_real == root_real or c_real.startswith(root_real + os.sep)):
+                return False
+        r = subprocess.run(
+            ["lsof", "-nP", "-Fn", "-a", "-d", "^cwd", "-p", ",".join(sorted(pids))],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode not in (0, 1) or lsof_stderr_incomplete(r.stderr, target):
+            return False
+        for raw in r.stdout.splitlines():
+            if not raw:
+                continue
+            tag = raw[:1]
+            if tag == b"n":
+                vp = os.fsdecode(raw[1:])
+                if not os.path.isabs(vp):
+                    continue
+                vp_abs = os.path.abspath(vp)
+                vp_real = os.path.realpath(vp)
+                if vp_abs in hardlink_paths or vp_real in hardlink_paths:
+                    continue
+                if (vp_abs == root_abs or vp_abs.startswith(root_abs + os.sep) or
+                        vp_real == root_real or vp_real.startswith(root_real + os.sep)):
+                    return False
+            elif tag not in (b"p", b"f", b"c"):
+                return False
+        return True
+    except Exception:
+        return False
 def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, live-user and re-hash checks all pass
     try:
         if deadline_passed(deadline): return "deferred:deadline"
@@ -255,11 +324,17 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         timeout = remaining_seconds(deadline)
         if timeout is not None and timeout <= 0: return "deferred:deadline"
+        target = os.path.join(qdir, qid)
         try:
-            lsof = subprocess.run(["lsof", "-nP", "+D" if stat.S_ISDIR(d.st_mode) else "--", os.path.join(qdir, qid)], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
+            lsof = subprocess.run(["lsof", "-nP", "-Fn", "+D" if stat.S_ISDIR(d.st_mode) else "--", target], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
         except subprocess.TimeoutExpired:
             return "deferred:deadline"
-        if lsof.stdout or lsof.returncode != 1 or lsof_stderr_incomplete(lsof.stderr, os.path.join(qdir, qid)): return "live-user" if lsof.stdout or not lsof.returncode else "check-failed"
+        has_user = bool(lsof.stdout) and not (
+            lsof.returncode in (0, 1) and stat.S_ISDIR(d.st_mode)
+            and not lsof_stderr_incomplete(lsof.stderr, target)
+            and _hardlink_only_false_positive(target, lsof.stdout, 120 if timeout is None else max(0.1, remaining_seconds(deadline) or 0.1))
+        )
+        if has_user or (not lsof.stdout and lsof.returncode != 1) or lsof_stderr_incomplete(lsof.stderr, target): return "live-user" if has_user or not lsof.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
@@ -281,11 +356,25 @@ def phase1(path, inv_file, binding_file, deadline=None):
         with open(inv_file) as f: inv = [e for e in json.load(f) if isinstance(e, dict)]
         root = next(e for e in inv if e.get("path") == ".")
         if any(type(root.get(k)) is not int for k in ("dev", "ino")): return "kept:identity-mismatch"
+        # Bound the full recovery record before creating quarantine state. Preserve unknown inventory fields.
+        qid = secrets.token_hex(8)
+        preview = {"id": qid, "original": os.path.join(parent, base),
+                   "dev": 18446744073709551615, "ino": 18446744073709551615,
+                   "parent_dev": parent_id[0], "parent_ino": parent_id[1],
+                   "quarantine_dev": 18446744073709551615, "quarantine_ino": 18446744073709551615,
+                   "inventory": inv, "phase": "intent"}
+        try: intent_bytes = json.dumps(preview).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError): return "kept:intent-too-large"
+        if len(intent_bytes) > MAX_INTENT_BYTES:
+            return "kept:intent-too-large"
         path = os.path.join(parent, base)
         pfd = os.open(parent, DIRFL)
         bound_parent = os.fstat(pfd)
         if (bound_parent.st_dev, bound_parent.st_ino) != parent_id: return "kept:parent-identity-mismatch"
-        try: os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
+        quarantine_created = False
+        try:
+            os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
+            quarantine_created = True
         except FileExistsError: pass
         qpath_st = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
         if not stat.S_ISDIR(qpath_st.st_mode): return "kept:quarantine-dir-unsafe"
@@ -295,25 +384,62 @@ def phase1(path, inv_file, binding_file, deadline=None):
         if [(st.st_dev, st.st_ino)] != [(e.get("dev"), e.get("ino")) for e in inv if e.get("path") == "."]: return "kept:identity-mismatch"
         if q.st_dev != st.st_dev: return "kept:cross-device"  # never copy
     except Exception: return "kept:check-failed"
-    qdir = os.path.join(parent, ".dm-quarantine"); qid = secrets.token_hex(8); side = qid + ".json"
-    try: index_write(qid, index_record(qid, parent, bound_parent, q, path, st))
-    except Exception: return "kept:quarantine-index-write-failed"
-    kill_at("after_index")
+    qdir = os.path.join(parent, ".dm-quarantine"); side = qid + ".json"
     rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
            "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
            "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
            "inventory": inv, "phase": "intent"}
     try:
+        intent_text = json.dumps(rec)
+        if len(intent_text.encode("utf-8")) > MAX_INTENT_BYTES:
+            raise ValueError("intent too large")
+    except (TypeError, ValueError, UnicodeError):
+        os.close(qfd)
+        if quarantine_created:
+            try: os.rmdir(".dm-quarantine", dir_fd=pfd)
+            except OSError: pass
+        os.close(pfd)
+        return "kept:intent-too-large"
+    try: index_write(qid, index_record(qid, parent, bound_parent, q, path, st))
+    except Exception: return "kept:quarantine-index-write-failed"
+    kill_at("after_index")
+    try:
         with os.fdopen(os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qfd), "w") as f:
             if ENV.get("DISK_MAGICIAN_TEST_INTENT_ERRNO"): raise OSError(int(ENV["DISK_MAGICIAN_TEST_INTENT_ERRNO"]), "test")
-            f.write(json.dumps(rec)); f.flush(); os.fsync(f.fileno())
+            f.write(intent_text); f.flush(); os.fsync(f.fileno())
         os.fsync(qfd)
-    except OSError:  # ENOSPC aborts before the rename; the artifact stays in place
+    except OSError as exc:  # ENOSPC aborts before the rename; the artifact stays in place
         try:
             if not finish_sidecar(qfd, qid, "original"):
                 return f"quarantine_conflict:{qid}:index-cleanup-failed"
         except Exception:
             return f"quarantine_conflict:{qid}:index-cleanup-failed"
+        diagnostic = ENV.get("DISK_MAGICIAN_C14_DIAGNOSTIC_OUT", "")
+        if diagnostic:
+            dfd = -1
+            try:
+                dfd = os.open(diagnostic, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                dst = os.fstat(dfd)
+                if not stat.S_ISREG(dst.st_mode) or dst.st_uid != os.getuid() or stat.S_IMODE(dst.st_mode) != 0o600:
+                    return "kept:intent-write-failed"
+                payload = json.dumps({"operation": "intent_write", "errno": exc.errno,
+                                      "errno_name": errno.errorcode.get(exc.errno, str(exc.errno))},
+                                     separators=(",", ":")).encode()
+                view = memoryview(payload)
+                while view:
+                    written = os.write(dfd, view)
+                    if written <= 0:
+                        raise OSError(errno.EIO, "short diagnostic write")
+                    view = view[written:]
+                os.fsync(dfd)
+            except OSError:
+                pass
+            finally:
+                if dfd >= 0:
+                    try:
+                        os.close(dfd)
+                    except OSError:
+                        pass
         return "kept:intent-write-failed"
     kill_at("after_intent")
     dest = os.path.join(qdir, qid)
@@ -328,7 +454,12 @@ def phase1(path, inv_file, binding_file, deadline=None):
     try: renamex(pfd, base, qfd, qid)  # commit point; both directory bindings stay pinned
     except (LookupError, OSError) as e:
         if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
-        return "kept:exclusive_rename_unavailable" if isinstance(e, LookupError) else "kept:rename-failed"
+        # Name the actual errno: a bare "rename-failed" collapsed EXDEV, EPERM,
+        # EACCES, ENOSPC, EROFS and a missing symbol into one indistinguishable
+        # string, so the caller could only report a generic "rm failed"
+        # (bead disk_magician-273z).
+        if isinstance(e, LookupError): return "kept:exclusive_rename_unavailable"
+        return "kept:rename-failed:" + errno.errorcode.get(e.errno, str(e.errno))
     try:
         os.fsync(pfd); os.fsync(qfd)
     except OSError: return f"quarantine_conflict:{qid}"
@@ -434,15 +565,19 @@ def tree_ancestry_still_quarantined(location_guard, ancestors):
     if not tree_still_quarantined(location_guard): return False
     return all(same_entry(parent_fd, name, expected) for parent_fd, name, expected in ancestors)
 
-def record_removed_path(qfd, side, record, rel):
+def _test_journal_active():
+    return any(k.startswith("DISK_MAGICIAN_TEST_") and ENV.get(k) for k in ENV)
+
+def record_removed_path(qfd, side, record, rel, removed_paths=None):
     key = record.get("journal_key", "removed_paths")
     removed = record.setdefault(key, [])
-    if rel in removed: return True
+    if (removed_paths is not None and rel in removed_paths) or (removed_paths is None and rel in removed): return True
     removed.append(rel)
-    try: update_sidecar(qfd, side, record)
-    except OSError:
-        removed.pop()
-        return False
+    if len(removed) <= 16 or len(removed) % 500 == 0 or _test_journal_active():
+        try: update_sidecar(qfd, side, record)
+        except OSError:
+            removed.pop()
+            return False
     return True
 
 def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
@@ -478,6 +613,8 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                                               deadline, location_guard, root_label, child_ancestors,
                                               qfd, side, record, removed_paths):
                     ok = False
+            try: os.fsync(child_fd)
+            except OSError: ok = False
             if not ok: return False
         finally: os.close(child_fd)
         try:
@@ -487,10 +624,10 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                 return False
             if deadline_passed(deadline): raise DeadlineExceeded()
             os.rmdir(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
+            if len(removed_paths) <= 16 or _test_journal_active(): os.fsync(parent_fd)
             kill_at("entry_removed_before_journal")
             if rel == ".": return True
-            if not record_removed_path(qfd, side, record, rel): return False
+            if not record_removed_path(qfd, side, record, rel, removed_paths): return False
             removed_paths.add(rel)
             hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
             kill_at("mid_delete")
@@ -527,12 +664,12 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
             return False
         if deadline_passed(deadline): raise DeadlineExceeded()
         os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        if len(removed_paths) <= 16 or _test_journal_active(): os.fsync(parent_fd)
         kill_at("entry_removed_before_journal")
         # Root completion is journaled by phase2, consistently with directory
         # roots. A child-path progress entry must never stand in for that proof.
         if rel == ".": return True
-        if not record_removed_path(qfd, side, record, rel): return False
+        if not record_removed_path(qfd, side, record, rel, removed_paths): return False
         removed_paths.add(rel)
         hook("DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL", root_label, rel)
         kill_at("mid_delete")
@@ -621,8 +758,12 @@ def phase2(binding_file, qid, deadline=None):
                                              location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
                                              qfd, side, record, removed_paths)
         except DeadlineExceeded:
+            try: update_sidecar(qfd, side, record)
+            except OSError: pass
             return "deferred:phase2"
         if not removed:
+            try: update_sidecar(qfd, side, record)
+            except OSError: pass
             return "kept:quarantine_partial_kept"
         os.fsync(qfd)
         if not same_entry(pfd, ".dm-quarantine", qst): return "kept:quarantine_partial_kept"

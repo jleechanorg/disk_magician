@@ -2,8 +2,10 @@ include disk_magician.sh
 include config.json.template
 include README.md
 recursive-include config *.txt
-recursive-include scripts *.sh *.py
+recursive-include scripts *.sh *.py *.swift
 recursive-include launchd *.plist *.template *.c
 recursive-include tools *.sh
 recursive-include tools/guards *
 recursive-include hooks *.sh
+
+recursive-include systemd *.service.in *.timer.in

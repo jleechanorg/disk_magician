@@ -107,7 +107,8 @@ mtime_epoch_of() {
 expand_path() {
   local path="$1"
   path="${path/#\~/$HOME}"
-  eval echo "$path"
+  path="${path/#\$HOME/$HOME}"
+  printf '%s\n' "$path"
 }
 
 clear_dir_contents() {

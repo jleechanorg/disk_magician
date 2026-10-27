@@ -19,6 +19,17 @@ echo "Filesystem 1024-blocks Used Available Capacity Mounted"
 echo "/dev/x 1000000000 100000000 900000000 10% /"
 SH
 chmod +x "$BIN/df"
+# Hermetic volume probe: no live Scratch volume and no volume alarms, whichever
+# config the host or repo template resolves to.
+cat > "$BIN/disk-magician" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "volume path scratch") exit 3 ;;
+  "volume status --json --snapshot") echo '{"alarms":[]}'; exit 0 ;;
+esac
+exit 2
+SH
+chmod +x "$BIN/disk-magician"
 
 reset() { rm -rf "$STATE"; mkdir -p "$STATE"; rm -f "$H/.disk_magician_alert.silenced"; }
 

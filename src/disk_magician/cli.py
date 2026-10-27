@@ -50,6 +50,19 @@ def main():
     
     # Ensure environment variables are passed along
     env = _build_orchestrator_env()
+    if args and args[0] in ("scratch-new", "scratch_new"):
+        helper = orchestrator.parent / "scripts" / "scratch_producer_pids.py"
+        try:
+            producer_pids = subprocess.run(
+                [sys.executable, str(helper), str(os.getppid())],
+                check=True, capture_output=True, text=True, timeout=3,
+            ).stdout.strip()
+            if not producer_pids:
+                raise ValueError("empty producer identity")
+            env["DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS"] = producer_pids
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"Error: scratch producer identity unavailable: {exc}", file=sys.stderr)
+            sys.exit(75)
     if auto_clean_env:
         env["DISK_MAGICIAN_AUTO_CLEAN"] = auto_clean_env
 

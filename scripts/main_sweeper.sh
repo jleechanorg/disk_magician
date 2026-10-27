@@ -289,6 +289,10 @@ main() {
       log "INFO: $desc skipped (lock held, rc=75)"
       return 0
     fi
+    if [[ "$step_rc" -eq 3 && "$desc" == *"cleanup_worktree_venvs"* ]]; then
+      log "INFO: $desc skipped (<90d worktrees require WORKTREE_APPROVED=1, rc=3)"
+      return 0
+    fi
     log "WARN: $desc failed (rc=${step_rc})"
     ERRORS=$((ERRORS + 1))
     return 1
@@ -378,6 +382,9 @@ main() {
       fi
     else
       log "Tier 3: Colima VM & Docker prune skipped (debounced to 24h; disk space healthy)."
+      if [[ -f "$REPO_ROOT/scripts/cleanup_colima.sh" ]]; then
+        run_job_step "Tier 3: cleanup_colima (trim-only)" bash "$REPO_ROOT/scripts/cleanup_colima.sh" --trim-only "$CLEAN_ARG" || true
+      fi
     fi
 
     # Tier 4: Browser Sessions & Assets
@@ -396,28 +403,25 @@ main() {
     fi
     [[ -f "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" ]] && run_job_step "Tier 5: cleanup_supervisor_logs" bash "$REPO_ROOT/scripts/cleanup_supervisor_logs.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_uv_cache.sh" ]] && run_job_step "Tier 5: cleanup_uv_cache" bash "$REPO_ROOT/scripts/cleanup_uv_cache.sh" "$CLEAN_ARG" || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_sessions.sh" ]] && run_job_step "Tier 5: cleanup_sessions" bash "$REPO_ROOT/scripts/cleanup_sessions.sh" "$CLEAN_ARG" || true
 
     # Routine code-sign clones maintenance
     if [[ -f "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" ]]; then
       CODE_SIGN_CLONES_APPROVED=1 run_job_step "Tier 5: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
 
-    # Tier 6: Dormant Worktree Venvs (>=7d) & Claude State (>=7d)
+    # Tier 6: Dormant Worktree Venvs (>=7d), Worktree Deps (>=3d), Claude State (>=7d), & Worktrees (>=3d)
+    # Candidates >= 90d (>3 months) are auto-approved without env vars; candidates < 90d require WORKTREE_APPROVED=1 / CLAUDE_STATE_APPROVED=1.
+    if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" ]]; then
+      run_job_step "Tier 6: cleanup_worktree_deps" bash "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" "$CLEAN_ARG" || true
+    fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" ]]; then
-      if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
-        log "Tier 6: cleanup_worktree_venvs skipped (requires WORKTREE_APPROVED=1)"
-      else
-        run_job_step "Tier 6: cleanup_worktree_venvs" bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" "$CLEAN_ARG" || true
-      fi
+      run_job_step "Tier 6: cleanup_worktree_venvs" bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" "$CLEAN_ARG" || true
     fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_claude_state.sh" ]]; then
-      if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
-        log "Tier 6: cleanup_claude_state skipped (requires CLAUDE_STATE_APPROVED=1)"
-      else
-        run_job_step "Tier 6: cleanup_claude_state" bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" "$CLEAN_ARG" || true
-      fi
+      run_job_step "Tier 6: cleanup_claude_state" bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" "$CLEAN_ARG" || true
     fi
-    if [[ "${WORKTREE_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/cleanup_worktrees.sh" ]]; then
+    if [[ -f "$REPO_ROOT/scripts/cleanup_worktrees.sh" ]]; then
       run_job_step "Tier 6: cleanup_worktrees" bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" "$CLEAN_ARG" || true
     fi
   fi

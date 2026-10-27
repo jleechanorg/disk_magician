@@ -86,6 +86,26 @@ scratch_roots_get_unique() {
   scratch_roots_get | awk '!seen[$0]++'
 }
 
+# Mounted quota volumes are a separate C14 domain, never ordinary tmp roots.
+scratch_roots_get_volumes() {
+  local cfg="${1:-${DISK_MAGICIAN_CONFIG:-}}" root
+  if [[ -z "$cfg" ]]; then cfg="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../resolve_config.py" 2>/dev/null)" || return 0; fi
+  [[ -f "$cfg" ]] || return 0
+  while IFS= read -r root; do
+    [[ -n "$root" && -d "$root" ]] || continue
+    (cd "$root" 2>/dev/null && pwd -P)
+  done < <(python3 - "$cfg" <<'PYVOLUMES'
+import json,sys
+try:
+ d=json.load(open(sys.argv[1]))
+ for c in (d.get("volumes",{}).get("classes",{}) or {}).values():
+  p=c.get("mountpoint") if isinstance(c,dict) else None
+  if isinstance(p,str) and p: print(p)
+except Exception: pass
+PYVOLUMES
+  )
+}
+
 # scratch_roots_protected [config.json] — never-touch tmp root basenames, one per
 # line: DISK_MAGICIAN_PROTECTED_TMP_ROOTS (space-separated), else the config's
 # "protected_tmp_roots", else the defaults cleanup_tmp.sh uses.

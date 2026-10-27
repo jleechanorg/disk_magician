@@ -24,6 +24,12 @@ class ScratchReceiptStatus(unittest.TestCase):
         self.write('df', '#!/bin/bash\n[[ ${BAD_DF:-0} == 1 ]] && exit 1\nprintf "Filesystem blocks used available capacity mount\\nfixture 100 10 90 10%% /\\n"\n')
         self.write('cleanup_tmp.sh', '#!/bin/bash\nexit "${CHILD_RC:-0}"\n')
         self.write('cleanup_claude_state.sh', '#!/bin/bash\nexit "${STATE_RC:-0}"\n')
+        # The production wrapper now delegates volume reclaim through the CLI.
+        # In this dry-run contract test, report the supported no-volume skip;
+        # never invoke the host disk_magician dispatcher or touch a real volume.
+        dispatcher = self.root / 'disk_magician.sh'
+        dispatcher.write_text('#!/bin/bash\nprintf \"skipped:unavailable\\n\"\n')
+        dispatcher.chmod(0o755)
         self.write('job_receipt.py', '''import json, os, sys
 args=sys.argv[1:]
 if args[0]=='begin': print('run')

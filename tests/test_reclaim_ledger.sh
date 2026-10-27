@@ -161,6 +161,35 @@ OUT12=$(env -i HOME="$P/home" XDG_CONFIG_HOME="$P/xdg" DISK_MAGICIAN_STATE_REPO=
 C12=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT12")
 has "$(grep -F '/new/inside' <<<"$C12")" '| yes |' && ok "XDG inventory marks the cleaned root monitored" || bad "effective config" "$C12"
 
+echo "Test 13: sync_monitored_superset syncs Disk Dir Ledger roots and Mega-Table <=5 GiB buckets into monitored_dirs"
+S="$TMP_ROOT/superset"
+mkdir -p "$S/home/.cache/uv" "$S/home/projects/mega_repo" "$S/state/config" "$S/state/ledger"
+git -C "$S/state" init -q 2>/dev/null
+printf '%s\n' '{"monitored_dirs":[{"key":"cache_dir","path":"~/.cache","timeout":60}]}' >"$S/state/config/config.json"
+git -C "$S/state" add config/config.json && git -C "$S/state" -c user.name=t -c user.email=t@t commit -q -m init
+SREG="$S/sweeper_roots.txt"
+printf '%s\t%s\t%s\n' '$HOME/.cache/uv' 'cleanup_dev_caches.sh' 'uv cache' >"$SREG"
+SLOG="$S/deletions.log"
+printf '%s\t%s\t%s\t%s\t%s\n' "2026-10-21T01:00:00Z" "cleanup_dev_caches.sh" "remove" "$GIB" "$S/home/.cache/uv/wheels" >"$SLOG"
+SFRONT="$S/state/ledger/topdown-5g.json"
+printf '{"captured_at":"2026-10-21T12:00:00Z","mode":"complete","granularity_buckets":[{"path":"%s/home/projects/mega_repo","measured_kb":%s}]}' "$S" "$((2*GIB))" >"$SFRONT"
+git -C "$S/state" add ledger/topdown-5g.json && git -C "$S/state" -c user.name=t -c user.email=t@t commit -q -m ledger
+# Before sync (--stdout --no-sync-config): broad ~/.cache parent does NOT mask ~/.cache/uv
+OUT13_PRE=$(env -i HOME="$S/home" DISK_MAGICIAN_STATE_REPO="$S/state" DISK_MAGICIAN_DELETION_LOG="$SLOG" \
+  PATH="$PYDIR:/usr/bin:/bin" python3 "$RL" --stdout --no-sync-config --registry "$SREG" --frontier "$SFRONT" --freshness-line "$FRESH_OK" --now "$NOW")
+C13_PRE=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$OUT13_PRE")
+has "$(grep -F '~/.cache/uv' <<<"$C13_PRE")" '**NO**' && ok "broad parent ~/.cache does not mask ~/.cache/uv before sync" || bad "pre-sync masking" "$C13_PRE"
+# Writing state ledger syncs both sweeper/cleaned root (~/.cache/uv) and mega-table bucket (~/projects/mega_repo)
+OUT13_SYNC=$(env -i HOME="$S/home" DISK_MAGICIAN_STATE_REPO="$S/state" DISK_MAGICIAN_DELETION_LOG="$SLOG" \
+  PATH="$PYDIR:/usr/bin:/bin" python3 "$RL" --state-dir "$S/state" --registry "$SREG" --frontier "$SFRONT" --freshness-line "$FRESH_OK" --now "$NOW")
+SCFG=$(cat "$S/state/config/config.json")
+has "$SCFG" '"path": "~/.cache/uv"' && ok "sweeper/cleaned root synced to monitored_dirs" || bad "sweeper root sync" "$SCFG"
+has "$SCFG" '"path": "~/projects/mega_repo"' && ok "mega-table 1-5 GiB dir synced to monitored_dirs" || bad "mega-table sync" "$SCFG"
+SREPORT=$(cat "$S/state/reclaim/known-reclaim-dirs.md")
+C13_POST=$(awk '/^### C\./{f=1;next} /^### /{f=0} f' <<<"$SREPORT")
+has "$(grep -F '~/.cache/uv' <<<"$C13_POST")" '| yes |' && ok "synced root marked yes in ledger report" || bad "post-sync yes" "$C13_POST"
+[[ -z "$(git -C "$S/state" status --porcelain)" ]] && ok "synced config and ledger committed cleanly" || bad "git status" "$(git -C "$S/state" status --porcelain)"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

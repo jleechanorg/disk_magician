@@ -25,6 +25,7 @@ DRY_RUN=true
 BUSY_TIMEOUT_MS="${CODEX_DB_BUSY_TIMEOUT_MS:-5000}"
 MIN_FREELIST="${CODEX_DB_MIN_FREELIST:-1}"
 CHUNK_SIZE="${CODEX_DB_CHUNK_SIZE:-50000}"
+THREAD_HISTORY_RETENTION_DAYS="${CODEX_THREAD_HISTORY_RETENTION_DAYS:-3}"
 CODEX_DIR="${DISK_MAGICIAN_CODEX_DIR_OVERRIDE:-${CODEX_DIR:-$HOME/.codex}}"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 LEASE_DIR_BASE="$STATE_DIR/codex_db_leases"
@@ -115,6 +116,11 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || { echo "ERROR: --chunk-size requires a page count" >&2; exit 2; }
       CHUNK_SIZE="$1"
       ;;
+    --retention-days)
+      shift
+      [[ $# -gt 0 ]] || { echo "ERROR: --retention-days requires a number of days" >&2; exit 2; }
+      THREAD_HISTORY_RETENTION_DAYS="$1"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -166,8 +172,112 @@ validate_numeric_param() {
 BUSY_TIMEOUT_MS=$(validate_numeric_param "$BUSY_TIMEOUT_MS" "--busy-timeout / CODEX_DB_BUSY_TIMEOUT_MS" true "3600000")
 MIN_FREELIST=$(validate_numeric_param "$MIN_FREELIST" "--min-freelist / CODEX_DB_MIN_FREELIST" false "1000000000")
 CHUNK_SIZE=$(validate_numeric_param "$CHUNK_SIZE" "--chunk-size / CODEX_DB_CHUNK_SIZE" true "10000000")
+THREAD_HISTORY_RETENTION_DAYS=$(validate_numeric_param "$THREAD_HISTORY_RETENTION_DAYS" "--retention-days / CODEX_THREAD_HISTORY_RETENTION_DAYS" false "36500")
 DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS="${DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS:-60}"
 DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS=$(validate_numeric_param "$DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS" "DISK_MAGICIAN_LSOF_TIMEOUT_SECONDS" true "3600")
+
+is_thread_history_projection_db() {
+  local db="$1"
+  local base
+  base="$(basename "$db")"
+  [[ "$base" == thread_history_*.sqlite ]] || return 1
+  [[ "${CODEX_THREAD_HISTORY_PRUNE:-1}" == "1" ]] || return 1
+  python3 - "$db" "$BUSY_TIMEOUT_MS" <<'PY' 2>/dev/null
+import os, sqlite3, sys, urllib.parse
+db_path = os.path.realpath(sys.argv[1])
+timeout_s = max(float(sys.argv[2]) / 1000.0, 5.0)
+uri = f"file:{urllib.parse.quote(db_path)}?mode=ro"
+conn = sqlite3.connect(uri, uri=True, timeout=timeout_s)
+cnt = conn.execute(
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('thread_history_projection_state','thread_turns','thread_items')"
+).fetchone()[0]
+conn.close()
+sys.exit(0 if cnt == 3 else 1)
+PY
+}
+
+prune_thread_history_projection() {
+  local db="$1" dry_run="$2" retention_days="$3" timeout_ms="$4"
+  python3 - "$db" "$dry_run" "$retention_days" "$timeout_ms" <<'PY'
+import os, sqlite3, sys, time, urllib.parse
+
+db_path = os.path.realpath(sys.argv[1])
+dry_run = sys.argv[2] == "true"
+retention_days = int(sys.argv[3])
+timeout_s = max(float(sys.argv[4]) / 1000.0, 15.0)
+cutoff_ms = int((time.time() - retention_days * 86400) * 1000)
+cutoff_s = int(time.time() - retention_days * 86400)
+
+mode = "ro" if dry_run else "rw"
+uri = f"file:{urllib.parse.quote(db_path)}?mode={mode}"
+conn = sqlite3.connect(uri, uri=True, timeout=timeout_s, isolation_level=None)
+conn.execute(f"PRAGMA busy_timeout = {int(timeout_s * 1000)};")
+
+tids = [r[0] for r in conn.execute("SELECT thread_id FROM thread_history_projection_state")]
+seen = set(tids)
+for (tid,) in conn.execute("SELECT DISTINCT thread_id FROM thread_turns"):
+    if tid not in seen:
+        seen.add(tid)
+        tids.append(tid)
+
+old_tids = []
+for tid in tids:
+    r = conn.execute(
+        "SELECT created_at_ms FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
+    if r is not None:
+        if r[0] < cutoff_ms:
+            old_tids.append(tid)
+    else:
+        tr = conn.execute(
+            "SELECT max(coalesce(completed_at, started_at, 0)) FROM thread_turns WHERE thread_id = ?",
+            (tid,),
+        ).fetchone()
+        if tr is None or tr[0] is None or (0 < tr[0] < cutoff_s):
+            old_tids.append(tid)
+
+if dry_run:
+    print(f"PRUNE_PREVIEW\t{len(old_tids)}\t{len(tids)}")
+    conn.close()
+    sys.exit(0)
+
+has_realtime = conn.execute(
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thread_realtime_items'"
+).fetchone()[0] > 0
+
+batch_size = 250
+pruned_threads = 0
+pruned_items = 0
+for i in range(0, len(old_tids), batch_size):
+    batch = old_tids[i:i + batch_size]
+    placeholders = ",".join("?" for _ in batch)
+    conn.execute("BEGIN IMMEDIATE;")
+    cur = conn.execute(f"DELETE FROM thread_items WHERE thread_id IN ({placeholders})", batch)
+    pruned_items += max(cur.rowcount, 0)
+    conn.execute(f"DELETE FROM thread_turns WHERE thread_id IN ({placeholders})", batch)
+    if has_realtime:
+        conn.execute(f"DELETE FROM thread_realtime_items WHERE thread_id IN ({placeholders})", batch)
+    conn.execute(f"DELETE FROM thread_history_projection_state WHERE thread_id IN ({placeholders})", batch)
+    conn.execute("COMMIT;")
+    pruned_threads += len(batch)
+    if pruned_threads % 2000 == 0:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
+        except sqlite3.Error:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE);").fetchall()
+            except sqlite3.Error:
+                pass
+
+try:
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE);").fetchall()
+except sqlite3.Error:
+    pass
+conn.close()
+print(f"PRUNED\t{pruned_threads}\t{pruned_items}\t{len(tids)}")
+PY
+}
 
 get_hardlink_count() {
   local f="$1"
@@ -640,13 +750,24 @@ for db in "${CANDIDATES[@]}"; do
     fi
   fi
 
+  is_projection_cache=false
+  if is_thread_history_projection_db "$db"; then
+    is_projection_cache=true
+  fi
+  online_projection=false
+
   # Conservative active-open-client check
   if [[ "$DRY_RUN" == false ]]; then
     if ! check_active_open_clients "$db"; then
-      total_locked=$(( total_locked + 1 ))
-      any_non_success=true
-      [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
-      continue
+      if [[ "$is_projection_cache" == true && "${CODEX_THREAD_HISTORY_ALLOW_ONLINE:-1}" == "1" ]]; then
+        online_projection=true
+        log "INFO: Active open client(s) on WAL projection cache $db — proceeding with online batched prune & incremental_vacuum"
+      else
+        total_locked=$(( total_locked + 1 ))
+        any_non_success=true
+        [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+        continue
+      fi
     fi
   fi
 
@@ -685,6 +806,31 @@ for db in "${CANDIDATES[@]}"; do
     continue
   fi
   total_size_before=$(( db_size_before + wal_size_before ))
+
+  if [[ "$is_projection_cache" == true ]]; then
+    set +e
+    prune_out=$(prune_thread_history_projection "$db" "$DRY_RUN" "$THREAD_HISTORY_RETENTION_DAYS" "$BUSY_TIMEOUT_MS" 2>&1)
+    prune_rc=$?
+    set -e
+    if [[ $prune_rc -ne 0 ]]; then
+      log "WARNING: Failed to prune thread_history projection rows for $db (rc=$prune_rc): $prune_out" >&2
+      any_non_success=true
+      [[ -n "$current_lease" ]] && release_db_lease "$current_lease"
+      CURRENT_TARGET_DB=""
+      CURRENT_EXPECTED_DEV_INODE=""
+      continue
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+      prune_preview_threads=$(printf '%s\n' "$prune_out" | awk -F'\t' '$1=="PRUNE_PREVIEW"{print $2+0}')
+      prune_total_threads=$(printf '%s\n' "$prune_out" | awk -F'\t' '$1=="PRUNE_PREVIEW"{print $3+0}')
+      log "  [dry-run] $db: pruneable_threads=${prune_preview_threads:-0}/${prune_total_threads:-0} (retention=${THREAD_HISTORY_RETENTION_DAYS}d)"
+    else
+      pruned_threads=$(printf '%s\n' "$prune_out" | awk -F'\t' '$1=="PRUNED"{print $2+0}')
+      pruned_items=$(printf '%s\n' "$prune_out" | awk -F'\t' '$1=="PRUNED"{print $3+0}')
+      prune_total_threads=$(printf '%s\n' "$prune_out" | awk -F'\t' '$1=="PRUNED"{print $4+0}')
+      log "  [clean] $db: pruned ${pruned_threads:-0}/${prune_total_threads:-0} projection threads (${pruned_items:-0} thread_items, retention=${THREAD_HISTORY_RETENTION_DAYS}d)"
+    fi
+  fi
 
   # Query basic DB pragmas with busy timeout via URI mode
   set +e
@@ -779,8 +925,36 @@ for db in "${CANDIDATES[@]}"; do
   vacuum_failed=false
   if [[ "$needs_vacuum" == true ]]; then
     log "Vacuuming $db: $freelist_count freelist pages (~$(fmt_bytes $reclaimable_bytes))..."
+    vac_pragmas="PRAGMA cache_size = -1048576; PRAGMA mmap_size = 2147418112; PRAGMA temp_store = MEMORY; PRAGMA synchronous = NORMAL;"
+    full_vac_done=false
 
-    if (( freelist_count > CHUNK_SIZE )); then
+    # When a projection cache has >=500k freelist pages and >=50% of the DB is free,
+    # incremental_vacuum degrades to O(freelist_count^2) freelist trunk scanning.
+    # Prefer a guarded full VACUUM (which copies only live pages) and fall back to
+    # chunked incremental_vacuum if a concurrent reader blocks VACUUM.
+    if [[ "$is_projection_cache" == true ]] && (( freelist_count >= 500000 && freelist_count * 2 >= page_count )); then
+      live_bytes=$(( (page_count - freelist_count) * page_size ))
+      free_kb=$(df -kP "$(dirname "$db")" 2>/dev/null | awk 'NR==2{print $4+0}' || echo 0)
+      free_b=$(( free_kb * 1024 ))
+      req_b=$(( live_bytes * 4 ))
+      (( req_b < 16106127360 )) && req_b=16106127360
+      if (( free_b >= req_b )); then
+        log "  Running fast full VACUUM on sparse projection cache (live=$(fmt_bytes $live_bytes), free=$(fmt_bytes $free_b))..."
+        set +e
+        v_out=$(run_sqlite "$target_uri" "$vac_pragmas VACUUM;" 2>&1)
+        v_rc=$?
+        set -e
+        if [[ $v_rc -eq 0 ]]; then
+          full_vac_done=true
+        else
+          log "  Fast full VACUUM deferred (rc=$v_rc: $v_out); falling back to chunked incremental_vacuum..."
+        fi
+      fi
+    fi
+
+    if [[ "$full_vac_done" == true ]]; then
+      :
+    elif (( freelist_count > CHUNK_SIZE )); then
       log "  Running incremental_vacuum in batches of $CHUNK_SIZE pages..."
       fl_remaining=$freelist_count
       while (( fl_remaining > 0 )); do
@@ -791,7 +965,7 @@ for db in "${CANDIDATES[@]}"; do
         fi
         chunk=$(( fl_remaining > CHUNK_SIZE ? CHUNK_SIZE : fl_remaining ))
         set +e
-        v_out=$(run_sqlite "$target_uri" "PRAGMA incremental_vacuum($chunk);" 2>&1)
+        v_out=$(run_sqlite "$target_uri" "$vac_pragmas PRAGMA incremental_vacuum($chunk);" 2>&1)
         v_rc=$?
         set -e
         if [[ $v_rc -ne 0 ]]; then
@@ -805,6 +979,9 @@ for db in "${CANDIDATES[@]}"; do
           break
         fi
         fl_remaining=$(( fl_remaining - chunk ))
+        if [[ "$is_projection_cache" == true ]]; then
+          run_sqlite "$target_uri" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || run_sqlite "$target_uri" "PRAGMA wal_checkpoint(PASSIVE);" >/dev/null 2>&1 || true
+        fi
         set +e
         cur_fl_out=$(run_sqlite "$target_uri" "PRAGMA freelist_count;" 2>&1)
         cur_fl_rc=$?
@@ -815,6 +992,7 @@ for db in "${CANDIDATES[@]}"; do
           break
         fi
         if (( cur_fl_out == 0 )); then break; fi
+        fl_remaining=$cur_fl_out
       done
     else
       if ! verify_db_identity "$db" "$db_physical_id"; then
@@ -822,7 +1000,7 @@ for db in "${CANDIDATES[@]}"; do
         vacuum_failed=true
       else
         set +e
-        v_out=$(run_sqlite "$target_uri" "PRAGMA incremental_vacuum;" 2>&1)
+        v_out=$(run_sqlite "$target_uri" "$vac_pragmas PRAGMA incremental_vacuum;" 2>&1)
         v_rc=$?
         set -e
         if [[ $v_rc -ne 0 ]]; then
@@ -849,17 +1027,27 @@ for db in "${CANDIDATES[@]}"; do
     cp_rc=$?
     set -e
     if [[ $cp_rc -ne 0 ]]; then
-      checkpoint_failed=true
-      if [[ "$cp_out" == *"database is locked"* || $cp_rc -eq 5 ]]; then
-        log "WARNING: Database is locked during checkpoint (busy timeout after ${BUSY_TIMEOUT_MS}ms): $db — skipping checkpoint" >&2
-        total_locked=$(( total_locked + 1 ))
+      if [[ "$online_projection" == true ]]; then
+        log "INFO: Online projection cache wal_checkpoint(TRUNCATE) deferred ($cp_out); running PASSIVE checkpoint"
+        run_sqlite "$target_uri" "PRAGMA wal_checkpoint(PASSIVE);" >/dev/null 2>&1 || true
       else
-        log "WARNING: wal_checkpoint failed for $db (code $cp_rc): $cp_out" >&2
+        checkpoint_failed=true
+        if [[ "$cp_out" == *"database is locked"* || $cp_rc -eq 5 ]]; then
+          log "WARNING: Database is locked during checkpoint (busy timeout after ${BUSY_TIMEOUT_MS}ms): $db — skipping checkpoint" >&2
+          total_locked=$(( total_locked + 1 ))
+        else
+          log "WARNING: wal_checkpoint failed for $db (code $cp_rc): $cp_out" >&2
+        fi
       fi
     else
       if ! parse_wal_checkpoint "$cp_out" "$db"; then
-        checkpoint_failed=true
-        total_locked=$(( total_locked + 1 ))
+        if [[ "$online_projection" == true ]]; then
+          log "INFO: Online projection cache WAL has active reader ($cp_out); continuing"
+          run_sqlite "$target_uri" "PRAGMA wal_checkpoint(PASSIVE);" >/dev/null 2>&1 || true
+        else
+          checkpoint_failed=true
+          total_locked=$(( total_locked + 1 ))
+        fi
       fi
     fi
   fi
@@ -924,8 +1112,12 @@ for db in "${CANDIDATES[@]}"; do
       else
         if [[ "$needs_vacuum" == true && "$vacuum_failed" == false ]]; then
           if (( post_fl != 0 )); then
-            log "WARNING: Freelist was not reduced to 0 after vacuum for $db (before: $freelist_count, after: $post_fl)" >&2
-            vacuum_failed=true
+            if [[ "$online_projection" == true ]] && (( post_fl < freelist_count )); then
+              log "INFO: Online projection cache $db freelist reduced from $freelist_count to $post_fl (live writer active)"
+            else
+              log "WARNING: Freelist was not reduced to 0 after vacuum for $db (before: $freelist_count, after: $post_fl)" >&2
+              vacuum_failed=true
+            fi
           fi
         fi
       fi
@@ -944,8 +1136,12 @@ for db in "${CANDIDATES[@]}"; do
         log "WARNING: Could not read WAL file size for $db — fail closed" >&2
         checkpoint_failed=true
       elif (( wal_sz > 0 )); then
-        log "WARNING: WAL file not truncated to 0 bytes after checkpoint for $db (size: $wal_sz)" >&2
-        checkpoint_failed=true
+        if [[ "$online_projection" == true ]]; then
+          log "INFO: Online projection cache WAL has $wal_sz B written by active client after checkpoint: $db"
+        else
+          log "WARNING: WAL file not truncated to 0 bytes after checkpoint for $db (size: $wal_sz)" >&2
+          checkpoint_failed=true
+        fi
       fi
     fi
   fi
@@ -960,6 +1156,9 @@ for db in "${CANDIDATES[@]}"; do
       freed=$(( total_size_before - total_size_after ))
     fi
     total_freed=$(( total_freed + freed ))
+    if (( freed >= 1024 )); then
+      deletion_log "$(basename "$0")" "vacuum_codex_db" "$(( freed / 1024 ))" "$db"
+    fi
     log "  [clean] $db: freed $(fmt_bytes $freed) (DB: $(fmt_bytes $db_size_before) -> $(fmt_bytes $db_size_after), WAL: $(fmt_bytes $wal_size_before) -> $(fmt_bytes $wal_size_after))"
   fi
 

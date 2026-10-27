@@ -2207,12 +2207,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     result["alerts"] = alerts
 
+    reclaim_stuck = None
+    reclaim_path = evaluator.state_dir / "volumes" / "reclaim_runs.json"
+    try:
+        runs = json.loads(reclaim_path.read_text()).get("runs", [])[-2:]
+        if len(runs) == 2 and all(int(r.get("aged_scanned", 0)) > 0 and int(r.get("removed", 0)) == 0 for r in runs):
+            reclaim_stuck = f"volume_reclaim_stuck: aged={sum(int(r.get('aged_scanned', 0)) for r in runs)} removed=0 runs=2 reason={runs[-1].get('top_kept_reason', 'unknown')}"
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
     if args.json:
         print(json.dumps(result, indent=2))
     else:
         if alerts:
             print("\n".join(alerts))
         print(f"Disk Magician Status: {result['status'].upper()} (checked: {result['checked_at']})")
+        if reclaim_stuck: print(reclaim_stuck)
         for dim_name, dim_data in result["dimensions"].items():
             print(f"  [{dim_data['status'].upper():<8}] {dim_name:<18} {dim_data['reason']}")
 

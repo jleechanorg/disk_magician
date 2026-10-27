@@ -28,6 +28,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_ignored.sh"
 # Brings artifact_removal_verdict (via artifact_verdict.sh) and, transitively,
 # wrh_remove_now (worktree_remove_hook.sh) for the C14 -> WRH removal route.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_lease.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit $?
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
@@ -155,13 +156,22 @@ fi
 WORKTREE_ROOT="${HOME}/.gemini/antigravity/worktrees"
 CLAUDE_WORKTREE_MARKER="/.claude/worktrees/"
 
+# Candidates >= 90d (>3 months) are auto-approved for --clean without WORKTREE_APPROVED=1;
+# candidates < 90d still require WORKTREE_APPROVED=1.
+AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
+if [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+    AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
+else
+    AUTO_APPROVE_AGE_DAYS=90
+fi
+[[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
+
 if [[ "$DRY_RUN" == true ]]; then
     echo "=== WORKTREE CLEANUP (DRY-RUN) ==="
 else
     echo "=== WORKTREE CLEANUP ==="
     if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
-        echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval."
-        exit 0
+        echo "Refusing to delete worktrees: set WORKTREE_APPROVED=1 after explicit approval (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
     fi
 fi
 echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: ${MIN_AGE_DAYS}d)"
@@ -431,7 +441,7 @@ worktree_head_on_origin_branch() {
     command -v timeout >/dev/null 2>&1 && t="timeout 30s"
     local remote_oid
     # shellcheck disable=SC2086
-    remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}')" || return 1
+    remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch" </dev/null 2>/dev/null | awk 'NR==1{print $1}')" || return 1
     [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]] && return 0
     return 1
 }
@@ -511,7 +521,7 @@ classify_content_and_merge() {
             local remote_oid="" t=""
             command -v timeout >/dev/null 2>&1 && t="timeout 30s"
             # shellcheck disable=SC2086
-            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
+            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" </dev/null 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
             if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
                 if has_ignored_user_data "$wt_path"; then
                     echo "ignored-data"
@@ -748,6 +758,11 @@ process_antigravity_orphan() {
         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + local_kb ))
         ANTIGRAVITY_DELETED=$(( ANTIGRAVITY_DELETED + 1 ))
     else
+        if [[ "${WORKTREE_APPROVED:-0}" != "1" ]] && worktree_is_recently_active "$abs_subdir" "$AUTO_APPROVE_AGE_DAYS"; then
+            ledger_line "antigravity" "PRESERVE" "$abs_subdir" "unapproved-under-${AUTO_APPROVE_AGE_DAYS}d"
+            ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
+            return 0
+        fi
         if [[ -e "$abs_subdir/.git" || -L "$abs_subdir/.git" ]] && has_hidden_state "$abs_subdir"; then
             ledger_line "antigravity" "PRESERVE" "$abs_subdir" "hidden-state"
             ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
@@ -934,6 +949,13 @@ process_repo_local_worktrees() {
                 TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                 REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
             else
+                if [[ "${WORKTREE_APPROVED:-0}" != "1" ]] && { [[ ! "$age_days" =~ ^[0-9]+$ ]] || (( age_days < AUTO_APPROVE_AGE_DAYS )) || worktree_is_recently_active "$abs_path" "$AUTO_APPROVE_AGE_DAYS"; }; then
+                    ledger_line "repo-local" "PRESERVE" "$abs_path" "unapproved-under-${AUTO_APPROVE_AGE_DAYS}d" "$extra"
+                    REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    act_candidate_done || return 3
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
                 if has_hidden_state "$abs_path"; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "hidden-state" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
@@ -963,6 +985,9 @@ process_repo_local_worktrees() {
                 local cw_c14_inv cw_c14_verdict cw_removed=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
                 if [[ -n "$cw_c14_inv" ]]; then
+                    if ! lease_registry_mutation_lock_enter; then
+                        cw_c14_verdict=kept:lease-busy
+                    else
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
                     # 3-day path. --t3-owner-null lets C14 free EXACTLY this
                     # candidate's own owner-null lease (never an
@@ -979,6 +1004,8 @@ process_repo_local_worktrees() {
                         else
                             wrh_remove_now "$abs_path" "$abs_path" --quarantine "$cw_c14_inv" && [[ ! -e "$abs_path" ]] && cw_removed=1
                         fi
+                    fi
+                    lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
                         rm -f "$cw_c14_inv"

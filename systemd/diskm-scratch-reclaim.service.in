@@ -1,0 +1,12 @@
+[Unit]
+Description=Disk Magician Scratch reclaim
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
+Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
+Environment=DISK_MAGICIAN_TRIGGER=timer
+Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
+ExecStart=/usr/bin/bash @ORCHESTRATOR@ volume reclaim --clean
+Restart=no
