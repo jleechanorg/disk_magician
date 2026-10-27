@@ -9,9 +9,10 @@
 # skipped (fail closed). Dry-run by default; a real run needs --clean AND
 # FILEPROVIDER_EVICT_APPROVED=1. Each verified eviction is written to the deletion log.
 #
-# Usage: evict_fileprovider.sh [--root DIR] [--min-age-hours N] [--limit N] [--dry-run|--clean]
+# Usage: evict_fileprovider.sh [--root DIR] [--min-age-hours N] [--limit N] [--prune-unuploaded-local-duplicates] [--dry-run|--clean]
 # Default root: ~/Library/CloudStorage/Dropbox/conversation-backups
-# Test hooks: DM_FILEPROVIDER_HELPER (probe/evict executable), DM_FILEPROVIDER_ALLOW_ANY_ROOT=1.
+# Test hooks: DM_FILEPROVIDER_HELPER (probe/evict executable), DM_FILEPROVIDER_ALLOW_ANY_ROOT=1,
+#             DM_FILEPROVIDER_LOCAL_CODEX_DIRS, DM_FILEPROVIDER_LOCAL_CLAUDE_DIR.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,15 +23,17 @@ ROOT="$HOME/Library/CloudStorage/Dropbox/conversation-backups"
 MIN_AGE_HOURS=24
 LIMIT=0
 CLEAN=false
+PRUNE_UNUPLOADED_DUPS=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) ROOT="${2:?--root needs a directory}"; shift 2 ;;
     --min-age-hours) MIN_AGE_HOURS="${2:?}"; shift 2 ;;
     --limit) LIMIT="${2:?}"; shift 2 ;;
+    --prune-unuploaded-local-duplicates) PRUNE_UNUPLOADED_DUPS=true; shift ;;
     --clean) CLEAN=true; shift ;;
     --dry-run) CLEAN=false; shift ;;
-    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -77,16 +80,20 @@ CUTOFF=$((NOW - MIN_AGE_HOURS * 3600))
 # Files open by any process (one system-wide lsof, filtered to the root).
 lsof -w -n -F n 2>/dev/null | sed -n 's/^n//p' | grep -F -- "$ROOT/" >"$WORK/open.txt" || true
 
-# Enumerate regular files; classify by measured allocated blocks and mtime.
+# Enumerate regular files; classify by measured allocated blocks and mtime in awk
+# to avoid slow per-file bash read loops over 350k+ dataless placeholders.
 : >"$WORK/cand.txt"; : >"$WORK/recent.txt"
-n_total=0; n_dataless=0
-while IFS=$'\t' read -r blocks mtime size path; do
-  [[ "$blocks" =~ ^[0-9]+$ && "$mtime" =~ ^[0-9]+$ && -n "$path" ]] || continue
-  n_total=$((n_total + 1))
-  if ((blocks == 0)); then n_dataless=$((n_dataless + 1)); continue; fi
-  if ((mtime > CUTOFF)); then printf '%s\t%s\t%s\n' "$blocks" "$size" "$path" >>"$WORK/recent.txt"; continue; fi
-  printf '%s\t%s\t%s\n' "$blocks" "$size" "$path" >>"$WORK/cand.txt"
-done < <(find "$ROOT" -type f -exec stat "${STAT_ARGS[@]}" {} +)
+read -r n_total n_dataless < <(
+  find "$ROOT" -type f -exec stat "${STAT_ARGS[@]}" {} + | awk -F'\t' \
+    -v cutoff="$CUTOFF" -v recent="$WORK/recent.txt" -v cand="$WORK/cand.txt" '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $4 != "" {
+      total++
+      if ($1 + 0 == 0) { dataless++; next }
+      if ($2 + 0 > cutoff) { print $1 "\t" $3 "\t" $4 > recent; next }
+      print $1 "\t" $3 "\t" $4 > cand
+    }
+    END { printf "%d %d\n", total+0, dataless+0 }'
+)
 
 # Open files are skipped.
 if [[ -s "$WORK/open.txt" ]]; then
@@ -125,6 +132,108 @@ if [[ "$CLEAN" == true ]]; then
   done <"$WORK/evict.txt"
 fi
 
+: >"$WORK/dups_verified.txt"
+n_pruned=0; n_prune_failed=0
+if [[ "$PRUNE_UNUPLOADED_DUPS" == true && -s "$WORK/notready.txt" ]]; then
+  CODEX_DIRS="${DM_FILEPROVIDER_LOCAL_CODEX_DIRS:-$HOME/.codex/sessions:$HOME/.codex/sessions_archive}"
+  CLAUDE_DIR="${DM_FILEPROVIDER_LOCAL_CLAUDE_DIR:-$HOME/.claude/projects}"
+  python3 - "$WORK/notready.txt" "$ROOT" "$CODEX_DIRS" "$CLAUDE_DIR" >"$WORK/dups_verified.txt" <<'PY'
+import gzip, os, stat, sys
+
+notready_file, root, codex_dirs_raw, claude_dir = sys.argv[1:5]
+codex_dirs = [d for d in codex_dirs_raw.split(":") if d]
+ELIGIBLE = {"SKIP:uploading", "SKIP:upload_error", "SKIP:not_uploaded"}
+CODEX_MARKERS = (
+    "/conversation-backups/codex_conversations/sessions/",
+    "/conversation-backups/codex_conversations/sessions_archive/",
+    "/codex_conversations/sessions/",
+    "/codex_conversations/sessions_archive/",
+)
+CLAUDE_MARKERS = ("/conversation-backups/claude_conversations/projects/", "/claude_conversations/projects/")
+
+
+def find_primary(dbx_path):
+    for m in CODEX_MARKERS:
+        if m in dbx_path:
+            rel = dbx_path.split(m, 1)[1]
+            for d in codex_dirs:
+                for cand in (os.path.join(d, rel), os.path.join(d, rel + ".gz")):
+                    if os.path.lexists(cand):
+                        return cand
+    for m in CLAUDE_MARKERS:
+        if m in dbx_path:
+            rel = dbx_path.split(m, 1)[1]
+            if claude_dir:
+                for cand in (os.path.join(claude_dir, rel), os.path.join(claude_dir, rel + ".gz")):
+                    if os.path.lexists(cand):
+                        return cand
+    return None
+
+
+def prefix_matches(primary, dbx_path, size, is_gz=False):
+    rem = size
+    try:
+        open_p = (lambda p: gzip.open(p, "rb")) if is_gz else (lambda p: open(p, "rb"))
+        with open_p(primary) as fp, open(dbx_path, "rb") as fd:
+            while rem > 0:
+                chunk = min(rem, 1048576)
+                bp = fp.read(chunk)
+                bd = fd.read(chunk)
+                if len(bd) != chunk or bp != bd:
+                    return False
+                rem -= chunk
+        return True
+    except (OSError, EOFError, zlib_error := Exception):
+        return False
+
+
+with open(notready_file, encoding="utf-8", errors="replace") as f:
+    for line in f:
+        parts = line.rstrip("\n").split("\t", 3)
+        if len(parts) != 4:
+            continue
+        reason, blocks_s, size_s, dbx_path = parts
+        if reason not in ELIGIBLE:
+            continue
+        primary = find_primary(dbx_path)
+        if not primary:
+            continue
+        try:
+            st_p = os.lstat(primary)
+            st_d = os.lstat(dbx_path)
+        except OSError:
+            continue
+        if not (stat.S_ISREG(st_p.st_mode) and stat.S_ISREG(st_d.st_mode)):
+            continue
+        if (st_p.st_dev, st_p.st_ino) == (st_d.st_dev, st_d.st_ino):
+            continue
+        if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
+            continue
+        is_gz = primary.endswith(".gz") and not dbx_path.endswith(".gz")
+        if not is_gz and st_p.st_size < st_d.st_size:
+            continue
+        if not prefix_matches(primary, dbx_path, st_d.st_size, is_gz=is_gz):
+            continue
+        print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
+PY
+  if [[ "$CLEAN" == true && -s "$WORK/dups_verified.txt" ]]; then
+    script_name="$(basename "$0")"
+    while IFS=$'\t' read -r before_blocks before_size path primary; do
+      if [[ -f "$primary" && ! -L "$primary" && -f "$path" && ! -L "$path" && ! "$primary" -ef "$path" ]]; then
+        rm -f -- "$path"
+        if [[ ! -e "$path" && -f "$primary" ]]; then
+          deletion_log "$script_name" "prune_unuploaded_duplicate" "$((before_blocks / 2))" "$path"
+          n_pruned=$((n_pruned + 1))
+        else
+          n_prune_failed=$((n_prune_failed + 1))
+        fi
+      else
+        n_prune_failed=$((n_prune_failed + 1))
+      fi
+    done <"$WORK/dups_verified.txt"
+  fi
+fi
+
 mode="DRY-RUN"; [[ "$CLEAN" == true ]] && mode="CLEAN"
 echo "[$mode] root: $ROOT (min age ${MIN_AGE_HOURS}h)"
 echo "files scanned: $n_total (already dataless: $n_dataless)"
@@ -133,6 +242,12 @@ echo "skipped recent (<${MIN_AGE_HOURS}h): $(count "$WORK/recent.txt") files, $(
 echo "skipped open by a process: $(count "$WORK/openskip.txt") files, $(sum_gib 1 "$WORK/openskip.txt") GiB physical"
 echo "skipped provider-not-ready: $(count "$WORK/notready.txt") files, $(sum_gib 2 "$WORK/notready.txt") GiB physical"
 cut -f1 "$WORK/notready.txt" | sort | uniq -c | sed 's/^ */  reason /' | awk '{print}'
+if [[ "$PRUNE_UNUPLOADED_DUPS" == true ]]; then
+  echo "would prune unuploaded duplicate (verified in local primary): $(count "$WORK/dups_verified.txt") files, $(sum_gib 1 "$WORK/dups_verified.txt") GiB physical"
+fi
 if [[ "$CLEAN" == true ]]; then
   echo "evicted+verified (blocks=0, size unchanged): $n_evicted; failed/unverified: $n_failed"
+  if [[ "$PRUNE_UNUPLOADED_DUPS" == true ]]; then
+    echo "pruned+verified unuploaded duplicates (local primary intact): $n_pruned; failed/unverified: $n_prune_failed"
+  fi
 fi
