@@ -332,6 +332,36 @@ class LinuxScratchTest(VolumeTestBase):
         self.set_linux_image_config(200)
         self.assertEqual(volume.path_cmd("scratch"), 3)
 
+    def test_linux_malformed_registry_refuses_public_path_and_scratch_new(self):
+        self.set_linux_image_config(200)
+        repo = self.root / "repo"
+        volume.subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        registry_path, _ = volume.registry_paths()
+        absent_result = volume.subprocess.run(
+            ["bash", str(ROOT / "disk_magician.sh"), "volume", "path", "scratch"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual((absent_result.returncode, absent_result.stdout), (3, ""))
+        for index, entry in enumerate((None, [], "corrupt")):
+            with self.subTest(entry=entry):
+                registry_path.write_text(json.dumps({"schema_version": 1, "volumes": {"scratch": entry}}))
+                fallback = self.root / f"fallback-{index}"
+                env = {**os.environ, "EVIDENCE_TMP_ROOT": str(fallback)}
+                path_result = volume.subprocess.run(
+                    ["bash", str(ROOT / "disk_magician.sh"), "volume", "path", "scratch"],
+                    env=env, capture_output=True, text=True,
+                )
+                birth_result = volume.subprocess.run(
+                    ["bash", str(ROOT / "disk_magician.sh"), "scratch-new", str(repo),
+                     "registry-proof", "--kind", "build"],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(path_result.returncode, 75)
+                self.assertEqual(path_result.stdout, "")
+                self.assertEqual(birth_result.returncode, 75)
+                self.assertEqual(birth_result.stdout, "")
+                self.assertFalse(fallback.exists())
+
 
     def test_linux_foreground_mount_refuses_an_existing_mount_without_owning_it(self):
         scratch = self.set_linux_image_config(1)

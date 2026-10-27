@@ -21,27 +21,23 @@ if [[ $rc -ne 0 || ! -d "$root" ]]; then echo skipped:unavailable; exit 0; fi
 "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || { echo skipped:unavailable; exit 0; }
 before="$(status_json)" || { echo skipped:measurement-unavailable; exit 0; }
 read -r used quota < <(usage_pair "$before" 2>/dev/null) || { echo skipped:measurement-unavailable; exit 0; }
-if (( used * 100 < quota * 90 )); then
- if [[ "$clean" == true ]]; then
-  ensure_rc=0
-  "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || ensure_rc=$?
-  after="$(status_json)" || ensure_rc=1
-  if (( ensure_rc != 0 )) || [[ "$(reserve_available "$after" 2>/dev/null)" != 1 ]]; then
-   echo kept:ballast-restore-failed
-   exit 0
-  fi
- fi
- echo "skipped:below-trigger:$((used * 100 / quota))"
- exit 0
-fi
 pct=$((used * 100 / quota))
-AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0
+reserve_before="$(reserve_available "$before" 2>/dev/null)" || reserve_before=0
+reserve_before_json=false
+[[ "$reserve_before" == 1 ]] && reserve_before_json=true
+AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json
 receipt="$SCRIPT_DIR/job_receipt.py"
-run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct}")" || { echo kept:receipt-begin-failed; exit 1; }
+precondition="{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct,\"reserve_available\":$reserve_before_json}"
+run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "$precondition")" || { echo kept:receipt-begin-failed; exit 1; }
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
+below_trigger=false
+if (( used * 100 < quota * 90 )); then
+ below_trigger=true
+ TOP_REASON="below-trigger"
+fi
 ACT_CURSOR_SOURCE="volume_reclaim:v1:$root"
 cursor_error=0
-if [[ "$clean" == true && -n "$ACT_CURSOR" ]]; then
+if [[ "$below_trigger" != true && "$clean" == true && -n "$ACT_CURSOR" ]]; then
  act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || { cursor_error=1; TOP_REASON=cursor-invalid; }
  if (( ! cursor_error )); then act_cursor_reset_once "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" || { cursor_error=1; TOP_REASON=cursor-reset-failed; }; fi
 fi
@@ -79,7 +75,7 @@ PYDIAG
  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$diag" 2>/dev/null || true
  printf '%s\n' "$result"
 }
-if (( ! cursor_error )); then
+if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
 while IFS=$'\t' read -r newest entry; do
  [[ -n "$entry" ]] || continue
  AGED=$((AGED+1))
@@ -119,19 +115,25 @@ if [[ "$clean" == true ]]; then
   read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; }
  fi
  if (( ! measurement_error )) && [[ "$now_quota" -ne "$quota" ]]; then TOP_REASON=quota-changed; measurement_error=1; fi
- if (( ! measurement_error )) && [[ "$(reserve_available "$current" 2>/dev/null)" != 1 ]]; then TOP_REASON=ballast-restore-failed; BALLAST_RESTORE_FAILURES=1; fi
+ if (( ! measurement_error )); then
+  reserve_after="$(reserve_available "$current" 2>/dev/null)" || reserve_after=0
+  reserve_after_json=false
+  [[ "$reserve_after" == 1 ]] && reserve_after_json=true
+  if [[ "$reserve_after" != 1 ]]; then TOP_REASON=ballast-restore-failed; BALLAST_RESTORE_FAILURES=1; fi
+ fi
  if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
- if (( ! measurement_error && now_used * 100 > quota * 80 )); then
+ if (( ! measurement_error && now_used * 100 > quota * 80 )) && [[ "$below_trigger" != true ]]; then
   echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
  fi
  if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
 fi
 outcome=success_noop
-reason="dry-run"
+reason=dry-run
+if [[ "$below_trigger" == true ]]; then reason=below-trigger; fi
 if [[ "$clean" == true ]]; then
  outcome=success; reason="$TOP_REASON"
- if (( measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
- if (( ! measurement_error )) && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" <<'PYREC'
+ if (( measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
+ if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" <<'PYREC'
 import json,os,sys,tempfile
 from datetime import datetime,timezone
 from pathlib import Path
@@ -153,8 +155,9 @@ PYREC
  then outcome=error; reason=history-write-failed; fi
 fi
 candidates="{\"aged_scanned\":$AGED,\"removed\":$REMOVED,\"ballast_restore_failures\":$BALLAST_RESTORE_FAILURES,\"top_kept_reason\":\"$TOP_REASON\"}"
-if (( measurement_error )); then post="{\"allocated_bytes_after\":null,\"quota_bytes\":$quota,\"target_reached\":null}"; else post="{\"allocated_bytes_after\":$now_used,\"quota_bytes\":$quota,\"target_reached\":$(( now_used * 100 <= quota * 80 ))}"; fi
-if ! python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome" --reason "$reason" --candidates "$candidates" --precondition "{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct}" --postcondition "$post" >/dev/null; then
+if (( measurement_error )); then post="{\"allocated_bytes_after\":null,\"quota_bytes\":$quota,\"target_reached\":null,\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":null}"; else post="{\"allocated_bytes_after\":$now_used,\"quota_bytes\":$quota,\"target_reached\":$(( now_used * 100 <= quota * 80 )),\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":$reserve_after_json}"; fi
+if ! python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome" --reason "$reason" --candidates "$candidates" --precondition "$precondition" --postcondition "$post" >/dev/null; then
  echo kept:receipt-finish-failed >&2; exit 1
 fi
+if [[ "$below_trigger" == true && "$outcome" == success_noop ]]; then echo "skipped:below-trigger:$pct"; fi
 [[ "$outcome" != error ]]

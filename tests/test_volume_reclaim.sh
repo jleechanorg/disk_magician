@@ -160,6 +160,15 @@ BALLAST_LOG="$T/ballast.log"
 export BALLAST_LOG
 mkdir -p "$TEST_ROOT/repo/evidence/oldest"; printf x >"$TEST_ROOT/repo/evidence/oldest/content"
 python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
+# A simulated scheduled below-trigger run still produces a fresh, correlated terminal receipt.
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+PRIOR_RUN="$(python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); print((r or {}).get("run_id", ""))')"
+DISK_MAGICIAN_TRIGGER=timer BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="true true" TEST_STATUS_SEQUENCE="899 899" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-terminal-receipt.out"
+grep -q 'skipped:below-trigger:89' "$T/below-trigger-terminal-receipt.out"
+if grep -q 'trim_target_not_reached' "$T/below-trigger-terminal-receipt.out"; then exit 1; fi
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); previous=sys.argv[1]; assert r["outcome"]=="success_noop" and r["reason"]=="below-trigger"; assert r["trigger"]=="timer" and r["run_id"] and r["run_id"] != previous and r["id"]==r["run_id"]; assert r["precondition"]=={"allocated_bytes":899,"quota_bytes":1000,"used_pct":89,"reserve_available":True}; post=r["postcondition"]; assert post["allocated_bytes_after"]==899 and post["quota_bytes"]==1000 and not post["target_reached"] and post["reserve_available_before"] is True and post["reserve_available_after"] is True; assert r["candidates"]["aged_scanned"]==0 and r["candidates"]["removed"]==0; assert r["times"]["ended_at"] and r["outcome"]!="unknown"' "$PRIOR_RUN"
+[[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
+[[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
 # A below-trigger clean pass still repairs a missing reserve without trimming.
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false true" TEST_STATUS_SEQUENCE="899 899" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-restored.out"
@@ -171,10 +180,12 @@ grep -q 'skipped:below-trigger:89' "$T/below-trigger-reserve-restored.out"
 BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_ENSURE_RC=1 TEST_BALLAST_AVAILABLE_SEQUENCE="false false" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-ensure-failed.out"
 grep -q 'kept:ballast-restore-failed' "$T/below-trigger-ensure-failed.out"
 ! grep -q 'skipped:below-trigger' "$T/below-trigger-ensure-failed.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="ballast-restore-failed" and r["candidates"]["ballast_restore_failures"]==1; assert r["precondition"]["reserve_available"] is False and r["postcondition"]["reserve_available_after"] is False and r["postcondition"]["allocated_bytes_after"]==899'
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false false" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-still-missing.out"
 grep -q 'kept:ballast-restore-failed' "$T/below-trigger-reserve-still-missing.out"
 ! grep -q 'skipped:below-trigger' "$T/below-trigger-reserve-still-missing.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="ballast-restore-failed" and r["candidates"]["ballast_restore_failures"]==1; assert r["precondition"]["reserve_available"] is False and r["postcondition"]["reserve_available_after"] is False and r["postcondition"]["allocated_bytes_after"]==899'
 : >"$STATUS_CALLS_FILE"
 : >"$BALLAST_LOG"
 BALLAST_LOG="$T/ballast.log" DISK_MAGICIAN_TEST_INTENT_ERRNO=28 TEST_STATUS_SEQUENCE="900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-release-fails.out"

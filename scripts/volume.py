@@ -541,9 +541,12 @@ def path_cmd(name: str, for_reclaim: bool = False) -> int:
     if linux_backend_enabled(name):
         try:
             settings, scratch = cls(name)
-            entry = registry()["volumes"].get(name)
-            if not isinstance(entry, dict):
+            entries = registry()["volumes"]
+            if name not in entries:
                 return 3
+            entry = entries[name]
+            if not isinstance(entry, dict):
+                return 75
             linux_validate_mount(settings, scratch, entry)
             print(scratch["mountpoint"])
             return 0
