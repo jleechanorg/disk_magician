@@ -18,23 +18,35 @@ dispatch. Migrate legacy direct-script schedules with behavior and safety
 checks; their current existence is not permission to add more. Build, package,
 and isolated test harnesses may call internal files directly.
 
-## Agent Scratch placement (Linux first)
+## Agent Scratch placement (Mac and Linux) — optional quota-bounded Scratch volume
 
-For disposable Linux build output, downloads and evidence, use the configured
-Scratch volume through `diskm scratch-new <repo-path> <purpose> --kind build`
-(or `--kind evidence`). Set `DISK_MAGICIAN_CONFIG` to the task's Linux Scratch
-profile, normally `$HOME/.config/disk-magician/linux-scratch.json`, for both the
-path check and allocation. First run `diskm volume path scratch` with that same
-profile; use only the identity-verified path returned by the CLI. Let
-`scratch-new` perform admission and register the producer lease; add
-`--owner-pid PID` for the actual long-lived producer when needed. Consumers and
-detached children must retain their own existing producer leases.
+For disposable build output, downloads, test scratch, and evidence on both macOS
+and Linux, use the dedicated quota-bounded Scratch volume:
+- **macOS**: `/Volumes/diskm-scratch` (APFS quota-bounded volume, default/recommended 200 GiB).
+- **Linux**: `~/Scratch` / `/home/<user>/Scratch` (sparse `ext4` quota-bounded volume mounted via `fuse2fs` or `native` loop mount, default/recommended 200 GiB).
+
+Agents allocate disposable build output, downloads, test scratch, and evidence
+via `diskm scratch-new <repo-path> <purpose> --kind build` (or `--kind evidence`).
+Before allocation, check `diskm volume path scratch` (using `~/.config/disk-magician/config.json`
+by default or `DISK_MAGICIAN_CONFIG`), falling back to `/tmp/<repo>/...` when no
+Scratch volume is provisioned. Let `scratch-new` perform admission and register
+the producer lease; add `--owner-pid PID` for the actual long-lived producer when
+needed. Consumers and detached children must retain their own existing producer
+leases.
+
+Users and operators setting up a workstation or CI host are encouraged to
+optionally partition/provision a dedicated Scratch volume via
+`diskm setup --scratch [--quota-gb 200]` (or interactively during `diskm setup`).
+This isolates disposable agent and CI artifacts so they cannot exhaust host free
+space. Scratch volumes are automatically trimmed from 90% down to 80% usage
+while strictly preserving a 64 MiB `.diskm-ballast` emergency reserve and
+48-hour recency, live-PID, and active-lease protections.
 
 Use the returned artifact directory rather than inventing paths under
-`~/Scratch`. A registered but unavailable, full or mismatched volume refuses
-new work; report that result without writing beneath an unmounted mountpoint or
-silently routing the same request to host temp. This Linux opt-in is the
-exception to the general `/tmp` scratch-location rule, not an exception to
+`/Volumes/diskm-scratch` or `~/Scratch`. A registered but unavailable, full or
+mismatched volume refuses new work; report that result without writing beneath an
+unmounted mountpoint or silently routing the same request to host temp. This opt-in
+is the exception to the general `/tmp` scratch-location rule, not an exception to
 admission, lease, identity or deletion safety.
 
 Git worktrees still use `~/.worktrees` through `diskm worktree-new`; tool profiles,
@@ -42,8 +54,6 @@ transcripts, credentials and mutable state stay in their existing homes. Durable
 human-readable reports stay in `~/roadmap`; publish evidence that must survive
 reclaim through the established evidence path. Do not remap global `TMPDIR`,
 replace `/tmp`, move existing user data or treat Scratch as durable storage.
-Mac agent routing remains on its existing path until the encrypted volume is
-created, unlocked and identity-verified for that task.
 
 ## Investigation methodology — fleet, existing ledger, floor/buckets, bounded audit
 

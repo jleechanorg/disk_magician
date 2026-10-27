@@ -25,6 +25,15 @@ This skill teaches Codex how to integrate with `disk_magician` to perform automa
    ```bash
    ./disk_magician.sh clean
    ```
+4. **Agent Scratch allocation & setup**:
+   Allocate disposable build outputs, downloads, test scratch, and evidence on the dedicated quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS, `~/Scratch` on Linux):
+   ```bash
+   diskm scratch-new <repo-path> <purpose> --kind build   # or --kind evidence
+   ```
+   Optionally provision and configure the dedicated Scratch volume on macOS or Linux:
+   ```bash
+   diskm setup --scratch [--quota-gb 200]
+   ```
 
 ## Codex Safety Policies
 - Codex agent session files inside `~/.codex/sessions` are protected under the global AGENTS policy and must never be deleted unless explicitly requested.

@@ -25,6 +25,14 @@ This skill teaches Claude how to use `disk_magician` to audit disk space, identi
   ```bash
   ./scripts/worktree_hygiene.sh
   ```
+* **Agent Scratch allocation & setup**: Allocate disposable build outputs, downloads, test scratch, and evidence on the dedicated quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS, `~/Scratch` on Linux):
+  ```bash
+  diskm scratch-new <repo-path> <purpose> --kind build   # or --kind evidence
+  ```
+  Optionally provision and configure the dedicated Scratch volume on macOS or Linux:
+  ```bash
+  diskm setup --scratch [--quota-gb 200]
+  ```
 
 ## Safety Constraints & Guardrails
 - **Worktree 7-day rule (single source of truth):** the repo `CLAUDE.md` section "Worktree 7-day rule" — a worktree touched within 7 days is protected; recency is measured by `scripts/lib/worktree_recency.sh` and never re-derived from `stat <wt>/.git` or `stat <wt>` (both measure creation, not use); unmeasurable fails closed to protected. Agent sessions follow the same 7-day floor and need explicit `WORKTREE_APPROVED=1` from the user.

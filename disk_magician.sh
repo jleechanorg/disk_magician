@@ -14,6 +14,7 @@ Commands:
   setup         Configure local backup repository, create GitHub remote, and schedule jobs.
                 setup --hooks [--settings P]: install the admission hook (needs decision external_edits).
                 setup --git-shim [--shim P]: apply tools/guards/git.patch from this package (needs external_edits).
+                setup --scratch [--quota-gb N]: optionally configure and provision a quota-bounded Scratch volume (/Volumes/diskm-scratch on macOS APFS, ~/Scratch on Linux ext4).
   snapshot      Perform disk usage breakdown and write to backup JSON.
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
@@ -140,8 +141,43 @@ resolve_dispatch_snapshot_json() {
 
 run_setup() {
   local dry_run=false
-  for arg in "$@"; do
-    [[ "$arg" == "--dry-run" ]] && dry_run=true
+  local opt_scratch=false
+  local scratch_quota_gb=200
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      --scratch)
+        opt_scratch=true
+        shift
+        ;;
+      --quota-gb)
+        if [[ $# -lt 2 ]]; then
+          echo "Error: --quota-gb requires a positive integer argument" >&2
+          return 1
+        fi
+        scratch_quota_gb="$2"
+        if ! [[ "$scratch_quota_gb" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Error: --quota-gb requires a positive integer argument (got: $scratch_quota_gb)" >&2
+          return 1
+        fi
+        shift 2
+        ;;
+      --quota-gb=*)
+        scratch_quota_gb="${1#*=}"
+        if ! [[ "$scratch_quota_gb" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Error: --quota-gb requires a positive integer argument (got: $scratch_quota_gb)" >&2
+          return 1
+        fi
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
   done
 
   echo "=== Setting up Disk Magician ==="
@@ -151,6 +187,9 @@ run_setup() {
     echo "[dry-run] Would create directory $BACKUP_DIR"
     echo "[dry-run] Would run: git init in $BACKUP_DIR"
     echo "[dry-run] Would create remote GitHub repository under jleechanorg"
+    if [[ "$opt_scratch" == true ]]; then
+      echo "[dry-run] Would configure and provision ${scratch_quota_gb} GiB Scratch volume"
+    fi
     return 0
   fi
 
@@ -227,6 +266,100 @@ XML
       printf '%s\n' "$cron_job"
     } | crontab -
     echo "Cron job added to crontab."
+  fi
+
+  # 4. Optional Quota-Bounded Scratch Volume
+  echo "Optional: Provision a quota-bounded Scratch volume (/Volumes/diskm-scratch on macOS APFS, \$HOME/Scratch on Linux ext4) via 'diskm setup --scratch' to isolate disposable agent builds, test scratch, and evidence."
+
+  local do_provision=false
+  if [[ "$opt_scratch" == true ]]; then
+    do_provision=true
+  elif [[ -t 0 && -t 1 ]]; then
+    local answer="n"
+    read -r -p "Do you want to provision an optional quota-bounded Scratch volume now (${scratch_quota_gb} GiB)? [y/N] " answer || true
+    if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+      do_provision=true
+    fi
+  fi
+
+  if [[ "$do_provision" == true ]]; then
+    local config_file="${DISK_MAGICIAN_CONFIG:-$HOME/.config/disk-magician/config.json}"
+    mkdir -p "$(dirname "$config_file")"
+    if [[ ! -f "$config_file" ]]; then
+      if [[ -f "$SCRIPT_DIR/config.json.template" ]]; then
+        cp "$SCRIPT_DIR/config.json.template" "$config_file"
+      else
+        echo "{}" > "$config_file"
+      fi
+    fi
+    chmod 0600 "$config_file"
+
+    python3 -c '
+import datetime, json, os, sys
+from pathlib import Path
+
+config_path = sys.argv[1]
+quota_gb = int(sys.argv[2])
+ostype = sys.argv[3]
+
+doc = {}
+if os.path.exists(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception:
+        doc = {}
+if not isinstance(doc, dict):
+    doc = {}
+
+volumes = doc.setdefault("volumes", {})
+if not isinstance(volumes, dict):
+    volumes = {}
+    doc["volumes"] = volumes
+
+volumes.setdefault("swap_headroom_gb", 40)
+volumes.setdefault("alarm_floor_gb", 20)
+volumes.setdefault("swap_used_bytes", None)
+volumes["encryption"] = "none"
+volumes["encryption_acknowledged_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+classes = volumes.setdefault("classes", {})
+if not isinstance(classes, dict):
+    classes = {}
+    volumes["classes"] = classes
+
+scratch = classes.setdefault("scratch", {})
+if not isinstance(scratch, dict):
+    scratch = {}
+    classes["scratch"] = scratch
+
+scratch["name"] = "diskm-scratch"
+scratch["quota_gb"] = quota_gb
+
+home = os.environ.get("HOME", str(Path.home()))
+if ostype.startswith("darwin"):
+    scratch["mountpoint"] = "/Volumes/diskm-scratch"
+    scratch.pop("image_path", None)
+else:
+    scratch["mountpoint"] = os.path.join(home, "Scratch")
+    scratch["image_path"] = os.path.join(home, ".local/share/disk-magician/volumes/scratch.ext4")
+
+with open(config_path, "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+' "$config_file" "$scratch_quota_gb" "$OSTYPE"
+
+    if "$installed_cli" volume path scratch >/dev/null 2>&1; then
+      echo "Scratch volume is already active: $("$installed_cli" volume path scratch)"
+    else
+      "$installed_cli" volume create scratch
+      "$installed_cli" volume create scratch --execute
+    fi
+    if [[ "$OSTYPE" != "darwin"* ]]; then
+      "$installed_cli" volume service install scratch
+      "$installed_cli" volume ballast ensure scratch
+      "$installed_cli" volume scheduler install scratch
+    fi
   fi
 
   echo "Setup complete! Run 'diskm snapshot' to capture your first snapshot."
