@@ -731,6 +731,36 @@
       "key": "venvs_home",
       "path": "~/.venvs",
       "timeout": 60
+    },
+    {
+      "key": "fileprovider_wharf",
+      "path": "~/Library/Application Support/FileProvider/C565AFA3-62F4-41F2-9ABE-2C80BFE53167/wharf",
+      "timeout": 60
+    },
+    {
+      "key": "dropbox_conversation_backups",
+      "path": "~/Library/CloudStorage/Dropbox/conversation-backups",
+      "timeout": 120
+    },
+    {
+      "key": "gcloud_logs",
+      "path": "~/.config/gcloud/logs",
+      "timeout": 60
+    },
+    {
+      "key": "hermes_checkpoints_store",
+      "path": "~/.hermes/checkpoints/store",
+      "timeout": 60
+    },
+    {
+      "key": "cache_codex_runtimes",
+      "path": "~/.cache/codex-runtimes",
+      "timeout": 60
+    },
+    {
+      "key": "tmp_worldai_ios_compilation_cache",
+      "path": "/private/tmp/worldai-ios-compilation-cache",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
@@ -842,7 +872,7 @@
     },
     {
       "key": "tmp_worldai_scratch",
-      "pattern": "/tmp/worldai-*"
+      "pattern": "/tmp/worldai*"
     },
     {
       "key": "tmp_dd_dirs",
@@ -851,6 +881,14 @@
     {
       "key": "tmp_wf_derived_data",
       "pattern": "/tmp/wf*_dd*"
+    },
+    {
+      "key": "tmp_worldarchitect_scratch",
+      "pattern": "/tmp/worldarchitect*"
+    },
+    {
+      "key": "tmp_background_pr_reviews",
+      "pattern": "/tmp/background-pr-reviews*"
     }
   ],
   "cleanup_thresholds": {

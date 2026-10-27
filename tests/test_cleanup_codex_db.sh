@@ -83,6 +83,7 @@ trap cleanup_test_env EXIT
 
 export CODEX_DIR="$TMP_DIR"
 export DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state"
+export DISK_MAGICIAN_DELETION_LOG="$TMP_DIR/deletions.log"
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"
 
 REAL_SQLITE3="$(command -v sqlite3)"
@@ -518,7 +519,7 @@ wait "$UNEXP_PID" 2>/dev/null || true
 
 expect_eq "unexpected content in lease dir retained" "1" "$([[ -f "$STATE8/codex_db_leases/${DB8_ID}.lease/unexpected_file.txt" ]] && echo 1 || echo 0)"
 expect_eq "own PID file removed from lease dir" "0" "$([[ -f "$STATE8/codex_db_leases/${DB8_ID}.lease/pid" ]] && echo 1 || echo 0)"
-rm -rf "$STATE8/codex_db_leases/${DB8_ID}.lease" "$M1_BIN"
+rm -rf "${STATE8:?}/codex_db_leases/${DB8_ID:?}.lease" "${M1_BIN:?}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 9: Conservative active-open-client policy & error handling
@@ -1122,7 +1123,8 @@ OUTSIDE_FL_AFTER=$("$REAL_SQLITE3" "$OUTSIDE_DB" "PRAGMA freelist_count;")
 expect "refused realpath escape through parent symlink" "resolves outside" "$OUT16_ESCAPE"
 expect_eq "escaped database freelist untouched" "$OUTSIDE_FL_BEFORE" "$OUTSIDE_FL_AFTER"
 expect_eq "escaped parent symlink exits non-zero" "1" "$RC16_ESCAPE"
-rm -rf "$TMP_DIR/symlink_parent" "$OUTSIDE_DIR" "$EXTERNAL_DIR"
+rm -f "${TMP_DIR:?}/symlink_parent"
+rm -rf "${OUTSIDE_DIR:?}" "${EXTERNAL_DIR:?}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 17: Pragma row count & constraints schema validation
@@ -1323,6 +1325,84 @@ assert receipt['postcondition']['df_delta_bytes'] is not None, receipt['postcond
 print('  PASS: governed Codex DB receipt records vacuums separately with removed_count 0')
 PY
 PASS=$((PASS + 1))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 19: thread_history_*.sqlite projection cache pruning & online WAL vacuum
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 19: thread_history_*.sqlite prunes expired projected threads while preserving recent threads and state_*.sqlite"
+TH_DIR="$TMP_DIR/th_codex"
+mkdir -p "$TH_DIR"
+TH_DB="$TH_DIR/thread_history_1.sqlite"
+ST_DB="$TH_DIR/state_5.sqlite"
+create_test_db "$ST_DB" 80 80 2
+ST_ROWS_BEFORE=$("$REAL_SQLITE3" "$ST_DB" "SELECT count(*) FROM t;")
+
+python3 - "$TH_DB" <<'PY'
+import sqlite3, sys, time
+db = sys.argv[1]
+now_s = int(time.time())
+now_ms = now_s * 1000
+old_ms = (now_s - 10 * 86400) * 1000
+old_s = now_s - 10 * 86400
+
+conn = sqlite3.connect(db, isolation_level=None)
+conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
+conn.execute("PRAGMA journal_mode = WAL;")
+conn.executescript("""
+CREATE TABLE thread_turns (
+    thread_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    rollout_ordinal INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    started_at INTEGER,
+    completed_at INTEGER,
+    PRIMARY KEY (thread_id, turn_id)
+);
+CREATE TABLE thread_items (
+    thread_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    rollout_ordinal INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    item_json TEXT NOT NULL,
+    PRIMARY KEY (thread_id, turn_id, item_id)
+);
+CREATE UNIQUE INDEX idx_thread_items_page ON thread_items(thread_id, rollout_ordinal);
+CREATE TABLE thread_history_projection_state (
+    thread_id TEXT PRIMARY KEY,
+    next_rollout_byte_offset INTEGER NOT NULL,
+    next_rollout_ordinal INTEGER NOT NULL
+);
+""")
+conn.execute("BEGIN;")
+conn.execute("INSERT INTO thread_history_projection_state VALUES ('old-thread', 1000, 50), ('fresh-thread', 500, 10);")
+conn.execute("INSERT INTO thread_turns VALUES ('old-thread', 't1', 1, 'completed', ?, ?), ('fresh-thread', 't1', 1, 'completed', ?, ?);", (old_s, old_s, now_s, now_s))
+for i in range(60):
+    conn.execute("INSERT INTO thread_items VALUES ('old-thread', 't1', ?, ?, ?, ?);", (f"i{i}", i, old_ms, "x" * 4000))
+for i in range(5):
+    conn.execute("INSERT INTO thread_items VALUES ('fresh-thread', 't1', ?, ?, ?, ?);", (f"f{i}", i, now_ms, "y" * 1000))
+conn.execute("COMMIT;")
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+conn.close()
+PY
+
+TH_SIZE_BEFORE=$(stat -f%z "$TH_DB" 2>/dev/null || stat -c%s "$TH_DB")
+OUT19_DRY=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state19" "$SCRIPT" --dry-run --codex-dir "$TH_DIR" --retention-days 3 2>&1)
+expect "dry-run previews pruneable projection threads" "pruneable_threads=1/2" "$OUT19_DRY"
+
+DELLOG19="$TMP_DIR/deletions19.log"
+OUT19_CLEAN=$(DISK_MAGICIAN_DELETION_LOG="$DELLOG19" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state19" "$SCRIPT" --clean --codex-dir "$TH_DIR" --retention-days 3 2>&1)
+TH_SIZE_AFTER=$(stat -f%z "$TH_DB" 2>/dev/null || stat -c%s "$TH_DB")
+OLD_LEFT=$("$REAL_SQLITE3" "$TH_DB" "SELECT count(*) FROM thread_items WHERE thread_id='old-thread';")
+FRESH_LEFT=$("$REAL_SQLITE3" "$TH_DB" "SELECT count(*) FROM thread_items WHERE thread_id='fresh-thread';")
+ST_ROWS_AFTER=$("$REAL_SQLITE3" "$ST_DB" "SELECT count(*) FROM t;")
+
+expect "clean pruned 1/2 projection threads" "pruned 1/2 projection threads" "$OUT19_CLEAN"
+expect_eq "old thread_items removed" "0" "$OLD_LEFT"
+expect_eq "fresh thread_items preserved" "5" "$FRESH_LEFT"
+expect_gt "thread_history_1.sqlite physical size shrank" "$TH_SIZE_BEFORE" "$TH_SIZE_AFTER"
+expect_eq "state_5.sqlite rows 100% untouched" "$ST_ROWS_BEFORE" "$ST_ROWS_AFTER"
+expect "deletion_log recorded vacuum_codex_db" "vacuum_codex_db" "$(cat "$DELLOG19" 2>/dev/null || true)"
 
 echo
 echo
