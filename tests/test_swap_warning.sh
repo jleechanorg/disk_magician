@@ -85,6 +85,7 @@ fi
 FAKE_DISKM="$TMP/disk-magician"
 cat > "$FAKE_DISKM" <<'EOF'
 #!/usr/bin/env bash
+[[ "$*" == "volume path scratch" ]] && exit 3  # no live Scratch (macOS legacy probe)
 echo called >> "$VOLUME_CALLS"
 [[ "$*" == "volume status --json --snapshot" ]] || exit 2
 [[ "${VOLUME_STATUS_EMPTY:-0}" == 1 ]] && exit 1
@@ -97,7 +98,8 @@ python3 - "$TMP/legacy-config.json" <<'PY'
 import json, sys
 json.dump({"budgets": {}}, open(sys.argv[1], "w"))
 PY
-ALERT_OUT_LEGACY=$(DISK_MAGICIAN_DISKM_BIN="$FAKE_DISKM" DISK_MAGICIAN_CONFIG="$TMP/legacy-config.json" \
+mkdir -p "$TMP/legacy-state"
+ALERT_OUT_LEGACY=$(DISK_MAGICIAN_DISKM_BIN="$FAKE_DISKM" DISK_MAGICIAN_CONFIG="$TMP/legacy-config.json" DISK_MAGICIAN_STATE_DIR="$TMP/legacy-state" \
   VOLUME_CALLS="$VOLUME_CALLS" DISK_MAGICIAN_SNAPSHOT_FILE="$LOW_SNAP" timeout 15 bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1 || true)
 if [[ ! -e "$VOLUME_CALLS" ]] && ! echo "$ALERT_OUT_LEGACY" | grep -q "volume_measurement_unavailable"; then
   pass "legacy no-volume config skips volume probe and unavailable alarm"

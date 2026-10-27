@@ -2265,7 +2265,7 @@ def verify_mount(root: str) -> int:
             return 75
     try:
         settings, _ = cls("scratch")
-        if root != settings["classes"]["scratch"]["mountpoint"]:
+        if os.path.realpath(root) != os.path.realpath(settings["classes"]["scratch"]["mountpoint"]):
             return 75
         exact_entry("scratch", {"active", "retired"})
         return 0

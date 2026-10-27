@@ -981,6 +981,15 @@ def govern(argv, state):  # observe tick, daily measure, or C10 act scheduler
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
             return print(f"govern_error:{type(e).__name__}", file=sys.stderr) or 3
     return print(f"zone={z}") or daily_rc
+def _diskm_bin():
+    """Prefer this checkout's dispatcher over whatever `disk-magician` is on PATH."""
+    explicit = os.environ.get("DISK_MAGICIAN_DISKM_BIN")
+    if explicit:
+        return explicit
+    sibling = Path(__file__).resolve().parent.parent / "disk_magician.sh"
+    return str(sibling) if sibling.is_file() else "disk-magician"
+
+
 def _scratch_mountpoint():
     """Return configured mount, None for legacy config, or False if damaged."""
     try:
@@ -998,7 +1007,7 @@ def _scratch_mountpoint():
             if sys.platform == "darwin":
                 try:
                     probe = subprocess.run(
-                        [os.environ.get("DISK_MAGICIAN_DISKM_BIN", "disk-magician"),
+                        [_diskm_bin(),
                          "volume", "path", "scratch"],
                         capture_output=True, text=True, timeout=12, check=False,
                     )
@@ -1019,7 +1028,7 @@ def _scratch_mountpoint():
             if sys.platform == "darwin":
                 try:
                     probe = subprocess.run(
-                        [os.environ.get("DISK_MAGICIAN_DISKM_BIN", "disk-magician"),
+                        [_diskm_bin(),
                          "volume", "path", "scratch"],
                         capture_output=True, text=True, timeout=12, check=False,
                     )
@@ -1085,7 +1094,7 @@ def volume_admission_gate(dest, estimate_gb, dry_run=False):
     except (OSError, ValueError):
         return None
 
-    diskm = os.environ.get("DISK_MAGICIAN_DISKM_BIN", "disk-magician")
+    diskm = _diskm_bin()
     first = _volume_status(diskm)
     if first is None or first["path"] != mountpoint:
         return "volume_measurement_unavailable:scratch"
