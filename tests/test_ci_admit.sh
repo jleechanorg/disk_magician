@@ -13,8 +13,8 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [[ "$1" == "$2" ]]; then ok "$3 (= $2)"; else bad "$3 — expected '$2', got '$1'"; fi; }
 
 T="$(mktemp -d)"
-# Hosted runners leave TMPDIR unset; the hook classifies workspaces by it.
-export TMPDIR="${TMPDIR:-$(dirname "$T")}"
+# Align TMPDIR with mktemp's actual parent (macOS mktemp -d uses /var/folders even when run_shell_tests_parallel sets TMPDIR=/tmp/...).
+export TMPDIR="$(dirname "$T")"
 trap 'rm -rf "$T" "${CONTRACT_DIR:-}"' EXIT
 mkdir -p "$T/bin" "$T/state"
 REAL_PS="$(command -v ps)"

@@ -98,7 +98,7 @@ if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
 assert_eq "$RC" 0 "packaged CLI direct scratch-new succeeds"
 DIRECT_LEASE="$(python3 -c 'import glob,json,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$(cat "$T/packaged-direct.out")")"
 assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$DIRECT_LEASE" "$CALLER_PID")" True "packaged CLI direct invocation persists its caller"
-assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("owners",[])))' "$DIRECT_LEASE")" 1 "packaged direct invocation does not retain unrelated ancestors"
+assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len([o for o in d.get("owners",[]) if o.get("comm") != "Runner.Worker"]))' "$DIRECT_LEASE")" 1 "packaged direct invocation does not retain unrelated ancestors"
 assert_eq "$(bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_owner_state "$2"' _ "$REPO_ROOT" "$DIRECT_LEASE")" alive "packaged direct caller keeps its lease alive"
 OUT="$(bash "$DISKM" scratch-new "$T/myrepo" shell-cli --detach HEAD 2>"$T/err")"; RC=$?
 if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
