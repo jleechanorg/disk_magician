@@ -1406,6 +1406,9 @@ fi
 # Use Python to safely and durably construct and validate JSON.
 # This prevents empty/malformed variables from creating invalid syntax.
 pretty_json=$(SNAP_TIMESTAMP="$captured_at" \
+  SNAP_INVENTORY_STATE="$SNAPSHOT_STATE_DIR" \
+  SNAP_INVENTORY_PREVIOUS_FILE="$prev_snapshot_path" \
+  SNAP_SCRIPT_DIR="$SCRIPT_DIR" \
   SNAP_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
   SNAP_DISK_TOTAL="$disk_total_gb" \
   SNAP_DISK_USED="$disk_used_gb" \
@@ -1753,6 +1756,26 @@ try:
     partial = not (0.0 <= effective <= 100.0 and effective >= 70.0)
     data["publication_kind"] = "partial" if partial else "complete"
     data["canonical"] = not partial
+    # Inventory is a verified immutable reference, independent of watched probes.
+    if os.environ.get("SNAP_SCRIPT_DIR"):
+        sys.path.insert(0, os.environ["SNAP_SCRIPT_DIR"])
+    from snapshot_measure import inventory_metadata
+    previous_inventory = {}
+    try:
+        previous_file = os.environ.get("SNAP_INVENTORY_PREVIOUS_FILE")
+        if previous_file:
+            with open(previous_file) as previous_stream:
+                previous_inventory = json.load(previous_stream).get("directory_inventory", {})
+        elif os.environ.get("SNAP_INVENTORY_PREVIOUS"):
+            previous_inventory = json.loads(os.environ["SNAP_INVENTORY_PREVIOUS"])
+    except (OSError, ValueError, TypeError):
+        pass
+    data.update(inventory_metadata(os.environ.get("SNAP_INVENTORY_STATE") or
+                                  os.environ.get("DISK_MAGICIAN_STATE_DIR") or
+                                  os.path.expanduser("~/.disk_magician_state"),
+                                  data["timestamp"], previous_inventory))
+    data["legacy_root_df"] = {"scope": "legacy_root_df", "used_bytes": used_kb * 1024,
+                              "sampled_at": data["timestamp"]}
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)

@@ -17,6 +17,7 @@ echo "$OUT" | grep -q "Usage:" && ok "help displays usage" || bad "help display"
 
 OUT_DRY=$("$REPO_ROOT/scripts/install_root_frontier_runner.sh" --dry-run)
 echo "$OUT_DRY" | grep -q "/usr/local/libexec/disk-magician" && ok "dry-run names immutable libexec path" || bad "dry-run libexec" "$OUT_DRY"
+echo "$OUT_DRY" | grep -q "directory_inventory.py" && ok "dry-run includes fixed inventory codec sibling" || bad "dry-run codec" "$OUT_DRY"
 echo "$OUT_DRY" | grep -q "com.jleechanorg.disk-magician-frontier-root.plist" && ok "dry-run names daemon plist" || bad "dry-run plist" "$OUT_DRY"
 
 echo "$OUT_DRY" | grep -q "$REPO_ROOT/launchd/diskm_root_launcher.c" && ok "dry-run names FDA launcher source" || bad "dry-run launcher" "$OUT_DRY"
@@ -65,7 +66,7 @@ fi
 
 echo "── 3b. Launcher compiles and refuses non-root ──"
 LTMP="$(mktemp -d)"
-if clang -Wall -Werror -o "$LTMP/diskm" "$REPO_ROOT/launchd/diskm_root_launcher.c" 2>"$LTMP/cc.log"; then
+if "${CC:-clang}" -Wall -Werror -o "$LTMP/diskm" "$REPO_ROOT/launchd/diskm_root_launcher.c" 2>"$LTMP/cc.log"; then
   ok "launcher compiles warning-free"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     RC=0; "$LTMP/diskm" --help >/dev/null 2>&1 || RC=$?

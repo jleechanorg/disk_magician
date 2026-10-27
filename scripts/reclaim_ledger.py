@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import datetime
 import fnmatch
+import hashlib
 import io
 import json
 import os
@@ -33,9 +34,11 @@ import check_uncovered_roots as cur  # noqa: E402
 import growth_top10  # noqa: E402
 import resolve_config  # noqa: E402
 import resolve_state_repo_path  # noqa: E402
+import directory_inventory  # noqa: E402
 
 GIB_KB = 1024 * 1024
 OUT_REL = "reclaim/known-reclaim-dirs.md"
+JSON_REL = "reclaim/directory-ledger.json"
 REPORT_COMPLETE = "<!-- diskm reclaim-ledger complete -->"
 FAST_DAYS = 3    # cleaned on this many distinct days ...
 FAST_HOURS = 6   # ... or in this many distinct hours => regrows fast
@@ -392,6 +395,256 @@ def sync_monitored_superset(state_dir, home, roots=None, frontier_path=None,
     return added_keys
 
 
+
+def inventory_rows(state_dir, home):
+    """Read the hash-verified current inventory as rows for the derived ledger."""
+    inventory_state = pathlib.Path(os.environ.get(
+        "DISK_MAGICIAN_STATE_DIR", os.path.expanduser("~/.disk_magician_state")))
+    try:
+        publication = directory_inventory.read_current(inventory_state, verify=True)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return [], None
+    manifest = publication["manifest"]
+    rows = []
+    for record in publication["records"]:
+        row = dict(record)
+        row.setdefault("row_type", "directory")
+        row.setdefault("history_status", "current")
+        row.setdefault("owner", "unknown")
+        row.setdefault("scheduler", "unknown")
+        rows.append(row)
+    imported = (manifest.get("scan_metadata") or {}).get("provenance", {}).get("historical_events", [])
+    for event in imported:
+        row = dict(event)
+        row.setdefault("history_status", "historical_import")
+        rows.append(row)
+    return rows, {
+        "manifest_sha256": publication["pointer"]["manifest_sha256"],
+        "published_at": manifest.get("published_at"),
+        "complete": bool(manifest.get("complete")),
+        "unresolved_frontier": manifest.get("unresolved_frontier", []),
+        "records_count": len(rows),
+        "coverage_status": "complete" if manifest.get("complete") else "partial",
+    }
+
+
+def deletion_event_rows(log_path, since, home):
+    """Keep exact deletion paths and source timestamps alongside grouped roots."""
+    events = []
+    try:
+        fh = open(log_path, errors="replace")
+    except OSError:
+        return events
+    with fh:
+        for line_number, line in enumerate(fh, 1):
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 5 or "dry" in fields[2]:
+                continue
+            timestamp = parse_ts(fields[0])
+            if timestamp is None or timestamp < since:
+                continue
+            path = norm(fields[4].split(" -> ", 1)[0].strip().rstrip("/"))
+            if not path.startswith("/"):
+                continue
+            try:
+                size_kb = int(float(fields[3]))
+            except (ValueError, OverflowError):
+                size_kb = -1
+            events.append({
+                "row_type": "cleanup_event", "canonical_path": path,
+                "source_timestamp": fields[0], "source": str(log_path),
+                "source_line": line_number, "script": fields[1],
+                "event_status": "known_size" if size_kb >= 0 else "unknown_size",
+                "removed_bytes": size_kb * 1024 if size_kb >= 0 else None,
+                "owner": fields[1], "scheduler": "unknown",
+            })
+    return events
+
+
+def ledger_json(args, state_dir, now):
+    home = norm(args.home)
+    since = now - datetime.timedelta(days=args.days)
+    rows, inventory = inventory_rows(state_dir, home)
+    events = deletion_event_rows(args.deletions_log, since, home)
+    mon = load_monitored(state_dir, home)
+    if mon:
+        dirs, globs, keys = mon
+        existing = {(r.get("canonical_path"), r.get("row_type")) for r in rows}
+        for key, path in keys.items():
+            row_type = "directory" if key in dirs else "pattern"
+            identity = (path, row_type)
+            if identity in existing:
+                continue
+            rows.append({"row_type": row_type, "canonical_path": path,
+                         "watch_key": key, "history_status": "priority_watch",
+                         "observation": {"allocated_bytes": None, "apparent_bytes": None,
+                                         "measurement_status": "not_yet_observed"},
+                         "owner": "unknown", "scheduler": "unknown"})
+            existing.add(identity)
+    grouped, _ = load_deletions(args.deletions_log, since, home)
+    for root, aggregate in grouped.items():
+        rows.append({"row_type": "cleanup_root", "canonical_path": root,
+                     "event_count": aggregate["n"], "known_removed_bytes": aggregate["kb"] * 1024,
+                     "unknown_size_events": aggregate["unknown"],
+                     "source_status": "grouped_summary", "owner": "unknown",
+                     "scheduler": "unknown"})
+    typed = rows + events
+    counts = {}
+    for row in typed:
+        kind = row.get("row_type", "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
+    return {
+        "schema_version": 1, "generated_at": now.isoformat(), "window_days": args.days,
+        "source": {"inventory": "current_hash_verified_manifest" if inventory else "unavailable",
+                   "deletion_log": str(args.deletions_log)},
+        "inventory": inventory or {"complete": False, "coverage_status": "unavailable",
+                                    "records_count": 0, "unresolved_frontier": []},
+        "counts": {"directories": counts.get("directory", 0),
+                   "files": counts.get("file", 0),
+                   "file_patterns": counts.get("file_pattern", 0) + counts.get("pattern", 0),
+                   "cleanup_events": counts.get("cleanup_event", 0),
+                   "exact_cleanup_events": sum(1 for row in typed if row.get("row_type") == "cleanup_event"
+                                                and row.get("event_id") and row.get("event_status") != "uncertain_lineage"),
+                   "uncertain_cleanup_events": sum(1 for row in typed if row.get("row_type") == "cleanup_event"
+                                                    and row.get("event_status") == "uncertain_lineage"),
+                   "cleanup_roots": counts.get("cleanup_root", 0),
+                   "historical_only": sum(1 for row in typed
+                                           if row.get("history_status") == "historical-only"),
+                   "total_rows": len(typed)},
+        "rows": typed,
+    }
+
+
+def parse_history_bundle(source_dir):
+    """Parse a bounded, hash-verified export without treating content as identity.
+
+    Bundle schema v1 has bundle.json, source segment entries and optional path_leads
+    and summaries. Exact event identity requires host + verified lineage + row
+    occurrence; byte-identical copies only deduplicate when that lineage agrees.
+    """
+    requested_root = pathlib.Path(source_dir).expanduser()
+    if requested_root.is_symlink():
+        raise ValueError("history source directory cannot be a symlink")
+    root = requested_root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("history source must be a real directory")
+    manifest_path = root / "bundle.json"
+    if manifest_path.is_symlink():
+        raise ValueError("history bundle manifest cannot be a symlink")
+    bundle = json.loads(manifest_path.read_text())
+    if bundle.get("schema_version") != 1 or not isinstance(bundle.get("sources", []), list):
+        raise ValueError("unsupported history bundle schema")
+    rows, counts = [], {"verified_segments": 0, "exact_events": 0,
+                         "uncertain_events": 0, "path_leads": 0,
+                         "summary_rows": 0, "malformed_rows": 0,
+                         "qualified_snapshots": 0}
+    proven_segments = {}
+    for source in bundle.get("sources", []):
+        rel = source.get("path", "")
+        candidate = root / rel
+        if not rel or candidate.is_symlink() or candidate.resolve(strict=True).parent != root:
+            raise ValueError("history source segment must be a regular direct child")
+        data = candidate.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != source.get("sha256"):
+            raise ValueError("history source segment hash mismatch: " + rel)
+        host = source.get("host") or "unknown"
+        lineage = source.get("lineage_id")
+        verified = source.get("lineage_status") == "verified" and bool(lineage) and host != "unknown"
+        if verified:
+            prior = proven_segments.get((host, lineage))
+            if prior is not None:
+                if prior != digest:
+                    raise ValueError("conflicting bytes for verified source lineage: " + str(lineage))
+                continue
+            proven_segments[(host, lineage)] = digest
+            counts["verified_segments"] += 1
+        else:
+            lineage = None
+        for occurrence, raw in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+            fields = raw.split("\t")
+            if len(fields) < 5:
+                counts["malformed_rows"] += 1
+                continue
+            timestamp = parse_ts(fields[0])
+            path = norm(fields[4].split(" -> ", 1)[0].strip().rstrip("/"))
+            if timestamp is None or not path.startswith("/"):
+                counts["malformed_rows"] += 1
+                continue
+            try:
+                size_kb = int(float(fields[3]))
+            except (ValueError, OverflowError):
+                size_kb = -1
+            exact = verified
+            event_id = hashlib.sha256(
+                f"{host}\0{lineage}\0{occurrence}".encode()).hexdigest() if exact else None
+            import_row_key = hashlib.sha256(f"{digest}\0{occurrence}".encode()).hexdigest()
+            rows.append({"row_type": "cleanup_event", "canonical_path": path,
+                         "source_timestamp": fields[0], "source": rel,
+                         "source_segment_sha256": digest, "source_occurrence": occurrence, "import_row_key": import_row_key,
+                         "occurrence_index": occurrence, "source_host": host,
+                         "source_lineage_id": lineage, "event_id": event_id,
+                         "event_status": ("known_size" if size_kb >= 0 else "unknown_size")
+                         if exact else "uncertain_lineage",
+                         "removed_bytes": size_kb * 1024 if exact and size_kb >= 0 else None,
+                         "script": fields[1], "owner": fields[1], "scheduler": "unknown"})
+            counts["exact_events" if exact else "uncertain_events"] += 1
+    leads_ref = bundle.get("path_leads")
+    if leads_ref:
+        lead_path = root / leads_ref
+        if lead_path.is_symlink() or lead_path.resolve(strict=True).parent != root:
+            raise ValueError("path leads must be a regular direct child")
+        leads = json.loads(lead_path.read_text())
+        if not isinstance(leads, list):
+            raise ValueError("path leads must be a JSON array")
+        for lead in leads:
+            path = norm(str(lead.get("path", "")).strip().rstrip("/"))
+            if not path.startswith("/") or not lead.get("source"):
+                counts["malformed_rows"] += 1
+                continue
+            rows.append({"row_type": "directory", "canonical_path": path,
+                         "history_status": "historical-lead", "source": lead["source"],
+                         "source_ref": lead.get("source_ref"), "owner": "unknown",
+                         "scheduler": "unknown", "observation": {
+                             "allocated_bytes": None, "apparent_bytes": None,
+                             "measurement_status": "lead_only",
+                             "subtree_coverage_status": "unknown"}})
+            counts["path_leads"] += 1
+    for summary in bundle.get("summaries", []):
+        rows.append({"row_type": "cleanup_summary", "canonical_path": None,
+                     "source": summary.get("source", "unknown"),
+                     "source_status": "rolling_summary_uncertain",
+                     "reported_event_count": summary.get("event_count"),
+                     "exact_event_count": None, "owner": "unknown", "scheduler": "unknown"})
+        counts["summary_rows"] += 1
+    for snapshot in bundle.get("snapshots", []):
+        coverage = snapshot.get("coverage_pct")
+        if not isinstance(coverage, (int, float)) or coverage < 70:
+            continue
+        rel = snapshot.get("path", "")
+        target = root / rel
+        if not rel or target.is_symlink() or target.resolve(strict=True).parent != root:
+            raise ValueError("snapshot source must be a regular direct child")
+        data = target.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != snapshot.get("sha256"):
+            raise ValueError("qualified snapshot hash mismatch: " + rel)
+        snap = json.loads(data)
+        for path, size in (snap.get("directories") or {}).items():
+            captured_at = snapshot.get("captured_at")
+            canonical_path = norm(path)
+            row_key = hashlib.sha256(f"{digest}\0{captured_at}\0{canonical_path}".encode()).hexdigest()
+            rows.append({"row_type": "historical_measurement", "canonical_path": canonical_path,
+                         "history_status": "historical-snapshot", "source": rel,
+                         "source_timestamp": captured_at, "source_sha256": digest,
+                         "import_row_key": row_key, "filesystem_id": snapshot.get("filesystem_id"),
+                         "observation": {"ended_at": captured_at, "allocated_bytes": int(size) * 1024,
+                             "apparent_bytes": None, "measurement_status": "historical-measured",
+                             "subtree_coverage_status": "qualified_snapshot", "comparable": False}})
+            counts["qualified_snapshots"] += 1
+    return {"rows": rows, "counts": counts}
+
+
 def snapshot_history(state_dir, since):
     """[(ts, snapshot dict)] from committed snapshots/disk_snapshot.json, oldest first, sampled at most
     once per SAMPLE_HOURS (the newest commit is always kept). Coverage is gated per key by
@@ -563,6 +816,36 @@ def freshness_line(override, state_dir):
         return f"UNKNOWN\t{exc}"
 
 
+
+def section_inventory(state_dir, home):
+    rows, source = inventory_rows(state_dir, home)
+    dirs = [row for row in rows if row.get("row_type", "directory") == "directory"]
+    if source is None:
+        return ["### Directory inventory", "", "Unavailable: no hash-verified current inventory.", ""]
+    ranked = sorted(dirs, key=lambda row: (
+        row.get("observation", {}).get("allocated_bytes") is not None,
+        row.get("observation", {}).get("allocated_bytes") or -1), reverse=True)
+    shown = ranked[:30]
+    out = ["### Directory inventory", "",
+           f"Directory inventory: {len(dirs)} total; displayed {len(shown)} in the attention view.",
+           f"Source manifest: {source['manifest_sha256']} published {source['published_at']}; "
+           f"coverage {source['coverage_status']}; unresolved frontier "
+           f"{len(source['unresolved_frontier'])}.", ""]
+    if not shown:
+        return out + ["No directory rows.", ""]
+    cells = []
+    for row in shown:
+        obs = row.get("observation") or {}
+        size = obs.get("allocated_bytes")
+        size_text = f"{size / (1024 ** 3):.2f}" if isinstance(size, (int, float)) else "unknown"
+        cells.append([fold(row.get("canonical_path", ""), home), size_text,
+                      str(obs.get("measurement_status", "unknown")),
+                      str(row.get("owner", "unknown")), str(row.get("scheduler", "unknown"))])
+    return out + table(["Directory", "Allocated GiB", "Measurement", "Owner", "Scheduler"],
+                       cells) + [""]
+
+
+
 def render(args, state_dir, now):
     home = norm(args.home)
     since = now - datetime.timedelta(days=args.days)
@@ -578,7 +861,8 @@ def render(args, state_dir, now):
     out = [f"# Known reclaim directories: {host}", "",
            f"Generated {now.strftime('%Y-%m-%d %H:%M UTC')} by `diskm reclaim-ledger` "
            f"(window {args.days}d). Read this first in any disk investigation or cleanup; "
-           "how to read it and the re-clean commands are in the repo's `docs/known-reclaim-dirs.md`.", ""]
+           "how to read it and the re-clean commands are in the repo's `docs/known-reclaim-dirs.md`.",
+           f"Complete typed rows: [`directory-ledger.json`]({JSON_REL}) (all rows; this Markdown view is attention-ranked).", ""]
     if stale:
         out += [f"> **STALE FULL-DISK LEDGER**: `{fresh}`. Sections A and B use older full-disk data "
                 "or are unavailable; C and D come from the deletion log and are current.", ""]
@@ -599,6 +883,7 @@ def render(args, state_dir, now):
             "cleaned roots outside it and should be added there by editing `monitored_dirs` "
             "(`check_uncovered_roots.py --register` records sweeper owners in "
             "`config/sweeper_roots.txt`, not `monitored_dirs`).", ""]
+    out += section_inventory(state_dir, home)
     out += section_c(roots, home, args.days, mon) + section_d(roots, home, args.days, mon)
     out += section_monitored(state_dir, mon, since, args.days, home)
     out += section_b(state_dir, args.days) + section_a(args.frontier, home, now)
@@ -606,17 +891,17 @@ def render(args, state_dir, now):
     return "\n".join(out).rstrip() + "\n"
 
 
-def commit(state_dir, rel, stamp):
+def commit(state_dir, rels, stamp):
     git = ["git", "-C", str(state_dir), "-c", "user.name=disk-magician",
            "-c", "user.email=disk-magician@localhost"]
-    paths = [rel]
-    if (state_dir / "config" / "config.json").is_file():
+    paths = list(rels)
+    if (state_dir / "config" / "config.json").is_file() and "config/config.json" not in paths:
         paths.append("config/config.json")
-    if subprocess.run(git + ["add", "--"] + paths, capture_output=True).returncode:
+    if subprocess.run(git + ["add", "--", *paths], capture_output=True).returncode:
         return "add_failed"
-    if subprocess.run(git + ["diff", "--cached", "--quiet", "--"] + paths).returncode == 0:
+    if subprocess.run(git + ["diff", "--cached", "--quiet", "--", *paths]).returncode == 0:
         return "unchanged"
-    r = subprocess.run(git + ["commit", "-q", "-m", f"reclaim-ledger {stamp}", "--"] + paths,
+    r = subprocess.run(git + ["commit", "-q", "-m", f"reclaim-ledger {stamp}", "--", *paths],
                        capture_output=True)
     return "committed" if r.returncode == 0 else "commit_failed"
 
@@ -707,6 +992,10 @@ def main(argv=None):
     p.add_argument("--home", default=os.path.expanduser("~"))
     p.add_argument("--frontier", default=None, help="frontier JSON for section A (testing)")
     p.add_argument("--days", type=int, default=7)
+    p.add_argument("--all", action="store_true", help="include every typed inventory and cleanup row in JSON output")
+    p.add_argument("--import-history", action="store_true", help="import a verified read-only history bundle")
+    p.add_argument("--source-dir", default=None, help="read-only directory containing bundle.json")
+    p.add_argument("--json", action="store_true", help="emit the complete machine-readable ledger as JSON")
     p.add_argument("--stdout", "--dry-run", dest="stdout", action="store_true",
                    help="print the ledger; write and commit nothing")
     p.add_argument("--no-commit", action="store_true", help="write the file but do not commit")
@@ -725,18 +1014,63 @@ def main(argv=None):
     if args.read_existing:
         read_existing(state_dir)
         return 0
+    if args.import_history and not args.source_dir:
+        p.error("--import-history requires --source-dir")
+    imported = None
+    if args.import_history:
+        try:
+            imported = parse_history_bundle(args.source_dir)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            p.error(f"history import rejected: {exc}")
+        if not hasattr(directory_inventory, "publish_inventory"):
+            p.error("inventory publisher unavailable")
+        try:
+            directory_rows = [row for row in imported["rows"] if row.get("row_type") == "directory"]
+            # Keep qualified snapshot-only paths in the directory universe as
+            # well as in the immutable per-observation lineage. The membership
+            # row is the newest imported observation for that filesystem/path;
+            # every timestamped measurement remains in historical_events below.
+            latest_measurements = {}
+            for measurement in imported["rows"]:
+                if measurement.get("row_type") != "historical_measurement":
+                    continue
+                key = (measurement.get("filesystem_id"), measurement["canonical_path"])
+                prior = latest_measurements.get(key)
+                if prior is None or (measurement.get("source_timestamp") or "") > (prior.get("source_timestamp") or ""):
+                    latest_measurements[key] = measurement
+            for measurement in latest_measurements.values():
+                directory_row = dict(measurement)
+                directory_row["row_type"] = "directory"
+                directory_rows.append(directory_row)
+            historical_events = [row for row in imported["rows"]
+                                 if row.get("row_type") in ("cleanup_event", "cleanup_summary", "historical_measurement")]
+            directory_inventory.publish_inventory(directory_rows,
+                state_dir=os.environ.get("DISK_MAGICIAN_STATE_DIR", os.path.expanduser("~/.disk_magician_state")),
+                complete=False, scan_metadata={"provenance": {
+                    "source_dir": str(pathlib.Path(args.source_dir).resolve()),
+                    "import_counts": imported["counts"],
+                    "historical_events": historical_events}},
+                merge_existing=True, merge_policy="existing_wins")
+        except (TypeError, ValueError) as exc:
+            p.error(f"atomic inventory union import unavailable: {exc}")
     now = parse_ts(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc)
+    if args.json:
+        sys.stdout.write(json.dumps(ledger_json(args, state_dir, now), sort_keys=True) + "\n")
+        return 0
     text = render(args, state_dir, now)
     if args.stdout:
         sys.stdout.write(text)
         return 0
     dest = state_dir / OUT_REL
+    json_dest = state_dir / JSON_REL
     dest.parent.mkdir(parents=True, exist_ok=True)
     publish_report(dest, text)
+    machine_data = json.dumps(ledger_json(args, state_dir, now), sort_keys=True, indent=2) + "\n"
+    publish_report(json_dest, machine_data)
     status = "written"
     if not args.no_commit and (state_dir / ".git").exists():
-        status = commit(state_dir, OUT_REL, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-    print(f"reclaim-ledger: {dest} ({status})")
+        status = commit(state_dir, [OUT_REL, JSON_REL], now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    print(f"reclaim-ledger: {dest} + {json_dest} ({status})")
     return 0 if status not in ("add_failed", "commit_failed") else 1
 
 

@@ -123,6 +123,7 @@ assert_safe_install_target "$STATE_DIR"
 if [[ "$DRY_RUN" == true ]]; then
   echo "[dry-run] Would create directory: $LIBEXEC_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would copy $REPO_ROOT/scripts/disk_frontier_scan.py -> $LIBEXEC_DIR/disk_frontier_scan.py (mode: 0755)"
+  echo "[dry-run] Would copy $REPO_ROOT/scripts/directory_inventory.py -> $LIBEXEC_DIR/directory_inventory.py (mode: 0644)"
   echo "[dry-run] Would build FDA launcher $LAUNCHER_SRC -> $LIBEXEC_DIR/diskm (mode: 0755, rebuilt only when source changes)"
   echo "[dry-run] Would create directory: $STATE_DIR (owner: root:wheel, mode: 0755)"
   echo "[dry-run] Would install LaunchDaemon: $PLIST_DST"
@@ -155,6 +156,10 @@ rm -f "$LIBEXEC_DIR/disk_frontier_scan.py"
 cp "$REPO_ROOT/scripts/disk_frontier_scan.py" "$LIBEXEC_DIR/disk_frontier_scan.py"
 chown root:wheel "$LIBEXEC_DIR/disk_frontier_scan.py"
 chmod 755 "$LIBEXEC_DIR/disk_frontier_scan.py"
+rm -f "$LIBEXEC_DIR/directory_inventory.py"
+cp "$REPO_ROOT/scripts/directory_inventory.py" "$LIBEXEC_DIR/directory_inventory.py"
+chown root:wheel "$LIBEXEC_DIR/directory_inventory.py"
+chmod 644 "$LIBEXEC_DIR/directory_inventory.py"
 
 # FDA launcher: macOS TCC keys an ad-hoc signature by cdhash, so rebuilding
 # would silently void the user's Full Disk Access grant. Rebuild only when

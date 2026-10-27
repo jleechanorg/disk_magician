@@ -1,0 +1,10 @@
+[Unit]
+Description=Existing two-hour Disk Magician snapshot cadence
+
+[Timer]
+OnCalendar=*-*-* 00/2:15:00
+Persistent=true
+Unit=disk-magician-snapshot.service
+
+[Install]
+WantedBy=timers.target

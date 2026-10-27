@@ -41,6 +41,7 @@ Commands:
   discover      Scan for untracked directories > 5 GB.
   alert         Check if free disk space is below alert threshold.
   state         Manage the per-machine state repo (init|status|remote|push).
+  state inventory-retain Preview inventory retention; --apply expires eligible objects.
   config        Edit the effective JSON config (add-monitored-dir|add-monitored-file-glob).
   check-system-residual Diagnose system residual space (/private/var/dirs_cleaner, deleted_helper logs).
   check-tmp-clones       Detect full git clones, oversize scratch, and advice dirs in /private/tmp.
@@ -251,7 +252,7 @@ case "$CMD" in
     run_setup "$@"
     ;;
   snapshot)
-    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh"
+    exec bash "$SCRIPT_DIR/scripts/snapshot_commit.sh" "$@"
     ;;
   status)
     exec python3 "$SCRIPT_DIR/scripts/disk_status.py" "$@"
@@ -363,6 +364,10 @@ case "$CMD" in
     "$SCRIPT_DIR/scripts/disk_usage_alert.sh" "$@"
     ;;
   state)
+    if [[ "${1:-}" == inventory-retain ]]; then
+      shift
+      exec python3 "$SCRIPT_DIR/scripts/directory_inventory.py" "$@"
+    fi
     "$SCRIPT_DIR/scripts/state_repo.sh" "$@"
     ;;
   config)
