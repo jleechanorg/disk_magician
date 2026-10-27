@@ -57,6 +57,7 @@ import json, sys, time
 p = sys.argv[1]
 d = json.load(open(p))
 d["owner"] = {"pid": 401, "start_epoch": 1760000000, "comm": "claude"}
+d["owners"] = [d["owner"]]
 d["owner_dead_seen_at"] = time.time() - 2400
 json.dump(d, open(p, "w"))
 PY

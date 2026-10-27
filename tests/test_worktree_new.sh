@@ -529,6 +529,7 @@ import json, os, sys
 p, pid, epoch, comm, marker = sys.argv[1:]
 d = json.load(open(p))
 d["owner"] = {"pid": int(pid), "start_epoch": int(epoch), "comm": comm}
+d["owners"] = [d["owner"]]
 tmp = p + ".live-owner-race"
 json.dump(d, open(tmp, "w"))
 os.replace(tmp, p)

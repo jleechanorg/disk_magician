@@ -96,7 +96,10 @@ new() {
 }
 edit() { python3 - "$LF" "$1" <<'PY'
 import json,sys,time,datetime
-p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2]); json.dump(d,open(p,'w'))
+p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2])
+# The reader prefers the owners array; keep it in step with a fixture owner edit.
+if 'd["owner"]' in sys.argv[2] and 'owners' not in sys.argv[2]: d['owners']=[d['owner']] if isinstance(d.get('owner'),dict) else []
+json.dump(d,open(p,'w'))
 PY
 }
 field() { python3 - "$LF" "$1" <<'PY'

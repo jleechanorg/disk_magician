@@ -311,7 +311,7 @@ try:
     st=os.lstat(wt)
     if not stat.S_ISDIR(st.st_mode): sys.exit(1)
     with open(path) as f: d=json.load(f)
-    if not isinstance(d, dict) or d.get("path") != os.path.realpath(wt): sys.exit(1)
+    if not isinstance(d, dict) or not isinstance(d.get("path"), str) or os.path.realpath(d["path"]) != os.path.realpath(wt): sys.exit(1)
     checkout_dev, checkout_ino = d.get("checkout_dev"), d.get("checkout_ino")
     if ((checkout_dev is not None and checkout_dev != st.st_dev) or
             (checkout_ino is not None and checkout_ino != st.st_ino)):
