@@ -92,7 +92,7 @@ assert_eq "$(lease_field "$OUT" producer)" scratch-new "default producer"
 # the short-lived CLI process exits, so the lease must retain the caller/runtime
 # owner rather than the CLI PID. Explicit owner PID covers detached workers.
 echo "== command-substitution caller and explicit detached owner =="
-CALLER_PID="$BASHPID"
+CALLER_PID="${BASHPID:-$$}"
 PYTHONPATH="$REPO_ROOT/src" python3 -m disk_magician.cli scratch-new "$T/myrepo" packaged-direct --detach HEAD >"$T/packaged-direct.out" 2>"$T/err"; RC=$?
 if [[ "$RC" != 0 ]]; then cat "$T/err" >&2; fi
 assert_eq "$RC" 0 "packaged CLI direct scratch-new succeeds"
