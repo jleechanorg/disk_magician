@@ -122,6 +122,7 @@ if [[ -n "$INVENTORY_MAX_AGE" ]]; then
   python3 - "$SCRIPT_DIR" "$INVENTORY_MAX_AGE" "$RECEIPT_STATE_DIR" <<'PY'
 import datetime
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -166,10 +167,13 @@ if fresh(current):
     finish('success_noop', 'fresh_inventory_no_collector_requested', current)
     raise SystemExit(0)
 
-if sys.platform.startswith('linux'):
+platform_hint = os.environ.get("DISK_MAGICIAN_OSTYPE")
+if platform_hint is None:
+    platform_hint = os.environ.get("OSTYPE", "") or sys.platform
+if platform_hint.startswith("linux"):
     root_parent = Path('/var/lib/disk-magician')
     command = ['systemctl', '--system', '--no-ask-password', 'start', 'disk-magician-inventory-root.service']
-elif sys.platform == 'darwin':
+elif platform_hint.startswith("darwin"):
     root_parent = Path('/var/db/disk-magician')
     command = ['launchctl', 'kickstart', 'system/com.jleechanorg.disk-magician-frontier-root']
 else:

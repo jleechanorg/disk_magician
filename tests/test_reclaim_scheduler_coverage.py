@@ -43,6 +43,7 @@ class SchedulerFixture(unittest.TestCase):
             entry = self.bin / name
             entry.write_text(f"#!{sys.executable}\nfrom disk_magician.cli import main\nmain()\n")
             entry.chmod(0o755)
+        (self.bin / "python3").symlink_to(sys.executable)
         self.snapshot_marker = self.root / "snapshot-started"
         snapshot = self.bin / "snapshot-fixture"
         snapshot.write_text('''#!/usr/bin/env bash
@@ -135,6 +136,7 @@ def fixture_open(file, *args, **kwargs):
         '/var/lib/disk-magician/inventory-root-receipt.json',
         '/var/db/disk-magician/inventory-root-receipt.json'):
         file = os.environ['ROOT_RECEIPT_FIXTURE']
+        kwargs.pop('opener', None)
     return _original_open(file, *args, **kwargs)
 io.open = fixture_open
 ''')
@@ -473,7 +475,10 @@ esac
         self.assertEqual(record['coverage_owner'], 'unknown')
 
     def test_partial_ok_line_never_promotes_stale_canonical_publication(self):
-        from test_disk_status import make_valid_partial_ledger
+        try:
+            from tests.test_disk_status import make_valid_partial_ledger
+        except ImportError:
+            from test_disk_status import make_valid_partial_ledger
         ledger = self.state_repo / 'ledger'
         ledger.mkdir(parents=True)
         subprocess.run(['git', 'init', '-q', str(self.state_repo)], check=True,

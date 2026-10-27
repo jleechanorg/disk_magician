@@ -26,7 +26,10 @@ target = args.stage_dir or Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home(
 target = target.expanduser().absolute()
 names = ('disk-magician-snapshot.service', 'disk-magician-snapshot.timer')
 payloads = {name: (source / (name + '.template')).read_bytes() for name in names}
+SYSTEM_SYMLINKS = {Path('/var'), Path('/tmp'), Path('/etc')}
 for path in (target, *target.parents):
+    if path in SYSTEM_SYMLINKS and path.resolve() == Path('/private') / path.name:
+        continue
     if path.is_symlink():
         parser.error(f'refusing symlinked destination: {path}')
 for name in (*names, 'disk-magician-snapshot.install.json'):

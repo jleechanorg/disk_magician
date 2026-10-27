@@ -21,8 +21,16 @@ EXPECTED_SCHEDULER = {
 EXPECTED_POLKIT = {"templates/polkit/50-disk-magician-inventory-root.rules.template"}
 
 
+try:
+    import setuptools
+except ImportError:
+    setuptools = None
+
+
 class InventoryPackageTests(unittest.TestCase):
     def test_wheel_contains_inventory_and_scheduler_templates_and_shared_dispatcher(self) -> None:
+        if setuptools is None:
+            self.skipTest("setuptools not available in test environment")
         with tempfile.TemporaryDirectory(prefix="disk-magician-package-test-") as tmp:
             fixture = Path(tmp) / "fixture"
             fixture.mkdir()
@@ -49,7 +57,9 @@ class InventoryPackageTests(unittest.TestCase):
                 self.assertIn("disk_magician/scripts/directory_inventory.py", names)
                 expected_wheel_systemd = {f"disk_magician/{rel}" for rel in EXPECTED_SYSTEMD}
                 self.assertTrue(expected_wheel_systemd <= names, expected_wheel_systemd - names)
-                entry_points = wheel.read("disk_magician-0.2.284.dist-info/entry_points.txt").decode()
+                entry_points_files = [n for n in names if n.endswith("/entry_points.txt")]
+                self.assertTrue(entry_points_files, "entry_points.txt not found in wheel")
+                entry_points = wheel.read(entry_points_files[0]).decode()
                 self.assertIn("disk-magician = disk_magician.cli:main", entry_points)
                 self.assertIn("diskm = disk_magician.cli:main", entry_points)
                 install = Path(tmp) / "install"
