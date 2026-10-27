@@ -31,6 +31,7 @@ precondition="{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pc
 run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "$precondition")" || { echo kept:receipt-begin-failed; exit 1; }
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
 below_trigger=false
+crossed_trigger=false
 if (( used * 100 < quota * 90 )); then
  below_trigger=true
  TOP_REASON="below-trigger"
@@ -122,6 +123,12 @@ if [[ "$clean" == true ]]; then
   if [[ "$reserve_after" != 1 ]]; then TOP_REASON=ballast-restore-failed; BALLAST_RESTORE_FAILURES=1; fi
  fi
  if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
+ # Usage can cross the trigger during reserve maintenance; the final high-water
+ # measurement, not the first, decides whether below-trigger is truthful.
+ if (( ! measurement_error )) && [[ "$below_trigger" == true ]] && (( now_used * 100 >= quota * 90 )); then
+  crossed_trigger=true; TOP_REASON=trim-target-not-reached
+  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
+ fi
  if (( ! measurement_error && now_used * 100 > quota * 80 )) && [[ "$below_trigger" != true ]]; then
   echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
  fi
@@ -132,7 +139,7 @@ reason=dry-run
 if [[ "$below_trigger" == true ]]; then reason=below-trigger; fi
 if [[ "$clean" == true ]]; then
  outcome=success; reason="$TOP_REASON"
- if (( measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
+ if (( measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
  if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" <<'PYREC'
 import json,os,sys,tempfile
 from datetime import datetime,timezone

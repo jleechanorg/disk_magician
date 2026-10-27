@@ -292,6 +292,16 @@ BALLAST_LOG="$BALLAST_LOG" TEST_ENSURE_RC=0 TEST_BALLAST_AVAILABLE_SEQUENCE="fal
 [[ ! -s "$BALLAST_LOG" || "$(grep -c '^release$' "$BALLAST_LOG")" == 0 ]]
 [[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
+# Crossing 89% -> 95% must not claim success_noop / below-trigger
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+TEST_STATUS_SEQUENCE="890 950" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/crossing-89-95.out" || true
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="trim-target-not-reached" and r["postcondition"]["allocated_bytes_after"]==950'
+
+# Stable 89% must report success_noop / below-trigger
+: >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
+TEST_STATUS_SEQUENCE="890 890" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stable-89.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["reason"]=="below-trigger" and r["postcondition"]["allocated_bytes_after"]==890'
+
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'
 echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 48h filter, oldest-first, and unavailable path passed'
