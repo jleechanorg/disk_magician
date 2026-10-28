@@ -1546,7 +1546,7 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         if not linux_wait_for_mount_identity(
                 settings, scratch, registry(state)["volumes"].get("scratch"),
                 validator=linux_validate_native_mount):
-            return 75
+            raise RuntimeError("native Scratch mount identity did not become ready after service start")
         linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
         return 0
     except Exception as error:
