@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -85,7 +86,7 @@ def test_docker_transport_accepts_only_local_fixed_rootful_image():
 
 def test_admin_view_rejects_pid_or_mount_equivalence_mismatch():
     host = {"mount": ["fuse.ext4", "/dev/loop7"], "loop_devices": ["/dev/loop7"],
-            "writer_pids": [2353264], "image": "/image", "mountpoint": "/mount"}
+            "writer_pids": [2353264], "reader_pids": [2353264], "image": "/image", "mountpoint": "/mount"}
     privileged = dict(host, writer_pids=[2353265])
     with mock.patch.object(volume, "linux_assert_admin_view", wraps=volume.linux_assert_admin_view):
         try:
@@ -94,6 +95,58 @@ def test_admin_view_rejects_pid_or_mount_equivalence_mismatch():
             assert "writer_pids" in str(error)
         else:
             raise AssertionError("mismatched privileged PID view was accepted")
+
+
+def test_fuser_unexpected_diagnostics_fail_closed():
+    with mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(
+        returncode=0, stdout=b" 2353264\n", stderr=b"warning 28\n")):
+        assert volume.linux_fuser_pid_set(Path("/image"), writers_only=True) is None
+
+
+def test_fuser_accepts_only_numeric_stdout_with_exact_path_stderr():
+    with mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(
+        returncode=0, stdout=b" 17 29\n", stderr=b"/image:\n")):
+        assert volume.linux_fuser_pid_set(Path("/image"), writers_only=True) == {17, 29}
+
+
+def test_deployed_runtime_manifest_binds_helper_source(tmp_path):
+    runtime = tmp_path / "package"
+    scripts = runtime / "scripts"
+    scripts.mkdir(parents=True)
+    helper = scripts / "volume.py"
+    orchestrator = runtime / "disk_magician.sh"
+    helper.write_text("canonical helper\n")
+    orchestrator.write_text("#!/bin/sh\n")
+    hashes = {
+        "scripts/volume.py": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "disk_magician.sh": hashlib.sha256(orchestrator.read_bytes()).hexdigest(),
+    }
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "deployed.json").write_text(json.dumps({
+        "schema_version": 1, "package_root": str(runtime), "package_hashes": hashes,
+    }))
+    assert volume.linux_validate_installed_runtime(runtime, state) == hashes["scripts/volume.py"]
+    helper.write_text("tampered\n")
+    try:
+        volume.linux_validate_installed_runtime(runtime, state)
+    except ValueError as error:
+        assert "hash" in str(error)
+    else:
+        raise AssertionError("tampered deployed helper was accepted")
+
+
+def test_admin_view_rejects_missing_or_unknown_reader_set():
+    host = {"mount": ["fuse.ext4", "/dev/loop7"], "loop_devices": ["/dev/loop7"],
+            "writer_pids": [2353264], "reader_pids": [2353264], "image": "/image", "mountpoint": "/mount"}
+    for privileged in ({k: v for k, v in host.items() if k != "reader_pids"},
+                       dict(host, reader_pids=None)):
+        try:
+            volume.linux_assert_admin_view(host, privileged)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("incomplete admin view was accepted")
 
 
 def test_fstab_probe_is_canonical_read_only_action():
@@ -120,6 +173,7 @@ def test_fsck_refuses_active_service_before_e2fsck():
     with (
         mock.patch.object(volume.sys, "platform", "linux"),
         mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(Path("/c"), Path("/s"), image, mountpoint)),
+        mock.patch.object(volume.os, "geteuid", return_value=1000),
         mock.patch.object(volume, "cls", return_value=(settings, scratch)),
         mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
         mock.patch.object(volume.Path, "stat", return_value=mock.Mock(st_size=2 * volume.GIB, st_uid=1000)),
@@ -142,6 +196,7 @@ def test_fsck_diagnostic_is_separate_and_preserves_raw_exit():
     with (
         mock.patch.object(volume.sys, "platform", "linux"),
         mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(Path("/c"), Path("/s"), image, mountpoint)),
+        mock.patch.object(volume.os, "geteuid", return_value=1000),
         mock.patch.object(volume, "cls", return_value=(settings, scratch)),
         mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
         mock.patch.object(volume.Path, "stat", return_value=mock.Mock(st_size=2 * volume.GIB, st_uid=1000)),
@@ -159,6 +214,111 @@ def test_fsck_diagnostic_is_separate_and_preserves_raw_exit():
     assert record["command"][-2:] == ["-fn", str(image)]
 
 
+def test_fsck_repair_uses_persistent_undo_and_exclusive_receipt(tmp_path):
+    image = tmp_path / "scratch.ext4"
+    mountpoint = tmp_path / "Scratch"
+    image.write_bytes(b"fixture")
+    mountpoint.mkdir()
+    uid = os.getuid()
+    settings = {"classes": {"scratch": {"quota_gb": 2}}}
+    scratch = {"image_path": str(image), "mountpoint": str(mountpoint), "quota_gb": 2}
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+             "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+    original_stat = Path.stat
+
+    def stat_override(path, *args, **kwargs):
+        if path == image:
+            return mock.Mock(st_size=2 * volume.GIB, st_uid=uid)
+        return original_stat(path, *args, **kwargs)
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[:4] == ["systemctl", "--user", "is-active", "--quiet"]:
+            return mock.Mock(returncode=3)
+        undo = Path(command[command.index("-z") + 1])
+        undo.write_bytes(b"undo")
+        return mock.Mock(returncode=0, stdout="clean\n", stderr="")
+
+    output = io.StringIO()
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(tmp_path / "c", tmp_path / "s", image, mountpoint)),
+        mock.patch.object(volume.os, "geteuid", return_value=uid),
+        mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume.Path, "stat", new=stat_override),
+        mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume, "linux_mount_record", return_value=None),
+        mock.patch.object(volume, "linux_loop_devices", return_value=[]),
+        mock.patch.object(volume, "linux_fuser_pid_set", return_value=set()),
+        mock.patch.object(volume.shutil, "which", return_value="/usr/sbin/e2fsck"),
+        mock.patch.object(volume.subprocess, "run", side_effect=run),
+        contextlib.redirect_stdout(output),
+    ):
+        assert volume.main(["fsck", "scratch", "--config", "/c", "--state-dir", "/s",
+                            "--user-uid", str(uid), "--repair", "--execute"]) == 0
+    assert calls[-1][1:4] == ["-fp", "-z", str(image.with_name("scratch.ext4.e2fsck-undo"))]
+    assert image.with_name("scratch.ext4.e2fsck-undo").is_file()
+    assert image.with_name("scratch.ext4.e2fsck-undo.receipt.json").is_file()
+    assert json.loads(output.getvalue())["undo_path"].endswith(".e2fsck-undo")
+
+
+def test_fsck_repair_stops_only_matching_user_service_and_restores_it(tmp_path):
+    image = tmp_path / "scratch.ext4"
+    mountpoint = tmp_path / "Scratch"
+    image.write_bytes(b"fixture")
+    mountpoint.mkdir()
+    uid = os.getuid()
+    settings = {"classes": {"scratch": {"quota_gb": 2}}}
+    scratch = {"image_path": str(image), "mountpoint": str(mountpoint), "quota_gb": 2}
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+             "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+    unit = tmp_path / ".config/systemd/user/diskm-scratch.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("verified unit")
+    original_stat = Path.stat
+
+    def stat_override(path, *args, **kwargs):
+        if path == image:
+            return mock.Mock(st_size=2 * volume.GIB, st_uid=uid)
+        return original_stat(path, *args, **kwargs)
+
+    service_calls = []
+
+    def run(command, **kwargs):
+        if command[:4] == ["systemctl", "--user", "is-active", "--quiet"]:
+            return mock.Mock(returncode=0)
+        undo = Path(command[command.index("-z") + 1])
+        undo.write_bytes(b"undo")
+        return mock.Mock(returncode=0, stdout="clean\n", stderr="")
+
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(tmp_path / "c", tmp_path / "s", image, mountpoint)),
+        mock.patch.object(volume.os, "geteuid", return_value=uid),
+        mock.patch.object(volume, "cls", return_value=(settings, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume.Path, "stat", new=stat_override),
+        mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume, "linux_mount_record", return_value=None),
+        mock.patch.object(volume, "linux_loop_devices", return_value=[]),
+        mock.patch.object(volume, "linux_fuser_pid_set", return_value=set()),
+        mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
+        mock.patch.object(volume.shutil, "which", return_value="/usr/sbin/e2fsck"),
+        mock.patch.object(volume.subprocess, "run", side_effect=run),
+        mock.patch.object(volume, "linux_command", side_effect=lambda args, timeout=30: service_calls.append(args)),
+        mock.patch.object(volume.Path, "home", return_value=tmp_path),
+    ):
+        assert volume.main(["fsck", "scratch", "--config", "/c", "--state-dir", "/s",
+                            "--user-uid", str(uid), "--repair", "--execute"]) == 0
+    assert service_calls == [
+        ["systemctl", "--user", "stop", "diskm-scratch.service"],
+        ["systemctl", "--user", "start", "diskm-scratch.service"],
+    ]
+
+
 def test_docker_migration_requires_digest_before_any_service_stop():
     with mock.patch.object(volume, "linux_command") as command:
         assert volume.linux_service_migrate_cmd([
@@ -166,3 +326,51 @@ def test_docker_migration_requires_digest_before_any_service_stop():
             "--user-uid", "1000", "--admin-transport", "docker", "--execute",
         ]) == 2
     command.assert_not_called()
+
+
+def test_docker_preflight_failure_does_not_stop_or_rollback(tmp_path):
+    config = tmp_path / "linux-scratch.json"
+    state = tmp_path / "state"
+    image = tmp_path / "scratch.ext4"
+    mountpoint = tmp_path / "Scratch"
+    runtime = tmp_path / "runtime"
+    unit = tmp_path / ".config/systemd/user/diskm-scratch.service"
+    state.mkdir()
+    mountpoint.mkdir()
+    runtime.mkdir()
+    (runtime / "disk_magician.sh").write_text("#!/bin/sh\n")
+    (runtime / "systemd").mkdir()
+    image.write_bytes(b"fixture")
+    config.write_text(json.dumps({"volumes": {"classes": {"scratch": {
+        "image_path": str(image), "mountpoint": str(mountpoint), "quota_gb": 1,
+        "backend": "fuse"}}}}))
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+             "quota_bytes": volume.GIB, "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+    scratch = {"image_path": str(image), "mountpoint": str(mountpoint), "quota_gb": 1, "backend": "fuse"}
+    with (
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": {}}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
+        mock.patch.object(volume, "linux_validate_installed_runtime", return_value="a" * 64),
+        mock.patch.object(volume, "linux_docker_transport_info", return_value=("/usr/bin/docker", {})),
+        mock.patch.object(volume, "linux_host_fstab_probe", return_value={
+            "mount": None, "loop_devices": [], "writer_pids": [17], "reader_pids": [17],
+            "image": str(image), "mountpoint": str(mountpoint), "runtime_sha256": "a" * 64,
+        }),
+        mock.patch.object(volume, "linux_docker_probe", side_effect=RuntimeError("helper view rejected")),
+        mock.patch.object(volume, "linux_command") as command,
+        mock.patch.object(volume, "linux_atomic_bytes") as atomic,
+        mock.patch.object(volume.Path, "home", return_value=tmp_path),
+        mock.patch.object(volume, "__file__", str(runtime / "scripts" / "volume.py")),
+    ):
+        assert volume.linux_service_migrate_cmd([
+            "scratch", "--backend", "native", "--config", str(config), "--state-dir", str(state),
+            "--user-uid", str(os.getuid()), "--admin-transport", "docker",
+            "--admin-image-id", "sha256:" + "a" * 64, "--execute",
+        ]) == 75
+    command.assert_not_called()
+    atomic.assert_not_called()
