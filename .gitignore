@@ -49,3 +49,5 @@ uv.lock
 /src/disk_magician/launchd/
 /src/disk_magician/tools/
 /src/disk_magician/hooks/
+/src/disk_magician/systemd/*.template
+/src/disk_magician/templates/
