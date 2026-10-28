@@ -1432,7 +1432,6 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         if (not isinstance(entry, dict) or entry.get("state") != "active" or
                 scratch.get("backend", "fuse") != "fuse"):
             return 75
-        linux_validate_mount(settings, scratch, entry)
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         if unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != os.geteuid():
             return 75
@@ -2151,7 +2150,6 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
                 or entry.get("image_path") != str(image)
                 or entry.get("mountpoint") != str(mountpoint)):
             return 75
-        linux_validate_mount(settings, scratch, entry)
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         runtime = Path(__file__).resolve().parent.parent
         if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
@@ -2165,11 +2163,17 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
         if active.returncode not in {0, 3}:
             return 75
         if action == "stop":
-            if active.returncode != 0:
+            if active.returncode != 0 or linux_mount_record(mountpoint) is None:
                 return 75
+            linux_validate_mount(settings, scratch, entry)
             linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
             return 0
+        if (image.is_symlink() or not image.is_file() or image.stat().st_uid != user_uid
+                or image.stat().st_size != scratch["quota_gb"] * GIB
+                or entry.get("filesystem_uuid") != linux_fs_uuid(image)):
+            return 75
         if active.returncode == 0:
+            linux_validate_mount(settings, scratch, entry)
             return 0
         linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
         linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
