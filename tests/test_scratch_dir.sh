@@ -75,14 +75,19 @@ ln -s "$OUTSIDE" "$T/active/intermediate"
 RC=0
 ERR="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir intermediate/created 2>&1)" || RC=$?
 assert_eq "$RC" 75 "intermediate symlink exits 75"
-assert_eq "$ERR" "scratch-dir: subpath contains a symlink: intermediate" "intermediate symlink error"
+assert_eq "$ERR" "scratch-dir: subpath escapes Scratch root" "intermediate symlink error"
 [[ ! -e "$OUTSIDE/created" ]] && ok "intermediate symlink created nothing outside Scratch" || bad "intermediate symlink escaped Scratch"
 
 ln -s "$OUTSIDE" "$T/active/final"
 RC=0
 ERR="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir final 2>&1)" || RC=$?
 assert_eq "$RC" 75 "final symlink exits 75"
-assert_eq "$ERR" "scratch-dir: subpath contains a symlink: final" "final symlink error"
+assert_eq "$ERR" "scratch-dir: subpath escapes Scratch root" "final symlink error"
+
+ln -s "$T/active" "$T/active/inside"
+OUT_INSIDE="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir inside/created 2>&1)"
+assert_eq "$OUT_INSIDE" "$T/active/inside/created" "inward symlink remains physically contained"
+[[ -d "$T/active/created" ]] && ok "inward symlink created only inside Scratch" || bad "inward symlink was not usable"
 [[ ! -e "$OUTSIDE/created" ]] && ok "final symlink created nothing outside Scratch" || bad "final symlink escaped Scratch"
 
 echo "== 3. Path traversal rejection (scratch-dir ../bad exits 2) =="
