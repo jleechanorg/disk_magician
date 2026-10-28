@@ -1312,7 +1312,7 @@ def linux_docker_helper_argv(
         raise ValueError("runtime manifest root does not match helper root")
     if runtime_sha256 is None or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256):
         raise ValueError("runtime hash is required")
-    args = ["volume", "fstab", action, "scratch", "--config", str(config_path),
+    args = ["fstab", action, "scratch", "--config", str(config_path),
             "--state-dir", str(state), "--user-uid", str(user_uid)]
     args.extend(("--runtime-sha256", runtime_sha256))
     if action in {"install", "remove"}:
@@ -1336,8 +1336,8 @@ def linux_docker_helper_argv(
         " dst=os.path.join(snapshot,p); os.makedirs(os.path.dirname(dst),mode=0o700,exist_ok=True)\n"
         " fd=os.open(dst,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)\n"
         " with os.fdopen(fd,'wb') as out: out.write(data); out.flush(); os.fsync(out.fileno())\n"
-        " helper=os.path.join(snapshot,'scripts','volume.py')\n"
-        f" if hashlib.sha256(open(helper,'rb').read()).hexdigest()!={runtime_sha256!r}: raise SystemExit(75)\n"
+        "helper=os.path.join(snapshot,'scripts','volume.py')\n"
+        f"if hashlib.sha256(open(helper,'rb').read()).hexdigest()!={runtime_sha256!r}: raise SystemExit(75)\n"
         "sys.path.insert(0,os.path.join(snapshot,'scripts')); sys.argv=['volume.py']+args\n"
         "runpy.run_path(helper,run_name='__main__')\n"
     )

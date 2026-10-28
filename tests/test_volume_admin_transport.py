@@ -54,8 +54,69 @@ def test_docker_helper_argv_is_fixed_and_narrow(tmp_path):
     assert ["--entrypoint", "/usr/sbin/chroot"] == argv[argv.index("--entrypoint"):argv.index("--entrypoint") + 2]
     assert "/usr/bin/python3" in argv
     compile(argv[-1], "<fixed-admin-bootstrap>", "exec")
-    assert '"volume","fstab","install","scratch"' in joined
+    assert '"fstab","install","scratch"' in joined
     assert "--execute" in joined
+
+
+def test_generated_bootstrap_copies_manifest_and_executes_verified_helper(tmp_path):
+    runtime = tmp_path / "runtime"
+    scripts = runtime / "scripts"
+    scripts.mkdir(parents=True)
+    launcher = runtime / "disk_magician.sh"
+    launcher.write_text("#!/bin/sh\nexit 99\n")
+    dependency = scripts / "dep.py"
+    dependency.write_text("MARKER = 'verified-dependency'\n")
+    helper = scripts / "volume.py"
+    helper.write_text(
+        "import json, sys\nfrom dep import MARKER\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'marker': MARKER}))\n"
+    )
+    manifest = {"package_root": str(runtime), "package_hashes": {
+        "scripts/dep.py": hashlib.sha256(dependency.read_bytes()).hexdigest(),
+        "scripts/volume.py": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "disk_magician.sh": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+    }}
+    argv = volume.linux_docker_helper_argv(
+        "/usr/bin/docker", "sha256:" + "a" * 64, runtime, "probe",
+        Path("/home/user/config"), Path("/home/user/state"), "1000",
+        manifest["package_hashes"]["scripts/volume.py"], manifest,
+    )
+    bootstrap = argv[-1]
+    snapshots = [tmp_path / "snapshot-1", tmp_path / "snapshot-2"]
+    for snapshot in snapshots:
+        snapshot.mkdir()
+    snapshot_iter = iter(snapshots)
+    original_cwd, original_argv = os.getcwd(), sys.argv[:]
+
+    def allocate_snapshot(*_args, **_kwargs):
+        return str(next(snapshot_iter))
+
+    try:
+        with (
+            mock.patch.object(volume.tempfile, "mkdtemp", side_effect=allocate_snapshot),
+            contextlib.redirect_stdout(io.StringIO()) as first_output,
+        ):
+            exec(bootstrap, {"__name__": "__main__"})
+        first = json.loads(first_output.getvalue())
+        assert first["marker"] == "verified-dependency"
+        assert first["argv"][0:3] == ["fstab", "probe", "scratch"]
+        assert "--runtime-sha256" in first["argv"]
+
+        dependency.write_text("MARKER = 'tampered'\n")
+        with (
+            mock.patch.object(volume.tempfile, "mkdtemp", side_effect=allocate_snapshot),
+            contextlib.redirect_stdout(io.StringIO()) as second_output,
+        ):
+            try:
+                exec(bootstrap, {"__name__": "__main__"})
+            except SystemExit as error:
+                assert error.code == 75
+            else:
+                raise AssertionError("tampered dependency was accepted")
+        assert second_output.getvalue() == ""
+    finally:
+        os.chdir(original_cwd)
+        sys.argv[:] = original_argv
 
 
 def test_docker_probe_keeps_host_etc_read_only(tmp_path):
