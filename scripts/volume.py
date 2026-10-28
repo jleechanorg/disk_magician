@@ -1802,7 +1802,8 @@ def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
 
 
 def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
-                             fixture_root: str | None) -> tuple[Path, Path, Path, Path] | None:
+                             fixture_root: str | None,
+                             *, probe_mounted: bool = False) -> tuple[Path, Path, Path, Path] | None:
     if fixture_root is not None:
         return linux_fixture_paths(config_path, state_path, user_uid, fixture_root)
     try:
@@ -1826,10 +1827,21 @@ def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
         mountpoint = Path(scratch["mountpoint"])
         if (image != home / ".local/share/disk-magician/volumes/scratch.ext4" or
                 mountpoint != home / "Scratch" or
-                not all(linux_path_components_owned(path, uid) for path in (image, mountpoint)) or
-                image.resolve(strict=True) != image or
-                mountpoint.resolve(strict=True) != mountpoint or image.stat().st_uid != uid or
-                mountpoint.stat().st_uid != uid or not image.is_file() or not mountpoint.is_dir()):
+                not linux_path_components_owned(image, uid) or
+                image.resolve(strict=True) != image or image.stat().st_uid != uid or
+                not image.is_file()):
+            return None
+        if probe_mounted:
+            # Docker-root FUSE probes cannot lstat the mounted leaf without
+            # allow_other.  Keep mutation paths strict, but prove this exact
+            # lexical mountpoint through owned parents and mountinfo instead.
+            if (not linux_path_components_owned(mountpoint.parent, uid)
+                    or mountpoint.parent != home
+                    or linux_mount_record(mountpoint) != ("fuse.ext4", str(image))):
+                return None
+        elif (not linux_path_components_owned(mountpoint, uid)
+              or mountpoint.resolve(strict=True) != mountpoint
+              or mountpoint.stat().st_uid != uid or not mountpoint.is_dir()):
             return None
         return config, state, image, mountpoint
     except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError, KeyError):
@@ -2087,7 +2099,11 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
                 (action not in {"preview", "probe", "install", "remove"}) or
                 (allow_absent and action != "remove")):
             return 2
-        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
+        safe = linux_fstab_allowed_paths(
+            values["--config"], values["--state-dir"], values["--user-uid"],
+            values.get("--fixture-root"), probe_mounted=(action == "probe" and
+                                                          "--fixture-root" not in values),
+        )
         if safe is None:
             return 75
         if "--runtime-sha256" in values:

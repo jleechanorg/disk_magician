@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -266,6 +267,32 @@ def test_fstab_probe_is_canonical_read_only_action():
     ):
         assert volume.main(["fstab", "probe", "scratch", "--config", "/c", "--state-dir", "/s", "--user-uid", "1000"]) == 0
     assert json.loads(output.getvalue())["probe"] == "fstab"
+
+
+def test_probe_allowed_paths_accepts_mountinfo_without_relaxing_mutation_paths(tmp_path):
+    home = tmp_path
+    config = home / ".config/disk-magician/linux-scratch.json"
+    state = home / ".disk_magician_state"
+    image = home / ".local/share/disk-magician/volumes/scratch.ext4"
+    mountpoint = home / "Scratch"
+    config.parent.mkdir(parents=True)
+    state.mkdir()
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fixture")
+    config.write_text(json.dumps({"volumes": {"classes": {"scratch": {
+        "image_path": str(image), "mountpoint": str(mountpoint), "backend": "fuse",
+    }}}}))
+    uid = os.getuid()
+    with (
+        mock.patch.object(volume.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=str(home))),
+        mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", str(image))),
+    ):
+        probe_safe = volume.linux_fstab_allowed_paths(
+            str(config), str(state), str(uid), None, probe_mounted=True
+        )
+        strict_safe = volume.linux_fstab_allowed_paths(str(config), str(state), str(uid), None)
+    assert probe_safe == (config, state, image, mountpoint)
+    assert strict_safe is None
 
 
 def test_fsck_refuses_active_service_before_e2fsck():
