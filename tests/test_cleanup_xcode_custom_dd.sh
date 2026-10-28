@@ -146,6 +146,7 @@ out="$(run_with_env CUSTOM_DD_IDLE_MINUTES 0)"
 [[ "$out" == *"within 60m"* ]] && ok "custom-DerivedData retention floor stays 60m" || bad "custom retention floor not reported: $out"
 out="$(run_with_env CUSTOM_DD_IDLE_MINUTES malformed)"
 [[ -d "$HOME/dd_malformed" ]] && ok "malformed custom-DerivedData override keeps fresh output" || bad "malformed override removed fresh output: $out"
+[[ "$out" == *"within 60m"* ]] && ok "malformed custom-DerivedData override retains the 60m floor" || bad "custom retention floor not reported for malformed value: $out"
 
 for spec in '124 1 0' '125 1 malformed'; do
     read -r run_id attempt override <<<"$spec"
