@@ -97,6 +97,7 @@ Commands:
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
+  scratch-dir [subpath]  Resolve active scratch root or create/return a subdirectory.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
   ci-admit               ezgha job-started hook: admit the CI workspace (class by workspace root; colima otherwise).
@@ -626,6 +627,9 @@ case "$CMD" in
       }
     fi
     DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS="$producer_pids" "$SCRIPT_DIR/scripts/scratch_new.sh" "$@"
+    ;;
+  scratch_dir|scratch-dir)
+    exec bash "$SCRIPT_DIR/scripts/scratch_dir.sh" "$@"
     ;;
   evidence_push|evidence-push)
     "$SCRIPT_DIR/scripts/evidence_push.sh" "$@"

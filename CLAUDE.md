@@ -20,14 +20,16 @@ and isolated test harnesses may call internal files directly.
 
 ## Agent Scratch placement (Mac and Linux) — optional quota-bounded Scratch volume
 
-For disposable build output, downloads, test scratch, and evidence on both macOS
-and Linux, use the dedicated quota-bounded Scratch volume:
-- **macOS**: `/Volumes/diskm-scratch` (APFS quota-bounded volume, default/recommended 200 GiB).
-- **Linux**: `~/Scratch` / `/home/<user>/Scratch` (sparse `ext4` quota-bounded volume mounted via `fuse2fs` or `native` loop mount, default/recommended 200 GiB).
+Single source of truth: `.agents/skills/scratch-space/SKILL.md` (`~/.claude/skills/scratch-space/SKILL.md`).
+For disposable build output, test fixtures, ad-hoc helper files, and evidence on both macOS and Linux, resolve paths through `diskm` and standard scratch environment variables:
+- **Repo build & evidence directories**: Allocate via `diskm scratch-new <repo-path> <purpose> --kind build` (or `--kind evidence`).
+- **Ad-hoc helper files, logs & ephemeral scripts**: Resolve via `diskm scratch-dir [subpath]` (or `~/.claude/skills/scratch-space/scripts/scratch-dir.sh [subpath]`).
+- **Default environment variables**: Pre-exported in shells and agent environments: `DISKM_SCRATCH` (host Scratch volume root), `CLAUDE_CODE_TMPDIR` (`${DISKM_SCRATCH}/tmp`), `PYTEST_DEBUG_TEMPROOT`, and `BASH_ENV`.
+- **Dedicated Scratch volumes**:
+  - **macOS**: `/Volumes/diskm-scratch` (APFS quota-bounded volume, default/recommended 200 GiB).
+  - **Linux**: `~/Scratch` / `/home/<user>/Scratch` (sparse `ext4` quota-bounded volume mounted via `fuse2fs` or `native` loop mount, default/recommended 200 GiB).
 
-Agents allocate disposable build output, downloads, test scratch, and evidence
-via `diskm scratch-new <repo-path> <purpose> --kind build` (or `--kind evidence`).
-Before allocation, check `diskm volume path scratch` (using `~/.config/disk-magician/config.json`
+Before allocation, `diskm` checks `diskm volume path scratch` (using `~/.config/disk-magician/config.json`
 by default or `DISK_MAGICIAN_CONFIG`), falling back to `/tmp/<repo>/...` when no
 Scratch volume is provisioned. Let `scratch-new` perform admission and register
 the producer lease; add `--owner-pid PID` for the actual long-lived producer when
