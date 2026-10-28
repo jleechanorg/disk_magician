@@ -9,8 +9,6 @@
 #   agent_scratch_create <runtime> <run-id>   # atomic mkdir, prints leaf path
 #   agent_scratch_trap_cleanup <path>          # arms EXIT/INT/TERM traps with containment & safety
 #
-AGENT_SCRATCH_ROOT="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
-
 _AGENT_SCRATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if type safety_gate >/dev/null 2>&1; then
   :
@@ -18,6 +16,28 @@ elif [[ -f "$_AGENT_SCRATCH_DIR/../safety_lib.sh" ]]; then
   # shellcheck source=scripts/safety_lib.sh
   source "$_AGENT_SCRATCH_DIR/../safety_lib.sh"
 fi
+
+_agent_scratch_root() {
+  if [[ -n "${AGENT_SCRATCH_ROOT:-}" ]]; then
+    printf '%s\n' "$AGENT_SCRATCH_ROOT"
+    return 0
+  fi
+
+  local resolver="${DISK_MAGICIAN_SCRATCH_DIR_BIN:-$_AGENT_SCRATCH_DIR/../scratch_dir.sh}" root
+  [[ -x "$resolver" ]] || {
+    echo "agent_scratch: scratch resolver unavailable: $resolver" >&2
+    return 1
+  }
+  root="$("$resolver")" || {
+    echo "agent_scratch: Scratch resolver refused the default root" >&2
+    return 1
+  }
+  [[ -n "$root" ]] || {
+    echo "agent_scratch: Scratch resolver returned an empty root" >&2
+    return 1
+  }
+  printf '%s/agent-scratch\n' "${root%/}"
+}
 
 _agent_scratch_valid_component() {
   local c="${1:-}"
@@ -53,7 +73,8 @@ agent_scratch_create() {
     return 1
   fi
 
-  local root="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
+  local root
+  root="$(_agent_scratch_root)" || return 1
   root="${root%/}"
   if [[ -z "$root" ]]; then
     echo "agent_scratch_create: empty AGENT_SCRATCH_ROOT" >&2
@@ -179,7 +200,8 @@ _agent_scratch_cleanup_path() {
     return 1
   fi
 
-  local root="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
+  local root
+  root="$(_agent_scratch_root)" || return 1
   if [[ -L "$root" ]]; then
     echo "agent_scratch_cleanup: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
     return 1
@@ -368,7 +390,8 @@ agent_scratch_trap_cleanup() {
     return 1
   fi
 
-  local root="${AGENT_SCRATCH_ROOT:-/private/tmp/agent-scratch}"
+  local root
+  root="$(_agent_scratch_root)" || return 1
   if [[ -L "$root" ]]; then
     echo "agent_scratch_trap_cleanup: AGENT_SCRATCH_ROOT is an explicit symlink: $root" >&2
     return 1

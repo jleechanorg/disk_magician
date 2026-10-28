@@ -54,6 +54,30 @@ fi
 # shellcheck source=scripts/lib/agent_scratch.sh
 source "$LIB"
 
+echo "── 0. Default Scratch resolver routing ──"
+cat > "$FAKE_ROOT/scratch-dir" <<'SH'
+#!/usr/bin/env bash
+case "${SCRATCH_RESOLVER_MODE:-ok}" in
+  ok) printf '%s\n' "$SCRATCH_RESOLVER_ROOT" ;;
+  unavailable) exit 75 ;;
+esac
+SH
+chmod +x "$FAKE_ROOT/scratch-dir"
+resolver_root="$FAKE_ROOT/resolved-scratch"
+mkdir -p "$resolver_root"
+default_path="$(env -u AGENT_SCRATCH_ROOT DISK_MAGICIAN_SCRATCH_DIR_BIN="$FAKE_ROOT/scratch-dir" SCRATCH_RESOLVER_ROOT="$resolver_root" bash -c 'source "$1"; agent_scratch_create disk_diagnostic default' bash "$LIB")"
+if [[ "$default_path" == "$resolver_root/agent-scratch/disk_diagnostic/default" && -d "$default_path" ]]; then
+  record_pass "default root uses canonical Scratch resolver"
+else
+  record_fail "default root did not use canonical Scratch resolver: $default_path"
+fi
+
+if env -u AGENT_SCRATCH_ROOT DISK_MAGICIAN_SCRATCH_DIR_BIN="$FAKE_ROOT/scratch-dir" SCRATCH_RESOLVER_MODE=unavailable bash -c 'source "$1"; agent_scratch_create disk_diagnostic unavailable' bash "$LIB" >/dev/null 2>&1; then
+  record_fail "unavailable registered Scratch fell back"
+else
+  record_pass "unavailable registered Scratch fails closed"
+fi
+
 path=$(agent_scratch_create "testruntime" "run123")
 if [[ -d "$path" ]]; then
   record_pass "scratch dir created"

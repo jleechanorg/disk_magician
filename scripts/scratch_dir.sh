@@ -10,57 +10,6 @@
 
 set -euo pipefail
 
-resolve_scratch_root() {
-  local root="${DISKM_SCRATCH:-}"
-  if [ -n "$root" ] && [ -d "$root" ] && [ -w "$root" ]; then
-    printf '%s\n' "$root"
-    return 0
-  fi
-
-  root=""
-  local script_dir diskm_bin
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  diskm_bin="${DISK_MAGICIAN_DISKM_BIN:-}"
-  if [ -n "$diskm_bin" ] && [ -x "$diskm_bin" ]; then
-    root="$("$diskm_bin" volume path scratch 2>/dev/null || true)"
-  elif [ -x "$script_dir/../disk_magician.sh" ]; then
-    root="$("$script_dir/../disk_magician.sh" volume path scratch 2>/dev/null || true)"
-  elif command -v diskm >/dev/null 2>&1; then
-    root="$(diskm volume path scratch 2>/dev/null || true)"
-  elif command -v disk-magician >/dev/null 2>&1; then
-    root="$(disk-magician volume path scratch 2>/dev/null || true)"
-  elif [ -x "${HOME}/.local/bin/diskm" ]; then
-    root="$("${HOME}/.local/bin/diskm" volume path scratch 2>/dev/null || true)"
-  elif [ -x "${HOME}/.local/bin/disk-magician" ]; then
-    root="$("${HOME}/.local/bin/disk-magician" volume path scratch 2>/dev/null || true)"
-  fi
-
-  if [ -z "$root" ]; then
-    local cfg="${DISK_MAGICIAN_CONFIG:-${HOME}/.config/disk-magician/config.json}"
-    if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
-      root="$(jq -r '.volumes.classes.scratch.mountpoint // .volumes.scratch.mountpoint // empty' "$cfg" 2>/dev/null || true)"
-    fi
-  fi
-
-  if [ -n "$root" ] && [ -d "$root" ] && [ -w "$root" ]; then
-    printf '%s\n' "$root"
-    return 0
-  fi
-
-  if [ -z "${DISK_MAGICIAN_DISKM_BIN:-}" ] && [ -z "${DISK_MAGICIAN_CONFIG:-}" ]; then
-    for candidate in "/Volumes/diskm-scratch" "${HOME}/Scratch" "/home/jleechan/Scratch"; do
-      if [ -d "$candidate" ] && [ -w "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
-  fi
-
-  printf '/tmp\n'
-}
-
-SCRATCH_ROOT="$(resolve_scratch_root)"
-
 if [ "$#" -gt 0 ]; then
   if [ -z "${1:-}" ]; then
     echo "scratch-dir: invalid subpath: (empty)" >&2
@@ -73,6 +22,47 @@ if [ "$#" -gt 0 ]; then
       exit 2
       ;;
   esac
+fi
+
+resolve_scratch_root() {
+  local root=""
+  local script_dir diskm_bin volume_rc=3
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  diskm_bin="${DISK_MAGICIAN_DISKM_BIN:-}"
+  if [ -n "$diskm_bin" ] && [ -x "$diskm_bin" ]; then
+    if root="$("$diskm_bin" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  elif [ -x "$script_dir/../disk_magician.sh" ]; then
+    if root="$("$script_dir/../disk_magician.sh" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  elif command -v diskm >/dev/null 2>&1; then
+    if root="$(diskm volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  elif command -v disk-magician >/dev/null 2>&1; then
+    if root="$(disk-magician volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  elif [ -x "${HOME}/.local/bin/diskm" ]; then
+    if root="$("${HOME}/.local/bin/diskm" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  elif [ -x "${HOME}/.local/bin/disk-magician" ]; then
+    if root="$("${HOME}/.local/bin/disk-magician" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
+  fi
+
+  if [ "$volume_rc" -eq 0 ]; then
+    [[ -n "$root" ]] || {
+      echo "scratch-dir: active Scratch volume returned no path" >&2
+      return 75
+    }
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [ "$volume_rc" -eq 3 ]; then
+    printf '/tmp\n'
+    return 0
+  fi
+
+  echo "scratch-dir: Scratch volume lookup failed (rc=$volume_rc)" >&2
+  return 75
+}
+
+SCRATCH_ROOT="$(resolve_scratch_root)"
+
+if [ "$#" -gt 0 ]; then
   TARGET="${SCRATCH_ROOT%/}/${SUBPATH}"
   mkdir -p "$TARGET"
   printf '%s\n' "$TARGET"
