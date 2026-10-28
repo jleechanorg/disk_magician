@@ -73,6 +73,12 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     shutil.rmtree(lock)
     print("PASS: concurrent recovery invocation is blocked before source inspection")
 
+    unsafe_state = Path(temp) / "unsafe-state"
+    unsafe_state.mkdir()
+    os.chmod(unsafe_state, 0o775)
+    assert "unsafe recovery guard directory" in run(unsafe_state, 1, "--registry").stderr
+    print("PASS: writable recovery guard parent remains fail-closed")
+
     lock = make_lock(state)
     (lock / "pid").write_text("123\n")
     old = time.time() - 7200

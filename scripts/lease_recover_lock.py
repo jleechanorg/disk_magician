@@ -38,17 +38,22 @@ def lstat_directory(path: Path, label: str, mode: int | None = None) -> os.stat_
 
 
 def acquire_recovery_lock(state: Path) -> int | None:
-    path = state / RECOVERY_LOCK_NAME
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, RECOVERY_LOCK_MODE)
+    dir_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        before = os.lstat(path)
+        parent = os.fstat(dir_fd)
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or
+                parent.st_mode & 0o022):
+            raise PermissionError("unsafe recovery guard directory")
+        fd = os.open(RECOVERY_LOCK_NAME, flags, RECOVERY_LOCK_MODE, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    try:
         current = os.fstat(fd)
-        if (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or
-                before.st_dev != current.st_dev or before.st_ino != current.st_ino or
-                current.st_uid != os.geteuid() or stat.S_IMODE(current.st_mode) != RECOVERY_LOCK_MODE or
+        if (not stat.S_ISREG(current.st_mode) or current.st_uid != os.geteuid() or
+                stat.S_IMODE(current.st_mode) != RECOVERY_LOCK_MODE or
                 current.st_nlink != 1):
             raise ValueError("recovery guard is not an owned private regular file")
         try:
