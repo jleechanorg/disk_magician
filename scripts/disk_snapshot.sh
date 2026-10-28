@@ -1770,12 +1770,14 @@ try:
             previous_inventory = json.loads(os.environ["SNAP_INVENTORY_PREVIOUS"])
     except (OSError, ValueError, TypeError):
         pass
-    data.update(inventory_metadata(os.environ.get("SNAP_INVENTORY_STATE") or
-                                  os.environ.get("DISK_MAGICIAN_STATE_DIR") or
-                                  os.path.expanduser("~/.disk_magician_state"),
-                                  data["timestamp"], previous_inventory))
-    data["legacy_root_df"] = {"scope": "legacy_root_df", "used_bytes": used_kb * 1024,
-                              "sampled_at": data["timestamp"]}
+    capture_timestamp = data.get("timestamp")
+    if capture_timestamp:
+        data.update(inventory_metadata(os.environ.get("SNAP_INVENTORY_STATE") or
+                                      os.environ.get("DISK_MAGICIAN_STATE_DIR") or
+                                      os.path.expanduser("~/.disk_magician_state"),
+                                      capture_timestamp, previous_inventory))
+        data["legacy_root_df"] = {"scope": "legacy_root_df", "used_bytes": used_kb * 1024,
+                                  "sampled_at": capture_timestamp}
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)
