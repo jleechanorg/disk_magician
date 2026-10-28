@@ -5,6 +5,7 @@
 # DISK_MAGICIAN_ADMIT_BIN except for one case that runs the real `diskm admit`
 # against a fake df.
 set -uo pipefail
+unset BASH_ENV
 export DISK_MAGICIAN_ADMIT_RETRY_S=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,7 +25,11 @@ export HOME="$T/home" STANDARD_WORKTREE_ROOT="$T/home/.worktrees" EVIDENCE_TMP_R
 export DISK_MAGICIAN_STATE_DIR="$T/state" EVIDENCE_GCS_PREFIX="gs://bkt/ev"
 # Keep volume lookup deterministic even when the caller exports machine-local
 # volume settings; the legacy no-volume config exercises the intended fallback.
-unset DISK_MAGICIAN_DISKM_BIN DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
+cat > "$T/fake-diskutil-clean.json" <<EOF
+{"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":994662584320,"free":100000000000},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":890000000000,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"}]}
+EOF
+export DISK_MAGICIAN_DISKUTIL_BIN="$REPO_ROOT/tests/lib/fake_diskutil.py" FAKE_DISKUTIL_STATE="$T/fake-diskutil-clean.json" FAKE_DISKUTIL_CALLS="$T/fake-diskutil-calls.jsonl"
+unset DISK_MAGICIAN_DISKM_BIN
 printf '%s\n' '{"budgets":{"daily":5}}' > "$T/legacy-config.json"
 export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -259,7 +264,7 @@ else
     bad "live volume check issued an addVolume command"
 fi
 export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
-unset DISK_MAGICIAN_DISKUTIL_BIN FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS
+export FAKE_DISKUTIL_STATE="$T/fake-diskutil-clean.json"
 
 echo "== real diskm admit (observe, fake df) admits and logs one event =="
 cat > "$T/bin/df" <<'EOF'
