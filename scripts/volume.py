@@ -1761,7 +1761,10 @@ def linux_image_has_loop_mapping(image: Path) -> bool:
 
 def linux_image_has_open_writers(image: Path) -> bool:
     try:
-        result = subprocess.run(["fuser", "-w", "--", str(image)],
+        # PSmisc fuser on Linux treats `--` as an invalid option. The image
+        # path is always an absolute, validated path, so option termination is
+        # unnecessary here and would make the no-writer probe fail closed.
+        result = subprocess.run(["fuser", "-w", str(image)],
                                 capture_output=True, timeout=10, check=False)
         if result.returncode == 1 and not result.stdout and not result.stderr:
             return False
