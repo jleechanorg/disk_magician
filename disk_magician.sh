@@ -89,7 +89,7 @@ Commands:
   lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
                          Session-exit release of that session's leases (deletes nothing).
   lease-recover-lock --registry
-                         Quarantine only the exact stale empty registry lock; never deletes it.
+                         Quarantine an exact stale empty lock or dead-PID partial lock past TTL; never deletes it.
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.

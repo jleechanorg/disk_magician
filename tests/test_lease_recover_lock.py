@@ -171,6 +171,22 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert "unsafe recovery guard directory" in run(unsafe_state, 1, "--registry").stderr
     print("PASS: writable recovery guard parent remains fail-closed")
 
+    for unsafe_mode in (0o775, 0o777):
+        writable_leases_state = Path(temp) / f"leases-{unsafe_mode:o}"
+        writable_leases_state.mkdir()
+        os.chmod(writable_leases_state, 0o755)
+        writable_leases = writable_leases_state / "worktree_leases"
+        writable_leases.mkdir(mode=unsafe_mode)
+        os.chmod(writable_leases, unsafe_mode)
+        candidate = writable_leases / MODULE.LOCK_NAME
+        candidate.mkdir(mode=0o755)
+        old = time.time() - 7200
+        os.utime(candidate, (old, old))
+        result = run(writable_leases_state, 1, "--registry")
+        assert "lease directory is group- or world-writable" in result.stderr
+        assert candidate.is_dir()
+    print("PASS: group- or world-writable lease parents (0775, 0777) remain fail-closed")
+
     lock = make_lock(state)
     (lock / "pid").write_text("123\n")
     old = time.time() - 7200

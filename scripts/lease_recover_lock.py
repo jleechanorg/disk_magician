@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Quarantine a stale empty or exactly partial lease-registry lock without deleting it."""
+"""Quarantine a stale empty or exactly partial lease-registry lock without deleting it.
+
+The canonical writer (`lease_reuse_lock_acquire` in lib/worktree_lease.sh)
+creates the lock directory with mkdir and writes pid/acquired_at only after
+mkdir succeeds. A pre-existing partial directory therefore is not a normal
+writer interruption; only its separately guarded stale-lock recovery can
+remove/recreate one. This recovery relies on that writer contract plus a
+private-enough lease parent, while still revalidating the observed inode and
+metadata immediately before rename. It does not provide an atomic compare-and-
+rename against arbitrary same-UID mutation. A post-rename identity anomaly
+receipt records the pre-rename snapshot and anomaly outcome; it does not prove
+the moved entry remained unchanged during the rename window.
+"""
 
 from __future__ import annotations
 
@@ -247,7 +259,9 @@ def main(argv: list[str]) -> int:
     try:
         if guard is None:
             return fail("recovery guard is busy")
-        leases_fd, _ = open_owned_directory(state_fd, "worktree_leases", "lease directory")
+        leases_fd, leases_info = open_owned_directory(state_fd, "worktree_leases", "lease directory")
+        if leases_info.st_mode & 0o022:
+            raise ValueError("lease directory is group- or world-writable")
         lock_fd, info = open_owned_directory(leases_fd, LOCK_NAME, "registry lock", LOCK_MODE)
         snapshot = lock_snapshot(lock_fd)
         pid = snapshot["members"]["pid"]["value"] if snapshot["shape"] == "partial_pid_empty_acquired_at" else None
