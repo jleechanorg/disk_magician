@@ -69,6 +69,14 @@ fi
 # Preserve real preflight/resolver imports; only the diagnostic lanes below are stubbed.
 cp "$REPO_ROOT/scripts/"*.py "$TREE/scripts/"
 cp "$REPO_ROOT/scripts/check_launchd_fleet.sh" "$TREE/scripts/"
+# Keep this fixture independent of the host's launchd/systemd fleet.  The
+# scratch allocation/cleanup contract is tested below; fleet health is not its subject.
+cat > "$TREE/scripts/check_launchd_fleet.sh" <<'SH'
+#!/usr/bin/env bash
+echo "Fleet: fixture healthy"
+exit 0
+SH
+chmod +x "$TREE/scripts/check_launchd_fleet.sh"
 cp "$REPO_ROOT/config.json.template" "$TREE/"
 # Exercise the real non-macOS fleet path, never inspect a host's launchd fleet.
 export DISK_MAGICIAN_OSTYPE=linux-gnu

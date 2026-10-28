@@ -86,7 +86,7 @@ run() {
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 DISK_MAGICIAN_WORKTREE_FLOOR_HOURS="${FLOOR_HOURS:-12}" LIVE_CWD="${LIVE_CWD:-}" \
     FIXTURE_REPO="$REPO" LOCK_TARGET="${LOCK_TARGET:-$OLD}" LSOF_COUNT_FILE="${LSOF_COUNT_FILE:-}" LOCK_ON_CALL="${LOCK_ON_CALL:-}" \
     DISK_MAGICIAN_STATE_DIR="$TMP/state" DISK_MAGICIAN_DELETION_LOG="$TMP/deletions.log" \
-    "$ROOT/disk_magician.sh" cleanup-worktrees "$@" --repos "$REPO" --discard-local-state --targets-file "${TARGETS_FILE:-$TMP/targets.txt}" "${include_args[@]}"
+    "$ROOT/disk_magician.sh" cleanup-worktrees "$@" --repos "$REPO" --discard-local-state --targets-file "${TARGETS_FILE:-$TMP/targets.txt}" "${include_args[@]+"${include_args[@]-}"}"
 }
 PASS=0
 FAIL=0
