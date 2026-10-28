@@ -1750,6 +1750,12 @@ try:
     data["unmeasured_keys"] = unmeasured
     data["fresh_keys_count"] = sum(1 for v in dirs.values() if v is not None)
     data["total_keys_count"] = len(dirs)
+    # Same convention as the frontier ledger's partial artifact: a snapshot whose
+    # fresh+carried coverage is below 70% is non-canonical and says so.
+    effective = data["coverage_effective_pct"]
+    partial = not (0.0 <= effective <= 100.0 and effective >= 70.0)
+    data["publication_kind"] = "partial" if partial else "complete"
+    data["canonical"] = not partial
     # Inventory is a verified immutable reference, independent of watched probes.
     if os.environ.get("SNAP_SCRIPT_DIR"):
         sys.path.insert(0, os.environ["SNAP_SCRIPT_DIR"])
@@ -1772,12 +1778,6 @@ try:
                                       capture_timestamp, previous_inventory))
         data["legacy_root_df"] = {"scope": "legacy_root_df", "used_bytes": used_kb * 1024,
                                   "sampled_at": capture_timestamp}
-    # Same convention as the frontier ledger's partial artifact: a snapshot whose
-    # fresh+carried coverage is below 70% is non-canonical and says so.
-    effective = data["coverage_effective_pct"]
-    partial = not (0.0 <= effective <= 100.0 and effective >= 70.0)
-    data["publication_kind"] = "partial" if partial else "complete"
-    data["canonical"] = not partial
     print(json.dumps(data, indent=4))
 except Exception:
     sys.exit(1)
