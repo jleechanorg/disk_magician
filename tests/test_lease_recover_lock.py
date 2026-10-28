@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import fcntl
+import stat
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,15 +17,16 @@ import importlib.util
 
 ROOT = Path(__file__).resolve().parent.parent
 CLI = ["bash", str(ROOT / "disk_magician.sh"), "lease-recover-lock"]
+PACKAGED_CLI = ["bash", str(ROOT / "src/disk_magician/disk_magician.sh"), "lease-recover-lock"]
 SPEC = importlib.util.spec_from_file_location("lease_recover_lock", ROOT / "scripts/lease_recover_lock.py")
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def run(state: Path, expected: int, *args: str) -> subprocess.CompletedProcess[str]:
+def run(state: Path, expected: int, *args: str, cli: list[str] = CLI) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)}
-    result = subprocess.run([*CLI, *args], text=True, capture_output=True, env=env, check=False)
+    result = subprocess.run([*cli, *args], text=True, capture_output=True, env=env, check=False)
     assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
     return result
 
@@ -37,6 +39,19 @@ def make_lock(state: Path) -> Path:
     lock.mkdir(mode=0o755)
     os.chmod(lock, 0o755)
     return lock
+
+
+def make_partial_lock(state: Path, pid: int) -> Path:
+    lock = make_lock(state)
+    (lock / "pid").write_bytes(f"{pid}\n".encode())
+    (lock / "acquired_at").write_bytes(b"")
+    os.chmod(lock / "pid", 0o644)
+    os.chmod(lock / "acquired_at", 0o644)
+    return lock
+
+
+def partial_lock_bytes(lock: Path) -> dict[str, bytes]:
+    return {name: (lock / name).read_bytes() for name in ("pid", "acquired_at")}
 
 
 with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as temp:
@@ -57,6 +72,83 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     stored = quarantined.with_name(quarantined.name + ".receipt.json")
     assert json.loads(stored.read_text())["lock_identity"]["inode"] == receipt["lock_identity"]["inode"]
     print("PASS: exact old empty registry lock is atomically quarantined with receipt")
+
+    partial_state = Path(temp) / "partial-state"
+    partial_state.mkdir()
+    os.chmod(partial_state, 0o755)
+    lock = make_partial_lock(partial_state, 2147483647)
+    os.utime(lock, (old, old))
+    expected_bytes = partial_lock_bytes(lock)
+    result = run(partial_state, 0, "--registry")
+    receipt = json.loads(result.stdout)
+    quarantined = Path(receipt["quarantined"])
+    assert receipt["shape"] == "partial_pid_empty_acquired_at"
+    assert {name: (quarantined / name).read_bytes() for name in expected_bytes} == expected_bytes
+    stored = quarantined.with_name(quarantined.name + ".receipt.json")
+    stored_record = json.loads(stored.read_text())
+    assert stored_record["outcome"] == "quarantined"
+    assert stored_record["metadata"]["acquired_at"]["size"] == 0
+    print("PASS: exact old dead-pid/empty-timestamp lock is quarantined byte-for-byte")
+
+    packaged_state = Path(temp) / "packaged-state"
+    packaged_state.mkdir()
+    os.chmod(packaged_state, 0o755)
+    lock = make_partial_lock(packaged_state, 2147483647)
+    os.utime(lock, (old, old))
+    result = run(packaged_state, 0, "--registry", cli=PACKAGED_CLI)
+    receipt = json.loads(result.stdout)
+    quarantined = Path(receipt["quarantined"])
+    assert partial_lock_bytes(quarantined) == {"pid": b"2147483647\n", "acquired_at": b""}
+    print("PASS: packaged diskm dispatcher recovers the same exact partial-lock form")
+
+    lock = make_partial_lock(state, os.getpid())
+    os.utime(lock, (old, old))
+    expected_bytes = partial_lock_bytes(lock)
+    result = run(state, 1, "--registry")
+    assert "pid is live" in result.stderr and partial_lock_bytes(lock) == expected_bytes
+    shutil.rmtree(lock)
+    print("PASS: old partial lock with a live pid remains fail-closed")
+
+    lock = make_partial_lock(state, 2147483647)
+    expected_bytes = partial_lock_bytes(lock)
+    result = run(state, 1, "--registry")
+    assert "too recent" in result.stderr and partial_lock_bytes(lock) == expected_bytes
+    shutil.rmtree(lock)
+    print("PASS: fresh partial lock remains fail-closed even with a dead pid")
+
+    lock = make_partial_lock(state, 2147483647)
+    (lock / "unexpected").write_text("unknown metadata\n")
+    assert "unexpected metadata entries" in run(state, 1, "--registry").stderr
+    shutil.rmtree(lock)
+    print("PASS: partial lock with an extra entry remains fail-closed")
+
+    lock = make_partial_lock(state, 2147483647)
+    os.chmod(lock / "acquired_at", 0)
+    run(state, 1, "--registry")
+    assert lock.is_dir() and stat.S_IMODE((lock / "acquired_at").stat().st_mode) == 0
+    shutil.rmtree(lock)
+    print("PASS: unreadable-mode partial metadata remains fail-closed")
+
+    lock = make_partial_lock(state, 2147483647)
+    (lock / "acquired_at").unlink()
+    (lock / "acquired_at").symlink_to(lock / "pid")
+    run(state, 1, "--registry")
+    assert lock.is_dir() and (lock / "acquired_at").is_symlink()
+    shutil.rmtree(lock)
+    print("PASS: symlink partial metadata remains fail-closed")
+
+    lock = make_partial_lock(state, 2147483647)
+    (lock / "pid").write_bytes(b"0\n")
+    assert "valid positive PID" in run(state, 1, "--registry").stderr and lock.is_dir()
+    shutil.rmtree(lock)
+    print("PASS: malformed partial pid remains fail-closed")
+
+    lock = make_partial_lock(state, 2147483647)
+    (lock / "acquired_at").write_bytes(b"1\n")
+    os.utime(lock, (old, old))
+    assert "acquired_at metadata is not empty" in run(state, 1, "--registry").stderr
+    shutil.rmtree(lock)
+    print("PASS: nonempty acquired_at remains fail-closed")
 
     lock = make_lock(state)
     old = time.time() - 7200
@@ -83,7 +175,7 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     (lock / "pid").write_text("123\n")
     old = time.time() - 7200
     os.utime(lock, (old, old))
-    assert "not empty" in run(state, 1, "--registry").stderr and lock.is_dir()
+    assert "unexpected metadata entries" in run(state, 1, "--registry").stderr and lock.is_dir()
     shutil.rmtree(lock)
     print("PASS: nonempty lock remains fail-closed")
 
@@ -127,9 +219,71 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert len(receipts) == 1 and json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
     print("PASS: replacement before rename is deferred and recorded")
 
+    partial_race_state = Path(temp) / "partial-race-state"
+    partial_race_state.mkdir()
+    os.chmod(partial_race_state, 0o755)
+    lock = make_partial_lock(partial_race_state, 2147483647)
+    os.utime(lock, (old, old))
+    original_bytes = partial_lock_bytes(lock)
+
+    def alter_partial_metadata() -> None:
+        (lock / "pid").write_bytes(b"2147483646\n")
+
+    original_hook = MODULE.before_revalidate
+    original_state = os.environ.get("DISK_MAGICIAN_STATE_DIR")
+    MODULE.before_revalidate = alter_partial_metadata
+    os.environ["DISK_MAGICIAN_STATE_DIR"] = str(partial_race_state)
+    try:
+        assert MODULE.main(["--registry"]) == 1
+    finally:
+        MODULE.before_revalidate = original_hook
+        if original_state is None:
+            os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
+        else:
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = original_state
+    assert lock.is_dir() and partial_lock_bytes(lock) != original_bytes
+    receipts = list((partial_race_state / "quarantine" / "lease-locks").glob("*.receipt.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
+    print("PASS: changed partial metadata bytes are preserved and recovery is deferred")
+
+    pid_race_state = Path(temp) / "pid-race-state"
+    pid_race_state.mkdir()
+    os.chmod(pid_race_state, 0o755)
+    lock = make_partial_lock(pid_race_state, 2147483647)
+    os.utime(lock, (old, old))
+    original_bytes = partial_lock_bytes(lock)
+    pid_checks = [0]
+
+    def pid_reused_after_first_check(_pid: int) -> bool:
+        pid_checks[0] += 1
+        return pid_checks[0] == 1
+
+    original_hook = MODULE.before_revalidate
+    original_pid_probe = MODULE.pid_is_dead
+    original_state = os.environ.get("DISK_MAGICIAN_STATE_DIR")
+    MODULE.before_revalidate = lambda: None
+    MODULE.pid_is_dead = pid_reused_after_first_check
+    os.environ["DISK_MAGICIAN_STATE_DIR"] = str(pid_race_state)
+    try:
+        assert MODULE.main(["--registry"]) == 1
+    finally:
+        MODULE.before_revalidate = original_hook
+        MODULE.pid_is_dead = original_pid_probe
+        if original_state is None:
+            os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
+        else:
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = original_state
+    assert pid_checks[0] == 2 and lock.is_dir() and partial_lock_bytes(lock) == original_bytes
+    receipts = list((pid_race_state / "quarantine" / "lease-locks").glob("*.receipt.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
+    print("PASS: pid reused between liveness probes is preserved and recovery is deferred")
+
     lock = state / "worktree_leases" / ".owner-mutation.reuse-lock"
     target = state / "other"
     target.mkdir()
     lock.symlink_to(target, target_is_directory=True)
-    assert "not a real directory" in run(state, 1, "--registry").stderr and lock.is_symlink()
+    run(state, 1, "--registry")
+    assert lock.is_symlink()
     print("PASS: symlink lock remains fail-closed")
