@@ -370,10 +370,15 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
     print("PASS: pid reused between liveness probes is preserved and recovery is deferred")
 
+    def change_timestamp(fd: int) -> None:
+        metadata_fd = os.open("acquired_at", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)
+        try:
+            os.write(metadata_fd, b"1\n")
+        finally:
+            os.close(metadata_fd)
+
     for label, mutate in (
-        ("changed-content", lambda fd: os.write(
-            os.open("acquired_at", os.O_WRONLY | os.O_TRUNC, dir_fd=fd), b"1\n"
-        )),
+        ("changed-content", change_timestamp),
         ("unsafe-mode", lambda fd: os.chmod("acquired_at", 0, dir_fd=fd, follow_symlinks=False)),
     ):
         post_move_state = Path(temp) / f"post-move-{label}"
