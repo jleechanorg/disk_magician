@@ -1,5 +1,6 @@
 """Offline CLI ordering and existing-ledger contracts; never scan the host."""
 import contextlib
+import json
 import datetime
 import io
 import os
@@ -195,18 +196,28 @@ class AuditLedgerFirst(unittest.TestCase):
         ledger = self.ledger()
         before = ledger.read_bytes()
         real_replace = os.replace
+        calls = []
         def observe_replace(source, target):
-            self.assertEqual(ledger.parent, Path(source).parent)
-            if Path(target) == ledger:
+            source = Path(source)
+            target = Path(target)
+            self.assertEqual(ledger.parent, source.parent)
+            if target == ledger:
                 self.assertEqual(before, ledger.read_bytes())
-                self.assertEqual('new complete report', Path(source).read_text())
+                self.assertEqual('new complete report', source.read_text())
+            else:
+                self.assertEqual(self.state / reclaim_ledger.JSON_REL, target)
+                json.loads(source.read_text())
+            calls.append((source, target))
             return real_replace(source, target)
-        with patch.object(reclaim_ledger, 'render', return_value='new complete report'), \
-                patch.object(reclaim_ledger.os, 'replace', side_effect=observe_replace) as replace:
+        with (
+            patch.object(reclaim_ledger, 'render', return_value='new complete report'),
+            patch.object(reclaim_ledger.os, 'replace', side_effect=observe_replace) as replace,
+        ):
             self.assertEqual(0, reclaim_ledger.main(['--state-dir', str(self.state), '--no-commit']))
-        self.assertGreaterEqual(replace.call_count, 1)
+        self.assertEqual(2, replace.call_count)
+        self.assertEqual(self.state / reclaim_ledger.JSON_REL, calls[1][1])
         self.assertEqual('new complete report', ledger.read_text())
-        self.assertEqual(sorted(p.name for p in ledger.parent.iterdir()), ['directory-ledger.json', 'known-reclaim-dirs.md'])
+        self.assertEqual(sorted(path.name for path in ledger.parent.iterdir()), sorted([ledger.name, Path(reclaim_ledger.JSON_REL).name]))
 
     def actual_render(self):
         args = SimpleNamespace(home=str(self.home), days=7,
