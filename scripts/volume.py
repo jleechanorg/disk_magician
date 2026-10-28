@@ -1198,10 +1198,13 @@ def linux_service_render(runtime: Path, config_path: str, state_path: Path,
     return rendered
 
 
-def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
-                                      config_path: str, state_path: Path) -> bool:
+def linux_service_matches_unit(unit_bytes: bytes, runtime: Path,
+                               config_path: str, state_path: Path,
+                               backend: str) -> bool:
     try:
-        if unit_bytes == linux_service_render(runtime, config_path, state_path, "fuse").encode():
+        if backend not in {"fuse", "native"}:
+            return False
+        if unit_bytes == linux_service_render(runtime, config_path, state_path, backend).encode():
             return True
     except (OSError, ValueError):
         return False
@@ -1227,10 +1230,29 @@ def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
             if (systemd.is_symlink() or template.is_symlink() or orchestrator.is_symlink() or
                     not systemd.is_dir() or not template.is_file() or not orchestrator.is_file()):
                 continue
-            if unit_bytes == linux_service_render(previous, config_path, state_path, "fuse").encode():
+            if unit_bytes == linux_service_render(previous, config_path, state_path, backend).encode():
                 return True
     except (OSError, ValueError):
         return False
+    return False
+
+
+def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
+                                    config_path: str, state_path: Path) -> bool:
+    return linux_service_matches_unit(unit_bytes, runtime, config_path, state_path, "fuse")
+
+
+def linux_wait_for_mount_identity(settings: dict[str, Any], scratch: dict[str, Any],
+                                  entry: Any, timeout: float = 15.0,
+                                  validator=None) -> bool:
+    validator = validator or linux_validate_mount
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            validator(settings, scratch, entry)
+            return True
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            time.sleep(0.1)
     return False
 
 
@@ -1521,7 +1543,10 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         linux_command(systemctl + ["daemon-reload"])
         linux_command(systemctl + ["start", "diskm-scratch.service"], 60)
         settings, scratch = cls("scratch", config_path)
-        linux_validate_native_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        if not linux_wait_for_mount_identity(
+                settings, scratch, registry(state)["volumes"].get("scratch"),
+                validator=linux_validate_native_mount):
+            return 75
         linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
         return 0
     except Exception as error:
@@ -2201,8 +2226,9 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         runtime = Path(__file__).resolve().parent.parent
         if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
-                or not linux_service_matches_fuse_unit(unit.read_bytes(), runtime,
-                                                        str(config_path), state)):
+                or not linux_service_matches_unit(unit.read_bytes(), runtime,
+                                                   str(config_path), state,
+                                                   scratch.get("backend", "fuse"))):
             return 75
         active = subprocess.run(
             ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
@@ -2225,7 +2251,9 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
             return 0
         linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
         linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
-        linux_validate_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        if not linux_wait_for_mount_identity(settings, scratch,
+                                             registry(state)["volumes"].get("scratch")):
+            return 75
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired):
         return 75
