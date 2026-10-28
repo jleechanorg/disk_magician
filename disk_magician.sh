@@ -88,6 +88,8 @@ Commands:
   lease-release-owner <path> --owner-pid PID Release only that process incarnation.
   lease-release --owner-session <id> [--runtime-pid P --runtime-start-epoch E]
                          Session-exit release of that session's leases (deletes nothing).
+  lease-recover-lock --registry
+                         Quarantine only the exact stale empty registry lock; never deletes it.
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
@@ -690,6 +692,9 @@ case "$CMD" in
     # Default runtime: the nearest runtime ancestor (the hook's ending session).
     [[ -n "$rpid" ]] || IFS=$'\t' read -r rpid rep _ < <(lease_resolve_owner)
     lease_release_owner_session "$sid" "$rpid" "$rep"
+    ;;
+  lease_recover_lock|lease-recover-lock)
+    exec python3 "$SCRIPT_DIR/scripts/lease_recover_lock.py" "$@"
     ;;
   worktree_release|worktree-release)
     [[ $# -eq 1 ]] || { echo "Usage: diskm worktree-release <path>" >&2; exit 1; }

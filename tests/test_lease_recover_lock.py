@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Focused contract tests for `diskm lease-recover-lock --registry`."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import time
+import importlib.util
+
+
+ROOT = Path(__file__).resolve().parent.parent
+CLI = ["bash", str(ROOT / "disk_magician.sh"), "lease-recover-lock"]
+SPEC = importlib.util.spec_from_file_location("lease_recover_lock", ROOT / "scripts/lease_recover_lock.py")
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+def run(state: Path, expected: int, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)}
+    result = subprocess.run([*CLI, *args], text=True, capture_output=True, env=env, check=False)
+    assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def make_lock(state: Path) -> Path:
+    leases = state / "worktree_leases"
+    leases.mkdir(parents=True, exist_ok=True)
+    os.chmod(leases, 0o755)
+    lock = leases / ".owner-mutation.reuse-lock"
+    lock.mkdir(mode=0o755)
+    os.chmod(lock, 0o755)
+    return lock
+
+
+with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as temp:
+    state = Path(temp) / "state"
+    state.mkdir()
+    os.chmod(state, 0o755)
+
+    assert run(state, 2, "--bad").stderr.startswith("lease-recover-lock: usage:")
+    print("PASS: invalid command shape is rejected")
+
+    lock = make_lock(state)
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    result = run(state, 0, "--registry")
+    receipt = json.loads(result.stdout)
+    quarantined = Path(receipt["quarantined"])
+    assert not lock.exists() and quarantined.is_dir()
+    stored = quarantined.with_name(quarantined.name + ".receipt.json")
+    assert json.loads(stored.read_text())["lock_identity"]["inode"] == receipt["lock_identity"]["inode"]
+    print("PASS: exact old empty registry lock is atomically quarantined with receipt")
+
+    lock = make_lock(state)
+    (lock / "pid").write_text("123\n")
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    assert "not empty" in run(state, 1, "--registry").stderr and lock.is_dir()
+    shutil.rmtree(lock)
+    print("PASS: nonempty lock remains fail-closed")
+
+    lock = make_lock(state)
+    assert "too recent" in run(state, 1, "--registry").stderr and lock.is_dir()
+    shutil.rmtree(lock)
+    print("PASS: young empty lock remains fail-closed")
+
+    lock = make_lock(state)
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    os.chmod(lock, 0o700)
+    assert "unexpected mode" in run(state, 1, "--registry").stderr and lock.is_dir()
+    shutil.rmtree(lock)
+    print("PASS: unexpected-mode lock remains fail-closed")
+
+    race_state = Path(temp) / "race-state"
+    race_state.mkdir()
+    os.chmod(race_state, 0o755)
+    lock = make_lock(race_state)
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    def replace_lock() -> None:
+        shutil.rmtree(lock)
+        lock.mkdir(mode=0o755)
+        os.chmod(lock, 0o755)
+    original_hook = MODULE.before_revalidate
+    original_state = os.environ.get("DISK_MAGICIAN_STATE_DIR")
+    MODULE.before_revalidate = replace_lock
+    os.environ["DISK_MAGICIAN_STATE_DIR"] = str(race_state)
+    try:
+        assert MODULE.main(["--registry"]) == 1
+    finally:
+        MODULE.before_revalidate = original_hook
+        if original_state is None:
+            os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
+        else:
+            os.environ["DISK_MAGICIAN_STATE_DIR"] = original_state
+    assert lock.is_dir()
+    receipts = list((race_state / "quarantine" / "lease-locks").glob("*.receipt.json"))
+    assert len(receipts) == 1 and json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
+    print("PASS: replacement before rename is deferred and recorded")
+
+    lock = state / "worktree_leases" / ".owner-mutation.reuse-lock"
+    target = state / "other"
+    target.mkdir()
+    lock.symlink_to(target, target_is_directory=True)
+    assert "not a real directory" in run(state, 1, "--registry").stderr and lock.is_symlink()
+    print("PASS: symlink lock remains fail-closed")
