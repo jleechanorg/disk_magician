@@ -8,7 +8,6 @@ import os
 import plistlib
 import pwd
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -797,7 +796,8 @@ def linux_host_fstab_probe(image: Path, mountpoint: Path,
     return view
 
 
-def linux_validate_installed_runtime(runtime: Path, state: Path) -> str:
+def linux_validate_installed_runtime(runtime: Path, state: Path,
+                                     *, return_manifest: bool = False) -> str | dict[str, Any]:
     """Require the helper to be the immutable package named by deployed.json."""
     manifest_path = state / "deployed.json"
     document = json.loads(manifest_path.read_text())
@@ -829,6 +829,8 @@ def linux_validate_installed_runtime(runtime: Path, state: Path) -> str:
     helper_hash = hashes.get("scripts/volume.py")
     if not helper.is_file() or not isinstance(helper_hash, str):
         raise ValueError("deployed volume helper is not pinned")
+    if return_manifest:
+        return {"package_root": str(package_root), "package_hashes": dict(hashes)}
     return helper_hash
 
 
@@ -1299,24 +1301,45 @@ def linux_docker_transport_info(image_id: str) -> tuple[str, dict[str, Any]]:
 def linux_docker_helper_argv(
     docker: str, image_id: str, runtime: Path, action: str,
     config_path: Path, state: Path, user_uid: str, runtime_sha256: str | None = None,
+    runtime_manifest: dict[str, Any] | None = None,
 ) -> list[str]:
     if action not in {"probe", "install", "remove"}:
         raise ValueError("unsupported Docker fstab helper action")
-    if runtime.is_symlink() or not runtime.is_dir() or not (runtime / "disk_magician.sh").is_file():
+    if (runtime.is_symlink() or not runtime.is_dir()
+            or runtime_manifest is None or not isinstance(runtime_manifest.get("package_hashes"), dict)):
         raise ValueError("installed canonical runtime is unavailable")
-    helper = str(runtime / "disk_magician.sh")
+    if runtime_manifest.get("package_root") != str(runtime.resolve()):
+        raise ValueError("runtime manifest root does not match helper root")
+    if runtime_sha256 is None or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256):
+        raise ValueError("runtime hash is required")
     args = ["volume", "fstab", action, "scratch", "--config", str(config_path),
             "--state-dir", str(state), "--user-uid", str(user_uid)]
-    if runtime_sha256 is not None:
-        if not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256):
-            raise ValueError("runtime hash is invalid")
-        args.extend(("--runtime-sha256", runtime_sha256))
+    args.extend(("--runtime-sha256", runtime_sha256))
     if action in {"install", "remove"}:
         args.append("--execute")
-    quoted = " ".join(shlex.quote(item) for item in args)
-    command = (
-        "exec chroot /host /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "
-        f"/usr/bin/bash {shlex.quote(helper)} {quoted}"
+    manifest = json.dumps(runtime_manifest, sort_keys=True, separators=(",", ":"))
+    args_json = json.dumps(args, separators=(",", ":"))
+    bootstrap = (
+        "import hashlib,json,os,runpy,shutil,stat,sys,tempfile\n"
+        "os.chdir('/')\n"
+        f"runtime={str(runtime)!r}; manifest=json.loads({manifest!r}); args=json.loads({args_json!r})\n"
+        "hashes=manifest.get('package_hashes')\n"
+        "if not isinstance(hashes,dict) or not hashes: raise SystemExit(75)\n"
+        "snapshot=tempfile.mkdtemp(prefix='.diskm-runtime-',dir='/tmp')\n"
+        "for rel,expected in hashes.items():\n"
+        " p=os.path.normpath(rel)\n"
+        " if not isinstance(rel,str) or p.startswith('/') or p=='..' or p.startswith('../'): raise SystemExit(75)\n"
+        " src=os.path.join(runtime,p); fd=os.open(src,os.O_RDONLY|os.O_NOFOLLOW); st=os.fstat(fd)\n"
+        " if not stat.S_ISREG(st.st_mode): os.close(fd); raise SystemExit(75)\n"
+        " with os.fdopen(fd,'rb') as inp: data=inp.read()\n"
+        " if hashlib.sha256(data).hexdigest()!=expected: raise SystemExit(75)\n"
+        " dst=os.path.join(snapshot,p); os.makedirs(os.path.dirname(dst),mode=0o700,exist_ok=True)\n"
+        " fd=os.open(dst,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)\n"
+        " with os.fdopen(fd,'wb') as out: out.write(data); out.flush(); os.fsync(out.fileno())\n"
+        " helper=os.path.join(snapshot,'scripts','volume.py')\n"
+        f" if hashlib.sha256(open(helper,'rb').read()).hexdigest()!={runtime_sha256!r}: raise SystemExit(75)\n"
+        "sys.path.insert(0,os.path.join(snapshot,'scripts')); sys.argv=['volume.py']+args\n"
+        "runpy.run_path(helper,run_name='__main__')\n"
     )
     mounts = [
         "--mount", "type=bind,src=/,dst=/host,readonly",
@@ -1329,25 +1352,27 @@ def linux_docker_helper_argv(
         docker, "--host", "unix:///var/run/docker.sock", "run", "--rm", "--pull", "never",
         "--network", "none", *DOCKER_TRANSPORT_FLAGS, "--read-only",
         *mounts,
-        "--entrypoint", "/bin/sh", image_id, "-c", command,
+        "--tmpfs", "/host/tmp:rw,size=64m,nosuid,nodev",
+        "--entrypoint", "/usr/bin/chroot", image_id, "/host", "/usr/bin/python3", "-c", bootstrap,
     ]
 
 
 def linux_docker_fstab_command(
     docker: str, image_id: str, runtime: Path, action: str,
     config_path: Path, state: Path, user_uid: str, runtime_sha256: str | None = None,
+    runtime_manifest: dict[str, Any] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     argv = linux_docker_helper_argv(docker, image_id, runtime, action, config_path, state, user_uid,
-                                    runtime_sha256)
+                                    runtime_sha256, runtime_manifest)
     return subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
 
 
 def linux_docker_probe(
     docker: str, image_id: str, runtime: Path, config_path: Path, state: Path, user_uid: str,
-    runtime_sha256: str | None = None,
+    runtime_sha256: str | None = None, runtime_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = linux_docker_fstab_command(docker, image_id, runtime, "probe", config_path, state,
-                                        user_uid, runtime_sha256)
+                                        user_uid, runtime_sha256, runtime_manifest)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Docker fstab probe failed")
     try:
@@ -1447,15 +1472,17 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
             return 75
         runtime_sha256 = None
+        runtime_manifest = None
         if not linux_service_matches_fuse_unit(unit_bytes, runtime, str(config_path), state):
             return 75
         if admin_transport == "docker":
-            runtime_sha256 = linux_validate_installed_runtime(runtime, state)
+            runtime_manifest = linux_validate_installed_runtime(runtime, state, return_manifest=True)
+            runtime_sha256 = runtime_manifest["package_hashes"]["scripts/volume.py"]
             docker, _ = linux_docker_transport_info(admin_image_id or "")
             host_view = linux_host_fstab_probe(image, mountpoint, runtime_sha256)
             privileged_view = linux_docker_probe(
                 docker, admin_image_id or "", runtime, config_path, state, values["--user-uid"],
-                runtime_sha256,
+                runtime_sha256, runtime_manifest,
             )
             linux_assert_admin_view(host_view, privileged_view)
         systemctl = ["systemctl", "--user"]
@@ -1470,6 +1497,7 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
                 result = linux_docker_fstab_command(
                     docker, admin_image_id or "", runtime, "install", config_path, state,
                     values["--user-uid"], runtime_sha256,
+                    runtime_manifest,
                 )
             else:
                 root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
@@ -1523,6 +1551,7 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
                     rollback = linux_docker_fstab_command(
                         docker, admin_image_id or "", Path(__file__).resolve().parent.parent,
                         "remove", config_path, state, str(os.geteuid()), runtime_sha256,
+                        runtime_manifest,
                     )
                 else:
                     root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),

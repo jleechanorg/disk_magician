@@ -23,10 +23,17 @@ def test_docker_helper_argv_is_fixed_and_narrow(tmp_path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "disk_magician.sh").write_text("#!/bin/sh\n")
+    (runtime / "scripts").mkdir()
+    helper = runtime / "scripts/volume.py"
+    helper.write_text("# verified fixture\n")
+    manifest = {"package_root": str(runtime), "package_hashes": {
+        "scripts/volume.py": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "disk_magician.sh": hashlib.sha256((runtime / "disk_magician.sh").read_bytes()).hexdigest(),
+    }}
     argv = volume.linux_docker_helper_argv(
         "/usr/bin/docker", image_id, runtime, "install",
         Path("/home/user/.config/disk-magician/linux-scratch.json"),
-        Path("/home/user/.disk_magician_state"), "1000",
+        Path("/home/user/.disk_magician_state"), "1000", manifest["package_hashes"]["scripts/volume.py"], manifest,
     )
     joined = " ".join(argv)
     assert "--host unix:///var/run/docker.sock" in joined
@@ -42,7 +49,12 @@ def test_docker_helper_argv_is_fixed_and_narrow(tmp_path):
     assert "type=bind,src=/,dst=/host,readonly" in joined
     assert "type=bind,src=/etc,dst=/host/etc" in joined
     assert "--privileged" not in argv
-    assert "volume fstab install scratch" in joined
+    assert "/usr/bin/bash" not in " ".join(argv)
+    assert "exec chroot /host" not in " ".join(argv)
+    assert ["--entrypoint", "/usr/bin/chroot"] == argv[argv.index("--entrypoint"):argv.index("--entrypoint") + 2]
+    assert "/usr/bin/python3" in argv
+    compile(argv[-1], "<fixed-admin-bootstrap>", "exec")
+    assert '"volume","fstab","install","scratch"' in joined
     assert "--execute" in joined
 
 
@@ -50,9 +62,16 @@ def test_docker_probe_keeps_host_etc_read_only(tmp_path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "disk_magician.sh").write_text("#!/bin/sh\n")
+    (runtime / "scripts").mkdir()
+    helper = runtime / "scripts/volume.py"
+    helper.write_text("# verified fixture\n")
+    manifest = {"package_root": str(runtime), "package_hashes": {
+        "scripts/volume.py": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "disk_magician.sh": hashlib.sha256((runtime / "disk_magician.sh").read_bytes()).hexdigest(),
+    }}
     argv = volume.linux_docker_helper_argv(
         "/usr/bin/docker", "sha256:" + "a" * 64, runtime, "probe",
-        Path("/c"), Path("/s"), "1000", "b" * 64,
+        Path("/c"), Path("/s"), "1000", manifest["package_hashes"]["scripts/volume.py"], manifest,
     )
     assert "type=bind,src=/etc,dst=/host/etc" not in argv
 
@@ -462,7 +481,9 @@ def test_docker_preflight_failure_does_not_stop_or_rollback(tmp_path):
         mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
         mock.patch.object(volume, "linux_validate_mount", return_value=entry["filesystem_uuid"]),
         mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
-        mock.patch.object(volume, "linux_validate_installed_runtime", return_value="a" * 64),
+        mock.patch.object(volume, "linux_validate_installed_runtime", return_value={
+            "package_root": str(runtime), "package_hashes": {"scripts/volume.py": "a" * 64},
+        }),
         mock.patch.object(volume, "linux_docker_transport_info", return_value=("/usr/bin/docker", {})),
         mock.patch.object(volume, "linux_host_fstab_probe", return_value={
             "mount": None, "loop_devices": [], "writer_pids": [17], "reader_pids": [17],
