@@ -30,6 +30,18 @@ def run(state: Path, expected: int, *args: str, cli: list[str] = CLI) -> subproc
     return result
 
 
+def run_bounded(state: Path, expected: int, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state)}
+    try:
+        result = subprocess.run(
+            [*CLI, *args], text=True, capture_output=True, env=env, check=False, timeout=2
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"lease recovery hung on malformed metadata: {exc}") from exc
+    assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
 def make_lock(state: Path) -> Path:
     leases = state / "worktree_leases"
     leases.mkdir(parents=True, exist_ok=True)
@@ -176,6 +188,20 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert lock.is_dir() and stat.S_IMODE((lock / "acquired_at").stat().st_mode) == 0
     shutil.rmtree(lock)
     print("PASS: unreadable-mode partial metadata remains fail-closed")
+
+    for fifo_name in ("pid", "acquired_at"):
+        fifo_state = Path(temp) / f"fifo-{fifo_name}"
+        fifo_state.mkdir()
+        os.chmod(fifo_state, 0o755)
+        fifo_lock = make_partial_lock(fifo_state, 2147483647)
+        fifo_path = fifo_lock / fifo_name
+        fifo_path.unlink()
+        os.mkfifo(fifo_path, 0o644)
+        run_bounded(fifo_state, 1, "--registry")
+        assert fifo_lock.is_dir() and stat.S_ISFIFO(fifo_path.stat().st_mode)
+        run_bounded(fifo_state, 1, "--registry")
+        shutil.rmtree(fifo_lock)
+    print("PASS: FIFO metadata in both names is rejected without blocking or holding the guard")
 
     lock = make_partial_lock(state, 2147483647)
     (lock / "acquired_at").unlink()
@@ -343,6 +369,45 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text())["outcome"] == "deferred_identity_changed"
     print("PASS: pid reused between liveness probes is preserved and recovery is deferred")
+
+    for label, mutate in (
+        ("changed-content", lambda fd: os.write(
+            os.open("acquired_at", os.O_WRONLY | os.O_TRUNC, dir_fd=fd), b"1\n"
+        )),
+        ("unsafe-mode", lambda fd: os.chmod("acquired_at", 0, dir_fd=fd, follow_symlinks=False)),
+    ):
+        post_move_state = Path(temp) / f"post-move-{label}"
+        post_move_state.mkdir()
+        os.chmod(post_move_state, 0o755)
+        post_move_lock = make_partial_lock(post_move_state, 2147483647)
+        os.utime(post_move_lock, (old, old))
+        original_after_rename = MODULE.after_quarantine_rename
+
+        def mutate_after_rename(quarantine_fd: int, name: str, mutate=mutate) -> None:
+            moved_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=quarantine_fd)
+            try:
+                mutate(moved_fd)
+            finally:
+                os.close(moved_fd)
+
+        MODULE.after_quarantine_rename = mutate_after_rename
+        original_state = os.environ.get("DISK_MAGICIAN_STATE_DIR")
+        os.environ["DISK_MAGICIAN_STATE_DIR"] = str(post_move_state)
+        try:
+            assert MODULE.main(["--registry"]) == 1
+        finally:
+            MODULE.after_quarantine_rename = original_after_rename
+            if original_state is None:
+                os.environ.pop("DISK_MAGICIAN_STATE_DIR", None)
+            else:
+                os.environ["DISK_MAGICIAN_STATE_DIR"] = original_state
+        assert not post_move_lock.exists()
+        receipts = list((post_move_state / "quarantine" / "lease-locks").glob("*.receipt.json"))
+        assert len(receipts) == 1
+        anomaly = json.loads(receipts[0].read_text())
+        assert anomaly["outcome"] == "quarantine_identity_anomaly"
+        assert anomaly["metadata"]["acquired_at"]["sha256"] == MODULE.hashlib.sha256(b"").hexdigest()
+    print("PASS: post-rename content and unsafe-mode mutations retain anomaly receipts without rollback")
 
     lock = state / "worktree_leases" / ".owner-mutation.reuse-lock"
     target = state / "other"

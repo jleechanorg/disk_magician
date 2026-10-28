@@ -114,7 +114,12 @@ def open_owned_directory(parent_fd: int, name: str, label: str, mode: int | None
 
 
 def read_metadata(lock_fd: int, name: str) -> tuple[os.stat_result, bytes]:
-    flags = os.O_RDONLY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    initial = os.stat(name, dir_fd=lock_fd, follow_symlinks=False)
+    if (not stat.S_ISREG(initial.st_mode) or initial.st_uid != os.geteuid() or
+            stat.S_IMODE(initial.st_mode) != METADATA_MODE or initial.st_nlink != 1 or
+            initial.st_size > 64):
+        raise ValueError(f"registry lock metadata {name} has unsafe type, owner, mode, links, or size")
     fd = os.open(name, flags, dir_fd=lock_fd)
     try:
         info = os.fstat(fd)
@@ -194,6 +199,10 @@ def path_entry_absent(dir_fd: int, name: str) -> bool:
 
 
 def before_revalidate() -> None:
+    """Test seam; production intentionally has no intervening mutation."""
+
+
+def after_quarantine_rename(quarantine_fd: int, name: str) -> None:
     """Test seam; production intentionally has no intervening mutation."""
 
 
@@ -313,11 +322,19 @@ def main(argv: list[str]) -> int:
             create_pending_receipt(quarantine_fd, pending_name, receipt_name, record)
             return fail("quarantine destination already exists; deferred with receipt")
         os.rename(LOCK_NAME, quarantined_name, src_dir_fd=leases_fd, dst_dir_fd=quarantine_fd)
-        moved_fd, moved = open_owned_directory(quarantine_fd, quarantined_name, "quarantined registry lock", LOCK_MODE)
+        after_quarantine_rename(quarantine_fd, quarantined_name)
+        moved_fd = None
         try:
+            moved_fd, moved = open_owned_directory(quarantine_fd, quarantined_name, "quarantined registry lock", LOCK_MODE)
             preserved = rename_identity(moved) == rename_identity(info) and lock_snapshot(moved_fd) == snapshot
+        except (OSError, ValueError) as exc:
+            record["outcome"] = "quarantine_identity_anomaly"
+            record["error"] = str(exc)
+            create_pending_receipt(quarantine_fd, pending_name, receipt_name, record)
+            return fail(f"quarantined lock validation failed; retained anomaly receipt: {exc}")
         finally:
-            os.close(moved_fd)
+            if moved_fd is not None:
+                os.close(moved_fd)
         if not preserved:
             record["outcome"] = "quarantine_identity_anomaly"
             create_pending_receipt(quarantine_fd, pending_name, receipt_name, record)
