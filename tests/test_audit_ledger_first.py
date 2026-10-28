@@ -217,7 +217,7 @@ class AuditLedgerFirst(unittest.TestCase):
         self.assertEqual(2, replace.call_count)
         self.assertEqual(self.state / reclaim_ledger.JSON_REL, calls[1][1])
         self.assertEqual('new complete report', ledger.read_text())
-        self.assertEqual(list(ledger.parent.iterdir()), [ledger, self.state / reclaim_ledger.JSON_REL])
+        self.assertEqual(sorted(path.name for path in ledger.parent.iterdir()), sorted([ledger.name, Path(reclaim_ledger.JSON_REL).name]))
 
     def actual_render(self):
         args = SimpleNamespace(home=str(self.home), days=7,
