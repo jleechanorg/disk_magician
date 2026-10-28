@@ -43,6 +43,15 @@ assert_eq "$OUT_PKG" "$T/active" "packaged CLI scratch-dir returns active volume
 OUT_ADAPTER="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$ADAPTER" adapter-subpath)"
 assert_eq "$OUT_ADAPTER" "adapter-cli:adapter-subpath" "skill adapter delegates to canonical CLI"
 
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/diskm" <<'EOF'
+#!/usr/bin/env bash
+printf 'home-fallback:%s\n' "${2:-}"
+EOF
+chmod +x "$HOME/.local/bin/diskm"
+OUT_ADAPTER_HOME="$(env -u DISK_MAGICIAN_DISKM_BIN PATH=/usr/bin:/bin HOME="$HOME" bash "$ADAPTER" home-subpath)"
+assert_eq "$OUT_ADAPTER_HOME" "home-fallback:home-subpath" "skill adapter uses user-local CLI fallback"
+
 echo "== 2. Subpath creation (scratch-dir tmp) =="
 OUT="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir tmp)"
 RC=$?
