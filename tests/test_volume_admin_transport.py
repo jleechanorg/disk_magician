@@ -565,6 +565,76 @@ def test_native_service_unit_matches_backend_specific_rendering(tmp_path):
     assert volume.linux_service_matches_fuse_unit(fuse, runtime, config, state)
 
 
+def _native_config_sync_fixture(tmp_path):
+    home = tmp_path
+    service_config = home / ".config/disk-magician/linux-scratch.json"
+    global_config = home / ".config/disk-magician/config.json"
+    state = home / ".disk_magician_state"
+    image = home / ".local/share/disk-magician/volumes/scratch.ext4"
+    mountpoint = home / "Scratch"
+    service_config.parent.mkdir(parents=True)
+    state.mkdir()
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fixture")
+    scratch = {"name": "diskm-scratch", "mountpoint": str(mountpoint),
+               "image_path": str(image), "quota_gb": 2, "backend": "native"}
+    service_config.write_text(json.dumps({"volumes": {"classes": {"scratch": scratch}}}))
+    global_doc = {"volumes": {"classes": {"scratch": {k: v for k, v in scratch.items()
+                                                           if k != "backend"}}},
+                  "unrelated": {"preserve": True}}
+    global_config.write_text(json.dumps(global_doc))
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+             "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+    return home, service_config, global_config, state, image, mountpoint, scratch, entry
+
+
+def test_native_service_sync_config_preserves_unrelated_keys_and_is_idempotent(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    old = global_config.read_bytes()
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        assert volume.main(args) == 0
+        synced = json.loads(global_config.read_text())
+        assert synced["volumes"]["classes"]["scratch"]["backend"] == "native"
+        assert synced["unrelated"] == {"preserve": True}
+        assert global_config.with_name("config.json.pre-native").read_bytes() == old
+        assert volume.main(args) == 0
+    assert json.loads(global_config.read_text())["volumes"]["classes"]["scratch"]["backend"] == "native"
+
+
+def test_native_service_sync_config_rejects_identity_mismatch_and_symlink(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    document = json.loads(global_config.read_text())
+    document["volumes"]["classes"]["scratch"]["image_path"] = str(tmp_path / "other.ext4")
+    global_config.write_text(json.dumps(document))
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        assert volume.main(args) == 75
+        global_config.unlink()
+        global_config.symlink_to(home / "missing-config.json")
+        assert volume.main(args) == 75
+
+
 def test_docker_migration_requires_digest_before_any_service_stop():
     with mock.patch.object(volume, "linux_command") as command:
         assert volume.linux_service_migrate_cmd([

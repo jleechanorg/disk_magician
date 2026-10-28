@@ -2259,6 +2259,93 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
         return 75
 
 
+def linux_service_sync_config_cmd(arguments: list[str]) -> int:
+    """Idempotently align the winning config with verified native Scratch."""
+    backup = None
+    try:
+        if len(arguments) < 1 or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        execute = False
+        index = 1
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if not execute or set(values) != {"--config", "--state-dir", "--user-uid"}:
+            return 2
+        user_uid = int(values["--user-uid"])
+        if os.geteuid() != user_uid:
+            return 75
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"],
+                                          values["--user-uid"], None)
+        if safe is None:
+            return 75
+        service_config, state, image, mountpoint = safe
+        settings, scratch = cls("scratch", service_config)
+        entry = registry(state)["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active"
+                or scratch.get("backend") != "native"
+                or entry.get("image_path") != str(image)
+                or entry.get("mountpoint") != str(mountpoint)):
+            return 75
+        linux_validate_native_mount(settings, scratch, entry)
+
+        home = Path(pwd.getpwuid(user_uid).pw_dir)
+        global_config = home / ".config/disk-magician/config.json"
+        if (global_config.is_symlink() or not global_config.is_file()
+                or global_config.stat().st_uid != user_uid
+                or not linux_path_components_owned(global_config.parent, user_uid)):
+            return 75
+        old = global_config.read_bytes()
+        document = json.loads(old)
+        volumes = document.get("volumes")
+        classes = volumes.get("classes") if isinstance(volumes, dict) else None
+        global_scratch = classes.get("scratch") if isinstance(classes, dict) else None
+        if not isinstance(global_scratch, dict):
+            return 75
+        for key in ("name", "mountpoint", "image_path", "quota_gb"):
+            if global_scratch.get(key) != scratch.get(key):
+                return 75
+        backend = global_scratch.get("backend")
+        if backend not in {None, "fuse", "native"}:
+            return 75
+        if backend == "native":
+            return 0
+
+        backup = global_config.with_name(global_config.name + ".pre-native")
+        if backup.is_symlink():
+            return 75
+        if backup.exists():
+            if (not backup.is_file() or backup.stat().st_uid != user_uid
+                    or backup.read_bytes() != old):
+                return 75
+        else:
+            descriptor = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                                 os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(old)
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        global_scratch["backend"] = "native"
+        new = (json.dumps(document, indent=2) + "\n").encode()
+        details = global_config.stat()
+        linux_atomic_bytes(global_config, new, details)
+        readback = json.loads(global_config.read_text())
+        if readback != document or readback["volumes"]["classes"]["scratch"].get("backend") != "native":
+            raise RuntimeError("native Scratch config read-back mismatch")
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError):
+        return 75
+
+
 def linux_fsck_cmd(arguments: list[str]) -> int:
     """Run a separately gated read-only or explicitly requested preen check."""
     try:
@@ -2825,6 +2912,8 @@ def main(argv: list[str] | None = None) -> int:
         if (arguments[:2] == ["service", "stop"] or arguments[:2] == ["service", "start"]):
             return (linux_service_control_cmd([arguments[1], *arguments[2:]])
                     if sys.platform.startswith("linux") else 2)
+        if arguments[:2] == ["service", "sync-config"] and sys.platform.startswith("linux"):
+            return linux_service_sync_config_cmd(arguments[2:])
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
                 print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
