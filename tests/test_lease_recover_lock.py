@@ -17,7 +17,6 @@ import importlib.util
 
 ROOT = Path(__file__).resolve().parent.parent
 CLI = ["bash", str(ROOT / "disk_magician.sh"), "lease-recover-lock"]
-PACKAGED_CLI = ["bash", str(ROOT / "src/disk_magician/disk_magician.sh"), "lease-recover-lock"]
 SPEC = importlib.util.spec_from_file_location("lease_recover_lock", ROOT / "scripts/lease_recover_lock.py")
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -58,6 +57,14 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     state = Path(temp) / "state"
     state.mkdir()
     os.chmod(state, 0o755)
+    packaged_root = Path(temp) / "packaged"
+    subprocess.run(
+        ["bash", str(ROOT / "scripts/sync_package_tree.sh"), "--stage", str(packaged_root)],
+        check=True,
+        text=True,
+    )
+    PACKAGED_CLI = ["bash", str(packaged_root / "disk_magician.sh"), "lease-recover-lock"]
+    assert (packaged_root / "disk_magician.sh").is_file()
 
     assert run(state, 2, "--bad").stderr.startswith("lease-recover-lock: usage:")
     print("PASS: invalid command shape is rejected")
