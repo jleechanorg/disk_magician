@@ -188,6 +188,20 @@ def test_admin_view_rejects_pid_or_mount_equivalence_mismatch():
             raise AssertionError("mismatched privileged PID view was accepted")
 
 
+def test_host_tuple_probe_json_roundtrip_matches_docker_view(tmp_path):
+    image = tmp_path / "scratch.ext4"
+    mountpoint = tmp_path / "Scratch"
+    with (
+        mock.patch.object(volume, "linux_fuser_pid_set", side_effect=[{17}, {17}]),
+        mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", "/dev/loop7")),
+        mock.patch.object(volume, "linux_loop_devices", return_value=[Path("/dev/loop7")]),
+    ):
+        host = volume.linux_host_fstab_probe(image, mountpoint)
+    privileged = json.loads(json.dumps(host))
+    volume.linux_assert_admin_view(host, privileged)
+    assert host["mount"] == ["fuse.ext4", "/dev/loop7"]
+
+
 def test_fuser_unexpected_diagnostics_fail_closed():
     with mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(
         returncode=0, stdout=b" 2353264\n", stderr=b"warning 28\n")):

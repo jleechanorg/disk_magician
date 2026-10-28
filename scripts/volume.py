@@ -783,8 +783,11 @@ def linux_host_fstab_probe(image: Path, mountpoint: Path,
     readers = linux_fuser_pid_set(image, writers_only=False)
     if writers is None or readers is None:
         raise RuntimeError("Scratch image reader/writer probe is unknown")
+    mount = linux_mount_record(mountpoint)
     view = {
-        "mount": linux_mount_record(mountpoint),
+        # Docker's JSON transport materializes arrays as lists; normalize the
+        # host tuple at this boundary so strict host/admin comparison is type-stable.
+        "mount": list(mount) if mount is not None else None,
         "loop_devices": sorted(str(path) for path in linux_loop_devices(image)),
         "writer_pids": sorted(writers),
         "reader_pids": sorted(readers),
