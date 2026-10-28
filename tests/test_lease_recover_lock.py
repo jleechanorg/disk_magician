@@ -421,3 +421,88 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     run(state, 1, "--registry")
     assert lock.is_symlink()
     print("PASS: symlink lock remains fail-closed")
+
+    # The canonical writer publishes two fields after mkdir. A signal or failed
+    # metadata write in that window must remove only its newly acquired lock;
+    # caller signal handlers must still receive the signal.
+    writer_state = Path(temp) / "writer-setup-state"
+    writer_lease_dir = writer_state / "worktree_leases"
+    writer_lease_dir.mkdir(parents=True)
+    writer_lease = writer_lease_dir / "fixture.json"
+    writer_mark = Path(temp) / "caller-term-trap.txt"
+    writer_case = Path(temp) / "lease-writer-setup-case.sh"
+    writer_case.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+source "$LEASE_LIBRARY"
+mode="$1"
+lease="$2"
+case "$mode" in
+  normal)
+    trap ':' TERM
+    before="$(trap -p TERM)"
+    lease_reuse_lock_acquire "$lease"
+    after="$(trap -p TERM)"
+    [[ "$before" == "$after" ]]
+    lease_reuse_lock_release "$lease"
+    [[ ! -e "$lease.reuse-lock" ]]
+    ;;
+  write-fail)
+    printf() {
+      if [[ "${LEASE_TEST_FAIL_ACQUIRED_WRITE:-0}" == "1" && "$BASH_COMMAND" == *"acquired_at"* ]]; then
+        LEASE_TEST_FAIL_ACQUIRED_WRITE=0
+        return 1
+      fi
+      builtin printf "$@"
+    }
+    if lease_reuse_lock_acquire "$lease"; then exit 99; fi
+    [[ ! -e "$lease.reuse-lock" ]]
+    ;;
+  term)
+    trap 'builtin printf "TERM delivered\n" > "$LEASE_TEST_TRAP_MARK"; exit 42' TERM
+    LEASE_TEST_TARGET_PID="$$"
+    date() {
+      if [[ "${1:-}" == "+%s" ]]; then
+        builtin printf '1793220000\n'
+        kill -TERM "$LEASE_TEST_TARGET_PID"
+        return 0
+      fi
+      command date "$@"
+    }
+    lease_reuse_lock_acquire "$lease"
+    exit 99
+    ;;
+  *) exit 2 ;;
+esac
+''')
+    writer_env = {
+        **os.environ,
+        "DISK_MAGICIAN_STATE_DIR": str(writer_state),
+        "LEASE_LIBRARY": str(ROOT / "scripts/lib/worktree_lease.sh"),
+        "BASH_ENV": "",
+    }
+    normal_writer = subprocess.run(
+        ["bash", str(writer_case), "normal", str(writer_lease)],
+        env=writer_env, text=True, capture_output=True, check=False,
+    )
+    assert normal_writer.returncode == 0, (normal_writer.stdout, normal_writer.stderr)
+    assert not Path(str(writer_lease) + ".reuse-lock").exists()
+    print("PASS: normal setup/release leaves no lock and preserves the caller TERM trap")
+
+    write_error_env = {**writer_env, "LEASE_TEST_FAIL_ACQUIRED_WRITE": "1"}
+    write_error = subprocess.run(
+        ["bash", str(writer_case), "write-fail", str(writer_lease)],
+        env=write_error_env, text=True, capture_output=True, check=False,
+    )
+    assert write_error.returncode == 0, (write_error.stdout, write_error.stderr)
+    assert not Path(str(writer_lease) + ".reuse-lock").exists()
+    print("PASS: acquired_at write failure removes only the newly acquired lock")
+
+    interrupted_env = {**writer_env, "LEASE_TEST_TRAP_MARK": str(writer_mark)}
+    interrupted = subprocess.run(
+        ["bash", str(writer_case), "term", str(writer_lease)],
+        env=interrupted_env, text=True, capture_output=True, check=False,
+    )
+    assert interrupted.returncode == 42, (interrupted.returncode, interrupted.stdout, interrupted.stderr)
+    assert writer_mark.read_text() == "TERM delivered\n"
+    assert not Path(str(writer_lease) + ".reuse-lock").exists()
+    print("PASS: TERM between pid and acquired_at cleans the lock then runs the caller trap")

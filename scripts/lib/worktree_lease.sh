@@ -536,14 +536,104 @@ lease_reuse_lock_recover() {
     return 1
 }
 
-lease_reuse_lock_acquire() {
-    local lease="$1" lock="$1.reuse-lock"
-    if ! mkdir "$lock" 2>/dev/null; then
-        lease_reuse_lock_recover "$lease" || return 1
-        mkdir "$lock" 2>/dev/null || return 1
+_lease_reuse_lock_restore_setup_traps() {
+    local old_hup="$1" old_int="$2" old_term="$3"
+    if [[ -n "$old_hup" ]]; then eval "$old_hup"; else trap - HUP; fi
+    if [[ -n "$old_int" ]]; then eval "$old_int"; else trap - INT; fi
+    if [[ -n "$old_term" ]]; then eval "$old_term"; else trap - TERM; fi
+}
+
+_lease_reuse_lock_setup_abort() {
+    local lease="$1" signal="$2" old_hup="$3" old_int="$4" old_term="$5"
+    if [[ "${__lease_reuse_lock_setup_owned:-0}" == "1" ]]; then
+        lease_reuse_lock_release "$lease" || true
+        __lease_reuse_lock_setup_owned=0
     fi
-    echo "$$" > "$lock/pid" 2>/dev/null || true
-    date +%s > "$lock/acquired_at" 2>/dev/null || true
+    _lease_reuse_lock_restore_setup_traps "$old_hup" "$old_int" "$old_term"
+    [[ -n "$signal" ]] && kill -s "$signal" "$$"
+    return 1
+}
+
+_lease_reuse_lock_trap_is_ignored() {
+    local signal="$1" saved="$2"
+    case "$signal:$saved" in
+        HUP:"trap -- '' HUP"|HUP:"trap -- '' SIGHUP"|\
+        INT:"trap -- '' INT"|INT:"trap -- '' SIGINT"|\
+        TERM:"trap -- '' TERM"|TERM:"trap -- '' SIGTERM") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+lease_reuse_lock_acquire() {
+    local lease="$1" lock="$1.reuse-lock" old_hup old_int old_term setup_signal attempt
+    local __lease_reuse_lock_setup_owned=0
+    for attempt in 0 1; do
+        setup_signal=""
+        old_hup="$(trap -p HUP)"
+        old_int="$(trap -p INT)"
+        old_term="$(trap -p TERM)"
+        if ! _lease_reuse_lock_trap_is_ignored HUP "$old_hup"; then
+            trap '__lease_reuse_lock_setup_signal=${__lease_reuse_lock_setup_signal:-HUP}' HUP
+        fi
+        if ! _lease_reuse_lock_trap_is_ignored INT "$old_int"; then
+            trap '__lease_reuse_lock_setup_signal=${__lease_reuse_lock_setup_signal:-INT}' INT
+        fi
+        if ! _lease_reuse_lock_trap_is_ignored TERM "$old_term"; then
+            trap '__lease_reuse_lock_setup_signal=${__lease_reuse_lock_setup_signal:-TERM}' TERM
+        fi
+
+        # Defer cleanup until mkdir's status is known: a signal during mkdir
+        # must not remove a lock won by another writer.
+        if mkdir "$lock" 2>/dev/null; then
+            __lease_reuse_lock_setup_owned=1
+            break
+        fi
+        setup_signal="${__lease_reuse_lock_setup_signal:-}"
+        _lease_reuse_lock_restore_setup_traps "$old_hup" "$old_int" "$old_term"
+        if [[ -n "$setup_signal" ]]; then
+            kill -s "$setup_signal" "$$"
+            return 1
+        fi
+        (( attempt == 0 )) || return 1
+        lease_reuse_lock_recover "$lease" || return 1
+    done
+
+    setup_signal="${__lease_reuse_lock_setup_signal:-}"
+    [[ -n "$setup_signal" ]] &&
+        { _lease_reuse_lock_setup_abort "$lease" "$setup_signal" "$old_hup" "$old_int" "$old_term"; return 1; }
+    if ! printf '%s\n' "$$" > "$lock/pid" 2>/dev/null; then
+        _lease_reuse_lock_setup_abort "$lease" "${__lease_reuse_lock_setup_signal:-}" "$old_hup" "$old_int" "$old_term" || true
+        return 1
+    fi
+    setup_signal="${__lease_reuse_lock_setup_signal:-}"
+    [[ -n "$setup_signal" ]] &&
+        { _lease_reuse_lock_setup_abort "$lease" "$setup_signal" "$old_hup" "$old_int" "$old_term"; return 1; }
+
+    local stamp
+    if ! stamp="$(date +%s 2>/dev/null)" || [[ ! "$stamp" =~ ^[0-9]+$ ]]; then
+        _lease_reuse_lock_setup_abort "$lease" "${__lease_reuse_lock_setup_signal:-}" "$old_hup" "$old_int" "$old_term" || true
+        return 1
+    fi
+    setup_signal="${__lease_reuse_lock_setup_signal:-}"
+    [[ -n "$setup_signal" ]] &&
+        { _lease_reuse_lock_setup_abort "$lease" "$setup_signal" "$old_hup" "$old_int" "$old_term"; return 1; }
+    if ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then
+        _lease_reuse_lock_setup_abort "$lease" "${__lease_reuse_lock_setup_signal:-}" "$old_hup" "$old_int" "$old_term" || true
+        return 1
+    fi
+    setup_signal="${__lease_reuse_lock_setup_signal:-}"
+    if [[ -n "$setup_signal" ]]; then
+        _lease_reuse_lock_setup_abort "$lease" "$setup_signal" "$old_hup" "$old_int" "$old_term"
+        return 1
+    fi
+
+    # Once both metadata files exist, later interruptions use caller traps
+    # and the existing dead-PID/TTL recovery rules.
+    __lease_reuse_lock_setup_owned=0
+    _lease_reuse_lock_restore_setup_traps "$old_hup" "$old_int" "$old_term"
+    setup_signal="${__lease_reuse_lock_setup_signal:-}"
+    [[ -n "$setup_signal" ]] && kill -s "$setup_signal" "$$"
+    return 0
 }
 lease_reuse_lock_release() {
     rm -f "$1.reuse-lock/pid" "$1.reuse-lock/acquired_at" 2>/dev/null

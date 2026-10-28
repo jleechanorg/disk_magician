@@ -1,3 +1,3 @@
 """Disk Magician package."""
 
-__version__ = "0.2.328"
+__version__ = "0.2.329"
