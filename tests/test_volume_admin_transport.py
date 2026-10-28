@@ -46,6 +46,17 @@ def test_docker_helper_argv_is_fixed_and_narrow(tmp_path):
     assert "--execute" in joined
 
 
+def test_docker_probe_keeps_host_etc_read_only(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "disk_magician.sh").write_text("#!/bin/sh\n")
+    argv = volume.linux_docker_helper_argv(
+        "/usr/bin/docker", "sha256:" + "a" * 64, runtime, "probe",
+        Path("/c"), Path("/s"), "1000", "b" * 64,
+    )
+    assert "type=bind,src=/etc,dst=/host/etc" not in argv
+
+
 def test_docker_transport_rejects_rootless_daemon():
     socket_stat = mock.Mock(st_mode=stat.S_IFSOCK, st_uid=0)
     info = json.dumps({"Rootless": True, "DockerRootDir": "/var/lib/docker",
@@ -265,7 +276,7 @@ def test_fsck_repair_uses_persistent_undo_and_exclusive_receipt(tmp_path):
     assert json.loads(output.getvalue())["undo_path"].endswith(".e2fsck-undo")
 
 
-def test_fsck_repair_stops_only_matching_user_service_and_restores_it(tmp_path):
+def test_fsck_repair_requires_service_already_stopped(tmp_path):
     image = tmp_path / "scratch.ext4"
     mountpoint = tmp_path / "Scratch"
     image.write_bytes(b"fixture")
@@ -312,11 +323,56 @@ def test_fsck_repair_stops_only_matching_user_service_and_restores_it(tmp_path):
         mock.patch.object(volume.Path, "home", return_value=tmp_path),
     ):
         assert volume.main(["fsck", "scratch", "--config", "/c", "--state-dir", "/s",
-                            "--user-uid", str(uid), "--repair", "--execute"]) == 0
-    assert service_calls == [
-        ["systemctl", "--user", "stop", "diskm-scratch.service"],
-        ["systemctl", "--user", "start", "diskm-scratch.service"],
-    ]
+                            "--user-uid", str(uid), "--repair", "--execute"]) == 75
+    assert service_calls == []
+
+
+def test_fstab_runtime_hash_is_checked_by_real_parser(tmp_path):
+    digest = hashlib.sha256(Path(volume.__file__).read_bytes()).hexdigest()
+    view = {"mount": None, "loop_devices": [], "writer_pids": [17], "reader_pids": [17],
+            "image": "/image", "mountpoint": "/mount", "runtime_sha256": digest}
+    output = io.StringIO()
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(Path("/c"), Path("/s"), Path("/i"), Path("/m"))),
+        mock.patch.object(volume, "linux_host_fstab_probe", return_value=view),
+        contextlib.redirect_stdout(output),
+    ):
+        assert volume.linux_fstab_cmd("probe", ["scratch", "--config", "/c", "--state-dir", "/s",
+                                                  "--user-uid", "1000", "--runtime-sha256", digest]) == 0
+        assert volume.linux_fstab_cmd("probe", ["scratch", "--config", "/c", "--state-dir", "/s",
+                                                  "--user-uid", "1000", "--runtime-sha256", "0" * 64]) == 75
+
+
+def test_service_stop_requires_exact_unit_and_explicit_execute(tmp_path):
+    config = tmp_path / "linux-scratch.json"
+    state = tmp_path / "state"
+    image = tmp_path / "scratch.ext4"
+    mountpoint = tmp_path / "Scratch"
+    unit = tmp_path / ".config/systemd/user/diskm-scratch.service"
+    state.mkdir()
+    image.write_bytes(b"fixture")
+    mountpoint.mkdir()
+    unit.parent.mkdir(parents=True)
+    unit.write_text("verified")
+    scratch = {"image_path": str(image), "mountpoint": str(mountpoint), "quota_gb": 1}
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint)}
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_mount"),
+        mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
+        mock.patch.object(volume.Path, "home", return_value=tmp_path),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
+        mock.patch.object(volume, "linux_command") as command,
+    ):
+        args = ["service", "stop", "scratch", "--config", str(config), "--state-dir", str(state),
+                "--user-uid", str(os.getuid()), "--execute"]
+        assert volume.main(args) == 0
+        command.assert_called_once_with(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
 
 
 def test_docker_migration_requires_digest_before_any_service_stop():

@@ -1318,13 +1318,17 @@ def linux_docker_helper_argv(
         "exec chroot /host /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "
         f"/usr/bin/bash {shlex.quote(helper)} {quoted}"
     )
+    mounts = [
+        "--mount", "type=bind,src=/,dst=/host,readonly",
+        "--mount", "type=bind,src=/proc,dst=/host/proc,readonly",
+        "--mount", "type=bind,src=/sys,dst=/host/sys,readonly",
+    ]
+    if action in {"install", "remove"}:
+        mounts[2:2] = ["--mount", "type=bind,src=/etc,dst=/host/etc"]
     return [
         docker, "--host", "unix:///var/run/docker.sock", "run", "--rm", "--pull", "never",
         "--network", "none", *DOCKER_TRANSPORT_FLAGS, "--read-only",
-        "--mount", "type=bind,src=/,dst=/host,readonly",
-        "--mount", "type=bind,src=/etc,dst=/host/etc",
-        "--mount", "type=bind,src=/proc,dst=/host/proc,readonly",
-        "--mount", "type=bind,src=/sys,dst=/host/sys,readonly",
+        *mounts,
         "--entrypoint", "/bin/sh", image_id, "-c", command,
     ]
 
@@ -2040,7 +2044,8 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             else:
                 return 2
         required = {"--config", "--user-uid"}
-        if not required.issubset(values) or set(values) - required - {"--state-dir", "--fixture-root"}:
+        if (not required.issubset(values)
+                or set(values) - required - {"--state-dir", "--fixture-root", "--runtime-sha256"}):
             return 2
         if "--state-dir" not in values:
             if "--fixture-root" in values:
@@ -2111,9 +2116,71 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             os.close(lock_fd)
 
 
+def linux_service_control_cmd(arguments: list[str]) -> int:
+    """Explicitly stop/start only the verified Scratch user service unit."""
+    try:
+        if len(arguments) < 2 or arguments[0] not in {"stop", "start"} or arguments[1] != "scratch":
+            return 2
+        action = arguments[0]
+        values: dict[str, str] = {}
+        execute = False
+        index = 2
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if not execute or set(values) != {"--config", "--state-dir", "--user-uid"}:
+            return 2
+        user_uid = int(values["--user-uid"])
+        if os.geteuid() != user_uid:
+            return 75
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"],
+                                          values["--user-uid"], None)
+        if safe is None:
+            return 75
+        config_path, state, image, mountpoint = safe
+        settings, scratch = cls("scratch", config_path)
+        entry = registry(state)["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active"
+                or entry.get("image_path") != str(image)
+                or entry.get("mountpoint") != str(mountpoint)):
+            return 75
+        linux_validate_mount(settings, scratch, entry)
+        unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
+        runtime = Path(__file__).resolve().parent.parent
+        if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
+                or not linux_service_matches_fuse_unit(unit.read_bytes(), runtime,
+                                                        str(config_path), state)):
+            return 75
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
+            capture_output=True, timeout=15, check=False,
+        )
+        if active.returncode not in {0, 3}:
+            return 75
+        if action == "stop":
+            if active.returncode != 0:
+                return 75
+            linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
+            return 0
+        if active.returncode == 0:
+            return 0
+        linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
+        linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
+        linux_validate_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return 75
+
+
 def linux_fsck_cmd(arguments: list[str]) -> int:
     """Run a separately gated read-only or explicitly requested preen check."""
-    service_stopped = False
     try:
         if not arguments or arguments[0] != "scratch":
             return 2
@@ -2158,20 +2225,8 @@ def linux_fsck_cmd(arguments: list[str]) -> int:
             ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
             capture_output=True, timeout=15, check=False,
         )
-        if active.returncode == 0:
-            if not repair:
-                return 75
-            unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
-            runtime = Path(__file__).resolve().parent.parent
-            if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
-                    or not linux_service_matches_fuse_unit(unit.read_bytes(), runtime,
-                                                            str(config_path), state)):
-                return 75
-            linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
-            service_stopped = True
         if active.returncode != 3:
-            if not service_stopped:
-                return 75
+            return 75
         if linux_mount_record(mountpoint) is not None or linux_loop_devices(image):
             return 75
         readers = linux_fuser_pid_set(image, writers_only=False)
@@ -2257,14 +2312,6 @@ def linux_fsck_cmd(arguments: list[str]) -> int:
         return result.returncode
     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
         return 75
-    finally:
-        if service_stopped:
-            try:
-                linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
-            except Exception:
-                # The repair result is already emitted when possible; a failed
-                # restart remains a fail-closed operational outcome.
-                pass
 
 def darwin_mount_cmd(name: str) -> int:
     if sys.platform != "darwin":
@@ -2695,6 +2742,9 @@ def main(argv: list[str] | None = None) -> int:
             return linux_fstab_cmd(arguments[1], arguments[2:])
         if arguments[:1] == ["fsck"] and sys.platform.startswith("linux"):
             return linux_fsck_cmd(arguments[1:])
+        if (arguments[:2] == ["service", "stop"] or arguments[:2] == ["service", "start"]):
+            return (linux_service_control_cmd([arguments[1], *arguments[2:]])
+                    if sys.platform.startswith("linux") else 2)
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
                 print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
