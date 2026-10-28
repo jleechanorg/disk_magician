@@ -64,6 +64,7 @@ jobs:
           tests/test_directory_ledger_export.py
           tests/test_inventory_history_import.py
           tests/test_inventory_retention_cli.py
+          tests/test_volume_admin_transport.py
 
       - name: Run shell tests
         run: bash ./disk_magician.sh test-shell
