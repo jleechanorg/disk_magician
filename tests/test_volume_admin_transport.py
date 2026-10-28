@@ -51,7 +51,7 @@ def test_docker_helper_argv_is_fixed_and_narrow(tmp_path):
     assert "--privileged" not in argv
     assert "/usr/bin/bash" not in " ".join(argv)
     assert "exec chroot /host" not in " ".join(argv)
-    assert ["--entrypoint", "/usr/bin/chroot"] == argv[argv.index("--entrypoint"):argv.index("--entrypoint") + 2]
+    assert ["--entrypoint", "/usr/sbin/chroot"] == argv[argv.index("--entrypoint"):argv.index("--entrypoint") + 2]
     assert "/usr/bin/python3" in argv
     compile(argv[-1], "<fixed-admin-bootstrap>", "exec")
     assert '"volume","fstab","install","scratch"' in joined

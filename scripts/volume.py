@@ -1353,7 +1353,7 @@ def linux_docker_helper_argv(
         "--network", "none", *DOCKER_TRANSPORT_FLAGS, "--read-only",
         *mounts,
         "--tmpfs", "/host/tmp:rw,size=64m,nosuid,nodev",
-        "--entrypoint", "/usr/bin/chroot", image_id, "/host", "/usr/bin/python3", "-c", bootstrap,
+        "--entrypoint", "/usr/sbin/chroot", image_id, "/host", "/usr/bin/python3", "-c", bootstrap,
     ]
 
 
