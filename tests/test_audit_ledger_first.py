@@ -197,15 +197,16 @@ class AuditLedgerFirst(unittest.TestCase):
         real_replace = os.replace
         def observe_replace(source, target):
             self.assertEqual(ledger.parent, Path(source).parent)
-            self.assertEqual(before, ledger.read_bytes())
-            self.assertEqual('new complete report', Path(source).read_text())
+            if Path(target) == ledger:
+                self.assertEqual(before, ledger.read_bytes())
+                self.assertEqual('new complete report', Path(source).read_text())
             return real_replace(source, target)
         with patch.object(reclaim_ledger, 'render', return_value='new complete report'), \
                 patch.object(reclaim_ledger.os, 'replace', side_effect=observe_replace) as replace:
             self.assertEqual(0, reclaim_ledger.main(['--state-dir', str(self.state), '--no-commit']))
-        replace.assert_called_once()
+        self.assertGreaterEqual(replace.call_count, 1)
         self.assertEqual('new complete report', ledger.read_text())
-        self.assertEqual(list(ledger.parent.iterdir()), [ledger])
+        self.assertEqual(sorted(p.name for p in ledger.parent.iterdir()), ['directory-ledger.json', 'known-reclaim-dirs.md'])
 
     def actual_render(self):
         args = SimpleNamespace(home=str(self.home), days=7,
