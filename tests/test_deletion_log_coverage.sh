@@ -20,8 +20,9 @@ T="$(mktemp -d /tmp/disk-magician-dlcov.XXXXXX)" || { echo "FATAL: no /tmp fixtu
 case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "FATAL: fixture not under /tmp: '$T'" >&2; exit 2 ;; esac
 T="$(cd "$T" && pwd -P)"
 trap 'chmod -R u+w "$T" 2>/dev/null; rm -rf -- "$T"' EXIT
+export HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state"
 export TMPDIR="$T/tmp" DM_ACTUATOR=fixture.sh DISK_MAGICIAN_DELETION_LOG="$T/del.log"
-mkdir -p "$TMPDIR"
+mkdir -p "$HOME" "$DISK_MAGICIAN_STATE_DIR" "$TMPDIR"
 
 lines() { if [[ -f "$DISK_MAGICIAN_DELETION_LOG" ]]; then wc -l <"$DISK_MAGICIAN_DELETION_LOG" | tr -d ' '; else echo 0; fi; }
 reset() { rm -f -- "$DISK_MAGICIAN_DELETION_LOG"; }

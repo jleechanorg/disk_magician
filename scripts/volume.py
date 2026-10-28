@@ -28,6 +28,12 @@ BALLAST_RECREATE_FREE_BYTES = 1088 * MIB
 DATA_MOUNTPOINT = "/System/Volumes/Data"
 REGISTRY_SCHEMA_VERSION = 1
 SUPPORTED_CLASSES = {"scratch"}
+DOCKER_SOCKET = Path("/var/run/docker.sock")
+DOCKER_TRANSPORT_FLAGS = (
+    "--pid", "host", "--security-opt", "apparmor=unconfined",
+    "--cap-drop", "ALL", "--cap-add", "SYS_CHROOT", "--cap-add", "DAC_OVERRIDE",
+    "--cap-add", "SYS_PTRACE",
+)
 
 
 @dataclass(frozen=True)
@@ -741,6 +747,96 @@ def linux_loop_devices(image: Path) -> list[Path]:
     return devices
 
 
+def linux_fuser_pid_set(image: Path, writers_only: bool = False) -> set[int] | None:
+    """Return a positively identified fuser PID set, or None when unknown."""
+    try:
+        argv = ["fuser"]
+        if writers_only:
+            argv.append("-w")
+        argv.append(str(image))
+        result = subprocess.run(argv, capture_output=True, timeout=10, check=False)
+        stdout = result.stdout.decode(errors="replace") if isinstance(result.stdout, bytes) else (result.stdout or "")
+        stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else (result.stderr or "")
+        # fuser's normal PID mode writes the path/diagnostics to stderr and
+        # the numeric PID list to stdout.  Never mine arbitrary diagnostics
+        # for digits: a warning or errno must make the observation unknown.
+        stderr = stderr.strip()
+        if stderr not in {"", f"{image}:"}:
+            return None
+        fields = stdout.split()
+        if any(not field.isdigit() for field in fields):
+            return None
+        pids = {int(field) for field in fields}
+        if result.returncode == 1:
+            return set() if not pids else None
+        if result.returncode != 0 or not pids:
+            return None
+        return pids
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def linux_host_fstab_probe(image: Path, mountpoint: Path,
+                           runtime_sha256: str | None = None) -> dict[str, Any]:
+    """Capture the host observations the privileged fstab helper must agree with."""
+    writers = linux_fuser_pid_set(image, writers_only=True)
+    readers = linux_fuser_pid_set(image, writers_only=False)
+    if writers is None or readers is None:
+        raise RuntimeError("Scratch image reader/writer probe is unknown")
+    mount = linux_mount_record(mountpoint)
+    view = {
+        # Docker's JSON transport materializes arrays as lists; normalize the
+        # host tuple at this boundary so strict host/admin comparison is type-stable.
+        "mount": list(mount) if mount is not None else None,
+        "loop_devices": sorted(str(path) for path in linux_loop_devices(image)),
+        "writer_pids": sorted(writers),
+        "reader_pids": sorted(readers),
+        "image": str(image),
+        "mountpoint": str(mountpoint),
+    }
+    if runtime_sha256 is not None:
+        view["runtime_sha256"] = runtime_sha256
+    return view
+
+
+def linux_validate_installed_runtime(runtime: Path, state: Path,
+                                     *, return_manifest: bool = False) -> str | dict[str, Any]:
+    """Require the helper to be the immutable package named by deployed.json."""
+    manifest_path = state / "deployed.json"
+    document = json.loads(manifest_path.read_text())
+    package_root_raw = document.get("package_root") if isinstance(document, dict) else None
+    hashes = document.get("package_hashes") if isinstance(document, dict) else None
+    if not isinstance(package_root_raw, str) or not isinstance(hashes, dict) or not hashes:
+        raise ValueError("deployed package manifest is unavailable")
+    package_root_arg = Path(package_root_raw)
+    runtime_arg = Path(runtime)
+    if package_root_arg.is_symlink() or runtime_arg.is_symlink():
+        raise ValueError("deployed package root may not be a symlink")
+    package_root = package_root_arg.resolve(strict=True)
+    runtime = runtime_arg.resolve(strict=True)
+    if runtime != package_root or (runtime / ".git").exists():
+        raise ValueError("runtime is not the deployed package root")
+    for relative, expected in hashes.items():
+        relative_path = Path(relative)
+        if (not isinstance(relative, str) or relative_path.is_absolute()
+                or ".." in relative_path.parts or not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise ValueError("deployed package manifest contains an unsafe entry")
+        candidate = package_root / relative_path
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError("deployed package contains an unsafe or missing file")
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if digest != expected:
+            raise ValueError("deployed package hash mismatch")
+    helper = package_root / "scripts" / "volume.py"
+    helper_hash = hashes.get("scripts/volume.py")
+    if not helper.is_file() or not isinstance(helper_hash, str):
+        raise ValueError("deployed volume helper is not pinned")
+    if return_manifest:
+        return {"package_root": str(package_root), "package_hashes": dict(hashes)}
+    return helper_hash
+
+
 def linux_validate_native_mount(settings: dict[str, Any], scratch: dict[str, Any], entry: Any) -> str:
     image, mountpoint = linux_paths(scratch)
     if not isinstance(entry, dict) or entry.get("state") != "active":
@@ -1168,6 +1264,151 @@ def linux_fstab_change_result(output: bytes | str | None) -> bool | None:
         return None
 
 
+def linux_docker_transport_info(image_id: str) -> tuple[str, dict[str, Any]]:
+    """Validate the fixed rootful Docker transport without pulling or mutating."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError("admin image id must be a full sha256 digest")
+    details = DOCKER_SOCKET.lstat()
+    if not stat.S_ISSOCK(details.st_mode) or details.st_uid != 0:
+        raise ValueError("rootful Docker socket identity is unsafe")
+    docker = shutil.which("docker")
+    if not docker:
+        raise ValueError("docker executable is unavailable")
+    host = "unix:///var/run/docker.sock"
+    result = subprocess.run(
+        [docker, "--host", host, "info", "--format", "{{json .}}"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "rootful Docker info failed")
+    try:
+        info = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("Docker info returned invalid JSON") from error
+    if not isinstance(info, dict) or info.get("Rootless") is True:
+        raise ValueError("Docker daemon is rootless")
+    if info.get("DockerRootDir") != "/var/lib/docker":
+        raise ValueError("Docker daemon root directory is not the fixed host root")
+    security = info.get("SecurityOptions") or []
+    if any("rootless" in str(item).lower() for item in security):
+        raise ValueError("Docker daemon advertises rootless security")
+    inspect = subprocess.run(
+        [docker, "--host", host, "image", "inspect", "--format", "{{.Id}}", image_id],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if inspect.returncode or inspect.stdout.strip() != image_id:
+        raise ValueError("pinned admin image is not locally available")
+    return docker, info
+
+
+def linux_docker_helper_argv(
+    docker: str, image_id: str, runtime: Path, action: str,
+    config_path: Path, state: Path, user_uid: str, runtime_sha256: str | None = None,
+    runtime_manifest: dict[str, Any] | None = None,
+) -> list[str]:
+    if action not in {"probe", "install", "remove"}:
+        raise ValueError("unsupported Docker fstab helper action")
+    if (runtime.is_symlink() or not runtime.is_dir()
+            or runtime_manifest is None or not isinstance(runtime_manifest.get("package_hashes"), dict)):
+        raise ValueError("installed canonical runtime is unavailable")
+    if runtime_manifest.get("package_root") != str(runtime.resolve()):
+        raise ValueError("runtime manifest root does not match helper root")
+    if runtime_sha256 is None or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256):
+        raise ValueError("runtime hash is required")
+    args = ["fstab", action, "scratch", "--config", str(config_path),
+            "--state-dir", str(state), "--user-uid", str(user_uid)]
+    args.extend(("--runtime-sha256", runtime_sha256))
+    if action in {"install", "remove"}:
+        args.append("--execute")
+    manifest = json.dumps(runtime_manifest, sort_keys=True, separators=(",", ":"))
+    args_json = json.dumps(args, separators=(",", ":"))
+    bootstrap = (
+        "import hashlib,json,os,runpy,shutil,stat,sys,tempfile\n"
+        "os.chdir('/')\n"
+        f"runtime={str(runtime)!r}; manifest=json.loads({manifest!r}); args=json.loads({args_json!r})\n"
+        "hashes=manifest.get('package_hashes')\n"
+        "if not isinstance(hashes,dict) or not hashes: raise SystemExit(75)\n"
+        "snapshot=tempfile.mkdtemp(prefix='.diskm-runtime-',dir='/tmp')\n"
+        "for rel,expected in hashes.items():\n"
+        " p=os.path.normpath(rel)\n"
+        " if not isinstance(rel,str) or p.startswith('/') or p=='..' or p.startswith('../'): raise SystemExit(75)\n"
+        " src=os.path.join(runtime,p); fd=os.open(src,os.O_RDONLY|os.O_NOFOLLOW); st=os.fstat(fd)\n"
+        " if not stat.S_ISREG(st.st_mode): os.close(fd); raise SystemExit(75)\n"
+        " with os.fdopen(fd,'rb') as inp: data=inp.read()\n"
+        " if hashlib.sha256(data).hexdigest()!=expected: raise SystemExit(75)\n"
+        " dst=os.path.join(snapshot,p); os.makedirs(os.path.dirname(dst),mode=0o700,exist_ok=True)\n"
+        " fd=os.open(dst,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)\n"
+        " with os.fdopen(fd,'wb') as out: out.write(data); out.flush(); os.fsync(out.fileno())\n"
+        "helper=os.path.join(snapshot,'scripts','volume.py')\n"
+        f"if hashlib.sha256(open(helper,'rb').read()).hexdigest()!={runtime_sha256!r}: raise SystemExit(75)\n"
+        "sys.path.insert(0,os.path.join(snapshot,'scripts')); sys.argv=['volume.py']+args\n"
+        "runpy.run_path(helper,run_name='__main__')\n"
+    )
+    mounts = [
+        "--mount", "type=bind,src=/,dst=/host,readonly",
+        "--mount", "type=bind,src=/proc,dst=/host/proc,readonly",
+        "--mount", "type=bind,src=/sys,dst=/host/sys,readonly",
+    ]
+    if action in {"install", "remove"}:
+        mounts[2:2] = ["--mount", "type=bind,src=/etc,dst=/host/etc"]
+    return [
+        docker, "--host", "unix:///var/run/docker.sock", "run", "--rm", "--pull", "never",
+        "--network", "none", *DOCKER_TRANSPORT_FLAGS, "--read-only",
+        *mounts,
+        "--tmpfs", "/host/tmp:rw,size=64m,nosuid,nodev",
+        "--entrypoint", "/usr/sbin/chroot", image_id, "/host", "/usr/bin/python3", "-c", bootstrap,
+    ]
+
+
+def linux_docker_fstab_command(
+    docker: str, image_id: str, runtime: Path, action: str,
+    config_path: Path, state: Path, user_uid: str, runtime_sha256: str | None = None,
+    runtime_manifest: dict[str, Any] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    argv = linux_docker_helper_argv(docker, image_id, runtime, action, config_path, state, user_uid,
+                                    runtime_sha256, runtime_manifest)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+
+
+def linux_docker_probe(
+    docker: str, image_id: str, runtime: Path, config_path: Path, state: Path, user_uid: str,
+    runtime_sha256: str | None = None, runtime_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = linux_docker_fstab_command(docker, image_id, runtime, "probe", config_path, state,
+                                        user_uid, runtime_sha256, runtime_manifest)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "Docker fstab probe failed")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("Docker fstab probe returned invalid JSON") from error
+    if not isinstance(value, dict) or value.get("probe") != "fstab":
+        raise ValueError("Docker fstab probe returned an invalid view")
+    return value
+
+
+def linux_assert_admin_view(host: dict[str, Any], privileged: dict[str, Any]) -> None:
+    keys = ("mount", "loop_devices", "writer_pids", "reader_pids", "image", "mountpoint")
+    if "runtime_sha256" in host or "runtime_sha256" in privileged:
+        keys += ("runtime_sha256",)
+    for view in (host, privileged):
+        if not isinstance(view, dict) or any(key not in view or view[key] is None for key in keys):
+            raise RuntimeError("admin transport view is incomplete")
+        for key in ("loop_devices", "writer_pids", "reader_pids"):
+            if (not isinstance(view[key], list) or
+                    not all(isinstance(item, (str, int)) and not isinstance(item, bool)
+                            for item in view[key])):
+                raise RuntimeError("admin transport PID/mount view has an invalid list")
+        if not isinstance(view["image"], str) or not isinstance(view["mountpoint"], str):
+            raise RuntimeError("admin transport path view is invalid")
+    for key in keys:
+        if host.get(key) != privileged.get(key):
+            raise RuntimeError("admin transport view differs from host for " + key)
+    writers = host.get("writer_pids")
+    if not isinstance(writers, list) or not writers:
+        raise RuntimeError("Scratch FUSE writer set is empty or unknown before stop")
+
+
 def linux_service_migrate_cmd(arguments: list[str]) -> int:
     config_path = unit = None
     state = image = mountpoint = None
@@ -1175,6 +1416,10 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
     config_stat = unit_stat = None
     fstab_install_attempted = False
     fstab_install_changed: bool | None = None
+    admin_transport = "sudo"
+    admin_image_id: str | None = None
+    docker = None
+    transaction_started = False
     try:
         if not arguments or arguments[0] != "scratch":
             return 2
@@ -1186,12 +1431,25 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
             if key == "--execute":
                 execute = True
                 index += 1
-            elif key in {"--backend", "--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+            elif key in {"--backend", "--config", "--state-dir", "--user-uid",
+                         "--admin-transport", "--admin-image-id"} and index + 1 < len(arguments):
                 values[key] = arguments[index + 1]
                 index += 2
             else:
                 return 2
-        if set(values) != {"--backend", "--config", "--state-dir", "--user-uid"} or not execute or values["--backend"] != "native":
+        required = {"--backend", "--config", "--state-dir", "--user-uid"}
+        if not required.issubset(values) or not execute or values["--backend"] != "native":
+            return 2
+        extra = set(values) - required
+        if extra - {"--admin-transport", "--admin-image-id"}:
+            return 2
+        admin_transport = values.get("--admin-transport", "sudo")
+        admin_image_id = values.get("--admin-image-id")
+        if admin_transport not in {"sudo", "docker"}:
+            return 2
+        if admin_transport == "docker" and admin_image_id is None:
+            return 2
+        if admin_transport == "sudo" and admin_image_id is not None:
             return 2
         allowed = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], None)
         if allowed is None or int(values["--user-uid"]) != os.geteuid():
@@ -1202,7 +1460,6 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         if (not isinstance(entry, dict) or entry.get("state") != "active" or
                 scratch.get("backend", "fuse") != "fuse"):
             return 75
-        linux_validate_mount(settings, scratch, entry)
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         if unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != os.geteuid():
             return 75
@@ -1217,19 +1474,39 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         runtime = Path(__file__).resolve().parent.parent
         if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
             return 75
+        runtime_sha256 = None
+        runtime_manifest = None
         if not linux_service_matches_fuse_unit(unit_bytes, runtime, str(config_path), state):
             return 75
+        if admin_transport == "docker":
+            runtime_manifest = linux_validate_installed_runtime(runtime, state, return_manifest=True)
+            runtime_sha256 = runtime_manifest["package_hashes"]["scripts/volume.py"]
+            docker, _ = linux_docker_transport_info(admin_image_id or "")
+            host_view = linux_host_fstab_probe(image, mountpoint, runtime_sha256)
+            privileged_view = linux_docker_probe(
+                docker, admin_image_id or "", runtime, config_path, state, values["--user-uid"],
+                runtime_sha256, runtime_manifest,
+            )
+            linux_assert_admin_view(host_view, privileged_view)
         systemctl = ["systemctl", "--user"]
+        transaction_started = True
         linux_command(systemctl + ["stop", "diskm-scratch.service"], 60)
         if (linux_mount_record(mountpoint) is not None or linux_image_has_loop_mapping(image) or
                 linux_image_has_open_writers(image)):
             raise RuntimeError("FUSE image remains mounted or open after stop")
-        root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
-                    "--config", str(config_path), "--state-dir", str(state),
-                    "--user-uid", values["--user-uid"], "--execute"]
         fstab_install_attempted = True
         try:
-            result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
+            if admin_transport == "docker":
+                result = linux_docker_fstab_command(
+                    docker, admin_image_id or "", runtime, "install", config_path, state,
+                    values["--user-uid"], runtime_sha256,
+                    runtime_manifest,
+                )
+            else:
+                root_cmd = ["bash", str(runtime / "disk_magician.sh"), "volume", "fstab", "install", "scratch",
+                            "--config", str(config_path), "--state-dir", str(state),
+                            "--user-uid", values["--user-uid"], "--execute"]
+                result = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True, timeout=45, check=False)
         except subprocess.TimeoutExpired as error:
             fstab_install_changed = linux_fstab_change_result(error.stdout or error.output)
             raise
@@ -1251,6 +1528,8 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         print("volume service migrate: " + str(error), file=sys.stderr)
         if config_path is None or unit is None or config_stat is None or unit_stat is None:
             return 75
+        if not transaction_started:
+            return 75
         stopped = True
         try:
             linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
@@ -1271,11 +1550,19 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
             if fstab_install_attempted and fstab_install_changed is None:
                 return 75
             if fstab_install_attempted and fstab_install_changed and not resources_busy:
-                root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
-                            "volume", "fstab", "remove", "scratch", "--config", str(config_path),
-                            "--state-dir", str(state), "--user-uid", str(os.geteuid()), "--allow-absent", "--execute"]
-                if subprocess.run(["sudo", "-n", *root_cmd], capture_output=True,
-                                   timeout=45, check=False).returncode:
+                if admin_transport == "docker":
+                    rollback = linux_docker_fstab_command(
+                        docker, admin_image_id or "", Path(__file__).resolve().parent.parent,
+                        "remove", config_path, state, str(os.geteuid()), runtime_sha256,
+                        runtime_manifest,
+                    )
+                else:
+                    root_cmd = ["bash", str(Path(__file__).resolve().parent.parent / "disk_magician.sh"),
+                                "volume", "fstab", "remove", "scratch", "--config", str(config_path),
+                                "--state-dir", str(state), "--user-uid", str(os.geteuid()), "--allow-absent", "--execute"]
+                    rollback = subprocess.run(["sudo", "-n", *root_cmd], capture_output=True,
+                                               timeout=45, check=False)
+                if rollback.returncode:
                     return 75
             if not stopped or resources_busy:
                 return 75
@@ -1515,7 +1802,8 @@ def linux_fixture_paths(config_path: str, state_path: str, user_uid: str,
 
 
 def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
-                             fixture_root: str | None) -> tuple[Path, Path, Path, Path] | None:
+                             fixture_root: str | None,
+                             *, probe_mounted: bool = False) -> tuple[Path, Path, Path, Path] | None:
     if fixture_root is not None:
         return linux_fixture_paths(config_path, state_path, user_uid, fixture_root)
     try:
@@ -1539,10 +1827,21 @@ def linux_fstab_allowed_paths(config_path: str, state_path: str, user_uid: str,
         mountpoint = Path(scratch["mountpoint"])
         if (image != home / ".local/share/disk-magician/volumes/scratch.ext4" or
                 mountpoint != home / "Scratch" or
-                not all(linux_path_components_owned(path, uid) for path in (image, mountpoint)) or
-                image.resolve(strict=True) != image or
-                mountpoint.resolve(strict=True) != mountpoint or image.stat().st_uid != uid or
-                mountpoint.stat().st_uid != uid or not image.is_file() or not mountpoint.is_dir()):
+                not linux_path_components_owned(image, uid) or
+                image.resolve(strict=True) != image or image.stat().st_uid != uid or
+                not image.is_file()):
+            return None
+        if probe_mounted:
+            # Docker-root FUSE probes cannot lstat the mounted leaf without
+            # allow_other.  Keep mutation paths strict, but prove this exact
+            # lexical mountpoint through owned parents and mountinfo instead.
+            if (not linux_path_components_owned(mountpoint.parent, uid)
+                    or mountpoint.parent != home
+                    or linux_mount_record(mountpoint) != ("fuse.ext4", str(image))):
+                return None
+        elif (not linux_path_components_owned(mountpoint, uid)
+              or mountpoint.resolve(strict=True) != mountpoint
+              or mountpoint.stat().st_uid != uid or not mountpoint.is_dir()):
             return None
         return config, state, image, mountpoint
     except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError, KeyError):
@@ -1760,17 +2059,8 @@ def linux_image_has_loop_mapping(image: Path) -> bool:
 
 
 def linux_image_has_open_writers(image: Path) -> bool:
-    try:
-        # PSmisc fuser on Linux treats `--` as an invalid option. The image
-        # path is always an absolute, validated path, so option termination is
-        # unnecessary here and would make the no-writer probe fail closed.
-        result = subprocess.run(["fuser", "-w", str(image)],
-                                capture_output=True, timeout=10, check=False)
-        if result.returncode == 1 and not result.stdout and not result.stderr:
-            return False
-        return True
-    except Exception:
-        return True
+    pids = linux_fuser_pid_set(image, writers_only=True)
+    return pids is None or bool(pids)
 
 
 def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
@@ -1790,24 +2080,42 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
             elif key == "--allow-absent":
                 allow_absent = True
                 i += 1
-            elif key in {"--config", "--state-dir", "--user-uid", "--fixture-root"} and i + 1 < len(arguments):
+            elif key in {"--config", "--state-dir", "--user-uid", "--fixture-root",
+                         "--runtime-sha256"} and i + 1 < len(arguments):
                 values[key] = arguments[i + 1]
                 i += 2
             else:
                 return 2
         required = {"--config", "--user-uid"}
-        if not required.issubset(values) or set(values) - required - {"--state-dir", "--fixture-root"}:
+        if (not required.issubset(values)
+                or set(values) - required - {"--state-dir", "--fixture-root", "--runtime-sha256"}):
             return 2
         if "--state-dir" not in values:
             if "--fixture-root" in values:
                 return 2
             values["--state-dir"] = str(Path(pwd.getpwuid(int(values["--user-uid"])).pw_dir) / ".disk_magician_state")
-        if ((action == "preview" and execute) or (action != "preview" and not execute) or
+        if ((action in {"preview", "probe"} and execute) or
+                (action in {"install", "remove"} and not execute) or
+                (action not in {"preview", "probe", "install", "remove"}) or
                 (allow_absent and action != "remove")):
             return 2
-        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], values.get("--fixture-root"))
+        safe = linux_fstab_allowed_paths(
+            values["--config"], values["--state-dir"], values["--user-uid"],
+            values.get("--fixture-root"), probe_mounted=(action == "probe" and
+                                                          "--fixture-root" not in values),
+        )
         if safe is None:
             return 75
+        if "--runtime-sha256" in values:
+            runtime_file = Path(__file__).resolve()
+            if (not re.fullmatch(r"[0-9a-f]{64}", values["--runtime-sha256"])
+                    or hashlib.sha256(runtime_file.read_bytes()).hexdigest() != values["--runtime-sha256"]):
+                return 75
+        if action == "probe":
+            config, state, image, mountpoint = safe
+            view = linux_host_fstab_probe(image, mountpoint, values.get("--runtime-sha256"))
+            print(json.dumps({"probe": "fstab", **view}, sort_keys=True), flush=True)
+            return 0
         if action != "preview":
             if os.geteuid() != 0:
                 runtime = Path(__file__).resolve().parent.parent
@@ -1853,6 +2161,209 @@ def linux_fstab_cmd(action: str, arguments: list[str]) -> int:
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
+
+
+def linux_service_control_cmd(arguments: list[str]) -> int:
+    """Explicitly stop/start only the verified Scratch user service unit."""
+    try:
+        if len(arguments) < 2 or arguments[0] not in {"stop", "start"} or arguments[1] != "scratch":
+            return 2
+        action = arguments[0]
+        values: dict[str, str] = {}
+        execute = False
+        index = 2
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if not execute or set(values) != {"--config", "--state-dir", "--user-uid"}:
+            return 2
+        user_uid = int(values["--user-uid"])
+        if os.geteuid() != user_uid:
+            return 75
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"],
+                                          values["--user-uid"], None)
+        if safe is None:
+            return 75
+        config_path, state, image, mountpoint = safe
+        settings, scratch = cls("scratch", config_path)
+        entry = registry(state)["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active"
+                or entry.get("image_path") != str(image)
+                or entry.get("mountpoint") != str(mountpoint)):
+            return 75
+        unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
+        runtime = Path(__file__).resolve().parent.parent
+        if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
+                or not linux_service_matches_fuse_unit(unit.read_bytes(), runtime,
+                                                        str(config_path), state)):
+            return 75
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
+            capture_output=True, timeout=15, check=False,
+        )
+        if active.returncode not in {0, 3}:
+            return 75
+        if action == "stop":
+            if active.returncode != 0 or linux_mount_record(mountpoint) is None:
+                return 75
+            linux_validate_mount(settings, scratch, entry)
+            linux_command(["systemctl", "--user", "stop", "diskm-scratch.service"], 60)
+            return 0
+        if (image.is_symlink() or not image.is_file() or image.stat().st_uid != user_uid
+                or image.stat().st_size != scratch["quota_gb"] * GIB
+                or entry.get("filesystem_uuid") != linux_fs_uuid(image)):
+            return 75
+        if active.returncode == 0:
+            linux_validate_mount(settings, scratch, entry)
+            return 0
+        linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
+        linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
+        linux_validate_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return 75
+
+
+def linux_fsck_cmd(arguments: list[str]) -> int:
+    """Run a separately gated read-only or explicitly requested preen check."""
+    try:
+        if not arguments or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        repair = execute = False
+        index = 1
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--repair":
+                repair = True
+                index += 1
+            elif key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if set(values) != {"--config", "--state-dir", "--user-uid"}:
+            return 2
+        if execute != repair:
+            return 2
+        user_uid = int(values["--user-uid"])
+        if os.geteuid() != user_uid:
+            return 75
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"], values["--user-uid"], None)
+        if safe is None:
+            return 75
+        config_path, state, image, mountpoint = safe
+        settings, scratch = cls("scratch", config_path)
+        entry = registry(state)["volumes"].get("scratch")
+        if not isinstance(entry, dict) or entry.get("state") != "active":
+            return 75
+        if entry.get("image_path") != str(image) or entry.get("mountpoint") != str(mountpoint):
+            return 75
+        if image.stat().st_size != scratch["quota_gb"] * GIB or image.stat().st_uid != user_uid:
+            return 75
+        if entry.get("filesystem_uuid") != linux_fs_uuid(image):
+            return 75
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
+            capture_output=True, timeout=15, check=False,
+        )
+        if active.returncode != 3:
+            return 75
+        if linux_mount_record(mountpoint) is not None or linux_loop_devices(image):
+            return 75
+        readers = linux_fuser_pid_set(image, writers_only=False)
+        if readers is None or readers:
+            return 75
+        e2fsck = shutil.which("e2fsck")
+        if not e2fsck:
+            return 75
+        undo_path = receipt_path = None
+        if repair:
+            parent = image.parent
+            parent_details = parent.stat()
+            if (parent_details.st_uid != user_uid or stat.S_IMODE(parent_details.st_mode) & 0o022 or
+                    parent.is_symlink()):
+                return 75
+            undo_path = image.with_name(image.name + ".e2fsck-undo")
+            receipt_path = image.with_name(image.name + ".e2fsck-undo.receipt.json")
+            if undo_path.exists() or undo_path.is_symlink() or receipt_path.exists() or receipt_path.is_symlink():
+                return 75
+            command = [e2fsck, "-fp", "-z", str(undo_path), str(image)]
+        else:
+            command = [e2fsck, "-fn", str(image)]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout.decode(errors="replace") if isinstance(error.stdout, bytes) else (error.stdout or "")
+            stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else (error.stderr or "")
+            if repair and receipt_path is not None:
+                timeout_receipt = {
+                    "command": command,
+                    "raw_exit": None,
+                    "timed_out": True,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "undo_path": str(undo_path) if undo_path else None,
+                    "undo_present": bool(undo_path and undo_path.is_file()),
+                    "image": str(image),
+                    "filesystem_uuid": entry["filesystem_uuid"],
+                }
+                try:
+                    descriptor = os.open(receipt_path, os.O_CREAT | os.O_EXCL |
+                                         os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                    with os.fdopen(descriptor, "w") as stream:
+                        json.dump(timeout_receipt, stream, sort_keys=True)
+                        stream.write("\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except OSError:
+                    return 75
+            print(json.dumps({"action": "repair" if repair else "diagnostic", "command": command,
+                              "raw_exit": None, "timed_out": True, "stdout": stdout, "stderr": stderr,
+                              "undo_path": str(undo_path) if undo_path else None}, sort_keys=True), flush=True)
+            return 75
+        if repair:
+            if not undo_path or not undo_path.is_file() or undo_path.stat().st_uid != user_uid:
+                return 75
+            receipt = {
+                "command": command,
+                "raw_exit": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "undo_path": str(undo_path),
+                "image": str(image),
+                "filesystem_uuid": entry["filesystem_uuid"],
+            }
+            try:
+                descriptor = os.open(receipt_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(descriptor, "w") as stream:
+                    json.dump(receipt, stream, sort_keys=True)
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError:
+                return 75
+        print(json.dumps({
+            "action": "repair" if repair else "diagnostic",
+            "command": command,
+            "raw_exit": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "undo_path": str(undo_path) if undo_path else None,
+        }, sort_keys=True), flush=True)
+        return result.returncode
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        return 75
 
 def darwin_mount_cmd(name: str) -> int:
     if sys.platform != "darwin":
@@ -2279,8 +2790,13 @@ def verify_mount(root: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     try:
-        if len(arguments) >= 2 and arguments[0] == "fstab" and arguments[1] in {"preview", "install", "remove"} and sys.platform.startswith("linux"):
+        if len(arguments) >= 2 and arguments[0] == "fstab" and arguments[1] in {"preview", "probe", "install", "remove"} and sys.platform.startswith("linux"):
             return linux_fstab_cmd(arguments[1], arguments[2:])
+        if arguments[:1] == ["fsck"] and sys.platform.startswith("linux"):
+            return linux_fsck_cmd(arguments[1:])
+        if (arguments[:2] == ["service", "stop"] or arguments[:2] == ["service", "start"]):
+            return (linux_service_control_cmd([arguments[1], *arguments[2:]])
+                    if sys.platform.startswith("linux") else 2)
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
                 print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
