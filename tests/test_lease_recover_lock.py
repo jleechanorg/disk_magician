@@ -471,6 +471,24 @@ case "$mode" in
     lease_reuse_lock_acquire "$lease"
     exit 99
     ;;
+  term-return-retry)
+    trap 'builtin printf "TERM handled\n" >> "$LEASE_TEST_TRAP_MARK"' TERM
+    LEASE_TEST_TARGET_PID="$$"
+    date() {
+      if [[ "${1:-}" == "+%s" && ! -e "$LEASE_TEST_DATE_SENT" ]]; then
+        : > "$LEASE_TEST_DATE_SENT"
+        builtin printf '1793220000\n'
+        kill -TERM "$LEASE_TEST_TARGET_PID"
+        return 0
+      fi
+      command date "$@"
+    }
+    if lease_reuse_lock_acquire "$lease"; then first_rc=0; else first_rc=$?; fi
+    if lease_reuse_lock_acquire "$lease"; then second_rc=0; else second_rc=$?; fi
+    builtin printf 'first=%s second=%s\n' "$first_rc" "$second_rc"
+    lease_reuse_lock_release "$lease"
+    [[ "$first_rc" == 1 && "$second_rc" == 0 ]]
+    ;;
   *) exit 2 ;;
 esac
 ''')
@@ -506,3 +524,20 @@ esac
     assert writer_mark.read_text() == "TERM delivered\n"
     assert not Path(str(writer_lease) + ".reuse-lock").exists()
     print("PASS: TERM between pid and acquired_at cleans the lock then runs the caller trap")
+    retry_lease = writer_lease_dir / "retry.json"
+    retry_mark = Path(temp) / "caller-term-retry.txt"
+    retry_date_sent = Path(temp) / "retry-date-sent.txt"
+    retry_env = {
+        **writer_env,
+        "LEASE_TEST_TRAP_MARK": str(retry_mark),
+        "LEASE_TEST_DATE_SENT": str(retry_date_sent),
+    }
+    retry = subprocess.run(
+        ["bash", str(writer_case), "term-return-retry", str(retry_lease)],
+        env=retry_env, text=True, capture_output=True, check=False,
+    )
+    assert retry.returncode == 0, (retry.returncode, retry.stdout, retry.stderr)
+    assert retry.stdout.strip() == "first=1 second=0", (retry.stdout, retry.stderr)
+    assert retry_mark.read_text() == "TERM handled\n"
+    assert not Path(str(retry_lease) + ".reuse-lock").exists()
+    print("PASS: a returning caller TERM trap does not poison the next acquisition")

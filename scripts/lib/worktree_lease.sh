@@ -566,7 +566,7 @@ _lease_reuse_lock_trap_is_ignored() {
 
 lease_reuse_lock_acquire() {
     local lease="$1" lock="$1.reuse-lock" old_hup old_int old_term setup_signal attempt
-    local __lease_reuse_lock_setup_owned=0
+    local __lease_reuse_lock_setup_owned=0 __lease_reuse_lock_setup_signal=""
     for attempt in 0 1; do
         setup_signal=""
         old_hup="$(trap -p HUP)"
