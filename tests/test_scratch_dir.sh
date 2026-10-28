@@ -5,6 +5,7 @@ unset BASH_ENV
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISKM="$REPO_ROOT/disk_magician.sh"
+ADAPTER="$REPO_ROOT/.agents/skills/scratch-space/scripts/scratch-dir.sh"
 
 PASS=0 FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
@@ -22,8 +23,11 @@ export HOME="$T/home"
 
 cat > "$T/bin/mock_diskm_active" <<EOF
 #!/usr/bin/env bash
-[[ "\$*" == "volume path scratch" ]] && { printf '%s\\n' "$T/active"; exit 0; }
-exit 1
+case "\$*" in
+  "volume path scratch") printf '%s\\n' "$T/active"; exit 0 ;;
+  scratch-dir*) printf 'adapter-cli:%s\\n' "\${2:-}"; exit 0 ;;
+  *) exit 1 ;;
+esac
 EOF
 chmod +x "$T/bin/mock_diskm_active"
 
@@ -35,6 +39,9 @@ assert_eq "$OUT" "$T/active" "active volume path wins over stale DISKM_SCRATCH"
 
 OUT_PKG="$(PYTHONPATH="$REPO_ROOT/src" DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" python3 -m disk_magician.cli scratch-dir)"
 assert_eq "$OUT_PKG" "$T/active" "packaged CLI scratch-dir returns active volume root"
+
+OUT_ADAPTER="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$ADAPTER" adapter-subpath)"
+assert_eq "$OUT_ADAPTER" "adapter-cli:adapter-subpath" "skill adapter delegates to canonical CLI"
 
 echo "== 2. Subpath creation (scratch-dir tmp) =="
 OUT="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir tmp)"
