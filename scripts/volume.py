@@ -1198,10 +1198,13 @@ def linux_service_render(runtime: Path, config_path: str, state_path: Path,
     return rendered
 
 
-def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
-                                      config_path: str, state_path: Path) -> bool:
+def linux_service_matches_unit(unit_bytes: bytes, runtime: Path,
+                               config_path: str, state_path: Path,
+                               backend: str) -> bool:
     try:
-        if unit_bytes == linux_service_render(runtime, config_path, state_path, "fuse").encode():
+        if backend not in {"fuse", "native"}:
+            return False
+        if unit_bytes == linux_service_render(runtime, config_path, state_path, backend).encode():
             return True
     except (OSError, ValueError):
         return False
@@ -1227,10 +1230,29 @@ def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
             if (systemd.is_symlink() or template.is_symlink() or orchestrator.is_symlink() or
                     not systemd.is_dir() or not template.is_file() or not orchestrator.is_file()):
                 continue
-            if unit_bytes == linux_service_render(previous, config_path, state_path, "fuse").encode():
+            if unit_bytes == linux_service_render(previous, config_path, state_path, backend).encode():
                 return True
     except (OSError, ValueError):
         return False
+    return False
+
+
+def linux_service_matches_fuse_unit(unit_bytes: bytes, runtime: Path,
+                                    config_path: str, state_path: Path) -> bool:
+    return linux_service_matches_unit(unit_bytes, runtime, config_path, state_path, "fuse")
+
+
+def linux_wait_for_mount_identity(settings: dict[str, Any], scratch: dict[str, Any],
+                                  entry: Any, timeout: float = 15.0,
+                                  validator=None) -> bool:
+    validator = validator or linux_validate_mount
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            validator(settings, scratch, entry)
+            return True
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            time.sleep(0.1)
     return False
 
 
@@ -1521,7 +1543,10 @@ def linux_service_migrate_cmd(arguments: list[str]) -> int:
         linux_command(systemctl + ["daemon-reload"])
         linux_command(systemctl + ["start", "diskm-scratch.service"], 60)
         settings, scratch = cls("scratch", config_path)
-        linux_validate_native_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        if not linux_wait_for_mount_identity(
+                settings, scratch, registry(state)["volumes"].get("scratch"),
+                validator=linux_validate_native_mount):
+            raise RuntimeError("native Scratch mount identity did not become ready after service start")
         linux_command(systemctl + ["is-active", "--quiet", "diskm-scratch.service"])
         return 0
     except Exception as error:
@@ -2201,8 +2226,9 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
         unit = Path.home() / ".config/systemd/user/diskm-scratch.service"
         runtime = Path(__file__).resolve().parent.parent
         if (unit.is_symlink() or not unit.is_file() or unit.stat().st_uid != user_uid
-                or not linux_service_matches_fuse_unit(unit.read_bytes(), runtime,
-                                                        str(config_path), state)):
+                or not linux_service_matches_unit(unit.read_bytes(), runtime,
+                                                   str(config_path), state,
+                                                   scratch.get("backend", "fuse"))):
             return 75
         active = subprocess.run(
             ["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"],
@@ -2225,9 +2251,115 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
             return 0
         linux_command(["systemctl", "--user", "start", "diskm-scratch.service"], 60)
         linux_command(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15)
-        linux_validate_mount(settings, scratch, registry(state)["volumes"].get("scratch"))
+        if not linux_wait_for_mount_identity(settings, scratch,
+                                             registry(state)["volumes"].get("scratch")):
+            return 75
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return 75
+
+
+def linux_sync_global_native_config(global_config: Path, user_uid: int,
+                                    scratch: dict[str, Any]) -> int:
+    """Mutate the winning config while its canonical config lock is held."""
+    if (global_config.is_symlink() or not global_config.is_file()
+            or global_config.stat().st_uid != user_uid
+            or not linux_path_components_owned(global_config.parent, user_uid)):
+        return 75
+    old = global_config.read_bytes()
+    document = json.loads(old)
+    volumes = document.get("volumes")
+    classes = volumes.get("classes") if isinstance(volumes, dict) else None
+    global_scratch = classes.get("scratch") if isinstance(classes, dict) else None
+    if not isinstance(global_scratch, dict):
+        return 75
+    for key in ("name", "mountpoint", "image_path", "quota_gb"):
+        if global_scratch.get(key) != scratch.get(key):
+            return 75
+    backend = global_scratch.get("backend")
+    if backend not in {None, "fuse", "native"}:
+        return 75
+    if backend == "native":
+        return 0
+
+    backup = global_config.with_name(global_config.name + ".pre-native")
+    if backup.is_symlink():
+        return 75
+    if backup.exists():
+        if (not backup.is_file() or backup.stat().st_uid != user_uid
+                or backup.read_bytes() != old):
+            return 75
+    else:
+        descriptor = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                             os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(old)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(backup.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    global_scratch["backend"] = "native"
+    new = (json.dumps(document, indent=2) + "\n").encode()
+    details = global_config.stat()
+    linux_atomic_bytes(global_config, new, details)
+    readback = json.loads(global_config.read_text())
+    if readback != document or readback["volumes"]["classes"]["scratch"].get("backend") != "native":
+        raise RuntimeError("native Scratch config read-back mismatch")
+    return 0
+
+
+def linux_service_sync_config_cmd(arguments: list[str]) -> int:
+    """Idempotently align the winning config with verified native Scratch."""
+    backup = None
+    try:
+        if len(arguments) < 1 or arguments[0] != "scratch":
+            return 2
+        values: dict[str, str] = {}
+        execute = False
+        index = 1
+        while index < len(arguments):
+            key = arguments[index]
+            if key == "--execute":
+                execute = True
+                index += 1
+            elif key in {"--config", "--state-dir", "--user-uid"} and index + 1 < len(arguments):
+                values[key] = arguments[index + 1]
+                index += 2
+            else:
+                return 2
+        if not execute or set(values) != {"--config", "--state-dir", "--user-uid"}:
+            return 2
+        user_uid = int(values["--user-uid"])
+        if os.geteuid() != user_uid:
+            return 75
+        safe = linux_fstab_allowed_paths(values["--config"], values["--state-dir"],
+                                          values["--user-uid"], None)
+        if safe is None:
+            return 75
+        service_config, state, image, mountpoint = safe
+        settings, scratch = cls("scratch", service_config)
+        entry = registry(state)["volumes"].get("scratch")
+        if (not isinstance(entry, dict) or entry.get("state") != "active"
+                or scratch.get("backend") != "native"
+                or entry.get("image_path") != str(image)
+                or entry.get("mountpoint") != str(mountpoint)):
+            return 75
+        linux_validate_native_mount(settings, scratch, entry)
+
+        home = Path(pwd.getpwuid(user_uid).pw_dir)
+        global_config = home / ".config/disk-magician/config.json"
+        import config_mutator
+        with config_mutator._lock(global_config) as config_lock:
+            fcntl.flock(config_lock, fcntl.LOCK_EX)
+            try:
+                return linux_sync_global_native_config(global_config, user_uid, scratch)
+            finally:
+                fcntl.flock(config_lock, fcntl.LOCK_UN)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError):
         return 75
 
 
@@ -2797,6 +2929,8 @@ def main(argv: list[str] | None = None) -> int:
         if (arguments[:2] == ["service", "stop"] or arguments[:2] == ["service", "start"]):
             return (linux_service_control_cmd([arguments[1], *arguments[2:]])
                     if sys.platform.startswith("linux") else 2)
+        if arguments[:2] == ["service", "sync-config"] and sys.platform.startswith("linux"):
+            return linux_service_sync_config_cmd(arguments[2:])
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
                 print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")

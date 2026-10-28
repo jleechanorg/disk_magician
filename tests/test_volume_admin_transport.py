@@ -7,6 +7,8 @@ import os
 import stat
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -437,7 +439,7 @@ def test_fsck_repair_requires_service_already_stopped(tmp_path):
         mock.patch.object(volume, "linux_mount_record", return_value=None),
         mock.patch.object(volume, "linux_loop_devices", return_value=[]),
         mock.patch.object(volume, "linux_fuser_pid_set", return_value=set()),
-        mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
+        mock.patch.object(volume, "linux_service_matches_unit", return_value=True),
         mock.patch.object(volume.shutil, "which", return_value="/usr/sbin/e2fsck"),
         mock.patch.object(volume.subprocess, "run", side_effect=run),
         mock.patch.object(volume, "linux_command", side_effect=lambda args, timeout=30: service_calls.append(args)),
@@ -485,7 +487,7 @@ def test_service_stop_requires_exact_unit_and_explicit_execute(tmp_path):
         mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
         mock.patch.object(volume, "linux_mount_record", return_value=("fuse.ext4", str(image))),
         mock.patch.object(volume, "linux_validate_mount"),
-        mock.patch.object(volume, "linux_service_matches_fuse_unit", return_value=True),
+        mock.patch.object(volume, "linux_service_matches_unit", return_value=True),
         mock.patch.object(volume.Path, "home", return_value=tmp_path),
         mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
         mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0)),
@@ -521,7 +523,12 @@ def test_service_start_from_offline_validates_mount_after_fixed_unit_start(tmp_p
             return mock.Mock(st_mode=stat.S_IFREG | 0o600, st_size=volume.GIB, st_uid=uid)
         return original_stat(path, *args, **kwargs)
 
+    validation_calls = []
+
     def validate_after_start(*_args):
+        validation_calls.append(True)
+        if len(validation_calls) == 1:
+            raise RuntimeError("mount still settling")
         assert volume.linux_mount_record(mountpoint) is not None
 
     with (
@@ -545,6 +552,140 @@ def test_service_start_from_offline_validates_mount_after_fixed_unit_start(tmp_p
         mock.call(["systemctl", "--user", "start", "diskm-scratch.service"], 60),
         mock.call(["systemctl", "--user", "is-active", "--quiet", "diskm-scratch.service"], 15),
     ]
+    assert len(validation_calls) == 2
+
+
+def test_native_service_unit_matches_backend_specific_rendering(tmp_path):
+    runtime = Path(volume.__file__).resolve().parent.parent
+    config = str(tmp_path / "linux-scratch.json")
+    state = tmp_path / "state"
+    state.mkdir()
+    native = volume.linux_service_render(runtime, config, state, "native").encode()
+    fuse = volume.linux_service_render(runtime, config, state, "fuse").encode()
+    assert volume.linux_service_matches_unit(native, runtime, config, state, "native")
+    assert not volume.linux_service_matches_unit(native, runtime, config, state, "fuse")
+    assert volume.linux_service_matches_fuse_unit(fuse, runtime, config, state)
+
+
+def _native_config_sync_fixture(tmp_path):
+    home = tmp_path
+    service_config = home / ".config/disk-magician/linux-scratch.json"
+    global_config = home / ".config/disk-magician/config.json"
+    state = home / ".disk_magician_state"
+    image = home / ".local/share/disk-magician/volumes/scratch.ext4"
+    mountpoint = home / "Scratch"
+    service_config.parent.mkdir(parents=True)
+    state.mkdir()
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fixture")
+    scratch = {"name": "diskm-scratch", "mountpoint": str(mountpoint),
+               "image_path": str(image), "quota_gb": 2, "backend": "native"}
+    service_config.write_text(json.dumps({"volumes": {"classes": {"scratch": scratch}}}))
+    global_doc = {"volumes": {"classes": {"scratch": {k: v for k, v in scratch.items()
+                                                           if k != "backend"}}},
+                  "unrelated": {"preserve": True}}
+    global_config.write_text(json.dumps(global_doc))
+    entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+             "filesystem_uuid": "12345678-1234-1234-1234-123456789abc"}
+    return home, service_config, global_config, state, image, mountpoint, scratch, entry
+
+
+def test_native_service_sync_config_preserves_unrelated_keys_and_is_idempotent(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    old = global_config.read_bytes()
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        assert volume.main(args) == 0
+        synced = json.loads(global_config.read_text())
+        assert synced["volumes"]["classes"]["scratch"]["backend"] == "native"
+        assert synced["unrelated"] == {"preserve": True}
+        assert global_config.with_name("config.json.pre-native").read_bytes() == old
+        assert volume.main(args) == 0
+    assert json.loads(global_config.read_text())["volumes"]["classes"]["scratch"]["backend"] == "native"
+
+
+def test_native_service_sync_config_rejects_identity_mismatch_and_symlink(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    document = json.loads(global_config.read_text())
+    document["volumes"]["classes"]["scratch"]["image_path"] = str(tmp_path / "other.ext4")
+    global_config.write_text(json.dumps(document))
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        assert volume.main(args) == 75
+        global_config.unlink()
+        global_config.symlink_to(home / "missing-config.json")
+        assert volume.main(args) == 75
+
+
+def test_native_service_sync_config_waits_for_canonical_mutator_lock(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    import config_mutator
+    lock_held = threading.Event()
+    release = threading.Event()
+    writer_errors = []
+
+    def writer():
+        try:
+            with config_mutator._lock(global_config) as lock:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                lock_held.set()
+                release.wait(timeout=5)
+                document = json.loads(global_config.read_text())
+                document["writer_unknown_key"] = {"preserve": True}
+                config_mutator._atomic_write(global_config, document)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        except Exception as error:
+            writer_errors.append(error)
+
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert lock_held.wait(timeout=5)
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        result = []
+        sync_thread = threading.Thread(target=lambda: result.append(volume.main(args)))
+        sync_thread.start()
+        time.sleep(0.1)
+        assert sync_thread.is_alive()
+        release.set()
+        thread.join(timeout=5)
+        sync_thread.join(timeout=5)
+    assert not writer_errors
+    assert result == [0]
+    synced = json.loads(global_config.read_text())
+    assert synced["writer_unknown_key"] == {"preserve": True}
+    assert synced["volumes"]["classes"]["scratch"]["backend"] == "native"
 
 
 def test_docker_migration_requires_digest_before_any_service_stop():
