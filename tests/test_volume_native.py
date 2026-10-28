@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -355,6 +356,18 @@ class NativeFstabPublicCliTest(unittest.TestCase):
         with mock.patch.object(volume.subprocess, "run",
                                return_value=mock.Mock(returncode=1, stdout=b"", stderr=b"Permission denied")):
             self.assertTrue(volume.linux_image_has_open_writers(self.image))
+
+    def test_fuser_uses_linux_psmisc_compatible_arguments(self):
+        with mock.patch.object(volume.subprocess, "run",
+                               return_value=mock.Mock(returncode=1, stdout=b"", stderr=b"")) as run:
+            self.assertFalse(volume.linux_image_has_open_writers(self.image))
+        run.assert_called_once_with(["fuser", "-w", str(self.image)],
+                                    capture_output=True, timeout=10, check=False)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("fuser"),
+                         "requires the Linux PSmisc fuser binary")
+    def test_linux_psmisc_fuser_no_writer_probe_accepts_real_fixture(self):
+        self.assertFalse(volume.linux_image_has_open_writers(self.image))
 
     def test_concurrent_fixture_installs_both_survive(self):
         second = self.root / "second"
