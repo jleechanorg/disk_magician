@@ -93,6 +93,7 @@ age "$SDD" 120
 age "$HOME/dd_recent" 5
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
+run_with_env() { env "$1=$2" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" --clean 2>&1; }
 
 echo "-- dry run --"
 out="$(run --dry-run)"
@@ -134,6 +135,34 @@ if [[ "$(id -u)" != 0 ]]; then
     chmod 755 "$HOME/dd_unmeasured/Index.noindex/sub"
     [[ -d "$HOME/dd_unmeasured" ]] && ok "unreadable tree is kept" || bad "unreadable tree removed"
 fi
+
+echo "-- retention floors reject zero and malformed environment overrides --"
+mkdir -p "$HOME/dd_zero/Build" "$HOME/dd_zero/Index.noindex" \
+    "$HOME/dd_malformed/Build" "$HOME/dd_malformed/Index.noindex"
+printf 'o' >"$HOME/dd_zero/Build/a.o"
+printf 'o' >"$HOME/dd_malformed/Build/a.o"
+out="$(run_with_env CUSTOM_DD_IDLE_MINUTES 0)"
+[[ -d "$HOME/dd_zero" ]] && ok "zero custom-DerivedData override keeps fresh output" || bad "zero override removed fresh output: $out"
+[[ "$out" == *"within 60m"* ]] && ok "custom-DerivedData retention floor stays 60m" || bad "custom retention floor not reported: $out"
+out="$(run_with_env CUSTOM_DD_IDLE_MINUTES malformed)"
+[[ -d "$HOME/dd_malformed" ]] && ok "malformed custom-DerivedData override keeps fresh output" || bad "malformed override removed fresh output: $out"
+[[ "$out" == *"within 60m"* ]] && ok "malformed custom-DerivedData override retains the 60m floor" || bad "custom retention floor not reported for malformed value: $out"
+
+for spec in '124 1 0' '125 1 malformed'; do
+    read -r run_id attempt override <<<"$spec"
+    dir="$TMPROOT/ptmp/worldai-ios-release-$run_id-$attempt"
+    mkdir -p "$dir/receipts" "$dir/DerivedData/Build" "$dir/verify-unpacked"
+    printf '{}' >"$dir/receipts/export.json"
+    printf 'o' >"$dir/DerivedData/Build/a.o"
+    printf 'v' >"$dir/verify-unpacked/v"
+    out="$(run_with_env IOS_RELEASE_IDLE_MINUTES "$override")"
+    [[ -d "$dir/DerivedData" && -d "$dir/verify-unpacked" ]] \
+        && ok "iOS release override '$override' keeps fresh rebuildable output" \
+        || bad "iOS release override '$override' removed fresh output: $out"
+    [[ "$out" == *"within 1440m"* ]] \
+        && ok "iOS release retention floor stays 1440m for '$override'" \
+        || bad "iOS release retention floor not reported for '$override': $out"
+done
 
 (( FAIL == 0 )) || printf '%s\n' "$out" | /usr/bin/grep -E "Custom|C14" >&2
 echo "-- secret scan is kind-scoped --"
