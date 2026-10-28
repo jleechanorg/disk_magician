@@ -2259,6 +2259,59 @@ def linux_service_control_cmd(arguments: list[str]) -> int:
         return 75
 
 
+def linux_sync_global_native_config(global_config: Path, user_uid: int,
+                                    scratch: dict[str, Any]) -> int:
+    """Mutate the winning config while its canonical config lock is held."""
+    if (global_config.is_symlink() or not global_config.is_file()
+            or global_config.stat().st_uid != user_uid
+            or not linux_path_components_owned(global_config.parent, user_uid)):
+        return 75
+    old = global_config.read_bytes()
+    document = json.loads(old)
+    volumes = document.get("volumes")
+    classes = volumes.get("classes") if isinstance(volumes, dict) else None
+    global_scratch = classes.get("scratch") if isinstance(classes, dict) else None
+    if not isinstance(global_scratch, dict):
+        return 75
+    for key in ("name", "mountpoint", "image_path", "quota_gb"):
+        if global_scratch.get(key) != scratch.get(key):
+            return 75
+    backend = global_scratch.get("backend")
+    if backend not in {None, "fuse", "native"}:
+        return 75
+    if backend == "native":
+        return 0
+
+    backup = global_config.with_name(global_config.name + ".pre-native")
+    if backup.is_symlink():
+        return 75
+    if backup.exists():
+        if (not backup.is_file() or backup.stat().st_uid != user_uid
+                or backup.read_bytes() != old):
+            return 75
+    else:
+        descriptor = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                             os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(old)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(backup.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    global_scratch["backend"] = "native"
+    new = (json.dumps(document, indent=2) + "\n").encode()
+    details = global_config.stat()
+    linux_atomic_bytes(global_config, new, details)
+    readback = json.loads(global_config.read_text())
+    if readback != document or readback["volumes"]["classes"]["scratch"].get("backend") != "native":
+        raise RuntimeError("native Scratch config read-back mismatch")
+    return 0
+
+
 def linux_service_sync_config_cmd(arguments: list[str]) -> int:
     """Idempotently align the winning config with verified native Scratch."""
     backup = None
@@ -2299,49 +2352,13 @@ def linux_service_sync_config_cmd(arguments: list[str]) -> int:
 
         home = Path(pwd.getpwuid(user_uid).pw_dir)
         global_config = home / ".config/disk-magician/config.json"
-        if (global_config.is_symlink() or not global_config.is_file()
-                or global_config.stat().st_uid != user_uid
-                or not linux_path_components_owned(global_config.parent, user_uid)):
-            return 75
-        old = global_config.read_bytes()
-        document = json.loads(old)
-        volumes = document.get("volumes")
-        classes = volumes.get("classes") if isinstance(volumes, dict) else None
-        global_scratch = classes.get("scratch") if isinstance(classes, dict) else None
-        if not isinstance(global_scratch, dict):
-            return 75
-        for key in ("name", "mountpoint", "image_path", "quota_gb"):
-            if global_scratch.get(key) != scratch.get(key):
-                return 75
-        backend = global_scratch.get("backend")
-        if backend not in {None, "fuse", "native"}:
-            return 75
-        if backend == "native":
-            return 0
-
-        backup = global_config.with_name(global_config.name + ".pre-native")
-        if backup.is_symlink():
-            return 75
-        if backup.exists():
-            if (not backup.is_file() or backup.stat().st_uid != user_uid
-                    or backup.read_bytes() != old):
-                return 75
-        else:
-            descriptor = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
-                                 os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(old)
-                stream.flush()
-                os.fsync(stream.fileno())
-
-        global_scratch["backend"] = "native"
-        new = (json.dumps(document, indent=2) + "\n").encode()
-        details = global_config.stat()
-        linux_atomic_bytes(global_config, new, details)
-        readback = json.loads(global_config.read_text())
-        if readback != document or readback["volumes"]["classes"]["scratch"].get("backend") != "native":
-            raise RuntimeError("native Scratch config read-back mismatch")
-        return 0
+        import config_mutator
+        with config_mutator._lock(global_config) as config_lock:
+            fcntl.flock(config_lock, fcntl.LOCK_EX)
+            try:
+                return linux_sync_global_native_config(global_config, user_uid, scratch)
+            finally:
+                fcntl.flock(config_lock, fcntl.LOCK_UN)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError):
         return 75
 

@@ -7,6 +7,8 @@ import os
 import stat
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -633,6 +635,57 @@ def test_native_service_sync_config_rejects_identity_mismatch_and_symlink(tmp_pa
         global_config.unlink()
         global_config.symlink_to(home / "missing-config.json")
         assert volume.main(args) == 75
+
+
+def test_native_service_sync_config_waits_for_canonical_mutator_lock(tmp_path):
+    home, service_config, global_config, state, image, mountpoint, scratch, entry = _native_config_sync_fixture(tmp_path)
+    import config_mutator
+    lock_held = threading.Event()
+    release = threading.Event()
+    writer_errors = []
+
+    def writer():
+        try:
+            with config_mutator._lock(global_config) as lock:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                lock_held.set()
+                release.wait(timeout=5)
+                document = json.loads(global_config.read_text())
+                document["writer_unknown_key"] = {"preserve": True}
+                config_mutator._atomic_write(global_config, document)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        except Exception as error:
+            writer_errors.append(error)
+
+    with (
+        mock.patch.object(volume.sys, "platform", "linux"),
+        mock.patch.object(volume.Path, "home", return_value=home),
+        mock.patch.object(volume.os, "geteuid", return_value=os.getuid()),
+        mock.patch.object(volume, "linux_fstab_allowed_paths", return_value=(service_config, state, image, mountpoint)),
+        mock.patch.object(volume, "cls", return_value=({"classes": {"scratch": scratch}}, scratch)),
+        mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+        mock.patch.object(volume, "linux_validate_native_mount", return_value=entry["filesystem_uuid"]),
+        mock.patch.object(volume.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))),
+    ):
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert lock_held.wait(timeout=5)
+        args = ["service", "sync-config", "scratch", "--config", str(service_config),
+                "--state-dir", str(state), "--user-uid", str(os.getuid()), "--execute"]
+        result = []
+        sync_thread = threading.Thread(target=lambda: result.append(volume.main(args)))
+        sync_thread.start()
+        time.sleep(0.1)
+        assert sync_thread.is_alive()
+        release.set()
+        thread.join(timeout=5)
+        sync_thread.join(timeout=5)
+    assert not writer_errors
+    assert result == [0]
+    synced = json.loads(global_config.read_text())
+    assert synced["writer_unknown_key"] == {"preserve": True}
+    assert synced["volumes"]["classes"]["scratch"]["backend"] == "native"
 
 
 def test_docker_migration_requires_digest_before_any_service_stop():
