@@ -16,7 +16,12 @@ assert_contains() { if [[ "$1" == *"$2"* ]]; then ok "$3"; else bad "$3 — miss
 T="$(mktemp -d /tmp/dm-scratch-dir.XXXXXX)" || exit 1
 [[ "$T" == /tmp/dm-scratch-dir.* && -d "$T" && ! -L "$T" ]] || exit 1
 T="$(cd -- "$T" && pwd -P)" || exit 1
-trap '[[ -n "${T:-}" && "$T" == /tmp/dm-scratch-dir.* ]] && rm -rf "$T"' EXIT
+cleanup_fixture() {
+  case "${T:-}" in
+    /tmp/dm-scratch-dir.*|/private/tmp/dm-scratch-dir.*) rm -rf -- "$T" ;;
+  esac
+}
+trap cleanup_fixture EXIT
 
 mkdir -p "$T/active" "$T/fast" "$T/home" "$T/bin"
 export HOME="$T/home"
@@ -62,6 +67,23 @@ assert_eq "$OUT" "$T/active/tmp" "scratch-dir tmp returns subpath"
 OUT_NESTED="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir "nested/deep/dir")"
 assert_eq "$OUT_NESTED" "$T/active/nested/deep/dir" "nested subpath returned"
 [[ -d "$T/active/nested/deep/dir" ]] && ok "nested directory was created" || bad "nested directory not created"
+
+echo "== 2b. Symlink containment is fail-closed before creation =="
+OUTSIDE="$T/outside"
+mkdir -p "$OUTSIDE"
+ln -s "$OUTSIDE" "$T/active/intermediate"
+RC=0
+ERR="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir intermediate/created 2>&1)" || RC=$?
+assert_eq "$RC" 75 "intermediate symlink exits 75"
+assert_eq "$ERR" "scratch-dir: subpath contains a symlink: intermediate" "intermediate symlink error"
+[[ ! -e "$OUTSIDE/created" ]] && ok "intermediate symlink created nothing outside Scratch" || bad "intermediate symlink escaped Scratch"
+
+ln -s "$OUTSIDE" "$T/active/final"
+RC=0
+ERR="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir final 2>&1)" || RC=$?
+assert_eq "$RC" 75 "final symlink exits 75"
+assert_eq "$ERR" "scratch-dir: subpath contains a symlink: final" "final symlink error"
+[[ ! -e "$OUTSIDE/created" ]] && ok "final symlink created nothing outside Scratch" || bad "final symlink escaped Scratch"
 
 echo "== 3. Path traversal rejection (scratch-dir ../bad exits 2) =="
 RC=0
@@ -115,6 +137,11 @@ RC=0
 ERR="$(DISKM_SCRATCH="$T/missing" DISK_MAGICIAN_DISKM_BIN="$T/bin/mock_diskm_active" bash "$DISKM" scratch-dir 2>&1)" || RC=$?
 assert_eq "$RC" 0 "stale DISKM_SCRATCH does not override active volume"
 assert_eq "$ERR" "$T/active" "stale DISKM_SCRATCH resolves through active volume identity"
+
+RC=0
+ERR="$(DISK_MAGICIAN_DISKM_BIN="$T/bin/missing-diskm" bash "$DISKM" scratch-dir 2>&1)" || RC=$?
+assert_eq "$RC" 75 "invalid configured CLI exits 75"
+assert_contains "$ERR" "configured Disk Magician CLI is unavailable" "invalid configured CLI fails closed"
 
 echo "== test_scratch_dir summary: $PASS passed, $FAIL failed =="
 [[ "$FAIL" -eq 0 ]] || exit 1

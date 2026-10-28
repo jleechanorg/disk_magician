@@ -29,7 +29,11 @@ resolve_scratch_root() {
   local script_dir diskm_bin volume_rc=3
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   diskm_bin="${DISK_MAGICIAN_DISKM_BIN:-}"
-  if [ -n "$diskm_bin" ] && [ -x "$diskm_bin" ]; then
+  if [ -n "$diskm_bin" ]; then
+    if [ ! -x "$diskm_bin" ]; then
+      echo "scratch-dir: configured Disk Magician CLI is unavailable" >&2
+      return 75
+    fi
     if root="$("$diskm_bin" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
   elif [ -x "$script_dir/../disk_magician.sh" ]; then
     if root="$("$script_dir/../disk_magician.sh" volume path scratch 2>/dev/null)"; then volume_rc=0; else volume_rc=$?; fi
@@ -64,7 +68,41 @@ SCRATCH_ROOT="$(resolve_scratch_root)"
 
 if [ "$#" -gt 0 ]; then
   TARGET="${SCRATCH_ROOT%/}/${SUBPATH}"
+  PHYSICAL_ROOT="$(cd -- "$SCRATCH_ROOT" 2>/dev/null && pwd -P)" || {
+    echo "scratch-dir: Scratch root cannot be resolved" >&2
+    exit 75
+  }
+  CURRENT="$PHYSICAL_ROOT"
+  IFS=/ read -r -a COMPONENTS <<<"$SUBPATH"
+  for COMPONENT in "${COMPONENTS[@]}"; do
+    [ -n "$COMPONENT" ] || continue
+    NEXT="$CURRENT/$COMPONENT"
+    if [ -L "$NEXT" ]; then
+      echo "scratch-dir: subpath contains a symlink: $COMPONENT" >&2
+      exit 75
+    fi
+    if [ -e "$NEXT" ]; then
+      CURRENT="$(cd -- "$NEXT" 2>/dev/null && pwd -P)" || {
+        echo "scratch-dir: subpath component cannot be resolved: $COMPONENT" >&2
+        exit 75
+      }
+      case "$CURRENT" in
+        "$PHYSICAL_ROOT"|"$PHYSICAL_ROOT"/*) ;;
+        *) echo "scratch-dir: subpath escapes Scratch root" >&2; exit 75 ;;
+      esac
+    else
+      CURRENT="$NEXT"
+    fi
+  done
   mkdir -p "$TARGET"
+  FINAL="$(cd -- "$TARGET" 2>/dev/null && pwd -P)" || {
+    echo "scratch-dir: created subpath cannot be resolved" >&2
+    exit 75
+  }
+  case "$FINAL" in
+    "$PHYSICAL_ROOT"|"$PHYSICAL_ROOT"/*) ;;
+    *) echo "scratch-dir: created subpath escapes Scratch root" >&2; exit 75 ;;
+  esac
   printf '%s\n' "$TARGET"
 else
   printf '%s\n' "$SCRATCH_ROOT"
