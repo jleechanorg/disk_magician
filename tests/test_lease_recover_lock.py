@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import fcntl
 from pathlib import Path
 import shutil
 import subprocess
@@ -56,6 +57,21 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     stored = quarantined.with_name(quarantined.name + ".receipt.json")
     assert json.loads(stored.read_text())["lock_identity"]["inode"] == receipt["lock_identity"]["inode"]
     print("PASS: exact old empty registry lock is atomically quarantined with receipt")
+
+    lock = make_lock(state)
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    guard_path = state / MODULE.RECOVERY_LOCK_NAME
+    guard_fd = os.open(guard_path, os.O_RDWR | os.O_CREAT, MODULE.RECOVERY_LOCK_MODE)
+    os.chmod(guard_path, MODULE.RECOVERY_LOCK_MODE)
+    fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert "guard is busy" in run(state, 1, "--registry").stderr and lock.is_dir()
+    finally:
+        fcntl.flock(guard_fd, fcntl.LOCK_UN)
+        os.close(guard_fd)
+    shutil.rmtree(lock)
+    print("PASS: concurrent recovery invocation is blocked before source inspection")
 
     lock = make_lock(state)
     (lock / "pid").write_text("123\n")
