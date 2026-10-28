@@ -230,12 +230,12 @@ def write_record_at(dir_fd: int, name: str, record: dict) -> None:
     os.fsync(dir_fd)
 
 
-def ensure_private_directory(parent_fd: int, name: str, label: str) -> tuple[int, os.stat_result]:
+def ensure_private_directory(parent_fd: int, name: str, label: str, mode: int | None = 0o700) -> tuple[int, os.stat_result]:
     try:
         os.mkdir(name, 0o700, dir_fd=parent_fd)
     except FileExistsError:
         pass
-    return open_owned_directory(parent_fd, name, label, 0o700)
+    return open_owned_directory(parent_fd, name, label, mode)
 
 
 def create_pending_receipt(dir_fd: int, pending: str, receipt: str, record: dict) -> None:
@@ -271,7 +271,10 @@ def main(argv: list[str]) -> int:
         if pid is not None and not pid_is_dead(pid):
             return fail("registry lock pid is live or cannot be validated dead")
 
-        quarantine_parent_fd, _ = ensure_private_directory(state_fd, "quarantine", "quarantine directory")
+        quarantine_parent_fd, quarantine_parent_info = ensure_private_directory(
+            state_fd, "quarantine", "quarantine directory", mode=None)
+        if quarantine_parent_info.st_mode & 0o022:
+            raise ValueError("quarantine directory is group- or world-writable")
         quarantine_fd, _ = ensure_private_directory(quarantine_parent_fd, "lease-locks", "lease-lock quarantine")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         quarantined_name = f"{stamp}-{info.st_dev}-{info.st_ino}-{uuid.uuid4().hex}-{LOCK_NAME}"

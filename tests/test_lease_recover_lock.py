@@ -73,6 +73,47 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     assert json.loads(stored.read_text())["lock_identity"]["inode"] == receipt["lock_identity"]["inode"]
     print("PASS: exact old empty registry lock is atomically quarantined with receipt")
 
+    shared_parent_state = Path(temp) / "shared-quarantine-parent-state"
+    shared_parent_state.mkdir()
+    os.chmod(shared_parent_state, 0o755)
+    lock = make_lock(shared_parent_state)
+    os.utime(lock, (old, old))
+    shared_parent = shared_parent_state / "quarantine"
+    shared_parent.mkdir(mode=0o755)
+    os.chmod(shared_parent, 0o755)
+    result = run(shared_parent_state, 0, "--registry")
+    receipt = json.loads(result.stdout)
+    assert Path(receipt["quarantined"]).is_dir()
+    assert stat.S_IMODE(shared_parent.stat().st_mode) == 0o755
+    print("PASS: existing owned 0755 quarantine parent is preserved and accepted")
+
+    for unsafe_mode in (0o775, 0o777):
+        unsafe_quarantine_state = Path(temp) / f"quarantine-{unsafe_mode:o}"
+        unsafe_quarantine_state.mkdir()
+        os.chmod(unsafe_quarantine_state, 0o755)
+        lock = make_lock(unsafe_quarantine_state)
+        os.utime(lock, (old, old))
+        unsafe_parent = unsafe_quarantine_state / "quarantine"
+        unsafe_parent.mkdir(mode=unsafe_mode)
+        os.chmod(unsafe_parent, unsafe_mode)
+        result = run(unsafe_quarantine_state, 1, "--registry")
+        assert "quarantine directory is group- or world-writable" in result.stderr
+        assert lock.is_dir()
+    print("PASS: group- or world-writable quarantine parents (0775, 0777) remain fail-closed")
+
+    unsafe_leaf_state = Path(temp) / "quarantine-leaf-mode-state"
+    unsafe_leaf_state.mkdir()
+    os.chmod(unsafe_leaf_state, 0o755)
+    lock = make_lock(unsafe_leaf_state)
+    os.utime(lock, (old, old))
+    unsafe_leaf = unsafe_leaf_state / "quarantine" / "lease-locks"
+    unsafe_leaf.mkdir(parents=True, mode=0o700)
+    os.chmod(unsafe_leaf, 0o755)
+    result = run(unsafe_leaf_state, 1, "--registry")
+    assert "lease-lock quarantine has unexpected mode 0755" in result.stderr
+    assert lock.is_dir()
+    print("PASS: existing lease-lock quarantine leaf must remain exactly 0700")
+
     partial_state = Path(temp) / "partial-state"
     partial_state.mkdir()
     os.chmod(partial_state, 0o755)
