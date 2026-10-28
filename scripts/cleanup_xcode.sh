@@ -2,14 +2,16 @@
 # cleanup_xcode.sh — Clear rebuildable Xcode and simulator caches.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_AV_DIR="$SCRIPT_DIR/lib"
 # shellcheck source=scripts/safety_lib.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
+source "$SCRIPT_DIR/lib/quarantine.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_recency.sh"
+source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=scripts/lib/scratch_roots.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
+source "$SCRIPT_DIR/lib/scratch_roots.sh"
 
 DRY_RUN=true
 DELETE_ALL_SIMULATORS=false
@@ -187,6 +189,8 @@ clear_contents() {
 # (kind xcode-derived-data: live cwd, open files, secrets, repos) and is logged by
 # quarantine_remove. Dirs written within CUSTOM_DD_IDLE_MINUTES, or whose recency
 # cannot be measured, are kept.
+# These are safety retention floors, not operator tuning knobs. Keep them fixed
+# so an ambient environment cannot make freshly-written build output eligible.
 CUSTOM_DD_IDLE_MINUTES=60
 
 clean_custom_derived_data() {
@@ -197,7 +201,8 @@ clean_custom_derived_data() {
   for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
       ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
       "$ptmp"/worldai-ios-* \
-      "$ptmp"/worldai_frontend/* "$ptmp"/worldai_frontend/*/* \
+      "$ptmp"/worldai_frontend*/* "$ptmp"/worldai_frontend*/*/* \
+      "$ptmp"/*-native*/* "$ptmp"/*-native*/build/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
       ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
@@ -262,7 +267,12 @@ clean_ios_release_scratch() {
         log "iOS release scratch: [dry-run] would remove $dir/$sub ($(fmt_kb "$before_kb"))"
       else
         log "iOS release scratch: removing $dir/$sub ($(fmt_kb "$before_kb"))"
-        c14_remove "$dir/$sub" --kind xcode-derived-data || true
+        local _retry=5
+        while (( _retry-- > 0 )); do
+          c14_remove "$dir/$sub" --kind xcode-derived-data && break
+          [[ -e "$dir/$sub" ]] || break
+          sleep 1
+        done
       fi
     done
   done

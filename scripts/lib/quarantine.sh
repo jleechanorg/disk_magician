@@ -55,7 +55,17 @@ quarantine_remove() {
   # Serialize lease-owner acquisition across all paths against the complete
   # verdict-to-rename interval. C14 considers ancestor and descendant leases,
   # so a candidate-only lock would leave those owner births able to cross it.
-  lease_registry_mutation_lock_enter || { rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; }
+  local _lock_acquired=0 _lock_tries=100
+  while (( _lock_tries-- > 0 )); do
+    if lease_registry_mutation_lock_enter; then
+      _lock_acquired=1
+      break
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  if [[ "$_lock_acquired" -ne 1 ]]; then
+    rm -f "$inv" "$binding"; echo kept:lease-busy; return 0
+  fi
   lease_lock_held=1
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
   if [[ "$v" == remove ]]; then
